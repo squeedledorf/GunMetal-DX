@@ -1,0 +1,179 @@
+<?xml version="1.0" ?>
+<!-- Pose Studio IK handles (#530): the bone chains that get a draggable handle.
+       joints   root -> end. Every joint before the last is solved, the last one keeps
+                (or takes) the handle's orientation.
+                The handle sits where the WORN RIGGED MESH ends the limb: of the joints at
+                and below the end joint that a worn rigged mesh weights vertices to, the
+                one whose vertex region reaches farthest from the chain's root, at that
+                region's far end (so a hoof's handle is on the hoof even when the wrist or
+                ankle is the "knee"). Joint-position overrides and scale are included. The
+                choice is logged at INFO ("IK chain ...") when Pose Studio shows the handles
+                and whenever the outfit's rigging changes.
+       tip      fallback when nothing worn is rigged at / below the end joint (system
+                avatar, mesh still loading): the first of these joints the avatar has.
+       hand_branches, hand_depth   a hand: when at least hand_branches children of the end
+                joint carry rigged fingers, the search stops hand_depth joints below it, so
+                a human hand's handle sits at the knuckles instead of a fingertip. A hoof
+                rigged on the hand bones uses fewer branches and is not capped.
+       rigged   1: only shown when a worn rigged mesh binds the chain (at or below it)
+       group    wings: shown by "IK wings" (SLPoseStudioIKWings, default on) instead of
+                the Bento setting
+       solver   twobone  a limb with an elbow / knee (pole) handle on its second joint:
+                         analytic two-bone IK for 3 joints, FABRIK (every joint folds,
+                         the pole turns the bend plane) when the chain is longer or has
+                         grown to its hoof (extend). Only the root keeps its dial ranges
+                         under "IK limits"; the hinges are capped by max_bend.
+                ccd      tail, wings, ears: FABRIK (analytic for 3 joints) with every joint
+                         held to its dial ranges, then damped CCD to close what the limits
+                         allow
+                lookat   aim the last joint's forward axis at the handle, the joints
+                         before it share part of the turn (neck + head)
+                pelvis   move / turn the pelvis itself (pinned chains hold)
+       mirror   the opposite chain (mirror mode drags it mirrored; just for display)
+       color    RGB of the handle
+       bend     twobone only: where the lower bone swings when a straight limb starts to
+                bend, in the root joint's frame (forearm forward: +X; shin back: -X); the
+                elbow / knee handle (pole) overrides it once dragged
+       extend   when the handle point (worn mesh) lies on a joint below the chain's end
+                and the end is not a hand (see hand_branches), the chain grows by up to
+                this many joints toward it: a pony's hoof below the wrist / cannon becomes
+                the end bone (it takes the handle's orientation) and the wrist / cannon
+                folds with the elbow and shoulder. 0 / absent: never (human legs: the
+                foot is not a limb segment).
+       max_bend twobone: how far a hinge may fold, degrees from straight (default 160)
+       bento    1: an optional Bento chain (tail, ears, hind limbs), only shown with
+                "Bento IK handles" (SLPoseStudioIKBentoChains) on
+       forward  lookat only: the aiming axis in the last joint's frame (avatars face +X)
+       share    lookat only: the part of the turn each joint before the last takes
+     Chains whose joints the avatar does not have are skipped. Data-driven so pony /
+     quadruped and human skeletons both work: edit or add chains here. -->
+<llsd>
+<array>
+  <map>
+    <key>name</key><string>arm_left</string>
+    <key>extend</key><integer>1</integer>
+    <key>solver</key><string>twobone</string>
+    <key>joints</key><array><string>mShoulderLeft</string><string>mElbowLeft</string><string>mWristLeft</string></array>
+    <key>tip</key><array><string>mHandMiddle1Left</string><string>mHandIndex1Left</string><string>mHandRing1Left</string></array>
+    <key>hand_branches</key><integer>3</integer>
+    <key>hand_depth</key><integer>1</integer>
+    <key>mirror</key><string>arm_right</string>
+    <key>bend</key><array><real>1</real><real>0</real><real>0</real></array>
+    <key>color</key><array><real>0.25</real><real>0.85</real><real>1.0</real></array>
+  </map>
+  <map>
+    <key>name</key><string>arm_right</string>
+    <key>extend</key><integer>1</integer>
+    <key>solver</key><string>twobone</string>
+    <key>joints</key><array><string>mShoulderRight</string><string>mElbowRight</string><string>mWristRight</string></array>
+    <key>tip</key><array><string>mHandMiddle1Right</string><string>mHandIndex1Right</string><string>mHandRing1Right</string></array>
+    <key>hand_branches</key><integer>3</integer>
+    <key>hand_depth</key><integer>1</integer>
+    <key>mirror</key><string>arm_left</string>
+    <key>bend</key><array><real>1</real><real>0</real><real>0</real></array>
+    <key>color</key><array><real>1.0</real><real>0.55</real><real>0.25</real></array>
+  </map>
+  <map>
+    <key>name</key><string>leg_left</string>
+    <key>solver</key><string>twobone</string>
+    <key>joints</key><array><string>mHipLeft</string><string>mKneeLeft</string><string>mAnkleLeft</string></array>
+    <key>tip</key><array><string>mToeLeft</string><string>mFootLeft</string></array>
+    <key>mirror</key><string>leg_right</string>
+    <key>bend</key><array><real>-1</real><real>0</real><real>0</real></array>
+    <key>color</key><array><real>0.3</real><real>0.55</real><real>1.0</real></array>
+  </map>
+  <map>
+    <key>name</key><string>leg_right</string>
+    <key>solver</key><string>twobone</string>
+    <key>joints</key><array><string>mHipRight</string><string>mKneeRight</string><string>mAnkleRight</string></array>
+    <key>tip</key><array><string>mToeRight</string><string>mFootRight</string></array>
+    <key>mirror</key><string>leg_left</string>
+    <key>bend</key><array><real>-1</real><real>0</real><real>0</real></array>
+    <key>color</key><array><real>1.0</real><real>0.3</real><real>0.35</real></array>
+  </map>
+  <map>
+    <key>name</key><string>head</string>
+    <key>solver</key><string>lookat</string>
+    <key>joints</key><array><string>mNeck</string><string>mHead</string></array>
+    <key>forward</key><array><real>1</real><real>0</real><real>0</real></array>
+    <key>share</key><array><real>0.4</real></array>
+    <key>color</key><array><real>1.0</real><real>0.9</real><real>0.25</real></array>
+  </map>
+  <map>
+    <key>name</key><string>pelvis</string>
+    <key>solver</key><string>pelvis</string>
+    <key>joints</key><array><string>mPelvis</string></array>
+    <key>color</key><array><real>0.75</real><real>0.4</real><real>1.0</real></array>
+  </map>
+  <map>
+    <key>name</key><string>tail</string>
+    <key>solver</key><string>ccd</string>
+    <key>bento</key><integer>1</integer>
+    <key>rigged</key><integer>1</integer>
+    <key>joints</key><array><string>mTail1</string><string>mTail2</string><string>mTail3</string><string>mTail4</string><string>mTail5</string><string>mTail6</string></array>
+    <key>color</key><array><real>0.4</real><real>1.0</real><real>0.45</real></array>
+  </map>
+  <map>
+    <key>name</key><string>wing_left</string>
+    <key>solver</key><string>ccd</string>
+    <key>group</key><string>wings</string>
+    <key>rigged</key><integer>1</integer>
+    <key>joints</key><array><string>mWing1Left</string><string>mWing2Left</string><string>mWing3Left</string></array>
+    <key>tip</key><array><string>mWing4Left</string><string>mWing4FanLeft</string></array>
+    <key>mirror</key><string>wing_right</string>
+    <key>color</key><array><real>0.55</real><real>0.95</real><real>0.9</real></array>
+  </map>
+  <map>
+    <key>name</key><string>wing_right</string>
+    <key>solver</key><string>ccd</string>
+    <key>group</key><string>wings</string>
+    <key>rigged</key><integer>1</integer>
+    <key>joints</key><array><string>mWing1Right</string><string>mWing2Right</string><string>mWing3Right</string></array>
+    <key>tip</key><array><string>mWing4Right</string><string>mWing4FanRight</string></array>
+    <key>mirror</key><string>wing_left</string>
+    <key>color</key><array><real>0.95</real><real>0.75</real><real>0.55</real></array>
+  </map>
+  <map>
+    <key>name</key><string>ear_left</string>
+    <key>solver</key><string>ccd</string>
+    <key>bento</key><integer>1</integer>
+    <key>rigged</key><integer>1</integer>
+    <key>joints</key><array><string>mFaceEar1Left</string><string>mFaceEar2Left</string></array>
+    <key>mirror</key><string>ear_right</string>
+    <key>color</key><array><real>0.85</real><real>0.6</real><real>1.0</real></array>
+  </map>
+  <map>
+    <key>name</key><string>ear_right</string>
+    <key>solver</key><string>ccd</string>
+    <key>bento</key><integer>1</integer>
+    <key>rigged</key><integer>1</integer>
+    <key>joints</key><array><string>mFaceEar1Right</string><string>mFaceEar2Right</string></array>
+    <key>mirror</key><string>ear_left</string>
+    <key>color</key><array><real>1.0</real><real>0.6</real><real>0.85</real></array>
+  </map>
+  <map>
+    <key>name</key><string>hind_left</string>
+    <key>extend</key><integer>1</integer>
+    <key>solver</key><string>twobone</string>
+    <key>bento</key><integer>1</integer>
+    <key>rigged</key><integer>1</integer>
+    <key>joints</key><array><string>mHindLimb1Left</string><string>mHindLimb2Left</string><string>mHindLimb3Left</string></array>
+    <key>tip</key><array><string>mHindLimb4Left</string></array>
+    <key>mirror</key><string>hind_right</string>
+    <key>bend</key><array><real>-1</real><real>0</real><real>0</real></array>
+    <key>color</key><array><real>0.3</real><real>0.7</real><real>0.85</real></array>
+  </map>
+  <map>
+    <key>name</key><string>hind_right</string>
+    <key>extend</key><integer>1</integer>
+    <key>solver</key><string>twobone</string>
+    <key>bento</key><integer>1</integer>
+    <key>rigged</key><integer>1</integer>
+    <key>joints</key><array><string>mHindLimb1Right</string><string>mHindLimb2Right</string><string>mHindLimb3Right</string></array>
+    <key>tip</key><array><string>mHindLimb4Right</string></array>
+    <key>mirror</key><string>hind_left</string>
+    <key>bend</key><array><real>-1</real><real>0</real><real>0</real></array>
+    <key>color</key><array><real>0.85</real><real>0.45</real><real>0.3</real></array>
+  </map>
+</array>
+</llsd>

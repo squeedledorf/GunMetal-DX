@@ -1,0 +1,863 @@
+/**
+ * @file lllocalrendermaterials.cpp
+ * @brief Local GLTF materials source
+ *
+ * $LicenseInfo:firstyear=2022&license=viewerlgpl$
+ * Second Life Viewer Source Code
+ * Copyright (C) 2022, Linden Research, Inc.
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation;
+ * version 2.1 of the License only.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+ *
+ * Linden Research, Inc., 945 Battery Street, San Francisco, CA  94111  USA
+ * $/LicenseInfo$
+ */
+
+/* precompiled headers */
+#include "llviewerprecompiledheaders.h"
+
+/* own header */
+#include "lllocalgltfmaterials.h"
+
+/* boost: will not compile unless equivalent is undef'd, beware. */
+#include "fix_macros.h"
+#include <boost/filesystem.hpp>
+
+/* time headers */
+#include <time.h>
+#include <ctime>
+
+/* misc headers */
+#include "llgltfmateriallist.h"
+#include "llimage.h"
+#include "llinventoryicon.h"
+#include "lllocalmesh.h"       // rebindFaceMaterials after a live-edit regroup
+#include "llmaterialmgr.h"
+#include "llnotificationsutil.h"
+#include "llscrolllistctrl.h"
+#include "lltextureentry.h"
+#include "lltrans.h"           // "(model)" tag for mesh-owned rows
+#include "lltinygltfhelper.h"
+#include "llviewertexture.h"
+
+/*=======================================*/
+/*  Formal declarations, constants, etc. */
+/*=======================================*/
+
+static const F32 LL_LOCAL_TIMER_HEARTBEAT   = 3.0;
+static const S32 LL_LOCAL_UPDATE_RETRIES    = 5;
+
+/*=======================================*/
+/*  LLLocalGLTFMaterial: unit class            */
+/*=======================================*/
+LLLocalGLTFMaterial::LLLocalGLTFMaterial(std::string filename, S32 index)
+    : mFilename(filename)
+    , mShortName(gDirUtilp->getBaseFileName(filename, true))
+    , mLastModified()
+    , mLinkStatus(LS_ON)
+    , mUpdateRetries(LL_LOCAL_UPDATE_RETRIES)
+    , mMaterialIndex(index)
+{
+    mTrackingID.generate();
+
+    /* extension */
+    std::string temp_exten = gDirUtilp->getExtension(mFilename);
+
+    if (temp_exten == "gltf")
+    {
+        mExtension = ET_MATERIAL_GLTF;
+    }
+    else if (temp_exten == "glb")
+    {
+        mExtension = ET_MATERIAL_GLB;
+    }
+    else
+    {
+        LL_WARNS("GLTF") << "File of no valid extension given, local material creation aborted." << "\n"
+            << "Filename: " << mFilename << LL_ENDL;
+        return; // no valid extension.
+    }
+}
+
+LLLocalGLTFMaterial::~LLLocalGLTFMaterial()
+{
+    // gGLTFMaterialList will clean itself
+}
+
+/* accessors */
+std::string LLLocalGLTFMaterial::getFilename() const
+{
+    return mFilename;
+}
+
+std::string LLLocalGLTFMaterial::getShortName() const
+{
+    return mShortName;
+}
+
+LLUUID LLLocalGLTFMaterial::getTrackingID() const
+{
+    return mTrackingID;
+}
+
+LLUUID LLLocalGLTFMaterial::getWorldID() const
+{
+    return mWorldID;
+}
+
+S32 LLLocalGLTFMaterial::getIndexInFile() const
+{
+    return mMaterialIndex;
+}
+
+/* update functions */
+bool LLLocalGLTFMaterial::updateSelf()
+{
+    bool updated = false;
+
+    if (mLinkStatus == LS_ON)
+    {
+        // verifying that the file exists
+        if (gDirUtilp->fileExists(mFilename))
+        {
+            // verifying that the file has indeed been modified
+            boost::system::error_code ec;
+#ifndef LL_WINDOWS
+            const std::time_t temp_time = boost::filesystem::last_write_time(boost::filesystem::path(mFilename), ec);
+#else
+            const std::time_t temp_time = boost::filesystem::last_write_time(boost::filesystem::path(ll_convert<std::wstring>(mFilename)), ec);
+#endif
+            if (ec.failed())
+            {
+                LL_WARNS() << "Failed to get last write time for filesystem path " << mFilename << " : " << ec.message() << LL_ENDL;
+                return false;
+            }
+            LLSD new_last_modified = asctime(localtime(&temp_time));
+
+            if (mLastModified.asString() != new_last_modified.asString())
+            {
+                if (loadMaterial())
+                {
+                    // decode is successful, we can safely proceed.
+                    if (mWorldID.isNull())
+                    {
+                        mWorldID.generate();
+                    }
+                    mLastModified = new_last_modified;
+
+                    // addMaterial will replace material witha a new
+                    // pointer if value already exists but we are
+                    // reusing existing pointer, so it should add only.
+                    gGLTFMaterialList.addMaterial(mWorldID, this);
+
+                    mUpdateRetries = LL_LOCAL_UPDATE_RETRIES;
+
+                    for (LLTextureEntry* entry : mTextureEntires)
+                    {
+                        // Normally a change in applied material id is supposed to
+                        // drop overrides thus reset material, but local materials
+                        // currently reuse their existing asset id, and purpose is
+                        // to preview how material will work in-world, overrides
+                        // included, so do an override to render update instead.
+                        LLGLTFMaterial* override_mat = entry->getGLTFMaterialOverride();
+                        if (override_mat)
+                        {
+                            // do not create a new material, reuse existing pointer
+                            LLFetchedGLTFMaterial* render_mat = (LLFetchedGLTFMaterial*)entry->getGLTFRenderMaterial();
+                            if (render_mat)
+                            {
+                                llassert(dynamic_cast<LLFetchedGLTFMaterial*>(entry->getGLTFRenderMaterial()) != nullptr);
+                                *render_mat = *this;
+                                render_mat->applyOverride(*override_mat);
+                            }
+                        }
+                    }
+
+                    materialBegin();
+                    materialComplete(true);
+                    updated = true;
+                }
+
+                // if decoding failed, we get here and it will attempt to decode it in the next cycles
+                // until mUpdateRetries runs out. this is done because some software lock the material while writing to it
+                else
+                {
+                    if (mUpdateRetries)
+                    {
+                        mUpdateRetries--;
+                    }
+                    else
+                    {
+                        LL_WARNS("GLTF") << "During the update process the following file was found" << "\n"
+                            << "but could not be opened or decoded for " << LL_LOCAL_UPDATE_RETRIES << " attempts." << "\n"
+                            << "Filename: " << mFilename << "\n"
+                            << "Disabling further update attempts for this file." << LL_ENDL;
+
+                        LLSD notif_args;
+                        notif_args["FNAME"] = mFilename;
+                        notif_args["NRETRIES"] = LL_LOCAL_UPDATE_RETRIES;
+                        LLNotificationsUtil::add("LocalBitmapsUpdateFailedFinal", notif_args);
+
+                        mLinkStatus = LS_BROKEN;
+                        materialBegin();
+                        materialComplete(false);
+                    }
+                }
+            }
+
+        } // end if file exists
+
+        else
+        {
+            LL_WARNS("GLTF") << "During the update process, the following file was not found." << "\n"
+                << "Filename: " << mFilename << "\n"
+                << "Disabling further update attempts for this file." << LL_ENDL;
+
+            LLSD notif_args;
+            notif_args["FNAME"] = mFilename;
+            LLNotificationsUtil::add("LocalBitmapsUpdateFileNotFound", notif_args);
+
+            mLinkStatus = LS_BROKEN;
+            materialBegin();
+            materialComplete(false);
+        }
+    }
+
+    return updated;
+}
+
+bool LLLocalGLTFMaterial::loadMaterial()
+{
+    bool decode_successful = false;
+
+    switch (mExtension)
+    {
+    case ET_MATERIAL_GLTF:
+    case ET_MATERIAL_GLB:
+    {
+            std::string filename_lc = mFilename;
+            LLStringUtil::toLower(filename_lc);
+            std::string material_name;
+
+            tinygltf::Model model;
+            decode_successful = LLTinyGLTFHelper::loadModel(mFilename, model);
+            if (decode_successful)
+            {
+                // Might be a good idea to make these textures into local textures
+                decode_successful = LLTinyGLTFHelper::getMaterialFromModel(
+                    mFilename,
+                    model,
+                    mMaterialIndex,
+                    this,
+                    material_name);
+            }
+
+            if (decode_successful)
+            {
+                // Only commit the binding name on success: a failed re-decode (e.g.
+                // the file locked mid-save, retried later) must not blank the name a
+                // mesh re-bind (getWorldIDsByName) matches faces against.
+                mMaterialName = material_name; // for matching a mesh face's binding name
+                if (!material_name.empty())
+                {
+                    mShortName = gDirUtilp->getBaseFileName(filename_lc, true) + " (" + material_name + ")";
+                }
+            }
+
+            break;
+        }
+
+        default:
+        {
+            // separating this into -several- LL_WARNS() calls because in the extremely unlikely case that this happens
+            // accessing mFilename and any other object properties might very well crash the viewer.
+            // getting here should be impossible, or there's been a pretty serious bug.
+
+            LL_WARNS("GLTF") << "During a decode attempt, the following local material had no properly assigned extension." << LL_ENDL;
+            LL_WARNS("GLTF") << "Filename: " << mFilename << LL_ENDL;
+            LL_WARNS("GLTF") << "Disabling further update attempts for this file." << LL_ENDL;
+            mLinkStatus = LS_BROKEN;
+        }
+    }
+
+    return decode_successful;
+}
+
+
+/*=======================================*/
+/*  LLLocalGLTFMaterialTimer: timer class      */
+/*=======================================*/
+LLLocalGLTFMaterialTimer::LLLocalGLTFMaterialTimer() : LLEventTimer(LL_LOCAL_TIMER_HEARTBEAT)
+{
+}
+
+LLLocalGLTFMaterialTimer::~LLLocalGLTFMaterialTimer()
+{
+}
+
+void LLLocalGLTFMaterialTimer::startTimer()
+{
+    mEventTimer.start();
+}
+
+void LLLocalGLTFMaterialTimer::stopTimer()
+{
+    mEventTimer.stop();
+}
+
+bool LLLocalGLTFMaterialTimer::isRunning()
+{
+    return mEventTimer.getStarted();
+}
+
+bool LLLocalGLTFMaterialTimer::tick()
+{
+    // todo: do on idle? No point in timer
+    LLLocalGLTFMaterialMgr::getInstance()->doUpdates();
+    return false;
+}
+
+/*=======================================*/
+/*  LLLocalGLTFMaterialMgr: manager class      */
+/*=======================================*/
+LLLocalGLTFMaterialMgr::LLLocalGLTFMaterialMgr()
+{
+}
+
+LLLocalGLTFMaterialMgr::~LLLocalGLTFMaterialMgr()
+{
+    mMaterialList.clear();
+}
+
+S32 LLLocalGLTFMaterialMgr::addUnit(const std::vector<std::string>& filenames)
+{
+    mTimer.stopTimer();
+    S32 add_count = 0;
+    LLUUID outid;
+    std::vector<std::string>::const_iterator iter = filenames.begin();
+    while (iter != filenames.end())
+    {
+        if (!iter->empty())
+        {
+            add_count += addUnitInternal(*iter, outid);
+        }
+        iter++;
+    }
+    mTimer.startTimer();
+    if (add_count > 0)
+    {
+        mUnitsChangedSignal();
+    }
+    return add_count;
+}
+
+S32 LLLocalGLTFMaterialMgr::addUnit(const std::string& filename)
+{
+    LLUUID out;
+    return addUnit(filename, out);
+}
+
+S32 LLLocalGLTFMaterialMgr::addUnit(const std::string& filename, LLUUID& outID)
+{
+    mTimer.stopTimer();
+    S32 res = addUnitInternal(filename, outID);
+    mTimer.startTimer();
+    if (res > 0)
+    {
+        mUnitsChangedSignal();
+    }
+    return res;
+}
+
+S32 LLLocalGLTFMaterialMgr::addUnit(const std::string& filename, bool mesh_owned)
+{
+    mTimer.stopTimer();
+    LLUUID outID;
+    S32 res = addUnitInternal(filename, outID, mesh_owned);
+    mTimer.startTimer();
+    if (res > 0)
+    {
+        mUnitsChangedSignal();
+    }
+    return res;
+}
+
+// Content signature of a glTF material: its factors plus, for each texture slot,
+// the SOURCE image (not the per-material texture index). Exporters routinely split
+// one atlas-textured material into one material per face (distinct names + distinct
+// texture objects that all point at the same image); those share a signature, so we
+// can import them as a single local material instead of N -- no Materials-tab
+// clutter, no repeated load/verify dialogs, and one shared texture that renders on
+// the first load (every face references it, so its load callback repaints them all).
+static std::string gltfMaterialSignature(const tinygltf::Model& model, S32 idx)
+{
+    const tinygltf::Material& m = model.materials[idx];
+    const tinygltf::PbrMetallicRoughness& pbr = m.pbrMetallicRoughness;
+    std::string s;
+    auto add_d = [&s](double d) { s += std::to_string(d); s += ','; };
+    auto add_vec = [&](const std::vector<double>& v) { for (double d : v) { add_d(d); } s += '|'; };
+    auto add_tex = [&](int ti, int tc)
+    {
+        const int src = (ti >= 0 && ti < (int)model.textures.size()) ? model.textures[ti].source : -1;
+        s += std::to_string(src); s += ':'; s += std::to_string(tc); s += '|';
+    };
+    add_vec(pbr.baseColorFactor);
+    add_d(pbr.metallicFactor); add_d(pbr.roughnessFactor); s += '|';
+    add_tex(pbr.baseColorTexture.index, pbr.baseColorTexture.texCoord);
+    add_tex(pbr.metallicRoughnessTexture.index, pbr.metallicRoughnessTexture.texCoord);
+    add_tex(m.normalTexture.index, m.normalTexture.texCoord); add_d(m.normalTexture.scale); s += '|';
+    add_tex(m.occlusionTexture.index, m.occlusionTexture.texCoord); add_d(m.occlusionTexture.strength); s += '|';
+    add_vec(m.emissiveFactor);
+    add_tex(m.emissiveTexture.index, m.emissiveTexture.texCoord);
+    s += m.alphaMode; s += '|'; add_d(m.alphaCutoff); s += (m.doubleSided ? '1' : '0');
+    return s;
+}
+
+S32 LLLocalGLTFMaterialMgr::addUnitInternal(const std::string& filename, LLUUID& outID, bool mesh_owned)
+{
+    // No double-add: if this file's materials are already loaded (same ownership
+    // class -- user vs mesh-owned), return the existing first material instead of
+    // loading the file's materials a second time.
+    for (const LLPointer<LLLocalGLTFMaterial>& unit : mMaterialList)
+    {
+        if (unit->getFilename() == filename && unit->isMeshOwned() == mesh_owned)
+        {
+            // Return THIS unit's id; getUnitID(filename, 0) ignores ownership and
+            // could hand back a different (user vs mesh-owned) unit for the file.
+            outID = unit->getTrackingID();
+            return 0; // nothing newly added
+        }
+    }
+
+    tinygltf::Model model;
+    LLTinyGLTFHelper::loadModel(filename, model);
+
+    auto materials_in_file = model.materials.size();
+    if (materials_in_file <= 0)
+    {
+        return 0;
+    }
+
+    S32 loaded_materials = 0;
+    // Deduplicate content-identical materials within this file (see
+    // gltfMaterialSignature). The signature comes straight from the parsed model,
+    // so a duplicate is skipped BEFORE it is loaded -- no second decode, no second
+    // verify dialog. Every original face binding name is recorded as an alias on
+    // the canonical unit so a mesh face still resolves to it (getWorldIDsByName).
+    std::vector<std::pair<std::string, LLLocalGLTFMaterial*>> by_signature;
+    for (size_t i = 0; i < materials_in_file; i++)
+    {
+        const std::string signature = gltfMaterialSignature(model, static_cast<S32>(i));
+
+        LLLocalGLTFMaterial* canonical = nullptr;
+        for (const auto& entry : by_signature)
+        {
+            if (entry.first == signature)
+            {
+                canonical = entry.second;
+                break;
+            }
+        }
+        if (canonical)
+        {
+            // Identical to an already-imported material: keep this face binding name
+            // (empty -> "mat<index>", matching the model loader) pointing at it.
+            const std::string& nm = model.materials[i].name;
+            canonical->addAliasName(nm.empty() ? ("mat" + std::to_string(i)) : nm);
+            continue;
+        }
+
+        LLPointer<LLLocalGLTFMaterial> unit = new LLLocalGLTFMaterial(filename, static_cast<S32>(i));
+
+        // load material from file
+        if (unit->updateSelf())
+        {
+            unit->setMeshOwned(mesh_owned);
+            mMaterialList.emplace_back(unit);
+            by_signature.emplace_back(signature, unit.get());
+            if(loaded_materials == 0)
+            {
+                outID = unit->getTrackingID();
+            }
+            loaded_materials++;
+        }
+        else
+        {
+            LL_WARNS("GLTF") << "Attempted to add invalid or unreadable image file, attempt cancelled.\n"
+                << "Filename: " << filename << LL_ENDL;
+
+            LLSD notif_args;
+            notif_args["FNAME"] = filename;
+            LLNotificationsUtil::add("LocalGLTFVerifyFail", notif_args);
+
+            unit = NULL;
+        }
+    }
+
+    return loaded_materials;
+}
+
+void LLLocalGLTFMaterialMgr::delUnit(LLUUID tracking_id)
+{
+    if (!mMaterialList.empty())
+    {
+        std::vector<LLLocalGLTFMaterial*> to_delete;
+        for (local_list_iter iter = mMaterialList.begin(); iter != mMaterialList.end(); iter++)
+        {   /* finding which ones we want deleted and making a separate list */
+            LLLocalGLTFMaterial* unit = *iter;
+            if (unit->getTrackingID() == tracking_id)
+            {
+                to_delete.push_back(unit);
+            }
+        }
+
+        for (std::vector<LLLocalGLTFMaterial*>::iterator del_iter = to_delete.begin();
+            del_iter != to_delete.end(); del_iter++)
+        {   /* iterating over a temporary list, hence preserving the iterator validity while deleting. */
+            LLLocalGLTFMaterial* unit = *del_iter;
+            mMaterialList.remove(unit);
+
+            unit = NULL;
+        }
+    }
+    mUnitsChangedSignal();
+}
+
+boost::signals2::connection LLLocalGLTFMaterialMgr::setUnitsChangedCallback(const std::function<void()>& cb)
+{
+    return mUnitsChangedSignal.connect(cb);
+}
+
+std::vector<std::string> LLLocalGLTFMaterialMgr::getFilenames() const
+{
+    // One .gltf/.glb can hold several materials (several units); persist the file once.
+    std::vector<std::string> out;
+    for (const LLPointer<LLLocalGLTFMaterial>& unit : mMaterialList)
+    {
+        if (unit->isMeshOwned())
+        {
+            continue; // a mesh's imported material, not part of the user's set
+        }
+        const std::string filename = unit->getFilename();
+        if (std::find(out.begin(), out.end(), filename) == out.end())
+        {
+            out.push_back(filename);
+        }
+    }
+    return out;
+}
+
+LLUUID LLLocalGLTFMaterialMgr::getUnitID(const std::string& filename, S32 index, bool mesh_owned)
+{
+    if (!mMaterialList.empty())
+    {
+        for (local_list_iter itBitmap = mMaterialList.begin(); mMaterialList.end() != itBitmap; ++itBitmap)
+        {
+            LLLocalGLTFMaterial* unit = *itBitmap;
+            if (filename == unit->getFilename() && index == unit->getIndexInFile()
+                && unit->isMeshOwned() == mesh_owned)
+            {
+                return unit->getTrackingID();
+            }
+        }
+    }
+    return LLUUID::null;
+}
+
+void LLLocalGLTFMaterialMgr::getTrackingIDs(const std::string& filename, std::vector<LLUUID>& out, bool mesh_owned)
+{
+    for (const LLPointer<LLLocalGLTFMaterial>& unit : mMaterialList)
+    {
+        if (unit->getFilename() == filename && unit->isMeshOwned() == mesh_owned)
+        {
+            out.push_back(unit->getTrackingID());
+        }
+    }
+}
+
+LLUUID LLLocalGLTFMaterialMgr::getWorldID(LLUUID tracking_id)
+{
+    LLUUID world_id = LLUUID::null;
+
+    for (local_list_iter iter = mMaterialList.begin(); iter != mMaterialList.end(); iter++)
+    {
+        LLLocalGLTFMaterial* unit = *iter;
+        if (unit->getTrackingID() == tracking_id)
+        {
+            world_id = unit->getWorldID();
+        }
+    }
+
+    return world_id;
+}
+
+bool LLLocalGLTFMaterialMgr::isLocal(const LLUUID world_id)
+{
+    for (local_list_iter iter = mMaterialList.begin(); iter != mMaterialList.end(); iter++)
+    {
+        LLLocalGLTFMaterial* unit = *iter;
+        if (unit->getWorldID() == world_id)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool LLLocalGLTFMaterialMgr::isMeshOwned(const LLUUID& tracking_id) const
+{
+    for (const LLPointer<LLLocalGLTFMaterial>& unit : mMaterialList)
+    {
+        if (unit->getTrackingID() == tracking_id)
+        {
+            return unit->isMeshOwned();
+        }
+    }
+    return false;
+}
+
+void LLLocalGLTFMaterialMgr::getFilenameAndIndex(LLUUID tracking_id, std::string &filename, S32 &index)
+{
+    filename = "";
+    index = 0;
+
+    for (local_list_iter iter = mMaterialList.begin(); iter != mMaterialList.end(); iter++)
+    {
+        LLLocalGLTFMaterial* unit = *iter;
+        if (unit->getTrackingID() == tracking_id)
+        {
+            filename = unit->getFilename();
+            index = unit->getIndexInFile();
+        }
+    }
+}
+
+void LLLocalGLTFMaterialMgr::getWorldIDsByName(const std::string& filename, std::map<std::string, LLUUID>& out, bool mesh_owned)
+{
+    for (local_list_iter iter = mMaterialList.begin(); iter != mMaterialList.end(); iter++)
+    {
+        LLLocalGLTFMaterial* unit = *iter;
+        if (unit->getFilename() != filename || unit->isMeshOwned() != mesh_owned)
+        {
+            continue;
+        }
+        // Match the model loader's face-binding convention: an unnamed glTF material
+        // binds as "mat<index>" (see LLGLTFLoader::generateMaterialName).
+        std::string name = unit->getMaterialName();
+        if (name.empty())
+        {
+            name = "mat" + std::to_string(unit->getIndexInFile());
+        }
+        out[name] = unit->getWorldID();
+
+        // Plus any face bindings that deduplicated onto this unit at import, so every
+        // face of a one-material-per-face mesh resolves to this shared material.
+        for (const std::string& alias : unit->getAliasNames())
+        {
+            out[alias] = unit->getWorldID();
+        }
+    }
+}
+
+// probably shouldn't be here, but at the moment this mirrors lllocalbitmaps
+void LLLocalGLTFMaterialMgr::feedScrollList(LLScrollListCtrl* ctrl)
+{
+    if (ctrl)
+    {
+        if (!mMaterialList.empty())
+        {
+            std::string icon_name = LLInventoryIcon::getIconName(
+                LLAssetType::AT_MATERIAL,
+                LLInventoryType::IT_NONE);
+
+            for (local_list_iter iter = mMaterialList.begin();
+                iter != mMaterialList.end(); iter++)
+            {
+                // Model-loaded (mesh-owned) materials are shown too, tagged "(model)"
+                // and flagged so the UI treats them as read-only / transient.
+                const bool mesh_owned = (*iter)->isMeshOwned();
+                LLSD element;
+
+                element["columns"][0]["column"] = "icon";
+                element["columns"][0]["type"] = "icon";
+                element["columns"][0]["value"] = icon_name;
+
+                std::string unit_name = (*iter)->getShortName();
+                if (mesh_owned)
+                {
+                    LLSD name_args;
+                    name_args["NAME"] = unit_name;
+                    unit_name = LLTrans::getString("LocalAssetModelOwned", name_args);
+                }
+                element["columns"][1]["column"] = "unit_name";
+                element["columns"][1]["type"] = "text";
+                element["columns"][1]["value"] = unit_name;
+
+                LLSD data;
+                data["id"] = (*iter)->getTrackingID();
+                data["type"] = (S32)LLAssetType::AT_MATERIAL;
+                data["mesh_owned"] = mesh_owned;
+                element["value"] = data;
+
+                ctrl->addElement(element);
+            }
+        }
+    }
+
+}
+
+void LLLocalGLTFMaterialMgr::doUpdates()
+{
+    // preventing theoretical overlap in cases with huge number of loaded images.
+    mTimer.stopTimer();
+
+    // Per-unit content refresh; collect which (file, ownership class) groups
+    // actually re-decoded so the structural pass below runs once per group.
+    std::vector<std::pair<std::string, bool>> changed;
+    for (local_list_iter iter = mMaterialList.begin(); iter != mMaterialList.end(); iter++)
+    {
+        if ((*iter)->updateSelf())
+        {
+            std::pair<std::string, bool> key((*iter)->getFilename(), (*iter)->isMeshOwned());
+            if (std::find(changed.begin(), changed.end(), key) == changed.end())
+            {
+                changed.push_back(key);
+            }
+        }
+    }
+
+    // A live edit can change a file's material STRUCTURE, not just content:
+    // re-derive its units/aliases, and when that moved the name -> id mapping,
+    // re-point any local mesh bound to the file (faces bind by name only at
+    // ingest, so a diverged formerly-deduplicated material would otherwise keep
+    // rendering the stale canonical unit forever).
+    bool structure_changed = false;
+    for (const auto& entry : changed)
+    {
+        if (regroupFileMaterials(entry.first, entry.second))
+        {
+            structure_changed = true;
+            LLLocalMeshMgr::getInstance()->rebindFaceMaterials(entry.first);
+        }
+    }
+    if (structure_changed)
+    {
+        mUnitsChangedSignal(); // regroup can add units -> refresh the lists
+    }
+
+    mTimer.startTimer();
+}
+
+bool LLLocalGLTFMaterialMgr::regroupFileMaterials(const std::string& filename, bool mesh_owned)
+{
+    std::map<std::string, LLUUID> before;
+    getWorldIDsByName(filename, before, mesh_owned);
+
+    tinygltf::Model model;
+    if (!LLTinyGLTFHelper::loadModel(filename, model))
+    {
+        return false; // unreadable mid-save; the per-unit retry path covers it
+    }
+    const S32 count = (S32)model.materials.size();
+    if (count <= 0)
+    {
+        return false;
+    }
+
+    // This file's units of this ownership class, by material index.
+    std::map<S32, LLLocalGLTFMaterial*> by_index;
+    for (const LLPointer<LLLocalGLTFMaterial>& unit : mMaterialList)
+    {
+        if (unit->getFilename() == filename && unit->isMeshOwned() == mesh_owned)
+        {
+            by_index[unit->getIndexInFile()] = unit.get();
+        }
+    }
+    if (by_index.empty())
+    {
+        return false;
+    }
+
+    // Units whose material index no longer exists: a successful parse is truth
+    // (a mesh reload replaces geometry wholesale, same idea), so drop them.
+    // Collect first -- delUnit mutates mMaterialList and fires the signal.
+    std::vector<LLUUID> dead;
+    for (auto it = by_index.begin(); it != by_index.end();)
+    {
+        if (it->first >= count)
+        {
+            dead.push_back(it->second->getTrackingID());
+            it = by_index.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+
+    // Signature per index, and signature -> canonical unit over the unit-backed
+    // indices (lowest index wins, matching import order).
+    std::vector<std::string> sigs;
+    sigs.reserve(count);
+    for (S32 i = 0; i < count; ++i)
+    {
+        sigs.push_back(gltfMaterialSignature(model, i));
+    }
+    std::map<std::string, LLLocalGLTFMaterial*> canonical;
+    for (const auto& entry : by_index)
+    {
+        canonical.emplace(sigs[entry.first], entry.second);
+    }
+
+    // Rebuild every alias from scratch. An index with no unit either still
+    // matches an existing unit's content (alias it there) or has diverged /
+    // been newly added (give it its own unit now).
+    for (const auto& entry : by_index)
+    {
+        entry.second->clearAliasNames();
+    }
+    for (S32 i = 0; i < count; ++i)
+    {
+        if (by_index.count(i))
+        {
+            continue; // has its own unit
+        }
+        const std::string& nm = model.materials[i].name;
+        const std::string name = nm.empty() ? ("mat" + std::to_string(i)) : nm;
+        std::map<std::string, LLLocalGLTFMaterial*>::iterator canon_it = canonical.find(sigs[i]);
+        if (canon_it != canonical.end())
+        {
+            canon_it->second->addAliasName(name);
+            continue;
+        }
+        LLPointer<LLLocalGLTFMaterial> unit = new LLLocalGLTFMaterial(filename, i);
+        if (unit->updateSelf())
+        {
+            unit->setMeshOwned(mesh_owned);
+            mMaterialList.emplace_back(unit);
+            by_index[i] = unit.get();
+            canonical.emplace(sigs[i], unit.get());
+        }
+    }
+
+    for (const LLUUID& id : dead)
+    {
+        delUnit(id);
+    }
+
+    std::map<std::string, LLUUID> after;
+    getWorldIDsByName(filename, after, mesh_owned);
+    return before != after;
+}
+

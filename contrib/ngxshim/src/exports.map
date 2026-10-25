@@ -1,0 +1,8 @@
+/* Export only the slip_nr C ABI: the statically linked NGX loader stays private, so it can't
+   clash with the NVIDIA driver's own NGX symbols. SPDX-License-Identifier: MIT */
+{
+  global:
+    slip_nr_*;
+  local:
+    *;
+};

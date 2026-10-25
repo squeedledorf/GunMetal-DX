@@ -1,0 +1,529 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<floater
+ positioning="cascading"
+ save_rect="true"
+ can_resize="false"
+ height="835"
+ width="320"
+ layout="topleft"
+ name="sl_weather"
+ single_instance="true"
+ title="Weather">
+    <floater.string name="export_tip">Write your current weather settings into this parcel's description as an [slwx ...] tag, so everyone on the parcel who uses shared weather sees it. You are asked first.</floater.string>
+    <floater.string name="export_tip_no_rights">Only the parcel's owner (or a group member with the right to change the parcel's description) can do this. You are not allowed to edit this parcel's description.</floater.string>
+    <floater.string name="export_tip_local_off">Turn your own weather on first: it is what gets written to the parcel.</floater.string>
+    <floater.string name="clear_tip">Remove the [slwx ...] weather tag from this parcel's description. You are asked first.</floater.string>
+    <floater.string name="master_off">Weather is switched off: no weather from any source. Your settings below are kept.</floater.string>
+    <floater.string name="status_off">No weather (surfaces dry)</floater.string>
+    <floater.string name="status_on">[PRECIP]  Wind [WIND] m/s (now [GUST])  Wet [WET]%  Snow cover [COVER]%  Depth [DEPTH] cm[SHARED]</floater.string>
+    <floater.string name="status_rain">Rain [RATE] mm/h ([CLASS])</floater.string>
+    <floater.string name="status_snow">Snow [RATE] cm/h ([CLASS])</floater.string>
+    <floater.string name="status_dry">Nothing falling</floater.string>
+    <floater.string name="blowing">, blowing snow</floater.string>
+    <floater.string name="rain_class_0">Drizzle</floater.string>
+    <floater.string name="rain_class_1">Rain</floater.string>
+    <floater.string name="rain_class_2">Heavy rain</floater.string>
+    <floater.string name="rain_class_3">Downpour</floater.string>
+    <floater.string name="snow_class_0">Flurries</floater.string>
+    <floater.string name="snow_class_1">Snow</floater.string>
+    <floater.string name="snow_class_2">Heavy snow</floater.string>
+    <floater.string name="snow_class_3">Blizzard</floater.string>
+    <floater.string name="unit_rain">mm/h</floater.string>
+    <floater.string name="unit_snow">cm/h</floater.string>
+    <floater.string name="depth_shared"> (the parcel's)</floater.string>
+    <floater.string name="since_none">Depth applies: when the tag is written</floater.string>
+    <floater.string name="since_at">Depth applies at: [TIME] UTC ([AGO] ago)</floater.string>
+    <floater.string name="since_ahead">Depth applies at: [TIME] UTC (in the future)</floater.string>
+    <floater.string name="region_off">Region weather: not used</floater.string>
+    <floater.string name="region_none">This parcel publishes no weather</floater.string>
+    <floater.string name="region_parcel">This parcel publishes weather: in use</floater.string>
+    <floater.string name="region_parcel_errors">This parcel publishes weather (parts of its tag were not understood)</floater.string>
+    <floater.string name="region_sky_rain">Rain from the region's cloudy sky</floater.string>
+    <floater.string name="region_sky_dry">The region's sky gives no rain right now</floater.string>
+    <floater.string name="region_overridden">[REGION] -- your local weather is on and takes priority</floater.string>
+    <check_box
+     control_name="WeatherMasterEnabled"
+     follows="left|top"
+     height="16"
+     label="Weather"
+     layout="topleft"
+     left="10"
+     name="weather_master"
+     tool_tip="Turns ALL weather on or off: your own, a parcel's and the region sky's rain, snow, wind effects, lightning and weather sounds. Off: no weather cost at all. Your other settings are kept and come back when this is on again."
+     top="26"
+     width="290" />
+    <text
+     follows="left|top"
+     height="30"
+     layout="topleft"
+     left="10"
+     name="master_status"
+     text_color="LtGray_50"
+     top_pad="4"
+     width="300"
+     wrap="true">
+    </text>
+    <check_box
+     control_name="WeatherEnabled"
+     follows="left|top"
+     height="16"
+     label="Local weather"
+     layout="topleft"
+     left="10"
+     name="weather_enabled"
+     tool_tip="Turn on your own weather: rain or snow, wind and wet surfaces. Off: no weather cost at all once the surfaces have dried."
+     top_pad="6"
+     width="290" />
+    <text
+     follows="left|top"
+     height="16"
+     layout="topleft"
+     left="10"
+     name="type_label"
+     top_pad="12"
+     width="110">
+        Precipitation:
+    </text>
+    <combo_box
+     control_name="WeatherType"
+     follows="left|top"
+     height="22"
+     layout="topleft"
+     left_pad="4"
+     name="weather_type"
+     tool_tip="Rain falls as streaks and wets the ground; snow drifts down as flakes."
+     top_delta="-4"
+     width="120">
+        <combo_box.item
+         label="Rain"
+         name="rain"
+         value="0" />
+        <combo_box.item
+         label="Snow"
+         name="snow"
+         value="1" />
+    </combo_box>
+    <slider
+     control_name="WeatherIntensity"
+     decimal_digits="2"
+     follows="left|top"
+     height="16"
+     increment="0.05"
+     initial_value="0.5"
+     label="Intensity:"
+     label_width="110"
+     layout="topleft"
+     left="10"
+     max_val="1"
+     min_val="0"
+     name="weather_intensity"
+     tool_tip="How hard it rains or snows, on the rate ladder: 0.25 is about 1 mm/h of rain (0.4 cm/h of snow), 0.5 about 5 mm/h (1.5 cm/h), 0.75 about 23 mm/h (5 cm/h), 1 a 100 mm/h downpour (a 15 cm/h blizzard). Moving it sets the rate from it again."
+     top_pad="12"
+     width="296" />
+    <text
+     follows="left|top"
+     height="16"
+     layout="topleft"
+     left="10"
+     name="fall_label"
+     top_pad="10"
+     width="60">
+        Rate:
+    </text>
+    <spinner
+     decimal_digits="1"
+     follows="left|top"
+     height="20"
+     increment="0.5"
+     initial_value="5"
+     layout="topleft"
+     left_pad="4"
+     max_val="200"
+     min_val="0"
+     name="weather_fall"
+     tool_tip="The precipitation rate: rain in millimetres per hour (light below 2.5, moderate to 7.6, heavy to 50, violent above), snow in centimetres of fresh snow per hour (light below 0.5, moderate to 2.5, heavy to 8, a blizzard above with strong wind). It sets how dense and big the drops / flakes are, how far you can see, how fast the ground gets wet or the snow deep, and how loud it sounds."
+     top_delta="-3"
+     width="70" />
+    <text
+     follows="left|top"
+     height="16"
+     layout="topleft"
+     left_pad="2"
+     name="fall_unit"
+     top_delta="3"
+     width="36">
+        mm/h
+    </text>
+    <combo_box
+     follows="left|top"
+     height="22"
+     layout="topleft"
+     left_pad="4"
+     name="weather_preset"
+     tool_tip="A preset rate: drizzle / rain / heavy rain / downpour (1 / 5 / 20 / 80 mm/h), or flurries / snow / heavy snow / blizzard (0.3 / 1.5 / 5 / 12 cm/h; the blizzard also raises the wind to at least 15 m/s). Shows the class of the rate set now."
+     top_delta="-4"
+     width="120" />
+    <slider
+     control_name="WeatherPrecipVariation"
+     decimal_digits="2"
+     follows="left|top"
+     height="16"
+     increment="0.05"
+     initial_value="0.35"
+     label="Rate bands:"
+     label_width="110"
+     layout="topleft"
+     left="10"
+     max_val="1"
+     min_val="0"
+     name="weather_fall_var"
+     tool_tip="How much the rate varies over time: 0 = steady; higher = heavier and lighter bands every few minutes, short bursts, and now and then a downpour or squall passing over (up to about 2.5 x for a minute or two). The same for everyone sharing the weather."
+     top_pad="10"
+     width="296" />
+    <slider
+     control_name="WeatherWindDirection"
+     decimal_digits="0"
+     follows="left|top"
+     height="16"
+     increment="5"
+     initial_value="225"
+     label="Wind from (deg):"
+     label_width="110"
+     layout="topleft"
+     left="10"
+     max_val="360"
+     min_val="0"
+     name="weather_wind_dir"
+     tool_tip="The direction the wind blows FROM, in degrees: 0 north, 90 east, 180 south, 270 west."
+     top_pad="10"
+     width="296" />
+    <slider
+     control_name="WeatherWindSpeed"
+     decimal_digits="1"
+     follows="left|top"
+     height="16"
+     increment="0.5"
+     initial_value="3"
+     label="Wind speed (m/s):"
+     label_width="110"
+     layout="topleft"
+     left="10"
+     max_val="20"
+     min_val="0"
+     name="weather_wind_speed"
+     tool_tip="How strongly the wind drives the rain and snow sideways."
+     top_pad="10"
+     width="296" />
+    <slider
+     control_name="WeatherWindVariation"
+     decimal_digits="2"
+     follows="left|top"
+     height="16"
+     increment="0.05"
+     initial_value="0.3"
+     label="Wind variation:"
+     label_width="110"
+     layout="topleft"
+     left="10"
+     max_val="1"
+     min_val="0"
+     name="weather_wind_var"
+     tool_tip="How far the wind speed swings around the set speed: 0.5 = between 50% and 150%. The direction wanders a little with it."
+     top_pad="10"
+     width="296" />
+    <slider
+     control_name="WeatherWindDirVariation"
+     decimal_digits="0"
+     follows="left|top"
+     height="16"
+     increment="5"
+     initial_value="0"
+     label="Direction swing (deg):"
+     label_width="110"
+     layout="topleft"
+     left="10"
+     max_val="180"
+     min_val="0"
+     name="weather_wind_dirvar"
+     tool_tip="How far the wind direction swings around the set direction, in degrees: 0 = steady (apart from the slight wander of the wind variation), 90 = veers up to a quarter turn either way, 180 = fully variable. Smooth; the gustiness adds quicker veers."
+     top_pad="10"
+     width="296" />
+    <slider
+     control_name="WeatherWindGustiness"
+     decimal_digits="2"
+     follows="left|top"
+     height="16"
+     increment="0.05"
+     initial_value="0.5"
+     label="Gustiness:"
+     label_width="110"
+     layout="topleft"
+     left="10"
+     max_val="1"
+     min_val="0"
+     name="weather_wind_gust"
+     tool_tip="How fast the wind picks up and dies down: low = slow swells over tens of seconds, high = sharp gusts within a second or two."
+     top_pad="10"
+     width="296" />
+    <slider
+     control_name="WeatherTransitionSeconds"
+     decimal_digits="0"
+     follows="left|top"
+     height="16"
+     increment="1"
+     initial_value="20"
+     label="Transition (s):"
+     label_width="110"
+     layout="topleft"
+     left="10"
+     max_val="120"
+     min_val="0"
+     name="weather_transition"
+     tool_tip="How long a change of weather takes to settle. 0 = immediate."
+     top_pad="10"
+     width="296" />
+    <slider
+     control_name="WeatherStorm"
+     decimal_digits="2"
+     follows="left|top"
+     height="16"
+     increment="0.05"
+     initial_value="0"
+     label="Thunderstorm:"
+     label_width="110"
+     layout="topleft"
+     left="10"
+     max_val="1"
+     min_val="0"
+     name="weather_storm"
+     tool_tip="Lightning and thunder. 0 = none. Strikes come more often in heavier rain, and a heavier storm strikes closer; the thunder arrives after the flash, later the farther away it struck."
+     top_pad="10"
+     width="296" />
+    <check_box
+     control_name="WeatherWetSurfaces"
+     follows="left|top"
+     height="16"
+     label="Wet surfaces (puddles, ripples)"
+     layout="topleft"
+     left="10"
+     name="weather_wet"
+     tool_tip="Rain darkens and glosses surfaces that are open to the sky, forms puddles and ripples on flat ground, and they dry after the rain. Sheltered surfaces stay dry."
+     top_pad="12"
+     width="290" />
+    <check_box
+     control_name="RenderVKWeatherRunoff"
+     follows="left|top"
+     height="16"
+     label="Run-off (drips, streams, rivulets)"
+     layout="topleft"
+     left="10"
+     name="weather_runoff"
+     tool_tip="Rain on roofs, awnings, tables and trees runs off and falls from their edges as drips, or as thin streams where a lot of water collects. The ground under a drip line puddles first, and walls carry rivulets. It keeps draining for a while after the rain stops."
+     top_pad="6"
+     width="290" />
+    <check_box
+     control_name="WeatherSnowCoating"
+     follows="left|top"
+     height="16"
+     label="Snow settles on surfaces"
+     layout="topleft"
+     left="10"
+     name="weather_snow_coat"
+     tool_tip="Falling snow builds up in patches on upward surfaces that are open to the sky and melts after the snow stops, leaving them wet. Sheltered surfaces and walls stay clear."
+     top_pad="6"
+     width="290" />
+    <check_box
+     control_name="RenderVKWeatherAvatarShelter"
+     follows="left|top"
+     height="16"
+     label="Umbrellas and hats shelter avatars"
+     layout="topleft"
+     left="10"
+     name="weather_avatar_shelter"
+     tool_tip="What an avatar wears shelters it: under an umbrella it stays dry and the rain splashes on the canopy, a hat keeps the face dry, and snow settles on hats and shoulders and falls off when running. Applies to avatars near you."
+     top_pad="6"
+     width="290" />
+    <slider
+     control_name="WeatherSnowMaxDepth"
+     decimal_digits="2"
+     follows="left|top"
+     height="16"
+     increment="0.05"
+     initial_value="0.35"
+     label="Snow max depth (m):"
+     label_width="110"
+     layout="topleft"
+     left="10"
+     max_val="10"
+     min_val="0"
+     name="weather_snow_max_depth"
+     tool_tip="The deepest the snow gets on open, level ground, in metres (0 to 10). Drifts against walls pile up to about three times this. It melts away with the snow cover once the snow stops. 0 = no snow depth, only the coating."
+     top_pad="8"
+     width="296" />
+    <check_box
+     control_name="WeatherAudio"
+     follows="left|top"
+     height="16"
+     label="Weather sounds (rain, wind, snow)"
+     layout="topleft"
+     left="10"
+     name="weather_audio"
+     tool_tip="Recorded rain, wind and snow that follow the weather; under a roof you hear the rain on the roof instead. Uses the ambient sound volume."
+     top_pad="10"
+     width="290" />
+    <slider
+     control_name="WeatherAudioVolume"
+     decimal_digits="2"
+     follows="left|top"
+     height="16"
+     increment="0.05"
+     initial_value="0.5"
+     label="Sound volume:"
+     label_width="110"
+     layout="topleft"
+     left="10"
+     max_val="1"
+     min_val="0"
+     name="weather_audio_volume"
+     tool_tip="Volume of the weather sounds, on top of the ambient sound volume."
+     top_pad="8"
+     width="296" />
+    <check_box
+     control_name="WeatherAllowRegion"
+     follows="left|top"
+     height="16"
+     label="Use the weather a parcel publishes"
+     layout="topleft"
+     left="10"
+     name="weather_allow_region"
+     tool_tip="A parcel can publish weather in its description (an [slwx ...] tag); with this on you see it, in step with everyone else on the parcel who uses it. Your local weather, when on, takes priority. Nothing is sent to the region."
+     top_pad="12"
+     width="290" />
+    <check_box
+     control_name="WeatherFromEnvironment"
+     follows="left|top"
+     height="16"
+     label="Rain from the region's cloudy sky"
+     layout="topleft"
+     left="10"
+     name="weather_from_env"
+     tool_tip="When the parcel publishes no weather, a heavily clouded region sky sometimes brings rain (the same for everyone in the region who uses this). The region's sky itself is never changed."
+     top_pad="6"
+     width="290" />
+    <text
+     follows="left|top"
+     height="16"
+     layout="topleft"
+     left="10"
+     name="region_status"
+     text_color="LtGray_50"
+     top_pad="6"
+     width="300">
+        Region weather: not used
+    </text>
+    <check_box
+     control_name="WeatherParcelSnowShare"
+     follows="left|top"
+     height="16"
+     label="Share the snow depth with the parcel"
+     layout="topleft"
+     left="10"
+     name="parcel_snow_share"
+     tool_tip="Set as parcel weather also writes a snow depth, so everyone on the parcel sees the same snow level -- someone who just arrived sees the same drifts as someone who has been there an hour. Off: each viewer builds its own snow up from when it arrived."
+     top_pad="8"
+     width="290" />
+    <spinner
+     control_name="WeatherParcelSnowDepth"
+     decimal_digits="2"
+     follows="left|top"
+     height="20"
+     increment="0.05"
+     initial_value="0.2"
+     label="Depth (m):"
+     label_width="62"
+     layout="topleft"
+     left="10"
+     max_val="10"
+     min_val="0"
+     name="parcel_snow_depth"
+     tool_tip="The parcel's snow depth on open, level ground at the time below, in metres. It cannot be deeper than your Snow max depth; each visitor's own max depth also caps it."
+     top_pad="6"
+     width="140" />
+    <spinner
+     control_name="WeatherParcelSnowRate"
+     decimal_digits="3"
+     follows="left|top"
+     height="20"
+     increment="0.05"
+     initial_value="0"
+     label="Rate (m/h):"
+     label_width="66"
+     layout="topleft"
+     left_pad="10"
+     max_val="100"
+     min_val="-100"
+     name="parcel_snow_rate"
+     tool_tip="How fast the snow gets deeper while it snows on the parcel, in metres per hour. 0 = the depth holds (snow that fell earlier stays); negative = it melts. It replaces the snowfall-based build-up for the depth; the snowfall rate still sets how much snow falls. Used when Rate follows the snowfall is off."
+     width="146" />
+    <check_box
+     control_name="WeatherParcelSnowRateFromFall"
+     follows="left|top"
+     height="16"
+     label="Rate follows the snowfall"
+     layout="topleft"
+     left="10"
+     name="parcel_snow_rate_fall"
+     tool_tip="Set as parcel weather writes the depth rate from your snowfall rate: every hour of snowfall adds the rate in cm x 0.7 (fresh snow settles), the same build-up you see locally. Off: the Rate field above is written as it is."
+     top_pad="6"
+     width="290" />
+    <text
+     follows="left|top"
+     height="16"
+     layout="topleft"
+     left="10"
+     name="parcel_snow_since"
+     text_color="LtGray_50"
+     top_pad="8"
+     width="210">
+        Depth applies: when the tag is written
+    </text>
+    <button
+     follows="left|top"
+     height="20"
+     label="Stamp now"
+     layout="topleft"
+     left_pad="4"
+     name="parcel_snow_stamp"
+     tool_tip="The depth above is the parcel's depth NOW: sets its time to the current UTC time. From then on every viewer adds the rate per hour of snowfall."
+     top_delta="-3"
+     width="86" />
+    <button
+     follows="left|top"
+     height="22"
+     label="Set as parcel weather"
+     layout="topleft"
+     left="10"
+     name="export_parcel"
+     top_pad="6"
+     width="170" />
+    <button
+     follows="left|top"
+     height="22"
+     label="Clear parcel weather"
+     layout="topleft"
+     left_pad="6"
+     name="clear_parcel"
+     width="124" />
+    <text
+     follows="left|top"
+     height="44"
+     layout="topleft"
+     left="10"
+     name="status"
+     wrap="true"
+     text_color="LtGray_50"
+     top_pad="10"
+     width="300">
+        No weather (surfaces dry)
+    </text>
+</floater>

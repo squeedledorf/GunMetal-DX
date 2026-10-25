@@ -1,0 +1,163 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<panel
+    height="408"
+    layout="topleft"
+    name="autoresponse_settings"
+    top="0"
+    left="13"
+    width="517">
+      <text
+         type="string"
+         length="1"
+         follows="left|top"
+         height="13"
+         layout="topleft"
+         left="15"
+         mouse_opaque="false"
+         name="autorespond_response_label"
+         top_pad="10"
+         width="475">
+           Automatic response to all avatars when in AUTORESPONSE to everyone mode:
+        </text>
+        <text_editor
+         enabled_control="SlipstreamAutoresponseEnable"
+         control_name="SlipstreamAutoresponse"
+         use_ellipses="false"
+         commit_on_focus_lost = "true"
+         follows="left|top"
+         height="45"
+         layout="topleft"
+         left="15"
+         top_pad="10"
+         name="SlipstreamAutoresponse"
+         width="475"
+         word_wrap="true">
+           log_in_to_change
+        </text_editor>
+
+        <text
+         type="string"
+         length="1"
+         follows="left|top"
+         height="13"
+         layout="topleft"
+         left="15"
+         mouse_opaque="false"
+         name="autorespond_nf_response_label"
+         top_pad="10"
+         width="475">
+           Automatic response to non-friends when in AUTORESPONSE TO NON-FRIENDS mode:
+        </text>
+        <text_editor
+        enabled_control="SlipstreamAutoresponseNotFriendEnable"
+         control_name="SlipstreamAutoresponseNotFriend"
+         use_ellipses="false"
+         commit_on_focus_lost = "true"
+         follows="left|top"
+         height="45"
+         layout="topleft"
+         left="15"
+         top_pad="10"
+         name="SlipstreamAutoresponseNotFriend"
+         width="475"
+         word_wrap="true">
+           log_in_to_change
+        </text_editor>
+    <check_box
+     top_pad="5"
+     follows="left|top"
+     height="16"
+     label="Autorespond to new instant messages from anyone"
+     left="10"
+     name="SlipstreamAutoresponseEnable"
+     width="270"
+     control_name="SlipstreamAutoresponseEnable"/>
+    <check_box
+     top_pad="5"
+     follows="left|top"
+     height="16"
+     label="Autorespond to new instant messages from non-friends"
+     left="10"
+     name="SlipstreamAutoresponseNotFriendEnable"
+     width="270"
+     control_name="SlipstreamAutoresponseNotFriendEnable"/>
+    <text
+     type="string"
+     length="1"
+     follows="left|top"
+     height="13"
+     layout="topleft"
+     left="15"
+     mouse_opaque="false"
+     name="autorespond_away_response_label"
+     top_pad="12"
+     width="475">
+       Automatic response to all avatars while AWAY:
+    </text>
+    <text_editor
+     enabled_control="FSSendAwayAvatarResponse"
+     control_name="FSAwayAvatarResponse"
+     use_ellipses="false"
+     commit_on_focus_lost="true"
+     follows="left|top"
+     height="45"
+     layout="topleft"
+     left="15"
+     top_pad="10"
+     name="FSAwayAvatarResponse"
+     width="475"
+     word_wrap="true">
+       log_in_to_change
+    </text_editor>
+    <check_box
+     top_pad="5"
+     follows="left|top"
+     height="16"
+     label="Send the away response to new instant messages and teleport offers while I'm away"
+     left="10"
+     name="FSSendAwayAvatarResponse"
+     width="480"
+     control_name="FSSendAwayAvatarResponse"/>
+    <text
+     type="string"
+     length="1"
+     follows="left|top"
+     height="13"
+     layout="topleft"
+     left="15"
+     mouse_opaque="false"
+     name="autoresponse_item_label"
+     top_pad="14"
+     width="190">
+       Item sent with autoresponses:
+    </text>
+    <fs_copytrans_inventory_drop_target
+     name="autoresponse_item"
+     follows="left|top"
+     height="20"
+     layout="topleft"
+     left_pad="5"
+     max_length_bytes="255"
+     top_delta="-4"
+     width="215"
+     tool_tip="Drag a copy + transfer inventory item here. It is given to the person along with an autoresponse (autorespond and away modes)."/>
+    <button
+     follows="left|top"
+     height="20"
+     label="Clear"
+     layout="topleft"
+     left_pad="4"
+     name="clear_autoresponse_item"
+     top_delta="0"
+     width="60"/>
+    <check_box
+     top_pad="10"
+     follows="left|top"
+     height="16"
+     label="Show Auto-Response in my name tag while an autorespond mode is on"
+     left="10"
+     name="FSShowAutorespondInNametag"
+     width="480"
+     control_name="FSShowAutorespondInNametag"/>
+
+    </panel>

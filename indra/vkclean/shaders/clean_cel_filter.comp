@@ -1,0 +1,66 @@
+#version 450
+// vkclean — AVATAR ID PASS, worn rigid attachments (#549, llcelshadevk.cpp).
+//
+// Worn unrigged attachments (instance bit 9) draw from the STATIC buckets, mixed with the
+// whole world. Re-rasterizing those buckets for the id pass would cost the world's vertex
+// work again; instead this compacts the main view's already-culled static draw lists down
+// to their bit-9 draws (a few hundred at most) into three private indirect lists the id
+// pass draws with vkCmdDrawIndexedIndirectCount:
+//   list 0: back-culled opaque + mask   (buckets 0, 1)
+//   list 1: double-sided opaque + mask  (buckets 6, 7)
+//   list 2: alpha-blend                 (pre-water bucket 2 + the post-water list)
+// One invocation per source command; gl_WorkGroupID.y picks the source list.
+layout(local_size_x = 64) in;
+
+struct DrawCmd {
+    uint indexCount;
+    uint instanceCount;
+    uint firstIndex;
+    int  vertexOffset;
+    uint firstInstance;
+};
+
+// Instance rows (224 B = 56 words): flags at word 46, skin_id at word 47.
+layout(std430, binding = 0) readonly buffer Inst     { uint inst_w[]; };
+layout(std430, binding = 1) readonly buffer Counters { uint counters[]; };
+layout(std430, binding = 2) readonly buffer Src0 { DrawCmd src0[]; };   // bucket 0 opaque
+layout(std430, binding = 3) readonly buffer Src1 { DrawCmd src1[]; };   // bucket 1 mask
+layout(std430, binding = 4) readonly buffer Src2 { DrawCmd src2[]; };   // bucket 6 ds opaque
+layout(std430, binding = 5) readonly buffer Src3 { DrawCmd src3[]; };   // bucket 7 ds mask
+layout(std430, binding = 6) readonly buffer Src4 { DrawCmd src4[]; };   // bucket 2 alpha (pre-water)
+layout(std430, binding = 7) readonly buffer Src5 { DrawCmd src5[]; };   // post-water alpha list
+// Output: 4 counts (16 B), then 3 lists of u_list_cap commands each.
+layout(std430, binding = 8) buffer Out { uint out_count[4]; DrawCmd out_cmd[]; };
+
+layout(push_constant) uniform Push {
+    uint u_src_cap;      // commands per source list (the renderer's bucket cap)
+    uint u_list_cap;     // commands per output list
+    uint u_inst_count;   // instance rows (bounds the flags read)
+    uint u_pad;
+} pc;
+
+const uint kCounterSlot[6] = uint[6](0u, 1u, 8u, 9u, 2u, 6u);
+const uint kList[6]        = uint[6](0u, 0u, 1u, 1u, 2u, 2u);
+
+void main()
+{
+    const uint src = gl_WorkGroupID.y;
+    const uint i = gl_GlobalInvocationID.x;
+    if (src >= 6u) return;
+    const uint n = min(counters[kCounterSlot[src]], pc.u_src_cap);
+    if (i >= n) return;
+    DrawCmd c;
+    if      (src == 0u) c = src0[i];
+    else if (src == 1u) c = src1[i];
+    else if (src == 2u) c = src2[i];
+    else if (src == 3u) c = src3[i];
+    else if (src == 4u) c = src4[i];
+    else                c = src5[i];
+    if (c.instanceCount == 0u || c.indexCount == 0u || c.firstInstance >= pc.u_inst_count) return;
+    const uint flags = inst_w[c.firstInstance * 56u + 46u];
+    if ((flags & 512u) == 0u || (flags & (8u | 2048u)) != 0u) return;   // worn attachment, not HUD / water
+    const uint list = kList[src];
+    const uint k = atomicAdd(out_count[list], 1u);
+    if (k >= pc.u_list_cap) return;
+    out_cmd[list * pc.u_list_cap + k] = c;
+}

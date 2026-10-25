@@ -1,0 +1,59 @@
+# Point a branch of the self-hosted Flatpak repo at an existing build again (#286).
+#
+# Manual only (Actions tab or the workflow dispatch API). Makes a new signed commit
+# on BRANCH with the content and subject of SRC (a commit checksum still in the
+# repo), regenerates the signed summary and publishes, so clients get it as a
+# normal update. Made to undo v1.3.2 being copied over v1.4.0-beta.4 on "beta"
+# (build_flatpak.sh no longer copies an older final onto beta).
+#
+# Secrets and runner as the release workflow's flatpak job.
+name: flatpak-repoint
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to repoint (stable or beta)'
+        required: true
+        default: beta
+      src:
+        description: 'Commit checksum whose content the branch should serve'
+        required: true
+
+env:
+  CI_ROOT: /srv/ci/slipstream
+  REPO_GIT: http://192.168.96.20:3000/${{ github.repository }}.git
+
+jobs:
+  repoint:
+    runs-on: flatpak
+    timeout-minutes: 30
+    env:
+      FP_ROOT: /srv/ci/slipstream-flatpak
+      FP_WORK: /srv/ci/slipstream-flatpak/repoint
+      DEPLOY_KEY: /home/ci/.ssh/slipstream_flatpak_deploy
+      DEPLOY_TARGET: sitedeploy@192.168.96.20
+    steps:
+      - name: Scripts at this commit
+        run: |
+          set -euo pipefail
+          [ -d "$CI_ROOT/.git" ] || git clone -q "$REPO_GIT" "$CI_ROOT"
+          git -C "$CI_ROOT" fetch -q origin "$GITHUB_SHA"
+          rm -rf "$FP_WORK"
+          mkdir -p "$FP_WORK"/{tree,out}
+          git -C "$CI_ROOT" archive "$GITHUB_SHA" scripts/packaging/flatpak | tar -x -C "$FP_WORK/tree"
+
+      - name: Pull the published repo if the local copy is missing
+        run: bash "$FP_WORK/tree/scripts/packaging/flatpak/publish_flatpak_repo.sh" pull "$FP_ROOT/repo"
+
+      - name: Re-commit, sign, update the repo
+        env:
+          SIGNING_KEY: ${{ secrets.LINUX_SIGNING_KEY }}
+          SIGNING_KEY_ID: ${{ secrets.LINUX_SIGNING_KEY_ID }}
+          SIGNING_KEY_PASSPHRASE: ${{ secrets.LINUX_SIGNING_KEY_PASSPHRASE }}
+          BRANCH: ${{ inputs.branch }}
+          SRC: ${{ inputs.src }}
+        run: bash "$FP_WORK/tree/scripts/packaging/flatpak/repoint_branch.sh" "$FP_ROOT/repo" "$BRANCH" "$SRC" "$FP_WORK/out"
+
+      - name: Publish the repo
+        run: bash "$FP_WORK/tree/scripts/packaging/flatpak/publish_flatpak_repo.sh" push "$FP_ROOT/repo" "$FP_WORK/out"

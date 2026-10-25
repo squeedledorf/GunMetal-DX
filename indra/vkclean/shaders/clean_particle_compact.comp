@@ -1,0 +1,175 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// vkclean — particle draw-list keys + per-pass culling (#518). Every pool slot writes one
+// (key, index) entry into the MAIN list: a live particle the main cull frustum sees gets
+// its draw segment (water side, SL blend pair) in the top bits and its INVERTED distance
+// from the camera below, so an ascending sort (clean_particle_sort.comp) groups the
+// segments and orders each back to front (LL draws alpha particles depth-sorted); a dead
+// or off-view slot's key is 0xFFFFFFFF (sorts last, counted nowhere, drawn nowhere).
+// With the mirror list on, the same for the MIRROR list (its frustum, keyed by the
+// distance from the reflected eye: it blends back to front too). Light-blocking particles
+// inside a rendered cascade's caster volume are appended (unsorted) to that cascade's
+// list. Counts per segment / per cascade feed the indirect commands.
+//
+// Bounds = what clean_particle.vert draws: a billboard (camera-, light- or reflected-
+// camera-facing, FOLLOW_VELOCITY streaks included -- always an orthonormal basis) is the
+// sphere of radius |scale| / 2 at its position; a ribbon is the quad from this particle
+// to its parent (or the live source for a chain head), each end +/- its axis x half its
+// width -- a ribbon the VS would collapse (no partner, a teleport-length jump) is culled.
+layout(local_size_x = 256) in;
+#include "clean_particle_compute_common.glsl"
+
+const uint DEPTH_BITS = 25u;
+const uint DEPTH_MAX  = (1u << DEPTH_BITS) - 2u;   // < all-ones: no live key == the dead key
+
+// The light-blocking "over" pairs the cascades draw (LLCleanRendererVK::recordParticleShadow):
+// alpha (SOURCE_ALPHA, ONE_MINUS_SOURCE_ALPHA) and premultiplied (ONE, ONE_MINUS_SOURCE_ALPHA).
+const uint PAIR_ALPHA   = 6u * 8u + 7u;
+const uint PAIR_PREMULT = 0u * 8u + 7u;
+
+shared uint s_stat[PART_STATS];
+
+bool sphereIn(const vec4 planes[6], vec3 c, float r)
+{
+    for (int k = 0; k < 6; ++k)
+        if (dot(planes[k].xyz, c) + planes[k].w < -r) return false;
+    return true;
+}
+
+bool sphereInCascade(uint cas, vec3 c, float r)
+{
+    for (uint k = 0u; k < 6u; ++k)
+    {
+        const vec4 b = pcull.shadow_planes[cas * 6u + k];
+        const vec4 q = pcull.caster_planes[cas * 6u + k];
+        if (dot(b.xyz, c) + b.w < -r || dot(q.xyz, c) + q.w < -r) return false;
+    }
+    return true;
+}
+
+// Bounding sphere of the quad clean_particle.vert builds for particle i (false: it draws
+// nothing). Same partner rule as the VS's ribbon branch.
+bool particleBounds(uint i, out vec3 ctr, out float rad)
+{
+    const Particle p = parts[i];
+    const float maxage = p.vel_maxage.w;
+    const float t = (maxage > 0.0) ? clamp(p.pos_age.w / maxage, 0.0, 1.0) : 0.0;
+    const vec2 scl = ((p.misc.x & F_INTERP_SCALE) != 0u) ? mix(p.scale.xy, p.scale.zw, t) : p.scale.xy;
+    ctr = p.pos_age.xyz;
+    rad = 0.5 * length(scl);
+    if ((p.misc.x & F_RIBBON) == 0u) return true;
+
+    vec3 P1, A1;
+    float s1;
+    bool have = false;
+    const uint par  = floatBitsToUint(p.prev_pos.x);
+    const uint pser = floatBitsToUint(p.prev_pos.y);
+    if (par < pp.u_max_particles && parts[par].misc.w != 0u && parts[par].pad.x == pser)
+    {
+        const Particle q = parts[par];
+        const float qmax = q.vel_maxage.w;
+        const float qt = (qmax > 0.0) ? clamp(q.pos_age.w / qmax, 0.0, 1.0) : 0.0;
+        P1 = q.pos_age.xyz;
+        A1 = q.axis.xyz;
+        s1 = ((q.misc.x & F_INTERP_SCALE) != 0u) ? mix(q.scale.x, q.scale.z, qt) : q.scale.x;
+        have = true;
+    }
+    else if (par == 0xFFFFFFFFu)
+    {
+        const Emitter em = emit[p.misc.z];
+        if (em.misc.w == p.pad.y)
+        {
+            P1 = em.pos.xyz;
+            const vec4 q = em.src_rot;
+            const vec3 up = vec3(0.0, 0.0, 1.0);
+            A1 = up + 2.0 * cross(q.xyz, cross(q.xyz, up) + q.w * up);
+            s1 = p.scale.x;
+            have = true;
+        }
+    }
+    if (!have) return false;
+    const vec3 P0 = p.pos_age.xyz;
+    const float seg = length(P1 - P0);
+    if (seg > 64.0) return false;
+    // Each corner is base +/- axis x half width: within |P - ctr| + |axis| x hw of the
+    // segment's midpoint (axes need not be unit).
+    ctr = 0.5 * (P0 + P1);
+    rad = 0.5 * seg + max(0.5 * scl.x * length(p.axis.xyz), 0.5 * s1 * length(A1));
+    return true;
+}
+
+void main()
+{
+    const uint lid = gl_LocalInvocationID.x;
+    if (lid < PART_STATS) s_stat[lid] = 0u;
+    barrier();
+
+    const uint i = gl_GlobalInvocationID.x;
+    const uint N = pp.u_max_particles;
+    const uint n = pp.u_num_buckets;
+    const bool mirror_on = (pp.u_cull.x & CULL_MIRROR) != 0u;
+    if (i < N)
+    {
+        uint main_key = 0xFFFFFFFFu, mirror_key = 0xFFFFFFFFu;
+        if (parts[i].misc.w != 0u)
+        {
+            atomicAdd(s_stat[STAT_LIVE], 1u);
+            vec3 c;
+            float r;
+            if (particleBounds(i, c, r))
+            {
+                // Segment = water side * NUM_PAIRS + blend pair. Side 0 = the far side of the
+                // water plane from the camera, drawn with the PRE-water alpha (before the
+                // refraction copy, so the water surface attenuates it); side 1 = post-water.
+                // Same rule as the alpha sort (clean_alpha_sort.comp). The mirror keeps the
+                // main camera's split (it draws both sides of each pair, far side first).
+                const uint NUM_PAIRS = n >> 1u;
+                uint pair = parts[i].misc.y;
+                if (pair >= NUM_PAIRS) pair = 0u;   // safety (CPU writes valid pairs)
+                const vec3 pos = parts[i].pos_age.xyz;
+                const bool below = pos.z < pp.u_cam.w;
+                const bool far_side = (pp.u_ctl.y != 0u) ? !below : below;
+                const uint seg = (far_side ? 0u : NUM_PAIRS) + pair;
+
+                const bool in_main = sphereIn(pcull.main_planes, c, r);
+                if (in_main)
+                {
+                    atomicAdd(draw_count[seg], 1u);
+                    // Squared distance is monotonic in distance; a positive float's bits are
+                    // monotonic as a uint. Far first = smaller key.
+                    const vec3 d = pos - pp.u_cam.xyz;
+                    const uint db = min(floatBitsToUint(dot(d, d)) >> (31u - DEPTH_BITS), DEPTH_MAX);
+                    main_key = (seg << DEPTH_BITS) | (DEPTH_MAX - db);
+                    atomicAdd(s_stat[STAT_MAIN], 1u);
+                }
+                bool in_mirror = false;
+                if (mirror_on && sphereIn(pcull.mirror_planes, c, r))
+                {
+                    in_mirror = true;
+                    atomicAdd(draw_count[n + seg], 1u);
+                    const vec3 d = pos - pcull.mirror_cam.xyz;
+                    const uint db = min(floatBitsToUint(dot(d, d)) >> (31u - DEPTH_BITS), DEPTH_MAX);
+                    mirror_key = (seg << DEPTH_BITS) | (DEPTH_MAX - db);
+                    if (!in_main) atomicAdd(s_stat[STAT_MIRROR_ONLY], 1u);
+                }
+                if (pair == PAIR_ALPHA || pair == PAIR_PREMULT)
+                {
+                    bool in_shadow = false;
+                    for (uint cas = 0u; cas < 4u; ++cas)
+                    {
+                        if ((pp.u_cull.x & CULL_CASCADE(cas)) == 0u || !sphereInCascade(cas, c, r)) continue;
+                        const uint slot = atomicAdd(draw_count[2u * n + cas], 1u);
+                        if (slot < N) draw_list[2u * N + cas * N + slot] = uvec2(0u, i);
+                        in_shadow = true;
+                    }
+                    if (in_shadow && !in_main && !in_mirror) atomicAdd(s_stat[STAT_SHADOW_ONLY], 1u);
+                }
+            }
+        }
+        draw_list[i] = uvec2(main_key, i);
+        if (mirror_on) draw_list[N + i] = uvec2(mirror_key, i);
+    }
+
+    barrier();
+    if (lid < PART_STATS && s_stat[lid] != 0u) atomicAdd(draw_count[2u * n + 4u + lid], s_stat[lid]);
+}

@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<panel
+ bottom="-371"
+ height="300"
+ left="280"
+ mouse_opaque="true"
+ name="groups"
+ width="355">
+	<filter_editor
+	 follows="left|top|right"
+	 height="23"
+	 layout="topleft"
+	 left="4"
+	 label="Filter Groups"
+	 max_length_bytes="35"
+	 name="group_filter_input"
+	 top="3"
+	 right="-58" />
+	<menu_button
+	 follows="top|right"
+	 height="23"
+	 image_hover_unselected="Toolbar_Middle_Over"
+	 image_overlay="AddItem_Off"
+	 image_selected="Toolbar_Middle_Selected"
+	 image_unselected="Toolbar_Middle_Off"
+	 layout="topleft"
+	 menu_filename="menu_fs_contacts_groups_plus.xml"
+	 menu_position="bottomleft"
+	 name="groups_plus_btn"
+	 right="-29"
+	 tool_tip="Join, create or manage groups"
+	 top="3"
+	 width="27" />
+	<button
+	 follows="top|right"
+	 height="23"
+	 image_hover_unselected="Toolbar_Middle_Over"
+	 image_overlay="TrashItem_Off"
+	 image_selected="Toolbar_Middle_Selected"
+	 image_unselected="Toolbar_Middle_Off"
+	 layout="topleft"
+	 name="leave_btn"
+	 right="-1"
+	 tool_tip="Leave the selected group"
+	 top="3"
+	 width="27" />
+	<group_list
+	 allow_select="true"
+	 bottom="-20"
+	 follows="all"
+	 left="4"
+	 layout="topleft"
+	 name="group_list"
+	 color="ScrollBgWriteableColor"
+	 right="-4"
+	 top="29" />
+	<text
+	 type="string"
+	 length="1"
+	 bottom="-4"
+	 follows="left|bottom"
+	 height="14"
+	 layout="topleft"
+	 left="6"
+	 name="groupcount"
+	 width="340">
+	</text>
+</panel>

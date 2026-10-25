@@ -1,0 +1,205 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// vkclean — GPU particle emission (port of cleanParticleEmitC.glsl). One workgroup per
+// emitter; threads cooperatively spawn that emitter's spawn_count particles, popping
+// slots off the free-list stack and placing them per LL's emission patterns.
+layout(local_size_x = 64) in;
+#include "clean_particle_compute_common.glsl"
+
+// LL pattern bits (LLPartSysData::LL_PART_SRC_PATTERN_*).
+const uint PAT_DROP             = 0x01u;
+const uint PAT_EXPLODE          = 0x02u;
+const uint PAT_ANGLE            = 0x04u;
+const uint PAT_ANGLE_CONE       = 0x08u;
+const uint PAT_ANGLE_CONE_EMPTY = 0x10u;
+
+uint pcg(uint v)
+{
+    uint state = v * 747796405u + 2891336453u;
+    uint word  = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+    return (word >> 22u) ^ word;
+}
+float rnd(inout uint s) { s = pcg(s); return float(s) * (1.0 / 4294967296.0); }
+
+vec3 qrot(vec4 q, vec3 v) { return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v); }
+vec3 rotX(vec3 v, float a) { float c = cos(a), s = sin(a); return vec3(v.x, c*v.y - s*v.z, s*v.y + c*v.z); }
+vec3 rotZ(vec3 v, float a) { float c = cos(a), s = sin(a); return vec3(c*v.x - s*v.y, s*v.x + c*v.y, v.z); }
+
+// Ribbon chaining (LL: each new ribbon particle becomes its predecessor's mParent):
+// this frame's spawned pool indices in spawn order, linked after the spawn loop.
+#define RIBBON_LINK_MAX 256u
+shared uint s_pi[RIBBON_LINK_MAX];
+
+void main()
+{
+    uint e = gl_WorkGroupID.x;
+    Emitter em = emit[e];
+    uint spawn = em.misc.z;
+    const bool ribbon_src = (em.misc.y & F_RIBBON) != 0u;
+    for (uint k = gl_LocalInvocationID.x; k < RIBBON_LINK_MAX; k += gl_WorkGroupSize.x) s_pi[k] = 0xFFFFFFFFu;
+    barrier();
+
+    float radius = em.pos.w;
+    float spdmin = em.speed_angle.x;
+    float spdmax = em.speed_angle.y;
+    float inner  = em.speed_angle.z;
+    float outer  = em.speed_angle.w;
+    uint  pattern = em.misc.x;
+
+    for (uint k = gl_LocalInvocationID.x; k < spawn; k += gl_WorkGroupSize.x)
+    {
+        // Pop a free slot. atomicAdd returns the prior count; an old
+        // value of 0 (or a wrapped huge value) means the stack is empty
+        // -- undo and stop (the pool is full this frame). The live count
+        // before this pop is max - old: at or past the live cap
+        // (RenderMaxPartCount, LL's particle limit) nothing more spawns.
+        // Exact under concurrency: each pop sees a distinct `old`, and a
+        // failed pop's transient decrement only makes others fail too.
+        uint old = atomicAdd(free_count, -1u);
+        if (old == 0u || old > pp.u_max_particles || (pp.u_max_particles - old) >= pp.u_ctl.x)
+        {
+            atomicAdd(free_count, 1u);
+            break;
+        }
+        uint pi = free_idx[old - 1u];
+
+        uint seed = pcg(em.misc.w ^ (k * 2654435761u) ^ (pp.u_frame * 40503u));
+
+        vec3 pos = em.pos.xyz;
+        vec3 vel = vec3(0.0);
+
+        // Same precedence as LLViewerPartSourceScript::update: DROP wins over every
+        // other pattern bit (pos at source, zero velocity).
+        if (k < RIBBON_LINK_MAX) s_pi[k] = pi;
+        if ((pattern & PAT_DROP) != 0u)
+        {
+        }
+        else if ((pattern & PAT_EXPLODE) != 0u)
+        {
+            // Uniform direction in the unit sphere (rejection sampled,
+            // capped so a degenerate RNG can't spin forever).
+            vec3 dir = vec3(0.0, 0.0, 1.0);
+            for (int t = 0; t < 8; ++t)
+            {
+                dir = vec3(rnd(seed) * 2.0 - 1.0,
+                           rnd(seed) * 2.0 - 1.0,
+                           rnd(seed) * 2.0 - 1.0);
+                float m = dot(dir, dir);
+                if (m <= 1.0 && m >= 0.01) break;
+            }
+            dir = normalize(dir);
+            pos = em.pos.xyz + radius * dir;
+            vel = dir * (spdmin + rnd(seed) * (spdmax - spdmin));
+        }
+        // ANGLE_CONE_EMPTY is deliberately absent: LLViewerPartSourceScript::update only
+        // tests ANGLE / ANGLE_CONE, so a pure CONE_EMPTY source falls through to "unknown"
+        // (pos at source, zero velocity). Tire-track ribbons use it with speed 1: launching
+        // them in a cone lifted the tracks into the air in bands.
+        else if ((pattern & (PAT_ANGLE | PAT_ANGLE_CONE)) != 0u)
+        {
+            vec3 dir = vec3(0.0, 0.0, 1.0);
+            float angle = inner + rnd(seed) * (outer - inner);
+            if (rnd(seed) < 0.5) angle = -angle;
+            dir = rotX(dir, angle);
+            if ((pattern & PAT_ANGLE_CONE) != 0u)
+            {
+                dir = rotZ(dir, rnd(seed) * 4.0 * 3.14159265);
+            }
+            // Deprecated angle parameters (no LL_PART_USE_NEW_ANGLE; flag bit 30 set
+            // by the CPU): LL rotates once more by the outer angle about X.
+            if ((em.misc.y & (1u << 30)) != 0u)
+                dir = rotX(dir, outer);
+            dir = qrot(em.rot, dir);
+            pos = em.pos.xyz + radius * dir;
+            vel = dir * (spdmin + rnd(seed) * (spdmax - spdmin));
+        }
+        // else DROP / unknown: pos at source, zero velocity.
+
+        // Procedural motion modes (non-script sources). The sim computes
+        // these particles' positions from age each frame; at spawn we just
+        // seed what that needs. SPIRAL (spiral + chat effects) stores a
+        // random orbit phase; BEAM (pointing/select beam) orients the
+        // billboard along the beam via velocity = target - source.
+        uint mode = em.blend.y;
+        float phase = 0.0;
+        if (mode == MODE_SPIRAL)
+        {
+            phase = rnd(seed) * 6.2831853;
+        }
+        else if (mode == MODE_BEAM)
+        {
+            vel = em.target.xyz - em.pos.xyz;
+        }
+
+        Particle p;
+        p.pos_age    = vec4(pos, 0.0);
+        p.vel_maxage = vec4(vel, em.accel.w);     // accel.w carries part max age
+        p.accel      = vec4(em.accel.xyz, em.target.w); // accel.w = bounce plane Z
+        p.start_color = em.start_color;
+        p.end_color   = em.end_color;
+        p.scale       = em.scale;
+        p.glow        = em.glow;
+        p.misc        = uvec4(em.misc.y, em.blend.x, e, 1u); // flags, bucket, emitter, alive
+        p.tex_handle  = em.tex_handle;
+        // pad.y = the source id (LLViewerPartSource mID) for EVERY particle: the cursor
+        // pick (clean_pick_particle.comp, #481) reports who emitted it, even after the
+        // source died or its emitter slot was recycled. Ribbons also carry a serial in .x.
+        p.pad         = uvec2(0u, em.misc.w);
+        bool ribbon = (em.misc.y & F_RIBBON) != 0u;
+        vec3 up = vec3(0.0, 0.0, 1.0);
+        if (ribbon)
+        {
+            // LL ribbon (LLViewerPartSource / LLVOPartGroup::getGeometry): a quad from
+            // this particle's CURRENT position to its parent's -- the particle this
+            // source emits next -- or, for the newest, to the live source. The link is
+            // filled below / by the next spawn; the width axis is the source's +Z at
+            // spawn (LL mAxis: the source rotation alone, not the omega-spun emission
+            // rotation). (It used to connect the source's frozen spawn points,
+            // so a leash never reached its holder: the ribbon stayed on the path the
+            // collar had walked and faded out.)
+            p.prev_pos   = vec4(uintBitsToFloat(0xFFFFFFFFu), 0.0, 0.0, 0.0);   // no parent yet
+            p.axis       = vec4(qrot(em.src_rot, up), 0.0);   // source rotation only, no omega
+            p.prev_axis  = vec4(0.0);
+            p.pos_offset = vec4(pos - em.pos.xyz, phase);                        // FOLLOW_SRC offset
+            p.pad        = uvec2((pp.u_frame << 10u) ^ k ^ 1u, em.misc.w);       // serial, source id
+        }
+        else
+        {
+            // Non-ribbon: prev_pos is this particle's own position (the VS
+            // sees a zero-length, ignored ribbon segment); axes unused.
+            p.prev_pos   = vec4(pos, 0.0);
+            p.axis       = vec4(qrot(em.rot,      up), 0.0);
+            p.prev_axis  = vec4(qrot(em.prev_rot, up), 0.0);
+            // FOLLOW_SRC source-relative offset (.xyz); SPIRAL phase (.w).
+            p.pos_offset = vec4(pos - em.pos.xyz, phase);
+        }
+
+        parts[pi] = p;
+    }
+
+    // Chain this frame's ribbon particles, oldest link first: the source's previous
+    // newest (tail) -> spawn 0 -> spawn 1 -> ... ; the last becomes the new tail. A
+    // link is only written while its target still holds the particle it named (alive,
+    // same serial); a tail from another source (emitter slot reused) is ignored.
+    memoryBarrierBuffer();
+    barrier();
+    if (gl_LocalInvocationID.x == 0u && ribbon_src)
+    {
+        const uint n = min(spawn, RIBBON_LINK_MAX);
+        uvec4 t = rtail[e];
+        uint prev_i = (t.w == 1u && t.z == em.misc.w) ? t.x : 0xFFFFFFFFu;
+        uint prev_s = t.y;
+        uint last_i = 0xFFFFFFFFu, last_s = 0u;
+        for (uint k = 0u; k < n; ++k)
+        {
+            const uint pi = s_pi[k];
+            if (pi == 0xFFFFFFFFu) break;   // the pool ran out at this spawn
+            const uint ps = parts[pi].pad.x;
+            if (prev_i < pp.u_max_particles && parts[prev_i].misc.w != 0u && parts[prev_i].pad.x == prev_s)
+                parts[prev_i].prev_pos.xy = vec2(uintBitsToFloat(pi), uintBitsToFloat(ps));
+            prev_i = pi; prev_s = ps;
+            last_i = pi; last_s = ps;
+        }
+        if (last_i != 0xFFFFFFFFu) rtail[e] = uvec4(last_i, last_s, em.misc.w, 1u);
+    }
+}

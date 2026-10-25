@@ -1,0 +1,50 @@
+# Jetstream: a build of main every 6 hours, only when main has commits the last Jetstream
+# build doesn't. This workflow only decides and tags (jetstream-X.Y.Z.N: VIEWER_VERSION.txt +
+# a running number); the tag push starts release.yml, which builds Linux + Windows, publishes
+# a pre-release on the "Slipstream Jetstream" channel, signs its update manifest, posts it to
+# Discord #jetstream and prunes all but the newest 10 Jetstream releases
+# (scripts/ci/jetstream_post.py). Jetstream never goes to the AUR / apt / pacman / Flatpak.
+#
+# The tag is pushed with RELEASE_TOKEN (a user token), so the push triggers release.yml; a
+# push made with the workflow's own token would not.
+name: jetstream
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+env:
+  GATE_ROOT: /srv/ci/slipstream-jetstream-gate
+  REPO_GIT: http://192.168.96.20:3000/${{ github.repository }}.git
+
+jobs:
+  tag:
+    runs-on: builder
+    timeout-minutes: 10
+    steps:
+      - name: Tag main when it changed since the last Jetstream build
+        env:
+          TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$GATE_ROOT"
+          cd "$GATE_ROOT"
+          [ -d .git ] || git init -q
+          AUTH="Authorization: token $TOKEN"
+          # Tags are re-read from scratch: pruned Jetstream tags must not linger here.
+          git tag -l | xargs -r git tag -d >/dev/null
+          git -c http.extraHeader="$AUTH" fetch -q --force "$REPO_GIT" main '+refs/tags/*:refs/tags/*'
+          HEAD=$(git rev-parse FETCH_HEAD)
+          VERSION=$(git show "$HEAD:indra/newview/VIEWER_VERSION.txt" | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+')
+          LAST=$(git tag -l 'jetstream-*' | sed 's/^jetstream-//' | sort -V | tail -1)
+          LAST=${LAST:+jetstream-$LAST}
+          if [ -n "$LAST" ] && [ "$(git rev-list -n 1 "$LAST")" = "$HEAD" ]; then
+            echo "main ($HEAD) is already Jetstream $LAST: nothing to build"
+            exit 0
+          fi
+          N=$(git tag -l "jetstream-${VERSION}.*" | sed "s/^jetstream-${VERSION}\.//" | grep -E '^[0-9]+$' | sort -n | tail -1 || true)
+          TAG="jetstream-${VERSION}.$(( ${N:-0} + 1 ))"
+          git tag "$TAG" "$HEAD"
+          git -c http.extraHeader="$AUTH" push -q "$REPO_GIT" "refs/tags/$TAG"
+          echo "tagged $TAG at $HEAD (previous: ${LAST:-none}); release.yml builds it"

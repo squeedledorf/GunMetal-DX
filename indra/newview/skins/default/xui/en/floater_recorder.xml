@@ -1,0 +1,353 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<!-- Camera and agent recorder, ported from Black Dragon (NiranV Dean, LGPL-2.1). -->
+<floater
+ positioning="centered"
+ legacy_header_height="18"
+ height="486"
+ min_height="486"
+ min_width="470"
+ layout="topleft"
+ name="floater_recorder"
+ help_topic="floater_recorder"
+ save_rect="true"
+ can_resize="true"
+ title="Camera Recorder"
+ width="470">
+  <scroll_list
+   column_padding="2"
+   draw_heading="true"
+   height="220"
+   follows="all"
+   layout="topleft"
+   left="8"
+   width="454"
+   multi_select="true"
+   name="recorder_scroll"
+   top="24">
+    <scroll_list.columns label="#" name="number" width="30" />
+    <scroll_list.columns label="Pos X" name="pos_x" width="52" />
+    <scroll_list.columns label="Pos Y" name="pos_y" width="52" />
+    <scroll_list.columns label="Pos Z" name="pos_z" width="52" />
+    <scroll_list.columns label="Roll" name="rot_x" width="46" />
+    <scroll_list.columns label="Pitch" name="rot_y" width="46" />
+    <scroll_list.columns label="Yaw" name="rot_z" width="46" />
+    <scroll_list.columns label="" name="target_x" width="0" />
+    <scroll_list.columns label="" name="target_y" width="0" />
+    <scroll_list.columns label="" name="target_z" width="0" />
+    <scroll_list.columns label="View" name="view" width="46" />
+    <scroll_list.columns label="" name="type" width="0" />
+    <scroll_list.columns label="Time" name="time" dynamic_width="true" />
+  </scroll_list>
+
+  <button
+   follows="left|bottom"
+   height="22"
+   is_toggle="true"
+   label="Record"
+   label_selected="Stop"
+   layout="topleft"
+   left="8"
+   name="record_btn"
+   tool_tip="Record your movement and camera (a waypoint every 0.1 s). Replaces the current list."
+   top_pad="6"
+   width="64">
+    <button.commit_callback function="Recorder.Record" />
+  </button>
+  <button
+   follows="left|bottom"
+   height="22"
+   is_toggle="true"
+   label="Play"
+   label_selected="Stop"
+   layout="topleft"
+   left_pad="3"
+   name="playback_btn"
+   tool_tip="Play back the saved list (Save applies your edits first)."
+   top_delta="0"
+   width="56">
+    <button.commit_callback function="Recorder.StartStop" />
+  </button>
+  <button
+   follows="left|bottom"
+   height="22"
+   is_toggle="true"
+   label="Loop"
+   label_selected="Loop"
+   layout="topleft"
+   left_pad="3"
+   name="loop_btn"
+   tool_tip="Loop playback."
+   top_delta="0"
+   width="52">
+    <button.commit_callback function="Recorder.Loop" />
+  </button>
+  <button
+   follows="left|bottom"
+   height="22"
+   label="Waypoint"
+   layout="topleft"
+   left_pad="3"
+   name="add_waypoint_btn"
+   tool_tip="Add a waypoint at your current position and camera."
+   top_delta="0"
+   width="74">
+    <button.commit_callback function="Recorder.Waypoint" />
+  </button>
+  <button
+   follows="left|bottom"
+   height="22"
+   label="Set Pos"
+   layout="topleft"
+   left_pad="3"
+   name="save_position_btn"
+   tool_tip="Store the current camera position in the selected waypoint."
+   top_delta="0"
+   width="60">
+    <button.commit_callback function="Recorder.Position" />
+  </button>
+  <button
+   follows="left|bottom"
+   height="22"
+   label="Set Rot"
+   layout="topleft"
+   left_pad="3"
+   name="save_rotation_btn"
+   tool_tip="Store the current camera rotation in the selected waypoint."
+   top_delta="0"
+   width="60">
+    <button.commit_callback function="Recorder.Rotation" />
+  </button>
+  <button
+   follows="left|bottom"
+   height="22"
+   label="Delete"
+   layout="topleft"
+   left_pad="3"
+   name="remove_btn"
+   tool_tip="Delete the selected waypoints."
+   top_delta="0"
+   width="56">
+    <button.commit_callback function="Recorder.Delete" />
+  </button>
+
+  <button
+   follows="left|bottom"
+   height="22"
+   is_toggle="true"
+   label="Preview"
+   label_selected="Preview"
+   layout="topleft"
+   left="8"
+   name="override_btn"
+   tool_tip="Hold the camera at the selected waypoint while you edit it."
+   top_pad="4"
+   width="64">
+    <button.commit_callback function="Recorder.Override" />
+  </button>
+  <button
+   follows="left|bottom"
+   height="22"
+   label="Save"
+   layout="topleft"
+   left_pad="3"
+   name="export_btn"
+   tool_tip="Apply the edited list and save it to the pilot file."
+   top_delta="0"
+   width="56">
+    <button.commit_callback function="Recorder.Export" />
+  </button>
+  <button
+   follows="left|bottom"
+   height="22"
+   label="Load"
+   layout="topleft"
+   left_pad="3"
+   name="import_btn"
+   tool_tip="Load the saved pilot file."
+   top_delta="0"
+   width="52">
+    <button.commit_callback function="Recorder.Import" />
+  </button>
+  <button
+   follows="left|bottom"
+   height="22"
+   label="Refresh"
+   layout="topleft"
+   left_pad="3"
+   name="refresh_btn"
+   tool_tip="Reload the list from the pilot (discards unsaved edits)."
+   top_delta="0"
+   width="74">
+    <button.commit_callback function="Recorder.Refresh" />
+  </button>
+  <button
+   follows="left|bottom"
+   height="22"
+   label="Copy"
+   layout="topleft"
+   left_pad="3"
+   name="clipboard_btn"
+   tool_tip="Copy the selected waypoints to the clipboard (CSV)."
+   top_delta="0"
+   width="60">
+    <button.commit_callback function="Recorder.Clipboard" />
+  </button>
+  <check_box
+   follows="left|bottom"
+   height="16"
+   initial_value="true"
+   label="Camera"
+   layout="topleft"
+   left_pad="6"
+   name="camera_playback_check"
+   tool_tip="Playback also moves the camera along the recorded poses."
+   top_delta="3"
+   width="70" />
+
+  <slider
+   can_edit_text="true"
+   decimal_digits="3"
+   follows="left|bottom"
+   height="14"
+   increment="0.001"
+   initial_value="0"
+   label="Position X:"
+   label_width="90"
+   layout="topleft"
+   left="8"
+   max_val="512"
+   min_val="-256"
+   name="Position_X"
+   top_pad="10"
+   width="450">
+    <slider.commit_callback function="Recorder.CamPos" parameter="X" />
+  </slider>
+  <slider
+   can_edit_text="true"
+   decimal_digits="3"
+   follows="left|bottom"
+   height="14"
+   increment="0.001"
+   initial_value="0"
+   label="Position Y:"
+   label_width="90"
+   layout="topleft"
+   left="8"
+   max_val="512"
+   min_val="-256"
+   name="Position_Y"
+   top_pad="4"
+   width="450">
+    <slider.commit_callback function="Recorder.CamPos" parameter="Y" />
+  </slider>
+  <slider
+   can_edit_text="true"
+   decimal_digits="3"
+   follows="left|bottom"
+   height="14"
+   increment="0.001"
+   initial_value="0"
+   label="Position Z:"
+   label_width="90"
+   layout="topleft"
+   left="8"
+   max_val="4096"
+   min_val="-256"
+   name="Position_Z"
+   top_pad="4"
+   width="450">
+    <slider.commit_callback function="Recorder.CamPos" parameter="Z" />
+  </slider>
+  <slider
+   can_edit_text="true"
+   decimal_digits="3"
+   follows="left|bottom"
+   height="14"
+   increment="0.001"
+   initial_value="0"
+   label="Roll:"
+   label_width="90"
+   layout="topleft"
+   left="8"
+   max_val="3.142"
+   min_val="-3.142"
+   name="Rotation_X"
+   top_pad="10"
+   width="450">
+    <slider.commit_callback function="Recorder.CamRot" parameter="0" />
+  </slider>
+  <slider
+   can_edit_text="true"
+   decimal_digits="3"
+   follows="left|bottom"
+   height="14"
+   increment="0.001"
+   initial_value="0"
+   label="Pitch:"
+   label_width="90"
+   layout="topleft"
+   left="8"
+   max_val="3.142"
+   min_val="-3.142"
+   name="Rotation_Y"
+   top_pad="4"
+   width="450">
+    <slider.commit_callback function="Recorder.CamRot" parameter="1" />
+  </slider>
+  <slider
+   can_edit_text="true"
+   decimal_digits="3"
+   follows="left|bottom"
+   height="14"
+   increment="0.001"
+   initial_value="0"
+   label="Yaw:"
+   label_width="90"
+   layout="topleft"
+   left="8"
+   max_val="3.142"
+   min_val="-3.142"
+   name="Rotation_Z"
+   top_pad="4"
+   width="450">
+    <slider.commit_callback function="Recorder.CamRot" parameter="2" />
+  </slider>
+  <slider
+   can_edit_text="true"
+   decimal_digits="3"
+   follows="left|bottom"
+   height="14"
+   increment="0.001"
+   initial_value="1.047"
+   label="Field of view:"
+   label_width="90"
+   layout="topleft"
+   left="8"
+   max_val="2.9"
+   min_val="0.1"
+   name="Camera_View"
+   tool_tip="Vertical field of view (radians)."
+   top_pad="10"
+   width="450">
+    <slider.commit_callback function="Recorder.CamAngle" />
+  </slider>
+  <slider
+   can_edit_text="true"
+   decimal_digits="2"
+   follows="left|bottom"
+   height="14"
+   increment="0.01"
+   initial_value="0"
+   label="Time:"
+   label_width="90"
+   layout="topleft"
+   left="8"
+   max_val="600"
+   min_val="0"
+   name="Transition_Time"
+   tool_tip="Seconds from the start of playback at which this waypoint is reached."
+   top_pad="4"
+   width="450">
+    <slider.commit_callback function="Recorder.Time" />
+  </slider>
+</floater>

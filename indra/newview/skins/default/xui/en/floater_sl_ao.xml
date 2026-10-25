@@ -1,0 +1,136 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<floater
+ positioning="cascading"
+ save_rect="true"
+ can_resize="false"
+ height="176"
+ width="300"
+ layout="topleft"
+ name="sl_ao"
+ single_instance="true"
+ title="AO">
+    <check_box
+     follows="left|top"
+     height="16"
+     label="AO"
+     layout="topleft"
+     left="8"
+     name="ao_enabled"
+     tool_tip="Turn the animation overrider on or off (/ao on, /ao off)"
+     top="24"
+     width="48" />
+    <combo_box
+     follows="left|top|right"
+     height="22"
+     layout="topleft"
+     left_pad="2"
+     name="set_combo"
+     tool_tip="Active AO set (/ao set &lt;name&gt;)"
+     top="21"
+     width="182" />
+    <button
+     follows="top|right"
+     height="22"
+     image_overlay="Icon_Gear"
+     layout="topleft"
+     left_pad="4"
+     name="edit_btn"
+     tool_tip="Open the AO editor: sets, states, animations, import"
+     top_delta="0"
+     width="28" />
+    <button
+     follows="left|top"
+     height="22"
+     image_overlay="Arrow_Left_Off"
+     layout="topleft"
+     left="8"
+     name="prev_btn"
+     tool_tip="Previous stand (or previous animation of the current state)"
+     top_pad="6"
+     width="28" />
+    <button
+     follows="left|top"
+     height="22"
+     image_overlay="Arrow_Right_Off"
+     layout="topleft"
+     left_pad="2"
+     name="next_btn"
+     tool_tip="Next stand (/ao next)"
+     top_delta="0"
+     width="28" />
+    <check_box
+     follows="left|top"
+     height="16"
+     label="Override sits"
+     layout="topleft"
+     left_pad="10"
+     name="sit_override"
+     tool_tip="Replace sit animations with this set's. Seats with their own animation still win when Smart sit is on (/ao sit)"
+     top_delta="3"
+     width="110" />
+    <button
+     follows="top|right"
+     height="22"
+     is_toggle="true"
+     label="Pause"
+     layout="topleft"
+     left_pad="4"
+     name="pause_btn"
+     tool_tip="Pause or resume the AO without switching it off (/ao pause, /ao resume)"
+     top_delta="-3"
+     width="80" />
+    <check_box
+     control_name="SLWalkBackwardsFacingForward"
+     follows="left|top"
+     height="16"
+     label="Walk backwards facing forward"
+     layout="topleft"
+     left="8"
+     name="back_facing_check"
+     tool_tip="On: moving backwards keeps your avatar facing forward and the AO plays its Walking Backwards animation (running: only in your own view). Off: your avatar turns round to face where it is going, walking or running, and the AO plays its forward Walking animation. Works with the AO off (then Off leaves the viewer default)."
+     top="74"
+     width="240" />
+    <check_box
+     control_name="SLSimulatedSwimming"
+     follows="left|top"
+     height="16"
+     label="Allow swimming"
+     layout="topleft"
+     left="8"
+     name="swim_check"
+     tool_tip="In deep water float at the surface, dive with crouch (C / Page Down), rise back when released, swim up with E / Page Up, and walk out onto land. Uses flying, so not where flying is blocked. Works with the AO off, but the swim animations come from the AO set."
+     top_pad="4"
+     width="240" />
+    <text
+     follows="left|top|right"
+     height="30"
+     layout="topleft"
+     left="8"
+     name="status_text"
+     text_color="EmphasisColor"
+     top_pad="4"
+     word_wrap="true"
+     width="284" />
+    <button
+     follows="left|top"
+     height="20"
+     label="Don't pause for this"
+     layout="topleft"
+     left="8"
+     name="ignore_btn"
+     tool_tip="This animation does not fight the AO (a deformer, a body fix, a small pose): never pause for it again. Manage the list in the AO editor."
+     top_pad="2"
+     visible="false"
+     width="160" />
+    <button
+     follows="left|top"
+     height="20"
+     label="Resume my AO"
+     layout="topleft"
+     left="8"
+     name="resume_scripted_btn"
+     tool_tip="Run this AO alongside the scripted AO you are wearing. Remembered choices can be changed under Remembered choices in the AO editor."
+     top_delta="0"
+     visible="false"
+     width="160" />
+</floater>

@@ -1,0 +1,254 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<floater
+ positioning="cascading"
+ can_minimize="false"
+ can_resize="false"
+ height="428"
+ layout="topleft"
+ name="floater_fs_kill_feed"
+ save_rect="true"
+ single_instance="true"
+ title="KILL FEED"
+ width="320">
+    <check_box
+     control_name="FSKillFeedEnabled"
+     follows="left|top"
+     layout="topleft"
+     left="12"
+     top="26"
+     height="16"
+     width="296"
+     label="Enable kill feed overlay"
+     tool_tip="Listen to the region combat log (Combat 2.0) and show kills as text on screen. Wears the small #GunMetal-DX Helper object while on." />
+    <check_box
+     control_name="FSKillFeedShortNames"
+     follows="left|top"
+     layout="topleft"
+     left="12"
+     top_pad="6"
+     height="16"
+     width="296"
+     label="Shorten names (Orion Starchild = Orion S.)"
+     tool_tip="Display short avatar names in kill lines" />
+    <check_box
+     control_name="FSKillFeedShowEmoji"
+     follows="left|top"
+     layout="topleft"
+     left="12"
+     top_pad="6"
+     height="16"
+     width="296"
+     label="Show damage type symbol"
+     tool_tip="Show the killing blow's damage type symbol in kill lines. Symbols can be changed in Preferences &gt; Combat &gt; Hit Marker (Customize...)." />
+    <slider
+     control_name="FSKillFeedTextScale"
+     follows="left|top"
+     layout="topleft"
+     left="12"
+     top_pad="10"
+     height="15"
+     width="296"
+     label="Text size:"
+     label_width="110"
+     min_val="0.5"
+     max_val="2.5"
+     increment="0.05"
+     decimal_digits="2"
+     can_edit_text="true"
+     show_text="true" />
+    <slider
+     control_name="FSKillFeedScreenX"
+     follows="left|top"
+     layout="topleft"
+     left="12"
+     top_pad="6"
+     height="15"
+     width="296"
+     label="Horizontal:"
+     label_width="110"
+     min_val="0.0"
+     max_val="1.0"
+     increment="0.01"
+     decimal_digits="2"
+     show_text="true"
+     tool_tip="Overlay position across the screen (0 = left, 1 = right)" />
+    <slider
+     control_name="FSKillFeedScreenY"
+     follows="left|top"
+     layout="topleft"
+     left="12"
+     top_pad="6"
+     height="15"
+     width="296"
+     label="Vertical:"
+     label_width="110"
+     min_val="0.0"
+     max_val="1.0"
+     increment="0.01"
+     decimal_digits="2"
+     show_text="true"
+     tool_tip="Overlay position up the screen (0 = bottom, 1 = top)" />
+    <slider
+     control_name="FSKillFeedMaxLines"
+     follows="left|top"
+     layout="topleft"
+     left="12"
+     top_pad="6"
+     height="15"
+     width="296"
+     label="Lines:"
+     label_width="110"
+     min_val="1"
+     max_val="10"
+     increment="1"
+     decimal_digits="0"
+     show_text="true"
+     tool_tip="Maximum kills shown at once" />
+    <text
+     type="string"
+     follows="left|top"
+     layout="topleft"
+     left="12"
+     top_pad="10"
+     height="14"
+     width="106"
+     name="font_label">
+        Font:
+    </text>
+    <combo_box
+     control_name="FSKillFeedFontName"
+     follows="left|top"
+     layout="topleft"
+     left_delta="110"
+     top_delta="-3"
+     height="20"
+     width="120"
+     name="font_combo">
+        <combo_box.item
+         label="Small"
+         name="font_small"
+         value="SansSerifSmall" />
+        <combo_box.item
+         label="Normal"
+         name="font_normal"
+         value="SansSerif" />
+        <combo_box.item
+         label="Large"
+         name="font_large"
+         value="SansSerifBig" />
+        <combo_box.item
+         label="Huge"
+         name="font_huge"
+         value="SansSerifHuge" />
+        <combo_box.item
+         label="Monospace"
+         name="font_mono"
+         value="Monospace" />
+    </combo_box>
+    <color_swatch
+     control_name="FSKillFeedTextColor"
+     can_apply_immediately="true"
+     follows="left|top"
+     layout="topleft"
+     left="12"
+     top_pad="10"
+     height="24"
+     label_height="0"
+     width="44"
+     name="text_color_swatch"
+     tool_tip="Default kill feed text color, and the fallback color for names" />
+    <text
+     type="string"
+     length="1"
+     follows="left|top"
+     layout="topleft"
+     left_pad="6"
+     top_delta="6"
+     height="12"
+     mouse_opaque="false"
+     width="200"
+     name="text_color_label">
+        Text color
+    </text>
+    <check_box
+     control_name="FSKillFeedColorOwnName"
+     follows="left|top"
+     layout="topleft"
+     left="12"
+     top_pad="10"
+     height="16"
+     width="296"
+     label="Color my own name"
+     tool_tip="Use the color below for your own name in the kill feed, overriding the map mark / contact set / group / default priority for yourself" />
+    <color_swatch
+     control_name="FSKillFeedOwnNameColor"
+     can_apply_immediately="true"
+     follows="left|top"
+     layout="topleft"
+     left="12"
+     top_pad="4"
+     height="24"
+     label_height="0"
+     width="44"
+     name="own_name_color_swatch"
+     tool_tip="Your own name's color in the kill feed" />
+    <text
+     type="string"
+     length="1"
+     follows="left|top"
+     layout="topleft"
+     left_pad="6"
+     top_delta="6"
+     height="12"
+     mouse_opaque="false"
+     width="200"
+     name="own_name_color_label">
+        My name color
+    </text>
+    <check_box
+     control_name="FSKillFeedColorOtherNames"
+     follows="left|top"
+     layout="topleft"
+     left="12"
+     top_pad="10"
+     height="16"
+     width="296"
+     label="Color other names"
+     tool_tip="Tint other players' names with their contact set color; falls back to the text color above" />
+    <check_box
+     control_name="FSKillFeedBoldText"
+     follows="left|top"
+     layout="topleft"
+     left="12"
+     top_pad="8"
+     height="16"
+     width="296"
+     label="Bold text"
+     tool_tip="Render kill feed text in bold" />
+    <check_box
+     control_name="FSKillFeedGrowUp"
+     follows="left|top"
+     layout="topleft"
+     left="12"
+     top_pad="8"
+     height="16"
+     width="296"
+     label="Grow upward (newest at bottom)"
+     tool_tip="Feed grows bottom-to-top: new kills appear at the bottom and push older lines up" />
+    <slider
+     control_name="FSKillFeedHoldTime"
+     follows="left|top"
+     layout="topleft"
+     left="12"
+     top_pad="6"
+     height="15"
+     width="296"
+     label="Hold (sec):"
+     label_width="110"
+     min_val="0"
+     max_val="120"
+     increment="1"
+     decimal_digits="0"
+     show_text="true"
+     tool_tip="How long each kill stays on screen (0 = never fade)" />
+</floater>

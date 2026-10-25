@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<panel name="commands_settings">
+	<check_box label="チャットバーコマンドを有効化" name="chat_cmd_toggle"/>
+	<!--dd-->
+	<text name="SlipstreamChatCommandDrawDistance_txt">
+		描画距離を変更（使用方法：cmd meters）
+	</text>
+	<!--gth-->
+	<text name="SlipstreamChatCommandHeight_txt">
+		テレポートする高さ（0～8192）
+	</text>
+	<!--flr-->
+	<text name="SlipstreamChatCommandGround_txt">
+		地表にテレポート
+	</text>
+	<!--pos-->
+	<text name="SlipstreamChatCommandPos_txt">
+		座標にテレポート（使用方法：cmd x y z）
+	</text>
+	<!--mapto-->
+	<text name="SlipstreamChatCommandMapto_txt">
+		リージョンにテレポート
+	</text>
+	<!--clr-->
+	<text name="SlipstreamChatCommandClearNearby_txt">
+		近くのチャットのコンテンツをクリア
+	</text>
+	<!--Hover-->
+	<text name="hover_txt">
+		ホバーする高さ
+	</text>
+	<!--AO-->
+	<text name="ao_txt">
+		アニメーションオーバーライド
+	</text>
+	<!--home-->
+	<text name="SlipstreamChatCommandHome_txt">
+		ホームにテレポート
+	</text>
+	<!--sethome-->
+	<text name="SlipstreamChatCommandSetHome_txt">
+		現在地をホームにする
+	</text>
+	<!--tp2cam-->
+	<text name="SlipstreamChatCommandTeleportToCam_txt">
+		カメラの位置にテレポート
+	</text>
+	<!--Calculatooor-->
+	<text name="calc_txt">
+		計算機
+	</text>
+	<!--Resync Anims-->
+	<text name="calc_txt">
+		アニメーションを再同期
+	</text>
+	<!--Set Channel-->
+	<text name="calc_txt">
+		近くのチャットのチャンネルをセット
+	</text>
+	<!--rezplat-->
+	<text name="SlipstreamChatCommandRezPlat_txt">
+		プラットフォームにRez（使用法：cmd size）
+	</text>
+	<slider name="SlipstreamChatCommandRezPlatSize" label="幅" tool_tip="コマンドでサイズが指定されていない場合、Rezされたプラットフォームのデフォルトのサイズを指定します。"/>
+</panel>

@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<toggleable_menu
+ name="menu_fs_contacts_friends_options"
+ left="0" bottom="0" visible="false"
+ mouse_opaque="false">
+    <menu_item_check
+     label="Show permission columns"
+     name="show_permissions">
+        <menu_item_check.on_click
+         function="ToggleControl"
+         parameter="FSFriendListColumnShowPermissions"/>
+        <menu_item_check.on_check
+         control="FSFriendListColumnShowPermissions"/>
+    </menu_item_check>
+    <menu_item_separator/>
+    <menu_item_check
+     label="Sort by username"
+     name="sort_by_username">
+        <menu_item_check.on_click
+         function="Contacts.Friends.SetSortOrder"
+         parameter="0"/>
+        <menu_item_check.on_check
+         function="Contacts.Friends.CheckSortOrder"
+         parameter="0"/>
+    </menu_item_check>
+    <menu_item_check
+     label="Sort by display name"
+     name="sort_by_displayname">
+        <menu_item_check.on_click
+         function="Contacts.Friends.SetSortOrder"
+         parameter="1"/>
+        <menu_item_check.on_check
+         function="Contacts.Friends.CheckSortOrder"
+         parameter="1"/>
+    </menu_item_check>
+</toggleable_menu>

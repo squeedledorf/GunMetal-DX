@@ -1,0 +1,464 @@
+#version 450
+// vkclean — GPU avatar animation evaluation (LLCleanAnimStore builds the inputs).
+//
+// One workgroup per joint-table slot listed this frame, one thread per joint. For a
+// CPU-evaluated avatar (self, UI avatars, no GPU mode) the CPU joint world matrices are
+// copied through. For a GPU-evaluated avatar:
+//   1. load the avatar's persistent LOCAL pose (LL blends from the joint's current local
+//      transform, so the pose persists frame to frame -- "sticky" joints included);
+//   2. apply this frame's BASE WRITES -- local components written by non-animation code
+//      (visual params, joint overrides, physics, resets) since the last frame;
+//   3. run LL's pose blend (LLJointStateBlender::blendJointStates) per animated joint over
+//      the ordered joint states the CPU motion controller exported: keyframe states are
+//      sampled here (LLKeyframeMotion curves: lower_bound + step/linear, nlerp rotations),
+//      procedural / constraint states arrive as CPU values;
+//   4. store the local pose back (persistent state);
+//   5. walk the hierarchy level by level (LLXformMatrix::update: child offset scaled by
+//      the parent's LOCAL scale, rotated by the parent's world rotation) and write each
+//      joint's world matrix exactly as LLMatrix4::initAll(local scale, world rot, world pos)
+//      lays it out -- the table the skin palette pass and the rigid-attachment draw read;
+//   6. SPARSE READBACK: for the joints the CPU requested this frame (its consumers only
+//      read a few), one record each: local pose + world transform RELATIVE TO THE ROOT
+//      this frame used (the CPU composes it with its live root).
+// All quaternion / vector formulas mirror llquaternion.cpp / v3math.h / m4math.cpp
+// term for term (LL's quaternion product order and v * q rotation).
+
+layout(local_size_x = 256) in;
+
+#define MAX_J 216u
+
+layout(std430, binding = 0) readonly buffer FrameWords { uint fw[]; };
+layout(std430, binding = 1) readonly buffer Topo { uint topo[]; };          // [slot*216 + j]
+layout(std430, binding = 2) readonly buffer MotionDesc { uvec4 desc[]; };  // 2 per joint motion
+layout(std430, binding = 3) readonly buffer KeyTimes { float ktime[]; };
+layout(std430, binding = 4) readonly buffer KeyVals { vec4 kval[]; };
+layout(std430, binding = 5) buffer LocalState { vec4 lstate[]; };          // [(slot*216+j)*3 + {pos,rot,scale}]
+#include "clean_joint_table.glsl"   // mat3x4 joint world rows (jointPack())
+layout(std430, binding = 6) readonly buffer CpuJoints { AvatarJoints cpu_av[]; };
+// (read too: a follow entry reads its wearer's joint, written by the first dispatch)
+layout(std430, binding = 7) buffer JointsOut { AvatarJoints out_av[]; };
+layout(std430, binding = 8) writeonly buffer LocalOut { vec4 lout[]; };    // [record*5 + k] (sparse readback)
+
+layout(push_constant) uniform Push {
+    uint entry_count;
+    uint slot_cap;      // joint-table slots available in cpu_av / out_av / lstate
+    uint cpu_slot_cap;  // slots the CPU joint input holds
+    uint entry_first;   // first entry of this dispatch (follow entries: second dispatch)
+} pc;
+
+// Frame word layout (see LLCleanAnimStore::buildFrame).
+const uint HDR_ENTRY_BASE = 8u;
+const uint ENTRY_WORDS    = 32u;     // 22..31: attached-animesh follow
+const uint RB_RECORD_VEC4 = 5u;     // local pos, local rot, local scale, rel pos, rel rot
+
+shared vec3 s_pos[MAX_J];
+shared vec4 s_rot[MAX_J];
+shared vec3 s_scale[MAX_J];
+shared vec3 s_wpos[MAX_J];
+shared vec4 s_wrot[MAX_J];
+
+float fwf(uint i) { return uintBitsToFloat(fw[i]); }
+
+bool finite3(vec3 v) { return !any(isnan(v)) && !any(isinf(v)); }
+bool finite4(vec4 v) { return !any(isnan(v)) && !any(isinf(v)); }
+
+// LLQuaternion operator*(a, b) -- "a then b", NOT renormalized.
+vec4 qmul(vec4 a, vec4 b)
+{
+    return vec4(b.w * a.x + b.x * a.w + b.y * a.z - b.z * a.y,
+                b.w * a.y + b.y * a.w + b.z * a.x - b.x * a.z,
+                b.w * a.z + b.z * a.w + b.x * a.y - b.y * a.x,
+                b.w * a.w - b.x * a.x - b.y * a.y - b.z * a.z);
+}
+
+// LLVector3 operator*(v, q): rotate v by q.
+vec3 qrot(vec3 a, vec4 q)
+{
+    float rw = - q.x * a.x - q.y * a.y - q.z * a.z;
+    float rx =   q.w * a.x + q.y * a.z - q.z * a.y;
+    float ry =   q.w * a.y + q.z * a.x - q.x * a.z;
+    float rz =   q.w * a.z + q.x * a.y - q.y * a.x;
+    return vec3(- rw * q.x +  rx * q.w - ry * q.z + rz * q.y,
+                - rw * q.y +  ry * q.w - rz * q.x + rx * q.z,
+                - rw * q.z +  rz * q.w - rx * q.y + ry * q.x);
+}
+
+// LLQuaternion::normalize(): leaves near-unit quaternions alone (drift guard), resets
+// degenerate ones to identity.
+vec4 qnormalize(vec4 q)
+{
+    float mag = sqrt(q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w);
+    if (mag > 0.0000001)
+    {
+        if (abs(1.0 - mag) > 0.000001)
+        {
+            float oomag = 1.0 / mag;
+            q *= oomag;
+        }
+        return q;
+    }
+    return vec4(0.0, 0.0, 0.0, 1.0);
+}
+
+// lerp(t, p, q) for quaternions (normalized).
+vec4 qlerp(float t, vec4 p, vec4 q)
+{
+    float inv_t = 1.0 - t;
+    return qnormalize(vec4(t * q.x + inv_t * p.x, t * q.y + inv_t * p.y,
+                           t * q.z + inv_t * p.z, t * q.w + inv_t * p.w));
+}
+
+// slerp(u, a, b) (NOT normalized, as LL).
+vec4 qslerp(float u, vec4 a, vec4 b)
+{
+    float cos_t = a.x*b.x + a.y*b.y + a.z*b.z + a.w*b.w;
+    bool bflip = false;
+    if (cos_t < 0.0) { cos_t = -cos_t; bflip = true; }
+    float alpha, beta;
+    if (1.0 - cos_t < 0.00001)
+    {
+        beta = 1.0 - u;
+        alpha = u;
+    }
+    else
+    {
+        float theta = acos(cos_t);
+        float sin_t = sin(theta);
+        beta = sin(theta - u*theta) / sin_t;
+        alpha = sin(u*theta) / sin_t;
+    }
+    if (bflip) beta = -beta;
+    return vec4(beta*a.x + alpha*b.x, beta*a.y + alpha*b.y, beta*a.z + alpha*b.z, beta*a.w + alpha*b.w);
+}
+
+vec4 qnlerp(float t, vec4 a, vec4 b)
+{
+    float d = a.x*b.x + a.y*b.y + a.z*b.z + a.w*b.w;
+    return (d < 0.0) ? qslerp(t, a, b) : qlerp(t, a, b);
+}
+
+// LLVector3 lerp(a, b, u) = a + (b - a) * u.
+vec3 vlerp(vec3 a, vec3 b, float u) { return a + (b - a) * u; }
+
+// Keyframe curve (LLKeyframeMotion::*Curve::getValue): lower_bound on the key times.
+// Returns false when the curve is empty.
+bool sampleCurve(uvec4 c, float t, bool is_rot, out vec4 v)
+{
+    uint off = c.x, n = c.y, interp = c.z;
+    if (n == 0u) { v = vec4(0.0); return false; }
+    uint lo = 0u, hi = n;               // first index with time >= t
+    while (lo < hi)
+    {
+        uint mid = (lo + hi) >> 1u;
+        if (ktime[off + mid] < t) lo = mid + 1u; else hi = mid;
+    }
+    if (lo == n) { v = kval[off + n - 1u]; return true; }            // past last key
+    if (lo == 0u || ktime[off + lo] == t) { v = kval[off + lo]; return true; }
+    float tb = ktime[off + lo - 1u], ta = ktime[off + lo];
+    float u = (t - tb) / (ta - tb);
+    vec4 before = kval[off + lo - 1u], after = kval[off + lo];
+    if (interp == 0u) { v = before; return true; }                  // IT_STEP
+    if (is_rot) v = qnlerp(u, before, after);
+    else        v = vec4(vlerp(before.xyz, after.xyz, u), 0.0);
+    return true;
+}
+
+// World position + rotation of a joint-table matrix (LLMatrix4::initAll(scale, rot, pos):
+// GLSL column c of the 3x3 = LL row c = the rotated basis vector c times the joint's
+// local scale). Returns false for a degenerate matrix (keep the CPU root).
+bool jointWorldPR(mat3x4 W, out vec3 pos, out vec4 q)
+{
+    mat4 M = jointWorld(W);
+    pos = M[3].xyz;
+    q = vec4(0.0, 0.0, 0.0, 1.0);
+    float l0 = length(M[0].xyz), l1 = length(M[1].xyz), l2 = length(M[2].xyz);
+    if (!(l0 > 1e-8 && l1 > 1e-8 && l2 > 1e-8) || !finite3(pos)) return false;
+    // R[c][r] (GLSL) = Rstd[r][c] of the column-vector rotation matrix
+    mat3 R = mat3(M[0].xyz / l0, M[1].xyz / l1, M[2].xyz / l2);
+    float r00 = R[0][0], r11 = R[1][1], r22 = R[2][2];
+    float r01 = R[1][0], r10 = R[0][1];
+    float r02 = R[2][0], r20 = R[0][2];
+    float r12 = R[2][1], r21 = R[1][2];
+    float tr = r00 + r11 + r22;
+    if (tr > 0.0)
+    {
+        float s = sqrt(tr + 1.0) * 2.0;
+        q = vec4((r21 - r12) / s, (r02 - r20) / s, (r10 - r01) / s, 0.25 * s);
+    }
+    else if (r00 > r11 && r00 > r22)
+    {
+        float s = sqrt(1.0 + r00 - r11 - r22) * 2.0;
+        q = vec4(0.25 * s, (r01 + r10) / s, (r02 + r20) / s, (r21 - r12) / s);
+    }
+    else if (r11 > r22)
+    {
+        float s = sqrt(1.0 + r11 - r00 - r22) * 2.0;
+        q = vec4((r01 + r10) / s, 0.25 * s, (r12 + r21) / s, (r02 - r20) / s);
+    }
+    else
+    {
+        float s = sqrt(1.0 + r22 - r00 - r11) * 2.0;
+        q = vec4((r02 + r20) / s, (r12 + r21) / s, 0.25 * s, (r10 - r01) / s);
+    }
+    float m = length(q);
+    if (!(m > 1e-8) || !finite4(q)) return false;
+    q /= m;
+    return true;
+}
+
+void main()
+{
+    uint e = gl_WorkGroupID.x + pc.entry_first;
+    if (e >= pc.entry_count) return;
+    uint eb = HDR_ENTRY_BASE + e * ENTRY_WORDS;
+    uint slot = fw[eb + 0u];
+    uint nj   = min(fw[eb + 1u], MAX_J);
+    uint mode = fw[eb + 2u];
+    uint rb   = fw[eb + 3u];
+    uint j = gl_LocalInvocationID.x;
+    if (slot >= pc.slot_cap) return;
+
+    if (mode == 0u)
+    {
+        // CPU-evaluated avatar: copy its streamed world matrices through.
+        if (j < MAX_J) out_av[slot].world[j] = (slot < pc.cpu_slot_cap) ? cpu_av[slot].world[j] : jointPack(mat4(1.0));
+        return;
+    }
+
+    uint hdr_base   = fw[1];
+    uint blend_base = fw[2];
+    uint value_base = fw[3];
+    uint basew_base = fw[4];
+
+    // 1. persistent local pose
+    uint sb = slot * MAX_J;
+    if (j < MAX_J)
+    {
+        s_pos[j]   = lstate[(sb + j) * 3u + 0u].xyz;
+        s_rot[j]   = lstate[(sb + j) * 3u + 1u];
+        s_scale[j] = lstate[(sb + j) * 3u + 2u].xyz;
+    }
+    barrier();
+
+    // 2. base writes (CPU dedups: at most one per joint)
+    uint bw_first = fw[eb + 6u], bw_count = fw[eb + 7u];
+    for (uint k = j; k < bw_count; k += 256u)
+    {
+        uint w = basew_base + (bw_first + k) * 12u;
+        uint jm = fw[w] & 0xFFFFu, mask = fw[w] >> 16u;
+        if (jm >= MAX_J) continue;
+        if ((mask & 1u) != 0u) s_pos[jm]   = vec3(fwf(w + 1u), fwf(w + 2u), fwf(w + 3u));
+        if ((mask & 2u) != 0u) s_rot[jm]   = vec4(fwf(w + 4u), fwf(w + 5u), fwf(w + 6u), fwf(w + 7u));
+        if ((mask & 4u) != 0u) s_scale[jm] = vec3(fwf(w + 8u), fwf(w + 9u), fwf(w + 10u));
+    }
+    barrier();
+
+    // 3. LL pose blend, one thread per animated joint
+    uint h_first = fw[eb + 4u], h_count = fw[eb + 5u];
+    for (uint k = j; k < h_count; k += 256u)
+    {
+        uint hw = hdr_base + (h_first + k) * 4u;
+        uint jm = fw[hw + 0u], first = fw[hw + 1u], count = fw[hw + 2u];
+        if (jm >= MAX_J) continue;
+
+        vec3 blended_pos = s_pos[jm];
+        vec4 blended_rot = s_rot[jm];
+        vec3 blended_scale = s_scale[jm];
+        vec3 added_pos = vec3(0.0);
+        vec4 added_rot = vec4(0.0, 0.0, 0.0, 1.0);
+        vec3 added_scale = vec3(0.0);
+        float sw_pos = 0.0, sw_rot = 0.0, sw_scale = 0.0;
+        uint sum_usage = 0u;
+
+        for (uint s = 0u; s < count; ++s)
+        {
+            uint bw = blend_base + (first + s) * 4u;
+            uint flags = fw[bw + 0u];
+            float weight = uintBitsToFloat(fw[bw + 1u]);
+            uint src = fw[bw + 2u];
+            float t = uintBitsToFloat(fw[bw + 3u]);
+            if (weight == 0.0) continue;
+            uint usage = (flags >> 1u) & 7u;
+            bool additive = (flags & 16u) != 0u;
+
+            vec3 v_pos = vec3(0.0), v_scale = vec3(0.0);
+            vec4 v_rot = vec4(0.0, 0.0, 0.0, 1.0);
+            if ((flags & 1u) != 0u)
+            {
+                // keyframe state: sample the joint motion's curves at t
+                vec4 r;
+                if ((usage & 2u) != 0u && sampleCurve(desc[src * 2u + 0u], t, true, r)) v_rot = r;
+                if ((usage & 1u) != 0u && sampleCurve(desc[src * 2u + 1u], t, false, r)) v_pos = r.xyz;
+            }
+            else
+            {
+                uint vw = value_base + src * 12u;
+                v_pos   = vec3(fwf(vw + 0u), fwf(vw + 1u), fwf(vw + 2u));
+                v_rot   = vec4(fwf(vw + 4u), fwf(vw + 5u), fwf(vw + 6u), fwf(vw + 7u));
+                v_scale = vec3(fwf(vw + 8u), fwf(vw + 9u), fwf(vw + 10u));
+            }
+
+            if (additive)
+            {
+                if ((usage & 1u) != 0u)
+                {
+                    float nws = min(1.0, weight + sw_pos);
+                    added_pos += v_pos * (nws - sw_pos);
+                }
+                if ((usage & 4u) != 0u)
+                {
+                    float nws = min(1.0, weight + sw_scale);
+                    added_scale += v_scale * (nws - sw_scale);
+                }
+                if ((usage & 2u) != 0u)
+                {
+                    float nws = min(1.0, weight + sw_rot);
+                    // <GMDX> from identity (llpose.cpp: LL's form doubled earlier additive states)
+                    added_rot = qmul(qnlerp(nws - sw_rot, vec4(0.0, 0.0, 0.0, 1.0), v_rot), added_rot);
+                }
+            }
+            else
+            {
+                if ((usage & 1u) != 0u)
+                {
+                    if ((sum_usage & 1u) != 0u)
+                    {
+                        float nws = min(1.0, weight + sw_pos);
+                        blended_pos = vlerp(v_pos, blended_pos, sw_pos / nws);
+                        sw_pos = nws;
+                    }
+                    else { blended_pos = v_pos; sw_pos = weight; }
+                }
+                if ((usage & 4u) != 0u)
+                {
+                    if ((sum_usage & 4u) != 0u)
+                    {
+                        float nws = min(1.0, weight + sw_scale);
+                        blended_scale = vlerp(v_scale, blended_scale, sw_scale / nws);
+                        sw_scale = nws;
+                    }
+                    else { blended_scale = v_scale; sw_scale = weight; }
+                }
+                if ((usage & 2u) != 0u)
+                {
+                    if ((sum_usage & 2u) != 0u)
+                    {
+                        float nws = min(1.0, weight + sw_rot);
+                        blended_rot = qnlerp(sw_rot / nws, v_rot, blended_rot);
+                        sw_rot = nws;
+                    }
+                    else { blended_rot = v_rot; sw_rot = weight; }
+                }
+                sum_usage |= usage;
+            }
+        }
+
+        if (!finite3(added_scale)) added_scale = vec3(0.0);
+        if (!finite3(blended_scale)) blended_scale = vec3(1.0);
+
+        // LLJoint::setPosition -> LLXform::setPosition (non-finite -> 0);
+        // setScale (non-finite -> 1); setRotation ignores a non-finite rotation.
+        vec3 np = blended_pos + added_pos;
+        s_pos[jm] = finite3(np) ? np : vec3(0.0);
+        vec3 ns = blended_scale + added_scale;
+        s_scale[jm] = finite3(ns) ? ns : vec3(1.0);
+        vec4 nr = qmul(added_rot, blended_rot);
+        if (finite4(nr)) s_rot[jm] = nr;
+    }
+    barrier();
+
+    // 4. persist
+    uint tp = (j < MAX_J) ? topo[sb + j] : 0xFFFEu;
+    if (j < MAX_J)
+    {
+        lstate[(sb + j) * 3u + 0u] = vec4(s_pos[j], 0.0);
+        lstate[(sb + j) * 3u + 1u] = s_rot[j];
+        lstate[(sb + j) * 3u + 2u] = vec4(s_scale[j], 0.0);
+    }
+
+    // 5. hierarchy, level by level (parents strictly shallower)
+    vec3 root_pos   = vec3(fwf(eb + 8u), fwf(eb + 9u), fwf(eb + 10u));
+    vec4 root_rot   = vec4(fwf(eb + 12u), fwf(eb + 13u), fwf(eb + 14u), fwf(eb + 15u));
+    vec3 root_scale = vec3(fwf(eb + 16u), fwf(eb + 17u), fwf(eb + 18u));
+    // ATTACHED-ANIMESH FOLLOW: the root sits at the wearer's attachment joint as this
+    // frame evaluated it (the first dispatch wrote it; the CPU's root came from a
+    // readback RING frames old). LLControlAvatar::matchVolumeTransform:
+    //     root pos = obj_pos * joint_rot + joint_pos,  root rot = obj_rot * joint_rot
+    uint fslot = fw[eb + 22u];
+    if (fslot != 0xFFFFFFFFu && fslot < pc.slot_cap && fslot != slot)
+    {
+        uint fj = min(fw[eb + 23u], MAX_J - 1u);
+        vec4 jr;
+        vec3 jp;
+        if (jointWorldPR(out_av[fslot].world[fj], jp, jr))
+        {
+            vec3 lp = vec3(fwf(eb + 24u), fwf(eb + 25u), fwf(eb + 26u));
+            vec4 lr = vec4(fwf(eb + 28u), fwf(eb + 29u), fwf(eb + 30u), fwf(eb + 31u));
+            root_pos = qrot(lp, jr) + jp;
+            root_rot = qmul(lr, jr);
+        }
+    }
+    uint max_depth  = min(fw[eb + 19u], 64u);
+    uint parent = tp & 0xFFFFu;
+    uint depth  = (tp >> 16u) & 0xFFu;
+    bool absent = parent == 0xFFFEu || j >= nj;
+    for (uint d = 0u; d <= max_depth; ++d)
+    {
+        if (!absent && depth == d)
+        {
+            vec3 ppos, pscale; vec4 prot;
+            if (parent == 0xFFFFu) { ppos = root_pos; prot = root_rot; pscale = root_scale; }
+            else { ppos = s_wpos[parent]; prot = s_wrot[parent]; pscale = s_scale[parent]; }
+            vec3 wp = s_pos[j] * pscale;       // parent->getScaleChildOffset() (all LLJoints)
+            wp = qrot(wp, prot);
+            wp += ppos;
+            s_wpos[j] = wp;
+            s_wrot[j] = qmul(s_rot[j], prot);
+        }
+        barrier();
+    }
+
+    // 6. sparse readback (all hierarchy levels are done: the loop ends on a barrier)
+    if (rb != 0xFFFFFFFFu)
+    {
+        uint req_base = fw[5];
+        uint rf = fw[eb + 20u], rc = fw[eb + 21u];
+        // inverse root rotation (LLQuaternion conjugate / norm^2): rel = (world - root) * ~root
+        vec4 rinv = vec4(-root_rot.xyz, root_rot.w) / max(dot(root_rot, root_rot), 1e-12);
+        for (uint k = j; k < rc; k += 256u)
+        {
+            uint jr = fw[req_base + rf + k];
+            uint ob = (rb + k) * RB_RECORD_VEC4;
+            if (jr >= MAX_J)
+            {
+                lout[ob + 0u] = vec4(0.0); lout[ob + 1u] = vec4(0.0, 0.0, 0.0, 1.0);
+                lout[ob + 2u] = vec4(1.0, 1.0, 1.0, 0.0);
+                lout[ob + 3u] = vec4(0.0); lout[ob + 4u] = vec4(0.0, 0.0, 0.0, 1.0);
+                continue;
+            }
+            bool present = (topo[sb + jr] & 0xFFFFu) != 0xFFFEu && jr < nj;
+            lout[ob + 0u] = vec4(s_pos[jr], 0.0);
+            lout[ob + 1u] = s_rot[jr];
+            lout[ob + 2u] = vec4(s_scale[jr], 0.0);
+            lout[ob + 3u] = present ? vec4(qrot(s_wpos[jr] - root_pos, rinv), 0.0) : vec4(0.0);
+            lout[ob + 4u] = present ? qmul(s_wrot[jr], rinv) : vec4(0.0, 0.0, 0.0, 1.0);
+        }
+    }
+
+    if (j >= MAX_J) return;
+    mat4 m = mat4(1.0);
+    if (!absent)
+    {
+        vec4 q = s_wrot[j];
+        vec3 sc = s_scale[j];
+        float xx = q.x * q.x, xy = q.x * q.y, xz = q.x * q.z, xw = q.x * q.w;
+        float yy = q.y * q.y, yz = q.y * q.z, yw = q.y * q.w;
+        float zz = q.z * q.z, zw = q.z * q.w;
+        // LLMatrix4::initAll rows == GLSL columns
+        m[0] = vec4((1.0 - 2.0 * (yy + zz)) * sc.x, (2.0 * (xy + zw)) * sc.x, (2.0 * (xz - yw)) * sc.x, 0.0);
+        m[1] = vec4((2.0 * (xy - zw)) * sc.y, (1.0 - 2.0 * (xx + zz)) * sc.y, (2.0 * (yz + xw)) * sc.y, 0.0);
+        m[2] = vec4((2.0 * (xz + yw)) * sc.z, (2.0 * (yz - xw)) * sc.z, (1.0 - 2.0 * (xx + yy)) * sc.z, 0.0);
+        m[3] = vec4(s_wpos[j], 1.0);
+    }
+    out_av[slot].world[j] = jointPack(m);   // (m's last row is the constant (0,0,0,1))
+}

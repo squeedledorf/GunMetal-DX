@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<floater name="build options floater" title="グリッドオプション">
+	<spinner label="単位（メートル）" name="GridResolution"/>
+	<spinner label="範囲（メートル）" name="GridDrawSize"/>
+	<check_box label="より細かい単位でスナップフィット" name="GridSubUnit"/>
+	<text name="grid_opacity_label" tool_tip="グリッドの不透明度">
+		不透明度：
+	</text>
+</floater>

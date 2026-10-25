@@ -1,0 +1,33 @@
+<?xml version="1.0" ?>
+<!--
+Photo Studio (#444): settings this feature owns that were renamed from their
+upstream Alchemy names, old name -> new name. Read by SLPhotoStudioSettings
+(slphotostudiosettings.cpp):
+
+- once, at startup, to carry each old value in the user's settings.xml over to
+  the new name (if the new one is still at its default); the marker
+  SLPhotoStudioSettingsMigrated keeps that to one run;
+- whenever a Look or a graphics preset is loaded, so files saved under the old
+  names still apply.
+
+Kept as its own table so it can be folded into the general settings rename
+(#126) as data. Not here, on purpose: ALLightboxState (the old floater's tab and
+window state, which has no meaning for the four-panel layout and is dropped),
+and AlchemyScopePane0-3 (never declared, so never saved).
+-->
+<llsd>
+<map>
+    <key>AlchemyRenderTonemapType</key>
+    <string>SlipstreamRenderTonemapType</string>
+    <key>AlchemyScopeLayout</key>
+    <string>SLPhotoStudioScopeLayout</string>
+    <key>AlchemyScopeLogScale</key>
+    <string>SLPhotoStudioScopeLogScale</string>
+    <key>AlchemyScopeSampleInterval</key>
+    <string>SLPhotoStudioScopeSampleInterval</string>
+    <key>AlchemyScopeSampleWidth</key>
+    <string>SLPhotoStudioScopeSampleWidth</string>
+    <key>AlchemyScopeSmoothing</key>
+    <string>SLPhotoStudioScopeSmoothing</string>
+</map>
+</llsd>

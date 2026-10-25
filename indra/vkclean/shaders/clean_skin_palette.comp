@@ -1,0 +1,73 @@
+#version 450
+// vkclean — GPU skin palette generation (Vulkan twin of GL cleanSkinPaletteC.glsl).
+//
+// One workgroup per live skin, one thread per palette lane. Lane j of skin s:
+//   M = (avatar joint world[joint_nums[j]] with translation made eye-relative) * inv_bind[j]
+// packed to the mat3x4 layout clean_preskin.comp reads (col c = (M[c].xyz, M[3][c])),
+// plus bind_shape copied from the static skin meta. Byte-for-byte the math
+// LLCleanSkinStore::buildVKPalettes did on the CPU every frame, including the tail
+// fill (lanes >= joint_count replicate the last real joint, which carries any custom
+// skeleton scale) and identity for an unresolved avatar.
+//
+// Inputs: avatar joint world matrices (streamed every frame, also read by the draw
+// for rigid attachments) + per-skin meta (static, streamed only when a skin registers
+// or resolves). Output: the palette SSBO -- written ONLY here (never by the CPU).
+
+layout(local_size_x = 128) in;
+
+#define MAX_JOINTS        110
+#define MAX_AVATAR_JOINTS 216
+
+#include "clean_joint_table.glsl"   // mat3x4 joint world rows (jointWorld())
+layout(std430, binding = 0) readonly buffer AvJoints { AvatarJoints avatars[]; };
+
+// Must match LLCleanSkinStore::SkinMeta (std430, 7568 B).
+struct SkinMeta {
+    uint avatar_idx;
+    uint joint_count;
+    uint pad0;
+    uint pad1;
+    int  joint_nums[MAX_JOINTS];
+    int  pad_align[2];
+    mat4 inv_bind[MAX_JOINTS];
+    mat4 bind_shape;
+};
+layout(std430, binding = 1) readonly buffer Meta { SkinMeta metas[]; };
+
+struct SkinBlock {
+    mat3x4 matrices[MAX_JOINTS];   // 48 B each
+    mat4   bind_shape;             // 64 B
+};
+layout(std430, binding = 2) writeonly buffer Palette { SkinBlock skins[]; };
+
+layout(push_constant) uniform Push {
+    vec4 eye;            // xyz = camera position (palettes are eye-relative)
+    uint skin_count;
+    uint avatar_count;   // live entries in avatars[]
+    uint pad0;
+    uint pad1;
+} pc;
+
+void main()
+{
+    const uint s = gl_WorkGroupID.x;
+    if (s >= pc.skin_count) return;
+    const uint j = gl_LocalInvocationID.x;
+
+    if (j == 0u) skins[s].bind_shape = metas[s].bind_shape;
+    if (j >= uint(MAX_JOINTS)) return;
+
+    const uint jc = metas[s].joint_count;
+    const uint src_j = (jc > 0u) ? min(j, jc - 1u) : 0u;
+    const int  jn = clamp(metas[s].joint_nums[src_j], 0, MAX_AVATAR_JOINTS - 1);
+    const uint av = metas[s].avatar_idx;
+
+    mat4 w = (av < pc.avatar_count) ? jointWorld(avatars[av].world[jn]) : mat4(1.0);
+    // Camera-relative BEFORE the multiply: the big translation cancels once per joint.
+    w[3].xyz -= pc.eye.xyz;
+    const mat4 m = w * metas[s].inv_bind[src_j];
+
+    skins[s].matrices[j] = mat3x4(vec4(m[0].xyz, m[3].x),
+                                  vec4(m[1].xyz, m[3].y),
+                                  vec4(m[2].xyz, m[3].z));
+}

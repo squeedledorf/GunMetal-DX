@@ -1,0 +1,70 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+// vkclean -- CLUSTER LOD selection finalize for ONE view (#745, OWNER: 1b), after
+// clean_cluster_select.comp: clamps the view's selected count to its slice, writes the
+// per-selected dispatch arguments (2a pre-skin / 2b RT read them, CLC_DISPATCH) and the
+// mesh-tier task commands per bucket (CLC_TASKS0 / 1) and, for the main view with the shared
+// rig cut, per rig list (CLC_RIG_TASKS), and counts the draws emitted.
+// Grids wrap rows at CL_TASK_GRID_X groups (consumers linearise y * x_count + x).
+layout(local_size_x = 1) in;
+
+#define CLUSTER_SET 0
+#define CL_DECLARE_STATS
+#include "clean_cluster_common.glsl"
+#define CL_SELECT_WRITE
+#include "clean_cluster_select_common.glsl"
+
+layout(push_constant) uniform FinalizePush { uint view; uint pad0, pad1, pad2; } fp;
+
+uvec3 clGrid(uint groups)
+{
+    if (groups == 0u) return uvec3(0u, 1u, 1u);
+    const uint x = min(groups, CL_TASK_GRID_X);
+    return uvec3(x, (groups + x - 1u) / x, 1u);
+}
+
+void main()
+{
+    if (fp.view >= CL_MAX_VIEWS) return;
+    const ClView v = cl_views[fp.view];
+    const uint vb = fp.view * CLC_VIEW_WORDS;
+    const uint n = min(cl_cnt[vb + CLC_SELECTED], v.sel_cap);
+    const uint d0 = min(cl_cnt[vb + CLC_DRAWS0], v.draw_cap);
+    const uint d1 = min(cl_cnt[vb + CLC_DRAWS1], v.draw_cap);
+    cl_cnt[vb + CLC_SEL_CLAMPED] = n;
+    const uvec3 g = clGrid((n + 63u) / 64u);
+    cl_cnt[vb + CLC_DISPATCH + 0u] = g.x;
+    cl_cnt[vb + CLC_DISPATCH + 1u] = g.y;
+    cl_cnt[vb + CLC_DISPATCH + 2u] = g.z;
+    const uvec3 t0 = clGrid((d0 + CL_TASK_CLUSTERS - 1u) / CL_TASK_CLUSTERS);
+    const uvec3 t1 = clGrid((d1 + CL_TASK_CLUSTERS - 1u) / CL_TASK_CLUSTERS);
+    cl_cnt[vb + CLC_TASKS0 + 0u] = t0.x;
+    cl_cnt[vb + CLC_TASKS0 + 1u] = t0.y;
+    cl_cnt[vb + CLC_TASKS0 + 2u] = t0.z;
+    cl_cnt[vb + CLC_TASKS1 + 0u] = t1.x;
+    cl_cnt[vb + CLC_TASKS1 + 1u] = t1.y;
+    cl_cnt[vb + CLC_TASKS1 + 2u] = t1.z;
+    uint dr = 0u;
+    // The shared rig lists (main view with the shared rig cut): their mesh-tier task commands.
+    if ((v.flags & CLV_MAIN) != 0u && (cl_aux.rig.z & 1u) != 0u)
+        for (uint r = 0u; r < CL_RIG_LISTS * 2u; ++r)
+        {
+            const uint d = min(cl_cnt[vb + CLC_RIG_DRAWS + r], cl_aux.rig.y);
+            dr += d;
+            const uvec3 t = clGrid((d + CL_TASK_CLUSTERS - 1u) / CL_TASK_CLUSTERS);
+            cl_cnt[vb + CLC_RIG_TASKS + r * 4u + 0u] = t.x;
+            cl_cnt[vb + CLC_RIG_TASKS + r * 4u + 1u] = t.y;
+            cl_cnt[vb + CLC_RIG_TASKS + r * 4u + 2u] = t.z;
+        }
+    // ALPHA LISTS (main view): the prep / scatter dispatch over the staged alpha records
+    // (clean_cluster_alpha.comp modes 0 / 2; the order pass writes the lists' counts / tasks).
+    if ((v.flags & CLV_MAIN) != 0u)
+    {
+        const uint st = (cl_aux.alpha.w & 1u) != 0u ? min(cl_cnt[vb + CLC_AL_STAGED], cl_aux.alpha.y) : 0u;
+        const uvec3 a = clGrid((st + 63u) / 64u);
+        cl_cnt[vb + CLC_AL_DISPATCH + 0u] = a.x;
+        cl_cnt[vb + CLC_AL_DISPATCH + 1u] = a.y;
+        cl_cnt[vb + CLC_AL_DISPATCH + 2u] = a.z;
+    }
+    CL_STAT_ADD(CLS_DRAWS, d0 + d1 + dr);
+}

@@ -1,0 +1,42 @@
+#version 450
+// vkclean — selection outline for RIGGED instances (#170). A rigged instance's
+// drawable vertices exist only in the pre-skin output (mSkinVbo), at a range the main
+// cull allocates every frame, so the CPU-built selection list can't know its
+// vertexOffset. The CPU writes one placeholder DrawCmd per selected rigged instance
+// (firstInstance = instance id); this pass, run while cand / cand_meta still hold the
+// MAIN view's cull, replaces each with the instance's final draw (skinned
+// vertexOffset), or empties it if the instance was culled this frame (no skinned
+// vertices to outline).
+layout(local_size_x = 64) in;
+
+struct DrawCmd { uint indexCount; uint instanceCount; uint firstIndex; int vertexOffset; uint firstInstance; };
+
+layout(std430, binding = 0) readonly buffer Cand     { DrawCmd cand[]; };
+layout(std430, binding = 1) readonly buffer CandMeta { uint cand_meta[]; };   // ~0 = culled
+layout(std430, binding = 2) buffer SelCmds { DrawCmd sel[]; };
+
+layout(push_constant) uniform P { uint first; uint count; uint instance_count; uint pad; } pc;
+
+// The cull's rigged buckets (clean_cull.comp: rigged 3 4 5, two-sided rigged 8 9, their
+// no-shadow twins 10..14). Only those candidates draw from the pre-skin output; any
+// other verdict (static bucket: flag set but no valid skin) has a static-VBO
+// vertexOffset and must not be drawn against mSkinVbo.
+bool riggedBucket(uint b)
+{
+    return b == 3u || b == 4u || b == 5u || b == 8u || b == 9u || (b >= 10u && b <= 14u);
+}
+
+void main()
+{
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pc.count) return;
+    uint e  = pc.first + i;
+    uint id = sel[e].firstInstance;
+    if (id >= pc.instance_count || cand_meta[id] == 0xFFFFFFFFu || !riggedBucket(cand_meta[id] >> 24))
+    {
+        sel[e].indexCount = 0u;
+        sel[e].instanceCount = 0u;
+        return;
+    }
+    sel[e] = cand[id];
+}

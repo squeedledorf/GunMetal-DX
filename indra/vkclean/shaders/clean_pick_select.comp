@@ -1,0 +1,340 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "clean_av_slots.glsl"
+// vkclean -- GPU RASTER CURSOR PICK (#702 / #704), stage 1: the candidates for ANY ray.
+//
+// The pick's own selection over the whole instance table. World rows are drawn as the
+// MAIN view drew them: LLCleanPickVK copies the main cull's per-instance draw (cand[] /
+// cand_meta[]: the drawn LOD slot / decimated step and, for rigged draws, that frame's
+// pre-skinned range) into a pick-owned SNAPSHOT right after the main cull's consumers,
+// before the HUD / probe / mirror culls reuse cand[]. This pass reads the snapshot, so it
+// runs for the per-frame cursor ray AND for a click's ray between frames (synchronous,
+// LLCleanPickVK::pickNow): the last frame's pre-skinned ranges stay intact until the next
+// frame's pre-skin, so the posed rigged vertices are exactly the pose on screen. A row the
+// main view did not draw (frustum / render type / hidden / a rigged capacity drop) is not
+// on screen and is not picked. One invocation per instance row:
+//
+//   world rows: drawn by the main view (snapshot meta, not an off-screen-only rigged draw)
+//               and the ray crosses its bounds inside the depth window -> the static or
+//               the rigged list;
+//   <SS:Skoomastream> all-static rays (job.w bit 2): also the static rows the main view
+//               did not draw, at their highest resident level;
+//   HUD rows:   the HUD layer is picked and the HUD ray crosses its bounds -> the HUD
+//               list, at the HUD cull's level (the highest resident one).
+//
+// Bounds: world rows the cull's worldAABB (resident LODs' bounds, spinner sweep, flexi
+// reach, 1 m pad); worn rigid attachments their box through the joint table (as
+// clean_draw.vert places them); rigged rows the wearer's padded box (computeAvatarVis,
+// av_vis); unknown bounds always pass. Lists overflowing their cap set an overflow bit:
+// the CPU narrows the depth window and asks again (llcleancursorpick.cpp).
+layout(local_size_x = 64) in;
+
+#include "clean_pick_common.glsl"
+
+// Draw set 0 (clean_draw.vert's layouts).
+struct Instance {
+    mat4 model_matrix;
+    vec4 aabb_min;     // .w LL LOD radius
+    vec4 aabb_max;     // .w worn attachment: joint index
+    vec4 tint;
+    mat4 uv_matrix;
+    uint lod_group_id;
+    uint material_id;
+    uint flags;
+    uint skin_id;      // rigged: skin; worn attachment: joint-table slot
+    vec4 spin_axis;
+    vec4 spin_pivot;
+};   // 224 B
+layout(std430, set = 0, binding = 0) readonly buffer Instances { Instance instances[]; };
+#include "clean_joint_table.glsl"   // mat3x4 joint world rows (jointWorld())
+layout(std430, set = 0, binding = 2) readonly buffer AvatarJointsSSBO { AvatarJoints avatar_joints[]; };
+
+struct SlotInfo {
+    uint first_index;
+    uint index_count;   // 0 = not resident
+    int  base_vertex;
+    uint has_weights;
+    uint vert_count;
+    uint _pad0;         // resident bounds (halfs; 0 = none)
+    uint _pad1;
+    uint _pad2;
+};
+struct DrawCmd { uint indexCount; uint instanceCount; uint firstIndex; int vertexOffset; uint firstInstance; };
+struct LodGroup { uint slot[4]; };
+#define LOD_SENTINEL 0xFFFFFFFFu
+
+// The main cull's snapshot (LLCleanPickVK::recordSnapshot): cand[] / cand_meta[] as the
+// main view left them.
+layout(std430, set = 1, binding = 0) readonly buffer Cand      { DrawCmd cand[]; };
+layout(std430, set = 1, binding = 1) readonly buffer CandMeta  { uint cand_meta[]; };   // bucket<<24 | rank, ~0 = culled
+layout(std430, set = 1, binding = 2) readonly buffer Slots     { SlotInfo slots[]; };
+layout(std430, set = 1, binding = 3) readonly buffer LodGroups { LodGroup lod_groups[]; };
+layout(std430, set = 1, binding = 4) readonly buffer AvatarVis { uint av_vis[]; };
+layout(std430, set = 1, binding = 5) readonly buffer SkinMetaW { uint skin_meta_w[]; };
+layout(std430, set = 1, binding = 6) buffer Lists { uint counts[16]; DrawCmd cmds[]; };
+
+layout(push_constant) uniform PickSelectPush {
+    vec4  w_org;    // world ray origin (agent space), w length
+    vec4  w_dir;    // unit direction
+    vec4  h_org;    // HUD ray origin (HUD space), w length
+    vec4  h_dir;    // unit direction
+    uvec4 job;      // x instance rows (snapshot rows for the world), y world list cap, z HUD list cap,
+                    // w bit0 world, bit1 HUD
+    uvec4 valid;    // x index count in the IBO, y vertex count in the VBO (0 = unchecked),
+                    // z rows the snapshot holds
+    vec4  win;      // depth windows: x / y world [lo, hi), z / w HUD [lo, hi) (clean_pick_common.glsl)
+} pc;
+
+// clean_cull.comp's tables (keep in step).
+#define SKIN_META_WORDS 1892u
+#define AV_VIS_SLOTS    AV_SLOT_CAP
+#define CASTER_BASE     (AV_VIS_SLOTS + 4u)
+#define AV_DEM_BASE     (CASTER_BASE + 102u)
+#define AV_BOX_BASE     (AV_DEM_BASE + 2u * AV_VIS_SLOTS)
+#define AV_LOD_BASE     (AV_BOX_BASE + 6u * AV_VIS_SLOTS)
+#define AV_HIDE_BASE    (AV_LOD_BASE + AV_VIS_SLOTS)
+#define OFF_META        0x80000000u
+#define NBI             15u
+#define FLEXI_FLAG      524288u
+
+bool groupOk(uint g) { return g < uint(lod_groups.length()); }
+bool slotOk(uint s)  { return s < uint(slots.length()) && slots[s].index_count != 0u; }
+bool rangeOk(uint base, uint count, uint cap) { return count <= cap && base <= cap - count; }
+
+// The cull's rigged buckets (rigged 3 4 5, two-sided rigged 8 9, no-shadow twins 10..14):
+// their draws read the pre-skinned stream.
+bool riggedBucket(uint b)
+{
+    return b == 3u || b == 4u || b == 5u || b == 8u || b == 9u || (b >= 10u && b <= 14u);
+}
+
+// clean_cull.comp avHidden (Hide Selected, #29): the HUD cull drops these too.
+bool avHidden(uint id)
+{
+    if (AV_HIDE_BASE >= uint(av_vis.length())) return false;
+    const uint n = min(av_vis[AV_HIDE_BASE], uint(av_vis.length()) - AV_HIDE_BASE - 1u);
+    uint lo = 0u, hi = n;
+    while (lo < hi)
+    {
+        const uint mid = (lo + hi) >> 1u;
+        if (av_vis[AV_HIDE_BASE + 1u + mid] < id) lo = mid + 1u; else hi = mid;
+    }
+    return lo < n && av_vis[AV_HIDE_BASE + 1u + lo] == id;
+}
+
+// clean_cull.comp localBounds: the instance box unioned with every resident LOD's bounds.
+void localBounds(uint id, out vec3 lo, out vec3 hi)
+{
+    lo = instances[id].aabb_min.xyz;
+    hi = instances[id].aabb_max.xyz;
+    const uint gid = instances[id].lod_group_id;
+    if (gid != LOD_SENTINEL && groupOk(gid))
+    {
+        for (uint L = 0u; L < 4u; ++L)
+        {
+            const uint sl = lod_groups[gid].slot[L];
+            if (sl >= uint(slots.length())) continue;
+            const SlotInfo si = slots[sl];
+            if (si.index_count == 0u || (si._pad0 | si._pad1 | si._pad2) == 0u) continue;
+            const vec2 a = unpackHalf2x16(si._pad0), b = unpackHalf2x16(si._pad1), c = unpackHalf2x16(si._pad2);
+            lo = min(lo, vec3(a.x, a.y, b.x));
+            hi = max(hi, vec3(b.y, c.x, c.y));
+        }
+    }
+}
+
+// The local box through M, padded.
+void xformBox(mat4 M, vec3 lo, vec3 hi, float pad, out vec3 wmin, out vec3 wmax)
+{
+    wmin = vec3(1e30);
+    wmax = vec3(-1e30);
+    for (int i = 0; i < 8; ++i)
+    {
+        const vec3 c = vec3((i & 1) != 0 ? hi.x : lo.x, (i & 2) != 0 ? hi.y : lo.y, (i & 4) != 0 ? hi.z : lo.z);
+        const vec3 w = (M * vec4(c, 1.0)).xyz;
+        wmin = min(wmin, w);
+        wmax = max(wmax, w);
+    }
+    wmin -= vec3(pad);
+    wmax += vec3(pad);
+}
+
+// clean_cull.comp worldAABB (world rows): flexi reach, spinner sweep, 1 m pad.
+void worldAABB(uint id, out vec3 wmin, out vec3 wmax)
+{
+    const mat4 mm = instances[id].model_matrix;
+    if ((instances[id].flags & FLEXI_FLAG) != 0u)
+    {
+        const vec3 sc = vec3(length(mm[0].xyz), length(mm[1].xyz), length(mm[2].xyz));
+        const float r = 1.5 * length(sc) + 0.05;
+        wmin = mm[3].xyz - vec3(r) - vec3(1.0);
+        wmax = mm[3].xyz + vec3(r) + vec3(1.0);
+        return;
+    }
+    vec3 lo, hi;
+    localBounds(id, lo, hi);
+    xformBox(mm, lo, hi, 0.0, wmin, wmax);
+    if (dot(instances[id].spin_axis.xyz, instances[id].spin_axis.xyz) > 0.0)
+    {
+        const vec3 piv = instances[id].spin_pivot.xyz;
+        const vec3 far_c = max(abs(wmin - piv), abs(wmax - piv));
+        const float r = length(far_c);
+        wmin = piv - vec3(r);
+        wmax = piv + vec3(r);
+    }
+    wmin -= vec3(1.0);
+    wmax += vec3(1.0);
+}
+
+// Segment [o + d * t_lo, o + d * t_hi] vs the box.
+bool rayBox(vec3 o, vec3 d, float t_lo, float t_hi, vec3 bmin, vec3 bmax)
+{
+    if (!(bmin.x <= bmax.x && bmin.y <= bmax.y && bmin.z <= bmax.z)) return true;   // degenerate: keep
+    float t0 = t_lo, t1 = t_hi;
+    if (t0 > t1) return false;
+    for (int a = 0; a < 3; ++a)
+    {
+        if (abs(d[a]) < 1e-8)
+        {
+            if (o[a] < bmin[a] || o[a] > bmax[a]) return false;
+            continue;
+        }
+        const float inv = 1.0 / d[a];
+        float ta = (bmin[a] - o[a]) * inv, tb = (bmax[a] - o[a]) * inv;
+        if (ta > tb) { const float x = ta; ta = tb; tb = x; }
+        t0 = max(t0, ta);
+        t1 = min(t1, tb);
+        if (t0 > t1) return false;
+    }
+    return true;
+}
+
+// The model matrix the static VS draws a row with (worn attachments: through its joint).
+mat4 drawMatrix(uint id)
+{
+    const Instance inst = instances[id];
+    if ((inst.flags & 512u) != 0u && inst.skin_id != 0xFFFFFFFFu && inst.skin_id < uint(avatar_joints.length()))
+    {
+        const uint bone = min(uint(inst.aabb_max.w + 0.5), 215u);
+        return jointWorld(avatar_joints[inst.skin_id].world[bone]) * inst.model_matrix;
+    }
+    return inst.model_matrix;
+}
+
+// World row: does the cursor ray cross what may be drawn of it?
+bool worldHit(uint id)
+{
+    const uint fl = instances[id].flags;
+    const vec3 o = pc.w_org.xyz, d = pc.w_dir.xyz;
+    const float lo = max(pc.win.x, 0.0), hi = min(pc.w_org.w, pc.win.y);
+    if ((fl & 1u) != 0u && (fl & FLEXI_FLAG) == 0u)
+    {
+        // Rigged: skinned by the palette -- the wearer's padded box (unknown: keep).
+        const uint sid = instances[id].skin_id;
+        if (sid == 0xFFFFFFFFu || uint(av_vis.length()) <= AV_VIS_SLOTS || av_vis[AV_VIS_SLOTS] == 0u
+            || (sid + 1u) * SKIN_META_WORDS > uint(skin_meta_w.length())) return true;
+        const uint av = skin_meta_w[sid * SKIN_META_WORDS];
+        if (av >= AV_VIS_SLOTS || AV_BOX_BASE + 6u * av + 5u >= uint(av_vis.length())) return true;
+        const uint b = AV_BOX_BASE + 6u * av;
+        const vec3 mn = vec3(uintBitsToFloat(av_vis[b]), uintBitsToFloat(av_vis[b + 1u]), uintBitsToFloat(av_vis[b + 2u]));
+        const vec3 mx = vec3(uintBitsToFloat(av_vis[b + 3u]), uintBitsToFloat(av_vis[b + 4u]), uintBitsToFloat(av_vis[b + 5u]));
+        if (!(mn.x <= mx.x)) return true;
+        return rayBox(o, d, lo, hi, mn - vec3(0.5), mx + vec3(0.5));
+    }
+    if ((fl & 128u) != 0u) return true;   // bounds unknown
+    vec3 wmin, wmax;
+    if ((fl & 512u) != 0u)
+    {
+        vec3 lo, hi;
+        localBounds(id, lo, hi);
+        xformBox(drawMatrix(id), lo, hi, 0.1, wmin, wmax);
+    }
+    else
+        worldAABB(id, wmin, wmax);
+    return rayBox(o, d, lo, hi, wmin, wmax);
+}
+
+void push(uint list, uint base, uint cap, uint ovf_bit, DrawCmd c)
+{
+    const uint k = atomicAdd(counts[list], 1u);
+    if (k < cap) cmds[base + k] = c;
+    else atomicOr(counts[PICK_CNT_OVERFLOW], ovf_bit);
+}
+
+void main()
+{
+    const uint id = gl_GlobalInvocationID.x;
+    if (id >= pc.job.x || id >= uint(instances.length())) return;
+    const Instance inst = instances[id];
+    if (inst.lod_group_id == LOD_SENTINEL) return;
+    if ((inst.flags & 0x00400000u) != 0u) return;   // <GMDX> dying (rez effects): never picked
+    const uint cap = pc.job.y;
+
+    if ((inst.flags & 8u) != 0u)
+    {
+        // HUD row: the HUD cull's choice (the highest resident level; rigged HUDs are not
+        // skinned, so not drawn).
+        if ((pc.job.w & 2u) == 0u || (inst.flags & 1u) != 0u || !groupOk(inst.lod_group_id) || avHidden(id)) return;
+        uint slot_id = LOD_SENTINEL;
+        for (int L = 3; L >= 0 && slot_id == LOD_SENTINEL; --L)
+        {
+            const uint s = lod_groups[inst.lod_group_id].slot[L];
+            if (slotOk(s)) slot_id = s;
+        }
+        if (slot_id == LOD_SENTINEL) return;
+        const SlotInfo s = slots[slot_id];
+        if (pc.valid.x != 0u && !rangeOk(s.first_index, s.index_count, pc.valid.x)) return;
+        if (pc.valid.y != 0u && (s.base_vertex < 0 || !rangeOk(uint(s.base_vertex), s.vert_count, pc.valid.y))) return;
+        vec3 lo, hi, bmin, bmax;
+        localBounds(id, lo, hi);
+        xformBox(drawMatrix(id), lo, hi, 0.01, bmin, bmax);
+        if (!rayBox(pc.h_org.xyz, pc.h_dir.xyz, max(pc.win.z, 0.0), min(pc.h_org.w, pc.win.w), bmin, bmax)) return;
+        push(PICK_CNT_HUD, 2u * cap, pc.job.z, 4u, DrawCmd(s.index_count, 1u, s.first_index, s.base_vertex, id));
+        return;
+    }
+
+    // <SS:Skoomastream> ALL-STATIC rays (job.w bit 2: the OTS camera / aim rays,
+    // sscombatray.cpp): a static, unworn world row the main view did NOT draw (behind the
+    // camera, off screen, occluded) still answers, at its highest resident level -- the
+    // camera pulled in front of a wall must keep seeing that wall behind it.
+    if ((pc.job.w & 5u) == 5u && (inst.flags & (1u | 512u | 2048u)) == 0u)
+    {
+        bool drawn = id < pc.valid.z && id < uint(cand_meta.length()) && id < uint(cand.length());
+        if (drawn)
+        {
+            const uint dm = cand_meta[id];
+            drawn = dm != 0xFFFFFFFFu && (dm & OFF_META) == 0u && (dm >> 24) < NBI
+                 && cand[id].indexCount != 0u && cand[id].instanceCount != 0u;
+        }
+        if (!drawn)
+        {
+            if (!groupOk(inst.lod_group_id)) return;
+            uint slot_id = LOD_SENTINEL;
+            for (int L = 3; L >= 0 && slot_id == LOD_SENTINEL; --L)
+            {
+                const uint sl = lod_groups[inst.lod_group_id].slot[L];
+                if (slotOk(sl)) slot_id = sl;
+            }
+            if (slot_id == LOD_SENTINEL) return;
+            const SlotInfo si = slots[slot_id];
+            if (pc.valid.x != 0u && !rangeOk(si.first_index, si.index_count, pc.valid.x)) return;
+            if (pc.valid.y != 0u && (si.base_vertex < 0 || !rangeOk(uint(si.base_vertex), si.vert_count, pc.valid.y))) return;
+            if (!worldHit(id)) return;
+            push(PICK_CNT_STATIC, 0u, cap, 1u, DrawCmd(si.index_count, 1u, si.first_index, si.base_vertex, id));
+            return;
+        }
+    }
+    // </SS:Skoomastream>
+    // World row: what the main view draws of it.
+    if ((pc.job.w & 1u) == 0u || id >= pc.valid.z || id >= uint(cand_meta.length()) || id >= uint(cand.length())) return;
+    const uint m = cand_meta[id];
+    if (m == 0xFFFFFFFFu || (m & OFF_META) != 0u || (m >> 24) >= NBI) return;
+    DrawCmd c = cand[id];
+    if (c.indexCount == 0u || c.instanceCount == 0u) return;   // (a rigged capacity drop)
+    if ((inst.flags & 2048u) != 0u) return;                    // water: never picked
+    if (!worldHit(id)) return;
+    c.instanceCount = 1u;
+    c.firstInstance = id;
+    if (riggedBucket(m >> 24)) push(PICK_CNT_RIGGED, cap, cap, 2u, c);
+    else                       push(PICK_CNT_STATIC, 0u, cap, 1u, c);
+}

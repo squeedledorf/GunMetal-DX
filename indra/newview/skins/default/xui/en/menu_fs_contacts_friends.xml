@@ -1,0 +1,140 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<context_menu
+ layout="topleft"
+ name="Friends Popup">
+    <menu_item_call
+     label="View Profile"
+     layout="topleft"
+     name="show_agent">
+        <menu_item_call.on_click
+         function="Contacts.Friends.ShowProfile"/>
+    </menu_item_call>
+    <menu_item_call
+     label="Send IM..."
+     layout="topleft"
+     name="send_im">
+        <menu_item_call.on_click
+         function="Contacts.Friends.SendIM"/>
+    </menu_item_call>
+    <menu_item_call
+     label="View chat transcripts..."
+     layout="topleft"
+     name="chat_history">
+        <menu_item_call.on_click
+         function="Contacts.Friends.Calllog"/>
+        <menu_item_call.on_enable
+         function="Contacts.Friends.EnableItem"
+         parameter="can_callog"/>
+    </menu_item_call>
+    <menu_item_call
+     label="Add to Set..."
+     layout="topleft"
+     name="Add to Set">
+        <menu_item_call.on_click
+         function="Contacts.Friends.AddToContactSet"/>
+    </menu_item_call>
+    <menu_item_call
+     label="Zoom at Friend"
+     layout="topleft"
+     name="zoom_agent">
+        <menu_item_call.on_click
+         function="Contacts.Friends.ZoomIn"/>
+        <menu_item_call.on_enable
+         function="Contacts.Friends.EnableZoomIn"/>
+    </menu_item_call>
+    <menu_item_call
+     label="Teleport to Friend"
+     layout="topleft"
+     name="teleportto_agent">
+        <menu_item_call.on_click
+         function="Contacts.Friends.TeleportToTarget"/>
+        <menu_item_call.on_enable
+         function="Contacts.Friends.EnableItem"
+         parameter="teleport_to"/>
+    </menu_item_call>
+    <menu_item_call
+     label="Offer Teleport"
+     layout="topleft"
+     name="offer_teleport">
+        <menu_item_call.on_click
+         function="Contacts.Friends.OfferTeleport"/>
+        <menu_item_call.on_enable
+         function="Contacts.Friends.EnableItem"
+         parameter="offer_teleport"/>
+    </menu_item_call>
+    <menu_item_call
+     label="Request Teleport"
+     layout="topleft"
+     name="request_teleport">
+        <menu_item_call.on_click
+         function="Contacts.Friends.RequestTeleport"/>
+        <menu_item_call.on_enable
+         function="Contacts.Friends.EnableItem"
+         parameter="request_teleport"/>
+    </menu_item_call>
+    <menu_item_call
+     label="Show on Map"
+     layout="topleft"
+     name="show_on_map">
+        <menu_item_call.on_click
+         function="Contacts.Friends.ShowOnMap"/>
+        <menu_item_call.on_enable
+         function="Contacts.Friends.EnableItem"
+         parameter="show_on_map"/>
+    </menu_item_call>
+    <menu_item_call
+     label="Pay"
+     layout="topleft"
+     name="pay">
+        <menu_item_call.on_click
+         function="Contacts.Friends.Pay"/>
+        <menu_item_call.on_enable
+         function="Contacts.Friends.EnableItem"
+         parameter="can_pay"/>
+    </menu_item_call>
+    <menu_item_call
+     label="Track Friend"
+     layout="topleft"
+     name="track_agent">
+        <menu_item_call.on_click
+         function="Contacts.Friends.TrackAvatar"/>
+        <menu_item_call.on_enable
+         function="Contacts.Friends.EnableItem"
+         parameter="track_avatar"/>
+    </menu_item_call>
+    <menu_item_call
+     label="Remove Friend..."
+     layout="topleft"
+     name="remove_friend">
+        <menu_item_call.on_click
+         function="Contacts.Friends.RemoveFriend"/>
+        <menu_item_call.on_enable
+         function="Contacts.Friends.EnableItem"
+         parameter="remove_friend"/>
+    </menu_item_call>
+    <menu_item_separator
+     layout="topleft" />
+    <menu_item_call
+     label="Copy Name to clipboard"
+     layout="topleft"
+     name="url_copy_label">
+        <menu_item_call.on_click
+         function="Contacts.Friends.CopyLabel"/>
+    </menu_item_call>
+    <menu_item_call
+     label="Copy Url to clipboard"
+     layout="topleft"
+     name="url_copy">
+        <menu_item_call.on_click
+         function="Contacts.Friends.CopyUrl"/>
+    </menu_item_call>
+    <!-- <FS:Zi> Add menu items to copy and/or insert mention URIs into chat -->
+    <menu_item_call
+     label="Copy Mention URI to clipboard"
+     layout="topleft"
+     name="mention_copy_label">
+        <menu_item_call.on_click
+         function="Mention.CopyURI" />
+    </menu_item_call>
+    <!-- </FS:Zi> -->
+</context_menu>

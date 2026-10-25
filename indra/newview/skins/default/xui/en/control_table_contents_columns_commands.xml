@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<contents>
+    <columns
+     relative_width="0.62"
+     label="Action"
+     name="lst_action" />
+    <columns
+     relative_width="0.38"
+     label="Shortcut"
+     name="lst_ctrl1" />
+</contents>

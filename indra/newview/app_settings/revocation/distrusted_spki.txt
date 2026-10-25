@@ -1,0 +1,34 @@
+# Slipstream static certificate distrust list.
+#
+# Applied to every certificate chain the viewer's own HTTPS stack verifies (alongside
+# Chrome's CRLSet, which is fetched at runtime), so a known-bad CA is refused even with
+# no CRLSet at all. This file is data: add entries here, no code change needed.
+#
+# Format, one entry per line; '#' starts a comment:
+#   <SHA-256 of the certificate's DER SubjectPublicKeyInfo, 64 hex digits>
+#       blocks that key wherever it appears in a chain (all cross-signs of a CA included)
+#   serial <issuer SPKI SHA-256, 64 hex> <serial number, hex>
+#       blocks the one certificate with that serial issued by that key
+#
+# SPKI hash of a certificate:
+#   openssl x509 -in cert.pem -noout -pubkey | openssl pkey -pubin -outform DER \
+#     | openssl dgst -sha256
+# A malformed line makes the viewer ignore the whole file (and log why), so check with
+#   scripts/revocation/test_revocation.sh
+#
+# ---------------------------------------------------------------------------------------
+# eMudhra intermediate CA key compromise, October 2026: the private keys of eight eMudhra
+# intermediates were derivable from their certificates. Revoked by the CA (ca_compromise,
+# 18-19 Oct 2026) and blocked by the browser root programs. Each key is blocked here, which
+# covers both the emSign-root and the Sectigo "AAA Certificate Services" cross-signed
+# certificates. The six TLS keys were computed from the chains served by the
+# *.we-have-a-problem.com test hosts (openssl s_client -showcerts) and match the published
+# impacted-intermediates list; the two code-signing keys are from that list only.
+ebed6475c2c2d80fcb199f3fe8dd6e6b3ce60b77eb15d4e42c3dec0c6f5b5105  # EM DV TLS CA - G3B (eMudhra BV)
+49dd353dc2b919a3770645117d0e60c16115e7d1bc259eefe734b00ea434fe5f  # EM DV TLS CA - G3C (eMudhra Inc)
+43bffa19d6ef651451f6841e019931e96f6f2eaeff28ab4b6f1ce4576de2717b  # EM OV TLS CA - G3B (eMudhra BV)
+63ecefee431d49523bc1136c4e72d0206a477086caf606cd5cf025686c109cf8  # EM OV TLS CA - G3C (eMudhra Inc)
+e0254c7fcdc265e2f0f8a428dabb75ab4ae039b4872d62f5ee57f0877d5a8a41  # EM EV TLS CA - G3B (eMudhra BV)
+5c0660a2b164910d8ff589c18e14552e9e0ec237dcefe2cb736d41a4811f81a0  # EM EV TLS CA - G3C (eMudhra Inc)
+ec4ffa1ad0ac88081314b7aaffef6a91f97cd57291bb5ba686c5415f5eb4f6b6  # EM OV CS CA - G3B (code signing; from the published list)
+92c063d67e8f14db71d288e11266ffdaf69cbf115f7bab14f3bc2f68d25e0e30  # EM OV CS CA - G3C (code signing; from the published list)

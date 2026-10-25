@@ -1,0 +1,101 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+// vkclean -- PARTICLE FOG (#1003): the NOISE VOLUMES, built once (tile in every axis; sampled
+// with REPEAT). The erosion model (clean_pfog_march.comp) is the cloud-rendering one: a
+// low-frequency BASE shape thresholds the brick's smooth density into lumps, a
+// high-frequency DETAIL erodes their edges into cauliflower.
+// BASE, 64^3 RGBA8 (1 MB; at world position / (4 x the base scale)):
+//   rgb  CURL of a periodic gradient-noise vector potential (divergence free: a domain warp
+//        that swirls without bunching up or tearing the medium), encoded * 0.5 + 0.5
+//   a    BILLOW (Perlin-Worley): a gradient-noise fBm mixed with an inverted Worley fBm
+//        (rounded, puffy cells -- the cauliflower edge of real smoke / steam), mean ~0.5
+// DETAIL, 32^3 RGBA8 (128 KB; four times the base frequency), written by the invocations of
+// the first 32^3 texels:
+//   rgb  INVERTED Worley F1 at 2 / 4 / 8 cells per tile (the march weights them 0.625 / 0.25 /
+//        0.125): round bumps -- the small billows on a big one; a 1
+// Our own implementation of the standard techniques (gradient noise, Worley cellular
+// noise, curl noise -- Bridson et al., "Curl-Noise for Procedural Fluid Flow", 2007).
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+#include "clean_pfog_common.glsl"
+
+layout(set = PF_SET, binding = 15, rgba8) writeonly uniform image3D uNoiseW;
+layout(set = PF_SET, binding = 26, rgba8) writeonly uniform image3D uNoiseDW;
+
+uint pfHashU(uvec3 v, uint seed)
+{
+    uint h = v.x * 73856093u ^ v.y * 19349663u ^ v.z * 83492791u ^ seed * 2654435761u;
+    h ^= h >> 16; h *= 0x7feb352du; h ^= h >> 15; h *= 0x846ca68bu; h ^= h >> 16;
+    return h;
+}
+vec3 pfHash3(uvec3 v, uint seed)
+{
+    const uint h = pfHashU(v, seed);
+    return vec3(float(h & 1023u), float((h >> 10) & 1023u), float((h >> 20) & 1023u)) / 1023.0;
+}
+
+// Periodic gradient noise, x in lattice cells, period `per` cells. ~[-0.7, 0.7].
+float pfGrad(vec3 x, int per, uint seed)
+{
+    const vec3 i = floor(x), f = x - i;
+    const vec3 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    float c[8];
+    for (int k = 0; k < 8; ++k)
+    {
+        const ivec3 o = ivec3(k & 1, (k >> 1) & 1, (k >> 2) & 1);
+        const ivec3 ic = (ivec3(i) + o) % per;
+        const uvec3 w = uvec3((ic + per) % per);
+        const vec3 g = normalize(pfHash3(w, seed) * 2.0 - 1.0 + vec3(1e-4));
+        c[k] = dot(g, f - vec3(o));
+    }
+    return mix(mix(mix(c[0], c[1], u.x), mix(c[2], c[3], u.x), u.y),
+               mix(mix(c[4], c[5], u.x), mix(c[6], c[7], u.x), u.y), u.z);
+}
+
+// Periodic Worley F1 (distance to the nearest feature point), x in cells. ~[0, 1].
+float pfWorley(vec3 x, int per, uint seed)
+{
+    const vec3 i = floor(x), f = x - i;
+    float d = 1e9;
+    for (int k = 0; k < 27; ++k)
+    {
+        const ivec3 o = ivec3(k % 3, (k / 3) % 3, k / 9) - 1;
+        const uvec3 w = uvec3(((ivec3(i) + o) % per + per) % per);
+        const vec3 fp = vec3(o) + pfHash3(w, seed);
+        const vec3 r = fp - f;
+        d = min(d, dot(r, r));
+    }
+    return clamp(sqrt(d), 0.0, 1.0);
+}
+
+vec3 pfPotential(vec3 p)
+{
+    return vec3(pfGrad(p * 4.0, 4, 11u) + 0.5 * pfGrad(p * 8.0, 8, 12u),
+                pfGrad(p * 4.0, 4, 21u) + 0.5 * pfGrad(p * 8.0, 8, 22u),
+                pfGrad(p * 4.0, 4, 31u) + 0.5 * pfGrad(p * 8.0, 8, 32u));
+}
+
+void main()
+{
+    const uvec3 c = gl_GlobalInvocationID;
+    if (any(greaterThanEqual(c, uvec3(64u)))) return;
+    const vec3 p = (vec3(c) + 0.5) / 64.0;   // one tile = [0, 1)^3
+    // billow
+    const float g = 0.5 * pfGrad(p * 4.0, 4, 1u) + 0.25 * pfGrad(p * 8.0, 8, 2u) + 0.125 * pfGrad(p * 16.0, 16, 3u);
+    const float wf = 0.625 * pfWorley(p * 4.0, 4, 4u) + 0.25 * pfWorley(p * 8.0, 8, 5u) + 0.125 * pfWorley(p * 16.0, 16, 6u);
+    const float billow = clamp(0.5 + 0.9 * g + 0.75 * (0.55 - wf), 0.0, 1.0);
+    // curl (central differences, one texel; wraps with the tile)
+    const float h = 1.0 / 64.0;
+    const vec3 dx = (pfPotential(p + vec3(h, 0, 0)) - pfPotential(p - vec3(h, 0, 0))) / (2.0 * h);
+    const vec3 dy = (pfPotential(p + vec3(0, h, 0)) - pfPotential(p - vec3(0, h, 0))) / (2.0 * h);
+    const vec3 dz = (pfPotential(p + vec3(0, 0, h)) - pfPotential(p - vec3(0, 0, h))) / (2.0 * h);
+    const vec3 curl = vec3(dy.z - dz.y, dz.x - dx.z, dx.y - dy.x);
+    imageStore(uNoiseW, ivec3(c), vec4(clamp(curl / 8.0, vec3(-1.0), vec3(1.0)) * 0.5 + 0.5, billow));
+    // detail
+    if (all(lessThan(c, uvec3(32u))))
+    {
+        const vec3 q = (vec3(c) + 0.5) / 32.0;
+        imageStore(uNoiseDW, ivec3(c), vec4(1.0 - pfWorley(q * 2.0, 2, 7u), 1.0 - pfWorley(q * 4.0, 4, 8u),
+                                            1.0 - pfWorley(q * 8.0, 8, 9u), 1.0));
+    }
+}

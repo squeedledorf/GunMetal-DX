@@ -1,0 +1,7 @@
+/* Localized versions of Info.plist keys */
+
+CFBundleName = "Slipstream";
+
+CFBundleShortVersionString = "Slipstream version %%VERSION%%";
+CFBundleGetInfoString = "Slipstream version %%VERSION%%, Copyright (C) 2026 Bluefast Studios. Based on Alchemy (C) 2013-2025 Alchemy Development Group and the Second Life viewer (C) Linden Research, Inc.";
+

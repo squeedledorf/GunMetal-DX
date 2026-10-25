@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<!--
+One Photo Studio panel: the section dropdown and the pop-out button on top,
+and the section itself in "slot_body" below, which SLPhotoStudioSlot fills with
+a fresh instance of whichever section is chosen.
+
+The dropdown's values are the section ids SLPhotoStudioSlot knows (see
+SECTIONS in slpanelphotostudiosection.cpp). The labels are the user's; the
+values are saved in SLPhotoStudioPanels, so never change a value.
+-->
+<panel
+ name="panel_photo_studio_slot"
+ layout="topleft"
+ width="360"
+ height="400"
+ follows="all"
+ background_visible="false">
+	<panel.string
+	 name="pop_out_tooltip">
+		Show this panel in a window of its own
+	</panel.string>
+	<panel.string
+	 name="put_back_tooltip">
+		Put this panel back in Photo Studio
+	</panel.string>
+	<view_border
+	 follows="all"
+	 layout="topleft"
+	 left="0"
+	 top="0"
+	 width="360"
+	 height="400"
+	 bevel_style="in"
+	 mouse_opaque="false"
+	 name="slot_border" />
+	<combo_box
+	 follows="left|top|right"
+	 layout="topleft"
+	 left="4"
+	 top="4"
+	 right="-32"
+	 height="22"
+	 max_chars="64"
+	 name="section_combo"
+	 tool_tip="What this panel shows (Ctrl+1 to Ctrl+4 jump to a panel's dropdown). Two panels may show the same section; they stay in step.">
+		<combo_box.item label="Look (everything)" name="look" value="look" />
+		<combo_box.item label="Look: Exposure &amp; Tone" name="tone" value="tone" />
+		<combo_box.item label="Look: Color Grading" name="grading" value="grading" />
+		<combo_box.item label="Lens (everything)" name="lens" value="lens" />
+		<combo_box.item label="Lens: Depth of Field" name="dof" value="dof" />
+		<combo_box.item label="Lens: Bloom, Flare &amp; Dirt" name="bloom" value="bloom" />
+		<combo_box.item label="Lens: Film &amp; Optics" name="film" value="film" />
+		<combo_box.item label="Scene" name="scene" value="scene" />
+		<combo_box.item label="Sky" name="sky" value="sky" />
+		<combo_box.item label="Cam" name="cam" value="cam" />
+		<combo_box.item label="Scopes" name="scopes" value="scopes" />
+		<combo_box.item label="Effects (ReShade FX)" name="effects" value="effects" />
+	</combo_box>
+	<button
+	 follows="top|right"
+	 layout="topleft"
+	 right="-4"
+	 top="4"
+	 width="24"
+	 height="22"
+	 label=""
+	 image_overlay="Conv_toolbar_arrow_ne"
+	 name="pop_out"
+	 tool_tip="Show this panel in a window of its own" />
+	<panel
+	 follows="all"
+	 layout="topleft"
+	 left="2"
+	 top="30"
+	 width="356"
+	 height="368"
+	 background_visible="false"
+	 name="slot_body" />
+	<!-- Shown in place of the body while the panel is in a window of its own. -->
+	<text
+	 follows="left|top|right"
+	 layout="topleft"
+	 left="12"
+	 top="44"
+	 right="-12"
+	 height="48"
+	 word_wrap="true"
+	 visible="false"
+	 name="popped_note"
+	 value="This panel is in a window of its own. Closing that window puts it back here, and so does the button below." />
+	<button
+	 follows="left|top"
+	 layout="topleft"
+	 left="12"
+	 top_pad="6"
+	 width="120"
+	 height="22"
+	 visible="false"
+	 label="Put it back"
+	 name="put_back" />
+</panel>

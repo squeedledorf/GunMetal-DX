@@ -1,0 +1,209 @@
+#version 460
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_GOOGLE_include_directive : require
+#ifdef CLEAN_PROJ_SHADOW_RAYQUERY
+#extension GL_EXT_ray_query : require   // ray-traced sun / projector shadows (clean_draw_common.glsl)
+#endif
+// vkclean — PER-PARTICLE LIGHTING (RenderVKParticleLighting 1, the default).
+//
+// The particle FS used to run the whole lit-surface stack PER FRAGMENT (atmosphere
+// light terms, reflection-probe cluster walk + cube taps, sun shadow -- cascade
+// Gaussian / PCSS gathers or a ray query --, the clustered local-light loop with
+// projector gobo + shadow-atlas / ray-query visibility, then haze + water fog +
+// distance fade): at 4K with large sprites near the camera that was ~12 shaded layers
+// per pixel. Particles are lit per particle in essentially every engine; this pass does
+// it ONCE per live particle, at its centre, for the main view, after pass 1 (every
+// input -- cascades, projector atlas, probes, light clusters, TLAS -- is final), and
+// writes the record clean_particle_common.glsl documents (PART_LIGHT_VEC4). The draw
+// VS forwards it, and the FS keeps only the texture sample, the tint, the record's
+// two multiply-adds and the blend.
+//
+// Same terms as the old per-pixel path (clean_particle.frag, non-emissive branch):
+// N = -camera forward (the billboard faces the viewer), LL's alpha-pool lighting --
+// probe irradiance (else the sky ambient), sun/moon min(N.L, shadow), local lights --
+// in both the classic and the PBR recombination. Linear in the albedo, so the record
+// holds the factors and the FS multiplies the texel in.
+//
+// Also, per particle (billboards only):
+//   * NEAR-CAMERA FADE: by screen footprint (partNearFade), into [1].a; the VS fades
+//     the sprite's tint by it and collapses a sprite that can no longer change a target.
+//   * COVERAGE ESTIMATE (the adaptive reduced-resolution switch): the clamped on-screen
+//     rectangle of every sprite that will rasterise, summed in units of 64 px --
+//     [0] the pairs the reduced-resolution pass can take (sprites the size routing
+//     keeps at full resolution excluded, #879), [1] all pairs; [2] / [3] the count of
+//     on-screen billboards routed small / large.
+//
+// Set 0 / 1 = the draw sets (as the deferred lighting compute), set 2 = the particle
+// compute set (0 pool, 9 the light records, 10 the coverage counters), set 3 (RT) =
+// the RT consumer set (RT_SET=3, the ray-query variant).
+
+layout(local_size_x = 64) in;
+
+#define CLEAN_EXTERNAL_DRAW_PUSH
+layout(push_constant) uniform PartLightPush {
+    uint view;     // the main view's draw-view ring entry
+    uint maxp;     // pool size
+    uint width;    // render extent (px)
+    uint height;
+    vec4 fade;     // x / y: near-fade range (footprint fraction of the view height; y <= x off),
+                   // z: size-routing threshold in render px (#879; 0 = off)
+} g_draw_push;     // 32 B
+
+#define CLEAN_COMPUTE_LIGHT
+#define CLEAN_NO_TANGENT_IN   // particle receivers (no RT mask, opaque-only shadow rays)
+vec2 g_frag_xy;               // the particle centre's render pixel (cluster lookups)
+#define CLEAN_FRAG_XY g_frag_xy
+#define CLEAN_SPEC_SETTINGS   // graphics-setting specialization constants 8-17 (clean_frame_info.glsl)
+#include "clean_draw_common.glsl"
+#include "clean_particle_common.glsl"
+
+layout(std430, set = 2, binding = 0)  readonly  buffer Particles { Particle parts[]; };
+// (Read-write: [2].a carries the particle's ray-traced sun visibility history, #666.)
+layout(std430, set = 2, binding = 9)  buffer PartLight { vec4 plight[]; };
+layout(std430, set = 2, binding = 10) buffer PartCover { uint pcover[]; };
+
+// Haze for an "over" pair (the old FS's composite): water fog under water, else the
+// WindLight haze then the far distance fade. Affine in lin with a scalar slope.
+vec3 partHaze(vec3 lin, vec3 P, vec3 cam)
+{
+    if (waterFogged(P)) return applyWaterFog(lin, P - cam, cam.z - waterHeight());
+    vec3 additive, atten;   // (#816: one scatter of the ray for the haze and the fade)
+    atmosScatterHaze(P - cam, additive, atten);
+    lin = atmosApplyRay(lin, additive, atten);
+    return atmosDistanceFade(lin, P, cam, linfo.cam_fwd.xyz, linfo.zinfo.y, additive, atten);
+}
+
+void main()
+{
+    const uint i = gl_GlobalInvocationID.x;
+    if (i >= g_draw_push.maxp) return;
+    const Particle p = parts[i];
+    if (p.misc.w == 0u) return;   // dead slot
+
+    const vec3 P   = p.pos_age.xyz;
+    const vec3 cam = pc.u_cam_time.xyz;
+    const vec3 fwd = linfo.cam_fwd.xyz;
+    const vec2 dims = vec2(float(g_draw_push.width), float(g_draw_push.height));
+
+    // Screen position of the centre (main view): the light / probe cluster tile.
+    {
+        const vec4 clip = pc.u_view_proj * vec4(P - pc.u_origin.xyz, 1.0);
+        const vec2 ndc = clip.xy / max(clip.w, 1e-4);
+        g_frag_xy = clamp((ndc * 0.5 + 0.5) * dims, vec2(0.5), max(dims - 0.5, vec2(0.5)));
+    }
+
+    const bool classic = atmosClassic();
+    vec3 light = vec3(0.0), local = vec3(0.0);
+    float shist = 0.0;   // [2].a: 1 + the ray-traced sun visibility history (#666), 0 = none
+    if ((p.misc.x & 0x100u) == 0u)   // not EMISSIVE (fullbright needs no light)
+    {
+        const vec3 N   = -fwd;
+        const vec3 V   = normalize(cam - P);
+        const vec3 L   = atmosLightDir();
+        vec3 sunlit, amblit, additive, atten;
+        atmosLightTerms(P - cam, N, sunlit, amblit, additive, atten);
+        if (classic) sunlit *= 1.35;
+        vec3 irradiance = amblit;
+        {
+            vec3 prad, pirr;
+            if (sampleProbes(P, N, reflect(-V, N), 0.0, amblit, prad, pirr) && !classic)
+                irradiance = pirr;
+        }
+#ifdef CLEAN_PROJ_SHADOW_RAYQUERY
+        // RAY-TRACED SUN ON A PARTICLE (#666): the full Shadow-quality ray count (one
+        // invocation per particle, not per fragment: clean_draw_common.glsl rtReceiverRays)
+        // with the disc pattern walking an R2 sequence over ~60 Hz frame ticks, accumulated
+        // per particle -- the pool slot is a stable history key; [2].a = 1 + last frame's
+        // visibility (0 = none: a fresh buffer, a frame of the non-RT variant). A particle
+        // younger than 0.1 s (a slot reused by a new spawn) starts over. ~4 frames: the
+        // soft edge converges without a screen-space history (blended sprites have none)
+        // and without TAA. The projectors' rays (localLights) keep the plain pattern:
+        // there is no per-light record to accumulate them in.
+        float scol;
+        {
+            const float tick = floor(pc.u_cam_time.w * 60.0);
+            rt_noise_shift = fract(tick * vec2(0.7548776662, 0.5698402910));
+            scol = sunShadow(P, N);
+            rt_noise_shift = vec2(0.0);
+            if (specSunTraced())
+            {
+                const float prev = plight[i * PART_LIGHT_VEC4 + 2u].w;
+                if (prev >= 1.0 && prev <= 2.0 && p.pos_age.w > 0.1) scol = mix(prev - 1.0, scol, 0.25);
+                shist = 1.0 + clamp(scol, 0.0, 1.0);
+            }
+        }
+#else
+        const float scol = sunShadow(P, N);
+#endif
+        float da = clamp(dot(N, L), 0.0, 1.0);
+        vec3 col = irradiance;
+        if (classic)
+        {
+            da = pow(da, 1.2);
+            col = atmosSrgbToLinear(col * 0.9 + atmosLinearToSrgb(vec3(min(da, scol))) * sunlit * 0.7);
+        }
+        else
+        {
+            col += min(da, scol) * sunlit;
+        }
+        light = col * (classic ? 1.1 : 1.0);
+        // Particles carry no legacy specular / PBR: every local term is linear in the
+        // albedo, so base = 1 gives the factor.
+        local = localLights(P, N, V, false, vec3(1.0), 0.0, 1.0) * (classic ? 0.9 : 1.0);
+    }
+
+    const vec3 h0 = partHaze(vec3(0.0), P, cam);
+    const float hslope = partHaze(vec3(1.0), P, cam).r - h0.r;
+
+    // Near fade + coverage (billboards; ribbons keep 1 and are not counted).
+    const float vz = dot(P - cam, fwd);
+    const float tanH = linfo.grid.w;   // tan(fovy / 2) (mainClusterProject)
+    float fade = 1.0;
+    const bool ribbon = (p.misc.x & F_RIBBON) != 0u;
+    if (!ribbon)
+    {
+        const float t = partAgeT(p);
+        const vec2 scl = partScaleAt(p, t);
+        const uint pair = p.misc.y;
+        const uint cls = partFadeClass(pair);
+        if (cls != 0u) fade = partNearFade(vz, max(scl.x, scl.y), tanH, g_draw_push.fade.xy);
+        // Coverage: the sprite's screen rectangle clipped to the view (not drawn: 0).
+        const vec4 tint = partApplyFade(partColorAt(p, t), cls, fade);
+        float area = 0.0;
+        bool small_ = false;
+        if (!partInvisible(tint, cls))
+        {
+            if (vz > 1e-3)
+            {
+                const vec4 clip = pc.u_view_proj * vec4(P - pc.u_origin.xyz, 1.0);
+                const vec2 c = (clip.xy / max(clip.w, 1e-4) * 0.5 + 0.5) * dims;
+                const float k = dims.y / (2.0 * vz * max(tanH, 1e-4));   // px per metre at P
+                const vec2 h = 0.5 * scl * k;
+                const vec2 lo = clamp(c - h, vec2(0.0), dims), hi = clamp(c + h, vec2(0.0), dims);
+                area = max(hi.x - lo.x, 0.0) * max(hi.y - lo.y, 0.0);
+                // SIZE ROUTING (#879; = clean_particle.vert): below the threshold the
+                // sprite draws at full resolution and full shading rate, never in the
+                // reduced-resolution pass -- so it does not count toward that pass's switch.
+                small_ = max(scl.x, scl.y) * k < g_draw_push.fade.z;
+            }
+            else if (length(P - cam) < 0.5 * max(scl.x, scl.y))
+                area = dims.x * dims.y;   // the camera is inside it
+        }
+        if (area > 0.0)
+        {
+            // [2] / [3]: on-screen billboards routed small / large (the RenderVKParticleRouteDiag log).
+            atomicAdd(pcover[small_ ? 2u : 3u], 1u);
+            const uint u = uint(area * (1.0 / 64.0) + 0.5);
+            if (u > 0u)
+            {
+                if (partLowResPair(pair) && !small_) atomicAdd(pcover[0], u);
+                atomicAdd(pcover[1], u);
+            }
+        }
+    }
+
+    const uint o = i * PART_LIGHT_VEC4;
+    plight[o + 0u] = vec4(light, hslope);
+    plight[o + 1u] = vec4(local, fade);
+    plight[o + 2u] = vec4(h0, shist);
+}

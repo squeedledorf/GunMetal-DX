@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<floater name="Joystick" title="ジョイスティックの設定">
+	<floater.string name="JoystickDisabled">
+		なし
+	</floater.string>
+	<text name="joystick_lbl" width="112">
+		ジョイスティック：
+	</text>
+	<spinner label="Ｘ軸マッピング" name="JoystickAxis1"/>
+	<spinner label="Ｙ軸マッピング" name="JoystickAxis2"/>
+	<spinner label="Ｚ軸マッピング" name="JoystickAxis0"/>
+	<spinner label="ピッチ・マッピング" name="JoystickAxis4"/>
+	<spinner label="ヨー・マッピング" name="JoystickAxis5"/>
+	<spinner label="ロール・マッピング" name="JoystickAxis3"/>
+	<spinner label="ズーム・マッピング" name="JoystickAxis6"/>
+	<check_box label="直接ズーム" name="ZoomDirect"/>
+	<check_box label="３Ｄカーソル" name="Cursor3D"/>
+	<check_box label="自動レベル" name="AutoLeveling"/>
+	<text name="Control Modes:">
+		制御モード：
+	</text>
+	<check_box label="アバター" name="JoystickAvatarEnabled"/>
+	<check_box label="ビルド" name="JoystickBuildEnabled"/>
+	<check_box label="フライカム" name="JoystickFlycamEnabled"/>
+	<stat_view label="ジョイスティック・モニター" name="axis_view">
+		<stat_bar label="軸０" name="axis0"/>
+		<stat_bar label="軸１" name="axis1"/>
+		<stat_bar label="軸２" name="axis2"/>
+		<stat_bar label="軸３" name="axis3"/>
+		<stat_bar label="軸４" name="axis4"/>
+		<stat_bar label="軸５" name="axis5"/>
+	</stat_view>
+	<text name="XScale">
+		Ｘスケール
+	</text>
+	<text name="YScale">
+		Ｙスケール
+	</text>
+	<text name="ZScale">
+		Ｚスケール
+	</text>
+	<text name="PitchScale">
+		ピッチ・スケール
+	</text>
+	<text name="YawScale">
+		ヨー・スケール
+	</text>
+	<text name="RollScale">
+		ロール・スケール
+	</text>
+	<text name="XDeadZone">
+		Ｘデッド・ゾーン
+	</text>
+	<text name="YDeadZone">
+		Ｙデッド・ゾーン
+	</text>
+	<text name="ZDeadZone">
+		Ｚデッド・ゾーン
+	</text>
+	<text name="PitchDeadZone">
+		ピッチ・デッド・ゾーン
+	</text>
+	<text name="YawDeadZone">
+		ヨー・デッド・ゾーン
+	</text>
+	<text name="RollDeadZone">
+		ロール・デッド・ゾーン
+	</text>
+	<text name="Feathering">
+		感度調整
+	</text>
+	<text name="ZoomScale2">
+		ズーム・スケール
+	</text>
+	<text name="ZoomDeadZone">
+		ズーム・デッド・ゾーン
+	</text>
+	<button label="SpaceNavigatorのデフォルト設定" name="SpaceNavigatorDefaults"/>
+	<button label="ＯＫ" label_selected="ＯＫ" name="ok_btn"/>
+	<button label="キャンセル" label_selected="キャンセル" name="cancel_btn"/>
+</floater>

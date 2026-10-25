@@ -1,0 +1,10 @@
+# Slipstream Viewer apt repository, beta builds and stable releases (the newest of either).
+# Install: see @APT_URL@/ or https://slipstreamviewer.org/wiki/install/
+# The key file comes from the slipstream-archive-keyring package (which keeps
+# it up to date); fetch it once by hand before the first apt update.
+Types: deb
+URIs: @APT_URL@
+Suites: beta
+Components: main
+Architectures: amd64
+Signed-By: @KEYRING_FILE@

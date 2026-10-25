@@ -1,0 +1,153 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#define CLEAN_PROBE_JOB_REF
+#include "clean_probe_job.glsl"
+// vkclean -- GPU-DRIVEN REFLECTION PROBES (#478): write a capture job's cameras into the
+// param-ring entries its passes read.
+//
+// The capture's world draws read their view from a DRAW-VIEW ring entry (clean_draw_view
+// .glsl, set 0 binding 36) and its cull reads a CULL-PARAMS ring entry (clean_cull.comp,
+// binding 25). The CPU reserves those entries for the probe faces (never deduplicated
+// against other entries), fills every field it knows -- the main view's lighting, the
+// capture mode, the LOD scale, the light-list index, the main eye for the rigged draws --
+// and records this pass before the capture: one thread per entry copies in the fields
+// only the GPU knows, from the job record clean_probe_gpu.comp wrote this frame:
+//   draw view (kind 0): view_proj = the face's matrix, cam_time.xyz = the origin;
+//   rigged draw view (kind 1): the same with view_proj * T(main eye) (the skinned
+//     vertices are main-eye relative; the eye is in water_fog.xyz);
+//   cull params (kind 2): the face's frustum planes, the probe camera, near / far, the
+//     dynamic bits (worn attachments, wearer-box cull), and instance_count = 0 when the
+//     job has no raster content (empty, sky only, or ray-traced): every cull phase then
+//     returns at once and every draw count stays 0.
+//   cluster rig-list draw view (kind 3, cluster LOD #702 integration + legacy-skin skip): kind
+//     0's camera when the job draws avatars (dynamic, raster content), else a view whose
+//     clip w is -1 for every vertex -- the shared capture rig list then draws nothing, the GPU
+//     decision the legacy avatar cull (clean_probe_rigcull.comp) makes for the legacy avatars.
+// No descriptor set: the job buffer and the ring by device address.
+
+layout(local_size_x = 32) in;
+
+struct DrawViewP {          // = clean_draw_view.glsl DrawView / C++ VKDrawPush (256 B)
+    mat4 view_proj;
+    vec4 sun_dir;
+    vec4 sun_color;
+    vec4 ambient_color;
+    vec4 cam_time;
+    vec4 sky_horizon;
+    vec4 sky_zenith;
+    mat4 inv_view_proj;
+    vec4 water_fog;
+    vec4 origin;            // #555: 0 for probe faces (world-space view_proj)
+};
+struct CullParamsP {        // = clean_cull.comp CullParams / C++ VKCullPush (224 B)
+    vec4  planes[6];
+    vec4  cam_pos;
+    vec4  lod_cam_pos;
+    uint  instance_count;
+    uint  bucket_cap;
+    uint  idx_valid;
+    uint  hud_pass;
+    uint  skin_count;
+    uint  skin_vert_cap;
+    uint  work_cap;
+    uint  phase;
+    uint  cascade;
+    uint  flags;
+    uint  cache_base;
+    uint  cache_cap;
+    uint  cache_epoch;
+    uint  frame;
+    float probe_near;
+    float probe_far;
+    float probe_lod_scale;
+    uint  probe_face;
+    uint  vtx_valid;
+    uint  tex_demand;
+    uint  rig_off_cap;      // #517 (main cull only)
+    uint  rig_off_pad0;
+    uint  rig_off_pad1;
+    uint  rig_off_pad2;
+};
+layout(buffer_reference, std430, buffer_reference_align = 16) buffer DrawViewRef { DrawViewP v[]; };
+layout(buffer_reference, std430, buffer_reference_align = 16) buffer PrbJobRW { PrbJob jobs[]; };
+layout(buffer_reference, std430, buffer_reference_align = 16) buffer CullRef { CullParamsP c[]; };
+
+#define PATCH_MAX 24u
+layout(push_constant) uniform PatchPush {
+    uvec2 jobs;              // job buffer
+    uvec2 views;             // draw-view ring: entry 0
+    uvec2 culls;             // cull-params ring: entry 0
+    uint  job;               // PJ_SCHED / PJ_REALTIME; bit 31: this frame cannot trace (no valid TLAS):
+                             // the job's ray-traced flag is cleared -- its faces rasterize
+    uint  n;                 // entries
+    uint  ent[PATCH_MAX];    // bits 0-19 ring entry, 20-21 kind (0 draw, 1 rigged draw, 2 cull, 3 cluster rig list), 24-26 face
+} pp;                        // 128 B
+
+void main()
+{
+    const uint i = gl_GlobalInvocationID.x;
+    if (i >= pp.n || i >= PATCH_MAX) return;
+    const uint e = pp.ent[i] & 0xFFFFFu;
+    const uint kind = (pp.ent[i] >> 20u) & 3u;
+    const uint face = min((pp.ent[i] >> 24u) & 7u, 5u);
+    const uint ji = pp.job & 0xFFu;
+    const PrbJob j = prbJob(pp.jobs, ji);
+    const bool noTrace = (pp.job & 0x80000000u) != 0u;
+    const uint jflags = noTrace ? (j.info.z & ~PJ_TRACED) : j.info.z;
+    if (i == 0u && noTrace && (j.info.z & PJ_TRACED) != 0u)
+    {
+        // Every later reader (the avatar cull, the alpha sort, the trace's indirect size)
+        // sees the corrected record (barrier after this pass).
+        PrbJobRW w = PrbJobRW(pp.jobs);
+        w.jobs[ji].info.z = jflags;
+        w.jobs[ji].trace = uvec4(0u, 1u, 1u, 0u);
+    }
+    const mat4 M = j.vp[face];
+    if (kind == 3u)
+    {
+        DrawViewRef r = DrawViewRef(pp.views);
+        const bool avatars = j.info.x != 0u && (jflags & PJ_DYNAMIC) != 0u && (jflags & (PJ_SKY | PJ_TRACED)) == 0u;
+        mat4 vp = M;
+        if (!avatars)
+        {
+            vp = mat4(0.0);
+            vp[3][3] = -1.0;   // gl_Position = (0, 0, 0, -1): outside -w <= x, every primitive clipped
+        }
+        r.v[e].view_proj = vp;
+        r.v[e].cam_time.xyz = j.origin.xyz;
+        return;
+    }
+    if (kind <= 1u)
+    {
+        DrawViewRef r = DrawViewRef(pp.views);
+        mat4 vp = M;
+        if (kind == 1u)
+        {
+            const vec3 eye = r.v[e].water_fog.xyz;
+            vp[3] = M * vec4(eye, 1.0);
+        }
+        r.v[e].view_proj = vp;
+        r.v[e].cam_time.xyz = j.origin.xyz;
+        return;
+    }
+    CullRef r = CullRef(pp.culls);
+    // Gribb-Hartmann planes of the VK clip space [0, w]: L R B T near far (normalized), as
+    // LLCleanRendererVK::probeCullParams. (The face frusta are analytic in the cull; the
+    // planes stay for any other reader.)
+    const vec4 row0 = vec4(M[0][0], M[1][0], M[2][0], M[3][0]);
+    const vec4 row1 = vec4(M[0][1], M[1][1], M[2][1], M[3][1]);
+    const vec4 row2 = vec4(M[0][2], M[1][2], M[2][2], M[3][2]);
+    const vec4 row3 = vec4(M[0][3], M[1][3], M[2][3], M[3][3]);
+    vec4 pl[6] = vec4[6](row3 + row0, row3 - row0, row3 + row1, row3 - row1, row2, row3 - row2);
+    for (int k = 0; k < 6; ++k)
+    {
+        const float len = length(pl[k].xyz);
+        r.c[e].planes[k] = len > 0.0 ? pl[k] / len : pl[k];
+    }
+    r.c[e].cam_pos.xyz = j.origin.xyz;
+    r.c[e].lod_cam_pos.xyz = j.origin.xyz;
+    r.c[e].probe_near = j.origin.w;
+    r.c[e].probe_far = j.clip.x;
+    if ((jflags & PJ_DYNAMIC) == 0u) r.c[e].flags &= ~(2048u | 4096u);
+    if (j.info.x == 0u || (jflags & (PJ_SKY | PJ_TRACED)) != 0u) r.c[e].instance_count = 0u;
+}

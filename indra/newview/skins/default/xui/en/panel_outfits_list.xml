@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<panel
+   background_visible="true"
+   bg_alpha_color="DkGray"
+   border="false"
+   follows="all"
+   height="430"
+   name="Outfits"
+   layout="topleft"
+   left="0"
+   top="0"
+   width="312">
+    <accordion
+     background_visible="true"
+     bg_alpha_color="DkGray2"
+     bg_opaque_color="DkGray2"
+
+     follows="all"
+     height="400"
+     layout="topleft"
+     left="3"
+     name="outfits_accordion"
+     top="0"
+     width="309">
+       <no_matched_tabs_text
+         name="no_matched_outfits_msg"
+         value="Didn't find what you're looking for? Try [secondlife:///app/search/all/[SEARCH_TERM] Search]."
+         v_pad="10"/>
+       <no_visible_tabs_text
+         name="no_outfits_msg"
+         value="You don't have any outfits yet. Try [secondlife:///app/search/all/ Search]"/>
+    </accordion>
+    <!-- #429 / #627 status bar (after Firestorm's Appearance window) -->
+    <panel
+     background_visible="false"
+     follows="bottom|left|right"
+     height="28"
+     layout="topleft"
+     left="4"
+     name="bottom_panel"
+     top_pad="0"
+     width="305">
+        <icon
+         follows="bottom|left|right"
+         height="25"
+         image_name="Toolbar_Middle_Off"
+         layout="topleft"
+         left="0"
+         name="dummy_icon"
+         top="0"
+         width="305" />
+        <text
+         follows="bottom|left"
+         font="SansSerifMedium"
+         height="25"
+         layout="topleft"
+         left="6"
+         name="OutfitcountText"
+         top="0"
+         v_pad="6"
+         width="130">
+            [COUNT] Outfits
+        </text>
+        <avatar_complexity_text
+         follows="bottom|right"
+         font="SansSerifMedium"
+         halign="right"
+         height="25"
+         layout="topleft"
+         right="-8"
+         name="avatar_complexity_label"
+         tool_tip="Your avatar complexity (ARC) as this viewer computes it. Per-item numbers are before the per-attachment cap, so they need not add up to this total."
+         top="0"
+         v_pad="6"
+         width="160">
+            Complexity: [WEIGHT]
+        </avatar_complexity_text>
+    </panel>
+</panel>

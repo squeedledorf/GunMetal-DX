@@ -1,0 +1,382 @@
+#version 460
+#ifdef GODRAYS_RT
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_nonuniform_qualifier : require
+#endif
+// vkclean -- GOD RAYS / volumetric sun shafts (#208): the MARCH.
+//
+// One invocation per in-scatter texel (render extent x RenderVKGodRaysScale). It rebuilds
+// the view ray of a representative render pixel from the finished opaque depth and
+// marches it from the eye to min(surface, RenderVKGodRaysMaxDist, the cascades' far
+// split, the water plane), one hardware-compare tap of the sun/moon cascades per step:
+//
+//   L = sun * sigma_s * HG(V.L, g) * sum_i  T(t_i) * vis(t_i) * dt
+//
+// a single-scattering integral through a homogeneous medium (Henyey-Greenstein phase,
+// transmittance T from the same extinction the WindLight haze uses on surfaces). The
+// result is LINEAR HDR, pre-exposure; clean_godrays_composite.frag adds it to the scene
+// before the refraction copy, so exposure, bloom, TAA and the tonemap all see it.
+//
+// Versus Black Dragon's volumetricLightF (display-space LDR, 1/i "shaftify" heuristic,
+// no phase function, per-pixel rand() with no temporal filtering): this is HDR-correct,
+// physically weighted, runs below render resolution, and its start offset is
+// interleaved-gradient noise rotated per frame; clean_godrays_temporal.comp integrates
+// the dither at the march's resolution (RenderVKGodRaysTemporal; else the TAA resolve).
+//
+// GODRAYS_RT (RenderVKSunShadows 2, ray-traced sun / moon; no cascades exist): the same
+// march, but each step's visibility is ONE shadow ray toward the sun / moon against the
+// scene TLAS -- the RT sun shadow's caster rules (clean_shadow_rt.glsl sunShadowRayCore,
+// single-ray branch): every class but water, the candidate alpha test for mask / blend
+// casters (foliage cut-outs), alpha-blend casters translucent (coloured with
+// RenderVKTranslucentShadows), opaque-only past RenderVKRTSunAlphaDist. The ray's
+// direction is jittered over the sun disc (RenderVKRTShadowSoftness) per step, so the
+// shafts' edges soften like the ground shadows'; the temporal accumulation's converged
+// mean of one disc-jittered ray per step is the disc-averaged visibility the ground's
+// multi-ray RT shadow computes, so the edges agree.
+//
+// Output: rgb = in-scatter, a = view distance of the texel's sample (m; sky = 65000),
+// the depth key for the composite's bilateral upsample.
+//
+// DENOISER OUTPUT (#657, RenderVKGodRaysDenoise; params2.z = 2): the god rays' denoiser
+// (clean_godrays_dn_temporal.comp + clean_godrays_atrous.comp) runs the RT shadow
+// denoiser's machinery, whose thresholds all live in [0, 1]. So the march splits its
+// estimate into
+//   rgb = v    = sum_i T(t_i) vis(t_i) / sum_i T(t_i)   the transmittance-weighted mean
+//                beam VISIBILITY along the segment, in [0, 1] (the same jittered T_i in
+//                numerator and denominator: their noise cancels; only vis is stochastic),
+//   uLmax.rgb  = beam sigma_s HG(V.L) (1 - exp(-sigma_t t_end)) / sigma_t   the fully lit
+//                in-scatter of the segment -- analytic, noise-free --
+// with in-scatter = v x Lmax (its expectation is the HDR output above). The denoiser
+// filters v and multiplies by Lmax at the end, so the phase / beam / segment length are
+// never smeared by the history or the spatial filter.
+//   a = the view distance, NEGATIVE when any of the texel's shadow rays met a MOVING
+//       caster (GODRAYS_TRACK_MOVERS: avatars, attachments, moved / spinning prims --
+//       clean_rt_moving_caster.glsl, the RT shadow mask's detector): the denoiser's
+//       anti-lag runs only there. The sign is only ever set in this mode.
+layout(local_size_x = 8, local_size_y = 8) in;
+
+#include "clean_frame_info.glsl"
+#include "clean_atmos_common.glsl"
+// #719: shafts through the gaps of the volumetric cloud layer -- its top-down sun
+// transmittance (draw set 0 binding 46) multiplies every step's visibility; 1 while it is off.
+#include "clean_cloud_shadow_map.glsl"
+
+#ifdef GODRAYS_RT
+// Sets: 0 draw set (frame info), 1 draw set 1 (bindless table for the alpha test),
+// 2 the RT consumer set (TLAS + instance / material / geometry SSBOs), 3 ours.
+layout(set = 1, binding = 0) uniform sampler2D uTextures[];
+#ifdef GODRAYS_TRACK_MOVERS
+// Every shadow trace reports its blocker (clean_rt_common.glsl RT_TRACK_BLOCKER) to the
+// moving-caster check shared with the RT shadow mask (draw set 0 binding 23).
+#define RT_TRACK_BLOCKER
+#endif
+#include "clean_rt_common.glsl"
+#ifdef GODRAYS_TRACK_MOVERS
+#include "clean_rt_moving_caster.glsl"
+#endif
+#define GR_SET 3
+#else
+// Set 0 = the draw set (frame info at 9); its sun/moon cascades (comparison sampler).
+layout(set = 0, binding = 15) uniform sampler2DArrayShadow uShadowMap;
+#define GR_SET 1
+#endif
+
+layout(set = GR_SET, binding = 0) uniform sampler2D uDepth;                   // world depth (texelFetch)
+layout(set = GR_SET, binding = 1, rgba16f) writeonly uniform image2D uOut;   // in-scatter
+// Denoiser output only (params2.z = 2, header): the segment's fully lit in-scatter.
+layout(set = GR_SET, binding = 3, rgba16f) writeonly uniform image2D uLmax;
+
+layout(push_constant) uniform GodRaysPush {
+    mat4 inv_view_proj;   // UNJITTERED VK clip -> CAMERA-RELATIVE world
+    vec4 cam;             // camera world pos xyz, w frame index (noise rotation)
+    vec4 dims;            // render w, h, in-scatter w, h
+    vec4 params;          // x sigma_s gain x intensity, y HG g, z max distance (m), w steps
+    vec4 params2;         // x water-plane clamp on, y time (s; RT texture animation),
+                          // z 1 = temporal accumulation follows (rotate the noise),
+                          //   2 = the denoiser follows (#657: rotate + v / Lmax split, header)
+                          // w RT: opaque-only shadow rays past this distance (m; 0 = off)
+} gp;
+
+const float kSkyDist = 65000.0;   // fp16-safe "infinitely far" key
+
+// Interleaved gradient noise (Jimenez 2014): neighbouring texels spread evenly over
+// [0,1), so the composite's 3x3 bilateral averages the dither out spatially.
+float ign(vec2 px) { return fract(52.9829189 * fract(dot(px, vec2(0.06711056, 0.00583715)))); }
+
+vec3 relAt(vec2 rpx, float d)
+{
+    vec2 ndc = rpx / gp.dims.xy * 2.0 - 1.0;
+    if (ssr.taa_params.w > 0.5) ndc -= ssr.taa_jitter.zw;   // the depth was rasterized jittered
+    const vec4 w = gp.inv_view_proj * vec4(ndc, d, 1.0);
+    return w.xyz / w.w;
+}
+
+// Writes the texel: HDR in-scatter, or (denoiser) visibility v + the lit in-scatter Lmax
+// (header). Early outs pass v = 1 (nothing known to occlude), Lmax = 0.
+void storeOut(ivec2 opx, vec3 v_or_l, vec3 lmax, float dist, bool moving)
+{
+    if (gp.params2.z > 1.5)
+    {
+        imageStore(uOut, opx, vec4(clamp(v_or_l, vec3(0.0), vec3(1.0)), moving ? -dist : dist));
+        imageStore(uLmax, opx, vec4(atmosClampHDR(lmax), 0.0));
+    }
+    else
+        imageStore(uOut, opx, vec4(v_or_l, dist));
+}
+
+// Henyey-Greenstein phase; cos_t = dot(view dir, direction TO the light).
+float phaseHG(float cos_t, float g)
+{
+    const float g2 = g * g;
+    return (1.0 - g2) / (4.0 * ATMOS_PI * pow(max(1.0 + g2 - 2.0 * g * cos_t, 1e-4), 1.5));
+}
+
+#ifndef GODRAYS_RT
+// One cascade tap (shadowTap's Low path: a single bilinear hardware compare).
+float cascadeTap(int c, vec3 P)
+{
+    const vec4 s = shadowSpace(c, P);
+    const vec2 uv = s.xy * 0.5 + 0.5;
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0))) || s.z > 1.0) return 1.0;
+    return texture(uShadowMap, vec4(uv, float(c), s.z - ssr.shadow_params.x));
+}
+#else
+// One shadow ray from a point in the air toward the sun / moon (direction d), tmin 0, the
+// RT sun's ray length (sun_rt.w). The last march step can sit within float error of the
+// surface the view ray ends on: the origin is nudged back toward the camera (n = -V, the
+// side the sample is on) by the coordinates' float error (clean_rt_common.glsl
+// offsetRayOrigin; a fraction of a millimetre -- nothing for the samples in the air).
+// Mirrors sunShadowRayCore's single-ray branch so shafts and ground shadows agree:
+// opaque_only = past RenderVKRTSunAlphaDist -- every caster opaque, alpha-blend casters
+// left OUT; else the candidate alpha test, blend casters translucent (RGB with #212).
+// FOLIAGE TRANSMISSION (#735, clean_rt_common.glsl rt_fol_*): the ground's rules, so
+// shafts come back through a canopy where its dappled light does -- mode 1 culls the
+// away-facing leaf faces in every ray here (opaque_only included: a ray flag, free);
+// mode 2 adds the transmission ray for lit samples (not past RenderVKGodRaysRTAlphaDist /
+// RenderVKRTSunAlphaDist: those stay at mode 1, the cheap end of the march).
+vec3 sunRayVisImpl(vec3 P, vec3 d, bool opaque_only)
+{
+    const float tmax = max(ssr.sun_rt.w, 1.0);
+    if (opaque_only)
+        return vec3(traceShadowRayOpaque(P, d, 0.0, tmax, RT_MASK_SHADOW & ~RT_MASK_BLEND));
+    vec3 v;
+    // Translucent split (RenderVKRTTranslucentSplit, as the ground's RT sun): opaque set
+    // first, the transmittance ray only where the sample is lit. One ray either way per
+    // blocked sample; lit samples pay a second (blend-class only) traversal.
+    if ((uint(ssr.lit_dbg.w + 0.5) & 2u) != 0u)
+    {
+        if (traceShadowRayVisSplit(P, d, 0.0, tmax, (uint(ssr.lit_dbg.w + 0.5) & 1u) != 0u) <= 0.0) return vec3(0.0);   // <SS:Skoomastream>
+        rt_blend_parity = (uint(ssr.lit_dbg.w + 0.5) & 1u) != 0u;
+        v = traceTransmittance(P, d, 0.0, tmax, ssr.render_opts.z > 0.5);
+        rt_blend_parity = false;
+    }
+    else
+        v = ssr.render_opts.z > 0.5 ? traceShadowRayRGB(P, d, 0.0, tmax, RT_MASK_SHADOW)
+                                    : vec3(traceShadowRay(P, d, 0.0, tmax, RT_MASK_SHADOW));
+    if (rt_fol_mode == 2u && max(max(v.r, v.g), v.b) > 0.0)
+        v *= traceFoliageTransmit(P, d, 0.0, tmax, ssr.render_opts.z > 0.5);
+    return v;
+}
+vec3 sunRayVis(vec3 P, vec3 d, bool opaque_only)
+{
+    rtFoliageSet(ssr.foliage_rt);
+    const vec3 v = sunRayVisImpl(P, d, opaque_only);
+    rtFoliageEnd();
+    return v;
+}
+#endif
+
+// The sun / moon beam as surfaces receive it (atmosLightTerms' sunlit): the haze light
+// colour through the atmosphere above, linear, times the sky's sunlight scale.
+vec3 beamColor()
+{
+    const vec3  blue_density = ssr.atmos[1].rgb;
+    const float haze_density = ssr.atmos[1].w;
+    const float max_y        = ssr.atmos[3].w;
+    const vec3  lightnorm    = ssr.atmos[4].xyz;
+    const float density_mul  = ssr.atmos[4].w;
+    const vec3 light_atten = (blue_density + vec3(haze_density * 0.25)) * (density_mul * max_y);
+    // <GMDX> Physical sky: the light through the physical air (transmittance LUT at the viewer:
+    // white at noon, orange at sunset) instead of WindLight's extinction; same brightness scale.
+    if (physkyOn())
+    {
+        vec3 T = textureLod(uPkTrans, pkTransUv(pkBottom() + max(pkViewHeight(), 0.0), atmosLightDir().z), 0.0).rgb;
+        return atmosSrgbToLinear(ssr.atmos[2].rgb) * T * ssr.atmos[12].z;
+    }
+    const vec3 sunlight = ssr.atmos[2].rgb * exp(-light_atten / max(1e-6, lightnorm.z));
+    return atmosSrgbToLinear(sunlight) * ssr.atmos[12].z;
+}
+
+void main()
+{
+    const ivec2 opx = ivec2(gl_GlobalInvocationID.xy);
+    if (opx.x >= int(gp.dims.z) || opx.y >= int(gp.dims.w)) return;
+
+    // Representative render pixel. Below full resolution the sample moves around the
+    // texel's footprint with the TAA jitter (as the RT shadow mask), so the resolve
+    // integrates a different real sample per pixel each frame instead of a static block.
+    const bool taa = ssr.taa_params.w > 0.5;
+    const vec2 jit = (taa && gp.dims.z < gp.dims.x) ? ssr.taa_jitter.xy : vec2(0.0);
+    const vec2 rpx = (vec2(opx) + 0.5 + jit) * (gp.dims.xy / gp.dims.zw);
+    const ivec2 rp = clamp(ivec2(rpx), ivec2(0), ivec2(gp.dims.xy) - 1);
+    const float d = texelFetch(uDepth, rp, 0).r;
+    const vec2 cpx = vec2(rp) + 0.5;
+
+    // View ray (camera-relative). Sky (reversed-Z: far = 0): the direction through a
+    // finite depth, distance = the march cap.
+    const bool sky = d <= 0.0;
+    const vec3 rel = relAt(cpx, sky ? 0.5 : d);
+    const float dist = sky ? kSkyDist : length(rel);
+    const vec3 V = rel / max(length(rel), 1e-6);
+
+    const vec3 beam = beamColor();
+    if (!atmosEnabled() || ssr.shadow_params.w < 0.5 || dot(beam, vec3(0.2126, 0.7152, 0.0722)) <= 1e-5)
+    {
+        storeOut(opx, gp.params2.z > 1.5 ? vec3(1.0) : vec3(0.0), vec3(0.0), dist, false);
+        return;
+    }
+
+    // Camera forward: the cascades split on view depth along it, not on ray distance.
+    const vec3 fwd = normalize(relAt(gp.dims.xy * 0.5, 0.5));
+    const float cos_f = dot(V, fwd);
+
+    float t_end = min(dist, gp.params.z);
+    if (cos_f > 1e-3) t_end = min(t_end, ssr.shadow_clip.w / cos_f);   // past the far split: lit
+    // Above water: the march ends at the water plane for pixels seen through it (the
+    // haze above the surface; the water fog takes over below).
+    if (gp.params2.x > 0.5)
+    {
+        const float h = ssr.water[3].w - gp.cam.z;   // plane height relative to the eye
+        if (h < 0.0 && V.z < -1e-4) t_end = min(t_end, h / V.z);
+    }
+    if (t_end <= 0.0)
+    {
+        storeOut(opx, gp.params2.z > 1.5 ? vec3(1.0) : vec3(0.0), vec3(0.0), dist, false);
+        return;
+    }
+
+    // Medium: the WindLight haze. Extinction as atmosScatter (blue + haze) x density x
+    // distance multiplier, so T matches the aerial perspective already on surfaces;
+    // scattering from the haze (Mie) part, scaled by params.x (gain x intensity).
+    const vec3  blue_density = ssr.atmos[1].rgb;
+    const float haze_density = ssr.atmos[1].w;
+    const float k_dist = ssr.atmos[4].w * ssr.atmos[5].w;   // density_multiplier x distance_multiplier
+    const float sigma_t = (dot(blue_density, vec3(1.0 / 3.0)) + haze_density) * k_dist;
+    const float sigma_s = haze_density * k_dist * gp.params.x;
+
+    const vec3 L = atmosLightDir();
+    // Light below the horizon: the ground occludes every beam -- skip the whole march
+    // (and, ray-traced, every shadow ray).
+    if (L.z <= 0.0)
+    {
+        storeOut(opx, gp.params2.z > 1.5 ? vec3(1.0) : vec3(0.0), vec3(0.0), dist, false);
+        return;
+    }
+    const float phase = phaseHG(dot(V, L), gp.params.y);
+
+    // Start offset: IGN at this texel, rotated per frame only while something integrates
+    // it -- the god rays' own temporal accumulation (params2.z, clean_godrays_temporal.comp)
+    // or the TAA resolve (a rotating dither without either just crawls).
+    const bool rotate = taa || gp.params2.z > 0.5;
+    const bool dn = gp.params2.z > 1.5;   // denoiser output (header)
+    const vec2 npx = vec2(opx) + (rotate ? 5.588238 * mod(gp.cam.w, 64.0) : 0.0);
+    const float n0 = ign(npx);
+#ifndef GODRAYS_RT
+    const float n1 = ign(npx.yx + vec2(17.0, 59.0));   // cascade-blend decision
+#endif
+
+    const int steps = max(int(gp.params.w), 1);
+    const float dt = t_end / float(steps);
+#ifdef GODRAYS_RT
+    // Ray-traced visibility per step (see the header). Ray-cone LOD for the alpha test:
+    // the receiver-footprint convention of the RT sun shadow, at the sample's distance.
+    rt_anim_time   = gp.params2.y;
+    rt_cone_spread = 0.0;
+    rt_cone_aniso  = 1.0;
+    const float ang = ssr.sun_rt.x;   // sun / moon disc angular radius (0 = hard)
+    const float tr  = tan(ang);
+    const vec3 Lu = normalize(abs(L.z) < 0.9 ? cross(L, vec3(0.0, 0.0, 1.0)) : cross(L, vec3(1.0, 0.0, 0.0)));
+    const vec3 Lv = cross(L, Lu);
+    const float n2 = ign(npx + vec2(31.0, 7.0));   // disc radius stratum
+    const float th = 6.2831853 * ign(npx.yx + vec2(3.0, 91.0));
+    // The RT shadow mask fades sun shadows out over the last 20% of the far split.
+    const float clip = ssr.shadow_clip.w;
+    vec3 acc = vec3(0.0);
+    float tsum = 0.0;   // sum of T(t_i): the denoiser's normalization (header)
+#ifdef GODRAYS_TRACK_MOVERS
+    rt_block_dyn = false;   // any step's ray meeting a moving caster flags the texel
+#endif
+    for (int i = 0; i < steps; ++i)
+    {
+        const float t = (float(i) + n0) * dt;
+        const vec3 P = gp.cam.xyz + V * t;
+        const float vz = t * cos_f;
+        const float fade = clamp((vz - clip * 0.8) / max(clip * 0.2, 1e-3), 0.0, 1.0);
+        vec3 vis = vec3(1.0);
+        if (fade < 1.0)
+        {
+            vec3 d = L;
+            if (ang > 0.0)
+            {
+                // One Vogel-disc sample per step: radius stratum and angle advance with
+                // the step (golden ratio / golden angle), the pattern rotated per texel.
+                const float r   = tr * sqrt(fract(n2 + float(i) * 0.618034));
+                const float phi = th + 2.3999632 * float(i);
+                d = normalize(L + (Lu * cos(phi) + Lv * sin(phi)) * r);
+            }
+            rt_cone_width0 = t * 0.001;
+            // Opaque-only (no any-hit alpha test) past the god rays' own alpha distance
+            // (RenderVKGodRaysRTAlphaDist) or the RT sun's, whichever is nearer: the
+            // alpha test through stacked foliage is most of a ray's cost, and far leaf
+            // holes are below the march's quarter-resolution texel anyway.
+            const bool opaque_only = (ssr.taa_scale.z > 0.0 && t > ssr.taa_scale.z)
+                                  || (gp.params2.w > 0.0 && t > gp.params2.w);
+            vis = mix(sunRayVis(offsetRayOrigin(P, -V), d, opaque_only), vec3(1.0), fade);
+        }
+        vis *= cloudShadowMap(P);
+        const float Tt = exp(-sigma_t * t);
+        acc += Tt * vis;
+        tsum += Tt;
+    }
+#ifdef GODRAYS_TRACK_MOVERS
+    const bool moving = rt_block_dyn;
+#else
+    const bool moving = false;
+#endif
+#else
+    float acc = 0.0;
+    float tsum = 0.0;
+    const bool moving = false;
+    for (int i = 0; i < steps; ++i)
+    {
+        const float t = (float(i) + n0) * dt;
+        const vec3 P = gp.cam.xyz + V * t;
+        const float vz = t * cos_f;
+        // Cascade by view depth; across the last 20% of a cascade, a dithered pick of
+        // the next one (stochastic version of sunShadowT's blend; TAA averages it).
+        int c = vz < ssr.shadow_clip.x ? 0 : (vz < ssr.shadow_clip.y ? 1 : (vz < ssr.shadow_clip.z ? 2 : 3));
+        const float cend = ssr.shadow_clip[c];
+        const float blend = clamp((vz - cend * 0.8) / max(cend * 0.2, 1e-3), 0.0, 1.0);
+        const float pick = fract(n1 + float(i) * 0.618034);
+        float vis;
+        if (pick < blend) vis = c < 3 ? cascadeTap(c + 1, P) : 1.0;
+        else              vis = cascadeTap(c, P);
+        vis *= cloudShadowMap(P);
+        const float Tt = exp(-sigma_t * t);
+        acc += Tt * vis;
+        tsum += Tt;
+    }
+#endif
+    if (dn)
+    {
+        // v = transmittance-weighted mean visibility; Lmax = the segment's lit in-scatter
+        // with the analytic transmittance integral (sigma_t -> 0: the segment length).
+        const vec3 v = tsum > 0.0 ? vec3(acc) / tsum : vec3(1.0);
+        const float st = sigma_t * t_end;
+        const float tint = st > 1e-4 ? (1.0 - exp(-st)) / sigma_t : t_end;
+        storeOut(opx, v, beam * (sigma_s * phase * tint), dist, moving);
+        return;
+    }
+    const vec3 inscatter = beam * (sigma_s * phase * acc * dt);
+    imageStore(uOut, opx, vec4(atmosClampHDR(inscatter), dist));
+}

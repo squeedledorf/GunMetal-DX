@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<floater
+ positioning="cascading"
+ save_rect="true"
+ can_resize="false"
+ height="330"
+ width="480"
+ layout="topleft"
+ name="sl_ao_import_object"
+ single_instance="true"
+ title="IMPORT AO FROM WORN HUD">
+    <text
+     follows="left|top"
+     height="32"
+     layout="topleft"
+     left="8"
+     name="intro_text"
+     top="22"
+     width="464"
+     word_wrap="true">
+        Worn HUDs and attachments with animations. Copyable animations are copied into a new set; no-copy animations stay in the HUD.
+    </text>
+    <scroll_list
+     draw_heading="true"
+     follows="left|top"
+     height="200"
+     layout="topleft"
+     left="6"
+     multi_select="false"
+     name="object_list"
+     tool_tip="Double-click to import"
+     top_pad="4"
+     width="468">
+        <scroll_list.columns
+         label="Attachment"
+         name="name"
+         relative_width="1" />
+        <scroll_list.columns
+         label="Worn on"
+         name="point"
+         width="110" />
+        <scroll_list.columns
+         label="Animations"
+         name="anims"
+         width="100" />
+        <scroll_list.columns
+         label="Notecard"
+         name="notecard"
+         width="60" />
+    </scroll_list>
+    <text
+     follows="left|top"
+     height="32"
+     layout="topleft"
+     left="8"
+     name="status_text"
+     text_color="EmphasisColor"
+     top_pad="6"
+     width="464"
+     word_wrap="true" />
+    <button
+     follows="left|top"
+     height="22"
+     label="Refresh"
+     layout="topleft"
+     left="6"
+     name="refresh_btn"
+     tool_tip="Look at your worn attachments again"
+     top_pad="6"
+     width="100" />
+    <button
+     follows="left|top"
+     font="SansSerifBold"
+     height="22"
+     label="Import"
+     layout="topleft"
+     left="374"
+     name="import_btn"
+     tool_tip="Copy this attachment's copyable animations into a new AO set, sorted into states by its AO notecard or by their names"
+     top_delta="0"
+     width="100" />
+</floater>

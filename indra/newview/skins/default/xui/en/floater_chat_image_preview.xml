@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<floater
+ legacy_header_height="18"
+ can_resize="true"
+ height="440"
+ layout="topleft"
+ min_height="200"
+ min_width="520"
+ name="chat_image_preview"
+ save_rect="true"
+ title="Image preview"
+ width="520">
+    <floater.string
+     name="title">
+        Image: [NAME]
+    </floater.string>
+    <floater.string
+     name="loading">
+        Loading image...
+    </floater.string>
+    <floater.string
+     name="failed">
+        Image unavailable ([REASON])
+    </floater.string>
+    <floater.string
+     name="info">
+        [WIDTH] x [HEIGHT] [TYPE], [SIZE] KB
+    </floater.string>
+    <view
+     follows="all"
+     height="362"
+     layout="topleft"
+     left="8"
+     mouse_opaque="false"
+     name="image_area"
+     top="22"
+     width="504" />
+    <text
+     follows="left|bottom|right"
+     height="16"
+     layout="topleft"
+     left="10"
+     name="status_text"
+     top_pad="4"
+     width="500">
+        Loading image...
+    </text>
+    <button
+     follows="left|bottom"
+     height="23"
+     label="Open in browser"
+     layout="topleft"
+     left="8"
+     name="open_browser_btn"
+     tool_tip="Open the link in your web browser"
+     top_pad="4"
+     width="130" />
+    <button
+     follows="left|bottom"
+     height="23"
+     label="Copy link"
+     layout="topleft"
+     left_pad="6"
+     name="copy_link_btn"
+     tool_tip="Copy the link to the clipboard"
+     top_delta="0"
+     width="100" />
+    <button
+     follows="left|bottom"
+     height="23"
+     label="Save to disk..."
+     layout="topleft"
+     left_pad="6"
+     name="save_btn"
+     tool_tip="Save the original image file"
+     top_delta="0"
+     width="120" />
+    <button
+     follows="left|bottom"
+     height="23"
+     label="Upload to inventory..."
+     layout="topleft"
+     left_pad="6"
+     name="upload_btn"
+     tool_tip="Upload this image to your inventory as a texture (costs L$ like any upload)"
+     top_delta="0"
+     width="140" />
+</floater>

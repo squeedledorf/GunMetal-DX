@@ -1,0 +1,93 @@
+# Manual Linux signing maintenance (#288), outside a release build:
+#
+#   apt_tags   space-separated release tags whose .deb to add to the apt
+#              repository (first seeding, e.g. "v1.0.0-beta.6", or rebuilding
+#              the repo after the state in /srv/ci/apt-repo was lost). Then
+#              re-publish (re-sign) both suites and deploy. Use "-" to only
+#              re-publish and deploy, e.g. after a keyring-version bump.
+#   sign_tag   a release tag to (re)write SHA256SUMS + SHA256SUMS.asc for, e.g.
+#              an older release, or after a late asset was attached.
+#
+# Run it from the Actions tab (workflow_dispatch) or through the API:
+#   curl -X POST -H "Authorization: token ..." -H 'Content-Type: application/json' \
+#     -d '{"ref":"main","inputs":{"apt_tags":"v1.0.0-beta.6","sign_tag":"v1.0.0-beta.6"}}' \
+#     http://192.168.96.20:3000/api/v1/repos/sky_line/Slipstream/actions/workflows/linux-signing.yml/dispatches
+#
+# The same secrets, host prerequisites and scripts as release.yml's apt-repo
+# and sign-release jobs (scripts/packaging/apt/INFRA.md, scripts/packaging/keys/README.md).
+name: linux-signing
+
+on:
+  workflow_dispatch:
+    inputs:
+      apt_tags:
+        description: 'Tags whose .deb to add to the apt repo ("-": only re-publish + deploy)'
+        type: string
+        default: ''
+      sign_tag:
+        description: 'Release tag to (re)write SHA256SUMS + SHA256SUMS.asc for'
+        type: string
+        default: ''
+
+env:
+  RELEASE_API: http://192.168.96.20:3000/api/v1/repos/${{ github.repository }}
+  REPO_GIT: http://192.168.96.20:3000/${{ github.repository }}.git
+  WORK: /srv/ci/slipstream-signing-manual
+
+jobs:
+  maintain:
+    runs-on: builder
+    timeout-minutes: 60
+    steps:
+      - name: Fetch the scripts
+        run: |
+          set -euo pipefail
+          rm -rf "$WORK"
+          mkdir -p "$WORK/tree" "$WORK/tmp"
+          git -C "$WORK/tree" init -q
+          git -C "$WORK/tree" -c http.extraHeader="Authorization: token ${{ secrets.RELEASE_TOKEN }}" \
+              fetch -q --depth=1 "$REPO_GIT" "$GITHUB_SHA"
+          git -C "$WORK/tree" checkout -q FETCH_HEAD -- scripts/ci scripts/packaging/apt scripts/packaging/keys
+          git -C "$WORK/tree" log --oneline -1 FETCH_HEAD
+
+      - name: apt repository
+        if: inputs.apt_tags != ''
+        env:
+          APT_TAGS: ${{ inputs.apt_tags }}
+          APT_REPO_ROOT: /srv/ci/apt-repo
+          APT_DEPLOY_KEY: /home/ci/.ssh/slipstream_apt_deploy
+          APT_DEPLOY_TARGET: 'aptdeploy@192.168.96.20:'
+          LINUX_SIGNING_KEY: ${{ secrets.LINUX_SIGNING_KEY }}
+          LINUX_SIGNING_KEY_ID: ${{ secrets.LINUX_SIGNING_KEY_ID }}
+          LINUX_SIGNING_KEY_PASSPHRASE: ${{ secrets.LINUX_SIGNING_KEY_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          H="$WORK/tree/scripts/ci/signing_key.sh"
+          R="$WORK/tree/scripts/packaging/apt/apt_repo.sh"
+          bash "$H" check
+          if [ "$APT_TAGS" != "-" ]; then
+            # shellcheck disable=SC2086
+            RELEASE_API="$RELEASE_API" DOWNLOAD_BASE="${REPO_GIT%.git}/releases/download" \
+              bash "$R" seed $APT_TAGS
+          fi
+          bash "$H" run bash "$R" publish
+          bash "$R" deploy
+          bash "$R" list
+
+      - name: SHA256SUMS
+        if: inputs.sign_tag != ''
+        env:
+          SIGN_TAG: ${{ inputs.sign_tag }}
+          TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          LINUX_SIGNING_KEY: ${{ secrets.LINUX_SIGNING_KEY }}
+          LINUX_SIGNING_KEY_ID: ${{ secrets.LINUX_SIGNING_KEY_ID }}
+          LINUX_SIGNING_KEY_PASSPHRASE: ${{ secrets.LINUX_SIGNING_KEY_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          H="$WORK/tree/scripts/ci/signing_key.sh"
+          bash "$H" check
+          TMPDIR="$WORK/tmp" bash "$H" run bash "$WORK/tree/scripts/ci/sign_release.sh" "$SIGN_TAG"
+
+      - name: Clean up
+        if: always()
+        run: rm -rf "$WORK"

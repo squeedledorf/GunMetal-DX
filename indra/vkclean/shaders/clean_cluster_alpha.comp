@@ -1,0 +1,282 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+// vkclean -- CLUSTER LOD ALPHA ORDER (OWNER: 1b; rigged alpha-blend on the cluster path).
+//
+// The main view's selection (clean_cluster_select.comp) STAGES every draw record of an alpha-blend
+// rigged instance (CLI1B_BLEND) unordered, with a tag {entry, staged list, local index}: the entry
+// is the instance's row in the alpha entry table (its counts per staged list, then its bases), the
+// local index the record's DETERMINISTIC rank inside its instance (page order, then cluster order).
+// LL draws alpha back to front BETWEEN faces and in index order WITHIN a face; this pass gives the
+// cluster path the same contract: instances ordered back to front, each instance's records kept
+// contiguous in their fixed intra-mesh order. Recorded after the cluster pre-skin (the key is the
+// POSED position: the skinned boxes it wrote), before any alpha draw. Three modes:
+//   0 PREP    (indirect, one lane per staged record): the instance's posed box = the union of its
+//             staged records' skinned cluster boxes (atomicMin / atomicMax on clOrderEnc words).
+//   1 ORDER   (ONE workgroup of 1024): per entry the key of clean_alpha_sort.comp mode 0 --
+//             k0 = (near side of the water ? 1 : 0) << 31 | (0x7FFFFFFF - (dist^2 bits >> 1)),
+//             k1 = the ClusterInstance index (deterministic ties) -- from the box centre (+ the
+//             palettes' eye), or the rest-pose mesh sphere centre when nothing was skinned; a
+//             bitonic sort of the entries in global memory (single workgroup: barrier() +
+//             memoryBarrierBuffer() order the steps), then exclusive prefix sums of the record
+//             counts in sorted order: main records split at the water (pre = far side, post =
+//             near side), rig list 0 (shadow casters) and rig list 1 (captures: pre then post,
+//             back to front -- the legacy captures drew the main sort's pre + post lists). Writes
+//             each entry's bases, the four lists' counts and their mesh-tier task commands.
+//   2 SCATTER (indirect, one lane per staged record): record -> its list at base + local index.
+// Capacity: the staging region and every output list hold cl_aux.alpha.y records; entries past
+// cl_aux.alpha.z, records past the staging -- dropped (counted in CLC_AL_OVERFLOW; the CPU grows
+// both from the read-back demand). Nothing is ever appended unordered.
+#ifdef CL_ALPHA_ORDER
+layout(local_size_x = 1024) in;   // mode 1: one workgroup
+#else
+layout(local_size_x = 64) in;     // modes 0 / 2: one lane per staged record (indirect, CLC_AL_DISPATCH)
+#endif
+
+#define CLUSTER_SET 0
+#define CL_DECLARE_INSTANCES
+#define CL_DECLARE_MESHES
+#include "clean_cluster_common.glsl"
+#define CL_SELECT_RW
+#include "clean_cluster_select_common.glsl"
+#define CL_DECLARE_SKIN_OUT
+#define CL_DECLARE_SKIN_SCRATCH
+#include "clean_cluster_skin_common.glsl"
+
+layout(push_constant) uniform AlphaPush
+{
+    vec4 cam;      // xyz camera (world / agent space, = the legacy alpha sort's), w water height
+    uint mode;     // 0 prep, 1 order, 2 scatter
+    uint view;     // the main cluster view
+    uint under;    // the camera is below the water plane
+    uint pad;
+} ap;
+
+uint stagedCount(uint vb) { return min(cl_cnt[vb + CLC_AL_STAGED], cl_aux.alpha.y); }
+// firstInstance word of a record (tier 0: VkDrawIndirectCommand + spare; tiers 1 / 2: indexed).
+uint recSel(uint w) { return cl_draws[w + (cl_aux.tier == 0u ? 3u : 4u)]; }
+
+void prep(uint g, uint vb)
+{
+    if (g >= stagedCount(vb)) return;
+    const uint tb = clAlphaTagBase() + g * 2u;
+    const uint e = cl_draws[tb] & 0x3FFFFFFFu;
+    if (e >= cl_aux.alpha.z) return;
+    const uint s = clSkinnedCluster(recSel((clAlphaStageRec() + g) * CLD_WORDS));
+    if (s == CL_NONE) return;
+    const uint b = clSkinBoxBase() + s * CL_SKIN_BOX_WORDS;
+    if (b + CL_SKIN_BOX_WORDS > uint(cl_skin_out.length()) || cl_skin_out[b + 7u] != 1u) return;
+    vec3 lo = uintBitsToFloat(uvec3(cl_skin_out[b], cl_skin_out[b + 1u], cl_skin_out[b + 2u]));
+    vec3 hi = uintBitsToFloat(uvec3(cl_skin_out[b + 3u], cl_skin_out[b + 4u], cl_skin_out[b + 5u]));
+    if (any(isnan(lo)) || any(isnan(hi)) || any(greaterThan(lo, hi))) return;
+    // (2026-10-14 step 2: the box is in its character's space, row = box word 6 -> eye-relative)
+    clCharBox(clSkinChar(cl_skin_out[b + 6u], false), lo, hi);
+    const uint eb = clAlphaEntryBase() + e * CLA_ENTRY_WORDS;
+    for (uint k = 0u; k < 3u; ++k)
+    {
+        atomicMin(cl_draws[eb + 2u + k], clOrderEnc(lo[k]));
+        atomicMax(cl_draws[eb + 5u + k], clOrderEnc(hi[k]));
+    }
+}
+
+void scatter(uint g, uint vb)
+{
+    if (g >= stagedCount(vb)) return;
+    const uint tb = clAlphaTagBase() + g * 2u;
+    const uint tag = cl_draws[tb];
+    const uint e = tag & 0x3FFFFFFFu, l = tag >> 30u;
+    if (e >= min(cl_cnt[vb + CLC_AL_SORTED], cl_aux.alpha.z) || l >= CLA_STAGE_LISTS) return;
+    const uint eb = clAlphaEntryBase() + e * CLA_ENTRY_WORDS;
+    if (cl_draws[eb + 1u] != 1u) return;
+    const uint k = l == 0u ? (cl_draws[eb + 15u] != 0u ? CLA_OUT_POST : CLA_OUT_PRE) : (l == 1u ? CLA_OUT_RIG0 : CLA_OUT_RIG1);
+    const uint dst = cl_draws[eb + 12u + l] + cl_draws[tb + 1u];
+    if (dst >= cl_aux.alpha.y) return;
+    const uint src = (clAlphaStageRec() + g) * CLD_WORDS;
+    const uint dw = (clAlphaOutRec(k) + dst) * CLD_WORDS;
+    for (uint w = 0u; w < CLD_WORDS; ++w) cl_draws[dw + w] = cl_draws[src + w];
+}
+
+#ifdef CL_ALPHA_ORDER
+shared uvec4 s_sc[1024];   // per-lane sums (pre main, post main, rig 0, rig 1), scanned
+
+uvec3 clGrid(uint groups)
+{
+    if (groups == 0u) return uvec3(0u, 1u, 1u);
+    const uint x = min(groups, CL_TASK_GRID_X);
+    return uvec3(x, (groups + x - 1u) / x, 1u);
+}
+
+// The sort key of entry e (k0 as clean_alpha_sort.comp mode 0, k1 = the instance).
+uvec2 entryKey(uint e)
+{
+    const uint eb = clAlphaEntryBase() + e * CLA_ENTRY_WORDS;
+    const uint ii = cl_draws[eb];
+    vec3 w;
+    const uvec3 el = uvec3(cl_draws[eb + 2u], cl_draws[eb + 3u], cl_draws[eb + 4u]);
+    const uvec3 eh = uvec3(cl_draws[eb + 5u], cl_draws[eb + 6u], cl_draws[eb + 7u]);
+    if (el.x != 0xFFFFFFFFu && eh.x != 0u)
+    {   // the posed box (eye-relative) + the palettes' eye
+        const vec3 lo = vec3(clOrderDec(el.x), clOrderDec(el.y), clOrderDec(el.z));
+        const vec3 hi = vec3(clOrderDec(eh.x), clOrderDec(eh.y), clOrderDec(eh.z));
+        w = 0.5 * (lo + hi) + clSkinEye();
+    }
+    else
+    {   // nothing skinned (its records draw nothing): the rest-pose mesh centre
+        w = vec3(0.0);
+        if (ii < uint(cl_instances.length()))
+        {
+            const ClInstance inst = cl_instances[ii];
+            if (inst.mesh < uint(cl_meshes.length())) w = clXformSphere(inst, cl_meshes[inst.mesh].sphere).xyz;
+        }
+    }
+    if (any(isnan(w)) || any(isinf(w))) w = ap.cam.xyz;
+    const bool below = w.z < ap.cam.w;
+    const bool far_side = ap.under != 0u ? !below : below;
+    const vec3 d = w - ap.cam.xyz;
+    const uint db = floatBitsToUint(dot(d, d));
+    return uvec2((far_side ? 0u : 0x80000000u) | (0x7FFFFFFFu - (db >> 1u)), ii);
+}
+
+void main()
+{
+    const uint lid = gl_LocalInvocationID.x;
+    if (ap.view >= CL_MAX_VIEWS) return;
+    const uint vb = ap.view * CLC_VIEW_WORDS;
+    const uint n = min(cl_cnt[vb + CLC_AL_INST], cl_aux.alpha.z);
+    uint N = 1u;
+    while (N < n) N <<= 1u;
+    const uint sb = clAlphaSortBase();
+    if (N <= 1024u)
+    {
+        // #826 (c_cl_alpha_order): up to 1024 entries -- every crowd short of a huge one -- sort in
+        // SHARED memory (s_sc, which the prefix sums below reuse afterwards): one lane per key, a
+        // workgroup barrier per step, instead of global-memory passes with a buffer barrier each.
+        // The same keys and the same bitonic network: the same order.
+        s_sc[lid] = lid < n ? uvec4(entryKey(lid), lid, 0u) : uvec4(0xFFFFFFFFu, 0xFFFFFFFFu, CL_NONE, 0u);
+        barrier();
+        for (uint k = 2u; k <= N; k <<= 1u)
+        {
+            for (uint j = k >> 1u; j > 0u; j >>= 1u)
+            {
+                const uint ixj = lid ^ j;
+                if (lid < N && ixj > lid)
+                {
+                    const uvec4 A = s_sc[lid], B = s_sc[ixj];
+                    const bool gt = (A.x > B.x) || (A.x == B.x && A.y > B.y);
+                    if (gt == ((lid & k) == 0u)) { s_sc[lid] = B; s_sc[ixj] = A; }
+                }
+                barrier();
+            }
+        }
+        if (lid < N)
+        {
+            const uvec4 v = s_sc[lid];
+            cl_draws[sb + lid * 4u + 0u] = v.x;
+            cl_draws[sb + lid * 4u + 1u] = v.y;
+            cl_draws[sb + lid * 4u + 2u] = v.z;
+        }
+        memoryBarrierBuffer();
+        barrier();
+    }
+    else
+    {
+    // keys: {k0, k1, entry, 0}; padding sorts last
+    for (uint i = lid; i < N; i += 1024u)
+    {
+        uvec2 k = uvec2(0xFFFFFFFFu);
+        uint e = CL_NONE;
+        if (i < n) { k = entryKey(i); e = i; }
+        cl_draws[sb + i * 4u + 0u] = k.x;
+        cl_draws[sb + i * 4u + 1u] = k.y;
+        cl_draws[sb + i * 4u + 2u] = e;
+    }
+    memoryBarrierBuffer();
+    barrier();
+    // Bitonic sort, ascending on (k0, k1), in global memory (one workgroup).
+    for (uint k = 2u; k <= N; k <<= 1u)
+    {
+        for (uint j = k >> 1u; j > 0u; j >>= 1u)
+        {
+            for (uint i = lid; i < N; i += 1024u)
+            {
+                const uint ixj = i ^ j;
+                if (ixj > i)
+                {
+                    const uint a = sb + i * 4u, b = sb + ixj * 4u;
+                    const uvec3 A = uvec3(cl_draws[a], cl_draws[a + 1u], cl_draws[a + 2u]);
+                    const uvec3 B = uvec3(cl_draws[b], cl_draws[b + 1u], cl_draws[b + 2u]);
+                    const bool gt = (A.x > B.x) || (A.x == B.x && A.y > B.y);
+                    if (gt == ((i & k) == 0u))
+                    {
+                        cl_draws[a] = B.x; cl_draws[a + 1u] = B.y; cl_draws[a + 2u] = B.z;
+                        cl_draws[b] = A.x; cl_draws[b + 1u] = A.y; cl_draws[b + 2u] = A.z;
+                    }
+                }
+            }
+            memoryBarrierBuffer();
+            barrier();
+        }
+    }
+    }
+    // Exclusive prefix sums in sorted order: lane `lid` owns positions [lid * per, + per).
+    const uint per = (n + 1023u) / 1024u;
+    const uint p0 = min(lid * per, n), p1 = min(p0 + per, n);
+    uvec4 sum = uvec4(0u);
+    for (uint p = p0; p < p1; ++p)
+    {
+        const uint e = cl_draws[sb + p * 4u + 2u];
+        if (e >= n) continue;
+        const uint eb = clAlphaEntryBase() + e * CLA_ENTRY_WORDS;
+        const bool post = (cl_draws[sb + p * 4u] >> 31u) != 0u;
+        const uint c0 = cl_draws[eb + 8u];
+        sum += uvec4(post ? 0u : c0, post ? c0 : 0u, cl_draws[eb + 9u], cl_draws[eb + 10u]);
+    }
+    s_sc[lid] = sum;
+    barrier();
+    for (uint off = 1u; off < 1024u; off <<= 1u)
+    {
+        const uvec4 v = lid >= off ? s_sc[lid - off] : uvec4(0u);
+        barrier();
+        s_sc[lid] += v;
+        barrier();
+    }
+    uvec4 run = s_sc[lid] - sum;   // exclusive
+    for (uint p = p0; p < p1; ++p)
+    {
+        const uint e = cl_draws[sb + p * 4u + 2u];
+        if (e >= n) continue;
+        const uint eb = clAlphaEntryBase() + e * CLA_ENTRY_WORDS;
+        const bool post = (cl_draws[sb + p * 4u] >> 31u) != 0u;
+        const uint c0 = cl_draws[eb + 8u];
+        cl_draws[eb + 12u] = post ? run.y : run.x;
+        cl_draws[eb + 13u] = run.z;
+        // captures: one back-to-front list over both water sides (pre then post: the sort order)
+        cl_draws[eb + 14u] = run.w;
+        cl_draws[eb + 15u] = post ? 1u : 0u;
+        run += uvec4(post ? 0u : c0, post ? c0 : 0u, cl_draws[eb + 9u], cl_draws[eb + 10u]);
+    }
+    if (lid == 1023u)
+    {
+        const uvec4 tot = s_sc[1023];
+        const uint cap = cl_aux.alpha.y;
+        const uint c[CLA_OUTS] = uint[CLA_OUTS](min(tot.x, cap), min(tot.y, cap), min(tot.z, cap), min(tot.w, cap));
+        for (uint k = 0u; k < CLA_OUTS; ++k)
+        {
+            cl_cnt[vb + CLC_AL_COUNT + k] = c[k];
+            const uvec3 t = clGrid((c[k] + CL_TASK_CLUSTERS - 1u) / CL_TASK_CLUSTERS);
+            cl_cnt[vb + CLC_AL_TASKS + k * 4u + 0u] = t.x;
+            cl_cnt[vb + CLC_AL_TASKS + k * 4u + 1u] = t.y;
+            cl_cnt[vb + CLC_AL_TASKS + k * 4u + 2u] = t.z;
+        }
+        cl_cnt[vb + CLC_AL_SORTED] = n;
+    }
+}
+#else
+void main()
+{
+    if (ap.view >= CL_MAX_VIEWS) return;
+    const uint vb = ap.view * CLC_VIEW_WORDS;
+    const uint g = (gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x) * 64u + gl_LocalInvocationID.x;
+    if (ap.mode == 0u) prep(g, vb);
+    else scatter(g, vb);
+}
+#endif

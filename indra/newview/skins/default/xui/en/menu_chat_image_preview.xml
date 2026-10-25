@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<menu
+ height="101"
+ layout="topleft"
+ left="100"
+ mouse_opaque="false"
+ name="Chat Image Preview Menu"
+ top="724"
+ visible="false"
+ width="160">
+    <menu_item_call
+     label="Copy link"
+     layout="topleft"
+     name="copy_link">
+        <menu_item_call.on_click
+         function="ChatImage.Action"
+         parameter="copy" />
+    </menu_item_call>
+    <menu_item_call
+     label="Open in browser"
+     layout="topleft"
+     name="open_browser">
+        <menu_item_call.on_click
+         function="ChatImage.Action"
+         parameter="open_browser" />
+    </menu_item_call>
+    <menu_item_call
+     label="Open preview"
+     layout="topleft"
+     name="open_preview">
+        <menu_item_call.on_click
+         function="ChatImage.Action"
+         parameter="open_preview" />
+        <menu_item_call.on_visible
+         function="ChatImage.Visible"
+         parameter="has_thumbnail" />
+    </menu_item_call>
+    <menu_item_separator
+     layout="topleft" />
+    <menu_item_call
+     label="Hide this preview"
+     layout="topleft"
+     name="hide_preview">
+        <menu_item_call.on_click
+         function="ChatImage.Action"
+         parameter="hide" />
+    </menu_item_call>
+</menu>

@@ -1,0 +1,227 @@
+#version 460
+// vkclean -- GOD RAYS DENOISER (#657, RenderVKGodRaysDenoise), temporal pass: the RT
+// shadow denoiser's temporal accumulation (clean_rt_mask_temporal.comp, shared helpers
+// in clean_denoise_common.glsl) applied to the god-ray march, at the march's resolution.
+// Replaces clean_godrays_temporal.comp (kept for RenderVKGodRaysDenoise 0).
+//
+// INPUT: the march in its denoiser mode (clean_godrays.comp, params2.z = 2):
+//   rgb = v, the transmittance-weighted mean beam VISIBILITY along the texel's view
+//   segment, in [0, 1] -- a signal in the shadow mask's units, so its thresholds carry
+//   over; a = the view distance (the depth key), NEGATIVE when a shadow ray met a MOVING
+//   caster this frame. The fully lit in-scatter it scales (Lmax) is noise-free and is
+//   applied after the spatial pass (clean_godrays_atrous.comp).
+//
+// The god-ray buffer is a VIEW-SPACE in-scatter integral, not a surface signal: no
+// receiver normal / plane terms anywhere. Texels match on the depth key alone (relative
+// view-distance agreement); sky texels (65000) are their own class.
+//
+//   * REPROJECTION (camera only: the integral is view-space): as clean_godrays_temporal
+//     .comp -- the texel's unjittered view ray at its stored distance -> last frame's clip
+//     through one matrix; 2x2 bilinear taps, each kept only when its stored distance
+//     agrees with the expected one (relative), same class; too little weight =
+//     disocclusion (no history).
+//   * NEIGHBOURHOOD CLAMP: the history is clamped to this frame's raw 3x3 mean +- gamma
+//     sigma (same depth class only; RenderVKGodRaysClamp sigmas).
+//   * FAST HISTORY (ReLAX-style): a ~3-frame running average of v's luminance and its
+//     square (meta.yz) widens the box to keep sub-texel casters (a branch hit on some
+//     frames only) inside it, and is the reference of the change detector below.
+//   * ADAPTIVE LENGTH: alpha = 1 / frames, frames capped by RenderVKGodRaysHistory, cut
+//     back by how far the clamp had to move the history (anti-lag), reset on
+//     disocclusion.
+//   * MOVING CASTERS (RenderVKGodRaysAntiLag): only texels whose shadow rays met a moving
+//     caster this frame or last frame (avatars, attachments, vehicles, spinning prims;
+//     the march's sign bit / the history meta's flag) run the change detector: the centre
+//     sample AND the 3x3 mean both left the fast history's noise band -> the widening is
+//     dropped, the history length snaps to 1, the fast moments re-seed from the 3x3, and
+//     the change goes to the TAA / FSR reactive (meta.w, RenderVKGodRaysReactive). Those
+//     texels also cap at a short history (RenderVKGodRaysDynamicHistory). Static casters
+//     keep the long widened history: their shafts can only change by noise.
+//   * SVGF-STYLE CLAMP (RenderVKGodRaysSvgf, static casters only): the history is clamped
+//     in LUMINANCE (tints keep their colour) to the box of last frame's FAST means around
+//     the reprojected position plus this texel's new fast mean, +- 0.02 -- a raw 3x3 of a
+//     few rays per texel is all-lit / all-blocked by chance at shaft edges, and would cut
+//     the history there (the shimmer); the fast means only move on a real change.
+//
+// Outputs (the history pair, ping-pong by parity):
+//   acc  rgba16f: rgb = accumulated v, a = this frame's view distance (positive)
+//   meta rgba16f: x = history length (frames) + 128 when THIS frame's rays met a moving
+//                 caster (the next frame's "last frame" flag), y / z the fast moments
+//                 (mean, mean of squares of v's luminance), w = the reactive (shading
+//                 change x gain, [0, 1]) the composite writes into the TAA / FSR mask.
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform sampler2D uCur;                       // march output (texelFetch)
+layout(set = 0, binding = 1) uniform sampler2D uHist;                      // last frame's acc
+layout(set = 0, binding = 2) uniform sampler2D uHistMeta;                  // last frame's meta
+layout(set = 0, binding = 3, rgba16f) writeonly uniform image2D uOutAcc;   // this frame's acc
+layout(set = 0, binding = 4, rgba16f) writeonly uniform image2D uOutMeta;  // this frame's meta
+
+layout(push_constant) uniform GodRaysDnTemporalPush {
+    mat4 reproj;    // CURRENT camera-relative world -> PREVIOUS frame's (unjittered) clip
+    // View ray (as clean_godrays_temporal.comp): xyz = ray_a ndc.x + ray_b ndc.y + ray_c;
+    // w = the camera's translation since last frame (x, y, z).
+    vec4 ray_a;
+    vec4 ray_b;
+    vec4 ray_c;
+    vec4 p;         // x max history (frames), y clamp width (sigmas), z flags (an exact
+                    // integer: bit 0 anti-lag, bit 1 SVGF clamp, bits 4-7 the moving-caster
+                    // history (frames), bits 8-15 reactive gain x 16), w 1 = no history
+} tp;
+
+#define DENOISE_NO_ATROUS
+#include "clean_denoise_common.glsl"
+
+const float kSkyDist = 65000.0;
+const float kHistTol = 0.08;   // relative view-distance agreement for a history tap
+const float kNbrTol  = 0.10;   // ... for a neighbourhood / fast-box texel
+const float kMovFlag = 128.0;  // meta.x offset: this frame's moving-caster flag
+
+bool  dnAntiLag()  { return (uint(tp.p.z + 0.5) & 1u) != 0u; }
+bool  dnSvgf()     { return (uint(tp.p.z + 0.5) & 2u) != 0u; }
+float dnDynLen()   { return max(float((uint(tp.p.z + 0.5) >> 4u) & 15u), 1.0); }
+float dnReactGain(){ return float((uint(tp.p.z + 0.5) >> 8u) & 255u) * (1.0 / 16.0); }
+
+float relErr(float a, float b) { return abs(a - b) / max(min(a, b), 0.1); }
+bool  isSky(float d) { return d >= kSkyDist * 0.5; }
+// Same depth class and agreeing distance (sky only ever matches sky).
+bool  sameKey(float a, float b, float tol) { return isSky(a) == isSky(b) && (isSky(a) || relErr(a, b) <= tol); }
+vec3  finite01(vec3 v) { return (any(isnan(v)) || any(isinf(v))) ? vec3(1.0) : clamp(v, vec3(0.0), vec3(1.0)); }
+
+void main()
+{
+    const ivec2 opx = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 dim = textureSize(uCur, 0);
+    if (opx.x >= dim.x || opx.y >= dim.y) return;
+
+    const vec4 c0 = texelFetch(uCur, opx, 0);
+    const float dist = abs(c0.a);
+    const bool dyn_now = c0.a < 0.0;
+    const vec3 raw = finite01(c0.rgb);
+
+    // ---- raw 3x3 neighbourhood (same depth class) ----
+    vec3 m1 = vec3(0.0), m2 = vec3(0.0);
+    float nn = 0.0;
+    for (int i = 0; i < 9; ++i)
+    {
+        const ivec2 q = clamp(opx + ivec2(i % 3 - 1, i / 3 - 1), ivec2(0), dim - 1);
+        const vec4 s = texelFetch(uCur, q, 0);
+        if (!sameKey(abs(s.a), dist, kNbrTol)) continue;
+        const vec3 v = finite01(s.rgb);
+        m1 += v; m2 += v * v; nn += 1.0;
+    }
+    // (The centre always qualifies.)
+    const vec3 mean = m1 / max(nn, 1.0);
+    const vec3 sigma = sqrt(max(m2 / max(nn, 1.0) - mean * mean, vec3(0.0)));
+
+    // ---- reprojection into last frame's history ----
+    vec3 hsum = vec3(0.0);
+    vec4 hmeta = vec4(0.0);   // x length, yz fast moments (flag decoded out)
+    float wsum = 0.0;
+    bool hfl = false;         // last frame's rays met a moving caster (any matched tap)
+    const bool sv = dnSvgf();
+    vec2 fbox = vec2(1e9, -1e9);   // SVGF: min / max of the fast history around the taps
+    if (tp.p.w < 0.5)
+    {
+        const vec2 dimf = vec2(dim);
+        const vec2 ndc = (vec2(opx) + 0.5) / dimf * 2.0 - 1.0;
+        const vec3 V = normalize(tp.ray_a.xyz * ndc.x + tp.ray_b.xyz * ndc.y + tp.ray_c.xyz);
+        const float dr = isSky(dist) ? 1000.0 : dist;   // a sky texel: reproject a far point
+        const vec4 pc = tp.reproj * vec4(V * dr, 1.0);
+        const float expect = isSky(dist) ? kSkyDist
+                           : length(V * dist + vec3(tp.ray_a.w, tp.ray_b.w, tp.ray_c.w));
+        if (pc.w > 1e-4)
+        {
+            const vec2 pp = ((pc.xy / pc.w) * 0.5 + 0.5) * dimf - 0.5;   // texel space
+            const ivec2 b = ivec2(floor(pp));
+            const vec2 f = pp - vec2(b);
+            for (int t = 0; t < 4; ++t)
+            {
+                const ivec2 o = ivec2(t & 1, t >> 1);
+                const ivec2 q = b + o;
+                if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, dim))) continue;
+                const vec4 h = texelFetch(uHist, q, 0);
+                if (!sameKey(h.a, expect, kHistTol)) continue;
+                const float w = (o.x == 1 ? f.x : 1.0 - f.x) * (o.y == 1 ? f.y : 1.0 - f.y);
+                if (w <= 0.0) continue;
+                vec4 mt = texelFetch(uHistMeta, q, 0);
+                if (any(isnan(mt)) || any(isinf(mt))) continue;
+                const bool fl = mt.x >= kMovFlag - 0.5;
+                if (fl) mt.x -= kMovFlag;
+                hfl = hfl || fl;
+                hsum += w * h.rgb;
+                hmeta += w * vec4(mt.xyz, 0.0);
+                wsum += w;
+                if (sv) fbox = vec2(min(fbox.x, mt.y), max(fbox.y, mt.y));
+            }
+            // SVGF: last frame's FAST means around the reprojected position, same key.
+            if (sv && wsum > 0.0)
+            {
+                const ivec2 hn = ivec2(floor(pp + 0.5));
+                for (int i = 0; i < 9; ++i)
+                {
+                    const ivec2 q = hn + ivec2(i % 3 - 1, i / 3 - 1);
+                    if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, dim))) continue;
+                    if (!sameKey(texelFetch(uHist, q, 0).a, expect, kNbrTol)) continue;
+                    const float fm = texelFetch(uHistMeta, q, 0).y;
+                    if (isnan(fm) || isinf(fm)) continue;
+                    fbox = vec2(min(fbox.x, fm), max(fbox.y, fm));
+                }
+            }
+        }
+    }
+    // Too little of the footprint matched: disocclusion, start over.
+    const bool hist = wsum >= 0.1;
+    vec3 hv = vec3(0.0);
+    if (hist) { hv = finite01(hsum / wsum); hmeta /= wsum; }
+
+    const float g = tp.p.y;
+    const vec3 clo = mean - g * sigma - 0.01, chi = mean + g * sigma + 0.01;   // this frame's box
+    vec3 lo = clo, hi = chi;
+    // MOVING CASTERS (header): this frame's rays met one, or last frame's.
+    const bool sdyn = dnAntiLag() && hist && (dyn_now || hfl);
+    const float rl = lum3(raw), ml = lum3(mean), sl = lum3(sigma);
+    vec2 hm = vec2(rl, rl * rl);
+    float sa = 0.0;   // the change detector (moving casters only)
+    if (hist)
+    {
+        hm = hmeta.yz;
+        const float fs = sqrt(max(hm.y - hm.x * hm.x, 0.0));
+        if (sdyn) sa = changeDetect(rl, ml, hm.x, 2.0 * fs + 0.08);
+        // The widening only where nothing moved (it would contain the stale history),
+        // and not on a mover's texel that snapped last frame (length 1: "hot").
+        const float wide = (sdyn && hmeta.x < 1.5) ? 0.0 : 1.0 - sa;
+        lo = mix(clo, min(lo, vec3(hm.x - 0.5 * fs)), wide);
+        hi = mix(chi, max(hi, vec3(hm.x + 0.5 * fs)), wide);
+    }
+
+    const float full = max(tp.p.x, 1.0);
+    const float scap_n = sdyn ? min(dnDynLen(), full) : full;
+    const float scap = mix(scap_n, 1.0, sa);
+    float slen, scut = 0.0;
+    vec3 acc;
+    if (sv && !sdyn)
+    {
+        const float fn = hist ? mix(hm.x, rl, max(1.0 / min(max(hmeta.x, 1.0) + 1.0, scap), 0.33)) : rl;
+        const vec2 fb = fbox.x <= fbox.y ? vec2(min(fbox.x, fn), max(fbox.y, fn)) : vec2(fn);
+        acc = accumulateLum(raw, fb.x - 0.02, fb.y + 0.02, hv, hist ? max(hmeta.x, 1.0) : 0.0,
+                            scap, slen, scut);
+    }
+    else
+        acc = accumulate(raw, lo, hi, hv, hist ? max(hmeta.x, 1.0) : 0.0, scap, slen);
+    acc = finite01(acc);
+
+    // Fast moments after the blend (as the RT shadow mask): static -- at the new length
+    // (an anti-lag snap resets them); movers -- a fixed ~3-frame rate, re-seeded from the
+    // 3x3 (mean, spatial variance) on a detected change or a clamp cut.
+    vec2 mom = hist ? mix(hm, vec2(rl, rl * rl), sdyn ? 0.33 : max(1.0 / slen, 0.33)) : vec2(rl, rl * rl);
+    const float reseed = (sdyn && slen < 1.5 && scap_n > 1.5) ? 1.0 : sa;
+    mom = mix(mom, vec2(ml, ml * ml + sl * sl), reseed);
+    if (any(isnan(mom)) || any(isinf(mom))) mom = vec2(rl, rl * rl);
+
+    // Shading change for the TAA / FSR reactive: where the detector fired, how far the
+    // shaft's visibility moved this frame. Never from noise (sa = 0 there).
+    const float react = clamp(sa * abs(lum3(acc) - lum3(hv)) * dnReactGain(), 0.0, 1.0);
+
+    imageStore(uOutAcc, opx, vec4(acc, dist));
+    imageStore(uOutMeta, opx, vec4(min(slen, 127.0) + (dyn_now ? kMovFlag : 0.0), mom, react));
+}

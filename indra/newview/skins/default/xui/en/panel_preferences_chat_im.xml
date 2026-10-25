@@ -1,0 +1,409 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<panel
+    border="false"
+    height="408"
+    layout="topleft"
+    name="chat_im_settings"
+    top="0"
+    left="13"
+    width="517">
+    <scroll_container
+        follows="all"
+        height="408"
+        layout="topleft"
+        left="0"
+        name="chat_windows_scroll"
+        reserve_scroll_corner="false"
+        top="0"
+        width="517">
+        <panel
+            follows="left|top"
+            height="560"
+            layout="topleft"
+            left="0"
+            name="chat_windows_scroll_panel"
+            top="0"
+            width="500">
+            <text
+                follows="left|top"
+                height="14"
+                layout="topleft"
+                left="10"
+                name="names_label"
+                text_color="White"
+                top="10"
+                width="480">
+                Message appearance
+            </text>
+            <check_box
+                control_name="PlainTextChatHistory"
+                follows="left|top"
+                height="16"
+                label="Use compact chat headers (V1 style)"
+                tool_tip="Show names and timestamps inline with each message instead of grouped headers with avatar icons. Applies to nearby chat, IMs and group chat."
+                layout="topleft"
+                left="15"
+                name="PlainTextChatHistory"
+                top_pad="4"
+                width="470" />
+            <check_box
+                control_name="ChatSystemMessageBrackets"
+                enabled_control="PlainTextChatHistory"
+                follows="left|top"
+                height="16"
+                label="Wrap system chat messages in brackets (V1 style chat headers only)"
+                layout="topleft"
+                left="15"
+                name="ChatSystemMessageBrackets"
+                top_pad="4"
+                width="470" />
+            <text
+                follows="left|top"
+                height="14"
+                layout="topleft"
+                left="10"
+                name="timestamps_label"
+                text_color="White"
+                width="480"
+                top_pad="8">
+                Timestamps (compact view)
+            </text>
+            <check_box
+                control_name="FSShowTimestampsNearbyChat"
+                follows="left|top"
+                height="16"
+                label="Nearby chat"
+                layout="topleft"
+                left="15"
+                name="FSShowTimestampsNearbyChat"
+                top_pad="4"
+                width="150" />
+            <check_box
+                control_name="IMShowTime"
+                follows="left|top"
+                height="16"
+                label="IMs and group chat"
+                layout="topleft"
+                left_pad="5"
+                name="IMShowTime"
+                top_delta="0"
+                width="150" />
+            <check_box
+                control_name="FSSecondsinChatTimestamps"
+                follows="left|top"
+                height="16"
+                label="Show seconds in timestamps (chat windows and logs)"
+                layout="topleft"
+                left="15"
+                name="FSSecondsinChatTimestamps"
+                top_pad="4"
+                width="470" />
+            <check_box
+                control_name="FSChatHistoryShowYou"
+                follows="left|top"
+                height="16"
+                label="Show (You) instead of my name (compact view)"
+                layout="topleft"
+                left="15"
+                name="FSChatHistoryShowYou"
+                top_pad="4"
+                width="470" />
+            <check_box
+                control_name="ChatHideUnnamedObjectNames"
+                follows="left|top"
+                height="16"
+                label="Show only the message when an unnamed object chats"
+                tool_tip="Objects with no name (boopers, region relays and the like) show just their message. Turn off to label them (Unnamed)."
+                layout="topleft"
+                left="15"
+                name="ChatHideUnnamedObjectNames"
+                top_pad="4"
+                width="470" />
+            <check_box
+                control_name="FSHighlightGroupMods"
+                follows="left|top"
+                height="16"
+                label="Highlight group moderators:"
+                tool_tip="Messages from group and conference moderators use the styles chosen here."
+                layout="topleft"
+                left="15"
+                name="FSHighlightGroupMods"
+                top_pad="4"
+                width="190" />
+            <text
+                follows="left|top"
+                height="16"
+                layout="topleft"
+                left_pad="2"
+                name="FSModNameStyle_label"
+                top_delta="2"
+                width="40">
+                name
+            </text>
+            <combo_box
+                control_name="FSModNameStyle"
+                enabled_control="FSHighlightGroupMods"
+                follows="left|top"
+                height="20"
+                layout="topleft"
+                left_pad="0"
+                name="FSModNameStyle"
+                top_delta="-4"
+                width="105">
+                <combo_box.item label="Normal" name="normal" value="0" />
+                <combo_box.item label="Bold" name="bold" value="1" />
+                <combo_box.item label="Italic" name="italic" value="2" />
+                <combo_box.item label="Bold italic" name="bold_italic" value="3" />
+                <combo_box.item label="Underline" name="underline" value="4" />
+                <combo_box.item label="Bold underline" name="bold_underline" value="5" />
+                <combo_box.item label="Italic underline" name="italic_underline" value="6" />
+                <combo_box.item label="All three" name="bold_italic_underline" value="7" />
+            </combo_box>
+            <text
+                follows="left|top"
+                height="16"
+                layout="topleft"
+                left_pad="8"
+                name="FSModTextStyle_label"
+                top_delta="4"
+                width="30">
+                text
+            </text>
+            <combo_box
+                control_name="FSModTextStyle"
+                enabled_control="FSHighlightGroupMods"
+                follows="left|top"
+                height="20"
+                layout="topleft"
+                left_pad="0"
+                name="FSModTextStyle"
+                top_delta="-4"
+                width="105">
+                <combo_box.item label="Normal" name="normal" value="0" />
+                <combo_box.item label="Bold" name="bold" value="1" />
+                <combo_box.item label="Italic" name="italic" value="2" />
+                <combo_box.item label="Bold italic" name="bold_italic" value="3" />
+                <combo_box.item label="Underline" name="underline" value="4" />
+                <combo_box.item label="Bold underline" name="bold_underline" value="5" />
+                <combo_box.item label="Italic underline" name="italic_underline" value="6" />
+                <combo_box.item label="All three" name="bold_italic_underline" value="7" />
+            </combo_box>
+            <text
+                follows="left|top"
+                height="14"
+                layout="topleft"
+                left="10"
+                name="conversation_list_label"
+                text_color="White"
+                top_pad="14"
+                width="480">
+                Conversation list
+            </text>
+            <text
+                follows="left|top"
+                height="20"
+                layout="topleft"
+                left="15"
+                name="conversation_sort_order_label"
+                top_pad="4"
+                width="135">
+                Sort conversations:
+            </text>
+            <combo_box
+                control_name="ConversationSortOrder"
+                follows="left|top"
+                height="20"
+                layout="topleft"
+                left_pad="5"
+                name="conversation_sort_order"
+                top_delta="0"
+                width="220">
+                <combo_box.item label="By type" name="by_type" value="131073" />
+                <combo_box.item label="By name" name="by_name" value="1" />
+                <combo_box.item label="By recent activity" name="by_recent" value="65537" />
+                <combo_box.item label="By opening order" name="by_opening_order" value="262145" />
+            </combo_box>
+            <check_box
+                control_name="ConversationsShowContacts"
+                follows="left|top"
+                height="16"
+                label="Show the Contacts tab at the top of the conversation list"
+                tool_tip="A Contacts entry pinned above the conversations. Click it to open the Contacts tab."
+                layout="topleft"
+                left="15"
+                name="ConversationsShowContacts"
+                top_pad="4"
+                width="470" />
+            <check_box
+                control_name="ContactsInConversations"
+                enabled_control="ConversationsShowContacts"
+                follows="left|top"
+                height="16"
+                label="The People button opens Contacts in this window"
+                tool_tip="The People toolbar button opens the Contacts tab inside Conversations instead of the People window, and closes it again. The People window stays under Communicate &gt; Nearby people."
+                layout="topleft"
+                left="30"
+                name="ContactsInConversations"
+                top_pad="4"
+                width="455" />
+            <check_box
+                control_name="ConversationsNearbyChatAtTop"
+                follows="left|top"
+                height="16"
+                label="Keep Nearby Chat at the top of the conversation list"
+                tool_tip="Pins Nearby Chat above your other conversations (below Contacts). When off, Nearby Chat stays at the bottom (or in date order when sorting by date)."
+                layout="topleft"
+                left="15"
+                name="ConversationsNearbyChatAtTop"
+                top_pad="4"
+                width="470" />
+            <check_box
+                control_name="ConversationsShowNearbyParticipants"
+                follows="left|top"
+                height="16"
+                label="Show people beneath Nearby Chat in the conversation list"
+                tool_tip="Allow Nearby Chat to expand into a list of nearby people."
+                layout="topleft"
+                left="15"
+                name="ConversationsShowNearbyParticipants"
+                top_pad="4"
+                width="470" />
+            <check_box
+                control_name="ConversationsShowGroupParticipants"
+                follows="left|top"
+                height="16"
+                label="Show people beneath group and conference chats in the conversation list"
+                tool_tip="Allow group and conference chats to expand into a list of participants."
+                layout="topleft"
+                left="15"
+                name="ConversationsShowGroupParticipants"
+                top_pad="4"
+                width="470" />
+            <text
+                follows="left|top"
+                height="14"
+                layout="topleft"
+                left="10"
+                name="contact_list_label"
+                text_color="White"
+                top_pad="14"
+                width="480">
+                Contact list
+            </text>
+            <check_box
+                control_name="FSFriendListColumnShowPermissions"
+                follows="left|top"
+                height="16"
+                label="Show permissions column"
+                tool_tip="The contact list will show the columns with the permissions you granted this avatar and vice versa."
+                layout="topleft"
+                left="15"
+                name="FSFriendListColumnShowPermissions"
+                top_pad="4"
+                width="470" />
+            <text
+                follows="left|top"
+                height="16"
+                layout="topleft"
+                left="15"
+                name="FSFriendListSortOrder_label"
+                top_pad="6"
+                width="90">
+                Sort list by:
+            </text>
+            <radio_group
+                control_name="FSFriendListSortOrder"
+                follows="left|top"
+                height="16"
+                layout="topleft"
+                left_pad="5"
+                name="FSFriendListSortOrder"
+                top_delta="0"
+                width="250">
+                <radio_item
+                    height="16"
+                    label="Username"
+                    layout="topleft"
+                    left="0"
+                    name="username"
+                    top="0"
+                    value="0"
+                    width="90" />
+                <radio_item
+                    height="16"
+                    label="Display name"
+                    layout="topleft"
+                    left_pad="15"
+                    name="displayname"
+                    top_delta="0"
+                    value="1"
+                    width="110" />
+            </radio_group>
+            <text
+                follows="left|top"
+                height="14"
+                layout="topleft"
+                left="10"
+                name="conversations_label"
+                text_color="White"
+                top_pad="14"
+                width="480">
+                History
+            </text>
+            <check_box
+                control_name="ChatHistoryCtrlFSearch"
+                follows="left|top"
+                height="16"
+                label="Ctrl+F searches the conversation's history (instead of world Search)"
+                tool_tip="The search button in the conversation toolbar always searches the history."
+                layout="topleft"
+                left="15"
+                name="ChatHistoryCtrlFSearch"
+                top_pad="4"
+                width="470" />
+            <text
+                follows="left|top"
+                height="14"
+                layout="topleft"
+                left="10"
+                name="opening_conversations_label"
+                text_color="White"
+                top_pad="14"
+                width="480">
+                Opening conversations
+            </text>
+            <check_box
+                control_name="FSRestoreOpenIMs"
+                follows="left|top"
+                height="16"
+                label="Reopen the IMs that were open when I logged out"
+                tool_tip="One-to-one conversations come back in the Conversations list at login."
+                layout="topleft"
+                left="15"
+                name="FSRestoreOpenIMs"
+                top_pad="4"
+                width="470" />
+            <check_box
+                control_name="FSOpenIMContainerOnOfflineMessage"
+                follows="left|top"
+                height="16"
+                label="Open the Conversations window at login when offline messages arrived"
+                layout="topleft"
+                left="15"
+                name="FSOpenIMContainerOnOfflineMessage"
+                top_pad="4"
+                width="470" />
+            <check_box
+                control_name="SlipstreamNotifyIncomingMessage"
+                follows="left|top"
+                height="16"
+                label="Open an IM as soon as someone starts typing one to me"
+                tool_tip="The conversation opens with an 'Incoming message from...' line before the message arrives."
+                layout="topleft"
+                left="15"
+                name="SlipstreamNotifyIncomingMessage"
+                top_pad="4"
+                width="470" />
+        </panel>
+    </scroll_container>
+</panel>

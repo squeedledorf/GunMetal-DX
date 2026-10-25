@@ -1,0 +1,124 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// vkclean — clustered local-light culling.
+//
+// The view frustum is split into GX x GY screen tiles x GZ exponential depth slices.
+// One invocation per cluster builds the cluster's view-space AABB and tests every
+// local light's bounding sphere (LL deferred radius) against it, writing up to
+// CLUSTER_CAP light indices -- shadowed projectors first (see main) -- and the packed
+// count word (clean_lights_common.glsl clusterLen & co.). clean_draw.frag finds its
+// cluster from gl_FragCoord + view depth and shades only those lights.
+
+#include "clean_lights_common.glsl"
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly  buffer Lights   { Light lights[]; };
+layout(std430, set = 0, binding = 1) writeonly buffer CCount   { uint cluster_count[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer CIndex   { uint cluster_index[]; };
+layout(std430, set = 0, binding = 3) readonly  buffer Info     { LightInfo info; };
+
+// Can light li reach this cluster? Sphere vs the cluster's view-space AABB, and for
+// PROJECTORS the lit FS's own frustum gate: the FS shades only inside the projected
+// frustum -- ptc = proj_mat * p with ptc.z > 0 and 0 < ptc.xy / ptc.w < 1 (w > 0 follows).
+// Those are five homogeneous half-spaces x > 0, w - x > 0, y > 0, w - y > 0, z > 0, linear
+// in p: a cluster whose bounding sphere (cw, cr: world space) lies wholly outside any one
+// of them can never be lit by the projector, however its sphere overlaps the light's range
+// sphere. Exact rejection of the FS's own test (conservative sphere).
+bool touches(uint li, vec3 bmin, vec3 bmax, vec3 cw, float cr)
+{
+    vec3  lp = (info.view * vec4(lights[li].pos_radius.xyz, 1.0)).xyz;
+    float r  = lights[li].pos_radius.w;
+    vec3  q  = clamp(lp, bmin, bmax);
+    vec3  d  = lp - q;
+    if (!(dot(d, d) <= r * r)) return false;   // (NaN-safe: a broken record never binds)
+    if (lights[li].proj_origin.w > 0.5)
+    {
+        const mat4 M = lights[li].proj_mat;
+        const vec4 rx = vec4(M[0][0], M[1][0], M[2][0], M[3][0]);
+        const vec4 ry = vec4(M[0][1], M[1][1], M[2][1], M[3][1]);
+        const vec4 rz = vec4(M[0][2], M[1][2], M[2][2], M[3][2]);
+        const vec4 rw = vec4(M[0][3], M[1][3], M[2][3], M[3][3]);
+        const vec4 pl[5] = vec4[5](rx, rw - rx, ry, rw - ry, rz);
+        for (int k = 0; k < 5; ++k)
+        {
+            const float len = length(pl[k].xyz);
+            if (len > 0.0 && dot(pl[k].xyz, cw) + pl[k].w < -cr * len) return false;
+        }
+    }
+    return true;
+}
+
+void main()
+{
+    uint c = gl_GlobalInvocationID.x;
+    if (c >= CLUSTER_COUNT) return;
+    uint cx = c % GX;
+    uint cy = (c / GX) % GY;
+    uint cz = c / (GX * GY);
+
+    float zn = info.zinfo.x, zf = info.zinfo.y;
+    float z0 = zn * pow(zf / zn, float(cz)      / float(GZ));
+    float z1 = zn * pow(zf / zn, float(cz + 1u) / float(GZ));
+    if (cz == 0u) z0 = 0.0;   // slice 0 also covers everything nearer than zn
+
+    // Tile NDC extent (Vulkan: x right, y DOWN), then view space (x right, y up, -z fwd).
+    float x0 = -1.0 + 2.0 * float(cx)      / float(GX);
+    float x1 = -1.0 + 2.0 * float(cx + 1u) / float(GX);
+    float y0 = -1.0 + 2.0 * float(cy)      / float(GY);
+    float y1 = -1.0 + 2.0 * float(cy + 1u) / float(GY);
+    float tx = info.grid.z, ty = info.grid.w;   // tan(half fov) x / y
+
+    vec3 bmin = vec3( 1e30), bmax = vec3(-1e30);
+    for (int k = 0; k < 2; ++k)
+    {
+        float z = (k == 0) ? z0 : z1;
+        for (int i = 0; i < 4; ++i)
+        {
+            float nx = (i & 1) != 0 ? x1 : x0;
+            float ny = (i & 2) != 0 ? y1 : y0;
+            vec3 p = vec3(nx * tx * z, -ny * ty * z, -z);
+            bmin = min(bmin, p); bmax = max(bmax, p);
+        }
+    }
+
+    // The cluster's bounding sphere in WORLD space (the view is rigid: world =
+    // R^T (v - t)), for the projector frustum test below.
+    const vec3  cv = 0.5 * (bmin + bmax);
+    const float cr = 0.5 * length(bmax - bmin);
+    const mat3  Rv = mat3(info.view);
+    const vec3  cw = transpose(Rv) * (cv - info.view[3].xyz);
+
+    // Two passes over the (importance-ordered) light list: SHADOWED projectors first, then
+    // everything else, each in index order. The RT shadow mask (clean_rt_shadow_mask.comp)
+    // traces only the shadowed projectors its pixel's cluster lists, and the deferred
+    // lighting (clean_deferred_light.comp: uncapped 16 px tile lists) lights every light,
+    // treating a shadowed projector the mask did not trace as UNSHADOWED. When a cluster
+    // overflowed CLUSTER_CAP in plain index order, its shadowed projectors past the cap were
+    // never traced there: projector light leaked through walls onto whole buildings /
+    // terrain, bounded exactly by the cluster (screen tile x depth slice) -- the mid / far
+    // white blocks in light-dense regions (Baltimare: > 1000 lights in the region, the 256
+    // most important uploaded, 64 ray-traced projectors).
+    // Listed first, every shadowed projector touching a cluster keeps its place as long as
+    // they alone fit the cap (RenderVKRTProjShadowMax <= CLUSTER_CAP always does).
+    uint n = 0u, ns = 0u, total = 0u, stotal = 0u;
+    uint count = min(uint(info.cam_pos.w), 256u);   // (the light SSBO holds MAX_VK_LIGHTS = 256)
+    for (uint pass = 0u; pass < 2u; ++pass)
+    {
+        for (uint li = 0u; li < count; ++li)
+        {
+            const bool shadowed = lights[li].proj_origin.w > 0.5 && lights[li].tex.z != 0u;
+            if (shadowed != (pass == 0u)) continue;
+            if (!touches(li, bmin, bmax, cw, cr)) continue;
+            ++total;
+            if (shadowed) ++stotal;
+            if (n < CLUSTER_CAP)
+            {
+                cluster_index[c * CLUSTER_CAP + n] = li;
+                ++n;
+            }
+        }
+        if (pass == 0u) ns = n;
+    }
+    cluster_count[c] = n | (ns << 8u) | (stotal > CLUSTER_CAP ? 0x8000u : 0u) | (min(total, 0xFFFFu) << 16u);
+}

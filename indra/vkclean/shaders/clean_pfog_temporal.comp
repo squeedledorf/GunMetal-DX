@@ -1,0 +1,86 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+// vkclean -- PARTICLE FOG (#1003): TEMPORAL accumulation of the march's jitter (march
+// resolution). Every texel is marched every frame; the history only averages the jittered
+// start / cascade pick over a few frames:
+//   * REPROJECTION by the texel's transmittance-weighted mean distance (no medium: its
+//     segment end) -- camera-relative world -> last frame's clip (pf.reproj, built in double).
+//   * VARIANCE CLAMP of the history to this frame's 3 x 3 neighbourhood: mean +- 1.25 sigma,
+//     inside the min / max -- tighter than a min / max box, so an eroded edge that moved does
+//     not drag its old position along: the medium moves and billows every frame.
+//   * SHORT ADAPTIVE LENGTH: weight 1 / len, len capped at pf.march.z frames (default 4) --
+//     enough to hide the step noise, not enough to blur the billows or thin the core -- and
+//     cut toward 1.5 at DENSITY EDGES (the 3 x 3 transmittance range), where the clamped
+//     history differs from this frame in transmittance, and with the reprojected MOTION
+//     (texels): billows keep their edges when they or the camera move.
+// The targets may be allocated larger than the march (the near-fog resolution): the history
+// lookup scales by march / allocated size (pf.atlas.w / pf.atlasC.w); a resolution change
+// resets the history. B: the composite reads the march's own B (entry / mean / segment end);
+// the history B keeps the length alone (r32f).
+layout(local_size_x = 8, local_size_y = 8) in;
+
+#define PF_NO_BUFFERS
+#include "clean_pfog_common.glsl"
+
+layout(set = PF_SET, binding = 18, rgba16f) readonly uniform image2D uMarchA;
+layout(set = PF_SET, binding = 19, rgba16f) readonly uniform image2D uMarchB;
+layout(set = PF_SET, binding = 20) uniform sampler2D uHistA;   // last frame (bilinear)
+layout(set = PF_SET, binding = 21) uniform sampler2D uHistB;
+layout(set = PF_SET, binding = 22, rgba16f) writeonly uniform image2D uOutA;
+layout(set = PF_SET, binding = 23, r32f) writeonly uniform image2D uOutB;
+
+void main()
+{
+    const ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 sz = ivec2(pf.dims.zw + 0.5);
+    if (px.x >= sz.x || px.y >= sz.y) return;
+    const vec4 curA = imageLoad(uMarchA, px);
+    const vec4 curB = imageLoad(uMarchB, px);
+    vec4 mn = curA, mx = curA, m1 = vec4(0.0), m2 = vec4(0.0);
+    for (int dy = -1; dy <= 1; ++dy)
+        for (int dx = -1; dx <= 1; ++dx)
+        {
+            const ivec2 q = clamp(px + ivec2(dx, dy), ivec2(0), sz - 1);
+            const vec4 a = imageLoad(uMarchA, q);
+            mn = min(mn, a); mx = max(mx, a);
+            m1 += a; m2 += a * a;
+        }
+    m1 /= 9.0;
+    const vec4 sd = sqrt(max(m2 / 9.0 - m1 * m1, vec4(0.0)));
+    const float maxLen = max(pf.march.z, 1.0);
+    vec4 outA = curA;
+    float len = 1.0;
+    if (pf.march.w < 0.5 && maxLen > 1.0)
+    {
+        const float d = curB.x < PF_FAR ? curB.y : min(abs(curB.z), 1000.0);
+        const vec2 ndc = (vec2(px) + 0.5) / pf.dims.zw * 2.0 - 1.0;
+        const vec4 w = pf.inv_vp * vec4(ndc, 0.5, 1.0);
+        const vec3 V = normalize(w.xyz / w.w);
+        const vec4 c = pf.reproj * vec4(V * max(d, 0.05), 1.0);
+        if (c.w > 1e-6)
+        {
+            const vec2 uv = (c.xy / c.w) * 0.5 + 0.5;
+            if (all(greaterThanEqual(uv, vec2(0.0))) && all(lessThanEqual(uv, vec2(1.0))))
+            {
+                // (clamped inside the active sub-rect: no bilinear bleed from texels beyond it)
+                const vec2 tsz = max(vec2(pf.atlas.w, pf.atlasC.w), vec2(1.0));
+                const vec2 tuv = min(uv * pf.dims.zw, pf.dims.zw - 0.5) / tsz;
+                const vec4 hA = textureLod(uHistA, tuv, 0.0);
+                const float hl = textureLod(uHistB, tuv, 0.0).r;
+                const vec4 slack = vec4(vec3(0.002), 0.005);
+                const vec4 lo = max(mn, m1 - 1.25 * sd) - slack, hi = min(mx, m1 + 1.25 * sd) + slack;
+                const vec4 hc = clamp(hA, lo, hi);
+                float cap = maxLen;
+                const float motion = length(uv * pf.dims.zw - (vec2(px) + 0.5));
+                cap = mix(cap, 1.5, clamp(motion / 6.0, 0.0, 1.0) * 0.5);
+                cap = mix(cap, 1.5, smoothstep(0.15, 0.5, mx.a - mn.a));
+                cap = mix(cap, 1.5, smoothstep(0.05, 0.2, abs(hc.a - curA.a)));
+                len = min(max(hl, 0.0) + 1.0, max(cap, 1.0));
+                outA = mix(hc, curA, 1.0 / len);
+            }
+        }
+    }
+    outA = vec4(max(outA.rgb, vec3(0.0)), clamp(outA.a, 0.0, 1.0));
+    imageStore(uOutA, px, outA);
+    imageStore(uOutB, px, vec4(len, 0.0, 0.0, 0.0));
+}

@@ -1,0 +1,262 @@
+#version 460
+// vkclean — WEATHER RUN-OFF FLOW (#783 M4; vkgfx/llcleanweathervk_runoff.cpp): water streaming
+// off covered surfaces. Built from the PUBLISHED near occlusion map whenever a new one is
+// published (prepare(), before any reader of the recording), never per frame.
+//
+// The near map holds the first surface the precipitation meets along each column (the top
+// surfaces: roofs, awnings, tables, canopies, the ground). Treated as a heightfield on a flow
+// grid (R^2, a whole number of near texels per flow texel), in passes of one invocation per
+// flow texel (pc.a.x = the pass):
+//   0 HEIGHT  the highest surface over the texel's near texels (a roof edge's texel is roof);
+//             none = kNone. Clears the outlet accumulators.
+//   1 SEED    OUTLETS: a texel with a neighbour more than pc.c.x lower (an eave, a table edge,
+//             a cliff; curbs and steps stay below it) -- the jump flood's seeds.
+//   2 JFA     jump flood (steps R/2 .. 1): the nearest outlet ON THE SAME SURFACE (a seed whose
+//             height is within pc.c.z of the texel's), so a flat roof knows its nearest edge.
+//   3 RECV    D8 FLOW DIRECTION: steepest descent of the potential H + eps x (distance to that
+//             outlet): slopes dominate (eps is millimetres per metre), flat roofs drain toward
+//             their nearest edge; outlets and pits keep themselves.
+//   4 JUMP    pointer jumping (log2 passes): each texel's outlet, and its rank (hops to it).
+//   5 ACC     each texel's rain to its outlet: the outlet's catchment (texels, atomic) and the
+//             longest path into it (the upslope length).
+//   6 FLOW    the per-texel flow (m of upslope length draining through it: the outlet's longest
+//             path minus the texel's rank -- exact on a plane), and the EMITTER list (bounded
+//             compaction: outlets with a catchment): origin on the edge (world, back out of the
+//             tilted column), catchment (m2), landing height, the outward step.
+//   7 SPREAD  the surfaces' flow map: for each texel the strongest outlet within 2 texels
+//             (falloff-weighted catchment, its edge and landing heights) + its own flow.
+//   8 ARGS    one invocation: the emitter list's dispatch / draw arguments.
+// The map is the precipitation's own (tilted while rain falls in wind, M2): every column takes
+// an equal share of the precipitation, a windward wall is a steep ramp (its water runs down it
+// as rivulets, not as an eave's discharge), a texel's world xy is its column + (top - z) s.
+//
+// Set 0 (own): 0 the near maps (D32, double-buffered: pc.a.w picks), 1 the scratch words
+// (heights | seeds x 2 | pointers x 2 | accumulators), 2 the flow map (rgba32f: x the
+// falloff-weighted catchment of the nearest outlet (m2), y its edge height, z its landing height
+// (m, world), w this texel's own flow (m)), 3 the emitter list (clean_weather_common.glsl).
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform sampler2D uNear[2];
+layout(std430, set = 0, binding = 1) buffer RunoffScratch { uint sc[]; };
+layout(set = 0, binding = 2, rgba32f) uniform image2D uFlow;
+layout(std430, set = 0, binding = 3) buffer RunoffEmitters { uint em_head[16]; vec4 emitters[]; };
+
+layout(push_constant) uniform RunoffPush
+{
+    uvec4 a;    // x pass, y flow resolution R, z near texels per flow texel, w the published near map (0 / 1)
+    uvec4 b;    // x source parity, y destination parity, z jump-flood step, w emitter capacity
+    vec4 fr0;   // the near map's frame: x0, y0 (corner on its top plane), extent, top
+    vec4 fr1;   // span, flow texel (m), shear x, y
+    vec4 c;     // x outlet drop (m), y eps (m per m), z same-surface tolerance (m), w the least outlet catchment (texels)
+} pc;
+
+const float kNone = -1e9;
+const uint  kNoSeed = 0xFFFFFFFFu;
+const float kNoSeedDist = 64.0;   // m: no outlet on this surface (flat interiors beyond reach: pits)
+const ivec2 kNb[8] = ivec2[8](ivec2(1, 0), ivec2(1, 1), ivec2(0, 1), ivec2(-1, 1),
+                              ivec2(-1, 0), ivec2(-1, -1), ivec2(0, -1), ivec2(1, -1));
+
+uint R() { return pc.a.y; }
+uint N2() { return pc.a.y * pc.a.y; }
+uint idx(ivec2 p) { return uint(p.y) * R() + uint(p.x); }
+ivec2 pos(uint i) { return ivec2(int(i % R()), int(i / R())); }
+bool inside(ivec2 p) { return all(greaterThanEqual(p, ivec2(0))) && all(lessThan(p, ivec2(int(R())))); }
+// Scratch regions (words).
+uint oH() { return 0u; }
+uint oSeed(uint par) { return N2() * (1u + par); }
+uint oPtr(uint par) { return N2() * (3u + 2u * par); }
+uint oAcc() { return N2() * 7u; }
+
+float H(uint i) { return uintBitsToFloat(sc[oH() + i]); }
+float H(ivec2 p) { return H(idx(p)); }
+
+// The texel is an outlet: some neighbour lies more than the drop below it (or off any surface).
+bool outlet(ivec2 p, out float low, out ivec2 lowDir)
+{
+    const float h = H(p);
+    low = h; lowDir = ivec2(0);
+    if (h <= kNone * 0.5) return false;
+    for (int k = 0; k < 8; ++k)
+    {
+        const ivec2 q = p + kNb[k];
+        if (!inside(q)) continue;
+        const float hq = H(q);
+        if (hq < low) { low = hq; lowDir = kNb[k]; }
+    }
+    return low < h - pc.c.x;
+}
+bool outlet(ivec2 p) { float l; ivec2 d; return outlet(p, l, d); }
+
+// Distance (m) from p to its outlet seed (jump flood result in parity par).
+float seedDist(ivec2 p, uint par)
+{
+    const uint s = sc[oSeed(par) + idx(p)];
+    if (s == kNoSeed) return kNoSeedDist;
+    return min(length(vec2(pos(s) - p)) * pc.fr1.y, kNoSeedDist);
+}
+
+void main()
+{
+    const uint pass = pc.a.x;
+    if (pass == 8u)
+    {
+        // ARGS (one invocation).
+        if (gl_GlobalInvocationID.x != 0u || gl_GlobalInvocationID.y != 0u) return;
+        const uint count = min(em_head[3], pc.b.w);
+        em_head[0] = (count + 63u) / 64u; em_head[1] = 1u; em_head[2] = 1u;
+        em_head[4] = 6u; em_head[5] = count; em_head[6] = 0u; em_head[7] = 0u;
+        em_head[9] = floatBitsToUint(pc.fr1.y * pc.fr1.y);
+        return;
+    }
+    const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (!inside(p)) return;
+    const uint i = idx(p);
+
+    if (pass == 0u)
+    {
+        // HEIGHT: the highest surface over the texel's near texels.
+        const int f = int(pc.a.z);
+        float h = kNone;
+        for (int v = 0; v < f; ++v)
+            for (int u = 0; u < f; ++u)
+            {
+                const ivec2 t = p * f + ivec2(u, v);
+                const float d = pc.a.w == 0u ? texelFetch(uNear[0], t, 0).r : texelFetch(uNear[1], t, 0).r;
+                if (d < 1.0) h = max(h, pc.fr0.w - d * pc.fr1.x);
+            }
+        sc[oH() + i] = floatBitsToUint(h);
+        sc[oAcc() + 2u * i] = 0u;
+        sc[oAcc() + 2u * i + 1u] = 0u;
+        return;
+    }
+    if (pass == 1u)
+    {
+        sc[oSeed(0u) + i] = outlet(p) ? i : kNoSeed;
+        return;
+    }
+    if (pass == 2u)
+    {
+        // JUMP FLOOD: the nearest seed on this texel's surface.
+        const float h = H(i);
+        uint best = sc[oSeed(pc.b.x) + i];
+        float bestD = best == kNoSeed ? 1e30 : dot(vec2(pos(best) - p), vec2(pos(best) - p));
+        if (h > kNone * 0.5)
+        {
+            const int k = int(pc.b.z);
+            for (int n = 0; n < 8; ++n)
+            {
+                const ivec2 q = p + kNb[n] * k;
+                if (!inside(q)) continue;
+                const uint s = sc[oSeed(pc.b.x) + idx(q)];
+                if (s == kNoSeed || abs(H(s) - h) > pc.c.z) continue;
+                const vec2 dv = vec2(pos(s) - p);
+                const float d = dot(dv, dv);
+                if (d < bestD) { bestD = d; best = s; }
+            }
+        }
+        sc[oSeed(pc.b.y) + i] = best;
+        return;
+    }
+    if (pass == 3u)
+    {
+        // RECEIVER: steepest descent of the potential; outlets and pits keep themselves.
+        uint recv = i;
+        const float h = H(i);
+        if (h > kNone * 0.5 && !outlet(p))
+        {
+            const float phi = h + pc.c.y * seedDist(p, pc.b.x);
+            float best = 0.0;
+            for (int k = 0; k < 8; ++k)
+            {
+                const ivec2 q = p + kNb[k];
+                if (!inside(q)) continue;
+                const float hq = H(q);
+                if (hq <= kNone * 0.5) continue;
+                const float drop = (phi - (hq + pc.c.y * seedDist(q, pc.b.x))) * ((k & 1) != 0 ? 0.70710678 : 1.0);
+                if (drop > best) { best = drop; recv = idx(q); }
+            }
+        }
+        sc[oPtr(0u) + 2u * i] = recv;
+        sc[oPtr(0u) + 2u * i + 1u] = recv == i ? 0u : 1u;
+        return;
+    }
+    if (pass == 4u)
+    {
+        // POINTER JUMPING: the successor's successor, the ranks summed.
+        const uint n = sc[oPtr(pc.b.x) + 2u * i];
+        const uint r = sc[oPtr(pc.b.x) + 2u * i + 1u];
+        uint n2 = n, r2 = 0u;
+        if (n != i)
+        {
+            n2 = sc[oPtr(pc.b.x) + 2u * n];
+            r2 = sc[oPtr(pc.b.x) + 2u * n + 1u];
+        }
+        sc[oPtr(pc.b.y) + 2u * i] = n2;
+        sc[oPtr(pc.b.y) + 2u * i + 1u] = r + r2;
+        return;
+    }
+    if (pass == 5u)
+    {
+        // ACCUMULATE: this texel's rain to its outlet.
+        if (H(i) <= kNone * 0.5) return;
+        const uint t = sc[oPtr(pc.b.x) + 2u * i];
+        if (!outlet(pos(t))) return;   // (a pit, or a path longer than the jumps reached)
+        atomicAdd(sc[oAcc() + 2u * t], 1u);
+        atomicMax(sc[oAcc() + 2u * t + 1u], sc[oPtr(pc.b.x) + 2u * i + 1u]);
+        return;
+    }
+    if (pass == 6u)
+    {
+        // FLOW + EMITTERS.
+        const uint t = sc[oPtr(pc.b.x) + 2u * i];
+        const uint rank = sc[oPtr(pc.b.x) + 2u * i + 1u];
+        const uint tCount = sc[oAcc() + 2u * t];
+        float F = 0.0;
+        if (H(i) > kNone * 0.5 && tCount > 0u)
+            F = float(sc[oAcc() + 2u * t + 1u] - min(rank, sc[oAcc() + 2u * t + 1u]) + 1u) * pc.fr1.y;
+        float C = 0.0, low = kNone;
+        ivec2 lowDir;
+        const uint own = sc[oAcc() + 2u * i];
+        if (t == i && float(own) >= pc.c.w && outlet(p, low, lowDir))
+        {
+            C = float(own) * pc.fr1.y * pc.fr1.y;
+            const float h = H(i);
+            // The edge: half a texel out toward the drop, back out of the column to world.
+            const vec2 o = normalize(vec2(lowDir));
+            const vec2 col = pc.fr0.xy + (vec2(p) + 0.5 + 0.5 * vec2(lowDir)) * pc.fr1.y;
+            const vec2 wxy = col + (pc.fr0.w - h) * pc.fr1.zw;
+            const float land = low <= kNone * 0.5 ? pc.fr0.w - pc.fr1.x : low;
+            const uint e = atomicAdd(em_head[3], 1u);
+            if (e < pc.b.w)
+            {
+                emitters[2u * e] = vec4(wxy, h, C);
+                emitters[2u * e + 1u] = vec4(land, o * pc.fr1.y, F);
+            }
+            atomicAdd(em_head[8], own);
+        }
+        // (the spread's inputs, in the seeds' words -- the jump flood is done with them)
+        sc[oSeed(0u) + i] = floatBitsToUint(C);
+        sc[oSeed(1u) + i] = floatBitsToUint(C > 0.0 ? (low <= kNone * 0.5 ? pc.fr0.w - pc.fr1.x : low) : kNone);
+        imageStore(uFlow, p, vec4(0.0, 0.0, 0.0, F));
+        return;
+    }
+    if (pass == 7u)
+    {
+        // SPREAD: the strongest outlet within two texels (the drip line and the wall under it).
+        float best = 0.0, top = kNone, land = kNone;
+        for (int v = -2; v <= 2; ++v)
+            for (int u = -2; u <= 2; ++u)
+            {
+                const ivec2 q = p + ivec2(u, v);
+                if (!inside(q)) continue;
+                const float C = uintBitsToFloat(sc[oSeed(0u) + idx(q)]);
+                if (!(C > 0.0)) continue;
+                const float w = C * max(1.0 - length(vec2(u, v)) / 2.5, 0.0);
+                if (w > best) { best = w; top = H(q); land = uintBitsToFloat(sc[oSeed(1u) + idx(q)]); }
+            }
+        const float F = imageLoad(uFlow, p).w;
+        imageStore(uFlow, p, vec4(best, top, land, F));
+        return;
+    }
+}

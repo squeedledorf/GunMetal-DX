@@ -1,0 +1,329 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "clean_av_slots.glsl"
+// vkclean -- CLUSTER LOD rigged welding on the cut (#574 / #641 / #626, OWNER: 2a). Host side:
+// vkgfx/llcleanclusterskinvk.cpp. Runs after clean_cluster_preskin.comp, which inserted every
+// skinned weld-boundary vertex of this frame's cut into the grid (scratch weld region).
+//
+// The same rules as the legacy weld (clean_rig_weld.comp; the shared clean_rig_weld_common.glsl):
+// candidates are the ORIGINAL face's open-boundary vertices (the weld bit; 1a locks them in every
+// simplification, so every cut carries them at their LOD0 positions), paired within eps in the
+// PAIRING SPACE the insert keyed them by -- the avatar's REST POSE (#641 / #798, RenderVKRigWeldMode
+// 1, the legacy default: shape + joint overrides; meshes with different bind poses that meet on
+// this avatar pair) or bind space (mode 0, A/B) -- per avatar, only with vertices of ANOTHER mesh
+// (= another ClusterInstance: a face never welds to itself -- slits, hems / linings and the
+// cluster-border copies of one vertex stay apart), whose skinned
+// positions are within max_gap, and -- the #641 rest-pose pairing's #626 rule -- whose skin
+// weights overlap by at least wmatch over the resolved avatar joints (cavity rims and onion
+// layers weighted differently never pair). ONE partner per other mesh (its nearest candidate:
+// legacy mode 1 PAIR's rule) and legacy mode 1 GATHER's symmetric blend, with the #798 NO-OP --
+// clean_rig_weld_common.glsl rwBlend*, the one copy both welds use. A PER-FRAME search in the
+// rest-pose space rather than legacy mode 1's stored pair lists: a cluster vertex carries no
+// stable LOD0 vertex id, so a stored pair would have to be found in this frame's cut through a
+// hash anyway (the cost of this grid), and the cut, LOD and held-row changes need no
+// invalidation -- the pairs are the rest pose's every frame; the rest rows themselves follow
+// legacy mode 1's triggers (llcleanclusterskinvk.cpp REST TABLE).
+// #826 WELD PAIR CACHE (clean_cluster_skin_common.glsl): the search runs only for the entries of
+// SEARCH rows (a cluster new to the cut, a rest-row change, a multi-partner candidate, no valid
+// pairing yet), and stores each candidate's chosen partner (an arena vertex: stable while both
+// clusters keep their slots) in its PAIR word. Entries of CACHED rows were not inserted into the grid;
+// they read their PAIR word, check that the partner's slot still holds the key it held at the pairing
+// (assigned no later than the row's pair frame) and is in the cut this frame, and blend with it --
+// the same resolve (rwBlend*) over the same partner the search would choose for an unchanged cut.
+//   mode 0 WELD   one thread per entry -> a result per entry (no stream writes while read)
+//   mode 1 APPLY  one thread per entry with a result: position, normal, tangent re-orthogonalised
+layout(local_size_x = 64) in;
+
+#define CLUSTER_SET 0
+#include "clean_cluster_common.glsl"
+#define CL_DECLARE_SKIN_OUT
+#define CL_SKIN_OUT_QUAL
+#define CL_DECLARE_SKIN_SCRATCH
+#define CL_SKIN_SCRATCH_QUAL
+#include "clean_cluster_skin_common.glsl"
+#include "clean_skinvert.glsl"
+
+layout(push_constant) uniform WeldPush
+{
+    uint  mode;
+    uint  cap;          // entry capacity
+    uint  weld_base;    // scratch words: heads [cells], entries [cap x 12], results [cap x 8]
+    uint  cell_mask;
+    float cell;
+    float eps;
+    float cos_n;
+    float max_gap;
+    float wmatch;
+    uint  stats_on;     // 1: count the unwelded candidates' reasons (#798; the host's sampled frames)
+    uint  slot_stats;   // 1: each candidate's outcome -> its slot's WELD STATUS word (RenderVKClusterDebug 6)
+    uint  pad2;
+} pc;
+
+#define ENT_WORDS 12u
+#define RES_WORDS 8u
+#define MAX_OTHER 6
+
+uint entryBase()  { return pc.weld_base + pc.cell_mask + 1u; }
+uint resultBase() { return entryBase() + pc.cap * ENT_WORDS; }
+
+#include "clean_rig_weld_common.glsl"   // (no RW_META / RW_REST: the hash + the overlap only)
+uint cellHash(ivec3 c, uint avatar) { return rwCellHash(c, avatar, pc.cell_mask); }
+
+vec3 skinnedPos(uint v) { return SV_POS(cl_skin_out, v); }
+vec3 skinnedNrm(uint v) { return SV_NRM(cl_skin_out, v); }
+
+// #626 (clean_rig_weld_common.glsl, = clean_rig_weld.comp weightOverlap).
+float weightOverlap(uint ea, uint eb)
+{
+    return rwWeightOverlap(cl_rig[ea + 7u], uvec2(cl_rig[ea + 8u], cl_rig[ea + 9u]),
+                           cl_rig[eb + 7u], uvec2(cl_rig[eb + 8u], cl_rig[eb + 9u]));
+}
+
+// #798 RenderVKClusterDebug 6: an outcome (field `shift` of clean_cluster_skin_common.glsl WELD
+// STATUS) for the slot holding arena vertex `dst`.
+void slotStat(uint dst, uint shift)
+{
+    if (pc.slot_stats == 0u) return;
+    const uint cap = cl_rig[CLK_CAP];
+    const uint s = dst / CL_MAX_CLUSTER_VERTS;
+    const uint w = clSkinWeldStatBaseC(cap) + s;
+    const uint mask = shift >= 24u ? 0xFu : 0xFFu;   // (24 rejected, 28 no-op: 4-bit fields)
+    if (s < cap && w < uint(cl_skin_out.length()) && ((cl_skin_out[w] >> shift) & mask) < mask)
+        atomicAdd(cl_skin_out[w], 1u << shift);
+}
+
+// #826 CACHED entry: the stored partner (PAIR word), validated, through the shared resolve.
+void weldCached(uint e, uint dst, uint row, uint cap, uint frame)
+{
+    const uint rb = resultBase() + e * RES_WORDS;
+    cl_rig[rb + 3u] = 0u;
+    if (pc.stats_on != 0u) atomicAdd(cl_rig[CLK_WELD_CACHED], 1u);
+    const uint rpb = clSkinRowPairBaseC(cap) + row * 2u;
+    const uint pw = clSkinPairBaseC(cap) + dst;
+    if (rpb + 2u > uint(cl_skin_out.length()) || pw >= uint(cl_skin_out.length())) return;
+    const uint pf = cl_skin_out[rpb];
+    const uint pv = cl_skin_out[pw];
+    if (pv == CL_NONE) return;                                   // no partner at the pairing
+    // Valid only while BOTH slots hold the keys they held at the pairing (assigned no later than it:
+    // an own slot assigned since has no pair word from it) and the partner is in the cut this frame
+    // (its vertices are this frame's: the row is re-skinned whole).
+    const uint os = dst / CL_MAX_CLUSTER_VERTS, ps = pv / CL_MAX_CLUSTER_VERTS;
+    const uint ab = clSkinAllocFrameBaseC(cap);
+    const uint pm = clSkinMetaBaseC(cap) + ps * CL_SKIN_META_WORDS;
+    if (pf == CL_NONE || ps >= cap || os >= cap || ab + max(os, ps) >= uint(cl_skin_out.length())
+        || pm + CL_SKIN_META_WORDS > uint(cl_skin_out.length())
+        || cl_skin_out[ab + os] > pf || cl_skin_out[ab + ps] > pf || cl_skin_out[pm + 5u] != frame
+        || (pv + 1u) * SV_WORDS > uint(cl_skin_out.length()))
+    {
+        if (pc.stats_on != 0u) atomicAdd(cl_rig[CLK_WELD_INVALID], 1u);
+        slotStat(dst, 24u);
+        return;
+    }
+    const vec3 p0 = skinnedPos(dst);
+    const vec3 n0 = skinnedNrm(dst);
+    RwBlend bl = rwBlendBegin(p0, n0);
+    rwBlendAdd(bl, skinnedPos(pv), skinnedNrm(pv), pc.max_gap, pc.cos_n);
+    vec3 p, nn;
+    const uint res = rwBlendEnd(bl, p, nn);
+    if (res == 2u) { slotStat(dst, 28u); return; }
+    if (res == 0u) { slotStat(dst, 24u); return; }
+    slotStat(dst, 8u);
+    cl_rig[rb + 0u] = floatBitsToUint(p.x);
+    cl_rig[rb + 1u] = floatBitsToUint(p.y);
+    cl_rig[rb + 2u] = floatBitsToUint(p.z);
+    cl_rig[rb + 3u] = 1u;
+    cl_rig[rb + 4u] = floatBitsToUint(nn.x);
+    cl_rig[rb + 5u] = floatBitsToUint(nn.y);
+    cl_rig[rb + 6u] = floatBitsToUint(nn.z);
+}
+
+void weldEntry()
+{
+    const uint e = gl_GlobalInvocationID.x;
+    const uint n = min(cl_rig[CLK_WELD_N], pc.cap);
+    if (e >= n) return;
+    const uint ebase = entryBase();
+    const uint eb = ebase + e * ENT_WORDS;
+    const uint dst = cl_rig[eb + 0u];
+    const uint key = cl_rig[eb + 1u];
+    // An avatar with a dropped insert this frame (the list was full) is not welded at all: its
+    // missing entries would leave some boundary vertices welded and their partners not.
+    if (pc.weld_base >= CLW_AV_WORDS
+        && (cl_rig[pc.weld_base - CLW_AV_WORDS + ((key & AV_SLOT_MASK) >> 5u)] & (1u << (key & 31u))) != 0u)
+    {
+        cl_rig[resultBase() + e * RES_WORDS + 3u] = 0u;
+        atomicAdd(cl_rig[CLK_WELD_SKIP], 1u);
+        // #826: an incomplete pairing (a search row's) or an unwelded frame (a cached row's): the
+        // row searches again next frame (multi frame = this frame: not older than its pair frame)
+        const uint w1 = clSkinRowPairBaseC(cl_rig[CLK_CAP]) + min(cl_rig[eb + 10u] & 0x7FFFFFFFu, CL_SKIN_AV_ROWS - 1u) * 2u + 1u;
+        if (w1 < uint(cl_skin_out.length())) cl_skin_out[w1] = cl_rig[CLK_FRAME];
+        return;
+    }
+    const uint ewd = cl_rig[eb + 10u];
+    const uint row = min(ewd & 0x7FFFFFFFu, CL_SKIN_AV_ROWS - 1u);
+    const uint capa = cl_rig[CLK_CAP];
+    const uint frame = cl_rig[CLK_FRAME];
+    const uint rpb = clSkinRowPairBaseC(capa) + row * 2u;
+    const bool rp_ok = rpb + 2u <= uint(cl_skin_out.length());
+    if ((ewd & 0x80000000u) != 0u)
+    {
+        weldCached(e, dst, row, capa, frame);
+        return;
+    }
+    if (pc.stats_on != 0u) atomicAdd(cl_rig[CLK_WELD_SEARCHED], 1u);
+    const uint own = cl_rig[eb + 3u];
+    const vec3 bp = vec3(uintBitsToFloat(cl_rig[eb + 4u]), uintBitsToFloat(cl_rig[eb + 5u]), uintBitsToFloat(cl_rig[eb + 6u]));
+    const vec3 p0 = skinnedPos(dst);
+    const vec3 n0 = skinnedNrm(dst);
+    const float l0 = length(n0);
+    const vec3 u0 = l0 > 1e-12 ? n0 / l0 : vec3(0.0, 0.0, 1.0);
+    // ONE PARTNER PER OTHER MESH (legacy mode 1 PAIR's rule): that mesh's NEAREST candidate in the
+    // pairing space within eps with matching skin weights (#626). Equal distances -- the copies one
+    // LOD0 vertex has in the clusters it borders, a mesh's UV / hard-edge splits at one position --
+    // go to the one whose normal agrees best with ours (legacy keeps whichever its bucket walk met
+    // first: arbitrary; this is the deterministic form of the same choice). Was (until #798): the
+    // centroid of every such vertex of the mesh, normals summed over all of them.
+    uint om[MAX_OTHER];
+    uint ov[MAX_OTHER];
+    float od_best[MAX_OTHER];
+    float odot[MAX_OTHER];
+    uint meshes = 0u;
+    bool near_any = false, wmatch_any = false;   // (#798 diagnostics: why a candidate stays unwelded)
+    bool multi = false;                          // (#798: more than one partner -- other meshes, or distinct vertices of one)
+    const ivec3 c0 = ivec3(floor((bp - vec3(pc.eps)) / pc.cell));
+    uint seen[8];
+    for (int i = 0; i < 8; ++i)
+    {
+        const ivec3 c = c0 + ivec3(i & 1, (i >> 1) & 1, i >> 2);
+        const uint h = cellHash(c, key);
+        seen[i] = h;
+        bool dup = false;
+        for (int j = 0; j < i; ++j) dup = dup || seen[j] == h;
+        if (dup) continue;
+        uint k = cl_rig[pc.weld_base + h];
+        for (uint steps = 0u; k != 0xFFFFFFFFu && k < pc.cap && steps < 64u; ++steps)
+        {
+            const uint kb = ebase + k * ENT_WORDS;
+            const uint next = cl_rig[kb + 2u];
+            const uint kw = cl_rig[kb + 3u];
+            if (kw != own && cl_rig[kb + 1u] == key)
+            {
+                const vec3 q = vec3(uintBitsToFloat(cl_rig[kb + 4u]), uintBitsToFloat(cl_rig[kb + 5u]), uintBitsToFloat(cl_rig[kb + 6u]));
+                const float d = distance(q, bp);
+                const bool near = d <= pc.eps;
+                near_any = near_any || near;
+                if (near && weightOverlap(eb, kb) >= pc.wmatch)
+                {
+                    wmatch_any = true;
+                    const uint od = cl_rig[kb + 0u];
+                    const vec3 on = skinnedNrm(od);
+                    const float ol = length(on);
+                    const float dt = ol > 1e-12 ? dot(on / ol, u0) : -2.0;
+                    uint m = 0u;
+                    while (m < meshes && om[m] != kw) ++m;
+                    if (m == meshes)
+                    {
+                        if (meshes < MAX_OTHER)
+                        {
+                            om[m] = kw; ov[m] = od; od_best[m] = d; odot[m] = dt;
+                            ++meshes;
+                        }
+                        multi = multi || meshes > 1u;
+                    }
+                    else if (od != ov[m])
+                    {
+                        // another vertex of that mesh: an ambiguity unless it is the same point
+                        // and normal (a copy of the chosen one)
+                        const vec3 cn = skinnedNrm(ov[m]);
+                        const float cl = length(cn);
+                        if (!rwSeamless(skinnedPos(ov[m]), cl > 1e-12 ? cn / cl : u0, skinnedPos(od), ol > 1e-12 ? on / ol : u0))
+                            multi = true;
+                        if (d < od_best[m] || (d == od_best[m] && dt > odot[m]))
+                        {
+                            ov[m] = od; od_best[m] = d; odot[m] = dt;
+                        }
+                    }
+                }
+            }
+            k = next;
+        }
+    }
+    const uint rb = resultBase() + e * RES_WORDS;
+    cl_rig[rb + 3u] = 0u;
+    // #826 PAIR CACHE: store the pairing (rest-pose decision, independent of this pose's gap): the
+    // one other-mesh partner, or none; more than one partner mesh does not fit the one-word pair --
+    // the row keeps searching (its multi frame = this pairing's frame). The row's pair frame says a
+    // pairing of this frame stands (every entry of the row writes the same value).
+    {
+        const uint pw = clSkinPairBaseC(capa) + dst;
+        if (pw < uint(cl_skin_out.length())) cl_skin_out[pw] = meshes == 1u ? ov[0] : CL_NONE;
+        if (rp_ok)
+        {
+            cl_skin_out[rpb] = frame;
+            if (meshes > 1u) cl_skin_out[rpb + 1u] = frame;
+        }
+    }
+    // (#798: PAIRED = a partner within eps in the pairing space with matching weights -- what the
+    // rest pose decided -- whether or not this pose keeps it within the max gap)
+    if (pc.stats_on != 0u && wmatch_any) atomicAdd(cl_rig[CLK_WELD_PAIRED], 1u);
+    if (pc.stats_on != 0u && multi) atomicAdd(cl_rig[CLK_WELD_MULTI], 1u);
+    // THE RESOLVE (clean_rig_weld_common.glsl: legacy mode 1 GATHER's, shared): own + each partner
+    // within the max gap, nothing written when every partner is already seamless (NO-OP)
+    RwBlend bl = rwBlendBegin(p0, n0);
+    for (uint m = 0u; m < meshes; ++m) rwBlendAdd(bl, skinnedPos(ov[m]), skinnedNrm(ov[m]), pc.max_gap, pc.cos_n);
+    vec3 p, nn;
+    const uint res = rwBlendEnd(bl, p, nn);
+    if (res == 2u)
+    {
+        if (pc.stats_on != 0u) atomicAdd(cl_rig[CLK_WELD_NOOP], 1u);
+        slotStat(dst, 28u);
+        return;
+    }
+    if (res == 0u)
+    {
+        // (no partner within eps in the pairing space / within eps but other skin weights /
+        // matching but apart by more than the max gap in this pose)
+        if (pc.stats_on != 0u)
+            atomicAdd(cl_rig[!near_any ? CLK_WELD_NOPAIR : !wmatch_any ? CLK_WELD_WREJ : CLK_WELD_GREJ], 1u);
+        slotStat(dst, !near_any ? 16u : 24u);
+        return;
+    }
+    slotStat(dst, 8u);
+    cl_rig[rb + 0u] = floatBitsToUint(p.x);
+    cl_rig[rb + 1u] = floatBitsToUint(p.y);
+    cl_rig[rb + 2u] = floatBitsToUint(p.z);
+    cl_rig[rb + 3u] = 1u;
+    cl_rig[rb + 4u] = floatBitsToUint(nn.x);
+    cl_rig[rb + 5u] = floatBitsToUint(nn.y);
+    cl_rig[rb + 6u] = floatBitsToUint(nn.z);
+}
+
+void applyEntry()
+{
+    const uint e = gl_GlobalInvocationID.x;
+    const uint n = min(cl_rig[CLK_WELD_N], pc.cap);
+    if (e >= n) return;
+    const uint rb = resultBase() + e * RES_WORDS;
+    if (cl_rig[rb + 3u] == 0u) return;
+    const uint dst = cl_rig[entryBase() + e * ENT_WORDS];
+    const vec3 p = vec3(uintBitsToFloat(cl_rig[rb + 0u]), uintBitsToFloat(cl_rig[rb + 1u]), uintBitsToFloat(cl_rig[rb + 2u]));
+    const vec3 nn = vec3(uintBitsToFloat(cl_rig[rb + 4u]), uintBitsToFloat(cl_rig[rb + 5u]), uintBitsToFloat(cl_rig[rb + 6u]));
+    if (any(isnan(p)) || any(isinf(p)) || any(isnan(nn)) || any(isinf(nn))) return;
+    const uint b = dst * SV_WORDS;
+    if (b + SV_WORDS > uint(cl_skin_out.length())) return;
+    cl_skin_out[b + 0u] = floatBitsToUint(p.x); cl_skin_out[b + 1u] = floatBitsToUint(p.y); cl_skin_out[b + 2u] = floatBitsToUint(p.z);
+    cl_skin_out[b + 3u] = svPackNormal(nn);
+    const vec4 t = svUnpackTangent(cl_skin_out[b + 4u]);
+    if (t.w != 0.0)
+    {
+        const vec3 to = t.xyz - nn * dot(nn, t.xyz);
+        if (length(to) > 1e-6) cl_skin_out[b + 4u] = svPackTangent(to, t.w);
+    }
+    atomicAdd(cl_rig[CLK_WELD_APPLIED], 1u);
+}
+
+void main()
+{
+    if (pc.mode == 0u) weldEntry();
+    else               applyEntry();
+}

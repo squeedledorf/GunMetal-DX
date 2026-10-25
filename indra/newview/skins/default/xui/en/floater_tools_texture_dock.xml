@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<floater
+ can_close="true"
+ can_dock="false"
+ can_minimize="false"
+ can_resize="false"
+ can_tear_off="false"
+ header_height="22"
+ height="440"
+ layout="topleft"
+ name="tools_texture_dock"
+ single_instance="true"
+ title="Texture"
+ width="303">
+  <string name="link_title">Link</string>
+</floater>

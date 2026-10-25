@@ -1,0 +1,97 @@
+#version 460
+// vkclean -- HDR NUMERIC PROBE (RenderVKFSRDebugProbe; LLCleanFSRProbeVK). A debug-only
+// dispatch that reads up to three HDR images and writes, into a host-visible buffer the
+// CPU logs a frame slot later:
+//   * the probe pixel (RenderVKFSRDebugProbeX / Y, 0..1 of each image's own extent) of
+//     every image, raw linear rgb;
+//   * the exposure the upscaler / resolve uses (static x the 1x1 dynamic image);
+//   * per image, over EVERY pixel: the largest finite channel, how many pixels have a
+//     NaN / Inf, and how many exceed exposed 16 / 256 (Tonemap 0.94 / 0.996: the
+//     fireflies a bloom spreads);
+//   * per image, the mean exposed luma over a 64 x 64 grid (each sample capped at 1000):
+//     the "is the whole frame brighter" number, comparable across render / display sizes.
+// Image slots (A, B, C) are what the call site binds: inside FSR A = its colour input,
+// B = the pre-RCAS internal upscaled colour, C = its output; after the resolve (FSR and
+// TAA) all three = the HDR target the post chain reads.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform sampler2D uImgA;                     // texelFetch
+layout(set = 0, binding = 1) uniform sampler2D uImgB;
+layout(set = 0, binding = 2) uniform sampler2D uImgC;
+layout(r32f, set = 0, binding = 3) readonly uniform image2D uExposure;     // 1x1
+layout(std430, set = 0, binding = 4) buffer ProbeOut { uint w[]; } outb;  // host-visible, zeroed by the CPU
+
+layout(push_constant) uniform Push {
+    ivec4 size01;   // A w, h; B w, h
+    ivec4 size2;    // C w, h; region base (uint index); image count
+    vec4  params;   // probe u, v; static exposure; dynamic exposure on (> 0.5)
+} pc;
+
+// Region layout (uints, LLCleanFSRProbeVK::kRegionWords):
+//   0 written (1)            1 exposure (float bits)
+//   2..10 probe rgb A, B, C (float bits)
+//   11 + 6 k + {0 max finite channel (float bits), 1 NaN / Inf count, 2 count > 16 exposed,
+//               3 count > 256 exposed, 4 grid luma sum (x 256), 5 grid sample count}
+
+shared uint s_acc[18];
+
+float luma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+
+void main()
+{
+    const uint li = gl_LocalInvocationIndex;
+    if (li < 18u) s_acc[li] = 0u;
+    barrier();
+
+    const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    const uint base = uint(pc.size2.z);
+    const int count = pc.size2.w;
+    float expo = pc.params.z;
+    if (pc.params.w > 0.5) expo *= imageLoad(uExposure, ivec2(0)).r;
+    expo = max(expo, 1e-6);
+
+    for (int k = 0; k < 3; ++k)
+    {
+        if (k >= count) break;
+        const ivec2 sz = k == 0 ? pc.size01.xy : (k == 1 ? pc.size01.zw : pc.size2.xy);
+        if (p.x >= sz.x || p.y >= sz.y) continue;
+        const vec3 c = k == 0 ? texelFetch(uImgA, p, 0).rgb
+                     : (k == 1 ? texelFetch(uImgB, p, 0).rgb : texelFetch(uImgC, p, 0).rgb);
+        const ivec2 pp = clamp(ivec2(pc.params.xy * vec2(sz)), ivec2(0), sz - 1);
+        if (p == pp)
+        {
+            outb.w[base + 2u + 3u * uint(k) + 0u] = floatBitsToUint(c.r);
+            outb.w[base + 2u + 3u * uint(k) + 1u] = floatBitsToUint(c.g);
+            outb.w[base + 2u + 3u * uint(k) + 2u] = floatBitsToUint(c.b);
+        }
+        const uint a = 6u * uint(k);
+        if (any(isnan(c)) || any(isinf(c)))
+        {
+            atomicAdd(s_acc[a + 1u], 1u);
+            continue;
+        }
+        const float m = max(max(c.r, c.g), c.b);
+        if (m > 0.0) atomicMax(s_acc[a + 0u], floatBitsToUint(m));   // positive floats order as uints
+        if (m * expo > 16.0)  atomicAdd(s_acc[a + 2u], 1u);
+        if (m * expo > 256.0) atomicAdd(s_acc[a + 3u], 1u);
+        // 64 x 64 grid: the pixel nearest each cell centre.
+        const ivec2 g = ivec2((vec2(p) + 0.5) * 64.0 / vec2(sz));
+        if (ivec2((vec2(g) + 0.5) * vec2(sz) / 64.0) == p)
+        {
+            atomicAdd(s_acc[a + 4u], uint(clamp(luma(max(c, vec3(0.0))) * expo, 0.0, 1000.0) * 256.0));
+            atomicAdd(s_acc[a + 5u], 1u);
+        }
+    }
+    barrier();
+    if (li < 18u && s_acc[li] != 0u)
+    {
+        if (li % 6u == 0u) atomicMax(outb.w[base + 11u + li], s_acc[li]);
+        else               atomicAdd(outb.w[base + 11u + li], s_acc[li]);
+    }
+    if (p == ivec2(0))
+    {
+        outb.w[base + 0u] = 1u;
+        outb.w[base + 1u] = floatBitsToUint(expo);
+    }
+}

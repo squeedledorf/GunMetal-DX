@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<floater
+ positioning="cascading"
+ bg_alpha_image_overlay="DkGray_33"
+ can_minimize="true" 
+ can_resize="true"
+ header_height="0"
+ chrome="true"
+ height="200"
+ layout="topleft"
+ min_height="128"
+ min_width="128"
+ name="Map"
+ title=""
+ help_topic="map"
+ save_rect="true"
+ save_visibility="true"
+ width="200">
+    <!-- RLVa shows the anonymized name on the regular tooltip when @shownames=n restricted (rather than show the avatar inspector) --> 
+	<floater.string name="mini_map_caption">
+	Mini-map
+    </floater.string>
+    <net_map
+     bg_color="NetMapBackgroundColor"
+     follows="top|left|bottom|right"
+     layout="topleft"
+     left="0"
+     mouse_opaque="false"
+     name="Net Map"
+     width="200"
+     height="200"
+     top="0"/>
+    <text
+     type="string"
+     length="1"
+     label="N"
+     layout="topleft"
+     name="floater_map_north"
+     text_color="1 1 1 0.7">
+        N
+    </text>
+    <text
+     type="string"
+     length="1"
+     label="E"
+     layout="topleft"
+     name="floater_map_east"
+     text_color="1 1 1 0.7">
+        E
+    </text>
+    <text
+     type="string"
+     length="1"
+     label="W"
+     layout="topleft"
+     name="floater_map_west"
+     text_color="1 1 1 0.7">
+        W
+    </text>
+    <text
+     type="string"
+     length="1"
+     label="S"
+     layout="topleft"
+     name="floater_map_south"
+     text_color="1 1 1 0.7">
+        S
+    </text>
+    <text
+     type="string"
+     length="1"
+     label="SE"
+     layout="topleft"
+     name="floater_map_southeast"
+     text_color="1 1 1 0.7">
+        SE
+    </text>
+    <text
+     type="string"
+     length="1"
+     label="NE"
+     layout="topleft"
+     name="floater_map_northeast"
+     text_color="1 1 1 0.7">
+        NE
+    </text>
+    <text
+     type="string"
+     length="1"
+     label="SW"
+     layout="topleft"
+     name="floater_map_southwest"
+     text_color="1 1 1 0.7">
+        SW
+    </text>
+    <text
+     type="string"
+     length="1"
+     label="NW"
+     layout="topleft"
+     name="floater_map_northwest"
+     text_color="1 1 1 0.7">
+        NW
+    </text>
+</floater>

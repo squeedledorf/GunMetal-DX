@@ -1,0 +1,164 @@
+# -*- cmake -*-
+
+# cmake_minimum_required should appear before any
+# other commands to guarantee full compatibility
+# with the version specified
+## 3.8 added VS_DEBUGGER_WORKING_DIRECTORY support
+## 3.13/12 is needed for add_link_options/add_compile_definitions
+## 3.14 added FILE CREATE_LINK
+## 3.16 is needed for target_precompile_headers
+## Nicky: Ideally we want at least 3.21 for good preset support
+##   We're not there yet, but once done, there is a kludge in Linking.cmake
+#    "if(${CMAKE_VERSION} VERSION_LESS "3.20.0")" that can also be removed
+# 3.19: string(JSON) (3p manifest, Prebuilt.cmake); 3.21: CMakePresets.json v3.
+cmake_minimum_required(VERSION 3.21.0...4.1.0 FATAL_ERROR)
+
+set(ROOT_PROJECT_NAME "Slipstream" CACHE STRING
+    "The root project/makefile/solution name. Defaults to Slipstream." FORCE)
+project(${ROOT_PROJECT_NAME})
+
+set(CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake"  "${CMAKE_CURRENT_BINARY_DIR}")
+
+include(conanbuildinfo OPTIONAL RESULT_VARIABLE USE_CONAN )
+if( USE_CONAN )
+    set( USE_CONAN ON )
+    set( USE_PREBUILT_3P OFF )
+    conan_basic_setup(TARGETS NO_OUTPUT_DIRS)
+    add_compile_definitions(LL_USESYSTEMLIBS USE_CONAN NO_PREBUILT_3P)
+else()
+  set( USE_CONAN OFF )
+  set( USE_PREBUILT_3P ON )
+endif()
+
+if (NOT DEFINED CMAKE_CXX_STANDARD)
+  set(CMAKE_CXX_STANDARD 20)
+endif()
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF) # This slows down build massively
+
+set(CMAKE_SKIP_TEST_ALL_DEPENDENCY OFF)
+set(CMAKE_OPTIMIZE_DEPENDENCIES ON)
+
+set(CMAKE_COLOR_DIAGNOSTICS ON)
+
+# Speeds up cmake generation significantly in some cases
+set(CMAKE_XCODE_GENERATE_TOP_LEVEL_PROJECT_ONLY ON)
+
+include(Variables)
+include(BuildVersion)
+
+if (LL_TESTS)
+  include(ProcessorCount)
+  ProcessorCount(NUM_CORES)
+
+  # Set parallel level to decrease test runtime
+  set(CMAKE_CTEST_ARGUMENTS -j${NUM_CORES} --output-on-failure)
+
+  # Set up our test targets
+  set(CTEST_TEST_TARGET_ALIAS BUILD_AND_RUN_TESTS)
+  include(CTest)
+
+  set_target_properties(BUILD_AND_RUN_TESTS
+        PROPERTIES
+        FOLDER "CMakePredefinedTargets"
+        )
+
+  add_custom_target(BUILD_TESTS)
+  add_dependencies(BUILD_AND_RUN_TESTS BUILD_TESTS)
+
+  set_target_properties(BUILD_TESTS
+        PROPERTIES
+        FOLDER "CMakePredefinedTargets"
+        )
+endif ()
+
+if (NOT CMAKE_BUILD_TYPE)
+  set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING
+      "Build type.  One of: Debug Release RelWithDebInfo" FORCE)
+endif (NOT CMAKE_BUILD_TYPE)
+
+add_subdirectory(cmake)
+
+add_subdirectory(externals)
+
+if (USE_PRECOMPILED_HEADERS)
+  add_subdirectory(${LIBS_OPEN_PREFIX}llprecompiled)
+endif ()
+add_subdirectory(${LIBS_OPEN_PREFIX}llaudio)
+add_subdirectory(${LIBS_OPEN_PREFIX}llcachestore)
+add_subdirectory(${LIBS_OPEN_PREFIX}llappearance)
+add_subdirectory(${LIBS_OPEN_PREFIX}llcharacter)
+add_subdirectory(${LIBS_OPEN_PREFIX}llconvexdecomposition)
+add_subdirectory(${LIBS_OPEN_PREFIX}llcommon)
+add_subdirectory(${LIBS_OPEN_PREFIX}llcorehttp)
+add_subdirectory(${LIBS_OPEN_PREFIX}llimage)
+add_subdirectory(${LIBS_OPEN_PREFIX}llimagej2coj)
+add_subdirectory(${LIBS_OPEN_PREFIX}llinventory)
+add_subdirectory(${LIBS_OPEN_PREFIX}llmath)
+add_subdirectory(${LIBS_OPEN_PREFIX}llmeshoptimizer)
+add_subdirectory(${LIBS_OPEN_PREFIX}llmessage)
+add_subdirectory(${LIBS_OPEN_PREFIX}llprimitive)
+add_subdirectory(${LIBS_OPEN_PREFIX}llrender)
+add_subdirectory(${LIBS_OPEN_PREFIX}llfilesystem)
+add_subdirectory(${LIBS_OPEN_PREFIX}llwebrtc)
+add_subdirectory(${LIBS_OPEN_PREFIX}llwindow)
+add_subdirectory(${LIBS_OPEN_PREFIX}llxml)
+
+if (WINDOWS AND EXISTS ${LIBS_CLOSED_DIR}copy_win_scripts)
+  add_subdirectory(${LIBS_CLOSED_PREFIX}copy_win_scripts)
+endif (WINDOWS AND EXISTS ${LIBS_CLOSED_DIR}copy_win_scripts)
+
+add_custom_target(BUILD_VIEWER)
+
+set_target_properties(BUILD_VIEWER
+      PROPERTIES
+      FOLDER "CMakePredefinedTargets"
+      )
+
+
+
+add_subdirectory(${LIBS_OPEN_PREFIX}llplugin)
+add_subdirectory(${LIBS_OPEN_PREFIX}llui)
+add_subdirectory(${LIBS_OPEN_PREFIX}viewer_components)
+
+if( LL_TESTS )
+# Legacy C++ tests. Build always, run if LL_TESTS is true.
+add_subdirectory(${VIEWER_PREFIX}test)
+endif()
+
+if (ENABLE_MEDIA_PLUGINS)
+# viewer media plugins
+add_subdirectory(${LIBS_OPEN_PREFIX}media_plugins)
+endif (ENABLE_MEDIA_PLUGINS)
+
+if (WINDOWS)
+  # cmake EXISTS requires an absolute path, see indra/cmake/Variables.cmake
+  if (EXISTS ${VIEWER_DIR}win_setup)
+    add_subdirectory(${VIEWER_DIR}win_setup)
+  endif (EXISTS ${VIEWER_DIR}win_setup)
+endif ()
+
+if (WINDOWS)
+    # cmake EXISTS requires an absolute path, see indra/cmake/Variables.cmake
+    if (EXISTS ${VIEWER_DIR}win_setup)
+      add_subdirectory(${VIEWER_DIR}win_setup)
+    endif (EXISTS ${VIEWER_DIR}win_setup)
+endif (WINDOWS)
+
+add_subdirectory(${VIEWER_PREFIX}newview)
+add_dependencies(BUILD_VIEWER slipstream-bin)
+
+# sets the 'startup project' for debugging from visual studio.
+set_property(
+        DIRECTORY ${VIEWER_PREFIX}
+        PROPERTY VS_STARTUP_PROJECT ${VIEWER_BINARY_NAME}
+        )
+
+add_subdirectory(${VIEWER_PREFIX}doxygen EXCLUDE_FROM_ALL)
+
+if (LL_TESTS)
+  # Define after the custom targets are created so
+  # individual apps can add themselves as dependencies
+  add_subdirectory(${INTEGRATION_TESTS_PREFIX}integration_tests)
+endif (LL_TESTS)
+

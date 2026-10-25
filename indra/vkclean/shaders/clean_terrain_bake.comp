@@ -1,0 +1,109 @@
+#version 460
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_control_flow_attributes : require
+#extension GL_EXT_samplerless_texture_functions : require
+// vkclean -- TERRAIN BAKE (#811, RenderVKTerrainBake; llcleanterrainbakevk.cpp): one
+// region's blended terrain surface, rendered at bake resolution into its bake images
+// (clean_terrain_bake.glsl documents the table and the formats).
+//
+// One invocation per texel of one TILE (the job's per-frame share: push org = the tile's
+// first texel; the whole image takes several frames). Texel (i, j) is region-local
+// XY = ((i, j) + 0.5) * texel_m -- the pixel centre of a top-down orthographic view of the
+// region -- and runs the SAME material code as the live terrain FS (clean_terrain_mat.glsl):
+//   * composition coord and geometric slope from the job's grid (set 2 binding 0: per region
+//     grid point (comp, dz/dx, dz/dy, 0), row-major, y outer -- the per-vertex composition
+//     the terrain meshes carry, bilinear as between the smooth levels' vertices);
+//   * explicit gradients = ONE TEXEL of the bake ((texel_m, 0) / (0, texel_m) in XY, the
+//     terrain's UV basis), so every material texture is prefiltered to the bake's own
+//     resolution; the surface tangents for the cotangent frame are the heightfield's
+//     ((1, 0, dz/dx), (0, 1, dz/dy)) times one texel. No TAA mip bias (the bake is static:
+//     the draw applies the view's bias when it samples the bake).
+//   * hex tiling as the job says (CLEAN_TERRAIN_HEX_OVERRIDE): the setting is part of the
+//     bake's input hash.
+// Output: A (UNORM view of an RGBA8 sRGB image: sRGB-encoded albedo here, decoded by the
+// sampled sRGB view) + PBR occlusion; PBR: B (normal xy in the Ng-relative frame, roughness,
+// metallic) and E (sRGB-encoded emissive, when the job has one). Mips: blits after the last
+// tile (llcleanterrainbakevk.cpp).
+layout(local_size_x = 8, local_size_y = 8) in;
+
+#define CLEAN_EXTERNAL_DRAW_PUSH
+layout(push_constant) uniform BakePush {
+    uint  view;      // (clean_draw_view.glsl names it; unused here)
+    uint  rec;       // terrain record index
+    uint  mat;       // legacy terrain: the region's instance material (4 detail textures)
+    uint  flags;     // BK_*
+    uvec2 org;       // this dispatch's first texel
+    uvec2 ext;       // this dispatch's texel extent (the tile, clipped to the image)
+    uint  grid_n;    // grid points per edge
+    float mpg;       // metres per grid
+    float texel_m;   // metres per texel
+    float pad0;
+} g_draw_push;
+#define BK_PBR  1u
+#define BK_HEX  2u
+#define BK_EMIS 4u
+
+#define CLEAN_COMPUTE_LIGHT
+#define CLEAN_FRAG_XY vec2(0.0)
+#define CLEAN_TERRAIN_HEX_OVERRIDE ((g_draw_push.flags & BK_HEX) != 0u)
+#include "clean_draw_common.glsl"
+#include "clean_normal_tex.glsl"   // cleanNormalTex (terrain normal maps)
+#include "clean_terrain_mat.glsl"
+#define CLEAN_TERRAIN_BAKE_TABLE_ONLY
+#include "clean_terrain_bake.glsl"   // terrBakeFrame (the table itself is not read here)
+
+layout(std430, set = 2, binding = 0) readonly buffer BakeGrid { vec4 grid[]; };
+layout(set = 2, binding = 1, rgba8) uniform writeonly image2D uBakeA;
+layout(set = 2, binding = 2, rgba8) uniform writeonly image2D uBakeB;
+layout(set = 2, binding = 3, rgba8) uniform writeonly image2D uBakeE;
+
+vec4 gridAt(int i, int j)
+{
+    const int n = int(g_draw_push.grid_n);
+    return grid[clamp(j, 0, n - 1) * n + clamp(i, 0, n - 1)];
+}
+
+void main()
+{
+    if (any(greaterThanEqual(gl_GlobalInvocationID.xy, g_draw_push.ext))) return;
+    const ivec2 px = ivec2(g_draw_push.org + gl_GlobalInvocationID.xy);
+    const float tm = g_draw_push.texel_m;
+    const vec2 xy = (vec2(px) + 0.5) * tm;
+
+    // Composition + slope, bilinear between the grid points.
+    const vec2 g = xy / g_draw_push.mpg;
+    const int n = int(g_draw_push.grid_n);
+    const ivec2 g0 = clamp(ivec2(floor(g)), ivec2(0), ivec2(max(n - 2, 0)));
+    const vec2 f = clamp(g - vec2(g0), vec2(0.0), vec2(1.0));
+    const vec4 s = mix(mix(gridAt(g0.x, g0.y), gridAt(g0.x + 1, g0.y), f.x),
+                       mix(gridAt(g0.x, g0.y + 1), gridAt(g0.x + 1, g0.y + 1), f.x), f.y);
+    const float comp = s.x;
+    const vec3 Ng = normalize(vec3(-s.y, -s.z, 1.0));
+    const vec2 dxy1 = vec2(tm, 0.0), dxy2 = vec2(0.0, tm);
+    const vec3 dp1 = vec3(tm, 0.0, s.y * tm), dp2 = vec3(0.0, tm, s.z * tm);
+    const uint rec = g_draw_push.rec;
+
+    if ((g_draw_push.flags & BK_PBR) != 0u)
+    {
+        // PBR terrain: the FS branch's weights (paint-map regions weight slot 1 only).
+        const vec4 w = (terrain_records[rec].misc.w == 1u) ? vec4(1.0, 0.0, 0.0, 0.0) : terrainWeights(comp);
+        vec3 col, orm, emis, N;
+        terrainPBR(rec, w, xy, dxy1, dxy2, dp1, dp2, Ng, 1.0, col, orm, emis, N);
+        vec3 T, B;
+        terrBakeFrame(Ng, T, B);
+        const vec2 t = clamp(vec2(dot(N, T), dot(N, B)), vec2(-1.0), vec2(1.0));
+        imageStore(uBakeA, px, vec4(srgbEncode(col), clamp(orm.r, 0.0, 1.0)));
+        imageStore(uBakeB, px, vec4(t * 0.5 + 0.5, clamp(orm.g, 0.0, 1.0), clamp(orm.b, 0.0, 1.0)));
+        if ((g_draw_push.flags & BK_EMIS) != 0u)
+            imageStore(uBakeE, px, vec4(srgbEncode(emis), 1.0));
+    }
+    else
+    {
+        // Legacy splat: detail UV = region-local XY * legacy.z + legacy.xy (the FS branch).
+        const vec4 lg = terrain_records[rec].legacy;
+        const vec2 d_uv = xy * lg.z + lg.xy;
+        const vec3 col = terrainLegacy(materials[g_draw_push.mat], comp, d_uv, dxy1 * lg.z, dxy2 * lg.z);
+        imageStore(uBakeA, px, vec4(srgbEncode(col), 1.0));
+    }
+}

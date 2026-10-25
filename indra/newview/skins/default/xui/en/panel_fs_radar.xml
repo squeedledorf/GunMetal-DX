@@ -1,0 +1,305 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<panel
+ name="panel_radar"
+ width="327"
+ height="333">
+	<string name="FlagsColumnValue_0" value=""/>
+	<string name="FlagsColumnValue_1" value="$"/>
+	<string name="FlagsColumnValue_2" value="$$"/>
+	<string name="NotesColumnIcon" value="Inv_Notecard"/>
+	<!-- Status columns are muted text glyphs coloured from colors.xml, not badge images -->
+	<string name="InRegionGlyph" value="&#x2022;"/>
+	<string name="SittingGlyph" value="&#x21A7;"/>
+	<string name="TypingGlyph" value="&#x270E;"/>
+	<string name="InRegionToolTip" value="In your region"/>
+	<string name="OnParcelToolTip" value="On your parcel"/>
+	<string name="SittingToolTip" value="Sitting"/>
+	<string name="TypingToolTip" value="Typing"/>
+	<string name="PaymentUsedToolTip" value="Has used payment info"/>
+	<string name="PaymentOnFileToolTip" value="Payment info on file"/>
+	<!-- Compact cell formats, matching the Friends/Recent list's last-interaction strings -->
+	<string name="AgeFormat" value="[COUNT]d"/>
+	<string name="RangeFormat" value="[DIST]m"/>
+	<string name="RangeBeyondFormat" value="&gt;[DIST]m"/>
+	<string name="SeenSeconds" value="[COUNT]s"/>
+	<string name="SeenMinutes" value="[COUNT]m"/>
+	<string name="SeenHours" value="[COUNT]h"/>
+	<string name="SeenDays" value="[COUNT]d"/>
+	<string
+	 name="filter_label"
+	 value="Filter [TOTAL] People"/>
+	<string
+	 name="avatar_name_count"
+	 value="[TOTAL] avatars, [IN_REGION] in the same region, [IN_CHAT_RANGE] in chat range"/>
+	<panel
+	 background_opaque="false"
+	 background_visible="false"
+	 follows="all"
+	 height="333"
+	 layout="topleft"
+	 left="0"
+	 name="nearby_panel"
+	 top="0"
+	 width="327">
+		<panel
+		 follows="left|top|right"
+		 height="27"
+		 label="bottom_panel"
+		 layout="topleft"
+		 left="0"
+		 name="nearby_buttons_panel"
+		 right="-1"
+		 top="0">
+			<filter_editor
+			 follows="left|top|right"
+			 height="23"
+			 layout="topleft"
+			 left="6"
+			 label="Filter People"
+			 max_length_chars="300"
+			 name="nearby_filter_input"
+			 text_pad_left="10"
+			 top="4"
+			 width="210" />
+			<button
+			 commit_callback.function="Radar.Gear"
+			 follows="right"
+			 height="25"
+			 image_hover_unselected="Toolbar_Middle_Over"
+			 image_overlay="OptionsMenu_Off"
+			 image_selected="Toolbar_Middle_Selected"
+			 image_unselected="Toolbar_Middle_Off"
+			 layout="topleft"
+			 left_pad="8"
+			 name="gear_btn"
+			 tool_tip="Actions on selected person"
+			 top="3"
+			 width="31" />
+			<menu_button
+			 follows="right"
+			 height="25"
+			 image_hover_unselected="Toolbar_Middle_Over"
+			 image_overlay="Conv_toolbar_sort"
+			 image_selected="Toolbar_Middle_Selected"
+			 image_unselected="Toolbar_Middle_Off"
+			 layout="topleft"
+			 left_pad="2"
+			 name="options_btn"
+			 tool_tip="Radar options"
+			 top_delta="0"
+			 width="31" />
+			<button
+			 follows="right"
+			 height="25"
+			 image_hover_unselected="Toolbar_Middle_Over"
+			 image_overlay="AddItem_Off"
+			 image_selected="Toolbar_Middle_Selected"
+			 image_unselected="Toolbar_Middle_Off"
+			 layout="topleft"
+			 left_pad="2"
+			 name="add_friend_btn"
+			 tool_tip="Offer friendship to a resident"
+			 top_delta="0"
+			 width="31">
+				<commit_callback
+				 function="Radar.AddFriend" />
+			</button>
+		</panel>
+			
+		<layout_stack
+		 orientation="vertical"
+		 clip="true"
+		 follows="all"
+		 layout="topleft"
+		 top="29"
+		 left="3"
+		 height="304"
+		 right="-2"
+		 mouse_opaque="false"
+		 name="radar_outer_ls">
+			<layout_panel
+			 auto_resize="true"
+			 layout="topleft"
+			 top="0"
+			 left="3"
+			 height="279"
+			 width="322"
+			 follows="all"
+			 mouse_opaque="false"
+			 name="radar_upper_layout">
+			<!-- Styled like the Friends/Groups/Recent avatar lists: no stripes, the panel's own
+			     background instead of the scroll list's lighter writeable fill. The column header
+			     is the flat Alchemy style (widgets/flat_column_header.xml), not the 3D segmented
+			     buttons: click a header to sort, click again to reverse. Status columns sort
+			     "has it" first; age / seen / range sort numerically via the hidden *_sort keys.
+			     The name is the only flexible column; the others are sized to their content. -->
+			<radar_list
+			 background_visible="true"
+			 bg_writeable_color="PanelFocusBackgroundColor"
+			 bg_readonly_color="PanelFocusBackgroundColor"
+			 column_header_template="flat_column_header"
+			 column_padding="3"
+			 desired_line_height="18"
+			 draw_heading="true"
+			 heading_height="20"
+			 draw_stripes="false"
+			 follows="all"
+			 height="279"
+			 layout="topleft"
+			 left="0"
+			 top_pad="0"
+			 name="radar_list"
+			 multi_select="true"
+			 content_type="Agents"
+			 width="322">
+				<radar_list.columns
+				 name="avatar_icon"
+				 tool_tip="Profile picture"
+				 width="20"/>
+				<radar_list.columns
+				 label="Name"
+				 name="name"
+				 dynamic_width="true"/>
+				<radar_list.columns
+				 icon="VoicePTT_Off"
+				 name="voice_level"
+				 sort_column="voice_sort"
+				 sort_direction="descending"
+				 tool_tip="Voice (loudest first)"
+				 width="18"/>
+				<radar_list.columns
+				 label="&#x2022;"
+				 halign="center"
+				 name="in_region"
+				 sort_column="in_region_sort"
+				 sort_direction="descending"
+				 tool_tip="In your region, or on your parcel (highlighted)"
+				 width="12"/>
+				<radar_list.columns
+				 label="&#x270E;"
+				 halign="center"
+				 name="typing_status"
+				 sort_direction="descending"
+				 tool_tip="Typing"
+				 width="12"/>
+				<radar_list.columns
+				 label="&#x21A7;"
+				 halign="center"
+				 name="sitting_status"
+				 sort_direction="descending"
+				 tool_tip="Sitting"
+				 width="12"/>
+				<radar_list.columns
+				 label="$"
+				 halign="center"
+				 name="flags"
+				 sort_direction="descending"
+				 tool_tip="Payment info status"
+				 width="14"/>
+				<radar_list.columns
+				 icon="Inv_Notecard"
+				 name="has_notes"
+				 sort_direction="descending"
+				 tool_tip="Has notes"
+				 width="16"/>
+				<radar_list.columns
+				 label="Age"
+				 halign="right"
+				 name="age"
+				 sort_column="age_sort"
+				 tool_tip="Account age in days"
+				 width="36"/>
+				<radar_list.columns
+				 label="Seen"
+				 halign="right"
+				 name="seen"
+				 sort_column="seen_sort"
+				 tool_tip="Time since they arrived"
+				 width="30"/>
+				<radar_list.columns
+				 label="Range"
+				 halign="right"
+				 name="range"
+				 sort_column="range_sort"
+				 tool_tip="Distance in metres"
+				 width="40"/>
+				<radar_list.columns
+				 name="seen_sort"
+				 width="-1"/>
+				<radar_list.columns
+				 name="range_sort"
+				 width="-1"/>
+				<radar_list.columns
+				 name="age_sort"
+				 width="-1"/>
+				<radar_list.columns
+				 name="in_region_sort"
+				 width="-1"/>
+				<radar_list.columns
+				 name="voice_sort"
+				 width="-1"/>
+			</radar_list>
+			</layout_panel>
+			<!-- <FS> Radar range (Firestorm panel_fs_radar.xml "radar_lower_layout", LGPL-2.1,
+			     Copyright (c) The Phoenix Firestorm Project, Inc.): NearMeRange 20-4096 m in 2 m steps,
+			     applied only while LimitRadarByRange is on (the same toggle as the options menu's
+			     "Limit Results to specific Radius"). FS hides the whole strip behind that toggle;
+			     here it is always shown in the bottom-left corner so the toggle is discoverable,
+			     with the slider disabled while the limit is off. Flat Alchemy look (panel
+			     background, SansSerifSmall, list-edge alignment) instead of FS's toolbar backdrop. -->
+			<layout_panel
+			 auto_resize="false"
+			 layout="topleft"
+			 top="0"
+			 left="0"
+			 height="24"
+			 width="322"
+			 min_dim="24"
+			 follows="all"
+			 mouse_opaque="false"
+			 name="radar_lower_layout">
+				<check_box
+				 control_name="LimitRadarByRange"
+				 follows="left|bottom"
+				 height="16"
+				 label="Range"
+				 layout="topleft"
+				 left="3"
+				 name="LimitRadarByRange"
+				 tool_tip="Limit results to a specific radius: only list people within this many metres of you"
+				 top="5"
+				 width="58" />
+				<slider
+				 control_name="NearMeRange"
+				 enabled_control="LimitRadarByRange"
+				 decimal_digits="0"
+				 follows="left|bottom"
+				 height="16"
+				 increment="2"
+				 initial_value="162"
+				 layout="topleft"
+				 left_pad="2"
+				 max_val="4096"
+				 min_val="20"
+				 name="NearMeRange"
+				 can_edit_text="true"
+				 text_width="40"
+				 tool_tip="Radar range in metres"
+				 top_delta="0"
+				 width="160" />
+				<text
+				 type="string"
+				 enabled_control="LimitRadarByRange"
+				 follows="left|bottom"
+				 height="16"
+				 layout="topleft"
+				 left_pad="3"
+				 name="NearMeRangeUnits"
+				 text_readonly_color="LabelDisabledColor"
+				 top_delta="1"
+				 width="14">m</text>
+			</layout_panel>
+			<!-- </FS> -->
+		</layout_stack>
+	</panel>
+</panel>

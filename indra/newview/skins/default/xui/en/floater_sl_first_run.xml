@@ -1,0 +1,168 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<!-- Welcome window (#132): "Which viewer did you use before?" Shown once on a fresh install,
+     and from Help > Set up Slipstream like my old viewer. Presets: app_settings/viewer_presets. -->
+<floater
+ legacy_header_height="18"
+ can_close="true"
+ can_minimize="false"
+ can_resize="false"
+ height="474"
+ layout="topleft"
+ name="sl_first_run"
+ help_topic="sl_first_run"
+ positioning="centered"
+ single_instance="true"
+ title="WELCOME TO SLIPSTREAM"
+ width="440">
+    <floater.string name="name_firestorm">Firestorm</floater.string>
+    <floater.string name="name_alchemy">Alchemy</floater.string>
+    <floater.string name="name_blackdragon">Black Dragon</floater.string>
+    <floater.string name="name_secondlife">the official Second Life viewer</floater.string>
+    <floater.string name="name_slipstream">Slipstream's own defaults</floater.string>
+    <floater.string name="desc_none">Pick the viewer you used before, or skip this for now.</floater.string>
+    <floater.string name="desc_firestorm">Pressing / starts chatting (letter keys still move you), right-click opens the round pie menu, chat is shown compact, nearby chat shows as click-through lines over the world, the People button opens your contacts in Conversations, notices stay up longer, the middle mouse button turns your microphone on and off, and you are never set Away on your own.</floater.string>
+    <floater.string name="desc_alchemy">Slipstream is built on Alchemy, so it already works the way you are used to. Pressing / starts chatting, as in Alchemy; everything else keeps Slipstream's own defaults.</floater.string>
+    <floater.string name="desc_blackdragon">Pressing / starts chatting, holding jump doesn't start flying, your body shows in mouselook, the camera can go anywhere, snapshots are silent, name tags hide group titles, and the middle mouse button turns your microphone on and off.</floater.string>
+    <floater.string name="desc_secondlife">Press Enter or / to chat in the Conversations window (no chat bar at the bottom), friends' name tags are not highlighted, and the Speak button and middle mouse button turn your microphone on and off.</floater.string>
+    <floater.string name="desc_slipstream">Slipstream's own settings. Choose this if you are new to Second Life or used a different viewer, or to undo a choice you made here before.</floater.string>
+    <floater.string name="import_found">We found your [VIEWER] settings on this computer. You'll see everything before it is imported.</floater.string>
+    <floater.string name="import_found_login">We found your [VIEWER] settings on this computer. You'll see everything before it is imported; chat history comes after you log in (we'll ask then).</floater.string>
+    <floater.string name="applied_viewer">Slipstream is now set up like [VIEWER].</floater.string>
+    <floater.string name="applied_defaults">Slipstream is set to its own defaults.</floater.string>
+    <floater.string name="restart_note">Some of the changes take effect after a restart.</floater.string>
+    <text
+     follows="left|top"
+     height="44"
+     layout="topleft"
+     left="16"
+     name="intro"
+     top="26"
+     width="408"
+     word_wrap="true">
+Which viewer did you use before? We'll set Slipstream up to feel familiar. You can change anything later in Preferences.
+    </text>
+    <button
+     follows="left|top"
+     height="28"
+     is_toggle="true"
+     label="Firestorm"
+     layout="topleft"
+     left="40"
+     name="choice_firestorm"
+     top_pad="4"
+     width="360" />
+    <button
+     follows="left|top"
+     height="28"
+     is_toggle="true"
+     label="Alchemy"
+     layout="topleft"
+     left="40"
+     name="choice_alchemy"
+     top_pad="6"
+     width="360" />
+    <button
+     follows="left|top"
+     height="28"
+     is_toggle="true"
+     label="Black Dragon"
+     layout="topleft"
+     left="40"
+     name="choice_blackdragon"
+     top_pad="6"
+     width="360" />
+    <button
+     follows="left|top"
+     height="28"
+     is_toggle="true"
+     label="Official Second Life viewer"
+     layout="topleft"
+     left="40"
+     name="choice_secondlife"
+     top_pad="6"
+     width="360" />
+    <button
+     follows="left|top"
+     height="28"
+     is_toggle="true"
+     label="Other viewer, or new to Second Life"
+     layout="topleft"
+     left="40"
+     name="choice_slipstream"
+     tool_tip="Slipstream's own defaults. Also the way back if you picked another viewer here before."
+     top_pad="6"
+     width="360" />
+    <text
+     follows="left|top"
+     height="72"
+     layout="topleft"
+     left="16"
+     name="description"
+     top_pad="10"
+     width="408"
+     word_wrap="true">
+Pick the viewer you used before, or skip this for now.
+    </text>
+    <text
+     follows="left|top"
+     height="44"
+     layout="topleft"
+     left="16"
+     name="import_text"
+     top_pad="4"
+     visible="false"
+     width="408"
+     word_wrap="true">
+We found your settings on this computer.
+    </text>
+    <check_box
+     follows="left|top"
+     height="16"
+     initial_value="true"
+     label="Also import my preferences and chat history"
+     layout="topleft"
+     left="16"
+     name="import_check"
+     top_pad="2"
+     visible="false"
+     width="408" />
+    <button
+     follows="left|top"
+     height="22"
+     label="New to Slipstream? Open the help pages"
+     layout="topleft"
+     left="16"
+     name="help_btn"
+     tool_tip="Opens slipstreamviewer.org/wiki in your web browser. You can find it again under Help."
+     top="404"
+     width="260" />
+    <button
+     follows="left|bottom"
+     height="23"
+     label="Put back how it was"
+     layout="topleft"
+     left="16"
+     name="undo_btn"
+     tool_tip="Restores the settings this window changed to how they were before you first used it."
+     top="436"
+     width="150" />
+    <button
+     follows="right|bottom"
+     height="23"
+     label="Skip"
+     layout="topleft"
+     left="236"
+     name="skip_btn"
+     tool_tip="Keep Slipstream's settings as they are. You can come back here from Help > Set up Slipstream like my old viewer."
+     top="436"
+     width="90" />
+    <button
+     follows="right|bottom"
+     height="23"
+     label="Continue"
+     layout="topleft"
+     left_pad="8"
+     name="continue_btn"
+     top="436"
+     width="90" />
+</floater>

@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<!-- #429 / #627: sort order of the Wearing tab (setting WearingTabSortOrder) -->
+<toggleable_menu
+ layout="topleft"
+ visible="false"
+ name="Sort Wearing">
+    <menu_item_check
+     label="Sort by type and layer"
+     layout="topleft"
+     name="sort_by_type">
+        <on_click
+         function="Wearing.Sort.Set"
+         parameter="type" />
+        <on_check
+         function="Wearing.Sort.Check"
+         parameter="type" />
+    </menu_item_check>
+    <menu_item_check
+     label="Sort by name"
+     layout="topleft"
+     name="sort_by_name">
+        <on_click
+         function="Wearing.Sort.Set"
+         parameter="name" />
+        <on_check
+         function="Wearing.Sort.Check"
+         parameter="name" />
+    </menu_item_check>
+    <menu_item_check
+     label="Sort by complexity"
+     layout="topleft"
+     name="sort_by_complexity">
+        <on_click
+         function="Wearing.Sort.Set"
+         parameter="complexity" />
+        <on_check
+         function="Wearing.Sort.Check"
+         parameter="complexity" />
+    </menu_item_check>
+</toggleable_menu>

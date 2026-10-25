@@ -1,0 +1,270 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<!--
+Photo Studio: a shared top bar over one, two or four panels. Each panel picks
+the section it shows from the dropdown at its top (panel_photo_studio_slot.xml);
+the sections themselves are panel_photo_studio_<page>.xml and
+panel_photo_studio_scopes.xml. The panels are laid out by
+SLFloaterPhotoStudio::arrangeSlots inside "slots_area", so nothing in that area
+is placed here.
+
+Based on Alchemy Viewer's Lightbox (credited); see slfloaterphotostudio.cpp.
+-->
+<floater
+ width="880"
+ height="700"
+ min_width="424"
+ min_height="420"
+ name="floater_photo_studio"
+ help_topic="photo_studio"
+ positioning="cascading"
+ title="Photo Studio"
+ save_rect="true"
+ can_resize="true">
+	<!-- The title while grading sections are switched off for comparison:
+	     a state nothing else on screen shows once those sections are
+	     scrolled away or not shown at all. -->
+	<floater.string
+	 name="title_bypassed">
+		Photo Studio ([COUNT] grading sections off)
+	</floater.string>
+	<floater.string
+	 name="look_name_modified">
+		[NAME] *
+	</floater.string>
+	<!-- What the undo history calls its steps. A step made some other way is
+	     called after the setting it changed, by the name its row shows. -->
+	<floater.string
+	 name="history_reset_section">
+		Reset [SECTION]
+	</floater.string>
+	<floater.string
+	 name="history_reset_setting">
+		Reset [SETTING]
+	</floater.string>
+	<floater.string
+	 name="history_look">
+		Look: [NAME]
+	</floater.string>
+	<floater.string
+	 name="history_revert">
+		Revert to [NAME]
+	</floater.string>
+	<floater.string
+	 name="history_white_balance">
+		White balance pick
+	</floater.string>
+	<floater.string
+	 name="history_settings">
+		[COUNT] settings
+	</floater.string>
+	<floater.string
+	 name="history_start">
+		Start of history
+	</floater.string>
+	<!-- Where the history says an Effects page change was made. -->
+	<floater.string
+	 name="effects_section">
+		Effects
+	</floater.string>
+	<floater.string
+	 name="find_none">
+		Nothing called "[TEXT]"
+	</floater.string>
+	<floater.string
+	 name="find_result">
+		[INDEX] of [COUNT]: [WHAT]
+	</floater.string>
+	<!-- Row 1: the Look, and the grade's own history. -->
+	<panel
+	 name="photo_studio_topbar"
+	 follows="left|top|right"
+	 layout="topleft"
+	 left="6"
+	 top="18"
+	 right="-6"
+	 height="52">
+		<combo_box
+		 follows="left|top|right"
+		 layout="topleft"
+		 left="0"
+		 top="0"
+		 right="-188"
+		 height="22"
+		 name="looks_combo"
+		 tool_tip="Apply a saved Look (a bundle of the aesthetic settings from the Look and Lens sections). A * after the name means the settings have been changed since that Look was applied.">
+			<combo_box.commit_callback
+			 function="PhotoStudio.LookSelected" />
+		</combo_box>
+		<button
+		 follows="top|right"
+		 layout="topleft"
+		 right="-158"
+		 top="0"
+		 width="24"
+		 height="22"
+		 label=""
+		 image_overlay="Script_Save"
+		 name="look_save"
+		 tool_tip="Save: overwrite the current Look with the settings as they are now">
+			<button.commit_callback
+			 function="PhotoStudio.LookSave" />
+		</button>
+		<button
+		 follows="top|right"
+		 layout="topleft"
+		 right="-133"
+		 top="0"
+		 width="24"
+		 height="22"
+		 label=""
+		 image_overlay="Conv_toolbar_plus"
+		 name="look_saveas"
+		 tool_tip="Save As: save the current settings as a new Look">
+			<button.commit_callback
+			 function="PhotoStudio.LookSaveAs" />
+		</button>
+		<button
+		 follows="top|right"
+		 layout="topleft"
+		 right="-108"
+		 top="0"
+		 width="24"
+		 height="22"
+		 label=""
+		 image_overlay="TrashItem_Off"
+		 name="look_delete"
+		 tool_tip="Delete a saved Look">
+			<button.commit_callback
+			 function="PhotoStudio.LookDelete" />
+		</button>
+		<button
+		 follows="top|right"
+		 layout="topleft"
+		 right="-83"
+		 top="0"
+		 width="24"
+		 height="22"
+		 label=""
+		 image_overlay="Refresh_Off"
+		 name="look_revert"
+		 tool_tip="Revert: discard changes and re-apply the last applied Look">
+			<button.commit_callback
+			 function="PhotoStudio.LookRevert" />
+		</button>
+		<button
+		 follows="top|right"
+		 layout="topleft"
+		 right="-52"
+		 top="0"
+		 width="24"
+		 height="22"
+		 label=""
+		 image_overlay="Script_Undo"
+		 name="look_undo"
+		 tool_tip="Undo the last grading change (Ctrl+Z). One drag of a control is one step.">
+			<button.commit_callback
+			 function="PhotoStudio.Undo" />
+		</button>
+		<button
+		 follows="top|right"
+		 layout="topleft"
+		 right="-27"
+		 top="0"
+		 width="24"
+		 height="22"
+		 label=""
+		 image_overlay="Script_Redo"
+		 name="look_redo"
+		 tool_tip="Redo the change just undone (Ctrl+Y, or Ctrl+Shift+Z)">
+			<button.commit_callback
+			 function="PhotoStudio.Redo" />
+		</button>
+		<button
+		 follows="top|right"
+		 layout="topleft"
+		 right="-2"
+		 top="0"
+		 width="24"
+		 height="22"
+		 label=""
+		 image_overlay="Conv_toolbar_call_log"
+		 name="look_history"
+		 tool_tip="History: every grading change since Photo Studio opened, by name. Double-click one to go back or forward to it.">
+			<button.commit_callback
+			 function="PhotoStudio.History" />
+		</button>
+		<!-- Row 2: Find, and how many panels. -->
+		<line_editor
+		 follows="left|top|right"
+		 layout="topleft"
+		 left="0"
+		 top="28"
+		 right="-160"
+		 height="22"
+		 max_length_bytes="64"
+		 commit_on_focus_lost="false"
+		 label="Find a setting or section (Ctrl+F)"
+		 name="find_editor"
+		 tool_tip="Type part of a setting's or section's name and press Enter. The focused panel (or the first) switches to the section that has it, and the setting is lit up. Press Enter again for the next match.">
+			<line_editor.commit_callback
+			 function="PhotoStudio.Find" />
+		</line_editor>
+		<text
+		 follows="top|right"
+		 layout="topleft"
+		 right="-100"
+		 top="32"
+		 width="54"
+		 height="16"
+		 halign="right"
+		 name="layout_label"
+		 value="Panels" />
+		<combo_box
+		 follows="top|right"
+		 layout="topleft"
+		 right="-2"
+		 top="28"
+		 width="92"
+		 height="22"
+		 name="layout_combo"
+		 tool_tip="How many panels Photo Studio shows. Each panel has its own section dropdown; the same section may be shown twice. Remembered between sessions.">
+			<combo_box.item
+			 label="One"
+			 name="one"
+			 value="1" />
+			<combo_box.item
+			 label="Two"
+			 name="two"
+			 value="2" />
+			<combo_box.item
+			 label="Four"
+			 name="four"
+			 value="4" />
+			<combo_box.commit_callback
+			 function="PhotoStudio.Layout" />
+		</combo_box>
+	</panel>
+	<text
+	 follows="left|top|right"
+	 layout="topleft"
+	 left="8"
+	 top_pad="2"
+	 right="-8"
+	 height="14"
+	 font="SansSerifSmall"
+	 text_color="LabelDisabledColor"
+	 name="find_status"
+	 value="" />
+	<!-- The panels. Their rects are worked out in C++ from the layout and
+	     this area's size, which is why nothing is placed in it here. -->
+	<panel
+	 follows="all"
+	 layout="topleft"
+	 left="4"
+	 top_pad="2"
+	 right="-4"
+	 height="608"
+	 background_visible="false"
+	 mouse_opaque="false"
+	 name="slots_area" />
+</floater>

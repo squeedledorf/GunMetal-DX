@@ -1,0 +1,710 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+// vkclean — PER-AVATAR REST-POSE ACCUMULATION (#901 follow-up; vkgfx/llcleanweathervk_accum.cpp
+// recordAccum; clean_weather_accum.glsl has the record, the grids and the rest-pose mapping).
+// Recorded right after the shelter chain (its work list and its just-published atlas), before the
+// G-buffer, for the grids the CPU scheduled this recording (at most kAcSlots, each at
+// RenderVKWeatherAvatarAccumRate, staggered; dt = the time since that grid's last update):
+//
+//   -DWX_AC_PREP     one invocation per joint-table slot: the slot -> grid directory the VS / FS
+//                    read (ac_slot); for the due grids (invocations 0..15 = grid g): a reset (a new
+//                    owner) clears the box, else the rest positions the last update measured are
+//                    adopted -- a first box, or a GROWN one (sticky: never shrinks; the old box
+//                    is kept in obox and the grid is resampled into the new one this update).
+//   -DWX_AC_ACCUM    one workgroup per item of the shelter chain's work list flagged accum-due
+//                    (indirect, the chain's dispatch): every triangle of the draw contributes ONE
+//                    vertex (its corner rotating per update, so every vertex is sampled every
+//                    third update) -- its current (animated) world position and normal, its
+//                    rest-pose position and normal. EXPOSURE at the current pose: the roof maps'
+//                    openness (a porch, a room) x the avatar's OWN cover from its shelter map (the
+//                    column above it + the slanted fall line in wind: an umbrella, a hat brim) x
+//                    #909 its NEAR self-cover (a snout over the tongue: in wind too).
+//                    Snow gain = exposure x upness (the current normal; a surface facing down now
+//                    instead SHEDS: the signed term), wet gain = exposure x how squarely it faces
+//                    the rain (sides and undersides out in the rain still soak, slowly). Into the
+//                    vertex's rest cell / bucket in the scratch: a count + the three quantised sums
+//                    (snow | wet, and the bare exposure: the per-cell #903 melt under cover)
+//                    (atomic adds: the cell's AVERAGE over its samples, order independent; capped
+//                    at kAcMaxSamples per cell so the sums cannot overflow). The rest positions
+//                    are measured (the box).
+//   -DWX_AC_ACCUM_CL (#901 / #909 follow-up, with RenderVKClusterLOD) the same for the CLUSTER LOD parts
+//                    of the due avatars: one workgroup per selected entry of the cluster pre-skin's
+//                    view (its indirect grid), one invocation per vertex of the skinned cluster --
+//                    its current position / normal from the skinned arena, its rest pose from the
+//                    cluster's source vertex x the bind shape (clean_weather_cluster.glsl). Into the
+//                    same scratch, the same box measure: the body, the clothes, the wings drawn by
+//                    the cluster path gather their snow / wetness in the grid like any other draw.
+//   -DWX_AC_STAGE    per cell of a grid that grew this update: its old state packed into the scratch
+//                    (the resample reads it there, not from the image it rewrites).
+//   -DWX_AC_RESOLVE  per cell (and bucket) of the due grids: the cell's average exposure this update
+//                    (or, sampled before but not now -- its draw was culled --, the avatar's joint
+//                    exposure, #909 x the cell's last sampled openness to its NEAR self-cover: the
+//                    texel's a) drives the snow (falls in where exposed at the snowfall rate, slides
+//                    off surfaces facing down, melts with the world's snow and -- #903 -- under a
+//                    roof whether or not it still snows, is shed by running) and the wetness (wets
+//                    at the rain x exposure, dries at the drying rate, the per-avatar wetness model
+//                    per cell). A cell's first sample starts from the guess (the avatar's joint
+//                    exposure, #909 capped at the cell's own exposure now, x the world's wetness /
+//                    snow depth). Stochastic rounding into 8 bits
+//                    (unbiased: tiny per-update increments still add up). The grid's stats.
+//
+// Set 0 = draw set 0 (0 the instances, 2 the joint table, 9 the frame info, 35 the rigged state
+// words, 39 the mega-VBO's words, 49 the weather maps). Set 1 = the shelter set: 1 the atlas
+// images, 2 the shelter record, 3 / 4 the main cull's candidates / meta, 5 the skinned vertices,
+// 6 the mega index buffer, 7 the skin meta words, 8 the avatars' motion state, 12 the accumulation
+// record, 13 the scratch, 14 the grids (storage).
+#include "clean_frame_info.glsl"
+#include "clean_joint_table.glsl"
+#include "clean_skinvert.glsl"   // (+ clean_qvertex.glsl, clean_av_slots.glsl)
+
+#define WX_SH_SET 1
+#define WX_SH_BINDING 2
+#define WX_SH_ACCESS readonly
+#include "clean_weather_shelter.glsl"
+#define WX_AC_SET 1
+#define WX_AC_BINDING 12
+#define WX_AC_ACCESS
+#include "clean_weather_accum.glsl"
+#if defined(WX_AC_ACCUM_CL)
+#include "clean_weather_cluster.glsl"   // (set 2: the cluster set; the pipelines' own layout)
+#endif
+
+struct WxAcInstance
+{
+    mat4 model_matrix;
+    vec4 aabb_min;
+    vec4 aabb_max;
+    vec4 tint;
+    mat4 uv_matrix;
+    uint lod_group_id;
+    uint material_id;
+    uint flags;
+    uint skin_id;
+    vec4 spin_axis;
+    vec4 spin_pivot;
+};
+layout(std430, set = 0, binding = 0) readonly buffer WxAcInstances { WxAcInstance instances[]; };
+layout(std430, set = 0, binding = 2) readonly buffer WxAcJoints { AvatarJoints avatar_joints[]; };
+layout(std430, set = 0, binding = 35) readonly buffer WxAcRigCache { uint rig_cache[]; };
+layout(std430, set = 0, binding = 39) readonly buffer WxAcQv { uint qv_words[]; };
+
+struct WxAcDraw { uint indexCount; uint instanceCount; uint firstIndex; int vertexOffset; uint firstInstance; };
+layout(set = 1, binding = 1, rg32f) uniform readonly image2D uShS[2];
+layout(std430, set = 1, binding = 3) readonly buffer WxAcCand { WxAcDraw cand[]; };
+layout(std430, set = 1, binding = 5) readonly buffer WxAcSkinV { uint skin_v[]; };
+layout(std430, set = 1, binding = 6) readonly buffer WxAcIbo { uint ibo[]; };
+layout(std430, set = 1, binding = 7) readonly buffer WxAcSkinMeta { uint skin_meta[]; };
+layout(std430, set = 1, binding = 8) readonly buffer WxAcAvState { vec4 av_state[]; };   // per slot 2 x vec4: [1] x / y smoothed speed (m/s)
+layout(std430, set = 1, binding = 13) buffer WxAcScratch { uint ac_scr[]; };              // per cell / bucket: count, snow | wet << 16, exposure | near cover << 16 (#909)
+layout(set = 1, binding = 14, rgba8) uniform image3D uAcGrid;
+
+layout(push_constant) uniform AcPush
+{
+    uvec4 a;   // x the atlas's per-slot rows' first row, y flags (1 avatar snow on (the setting), 2 wetness on, 4 motion state, 8 skin meta bound,
+               // 16 skinned vertices bound), z the update counter (the sampled corner), w the scratch slots in use
+    vec4  b;   // xyz the palettes' eye (world), w the world's surface wetness 0..1 (the guess)
+    vec4  c;   // snow: x the world's depth (m), y the snowfall (m / s, while it falls), z the world's melt (m / s),
+               // w the melt under a roof (m / s; #903)
+    vec4  d;   // wetness: x the rain 0..1, y wetting (/ s at full rain, fully exposed), z drying (/ s), w the fall shear x
+    vec4  e;   // x the fall shear y, y / z the shed speeds (horizontal / vertical, m / s), w unused
+} sp;
+
+const uint kAcFlagSnow = 1u, kAcFlagWet = 2u, kAcFlagMotion = 4u, kAcFlagSkinMeta = 8u, kAcFlagSkinV = 16u;
+const uint kSkinMetaWords = 1892u;    // LLCleanSkinStore::SkinMeta / 4 (word 0 the avatar's slot)
+const uint kSkinMetaBindShape = 1876u;   // ... its bind_shape (16 floats, column-major)
+const uint kAcMaxSamples = 1000u;     // per cell and update: 1000 x 63 fits the 16-bit sums
+
+// The grid's scratch cell (k scratch slot, b bucket, c the cell) -> its first word.
+uint acScratch(uint k, uint b, uvec3 c, uvec3 res)
+{
+    return 3u * ((((k * WX_AC_BUCKETS + b) * res.z + c.z) * res.y + c.y) * res.x + c.x);
+}
+
+#if defined(WX_AC_PREP)
+layout(local_size_x = 64) in;
+
+const float kAcPad = 0.04;       // m added around the measured box (+ 4 % of its size)
+const float kAcMinExt = 0.3;     // m: the least extent per axis (a thin part keeps sane cells)
+const vec3  kAcLimLo = vec3(-4.0, -4.0, -2.0), kAcLimHi = vec3(4.0, 4.0, 6.0);   // rest-space clamp (broken bind shapes)
+
+void acPadBox(inout vec3 mn, inout vec3 mx)
+{
+    mn = clamp(mn, kAcLimLo, kAcLimHi);
+    mx = clamp(mx, kAcLimLo, kAcLimHi);
+    const vec3 pad = vec3(kAcPad) + 0.04 * (mx - mn);
+    mn -= pad; mx += pad;
+    const vec3 grow = max(vec3(kAcMinExt) - (mx - mn), vec3(0.0)) * 0.5;
+    mn -= grow; mx += grow;
+}
+
+void main()
+{
+    const uint s = gl_GlobalInvocationID.x;
+    if (s >= AV_SLOT_CAP) return;
+    const uint G = min(ac_head.x, WX_AC_GRIDS);
+    // the slot -> grid directory
+    uint dir = 0u;
+    for (uint g = 0u; g < G; ++g)
+        if (ac_ctl[g].x == s) dir = g + 1u;
+    ac_slot[s] = dir;
+    if (s >= G) return;
+    const uint g = s;
+    const uvec4 ctl = ac_ctl[g];
+    if (ctl.x == 0xFFFFFFFFu || (ctl.y & 1u) == 0u) return;
+    ac_stat[g] = uvec4(0u);
+    ac_obox[2u * g].w = 0.0;
+    const bool measured = ac_meas[2u * g].x != 0xFFFFFFFFu && ac_meas[2u * g + 1u].x != 0u;
+    vec3 mn = vec3(wxShDec(ac_meas[2u * g].x), wxShDec(ac_meas[2u * g].y), wxShDec(ac_meas[2u * g].z));
+    vec3 mx = vec3(wxShDec(ac_meas[2u * g + 1u].x), wxShDec(ac_meas[2u * g + 1u].y), wxShDec(ac_meas[2u * g + 1u].z));
+    ac_meas[2u * g] = uvec4(0xFFFFFFFFu);
+    ac_meas[2u * g + 1u] = uvec4(0u);
+    if ((ctl.y & 2u) != 0u && (ctl.y & 4u) == 0u)
+    {
+        ac_box[2u * g] = vec4(0.0);   // (a new owner: measured again by this update)
+        ac_box[2u * g + 1u] = vec4(0.0);
+        return;
+    }
+    if (!measured || any(isnan(mn)) || any(isnan(mx)) || any(greaterThan(mn, mx))) return;
+    acPadBox(mn, mx);
+    const vec4 b0 = ac_box[2u * g], b1 = ac_box[2u * g + 1u];
+    if (!(b0.w > 0.5))
+    {
+        ac_box[2u * g] = vec4(mn, 1.0);
+        ac_box[2u * g + 1u] = vec4(mx, 0.0);
+        return;
+    }
+    // GROW (a new attachment, a measure that saw more of the avatar): past a quarter cell outside
+    const vec3 cell = (b1.xyz - b0.xyz) / vec3(max(wxAcRes(), uvec3(1u)));
+    if (any(lessThan(mn, b0.xyz - 0.25 * cell)) || any(greaterThan(mx, b1.xyz + 0.25 * cell)))
+    {
+        ac_obox[2u * g] = vec4(b0.xyz, 1.0);
+        ac_obox[2u * g + 1u] = vec4(b1.xyz, 0.0);
+        ac_box[2u * g] = vec4(min(b0.xyz, mn), 1.0);
+        ac_box[2u * g + 1u] = vec4(max(b1.xyz, mx), 0.0);
+    }
+}
+
+#elif defined(WX_AC_ACCUM) || defined(WX_AC_ACCUM_CL)
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 49) uniform sampler2D uWeatherOccl[10];
+shared uint sMn[3], sMx[3], sSamples;
+
+// The roof maps' openness at P (as clean_weather_shelter.comp shSkyAt: one gathered tap per cascade).
+float acOpenAt(vec4 fr, vec4 fz, vec2 s, uint base, vec3 P)
+{
+    const vec2 uv = (P.xy - (fz.x - P.z) * s - fr.xy) * fr.z;
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) return -1.0;
+    const uint m = base + uint(fr.w + 0.5) - 1u;
+    vec4 d;
+    if (m == 0u) d = textureGather(uWeatherOccl[0], uv, 0);
+    else if (m == 1u) d = textureGather(uWeatherOccl[1], uv, 0);
+    else if (m == 2u) d = textureGather(uWeatherOccl[2], uv, 0);
+    else d = textureGather(uWeatherOccl[3], uv, 0);
+    const vec4 top = fz.x - d * fz.y;
+    return dot(clamp((vec4(P.z) - (top - 1.5 * fz.z)) / fz.z, 0.0, 1.0), vec4(0.25));
+}
+float acSkyAt(vec3 P)
+{
+    float o = -1.0;
+    if (ssr.weather[3].w > 0.5) o = acOpenAt(ssr.weather[3], ssr.weather[4], ssr.weather[7].xy, 2u, P);
+    if (o < 0.0 && ssr.weather[1].w > 0.5) o = acOpenAt(ssr.weather[1], ssr.weather[2], ssr.weather[6].xy, 0u, P);
+    return o < 0.0 ? 1.0 : o;
+}
+
+// The avatar's OWN cover at P (layer L's map, just published into atlas image dst): 1 open .. 0
+// under its own surface -- the column a texel out along the normal (a surface does not cover itself
+// across its silhouette), against the receiver's own plane at the texel's centre (a slope is not
+// its own cover), with the fragment test's tight tolerance (~1 cm + half a texel: mouth scale;
+// clean_weather_surface.glsl weatherAvatarShelter -- #909: this was 2 cm + half a texel, so a
+// 2-3 cm mouth gap read as mostly open); then, in wind, the slanted fall line instead (the
+// canopy's rain shadow moves downwind, drops slant in under its edge).
+// #909 nearCov: the NEAR SELF-COVER at P (clean_weather_accum.glsl wxAcNearCover: the avatar's own
+// top within the near range above P -- a snout over the tongue). It holds in wind too: the slanted
+// test only sees cover 15 cm and more above, so in any wind a mouth, a throat, an armpit read as
+// open and filled their cells with snow.
+float acOwnOpen(uint L, uint dst, vec3 P, vec3 N, vec2 shw, vec3 nr, out float nearCov)
+{
+    nearCov = 0.0;
+    const float e = sh_ext[L].x;
+    const int res = int(sh_info[L].y);
+    if (!(e > 0.0) || res <= 0) return 1.0;
+    const ivec2 o = ivec2(int(sh_info[L].z & 0xFFFFu), int(sh_info[L].z >> 16u));
+    const float texel = e / float(res);
+    const vec3 d = wxShLocal(L, P + vec3(N.xy * texel, 0.0));
+    const vec2 tc = (d.xy / e + 0.5) * float(res);
+    if (any(lessThan(tc, vec2(0.0))) || any(greaterThanEqual(tc, vec2(res)))) return 1.0;
+    const float H = imageLoad(uShS[dst], o + ivec2(tc)).x;
+    const float tol = 0.008 + 0.5 * texel;
+    const vec2 cs = vec2(cos(sh_frame[L].w), sin(sh_frame[L].w));
+    // the receiver's plane at the texel's centre: z + g . (centre - sample), g its slope in the map's frame
+    const vec2 nl = vec2(cs.x * N.x + cs.y * N.y, cs.x * N.y - cs.y * N.x);
+    const vec2 gs = clamp(-nl / max(N.z, 0.25), vec2(-3.0), vec2(3.0));
+    const float zr = d.z + dot(gs, (floor(tc) + 0.5 - tc) * texel);
+    const bool has = H > kShNoneTest;
+    float open = has ? clamp((zr - (H - 1.5 * tol)) / tol, 0.0, 1.0) : 1.0;
+    nearCov = has ? wxAcNearCover(H - zr, nr) : 0.0;
+    if (dot(shw, shw) > 1.0e-4)
+    {
+        const vec2 sl = vec2(cs.x * shw.x + cs.y * shw.y, cs.x * shw.y - cs.y * shw.x);   // (the map's frame)
+        float dz = has ? max(H - d.z, 0.0) : 0.0;
+        if (dz < 1.5 * tol) dz = 0.6;
+        float openT = 1.0;
+        for (int it = 0; it < 3; ++it)
+        {
+            const vec2 tq = ((d.xy - sl * dz) / e + 0.5) * float(res);
+            if (any(lessThan(tq, vec2(0.0))) || any(greaterThanEqual(tq, vec2(res)))) { openT = 1.0; break; }
+            const float hs = imageLoad(uShS[dst], o + ivec2(tq)).x;
+            const float above = hs > kShNoneTest ? hs - d.z : -1.0;
+            const float need = max(max(1.5 * tol, 0.15), 0.5 * dz);
+            openT = clamp((need - above) / tol, 0.0, 1.0);
+            if (openT > 0.5 || abs(above - dz) < 0.05) break;
+            dz = clamp(above, 0.0, 3.0);
+        }
+        open = openT;
+    }
+    return min(open, 1.0 - nearCov);
+}
+
+bool acFinite(vec3 v) { return !any(isnan(v)) && !any(isinf(v)) && all(lessThan(abs(v), vec3(1.0e6))); }
+
+// One grid update's sampling context (the work item's layer, its grid's box / scratch slot).
+struct AcCtx
+{
+    uint L, dst, g, k;     // layer, the atlas image just published, grid, scratch slot
+    bool boxOk;
+    vec3 b0, inv;          // the box's corner, 1 / its size
+    uvec3 res;
+    vec2 shw;              // the fall shear
+    vec3 nr;               // #909 the near self-cover parameters
+    float shl;
+};
+
+// The context of grid g's update (the box PREP adopted; a growing update only measures).
+AcCtx acContext(uint L, uint g, uvec4 ctl)
+{
+    AcCtx c;
+    c.L = L; c.g = g; c.k = ctl.z;
+    c.dst = sh_cfg.y & 1u;
+    const vec4 b0 = ac_box[2u * g], b1 = ac_box[2u * g + 1u];
+    c.boxOk = b0.w > 0.5 && !(ac_obox[2u * g].w > 0.5) && all(greaterThan(b1.xyz, b0.xyz));
+    c.res = wxAcRes();
+    c.b0 = b0.xyz;
+    c.inv = c.boxOk ? 1.0 / (b1.xyz - b0.xyz) : vec3(0.0);
+    c.shw = vec2(sp.d.w, sp.e.x);
+    c.nr = wxAcNear();
+    c.shl = inversesqrt(1.0 + dot(c.shw, c.shw));
+    return c;
+}
+
+// One vertex sample: P / N its current (animated) world position and normal, R / RN its rest-pose
+// position and normal. Measures the rest box; with a box, its EXPOSURE into the vertex's rest cell /
+// bucket of the scratch (the header's model).
+void acSample(AcCtx c, vec3 P, vec3 N, vec3 R, vec3 RN, inout uint mn[3], inout uint mx[3], inout uint samples)
+{
+    if (!acFinite(P) || !acFinite(R) || !(dot(N, N) > 1e-12) || !(dot(RN, RN) > 1e-12)) return;
+    N = normalize(N);
+    RN = normalize(RN);
+    // the rest box's measure (clamped against broken bind shapes)
+    const vec3 Rc = clamp(R, vec3(-4.0, -4.0, -2.0), vec3(4.0, 4.0, 6.0));
+    for (int i = 0; i < 3; ++i)
+    {
+        mn[i] = min(mn[i], wxShEnc(Rc[i]));
+        mx[i] = max(mx[i], wxShEnc(Rc[i]));
+    }
+    if (!c.boxOk) return;
+    const vec3 uvw = (R - c.b0) * c.inv;
+    if (any(lessThan(uvw, vec3(0.0))) || any(greaterThanEqual(uvw, vec3(1.0)))) return;
+    const uvec3 cell = min(uvec3(uvw * vec3(c.res)), c.res - 1u);
+    // EXPOSURE at the current pose
+    const float roof = acSkyAt(P + 0.03 * N + vec3(0.0, 0.0, 0.05));
+    // (#909: own includes the NEAR self-cover -- a vertex inside the mouth adds no snow, no
+    // wetness, and counts as covered for its cell's #903 melt)
+    float nearCov = 0.0;
+    const float own = roof > 0.02 ? acOwnOpen(c.L, c.dst, P, N, c.shw, c.nr, nearCov) : 0.0;
+    const float expo = roof * own;
+    const float face = dot(N, vec3(-c.shw, 1.0)) * c.shl;   // (facing the precipitation)
+    const float snowIn = expo * smoothstep(0.4, 0.82, N.z) * (face > 0.0 ? 1.0 : 0.0);
+    const float slide = 1.0 - smoothstep(-0.6, -0.1, N.z);   // (facing down now: it falls off)
+    // (sides soak slowly by splashes / wicking; a surface facing DOWN takes nothing -- an
+    // umbrella's underside is open to the sky through its own column, but rain never hits it)
+    const float wetIn = expo * (0.3 * smoothstep(-0.6, -0.1, N.z) + 0.7 * smoothstep(0.05, 0.45, face));
+    const uint sq = uint(round(31.0 + 31.0 * clamp(snowIn - slide, -1.0, 1.0)));
+    const uint wq = uint(round(63.0 * clamp(wetIn, 0.0, 1.0)));
+    const uint eq = uint(round(63.0 * clamp(expo, 0.0, 1.0)));
+    const uint w0 = acScratch(c.k, wxAcBucket(RN.z), cell, c.res);
+    if (w0 + 2u >= uint(ac_scr.length())) return;
+    if (atomicAdd(ac_scr[w0], 1u) < kAcMaxSamples)
+    {
+        atomicAdd(ac_scr[w0 + 1u], sq | (wq << 16u));
+        atomicAdd(ac_scr[w0 + 2u], eq | (uint(round(63.0 * clamp(nearCov, 0.0, 1.0))) << 16u));   // (#909: | the near cover)
+    }
+    ++samples;
+}
+
+// The workgroup's measure and sample count into grid g (every invocation calls it: a barrier).
+void acFlush(uint g, uint mn[3], uint mx[3], uint samples)
+{
+    for (int c = 0; c < 3; ++c)
+    {
+        if (mn[c] != 0xFFFFFFFFu) atomicMin(sMn[c], mn[c]);
+        if (mx[c] != 0u) atomicMax(sMx[c], mx[c]);
+    }
+    if (samples != 0u) atomicAdd(sSamples, samples);
+    barrier();
+    if (gl_LocalInvocationIndex == 0u)
+    {
+        if (sMn[0] != 0xFFFFFFFFu)
+        {
+            atomicMin(ac_meas[2u * g].x, sMn[0]); atomicMin(ac_meas[2u * g].y, sMn[1]); atomicMin(ac_meas[2u * g].z, sMn[2]);
+            atomicMax(ac_meas[2u * g + 1u].x, sMx[0]); atomicMax(ac_meas[2u * g + 1u].y, sMx[1]); atomicMax(ac_meas[2u * g + 1u].z, sMx[2]);
+        }
+        if (sSamples != 0u) atomicAdd(ac_stat[g].x, sSamples);
+    }
+}
+
+#if defined(WX_AC_ACCUM_CL)
+// (#901 / #909 follow-up) A CLUSTER LOD avatar's skinned cluster (clean_weather_cluster.glsl) whose
+// avatar's grid is due: one invocation per vertex of the cluster -- its skinned position / normal
+// (the arena) and its rest pose (bind_shape x the cluster's source vertex: the key the cluster draw
+// gives the fragments). Every vertex every update (a cluster has <= 64; the legacy pass samples one
+// corner of each triangle). Every return before acFlush is workgroup-uniform.
+void main()
+{
+    const uint lid = gl_LocalInvocationIndex;
+    if (lid == 0u)
+    {
+        sMn[0] = sMn[1] = sMn[2] = 0xFFFFFFFFu;
+        sMx[0] = sMx[1] = sMx[2] = 0u;
+        sSamples = 0u;
+    }
+    barrier();
+    if ((sp.a.y & kAcFlagSkinMeta) == 0u) return;
+    WxClEntry x;
+    if (!wxClEntry(x) || x.ri >= uint(instances.length())) return;
+    const uint fl = instances[x.ri].flags;
+    if ((fl & 1u) == 0u || (fl & 8u) != 0u || (fl & 524288u) != 0u || instances[x.ri].tint.a < 0.05) return;
+    if (ac_slot[x.slot] == 0u) return;
+    uint L = 0xFFFFFFFFu;
+    for (uint l = 0u; l < min(sh_cfg.x, WX_SH_LAYERS); ++l)
+        if (sh_info[l].x == x.slot) L = l;
+    if (L == 0xFFFFFFFFu || (sh_info[L].w & 4u) == 0u) return;   // (its grid is not due this recording)
+    const uint g = ac_slot[x.slot] - 1u;
+    const uvec4 ctl = ac_ctl[g];
+    if ((ctl.y & 1u) == 0u || ctl.z >= sp.a.w) return;
+    const uint sid = instances[x.ri].skin_id;
+    if (sid >= 0x100000u || (sid + 1u) * kSkinMetaWords > uint(skin_meta.length())) return;
+    const uint w = sid * kSkinMetaWords + kSkinMetaBindShape;
+    mat4 BS;
+    for (int c = 0; c < 4; ++c)
+        BS[c] = vec4(uintBitsToFloat(skin_meta[w + 4u * uint(c)]), uintBitsToFloat(skin_meta[w + 4u * uint(c) + 1u]),
+                     uintBitsToFloat(skin_meta[w + 4u * uint(c) + 2u]), uintBitsToFloat(skin_meta[w + 4u * uint(c) + 3u]));
+    const mat3 BSn = wxAcCofactor(mat3(BS));
+    const AcCtx c = acContext(L, g, ctl);
+    uint samples = 0u;
+    uint mn[3] = uint[3](0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu), mx[3] = uint[3](0u, 0u, 0u);
+    if (lid < x.vc)
+    {
+        vec3 lp, ln;
+        wxClSource(x, lid, lp, ln);
+        acSample(c, wxClPos(x, lid), wxClNrm(x, lid), (BS * vec4(lp, 1.0)).xyz, BSn * ln, mn, mx, samples);
+    }
+    acFlush(g, mn, mx, samples);
+}
+#else
+void main()
+{
+    const uint k = gl_WorkGroupID.x;
+    const uint lid = gl_LocalInvocationIndex;
+    if (lid == 0u)
+    {
+        sMn[0] = sMn[1] = sMn[2] = 0xFFFFFFFFu;
+        sMx[0] = sMx[1] = sMx[2] = 0u;
+        sSamples = 0u;
+    }
+    barrier();
+    // (every return below depends on the work item alone: uniform per workgroup)
+    if (k >= min(sh_head.x, sh_head.y)) return;
+    const uvec2 item = sh_items[k];
+    if ((item.y & 0x200u) == 0u) return;   // (a raster-only item)
+    const uint id = item.x, L = item.y & 0xFFu;
+    if (L >= WX_SH_LAYERS || id >= uint(instances.length()) || id >= uint(cand.length())) return;
+    const uint slot = sh_info[L].x;
+    if (slot >= AV_SLOT_CAP || ac_slot[slot] == 0u) return;
+    const uint g = ac_slot[slot] - 1u;
+    const uvec4 ctl = ac_ctl[g];
+    if ((ctl.y & 1u) == 0u || ctl.z >= sp.a.w) return;
+    const bool rigged = (instances[id].flags & 1u) != 0u;
+    if (rigged && (sp.a.y & (kAcFlagSkinV | kAcFlagSkinMeta)) != (kAcFlagSkinV | kAcFlagSkinMeta)) return;
+    if (!rigged && (ac_head.w & 1u) == 0u) return;   // (no rest skeleton yet: worn rigid parts wait)
+    const WxAcDraw dc = cand[id];
+    const uint vb = uint(max(dc.vertexOffset, 0));
+    // the box (a growing update only measures: the cells are being resampled)
+    const AcCtx c = acContext(L, g, ctl);
+    // the draw's pose
+    const uint st = (rigged && id * RC_WORDS + RC_STATE < uint(rig_cache.length())) ? rig_cache[id * RC_WORDS + RC_STATE] : 0u;
+    const bool local = rigged && (st & RC_ST_LOCAL) != 0u;
+    const uint pslot = st & RC_ST_SLOT;
+    const mat4 Mp = (local && pslot < uint(avatar_joints.length())) ? jointWorld(avatar_joints[pslot].world[0]) : mat4(1.0);
+    const mat3 Rp = mat3(normalize(Mp[0].xyz), normalize(Mp[1].xyz), normalize(Mp[2].xyz));
+    // rigged: the source vertices (rest = bind shape x the source position)
+    const uint sbase = (rigged && id * RC_WORDS + RC_SRC < uint(rig_cache.length())) ? rig_cache[id * RC_WORDS + RC_SRC] : 0xFFFFFFFFu;
+    mat4 BS = mat4(1.0);
+    if (rigged)
+    {
+        const uint sid = instances[id].skin_id;
+        if (sbase == 0xFFFFFFFFu || sid >= 0x100000u || (sid + 1u) * kSkinMetaWords > uint(skin_meta.length())) return;
+        const uint w = sid * kSkinMetaWords + kSkinMetaBindShape;
+        for (int i = 0; i < 4; ++i)
+            BS[i] = vec4(uintBitsToFloat(skin_meta[w + 4u * uint(i)]), uintBitsToFloat(skin_meta[w + 4u * uint(i) + 1u]),
+                         uintBitsToFloat(skin_meta[w + 4u * uint(i) + 2u]), uintBitsToFloat(skin_meta[w + 4u * uint(i) + 3u]));
+    }
+    const mat3 BSn = wxAcCofactor(mat3(BS));
+    // worn rigid: the joint offset, the live joint, the rest joint
+    const mat4 Moff = instances[id].model_matrix;
+    mat4 Mi = Moff, RJ = mat4(1.0);
+    if (!rigged)
+    {
+        const uint wearer = instances[id].skin_id;
+        if (wearer >= uint(avatar_joints.length())) return;
+        const uint bone = min(uint(instances[id].aabb_max.w + 0.5), 215u);
+        Mi = jointWorld(avatar_joints[wearer].world[bone]) * Moff;
+        RJ = wxAcRestJoint(bone);
+    }
+    const mat3 Mn = wxAcCofactor(mat3(Mi)) * (determinant(mat3(Mi)) < 0.0 ? -1.0 : 1.0);
+    const mat3 Rn = mat3(RJ) * wxAcCofactor(mat3(Moff)) * (determinant(mat3(Moff)) < 0.0 ? -1.0 : 1.0);
+    const uint qbase = rigged ? sbase : vb;
+    const QvHeader qh = QV_LOAD_HEADER(qv_words, max(qbase, QV_HEADER_VERTS));
+    const uint nTri = dc.indexCount / 3u;
+    const uint nIdx = uint(ibo.length()) * 2u;
+    const uint nQv = uint(qv_words.length());
+    uint samples = 0u;
+    uint mn[3] = uint[3](0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu), mx[3] = uint[3](0u, 0u, 0u);
+    for (uint tri = lid; tri < nTri; tri += 64u)
+    {
+        const uint ii = dc.firstIndex + 3u * tri + (tri + sp.a.z) % 3u;   // (one corner per triangle, rotating)
+        if (ii >= nIdx) break;
+        const uint li = QV_INDEX16(ibo, ii);
+        const uint src = qbase + li;
+        if ((src + 1u) * QV_WORDS > nQv) continue;
+        const uint q0 = qv_words[src * QV_WORDS], q1 = qv_words[src * QV_WORDS + 1u], q3 = qv_words[src * QV_WORDS + 3u];
+        const vec3 lp = qvPos(qh, q0, q1);
+        const vec3 ln = qvNormal(q3);
+        vec3 P, N, R, RN;
+        if (rigged)
+        {
+            const uint v = vb + li;
+            if ((v + 1u) * SV_WORDS > uint(skin_v.length())) continue;
+            const vec3 p = SV_POS(skin_v, v);
+            P = local ? Rp * p + Mp[3].xyz : sp.b.xyz + p;
+            N = SV_NRM(skin_v, v);
+            if (local) N = Rp * N;
+            R = (BS * vec4(lp, 1.0)).xyz;
+            RN = BSn * ln;
+        }
+        else
+        {
+            P = (Mi * vec4(lp, 1.0)).xyz;
+            N = Mn * ln;
+            R = (RJ * (Moff * vec4(lp, 1.0))).xyz;
+            RN = Rn * ln;
+        }
+        acSample(c, P, N, R, RN, mn, mx, samples);
+    }
+    acFlush(g, mn, mx, samples);
+}
+#endif   // WX_AC_ACCUM_CL
+
+#else   // WX_AC_STAGE / WX_AC_RESOLVE: one invocation per cell (x: bucket x res.x, y: res.y, z: scratch slot x res.z)
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+#if defined(WX_AC_STAGE)
+void main()
+{
+    const uvec3 res = wxAcRes();
+    const uvec3 t = gl_GlobalInvocationID;
+    if (any(equal(res, uvec3(0u))) || t.x >= res.x * WX_AC_BUCKETS || t.y >= res.y) return;
+    const uint k = t.z / res.z;
+    if (k >= min(sp.a.w, 4u)) return;
+    const uint g = ac_kgrid[k];
+    if (g >= min(ac_head.x, WX_AC_GRIDS) || !(ac_obox[2u * g].w > 0.5)) return;
+    const uvec3 c = uvec3(t.x % res.x, t.y, t.z % res.z);
+    const uint w0 = acScratch(k, t.x / res.x, c, res);
+    if (w0 >= uint(ac_scr.length())) return;
+    ac_scr[w0] = packUnorm4x8(imageLoad(uAcGrid, ivec3(int(t.x), int(t.y), int(g * res.z + c.z))));
+}
+
+#else   // WX_AC_RESOLVE
+shared uint sMaxSnow, sWetSum, sOcc;
+
+uint acHash(uint x)
+{
+    x ^= x >> 16; x *= 0x7feb352du;
+    x ^= x >> 15; x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+// v (0..1) to the 8-bit grid, rounded STOCHASTICALLY (u uniform 0..1): unbiased, so an increment
+// far below one step still adds up over the updates.
+float acQ8(float v, float u) { return clamp(floor(clamp(v, 0.0, 1.0) * 255.0 + u) / 255.0, 0.0, 1.0); }
+
+void main()
+{
+    const uint lid = gl_LocalInvocationIndex;
+    if (lid == 0u) { sMaxSnow = 0u; sWetSum = 0u; sOcc = 0u; }
+    barrier();
+    const uvec3 res = wxAcRes();
+    const uvec3 t = gl_GlobalInvocationID;
+    const uint k = res.z > 0u ? t.z / res.z : 0xFFFFFFFFu;
+    const uint g = k < min(sp.a.w, 4u) ? ac_kgrid[k] : 0xFFFFFFFFu;
+    const bool inside = all(greaterThan(res, uvec3(0u))) && t.x < res.x * WX_AC_BUCKETS && t.y < res.y
+                     && g < min(ac_head.x, WX_AC_GRIDS);
+    // (workgroups straddle no grid: res.z is a multiple of 4; the barrier below is reached by all)
+    float snowN = 0.0, wet = 0.0, occ = 0.0;
+    float expoKeep = 1.0;   // (#909: stored with the cell -- 1 - its last sampled NEAR self-cover)
+    bool write = false;
+    if (inside)
+    {
+        const uvec4 ctl = ac_ctl[g];
+        const float dt = clamp(uintBitsToFloat(ctl.w), 0.0, 0.5);
+        const uint b = t.x / res.x;
+        const uvec3 c = uvec3(t.x % res.x, t.y, t.z % res.z);
+        const ivec3 tx = ivec3(int(t.x), int(t.y), int(g * res.z + c.z));
+        const uint w0 = acScratch(k, b, c, res);
+        // the avatar's joint exposure (the shelter PREP's per-slot row + 5: x the sky over its head,
+        // y its body's exposure; the wetness off: none measured -- open)
+        const bool wetOn = (sp.a.y & kAcFlagWet) != 0u, snowOn = (sp.a.y & kAcFlagSnow) != 0u;
+        vec2 jx = vec2(1.0);
+        if (ctl.x < AV_SLOT_CAP && wetOn) jx = clamp(imageLoad(uShS[0], ivec2(int(ctl.x), int(sp.a.x) + 5)).xy, 0.0, 1.0);
+        const float bf = b == 0u ? 1.0 : (b == 1u ? 0.7 : 0.4);
+        if ((ctl.y & 2u) != 0u && (ctl.y & 4u) == 0u)
+        {
+            write = true;   // (a new owner: empty -- every cell starts from the guess at its first sample)
+        }
+        else if (ac_obox[2u * g].w > 0.5)
+        {
+            // GROWN: the old state at this cell's centre in the old box (STAGE packed it)
+            const vec3 b0 = ac_box[2u * g].xyz, b1 = ac_box[2u * g + 1u].xyz;
+            const vec3 o0 = ac_obox[2u * g].xyz, o1 = ac_obox[2u * g + 1u].xyz;
+            const vec3 P = b0 + (vec3(c) + 0.5) / vec3(res) * (b1 - b0);
+            const vec3 ou = (P - o0) / max(o1 - o0, vec3(1e-6));
+            if (all(greaterThanEqual(ou, vec3(0.0))) && all(lessThan(ou, vec3(1.0))))
+            {
+                const uint wo = acScratch(k, b, min(uvec3(ou * vec3(res)), res - 1u), res);
+                if (wo < uint(ac_scr.length()))
+                {
+                    const vec4 v = unpackUnorm4x8(ac_scr[wo]);
+                    occ = v.b;
+                    if (occ > 0.5) { snowN = v.r / occ; wet = v.g / occ; expoKeep = v.a / occ; }
+                }
+            }
+            write = true;
+        }
+        else if (w0 + 2u < uint(ac_scr.length()))
+        {
+            const vec4 s0 = imageLoad(uAcGrid, tx);
+            occ = s0.b;
+            if (occ > 0.5) { snowN = s0.r / occ; wet = s0.g / occ; expoKeep = s0.a / occ; }
+            const uint n = ac_scr[w0];
+            float sAvg = 0.0, wAvg = 0.0, eAvg = 0.0;
+            bool live = false;
+            if (n > 0u)
+            {
+                const uint sums = ac_scr[w0 + 1u];
+                const float m = float(min(n, kAcMaxSamples));
+                sAvg = float(sums & 0xFFFFu) / (31.0 * m) - 1.0;
+                wAvg = float(sums >> 16u) / (63.0 * m);
+                const uint ew = ac_scr[w0 + 2u];
+                eAvg = float(ew & 0xFFFFu) / (63.0 * m);
+                const float nAvg = float(ew >> 16u) / (63.0 * m);   // (#909: the near self-cover)
+                if (!(occ > 0.5))
+                {
+                    // the cell's FIRST sample: start from the guess (the avatar's joint exposure x the
+                    // world's snow depth on tops / the world's wetness, less on sides and undersides)
+                    // -- #909: no more than this cell's own exposure now: a cell inside the mouth,
+                    // under the chin (its vertices self-covered) starts empty, not with the head's
+                    // snow it then has to melt out
+                    const float e0 = min(jx.y, clamp(eAvg, 0.0, 1.0));
+                    snowN = b == 0u ? e0 * min(sp.c.x, kAcSnowFull) / kAcSnowFull : 0.0;
+                    wet = clamp(sp.b.w * e0 * bf, 0.0, 1.0);
+                    occ = 1.0;
+                }
+                expoKeep = clamp(1.0 - nAvg, 0.0, 1.0);
+                live = true;
+            }
+            else if (occ > 0.5)
+            {
+                // sampled before, not now (its draw culled this update): the avatar's joint exposure
+                // (live: a porch, an umbrella opened or closed meanwhile), #909 x the cell's openness
+                // to the avatar's own NEAR cover when it was last sampled (static: a mouth's interior,
+                // culled while the avatar is off screen, does not fill with the head's snow)
+                const float e1 = jx.y * clamp(expoKeep, 0.0, 1.0);
+                sAvg = b == 0u ? e1 : 0.0;
+                wAvg = e1 * bf;
+                eAvg = e1;
+                live = true;
+            }
+            if (live)
+            {
+                // SNOW (m): falls in where exposed, slides off what faces down now, melts with the
+                // world's snow and under a roof (#903: snowing or not), shed by running / flying
+                float D = snowN * kAcSnowFull;
+                if (snowOn)
+                {
+                    // (the snowfall fills a cell up to the world's depth; snow already lying is not
+                    // cut down to it -- #895: a teleport out of region weather zeroes the world's
+                    // amounts, the avatar's snow then melts at its own pace)
+                    const float D0 = D;
+                    D = min(D + max(sAvg, 0.0) * sp.c.y * dt, max(min(max(sp.c.x, 0.0), kAcSnowFull), D0));
+                    D -= max(-sAvg, 0.0) * D * 1.5 * dt;
+                    D -= sp.c.z * dt;
+                    // (#903 PER CELL: under ANY cover -- a roof or the avatar's own umbrella / brim --
+                    // this cell's snow melts, snowing or not: a patch exposed for a moment loses its
+                    // little again once the cover is back; the canopy's own cells stay exposed)
+                    D -= sp.c.w * dt * clamp(1.0 - 2.0 * eAvg, 0.0, 1.0);
+                    if ((sp.a.y & kAcFlagMotion) != 0u && 2u * ctl.x + 1u < uint(av_state.length()))
+                    {
+                        const vec4 v = av_state[2u * ctl.x + 1u];
+                        if (v.x > sp.e.y || v.y > sp.e.z) D *= exp(-dt * 2.5);
+                    }
+                    D = clamp(D, 0.0, kAcSnowFull);
+                }
+                else
+                    D = 0.0;
+                snowN = D / kAcSnowFull;
+                // WETNESS: wets at the rain x the exposure, dries otherwise (partly exposed: both)
+                if (wetOn)
+                {
+                    const float hit = sp.d.x * wAvg;
+                    wet = clamp(wet + dt * (hit * sp.d.y - (1.0 - clamp(hit * 4.0, 0.0, 1.0)) * sp.d.z), 0.0, 1.0);
+                }
+                else
+                    wet = 0.0;
+                write = true;
+            }
+        }
+        if (write)
+        {
+            const uint h = acHash(t.x * 73856093u ^ t.y * 19349663u ^ (g * res.z + c.z) * 83492791u ^ sp.a.z * 2654435761u);
+            const float u0 = float(h & 0xFFFFu) / 65536.0, u1 = float(h >> 16u) / 65536.0;
+            const float o = occ > 0.5 ? 1.0 : 0.0;
+            // (a: 1 - the cell's last sampled near self-cover, #909 -- rounded to nearest: a state, not an increment)
+            const vec4 outv = vec4(acQ8(snowN, u0) * o, acQ8(wet, u1) * o, o, acQ8(expoKeep, 0.5) * o);
+            imageStore(uAcGrid, tx, outv);
+            if (o > 0.5)
+            {
+                atomicMax(sMaxSnow, uint(outv.r * 65535.0));
+                atomicAdd(sWetSum, uint(outv.g * 255.0 + 0.5));
+                atomicAdd(sOcc, 1u);
+            }
+        }
+    }
+    barrier();
+    if (lid == 0u && sOcc != 0u && g < WX_AC_GRIDS)
+    {
+        atomicMax(ac_stat[g].y, sMaxSnow);
+        atomicAdd(ac_stat[g].z, sWetSum);
+        atomicAdd(ac_stat[g].w, sOcc);
+    }
+}
+#endif
+#endif

@@ -1,0 +1,136 @@
+#version 460
+// vkclean -- AO view-depth MIP chain (#648, RenderVKAODepthMips; after Intel XeGTAO
+// XeGTAO_PrefilterDepths16x16). Built once per frame from the pre-pass depth, before the
+// AO kernel (clean_ao.comp modes 6-8), so a large projected search radius takes the same
+// number of taps at a coarser level instead of being capped in pixels (the cap made the
+// effective WORLD radius shrink with camera distance: close-up faces lost their broad
+// occlusion, #648).
+//
+// Output: R32F linear view depth (positive metres; 0 = sky / no surface -- "sky never
+// occludes" survives every level). Level 0 is the full AO-resolution depth (exact texel
+// for texel); level l is Vulkan's own floor(size / 2^l). One dispatch: each 8x8
+// workgroup covers a 16x16 level-0 tile (one thread per 2x2), the coarser levels reduce
+// in shared memory (16x16 -> 8x8 -> 4x4 -> 2x2 -> 1x1 = levels 0..4).
+//
+// The 2x2 reduction is XeGTAO's depth-aware weighted average: the farthest of the four
+// has weight 1, nearer ones fade out over the effect radius's falloff band, so a thin
+// foreground edge does not pull a coarse texel forward (which would halo-occlude the
+// surface behind it), while a continuous surface averages normally. Sky texels (0) are
+// excluded; an all-sky 2x2 stays sky.
+//
+// params.w > 0 (#648 round 3, RenderVKAODepthMipFilter 1, default): a plain mean of the
+// non-sky texels instead. The XeGTAO weights fall off with VIEW-depth difference, and on
+// layered alpha-masked content (shell grass: layers a few cm apart) the view-depth gap
+// between layers seen at a grazing angle grows with distance -- past the falloff band
+// the nearer (occluding) layers drop out of the coarse levels, so AO from the coarse
+// taps fell off at a fixed camera distance (a band following the camera). The mean is
+// coverage-weighted: a 2x2 half covered by a nearer layer sits between the layers at
+// every distance; a far-apart silhouette mix lands outside the AO falloff either way.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform sampler2D uDepth;                 // pre-pass depth (reversed-Z)
+layout(r32f, set = 0, binding = 1) writeonly uniform image2D uOut[5];  // levels 0..4
+
+layout(push_constant) uniform Push {
+    mat4 inv_proj;   // VK clip -> view (the AO kernel's matrix)
+    vec4 screen;     // width, height, 1/width, 1/height (AO resolution = level 0)
+    vec4 params;     // x: effect radius (m), y: falloff fraction of it, z: level count (1..5),
+                     // w: > 0 = plain mean filter (else XeGTAO depth-aware weights)
+} pc;
+
+shared float sZ[8][8];
+
+float linZ(ivec2 p)
+{
+    p = min(p, ivec2(pc.screen.xy) - 1);
+    const float d = texelFetch(uDepth, p, 0).r;
+    if (d <= 0.0) return 0.0;   // sky (reversed-Z: far = 0)
+    const vec2 tc = (vec2(p) + 0.5) * pc.screen.zw;
+    const vec4 v = pc.inv_proj * vec4(tc * 2.0 - 1.0, d, 1.0);
+    return max(-v.z / v.w, 1e-6);
+}
+
+float reduce4(float a, float b, float c, float d)
+{
+    const float mx = max(max(a, b), max(c, d));
+    if (mx <= 0.0) return 0.0;   // all sky
+    if (pc.params.w > 0.0)
+    {
+        const float n = (a > 0.0 ? 1.0 : 0.0) + (b > 0.0 ? 1.0 : 0.0) + (c > 0.0 ? 1.0 : 0.0) + (d > 0.0 ? 1.0 : 0.0);
+        return (a + b + c + d) / n;   // sky texels are 0: they add nothing
+    }
+    // XeGTAO_DepthMIPFilter (0.75: its empirical depth-range scale).
+    const float r = 0.75 * max(pc.params.x, 1e-3);
+    const float fr = max(pc.params.y, 0.01) * r;
+    const float fMul = -1.0 / fr;
+    const float fAdd = (r - fr) / fr + 1.0;
+    const float wa = a > 0.0 ? clamp((mx - a) * fMul + fAdd, 0.0, 1.0) : 0.0;
+    const float wb = b > 0.0 ? clamp((mx - b) * fMul + fAdd, 0.0, 1.0) : 0.0;
+    const float wc = c > 0.0 ? clamp((mx - c) * fMul + fAdd, 0.0, 1.0) : 0.0;
+    const float wd = d > 0.0 ? clamp((mx - d) * fMul + fAdd, 0.0, 1.0) : 0.0;
+    const float ws = wa + wb + wc + wd;   // >= 1 (the farthest has weight 1)
+    return (wa * a + wb * b + wc * c + wd * d) / ws;
+}
+
+void storeIf(int level, ivec2 q, float z)
+{
+    // Explicit bounds: out-of-range image stores are not guaranteed to be discarded.
+    if (level == 0) { if (all(lessThan(q, imageSize(uOut[0])))) imageStore(uOut[0], q, vec4(z)); }
+    else if (level == 1) { if (all(lessThan(q, imageSize(uOut[1])))) imageStore(uOut[1], q, vec4(z)); }
+    else if (level == 2) { if (all(lessThan(q, imageSize(uOut[2])))) imageStore(uOut[2], q, vec4(z)); }
+    else if (level == 3) { if (all(lessThan(q, imageSize(uOut[3])))) imageStore(uOut[3], q, vec4(z)); }
+    else                 { if (all(lessThan(q, imageSize(uOut[4])))) imageStore(uOut[4], q, vec4(z)); }
+}
+
+void main()
+{
+    const int levels = clamp(int(pc.params.z + 0.5), 1, 5);
+    const ivec2 l = ivec2(gl_LocalInvocationID.xy);
+    const ivec2 g = ivec2(gl_WorkGroupID.xy);
+    const ivec2 p0 = g * 16 + l * 2;
+
+    // Level 0: this thread's 2x2.
+    const float z00 = linZ(p0);
+    const float z10 = linZ(p0 + ivec2(1, 0));
+    const float z01 = linZ(p0 + ivec2(0, 1));
+    const float z11 = linZ(p0 + ivec2(1, 1));
+    storeIf(0, p0, z00);
+    storeIf(0, p0 + ivec2(1, 0), z10);
+    storeIf(0, p0 + ivec2(0, 1), z01);
+    storeIf(0, p0 + ivec2(1, 1), z11);
+
+    // Level 1: one texel per thread.
+    const float z1 = reduce4(z00, z10, z01, z11);
+    if (levels > 1) storeIf(1, g * 8 + l, z1);
+    sZ[l.x][l.y] = z1;
+    barrier();
+
+    // Level 2: 4x4 threads.
+    float z2 = 0.0;
+    if (all(lessThan(l, ivec2(4))))
+    {
+        const ivec2 s = l * 2;
+        z2 = reduce4(sZ[s.x][s.y], sZ[s.x + 1][s.y], sZ[s.x][s.y + 1], sZ[s.x + 1][s.y + 1]);
+        if (levels > 2) storeIf(2, g * 4 + l, z2);
+    }
+    barrier();
+    if (all(lessThan(l, ivec2(4)))) sZ[l.x][l.y] = z2;
+    barrier();
+
+    // Level 3: 2x2 threads.
+    float z3 = 0.0;
+    if (all(lessThan(l, ivec2(2))))
+    {
+        const ivec2 s = l * 2;
+        z3 = reduce4(sZ[s.x][s.y], sZ[s.x + 1][s.y], sZ[s.x][s.y + 1], sZ[s.x + 1][s.y + 1]);
+        if (levels > 3) storeIf(3, g * 2 + l, z3);
+    }
+    barrier();
+    if (all(lessThan(l, ivec2(2)))) sZ[l.x][l.y] = z3;
+    barrier();
+
+    // Level 4: one thread.
+    if (l.x == 0 && l.y == 0 && levels > 4)
+        storeIf(4, g, reduce4(sZ[0][0], sZ[1][0], sZ[0][1], sZ[1][1]));
+}

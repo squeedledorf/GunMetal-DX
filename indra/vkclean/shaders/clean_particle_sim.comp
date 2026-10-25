@@ -1,0 +1,173 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// vkclean — GPU particle simulation (port of cleanParticleSimC.glsl). One invocation
+// per pool slot: advance live particles (LL's semi-implicit Euler), age them, and
+// recycle dead slots onto the free-list stack. Runs BEFORE emit so slots freed this
+// frame are immediately reusable. Color/scale/glow are interpolated at draw time.
+layout(local_size_x = 256) in;
+#include "clean_particle_compute_common.glsl"
+
+void main()
+{
+    uint i = gl_GlobalInvocationID.x;
+    if (i >= pp.u_max_particles) return;
+    if (parts[i].misc.w == 0u) return; // dead slot
+
+    // Region crossing: LL re-based agent space by u_shift; move every agent-space
+    // point the particle carries (ribbon history points too) exactly once.
+    if (pp.u_shift.x != 0.0 || pp.u_shift.y != 0.0 || pp.u_shift.z != 0.0)
+    {
+        vec3 s = pp.u_shift.xyz;
+        parts[i].pos_age.xyz  += s;
+        // (ribbon prev_pos holds its parent link, axis a direction: not positions)
+        if ((parts[i].misc.x & F_RIBBON) == 0u) parts[i].prev_pos.xyz += s;
+        parts[i].accel.w      += s.z;               // bounce plane Z
+    }
+
+    float age0   = parts[i].pos_age.w;          // age at frame start (LL mLastUpdateTime)
+    float age    = age0 + pp.u_dt;
+    float maxage = parts[i].vel_maxage.w;
+
+    // Dies at its max age; also when the max age is 0 / negative / NaN (a source whose
+    // 8.8 fixed-point max age decoded to 0 would otherwise live forever and fill the
+    // pool) and past a hard ceiling: the wire format's largest max age is < 256 s
+    // (8.8 fixed point; LSL clamps to 30 s), so no legitimate particle reaches it.
+    const float PART_AGE_CEIL = 256.0;
+    if (!(maxage > 0.0) || age >= maxage || !(age < PART_AGE_CEIL))
+    {
+        // Death: mark dead and push the slot back onto the free stack.
+        // Invariant (alive + free == capacity) guarantees free_count <
+        // capacity here, so the push index is in range.
+        parts[i].misc.w = 0u;
+        uint slot = atomicAdd(free_count, 1u);
+        free_idx[slot] = i;
+        return;
+    }
+
+    vec3 pos = parts[i].pos_age.xyz;
+    vec3 vel = parts[i].vel_maxage.xyz;
+    vec3 acc = parts[i].accel.xyz;
+
+    uint flags = parts[i].misc.x;
+    uint eidx  = parts[i].misc.z;
+    // The emitter slot is this particle's source only while the slot still carries that
+    // source's id (#693). The store recycles a slot once its source has stopped feeding
+    // for the reclaim grace, and a particle can outlive its source (LL kept the dead
+    // source's last position: LLViewerPart::mPartSourcep). Reading a recycled slot
+    // teleported a FOLLOW_SRC particle onto whichever source took the slot next (or the
+    // agent origin for a zeroed row) and swapped its texture. Not owned: the source is
+    // frozen where it was last seen, as LL's dead source is.
+    const Emitter em = emit[eidx];
+    const bool own = em.misc.w == parts[i].pad.y;
+    // Frozen source: a FOLLOW_SRC particle keeps its offset from it (= stays put); the
+    // bounce plane is the source height at spawn (accel.w, re-based on crossings).
+    vec3 src_pos = own ? em.pos.xyz
+                 : (((flags & F_FOLLOW_SRC) != 0u) ? pos - parts[i].pos_offset.xyz
+                                                   : vec3(pos.xy, parts[i].accel.w));
+    vec3 tgt_pos = own ? em.target.xyz : src_pos;   // live target position this frame
+    uint mode    = own ? em.blend.y : MODE_NORMAL;  // procedural motion mode
+    // The draw / pick read the particle's own texture index: refreshed from the live slot
+    // while it is still this particle's (it upgrades as the texture loads), kept after.
+    if (own) parts[i].tex_handle.x = em.tex_handle.x;
+    // Particle fog (#1003): the system's converted flag follows its emitter (F_PFOG).
+    if (own && (flags & F_PFOG) != (em.misc.y & F_PFOG))
+    {
+        flags = (flags & ~F_PFOG) | (em.misc.y & F_PFOG);
+        parts[i].misc.x = flags;
+    }
+
+    float frac = (maxage > 0.0) ? clamp(age / maxage, 0.0, 1.0) : 0.0;
+
+    if (mode == MODE_SPIRAL)
+    {
+        // Spiral + chat effects: orbit the (live) source on a unit-radius
+        // circle while rising from -0.5 to +0.5 over the particle's life.
+        // The per-particle orbit phase was baked into pos_offset.w at spawn.
+        // (Matches LLViewerPartSourceSpiral::updatePart.)
+        float ph = parts[i].pos_offset.w;
+        pos = src_pos + vec3(sin(6.2831853 * frac + ph),
+                             cos(6.2831853 * frac + ph),
+                             -0.5 + frac);
+    }
+    else if (mode == MODE_BEAM)
+    {
+        // Pointing / select beam: linear source -> target over life.
+        // (Matches LLViewerPartSourceBeam::updatePart.) Velocity stays the
+        // spawn beam direction so FOLLOW_VELOCITY orients the billboard.
+        pos = mix(src_pos, tgt_pos, frac);
+    }
+    else
+    {
+        // Faithful port of LLViewerPartGroup::updateParticles physics order.
+
+        // FOLLOW_SRC: rigidly translate with the source, preserving the
+        // particle's source-relative offset.
+        if ((flags & F_FOLLOW_SRC) != 0u)
+        {
+            pos = src_pos + parts[i].pos_offset.xyz;
+        }
+
+        // WIND: drag the velocity toward the region wind (sampled CPU-side
+        // once per source into emit.wind; the wind grid is coarse so the
+        // source position is representative). Matches LL's update order
+        // (after follow-src, before target).
+        // (Not owned: no wind sample any more -- the velocity carries on.)
+        if ((flags & F_WIND) != 0u && own)
+        {
+            vel *= (1.0 - 0.1 * pp.u_dt);
+            vel += 0.1 * pp.u_dt * em.wind.xyz;
+        }
+
+        // TARGET_POS: steer velocity toward a value that reaches the target
+        // by end of life; the pull strengthens as the particle ages.
+        // (Not owned: the target is unknown -- no steering.)
+        if ((flags & F_TARGET_POS) != 0u && own)
+        {
+            float remaining = maxage - age0;
+            if (remaining > 1.0e-4)
+            {
+                float step = clamp(pp.u_dt / remaining, 0.0, 0.1) * 5.0;
+                vec3 delta_pos = (tgt_pos - pos) / remaining;
+                vel = vel * (1.0 - step) + step * delta_pos;
+            }
+        }
+
+        if ((flags & F_TARGET_LIN) != 0u && own)
+        {
+            vec3 delta = tgt_pos - src_pos;
+            pos = src_pos + frac * delta;
+            vel = delta;
+        }
+        else if ((flags & F_TARGET_LIN) != 0u)
+        {
+            // Not owned: carry on along the last source -> target line at the same rate
+            // (vel holds the whole delta, covered over the max age).
+            pos += pp.u_dt * vel / maxage;
+        }
+        else
+        {
+            pos += pp.u_dt * vel + 0.5 * pp.u_dt * pp.u_dt * acc;
+            vel += pp.u_dt * acc;
+        }
+
+        // Bounce: reflect around the live source height.
+        if ((flags & F_BOUNCE) != 0u)
+        {
+            float dz = pos.z - src_pos.z;
+            if (dz < 0.0)
+            {
+                pos.z += -2.0 * dz;
+                vel.z *= -0.75;
+            }
+        }
+
+        // FOLLOW_SRC: store the new source-relative offset for next frame.
+        if ((flags & F_FOLLOW_SRC) != 0u)
+        {
+            parts[i].pos_offset = vec4(pos - src_pos, 0.0);
+        }
+    }
+
+    parts[i].pos_age    = vec4(pos, age);
+    parts[i].vel_maxage = vec4(vel, maxage);
+}

@@ -1,0 +1,903 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+// vkclean — screen-space ambient occlusion (RenderDeferredSSAO), run between the
+// depth pre-pass and the lit pass. Writes the shared AO target (uAO in
+// clean_draw.frag, binding 21) that the lit FS folds into ambient/irradiance the way
+// LL's softenLightF adjustIrradiance does. A ray-traced AO producer (#86) writes the
+// same target; the consumer side does not change.
+//
+// mode 0: LL class1/deferred/aoUtil.glsl calcAmbientOcclusion (8 taps, noise-reflected
+//         kernel, sphere-occluder falloff). Normals: the depth+normal pre-pass target
+//         (view space, normal-mapped -- LL's G-buffer normal).
+// mode 1/2: LL class1/deferred/blurLightF.glsl on the AO channel, horizontal then
+//         vertical: RenderShadowGaussian.y weights, plane-distance rejection.
+// mode 3: GTAO (Jimenez et al. 2016, "Practical Real-Time Strategies for Accurate
+//         Indirect Occlusion"; structure after Intel XeGTAO): per pixel S slices at a
+//         Hilbert-curve R2 noise rotation (#843), a horizon search of M steps per side within
+//         a world-space radius, then the analytic cosine-weighted visibility integral
+//         against the slice-projected normal (RenderVKAOMethod 1).
+// (modes 4 / 5 / 8, the older GTAO-only half-res + quadrant upsample, are gone: the
+//         half grid below, mode.x + 32, covers both methods.)
+// mode 6/7 (#648, RenderVKAODepthMips): modes 0/3 with a DISTANCE-INVARIANT world
+//         radius. The old modes cap the projected radius in pixels, and the cap shrinks
+//         the world radius it searches proportionally to view depth (close-up, an avatar
+//         face kept only its smallest creases; zoomed out it got the broad occlusion of
+//         the head / hair). Here the radius is never shrunk (a pixel cap applies only if
+//         explicitly set, as a safety valve); large pixel offsets instead read the view-
+//         depth MIP chain (uViewZ, clean_ao_depth.comp) at a level chosen from the
+//         offset length (XeGTAO: log2(len) - 3.3), so the cost per pixel stays the same.
+//         Every tap is snapped to a texel centre of the level it reads and reconstructed
+//         at THAT centre (ray x linear depth): the old taps took a NEAREST depth texel but
+//         the un-snapped position, a sub-texel position/depth mismatch that becomes a
+//         false height on surfaces seen at grazing angles (ground). Taps off screen are
+//         "no data" (the old taps clamped to the edge texel).
+//         Blur modes 1/2 with params.z > 0 (same setting): the plane-distance test uses
+//         the depth-derived face normal and the tap's exact texel-centre position, so a
+//         normal-mapped plane (grass terrain) is not rejected tap by tap at grazing angles.
+// mode.x + 32 (RenderVKAOHalfRes): the HALF-RESOLUTION GRID for the kernels 0 / 3 / 6 / 7
+//         (+ 10 blend) and the blurs 1 / 2 -- one invocation per 2 x 2 block, the AO target
+//         and the blur intermediate ceil(w / 2) x ceil(h / 2), ~1/4 of the work. pc.screen
+//         stays the FULL render size (every depth / normal / radius term is in full-res
+//         pixels exactly as before). Texel q stands for ONE full-res pixel of its block, its
+//         REPRESENTATIVE (repPixel): on a checkerboard, even blocks ((q.x ^ q.y) & 1 == 0)
+//         take the CLOSEST depth, odd blocks the FARTHEST non-sky one -- so across any
+//         silhouette both the foreground and the background surface keep samples within
+//         one texel (a fixed corner would lose 1-px features three times in four, the
+//         closest alone would starve the background behind thin occluders, and a depth MIP
+//         average -- RenderVKAODepthMips' level 1 mean -- belongs to no surface at all).
+//         The kernel runs AT that pixel (its depth, its normals, its exact position); the
+//         blur's receiver and taps are representatives too (position from the exact depth
+//         texel), and the consumers upsample (clean_surface_light.glsl aoSample) with each
+//         texel's representative PLANE, written here to uMeta (aoMeta) when it is allocated
+//         (RenderVKAOUpsample 1).
+// mode 4 (#843, RenderVKAOTemporal): the TEMPORAL ACCUMULATOR, between the kernel and the
+//         blurs (aoTemporal below). The kernel's noise varies every frame then (GTAO: the
+//         Hilbert R2 temporal index, SSAO: a per-frame noiseReflect seed), so this is the AO's
+//         own integrator -- it never relies on TAA / FSR ("denoiser everywhere").
+//
+// AO_FORMAT (r8 / r16f / r32f) matches the storage view format the renderer picked.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform sampler2D uDepth;   // pre-pass depth (NEAREST)
+layout(set = 0, binding = 1) uniform sampler2D uSrc;     // blur source AO (LINEAR)
+layout(AO_FORMAT, set = 0, binding = 2) writeonly uniform image2D uDst;
+layout(set = 0, binding = 3) uniform sampler2D uNormal;  // pre-pass normals (oct, view space) | G-buffer G1
+// NORMAL SOURCE (spec constant 0; RenderVKPrepassDepthOnlyDeferred): false = the depth +
+// normal pre-pass target (view-space oct, below); true = the deferred G-buffer's G1
+// (clean_gbuffer.glsl: xy oct WORLD shading normal, zw oct WORLD Ng -- the oriented smooth
+// interpolated vertex normal, the same value the pre-pass writes to .zw), rotated to view
+// space with the frame's world -> view (binding 9, the frame-info block: ssr.cur_view, the
+// same rotation clean_prepass_normal.frag applies). Deferred frames then pre-pass depth
+// only, and AO runs after the G-buffer pass.
+layout(constant_id = 0) const bool kAoGbufNormals = false;
+#include "clean_frame_info.glsl"   // ssr.cur_view (binding 9)
+// Linear view-depth MIP chain (modes 6-7; clean_ao_depth.comp). When the chain is not
+// allocated the host binds the pre-pass depth here (valid, never read by modes 0-3).
+layout(set = 0, binding = 4) uniform sampler2D uViewZ;
+// Half-resolution upsample meta (mode.x + 32, RenderVKAOUpsample 1): per AO texel x the plane
+// offset dot(Ng, P - eye) of its representative, y its world Ng (12 + 12-bit oct as an exact
+// integer; -1 = sky). A 1 x 1 placeholder otherwise: written only when its size is the half
+// grid's. R32G32_SFLOAT: a mandatory storage format.
+layout(rg32f, set = 0, binding = 5) writeonly uniform image2D uMeta;
+// TEMPORAL HISTORY (#843, mode 4; RenderVKAOTemporal): r32ui per AO texel (aoPackHist): last
+// frame's accumulated history (b6, read at the reprojected position) and this frame's (b7,
+// written by mode 4 at its own texel, read by the blurs for its length; the host copies b7 ->
+// b6 after mode 4). 1 x 1 stubs while the accumulator is off.
+layout(set = 0, binding = 6) uniform usampler2D uHistPrev;
+layout(r32ui, set = 0, binding = 7) uniform uimage2D uHistCur;
+// Motion vectors (the pre-pass target, uv units, current - previous; read only when
+// ssr.taa_params.y says this frame wrote them). The depth view as a placeholder otherwise.
+layout(set = 0, binding = 8) uniform sampler2D uMotion;
+
+layout(push_constant) uniform Push {
+    mat4 inv_proj;   // VK clip -> view (current frame)
+    vec4 screen;     // width, height, 1/width, 1/height
+    vec4 params;     // mode 0: ssao_radius, ssao_max_radius, ssao_factor, ssao_factor_inv
+                     // mode 1/2: kern_scale, dist_factor, -, -
+    vec4 kern_y;     // blur: gaussian weights for offsets 0..3 (LL kern[i].y)
+    vec4 mode;       // x: 0 = SSAO, 1 = blur H, 2 = blur V
+                     // y (SSAO): contact slope -- 0 = LL's fixed 5 cm occluder bias,
+                     //   > 0 = min(5 cm, y * sample distance + depth epsilon) (see ssao())
+                     // z (SSAO): strength exponent on the result (1 = as computed)
+                     // w (SSAO): > 0 = occluder tangent plane from the depth-reconstructed
+                     //   face normal instead of the smooth shading normal (see geomNormal())
+    // GTAO (mode 3) re-purposes the block:
+    //   params = radius (m), max radius (render px), falloff fraction of the radius,
+    //            thin-occluder compensation (XeGTAO; 0 = off)
+    //   kern_y = slices, steps per side, noise frame, multi-bounce albedo (0 = off)
+    //            noise frame (#843, gtaoNoise): 0 = the static spatial pattern; > 0 =
+    //            1 + (AO frame % 64), the XeGTAO temporal index (288 x frame along R2)
+    //   mode   = 3 (7: depth-MIP path), pixels per metre at 1 m view depth
+    //            (0.5 * height * P[1][1]), strength exponent, geometric normal flag
+    //   (depth-MIP path: params.y = safety cap in render px, 0 = none)
+    // SSAO depth-MIP path (mode 6): as mode 0; params.y = safety cap (0 = none).
+    // Blur (mode 1/2): params.z > 0 = depth-MIP path's precise plane test; params.w > 0 =
+    //   absolute plane tolerance (m, RenderVKAOBlurTol); mode.y > 0 = pass-through (blur off);
+    //   mode.z > 0 (#843, the accumulator on) = history length from which a texel counts as
+    //   converged: its blur keeps only the two nearest taps per side (blurTaps).
+    // SSAO (mode 0/6): kern_y.z = per-frame noise seed (#843; 0 = the static LL pattern).
+    // Temporal (mode 4): params = history cap (frames), 1 = last frame's history is valid,
+    //   clamp gamma, REACTIVE cap (#86 RTAO, frames; 0 = off): texels the RT kernel flagged in
+    //   b7 (a ray met a moving caster, clean_rtao.comp) keep at most this much history.
+    // Blur V: mode.w > 0 = the GTAO / RTAO working-term scale (kGtaoTermScale); mode.w < 0
+    //   (#86 RTAO) = the same scale, then the strength exponent -mode.w (RenderVKAOStrength:
+    //   RTAO's one-ray estimate is binary, so its strength applies to the denoised value).
+} pc;
+
+// Receiver / normal / half-grid helpers shared with the ray-traced AO (clean_rtao.comp).
+#include "clean_ao_common.glsl"
+
+// ---- depth-MIP path (modes 6-7, precise blur) ----
+// View ray through tc, scaled to view z = -1: affine in tc for a perspective projection
+// (jitter included), so three reconstructions per invocation give the basis.
+vec3 gRay0, gRayX, gRayY;
+void initRay()
+{
+    vec3 a = viewPos(vec2(0.0), 1.0), b = viewPos(vec2(1.0, 0.0), 1.0), c = viewPos(vec2(0.0, 1.0), 1.0);
+    a /= -a.z; b /= -b.z; c /= -c.z;
+    gRay0 = a; gRayX = b - a; gRayY = c - a;
+}
+vec3 rayPos(vec2 tc, float z) { return (gRay0 + tc.x * gRayX + tc.y * gRayY) * z; }   // z: linear (> 0)
+
+// Level-0 linear depth at full-res pixel p (0 = sky / off the chain).
+float viewZ0(ivec2 p) { return texelFetch(uViewZ, p, 0).r; }
+
+// The level for a tap pixelLen pixels from the receiver (XeGTAO DepthMIPSamplingOffset
+// 3.3, rounded as a NEAREST mip filter would).
+int tapLevel(float pixelLen, int levels)
+{
+    return clamp(int(floor(log2(max(pixelLen, 1.0)) - 3.3 + 0.5)), 0, levels - 1);
+}
+
+// A tap at full-res pixel sp read from level lv: the view position at that level's texel
+// centre (the depth and the position describe the same point). false = off screen / sky.
+bool tapPos(ivec2 sp, int lv, out vec3 p)
+{
+    p = vec3(0.0);
+    const ivec2 full = ivec2(pc.screen.xy);
+    if (any(lessThan(sp, ivec2(0))) || any(greaterThanEqual(sp, full))) return false;
+    // Level size: Vulkan's max(1, size >> l) of the chain, which the host builds only at
+    // pc.screen's size (the depth-MIP modes run only then) -- the same value textureSize
+    // returns, without a texture-pipe size query per tap (#828: up to 48 per GTAO pixel).
+    const ivec2 q = min(sp >> lv, max(full >> lv, ivec2(1)) - 1);
+    const float z = texelFetch(uViewZ, q, lv).r;
+    if (z <= 0.0) return false;
+    const vec2 cpx = (vec2(q) + 0.5) * float(1 << lv);   // texel centre, full-res pixels
+    p = rayPos(cpx * pc.screen.zw, z);
+    return true;
+}
+
+// #648 round 3 (mode.x + 10, RenderVKAOTapBlend): taps blend the two levels around the
+// fractional level instead of jumping at log2 thresholds, and the facet test is a ratio
+// (facetRatio) instead of an elevation threshold. Set in main().
+bool gBlend = false;
+
+// A tap pixelLen pixels out at full-res pixel sp, at the level(s) its length selects.
+bool tapAt(ivec2 sp, float pixelLen, int levels, out vec3 p)
+{
+    if (!gBlend) return tapPos(sp, tapLevel(pixelLen, levels), p);
+    const float lf = clamp(log2(max(pixelLen, 1.0)) - 3.3, 0.0, float(levels - 1));
+    const int l0 = int(floor(lf));
+    const float fr = lf - float(l0);
+    vec3 p0, p1;
+    const bool ok0 = tapPos(sp, l0, p0);
+    if (fr < 1e-3 || l0 + 1 >= levels) { p = p0; return ok0; }
+    const bool ok1 = tapPos(sp, l0 + 1, p1);
+    p = ok0 && ok1 ? mix(p0, p1, fr) : (ok0 ? p0 : p1);
+    return ok0 || ok1;
+}
+
+
+// Depth-MIP path (#648 round 2): weight of a tap as an occluder, from its elevation above
+// the receiver's FACET plane (ng = geomNormal). The facet normal is constant per
+// triangle, so using it as THE normal (the hemisphere / tangent plane) steps the AO at
+// every triangle edge once the radius reaches real occluders (a pony's leg under its
+// body, the terrain grid). Instead the smooth shading normal orients the hemisphere and
+// the facet plane only REJECTS self-occlusion: a tap on the receiver's own triangle has
+// elevation 0, a convex neighbour is below it, a shallow concave fold (< ~slope) fades
+// out -- what a9b364273a's facet normal was introduced for -- while a real occluder rises
+// far above every facet's plane and keeps full weight whichever triangle receives it.
+float facetWeight(vec3 dl, float dist, vec3 ng, float slope)
+{
+    const float e = dot(dl, ng) / max(dist, 1e-6);   // sine of the elevation
+    return smoothstep(slope, 2.0 * slope + 0.02, e);
+}
+// Round 3: the share of the tap's elevation above the smooth plane (N) that is also
+// above the facet plane. A tap on the receiver's own triangle (0 above the facet) or
+// on a convex neighbour (below it) gets 0 -- the a9b364273a self-facet case -- a real
+// occluder rising above both gets ~1, with NO absolute angle threshold: the elevation
+// of an occluder layer shrinks smoothly with distance (alpha shell grass: a few cm of
+// height over a ground distance growing ~z^2 per pixel), and a threshold on it turned
+// that into a band at a fixed camera distance.
+float facetRatio(vec3 dl, vec3 ng, vec3 N)
+{
+    const float es = dot(dl, N);
+    return es > 0.0 ? clamp(dot(dl, ng) / es, 0.0, 1.0) : 1.0;
+}
+
+// LL noiseMap: 128x128 point-sampled, xy = normalize(frand-0.5, frand-0.5), tiled
+// one texel per pixel. Hash of the pixel within its 128 tile, same distribution.
+// #843: seed > 0 (the AO accumulator on) re-hashes the tile every frame, so the accumulator
+// integrates many kernel orientations per pixel; seed 0 = LL's static pattern, unchanged.
+vec2 noiseReflect(ivec2 px, uint seed)
+{
+    uvec2 q = uvec2(px & 127);
+    uint h = q.x * 0x8da6b343u ^ q.y * 0xd8163841u ^ seed * 0x9e3779b9u;
+    h ^= h >> 16; h *= 0x7feb352du; h ^= h >> 15; h *= 0x846ca68bu; h ^= h >> 16;
+    vec2 v = vec2(float(h & 0xffffu), float(h >> 16)) * (1.0 / 65535.0) - 0.5;
+    return dot(v, v) > 1e-8 ? normalize(v) : vec2(1.0, 0.0);
+}
+
+// px: the full-res pixel evaluated (tc its centre); npx: the noise coordinate (the pixel on
+// the grid being written: px itself, or the half-res texel).
+float ssao(ivec2 px, vec2 tc, ivec2 npx, bool mips)
+{
+    float d = depthAt(tc);
+    if (d <= 0.0) return 1.0;   // sky (reversed-Z: far = 0)
+    vec3 pos  = viewPos(tc, d);
+    int levels = 1;
+    if (mips)
+    {
+        // Receiver from the same linear depth / ray basis as the taps, so a plane
+        // reconstructs consistently on both sides of the occluder test.
+        const float z0 = viewZ0(px);
+        if (z0 <= 0.0) return 1.0;
+        pos = rayPos(tc, z0);
+        levels = textureQueryLevels(uViewZ);
+    }
+    vec3 norm = mips ? vertexNormal(tc) : viewNormal(tc);
+    // The occluder test uses the triangle's real surface: on a smooth-shaded low-poly
+    // mesh the shading normal tilts off the facet (up to half the dihedral angle near
+    // edges), so same-facet samples rose above the "tangent plane" and drew faceting lines.
+    // Depth-MIP path: the smooth normal stays the tangent plane and the facet plane only
+    // rejects self-occlusion (facetWeight), so the result is continuous across edges.
+    const bool facet = pc.mode.w > 0.0;
+    const vec3 ng = facet ? geomNormal(tc, pos, norm) : norm;
+    if (facet && !mips) norm = ng;
+    const float fslope = max(pc.mode.y, 0.02);
+    vec2 nr   = noiseReflect(npx, uint(max(pc.kern_y.z, 0.0) + 0.5));
+
+    const vec2 kern[8] = vec2[8](
+        vec2(-1.0, 0.0) * (0.125 * 0.125),
+        vec2( 1.0, 0.0) * (0.250 * 0.250),
+        vec2( 0.0, 1.0) * (0.375 * 0.375),
+        vec2( 0.0,-1.0) * (0.500 * 0.500),
+        vec2( 0.7071, 0.7071) * (0.625 * 0.625),
+        vec2(-0.7071,-0.7071) * (0.750 * 0.750),
+        vec2(-0.7071, 0.7071) * (0.875 * 0.875),
+        vec2( 0.7071,-0.7071) * (1.000 * 1.000));
+
+    // Pixels at this depth for the unit kernel. Legacy: capped (the cap shrinks the world
+    // radius close up, #648); depth-MIP path: uncapped unless a safety cap is set.
+    float scale = pc.params.x / -pos.z;
+    if (!mips || pc.params.y > 0.0) scale = min(scale, pc.params.y);
+    float angle_hidden = 0.0, points = 0.0;
+    for (int i = 0; i < 8; ++i)
+    {
+        vec3 spos;
+        if (mips)
+        {
+            // Pixel offset (noise-reflected kernel, as LL), snapped to a pixel; the tap
+            // reads the level its length selects, at that level's texel centre.
+            const vec2 offPx = scale * reflect(kern[i], nr);
+            const ivec2 sp = px + ivec2(round(offPx));
+            if (!tapAt(sp, length(offPx), levels, spos)) continue;   // no data
+        }
+        else
+        {
+            vec2 stc = tc + scale * reflect(kern[i] * pc.screen.zw, nr);
+            spos = viewPos(stc);
+        }
+        vec3 diff = pos - spos;
+        float dist2 = dot(diff, diff);
+        // LL: an occluder must rise more than 5 cm above the receiver's tangent plane.
+        // That fixed bias is build-scale: avatar-scale creases (the neck under the chin,
+        // a face inside a helmet, the nostrils / ears) never pass it, so they got no
+        // occlusion at ANY radius or factor. Contact mode (RenderVKAOStandard,
+        // RenderVKAOContactSlope): the bias scales with the sample's distance -- an angle
+        // above the tangent plane (slope 0.2 ~ 11.5 deg, which also rejects normal-map
+        // tilt on flat ground) plus a small depth-precision epsilon -- capped at LL's
+        // 5 cm, so samples farther than ~25 cm are judged exactly as before.
+        const float h = dot(spos - pos, norm);
+        const float bias = pc.mode.y > 0.0
+            ? min(0.05, pc.mode.y * sqrt(dist2) + 0.002 * -pos.z)
+            : 0.05;
+        float funky = (h > bias) ? 1.0 : 0.0;
+        if (mips && facet) funky *= gBlend ? facetRatio(spos - pos, ng, norm) : facetWeight(spos - pos, sqrt(dist2), ng, fslope);
+        // (A tap that rounds onto the receiver itself: dist2 = 0 but h = 0, so it never
+        // counts as an occluder; it only counts as a data point, as LL's same-texel taps.)
+        angle_hidden += funky * min(1.0 / max(dist2, 1e-12), pc.params.w);
+        // samples well in front of the point are "no data", not "no occlusion"
+        points += (diff.z > -1.0) ? 1.0 : 0.0;
+    }
+    angle_hidden = points > 0.0 ? min(pc.params.z * angle_hidden / points, 1.0) : 0.0;
+    const float ao = clamp(1.0 - angle_hidden, 0.0, 1.0);
+    // Strength (RenderVKAOStrength): an exponent, so unoccluded stays 1 and full
+    // occlusion stays 0; > 1 deepens partial occlusion (crevices read darker).
+    return pc.mode.z > 0.0 && pc.mode.z != 1.0 ? pow(ao, pc.mode.z) : ao;
+}
+
+// #843 (blur mode.z > 0): the number of taps per side -- 6 (LL's kernel), or 2 where the
+// accumulator's history at this texel is converged (length >= mode.z): the history already
+// averaged the noise, the short kernel only takes the residual. Young / disoccluded texels
+// (length 1 after a cut or a disocclusion) keep the full blur. ~1/3 of the blur's taps over
+// converged screen area (the measured 1.23 ms at 4K half res on a GTX 1080 is the budget the
+// accumulator pass has to fit into).
+int blurTaps(ivec2 q)
+{
+    if (pc.mode.z <= 0.0) return 6;
+    const float len = float(imageLoad(uHistCur, q).x >> 27u) + 1.0;
+    return len >= pc.mode.z ? 2 : 6;
+}
+
+float blur(vec2 tc, vec2 delta)
+{
+    float c = textureLod(uSrc, tc, 0.0).r;
+    if (pc.mode.y > 0.0) return c;   // RenderVKAOBlur 0 (#648 A/B): pass-through
+    float d = depthAt(tc);
+    if (d <= 0.0) return c;     // sky (reversed-Z)
+    vec3 pos  = viewPos(tc, d);
+    vec3 norm = viewNormal(tc);
+    // Depth-MIP path (#648): taps are positioned at the depth texel actually read, and
+    // the plane test uses the smooth unperturbed vertex normal. (Round 1 used the
+    // per-triangle facet normal here: acceptance changed at every triangle edge of
+    // smooth-shaded meshes, so the blur stopped at the edges and printed them.)
+    const bool exact = pc.params.z > 0.0;
+    const vec3 pnorm = exact ? vertexNormal(tc) : norm;
+
+    vec2 dlt = pc.params.x * delta / (1.0 + norm.xy * norm.xy);
+    dlt /= max(-pos.z * pc.params.y, 1.0);
+
+    // LL k[7]: kern[0..3] at offsets 0..3 on even slots, midpoints on odd.
+    float w[7], o[7];
+    w[0] = pc.kern_y.x; w[2] = pc.kern_y.y; w[4] = pc.kern_y.z; w[6] = pc.kern_y.w;
+    w[1] = (w[0] + w[2]) * 0.5; w[3] = (w[2] + w[4]) * 0.5; w[5] = (w[4] + w[6]) * 0.5;
+    for (int i = 0; i < 7; ++i) o[i] = float(i) * 0.5;
+
+    float wsum = w[0];
+    float col  = c * w[0];
+    // LL's plane tolerance is RELATIVE to view depth: |pd| <= 0.0071 z. On layered alpha
+    // content (shell grass, layers a few cm apart) the layer gap falls inside it past
+    // gap / 0.0071 (3 cm -> ~4 m): nearer, the blur keeps each layer's AO apart (per-blade
+    // speckle); beyond, it averages across layers (smooth, lighter) -- a sharp line at a
+    // fixed camera distance, further out for taller (wider-spaced) grass (#648 round 5).
+    // params.w > 0 (RenderVKAOBlurTol, metres): an ABSOLUTE plane tolerance plus a small
+    // float-precision floor (5e-4 z) and a 1-degree slope term on the tap's in-plane
+    // distance (smooth-normal vs real-surface mismatch), never looser than LL's -- so
+    // near it is LL's test, and layers centimetres apart stay apart out to tens of metres.
+    float tol2 = pos.z * pos.z * 0.00005;
+    const float tolAbs = pc.params.w;
+
+    // perturb the origin slightly to hide edge ghosting (LL tc_mod)
+    vec2 tcp = tc * pc.screen.xy;
+    float tc_mod = 0.5 * (tcp.x + tcp.y);
+    tc_mod = (tc_mod - floor(tc_mod)) * 2.0;
+    tcp += (tc_mod - 0.5) * o[2] * dlt * 0.5;
+
+    const int nt = blurTaps(ivec2(tc * pc.screen.xy));
+    for (int s = -1; s <= 1; s += 2)
+    {
+        for (int i = 1; i <= nt; ++i)
+        {
+            vec2 stc = (tcp + float(s) * o[i] * dlt * 2.0) * pc.screen.zw;
+            // Exact: the position of the depth texel actually read (NEAREST), at its
+            // centre -- not the depth of one point at the position of another.
+            vec3 spos = exact ? viewPos((floor(stc * pc.screen.xy) + 0.5) * pc.screen.zw) : viewPos(stc);
+            float pd = dot(pnorm, spos - pos);
+            float t2 = tol2;
+            if (tolAbs > 0.0)
+            {
+                const float lat = length((spos - pos) - pd * pnorm);
+                const float t = tolAbs + 5e-4 * -pos.z + 0.0175 * lat;
+                t2 = min(tol2, t * t);
+            }
+            if (pd * pd <= t2)
+            {
+                col  += textureLod(uSrc, stc, 0.0).r * w[i];
+                wsum += w[i];
+            }
+        }
+    }
+    return max(col / wsum, 0.0);
+}
+
+// ---------------------------------------------------------------------------------
+// GTAO (mode 3)
+// ---------------------------------------------------------------------------------
+const float GTAO_PI = 3.14159265;
+const float GTAO_HALF_PI = 1.57079633;
+
+// SLICE / STEP NOISE (#843). Was interleaved gradient noise (Jimenez 2014) -- the bands:
+// with only S = 2 slice directions per pixel (RenderVKGTAOSlices) the AO of a curved surface
+// is a smooth function of the slice angle, so the result took on the noise's own structure,
+// and IGN is a strongly DIAGONAL, lattice-like ramp (its value is a linear function of the
+// pixel, wrapped). The +-3 texel blur cannot remove structure that coarse (at half
+// resolution twice as coarse in render pixels); 8 slices hid it (owner A/B), 16 steps only
+// masked it. Its per-frame variation was also tied to the TAA counter (#841's flaw): without
+// TAA / FSR it never changed, with FSR the residual pattern moved every frame (the scroll).
+// IGN is the default again (RenderVKGTAONoise 0) now that the kernel no longer saturates
+// per pixel (kGtaoTermScale) and its frame is the AO's own counter, not the TAA's.
+// RenderVKGTAONoise 1: Intel XeGTAO's spatio-temporal noise -- its 64 x 64 tile printed as a
+// grid of boxes on two-slice curved surfaces (#843): the pixel's index along a 64 x 64 HILBERT CURVE
+// (consecutive indices are spatial neighbours, so a low-discrepancy sequence indexed by it
+// spreads evenly over every small neighbourhood with no preferred direction) into the R2
+// sequence (Roberts 2018, plastic-number additive recurrence) -- x the slice rotation, y the
+// step offset. Temporal: XeGTAO's 288 x (frame % 64) along the same sequence, frame = the
+// AO's OWN counter (LLCleanRendererVK::mAoFrame), never mTaaFrame. Each 64 x 64 tile (on
+// the half grid 128 x 128 render px) holds every one of the 4096 indices exactly once.
+uint gtaoHilbert(uvec2 p)
+{
+    // XeGTAO HilbertIndex (XE_HILBERT_LEVEL 6; MIT, Intel 2016-2021), on p & 63.
+    uint x = p.x & 63u, y = p.y & 63u, index = 0u;
+    for (uint lv = 32u; lv > 0u; lv >>= 1u)
+    {
+        const uint rx = (x & lv) != 0u ? 1u : 0u;
+        const uint ry = (y & lv) != 0u ? 1u : 0u;
+        index += lv * lv * ((3u * rx) ^ ry);
+        if (ry == 0u)
+        {
+            if (rx == 1u) { x = 63u - x; y = 63u - y; }
+            const uint t = x; x = y; y = t;
+        }
+    }
+    return index;
+}
+// R2 in 32-bit fixed point (round(alpha * 2^32) = 3242174889, 2447445414; + 0.5): exact for
+// any index -- the float product index * alpha loses ~11 fraction bits at index ~2e4.
+vec2 gtaoNoiseHilbert(uvec2 npx, uint frame)
+{
+    const uint i = gtaoHilbert(npx) + 288u * frame;
+    const uvec2 r = uvec2(0x80000000u) + i * uvec2(3242174889u, 2447445414u);
+    return vec2(r >> 8u) * (1.0 / 16777216.0);
+}
+// Interleaved gradient noise (Jimenez 2014): every 3 x 3 neighbourhood spans [0, 1), and
+// nothing repeats on a coarse grid. Temporal: Jimenez's 5.588238 px offset per frame. y is
+// IGN on the transposed pixel (an offset along the same axes would only shift x's value).
+float gtaoIgn(vec2 p) { return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))); }
+vec2 gtaoNoise(uvec2 npx, uint frame, bool hilbert)
+{
+    if (hilbert) return gtaoNoiseHilbert(npx, frame);
+    const vec2 p = vec2(npx) + 5.588238 * float(frame);
+    return vec2(gtaoIgn(p), gtaoIgn(p.yx + vec2(7.0, 13.0)));
+}
+
+bool onScreen(vec2 tc) { return all(greaterThanEqual(tc, vec2(0.0))) && all(lessThanEqual(tc, vec2(1.0))); }
+
+// Jimenez 2016 multi-bounce fit (albedo constant): brightens occlusion the way
+// interreflection from a surface of that albedo would.
+float multiBounce(float v, float albedo)
+{
+    const float a =  2.0404 * albedo - 0.3324;
+    const float b = -4.7951 * albedo + 0.6417;
+    const float c =  2.7552 * albedo + 0.6903;
+    return max(v, ((v * a + b) * v + c) * v);
+}
+
+// GTAO's working term (XeGTAO XE_GTAO_OCCLUSION_TERM_SCALE): visibility / 1.5 in the unorm
+// AO targets, from the kernel through the accumulator and both blurs; blur V (push mode.w)
+// scales it back and saturates. One pixel's estimate is legitimately above 1 for some slice
+// orientations (an unoccluded slice integrates to pl (cos n + n sin n); only the average over
+// all orientations is 1), so saturating it in the kernel kept the dark half only: a darkening
+// set by the slice angle, i.e. by the noise tile -- the #843 lattice.
+const float kGtaoTermScale = 1.5;
+
+// tc: the full-res pixel centre to evaluate; npx: the noise coordinate (the pixel on the
+// grid being written). mips: the depth-MIP path (#648; fp = the full-res pixel of tc).
+// Visibility, NOT saturated (see kGtaoTermScale); gtaoTerm stores it.
+float gtaoVis(vec2 tc, vec2 npx, bool mips, ivec2 fp)
+{
+    const float d = depthAt(tc);
+    if (d <= 0.0) return 1.0;   // sky (reversed-Z)
+    vec3 pos = viewPos(tc, d);
+    int levels = 1;
+    if (mips)
+    {
+        const float z0 = viewZ0(fp);
+        if (z0 <= 0.0) return 1.0;
+        pos = rayPos(tc, z0);   // same reconstruction as the taps
+        levels = textureQueryLevels(uViewZ);
+    }
+    vec3 N = mips ? vertexNormal(tc) : viewNormal(tc);
+    // Legacy: mode.w > 0 = the facet normal as the hemisphere normal. Depth-MIP path:
+    // mode.w = facet self-occlusion slope (0 = off); the hemisphere stays on the smooth
+    // normal (see facetWeight).
+    const bool facet = pc.mode.w > 0.0;
+    const vec3 ng = facet ? geomNormal(tc, pos, N) : N;
+    if (facet && !mips) N = ng;
+    const float fslope = max(pc.mode.w, 0.02);
+    const vec3 V = normalize(-pos);
+
+    // World radius -> pixels at this depth. Legacy: capped (the cap then shrinks the radius
+    // the falloff works against, so a capped search still fades to its own edge -- and
+    // the world radius shrinks with camera distance, #648). Depth-MIP path: no cap unless
+    // a safety cap is set; the taps' MIP level keeps the cost of a large radius flat.
+    const float zv = max(-pos.z, 1e-4);
+    float rpx = pc.params.x * pc.mode.y / zv;
+    if (!mips || pc.params.y > 0.0) rpx = min(rpx, pc.params.y);
+    if (rpx < 1.0) return 1.0;
+    const float radius = rpx * zv / pc.mode.y;
+    // XeGTAO falloff: weight 1 inside (1 - f) * radius, linear to 0 at the radius.
+    const float fRange = max(pc.params.z, 0.01) * radius;
+    const float fMul = -1.0 / fRange;
+    const float fAdd = (radius - fRange) / fRange + 1.0;
+    const float thin = max(pc.params.w, 0.0);
+
+    const int S = clamp(int(pc.kern_y.x + 0.5), 1, 8);
+    const int M = clamp(int(pc.kern_y.y + 0.5), 1, 32);
+    // kern_y.z: |v| = 0 static, else 1 + the AO frame (% 64); v < 0 = the Hilbert-R2 noise
+    // (RenderVKGTAONoise 1) -- see gtaoNoise.
+    const float kz = abs(pc.kern_y.z);
+    const uint nframe = kz > 0.5 ? uint(kz + 0.5) - 1u : 0u;
+    const vec2 nz = gtaoNoise(uvec2(npx), nframe, pc.kern_y.z < 0.0);
+    const float nSlice = nz.x;
+    const float minS = 1.3 / rpx;   // first tap at least ~1 px out (never the centre texel)
+
+    float vis = 0.0;
+    for (int s = 0; s < S; ++s)
+    {
+        const float phi = (float(s) + nSlice) * (GTAO_PI / float(S));
+        const vec2 omega = vec2(cos(phi), sin(phi));
+        // The slice plane: through the camera, this point and the screen line along
+        // omega -- built from a reconstructed neighbour at the same depth, so no screen /
+        // view axis sign convention is assumed. +ortho is the +omega side.
+        const vec3 Q = viewPos(tc + omega * pc.screen.zw, d);
+        vec3 ortho = (Q - pos) - dot(Q - pos, V) * V;
+        const float ol = length(ortho);
+        if (ol < 1e-12) { vis += 1.0; continue; }
+        ortho /= ol;
+        const vec3 axis = normalize(cross(ortho, V));
+        const vec3 projN = N - axis * dot(N, axis);
+        const float pl = length(projN);
+        if (pl < 1e-6) { vis += 1.0; continue; }
+        const float cosN = clamp(dot(projN, V) / pl, -1.0, 1.0);
+        const float n = (dot(ortho, projN) >= 0.0 ? 1.0 : -1.0) * acos(cosN);
+        // The hemisphere boundary on each side (what an absent / faded sample means).
+        const float low0 = cos(n + GTAO_HALF_PI);   // +omega
+        const float low1 = cos(n - GTAO_HALF_PI);   // -omega
+        float hc0 = low0, hc1 = low1;
+
+        for (int j = 0; j < M; ++j)
+        {
+            // XeGTAO: the step offset walks the R1 (golden ratio) sequence per (slice, step)
+            // (its stepBaseNoise, slice + step * stepsPerSlice), so the taps of one pixel do
+            // not all share one phase.
+            const float nStep = fract(nz.y + float(s + j * M) * 0.6180339887498948482);
+            float t = (float(j) + nStep) / float(M);
+            t = t * t + minS;   // quadratic: dense near the pixel (contact detail)
+            const vec2 off = omega * (t * rpx) * pc.screen.zw;
+            // Depth-MIP path: the offset snapped to whole pixels (XeGTAO; >= 1 px since
+            // t * rpx >= 1.3) and the level its length selects.
+            const vec2 offPx = round(omega * (t * rpx));
+            const float offLen = length(offPx);
+            for (int side = 0; side < 2; ++side)
+            {
+                vec3 spos;
+                if (mips)
+                {
+                    if (!tapAt(side == 0 ? fp + ivec2(offPx) : fp - ivec2(offPx), offLen, levels, spos)) continue;
+                }
+                else
+                {
+                    const vec2 stc = side == 0 ? tc + off : tc - off;
+                    if (!onScreen(stc)) continue;
+                    const float sd = depthAt(stc);
+                    if (sd <= 0.0) continue;   // sky never occludes
+                    spos = viewPos(stc, sd);
+                }
+                const vec3 dl = spos - pos;
+                const float dist = length(dl);
+                if (dist < 1e-6) continue;
+                // Thin-occluder compensation (XeGTAO): the view-depth part of the offset
+                // counts (1 + thin) times in the falloff, so samples far in front of /
+                // behind the receiver (a thin pole, an avatar edge) fade out instead of
+                // casting a halo onto the surface behind them.
+                const float fd = length(vec3(dl.xy, dl.z * (1.0 + thin)));
+                float w = clamp(fd * fMul + fAdd, 0.0, 1.0);
+                if (mips && facet) w *= gBlend ? facetRatio(dl, ng, N) : facetWeight(dl, dist, ng, fslope);
+                const float shc = dot(dl / dist, V);
+                if (side == 0) hc0 = max(hc0, mix(low0, shc, w));
+                else           hc1 = max(hc1, mix(low1, shc, w));
+            }
+        }
+        // Horizon angles (signed, from V; + toward +omega), clamped to the hemisphere.
+        float h0 = -acos(clamp(hc1, -1.0, 1.0));
+        float h1 =  acos(clamp(hc0, -1.0, 1.0));
+        h0 = n + clamp(h0 - n, -GTAO_HALF_PI, GTAO_HALF_PI);
+        h1 = n + clamp(h1 - n, -GTAO_HALF_PI, GTAO_HALF_PI);
+        // Cosine-weighted visibility of the slice: a(h) = 0.25 (-cos(2h - n) + cos n + 2h sin n)
+        // per side, weighted by the projected-normal length. Not saturated per slice (an
+        // unoccluded grazing slice integrates above 1; only the slice average is 1).
+        const float sinN = sin(n);
+        const float a0 = 0.25 * (cosN + 2.0 * h0 * sinN - cos(2.0 * h0 - n));
+        const float a1 = 0.25 * (cosN + 2.0 * h1 * sinN - cos(2.0 * h1 - n));
+        vis += pl * (a0 + a1);
+    }
+    float ao = max(vis / float(S), 0.0);
+    // Round 3: fade in over 1..2 px of projected radius (was a hard cut at 1 px).
+    if (gBlend) ao = mix(1.0, ao, smoothstep(1.0, 2.0, rpx));
+    // (The multi-bounce fit is for [0, 1]: above 1 nothing is occluded to brighten.)
+    if (pc.kern_y.w > 0.0 && ao < 1.0) ao = min(multiBounce(ao, pc.kern_y.w), 1.0);
+    return pc.mode.z > 0.0 && pc.mode.z != 1.0 ? pow(ao, pc.mode.z) : ao;
+}
+float gtaoTerm(vec2 tc, vec2 npx, bool mips, ivec2 fp)
+{
+    return clamp(gtaoVis(tc, npx, mips, fp) / kGtaoTermScale, 0.0, 1.0);
+}
+
+
+// blur() on the half grid along dir: the same LL weights / plane tests, but every position
+// is a representative's exact one and the taps are whole texels (the step params.x is in
+// half texels: the host halves it, so the blur spans the same screen extent as full res).
+float blurHalf(ivec2 q, ivec2 dir)
+{
+    const float c = texelFetch(uSrc, q, 0).r;
+    if (pc.mode.y > 0.0) return c;   // RenderVKAOBlur 0: pass-through
+    ivec2 fp;
+    vec3 pos;
+    if (!repPos(q, fp, pos)) return c;   // sky
+    const vec2 tc = (vec2(fp) + 0.5) * pc.screen.zw;
+    const vec3 norm = viewNormal(tc);
+    const vec3 pnorm = pc.params.z > 0.0 ? vertexNormal(tc) : norm;
+    const float nc = dir.x != 0 ? norm.x : norm.y;
+    float dlt = pc.params.x / (1.0 + nc * nc);
+    dlt /= max(-pos.z * pc.params.y, 1.0);
+
+    float w[7];
+    w[0] = pc.kern_y.x; w[2] = pc.kern_y.y; w[4] = pc.kern_y.z; w[6] = pc.kern_y.w;
+    w[1] = (w[0] + w[2]) * 0.5; w[3] = (w[2] + w[4]) * 0.5; w[5] = (w[4] + w[6]) * 0.5;
+    float wsum = w[0];
+    float col  = c * w[0];
+    const float tol2 = pos.z * pos.z * 0.00005;
+    const float tolAbs = pc.params.w;
+    const ivec2 hmax = halfSize() - 1;
+    const int nt = blurTaps(q);
+    for (int s = -1; s <= 1; s += 2)
+    {
+        for (int i = 1; i <= nt; ++i)
+        {
+            // blur(): offset o[i] * dlt * 2 = i * dlt texels, here rounded to a whole texel
+            const ivec2 tq = clamp(q + dir * int(round(float(s * i) * dlt)), ivec2(0), hmax);
+            ivec2 sfp;
+            vec3 spos;
+            if (!repPos(tq, sfp, spos)) continue;   // a sky texel: no data
+            const float pd = dot(pnorm, spos - pos);
+            float t2 = tol2;
+            if (tolAbs > 0.0)
+            {
+                const float lat = length((spos - pos) - pd * pnorm);
+                const float t = tolAbs + 5e-4 * -pos.z + 0.0175 * lat;
+                t2 = min(tol2, t * t);
+            }
+            if (pd * pd <= t2)
+            {
+                col  += texelFetch(uSrc, tq, 0).r * w[i];
+                wsum += w[i];
+            }
+        }
+    }
+    return max(col / wsum, 0.0);
+}
+
+// ---------------------------------------------------------------------------------
+// TEMPORAL ACCUMULATOR (mode 4, #843; RenderVKAOTemporal / RenderVKAOHistory)
+// ---------------------------------------------------------------------------------
+// Placement: AFTER the kernel, BEFORE the blurs. The history must hold the UNBLURRED signal:
+// accumulating the blurred result would feed each frame's blur back into the next (the
+// filter compounds: progressive over-blur, halos across the plane tests), and this frame's
+// RAW neighbourhood is exactly the clamp box the history needs. The blurs then run on the
+// accumulated value -- full width only where the history is young (blurTaps), so a cut or a
+// disocclusion still gets the full spatial filter on its first frames, and converged areas
+// pay a third of the blur's taps.
+//   * REPROJECTION (the RT mask's convention, clean_rt_mask_common.glsl rtMaskPrevPx): the
+//     receiver -- this texel's pixel (half grid: its representative, repPixel) -- rebuilt from
+//     the pre-pass depth with the frame's jitter taken out (as worldAt), camera-relative
+//     world P = transpose(mat3(ssr.cur_view)) * view, last frame's unjittered render px
+//     through ssr.taa_prev_vp, or along the pre-pass motion vector where this frame wrote one
+//     (skinned avatars, moved prims). The host keeps the temporal plumbing on for this
+//     (ensureTemporal: aoWantsTemporal), so taa_prev_vp is real without TAA / FSR too.
+//   * DISOCCLUSION: 2 x 2 bilinear taps of last frame's AO grid, each kept only when its
+//     stored view depth matches the receiver's depth carried along THIS frame's depth plane
+//     (the receiver's grid gradient: sloped ground at grazing views and the half grid's
+//     closest / farthest representatives pass; another surface fails).
+//   * NEIGHBOURHOOD CLAMP: the history is clamped to mean +- gamma sigma of this frame's raw
+//     3 x 3 (same surface only) with the anti-lag length cut of the shared helper
+//     (clean_denoise_common.glsl accumulate, untouched): a moving occluder's old contact
+//     shadow leaves the box at once instead of ghosting; the length is capped at
+//     RenderVKAOHistory.
+//   * RESET: the host's valid flag (params.y) is 0 on camera cuts / teleports / origin
+//     shifts (the frame info's history reset), when the AO or history targets were
+//     re-created, after a skipped or offscreen AO frame, and on an AO method switch.
+#define DENOISE_NO_ATROUS
+#include "clean_denoise_common.glsl"
+
+// History texel: bits 0-15 the view depth (half float; 0 = sky / none: relative precision
+// 2^-11, far inside the 2 % depth test), 16-26 the AO (11-bit unorm: an EMA stalls at most
+// 0.5 / 2047 x 32 = 0.008 short of its target, about the 8-bit AO target's step), 27-31 the
+// history length - 1 (1..32 frames). 4 B per AO texel.
+uint aoPackHist(float ao, float z, float len)
+{
+    const uint zb = packHalf2x16(vec2(z, 0.0)) & 0xffffu;
+    const uint ab = uint(clamp(ao, 0.0, 1.0) * 2047.0 + 0.5);
+    const uint lb = uint(clamp(len, 1.0, 32.0) + 0.5) - 1u;
+    return zb | (ab << 16u) | (lb << 27u);
+}
+vec3 aoUnpackHist(uint v)   // ao, view depth, length
+{
+    return vec3(float((v >> 16u) & 2047u) * (1.0 / 2047.0), unpackHalf2x16(v & 0xffffu).x,
+                float(v >> 27u) + 1.0);
+}
+
+// The receiver of AO texel q (full res: q itself): its full-res pixel and depth.
+ivec2 aoRecv(ivec2 q, bool halfGrid, out float d)
+{
+    if (halfGrid) return repPixel(q, d);
+    d = texelFetch(uDepth, q, 0).r;
+    return q;
+}
+// View depth (> 0) of a full-res pixel at depth d -- the kernel's reconstruction (viewPos).
+float aoViewZ(ivec2 fp, float d) { return -viewPos((vec2(fp) + 0.5) * pc.screen.zw, d).z; }
+
+void aoTemporal(ivec2 q, bool halfGrid)
+{
+    const float raw = texelFetch(uSrc, q, 0).r;
+    // #86 REACTIVE (RTAO, params.w > 0): the kernel left 1 in b7 where a ray met a moving caster
+    // (read before this pass overwrites it): that texel's history is capped at params.w frames.
+    float hcap = clamp(pc.params.x, 1.0, 32.0);
+    if (pc.params.w > 0.5 && imageLoad(uHistCur, q).x == 1u) hcap = min(hcap, max(pc.params.w, 1.0));
+    float d;
+    const ivec2 fp = aoRecv(q, halfGrid, d);
+    if (d <= 0.0)   // sky
+    {
+        imageStore(uDst, q, vec4(raw, 0.0, 0.0, 1.0));
+        imageStore(uHistCur, q, uvec4(0u));
+        return;
+    }
+    const float z = aoViewZ(fp, d);
+    const ivec2 gmax = (halfGrid ? halfSize() : ivec2(pc.screen.xy)) - 1;
+
+    // View depth of the 3 x 3 receivers on the AO grid (-1: sky).
+    float zn[9];
+    for (int i = 0; i < 9; ++i)
+    {
+        const ivec2 t = clamp(q + ivec2(i % 3 - 1, i / 3 - 1), ivec2(0), gmax);
+        float dt;
+        const ivec2 ft = aoRecv(t, halfGrid, dt);
+        zn[i] = dt > 0.0 ? aoViewZ(ft, dt) : -1.0;
+    }
+    // The receiver's depth plane, view depth per AO texel: per axis the neighbour with the
+    // smaller step (robust at silhouettes, as geomNormal), clamped as the RT mask's.
+    vec2 g = vec2(0.0);
+    {
+        const float zl = zn[3], zr = zn[5], zd = zn[1], zu = zn[7];
+        const bool okL = zl > 0.0, okR = zr > 0.0, okD = zd > 0.0, okU = zu > 0.0;
+        if (okL || okR) g.x = (okR && (!okL || abs(zr - z) < abs(z - zl))) ? zr - z : z - zl;
+        if (okD || okU) g.y = (okU && (!okD || abs(zu - z) < abs(z - zd))) ? zu - z : z - zd;
+        g = clamp(g, vec2(-0.25 * z), vec2(0.25 * z));
+    }
+
+    // Raw 3 x 3, same surface (the plane above): the clamp box. (The centre always counts.)
+    const float tolN = max(z * 0.02, 0.03);
+    float m1 = 0.0, m2 = 0.0, nn = 0.0;
+    for (int i = 0; i < 9; ++i)
+    {
+        const vec2 o = vec2(i % 3 - 1, i / 3 - 1);
+        if (i != 4 && (zn[i] <= 0.0 || abs(zn[i] - (z + dot(g, o))) >= tolN)) continue;
+        const float v = texelFetch(uSrc, clamp(q + ivec2(o), ivec2(0), gmax), 0).r;
+        m1 += v; m2 += v * v; nn += 1.0;
+    }
+    const float mean = m1 / nn;
+    const float sigma = sqrt(max(m2 / nn - mean * mean, 0.0));
+    const float gam = max(pc.params.z, 0.5);
+    const float lo = mean - gam * sigma - 0.02, hi = mean + gam * sigma + 0.02;
+
+    // History at the reprojected position.
+    float hao = 0.0, hlen = 0.0, wsum = 0.0;
+    if (pc.params.y > 0.5)
+    {
+        vec2 tc = (vec2(fp) + 0.5) * pc.screen.zw;
+        if (ssr.taa_params.w > 0.5) tc -= ssr.taa_jitter.zw * 0.5;   // jitter (NDC) out, as worldAt
+        const vec3 P = transpose(mat3(ssr.cur_view)) * viewPos(tc, d);   // camera-relative (#555)
+        const vec4 c = ssr.taa_prev_vp * vec4(P, 1.0);
+        if (c.w > 1e-4)
+        {
+            vec2 prpx = (c.xy / c.w * 0.5 + 0.5) * pc.screen.xy;
+            if (ssr.taa_params.y > 0.5)   // object motion (as rtMaskPrevPx)
+            {
+                const vec4 k = ssr.taa_cur_vp * vec4(P, 1.0);
+                if (k.w > 1e-4)
+                    prpx = ((k.xy / k.w * 0.5 + 0.5) - texelFetch(uMotion, fp, 0).xy) * pc.screen.xy;
+            }
+            const float pw = c.w;   // the receiver's view depth through last frame's camera
+            // Continuous AO-grid coordinate (texel centres at integers): half-grid texel q
+            // stands for render px [2q, 2q + 2).
+            const vec2 hc = halfGrid ? prpx * 0.5 - 0.5 : prpx - 0.5;
+            const ivec2 hb = ivec2(floor(hc));
+            const vec2 f = hc - vec2(hb);
+            const float tol = max(pw * 0.02, 0.03);
+            for (int i = 0; i < 4; ++i)
+            {
+                const ivec2 o = ivec2(i & 1, i >> 1);
+                const ivec2 t = hb + o;
+                if (any(lessThan(t, ivec2(0))) || any(greaterThan(t, gmax))) continue;
+                const vec3 h = aoUnpackHist(texelFetch(uHistPrev, t, 0).x);
+                if (!(h.y > 0.0) || isinf(h.y)) continue;
+                const float zp = pw + dot(g, vec2(t) - hc);
+                const float wz = clamp(1.0 - abs(h.y - zp) / tol, 0.0, 1.0);
+                const float bw = (o.x == 1 ? f.x : 1.0 - f.x) * (o.y == 1 ? f.y : 1.0 - f.y);
+                const float w = bw * wz;
+                hao += w * h.x; hlen += w * h.z; wsum += w;
+            }
+        }
+    }
+    float len = 1.0;
+    float ao = raw;
+    if (wsum >= 0.1)   // else too little of the footprint matched: disocclusion, start over
+    {
+        hao /= wsum; hlen /= wsum;
+        const vec3 r = accumulate(vec3(raw), vec3(lo), vec3(hi), vec3(hao), max(hlen, 1.0),
+                                  hcap, len);
+        ao = r.x;
+    }
+    ao = (isnan(ao) || isinf(ao)) ? raw : clamp(ao, 0.0, 1.0);
+    imageStore(uDst, q, vec4(ao, 0.0, 0.0, 1.0));
+    imageStore(uHistCur, q, uvec4(aoPackHist(ao, z, len)));
+}
+
+// Blur V's output (see the push block): the working term -> the visibility the lit pass reads.
+float aoTermOut(float r)
+{
+    if (pc.mode.w > 0.0) return clamp(r * pc.mode.w, 0.0, 1.0);
+    if (pc.mode.w < 0.0)
+    {
+        const float v = clamp(r * kGtaoTermScale, 0.0, 1.0);
+        return -pc.mode.w != 1.0 ? pow(v, -pc.mode.w) : v;
+    }
+    return r;
+}
+
+void main()
+{
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    int m = int(pc.mode.x + 0.5);
+    const bool halfGrid = m >= 32;              // RenderVKAOHalfRes (see the header)
+    if (halfGrid) m -= 32;
+    if (m >= 16) { gBlend = true; m -= 10; }   // round 3 variants of modes 6-7
+    const bool mips = m >= 6;
+    if (mips) initRay();
+    if (halfGrid)
+    {
+        const ivec2 hs = halfSize();
+        if (any(greaterThanEqual(px, hs))) return;
+        float r;
+        if (m == 4) { aoTemporal(px, true); return; }   // #843 (writes its own outputs)
+        if (m == 1 || m == 2)
+        {
+            r = blurHalf(px, m == 1 ? ivec2(1, 0) : ivec2(0, 1));
+            if (m == 2) r = aoTermOut(r);   // GTAO / RTAO term -> visibility
+        }
+        else
+        {
+            float d;
+            const ivec2 fp = repPixel(px, d);
+            const vec2 tc = (vec2(fp) + 0.5) * pc.screen.zw;
+            r = (m == 0 || m == 6) ? ssao(fp, tc, px, mips) : gtaoTerm(tc, vec2(px), mips, fp);
+            if (all(equal(imageSize(uMeta), hs))) imageStore(uMeta, px, aoMeta(tc, d));
+        }
+        imageStore(uDst, px, vec4(r, 0.0, 0.0, 1.0));
+        return;
+    }
+    if (px.x >= int(pc.screen.x) || px.y >= int(pc.screen.y)) return;
+    if (m == 4) { aoTemporal(px, false); return; }   // #843
+    vec2 tc = (vec2(px) + 0.5) * pc.screen.zw;
+    float r;
+    if (m == 0 || m == 6)      r = ssao(px, tc, px, mips);
+    else if (m == 1)           r = blur(tc, vec2(1.0, 0.0));
+    else if (m == 2)
+    {
+        r = blur(tc, vec2(0.0, 1.0));
+        r = aoTermOut(r);   // GTAO / RTAO term -> visibility
+    }
+    else                       r = gtaoTerm(tc, vec2(px), mips, px);
+    imageStore(uDst, px, vec4(r, 0.0, 0.0, 1.0));
+}

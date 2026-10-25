@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<panel label="インスタントメッセージ" name="panel_group_notify">
+	<panel label="ヘッダー" name="header">
+		<text name="title" value="送信者の名前／グループ名"/>
+	</panel>
+	<text_editor name="message" value="メッセージ"/>
+	<text name="attachment" value="添付アイテム"/>
+	<button label="ＯＫ" name="btn_ok"/>
+</panel>

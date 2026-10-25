@@ -1,0 +1,89 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+// vkclean -- GPU RASTER CURSOR PICK (#704), stage 3: COUNT-THEN-FILL on overflow.
+//
+// Between the pick's two draw rounds (LLCleanPickVK::recordDrawInto). Round 1 counted every
+// fragment in the request's depth window into the layer's histogram and stored the first
+// PICK_*_FRAGS. When a layer holds more than that, its stored fragments are an arbitrary
+// subset; this pass narrows the layer's window to the deepest histogram bin edge whose
+// cumulative count fits (at least one bin), clears the layer's count and histogram, and
+// arms round 2 -- the same candidate lists drawn again (their counts copied to the round-2
+// count words) -- which refills the list with exactly the fragments of the narrower
+// window: the nearest ones, which LL's nearest-first rules need. No overflow: round 2's
+// counts are zero and it draws nothing. A single bin holding more than the list (a dense
+// stack within a few centimetres) still overflows; the CPU narrows again from that
+// histogram (llcleancursorpick.cpp).
+layout(local_size_x = 1) in;
+
+#include "clean_pick_common.glsl"
+
+layout(std430, set = 0, binding = 0) coherent buffer PickOut { PickEntry entries[]; };
+// The candidate lists' counters (clean_pick_select.comp Lists): 0..2 round 1 (static,
+// rigged, HUD), 4..6 round 2, 7 = 1 when this pass narrowed a window (diagnostics).
+layout(std430, set = 0, binding = 1) buffer Lists { uint counts[16]; };
+
+layout(push_constant) uniform PickWindowPush {
+    uint entry;
+    uint hud;   // the HUD layer was drawn
+    uvec2 cl;   // cluster LOD (#702 integration): device address of the cluster pick list
+                // (CL_B_PICK: word 0 round-1 count, word 1 round-2 count), 0 = no cluster pick
+} pc;
+// Round 2 of the cluster-drawn objects: their round-1 list again when the world layer narrowed
+// (word 1 stays 0 otherwise: the cluster filter zeroed it, so round 2 draws nothing of it).
+layout(buffer_reference, std430, buffer_reference_align = 4) buffer ClPickRef { uint w[]; };
+
+// clean_pick_common.glsl pickBin's inverse (C++ LLCleanPickVK::binEdge).
+float binEdge(uint b, uint nb, float lo, float hi)
+{
+    const float span = max(min(hi, 1.0e6) - lo, 1.0e-3);
+    if (b >= nb) return hi;
+    return lo + exp2(float(b) / float(nb) * log2(1.0 + span)) - 1.0;
+}
+
+void main()
+{
+    const uint e = pc.entry;
+    counts[4] = 0u;
+    counts[5] = 0u;
+    counts[6] = 0u;
+    if (entries[e].hdr.n_world > PICK_WORLD_FRAGS)
+    {
+        uint cum = 0u, b = 0u;
+        for (; b < PICK_HIST_WORLD; ++b)
+        {
+            if (cum + entries[e].hdr.hist_w[b] > PICK_WORLD_FRAGS) break;
+            cum += entries[e].hdr.hist_w[b];
+        }
+        b = max(b, 1u);
+        const vec4 w = entries[e].hdr.win;
+        entries[e].hdr.win.y = binEdge(b, PICK_HIST_WORLD, w.x, w.y);
+        entries[e].hdr.n_world = 0u;
+        for (uint i = 0u; i < PICK_HIST_WORLD; ++i) entries[e].hdr.hist_w[i] = 0u;
+        counts[4] = counts[0];
+        counts[5] = counts[1];
+        counts[7] = 1u;
+        if (pc.cl != uvec2(0u))
+        {
+            ClPickRef r = ClPickRef(pc.cl);
+            r.w[1] = r.w[0];
+        }
+    }
+    if (pc.hud != 0u && entries[e].hdr.n_hud > PICK_HUD_FRAGS)
+    {
+        uint cum = 0u, b = 0u;
+        for (; b < PICK_HIST_HUD; ++b)
+        {
+            if (cum + entries[e].hdr.hist_h[b] > PICK_HUD_FRAGS) break;
+            cum += entries[e].hdr.hist_h[b];
+        }
+        b = max(b, 1u);
+        const vec4 w = entries[e].hdr.win;
+        entries[e].hdr.win.w = binEdge(b, PICK_HIST_HUD, w.z, w.w);
+        entries[e].hdr.n_hud = 0u;
+        for (uint i = 0u; i < PICK_HIST_HUD; ++i) entries[e].hdr.hist_h[i] = 0u;
+        counts[6] = counts[2];
+        counts[7] = 1u;
+    }
+}

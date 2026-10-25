@@ -1,0 +1,12 @@
+Slipstream weather sound pack
+
+All audio files in this set are derived (trimmed, filtered, looped, loudness-normalised, re-encoded)
+from recordings published on Freesound.org under the Creative Commons 0 1.0 Universal Public Domain
+Dedication (https://creativecommons.org/publicdomain/zero/1.0/). The per-file source, author,
+Freesound id and licence-check date are recorded in manifest.json and SOURCES.md.
+
+To the extent possible under law, the derived works in this set are likewise dedicated to the public
+domain under CC0 1.0. No attribution is required; a courtesy credit list is in SOURCES.md.
+
+CC0 status is asserted by the original uploaders; the licence text on each Freesound page was
+re-verified on the date listed in the manifest.

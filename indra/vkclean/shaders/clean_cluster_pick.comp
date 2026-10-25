@@ -1,0 +1,86 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_ballot : require
+// vkclean -- CLUSTER LOD GPU PICK filter (#702 for cluster-drawn objects, OWNER: 1b).
+// Host side: vkgfx/llcleanclusterselectvk.cpp (recordPickFilter).
+//
+// The raster cursor pick (llcleanpickvk.h) draws the candidates a ray crosses into a 1x1
+// target with the world's own vertex shaders. Objects the cluster path draws are not in its
+// candidates (cluster-owned statics leave the main cull; switched avatars' legacy rigged draws
+// are dropped there by RC_CLUSTER), so this pass gives the pick their CLUSTERS instead: one
+// thread per selected entry of the MAIN view (CL_B_SELECTED, its valid count CLC_SEL_CLAMPED,
+// the per-selected dispatch CLC_DISPATCH), drawn for real (CLI1B_DRAW), whose world sphere
+// (rigged: + the posed-bound margin, as the selection culls) the ray crosses inside the
+// request's depth window -> a tier-0 draw record (VkDrawIndirectCommand: vertex count, 1, first
+// index BYTE, firstInstance = the absolute selected index, + 1 spare word) in CL_B_PICK. The
+// pick then draws them with the cluster vertex-pulling VS (-DCLEAN_PICK) and clean_pick.frag:
+// exactly the triangles the main view draws, in the pose it draws them (the skinned arena).
+//
+// CL_B_PICK: word 0 = records appended (may exceed the cap: the excess is dropped), 1..3 pad,
+// records from word 4, PickPush.cap of them. The host zeroes word 0 before the dispatch.
+layout(local_size_x = 64) in;
+
+#define CLUSTER_SET 0
+#define CL_DECLARE_POOL
+#define CL_DECLARE_INSTANCES
+#include "clean_cluster_common.glsl"
+#include "clean_cluster_select_common.glsl"
+#define CL_DECLARE_SKIN_SCRATCH
+#include "clean_cluster_skin_common.glsl"
+
+layout(std430, set = CLUSTER_SET, binding = CL_B_PICK) coherent buffer ClPick { uint cl_pick[]; };
+
+layout(push_constant) uniform PickPush
+{
+    vec4 org;      // xyz ray origin (agent space), w = window start (t, metres)
+    vec4 dir;      // xyz unit direction, w = window end (min(window end, ray length))
+    uint view;     // the main cluster view
+    uint cap;      // records CL_B_PICK holds
+    float cone;    // radians per pixel: the pixel's cone widens the test
+    uint pad;
+} pp;
+
+void main()
+{
+    const uint v = min(pp.view, CL_MAX_VIEWS - 1u);
+    const uint e = gl_WorkGroupID.y * gl_NumWorkGroups.x * 64u + gl_GlobalInvocationID.x;
+    bool hit = false;
+    uint sel = 0u, tris = 0u, first_idx = 0u;
+    if (e < cl_cnt[v * CLC_VIEW_WORDS + CLC_SEL_CLAMPED])
+    {
+        sel = cl_views[v].sel_base + e;
+        const ClSelected cs = cl_sel[sel];
+        const ClInstance inst = cl_instances[cs.instance];
+        // (our own avatar hidden in the main view -- mouselook, CLV_HIDE_SELF -- is not pickable)
+        if ((inst.flags & CLI1B_DRAW) != 0u
+            && ((cl_views[v].flags & CLV_HIDE_SELF) == 0u || (inst.flags & CLI_SELF) == 0u))
+        {
+            const uint slot = clRefSlot(cs.cluster_ref);
+            const ClRecord rec = clLoadRecord(slot, clRefIndex(cs.cluster_ref));
+            tris = clRecTriCount(rec);
+            first_idx = clFirstIndexByte(slot, rec);
+            vec4 ws = clXformSphere(inst, rec.sphere);
+            if ((inst.flags & CLI_RIGGED) != 0u) ws.w += clRigMargin(cs.instance);
+            const vec3 oc = ws.xyz - pp.org.xyz;
+            const float tc = dot(oc, pp.dir.xyz);
+            const float r = ws.w + max(tc, 0.0) * pp.cone + 1.0e-3;
+            const float d2 = dot(oc, oc) - tc * tc;
+            hit = tris != 0u && d2 <= r * r && tc + r >= pp.org.w && tc - r < pp.dir.w;
+        }
+    }
+    const uvec4 b = subgroupBallot(hit);
+    const uint n = subgroupBallotBitCount(b);
+    uint base = 0u;
+    if (n != 0u && subgroupElect()) base = atomicAdd(cl_pick[0], n);
+    base = subgroupBroadcastFirst(base) + subgroupBallotExclusiveBitCount(b);
+    if (hit && base < pp.cap)
+    {
+        const uint w = 4u + base * CLD_WORDS;
+        cl_pick[w + 0u] = tris * 3u;
+        cl_pick[w + 1u] = 1u;
+        cl_pick[w + 2u] = first_idx;
+        cl_pick[w + 3u] = sel;
+        cl_pick[w + 4u] = 0u;
+    }
+}

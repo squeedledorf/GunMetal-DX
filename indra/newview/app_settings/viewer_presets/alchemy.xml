@@ -1,0 +1,24 @@
+<?xml version="1.0" ?>
+<llsd>
+<!--
+  Viewer preset "Alchemy" (#132). File format: see firestorm.xml.
+
+  Slipstream is built on Alchemy, so its defaults already behave like Alchemy's: same chat bar,
+  same camera options, same middle-mouse hold-to-talk (Alchemy develop key_bindings.xml binds
+  MMB to voice_follow_key too). Choosing Alchemy therefore applies Slipstream's defaults for the
+  settings the other presets change, except the one control Slipstream changed on purpose
+  (SlashStartsChat, below). Differences against Alchemy develop (2026-10) that are left out
+  because nobody switching over would notice them: TeleportArrivalDelay, ShowSelectionBeam,
+  NearMeRange, AllowMultipleViewers, the ShowMature* search filters.
+-->
+  <map>
+    <key>settings</key>
+    <map>
+      <!-- In Alchemy pressing / opens nearby chat with a leading slash, for gestures and chat
+           commands (its start_gesture has no switch). Slipstream made that opt-in so a stray /
+           does not grab the keyboard (SlashStartsChat, "as in LL viewers"). -->
+      <key>SlashStartsChat</key>
+      <boolean>1</boolean>
+    </map>
+  </map>
+</llsd>

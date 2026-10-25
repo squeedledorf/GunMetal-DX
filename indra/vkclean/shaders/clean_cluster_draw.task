@@ -1,0 +1,122 @@
+#version 460
+#extension GL_EXT_mesh_shader : require
+#extension GL_GOOGLE_include_directive : require
+// vkclean -- CLUSTER LOD mesh-shader tier: TASK stage (#745, OWNER: 1b).
+//
+// One 32-invocation task workgroup per CL_TASK_CLUSTERS draw records of a view's bucket (the
+// selection compute wrote them; grid rows wrap at CL_TASK_GRID_X, clean_cluster_select_finalize).
+// Each invocation reads one record, drops empty ones, and the survivors are compacted into
+// the payload (shared atomics: portable across subgroup sizes); one mesh workgroup is then
+// launched per surviving cluster (amplification). Culling already ran per cluster in the
+// selection compute (cut, frustum, cone, Hi-Z), which every tier shares, so the statistics
+// and the cut are identical across tiers.
+//
+// Push (the renderer's 16 B draw push, re-pushed by the cluster module): view = draw-view
+// ring index (the FS / mesh read it), pad0 = cluster view, pad1 = bucket | list << 4: list 0 =
+// the view's own records, 1 + L = the main view's shared rig list L (cl_aux.rig).
+//
+// RIG-LIST CULL (#748 perf pass): a shared rig list is the WHOLE un-culled cut of every switched
+// avatar a secondary pass draws (sun cascades / projector tiles, or mirror / probe captures),
+// selected once with the main view -- so without a test here every cube face of every probe
+// capture and every cascade drew every avatar's whole cut. A record of a rig list whose cluster
+// was skinned this frame is dropped when its AVATAR's skinned box, else its cluster's own skinned
+// box (both written by the cluster pre-skin, eye-relative, padded by the weld gap: + (eye -
+// u_origin) is what the mesh stage projects), lies outside one of the four SIDE planes of this
+// draw's view-projection (the pass's own draw view, set 0 binding 36): no near / far test
+// (casters behind the light's near plane still cast). One 32 B read per record (was: its 64
+// skinned vertices, per record, per view); a whole avatar outside the view costs one box test per
+// record on cached words. This task stage IS the mesh tier's per-view compaction (only the
+// surviving clusters launch mesh groups); the MDI tiers compact into a per-view list first
+// (clean_cluster_rigcull.comp). Unskinned records (rest pose) and the views' own records are never
+// tested here (the selection culled them).
+layout(local_size_x = 32) in;
+
+#ifndef CLUSTER_SET
+#define CLUSTER_SET 2   // (-DCLUSTER_SET=3: the ray-query lit capture variant, RT set at 2)
+#endif
+#define CL_DECLARE_POOL
+#define CL_DECLARE_INSTANCES
+#include "clean_cluster_common.glsl"
+#include "clean_cluster_select_common.glsl"
+#define CL_DECLARE_SKIN_OUT
+#define CL_DECLARE_SKIN_SCRATCH
+#include "clean_cluster_skin_common.glsl"
+#include "clean_qvertex.glsl"
+#include "clean_skinvert.glsl"
+
+layout(push_constant) uniform DrawPush { uint view; uint f8; uint pad0; uint pad1; } g_draw_push;
+#define CLEAN_EXTERNAL_DRAW_PUSH
+#include "clean_draw_view.glsl"   // draw_views[] (set 0 binding 36; the mesh stage's projection)
+
+// RIG-LIST CULL (header): false = selected entry `sel` lies outside this draw's view-projection
+// (its avatar's skinned box, then its cluster's: clean_cluster_skin_common.glsl clRigEntryInView).
+// depth: the capture list (push list 2 = CLLIST_RIG_CAPTURE) also tests the near / far planes.
+bool rigClusterVisible(uint sel, bool depth)
+{
+    return clRigEntryInView(sel, draw_views[g_draw_push.view].u_view_proj,
+                            clSkinEye() - draw_views[g_draw_push.view].u_origin.xyz, depth);
+}
+
+struct ClTaskPayload { uint sel[CL_TASK_CLUSTERS]; };
+taskPayloadSharedEXT ClTaskPayload tp;
+shared uint s_keep[CL_TASK_CLUSTERS];
+
+// ALPHA LISTS (pad1 bucket field >= 2; clean_cluster_select_common.glsl CLA_OUT_*): list 0 bucket 2
+// / 3 = the main view's pre / post-water list, list 1 + L bucket 2 = rig list L's alpha list. Their
+// records are ORDERED (back to front between instances, fixed inside one): the compaction below
+// keeps the record order (a prefix over the kept flags, not an atomic), for every list.
+// F8 (push f8 = 1, the cull-FRONT draw of the two-pass blend): a single-sided instance's back
+// faces would only be discarded by the FS -- its clusters launch no mesh group at all.
+void main()
+{
+    const uint lid = gl_LocalInvocationIndex;
+    const uint cv = min(g_draw_push.pad0, CL_MAX_VIEWS - 1u);
+    const uint bucket = min(g_draw_push.pad1 & 15u, 3u);
+    const uint list = g_draw_push.pad1 >> 4u;
+    const uint group = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
+    const uint k = group * CL_TASK_CLUSTERS + lid;
+    uint base, cap, count;
+    if (bucket >= 2u)
+    {
+        const uint o = list == 0u ? (bucket == 2u ? CLA_OUT_PRE : CLA_OUT_POST)
+                                  : (min(list - 1u, CL_RIG_LISTS - 1u) == 0u ? CLA_OUT_RIG0 : CLA_OUT_RIG1);
+        cap = cl_aux.alpha.y;
+        base = clAlphaOutRec(o);
+        count = min(cl_cnt[cv * CLC_VIEW_WORDS + CLC_AL_COUNT + o], cap);
+    }
+    else if (list == 0u)
+    {
+        cap = cl_views[cv].draw_cap;
+        base = cl_views[cv].draw_base + bucket * cap;
+        count = min(cl_cnt[cv * CLC_VIEW_WORDS + CLC_DRAWS0 + bucket], cap);
+    }
+    else
+    {
+        const uint r = min(list - 1u, CL_RIG_LISTS - 1u) * 2u + bucket;
+        cap = cl_aux.rig.y;
+        base = cl_aux.rig.x + r * cap;
+        count = min(cl_cnt[cv * CLC_VIEW_WORDS + CLC_RIG_DRAWS + r], cap);
+    }
+    uint keep = 0u, sel = 0u;
+    if (k < count)
+    {
+        const uint w = (base + k) * CLD_WORDS;
+        sel = cl_draws[w + 4u];
+        if (cl_draws[w] != 0u && (list == 0u || rigClusterVisible(sel, list == 2u)))   // (empty: emits nothing)
+        {
+            keep = 1u;
+            if (g_draw_push.f8 == 1u && (cl_instances[cl_sel[sel].instance].flags & CLI1B_DOUBLE_SIDED) == 0u) keep = 0u;
+        }
+    }
+    s_keep[lid] = keep;
+    barrier();
+    uint slot = 0u, total = 0u;
+    for (uint j = 0u; j < CL_TASK_CLUSTERS; ++j)
+    {
+        const uint kj = s_keep[j];
+        if (j < lid) slot += kj;
+        total += kj;
+    }
+    if (keep != 0u) tp.sel[slot] = sel;
+    EmitMeshTasksEXT(total, 1u, 1u);
+}

@@ -1,0 +1,158 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+// vkclean -- PARTICLE FOG (#1003): SPLAT. One workgroup per splat record (dispatched
+// indirectly: the bin pass's record count), its 64 invocations sharing the kernel footprint.
+//
+// KERNEL: the smooth sphere (1 - r^2 / R^2)^2 of radius R (voxel units) about the particle,
+// normalised by its DISCRETE weight sum over the voxels it covers, so the mass lands in the
+// brick EXACTLY whatever R is relative to the voxels (no density pumping as kernels grow or
+// shrink across voxel sizes): sigma_v += M w_v / (sum w x voxel volume). Two levels:
+//   * fine (the brick's voxels) while R <= PF_FINE_R voxels: a footprint of <= 9^3 voxels;
+//   * coarse (twice the voxel size, PF_NC^3 per slot) for the big, old, spread-out kernels,
+//     R capped at PF_MAX_R coarse voxels (a quarter of the brick) -- the fine resolve adds
+//     the coarse level back trilinearly. The footprint stays bounded however large a
+//     creator's particles are.
+// R is at least pf.misc.z voxels (a kernel smaller than a voxel would alias as it moves).
+// INDIVIDUAL PUFFS: the kernel is not a smooth sphere but the particle's own LUMPY one -- its
+// radius displaced by the base billow noise sampled in the PARTICLE'S frame (the offset / R,
+// plus its seed's phase): r' = R (1 + L (2 n - 1)), L = pf.erode.y. The lumps scale with the
+// puff, so they persist as it grows and spreads instead of the sum turning Gaussian; the
+// discrete normalisation keeps the mass whatever the shape. A SETTLED particle's kernel is
+// flattened in z (rec.aux.x: the layer it spreads into on the floor).
+// VELOCITY: every record also adds its mass-weighted velocity to the coarse level (a small
+// kernel, <= 2.5 coarse voxels): the flow field the march advects the billow noise with.
+// Fixed point: PF_FIX per 1/m of sigma; velocity weights PF_FIXV (two's complement sums).
+layout(local_size_x = 64) in;
+
+#define PF_SAMPLERS
+#include "clean_pfog_common.glsl"
+
+#define PF_FINE_R 4.0
+#define PF_MAX_R  8.0
+
+shared float sW[64];
+
+// The lumpy kernel's normalised squared radius of offset d (voxels): the flattened sphere
+// (z / sq) over the noise-displaced radius.
+float pfLumpU2(vec3 d, float inv, float sq, float L, float Rl, vec3 phase)
+{
+    const vec3 e = vec3(d.xy, d.z / sq);
+    const float u2 = dot(e, e) * inv;
+    if (L <= 0.0 || u2 >= (1.0 + L) * (1.0 + L)) return u2;
+    const float n = textureLod(uNoise, e / Rl * 0.3 + phase, 0.0).a;
+    const float rs = max(1.0 + L * (2.0 * n - 1.0), 0.2);
+    return u2 / (rs * rs);
+}
+
+float groupSum(float v)
+{
+    const uint t = gl_LocalInvocationIndex;
+    sW[t] = v;
+    barrier();
+    for (uint s = 32u; s > 0u; s >>= 1u)
+    {
+        if (t < s) sW[t] += sW[t + s];
+        barrier();
+    }
+    const float r = sW[0];
+    barrier();
+    return r;
+}
+
+void main()
+{
+    const uint r = gl_WorkGroupID.x;
+    if (r >= ls_hdr.x) return;   // (uniform)
+    const PfRec rec = ls_rec[r];
+    const uint b = uint(rec.vel_b.w + 0.5);
+    if (b >= PF_MAX_BRICKS) return;
+    const PfBrick br = pf.bricks[b];
+    const float vox = br.org_vox.w;
+    const uvec3 dims = pfDims(br);
+    const uint slot = uint(br.dims_slot.w + 0.5);
+    const uint base = slot * PF_SLOT_WORDS;
+    const uint li = gl_LocalInvocationIndex;
+
+    // ---- density ----
+    const float Rvox = rec.pos_r.w / vox;
+    const bool coarse = Rvox > PF_FINE_R;
+    const float lv = coarse ? 2.0 * vox : vox;
+    const uvec3 ld = coarse ? pfDimsC(br) : dims;
+    const uint edge = coarse ? PF_NC : PF_N;
+    const float Rl = clamp(rec.pos_r.w / lv, max(pf.misc.z, 0.5), PF_MAX_R);
+    const float sq = clamp(rec.aux.x, 0.1, 1.0);
+    const float L = clamp(pf.erode.y, 0.0, 0.6);
+    const vec3 phase = pfHashVec(uint(rec.aux.y + 0.5));
+    const vec3 Rx = vec3(Rl, Rl, Rl * sq) * (1.0 + L);   // the footprint (the lumps' outer reach)
+    const vec3 c = (rec.pos_r.xyz - br.org_vox.xyz) / lv - 0.5;   // voxel centres at integers
+    const ivec3 lo = max(ivec3(ceil(c - Rx)), ivec3(0));
+    const ivec3 hi = min(ivec3(floor(c + Rx)), ivec3(ld) - 1);
+    if (all(lessThanEqual(lo, hi)))
+    {
+        const ivec3 ext = hi - lo + 1;
+        const uint total = uint(ext.x * ext.y * ext.z);
+        const float inv = 1.0 / (Rl * Rl);
+        float ws = 0.0;
+        for (uint k = li; k < total; k += 64u)
+        {
+            const ivec3 q = lo + ivec3(int(k % uint(ext.x)), int((k / uint(ext.x)) % uint(ext.y)), int(k / uint(ext.x * ext.y)));
+            const float u2 = pfLumpU2(vec3(q) - c, inv, sq, L, Rl, phase);
+            if (u2 < 1.0) { const float s = 1.0 - u2; ws += s * s; }
+        }
+        const float W = groupSum(ws);
+        if (W > 1e-6)
+        {
+            const float scale = rec.tint_m.w / (W * lv * lv * lv) * PF_FIX;
+            const uint vol = edge * edge * edge;
+            const uint cbase = base + (coarse ? PF_COARSE_BASE : 0u);
+            const vec3 tint = clamp(rec.tint_m.rgb, vec3(0.0), vec3(1.0));
+            for (uint k = li; k < total; k += 64u)
+            {
+                const ivec3 q = lo + ivec3(int(k % uint(ext.x)), int((k / uint(ext.x)) % uint(ext.y)), int(k / uint(ext.x * ext.y)));
+                const float u2 = pfLumpU2(vec3(q) - c, inv, sq, L, Rl, phase);
+                if (u2 >= 1.0) continue;
+                const float s = 1.0 - u2;
+                const float val = min(s * s * scale, 4.0e6);
+                if (val < 0.5) continue;
+                const uint idx = (uint(q.z) * edge + uint(q.y)) * edge + uint(q.x);
+                atomicAdd(ac[cbase + idx], uint(val + 0.5));
+                atomicAdd(ac[cbase + vol + idx], uint(val * tint.r + 0.5));
+                atomicAdd(ac[cbase + 2u * vol + idx], uint(val * tint.g + 0.5));
+                atomicAdd(ac[cbase + 3u * vol + idx], uint(val * tint.b + 0.5));
+            }
+        }
+    }
+
+    // ---- velocity (coarse) ----
+    {
+        const float cv = 2.0 * vox;
+        const uvec3 cd = pfDimsC(br);
+        const float Rc = clamp(rec.pos_r.w / cv, 0.9, 2.5);
+        const vec3 cc = (rec.pos_r.xyz - br.org_vox.xyz) / cv - 0.5;
+        const ivec3 clo = max(ivec3(ceil(cc - Rc)), ivec3(0));
+        const ivec3 chi = min(ivec3(floor(cc + Rc)), ivec3(cd) - 1);
+        if (any(greaterThan(clo, chi))) return;
+        const ivec3 ext = chi - clo + 1;
+        const uint total = uint(ext.x * ext.y * ext.z);
+        const float inv = 1.0 / (Rc * Rc);
+        const float m = clamp(rec.tint_m.w * PF_FIXV * 4.0, 1.0, 65535.0);
+        const uint vol = PF_NC * PF_NC * PF_NC;
+        const uint vbase = base + PF_COARSE_BASE + 4u * vol;
+        for (uint k = li; k < total; k += 64u)
+        {
+            const ivec3 q = clo + ivec3(int(k % uint(ext.x)), int((k / uint(ext.x)) % uint(ext.y)), int(k / uint(ext.x * ext.y)));
+            const vec3 d = vec3(q) - cc;
+            const float u2 = dot(d, d) * inv;
+            if (u2 >= 1.0) continue;
+            const float s = 1.0 - u2;
+            const float w = s * s * m;
+            if (w < 0.5) continue;
+            const uint idx = (uint(q.z) * PF_NC + uint(q.y)) * PF_NC + uint(q.x);
+            const ivec3 mv = ivec3(round(rec.vel_b.xyz * w));
+            atomicAdd(ac[vbase + idx], uint(mv.x));
+            atomicAdd(ac[vbase + vol + idx], uint(mv.y));
+            atomicAdd(ac[vbase + 2u * vol + idx], uint(mv.z));
+            atomicAdd(ac[vbase + 3u * vol + idx], uint(w + 0.5));
+        }
+    }
+}

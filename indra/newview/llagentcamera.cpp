@@ -1,0 +1,4669 @@
+/**
+ * @file llagentcamera.cpp
+ * @brief LLAgent class implementation
+ *
+ * $LicenseInfo:firstyear=2001&license=viewerlgpl$
+ * Second Life Viewer Source Code
+ * Copyright (C) 2010, Linden Research, Inc.
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation;
+ * version 2.1 of the License only.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+ *
+ * Linden Research, Inc., 945 Battery Street, San Francisco, CA  94111  USA
+ * $/LicenseInfo$
+ */
+
+#include "llviewerprecompiledheaders.h"
+#include "llagentcamera.h"
+#include "slspeedfov.h"
+#include "llframetimer.h"
+#include "slaoengine.h"
+
+#include "pipeline.h"
+#include "sscombatray.h"   // <SS:Skoomastream> OTS camera collision
+
+#include "llagent.h"
+#include "llagentpilot.h"
+#include "sltpscamera.h"
+#include "llanimationstates.h"
+#include "llfloatercamera.h"
+#include "llfloaterreg.h"
+#include "llhudmanager.h"
+#include "lljoystickbutton.h"
+#include "llmorphview.h"
+#include "llmoveview.h"
+#include "llnotificationsutil.h"
+#include "llselectmgr.h"
+#include "llsmoothstep.h"
+#include "lltoolmgr.h"
+#include "llviewercamera.h"
+#include "llviewercontrol.h"
+#include "llviewerjoystick.h"
+#include "llviewermenu.h"
+#include "llviewerobjectlist.h"
+#include "llviewerregion.h"
+#include "llviewerwindow.h"
+#include "llvoavatarself.h"
+#include "llwindow.h"
+#include "llworld.h"
+// [RLVa:KB] - Checked: 2010-05-10 (RLVa-1.2.0g)
+#include "rlvactions.h"
+#include "rlvhandler.h"
+// [/RLVa:KB]
+
+using namespace LLAvatarAppearanceDefines;
+
+extern LLMenuBarGL* gMenuBarView;
+
+// Mousewheel camera zoom
+const F32 MIN_ZOOM_FRACTION = 0.25f;
+const F32 INITIAL_ZOOM_FRACTION = 1.f;
+const F32 MAX_ZOOM_FRACTION = 8.f;
+
+const F32 CAMERA_ZOOM_HALF_LIFE = 0.07f;    // seconds
+const F32 FOV_ZOOM_HALF_LIFE = 0.07f;   // seconds
+
+const F32 CAMERA_FOCUS_HALF_LIFE = 0.f;//0.02f;
+const F32 CAMERA_LAG_HALF_LIFE = 0.25f;
+const F32 MIN_CAMERA_LAG = 0.5f;
+const F32 MAX_CAMERA_LAG = 5.f;
+
+const F32 CAMERA_COLLIDE_EPSILON = 0.1f;
+const F32 MIN_CAMERA_DISTANCE = 0.1f;
+
+const F32 AVATAR_ZOOM_MIN_X_FACTOR = 0.55f;
+const F32 AVATAR_ZOOM_MIN_Y_FACTOR = 0.7f;
+const F32 AVATAR_ZOOM_MIN_Z_FACTOR = 1.15f;
+
+const F32 MAX_CAMERA_DISTANCE_FROM_AGENT = 50.f;
+const F32 MAX_CAMERA_DISTANCE_FROM_OBJECT = 496.f;
+const F32 CAMERA_FUDGE_FROM_OBJECT = 16.f;
+
+const F32 MAX_CAMERA_SMOOTH_DISTANCE = 50.0f;
+
+const F32 HEAD_BUFFER_SIZE = 0.3f;
+
+const F32 CUSTOMIZE_AVATAR_CAMERA_ANIM_SLOP = 0.1f;
+
+const F32 LAND_MIN_ZOOM = 0.15f;
+
+const F32 AVATAR_MIN_ZOOM = 0.5f;
+const F32 OBJECT_MIN_ZOOM = 0.02f;
+
+const F32 APPEARANCE_MIN_ZOOM = 0.39f;
+const F32 APPEARANCE_MAX_ZOOM = 8.f;
+
+const F32 CUSTOMIZE_AVATAR_CAMERA_DEFAULT_DIST = 3.5f;
+
+const F32 GROUND_TO_AIR_CAMERA_TRANSITION_TIME = 0.5f;
+const F32 GROUND_TO_AIR_CAMERA_TRANSITION_START_TIME = 0.5f;
+
+const F32 OBJECT_EXTENTS_PADDING = 0.5f;
+
+// TPS camera pitch limits (radians). +pitch looks down (camera above
+// the avatar), -pitch looks up (camera below the head; the ground clamp in
+// calcCameraPositionTargetGlobal keeps it above the terrain).
+const F32 TPS_PITCH_DOWN_LIMIT = 80.f * DEG_TO_RAD;
+const F32 TPS_PITCH_UP_LIMIT = 65.f * DEG_TO_RAD;
+
+static bool isDisableCameraConstraints()
+{
+    static LLCachedControl<bool> sDisableCameraConstraints(gSavedSettings, "DisableCameraConstraints", false);
+    return sDisableCameraConstraints;
+}
+
+// The agent instance.
+LLAgentCamera gAgentCamera;
+
+//-----------------------------------------------------------------------------
+// LLAgentCamera()
+//-----------------------------------------------------------------------------
+LLAgentCamera::LLAgentCamera() :
+    mInitialized(false),
+
+    mDrawDistance( DEFAULT_FAR_PLANE ),
+
+    mLookAt(NULL),
+    mPointAt(NULL),
+
+    mHUDTargetZoom(1.f),
+    mHUDCurZoom(1.f),
+    mHUDTargetPan(),
+    mHUDCurPan(),
+
+    mForceMouselook(false),
+
+    mCameraMode( CAMERA_MODE_THIRD_PERSON ),
+    mLastCameraMode( CAMERA_MODE_THIRD_PERSON ),
+
+    mCameraPreset(CAMERA_PRESET_REAR_VIEW),
+
+    mCameraAnimating( false ),
+    mAnimationCameraStartGlobal(),
+    mAnimationFocusStartGlobal(),
+    mAnimationTimer(),
+    mAnimationDuration(0.33f),
+
+    mCameraFOVZoomFactor(0.f),
+    mCameraCurrentFOVZoomFactor(0.f),
+    mCameraFocusOffset(),
+
+    mCameraCollidePlane(),
+
+    mCurrentCameraDistance(2.f),        // meters, set in init()
+    mTargetCameraDistance(2.f),
+    // <SS:Skoomastream>
+    mOTSCollisionDistance(-1.f),
+    // </SS:Skoomastream>
+    mCameraZoomFraction(1.f),           // deprecated
+    mThirdPersonHeadOffset(0.f, 0.f, 1.f),
+    mSitCameraEnabled(false),
+    mCameraSmoothingLastPositionGlobal(),
+    mCameraSmoothingLastPositionAgent(),
+    mCameraSmoothingStop(false),
+
+    mCameraUpVector(LLVector3::z_axis), // default is straight up
+
+    mFocusOnAvatar(true),
+    mAllowChangeToFollow(false),
+    mFocusGlobal(),
+    mFocusTargetGlobal(),
+    mFocusObject(NULL),
+    mFocusObjectDist(0.f),
+    mFocusObjectOffset(),
+    mTrackFocusObject(true),
+
+    mAtKey(0), // Either 1, 0, or -1... indicates that movement-key is pressed
+    mWalkKey(0), // like AtKey, but causes less forward thrust
+    mLeftKey(0),
+    mUpKey(0),
+    mYawKey(0.f),
+    mPitchKey(0.f),
+
+    mOrbitLeftKey(0.f),
+    mOrbitRightKey(0.f),
+    mOrbitUpKey(0.f),
+    mOrbitDownKey(0.f),
+    mOrbitInKey(0.f),
+    mOrbitOutKey(0.f),
+
+    mPanUpKey(0.f),
+    mPanDownKey(0.f),
+    mPanLeftKey(0.f),
+    mPanRightKey(0.f),
+    mPanInKey(0.f),
+    mPanOutKey(0.f),
+    mRollLeftKey(0.f),
+    mRollRightKey(0.f)
+{
+    mFollowCam.setMaxCameraDistantFromSubject( MAX_CAMERA_DISTANCE_FROM_AGENT );
+
+    clearGeneralKeys();
+    clearOrbitKeys();
+    clearPanKeys();
+
+    resetPanDiff();
+    resetOrbitDiff();
+    resetCameraRoll();
+}
+
+// Requires gSavedSettings to be initialized.
+//-----------------------------------------------------------------------------
+// init()
+//-----------------------------------------------------------------------------
+void LLAgentCamera::init()
+{
+    // *Note: this is where LLViewerCamera::getInstance() used to be constructed.
+
+    mDrawDistance = gSavedSettings.getF32("RenderFarClip");
+
+    LLViewerCamera::getInstance()->setView(DEFAULT_FIELD_OF_VIEW);
+    // Leave at 0.1 meters until we have real near clip management
+    LLViewerCamera::getInstance()->setNear(0.1f);
+    LLViewerCamera::getInstance()->setFar(mDrawDistance);           // if you want to change camera settings, do so in camera.h
+    LLViewerCamera::getInstance()->setAspect( gViewerWindow->getWorldViewAspectRatio() );       // default, overridden in LLViewerWindow::reshape
+    LLViewerCamera::getInstance()->setViewHeightInPixels(768);          // default, overridden in LLViewerWindow::reshape
+
+    mCameraFocusOffsetTarget = LLVector4(gSavedSettings.getVector3("CameraOffsetBuild"));
+
+    mCameraPreset = (ECameraPreset) gSavedSettings.getU32("CameraPresetType");
+
+    mCameraCollidePlane.clearVec();
+    mCurrentCameraDistance = getCameraOffsetInitial().magVec() * gSavedSettings.getF32("CameraOffsetScale");
+    mTargetCameraDistance = mCurrentCameraDistance;
+    mCameraZoomFraction = 1.f;
+    mTrackFocusObject = gSavedSettings.getBOOL("TrackFocusObject");
+
+    // <SS:Skoomastream>
+    // Turning OTS off (preferences, @setdebug_otsenabled) while in OTS leaves it.
+    if (LLControlVariable* ots_enabled = gSavedSettings.getControl("OTSEnabled"))
+    {
+        mOTSEnabledConnection = ots_enabled->getSignal()->connect(
+            [this](LLControlVariable*, const LLSD& new_value, const LLSD&) { onOTSEnabledChanged(new_value); });
+    }
+    // </SS:Skoomastream>
+
+    mInitialized = true;
+}
+
+//-----------------------------------------------------------------------------
+// cleanup()
+//-----------------------------------------------------------------------------
+void LLAgentCamera::cleanup()
+{
+    mOTSEnabledConnection.disconnect(); // <SS:Skoomastream/>
+    setSitCamera(LLUUID::null);
+
+    if(mLookAt)
+    {
+        mLookAt->markDead() ;
+        mLookAt = NULL;
+    }
+    if(mPointAt)
+    {
+        mPointAt->markDead() ;
+        mPointAt = NULL;
+    }
+    setFocusObject(NULL);
+}
+
+void LLAgentCamera::setAvatarObject(LLVOAvatarSelf* avatar)
+{
+    if (!mLookAt)
+    {
+        mLookAt = (LLHUDEffectLookAt *)LLHUDManager::getInstance()->createViewerEffect(LLHUDObject::LL_HUD_EFFECT_LOOKAT);
+    }
+    if (!mPointAt)
+    {
+        mPointAt = (LLHUDEffectPointAt *)LLHUDManager::getInstance()->createViewerEffect(LLHUDObject::LL_HUD_EFFECT_POINTAT);
+    }
+
+    if (!mLookAt.isNull())
+    {
+        mLookAt->setSourceObject(avatar);
+    }
+    if (!mPointAt.isNull())
+    {
+        mPointAt->setSourceObject(avatar);
+    }
+}
+
+//-----------------------------------------------------------------------------
+// LLAgent()
+//-----------------------------------------------------------------------------
+LLAgentCamera::~LLAgentCamera()
+{
+    cleanup();
+
+    // *Note: this is where LLViewerCamera::getInstance() used to be deleted.
+}
+
+// Change camera back to third person, stop the autopilot,
+// deselect stuff, etc.
+//-----------------------------------------------------------------------------
+// resetView()
+//-----------------------------------------------------------------------------
+void LLAgentCamera::resetView(bool reset_camera, bool change_camera)
+{
+    if (gDisconnected)
+    {
+        return;
+    }
+
+    if (gAgent.getAutoPilot())
+    {
+        gAgent.stopAutoPilot(true);
+    }
+
+    LLSelectMgr::getInstance()->unhighlightAll();
+
+    // By popular request, keep land selection while walking around. JC
+    // LLViewerParcelMgr::getInstance()->deselectLand();
+
+    // force deselect when walking and attachment is selected
+    // this is so people don't wig out when their avatar moves without animating
+    if (LLSelectMgr::getInstance()->getSelection()->isAttachment())
+    {
+        LLSelectMgr::getInstance()->deselectAll();
+    }
+
+    if (gMenuHolder != NULL)
+    {
+        // Hide all popup menus
+        gMenuHolder->hideMenus();
+    }
+
+    static LLCachedControl<bool> freeze_time(gSavedSettings, "FreezeTime", false);
+    if (change_camera && !freeze_time)
+    {
+        changeCameraToDefault();
+
+        if (LLViewerJoystick::getInstance()->getOverrideCamera())
+        {
+            handle_toggle_flycam();
+        }
+
+        // reset avatar mode from eventual residual motion
+        if (LLToolMgr::getInstance()->inBuildMode())
+        {
+            LLViewerJoystick::getInstance()->moveAvatar(true);
+        }
+
+        //Camera Tool is needed for Free Camera Control Mode
+        if (!LLFloaterCamera::inFreeCameraMode())
+        {
+            if (LLFloaterReg::instanceVisible("build"))
+                LLFloaterReg::hideInstance("build");
+
+            // Switch back to basic toolset
+            LLToolMgr::getInstance()->setCurrentToolset(gBasicToolset);
+        }
+
+        gViewerWindow->showCursor();
+    }
+
+
+    if (reset_camera && !freeze_time)
+    {
+        if (!gViewerWindow->getLeftMouseDown() && cameraThirdPerson())
+        {
+            // leaving mouse-steer mode
+            LLVector3 agent_at_axis = gAgent.getAtAxis();
+            agent_at_axis -= projected_vec(agent_at_axis, gAgent.getReferenceUpVector());
+            agent_at_axis.normalize();
+            gAgent.resetAxes(lerp(gAgent.getAtAxis(), agent_at_axis, LLSmoothInterpolation::getInterpolant(0.3f)));
+        }
+
+        setFocusOnAvatar(true, ANIMATE);
+
+        mCameraFOVZoomFactor = 0.f;
+
+        resetCameraRoll();
+    }
+    resetPanDiff();
+    resetOrbitDiff();
+    resetHUDZoom();
+
+    if (LLSelectMgr::getInstance()->mAllowSelectAvatar)
+    {
+        // resetting camera also resets position overrides in debug mode 'AllowSelectAvatar'
+        LLObjectSelectionHandle selected_handle = LLSelectMgr::getInstance()->getSelection();
+        if (selected_handle->getObjectCount() == 1
+            && selected_handle->getFirstObject() != NULL
+            && selected_handle->getFirstObject()->isAvatar())
+        {
+            LLSelectMgr::getInstance()->resetObjectOverrides(selected_handle);
+        }
+    }
+}
+
+// Allow camera to be moved somewhere other than behind avatar.
+//-----------------------------------------------------------------------------
+// unlockView()
+//-----------------------------------------------------------------------------
+void LLAgentCamera::unlockView()
+{
+    if (tpsCameraActive())
+    {
+        // TPS camera: keyboard camera orbit keys drive the TPS camera, which
+        // already orbits independently of the avatar; keep it locked on.
+        return;
+    }
+    if (getFocusOnAvatar())
+    {
+        if (isAgentAvatarValid())
+        {
+            setFocusGlobal(LLVector3d::zero, gAgentAvatarp->mID);
+        }
+        setFocusOnAvatar(false, false); // no animation
+    }
+}
+
+//-----------------------------------------------------------------------------
+// slamLookAt()
+//-----------------------------------------------------------------------------
+void LLAgentCamera::slamLookAt(const LLVector3 &look_at)
+{
+    LLVector3 look_at_norm = look_at;
+    look_at_norm.mV[VZ] = 0.f;
+    look_at_norm.normalize();
+    gAgent.resetAxes(look_at_norm);
+}
+
+//-----------------------------------------------------------------------------
+// calcFocusOffset()
+//-----------------------------------------------------------------------------
+LLVector3 LLAgentCamera::calcFocusOffset(LLViewerObject *object, LLVector3 original_focus_point, S32 x, S32 y)
+{
+    LLMatrix4 obj_matrix = object->getRenderMatrix();
+    LLQuaternion obj_rot = object->getRenderRotation();
+    LLVector3 obj_pos = object->getRenderPosition();
+
+    // if is avatar - don't do any funk heuristics to position the focal point
+    // see DEV-30589
+    if ((object->isAvatar() && !object->isRoot()) || (object->isAnimatedObject() && object->getControlAvatar()))
+    {
+        return original_focus_point - obj_pos;
+    }
+    if (object->isAvatar())
+    {
+        LLVOAvatar* av = object->asAvatar();
+        return original_focus_point - av->getCharacterPosition();
+    }
+
+    LLQuaternion inv_obj_rot = ~obj_rot; // get inverse of rotation
+    LLVector3 object_extents = object->getScale();
+
+    // make sure they object extents are non-zero
+    object_extents.clamp(0.001f, F32_MAX);
+
+    // obj_to_cam_ray is unit vector pointing from object center to camera, in the coordinate frame of the object
+    LLVector3 obj_to_cam_ray = obj_pos - LLViewerCamera::getInstance()->getOrigin();
+    obj_to_cam_ray.rotVec(inv_obj_rot);
+    obj_to_cam_ray.normalize();
+
+    // obj_to_cam_ray_proportions are the (positive) ratios of
+    // the obj_to_cam_ray x,y,z components with the x,y,z object dimensions.
+    LLVector3 obj_to_cam_ray_proportions;
+    obj_to_cam_ray_proportions.mV[VX] = llabs(obj_to_cam_ray.mV[VX] / object_extents.mV[VX]);
+    obj_to_cam_ray_proportions.mV[VY] = llabs(obj_to_cam_ray.mV[VY] / object_extents.mV[VY]);
+    obj_to_cam_ray_proportions.mV[VZ] = llabs(obj_to_cam_ray.mV[VZ] / object_extents.mV[VZ]);
+
+    // find the largest ratio stored in obj_to_cam_ray_proportions
+    // this corresponds to the object's local axial plane (XY, YZ, XZ) that is *most* facing the camera
+    LLVector3 longest_object_axis;
+    // is x-axis longest?
+    if (obj_to_cam_ray_proportions.mV[VX] > obj_to_cam_ray_proportions.mV[VY]
+        && obj_to_cam_ray_proportions.mV[VX] > obj_to_cam_ray_proportions.mV[VZ])
+    {
+        // then grab it
+        longest_object_axis.setVec(obj_matrix.getFwdRow4());
+    }
+    // is y-axis longest?
+    else if (obj_to_cam_ray_proportions.mV[VY] > obj_to_cam_ray_proportions.mV[VZ])
+    {
+        // then grab it
+        longest_object_axis.setVec(obj_matrix.getLeftRow4());
+    }
+    // otherwise, use z axis
+    else
+    {
+        longest_object_axis.setVec(obj_matrix.getUpRow4());
+    }
+
+    // Use this axis as the normal to project mouse click on to plane with that normal, at the object center.
+    // This generates a point behind the mouse cursor that is approximately in the middle of the object in
+    // terms of depth.
+    // We do this to allow the camera rotation tool to "tumble" the object by rotating the camera.
+    // If the focus point were the object surface under the mouse, camera rotation would introduce an undesirable
+    // eccentricity to the object orientation
+    LLVector3 focus_plane_normal(longest_object_axis);
+    focus_plane_normal.normalize();
+
+    LLVector3d focus_pt_global;
+    gViewerWindow->mousePointOnPlaneGlobal(focus_pt_global, x, y, gAgent.getPosGlobalFromAgent(obj_pos), focus_plane_normal);
+    LLVector3 focus_pt = gAgent.getPosAgentFromGlobal(focus_pt_global);
+
+    // find vector from camera to focus point in object space
+    LLVector3 camera_to_focus_vec = focus_pt - LLViewerCamera::getInstance()->getOrigin();
+    camera_to_focus_vec.rotVec(inv_obj_rot);
+
+    // find vector from object origin to focus point in object coordinates
+    LLVector3 focus_offset_from_object_center = focus_pt - obj_pos;
+    // convert to object-local space
+    focus_offset_from_object_center.rotVec(inv_obj_rot);
+
+    // We need to project the focus point back into the bounding box of the focused object.
+    // Do this by calculating the XYZ scale factors needed to get focus offset back in bounds along the camera_focus axis
+    LLVector3 clip_fraction;
+
+    // for each axis...
+    for (U32 axis = VX; axis <= VZ; axis++)
+    {
+        //...calculate distance that focus offset sits outside of bounding box along that axis...
+        //NOTE: dist_out_of_bounds keeps the sign of focus_offset_from_object_center
+        F32 dist_out_of_bounds;
+        if (focus_offset_from_object_center.mV[axis] > 0.f)
+        {
+            dist_out_of_bounds = llmax(0.f, focus_offset_from_object_center.mV[axis] - (object_extents.mV[axis] * 0.5f));
+        }
+        else
+        {
+            dist_out_of_bounds = llmin(0.f, focus_offset_from_object_center.mV[axis] + (object_extents.mV[axis] * 0.5f));
+        }
+
+        //...then calculate the scale factor needed to push camera_to_focus_vec back in bounds along current axis
+        if (llabs(camera_to_focus_vec.mV[axis]) < 0.0001f)
+        {
+            // don't divide by very small number
+            clip_fraction.mV[axis] = 0.f;
+        }
+        else
+        {
+            clip_fraction.mV[axis] = dist_out_of_bounds / camera_to_focus_vec.mV[axis];
+        }
+    }
+
+    LLVector3 abs_clip_fraction = clip_fraction;
+    abs_clip_fraction.abs();
+
+    // find axis of focus offset that is *most* outside the bounding box and use that to
+    // rescale focus offset to inside object extents
+    if (abs_clip_fraction.mV[VX] > abs_clip_fraction.mV[VY]
+        && abs_clip_fraction.mV[VX] > abs_clip_fraction.mV[VZ])
+    {
+        focus_offset_from_object_center -= clip_fraction.mV[VX] * camera_to_focus_vec;
+    }
+    else if (abs_clip_fraction.mV[VY] > abs_clip_fraction.mV[VZ])
+    {
+        focus_offset_from_object_center -= clip_fraction.mV[VY] * camera_to_focus_vec;
+    }
+    else
+    {
+        focus_offset_from_object_center -= clip_fraction.mV[VZ] * camera_to_focus_vec;
+    }
+
+    // convert back to world space
+    focus_offset_from_object_center.rotVec(obj_rot);
+
+    // now, based on distance of camera from object relative to object size
+    // push the focus point towards the near surface of the object when (relatively) close to the objcet
+    // or keep the focus point in the object middle when (relatively) far
+    // NOTE: leave focus point in middle of avatars, since the behavior you want when alt-zooming on avatars
+    // is almost always "tumble about middle" and not "spin around surface point"
+    {
+        LLVector3 obj_rel = original_focus_point - object->getRenderPosition();
+
+        //now that we have the object relative position, we should bias toward the center of the object
+        //based on the distance of the camera to the focus point vs. the distance of the camera to the focus
+
+        F32 relDist = llabs(obj_rel * LLViewerCamera::getInstance()->getAtAxis());
+        F32 viewDist = dist_vec(obj_pos + obj_rel, LLViewerCamera::getInstance()->getOrigin());
+
+
+        LLBBox obj_bbox = object->getBoundingBoxAgent();
+        F32 bias = 0.f;
+
+        // virtual_camera_pos is the camera position we are simulating by backing the camera off
+        // and adjusting the FOV
+        LLVector3 virtual_camera_pos = gAgent.getPosAgentFromGlobal(mFocusTargetGlobal + (getCameraPositionGlobal() - mFocusTargetGlobal) / (1.f + mCameraFOVZoomFactor));
+
+        // if the camera is inside the object (large, hollow objects, for example)
+        // leave focus point all the way to destination depth, away from object center
+        if(!obj_bbox.containsPointAgent(virtual_camera_pos))
+        {
+            // perform magic number biasing of focus point towards surface vs. planar center
+            bias = clamp_rescale(relDist/viewDist, 0.1f, 0.7f, 0.0f, 1.0f);
+            obj_rel = lerp(focus_offset_from_object_center, obj_rel, bias);
+        }
+
+        focus_offset_from_object_center = obj_rel;
+    }
+
+    return focus_offset_from_object_center;
+}
+
+//-----------------------------------------------------------------------------
+// calcCameraMinDistance()
+//-----------------------------------------------------------------------------
+bool LLAgentCamera::calcCameraMinDistance(F32 &obj_min_distance)
+{
+    bool soft_limit = false; // is the bounding box to be treated literally (volumes) or as an approximation (avatars)
+
+    if (!mFocusObject || mFocusObject->isDead() ||
+        mFocusObject->isMesh() ||
+        isDisableCameraConstraints())
+    {
+        obj_min_distance = 0.f;
+        return true;
+    }
+
+    if (mFocusObject->mDrawable.isNull())
+    {
+#ifdef LL_RELEASE_FOR_DOWNLOAD
+        LL_WARNS() << "Focus object with no drawable!" << LL_ENDL;
+#else
+        mFocusObject->dump();
+        LL_ERRS() << "Focus object with no drawable!" << LL_ENDL;
+#endif
+        obj_min_distance = 0.f;
+        return true;
+    }
+
+    LLQuaternion inv_object_rot = ~mFocusObject->getRenderRotation();
+    LLVector3 target_offset_origin = mFocusObjectOffset;
+    LLVector3 camera_offset_target(getCameraPositionAgent() - gAgent.getPosAgentFromGlobal(mFocusTargetGlobal));
+
+    // convert offsets into object local space
+    camera_offset_target.rotVec(inv_object_rot);
+    target_offset_origin.rotVec(inv_object_rot);
+
+    // push around object extents based on target offset
+    LLVector3 object_extents = mFocusObject->getScale();
+    if (mFocusObject->isAvatar())
+    {
+        // fudge factors that lets you zoom in on avatars a bit more (which don't do FOV zoom)
+        object_extents.mV[VX] *= AVATAR_ZOOM_MIN_X_FACTOR;
+        object_extents.mV[VY] *= AVATAR_ZOOM_MIN_Y_FACTOR;
+        object_extents.mV[VZ] *= AVATAR_ZOOM_MIN_Z_FACTOR;
+        soft_limit = true;
+    }
+    LLVector3 abs_target_offset = target_offset_origin;
+    abs_target_offset.abs();
+
+    LLVector3 target_offset_dir = target_offset_origin;
+
+    bool target_outside_object_extents = false;
+
+    for (U32 i = VX; i <= VZ; i++)
+    {
+        if (abs_target_offset.mV[i] * 2.f > object_extents.mV[i] + OBJECT_EXTENTS_PADDING)
+        {
+            target_outside_object_extents = true;
+        }
+        if (camera_offset_target.mV[i] > 0.f)
+        {
+            object_extents.mV[i] -= target_offset_origin.mV[i] * 2.f;
+        }
+        else
+        {
+            object_extents.mV[i] += target_offset_origin.mV[i] * 2.f;
+        }
+    }
+
+    // don't shrink the object extents so far that the object inverts
+    object_extents.clamp(0.001f, F32_MAX);
+
+    // move into first octant
+    LLVector3 camera_offset_target_abs_norm = camera_offset_target;
+    camera_offset_target_abs_norm.abs();
+    // make sure offset is non-zero
+    camera_offset_target_abs_norm.clamp(0.001f, F32_MAX);
+    camera_offset_target_abs_norm.normalize();
+
+    // find camera position relative to normalized object extents
+    LLVector3 camera_offset_target_scaled = camera_offset_target_abs_norm;
+    camera_offset_target_scaled.mV[VX] /= object_extents.mV[VX];
+    camera_offset_target_scaled.mV[VY] /= object_extents.mV[VY];
+    camera_offset_target_scaled.mV[VZ] /= object_extents.mV[VZ];
+
+    if (camera_offset_target_scaled.mV[VX] > camera_offset_target_scaled.mV[VY] &&
+        camera_offset_target_scaled.mV[VX] > camera_offset_target_scaled.mV[VZ])
+    {
+        if (camera_offset_target_abs_norm.mV[VX] < 0.001f)
+        {
+            obj_min_distance = object_extents.mV[VX] * 0.5f;
+        }
+        else
+        {
+            obj_min_distance = object_extents.mV[VX] * 0.5f / camera_offset_target_abs_norm.mV[VX];
+        }
+    }
+    else if (camera_offset_target_scaled.mV[VY] > camera_offset_target_scaled.mV[VZ])
+    {
+        if (camera_offset_target_abs_norm.mV[VY] < 0.001f)
+        {
+            obj_min_distance = object_extents.mV[VY] * 0.5f;
+        }
+        else
+        {
+            obj_min_distance = object_extents.mV[VY] * 0.5f / camera_offset_target_abs_norm.mV[VY];
+        }
+    }
+    else
+    {
+        if (camera_offset_target_abs_norm.mV[VZ] < 0.001f)
+        {
+            obj_min_distance = object_extents.mV[VZ] * 0.5f;
+        }
+        else
+        {
+            obj_min_distance = object_extents.mV[VZ] * 0.5f / camera_offset_target_abs_norm.mV[VZ];
+        }
+    }
+
+    LLVector3 object_split_axis;
+    LLVector3 target_offset_scaled = target_offset_origin;
+    target_offset_scaled.abs();
+    target_offset_scaled.normalize();
+    target_offset_scaled.mV[VX] /= object_extents.mV[VX];
+    target_offset_scaled.mV[VY] /= object_extents.mV[VY];
+    target_offset_scaled.mV[VZ] /= object_extents.mV[VZ];
+
+    if (target_offset_scaled.mV[VX] > target_offset_scaled.mV[VY] &&
+        target_offset_scaled.mV[VX] > target_offset_scaled.mV[VZ])
+    {
+        object_split_axis = LLVector3::x_axis;
+    }
+    else if (target_offset_scaled.mV[VY] > target_offset_scaled.mV[VZ])
+    {
+        object_split_axis = LLVector3::y_axis;
+    }
+    else
+    {
+        object_split_axis = LLVector3::z_axis;
+    }
+
+    LLVector3 camera_offset_object(getCameraPositionAgent() - mFocusObject->getPositionAgent());
+
+
+    F32 camera_offset_clip = camera_offset_object * object_split_axis;
+    F32 target_offset_clip = target_offset_dir * object_split_axis;
+
+    // target has moved outside of object extents
+    // check to see if camera and target are on same side
+    if (target_outside_object_extents)
+    {
+        if (camera_offset_clip > 0.f && target_offset_clip > 0.f)
+        {
+            return false;
+        }
+        else if (camera_offset_clip < 0.f && target_offset_clip < 0.f)
+        {
+            return false;
+        }
+    }
+
+    // clamp obj distance to diagonal of 10 by 10 cube
+    obj_min_distance = llmin(obj_min_distance, 10.f * F_SQRT3);
+
+    obj_min_distance += LLViewerCamera::getInstance()->getNear() + (soft_limit ? 0.1f : 0.2f);
+
+    return true;
+}
+
+F32 LLAgentCamera::getCameraZoomFraction(bool get_third_person)
+{
+    // 0.f -> camera zoomed all the way out
+    // 1.f -> camera zoomed all the way in
+    LLObjectSelectionHandle selection = LLSelectMgr::getInstance()->getSelection();
+    if (selection->getObjectCount() && selection->getSelectType() == SELECT_TYPE_HUD)
+    {
+        // HUD zoom spans [HUD_ZOOM_MIN, HUD_ZOOM_MAX] (#413): log scale, 1x at the middle.
+        return clamp_rescale(log10f(llmax(mHUDTargetZoom, HUD_ZOOM_MIN)),
+                             log10f(HUD_ZOOM_MIN), log10f(HUD_ZOOM_MAX), 0.f, 1.f);
+    }
+
+    if (get_third_person || (mFocusOnAvatar && cameraThirdPerson()))
+    {
+        return clamp_rescale(mCameraZoomFraction, MIN_ZOOM_FRACTION, MAX_ZOOM_FRACTION, 1.f, 0.f);
+    }
+
+    if (cameraCustomizeAvatar())
+    {
+        F32 distance = (F32)mCameraFocusOffsetTarget.magVec();
+        return clamp_rescale(distance, APPEARANCE_MIN_ZOOM, APPEARANCE_MAX_ZOOM, 1.f, 0.f );
+    }
+
+    F32 min_zoom;
+    F32 max_zoom = getCameraMaxZoomDistance();
+    if (isDisableCameraConstraints())
+    {
+        max_zoom = MAX_CAMERA_DISTANCE_FROM_OBJECT;
+    }
+
+    F32 distance = (F32)mCameraFocusOffsetTarget.magVec();
+    if (mFocusObject.notNull())
+    {
+        if (mFocusObject->isAvatar())
+        {
+            min_zoom = AVATAR_MIN_ZOOM;
+        }
+        else
+        {
+            min_zoom = OBJECT_MIN_ZOOM;
+        }
+    }
+    else
+    {
+        min_zoom = LAND_MIN_ZOOM;
+    }
+
+    return clamp_rescale(distance, min_zoom, max_zoom, 1.f, 0.f);
+}
+
+void LLAgentCamera::setCameraZoomFraction(F32 fraction)
+{
+    // 0.f -> camera zoomed all the way out
+    // 1.f -> camera zoomed all the way in
+    LLObjectSelectionHandle selection = LLSelectMgr::getInstance()->getSelection();
+
+    if (selection->getObjectCount() && selection->getSelectType() == SELECT_TYPE_HUD)
+    {
+        // Inverse of getCameraZoomFraction's HUD mapping (#413).
+        setHUDTargetZoom(powf(10.f, clamp_rescale(fraction, 0.f, 1.f, log10f(HUD_ZOOM_MIN), log10f(HUD_ZOOM_MAX))), false);
+    }
+    else if (mFocusOnAvatar && cameraThirdPerson())
+    {
+        mCameraZoomFraction = rescale(fraction, 0.f, 1.f, MAX_ZOOM_FRACTION, MIN_ZOOM_FRACTION);
+    }
+    else if (cameraCustomizeAvatar())
+    {
+        LLVector3d camera_offset_dir = mCameraFocusOffsetTarget;
+        camera_offset_dir.normalize();
+        mCameraFocusOffsetTarget = camera_offset_dir * rescale(fraction, 0.f, 1.f, APPEARANCE_MAX_ZOOM, APPEARANCE_MIN_ZOOM);
+    }
+    else
+    {
+        F32 min_zoom = LAND_MIN_ZOOM;
+        F32 max_zoom = getCameraMaxZoomDistance();
+        if (isDisableCameraConstraints())
+        {
+            max_zoom = MAX_CAMERA_DISTANCE_FROM_OBJECT;
+        }
+
+        if (mFocusObject.notNull())
+        {
+            if (mFocusObject.notNull())
+            {
+                if (mFocusObject->isAvatar())
+                {
+                    min_zoom = AVATAR_MIN_ZOOM;
+                }
+                else
+                {
+                    min_zoom = OBJECT_MIN_ZOOM;
+                }
+            }
+        }
+
+        LLVector3d camera_offset_dir = mCameraFocusOffsetTarget;
+        camera_offset_dir.normalize();
+// [RLVa:KB] - Checked: 2.0.0
+        const LLVector3d focus_offset_target = camera_offset_dir * rescale(fraction, 0.f, 1.f, max_zoom, min_zoom);
+        if ( (RlvActions::isRlvEnabled()) && (!allowFocusOffsetChange(focus_offset_target)) )
+            return;
+        mCameraFocusOffsetTarget = focus_offset_target;
+// [/RLVa:KB]
+//      mCameraFocusOffsetTarget = camera_offset_dir * rescale(fraction, 0.f, 1.f, max_zoom, min_zoom);
+    }
+
+    startCameraAnimation();
+}
+
+bool LLAgentCamera::isEditingHUD() const
+{
+    if (!LLToolMgr::instanceExists() || !LLToolMgr::getInstance()->inBuildMode())
+    {
+        return false;
+    }
+    LLObjectSelectionHandle selection = LLSelectMgr::getInstance()->getSelection();
+    return selection->getObjectCount() && selection->getSelectType() == SELECT_TYPE_HUD;
+}
+
+//-----------------------------------------------------------------------------
+// updateHUDZoom() (#413)
+// LL eased mHUDCurZoom toward the target in render_hud_attachments (GL display
+// path, gone under Vulkan), so the HUD zoom never moved. Once per frame, from idle.
+//-----------------------------------------------------------------------------
+void LLAgentCamera::updateHUDZoom()
+{
+    if (!isEditingHUD())
+    {
+        // Left HUD edit: the next edit starts at 1x; the current zoom eases home.
+        resetHUDZoom();
+    }
+    mHUDTargetZoom = llclamp(mHUDTargetZoom, HUD_ZOOM_MIN, HUD_ZOOM_MAX);
+    if (mHUDTargetZoom <= 1.f)
+    {
+        mHUDTargetPan.clearVec();
+    }
+
+    const F32 target = getAgentHUDTargetZoom();
+    const F32 t = LLSmoothInterpolation::getInterpolant(0.03f);
+    mHUDCurZoom = lerp(mHUDCurZoom, target, t);
+    mHUDCurPan = lerp(mHUDCurPan, mHUDTargetPan, t);
+    if (llabs(mHUDCurZoom - target) < 0.0001f * target)
+    {
+        mHUDCurZoom = target;
+    }
+    if (dist_vec_squared(mHUDCurPan, mHUDTargetPan) < 1.e-10f)
+    {
+        mHUDCurPan = mHUDTargetPan;
+    }
+}
+
+void LLAgentCamera::resetHUDZoom()
+{
+    mHUDTargetZoom = 1.f;
+    mHUDTargetPan.clearVec();
+}
+
+void LLAgentCamera::setHUDTargetZoom(F32 target_zoom, bool about_cursor)
+{
+    const F32 old_target = llclamp(mHUDTargetZoom, HUD_ZOOM_MIN, HUD_ZOOM_MAX);
+    const F32 new_target = llclamp(target_zoom, HUD_ZOOM_MIN, HUD_ZOOM_MAX);
+    mHUDTargetZoom = new_target;
+
+    if (new_target <= 1.f)
+    {
+        // At or below 1x the HUD layer is centred, as LL.
+        mHUDTargetPan.clearVec();
+    }
+    else if (new_target > old_target)
+    {
+        if (about_cursor && gViewerWindow)
+        {
+            // Keep the HUD point under the cursor fixed. The cursor sits at HUD-screen
+            // offset s (mousePointHUD's mapping, unzoomed) and over the point
+            // p = s / z + pan, so the new pan is p - s / z'. HUDScaleFactor scales
+            // both zooms alike (getAgentHUDTargetZoom).
+            static LLCachedControl<F32> hud_scale_factor(gSavedSettings, "HUDScaleFactor");
+            const F32 scale = llmax((F32)hud_scale_factor, 0.01f);
+            const LLRect wv = gViewerWindow->getHudRectScaled();   // #919: as mousePointHUD
+            const F32 h = (F32)llmax(wv.getHeight(), 1);
+            const LLVector3 s(0.f,
+                              -((F32)gViewerWindow->getCurrentMouseX() - 0.5f * (F32)(wv.mLeft + wv.mRight)) / h,
+                               ((F32)gViewerWindow->getCurrentMouseY() - 0.5f * (F32)(wv.mBottom + wv.mTop)) / h);
+            mHUDTargetPan += s * (1.f / (scale * old_target) - 1.f / (scale * new_target));
+        }
+        // else: zoom about the view centre, the pan stays.
+    }
+    else if (new_target < old_target)
+    {
+        // Zooming out: shrink the pan with the zoom so it reaches 0 at 1x.
+        mHUDTargetPan *= (new_target - 1.f) / (old_target - 1.f);   // old_target > new_target > 1
+    }
+    mHUDTargetPan.mV[VX] = 0.f;
+    mHUDTargetPan.mV[VY] = llclamp(mHUDTargetPan.mV[VY], -10.f, 10.f);
+    mHUDTargetPan.mV[VZ] = llclamp(mHUDTargetPan.mV[VZ], -10.f, 10.f);
+}
+
+F32 LLAgentCamera::getAgentHUDTargetZoom()
+{
+    static LLCachedControl<F32> hud_scale_factor(gSavedSettings, "HUDScaleFactor");
+    LLObjectSelectionHandle selection = LLSelectMgr::getInstance()->getSelection();
+    return (selection->getObjectCount() && selection->getSelectType() == SELECT_TYPE_HUD) ? hud_scale_factor*gAgentCamera.mHUDTargetZoom : hud_scale_factor;
+}
+
+//-----------------------------------------------------------------------------
+// cameraOrbitAround()
+//-----------------------------------------------------------------------------
+void LLAgentCamera::cameraOrbitAround(const F32 radians)
+{
+    LLObjectSelectionHandle selection = LLSelectMgr::getInstance()->getSelection();
+    if (selection->getObjectCount() && selection->getSelectType() == SELECT_TYPE_HUD)
+    {
+        // do nothing for hud selection
+    }
+    else if (tpsCameraActive())
+    {
+        // TPS camera orbits independently of the avatar
+        tpsCameraOrbit(radians, 0.f);
+    }
+    else if (mFocusOnAvatar && (mCameraMode == CAMERA_MODE_THIRD_PERSON || mCameraMode == CAMERA_MODE_FOLLOW))
+    {
+        gAgent.yaw(radians);
+    }
+    else
+    {
+        mOrbitAroundRadians += radians;
+        mCameraFocusOffsetTarget.rotVec(radians, 0.f, 0.f, 1.f);
+
+        cameraZoomIn(1.f);
+    }
+}
+
+
+//-----------------------------------------------------------------------------
+// cameraOrbitOver()
+//-----------------------------------------------------------------------------
+void LLAgentCamera::cameraOrbitOver(const F32 angle)
+{
+    LLObjectSelectionHandle selection = LLSelectMgr::getInstance()->getSelection();
+    if (selection->getObjectCount() && selection->getSelectType() == SELECT_TYPE_HUD)
+    {
+        // do nothing for hud selection
+    }
+    else if (tpsCameraActive())
+    {
+        tpsCameraOrbit(0.f, angle);
+    }
+    else if (mFocusOnAvatar && mCameraMode == CAMERA_MODE_THIRD_PERSON)
+    {
+        gAgent.pitch(angle);
+    }
+    else
+    {
+        LLVector3 camera_offset_unit(mCameraFocusOffsetTarget);
+        camera_offset_unit.normalize();
+
+        F32 angle_from_up = acos( camera_offset_unit * gAgent.getReferenceUpVector() );
+
+        LLVector3d left_axis;
+        left_axis.setVec(LLViewerCamera::getInstance()->getLeftAxis());
+        F32 new_angle = llclamp(angle_from_up - angle, 1.f * DEG_TO_RAD, 179.f * DEG_TO_RAD);
+        mOrbitOverAngle += angle_from_up - new_angle;
+        mCameraFocusOffsetTarget.rotVec(angle_from_up - new_angle, left_axis);
+
+        cameraZoomIn(1.f);
+    }
+}
+
+//-----------------------------------------------------------------------------
+// cameraRollOver()
+//-----------------------------------------------------------------------------
+void LLAgentCamera::cameraRollOver(const F32 angle)
+{
+    mRollAngle += fmod(angle, F_TWO_PI);
+}
+
+void LLAgentCamera::resetCameraRoll()
+{
+    mRollAngle = 0.f;
+}
+
+void LLAgentCamera::resetCameraOrbit()
+{
+    LLVector3 camera_offset_unit(mCameraFocusOffsetTarget);
+    camera_offset_unit.normalize();
+
+    LLVector3d left_axis;
+    left_axis.setVec(LLViewerCamera::getInstance()->getLeftAxis());
+    mCameraFocusOffsetTarget.rotVec(-mOrbitOverAngle, left_axis);
+
+    mCameraFocusOffsetTarget.rotVec(-mOrbitAroundRadians, 0.f, 0.f, 1.f);
+
+    cameraZoomIn(1.f);
+    resetOrbitDiff();
+    resetCameraRoll();
+}
+
+void LLAgentCamera::resetOrbitDiff()
+{
+    mOrbitAroundRadians = 0;
+    mOrbitOverAngle = 0;
+}
+
+//-----------------------------------------------------------------------------
+// Third-person shooter (TPS) camera
+//-----------------------------------------------------------------------------
+void LLAgentCamera::setTPSCameraEngaged(bool engaged, F32 yaw, F32 pitch)
+{
+    mTPSCameraEngaged = engaged;
+    if (engaged)
+    {
+        // Drop leftovers of a previous alt-cam/object focus (FOV zoom, focus
+        // object) that the focus-on-avatar path would otherwise keep using.
+        clearFocusObject();
+        mCameraFOVZoomFactor = 0.f;
+        mTPSYaw = yaw;
+        mTPSPitch = llclamp(pitch, -TPS_PITCH_UP_LIMIT, TPS_PITCH_DOWN_LIMIT);
+    }
+}
+
+bool LLAgentCamera::tpsCameraActive() const
+{
+    return mTPSCameraEngaged
+        && mCameraMode == CAMERA_MODE_THIRD_PERSON
+        && mFocusOnAvatar
+        && isAgentAvatarValid()
+        // Seated / in a vehicle is fine (#95), but a sit camera set by the object's script
+        // (llSetCameraEyeOffset / llSetCameraAtOffset) wins: TPS yields to scripted cameras.
+        // (llSetCameraParams switches to CAMERA_MODE_FOLLOW, which also fails the test above.)
+        && !mSitCameraEnabled;
+}
+
+// Orbit pivot while seated (#95): the ROOT prim of the sat-on linkset (the vehicle), not
+// the seat, plus a fixed lift so the camera clears the hull. Agent-region coordinates.
+bool LLAgentCamera::getTPSVehiclePivot(LLVector3& pivot_agent) const
+{
+    if (!isAgentAvatarValid())
+    {
+        return false;
+    }
+    LLViewerObject* seat = (LLViewerObject*)gAgentAvatarp->getParent();
+    if (!seat)
+    {
+        return false;
+    }
+    LLViewerObject* root = seat->getRootEdit();
+    if (!root)
+    {
+        root = seat;
+    }
+    constexpr F32 TPS_VEHICLE_PIVOT_LIFT = 1.f;
+    pivot_agent = root->getRenderPosition() + LLVector3(0.f, 0.f, TPS_VEHICLE_PIVOT_LIFT);
+    return true;
+}
+
+void LLAgentCamera::tpsCameraOrbit(F32 yaw_delta, F32 pitch_delta)
+{
+    mTPSYaw = fmodf(mTPSYaw + yaw_delta, F_TWO_PI);
+    mTPSPitch = llclamp(mTPSPitch + pitch_delta, -TPS_PITCH_UP_LIMIT, TPS_PITCH_DOWN_LIMIT);
+}
+
+LLQuaternion LLAgentCamera::getTPSYawRotation() const
+{
+    return LLQuaternion(mTPSYaw, LLVector3::z_axis);
+}
+
+LLQuaternion LLAgentCamera::getTPSRotation() const
+{
+    // v * (P * Y): pitch about the local left (+Y) axis, then heading about +Z.
+    // Positive pitch tilts the at-axis toward the ground, as LLAgent::pitch.
+    return LLQuaternion(mTPSPitch, LLVector3::y_axis) * getTPSYawRotation();
+}
+
+LLVector3 LLAgentCamera::getTPSShoulderOffset() const
+{
+    static LLCachedControl<F32> shoulder_offset(gSavedSettings, "SlipstreamTPSShoulderOffset", 0.f);
+    if (shoulder_offset == 0.f)
+    {
+        return LLVector3::zero;
+    }
+    // positive = camera sits over the avatar's right shoulder (-left axis)
+    return LLVector3(0.f, -(F32)shoulder_offset, 0.f) * getTPSYawRotation();
+}
+
+//-----------------------------------------------------------------------------
+// cameraZoomIn()
+//-----------------------------------------------------------------------------
+void LLAgentCamera::cameraZoomIn(const F32 fraction)
+{
+    if (gDisconnected)
+    {
+        return;
+    }
+
+    LLObjectSelectionHandle selection = LLSelectMgr::getInstance()->getSelection();
+    if (LLToolMgr::getInstance()->inBuildMode() && selection->getObjectCount() && selection->getSelectType() == SELECT_TYPE_HUD)
+    {
+        // just update hud zoom level
+        setHUDTargetZoom(mHUDTargetZoom / fraction, false);
+        return;
+    }
+
+    LLVector3d camera_offset_unit(mCameraFocusOffsetTarget);
+    F32 current_distance = (F32)camera_offset_unit.normalize();
+    F32 new_distance = current_distance * fraction;
+
+    // Unless camera is unlocked
+    if (!isDisableCameraConstraints())
+    {
+        F32 min_zoom = LAND_MIN_ZOOM;
+
+        // Don't move through focus point
+        if (mFocusObject)
+        {
+            LLVector3 camera_offset_dir((F32)camera_offset_unit.mdV[VX], (F32)camera_offset_unit.mdV[VY], (F32)camera_offset_unit.mdV[VZ]);
+
+            if (mFocusObject->isAvatar())
+            {
+                calcCameraMinDistance(min_zoom);
+            }
+            else
+            {
+                min_zoom = OBJECT_MIN_ZOOM;
+            }
+        }
+
+        new_distance = llmax(new_distance, min_zoom);
+
+        F32 max_distance = getCameraMaxZoomDistance();
+        max_distance = llmin(max_distance, current_distance * 4.f); //Scaled max relative to current distance.  MAINT-3154
+        new_distance = llmin(new_distance, max_distance);
+
+        if (cameraCustomizeAvatar())
+        {
+            new_distance = llclamp(new_distance, APPEARANCE_MIN_ZOOM, APPEARANCE_MAX_ZOOM);
+        }
+    }
+
+// [RLVa:KB] - Checked: 2.0.0
+    if ( (RlvActions::isRlvEnabled()) && (!allowFocusOffsetChange(new_distance * camera_offset_unit)) )
+        return;
+// [/RLVa:KB]
+
+    mCameraFocusOffsetTarget = new_distance * camera_offset_unit;
+}
+
+//-----------------------------------------------------------------------------
+// cameraOrbitIn()
+//-----------------------------------------------------------------------------
+// Zoom by a fraction of the current distance. In the follow view the distance is the
+// zoom-fraction camera (what the scroll wheel drives), elsewhere it is the focus offset.
+void LLAgentCamera::cameraZoomDrag(const F32 fraction)
+{
+    if (mFocusOnAvatar && mCameraMode == CAMERA_MODE_THIRD_PERSON)
+    {
+        cameraOrbitIn(mTargetCameraDistance * (1.f - fraction));
+    }
+    else
+    {
+        cameraZoomIn(fraction);
+    }
+}
+
+void LLAgentCamera::cameraOrbitIn(const F32 meters)
+{
+    if (mFocusOnAvatar && mCameraMode == CAMERA_MODE_THIRD_PERSON)
+    {
+// [RLVa:KB] - @setcam_eyeoffsetscale
+        F32 camera_offset_dist = llmax(0.001f, getCameraOffsetInitial().magVec() * getCameraOffsetScale());
+// [/RLVa:KB]
+//      F32 camera_offset_dist = llmax(0.001f, getCameraOffsetInitial().magVec() * gSavedSettings.getF32("CameraOffsetScale"));
+
+        mCameraZoomFraction = (mTargetCameraDistance - meters) / camera_offset_dist;
+
+        static LLCachedControl<bool> freeze_time(gSavedSettings, "FreezeTime", false);
+        // TPS camera: zooming all the way in clamps at the minimum instead of
+        // dropping into mouselook.
+        if (!freeze_time && mCameraZoomFraction < MIN_ZOOM_FRACTION && meters > 0.f && !tpsCameraActive())
+        {
+            // No need to animate, camera is already there.
+            changeCameraToMouselook(false);
+        }
+
+        if (!isDisableCameraConstraints())
+        {
+            mCameraZoomFraction = llclamp(mCameraZoomFraction, MIN_ZOOM_FRACTION, MAX_ZOOM_FRACTION);
+        }
+        else if (tpsCameraActive())
+        {
+            // never pass through the avatar in TPS, even with constraints off
+            mCameraZoomFraction = llmax(mCameraZoomFraction, MIN_ZOOM_FRACTION);
+        }
+    }
+    else
+    {
+        LLVector3d  camera_offset_unit(mCameraFocusOffsetTarget);
+        F32 current_distance = (F32)camera_offset_unit.normalize();
+        F32 new_distance = current_distance - meters;
+
+        // Unless camera is unlocked
+        if (!isDisableCameraConstraints())
+        {
+            F32 min_zoom = LAND_MIN_ZOOM;
+
+            // Don't move through focus point
+            if (mFocusObject.notNull())
+            {
+                if (mFocusObject->isAvatar())
+                {
+                    min_zoom = AVATAR_MIN_ZOOM;
+                }
+                else
+                {
+                    min_zoom = OBJECT_MIN_ZOOM;
+                }
+            }
+
+            new_distance = llmax(new_distance, min_zoom);
+
+            F32 max_distance = getCameraMaxZoomDistance();
+            new_distance = llmin(new_distance, max_distance);
+
+            if (CAMERA_MODE_CUSTOMIZE_AVATAR == getCameraMode())
+            {
+                new_distance = llclamp(new_distance, APPEARANCE_MIN_ZOOM, APPEARANCE_MAX_ZOOM);
+            }
+        }
+// [RLVa:KB] - Checked: 2.0.0
+        if ( (RlvActions::isRlvEnabled()) && (!allowFocusOffsetChange(new_distance * camera_offset_unit)) )
+            return;
+// [/RLVa:KB]
+
+        // Compute new camera offset
+        mCameraFocusOffsetTarget = new_distance * camera_offset_unit;
+        cameraZoomIn(1.f);
+    }
+}
+
+//-----------------------------------------------------------------------------
+// cameraPanIn()
+//-----------------------------------------------------------------------------
+void LLAgentCamera::cameraPanIn(F32 meters)
+{
+    LLVector3d at_axis;
+    at_axis.setVec(LLViewerCamera::getInstance()->getAtAxis());
+
+    mPanFocusDiff += meters * at_axis;
+
+    mFocusTargetGlobal += meters * at_axis;
+    mFocusGlobal = mFocusTargetGlobal;
+    // don't enforce zoom constraints as this is the only way for users to get past them easily
+    updateFocusOffset();
+    // NOTE: panning movements expect the camera to move exactly with the focus target, not animated behind -Nyx
+    mCameraSmoothingLastPositionGlobal = calcCameraPositionTargetGlobal();
+}
+
+//-----------------------------------------------------------------------------
+// cameraPanLeft()
+//-----------------------------------------------------------------------------
+void LLAgentCamera::cameraPanLeft(F32 meters)
+{
+    LLVector3d left_axis;
+    left_axis.setVec(LLViewerCamera::getInstance()->getLeftAxis());
+
+    mPanFocusDiff += meters * left_axis;
+
+    mFocusTargetGlobal += meters * left_axis;
+    mFocusGlobal = mFocusTargetGlobal;
+
+    // disable smoothing for camera pan, which causes some residents unhappiness
+    mCameraSmoothingStop = true;
+
+    cameraZoomIn(1.f);
+    updateFocusOffset();
+    // NOTE: panning movements expect the camera to move exactly with the focus target, not animated behind - Nyx
+    mCameraSmoothingLastPositionGlobal = calcCameraPositionTargetGlobal();
+}
+
+//-----------------------------------------------------------------------------
+// cameraPanUp()
+//-----------------------------------------------------------------------------
+void LLAgentCamera::cameraPanUp(F32 meters)
+{
+    LLVector3d up_axis;
+    up_axis.setVec(LLViewerCamera::getInstance()->getUpAxis());
+
+    mPanFocusDiff += meters * up_axis;
+
+    mFocusTargetGlobal += meters * up_axis;
+    mFocusGlobal = mFocusTargetGlobal;
+
+    // disable smoothing for camera pan, which causes some residents unhappiness
+    mCameraSmoothingStop = true;
+
+    cameraZoomIn(1.f);
+    updateFocusOffset();
+    // NOTE: panning movements expect the camera to move exactly with the focus target, not animated behind -Nyx
+    mCameraSmoothingLastPositionGlobal = calcCameraPositionTargetGlobal();
+}
+
+void LLAgentCamera::resetCameraPan()
+{
+    mFocusTargetGlobal -= mPanFocusDiff;
+
+    mFocusGlobal = mFocusTargetGlobal;
+    mCameraSmoothingStop = true;
+
+    cameraZoomIn(1.f);
+    updateFocusOffset();
+
+    mCameraSmoothingLastPositionGlobal = calcCameraPositionTargetGlobal();
+
+    resetPanDiff();
+}
+
+void LLAgentCamera::resetPanDiff()
+{
+    mPanFocusDiff.clear();
+}
+
+//-----------------------------------------------------------------------------
+// updateLookAt()
+//-----------------------------------------------------------------------------
+void LLAgentCamera::updateLookAt(const S32 mouse_x, const S32 mouse_y)
+{
+    static LLVector3 last_at_axis;
+
+    if (!isAgentAvatarValid()) return;
+
+    LLQuaternion av_inv_rot = ~gAgentAvatarp->mRoot->getWorldRotation();
+    LLVector3 root_at = LLVector3::x_axis * gAgentAvatarp->mRoot->getWorldRotation();
+
+    // Slipstream (#902): with the camera detached from the avatar, the head looks where the
+    // camera looks; the idle / mouse free-look below is for the camera that follows the avatar.
+    if (updateFreeCameraLookAt())
+    {
+        last_at_axis = root_at;
+        return;
+    }
+
+    if  (LLTrace::get_frame_recording().getLastRecording().getLastValue(*gViewerWindow->getMouseVelocityStat()) < 0.01f
+        && (root_at * last_at_axis > 0.95f))
+    {
+        LLVector3 vel = gAgentAvatarp->getVelocity();
+        if (vel.magVecSquared() > 4.f)
+        {
+            setLookAt(LOOKAT_TARGET_IDLE, gAgentAvatarp, vel * av_inv_rot);
+        }
+        else
+        {
+            // *FIX: rotate mframeagent by sit object's rotation?
+            LLQuaternion look_rotation = gAgentAvatarp->isSitting() ? gAgentAvatarp->getRenderRotation() : gAgent.getFrameAgent().getQuaternion(); // use camera's current rotation
+            LLVector3 look_offset = LLVector3(2.f, 0.f, 0.f) * look_rotation * av_inv_rot;
+            setLookAt(LOOKAT_TARGET_IDLE, gAgentAvatarp, look_offset);
+        }
+        last_at_axis = root_at;
+        return;
+    }
+
+    last_at_axis = root_at;
+
+    if (CAMERA_MODE_CUSTOMIZE_AVATAR == getCameraMode())
+    {
+        setLookAt(LOOKAT_TARGET_NONE, gAgentAvatarp, LLVector3(-2.f, 0.f, 0.f));
+    }
+    else
+    {
+        // Move head based on cursor position
+        ELookAtType lookAtType = LOOKAT_TARGET_NONE;
+        LLVector3 headLookAxis;
+        LLCoordFrame frameCamera = *((LLCoordFrame*)LLViewerCamera::getInstance());
+
+        // <SS:Skoomastream>
+        //if (cameraMouselook())
+        if (cameraMouselook() || cameraOTS())
+        // </SS:Skoomastream>
+        {
+            lookAtType = LOOKAT_TARGET_MOUSELOOK;
+        }
+        else if (cameraThirdPerson())
+        {
+            // range from -.5 to .5
+            F32 x_from_center =
+                ((F32) mouse_x / (F32) gViewerWindow->getWorldViewWidthScaled() ) - 0.5f;
+            F32 y_from_center =
+                ((F32) mouse_y / (F32) gViewerWindow->getWorldViewHeightScaled() ) - 0.5f;
+
+            frameCamera.yaw( - x_from_center * gSavedSettings.getF32("YawFromMousePosition") * DEG_TO_RAD);
+            frameCamera.pitch( - y_from_center * gSavedSettings.getF32("PitchFromMousePosition") * DEG_TO_RAD);
+            lookAtType = LOOKAT_TARGET_FREELOOK;
+        }
+
+        headLookAxis = frameCamera.getAtAxis();
+        // RN: we use world-space offset for mouselook and freelook
+        //headLookAxis = headLookAxis * av_inv_rot;
+        setLookAt(lookAtType, gAgentAvatarp, headLookAxis);
+    }
+}
+
+//-----------------------------------------------------------------------------
+// updateFreeCameraLookAt()
+// Slipstream (#902): while the camera is detached from the avatar (Alt-click focus then
+// orbit / pan / zoom, right-drag orbit, middle-mouse navigation, the camera floater, the
+// flycam, the camera recorder), the look-at target is the point the camera is looking at,
+// re-aimed every frame. LL set a FOCUS target once, when the focus was picked, and never
+// moved it: panning (cameraPanIn/Left/Up, resetCameraPan) moves mFocusTargetGlobal without
+// a new setLookAt, the flycam never touches the focus at all, and a focus on our own avatar
+// (unlocking the camera, right-drag orbit) makes the head stare along the body instead.
+// Returns true while detached (the caller then leaves the look-at alone).
+//-----------------------------------------------------------------------------
+bool LLAgentCamera::updateFreeCameraLookAt()
+{
+    const bool override_camera = LLViewerJoystick::getInstance()->getOverrideCamera()
+        || (gAgentPilot.isPlaying() && gAgentPilot.getOverrideCamera())
+        || gAgentPilot.isPreviewing();
+    const bool detached = isAgentAvatarValid() && gAgentAvatarp->mHeadp
+        && mCameraMode != CAMERA_MODE_MOUSELOOK
+        && mCameraMode != CAMERA_MODE_CUSTOMIZE_AVATAR
+        && (override_camera
+            || (!mFocusOnAvatar
+                && (mCameraMode == CAMERA_MODE_THIRD_PERSON || mCameraMode == CAMERA_MODE_FOLLOW)
+                && !tpsCameraActive()));
+
+    if (!detached)
+    {
+        if (mFreeCamLookAt)
+        {
+            // The camera came back to the avatar without a CLEAR (setFocusOnAvatar(true)
+            // without reset_axes): drop the world point we left behind, or it would hold the
+            // head forever (FOCUS never times out). Anything that replaced it stays.
+            mFreeCamLookAt = false;
+            if (getLookAtType() == LOOKAT_TARGET_FOCUS && !cameraCustomizeAvatar())
+            {
+                setLookAt(LOOKAT_TARGET_CLEAR);
+            }
+        }
+        return false;
+    }
+
+    // Targets with a reason of their own keep the head: an object being edited (SELECT,
+    // same priority as FOCUS, so the priority check would not protect it), a chat partner
+    // (RESPOND / AUTO_LISTEN / CONVERSATION), the mouselook aim, the hover glance.
+    switch (getLookAtType())
+    {
+    case LOOKAT_TARGET_NONE:
+    case LOOKAT_TARGET_IDLE:
+    case LOOKAT_TARGET_FREELOOK:
+    case LOOKAT_TARGET_FOCUS:
+        break;
+    default:
+        mFreeCamLookAt = false;
+        return true;
+    }
+
+    LLViewerCamera* camera = LLViewerCamera::getInstance();
+    const LLVector3 origin = camera->getOrigin();
+    LLVector3 at = camera->getAtAxis();
+    if (!origin.isFinite() || !at.isFinite() || at.normalize() < 0.001f)
+    {
+        return true;
+    }
+
+    // Distance along the view axis. The camera is aimed at its focus point (updateCamera:
+    // updateCameraLocation(position, up, focus)), so that point projected on the axis is
+    // the focus itself. No usable focus (flycam / recorder, or behind the camera): the
+    // focus distance, or a few metres, straight ahead.
+    constexpr F32 MIN_AHEAD = 0.5f;            // metres in front of the lens
+    constexpr F32 DEFAULT_DISTANCE = 10.f;     // straight ahead when there is no focus
+    constexpr F32 MAX_DISTANCE = 512.f;
+    constexpr F32 MIN_FROM_HEAD = 1.5f;        // closer to the head than this means "at me"
+    constexpr F32 PAST_HEAD = 3.f;             // how far past the head to look then
+    F32 dist = -1.f;
+    if (!override_camera)
+    {
+        const LLVector3 focus_agent = gAgent.getPosAgentFromGlobal(mFocusGlobal);
+        if (focus_agent.isFinite())
+        {
+            dist = (focus_agent - origin) * at;
+            if (!(dist > MIN_AHEAD))
+            {
+                dist = llmax(dist_vec(focus_agent, origin), 2.f);
+            }
+        }
+    }
+    if (!(dist > MIN_AHEAD))   // also catches NaN
+    {
+        dist = DEFAULT_DISTANCE;
+    }
+    dist = llmin(dist, MAX_DISTANCE);
+    LLVector3 target = origin + at * dist;
+
+    // A camera looking at our own avatar (the focus is on us: unlocking the camera, the
+    // right-drag orbit pivot, an Alt-click on ourselves) has its point at the head, which
+    // gives no direction. Look on along the camera's line of sight, past the head, so the
+    // avatar faces where the camera faces. If that is behind the body (the camera in front
+    // looking back at us), keep LL's look for a focus on ourselves: straight ahead.
+    const LLVector3 head = gAgentAvatarp->mHeadp->getWorldPosition();
+    if (dist_vec(target, head) < MIN_FROM_HEAD)
+    {
+        const F32 head_along = (head - origin) * at;
+        target = origin + at * llmin(llmax(head_along + PAST_HEAD, MIN_AHEAD), MAX_DISTANCE);
+        const LLVector3 body_at = LLVector3::x_axis * gAgentAvatarp->mRoot->getWorldRotation();
+        if ((target - head) * body_at < 0.f)
+        {
+            target = head + body_at * 5.f;
+        }
+    }
+
+    if (!target.isFinite())
+    {
+        return true;
+    }
+
+    // A world point, no object: nothing is stored relative to anything that can move or
+    // rotate under it. LLHUDEffectLookAt::setLookAt throttles the sends to the simulator
+    // (MIN_DELTAPOS_FOR_UPDATE / MAX_SENDS_PER_SEC); setLookAt applies the privacy option
+    // and the AO head-hold.
+    setLookAt(LOOKAT_TARGET_FOCUS, NULL, target);
+    mFreeCamLookAt = true;
+    return true;
+}
+
+static LLTrace::BlockTimerStatHandle FTM_UPDATE_CAMERA("Camera");
+
+//-----------------------------------------------------------------------------
+// updateCamera()
+//-----------------------------------------------------------------------------
+void LLAgentCamera::updateCamera()
+{
+    LL_RECORD_BLOCK_TIME(FTM_UPDATE_CAMERA);
+
+    // <SS:Skoomastream>
+    // An RLVa camera distance cap that arrives (or tightens) while in OTS and
+    // leaves no room for a shoulder camera drops the aim view to first person.
+    // Smaller caps are applied to the OTS camera in calcCameraPositionTargetGlobal.
+    if (mCameraMode == CAMERA_MODE_OTS && !rlvAllowsOTS())
+    {
+        changeCameraToMouselook(false);
+        if (mCameraMode == CAMERA_MODE_OTS)
+        {
+            changeCameraFromOTS(); // mouselook refused too: leave the aim mode
+        }
+    }
+    // </SS:Skoomastream>
+    updateSmoothZoom();
+
+    // - changed camera_skyward to the new global "mCameraUpVector"
+    mCameraUpVector = LLVector3::z_axis;
+    //LLVector3 camera_skyward(0.f, 0.f, 1.f);
+
+// [RLVa:KB] - Checked: RLVa-2.0.0
+    // Set focus back on our avie if something changed it
+    if ( (gRlvHandler.hasBehaviour(RLV_BHVR_SETCAM_UNLOCK)) && ((cameraThirdPerson()) || (cameraFollow())) && (!getFocusOnAvatar()) )
+    {
+        setFocusOnAvatar(true, false);
+    }
+// [/RLVa:KB]
+
+    U32 camera_mode = mCameraAnimating ? mLastCameraMode : mCameraMode;
+
+    validateFocusObject();
+
+    if (isAgentAvatarValid() &&
+        gAgentAvatarp->isSitting() &&
+        camera_mode == CAMERA_MODE_MOUSELOOK)
+    {
+        //changed camera_skyward to the new global "mCameraUpVector"
+        mCameraUpVector = mCameraUpVector * gAgentAvatarp->getRenderRotation();
+    }
+
+    if (cameraThirdPerson() && (mFocusOnAvatar || mAllowChangeToFollow) && LLFollowCamMgr::getInstance()->getActiveFollowCamParams())
+    {
+        mAllowChangeToFollow = false;
+        mFocusOnAvatar = true;
+        changeCameraToFollow();
+    }
+
+    //NOTE - this needs to be integrated into a general upVector system here within llAgent.
+    if ( camera_mode == CAMERA_MODE_FOLLOW && mFocusOnAvatar )
+    {
+        mCameraUpVector = mFollowCam.getUpVector();
+    }
+
+    if (mSitCameraEnabled)
+    {
+        if (mSitCameraReferenceObject->isDead())
+        {
+            setSitCamera(LLUUID::null);
+        }
+    }
+
+    // Update UI with our camera inputs
+    LLFloaterCamera* camera_floater = LLFloaterReg::findTypedInstance<LLFloaterCamera>("camera");
+    if (camera_floater)
+    {
+        camera_floater->mRotate->setToggleState(gAgentCamera.getOrbitRightKey() > 0.f,  // left
+                                                gAgentCamera.getOrbitUpKey() > 0.f,     // top
+                                                gAgentCamera.getOrbitLeftKey() > 0.f,   // right
+                                                gAgentCamera.getOrbitDownKey() > 0.f);  // bottom
+
+        camera_floater->mTrack->setToggleState(gAgentCamera.getPanLeftKey() > 0.f,      // left
+                                               gAgentCamera.getPanUpKey() > 0.f,            // top
+                                               gAgentCamera.getPanRightKey() > 0.f,     // right
+                                               gAgentCamera.getPanDownKey() > 0.f);     // bottom
+    }
+
+    // Handle camera movement based on keyboard.
+    const F32 ORBIT_OVER_RATE = 90.f * DEG_TO_RAD;          // radians per second
+    const F32 ORBIT_AROUND_RATE = 90.f * DEG_TO_RAD;        // radians per second
+    const F32 PAN_RATE = 5.f;                               // meters per second
+    const F32 ROLL_RATE = 45.f * DEG_TO_RAD;                // radians per second
+
+    if (gAgentCamera.getOrbitUpKey() || gAgentCamera.getOrbitDownKey())
+    {
+        F32 input_rate = gAgentCamera.getOrbitUpKey() - gAgentCamera.getOrbitDownKey();
+        cameraOrbitOver( input_rate * ORBIT_OVER_RATE / gFPSClamped );
+    }
+
+    if (gAgentCamera.getOrbitLeftKey() || gAgentCamera.getOrbitRightKey())
+    {
+        F32 input_rate = gAgentCamera.getOrbitLeftKey() - gAgentCamera.getOrbitRightKey();
+        cameraOrbitAround(input_rate * ORBIT_AROUND_RATE / gFPSClamped);
+    }
+
+    if (gAgentCamera.getOrbitInKey() || gAgentCamera.getOrbitOutKey())
+    {
+        F32 input_rate = gAgentCamera.getOrbitInKey() - gAgentCamera.getOrbitOutKey();
+
+        LLVector3d to_focus = gAgent.getPosGlobalFromAgent(LLViewerCamera::getInstance()->getOrigin()) - calcFocusPositionTargetGlobal();
+        F32 distance_to_focus = (F32)to_focus.magVec();
+        // Move at distance (in meters) meters per second
+        cameraOrbitIn( input_rate * distance_to_focus / gFPSClamped );
+    }
+
+    if (gAgentCamera.getPanInKey() || gAgentCamera.getPanOutKey())
+    {
+        F32 input_rate = gAgentCamera.getPanInKey() - gAgentCamera.getPanOutKey();
+        cameraPanIn(input_rate * PAN_RATE / gFPSClamped);
+    }
+
+    if (gAgentCamera.getPanRightKey() || gAgentCamera.getPanLeftKey())
+    {
+        F32 input_rate = gAgentCamera.getPanRightKey() - gAgentCamera.getPanLeftKey();
+        cameraPanLeft(input_rate * -PAN_RATE / gFPSClamped );
+    }
+
+    if (gAgentCamera.getPanUpKey() || gAgentCamera.getPanDownKey())
+    {
+        F32 input_rate = gAgentCamera.getPanUpKey() - gAgentCamera.getPanDownKey();
+        cameraPanUp(input_rate * PAN_RATE / gFPSClamped );
+    }
+
+    if (getRollLeftKey() || getRollRightKey())
+    {
+        F32 input_rate = getRollRightKey() - getRollLeftKey();
+        cameraRollOver(input_rate * ROLL_RATE / gFPSClamped);
+    }
+
+    // Clear camera keyboard keys.
+    gAgentCamera.clearOrbitKeys();
+    gAgentCamera.clearPanKeys();
+
+    // lerp camera focus offset
+    mCameraFocusOffset = lerp(mCameraFocusOffset, mCameraFocusOffsetTarget, LLSmoothInterpolation::getInterpolant(CAMERA_FOCUS_HALF_LIFE));
+
+    if ( mCameraMode == CAMERA_MODE_FOLLOW )
+    {
+        if (isAgentAvatarValid())
+        {
+            //--------------------------------------------------------------------------------
+            // this is where the avatar's position and rotation are given to followCam, and
+            // where it is updated. All three of its attributes are updated: (1) position,
+            // (2) focus, and (3) upvector. They can then be queried elsewhere in llAgent.
+            //--------------------------------------------------------------------------------
+            // *TODO: use combined rotation of frameagent and sit object
+            LLQuaternion avatarRotationForFollowCam = gAgentAvatarp->isSitting() ? gAgentAvatarp->getRenderRotation() : gAgent.getFrameAgent().getQuaternion();
+
+            LLFollowCamParams* current_cam = LLFollowCamMgr::getInstance()->getActiveFollowCamParams();
+            if (current_cam)
+            {
+                mFollowCam.copyParams(*current_cam);
+                mFollowCam.setSubjectPositionAndRotation( gAgentAvatarp->getRenderPosition(), avatarRotationForFollowCam );
+                mFollowCam.update();
+                LLViewerJoystick::getInstance()->setCameraNeedsUpdate(true);
+            }
+            else
+            {
+                changeCameraToThirdPerson(true);
+            }
+        }
+    }
+
+    bool hit_limit;
+    LLVector3d camera_pos_global;
+    LLVector3d camera_target_global = calcCameraPositionTargetGlobal(&hit_limit);
+    mCameraVirtualPositionAgent = gAgent.getPosAgentFromGlobal(camera_target_global);
+    LLVector3d focus_target_global = calcFocusPositionTargetGlobal();
+
+    // perform field of view correction
+    mCameraFOVZoomFactor = calcCameraFOVZoomFactor();
+    camera_target_global = focus_target_global + (camera_target_global - focus_target_global) * (1.f + mCameraFOVZoomFactor);
+
+    gAgent.setShowAvatar(true); // can see avatar by default
+
+    // Adjust position for animation
+    if (mCameraAnimating)
+    {
+        F32 time = mAnimationTimer.getElapsedTimeF32();
+
+        // yet another instance of critically damped motion, hooray!
+        // F32 fraction_of_animation = 1.f - pow(2.f, -time / CAMERA_ZOOM_HALF_LIFE);
+
+        // linear interpolation
+        F32 fraction_of_animation = time / mAnimationDuration;
+
+        bool isfirstPerson = mCameraMode == CAMERA_MODE_MOUSELOOK;
+        bool wasfirstPerson = mLastCameraMode == CAMERA_MODE_MOUSELOOK;
+        F32 fraction_animation_to_skip;
+
+        if (mAnimationCameraStartGlobal == camera_target_global)
+        {
+            fraction_animation_to_skip = 0.f;
+        }
+        else
+        {
+            LLVector3d cam_delta = mAnimationCameraStartGlobal - camera_target_global;
+            fraction_animation_to_skip = HEAD_BUFFER_SIZE / (F32)cam_delta.magVec();
+        }
+        F32 animation_start_fraction = (wasfirstPerson) ? fraction_animation_to_skip : 0.f;
+        F32 animation_finish_fraction =  (isfirstPerson) ? (1.f - fraction_animation_to_skip) : 1.f;
+
+        if (fraction_of_animation < animation_finish_fraction)
+        {
+            if (fraction_of_animation < animation_start_fraction || fraction_of_animation > animation_finish_fraction )
+            {
+                gAgent.setShowAvatar(false);
+            }
+
+            // ...adjust position for animation
+            F32 smooth_fraction_of_animation = llsmoothstep(0.0f, 1.0f, fraction_of_animation);
+
+            // <SS:Skoomastream>
+            // In the aim modes (mouselook/OTS) the camera is rigidly attached to the
+            // avatar's frame, so a turn or strafe during the swap must carry the
+            // animation start with it. Otherwise the start stays pinned in world space
+            // while the live target tracks the yaw, and the look freezes/turns away
+            // from where you are aiming until the swap finishes. Re-anchor the start
+            // points to the avatar's current frame: translate by how far the root has
+            // moved and rotate by how far the agent has turned since the swap began.
+            LLVector3d cam_start = mAnimationCameraStartGlobal;
+            LLVector3d focus_start = mAnimationFocusStartGlobal;
+            if (mCameraMode == CAMERA_MODE_MOUSELOOK || mCameraMode == CAMERA_MODE_OTS)
+            {
+                const LLQuaternion delta_rot = ~mAnimationStartAgentRot * gAgent.getFrameAgent().getQuaternion();
+                const LLVector3d   root_now  = gAgent.getPosGlobalFromAgent(getAvatarRootPosition());
+                LLVector3 cam_off(cam_start   - mAnimationStartRootGlobal); // explicit LLVector3(LLVector3d)
+                LLVector3 foc_off(focus_start - mAnimationStartRootGlobal);
+                cam_off = cam_off * delta_rot;                             // rotate offset with the avatar
+                foc_off = foc_off * delta_rot;
+                cam_start   = root_now + LLVector3d(cam_off);              // explicit LLVector3d(LLVector3)
+                focus_start = root_now + LLVector3d(foc_off);
+            }
+
+            //camera_pos_global = lerp(mAnimationCameraStartGlobal, camera_target_global, smooth_fraction_of_animation);
+            //mFocusGlobal = lerp(mAnimationFocusStartGlobal, focus_target_global, smooth_fraction_of_animation);
+            camera_pos_global = lerp(cam_start, camera_target_global, smooth_fraction_of_animation);
+            mFocusGlobal = lerp(focus_start, focus_target_global, smooth_fraction_of_animation);
+            // </SS:Skoomastream>
+        }
+        else
+        {
+            // ...animation complete
+            mCameraAnimating = false;
+
+            camera_pos_global = camera_target_global;
+            mFocusGlobal = focus_target_global;
+
+            gAgent.endAnimationUpdateUI();
+            gAgent.setShowAvatar(true);
+        }
+    }
+    else
+    {
+        camera_pos_global = camera_target_global;
+        mFocusGlobal = focus_target_global;
+        gAgent.setShowAvatar(true);
+    }
+
+    // smoothing
+    if (true)
+    {
+        LLVector3d agent_pos = gAgent.getPositionGlobal();
+        LLVector3d camera_pos_agent = camera_pos_global - agent_pos;
+        // Sitting on what you're manipulating can cause camera jitter with smoothing.
+        // This turns off smoothing while editing. -MG
+        bool in_build_mode = LLToolMgr::getInstance()->inBuildMode();
+        mCameraSmoothingStop = mCameraSmoothingStop || in_build_mode;
+
+        if (cameraThirdPerson() && !mCameraSmoothingStop)
+        {
+            const F32 SMOOTHING_HALF_LIFE = 0.02f;
+
+            F32 smoothing = LLSmoothInterpolation::getInterpolant(gSavedSettings.getF32("CameraPositionSmoothing") * SMOOTHING_HALF_LIFE, false);
+
+            if (mFocusOnAvatar && !mFocusObject) // we differentiate on avatar mode
+            {
+                // for avatar-relative focus, we smooth in avatar space -
+                // the avatar moves too jerkily w/r/t global space to smooth there.
+
+                LLVector3d delta = camera_pos_agent - mCameraSmoothingLastPositionAgent;
+                if (delta.magVec() < MAX_CAMERA_SMOOTH_DISTANCE)  // only smooth over short distances please
+                {
+                    camera_pos_agent = lerp(mCameraSmoothingLastPositionAgent, camera_pos_agent, smoothing);
+                    camera_pos_global = camera_pos_agent + agent_pos;
+                }
+            }
+            else
+            {
+                LLVector3d delta = camera_pos_global - mCameraSmoothingLastPositionGlobal;
+                if (delta.magVec() < MAX_CAMERA_SMOOTH_DISTANCE) // only smooth over short distances please
+                {
+                    camera_pos_global = lerp(mCameraSmoothingLastPositionGlobal, camera_pos_global, smoothing);
+                }
+            }
+        }
+
+        mCameraSmoothingLastPositionGlobal = camera_pos_global;
+        mCameraSmoothingLastPositionAgent = camera_pos_agent;
+        mCameraSmoothingStop = false;
+    }
+
+
+    mCameraCurrentFOVZoomFactor = lerp(mCameraCurrentFOVZoomFactor, mCameraFOVZoomFactor, LLSmoothInterpolation::getInterpolant(FOV_ZOOM_HALF_LIFE));
+
+//  LL_INFOS() << "Current FOV Zoom: " << mCameraCurrentFOVZoomFactor << " Target FOV Zoom: " << mCameraFOVZoomFactor << " Object penetration: " << mFocusObjectDist << LL_ENDL;
+
+    LLVector3 focus_agent = gAgent.getPosAgentFromGlobal(mFocusGlobal);
+    LLVector3 position_agent = gAgent.getPosAgentFromGlobal(camera_pos_global);
+
+    // Bone camera + cinematic head tracking (ported from Black Dragon, NiranV Dean):
+    // third person, focused on the avatar (not the TPS camera, which owns its focus).
+    static LLCachedControl<S32>  follow_joint(gSavedSettings, "CameraFollowJoint", -1);
+    static LLCachedControl<bool> cinematic(gSavedSettings, "UseCinematicCamera", false);
+    static LLCachedControl<F32>  max_roll(gSavedSettings, "CameraMaxRoll", 0.85f);
+    static LLCachedControl<F32>  max_roll_sitting(gSavedSettings, "CameraMaxRollSitting", 0.85f);
+    if (isAgentAvatarValid() && mFocusOnAvatar && mCameraMode == CAMERA_MODE_THIRD_PERSON && !tpsCameraActive()
+        && ((S32)follow_joint >= 0 || cinematic))
+    {
+        LLJoint* joint = (S32)follow_joint >= 0 ? gAgentAvatarp->getCharacterJoint((U32)(S32)follow_joint) : nullptr;
+        if (joint)
+        {
+            // Focus pinned to the bone, plus the preset's focus offset in the avatar frame.
+            const LLQuaternion av_rot = gAgentAvatarp->isSitting() ? gAgentAvatarp->getRenderRotation()
+                                                                   : gAgent.getFrameAgent().getQuaternion();
+            focus_agent = joint->getWorldPosition() + LLVector3(getFocusOffsetInitial()) * av_rot;
+        }
+        else if (cinematic && gAgentAvatarp->mHeadp && gAgentAvatarp->mPelvisp)
+        {
+            // Focus follows the head's motion; camera up follows head roll, damped back
+            // towards +Z by CameraMaxRoll (1 = no roll).
+            const LLQuaternion head_rot = gAgentAvatarp->mHeadp->getWorldRotation();
+            const LLVector3 head_pos = gAgentAvatarp->mHeadp->getWorldPosition()
+                - LLVector3(0.08f, 0.f, 0.05f) * head_rot
+                + LLVector3(0.1f, 0.f, 0.f) * gAgentAvatarp->mPelvisp->getWorldRotation();
+            focus_agent += gAgentAvatarp->mHeadp->getWorldPosition() - head_pos;
+            mCameraUpVector += LLVector3::z_axis * head_rot;
+            mCameraUpVector = lerp(mCameraUpVector, LLVector3::z_axis,
+                                   llclamp(gAgentAvatarp->isSitting() ? (F32)max_roll_sitting : (F32)max_roll, 0.f, 1.f));
+        }
+    }
+
+    // Try to move the camera
+
+    if (!LLViewerCamera::getInstance()->updateCameraLocation(position_agent, mCameraUpVector, focus_agent))
+        return;
+
+    // Speed-based FoV (#663): extra FoV on top of the user's, applied inside setView().
+    LLViewerCamera::getInstance()->setSpeedFovBoost(SLSpeedFov::update());
+
+    // Change FOV
+    LLViewerCamera::getInstance()->setView(LLViewerCamera::getInstance()->getDefaultFOV() / (1.f + mCameraCurrentFOVZoomFactor));
+
+    // follow camera when in customize mode
+    if (cameraCustomizeAvatar())
+    {
+        setLookAt(LOOKAT_TARGET_FOCUS, NULL, position_agent);
+    }
+
+    // update the travel distance stat
+    // this isn't directly related to the camera
+    // but this seemed like the best place to do this
+    LLVector3d global_pos = gAgent.getPositionGlobal();
+    if (!gAgent.getLastPositionGlobal().isExactlyZero())
+    {
+        LLVector3d delta = global_pos - gAgent.getLastPositionGlobal();
+        gAgent.setDistanceTraveled(gAgent.getDistanceTraveled() + delta.magVec());
+    }
+    gAgent.setLastPositionGlobal(global_pos);
+
+    // <SS:Skoomastream>
+    // Exclude OTS -- shoulder camera position must not be overridden by head-tracking.
+    //if (LLVOAvatar::sVisibleInFirstPerson && isAgentAvatarValid() && !gAgentAvatarp->isSitting() && cameraMouselook())
+    // Also skipped while the camera animates: during the OTS -> first person
+    // swap cameraMouselook() is already true but the camera is still gliding in
+    // from the shoulder, which would shove the pelvis toward it.
+    if (LLVOAvatar::sVisibleInFirstPerson && isAgentAvatarValid() && !gAgentAvatarp->isSitting() && cameraMouselook() && !cameraOTS() && !mCameraAnimating)
+    // </SS:Skoomastream>
+    {
+        LLVector3 head_pos = gAgentAvatarp->mHeadp->getWorldPosition() +
+            LLVector3(0.08f, 0.f, 0.05f) * gAgentAvatarp->mHeadp->getWorldRotation() +
+            LLVector3(0.1f, 0.f, 0.f) * gAgentAvatarp->mPelvisp->getWorldRotation();
+        LLVector3 diff = position_agent - head_pos;
+        diff *= ~gAgentAvatarp->mRoot->getWorldRotation();
+
+        LLJoint* torso_joint = gAgentAvatarp->mTorsop;
+        LLJoint* chest_joint = gAgentAvatarp->mChestp;
+        LLVector3 torso_scale = torso_joint->getScale();
+        LLVector3 chest_scale = chest_joint->getScale();
+
+        // shorten avatar skeleton to avoid foot interpenetration
+#if 0 // This screws up mouselook attachments
+        if (!gAgentAvatarp->mInAir)
+        {
+            LLVector3 chest_offset = LLVector3(0.f, 0.f, chest_joint->getPosition().mV[VZ]) * torso_joint->getWorldRotation();
+            F32 z_compensate = llclamp(-diff.mV[VZ], -0.2f, 1.f);
+            F32 scale_factor = llclamp(1.f - ((z_compensate * 0.5f) / chest_offset.mV[VZ]), 0.5f, 1.2f);
+            torso_joint->setScale(LLVector3(1.f, 1.f, scale_factor));
+
+            LLJoint* neck_joint = gAgentAvatarp->mNeckp;
+            LLVector3 neck_offset = LLVector3(0.f, 0.f, neck_joint->getPosition().mV[VZ]) * chest_joint->getWorldRotation();
+            scale_factor = llclamp(1.f - ((z_compensate * 0.5f) / neck_offset.mV[VZ]), 0.5f, 1.2f);
+            chest_joint->setScale(LLVector3(1.f, 1.f, scale_factor));
+            diff.mV[VZ] = 0.f;
+        }
+#endif
+        static LLCachedControl<bool> useRealisticMouselook(gSavedSettings, "SlipstreamRealisticMouselook", false);
+        if (useRealisticMouselook)
+        {
+            auto frame_agent = gAgent.getFrameAgent();
+            LLQuaternion agent_rot(frame_agent.getQuaternion());
+            auto avatarp_parent = (LLViewerObject*)gAgentAvatarp->getParent();
+            if(avatarp_parent)
+            {
+                auto avatarp_root = (LLViewerObject*)gAgentAvatarp->getRoot();
+                if(avatarp_root)
+                {
+                    auto decoupled = avatarp_root->flagCameraDecoupled();
+                    if(decoupled)
+                    {
+                        agent_rot *= avatarp_parent->getRenderRotation();
+                    }
+
+                }
+            }
+
+            LLViewerCamera::instance().updateCameraLocation(head_pos, mCameraUpVector, gAgentAvatarp->mHeadp->getWorldPosition() + LLVector3(1.0, 0.0, 0.0) * agent_rot);
+        }
+        else
+        {
+            // SL-315
+            gAgentAvatarp->mPelvisp->setPosition(gAgentAvatarp->mPelvisp->getPosition() + diff);
+        }
+
+        gAgentAvatarp->mRoot->updateWorldMatrixChildren();
+
+        for (LLVOAvatar::attachment_map_t::iterator iter = gAgentAvatarp->mAttachmentPoints.begin();
+             iter != gAgentAvatarp->mAttachmentPoints.end(); )
+        {
+            LLVOAvatar::attachment_map_t::iterator curiter = iter++;
+            LLViewerJointAttachment* attachment = curiter->second;
+            for (LLViewerJointAttachment::attachedobjs_vec_t::iterator attachment_iter = attachment->mAttachedObjects.begin();
+                 attachment_iter != attachment->mAttachedObjects.end();
+                 ++attachment_iter)
+            {
+                LLViewerObject *attached_object = attachment_iter->get();
+                if (attached_object && !attached_object->isDead() && attached_object->mDrawable.notNull())
+                {
+                    // clear any existing "early" movements of attachment
+                    attached_object->mDrawable->clearState(LLDrawable::EARLY_MOVE);
+                    gPipeline.updateMoveNormalAsync(attached_object->mDrawable);
+                    attached_object->updateText();
+                }
+            }
+        }
+
+        torso_joint->setScale(torso_scale);
+        chest_joint->setScale(chest_scale);
+    }
+
+    //     We have do this at the very end to make sure it takes all previous calculations into
+    //     account and then applies our roll on top of it, besides it wouldn't even work otherwise.
+    LLQuaternion rot_quat = LLViewerCamera::instance().getQuaternion();
+    LLMatrix3 rot_mat(mRollAngle, 0.f, 0.f);
+    rot_quat = LLQuaternion(rot_mat)*rot_quat;
+
+    LLMatrix3 mat(rot_quat);
+
+    LLViewerCamera::instance().mXAxis = LLVector3(mat.mMatrix[0]);
+    LLViewerCamera::instance().mYAxis = LLVector3(mat.mMatrix[1]);
+    LLViewerCamera::instance().mZAxis = LLVector3(mat.mMatrix[2]);
+}
+
+void LLAgentCamera::updateLastCamera()
+{
+    mLastCameraMode = mCameraMode;
+}
+
+void LLAgentCamera::updateFocusOffset()
+{
+    validateFocusObject();
+    if (mFocusObject.notNull())
+    {
+        LLVector3d obj_pos = gAgent.getPosGlobalFromAgent(mFocusObject->getRenderPosition());
+        mFocusObjectOffset.setVec(mFocusTargetGlobal - obj_pos);
+    }
+}
+
+void LLAgentCamera::validateFocusObject()
+{
+    if (mFocusObject.notNull() &&
+        mFocusObject->isDead())
+    {
+        mFocusObjectOffset.clearVec();
+        clearFocusObject();
+        mCameraFOVZoomFactor = 0.f;
+    }
+}
+
+//-----------------------------------------------------------------------------
+// calcFocusPositionTargetGlobal()
+//-----------------------------------------------------------------------------
+LLVector3d LLAgentCamera::calcFocusPositionTargetGlobal()
+{
+    if (mFocusObject.notNull() && mFocusObject->isDead())
+    {
+        clearFocusObject();
+    }
+
+    if (mCameraMode == CAMERA_MODE_FOLLOW && mFocusOnAvatar)
+    {
+        mFocusTargetGlobal = gAgent.getPosGlobalFromAgent(mFollowCam.getSimulatedFocus());
+        return mFocusTargetGlobal;
+    }
+    // <SS:Skoomastream>
+    else if (mCameraMode == CAMERA_MODE_OTS)
+    {
+        // Focus in front of avatar at aim height
+        static LLCachedControl<F32> ots_focus_dist(gSavedSettings, "OTSFocusDistance", 10.0f);
+        static LLCachedControl<F32> ots_height(gSavedSettings,     "OTSCameraHeight",   0.5f);
+        static LLCachedControl<F32> ots_side(gSavedSettings,       "OTSCameraSide",    -0.5f);
+        // <GMDX> SoapStorm 557eddcac5: focus at the camera's own height and side, so the
+        // view looks parallel to the avatar's facing instead of angling in toward it.
+        F32 focus_height = (F32)ots_height;
+        F32 focus_side = (F32)ots_side;
+        if (isAgentAvatarValid() && gAgentAvatarp->isSitting() && mSitCameraEnabled)
+        {
+            focus_height = mSitCameraPos.mV[VZ];
+            focus_side = mSitCameraPos.mV[VY];
+            // </GMDX>
+        }
+        LLVector3 focus_local((F32)ots_focus_dist, focus_side, focus_height);
+        LLVector3 focus_world = focus_local * getOTSFrameRotation(); // seat-relative when seated, as mouselook
+        LLVector3d avatar_pos = gAgent.getPosGlobalFromAgent(getAvatarRootPosition());
+        mFocusTargetGlobal = avatar_pos + LLVector3d(focus_world);
+        return mFocusTargetGlobal;
+    }
+    // </SS:Skoomastream>
+    else if (mCameraMode == CAMERA_MODE_MOUSELOOK)
+    {
+        LLVector3d at_axis(1.0, 0.0, 0.0);
+        LLQuaternion agent_rot = gAgent.getFrameAgent().getQuaternion();
+        if (isAgentAvatarValid() && gAgentAvatarp->getParent())
+        {
+            LLViewerObject* root_object = (LLViewerObject*)gAgentAvatarp->getRoot();
+            if (!root_object->flagCameraDecoupled())
+            {
+                agent_rot *= ((LLViewerObject*)(gAgentAvatarp->getParent()))->getRenderRotation();
+            }
+        }
+        at_axis = at_axis * agent_rot;
+        mFocusTargetGlobal = calcCameraPositionTargetGlobal() + at_axis;
+        return mFocusTargetGlobal;
+    }
+    else if (mCameraMode == CAMERA_MODE_CUSTOMIZE_AVATAR)
+    {
+        if (mFocusOnAvatar)
+        {
+            LLVector3 focus_target = isAgentAvatarValid()
+                ? gAgentAvatarp->mHeadp->getWorldPosition()
+                : gAgent.getPositionAgent();
+            LLVector3d focus_target_global = gAgent.getPosGlobalFromAgent(focus_target);
+            mFocusTargetGlobal = focus_target_global;
+        }
+        return mFocusTargetGlobal;
+    }
+    else if (!mFocusOnAvatar)
+    {
+        if (mFocusObject.notNull() && !mFocusObject->isDead() && mFocusObject->mDrawable.notNull())
+        {
+            LLDrawable* drawablep = mFocusObject->mDrawable;
+
+            if (mTrackFocusObject &&
+                drawablep &&
+                drawablep->isActive())
+            {
+                if (!mFocusObject->isAvatar())
+                {
+                    if (mFocusObject->isSelected())
+                    {
+                        gPipeline.updateMoveNormalAsync(drawablep);
+                    }
+                    else
+                    {
+                        if (drawablep->isState(LLDrawable::MOVE_UNDAMPED))
+                        {
+                            gPipeline.updateMoveNormalAsync(drawablep);
+                        }
+                        else
+                        {
+                            gPipeline.updateMoveDampedAsync(drawablep);
+                        }
+                    }
+                }
+            }
+            // if not tracking object, update offset based on new object position
+            else
+            {
+                updateFocusOffset();
+            }
+            LLVector3 focus_agent = mFocusObject->getRenderPosition() + mFocusObjectOffset;
+            mFocusTargetGlobal.setVec(gAgent.getPosGlobalFromAgent(focus_agent));
+        }
+        return mFocusTargetGlobal;
+    }
+    else if (mSitCameraEnabled && isAgentAvatarValid() && gAgentAvatarp->isSitting() && mSitCameraReferenceObject.notNull())
+    {
+        // sit camera
+        LLVector3 object_pos = mSitCameraReferenceObject->getRenderPosition();
+        LLQuaternion object_rot = mSitCameraReferenceObject->getRenderRotation();
+
+        LLVector3 target_pos = object_pos + (mSitCameraFocus * object_rot);
+        return gAgent.getPosGlobalFromAgent(target_pos);
+    }
+    else
+    {
+        if (tpsCameraActive())
+        {
+            LLVector3 vehicle_pivot;
+            if (getTPSVehiclePivot(vehicle_pivot))
+            {
+                return gAgent.getPosGlobalFromAgent(vehicle_pivot) + calcThirdPersonFocusOffset();
+            }
+        }
+        return gAgent.getPositionGlobal() + calcThirdPersonFocusOffset();
+    }
+}
+
+LLVector3d LLAgentCamera::calcThirdPersonFocusOffset()
+{
+    if (tpsCameraActive())
+    {
+        // TPS camera: the focus follows the TPS camera rotation, not the avatar
+        LLVector3d offset = getFocusOffsetInitial() * getTPSRotation();
+        offset += LLVector3d(getTPSShoulderOffset());
+        return offset;
+    }
+
+    // ...offset from avatar
+    LLQuaternion agent_rot = gAgent.getFrameAgent().getQuaternion();
+    if (isAgentAvatarValid() && gAgentAvatarp->getParent())
+    {
+        agent_rot *= ((LLViewerObject*)(gAgentAvatarp->getParent()))->getRenderRotation();
+    }
+
+// [RLVa:KB] - @setcam_focusoffset
+    return getFocusOffsetInitial() * agent_rot;
+// [/RLVa:KB]
+//    static LLCachedControl<LLVector3d> focus_offset_initial(gSavedSettings, "FocusOffsetRearView", LLVector3d());
+//  return focus_offset_initial * agent_rot;
+}
+
+void LLAgentCamera::setupSitCamera()
+{
+    // agent frame entering this function is in world coordinates
+    if (isAgentAvatarValid() && gAgentAvatarp->getParent())
+    {
+        LLQuaternion parent_rot = ((LLViewerObject*)gAgentAvatarp->getParent())->getRenderRotation();
+        // slam agent coordinate frame to proper parent local version
+        LLVector3 at_axis = gAgent.getFrameAgent().getAtAxis();
+        at_axis.mV[VZ] = 0.f;
+        at_axis.normalize();
+        gAgent.resetAxes(at_axis * ~parent_rot);
+    }
+}
+
+//-----------------------------------------------------------------------------
+// getCameraPositionAgent()
+//-----------------------------------------------------------------------------
+const LLVector3 &LLAgentCamera::getCameraPositionAgent() const
+{
+    return LLViewerCamera::getInstance()->getOrigin();
+}
+
+//-----------------------------------------------------------------------------
+// getCameraPositionGlobal()
+//-----------------------------------------------------------------------------
+LLVector3d LLAgentCamera::getCameraPositionGlobal() const
+{
+    return gAgent.getPosGlobalFromAgent(LLViewerCamera::getInstance()->getOrigin());
+}
+
+//-----------------------------------------------------------------------------
+// calcCameraFOVZoomFactor()
+//-----------------------------------------------------------------------------
+F32 LLAgentCamera::calcCameraFOVZoomFactor()
+{
+    LLVector3 camera_offset_dir;
+    camera_offset_dir.setVec(mCameraFocusOffset);
+
+    if (mCameraMode == CAMERA_MODE_MOUSELOOK)
+    {
+        return 0.f;
+    }
+    else if (mFocusObject.notNull() && !mFocusObject->isAvatar() && !mFocusOnAvatar)
+    {
+        // don't FOV zoom on mostly transparent objects
+        F32 obj_min_dist = 0.f;
+        calcCameraMinDistance(obj_min_dist);
+        F32 current_distance = llmax(0.001f, camera_offset_dir.magVec());
+
+        mFocusObjectDist = obj_min_dist - current_distance;
+
+        F32 new_fov_zoom = llclamp(mFocusObjectDist / current_distance, 0.f, 1000.f);
+        return new_fov_zoom;
+    }
+    else // focusing on land or avatar
+    {
+        // keep old field of view until user changes focus explicitly
+        return mCameraFOVZoomFactor;
+        //return 0.f;
+    }
+}
+
+//-----------------------------------------------------------------------------
+// calcCameraPositionTargetGlobal()
+//-----------------------------------------------------------------------------
+LLVector3d LLAgentCamera::calcCameraPositionTargetGlobal(bool *hit_limit)
+{
+    // Compute base camera position and look-at points.
+    LLVector3d  frame_center_global = !isAgentAvatarValid() ?
+        gAgent.getPositionGlobal() :
+        gAgent.getPosGlobalFromAgent(getAvatarRootPosition());
+
+    bool        isConstrained = false;
+    LLVector3d  head_offset;
+    head_offset.setVec(mThirdPersonHeadOffset);
+
+    if (tpsCameraActive())
+    {
+        LLVector3 vehicle_pivot;
+        if (getTPSVehiclePivot(vehicle_pivot))
+        {
+            frame_center_global = gAgent.getPosGlobalFromAgent(vehicle_pivot);
+        }
+    }
+
+    LLVector3d camera_position_global;
+
+    if (mCameraMode == CAMERA_MODE_FOLLOW && mFocusOnAvatar)
+    {
+        camera_position_global = gAgent.getPosGlobalFromAgent(mFollowCam.getSimulatedPosition());
+    }
+    // <SS:Skoomastream>
+    else if (mCameraMode == CAMERA_MODE_OTS)
+    {
+        // Shoulder offset camera -- avatar-local space: X=forward, Y=left, Z=up
+        static LLCachedControl<F32> ots_dist(gSavedSettings,   "OTSCameraDistance", 3.0f);
+        static LLCachedControl<F32> ots_side(gSavedSettings,   "OTSCameraSide",    -0.5f);
+        static LLCachedControl<F32> ots_height(gSavedSettings, "OTSCameraHeight",   0.5f);
+        LLVector3 local_offset(-(F32)ots_dist, (F32)ots_side, (F32)ots_height);
+        F32 pivot_height = (F32)ots_height;
+
+        const bool is_sitting = isAgentAvatarValid() && gAgentAvatarp->isSitting();
+        const LLViewerObject* seated_root = is_sitting ? (const LLViewerObject*)gAgentAvatarp->getRoot() : nullptr;
+
+        if (is_sitting && mSitCameraEnabled)
+        {
+            // Vehicle creator specified a sit camera offset: honor their exact intended
+            // X (distance back), Y (side offset), and Z (elevation).
+            local_offset.setVec(-fabs(mSitCameraPos.mV[VX]), mSitCameraPos.mV[VY], mSitCameraPos.mV[VZ]);
+            pivot_height = mSitCameraPos.mV[VZ];
+        }
+
+        LLVector3 world_offset = local_offset * getOTSFrameRotation(); // seat-relative when seated, as mouselook
+        LLVector3 avatar_pos_agent = getAvatarRootPosition();
+        LLVector3 cam_pos_agent = avatar_pos_agent + world_offset;
+
+        // Camera collision: the agent frame pitches with the look direction in OTS,
+        // so pitching up swings the shoulder camera down toward the ground (and
+        // strafing near walls swings it into geometry). Raycast from a pivot at
+        // shoulder height out to the desired camera position and pull the camera
+        // in just in front of anything solid. World geometry only; avatars and
+        // attachments never block the camera. Also skips the seated vehicle linkset.
+        static LLCachedControl<bool> ots_collision(gSavedSettings, "OTSCameraCollision", true);
+        if (ots_collision && gAgent.getTeleportState() == LLAgent::TELEPORT_NONE) // never raycast mid-teleport
+        {
+            // The margin keeps the near clip plane out of the surface the camera stopped
+            // in front of, so it has to stay at or above the near clip or the plane pokes
+            // through and the wall goes see-through. Tracks the camera's near plane instead
+            // of being a constant so a larger near clip cannot outgrow it. (The source viewer
+            // also read its FSRenderNearClip setting here; this viewer has no such setting,
+            // so DEFAULT_NEAR_PLANE is the floor.)
+            const F32 OTS_COLLISION_MARGIN = llmax(DEFAULT_NEAR_PLANE, LLViewerCamera::getInstance()->getNear() + 0.05f);
+            const F32 OTS_MIN_CAMERA_DISTANCE = 0.30f;       // never pull in closer than just behind the head
+            const F32 OTS_COLLISION_EASE_OUT_HALF_LIFE = 0.15f; // seconds; recovery speed when an obstruction clears
+
+            LLVector3 pivot = avatar_pos_agent + LLVector3(0.f, 0.f, pivot_height);
+            LLVector3 dir = cam_pos_agent - pivot;
+            F32 desired_dist = dir.normalize();
+            F32 target_dist = desired_dist;
+
+            // GPU pick (SSCombatRay): objects answer ~2 frames late, terrain at once. With
+            // no recent object answer, hold the last distance instead of easing out.
+            F32 hit_dist = desired_dist;
+            bool known = false;
+            if (SSCombatRay::cast(SSCombatRay::KEY_OTS_COLLISION, pivot, cam_pos_agent, seated_root, hit_dist, &known))
+            {
+                target_dist = llclamp(hit_dist - OTS_COLLISION_MARGIN, OTS_MIN_CAMERA_DISTANCE, desired_dist);
+            }
+            else if (!known && mOTSCollisionDistance >= 0.f)
+            {
+                target_dist = llmin(mOTSCollisionDistance, desired_dist);
+            }
+
+            // Asymmetric smoothing: snap in instantly so the camera never clips,
+            // but ease back out so uneven surfaces don't jitter the camera while
+            // turning or strafing.
+            if (mOTSCollisionDistance < 0.f || target_dist <= mOTSCollisionDistance)
+            {
+                mOTSCollisionDistance = target_dist;
+            }
+            else
+            {
+                F32 ease_amt = LLSmoothInterpolation::getInterpolant(OTS_COLLISION_EASE_OUT_HALF_LIFE);
+                mOTSCollisionDistance = lerp(mOTSCollisionDistance, target_dist, ease_amt);
+            }
+
+            cam_pos_agent = pivot + dir * llmin(mOTSCollisionDistance, desired_dist);
+        }
+        else
+        {
+            mOTSCollisionDistance = -1.f; // restart smoothing fresh if collision is re-enabled
+        }
+
+        // RLVa camera distance cap (@setcam_avdistmax / @setcam_origindistmax):
+        // pull the camera toward the head so it never sits further out than
+        // allowed, whatever OTSCameraDistance (or an @setdebug write to it) says.
+        // A cap too small for a shoulder camera drops OTS altogether (updateCamera,
+        // changeCameraToOTS); the minimums already forbid mouselook, and so OTS.
+        F32 rlv_max_dist = F32_MAX;
+        if (getOTSRlvMaxDistance(rlv_max_dist) && isAgentAvatarValid() && gAgentAvatarp->mHeadp)
+        {
+            const LLVector3 head = gAgentAvatarp->mHeadp->getWorldPosition();
+            LLVector3 from_head = cam_pos_agent - head;
+            const F32 head_dist = from_head.normalize();
+            if (head_dist > rlv_max_dist)
+            {
+                cam_pos_agent = head + from_head * rlv_max_dist;
+                isConstrained = true;
+            }
+        }
+
+        camera_position_global = gAgent.getPosGlobalFromAgent(cam_pos_agent);
+    }
+    // </SS:Skoomastream>
+    else if (mCameraMode == CAMERA_MODE_MOUSELOOK)
+    {
+        if (!isAgentAvatarValid() || gAgentAvatarp->mDrawable.isNull())
+        {
+            LL_WARNS() << "Null avatar drawable!" << LL_ENDL;
+            return LLVector3d::zero;
+        }
+
+        head_offset.clearVec();
+        F32 fixup;
+        if (gAgentAvatarp->hasPelvisFixup(fixup) && !gAgentAvatarp->isSitting())
+        {
+            head_offset[VZ] -= fixup;
+        }
+        if (gAgentAvatarp->isSitting())
+        {
+            head_offset.mdV[VZ] += 0.1;
+        }
+
+        if (gAgentAvatarp->isSitting() && gAgentAvatarp->getParent())
+        {
+            gAgentAvatarp->updateHeadOffset();
+            head_offset.mdV[VX] += gAgentAvatarp->mHeadOffset.mV[VX];
+            head_offset.mdV[VY] += gAgentAvatarp->mHeadOffset.mV[VY];
+            head_offset.mdV[VZ] += gAgentAvatarp->mHeadOffset.mV[VZ];
+            const LLMatrix4& mat = ((LLViewerObject*) gAgentAvatarp->getParent())->getRenderMatrix();
+            camera_position_global = gAgent.getPosGlobalFromAgent
+                                ((gAgentAvatarp->getPosition()+
+                                 LLVector3(head_offset)*gAgentAvatarp->getRotation()) * mat);
+        }
+        else
+        {
+            head_offset.mdV[VZ] += gAgentAvatarp->mHeadOffset.mV[VZ];
+            camera_position_global = gAgent.getPosGlobalFromAgent(gAgentAvatarp->getRenderPosition());//frame_center_global;
+            head_offset = head_offset * gAgentAvatarp->getRenderRotation();
+            camera_position_global = camera_position_global + head_offset;
+        }
+    }
+    else if (mCameraMode == CAMERA_MODE_THIRD_PERSON && mFocusOnAvatar)
+    {
+        LLVector3 local_camera_offset;
+        F32 camera_distance = 0.f;
+
+        if (mSitCameraEnabled
+            && isAgentAvatarValid()
+            && gAgentAvatarp->isSitting()
+            && mSitCameraReferenceObject.notNull())
+        {
+            // sit camera
+            LLVector3 object_pos = mSitCameraReferenceObject->getRenderPosition();
+            LLQuaternion object_rot = mSitCameraReferenceObject->getRenderRotation();
+
+            LLVector3 target_pos = object_pos + (mSitCameraPos * object_rot);
+
+            camera_position_global = gAgent.getPosGlobalFromAgent(target_pos);
+        }
+        else
+        {
+// [RLVa:KB] - @setcam_eyeoffsetscale
+            local_camera_offset = mCameraZoomFraction * getCameraOffsetInitial() * getCameraOffsetScale();
+// [/RLVa:KB]
+//            static LLCachedControl<F32> camera_offset_scale(gSavedSettings, "CameraOffsetScale");
+//            local_camera_offset = mCameraZoomFraction * getCameraOffsetInitial() * camera_offset_scale;
+
+            // are we sitting down?
+            if (tpsCameraActive())
+            {
+                // TPS camera (on foot or seated): orbit with the TPS camera rotation in the
+                // world frame. While seated the pivot is the vehicle root (see above) and the
+                // agent frame is left alone.
+                local_camera_offset = local_camera_offset * getTPSRotation();
+            }
+            else if (isAgentAvatarValid() && gAgentAvatarp->getParent())
+            {
+                LLQuaternion parent_rot = ((LLViewerObject*)gAgentAvatarp->getParent())->getRenderRotation();
+                // slam agent coordinate frame to proper parent local version
+                LLVector3 at_axis = gAgent.getFrameAgent().getAtAxis() * parent_rot;
+                at_axis.mV[VZ] = 0.f;
+                at_axis.normalize();
+                gAgent.resetAxes(at_axis * ~parent_rot);
+
+                local_camera_offset = local_camera_offset * gAgent.getFrameAgent().getQuaternion() * parent_rot;
+            }
+            else
+            {
+                local_camera_offset = gAgent.getFrameAgent().rotateToAbsolute( local_camera_offset );
+            }
+
+            // FSIgnoreSimulatorCameraConstraints: ignore the
+            // simulator's push-out plane. Dropping the message instead
+            // needs a relog to clear a plane already received; gating the
+            // use here makes the switch take effect immediately.
+            static LLCachedControl<bool> ignore_sim_constraints(gSavedSettings, "FSIgnoreSimulatorCameraConstraints", false);
+            if (!isDisableCameraConstraints() && !ignore_sim_constraints && !mCameraCollidePlane.isExactlyZero() &&
+                (!isAgentAvatarValid() || !gAgentAvatarp->isSitting()))
+            {
+                LLVector3 plane_normal;
+                plane_normal.setVec(mCameraCollidePlane.mV);
+
+                F32 offset_dot_norm = local_camera_offset * plane_normal;
+                if (llabs(offset_dot_norm) < 0.001f)
+                {
+                    offset_dot_norm = 0.001f;
+                }
+
+                camera_distance = local_camera_offset.normalize();
+
+                F32 pos_dot_norm = gAgent.getPosAgentFromGlobal(frame_center_global + head_offset) * plane_normal;
+
+                // if agent is outside the colliding half-plane
+                if (pos_dot_norm > mCameraCollidePlane.mV[VW])
+                {
+                    // check to see if camera is on the opposite side (inside) the half-plane
+                    if (offset_dot_norm + pos_dot_norm < mCameraCollidePlane.mV[VW])
+                    {
+                        // diminish offset by factor to push it back outside the half-plane
+                        camera_distance *= (pos_dot_norm - mCameraCollidePlane.mV[VW] - CAMERA_COLLIDE_EPSILON) / -offset_dot_norm;
+                    }
+                }
+                else
+                {
+                    if (offset_dot_norm + pos_dot_norm > mCameraCollidePlane.mV[VW])
+                    {
+                        camera_distance *= (mCameraCollidePlane.mV[VW] - pos_dot_norm - CAMERA_COLLIDE_EPSILON) / offset_dot_norm;
+                    }
+                }
+            }
+            else
+            {
+                camera_distance = local_camera_offset.normalize();
+            }
+
+            mTargetCameraDistance = llmax(camera_distance, MIN_CAMERA_DISTANCE);
+
+            if (mTargetCameraDistance != mCurrentCameraDistance)
+            {
+                F32 camera_lerp_amt = LLSmoothInterpolation::getInterpolant(CAMERA_ZOOM_HALF_LIFE);
+
+                mCurrentCameraDistance = lerp(mCurrentCameraDistance, mTargetCameraDistance, camera_lerp_amt);
+            }
+
+            // Make the camera distance current
+            local_camera_offset *= mCurrentCameraDistance;
+
+            // set the global camera position
+            LLVector3d camera_offset;
+
+            camera_offset.setVec( local_camera_offset );
+            camera_position_global = frame_center_global + head_offset + camera_offset;
+            if (tpsCameraActive())
+            {
+                camera_position_global += LLVector3d(getTPSShoulderOffset());
+            }
+
+            if (isAgentAvatarValid())
+            {
+                LLVector3d camera_lag_d;
+                F32 lag_interp = LLSmoothInterpolation::getInterpolant(CAMERA_LAG_HALF_LIFE);
+                LLVector3 target_lag;
+                LLVector3 vel = gAgent.getVelocity();
+
+                // lag by appropriate amount for flying
+                F32 time_in_air = gAgentAvatarp->mTimeInAir.getElapsedTimeF32();
+                if(!mCameraAnimating && gAgentAvatarp->mInAir && time_in_air > GROUND_TO_AIR_CAMERA_TRANSITION_START_TIME)
+                {
+                    LLVector3 frame_at_axis = tpsCameraActive() ? LLVector3::x_axis * getTPSRotation() : gAgent.getFrameAgent().getAtAxis();
+                    frame_at_axis -= projected_vec(frame_at_axis, gAgent.getReferenceUpVector());
+                    frame_at_axis.normalize();
+
+                    //transition smoothly in air mode, to avoid camera pop
+                    F32 u = (time_in_air - GROUND_TO_AIR_CAMERA_TRANSITION_START_TIME) / GROUND_TO_AIR_CAMERA_TRANSITION_TIME;
+                    u = llclamp(u, 0.f, 1.f);
+
+                    lag_interp *= u;
+
+                    if (gViewerWindow->getLeftMouseDown() && gViewerWindow->getLastPick().mObjectID == gAgentAvatarp->getID())
+                    {
+                        // disable camera lag when using mouse-directed steering
+                        target_lag.clearVec();
+                    }
+                    else
+                    {
+                        static LLCachedControl<F32> dynamic_camera_strength(gSavedSettings, "DynamicCameraStrength");
+                        target_lag = vel * dynamic_camera_strength / 30.f;
+                    }
+
+                    mCameraLag = lerp(mCameraLag, target_lag, lag_interp);
+
+                    F32 lag_dist = mCameraLag.magVec();
+                    if (lag_dist > MAX_CAMERA_LAG)
+                    {
+                        mCameraLag = mCameraLag * MAX_CAMERA_LAG / lag_dist;
+                    }
+
+                    // clamp camera lag so that avatar is always in front
+                    F32 dot = (mCameraLag - (frame_at_axis * (MIN_CAMERA_LAG * u))) * frame_at_axis;
+                    if (dot < -(MIN_CAMERA_LAG * u))
+                    {
+                        mCameraLag -= (dot + (MIN_CAMERA_LAG * u)) * frame_at_axis;
+                    }
+                }
+                else
+                {
+                    mCameraLag = lerp(mCameraLag, LLVector3::zero, LLSmoothInterpolation::getInterpolant(0.15f));
+                }
+
+                camera_lag_d.setVec(mCameraLag);
+                camera_position_global = camera_position_global - camera_lag_d;
+            }
+        }
+    }
+    else
+    {
+        LLVector3d focusPosGlobal = calcFocusPositionTargetGlobal();
+        // camera gets pushed out later wrt mCameraFOVZoomFactor...this is "raw" value
+        camera_position_global = focusPosGlobal + mCameraFocusOffset;
+    }
+
+    if (!isDisableCameraConstraints() && !gAgent.isGodlike())
+    {
+        LLViewerRegion* regionp = LLWorld::getInstance()->getRegionFromPosGlobal(camera_position_global);
+        bool constrain = true;
+        if(regionp && regionp->canManageEstate())
+        {
+            constrain = false;
+        }
+        if(constrain)
+        {
+            F32 max_dist = (CAMERA_MODE_CUSTOMIZE_AVATAR == mCameraMode) ? APPEARANCE_MAX_ZOOM : mDrawDistance;
+
+            LLVector3d camera_offset = camera_position_global - gAgent.getPositionGlobal();
+            F32 camera_distance = (F32)camera_offset.magVec();
+
+            if(camera_distance > max_dist)
+            {
+                camera_position_global = gAgent.getPositionGlobal() + (max_dist/camera_distance)*camera_offset;
+                isConstrained = true;
+            }
+        }
+    }
+
+// [RLVa:KB] - Checked: RLVa-2.0.0
+    if ( (RlvActions::isRlvEnabled()) && ((CAMERA_MODE_THIRD_PERSON == mCameraMode) || (CAMERA_MODE_FOLLOW == mCameraMode)) && (RlvActions::isCameraDistanceClamped()) )
+    {
+        m_fRlvMinDist = m_fRlvMaxDist = false;
+
+        // Av-locked | Focus-locked | Result
+        // ===================================================
+        //     T     |      T       | skip focus => slam av
+        //     T     |      F       | skip focus => slam av
+        //     F     |      T       | skip av    => slam focus
+        //     F     |      F       | clamp focus then av
+        bool fCamAvDistClamped, fCamAvDistLocked = false; float nCamAvDistLimitMin, nCamAvDistLimitMax;
+        if ((fCamAvDistClamped = RlvActions::getCameraAvatarDistanceLimits(nCamAvDistLimitMin, nCamAvDistLimitMax)))
+            fCamAvDistLocked = nCamAvDistLimitMin == nCamAvDistLimitMax;
+        bool fCamOriginDistClamped = false; float nCamOriginDistLimitMin, nCamOriginDistLimitMax;
+        fCamOriginDistClamped = RlvActions::getCameraOriginDistanceLimits(nCamOriginDistLimitMin, nCamOriginDistLimitMax);
+
+        // Check focus distance limits
+        if ( (fCamOriginDistClamped) && (!fCamAvDistLocked) )
+        {
+//          const LLVector3 offsetCameraLocal = mCameraZoomFraction * getCameraOffsetInitial() * gSavedSettings.getF32("CameraOffsetScale");
+// [RLVa:KB] - @setcam_eyeoffsetscale
+            const LLVector3 offsetCameraLocal = mCameraZoomFraction * getCameraOffsetInitial() * getCameraOffsetScale();
+// [/RLVa:KB]
+            const LLVector3d offsetCamera(tpsCameraActive() ? offsetCameraLocal * getTPSRotation() : gAgent.getFrameAgent().rotateToAbsolute(offsetCameraLocal));
+            const LLVector3d posFocusCam = frame_center_global + head_offset + offsetCamera;
+            if (clampCameraPosition(camera_position_global, posFocusCam, nCamOriginDistLimitMin, nCamOriginDistLimitMax))
+                isConstrained = true;
+        }
+
+        // Check avatar distance limits
+        if ( (fCamAvDistClamped) && (fCamAvDistLocked || !fCamOriginDistClamped) )
+        {
+            const LLVector3d posAvatarCam = gAgent.getPosGlobalFromAgent( (isAgentAvatarValid()) ? gAgentAvatarp->mHeadp->getWorldPosition() : gAgent.getPositionAgent() );
+            if (clampCameraPosition(camera_position_global, posAvatarCam, nCamAvDistLimitMin, nCamAvDistLimitMax))
+                isConstrained = true;
+        }
+    }
+// [/RLVa:KB]
+
+    // Don't let camera go underground if constrained
+    // If not constrained, permit going 1000m below 0, use case: retrieving objects
+    F32 camera_min_off_ground = getCameraMinOffGround(); // checks isDisableCameraConstraints
+    F32 camera_land_height = LLWorld::getInstance()->resolveLandHeightGlobal(camera_position_global);
+    F32 minZ = camera_land_height + camera_min_off_ground;
+    if (camera_position_global.mdV[VZ] < minZ)
+    {
+        camera_position_global.mdV[VZ] = minZ;
+        isConstrained = true;
+    }
+
+    if (hit_limit)
+    {
+        *hit_limit = isConstrained;
+    }
+
+    return camera_position_global;
+}
+
+// [RLVa:KB] - Checked: RLVa-2.0.0
+bool LLAgentCamera::allowFocusOffsetChange(const LLVector3d& offsetFocus)
+{
+    if (RlvActions::isCameraDistanceClamped())
+    {
+        if ( ((CAMERA_MODE_THIRD_PERSON == getCameraMode()) || (CAMERA_MODE_FOLLOW == getCameraMode())) && ((m_fRlvMinDist) || (m_fRlvMaxDist)) )
+        {
+            const LLVector3d posFocusGlobal = calcFocusPositionTargetGlobal();
+            // Don't allow moving the focus offset if at minimum and moving closer (or if at maximum and moving further) to prevent camera warping
+            F32 nCurDist = F32(llabs((posFocusGlobal + mCameraFocusOffsetTarget - m_posRlvRefGlobal).magVec()));
+            F32 nNewDist = F32(llabs((posFocusGlobal + offsetFocus - m_posRlvRefGlobal).magVec()));
+            if ( ((m_fRlvMaxDist) && (nNewDist > nCurDist)) || ((m_fRlvMinDist) && (nNewDist < nCurDist)) )
+                return false;
+        }
+    }
+    return true;
+}
+
+bool LLAgentCamera::clampCameraPosition(LLVector3d& posCamGlobal, const LLVector3d posCamRefGlobal, float nDistMin, float nDistMax)
+{
+    const LLVector3d offsetCamera = posCamGlobal - posCamRefGlobal;
+
+    F32 nCamAvDist = F32(llabs(offsetCamera.magVec())), nDistMult = NAN;
+    if (nCamAvDist > nDistMax)
+    {
+        nDistMult = nDistMax / nCamAvDist;
+        m_fRlvMaxDist = true;
+    }
+    else if (nCamAvDist < nDistMin)
+    {
+        nDistMult = nDistMin / nCamAvDist;
+        m_fRlvMinDist = true;
+    }
+
+    if (!llisnan(nDistMult))
+    {
+        posCamGlobal = posCamRefGlobal + nDistMult * offsetCamera;
+        m_posRlvRefGlobal = posCamRefGlobal;
+        return true;
+    }
+    return false;
+}
+// [/RLVa:KB]
+
+LLVector3 LLAgentCamera::getCurrentCameraOffset()
+{
+    return (LLViewerCamera::getInstance()->getOrigin() - getAvatarRootPosition() - mThirdPersonHeadOffset) * ~getCurrentAvatarRotation();
+}
+
+LLVector3d LLAgentCamera::getCurrentFocusOffset()
+{
+    return (mFocusTargetGlobal - gAgent.getPositionGlobal()) * ~getCurrentAvatarRotation();
+}
+
+LLQuaternion LLAgentCamera::getCurrentAvatarRotation()
+{
+    LLViewerObject* sit_object = (LLViewerObject*)gAgentAvatarp->getParent();
+
+    LLQuaternion av_rot = gAgent.getFrameAgent().getQuaternion();
+    LLQuaternion obj_rot = sit_object ? sit_object->getRenderRotation() : LLQuaternion::DEFAULT;
+    return av_rot * obj_rot;
+}
+
+bool LLAgentCamera::isJoystickCameraUsed()
+{
+    return ((mOrbitAroundRadians != 0) || (mOrbitOverAngle != 0) || !mPanFocusDiff.isNull());
+}
+
+LLVector3 LLAgentCamera::getCameraOffsetInitial()
+{
+    // getCameraOffsetInitial and getFocusOffsetInitial can be called on update from idle before init()
+    static LLCachedControl<LLVector3> camera_offset_initial (gSavedSettings, "CameraOffsetRearView", LLVector3());
+// [RLVa:KB] - @setcam_eyeoffset
+    static LLCachedControl<LLVector3> camera_offset_initial_rlv (gSavedSettings, "CameraOffsetRLVaView", LLVector3());
+    return (ECameraPreset::CAMERA_RLV_SETCAM_VIEW != mCameraPreset) ? camera_offset_initial : camera_offset_initial_rlv;
+// [/RLVa:KB]
+//  return camera_offset_initial;
+}
+
+LLVector3d LLAgentCamera::getFocusOffsetInitial()
+{
+    static LLCachedControl<LLVector3d> focus_offset_initial(gSavedSettings, "FocusOffsetRearView", LLVector3d());
+// [RLVa:KB] - @setcam_focusoffset
+    static LLCachedControl<LLVector3d> focus_offset_initial_rlv(gSavedSettings, "FocusOffsetRLVaView", LLVector3d());
+    return (ECameraPreset::CAMERA_RLV_SETCAM_VIEW != mCameraPreset) ? focus_offset_initial : focus_offset_initial_rlv;
+// [/RLVa:KB]
+//  return focus_offset_initial;
+}
+
+// [RLVa:KB] - @setcam_eyeoffsetscale
+F32 LLAgentCamera::getCameraOffsetScale() const
+{
+    static LLCachedControl<F32> camera_offset_scale(gSavedSettings, "CameraOffsetScale", 1.0f);
+    static LLCachedControl<F32> camera_offset_scale_rlv(gSavedSettings, "CameraOffsetScaleRLVa", 0.0f);
+    return (ECameraPreset::CAMERA_RLV_SETCAM_VIEW != mCameraPreset) ? camera_offset_scale : camera_offset_scale_rlv;
+}
+// [/RLVa:KB]
+
+F32 LLAgentCamera::getCameraMaxZoomDistance()
+{
+    // SL-14706 / SL-14885 TPV have relaxed camera constraints allowing you to mousewheeel zoom WAY out.
+    static LLCachedControl<bool> s_disable_camera_constraints(gSavedSettings, "DisableCameraConstraints", false);
+    if (s_disable_camera_constraints)
+    {
+        return (F32)INT_MAX;
+    }
+
+    // Ignore "DisableCameraConstraints", we don't want to be out of draw range when we focus onto objects or avatars
+    return llmin(MAX_CAMERA_DISTANCE_FROM_OBJECT,
+                 mDrawDistance - 1, // convenience, don't hit draw limit when focusing on something
+                 LLWorld::getInstance()->getRegionWidthInMeters() - CAMERA_FUDGE_FROM_OBJECT);
+}
+
+LLVector3 LLAgentCamera::getAvatarRootPosition()
+{
+    static LLCachedControl<bool> use_hover_height(gSavedSettings, "HoverHeightAffectsCamera");
+    return use_hover_height ? gAgentAvatarp->mRoot->getWorldPosition() : gAgentAvatarp->mRoot->getWorldPosition() - gAgentAvatarp->getHoverOffset();
+
+}
+//-----------------------------------------------------------------------------
+// Wheel orbit zoom (#727): CameraSmoothZoom eases the zoom toward its target over
+// CameraSmoothZoomTime instead of applying each wheel event at once.
+//-----------------------------------------------------------------------------
+void LLAgentCamera::applyWheelOrbitZoom(F32 notches)
+{
+    const F32 ROOT_ROOT_TWO = sqrt(F_SQRT2);
+    if (mFocusOnAvatar && (mCameraMode == CAMERA_MODE_THIRD_PERSON))
+    {
+        F32 camera_offset_initial_mag = getCameraOffsetInitial().magVec();
+// [RLVa:KB] - @setcam_eyeoffsetscale
+        F32 current_zoom_fraction = mTargetCameraDistance / (camera_offset_initial_mag * getCameraOffsetScale());
+// [/RLVa:KB]
+        current_zoom_fraction *= 1.f - (F32)pow(ROOT_ROOT_TWO, notches);
+
+// [RLVa:KB] - @setcam_eyeoffsetscale
+        cameraOrbitIn(current_zoom_fraction * camera_offset_initial_mag * getCameraOffsetScale());
+// [/RLVa:KB]
+    }
+    else
+    {
+        F32 current_zoom_fraction = (F32)mCameraFocusOffsetTarget.magVec();
+        cameraOrbitIn(current_zoom_fraction * (1.f - (F32)pow(ROOT_ROOT_TWO, notches)));
+    }
+}
+
+void LLAgentCamera::queueWheelOrbitZoom(F32 notches)
+{
+    static LLCachedControl<bool> s_smooth(gSavedSettings, "CameraSmoothZoom", true);
+    if (!s_smooth || mCameraAnimating)
+    {
+        mPendingWheelZoom = 0.f;
+        applyWheelOrbitZoom(notches);
+        return;
+    }
+    // A reversal drops what the old direction still had pending.
+    if ((mPendingWheelZoom > 0.f && notches < 0.f) || (mPendingWheelZoom < 0.f && notches > 0.f))
+    {
+        mPendingWheelZoom = 0.f;
+    }
+    mPendingWheelZoom += notches;
+}
+
+void LLAgentCamera::updateSmoothZoom()
+{
+    if (mPendingWheelZoom == 0.f) return;
+    if (mCameraAnimating)
+    {
+        mPendingWheelZoom = 0.f;
+        return;
+    }
+    static LLCachedControl<U32> s_time(gSavedSettings, "CameraSmoothZoomTime", 150);
+    // ~95% of the way in the configured time (3 time constants); frame-rate independent.
+    const F32 tau = llmax((F32)s_time, 1.f) / 3000.f;
+    const F32 k = 1.f - expf(-LLFrameTimer::getFrameDeltaTimeF32() / tau);
+    F32 step = mPendingWheelZoom * k;
+    if (fabsf(mPendingWheelZoom) < 0.002f) step = mPendingWheelZoom;   // settle
+    mPendingWheelZoom -= step;
+    if (step != 0.f) applyWheelOrbitZoom(step);
+}
+
+//-----------------------------------------------------------------------------
+// handleScrollWheel()
+//-----------------------------------------------------------------------------
+void LLAgentCamera::handleScrollWheel(F32 fclicks)
+{
+    if (isUsingFlycam())
+    {
+        // Flycam preempts updateCamera() entirely, so none of the mCameraMode-based
+        // zoom logic applies to it; drive the flycam's own FOV-based "zoom"
+        // (LLFlycam::mView, also fed by the FLYCAM_ZOOM game-control channel in
+        // updateFlycam()) instead (LL 2cdb4ab7b1). Negative 'clicks' (forward/up
+        // scroll) narrows the FOV to zoom in, matching the other paths.
+        constexpr F32 FLYCAM_SCROLL_ZOOM_FACTOR_PER_CLICK = 0.9f;
+        F32 zoom_factor = (F32)pow(FLYCAM_SCROLL_ZOOM_FACTOR_PER_CLICK, -fclicks);
+        mFlycam.setView(mFlycam.getView() * zoom_factor);
+        return;
+    }
+
+    const bool follow_cam = mCameraMode == CAMERA_MODE_FOLLOW && getFocusOnAvatar();
+    if (!follow_cam)
+    {
+        // HUD edit zoom (#413), about the cursor, before the animation gate: entering
+        // edit animates the camera (setFocusOnAvatar ANIMATE), which used to swallow
+        // the first scrolls.
+        if (isEditingHUD())
+        {
+            setHUDTargetZoom(mHUDTargetZoom / (F32)pow(0.8, -fclicks), true);
+            return;
+        }
+
+        // Camera focus and offset with Shift/Ctrl + scroll wheel (wheel only; the
+        // shared distance change is scrollCamera(), which the game controller's
+        // "Scroll" input also uses)
+        LLObjectSelectionHandle selection = LLSelectMgr::getInstance()->getSelection();
+        const bool hud_selected = selection->getObjectCount() && selection->getSelectType() == SELECT_TYPE_HUD;
+        if (!mCameraAnimating && !hud_selected && mFocusOnAvatar && (mCameraMode == CAMERA_MODE_THIRD_PERSON))
+        {
+            MASK mask = gKeyboard->currentMask(true);
+            if (mask & MASK_SHIFT)
+            {
+                LLVector3d offset = gSavedSettings.getVector3d("FocusOffsetRearView");
+                offset.mdV[VZ] += 0.1f * fclicks;
+                gSavedSettings.setVector3d("FocusOffsetRearView", offset);
+                return;
+            }
+            else if (mask & MASK_CONTROL)
+            {
+                LLVector3 offset = gSavedSettings.getVector3("CameraOffsetRearView");
+                offset.mV[VZ] += 0.1f * fclicks;
+                gSavedSettings.setVector3("CameraOffsetRearView", offset);
+                return;
+            }
+        }
+    }
+
+    scrollCamera(fclicks);
+}
+
+// The wheel's camera distance change, shared with the game controller's "Scroll" (fractional
+// clicks). Branches that act in whole steps get the fractional delta accumulated into whole ones
+// (an integer input passes straight through); the orbit zoom takes the fraction itself (#727's
+// smooth zoom eases it).
+void LLAgentCamera::scrollCamera(F32 fclicks)
+{
+    if ((mScrollAccum > 0.f && fclicks < 0.f) || (mScrollAccum < 0.f && fclicks > 0.f)) mScrollAccum = 0.f;
+    mScrollAccum += fclicks;
+    const S32 clicks = (S32)mScrollAccum;
+    mScrollAccum -= (F32)clicks;
+    if (mCameraMode == CAMERA_MODE_FOLLOW && getFocusOnAvatar())
+    {
+        if (clicks != 0 && !mFollowCam.getPositionLocked()) // not if the followCam position is locked in place
+        {
+            mFollowCam.zoom(clicks);
+            if (mFollowCam.isZoomedToMinimumDistance())
+            {
+                changeCameraToMouselook(false);
+            }
+        }
+        return;
+    }
+
+    // Block if camera is animating
+    if (mCameraAnimating)
+    {
+        return;
+    }
+
+    LLObjectSelectionHandle selection = LLSelectMgr::getInstance()->getSelection();
+    if (selection->getObjectCount() && selection->getSelectType() == SELECT_TYPE_HUD)
+    {
+        if (clicks != 0)
+        {
+            cameraZoomIn((F32)pow(0.8, -clicks));
+        }
+    }
+    else
+    {
+        queueWheelOrbitZoom(fclicks);
+    }
+}
+
+
+//-----------------------------------------------------------------------------
+// getCameraMinOffGround()
+//-----------------------------------------------------------------------------
+F32 LLAgentCamera::getCameraMinOffGround()
+{
+    if (mCameraMode == CAMERA_MODE_MOUSELOOK)
+    {
+        return 0.f;
+    }
+
+    if (isDisableCameraConstraints())
+    {
+        return -1000.f;
+    }
+
+    return 0.5f;
+}
+
+
+//-----------------------------------------------------------------------------
+// resetCamera()
+//-----------------------------------------------------------------------------
+void LLAgentCamera::resetCamera()
+{
+    // Remove any pitch from the avatar
+    LLVector3 at = gAgent.getFrameAgent().getAtAxis();
+    at.mV[VZ] = 0.f;
+    at.normalize();
+    gAgent.resetAxes(at);
+    // have to explicitly clear field of view zoom now
+    mCameraFOVZoomFactor = 0.f;
+
+    updateCamera();
+}
+
+//-----------------------------------------------------------------------------
+// changeCameraToMouselook()
+//-----------------------------------------------------------------------------
+void LLAgentCamera::changeCameraToMouselook(bool animate)
+{
+    if (!gSavedSettings.getBOOL("EnableMouselook")
+// [RLVa:KB] - Checked: RLVa-2.0.0
+        || ( (RlvActions::isRlvEnabled()) && (!RlvActions::canChangeToMouselook()) )
+// [/RLVa:KB]
+
+        || gAgent.isCameraExternallyDriven())
+    {
+        return;
+    }
+
+    // Mouselook takes over from the TPS camera. Release it before the
+    // mouselook toolset grabs the mouse, and keep the cursor hidden.
+    SLTPSCamera::disengageIfEngaged(SLTPSCamera::DISENGAGE_MOUSELOOK);
+
+    // visibility changes at end of animation
+    gViewerWindow->getWindow()->resetBusyCount();
+
+    // Menus should not remain open on switching to mouselook...
+    LLMenuGL::sMenuContainer->hideMenus();
+    LLUI::getInstance()->clearPopups();
+
+    // unpause avatar animation
+    gAgent.unpauseAnimation();
+
+    LLToolMgr::getInstance()->setCurrentToolset(gMouselookToolset);
+
+    if (isAgentAvatarValid())
+    {
+        gAgentAvatarp->stopMotion(ANIM_AGENT_BODY_NOISE);
+        gAgentAvatarp->stopMotion(ANIM_AGENT_BREATHE_ROT);
+    }
+
+    //gViewerWindow->stopGrab();
+    LLSelectMgr::getInstance()->deselectAll();
+//  gViewerWindow->hideCursor();
+//  gViewerWindow->moveCursorToCenter();
+
+    if (mCameraMode != CAMERA_MODE_MOUSELOOK)
+    {
+        gFocusMgr.setKeyboardFocus(NULL);
+
+        updateLastCamera();
+        mCameraMode = CAMERA_MODE_MOUSELOOK;
+        gAgent.setControlFlags(AGENT_CONTROL_MOUSELOOK);
+
+        if (animate)
+        {
+            startCameraAnimation();
+        }
+        else
+        {
+            mCameraAnimating = false;
+            gAgent.endAnimationUpdateUI();
+        }
+    }
+}
+
+
+//-----------------------------------------------------------------------------
+// changeCameraToDefault()
+//-----------------------------------------------------------------------------
+void LLAgentCamera::changeCameraToDefault()
+{
+    if (gAgent.isCameraExternallyDriven())
+    {
+        return;
+    }
+
+    if (LLFollowCamMgr::getInstance()->getActiveFollowCamParams())
+    {
+        changeCameraToFollow();
+    }
+    else
+    {
+        changeCameraToThirdPerson();
+    }
+    if (gSavedSettings.getBOOL("HideUIControls"))
+    {
+        gViewerWindow->setUIVisibility(false);
+        LLPanelStandStopFlying::getInstance()->setVisible(false);
+    }
+}
+
+
+// <SS:Skoomastream>
+//-----------------------------------------------------------------------------
+// changeCameraToOTS()
+// Over-the-shoulder aim mode.
+// Calls changeCameraToMouselook() to inherit ALL of its input setup
+// (cursor hiding, mouse capture, control flags, focus management),
+// then immediately overrides mCameraMode to CAMERA_MODE_OTS so that
+// calcCameraPositionTargetGlobal places the camera at the shoulder offset
+// instead of the avatar's eye position.
+// Avatar rendering is handled explicitly in needsRenderAvatar() and needsRenderHead().
+//
+// Alchemy TPS camera: changeCameraToMouselook() releases it
+// (DISENGAGE_MOUSELOOK, so the aim keeps the TPS look direction), and
+// SLTPSCamera::canEngage() refuses while OTS is engaged, so OTS owns the
+// camera until it is left again.
+//-----------------------------------------------------------------------------
+void LLAgentCamera::changeCameraToOTS(bool animate)
+{
+    if (mCameraMode != CAMERA_MODE_OTS)
+    {
+        // Inherit everything from mouselook: cursor lock, mouse capture,
+        // AGENT_CONTROL_MOUSELOOK flag, keyboard focus clear, etc.
+        changeCameraToMouselook(false);
+
+        // Mouselook refused (EnableMouselook off, RLVa, joystick camera):
+        // the aim mode is not available either.
+        if (mCameraMode != CAMERA_MODE_MOUSELOOK)
+        {
+            return;
+        }
+
+        // An RLVa camera distance cap too small for a shoulder camera: stay in
+        // the first person view mouselook just set up.
+        if (!rlvAllowsOTS())
+        {
+            return;
+        }
+
+        // Undo a first person head-tracking pelvis shift (OTS <- first person
+        // toggle), as changeCameraToThirdPerson / changeCameraToFollow do.
+        if (isAgentAvatarValid() && !gAgentAvatarp->isSitting())
+        {
+            gAgentAvatarp->mPelvisp->setPosition(LLVector3::zero);
+        }
+
+        // Override mCameraMode to OTS so position/focus calculations
+        // use the shoulder offset instead of the eye position.
+        mCameraMode = CAMERA_MODE_OTS;
+
+        // Restart collision smoothing fresh; a stale pull-in distance from the
+        // last OTS session would briefly hold the camera too close.
+        mOTSCollisionDistance = -1.f;
+
+        // (Own avatar and attachments stay drawn and pickable in OTS:
+        // LLVOAvatar::selfHiddenInMainView exempts it.)
+
+        if (animate)
+        {
+            // Start the camera animation LAST, after mCameraMode is OTS. The
+            // rendered camera is still at the old position this frame, so
+            // startCameraAnimation snapshots it as the start and updateCamera
+            // lerps to the OTS shoulder target over ZoomTime seconds.
+            startCameraAnimation();
+        }
+        else
+        {
+            // Snap instantly.
+            mCameraAnimating = false;
+            gAgent.endAnimationUpdateUI();
+        }
+    }
+}
+
+//-----------------------------------------------------------------------------
+// changeCameraFromOTS()
+//-----------------------------------------------------------------------------
+void LLAgentCamera::changeCameraFromOTS()
+{
+    if (mCameraMode == CAMERA_MODE_OTS)
+    {
+        // changeCameraToDefault handles clearing AGENT_CONTROL_MOUSELOOK,
+        // showing the cursor, and restoring the normal camera mode.
+        changeCameraToDefault();
+    }
+}
+
+// Whether OTS may be used now. Seated on an object that set no sit camera
+// (llSetCameraEyeOffset), the shoulder camera has nothing sensible to sit on
+// and clips into the seat: use first person mouselook (cockpit view) instead.
+bool LLAgentCamera::canUseOTS()
+{
+    const bool is_sitting = isAgentAvatarValid() && gAgentAvatarp->isSitting();
+    return (!is_sitting || sitCameraEnabled()) && rlvAllowsOTS();
+}
+
+// The RLVa camera distance cap that applies to the OTS camera, measured from
+// the head (the avatar distance limit; the origin distance limit is applied
+// the same way, since the OTS focus is a point in front of the avatar rather
+// than a camera origin). False when there is none.
+bool LLAgentCamera::getOTSRlvMaxDistance(F32& max_dist) const
+{
+    if (!RlvActions::isRlvEnabled() || !RlvActions::isCameraDistanceClamped())
+    {
+        return false;
+    }
+    max_dist = F32_MAX;
+    F32 dist_min = 0.f, dist_max = F32_MAX;
+    if (RlvActions::getCameraAvatarDistanceLimits(dist_min, dist_max))
+    {
+        max_dist = llmin(max_dist, dist_max);
+    }
+    if (RlvActions::getCameraOriginDistanceLimits(dist_min, dist_max))
+    {
+        max_dist = llmin(max_dist, dist_max);
+    }
+    return max_dist < F32_MAX;
+}
+
+bool LLAgentCamera::rlvAllowsOTS() const
+{
+    // Below this the camera would sit inside the head: not a shoulder view.
+    const F32 OTS_RLV_MIN_SHOULDER_DISTANCE = 0.5f;
+    F32 max_dist = F32_MAX;
+    return !getOTSRlvMaxDistance(max_dist) || max_dist >= OTS_RLV_MIN_SHOULDER_DISTANCE;
+}
+
+// The rotation the OTS offsets are expressed in. Seated, the agent frame is
+// relative to the seat, so add the seat's rotation unless the vehicle
+// decoupled the camera -- the same rule as the mouselook focus.
+LLQuaternion LLAgentCamera::getOTSFrameRotation() const
+{
+    LLQuaternion agent_rot = gAgent.getFrameAgent().getQuaternion();
+    if (isAgentAvatarValid() && gAgentAvatarp->getParent())
+    {
+        LLViewerObject* root_object = (LLViewerObject*)gAgentAvatarp->getRoot();
+        if (!root_object->flagCameraDecoupled())
+        {
+            agent_rot *= ((LLViewerObject*)(gAgentAvatarp->getParent()))->getRenderRotation();
+        }
+    }
+    return agent_rot;
+}
+
+void LLAgentCamera::onOTSEnabledChanged(const LLSD& new_value)
+{
+    // Leave the shoulder camera for first person: the user is still aiming,
+    // only the OTS view was switched off.
+    if (!new_value.asBoolean() && cameraOTS())
+    {
+        changeCameraToMouselook();
+        if (cameraOTS())
+        {
+            // mouselook refused (e.g. RLVa): leave the aim mode instead
+            changeCameraFromOTS();
+        }
+    }
+}
+// </SS:Skoomastream>
+
+//-----------------------------------------------------------------------------
+// changeCameraToFollow()
+//-----------------------------------------------------------------------------
+void LLAgentCamera::changeCameraToFollow(bool animate)
+{
+    if (gAgent.isCameraExternallyDriven())
+    {
+        return;
+    }
+
+    if(mCameraMode != CAMERA_MODE_FOLLOW)
+    {
+        if (mCameraMode == CAMERA_MODE_MOUSELOOK)
+        {
+            animate = false;
+        }
+        startCameraAnimation();
+
+        updateLastCamera();
+        mCameraMode = CAMERA_MODE_FOLLOW;
+
+        // bang-in the current focus, position, and up vector of the follow cam
+        const LLViewerCamera& camera = LLViewerCamera::instance();
+        mFollowCam.reset(camera.getOrigin(), camera.getPointOfInterest(), LLVector3::z_axis);
+
+        if (gBasicToolset)
+        {
+            LLToolMgr::getInstance()->setCurrentToolset(gBasicToolset);
+        }
+
+        if (isAgentAvatarValid())
+        {
+            // SL-315
+            gAgentAvatarp->mPelvisp->setPosition(LLVector3::zero);
+            gAgentAvatarp->startMotion( ANIM_AGENT_BODY_NOISE );
+            gAgentAvatarp->startMotion( ANIM_AGENT_BREATHE_ROT );
+        }
+
+        // unpause avatar animation
+        gAgent.unpauseAnimation();
+
+        gAgent.clearControlFlags(AGENT_CONTROL_MOUSELOOK);
+
+        if (animate)
+        {
+            startCameraAnimation();
+        }
+        else
+        {
+            mCameraAnimating = false;
+            gAgent.endAnimationUpdateUI();
+        }
+    }
+}
+
+//-----------------------------------------------------------------------------
+// changeCameraToThirdPerson()
+//-----------------------------------------------------------------------------
+void LLAgentCamera::changeCameraToThirdPerson(bool animate)
+{
+    if (gAgent.isCameraExternallyDriven())
+    {
+        return;
+    }
+
+    gViewerWindow->getWindow()->resetBusyCount();
+
+    mCameraZoomFraction = INITIAL_ZOOM_FRACTION;
+
+    if (isAgentAvatarValid())
+    {
+        if (!gAgentAvatarp->isSitting())
+        {
+            // SL-315
+            gAgentAvatarp->mPelvisp->setPosition(LLVector3::zero);
+        }
+        gAgentAvatarp->startMotion(ANIM_AGENT_BODY_NOISE);
+        gAgentAvatarp->startMotion(ANIM_AGENT_BREATHE_ROT);
+    }
+
+    LLVector3 at_axis;
+
+    // unpause avatar animation
+    gAgent.unpauseAnimation();
+
+    if (mCameraMode != CAMERA_MODE_THIRD_PERSON)
+    {
+        if (gBasicToolset)
+        {
+            LLToolMgr::getInstance()->setCurrentToolset(gBasicToolset);
+        }
+
+        mCameraLag.clearVec();
+        // <SS:Skoomastream>
+        //if (mCameraMode == CAMERA_MODE_MOUSELOOK)
+        if (mCameraMode == CAMERA_MODE_MOUSELOOK || mCameraMode == CAMERA_MODE_OTS)
+        // </SS:Skoomastream>
+        {
+            mCurrentCameraDistance = MIN_CAMERA_DISTANCE;
+            mTargetCameraDistance = MIN_CAMERA_DISTANCE;
+            animate = false;
+        }
+        updateLastCamera();
+        mCameraMode = CAMERA_MODE_THIRD_PERSON;
+        gAgent.clearControlFlags(AGENT_CONTROL_MOUSELOOK);
+    }
+
+    // Remove any pitch from the avatar
+    if (!isAgentAvatarValid() || !gAgentAvatarp->getParent())
+    {
+        at_axis = gAgent.getFrameAgent().getAtAxis();
+        at_axis.mV[VZ] = 0.f;
+        at_axis.normalize();
+        gAgent.resetAxes(at_axis);
+    }
+
+
+    if (animate)
+    {
+        startCameraAnimation();
+    }
+    else
+    {
+        mCameraAnimating = false;
+        gAgent.endAnimationUpdateUI();
+    }
+}
+
+//-----------------------------------------------------------------------------
+// changeCameraToCustomizeAvatar()
+//-----------------------------------------------------------------------------
+void LLAgentCamera::changeCameraToCustomizeAvatar()
+{
+    if (gAgent.isCameraExternallyDriven() || !isAgentAvatarValid())
+    {
+        return;
+    }
+
+// [RLVa:KB] - Checked: 2010-03-07 (RLVa-1.2.0c) | Modified: RLVa-1.0.0g
+    if ( (rlv_handler_t::isEnabled()) && (!RlvActions::canStand()) )
+    {
+        return;
+    }
+// [/RLVa:KB]
+
+    // Appearance mode needs the cursor; release the TPS camera first.
+    SLTPSCamera::disengageIfEngaged(SLTPSCamera::DISENGAGE_MODE_CHANGE);
+
+    gAgent.standUp(); // force stand up
+    gViewerWindow->getWindow()->resetBusyCount();
+
+    if (LLSelectMgr::getInstance()->getSelection()->isAttachment())
+    {
+        LLSelectMgr::getInstance()->deselectAll();
+    }
+
+    if (gFaceEditToolset)
+    {
+        LLToolMgr::getInstance()->setCurrentToolset(gFaceEditToolset);
+    }
+
+    startCameraAnimation();
+
+    if (mCameraMode != CAMERA_MODE_CUSTOMIZE_AVATAR)
+    {
+        updateLastCamera();
+        mCameraMode = CAMERA_MODE_CUSTOMIZE_AVATAR;
+        gAgent.clearControlFlags(AGENT_CONTROL_MOUSELOOK);
+
+        gFocusMgr.setKeyboardFocus( NULL );
+        gFocusMgr.setMouseCapture( NULL );
+        if( gMorphView )
+        {
+            gMorphView->setVisible( true );
+        }
+        // Remove any pitch or rotation from the avatar
+        LLVector3 at = gAgent.getAtAxis();
+        at.mV[VZ] = 0.f;
+        at.normalize();
+        gAgent.resetAxes(at);
+
+        gAgent.sendAnimationRequest(ANIM_AGENT_CUSTOMIZE, ANIM_REQUEST_START);
+        gAgent.setCustomAnim(true);
+        gAgentAvatarp->startMotion(ANIM_AGENT_CUSTOMIZE);
+        LLMotion* turn_motion = gAgentAvatarp->findMotion(ANIM_AGENT_CUSTOMIZE);
+
+        if (turn_motion)
+        {
+            // delay camera animation long enough to play through turn animation
+            setAnimationDuration(turn_motion->getDuration() + CUSTOMIZE_AVATAR_CAMERA_ANIM_SLOP);
+        }
+    }
+
+    LLVector3 agent_at = gAgent.getAtAxis();
+    agent_at.mV[VZ] = 0.f;
+    agent_at.normalize();
+
+    // default focus point for customize avatar
+    LLVector3 focus_target = isAgentAvatarValid()
+        ? gAgentAvatarp->mHeadp->getWorldPosition()
+        : gAgent.getPositionAgent();
+
+    LLVector3d camera_offset(agent_at * -1.0);
+    // push camera up and out from avatar
+    camera_offset.mdV[VZ] = 0.1f;
+    camera_offset *= CUSTOMIZE_AVATAR_CAMERA_DEFAULT_DIST;
+    LLVector3d focus_target_global = gAgent.getPosGlobalFromAgent(focus_target);
+    setAnimationDuration(gSavedSettings.getF32("ZoomTime"));
+    setCameraPosAndFocusGlobal(focus_target_global + camera_offset, focus_target_global, gAgent.getID());
+}
+
+
+void LLAgentCamera::switchCameraPreset(ECameraPreset preset)
+{
+// [RLVa:KB] - @setcam family
+    if (RlvActions::isRlvEnabled())
+    {
+        // Don't allow changing away from our view if an object is restricting it
+        if (RlvActions::isCameraPresetLocked())
+            preset = CAMERA_RLV_SETCAM_VIEW;
+
+        if (CAMERA_RLV_SETCAM_VIEW == preset)
+        {
+            if (CAMERA_RLV_SETCAM_VIEW == mCameraPreset)
+            {
+                // Don't reset anything if our view is already current
+                return;
+            }
+            else
+            {
+                // When switching to our view, copy the current values
+                gSavedSettings.setVector3("CameraOffsetRLVaView", getCameraOffsetInitial());
+                gSavedSettings.setVector3d("FocusOffsetRLVaView", getFocusOffsetInitial());
+                gSavedSettings.setF32("CameraOffsetScaleRLVa", getCameraOffsetScale());
+            }
+        }
+    }
+// [/RLVa:KB]
+
+    //zoom is supposed to be reset for the front and group views
+    mCameraZoomFraction = 1.f;
+
+    //focusing on avatar in that case means following him on movements
+    mFocusOnAvatar = true;
+
+    mCameraPreset = preset;
+
+    resetPanDiff();
+    resetOrbitDiff();
+    resetCameraRoll();
+
+    gSavedSettings.setU32("CameraPresetType", mCameraPreset);
+}
+
+
+//
+// Focus point management
+//
+
+void LLAgentCamera::setAnimationDuration(F32 duration)
+{
+    if (mCameraAnimating)
+    {
+        // do not cut any existing camera animation short
+        F32 animation_left = llmax(0.f, mAnimationDuration - mAnimationTimer.getElapsedTimeF32());
+        mAnimationDuration = llmax(duration, animation_left);
+    }
+    else
+    {
+        mAnimationDuration = duration;
+    }
+}
+
+//-----------------------------------------------------------------------------
+// startCameraAnimation()
+//-----------------------------------------------------------------------------
+void LLAgentCamera::startCameraAnimation()
+{
+    mAnimationCameraStartGlobal = getCameraPositionGlobal();
+    mAnimationFocusStartGlobal = mFocusGlobal;
+    // <SS:Skoomastream>
+    // Snapshot the avatar pose so the start points can be re-anchored to the
+    // avatar's frame while the animation plays (see updateCamera).
+    mAnimationStartRootGlobal = gAgent.getPosGlobalFromAgent(getAvatarRootPosition());
+    mAnimationStartAgentRot = gAgent.getFrameAgent().getQuaternion();
+    // </SS:Skoomastream>
+    // <GMDX> a one-shot override (the ADS camera swap, FSADSSwapTransitionSpeed) wins over ZoomTime
+    const F32 next_duration = mNextAnimationDuration;
+    mNextAnimationDuration = -1.f;
+    setAnimationDuration(next_duration >= 0.f ? next_duration : gSavedSettings.getF32("ZoomTime"));
+    // </GMDX>
+    mAnimationTimer.reset();
+    mCameraAnimating = true;
+}
+
+//-----------------------------------------------------------------------------
+// stopCameraAnimation()
+//-----------------------------------------------------------------------------
+void LLAgentCamera::stopCameraAnimation()
+{
+    mCameraAnimating = false;
+}
+
+void LLAgentCamera::clearFocusObject()
+{
+    if (mFocusObject.notNull())
+    {
+        startCameraAnimation();
+
+        setFocusObject(NULL);
+        mFocusObjectOffset.clearVec();
+    }
+}
+
+void LLAgentCamera::setFocusObject(LLViewerObject* object)
+{
+    mFocusObject = object;
+}
+
+// Focus on a point, but try to keep camera position stable.
+//-----------------------------------------------------------------------------
+// setFocusGlobal()
+//-----------------------------------------------------------------------------
+void LLAgentCamera::setFocusGlobal(const LLPickInfo& pick)
+{
+    LLViewerObject* objectp = gObjectList.findObject(pick.mObjectID);
+
+    if (objectp && pick.mGLTFNodeIndex == -1)
+    {
+        // focus on object plus designated offset
+        // which may or may not be same as pick.mPosGlobal
+        setFocusGlobal(objectp->getPositionGlobal() + LLVector3d(pick.mObjectOffset), pick.mObjectID);
+    }
+    else
+    {
+        // focus directly on point where user clicked
+        setFocusGlobal(pick.mPosGlobal, pick.mObjectID);
+    }
+}
+
+
+void LLAgentCamera::setFocusGlobal(const LLVector3d& focus, const LLUUID &object_id)
+{
+    setFocusObject(gObjectList.findObject(object_id));
+    LLVector3d old_focus = mFocusTargetGlobal;
+    LLViewerObject *focus_obj = mFocusObject;
+
+    // if focus has changed
+    if (old_focus != focus)
+    {
+        if (focus.isExactlyZero())
+        {
+            if (isAgentAvatarValid())
+            {
+                mFocusTargetGlobal = gAgent.getPosGlobalFromAgent(gAgentAvatarp->mHeadp->getWorldPosition());
+            }
+            else
+            {
+                mFocusTargetGlobal = gAgent.getPositionGlobal();
+            }
+            mCameraFocusOffsetTarget = getCameraPositionGlobal() - mFocusTargetGlobal;
+            mCameraFocusOffset = mCameraFocusOffsetTarget;
+            setLookAt(LOOKAT_TARGET_CLEAR);
+        }
+        else
+        {
+            mFocusTargetGlobal = focus;
+            if (!focus_obj)
+            {
+                mCameraFOVZoomFactor = 0.f;
+            }
+
+            mCameraFocusOffsetTarget = gAgent.getPosGlobalFromAgent(mCameraVirtualPositionAgent) - mFocusTargetGlobal;
+
+            startCameraAnimation();
+
+            if (focus_obj)
+            {
+                if (focus_obj->isAvatar())
+                {
+                    setLookAt(LOOKAT_TARGET_FOCUS, focus_obj);
+                }
+                else
+                {
+                    setLookAt(LOOKAT_TARGET_FOCUS, focus_obj, (gAgent.getPosAgentFromGlobal(focus) - focus_obj->getRenderPosition()) * ~focus_obj->getRenderRotation());
+                }
+            }
+            else
+            {
+                setLookAt(LOOKAT_TARGET_FOCUS, NULL, gAgent.getPosAgentFromGlobal(mFocusTargetGlobal));
+            }
+        }
+    }
+    else // focus == mFocusTargetGlobal
+    {
+        if (focus.isExactlyZero())
+        {
+            if (isAgentAvatarValid())
+            {
+                mFocusTargetGlobal = gAgent.getPosGlobalFromAgent(gAgentAvatarp->mHeadp->getWorldPosition());
+            }
+            else
+            {
+                mFocusTargetGlobal = gAgent.getPositionGlobal();
+            }
+        }
+        mCameraFocusOffsetTarget = (getCameraPositionGlobal() - mFocusTargetGlobal) / (1.f + mCameraFOVZoomFactor);;
+        mCameraFocusOffset = mCameraFocusOffsetTarget;
+    }
+
+    if (mFocusObject.notNull())
+    {
+        // for attachments, make offset relative to avatar, not the attachment
+        if (mFocusObject->isAttachment())
+        {
+            while (mFocusObject.notNull() && !mFocusObject->isAvatar())
+            {
+                mFocusObject = (LLViewerObject*) mFocusObject->getParent();
+            }
+            setFocusObject((LLViewerObject*)mFocusObject);
+        }
+        updateFocusOffset();
+    }
+}
+
+// Used for avatar customization
+//-----------------------------------------------------------------------------
+// setCameraPosAndFocusGlobal()
+//-----------------------------------------------------------------------------
+void LLAgentCamera::setCameraPosAndFocusGlobal(const LLVector3d& camera_pos, const LLVector3d& focus, const LLUUID &object_id)
+{
+    LLVector3d old_focus = mFocusTargetGlobal.isExactlyZero() ? focus : mFocusTargetGlobal;
+
+    F64 focus_delta_squared = (old_focus - focus).magVecSquared();
+    const F64 ANIM_EPSILON_SQUARED = 0.0001;
+    if (focus_delta_squared > ANIM_EPSILON_SQUARED)
+    {
+        startCameraAnimation();
+    }
+
+    //LLViewerCamera::getInstance()->setOrigin( gAgent.getPosAgentFromGlobal( camera_pos ) );
+    setFocusObject(gObjectList.findObject(object_id));
+    mFocusTargetGlobal = focus;
+    mCameraFocusOffsetTarget = camera_pos - focus;
+    mCameraFocusOffset = mCameraFocusOffsetTarget;
+
+    if (mFocusObject)
+    {
+        if (mFocusObject->isAvatar())
+        {
+            setLookAt(LOOKAT_TARGET_FOCUS, mFocusObject);
+        }
+        else
+        {
+            setLookAt(LOOKAT_TARGET_FOCUS, mFocusObject, (gAgent.getPosAgentFromGlobal(focus) - mFocusObject->getRenderPosition()) * ~mFocusObject->getRenderRotation());
+        }
+    }
+    else
+    {
+        setLookAt(LOOKAT_TARGET_FOCUS, NULL, gAgent.getPosAgentFromGlobal(mFocusTargetGlobal));
+    }
+
+    if (mCameraAnimating)
+    {
+        const F64 ANIM_METERS_PER_SECOND = 10.0;
+        const F64 MIN_ANIM_SECONDS = 0.5;
+        const F64 MAX_ANIM_SECONDS = 1.0;
+        F64 anim_duration = llmax( MIN_ANIM_SECONDS, sqrt(focus_delta_squared) / ANIM_METERS_PER_SECOND );
+        anim_duration = llmin( anim_duration, MAX_ANIM_SECONDS );
+        setAnimationDuration( (F32)anim_duration );
+    }
+
+    updateFocusOffset();
+}
+
+//-----------------------------------------------------------------------------
+// setSitCamera()
+//-----------------------------------------------------------------------------
+void LLAgentCamera::setSitCamera(const LLUUID &object_id, const LLVector3 &camera_pos, const LLVector3 &camera_focus)
+{
+    bool camera_enabled = !object_id.isNull();
+
+    if (camera_enabled)
+    {
+        LLViewerObject *reference_object = gObjectList.findObject(object_id);
+        if (reference_object)
+        {
+            //convert to root object relative?
+            mSitCameraPos = camera_pos;
+            mSitCameraFocus = camera_focus;
+            mSitCameraReferenceObject = reference_object;
+            mSitCameraEnabled = true;
+        }
+    }
+    else
+    {
+        mSitCameraPos.clearVec();
+        mSitCameraFocus.clearVec();
+        mSitCameraReferenceObject = NULL;
+        mSitCameraEnabled = false;
+    }
+}
+
+//-----------------------------------------------------------------------------
+// setFocusOnAvatar()
+//-----------------------------------------------------------------------------
+void LLAgentCamera::setFocusOnAvatar(bool focus_on_avatar, bool animate, bool reset_axes)
+{
+    if (focus_on_avatar != mFocusOnAvatar)
+    {
+        if (animate)
+        {
+            startCameraAnimation();
+        }
+        else
+        {
+            stopCameraAnimation();
+        }
+    }
+
+    //RN: when focused on the avatar, we're not "looking" at it
+    // looking implies intent while focusing on avatar means
+    // you're just walking around with a camera on you...eesh.
+    if (!mFocusOnAvatar && focus_on_avatar && reset_axes)
+    {
+        setFocusGlobal(LLVector3d::zero);
+        mCameraFOVZoomFactor = 0.f;
+        if (mCameraMode == CAMERA_MODE_THIRD_PERSON)
+        {
+            LLVector3 at_axis;
+            if (!isAgentAvatarValid() || !gAgentAvatarp->getParent())
+            {
+                // In case of front view rotate agent to look into direction opposite to camera
+                // In case of rear view rotate agent into diraction same as camera, e t c
+                LLVector3 vect = getCameraOffsetInitial();
+                F32 rotxy = F32(atan2(vect.mV[VY], vect.mV[VX]));
+
+                LLCoordFrame frameCamera = *((LLCoordFrame*)LLViewerCamera::getInstance());
+                // front view angle rotxy is zero, rear view rotxy angle is 180, compensate
+                frameCamera.yaw((180 * DEG_TO_RAD) - rotxy);
+                at_axis = frameCamera.getAtAxis();
+                at_axis.mV[VZ] = 0.f;
+                at_axis.normalize();
+                gAgent.resetAxes(at_axis);
+                gAgent.yaw(0);
+            }
+        }
+    }
+    // unlocking camera from avatar
+    else if (mFocusOnAvatar && !focus_on_avatar)
+    {
+        // keep camera focus point consistent, even though it is now unlocked
+        setFocusGlobal(gAgent.getPositionGlobal() + calcThirdPersonFocusOffset(), gAgent.getID());
+        mAllowChangeToFollow = false;
+    }
+
+    mFocusOnAvatar = focus_on_avatar;
+}
+
+
+bool LLAgentCamera::setLookAt(ELookAtType target_type, LLViewerObject *object, LLVector3 position)
+{
+    static LLCachedControl<bool> isPrivate(gSavedSettings, "EnableLookAtTarget", false);
+    // Slipstream (#496): the AO holds the head still, so send no target
+    if (isPrivate || (SLAOEngine::instanceExists() && SLAOEngine::instance().holdsHead()))
+    {
+        target_type = LOOKAT_TARGET_NONE;
+        object = gAgentAvatarp;
+        position.clearVec();
+    }
+    else if(object && object->isAttachment())
+    {
+        LLViewerObject* parent = object;
+        while(parent)
+        {
+            if (parent == gAgentAvatarp)
+            {
+                // looking at an attachment on ourselves, which we don't want to do
+                object = gAgentAvatarp;
+                position.clearVec();
+            }
+            parent = (LLViewerObject*)parent->getParent();
+        }
+    }
+    if(!mLookAt || mLookAt->isDead())
+    {
+        mLookAt = (LLHUDEffectLookAt *)LLHUDManager::getInstance()->createViewerEffect(LLHUDObject::LL_HUD_EFFECT_LOOKAT);
+        mLookAt->setSourceObject(gAgentAvatarp);
+    }
+
+    return mLookAt->setLookAt(target_type, object, position);
+}
+
+//-----------------------------------------------------------------------------
+// lookAtLastChat()
+//-----------------------------------------------------------------------------
+void LLAgentCamera::lookAtLastChat()
+{
+    // Block if camera is animating or not in normal third person camera mode
+    if (mCameraAnimating || !cameraThirdPerson())
+    {
+        return;
+    }
+
+    LLViewerObject *chatter = gObjectList.findObject(gAgent.getLastChatter());
+    if (!chatter)
+    {
+        return;
+    }
+
+    LLVector3 delta_pos;
+    if (chatter->isAvatar())
+    {
+        LLVOAvatar *chatter_av = (LLVOAvatar*)chatter;
+        if (isAgentAvatarValid() && chatter_av->mHeadp)
+        {
+            delta_pos = chatter_av->mHeadp->getWorldPosition() - gAgentAvatarp->mHeadp->getWorldPosition();
+        }
+        else
+        {
+            delta_pos = chatter->getPositionAgent() - gAgent.getPositionAgent();
+        }
+        delta_pos.normalize();
+
+        gAgent.setControlFlags(AGENT_CONTROL_STOP);
+
+        changeCameraToThirdPerson();
+
+        LLVector3 new_camera_pos = gAgentAvatarp->mHeadp->getWorldPosition();
+        LLVector3 left = delta_pos % LLVector3::z_axis;
+        left.normalize();
+        LLVector3 up = left % delta_pos;
+        up.normalize();
+        new_camera_pos -= delta_pos * 0.4f;
+        new_camera_pos += left * 0.3f;
+        new_camera_pos += up * 0.2f;
+
+        setFocusOnAvatar(false, false);
+
+        if (chatter_av->mHeadp)
+        {
+            setFocusGlobal(gAgent.getPosGlobalFromAgent(chatter_av->mHeadp->getWorldPosition()), gAgent.getLastChatter());
+            mCameraFocusOffsetTarget = gAgent.getPosGlobalFromAgent(new_camera_pos) - gAgent.getPosGlobalFromAgent(chatter_av->mHeadp->getWorldPosition());
+        }
+        else
+        {
+            setFocusGlobal(chatter->getPositionGlobal(), gAgent.getLastChatter());
+            mCameraFocusOffsetTarget = gAgent.getPosGlobalFromAgent(new_camera_pos) - chatter->getPositionGlobal();
+        }
+    }
+    else
+    {
+        delta_pos = chatter->getRenderPosition() - gAgent.getPositionAgent();
+        delta_pos.normalize();
+
+        gAgent.setControlFlags(AGENT_CONTROL_STOP);
+
+        changeCameraToThirdPerson();
+
+        LLVector3 new_camera_pos = gAgentAvatarp->mHeadp->getWorldPosition();
+        LLVector3 left = delta_pos % LLVector3::z_axis;
+        left.normalize();
+        LLVector3 up = left % delta_pos;
+        up.normalize();
+        new_camera_pos -= delta_pos * 0.4f;
+        new_camera_pos += left * 0.3f;
+        new_camera_pos += up * 0.2f;
+
+        setFocusOnAvatar(false, false);
+
+        setFocusGlobal(chatter->getPositionGlobal(), gAgent.getLastChatter());
+        mCameraFocusOffsetTarget = gAgent.getPosGlobalFromAgent(new_camera_pos) - chatter->getPositionGlobal();
+    }
+}
+
+bool LLAgentCamera::isfollowCamLocked()
+{
+    return mFollowCam.getPositionLocked();
+}
+
+//-----------------------------------------------------------------------------
+// resetFlycamToCurrentView()
+//-----------------------------------------------------------------------------
+void LLAgentCamera::resetFlycamToCurrentView()
+{
+    LLViewerCamera* camera = LLViewerCamera::getInstance();
+    mFlycam.setTransform(gAgent.getPosGlobalFromAgent(camera->getOrigin()), camera->getQuaternion());
+    mFlycam.setView(camera->getView());
+}
+
+//-----------------------------------------------------------------------------
+// toggleFlycam()
+//-----------------------------------------------------------------------------
+void LLAgentCamera::toggleFlycam()
+{
+    mUsingFlycam = !mUsingFlycam;
+    if (mUsingFlycam)
+    {
+        resetFlycamToCurrentView();
+        // Flycam starts from the current view, which in mouselook is inside the
+        // avatar's head: keep the avatar hidden until it's out of view.
+        mFlycamHidingAvatar = cameraMouselook();
+    }
+    else
+    {
+        bool was_revealed = !mFlycamHidingAvatar;
+        mFlycamHidingAvatar = false;
+        // (Slipstream asks LLVOAvatar::selfHiddenInMainView() every frame, so the
+        // attachments hide again on their own back in mouselook.)
+        (void)was_revealed;
+    }
+}
+
+bool LLAgentCamera::isHidingAvatarForFirstPerson() const
+{
+    return cameraMouselook() && (!mUsingFlycam || mFlycamHidingAvatar);
+}
+
+//-----------------------------------------------------------------------------
+// updateFlycamAvatarVisibility()
+//-----------------------------------------------------------------------------
+void LLAgentCamera::updateFlycamAvatarVisibility()
+{
+    if (!mFlycamHidingAvatar)
+    {
+        return;
+    }
+    if (!cameraMouselook() || !isAgentAvatarValid())
+    {
+        // Nothing left to hide from (e.g. the camera mode changed underneath).
+        mFlycamHidingAvatar = false;
+        return;
+    }
+
+    // Bounding sphere of the avatar, including its attachments.
+    LLVector3 center = gAgentAvatarp->getRenderPosition();
+    F32 radius = 0.f;
+    if (gAgentAvatarp->mDrawable.notNull())
+    {
+        const LLVector4a* extents = gAgentAvatarp->mDrawable->getSpatialExtents();
+        LLVector3 min(extents[0].getF32ptr());
+        LLVector3 max(extents[1].getF32ptr());
+        center = (min + max) * 0.5f;
+        radius = (max - min).magVec() * 0.5f;
+    }
+    // Pad for stale extents and animation beyond the bounds.
+    constexpr F32 MIN_AVATAR_RADIUS = 1.f; // meters
+    constexpr F32 AVATAR_RADIUS_PADDING = 1.25f;
+    radius = llmax(radius * AVATAR_RADIUS_PADDING, MIN_AVATAR_RADIUS);
+
+    // Conservative test: the avatar is out of view if its bounding sphere lies
+    // entirely outside the cone that encloses the view frustum (half-angle to
+    // the frustum's corners).
+    const LLViewerCamera* camera = LLViewerCamera::getInstance();
+    LLVector3 to_avatar = center - camera->getOrigin();
+    F32 distance = to_avatar.normVec();
+    if (distance <= radius)
+    {
+        return; // camera is inside the bounds
+    }
+    F32 tan_half_view = tanf(0.5f * camera->getView());
+    F32 frustum_half_angle = atanf(tan_half_view * sqrtf(1.f + camera->getAspect() * camera->getAspect()));
+    F32 avatar_half_angle = asinf(radius / distance);
+    F32 angle_to_avatar = acosf(llclamp(to_avatar * camera->getAtAxis(), -1.f, 1.f));
+    if (angle_to_avatar > frustum_half_angle + avatar_half_angle)
+    {
+        mFlycamHidingAvatar = false;
+    }
+}
+
+void LLAgentCamera::updateFlycamCursorVisibility(LLGameControl::AgentControlMode mode)
+{
+    // Seconds until the cursor hides again after the mouse moves...
+    constexpr F64 FLYCAM_CURSOR_MOUSE_TIMEOUT = 5.0;
+    // ...shortened to at most this while the flycam camera itself is moving.
+    constexpr F64 FLYCAM_CURSOR_CAMERA_TIMEOUT = 1.0;
+    // Tolerance when comparing mouse-move timestamps reconstructed from
+    // LLUI's F32 mouse idle time.
+    constexpr F64 MOUSE_MOVE_EPSILON = 0.005;
+
+    if (!gViewerWindow)
+    {
+        return;
+    }
+
+    // Mouselook (which flycam can be engaged from) manages its own hidden
+    // cursor, so leave the cursor alone while it is active.
+    bool mouselook = cameraMouselook();
+    bool want_hiding = mode == LLGameControl::CONTROL_MODE_FLYCAM
+        && LLGameControl::isFlycamHideCursorEnabled()
+        && !mouselook;
+
+    if (!want_hiding)
+    {
+        if (mFlycamCursorHidden && !mouselook)
+        {
+            gViewerWindow->showCursor();
+        }
+        mFlycamCursorHiding = false;
+        mFlycamCursorHidden = false;
+        return;
+    }
+
+    F64 now = LLFrameTimer::getElapsedSeconds();
+    // LLViewerWindow::handleMouseMove() resets LLUI's mouse idle timer
+    // whenever the mouse moves, so this is when it last moved.
+    F64 mouse_move_time = now - (F64)LLUI::getInstance()->getMouseIdleTime();
+
+    // Detect flycam camera motion by comparing its transform (global, so
+    // unaffected by region-origin rebases) and view angle against the
+    // previous frame's.
+    LLVector3d flycam_position;
+    LLQuaternion flycam_rotation;
+    mFlycam.getTransform(flycam_position, flycam_rotation);
+    F32 flycam_view = mFlycam.getView();
+    bool flycam_moved = flycam_position != mFlycamCursorLastPosition
+        || flycam_rotation != mFlycamCursorLastRotation
+        || flycam_view != mFlycamCursorLastView;
+    mFlycamCursorLastPosition = flycam_position;
+    mFlycamCursorLastRotation = flycam_rotation;
+    mFlycamCursorLastView = flycam_view;
+
+    if (!mFlycamCursorHiding)
+    {
+        // Just entered FlyCam mode: hide immediately.
+        mFlycamCursorHiding = true;
+        mFlycamCursorHidden = true;
+        mFlycamCursorMouseMoveTime = mouse_move_time;
+        gViewerWindow->hideCursor();
+        return;
+    }
+
+    if (mFlycamCursorHidden && !gViewerWindow->getCursorHidden())
+    {
+        // Something else re-showed the cursor behind our back: treat it as
+        // visible, with a fresh timeout.
+        mFlycamCursorHidden = false;
+        mFlycamCursorHideTime = now + FLYCAM_CURSOR_MOUSE_TIMEOUT;
+    }
+
+    if (mouse_move_time > mFlycamCursorMouseMoveTime + MOUSE_MOVE_EPSILON)
+    {
+        // The mouse moved: show the cursor (if hidden) and restart the timeout.
+        mFlycamCursorMouseMoveTime = mouse_move_time;
+        mFlycamCursorHideTime = mouse_move_time + FLYCAM_CURSOR_MOUSE_TIMEOUT;
+        if (mFlycamCursorHidden)
+        {
+            mFlycamCursorHidden = false;
+            gViewerWindow->showCursor();
+        }
+    }
+
+    if (mFlycamCursorHidden)
+    {
+        return;
+    }
+
+    if (flycam_moved)
+    {
+        mFlycamCursorHideTime = llmin(mFlycamCursorHideTime, now + FLYCAM_CURSOR_CAMERA_TIMEOUT);
+    }
+
+    if (now >= mFlycamCursorHideTime)
+    {
+        mFlycamCursorHidden = true;
+        gViewerWindow->hideCursor();
+    }
+}
+
+//-----------------------------------------------------------------------------
+// applyNdofFlycamFrameDelta()
+//-----------------------------------------------------------------------------
+void LLAgentCamera::applyNdofFlycamFrameDelta(const F32 local_delta[7],
+                                               bool auto_level, F32 auto_level_fraction,
+                                               bool direct_view, F32 direct_view_value)
+{
+    mFlycam.applyFrameDelta(local_delta, auto_level, auto_level_fraction, direct_view, direct_view_value);
+
+    LLVector3d pos_global;
+    LLQuaternion rot;
+    mFlycam.getTransform(pos_global, rot);
+    LLVector3 pos = gAgent.getPosAgentFromGlobal(pos_global);
+    LLMatrix3 mat(rot);
+    LLViewerCamera::getInstance()->setOrigin(pos);
+    LLViewerCamera::getInstance()->mXAxis = LLVector3(mat.mMatrix[0]);
+    LLViewerCamera::getInstance()->mYAxis = LLVector3(mat.mMatrix[1]);
+    LLViewerCamera::getInstance()->mZAxis = LLVector3(mat.mMatrix[2]);
+
+    LLViewerCamera::getInstance()->setView(mFlycam.getView());
+}
+
+//-----------------------------------------------------------------------------
+// updateFlycam()
+//-----------------------------------------------------------------------------
+void LLAgentCamera::updateFlycam(F32 delta_time)
+{
+    // Note: flycam_inputs arrive in range [-1,1]
+    std::vector<F32> flycam_inputs;
+    U32 flycam_misc_actions = 0;
+    U32 flycam_modifiers = 0;
+    LLGameControl::getFlycamInputs(flycam_inputs, flycam_misc_actions, flycam_modifiers);
+
+    // The channel order is defined by LLGameControl::FlycamChannel.
+
+    // Defensive: getFlycamInputs() should return one value per channel.
+    if ((S32)flycam_inputs.size() < LLGameControl::FLYCAM_NUM_CHANNELS)
+    {
+        return;
+    }
+
+    if (flycam_misc_actions & LLGameControl::FLYCAM_ACTION_ESCAPE)
+    {
+        // Bail out of FlyCam mode immediately; no point applying this frame's
+        // (about to be abandoned) flycam deltas below.
+        gAgent.resetToAvatarMode();
+        return;
+    }
+
+    // Blend in keyboard-driven flycam input (independent of LLGameControl,
+    // which only sees a physical controller).  mFlycamKeyboardInput is
+    // level-triggered by flycam_axis_key<> in llviewerinput.cpp -- it must be
+    // re-set every frame a key is held, so clear it here once consumed.
+    // OCOL: controller sensitivity may push the controller part past 1
+    F32 input_limit = llmax(1.f, LLGameControl::getActiveSensitivity());
+    for (U8 i = 0; i < LLGameControl::FLYCAM_NUM_CHANNELS; ++i)
+    {
+        flycam_inputs[i] = llclamp(flycam_inputs[i] + mFlycamKeyboardInput[i], -input_limit, input_limit);
+    }
+    mFlycamKeyboardInput.fill(0.f);
+    bool flycam_key_unroll_requested = mFlycamKeyboardUnrollRequested;
+    mFlycamKeyboardUnrollRequested = false;
+
+    // Unroll only undoes roll, and roll is already kept at zero every frame
+    // (LLFlycam::setRollRate()/integrate()) whenever roll is disallowed, so
+    // treat an Unroll request as a no-op rather than kicking off a pointless
+    // startReset() lerp while "Allow Roll" is unchecked.
+    if (LLGameControl::isFlycamRollAllowed()
+        && ((flycam_misc_actions & LLGameControl::FLYCAM_ACTION_UNROLL) || flycam_key_unroll_requested))
+    {
+        // Re-orient the flycam in place: keep its current position and
+        // forward (local X) axis unchanged, but unroll it so its local vertical
+        // axis lies on the plane defined by forward axis and world-up, with positive
+        // dot-product with world-up.
+        // mFlycam.startReset() smoothly lerps into this transform (see
+        // LLFlycam::integrate()); flycam input has no effect until the lerp
+        // completes.
+        constexpr F32 FLYCAM_UNROLL_DURATION = 1.0f; // seconds; may be tuned later
+
+        LLVector3d current_position;
+        LLQuaternion current_rotation;
+        mFlycam.getTransform(current_position, current_rotation);
+
+        LLMatrix3 level(current_rotation);
+        LLVector3 forward(level.getFwdRow());
+        forward.normVec();
+
+        LLVector3 world_up = LLVector3::z_axis;
+        LLVector3 new_up = world_up - (world_up * forward) * forward;
+        constexpr F32 MIN_UNROLL_SIN = 0.01f; // ~0.6 degrees off vertical
+        if (new_up.lengthSquared() > MIN_UNROLL_SIN * MIN_UNROLL_SIN)
+        {
+            new_up.normVec();
+            // Right-handed (forward, left, up) basis, per
+            // LLMatrix3::orthogonalize()'s up = forward % left: up % forward == left.
+            LLVector3 new_left = new_up % forward;
+            level.setRows(forward, new_left, new_up);
+            level.orthogonalize(); // numerical cleanup only; rows are already orthonormal by construction
+
+            mFlycam.startReset(current_position, LLQuaternion(level), FLYCAM_UNROLL_DURATION);
+        }
+    }
+
+    // Orbit modifier: while held, Truck stops meaning strafe and instead adds
+    // into Pan's yaw (both sweep the camera left/right around the focal
+    // point), and Dolly stops meaning advance and instead adjusts the radius
+    // (see LLFlycam::setOrbitRadialRate()/integrate()).  Tilt, Roll, Boom,
+    // and Zoom keep their normal meaning either way: Tilt already rotates the
+    // camera about its own local left axis, which is exactly what swings it
+    // up/down around the focal point once position is derived from
+    // orientation; Roll still passes straight through (it just changes which
+    // region-frame axis Tilt's local axis happens to be next frame).
+    bool flycam_orbit_held = (flycam_modifiers & LLGameControl::FLYCAM_MODIFIER_ORBIT) != 0;
+    constexpr F32 FLYCAM_ORBIT_DEFAULT_FOCAL_DISTANCE = 20.0f; // meters; hard-coded for now, may be tuned later
+    constexpr F32 FLYCAM_ORBIT_MAX_TRACE_DISTANCE = 512.0f; // meters; matches the general world-raycast convention used elsewhere (e.g. LLViewerWindow::cursorIntersect)
+    F32 flycam_orbit_focal_distance = FLYCAM_ORBIT_DEFAULT_FOCAL_DISTANCE;
+    {
+        // Ray forward from the flycam, so Orbit pivots around what it is
+        // pointing at instead of an arbitrary fixed distance whenever there's
+        // something in view; falls back to the default distance if nothing is
+        // hit within range. <GMDX> Slipstream has no CPU world raycast: the GPU
+        // ray is asked every flycam frame (terrain is tested at once), so the
+        // orbit's rising edge finds a recent answer.
+        LLVector3d camera_pos_global;
+        LLQuaternion camera_rot;
+        mFlycam.getTransform(camera_pos_global, camera_rot);
+        LLVector3 camera_pos = gAgent.getPosAgentFromGlobal(camera_pos_global);
+        LLVector3 forward(LLMatrix3(camera_rot).getFwdRow());
+        LLVector3 trace_end = camera_pos + forward * FLYCAM_ORBIT_MAX_TRACE_DISTANCE;
+
+        F32 hit_dist = 0.f;
+        bool hit = SSCombatRay::cast(SSCombatRay::KEY_FLYCAM_ORBIT, camera_pos, trace_end, nullptr, hit_dist);
+        if (hit && flycam_orbit_held && !mFlycam.isOrbitEngaged())
+        {
+            flycam_orbit_focal_distance = hit_dist;
+        }
+    }
+    mFlycam.setOrbitEngaged(flycam_orbit_held, flycam_orbit_focal_distance);
+
+    F32 yaw_input = flycam_inputs[LLGameControl::FLYCAM_PAN];
+    F32 truck_input = flycam_inputs[LLGameControl::FLYCAM_TRUCK];
+    F32 dolly_input = flycam_inputs[LLGameControl::FLYCAM_DOLLY];
+    if (flycam_orbit_held)
+    {
+        // Truck/Dolly are negated here (Pan/Tilt/Roll/Boom/Zoom are not) --
+        // determined empirically to match the expected orbit sweep/radial
+        // directions.
+        truck_input = -truck_input;
+        dolly_input = -dolly_input;
+        yaw_input = llclamp(yaw_input + truck_input, -1.f, 1.f);
+        truck_input = 0.f;
+        mFlycam.setOrbitRadialRate(dolly_input);
+        dolly_input = 0.f;
+    }
+    else
+    {
+        mFlycam.setOrbitRadialRate(0.f);
+    }
+
+    // Must precede setLinearVelocity()/setPitchRate()/setYawRate()/setRollRate():
+    // those setters apply mSpeedFactor/mAllowRoll immediately rather than at
+    // integrate() time.
+    mFlycam.setSpeedFactor(LLGameControl::getFlycamSpeedFactor());
+    mFlycam.setAllowRoll(LLGameControl::isFlycamRollAllowed());
+
+    LLVector3 linear_velocity(dolly_input, truck_input, flycam_inputs[LLGameControl::FLYCAM_BOOM]);
+    constexpr F32 MAX_FLYCAM_SPEED = 10.0f;
+    mFlycam.setLinearVelocity(MAX_FLYCAM_SPEED * linear_velocity);
+
+    mFlycam.setPitchRate(flycam_inputs[LLGameControl::FLYCAM_TILT]);
+    mFlycam.setYawRate(yaw_input);
+    mFlycam.setRollRate(flycam_inputs[LLGameControl::FLYCAM_ROLL]);
+    mFlycam.setZoomRate(flycam_inputs[LLGameControl::FLYCAM_ZOOM]);
+
+    mFlycam.integrate(delta_time);
+
+    LLVector3d pos_global;
+    LLQuaternion rot;
+    mFlycam.getTransform(pos_global, rot);
+    LLVector3 pos = gAgent.getPosAgentFromGlobal(pos_global);
+    LLMatrix3 mat(rot);
+    LLViewerCamera::getInstance()->setOrigin(pos);
+    LLViewerCamera::getInstance()->mXAxis = LLVector3(mat.mMatrix[0]);
+    LLViewerCamera::getInstance()->mYAxis = LLVector3(mat.mMatrix[1]);
+    LLViewerCamera::getInstance()->mZAxis = LLVector3(mat.mMatrix[2]);
+
+    LLViewerCamera::getInstance()->setView(mFlycam.getView());
+
+    updateFlycamAvatarVisibility();
+}
+
+bool LLAgentCamera::setPointAt(EPointAtType target_type, LLViewerObject *object, LLVector3 position)
+{
+    // disallow pointing at attachments and avatars
+    if (object && (object->isAttachment() || object->isAvatar()))
+    {
+        return false;
+    }
+
+    static LLCachedControl<bool> enable_selection_hints(gSavedSettings, "EnableSelectionHints", true);
+    if (!enable_selection_hints)
+    {
+        target_type = POINTAT_TARGET_CLEAR;
+        object = nullptr;
+        position.clear();
+    }
+    if (!mPointAt || mPointAt->isDead())
+    {
+        mPointAt = (LLHUDEffectPointAt *)LLHUDManager::getInstance()->createViewerEffect(LLHUDObject::LL_HUD_EFFECT_POINTAT);
+        mPointAt->setSourceObject(gAgentAvatarp);
+    }
+    return mPointAt->setPointAt(target_type, object, position);
+}
+
+void LLAgentCamera::rotateToInitSitRot()
+{
+    gAgent.rotate(~gAgent.getFrameAgent().getQuaternion());
+    gAgent.rotate(mInitSitRot);
+}
+
+void LLAgentCamera::resetCameraZoomFraction()
+{
+    mCameraZoomFraction = INITIAL_ZOOM_FRACTION;
+}
+
+ELookAtType LLAgentCamera::getLookAtType()
+{
+    if (mLookAt)
+    {
+        return mLookAt->getLookAtType();
+    }
+    return LOOKAT_TARGET_NONE;
+}
+
+EPointAtType LLAgentCamera::getPointAtType()
+{
+    if (mPointAt)
+    {
+        return mPointAt->getPointAtType();
+    }
+    return POINTAT_TARGET_NONE;
+}
+
+void LLAgentCamera::clearGeneralKeys()
+{
+    mAtKey              = 0;
+    mWalkKey            = 0;
+    mLeftKey            = 0;
+    mUpKey              = 0;
+    mYawKey             = 0.f;
+    mPitchKey           = 0.f;
+}
+
+void LLAgentCamera::clearOrbitKeys()
+{
+    mOrbitLeftKey       = 0.f;
+    mOrbitRightKey      = 0.f;
+    mOrbitUpKey         = 0.f;
+    mOrbitDownKey       = 0.f;
+    mOrbitInKey         = 0.f;
+    mOrbitOutKey        = 0.f;
+    mRollLeftKey        = 0.f;
+    mRollRightKey       = 0.f;
+}
+
+void LLAgentCamera::clearPanKeys()
+{
+    mPanRightKey        = 0.f;
+    mPanLeftKey         = 0.f;
+    mPanUpKey           = 0.f;
+    mPanDownKey         = 0.f;
+    mPanInKey           = 0.f;
+    mPanOutKey          = 0.f;
+}
+
+// static
+S32 LLAgentCamera::directionToKey(S32 direction)
+{
+    if (direction > 0) return 1;
+    if (direction < 0) return -1;
+    return 0;
+}
+
+void LLAgentCamera::storeCameraPosition()
+{
+    gSavedPerAccountSettings.setVector3d("SlipstreamStoredCameraPos", getCameraPositionGlobal());
+
+    // get a vector pointing forward from the camera view manually, getFocusTargetGlobal() will
+    // not return useful values if the camera is in flycam mode or was just switched out of
+    // flycam  mode and not repositioned after
+    LLVector3d forward = LLVector3d(1.0, 0.0, 0.0) * LLViewerCamera::getInstance()->getQuaternion() + getCameraPositionGlobal();
+    gSavedPerAccountSettings.setVector3d("SlipstreamStoredCameraFocus", forward);
+    gSavedPerAccountSettings.setF32("SlipstreamStoredCameraRoll", mRollAngle);
+
+    LLUUID stored_camera_focus_object_id = LLUUID::null;
+    if (mFocusObject)
+    {
+        stored_camera_focus_object_id = mFocusObject->getID();
+    }
+    gSavedPerAccountSettings.setString("SlipstreamStoredCameraFocusObjectId", stored_camera_focus_object_id.asString());
+}
+
+void LLAgentCamera::loadCameraPosition()
+{
+    LLVector3d stored_camera_pos = gSavedPerAccountSettings.getVector3d("SlipstreamStoredCameraPos");
+    LLVector3d stored_camera_focus = gSavedPerAccountSettings.getVector3d("SlipstreamStoredCameraFocus");
+    F32 stored_camera_roll = gSavedPerAccountSettings.getF32("SlipstreamStoredCameraRoll");
+    LLUUID stored_camera_focus_object_id = LLUUID(gSavedPerAccountSettings.getString("SlipstreamStoredCameraFocusObjectId"));
+
+    F32 renderFarClip = gSavedSettings.getF32("RenderFarClip");
+    F32 far_clip_squared = renderFarClip * renderFarClip;
+
+    if (stored_camera_pos.isNull())
+    {
+        LLNotificationsUtil::add("LoadCameraPositionNoneSaved", LLSD());
+        return;
+    }
+
+    if (dist_vec_squared(gAgent.getPositionGlobal(), stored_camera_pos) > far_clip_squared)
+    {
+        LLNotificationsUtil::add("LoadCameraPositionOutsideDrawDistance", LLSD());
+        return;
+    }
+
+    // switch off flycam mode if needed
+    if (LLViewerJoystick::getInstance()->getOverrideCamera())
+    {
+        handle_toggle_flycam();
+
+        // exiting from flycam usually keeps the camera where it is but here we want it to actually move
+        LLViewerJoystick::getInstance()->setCameraNeedsUpdate(true);
+    }
+
+    unlockView();
+    setCameraPosAndFocusGlobal(stored_camera_pos, stored_camera_focus, stored_camera_focus_object_id);
+
+    mRollAngle = stored_camera_roll;
+}
+
+//-----------------------------------------------------------------------------
+// Network draw distance (see llagentcamera.h)
+//-----------------------------------------------------------------------------
+namespace
+{
+    constexpr F64 NET_SPEED_SAMPLE_SECS   = 0.25;  // position sampling period
+    constexpr F64 NET_SPEED_JUMP_M_PER_S  = 400.0; // faster than this between samples = teleport / warp, ignored
+    constexpr F64 NET_FAST_ENTER_SECS     = 1.0;   // above the threshold this long -> fast
+    constexpr F64 NET_FAST_LEAVE_SECS     = 3.0;   // below 60 % of it this long -> slow again
+    constexpr F32 NET_FAST_LEAVE_FRACTION = 0.6f;
+    constexpr F32 NET_MIN_DRAW_DISTANCE   = 64.f;  // never ask for less than this (own region + border)
+    constexpr F32 NET_MAX_DRAW_DISTANCE   = 512.f; // never ask for more than this (simulator load)
+}
+
+// Horizontal speed from the agent's GLOBAL position, so it covers walking, flying and
+// vehicles alike (a seated avatar's own velocity is its offset on the seat).
+void LLAgentCamera::updateNetMoveSpeed()
+{
+    const F64 now = LLFrameTimer::getTotalSeconds();
+    if (gAgent.getTeleportState() != LLAgent::TELEPORT_NONE || !gAgent.getRegion())
+    {
+        // Re-baseline after the jump; arrival has its own Far handling (send_agent_update).
+        mNetLastSample = -1.0;
+        mNetSpeed = 0.f;
+        mNetFast = false;
+        mNetFastCandidateSince = -1.0;
+        mNetSlowCandidateSince = -1.0;
+        return;
+    }
+    const LLVector3d pos = gAgent.getPositionGlobal();
+    if (mNetLastSample < 0.0)
+    {
+        mNetLastSample = now;
+        mNetLastPos = pos;
+        return;
+    }
+    const F64 dt = now - mNetLastSample;
+    if (dt < NET_SPEED_SAMPLE_SECS)
+    {
+        return;
+    }
+    const F64 dx = pos.mdV[VX] - mNetLastPos.mdV[VX];
+    const F64 dy = pos.mdV[VY] - mNetLastPos.mdV[VY];
+    const F64 inst = std::sqrt(dx * dx + dy * dy) / dt;
+    mNetLastSample = now;
+    mNetLastPos = pos;
+    if (inst > NET_SPEED_JUMP_M_PER_S)
+    {
+        return;     // teleport / sit-teleport / region handoff glitch: not motion
+    }
+    mNetSpeed = 0.5f * mNetSpeed + 0.5f * (F32)inst;
+
+    static LLCachedControl<F32> s_fast(gSavedSettings, "SLNetDrawDistanceFastSpeed", 25.f);
+    const F32 fast = (F32)s_fast;
+    if (fast <= 0.f)
+    {
+        mNetFast = false;
+        return;
+    }
+    if (!mNetFast)
+    {
+        mNetSlowCandidateSince = -1.0;
+        if (mNetSpeed > fast)
+        {
+            if (mNetFastCandidateSince < 0.0) mNetFastCandidateSince = now;
+            if (now - mNetFastCandidateSince >= NET_FAST_ENTER_SECS)
+            {
+                mNetFast = true;
+                mNetFastCandidateSince = -1.0;
+                LL_INFOS("NetDrawDistance") << "Fast movement (" << llformat("%.0f", mNetSpeed)
+                                            << " m/s > " << fast << "): network draw distance follows speed"
+                                            << " (lead time)" << LL_ENDL;
+            }
+        }
+        else
+        {
+            mNetFastCandidateSince = -1.0;
+        }
+    }
+    else
+    {
+        mNetFastCandidateSince = -1.0;
+        if (mNetSpeed < fast * NET_FAST_LEAVE_FRACTION)
+        {
+            if (mNetSlowCandidateSince < 0.0) mNetSlowCandidateSince = now;
+            if (now - mNetSlowCandidateSince >= NET_FAST_LEAVE_SECS)
+            {
+                mNetFast = false;
+                mNetSlowCandidateSince = -1.0;
+                LL_INFOS("NetDrawDistance") << "Slow again (" << llformat("%.0f", mNetSpeed)
+                                            << " m/s): network draw distance ramps back up" << LL_ENDL;
+            }
+        }
+        else
+        {
+            mNetSlowCandidateSince = -1.0;
+        }
+    }
+}
+
+F32 LLAgentCamera::getNetworkDrawDistance()
+{
+    static LLCachedControl<F32> s_max(gSavedSettings, "SLNetDrawDistanceMax", 512.f);
+    static LLCachedControl<bool> s_fast_on(gSavedSettings, "SLNetDrawDistanceFastLimit", true);
+    static LLCachedControl<F32> s_lead(gSavedSettings, "SLNetDrawDistanceFastLeadSeconds", 8.f);
+    static LLCachedControl<F32> s_margin(gSavedSettings, "SLNetDrawDistanceFastMargin", 64.f);
+    static LLCachedControl<F32> s_fast_min(gSavedSettings, "SLNetDrawDistanceFastMin", 256.f);
+    static LLCachedControl<F32> s_fast_max(gSavedSettings, "SLNetDrawDistanceFastMax", 512.f);
+
+    updateNetMoveSpeed();
+
+    // The network draw distance never exceeds NET_MAX_DRAW_DISTANCE (512 m), whatever the
+    // render draw distance or SLNetDrawDistanceMax says: past it the simulator stands up child
+    // agents in ever more regions for little gain. SLNetDrawDistanceMax only lowers it
+    // (0 or anything above the cap = the cap).
+    const F32 cap = ((F32)s_max > 0.f) ? llclamp((F32)s_max, NET_MIN_DRAW_DISTANCE, NET_MAX_DRAW_DISTANCE)
+                                       : NET_MAX_DRAW_DISTANCE;
+    F32 net = llmin(mDrawDistance, cap);
+    if (mNetFast && s_fast_on)
+    {
+        // #850: lead-time based, not a fixed floor. The simulator only stands up the child
+        // agent of a region once it is within Far, and connect + handshake + object stream
+        // + caps must finish before we reach its border. Far = speed x lead + margin keeps
+        // ~lead seconds of warning at any speed; the clamp bounds it (FastMin keeps
+        // diagonals up at moderate speed, FastMax caps the server work). The old fixed
+        // 192 m left ~3 s at 60 m/s and dropped regions we already had.
+        const F32 lo = llmax((F32)s_fast_min, NET_MIN_DRAW_DISTANCE);
+        const F32 hi = llmax((F32)s_fast_max, lo);
+        const F32 lead_far = mNetSpeed * llmax((F32)s_lead, 0.f) + llmax((F32)s_margin, 0.f);
+        net = llmin(net, llclamp(lead_far, lo, hi));
+    }
+    return net;
+}
+
+// EOF
+

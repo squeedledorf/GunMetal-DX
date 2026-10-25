@@ -1,0 +1,433 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_nonuniform_qualifier : require
+#ifdef VOL_RT
+#extension GL_EXT_ray_query : require
+#endif
+// vkclean -- VOLUMETRIC FOG (#718), pass 2/4: LIGHT PER CELL.
+//
+// One invocation per froxel cell, at the same jittered sample point as the injection. Reads
+// the cell's medium (sigma_s, sigma_t) from uCur and overwrites it IN PLACE with the
+// in-scatter radiance per metre toward the eye (rgb) and sigma_t (a, carried for the
+// temporal filter and the integration):
+//
+//   Ls = sigma_s ( pi E_sun p(V.L) vis cs  +  A  +  pi sum_i E_i p(V.L_i) )  +  sigma_h E_sun p(V.L) vis cs
+//
+//   * E_sun the sun / moon beam (volBeam: the haze light colour through the atmosphere,
+//     what surfaces receive), p the Henyey-Greenstein phase (vol_slice.w), vis the sun
+//     visibility -- ONE hardware-compare tap of the sun / moon cascades at the jittered point
+//     (cascade by view depth, a dithered pick across the last 20 % of a cascade, as god
+//     rays); the temporal pass integrates the jitter into a soft, converged shadow. Past the
+//     cascades' far split: lit. Ray-traced sun mode (no cascades) / shadows off: unshadowed
+//     (the haze term sigma_h is then zeroed: shafts need a shadow source).
+//     cs = cloudShadow(P) (clean_vol_cloud_shadow.glsl; #719's cloud shadow map).
+//     The sun below the horizon: no sun term (the ground occludes every beam).
+//   * A the sky ambient (volAmbient: atmosLightTerms' amblit, isotropic).
+//   * E_i the local lights from the main view's light CLUSTERS (draw set 0 bindings 3-6, the
+//     lists the lit passes walk; always built): points with LL's legacy distance
+//     attenuation, projectors inside their frustum with their gobo (projDiffuse; bindless
+//     set 1). x vol_misc.x.
+//     SHADOWED PROJECTORS (RenderVKVolumetricFogLocalShadows; push p0.w): a projector with a
+//     shadow record (tex.z != 0: the lit passes' RenderVKProjectorShadows records) is
+//     occluded by geometry here too -- before, its cone lit the fog through walls (a stage
+//     projector's beam glowing in the next room). Per record technique:
+//       - SHADOW MAP (params.z < 1.5): ONE hardware-compare tap of the projector's atlas
+//         tile at the jittered sample point (volProjShadowMap); the temporal pass integrates
+//         the jitter into a soft edge, as the sun's single cascade tap.
+//       - RAY TRACED (params.z = 2; the VOL_RT variant, RT consumer set at RT_SET = 3):
+//         STOCHASTIC LIGHT PICK -- the cell's ray-traced projectors' unshadowed in-scatter
+//         E_i feeds a streaming weighted reservoir (weight = luminance of E_i), p1.y
+//         independent picks; each pick traces ONE opaque, terminate-on-first-hit shadow ray
+//         from the cell toward the projector apex, stopped at the projector's near plane
+//         (the fixture prim never occludes its own light: projShadowRayCoreImpl's clip), and
+//         adds E_k vis_k / p_k (p_k = w_k / sum w): an unbiased estimate of sum_i E_i vis_i
+//         that the jittered temporal pass converges. Alpha-blend casters are left out (the
+//         opaque split's caster set); alpha-mask cut-outs count as solid (the cheap
+//         force-opaque walk, no candidate alpha test). Past p1.x (view depth, m; 0 = no
+//         limit) no rays: lit. The plain variant (RT pipeline still compiling, or no RT
+//         record this frame) leaves RT records unshadowed.
+//     SHADOWED POINT LIGHTS (RenderVKVolumetricFogPointShadows; reproj[1].x, VOL_RT only): a
+//     lamp under a bridge deck lit the fog ABOVE the deck (the in-scatter was unshadowed; the
+//     #954 precipitation medium made the glow obvious). Point lights now join the SAME
+//     reservoir as the ray-traced projectors (weight = luminance of E_i, the p1.y picks are
+//     shared: the ray count per cell does not grow with the light count), and a picked point
+//     traces ONE opaque, terminate-on-first-hit ray toward its centre (volPointShadowRay) with
+//     the surface rays' fixture rules (clean_deferred_light.comp pdnProjSample, clean_shadow_core
+//     SH_SPHERE + SH_FIXTURE): the ray stops at the light's own prim's bounding sphere
+//     (proj_axis.x), and when the first caster it meets is the light's FIXTURE (an instance whose
+//     box holds the centre, largest edge <= reproj[1].y = RenderVKReSTIRFixtureSize) it is traced
+//     again up to the box entry (at most twice: nested lamps) -- a bulb in a shade, a lantern,
+//     a sconce still light their fog, everything between them and the cell still shadows.
+//     Attachment lights (proj_axis.y = 1: facelights) stay unshadowed unless reproj[1].x = 2
+//     (the surface rule, RenderVKReSTIRAttachedLights). Same ray kind as the projectors' rays:
+//     force-opaque, alpha-blend casters left out, alpha-mask cut-outs solid. Past p1.x, or
+//     without the RT variant (no TLAS this frame / RT off): unshadowed, as before.
+//   * sigma_h the haze's sun single scattering (vol_slice.z = haze sigma_s x the god rays'
+//     gain x intensity): exactly the god rays term (clean_godrays.comp), which the renderer
+//     skips while the fog runs. No pi: the god rays' calibration, kept so fog-on shafts read
+//     like god-rays-on shafts.
+// pi: LL's light colours are irradiance / pi (clean_vol_common.glsl volFogSource).
+//
+// push p0: x 1 = cascades available (shadow_params.w == 1), y light count, z 1 = local
+//          lights on, w 1 = local-light (projector) shadows on.
+//      p1: x ray-traced shadow distance limit (view depth, m; 0 = none), y ray-traced picks
+//          per cell (1..4), z frame counter (pick noise), w 1 = add the volumetric particles'
+//          emitted light (uEmit, binding 7: clean_vol_inject.comp, #721) to the in-scatter.
+//      reproj[1] (VOL_RT only): x point-light shadows (0 off, 1 on -- attachment lights
+//          unshadowed, 2 on + attachment lights), y the fixture size limit (m; 0 = only the
+//          light's own prim sphere), zw 0.
+//      reproj[0] (unused by this pass otherwise; VOL_RT only -- the GI-era OCCLUSION TERMS, the
+//          "fog lights up a sealed dark room" fix): x 1 = AMBIENT SKY VISIBILITY, y its ray length
+//          (m), z 1 = SUN / MOON SHADOW RAY (ray-traced sun mode: no cascades), w the view-depth
+//          limit of both (m; 0 = none -- past it the cell stays unoccluded, as before).
+//     * AMBIENT SKY VISIBILITY (RenderVKVolumetricFogAmbientOcclusion): the sky ambient A is
+//       scaled by whether ONE cosine-weighted ray about +Z (the sky's hemisphere) from the cell
+//       escapes within the ray length -- the GI's own sky-visibility definition (the fresh GI ray
+//       of clean_deferred_light.comp's layer 1, what RenderVKGISpecOcclusion occludes the
+//       specular by), per froxel. A new direction per cell and frame; the temporal pass
+//       integrates the binary sample into the visible fraction of the sky. A sealed room: 0, so
+//       its fog in-scatters no sky light; an open window: the share of rays that leave by it.
+//       Opaque casters only (alpha-blend glass lets the sky in, as the GI's).
+//     * SUN / MOON SHADOW RAY (RenderVKVolumetricFogSunRT): in ray-traced sun mode the cascades
+//       do not exist and the beam was unshadowed in every cell -- the sun lit the fog inside any
+//       room. Now one opaque shadow ray toward the sun per cell (the frame's sun ray length).
+//       Local lights are unchanged (a lamp in the room still lights its fog).
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+#include "clean_frame_info.glsl"
+#include "clean_atmos_common.glsl"
+#include "clean_vol_common.glsl"
+#include "clean_vol_pass.glsl"
+#include "clean_lights_common.glsl"
+#include "clean_vol_cloud_shadow.glsl"   // cloudShadow(): #719 cloud shadow map
+
+// Draw set 0: local lights (3), cluster counts / indices (4, 5), light info (6, UBO),
+// the sun / moon cascades (15, comparison sampler), the projector shadow atlas (18) and
+// records (19). Set 1: the bindless table (gobos). VOL_RT: set 3 = the RT consumer set.
+layout(std430, set = 0, binding = 3) readonly buffer Lights { Light lights[]; };
+layout(std430, set = 0, binding = 4) readonly buffer CCount { uint cluster_count[]; };
+layout(std430, set = 0, binding = 5) readonly buffer CIndex { uint cluster_index[]; };
+layout(std140, set = 0, binding = 6) uniform LInfo { LightInfo linfo; };
+layout(set = 0, binding = 15) uniform sampler2DArrayShadow uShadowMap;
+layout(set = 1, binding = 0) uniform sampler2D uTextures[];
+#include "clean_light_eval.glsl"   // legacyAtten, projDiffuse
+// The projector shadow records (binding 19) and the shadow-map atlas (18, comparison).
+layout(set = 0, binding = 18) uniform sampler2DShadow uProjShadowAtlas;
+#include "clean_projshadow.glsl"
+#ifdef VOL_RT
+// The RT consumer set (LLCleanRTVK) at RT_SET = 3 (-DRT_SET=3): sets 0..2 stay the plain
+// passes' layout, so the light pass binds only set 3 on top of them.
+#include "clean_rt_common.glsl"
+#endif
+
+layout(set = VOL_SET, binding = 0, rgba16f) uniform image3D uCur;
+layout(set = VOL_SET, binding = 7, rgba16f) readonly uniform image3D uEmit;   // (p1.w gates it)
+
+// One cascade tap (clean_godrays.comp cascadeTap).
+float cascadeTap(int c, vec3 P)
+{
+    const vec4 s = shadowSpace(c, P);
+    const vec2 uv = s.xy * 0.5 + 0.5;
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0))) || s.z > 1.0) return 1.0;
+    return texture(uShadowMap, vec4(uv, float(c), s.z - ssr.shadow_params.x));
+}
+
+float sunVisibility(vec3 P, float vz, float n1)
+{
+    if (vp.p0.x < 0.5 || vz >= ssr.shadow_clip.w) return 1.0;
+    const int c = vz < ssr.shadow_clip.x ? 0 : (vz < ssr.shadow_clip.y ? 1 : (vz < ssr.shadow_clip.z ? 2 : 3));
+    const float cend = ssr.shadow_clip[c];
+    const float blend = clamp((vz - cend * 0.8) / max(cend * 0.2, 1e-3), 0.0, 1.0);
+    if (n1 < blend) return c < 3 ? cascadeTap(c + 1, P) : 1.0;
+    return cascadeTap(c, P);
+}
+
+// The main-view light cluster a world point projects into (clean_draw_common.glsl
+// mainClusterProject; froxels are inside the main frustum, so no edge clamp is ever hit
+// beyond rounding).
+uint volCluster(vec3 P)
+{
+    const vec4 v = linfo.view * vec4(P, 1.0);   // -Z forward
+    const float z = max(-v.z, 1e-3);
+    const float sx = (v.x / z) / max(linfo.grid.z, 1e-4);
+    const float sy = (v.y / z) / max(linfo.grid.w, 1e-4);
+    const uint cx = uint(clamp((sx * 0.5 + 0.5) * float(GX), 0.0, float(GX) - 1.0));
+    const uint cy = uint(clamp((0.5 - sy * 0.5) * float(GY), 0.0, float(GY) - 1.0));
+    const float vz = -v.z;
+    const uint cz = (vz <= linfo.zinfo.x) ? 0u : min(uint(log(vz / linfo.zinfo.x) * linfo.zinfo.z), GZ - 1u);
+    return (cz * GY + cy) * GX + cx;
+}
+
+// SHADOW-MAPPED PROJECTOR at a fog point: one compare tap of its atlas tile (no surface:
+// no normal offset; the record's light offset in texel footprints toward the apex).
+// Outside the tile / behind the apex: lit (projShadowMap's rules).
+float volProjShadowMap(Light L, ProjShadow s, vec3 P)
+{
+    const vec3  tl = L.proj_origin.xyz - P;
+    const float d  = max(dot(-tl, L.proj_axis.xyz), 0.0);
+    const vec3  l  = tl / max(length(tl), 1e-4);
+    const vec3  Po = P + l * (s.params.x * d * s.texel.w);
+    const vec4  c  = s.vp * vec4(Po - ssr.cam_origin.xyz, 1.0);   // camera-relative (#555)
+    if (c.w <= 0.0) return 1.0;
+    const vec3 ndc = c.xyz / c.w;
+    if (ndc.z >= 1.0 || ndc.z <= 0.0) return 1.0;
+    const vec2 uv = ndc.xy * 0.5 + 0.5;
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) return 1.0;
+    const vec2 t = s.texel.xy;
+    const vec2 lo = s.rect.xy + t * 0.5, hi = s.rect.xy + s.rect.zw - t * 0.5;
+    return texture(uProjShadowAtlas, vec3(clamp(s.rect.xy + uv * s.rect.zw, lo, hi), ndc.z));
+}
+
+#ifdef VOL_RT
+// Pick noise: PCG hash, one stream per cell and frame.
+uint volPcg(inout uint st)
+{
+    st = st * 747796405u + 2891336453u;
+    const uint w = ((st >> ((st >> 28u) + 4u)) ^ st) * 277803737u;
+    return (w >> 22u) ^ w;
+}
+float volRand(inout uint st) { return float(volPcg(st) >> 8u) * (1.0 / 16777216.0); }
+
+#define VOL_MAX_PICKS 4u
+// One opaque shadow ray from the fog point P toward projector li's apex, clipped at its
+// near plane (projShadowRayCoreImpl's clip). 1 = lit.
+float volProjShadowRay(uint li, vec3 P)
+{
+    const vec3  O = lights[li].proj_origin.xyz;
+    const vec3  A = lights[li].proj_axis.xyz;
+    const float near = pshadow[lights[li].tex.z - 1u].params.y;
+    const vec3  toL = O - P;
+    const float len = length(toL);
+    if (len <= 1e-4) return 1.0;
+    const vec3  dir = toL / len;
+    const float da = dot(dir, A);   // < 0: travelling back toward the apex
+    const float dp = dot(P - O, A);
+    float tmax = (da < -1e-6) ? (near - dp) / da : len;
+    tmax = min(tmax, len) - 0.002;
+    if (!(tmax > 0.0)) return 1.0;
+    return traceShadowRayOpaque(P, dir, 0.0, tmax, RT_MASK_SHADOW & ~RT_MASK_BLEND);
+}
+
+// One opaque shadow ray from the fog point P toward point light li's centre (header: SHADOWED
+// POINT LIGHTS): stopped at its own prim's bounding sphere, the own-fixture rule over the
+// committed caster (clean_shadow_core.glsl rtFixtureBox + traceShadowWalkG's slab entry; the
+// fog has none of that file's receiver bindings, so the ~15 lines live here). 1 = lit.
+float volPointShadowRay(uint li, vec3 P, float fixMax)
+{
+    const vec3  C = lights[li].pos_radius.xyz;
+    const float nearClip = clamp(lights[li].proj_axis.x, 0.0, 0.5 * lights[li].pos_radius.w);
+    const vec3  toL = C - P;
+    const float len = length(toL);
+    float tmax = len - nearClip - 0.002;
+    if (!(tmax > 0.0)) return 1.0;   // inside the light's own prim: its light
+    const vec3 dir = toL / len;
+    for (uint fr = 0u; fr < 3u; ++fr)
+    {
+        rayQueryEXT rq;
+        rayQueryInitializeEXT(rq, uTLAS, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT,
+                              (RT_MASK_SHADOW & ~RT_MASK_BLEND) & 0xFFu, P, 0.0, dir, tmax);
+        while (rayQueryProceedEXT(rq)) {}
+        if (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT) return 1.0;
+        if (!(fixMax > 0.0)) return 0.0;
+        // OWN FIXTURE: the committed caster's object box holds the light's centre and is small
+        const uint id = rtHitInstance(uint(rayQueryGetIntersectionInstanceCustomIndexEXT(rq, true)),
+                                      uint(rayQueryGetIntersectionGeometryIndexEXT(rq, true)));
+        if (!rtIdIn(id)) return 0.0;
+        const vec3 a = rt_instances[id].aabb_min.xyz, b = rt_instances[id].aabb_max.xyz;
+        const mat4x3 w2o = rayQueryGetIntersectionWorldToObjectEXT(rq, true);
+        const mat4x3 o2w = rayQueryGetIntersectionObjectToWorldEXT(rq, true);
+        const vec3 lo = w2o * vec4(C, 1.0);
+        if (!(all(greaterThanEqual(lo, a)) && all(lessThanEqual(lo, b)))) return 0.0;
+        const vec3 e = abs(b - a) * vec3(length(o2w[0]), length(o2w[1]), length(o2w[2]));
+        if (max(max(e.x, e.y), e.z) > fixMax) return 0.0;
+        // re-trace up to where the ray ENTERS the fixture's box (the slab test in object space:
+        // the ray parameter is the same through the affine map)
+        const vec3 oo = w2o * vec4(P, 1.0);
+        const vec3 od = w2o * vec4(dir, 0.0);
+        const vec3 inv = vec3(1.0) / mix(od, vec3(1e-20), lessThan(abs(od), vec3(1e-20)));
+        const vec3 tn = min((a - oo) * inv, (b - oo) * inv);
+        tmax = min(max(max(max(tn.x, tn.y), tn.z), 0.0), tmax) - 0.002;
+        if (!(tmax > 0.0)) return 1.0;   // the cell is inside the fixture's box: nothing between
+    }
+    return 1.0;   // (three nested fixtures: lit, as the surface rule)
+}
+#endif
+
+// pi x sum over the cluster's lights of E_i x p(V.L_i) (x the projectors' visibility) at P.
+// cell: the froxel (pick noise), vz: its view depth (the ray distance limit).
+vec3 localLightsInscatter(vec3 P, vec3 V, float g, uvec3 cell, float vz)
+{
+    const uint c = volCluster(P);
+    const uint n = clusterLen(cluster_count[c]);
+    const uint count = uint(vp.p0.y + 0.5);
+    const bool shadows = vp.p0.w > 0.5;
+    const uint nrec = uint(pshadow.length());
+    vec3 sum = vec3(0.0);
+#ifdef VOL_RT
+    // Streaming weighted reservoir over the ray-traced projectors and (reproj[1].x) the point
+    // lights (header). pick_r[k] = E_k / w_k; the estimate is sum_w x mean over the picks of
+    // E_k / w_k x vis_k.
+    const bool in_range = vp.p1.x <= 0.0 || vz < vp.p1.x;
+    const bool rt_on = shadows && in_range;
+    const uint pt_mode = uint(vp.reproj[1].x + 0.5);
+    const bool pt_on = pt_mode != 0u && in_range;
+    const uint picks = clamp(uint(vp.p1.y + 0.5), 1u, VOL_MAX_PICKS);
+    uint  st = (cell.x * 1973u + cell.y * 9277u + cell.z * 26699u) ^ (uint(vp.p1.z) * 0x9E3779B9u);
+    float sum_w = 0.0;
+    uint  pick_li[VOL_MAX_PICKS];
+    vec3  pick_r[VOL_MAX_PICKS];
+    for (uint k = 0u; k < VOL_MAX_PICKS; ++k) { pick_li[k] = 0xFFFFFFFFu; pick_r[k] = vec3(0.0); }
+#endif
+    for (uint i = 0u; i < n; ++i)
+    {
+        const uint li = cluster_index[c * CLUSTER_CAP + i];
+        if (li >= count) continue;
+        const vec4 pr = lights[li].pos_radius;
+        const vec3 lv = pr.xyz - P;
+        const float d2 = dot(lv, lv);
+        if (d2 >= pr.w * pr.w) continue;
+        const float dist = sqrt(d2);
+        const vec4 cf = lights[li].color_falloff;
+        const float atten = legacyAtten(dist / pr.w, cf.w);
+        if (atten <= 0.0) continue;
+        const vec3 l = lv / max(dist, 1e-4);
+        const float ph = volPhaseHG(dot(V, l), g);
+        if (lights[li].proj_origin.w < 0.5)
+        {
+            const vec3 E = cf.rgb * (atten * ph);
+#ifdef VOL_RT
+            // shadowed point light: into the reservoir (attachment lights only in mode 2)
+            if (pt_on && (pt_mode >= 2u || lights[li].proj_axis.y < 0.5))
+            {
+                const float w = dot(E, vec3(0.2126, 0.7152, 0.0722));
+                if (!(w > 0.0)) continue;
+                sum_w += w;
+                for (uint k = 0u; k < picks; ++k)
+                    if (volRand(st) * sum_w < w) { pick_li[k] = li; pick_r[k] = E / w; }
+                continue;
+            }
+#endif
+            sum += E;
+            continue;
+        }
+        // Projector: inside its projected frustum only, the gobo's diffuse texel.
+        const Light L = lights[li];
+        vec4 ptc = L.proj_mat * vec4(P, 1.0);
+        if (ptc.z < 0.0) continue;
+        ptc.xyz /= ptc.w;
+        if (ptc.z <= 0.0 || ptc.x <= 0.0 || ptc.x >= 1.0 || ptc.y <= 0.0 || ptc.y >= 1.0) continue;
+        const float l_dist = -dot(lv, L.proj_axis.xyz);
+        const vec3 E = projDiffuse(L, l_dist, ptc.xy) * (atten * ph);
+        if (shadows && L.tex.z != 0u && L.tex.z - 1u < nrec)
+        {
+            const ProjShadow s = pshadow[L.tex.z - 1u];
+            if (!(s.params.w < 0.5))
+            {
+                if (s.params.z > 1.5)
+                {
+#ifdef VOL_RT
+                    // Ray traced: into the reservoir (no ray for a black / gobo-dark texel).
+                    if (!rt_on) { sum += E; continue; }
+                    const float w = dot(E, vec3(0.2126, 0.7152, 0.0722));
+                    if (!(w > 0.0)) continue;
+                    sum_w += w;
+                    for (uint k = 0u; k < picks; ++k)
+                        if (volRand(st) * sum_w < w) { pick_li[k] = li; pick_r[k] = E / w; }
+#else
+                    sum += E;   // (no RT pipeline this frame: unshadowed)
+#endif
+                    continue;
+                }
+                sum += E * volProjShadowMap(L, s, P);
+                continue;
+            }
+        }
+        sum += E;
+    }
+#ifdef VOL_RT
+    if (sum_w > 0.0)
+    {
+        vec3 est = vec3(0.0);
+        for (uint k = 0u; k < picks; ++k)
+            if (pick_li[k] != 0xFFFFFFFFu)
+                est += pick_r[k] * (lights[pick_li[k]].proj_origin.w < 0.5
+                                        ? volPointShadowRay(pick_li[k], P, max(vp.reproj[1].y, 0.0))
+                                        : volProjShadowRay(pick_li[k], P));
+        sum += est * (sum_w / float(picks));
+    }
+#endif
+    // (finite guard: a bad light record must not poison the history)
+    if (any(isnan(sum)) || any(isinf(sum))) sum = vec3(0.0);
+    return ATMOS_PI * min(sum, vec3(1e4));
+}
+
+void main()
+{
+    const uvec3 c = gl_GlobalInvocationID;
+    if (any(greaterThanEqual(c, volDims()))) return;
+    const vec4 med = imageLoad(uCur, ivec3(c));   // (sigma_s rgb, sigma_t)
+    // Haze sun scatter: only with a shadow source (the cascades; push p0.x is decided after
+    // the lit variant, which can still switch the sun to ray traced after the frame-info fill).
+    const float sigma_h = vp.p0.x > 0.5 ? ssr.vol_slice.z : 0.0;
+    const bool extra = med.a > 0.0 && any(greaterThan(med.rgb, vec3(0.0)));
+    // Volumetric particles' emission (#721): radiance per metre, added unlit.
+    const vec3 emit = vp.p1.w > 0.5 ? max(imageLoad(uEmit, ivec3(c)).rgb, vec3(0.0)) : vec3(0.0);
+    if (!extra && sigma_h <= 0.0)
+    {
+        imageStore(uCur, ivec3(c), vec4(atmosClampHDR(emit), med.a));
+        return;
+    }
+    const vec3 rel = volRelPos(volSampleCoord(c));
+    const vec3 P = ssr.vol_eye.xyz + rel;
+    const vec3 V = rel / max(length(rel), 1e-6);
+    const float vz = dot(rel, vp.fwd.xyz);
+    const float g = ssr.vol_slice.w;
+
+    vec3 Ls = vec3(0.0);
+    const vec3 L = atmosLightDir();
+#ifdef VOL_RT
+    const vec4 rq = vp.reproj[0];   // the occlusion terms (header)
+    const bool rqNear = rq.w <= 0.0 || vz < rq.w;
+#endif
+    if (L.z > 0.0)
+    {
+        const float n1 = volIgn(vec2(c.xy) + vec2(17.0, 59.0) * float(c.z + 1u) + 7.13 * mod(vp.jitter.w, 64.0));
+        float vis = sunVisibility(P, vz, n1) * cloudShadow(P);
+#ifdef VOL_RT
+        // ray-traced sun mode (no cascades: p0.x 0): one opaque shadow ray toward the sun / moon
+        if (vis > 0.0 && vp.p0.x < 0.5 && rq.z > 0.5 && rqNear)
+            vis *= traceShadowRayOpaque(P, L, 0.0, ssr.sun_rt.w > 0.0 ? ssr.sun_rt.w : 512.0,
+                                        RT_MASK_SHADOW & ~RT_MASK_BLEND);
+#endif
+        if (vis > 0.0)
+        {
+            const vec3 beam = volBeam() * (volPhaseHG(dot(V, L), g) * vis);
+            // (the haze's shafts end at the water plane, as the god rays' march)
+            const float sh = P.z >= ssr.vol_misc.z ? sigma_h : 0.0;
+            Ls += (med.rgb * ATMOS_PI + vec3(sh)) * beam;
+        }
+    }
+    if (extra)
+    {
+        vec3 amb = volAmbient();
+#ifdef VOL_RT
+        if (rq.x > 0.5 && rqNear)
+        {
+            // AMBIENT SKY VISIBILITY: one cosine-weighted ray about +Z, a new direction per cell
+            // and frame -- the elevation by IGN over the column (rotated per frame, as the sun's
+            // cascade jitter: neighbouring cells take spread-out elevations, so the integration
+            // and the temporal pass average a stratified set), the azimuth by a per-cell hash.
+            uint st = (c.x * 7919u + c.y * 104729u + c.z * 15485863u) ^ (uint(vp.p1.z) * 0x85EBCA6Bu);
+            const vec2 u = vec2(volIgn(vec2(c.xy) + vec2(31.0, 47.0) * float(c.z + 1u) + 5.588238 * mod(vp.jitter.w, 64.0)),
+                                fract(volRand(st) + vp.p1.z * 0.6180339887));
+            const float r = sqrt(u.x), ph = 6.2831853 * u.y;
+            const vec3 d = vec3(r * cos(ph), r * sin(ph), sqrt(max(1.0 - u.x, 0.0)));
+            amb *= traceShadowRayOpaque(P, d, 0.0, max(rq.y, 0.5), RT_MASK_SHADOW & ~RT_MASK_BLEND);
+        }
+#endif
+        Ls += med.rgb * amb;
+        if (vp.p0.z > 0.5 && ssr.vol_misc.x > 0.0)
+            Ls += med.rgb * localLightsInscatter(P, V, g, c, vz) * ssr.vol_misc.x;
+    }
+    imageStore(uCur, ivec3(c), vec4(atmosClampHDR(Ls + emit), med.a));
+}

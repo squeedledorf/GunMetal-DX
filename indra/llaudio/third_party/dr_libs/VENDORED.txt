@@ -1,0 +1,12 @@
+Vendored single-header audio decoders from https://github.com/mackron/dr_libs
+(David Reid). Files are unmodified; do not edit them in place.
+
+  dr_flac.h  v0.13.3 (2026-01-17)  tag flac-0.13.3  commit 69d777c482775858e8ea8a7b047c9bcd451febc8
+  dr_mp3.h   v0.7.3  (2026-01-17)  tag mp3-0.7.3    commit 5690d4671d7ad07ae6021756d7222eb159745f06
+
+Licence: public domain (Unlicense) OR MIT-0, at the user's choice (full text at the
+end of each header). Used by llaudiofiledecode.cpp (sound uploader: FLAC and MP3
+input). dr_mp3 applies LAME/Xing encoder delay and padding for gapless decoding.
+
+Updating: fetch the new tagged headers from raw.githubusercontent.com/mackron/dr_libs/<tag>/,
+replace the files, update the versions above and in newview/licenses-*.txt.

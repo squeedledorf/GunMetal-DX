@@ -1,0 +1,12 @@
+[Flatpak Ref]
+Name=org.slipstreamviewer.Slipstream
+Branch=@BRANCH@
+Title=Slipstream Viewer@TITLE_SUFFIX@
+Url=@REPO_URL@
+SuggestRemoteName=slipstream
+RuntimeRepo=https://dl.flathub.org/repo/flathub.flatpakrepo
+IsRuntime=false
+Homepage=https://slipstreamviewer.org/
+Comment=Vulkan viewer for Second Life
+Icon=@SITE_URL@slipstream.png
+GPGKey=@GPGKEY@

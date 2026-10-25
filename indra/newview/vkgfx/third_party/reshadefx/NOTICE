@@ -1,0 +1,20 @@
+Slipstream Viewer -- ReShade FX effect compiler (vendored)
+
+This product includes the ReShade FX effect compiler from ReShade
+(https://github.com/crosire/reshade, release v6.8.0):
+
+    Copyright 2014 Patrick Mours. All rights reserved.
+    Licensed under the BSD 3-Clause License (see LICENSE.md in this directory).
+
+This product includes SPIR-V headers from the Khronos Group
+(https://github.com/KhronosGroup/SPIRV-Headers):
+
+    Copyright (c) 2014-2020 The Khronos Group Inc.
+    Licensed under the terms in include/spirv/LICENSE.SPIRV-Headers and the
+    header of each file.
+
+The viewer ships ReShade.fxh from crosire/reshade-shaders, dedicated to the public
+domain under CC0-1.0 by its authors.
+
+"ReShade" is the name of Patrick Mours' project. Slipstream is not affiliated with or
+endorsed by it; the name is used only to say which effect format is supported.

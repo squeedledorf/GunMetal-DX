@@ -1,0 +1,55 @@
+#version 460
+// vkclean -- #870 RenderVKDlssDebug: shows one of LLCleanDlssRRVK's network inputs instead
+// of the reconstruction (the network is not evaluated that frame). Nearest upsample of the
+// render-size input to the display-size output; clean_rr_unexpose.comp then divides by the
+// exposure, so the tonemap shows guide values roughly as they are (colours: as the network
+// sees them, i.e. the exposed scene).
+//   1 colour input   2 diffuse albedo   3 specular albedo   4 normal (x 0.5 + 0.5)
+//   5 roughness      6 specular hit distance (log: black 0 m .. white 256 m; magenta = none,
+//                      65504)           7 motion (pixels: |x| red, |y| green, 1 = 8 px; blue
+//                      = sign of x)     8 transparency overlay rgb   9 its alpha
+//  10 responsivity (red > 0, blue < 0)  11 depth (reversed-Z device depth x 64)
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0, rgba16f) uniform writeonly image2D oOut;     // display size
+layout(set = 0, binding = 1, rgba16f) uniform readonly image2D uColor;
+layout(set = 0, binding = 2, rgba8)   uniform readonly image2D uDiffuse;
+layout(set = 0, binding = 3, rgba16f) uniform readonly image2D uSpecular;
+layout(set = 0, binding = 4, rgba16f) uniform readonly image2D uNormal;
+layout(set = 0, binding = 5, r16f)    uniform readonly image2D uHit;
+layout(set = 0, binding = 6, rg16f)   uniform readonly image2D uMotion;   // FSR convention (UV)
+layout(set = 0, binding = 7, rgba16f) uniform readonly image2D uTransp;
+layout(set = 0, binding = 8, r16f)    uniform readonly image2D uResp;
+layout(set = 0, binding = 9, r32f)    uniform readonly image2D uDepth;
+
+layout(push_constant) uniform Push { uvec4 size; uvec4 mode; } pc;   // size: dw, dh, rw, rh
+
+void main()
+{
+    const ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+    if (q.x >= int(pc.size.x) || q.y >= int(pc.size.y)) return;
+    const ivec2 r = min(ivec2((vec2(q) + 0.5) * vec2(pc.size.zw) / vec2(pc.size.xy)), ivec2(pc.size.zw) - 1);
+    vec3 c = vec3(0.0);
+    const uint m = pc.mode.x;
+    if (m == 1u) c = imageLoad(uColor, r).rgb;
+    else if (m == 2u) c = imageLoad(uDiffuse, r).rgb;
+    else if (m == 3u) c = imageLoad(uSpecular, r).rgb;
+    else if (m == 4u) { const vec3 n = imageLoad(uNormal, r).xyz; c = dot(n, n) > 0.0 ? n * 0.5 + 0.5 : vec3(0.0); }
+    else if (m == 5u) c = vec3(imageLoad(uNormal, r).w);
+    else if (m == 6u)
+    {
+        const float t = imageLoad(uHit, r).x;
+        c = t >= 65000.0 ? vec3(1.0, 0.0, 1.0) : vec3(clamp(log2(1.0 + t) / 8.0, 0.0, 1.0));
+    }
+    else if (m == 7u)
+    {
+        const vec2 mv = imageLoad(uMotion, r).xy * vec2(pc.size.zw);
+        c = vec3(clamp(abs(mv) / 8.0, 0.0, 1.0), mv.x < 0.0 ? 0.5 : 0.0);
+    }
+    else if (m == 8u) c = imageLoad(uTransp, r).rgb;
+    else if (m == 9u) c = vec3(imageLoad(uTransp, r).a);
+    else if (m == 10u) { const float v = imageLoad(uResp, r).x; c = vec3(max(v, 0.0), 0.0, max(-v, 0.0)); }
+    else if (m == 11u) c = vec3(clamp(imageLoad(uDepth, r).x * 64.0, 0.0, 1.0));
+    imageStore(oOut, q, vec4(c, 1.0));
+}

@@ -1,0 +1,474 @@
+/**
+ * @file llsetkeybinddialog.cpp
+ * @brief LLSetKeyBindDialog class implementation.
+ *
+ * $LicenseInfo:firstyear=2019&license=viewerlgpl$
+ * Second Life Viewer Source Code
+ * Copyright (C) 2019, Linden Research, Inc.
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation;
+ * version 2.1 of the License only.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+ *
+ * Linden Research, Inc., 945 Battery Street, San Francisco, CA  94111  USA
+ * $/LicenseInfo$
+ */
+
+#include "llviewerprecompiledheaders.h"
+
+#include "llsetkeybinddialog.h"
+
+#include "llbutton.h"
+#include "llcheckboxctrl.h"
+#include "lleventtimer.h"
+#include "llfloaterreg.h"
+#include "llfocusmgr.h"
+#include "llgamecontrol.h"
+#include "llkeyconflict.h"
+#include "llviewercontrol.h"
+
+class LLSetKeyBindDialog::Updater : public LLEventTimer
+{
+public:
+
+    typedef boost::function<void(MASK)> callback_t;
+
+    Updater(callback_t cb, F32 period, MASK mask)
+        :LLEventTimer(period),
+        mMask(mask),
+        mCallback(cb)
+    {
+        mEventTimer.start();
+    }
+
+    virtual ~Updater(){}
+
+protected:
+    bool tick()
+    {
+        mCallback(mMask);
+        // Deletes itseft after execution
+        return true;
+    }
+
+private:
+    MASK mMask;
+    callback_t mCallback;
+};
+
+bool LLSetKeyBindDialog::sRecordKeys = false;
+U32 LLSetKeyBindDialog::sRecordedKeyFrame = U32_MAX; // <SS:GameControl/>
+
+LLSetKeyBindDialog::LLSetKeyBindDialog(const LLSD& key)
+    : LLModalDialog(key),
+    pParent(NULL),
+    mKeyFilterMask(DEFAULT_KEY_FILTER),
+    pUpdater(NULL),
+    mLastMaskKey(0),
+    mLastControllerButtons(0),
+    mLastControllerAxes(U32_MAX),
+    mContextConeOpacity(0.f),
+    mContextConeInAlpha(CONTEXT_CONE_IN_ALPHA),
+    mContextConeOutAlpha(CONTEXT_CONE_OUT_ALPHA),
+    mContextConeFadeTime(CONTEXT_CONE_FADE_TIME)
+{
+}
+
+LLSetKeyBindDialog::~LLSetKeyBindDialog()
+{
+}
+
+//virtual
+bool LLSetKeyBindDialog::postBuild()
+{
+    childSetAction("SetEmpty", onBlank, this);
+    childSetAction("Default", onDefault, this);
+    childSetAction("Cancel", onCancel, this);
+    getChild<LLUICtrl>("Cancel")->setFocus(true);
+
+    pCheckBox = getChild<LLCheckBoxCtrl>("apply_all");
+    pDescription = getChild<LLTextBase>("description");
+
+    gFocusMgr.setKeystrokesOnly(true);
+
+    return true;
+}
+
+//virtual
+void LLSetKeyBindDialog::onOpen(const LLSD& data)
+{
+     sRecordKeys = true;
+     LLModalDialog::onOpen(data);
+}
+
+//virtual
+void LLSetKeyBindDialog::onClose(bool app_quiting)
+{
+    sRecordKeys = false;
+    if (pParent)
+    {
+        pParent->onCancelKeyBind();
+        pParent = NULL;
+    }
+    if (pUpdater)
+    {
+        // Doubleclick timer has't fired, delete it
+        delete pUpdater;
+        pUpdater = NULL;
+    }
+    LLModalDialog::onClose(app_quiting);
+}
+
+void LLSetKeyBindDialog::drawFrustum()
+{
+    static LLCachedControl<F32> max_opacity(gSavedSettings, "PickerContextOpacity", 0.4f);
+    drawConeToOwner(mContextConeOpacity, max_opacity, mFrustumOrigin.get(), mContextConeFadeTime, mContextConeInAlpha, mContextConeOutAlpha);
+}
+
+//virtual
+void LLSetKeyBindDialog::draw()
+{
+    drawFrustum();
+    LLModalDialog::draw();
+    recordController();
+}
+
+// OCOL: the first controller button, stick direction or trigger pushed while the
+// dialog is open becomes the binding. Inputs already held when the dialog
+// opened have to be released first.
+void LLSetKeyBindDialog::recordController()
+{
+    if (!pParent || (mKeyFilterMask & ALLOW_CONTROLLER) == 0 || !LLGameControl::isEnabled())
+    {
+        return;
+    }
+
+    constexpr U16 AXIS_THRESHOLD = 32767 / 2;
+    U32 buttons = 0;
+    U32 previous = 0;
+    LLGameControl::getButtonStates(buttons, previous);
+    const LLGameControl::State& state = LLGameControl::getState();
+    U32 axes = 0;
+    for (size_t i = 0; i < state.mAxes.size() && i < 32; ++i)
+    {
+        if (state.mAxes[i] > AXIS_THRESHOLD)
+        {
+            axes |= 1U << i;
+        }
+    }
+
+    if (mLastControllerAxes == U32_MAX)
+    {
+        // first frame: remember what's already held
+        mLastControllerButtons = buttons;
+        mLastControllerAxes = axes;
+        return;
+    }
+
+    U32 new_buttons = buttons & ~mLastControllerButtons;
+    U32 new_axes = axes & ~mLastControllerAxes;
+    mLastControllerButtons = buttons;
+    mLastControllerAxes = axes;
+
+    bool all_modes = pCheckBox->getValue().asBoolean();
+    for (U8 i = 0; i < LLGameControl::NUM_BUTTONS; ++i)
+    {
+        if (new_buttons & (1U << i))
+        {
+            pParent->onSetControllerBind(LLGameControl::ActionType::BUTTON, i, all_modes);
+            pParent = NULL;
+            sRecordKeys = false;
+            closeFloater();
+            return;
+        }
+    }
+    for (U8 dir = 0; dir < LLGameControl::NUM_MOVE_DIRS; ++dir)
+    {
+        S32 slot = LLGameControl::halfAxisForDirection(dir);
+        if (slot >= 0 && (new_axes & (1U << slot)))
+        {
+            pParent->onSetControllerBind(LLGameControl::ActionType::DOF, dir, all_modes);
+            pParent = NULL;
+            sRecordKeys = false;
+            closeFloater();
+            return;
+        }
+    }
+}
+
+void LLSetKeyBindDialog::setParent(LLKeyBindResponderInterface* parent, LLView* frustum_origin, U32 key_mask)
+{
+    pParent = parent;
+    mFrustumOrigin = frustum_origin->getHandle();
+    mKeyFilterMask = key_mask;
+
+    // 'Apply to all modes' only means something for the movement/camera actions (mouse capable);
+    // the menu and other shortcuts have a single binding for every mode (#863)
+    const bool movement_binding = (key_mask & ALLOW_MOUSE) != 0;
+    pCheckBox->setVisible(movement_binding);
+    if (!movement_binding)
+    {
+        pCheckBox->setValue(false);
+    }
+
+    std::string input;
+    if ((key_mask & ALLOW_MOUSE) != 0)
+    {
+        input = getString("mouse");
+    }
+    if ((key_mask & ALLOW_KEYS) != 0)
+    {
+        if (!input.empty())
+        {
+            input += ", ";
+        }
+        input += getString("keyboard");
+    }
+    if ((key_mask & ALLOW_CONTROLLER) != 0 && hasString("controller"))
+    {
+        if (!input.empty())
+        {
+            input += ", ";
+        }
+        input += getString("controller");
+    }
+    mLastControllerAxes = U32_MAX;
+    pDescription->setText(getString("basic_description"));
+    pDescription->setTextArg("[INPUT]", input);
+}
+
+// static
+bool LLSetKeyBindDialog::recordKey(KEY key, MASK mask, bool down)
+{
+    if (sRecordKeys)
+    {
+        LLSetKeyBindDialog* dialog = LLFloaterReg::getTypedInstance<LLSetKeyBindDialog>("keybind_dialog", LLSD());
+        if (dialog && dialog->getVisible())
+        {
+            if (down)
+            {
+                sRecordedKeyFrame = LLFrameTimer::getFrameCount(); // <SS:GameControl/>
+            }
+            return dialog->recordAndHandleKey(key, mask, down);
+        }
+        else
+        {
+            LL_WARNS() << "Key recording was set despite no open dialog" << LL_ENDL;
+            sRecordKeys = false;
+        }
+    }
+    return false;
+}
+
+// static <SS:GameControl>
+bool LLSetKeyBindDialog::consumesTypedChar()
+{
+    return sRecordKeys || LLFrameTimer::getFrameCount() - sRecordedKeyFrame <= 1;
+}
+
+bool LLSetKeyBindDialog::recordAndHandleKey(KEY key, MASK mask, bool down)
+{
+    if ((key == 'Q' && mask == MASK_CONTROL)
+        || key == KEY_ESCAPE)
+    {
+        sRecordKeys = false;
+        closeFloater();
+        return true;
+    }
+
+    if (key == KEY_DELETE)
+    {
+        setKeyBind(CLICK_NONE, KEY_NONE, MASK_NONE, false);
+        sRecordKeys = false;
+        closeFloater();
+        return false;
+    }
+
+    // forbidden keys
+    // Enter alone starts chat, but Ctrl/Shift/Alt+Enter are bindable (chat shout, whisper, ...)
+    if (key == KEY_NONE
+        || (key == KEY_RETURN && mask == MASK_NONE)
+        || key == KEY_BACKSPACE)
+    {
+        return false;
+    }
+
+    if (key == KEY_CONTROL || key == KEY_SHIFT || key == KEY_ALT)
+    {
+        // Mask keys get special treatment
+        if ((mKeyFilterMask & ALLOW_MASKS) == 0)
+        {
+            // Masks by themself are not allowed
+            return false;
+        }
+        if (down)
+        {
+            // Most keys are handled on 'down' event because menu is handled on 'down'
+            // masks are exceptions to let other keys be handled
+            mLastMaskKey = key;
+            return false;
+        }
+        if (mLastMaskKey != key)
+        {
+            // This was mask+key combination that got rejected, don't handle mask's key
+            // Or user did something like: press shift, press ctrl, release shift
+            return false;
+        }
+        // Mask up event often generates things like 'shift key + shift mask', filter it out.
+        if (key == KEY_CONTROL)
+        {
+            mask &= ~MASK_CONTROL;
+        }
+        if (key == KEY_SHIFT)
+        {
+            mask &= ~MASK_SHIFT;
+        }
+        if (key == KEY_ALT)
+        {
+            mask &= ~MASK_ALT;
+        }
+    }
+    if ((mKeyFilterMask & ALLOW_KEYS) == 0)
+    {
+        // basic keys not allowed
+        return false;
+    }
+    else if ((mKeyFilterMask & ALLOW_MASK_KEYS) == 0 && mask != 0)
+    {
+        // masked keys not allowed
+        return false;
+    }
+
+    if ((mKeyFilterMask & ALLOW_MENU_KEYS) == 0 && LLKeyConflictHandler::isReservedByMenu(key, mask))
+    {
+        pDescription->setText(getString("reserved_by_menu"));
+        pDescription->setTextArg("[KEYSTR]", LLKeyboard::stringFromAccelerator(mask,key));
+        mLastMaskKey = 0;
+        return true;
+    }
+
+    setKeyBind(CLICK_NONE, key, mask, pCheckBox->getValue().asBoolean());
+    // Note/Todo: To warranty zero interference we should also consume
+    // an 'up' event if we recorded on 'down', not just close floater
+    // on first recorded combination.
+    sRecordKeys = false;
+    closeFloater();
+    return true;
+}
+
+bool LLSetKeyBindDialog::handleAnyMouseClick(S32 x, S32 y, MASK mask, EMouseClickType clicktype, bool down)
+{
+    bool result = false;
+    if (!pParent)
+    {
+        // we already processed 'down' event, this is 'up', consume
+        closeFloater();
+        result = true;
+    }
+    if (!result && clicktype == CLICK_LEFT)
+    {
+        // try handling buttons first
+        if (down)
+        {
+            result = LLView::handleMouseDown(x, y, mask);
+        }
+        else
+        {
+            result = LLView::handleMouseUp(x, y, mask);
+        }
+        if (result)
+        {
+            setFocus(true);
+            gFocusMgr.setKeystrokesOnly(true);
+        }
+        // ignore selection related combinations
+        else if (down && (mask & (MASK_SHIFT | MASK_CONTROL)) == 0)
+        {
+            // this can be a double click, wait a bit;
+            if (!pUpdater)
+            {
+                // Note: default doubleclick time is 500ms, but can stretch up to 5s
+                pUpdater = new Updater(boost::bind(&onClickTimeout, this, _1), 0.7f, mask);
+                result = true;
+            }
+        }
+    }
+
+    if (!result
+        && (clicktype != CLICK_LEFT) // subcases were handled above
+        && ((mKeyFilterMask & ALLOW_MOUSE) != 0)
+        && (clicktype != CLICK_RIGHT || mask != 0) // reassigning menu button is not supported
+        && ((mKeyFilterMask & ALLOW_MASK_MOUSE) != 0 || mask == 0)) // reserved for selection
+    {
+        setKeyBind(clicktype, KEY_NONE, mask, pCheckBox->getValue().asBoolean());
+        result = true;
+        if (!down)
+        {
+            // wait for 'up' event before closing
+            // alternative: set pUpdater
+            closeFloater();
+        }
+    }
+
+    return result;
+}
+
+//static
+void LLSetKeyBindDialog::onCancel(void* user_data)
+{
+    LLSetKeyBindDialog* self = (LLSetKeyBindDialog*)user_data;
+    self->closeFloater();
+}
+
+//static
+void LLSetKeyBindDialog::onBlank(void* user_data)
+{
+    LLSetKeyBindDialog* self = (LLSetKeyBindDialog*)user_data;
+
+    self->setKeyBind(CLICK_NONE, KEY_NONE, MASK_NONE, self->pCheckBox->getValue().asBoolean());
+    self->closeFloater();
+}
+
+//static
+void LLSetKeyBindDialog::onDefault(void* user_data)
+{
+    LLSetKeyBindDialog* self = (LLSetKeyBindDialog*)user_data;
+    if (self->pParent)
+    {
+        self->pParent->onDefaultKeyBind(self->pCheckBox->getValue().asBoolean());
+        self->pParent = NULL;
+    }
+    self->closeFloater();
+}
+
+//static
+void LLSetKeyBindDialog::onClickTimeout(void* user_data, MASK mask)
+{
+    LLSetKeyBindDialog* self = (LLSetKeyBindDialog*)user_data;
+
+    // timer will delete itself after timeout
+    self->pUpdater = NULL;
+
+    self->setKeyBind(CLICK_LEFT, KEY_NONE, mask, self->pCheckBox->getValue().asBoolean());
+    self->closeFloater();
+}
+
+void LLSetKeyBindDialog::setKeyBind(EMouseClickType click, KEY key, MASK mask, bool all_modes)
+{
+    if (pParent)
+    {
+        pParent->onSetKeyBind(click, key, mask, all_modes);
+        pParent = NULL;
+    }
+}
+

@@ -1,0 +1,838 @@
+# Tester release: build Linux + Windows on the `builder` host runner (applejack,
+# the dedicated CI container in the DMZ), package, verify, publish both to one
+# release.
+#
+# Versioning (scripts/ci/version.sh): MAJOR.MINOR.PATCH from
+# indra/newview/VIEWER_VERSION.txt, BUILD = the tagged-build count of that version
+# (beta.N -> N, final -> last beta + 1, untagged -> 0), derived from the tags.
+#
+# Triggers:
+#   vX.Y.Z-beta.N tag -> "<base> Beta" channel, published as a PRE-release
+#   vX.Y.Z tag        -> "<base> Release" channel, published as a release
+#                        (a v* tag must match VIEWER_VERSION.txt: `make version-bump`)
+#   jetstream-X.Y.Z.N tag -> "<base> Jetstream" channel, a pre-release (made every 6 hours
+#                        from main by jetstream.yml when main changed; no AUR / apt / pacman /
+#                        Flatpak; posted to Discord #jetstream; only the newest 10 are kept)
+#   vk-*  tag -> legacy tester tag: "<base> Test" channel, published as a pre-release
+#   ci-*  tag -> dry run: build, package, verify, no release
+#   manual (workflow_dispatch, newer Forgejo UI) -> publishes only if `publish` is set
+# Release notes are drafted from the commits since the previous tag
+# (scripts/ci/release_notes.sh) and can be edited on the release page.
+#
+# Runs on the self-hosted `builder` HOST runner (applejack, Ubuntu 24.04, runner
+# user `ci`): GCC 14 for Linux (libstdc++ floor GLIBCXX_3.4.33, glibc floor via the
+# glibc_compat.h pins, checked by `make glibc-check`), clang/LLD 22 + the xwin
+# sysroot in ~ci/.xwin for Windows. The source is checked out into persistent
+# directories (CI_ROOT, CI_ROOT_WIN) that also hold the venv and the 3p download
+# caches, so a release build is incremental. The build is plain CMake (presets in
+# indra/CMakePresets.json via the Makefile); CMake fetches the 3p packages itself
+# (indra/cmake/Prebuilt.cmake). The caches keep their autobuild-era directory names
+# (.autobuild-installables, .autobuild-installables-win) and are passed as
+# SL_3P_CACHE. (The apr_suite and nvapi manifest entries, whose upstream URLs went
+# away, now point at the git.slipstreamviewer.org mirror for linux64/windows64, so a
+# cold cache can build too; renaming the cache dirs needs coordinated changes on
+# the build host.) Nothing here refers to a
+# developer machine: the binaries carry no build paths (-ffile-prefix-map).
+#
+# Shader tools: the embedded SPIR-V headers are compiled from the GLSL at build time (CMake
+# target vk_shaders), so the runner needs glslc and glslangValidator:
+#   apt install glslc glslang-tools
+#
+# Linux host prerequisite (#197): the package copies libdecor and its cairo
+# plugin from the host into lib/libdecor (window frame on GNOME Wayland), and
+# viewer_manifest.py fails the build without them:
+#   apt install libdecor-0-0 libdecor-0-plugin-1-cairo
+#
+# Uploads go to the LAN address (RELEASE_API) -- the public URL sits behind
+# Cloudflare, which caps request bodies at 100 MB.
+#
+# The Windows job cross-compiles (clang-cl + xwin, scripts/wincross) in its own
+# persistent tree so it never races the Linux job's checkout. Host prerequisites:
+# ~ci/.xwin (xwin splat), clang/lld/llvm 22, 7z, Vulkan loader + headers.
+#
+# Secrets: RELEASE_TOKEN (Forgejo token, Repository read+write).
+#          AUR_SSH_KEY (optional): private SSH key of the AUR account that owns
+#          slipstream-bin; while it is unset the AUR push is skipped.
+#          LINUX_SIGNING_KEY, LINUX_SIGNING_KEY_ID, LINUX_SIGNING_KEY_PASSPHRASE
+#          (#288; optional until the key exists): the Linux release signing
+#          subkey, the primary fingerprint and an optional passphrase. Shared by
+#          every Linux signing job (sign-release, arch-package, apt-repo, Flatpak)
+#          through scripts/ci/signing_key.sh. While unset, signing is skipped
+#          with a warning. See scripts/packaging/keys/README.md.
+# Variables: AUR_PUBLISH_BETAS (optional): "false" pushes only vX.Y.Z releases to
+#          the AUR (default: betas too).
+#
+# The arch-package job (#248) runs after the Linux assets are published and can't
+# block them: it attaches the Arch PKGBUILD (and, when makepkg is installed on the
+# runner, slipstream-bin-*.pkg.tar.zst) to the release and pushes the PKGBUILD to
+# the AUR. See scripts/packaging/aur/README.md.
+#
+# The deb-package job (#278) likewise runs after the Linux tarball is published
+# and can't block it: it repackages the tarball as slipstream-viewer
+# (Slipstream_<ver>_amd64.deb, Ubuntu 24.04+ / Debian 13+ / Mint 22+) and
+# attaches it. See scripts/packaging/deb/README.md.
+#
+# Signing (#288): arch-package attaches a detached .sig of the tarball and makes
+# the PKGBUILD verify it; apt-repo adds the .deb to the signed apt repository
+# (scripts/packaging/apt, host prerequisites in INFRA.md there); sign-release
+# runs last and attaches SHA256SUMS + SHA256SUMS.asc covering every asset.
+
+name: release
+
+on:
+  push:
+    tags: ['v*', 'ci-*', 'jetstream-*']
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Create a release and upload the tarball'
+        type: boolean
+        default: false
+
+env:
+  CI_ROOT: /srv/ci/slipstream
+  CI_ROOT_WIN: /srv/ci/slipstream-win
+  RELEASE_API: http://192.168.96.20:3000/api/v1/repos/${{ github.repository }}
+  REPO_GIT: http://192.168.96.20:3000/${{ github.repository }}.git
+
+jobs:
+  build:
+    runs-on: builder
+    timeout-minutes: 240
+    steps:
+      - name: Checkout into persistent tree
+        run: |
+          set -euo pipefail
+          mkdir -p "$CI_ROOT"
+          cd "$CI_ROOT"
+          if [ ! -d .git ]; then
+            git init -q
+            git remote add origin "$REPO_GIT"
+          fi
+          git remote set-url origin "$REPO_GIT"   # follows repo renames
+          # History + tags: release notes are drafted from the commits since the last tag.
+          git -c http.extraHeader="Authorization: token ${{ secrets.RELEASE_TOKEN }}" \
+              fetch -q --depth=500 --force origin "${{ github.sha }}" '+refs/tags/*:refs/tags/*'
+          git checkout -q --force "${{ github.sha }}"
+          # Keep the build dir and the caches (venv, 3p tarballs);
+          # the Makefile creates them on the first run.
+          git clean -qfdx -e build-linux-x86_64 -e .venv -e .autobuild-installables
+          git log --oneline -1
+
+      - name: Resolve version
+        id: ver
+        run: |
+          set -euo pipefail
+          cd "$CI_ROOT"
+          bash scripts/ci/version.sh | tee -a "$GITHUB_OUTPUT"
+
+      - name: Check XUI files are well-formed
+        run: |
+          set -euo pipefail
+          cd "$CI_ROOT"
+          python3 scripts/ci/check_xui.py
+
+      - name: Check keyboard shortcuts are rebindable commands (#863)
+        run: |
+          set -euo pipefail
+          cd "$CI_ROOT"
+          python3 scripts/ci/check_key_commands.py
+
+      - name: Refresh the baseline CRLSet (certificate revocation)
+        # A fresh install must have revocation data before its first runtime fetch. Replaces
+        # the committed (small-cohort) app_settings/revocation/crl-set with Google's current
+        # full desktop CRLSet, CRX3 signature checked. Network trouble keeps the committed
+        # copy (the static distrust list and the runtime fetch still apply), not a failure.
+        run: |
+          set -euo pipefail
+          cd "$CI_ROOT"
+          python3 -I scripts/revocation/fetch_crlset.py --cohort full \
+              --out indra/newview/app_settings/revocation/crl-set \
+            || echo "::warning::CRLSet fetch failed; shipping the committed baseline"
+          python3 -I scripts/revocation/fetch_crlset.py --info indra/newview/app_settings/revocation/crl-set
+
+      - name: Build + portability checks
+        env:
+          # Public key the viewer verifies update manifests with (#421); unset = the
+          # auto-updater stays inert in this build.
+          UPDATE_PUBKEY_HEX: ${{ vars.UPDATE_PUBKEY_HEX }}
+        run: |
+          set -euo pipefail
+          cd "$CI_ROOT"
+          # The packaged tree is only ever added to: drop it so renamed/removed files
+          # (e.g. the Alchemy -> Slipstream rename) don't linger in the tarball.
+          rm -rf build-linux-x86_64/newview/packaged
+          export CMAKE_BUILD_PARALLEL_LEVEL=$(sh scripts/ci/build_jobs.sh)
+          echo "compile jobs: $CMAKE_BUILD_PARALLEL_LEVEL"
+          make build VIEWER_CHANNEL="${{ steps.ver.outputs.CHANNEL }}" BUILD_ID="${{ steps.ver.outputs.BUILD }}" GLIBCXX_STRICT=1 \
+            SL_3P_CACHE="$CI_ROOT/.autobuild-installables"
+
+      - name: Package + verify
+        id: pkg
+        run: |
+          set -euo pipefail
+          cd "$CI_ROOT"
+          SHORT=$(git rev-parse --short=10 HEAD)
+          BASE="${{ steps.ver.outputs.ARTIFACT_BASE }}"
+          NAME="${BASE}_x86_64.tar.xz"
+          STAGE=$(mktemp -d)
+          trap 'rm -rf "$STAGE"' EXIT
+          cp -a build-linux-x86_64/newview/packaged "$STAGE/${BASE}_x86_64"
+          ( cd "$STAGE" && tar -cf - "${BASE}_x86_64" | xz -T0 -6 > "$CI_ROOT/$NAME" )
+          xz -t "$CI_ROOT/$NAME"
+          mkdir "$STAGE/verify"
+          tar -xJf "$CI_ROOT/$NAME" -C "$STAGE/verify"
+          diff -rq "$STAGE/${BASE}_x86_64" "$STAGE/verify/${BASE}_x86_64"
+          SHA=$(sha256sum "$CI_ROOT/$NAME" | cut -d' ' -f1)
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA"   >> "$GITHUB_OUTPUT"
+          echo "short=$SHORT" >> "$GITHUB_OUTPUT"
+          echo "$SHA  $NAME"
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/jetstream-') || inputs.publish
+        env:
+          TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          NAME: ${{ steps.pkg.outputs.name }}
+          SHA: ${{ steps.pkg.outputs.sha }}
+          SHORT: ${{ steps.pkg.outputs.short }}
+        run: |
+          set -euo pipefail
+          cd "$CI_ROOT"
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then TAG="${GITHUB_REF_NAME}"; else TAG="vk-${SHORT}"; fi
+          NOTES_FILE=$(mktemp)
+          bash scripts/ci/release_notes.sh "$TAG" > "$NOTES_FILE" || git log -1 --format='%s' > "$NOTES_FILE"
+          TAG="$TAG" FILE="$CI_ROOT/$NAME" NOTES_FILE="$NOTES_FILE" COMMIT="$GITHUB_SHA" \
+            CHANNEL="${{ steps.ver.outputs.CHANNEL }}" FULL_VERSION="${{ steps.ver.outputs.FULL_VERSION }}" \
+            PRERELEASE="${{ steps.ver.outputs.PRERELEASE }}" \
+            bash scripts/ci/publish_release.sh
+          rm -f "$NAME" "$NOTES_FILE"
+
+  windows:
+    runs-on: builder
+    timeout-minutes: 240
+    steps:
+      - name: Checkout into persistent tree
+        run: |
+          set -euo pipefail
+          mkdir -p "$CI_ROOT_WIN"
+          cd "$CI_ROOT_WIN"
+          if [ ! -d .git ]; then
+            git init -q
+            git remote add origin "$REPO_GIT"
+          fi
+          git remote set-url origin "$REPO_GIT"   # follows repo renames
+          git -c http.extraHeader="Authorization: token ${{ secrets.RELEASE_TOKEN }}" \
+              fetch -q --depth=500 --force origin "${{ github.sha }}" '+refs/tags/*:refs/tags/*'
+          git checkout -q --force "${{ github.sha }}"
+          git clean -qfdx -e build-windows-x86_64 -e .venv -e .autobuild-installables-win
+          git log --oneline -1
+
+      - name: Resolve version
+        id: ver
+        run: |
+          set -euo pipefail
+          cd "$CI_ROOT_WIN"
+          bash scripts/ci/version.sh | tee -a "$GITHUB_OUTPUT"
+
+      - name: Refresh the baseline CRLSet (certificate revocation)
+        # A fresh install must have revocation data before its first runtime fetch. Replaces
+        # the committed (small-cohort) app_settings/revocation/crl-set with Google's current
+        # full desktop CRLSet, CRX3 signature checked. Network trouble keeps the committed
+        # copy (the static distrust list and the runtime fetch still apply), not a failure.
+        run: |
+          set -euo pipefail
+          cd "$CI_ROOT_WIN"
+          python3 -I scripts/revocation/fetch_crlset.py --cohort full \
+              --out indra/newview/app_settings/revocation/crl-set \
+            || echo "::warning::CRLSet fetch failed; shipping the committed baseline"
+          python3 -I scripts/revocation/fetch_crlset.py --info indra/newview/app_settings/revocation/crl-set
+
+      - name: Cross-build + package (Windows x64)
+        id: pkg
+        env:
+          UPDATE_PUBKEY_HEX: ${{ vars.UPDATE_PUBKEY_HEX }}
+        run: |
+          set -euo pipefail
+          cd "$CI_ROOT_WIN"
+          export NINJA_JOBS=$(sh scripts/ci/build_jobs.sh); echo "compile jobs: $NINJA_JOBS"
+          make windows VIEWER_CHANNEL="${{ steps.ver.outputs.CHANNEL }}" BUILD_ID="${{ steps.ver.outputs.BUILD }}" \
+            SL_3P_CACHE="$CI_ROOT_WIN/.autobuild-installables-win"
+          SHORT=$(git rev-parse --short=10 HEAD)
+          ZIP="build-windows-x86_64/package/${{ steps.ver.outputs.ARTIFACT_BASE }}_win64.zip"
+          7z t "$ZIP" >/dev/null
+          SHA=$(sha256sum "$ZIP" | cut -d' ' -f1)
+          echo "zip=$CI_ROOT_WIN/$ZIP" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA"   >> "$GITHUB_OUTPUT"
+          echo "short=$SHORT" >> "$GITHUB_OUTPUT"
+          echo "$SHA  $(basename "$ZIP")"
+          SETUP="build-windows-x86_64/package/${{ steps.ver.outputs.ARTIFACT_BASE }}_Setup.exe"
+          if [ -f "$SETUP" ]; then
+            SETUP_SHA=$(sha256sum "$SETUP" | cut -d' ' -f1)
+            echo "setup=$CI_ROOT_WIN/$SETUP" >> "$GITHUB_OUTPUT"
+            echo "setup_sha=$SETUP_SHA" >> "$GITHUB_OUTPUT"
+            echo "$SETUP_SHA  $(basename "$SETUP")"
+          else
+            echo "::warning::no Windows installer built (makensis missing on this runner?)"
+          fi
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/jetstream-') || inputs.publish
+        env:
+          TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          FILE: ${{ steps.pkg.outputs.zip }}
+          SHA: ${{ steps.pkg.outputs.sha }}
+          SHORT: ${{ steps.pkg.outputs.short }}
+        run: |
+          set -euo pipefail
+          cd "$CI_ROOT_WIN"
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then TAG="${GITHUB_REF_NAME}"; else TAG="vk-${SHORT}"; fi
+          NOTES_FILE=$(mktemp)
+          bash scripts/ci/release_notes.sh "$TAG" > "$NOTES_FILE" || git log -1 --format='%s' > "$NOTES_FILE"
+          TAG="$TAG" NOTES_FILE="$NOTES_FILE" COMMIT="$GITHUB_SHA" \
+            CHANNEL="${{ steps.ver.outputs.CHANNEL }}" FULL_VERSION="${{ steps.ver.outputs.FULL_VERSION }}" \
+            PRERELEASE="${{ steps.ver.outputs.PRERELEASE }}" \
+            bash scripts/ci/publish_release.sh
+          if [ -n "${{ steps.pkg.outputs.setup }}" ]; then
+            TAG="$TAG" NOTES_FILE="$NOTES_FILE" COMMIT="$GITHUB_SHA" \
+              CHANNEL="${{ steps.ver.outputs.CHANNEL }}" FULL_VERSION="${{ steps.ver.outputs.FULL_VERSION }}" \
+              PRERELEASE="${{ steps.ver.outputs.PRERELEASE }}" \
+              FILE="${{ steps.pkg.outputs.setup }}" SHA="${{ steps.pkg.outputs.setup_sha }}" \
+              bash scripts/ci/publish_release.sh
+          fi
+          rm -f "$NOTES_FILE"
+
+  arch-package:
+    # Arch Linux package (#248). Every step is continue-on-error: a failure here
+    # never touches the tarball / Windows assets the other jobs published.
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') && !startsWith(github.ref, 'refs/tags/vk-')
+    runs-on: builder
+    timeout-minutes: 30
+    env:
+      TAG: ${{ github.ref_name }}
+      AUR_WORK: /srv/ci/slipstream-aur
+    steps:
+      - name: Fetch the packaging scripts
+        id: tree
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          rm -rf "$AUR_WORK"
+          mkdir -p "$AUR_WORK"/{tree,out,src,pkg}
+          # The scripts at this commit, without touching the build job's tree.
+          git -C "$CI_ROOT" archive "$GITHUB_SHA" scripts/packaging/aur scripts/packaging/keys scripts/ci | tar -x -C "$AUR_WORK/tree"
+
+      - name: Sign the source tarball (#288)
+        # Attaches Slipstream_<ver>_x86_64.tar.xz.sig so the PKGBUILD can verify
+        # it (validpgpkeys). Skipped, leaving the PKGBUILD unsigned, until the
+        # LINUX_SIGNING_KEY secret exists.
+        id: sig
+        if: steps.tree.outcome == 'success'
+        continue-on-error: true
+        env:
+          TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          LINUX_SIGNING_KEY: ${{ secrets.LINUX_SIGNING_KEY }}
+          LINUX_SIGNING_KEY_ID: ${{ secrets.LINUX_SIGNING_KEY_ID }}
+          LINUX_SIGNING_KEY_PASSPHRASE: ${{ secrets.LINUX_SIGNING_KEY_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          H="$AUR_WORK/tree/scripts/ci/signing_key.sh"
+          bash "$H" check || { echo "::warning::no signing key: the PKGBUILD stays unsigned"; exit 0; }
+          ASSET="Slipstream_${TAG#v}_x86_64.tar.xz"
+          curl -fsSL -o "$AUR_WORK/src/$ASSET" "${REPO_GIT%.git}/releases/download/$TAG/$ASSET"
+          WANT=$(curl -fsS "$RELEASE_API/releases/tags/$TAG" \
+                 | python3 -c 'import json,sys; print(json.load(sys.stdin).get("body",""))' \
+                 | sed -nE "s/^([0-9a-f]{64})  ${ASSET//./\\.}\$/\1/p" | tail -1)
+          GOT=$(sha256sum "$AUR_WORK/src/$ASSET" | cut -d' ' -f1)
+          [ "$WANT" = "$GOT" ] || { echo "::error::$ASSET sha256 $GOT does not match the release notes ('$WANT')"; exit 1; }
+          # Binary detached signature, the form makepkg expects for a .sig source.
+          # The public key is exported for the makepkg check below.
+          bash "$H" run bash -c 'gpg --yes -u "$SIGNING_KEY_FPR" --detach-sign -o "$1.sig" "$1" &&
+            gpg --verify "$1.sig" "$1" && cp "$SIGNING_PUBKEY" "$2"' _ "$AUR_WORK/src/$ASSET" "$AUR_WORK/pubkey.asc"
+          SIG="$AUR_WORK/src/$ASSET.sig"
+          TAG="$TAG" FILE="$SIG" SHA=$(sha256sum "$SIG" | cut -d' ' -f1) COMMIT="$GITHUB_SHA" \
+            bash "$AUR_WORK/tree/scripts/ci/publish_release.sh"
+          echo "fpr=$(tr -d ' ' <<<"$LINUX_SIGNING_KEY_ID" | tr a-f A-F)" >> "$GITHUB_OUTPUT"
+
+      - name: Generate PKGBUILD + .SRCINFO
+        id: gen
+        if: steps.tree.outcome == 'success'
+        continue-on-error: true
+        env:
+          # Set only when the .sig was attached: source=(... .sig) + validpgpkeys.
+          PGP_FPR: ${{ steps.sig.outputs.fpr }}
+        run: |
+          set -euo pipefail
+          # The tarball's sha256 comes from the release notes (publish_release.sh
+          # appended it after verifying the upload).
+          API_BASE="$RELEASE_API" DOWNLOAD_BASE="${REPO_GIT%.git}/releases/download" \
+            bash "$AUR_WORK/tree/scripts/packaging/aur/gen.sh" -o "$AUR_WORK/out" "$TAG"
+          cat "$AUR_WORK/out/.SRCINFO"
+
+      - name: Build slipstream-bin package
+        id: makepkg
+        if: steps.gen.outcome == 'success'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          if ! command -v makepkg >/dev/null 2>&1 || ! command -v bsdtar >/dev/null 2>&1; then
+            echo "::warning::makepkg/bsdtar not installed on this runner (apt install makepkg libarchive-tools): attaching the PKGBUILD only"
+            exit 0
+          fi
+          ASSET="Slipstream_${TAG#v}_x86_64.tar.xz"
+          # Pre-seed the source over the LAN; makepkg still checks it against sha256sums.
+          [ -f "$AUR_WORK/src/$ASSET" ] || curl -fsSL -o "$AUR_WORK/src/$ASSET" "${REPO_GIT%.git}/releases/download/$TAG/$ASSET"
+          # A signed PKGBUILD: makepkg verifies the .sig against validpgpkeys with
+          # a keyring holding only the release key, as a user's would.
+          if grep -q '^validpgpkeys=' "$AUR_WORK/out/PKGBUILD"; then
+            export GNUPGHOME=$(mktemp -d /tmp/slipstream-makepkg-gpg.XXXXXX)
+            trap 'gpgconf --homedir "$GNUPGHOME" --kill all 2>/dev/null; rm -rf "$GNUPGHOME"' EXIT
+            gpg --batch --quiet --import "$AUR_WORK/pubkey.asc"
+          fi
+          cd "$AUR_WORK/out"
+          # -d: the runner is not Arch, so there is no pacman database to check depends against.
+          SRCDEST="$AUR_WORK/src" PKGDEST="$AUR_WORK/pkg" BUILDDIR="$AUR_WORK/build" PKGEXT=.pkg.tar.zst \
+            PACKAGER='Slipstream CI <noreply@slipstreamviewer.org>' makepkg -f -d --noconfirm
+          PKG=$(ls "$AUR_WORK"/pkg/slipstream-bin-*.pkg.tar.zst)
+          echo "pkg=$PKG" >> "$GITHUB_OUTPUT"
+          bsdtar -xOf "$PKG" .PKGINFO
+
+      - name: Attach PKGBUILD + package to the release
+        if: steps.gen.outcome == 'success'
+        continue-on-error: true
+        env:
+          TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          PKG: ${{ steps.makepkg.outputs.pkg }}
+        run: |
+          set -euo pipefail
+          for f in "$AUR_WORK/out/PKGBUILD" ${PKG:+"$PKG"}; do
+            TAG="$TAG" FILE="$f" SHA=$(sha256sum "$f" | cut -d' ' -f1) COMMIT="$GITHUB_SHA" \
+              bash "$AUR_WORK/tree/scripts/ci/publish_release.sh"
+          done
+
+      - name: Push to the AUR
+        if: steps.gen.outcome == 'success'
+        continue-on-error: true
+        env:
+          AUR_SSH_KEY: ${{ secrets.AUR_SSH_KEY }}
+          AUR_PUBLISH_BETAS: ${{ vars.AUR_PUBLISH_BETAS }}
+        run: |
+          set -euo pipefail
+          bash "$AUR_WORK/tree/scripts/packaging/aur/aur_push.sh" "$AUR_WORK/out" "$TAG"
+
+      - name: Clean up
+        if: always()
+        run: rm -rf "$AUR_WORK"
+
+  deb-package:
+    # Debian / Ubuntu / Mint package (#278). Every step is continue-on-error: a
+    # failure here never touches the assets the other jobs published.
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') && !startsWith(github.ref, 'refs/tags/vk-')
+    runs-on: builder
+    timeout-minutes: 30
+    env:
+      TAG: ${{ github.ref_name }}
+      DEB_WORK: /srv/ci/slipstream-deb
+    steps:
+      - name: Fetch the published tarball
+        id: fetch
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          rm -rf "$DEB_WORK"
+          mkdir -p "$DEB_WORK"/{tree,out,tmp}
+          # The scripts at this commit, without touching the build job's tree.
+          git -C "$CI_ROOT" archive "$GITHUB_SHA" scripts/packaging/deb scripts/ci | tar -x -C "$DEB_WORK/tree"
+          ASSET="Slipstream_${TAG#v}_x86_64.tar.xz"
+          curl -fsSL -o "$DEB_WORK/$ASSET" "${REPO_GIT%.git}/releases/download/$TAG/$ASSET"
+          # Check it against the sha256 publish_release.sh appended to the notes
+          # after verifying the upload.
+          WANT=$(curl -fsS "$RELEASE_API/releases/tags/$TAG" \
+                 | python3 -c 'import json,sys; print(json.load(sys.stdin).get("body",""))' \
+                 | sed -nE "s/^([0-9a-f]{64})  ${ASSET//./\\.}\$/\1/p" | tail -1)
+          GOT=$(sha256sum "$DEB_WORK/$ASSET" | cut -d' ' -f1)
+          if [ "$WANT" != "$GOT" ]; then
+            echo "::error::$ASSET sha256 $GOT does not match the release notes ('$WANT')"
+            exit 1
+          fi
+          echo "tarball=$DEB_WORK/$ASSET" >> "$GITHUB_OUTPUT"
+
+      - name: Build slipstream-viewer .deb
+        id: deb
+        if: steps.fetch.outcome == 'success'
+        continue-on-error: true
+        env:
+          TARBALL: ${{ steps.fetch.outputs.tarball }}
+        run: |
+          set -euo pipefail
+          # dpkg-deb comes with dpkg. Without dpkg-dev (dpkg-shlibdeps) or the
+          # runtime libraries, build_deb.sh falls back to the committed
+          # depends.shlibs; without lintian it skips the report. One-time setup:
+          # scripts/packaging/deb/README.md, "CI".
+          command -v dpkg-shlibdeps >/dev/null 2>&1 \
+            || echo "::warning::dpkg-dev not installed on this runner: using the committed depends.shlibs (see scripts/packaging/deb/README.md)"
+          command -v lintian >/dev/null 2>&1 \
+            || echo "::warning::lintian not installed on this runner: no lintian report"
+          # The staging tree is ~750 MB: keep it on /srv, not /tmp.
+          TMPDIR="$DEB_WORK/tmp" bash "$DEB_WORK/tree/scripts/packaging/deb/build_deb.sh" \
+            "$TARBALL" "$TAG" "$DEB_WORK/out"
+          DEB="$DEB_WORK/out/Slipstream_${TAG#v}_amd64.deb"
+          dpkg-deb --info "$DEB"
+          echo "deb=$DEB" >> "$GITHUB_OUTPUT"
+
+      - name: Attach the .deb to the release
+        if: steps.deb.outcome == 'success'
+        continue-on-error: true
+        env:
+          TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          DEB: ${{ steps.deb.outputs.deb }}
+        run: |
+          set -euo pipefail
+          TAG="$TAG" FILE="$DEB" SHA=$(sha256sum "$DEB" | cut -d' ' -f1) COMMIT="$GITHUB_SHA" \
+            bash "$DEB_WORK/tree/scripts/ci/publish_release.sh"
+
+      - name: Clean up
+        if: always()
+        run: rm -rf "$DEB_WORK"
+
+  apt-repo:
+    # Signed apt repository (#288), https://apt.slipstreamviewer.org: adds the
+    # .deb deb-package attached to the release to the `beta` suite (betas) or to
+    # `stable` + `beta` (vX.Y.Z), keeps the newest APT_KEEP versions per suite,
+    # signs Release/InRelease and rsyncs the tree to the web host. The aptly
+    # state lives in APT_REPO_ROOT on the runner and persists between runs.
+    # Not continue-on-error: a release missing from the repo should be red.
+    # See scripts/packaging/apt/README.md and INFRA.md.
+    needs: deb-package
+    if: startsWith(github.ref, 'refs/tags/v') && !startsWith(github.ref, 'refs/tags/vk-')
+    runs-on: builder
+    timeout-minutes: 30
+    env:
+      TAG: ${{ github.ref_name }}
+      APT_WORK: /srv/ci/slipstream-apt
+      APT_REPO_ROOT: /srv/ci/apt-repo
+      APT_DEPLOY_KEY: /home/ci/.ssh/slipstream_apt_deploy
+      APT_DEPLOY_TARGET: 'aptdeploy@192.168.96.20:'
+    steps:
+      - name: Add the .deb, sign, publish, deploy
+        env:
+          LINUX_SIGNING_KEY: ${{ secrets.LINUX_SIGNING_KEY }}
+          LINUX_SIGNING_KEY_ID: ${{ secrets.LINUX_SIGNING_KEY_ID }}
+          LINUX_SIGNING_KEY_PASSPHRASE: ${{ secrets.LINUX_SIGNING_KEY_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          rm -rf "$APT_WORK"
+          mkdir -p "$APT_WORK/tree"
+          trap 'rm -rf "$APT_WORK"' EXIT
+          git -C "$CI_ROOT" archive "$GITHUB_SHA" scripts/packaging/apt scripts/packaging/keys scripts/ci | tar -x -C "$APT_WORK/tree"
+          H="$APT_WORK/tree/scripts/ci/signing_key.sh"
+          R="$APT_WORK/tree/scripts/packaging/apt/apt_repo.sh"
+          if ! bash "$H" check; then
+            echo "::warning::no LINUX_SIGNING_KEY: the apt repository is not updated (seed it later, INFRA.md)"
+            exit 0
+          fi
+          # Downloads Slipstream_<ver>_amd64.deb over the LAN and checks it
+          # against the sha256 publish_release.sh put in the release notes.
+          RELEASE_API="$RELEASE_API" DOWNLOAD_BASE="${REPO_GIT%.git}/releases/download" \
+            bash "$R" seed "$TAG"
+          bash "$H" run bash "$R" publish
+          bash "$R" deploy
+          bash "$R" list
+
+  pacman-repo:
+    # Signed pacman repositories (#419), https://arch.slipstreamviewer.org: adds the
+    # slipstream-bin package the arch-package job attached to the release (built from the
+    # release tarball when none is attached) to `slipstream-beta` (betas) or to
+    # `slipstream` + `slipstream-beta` (vX.Y.Z), signs the package and the databases and
+    # rsyncs the tree to the web host (rrsync-locked deploy key, like the apt repo). State
+    # lives in PACMAN_REPO_ROOT on the runner. Skipped with a warning until the one-time
+    # host setup (scripts/packaging/pacman/INFRA.md) and the signing key exist.
+    needs: arch-package
+    if: always() && startsWith(github.ref, 'refs/tags/v') && !startsWith(github.ref, 'refs/tags/vk-')
+    runs-on: builder
+    timeout-minutes: 30
+    env:
+      TAG: ${{ github.ref_name }}
+      PACMAN_WORK: /srv/ci/slipstream-pacman
+      PACMAN_REPO_ROOT: /srv/ci/pacman-repo
+      PACMAN_DEPLOY_KEY: /home/ci/.ssh/slipstream_arch_deploy
+      PACMAN_DEPLOY_TARGET: 'archdeploy@192.168.96.20:'
+    steps:
+      - name: Add the package, sign, publish, deploy
+        env:
+          LINUX_SIGNING_KEY: ${{ secrets.LINUX_SIGNING_KEY }}
+          LINUX_SIGNING_KEY_ID: ${{ secrets.LINUX_SIGNING_KEY_ID }}
+          LINUX_SIGNING_KEY_PASSPHRASE: ${{ secrets.LINUX_SIGNING_KEY_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          if [ ! -f "$PACMAN_DEPLOY_KEY" ]; then
+            echo "::warning::$PACMAN_DEPLOY_KEY missing: the pacman repository is not set up (scripts/packaging/pacman/INFRA.md)"
+            exit 0
+          fi
+          rm -rf "$PACMAN_WORK"
+          mkdir -p "$PACMAN_WORK/tree"
+          trap 'rm -rf "$PACMAN_WORK"' EXIT
+          git -C "$CI_ROOT" archive "$GITHUB_SHA" scripts/packaging/pacman scripts/packaging/aur scripts/packaging/keys scripts/ci | tar -x -C "$PACMAN_WORK/tree"
+          H="$PACMAN_WORK/tree/scripts/ci/signing_key.sh"
+          R="$PACMAN_WORK/tree/scripts/packaging/pacman/pacman_repo.sh"
+          if ! bash "$H" check; then
+            echo "::warning::no LINUX_SIGNING_KEY: the pacman repository is not updated (seed it later, INFRA.md)"
+            exit 0
+          fi
+          RELEASE_API="$RELEASE_API" DOWNLOAD_BASE="${REPO_GIT%.git}/releases/download" \
+            bash "$R" seed "$TAG"
+          bash "$H" run bash "$R" publish
+          bash "$R" deploy
+          bash "$R" list
+
+  sign-release:
+    # SHA256SUMS + SHA256SUMS.asc over every asset of the release (#288). Runs
+    # after every job that attaches assets: add a new asset-producing job to
+    # `needs` (e.g. the Flatpak job, #286), or re-run this job afterwards
+    # (sign_release.sh replaces the previous SHA256SUMS). Skipped while
+    # LINUX_SIGNING_KEY is unset. Runs even if Windows / .deb / Arch failed, so
+    # whatever was published is still covered; it needs the Linux build.
+    needs: [build, windows, deb-package, arch-package, flatpak, update-manifest]
+    if: always() && needs.build.result == 'success' && ((startsWith(github.ref, 'refs/tags/v') && !startsWith(github.ref, 'refs/tags/vk-')) || startsWith(github.ref, 'refs/tags/jetstream-'))
+    runs-on: builder
+    timeout-minutes: 30
+    env:
+      TAG: ${{ github.ref_name }}
+      SIGN_WORK: /srv/ci/slipstream-sign
+    steps:
+      - name: Write, sign and attach SHA256SUMS
+        env:
+          TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          LINUX_SIGNING_KEY: ${{ secrets.LINUX_SIGNING_KEY }}
+          LINUX_SIGNING_KEY_ID: ${{ secrets.LINUX_SIGNING_KEY_ID }}
+          LINUX_SIGNING_KEY_PASSPHRASE: ${{ secrets.LINUX_SIGNING_KEY_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          rm -rf "$SIGN_WORK"
+          mkdir -p "$SIGN_WORK/tree" "$SIGN_WORK/tmp"
+          trap 'rm -rf "$SIGN_WORK"' EXIT
+          git -C "$CI_ROOT" archive "$GITHUB_SHA" scripts/ci scripts/packaging/keys | tar -x -C "$SIGN_WORK/tree"
+          H="$SIGN_WORK/tree/scripts/ci/signing_key.sh"
+          if ! bash "$H" check; then
+            echo "::warning::no LINUX_SIGNING_KEY: release assets are not signed (scripts/packaging/keys/README.md)"
+            exit 0
+          fi
+          # The assets (~1 GB together) are downloaded one at a time to /srv, not /tmp.
+          TMPDIR="$SIGN_WORK/tmp" bash "$H" run bash "$SIGN_WORK/tree/scripts/ci/sign_release.sh" "$TAG"
+
+  update-manifest:
+    # Signed auto-update manifest (#421). After the Linux tarball and the Windows installer
+    # are published, builds the manifest from the release (asset URLs, sizes, the sha256
+    # lines in the notes), signs it with the update key (Ed25519, key from a CI secret,
+    # never in the repository) and attaches update-manifest.json to the release. The
+    # website feed builder (scripts/build_update.py, website repo) embeds it in
+    # /update/release.json and /update/beta.json on its next build.
+    # Secret: UPDATE_SIGNING_KEY (PEM text from scripts/updater/gen_update_key.sh).
+    # Skipped with a warning while it is unset; never blocks the release assets.
+    needs: [build, windows]
+    if: always() && needs.build.result == 'success' && needs.windows.result == 'success' && ((startsWith(github.ref, 'refs/tags/v') && !startsWith(github.ref, 'refs/tags/vk-')) || startsWith(github.ref, 'refs/tags/jetstream-'))
+    runs-on: builder
+    timeout-minutes: 15
+    env:
+      TAG: ${{ github.ref_name }}
+      UM_WORK: /srv/ci/slipstream-update-manifest
+    steps:
+      - name: Build, sign and attach update-manifest.json
+        env:
+          TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${UPDATE_SIGNING_KEY:-}" ]; then
+            echo "::warning::no UPDATE_SIGNING_KEY: no signed update manifest (scripts/updater/README.md)"
+            exit 0
+          fi
+          rm -rf "$UM_WORK"; mkdir -p "$UM_WORK/tree"
+          trap 'rm -rf "$UM_WORK"' EXIT
+          git -C "$CI_ROOT" archive "$GITHUB_SHA" scripts/updater scripts/ci | tar -x -C "$UM_WORK/tree"
+          curl -fsS -H "Authorization: token $TOKEN" "$RELEASE_API/releases/tags/$TAG" > "$UM_WORK/release.json"
+          python3 "$UM_WORK/tree/scripts/updater/sign_update_manifest.py" from-release "$UM_WORK/release.json" \
+            --tag "$TAG" --out "$UM_WORK/update-manifest.json"
+          # The key is only in this step's environment; check the result with the public half
+          # when the repo variable is set.
+          if [ -n "${{ vars.UPDATE_PUBKEY_HEX }}" ]; then
+            python3 "$UM_WORK/tree/scripts/updater/sign_update_manifest.py" verify "$UM_WORK/update-manifest.json" \
+              --pubkey "${{ vars.UPDATE_PUBKEY_HEX }}"
+          fi
+          SHA=$(sha256sum "$UM_WORK/update-manifest.json" | cut -d' ' -f1)
+          TAG="$TAG" FILE="$UM_WORK/update-manifest.json" SHA="$SHA" COMMIT="$GITHUB_SHA" \
+            bash "$UM_WORK/tree/scripts/ci/publish_release.sh"
+
+  test-plan:
+    # Jetstream builds and betas: the test plan for testers in Discord #test-plans, built from
+    # the Test-Plan / Test-Settings trailers of the commits since the previous build of the same
+    # kind (scripts/ci/test_plan.py). Secret: DISCORD_TESTPLANS_WEBHOOK (unset = printed only).
+    needs: [build, windows]
+    if: always() && needs.build.result == 'success' && needs.windows.result == 'success' && (startsWith(github.ref, 'refs/tags/jetstream-') || contains(github.ref, '-beta.'))
+    runs-on: builder
+    timeout-minutes: 10
+    env:
+      TAG: ${{ github.ref_name }}
+      TP_WORK: /srv/ci/slipstream-test-plan
+    steps:
+      - name: Post the test plan
+        env:
+          TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          DISCORD_TESTPLANS_WEBHOOK: ${{ secrets.DISCORD_TESTPLANS_WEBHOOK }}
+        run: |
+          set -euo pipefail
+          rm -rf "$TP_WORK"; mkdir -p "$TP_WORK"
+          trap 'rm -rf "$TP_WORK"' EXIT
+          cd "$TP_WORK"
+          git init -q
+          # History + tags up to this build (the previous Jetstream / beta tag must be reachable).
+          git -c http.extraHeader="Authorization: token $TOKEN" \
+              fetch -q --depth=1000 "$REPO_GIT" "$GITHUB_SHA" '+refs/tags/*:refs/tags/*'
+          git checkout -q --detach "$GITHUB_SHA"
+          python3 -I scripts/ci/test_plan.py "$TAG"
+
+  jetstream-post:
+    # Jetstream only: announce the build on Discord #jetstream (notes = the drafted commit
+    # list in the release text) and delete all but the newest 10 Jetstream releases + tags.
+    # Secret: DISCORD_JETSTREAM_WEBHOOK (optional; unset = no post). Variable:
+    # DISCORD_JETSTREAM_ROLE (the "Jetstream Pings" role id, pinged with each post).
+    needs: [build, windows, update-manifest]
+    if: always() && needs.build.result == 'success' && needs.windows.result == 'success' && startsWith(github.ref, 'refs/tags/jetstream-')
+    runs-on: builder
+    timeout-minutes: 15
+    env:
+      TAG: ${{ github.ref_name }}
+      JP_WORK: /srv/ci/slipstream-jetstream-post
+    steps:
+      - name: Announce on Discord + prune old Jetstream releases
+        env:
+          TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          DISCORD_JETSTREAM_WEBHOOK: ${{ secrets.DISCORD_JETSTREAM_WEBHOOK }}
+          DISCORD_JETSTREAM_ROLE: ${{ vars.DISCORD_JETSTREAM_ROLE }}
+        run: |
+          set -euo pipefail
+          rm -rf "$JP_WORK"; mkdir -p "$JP_WORK"
+          trap 'rm -rf "$JP_WORK"' EXIT
+          git -C "$CI_ROOT" archive "$GITHUB_SHA" scripts/ci | tar -x -C "$JP_WORK"
+          python3 -I "$JP_WORK/scripts/ci/jetstream_post.py"
+
+  flatpak:
+    # Flatpak + the self-hosted, GPG-signed Flatpak repo (#286). Repackages the
+    # published tarball (scripts/packaging/flatpak), commits it to the persistent
+    # OSTree repo on this runner (branch "stable" for vX.Y.Z, also copied to
+    # "beta"; "beta" for vX.Y.Z-beta.N), signs commits + summary with the
+    # project release key, rsyncs the repo to https://flatpak.slipstreamviewer.org/repo/
+    # and attaches Slipstream_<ver>.flatpak to the release. ci-* tags build an
+    # unsigned "test" branch into a throwaway repo and publish nothing.
+    # Every step is continue-on-error: a failure never touches the assets the
+    # other jobs published. One-time setup: scripts/packaging/flatpak/INFRA.md.
+    #
+    # Secrets: LINUX_SIGNING_KEY (armored secret key/subkey, shared with the apt
+    #          repo + SHA256SUMS signing of #288), LINUX_SIGNING_KEY_ID (its
+    #          fingerprint), LINUX_SIGNING_KEY_PASSPHRASE (optional).
+    # Deploy key: $DEPLOY_KEY on the runner (rrsync-locked, like the
+    #          website's), not a secret.
+    needs: build
+    if: (startsWith(github.ref, 'refs/tags/v') && !startsWith(github.ref, 'refs/tags/vk-')) || startsWith(github.ref, 'refs/tags/ci-')
+    # Its own VM (applejack-flatpak, 192.168.96.26): flatpak-builder needs user
+    # namespaces, which the LXC host disables. INFRA.md, "Build VM".
+    runs-on: flatpak
+    timeout-minutes: 90
+    env:
+      TAG: ${{ github.ref_name }}
+      FP_ROOT: /srv/ci/slipstream-flatpak
+      FP_WORK: /srv/ci/slipstream-flatpak/work
+      # publish_flatpak_repo.sh: rsync-only key, forced to
+      # `rrsync /srv/flatpak.slipstreamviewer.org` on starswirl.
+      DEPLOY_KEY: /home/ci/.ssh/slipstream_flatpak_deploy
+      DEPLOY_TARGET: sitedeploy@192.168.96.20
+    steps:
+      - name: Sync the build VM's checkout
+        id: sync
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          [ -d "$CI_ROOT/.git" ] || git clone -q "$REPO_GIT" "$CI_ROOT"
+          git -C "$CI_ROOT" fetch -q --tags --force origin
+          git -C "$CI_ROOT" fetch -q origin "$GITHUB_SHA"
+
+      - name: Fetch the tarball
+        id: fetch
+        if: steps.sync.outcome == 'success'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          rm -rf "$FP_WORK"
+          mkdir -p "$FP_WORK"/{tree,out,tmp}
+          # The scripts at this commit, without touching the build job's tree.
+          git -C "$CI_ROOT" archive "$GITHUB_SHA" scripts/packaging/flatpak scripts/ci | tar -x -C "$FP_WORK/tree"
+          if [[ "$TAG" == ci-* ]]; then
+            # Dry run: the build job's unpublished tarball stays on applejack, so a
+            # dry run here packages the newest published release instead.
+            NEWEST=$(curl -fsS "$RELEASE_API/releases?limit=1" | python3 -c 'import json,sys; print(json.load(sys.stdin)[0]["tag_name"])')
+            ASSET="Slipstream_${NEWEST#v}_x86_64.tar.xz"
+            curl -fsSL -o "$FP_WORK/$ASSET" "${REPO_GIT%.git}/releases/download/$NEWEST/$ASSET"
+            echo "tarball=$FP_WORK/$ASSET" >> "$GITHUB_OUTPUT"
+            echo "repo=$FP_WORK/test-repo" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          ASSET="Slipstream_${TAG#v}_x86_64.tar.xz"
+          curl -fsSL -o "$FP_WORK/$ASSET" "${REPO_GIT%.git}/releases/download/$TAG/$ASSET"
+          # Check it against the sha256 publish_release.sh appended to the notes.
+          WANT=$(curl -fsS "$RELEASE_API/releases/tags/$TAG" \
+                 | python3 -c 'import json,sys; print(json.load(sys.stdin).get("body",""))' \
+                 | sed -nE "s/^([0-9a-f]{64})  ${ASSET//./\\.}\$/\1/p" | tail -1)
+          GOT=$(sha256sum "$FP_WORK/$ASSET" | cut -d' ' -f1)
+          if [ "$WANT" != "$GOT" ]; then
+            echo "::error::$ASSET sha256 $GOT does not match the release notes ('$WANT')"
+            exit 1
+          fi
+          echo "tarball=$FP_WORK/$ASSET" >> "$GITHUB_OUTPUT"
+          echo "repo=$FP_ROOT/repo" >> "$GITHUB_OUTPUT"
+
+      - name: Pull the published repo if the local copy is missing
+        id: pull
+        if: steps.fetch.outcome == 'success' && startsWith(github.ref, 'refs/tags/v')
+        continue-on-error: true
+        run: bash "$FP_WORK/tree/scripts/packaging/flatpak/publish_flatpak_repo.sh" pull "${{ steps.fetch.outputs.repo }}"
+
+      - name: Build, sign, update the repo, bundle
+        id: build
+        if: steps.fetch.outcome == 'success' && (steps.pull.outcome == 'success' || startsWith(github.ref, 'refs/tags/ci-'))
+        continue-on-error: true
+        env:
+          SIGNING_KEY: ${{ secrets.LINUX_SIGNING_KEY }}
+          SIGNING_KEY_ID: ${{ secrets.LINUX_SIGNING_KEY_ID }}
+          SIGNING_KEY_PASSPHRASE: ${{ secrets.LINUX_SIGNING_KEY_PASSPHRASE }}
+          TARBALL: ${{ steps.fetch.outputs.tarball }}
+          REPO: ${{ steps.fetch.outputs.repo }}
+        run: |
+          set -euo pipefail
+          if [[ "$TAG" == ci-* ]]; then unset SIGNING_KEY SIGNING_KEY_ID SIGNING_KEY_PASSPHRASE; fi
+          # The staging tree and the build are ~1.6 GB: keep them on /srv, not /tmp.
+          TMPDIR="$FP_WORK/tmp" STATE_DIR="$FP_WORK/builder-state" TAGS_REPO="$CI_ROOT" \
+            bash "$FP_WORK/tree/scripts/packaging/flatpak/build_flatpak.sh" "$TARBALL" "$TAG" "$REPO" "$FP_WORK/out"
+          echo "bundle=$(ls "$FP_WORK"/out/Slipstream_*.flatpak)" >> "$GITHUB_OUTPUT"
+
+      - name: Publish the repo
+        if: steps.build.outcome == 'success' && startsWith(github.ref, 'refs/tags/v')
+        continue-on-error: true
+        run: bash "$FP_WORK/tree/scripts/packaging/flatpak/publish_flatpak_repo.sh" push "${{ steps.fetch.outputs.repo }}" "$FP_WORK/out"
+
+      - name: Attach the .flatpak bundle to the release
+        if: steps.build.outcome == 'success' && startsWith(github.ref, 'refs/tags/v')
+        continue-on-error: true
+        env:
+          TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          BUNDLE: ${{ steps.build.outputs.bundle }}
+        run: |
+          set -euo pipefail
+          TAG="$TAG" FILE="$BUNDLE" SHA=$(sha256sum "$BUNDLE" | cut -d' ' -f1) COMMIT="$GITHUB_SHA" \
+            bash "$FP_WORK/tree/scripts/ci/publish_release.sh"
+
+      - name: Clean up
+        if: always()
+        # Keeps $FP_ROOT/repo: the next release's static deltas build on it.
+        run: rm -rf "$FP_WORK"

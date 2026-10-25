@@ -1,0 +1,98 @@
+#version 460
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_samplerless_texture_functions : require
+#extension GL_EXT_control_flow_attributes : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#ifdef CLEAN_PROJ_SHADOW_RAYQUERY
+#extension GL_EXT_ray_query : require   // the sun's one hard shadow ray (clean_shadow_rt.glsl)
+#endif
+// vkclean -- DEFERRED PROBE CAPTURE LIGHTING (#833, RenderVKProbeDeferred).
+//
+// A reflection-probe face's opaque / mask / rigged surfaces are first drawn into a small
+// G-buffer at probe resolution (clean_draw.frag -DCLEAN_GBUFFER -DCLEAN_CAPTURE_GBUF, the
+// clean_gbuffer.glsl layout, one face at a time: LLCleanRendererVK mProbeGb), then lit here,
+// one invocation per face texel, into mip 0 of the capture cube (the face's layer of the
+// cube's 2D-array storage view). The face's sky was drawn first; texels without a surface
+// keep it. The water, the cluster LOD avatars and the blended alpha are drawn forward over
+// this afterwards, depth-tested against the G-buffer pass's depth.
+//
+// THE SAME LIGHTING AS THE CAPTURE FS: this is clean_draw.frag -DCLEAN_CAPTURE's lighting
+// half (lightSurface + surfacePost, clean_surface_light.glsl -- the function the main view's
+// deferred kernels run too), compiled in the capture configuration: probeCapture() /
+// mirrorPass() are constants, so there is no probe walk (no probes-in-probes feedback: the
+// sky ambient / reflection as the capture FS), no SSR / planar mirror / AO / distance fade /
+// debug terms; local lights = the probe's own light list (draw view water_fog.w), its nearest
+// CAPTURE_LIGHT_CAP; the sun through the cascades -- or, in frames that trace (the -RT twin,
+// RT set 3), ONE hard shadow ray (CLEAN_RT_SUN_HARD), as the ray-query capture FS; projectors
+// unshadowed (1.0 in captures). What changes is only WHERE it runs: once per visible texel
+// after the decode, in a ~70-register kernel instead of the ~140-register decode + light FS
+// per fragment (overdraw included).
+//
+// The view: the face's draw-view ring entry (the GPU capture job's patched one; pushed index,
+// set 0 binding 36): view_proj = the face's world-space matrix (clean_probe_gpu.comp
+// faceMatrix, u_origin 0), cam_time.xyz = the probe origin -- the position is rebuilt from
+// the G-buffer pass's depth through that matrix, origin-relative for precision.
+layout(local_size_x = 8, local_size_y = 8) in;
+
+#define CLEAN_CAPTURE                // probeCapture() / mirrorPass() constants (clean_draw_common.glsl)
+#define CLEAN_DEBUG_CONST
+const bool kDebugViews = false;      // (as the capture FS: no debug twin)
+#define CLEAN_SPEC_SETTINGS          // (constants 8-17 left at their defaults: the run-time tests)
+#ifdef CLEAN_PROJ_SHADOW_RAYQUERY
+#define CLEAN_RT_SUN_HARD            // (#829) one hard sun ray, no terminator probe / disc
+#endif
+#define CLEAN_COMPUTE_LIGHT          // no vertex inputs (clean_draw_common.glsl)
+vec2 g_frag_xy;                      // this invocation's texel centre (face px)
+#define CLEAN_FRAG_XY g_frag_xy
+#define CLEAN_EXTERNAL_DRAW_PUSH
+layout(push_constant) uniform ProbeDeferPush {
+    uint view;    // the face's draw-view ring entry (absolute index; draw set 0 binding 36)
+    uint face;    // the capture cube layer this dispatch lights
+    uint res;     // face size (texels)
+    uint flags;   // reserved (0)
+} g_draw_push;    // 16 B = LLCleanRendererVK::ProbeDeferPushData
+
+#include "clean_draw_common.glsl"
+#include "clean_surface_light.glsl"
+#include "clean_gbuffer.glsl"
+
+// Set 2 (LLCleanRendererVK mDslProbeDefer): the face's G-buffer + its depth (the G-buffer
+// pass's, DEPTH_READ_ONLY), the capture cube's mip 0 (all six faces, GENERAL).
+layout(set = 2, binding = 0) uniform texture2D uG0;
+layout(set = 2, binding = 1) uniform texture2D uG1;
+layout(set = 2, binding = 2) uniform texture2D uG2;
+layout(set = 2, binding = 3) uniform texture2D uG3;
+layout(set = 2, binding = 4) uniform texture2D uDepthG;
+layout(set = 2, binding = 5, rgba16f) uniform writeonly image2DArray uFaces;
+
+// World position of a face texel: the face's view-projection made relative to the probe
+// origin (column 3 = VP * (origin, 1)), inverted, + the origin.
+vec3 probeDeferPosition(float d)
+{
+    const vec3 o = pc.u_cam_time.xyz;
+    mat4 M = pc.u_view_proj;
+    M[3] = pc.u_view_proj * vec4(o, 1.0);
+    const vec2 ndc = g_frag_xy / float(g_draw_push.res) * 2.0 - 1.0;
+    const vec4 h = inverse(M) * vec4(ndc, d, 1.0);
+    return o + h.xyz / h.w;
+}
+
+void main()
+{
+    const ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    if (px.x >= int(g_draw_push.res) || px.y >= int(g_draw_push.res)) return;
+    g_frag_xy = vec2(px) + 0.5;
+    const vec4 g2 = texelFetch(uG2, px, 0);
+    if ((uint(g2.w * 255.0 + 0.5) & 3u) == SURF_NONE) return;   // no surface: the sky stays
+    const vec3 P = probeDeferPosition(texelFetch(uDepthG, px, 0).r);
+    float glow;   // (captures carry no glow)
+    bool noFade;
+    const SurfaceLit s = gbufferUnpack(texelFetch(uG0, px, 0), texelFetch(uG1, px, 0), g2, texelFetch(uG3, px, 0),
+                                       glow, noFade);
+    const vec4 lit = lightSurface(s, P, 1.0);
+    // (the capture FS's tail: haze from the probe origin, then the lit guard)
+    const vec3 color = lgFinite(surfacePost(s.model, noFade, lit.rgb, P), LG_OUT);
+    imageStore(uFaces, ivec3(px, int(g_draw_push.face)), vec4(color, 1.0));
+}

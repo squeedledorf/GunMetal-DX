@@ -1,0 +1,57 @@
+<?xml version="1.0" ?>
+<llsd>
+<!--
+  Viewer preset "Second Life (official viewer)" (#132). File format: see firestorm.xml.
+
+  Source: secondlife/viewer develop (2026-10) app_settings/settings.xml and key_bindings.xml.
+  Left out on purpose: ParcelMediaAutoPlayEnable (the official viewer auto-plays parcel media,
+  which lets the media's web server see your IP address; we keep it off).
+-->
+  <map>
+    <key>settings</key>
+    <map>
+      <!-- In the official viewer pressing / opens nearby chat with a leading slash, for
+           gestures and chat commands. Slipstream made that opt-in so a stray / does not grab
+           the keyboard (SlashStartsChat, "as in LL viewers"). -->
+      <key>SlashStartsChat</key>
+      <boolean>1</boolean>
+      <!-- The official viewer has no chat bar at the bottom of the screen: Enter opens nearby
+           chat in the Conversations window. SlipstreamNearbyChatInput = 0 does the same here. -->
+      <key>SlipstreamNearbyChatInput</key>
+      <boolean>0</boolean>
+      <!-- Official NameTagShowFriends = 0: friends' name tags are not highlighted. -->
+      <key>NameTagShowFriends</key>
+      <boolean>0</boolean>
+      <!-- Official NavBarShowCoordinates = 0: the location bar shows no x, y, z. -->
+      <key>NavBarShowCoordinates</key>
+      <boolean>0</boolean>
+      <!-- Official DoubleClickTeleport = 0: double-clicking the minimap or a person does not
+           teleport. -->
+      <key>DoubleClickTeleport</key>
+      <boolean>0</boolean>
+      <!-- Official PushToTalkToggle = 1: the Speak button switches the microphone on and off
+           (ours: hold to talk). -->
+      <key>PushToTalkToggle</key>
+      <boolean>1</boolean>
+    </map>
+    <key>key_bindings</key>
+    <array>
+      <!-- The official key_bindings.xml binds the middle mouse button to toggle_voice in every
+           mode; ours holds it to talk (voice_follow_key). -->
+      <map>
+        <key>command</key>
+        <string>toggle_voice</string>
+        <key>mouse</key>
+        <string>MMB</string>
+        <key>key</key>
+        <string />
+        <key>mask</key>
+        <string>NONE</string>
+        <key>instead_of</key>
+        <array>
+          <string>voice_follow_key</string>
+        </array>
+      </map>
+    </array>
+  </map>
+</llsd>

@@ -1,0 +1,142 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_control_flow_attributes : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_vote : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+// vkclean -- WORLD-SPACE LIGHT RESERVOIR GRID BUILD (RenderVKLightGrid; LLCleanRendererVK
+// "c_light_regir", in the light pass after the clusters / froxels, before every consumer). One
+// invocation per cell of the clipmap (clean_regir.glsl: layout, targets, sampling, the
+// unbiasedness argument). The host wrote the header this frame (origins, R, N, seed, the changed-
+// light mask; reach + stats zeroed) behind the light uploads' barrier.
+//
+// Per cell, two walks over the frame's lights (a uniform loop: every lane takes light li at the
+// same time, so its record loads are broadcasts):
+//   1 the candidate count M and target sum W (+ the light's reach bit, one shared atomic per
+//     subgroup and light);
+//   2 M <= N: the candidate list (REGIR_CELL_EXACT); else R stratified samples of p_cell / W
+//     (u_r = (r + xi) / R of the cumulative sum, one xi per cell and frame).
+// The second walk recomputes the same target function, so its cumulative sum ends at W up to
+// float rounding: strata whose point lies past the end take the last candidate (the slot still
+// stores that light's own 1 / q).
+// TWO POPULATIONS (gl_WorkGroupID.y; clean_regir.glsl ReSTIR DI POPULATION): 0 = every light (the
+// RT reflection hits' grid, built while rs_cfg.z has RS_F_POP0), 1 = pass 15's light set (rsInSet,
+// rs_cfg.x slots, while RS_F_BUILT) -- the same cells, targets and sampling, a different set.
+
+#include "clean_lights_common.glsl"
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer Lights { Light lights[]; };
+layout(std430, set = 0, binding = 1) readonly buffer Info   { LightInfo info; };
+#define REGIR_SET 0
+#define REGIR_BINDING 2
+#include "clean_regir.glsl"
+
+shared uint s_reach[8];
+
+void main()
+{
+    const uint lid = gl_LocalInvocationIndex;
+    const uint pop = gl_WorkGroupID.y;   // (uniform per workgroup)
+    const uint rsf = rg.rs_cfg.z;
+    if (pop == 0u ? (rsf & RS_F_POP0) == 0u : (rsf & RS_F_BUILT) == 0u) return;   // (whole workgroup)
+    if (lid < 8u) s_reach[lid] = 0u;
+    barrier();
+    const uint levels = regirLevels();
+    const uint R = pop == 0u ? regirRes() : rsSlots();
+    const uint N = regirPicks();
+    const uint cell = gl_GlobalInvocationID.x;
+    const bool live = cell < levels * REGIR_CELLS_PER_LEVEL;
+    const uint count = min(uint(info.cam_pos.w), 256u);   // (the light SSBO holds MAX_VK_LIGHTS = 256)
+    vec3 lo = vec3(0.0), hi = vec3(0.0);
+    if (live) regirCellBox(cell, lo, hi);
+
+    // ---- walk 1: M, W, reach ----
+    float W = 0.0;
+    uint M = 0u;
+    for (uint li = 0u; li < count; ++li)
+    {
+        // (population 1: its light set only -- a uniform test, the walk stays uniform)
+        const bool inSet = pop == 0u || rsInSet(li);
+        const float t = (live && inSet) ? regirCellTarget(li, lo, hi) : 0.0;
+        if (t > 0.0) { W += t; ++M; }
+        if (pop == 0u && subgroupAny(t > 0.0) && subgroupElect()) atomicOr(s_reach[li >> 5u], 1u << (li & 31u));
+    }
+    // stats: one atomic per subgroup (every lane is still here)
+    {
+        const uint ne = subgroupAdd(M > 0u ? 1u : 0u);
+        const uint sm = subgroupAdd(M);
+        const uint mx = subgroupMax(M);
+        if (subgroupElect() && ne != 0u)
+        {
+            if (pop == 0u)
+            {
+                atomicAdd(rg.stat[0], ne);
+                atomicAdd(rg.stat[1], sm);
+                atomicMax(rg.stat[2], mx);
+            }
+            else
+            {
+                atomicAdd(rg.rs_stat[0], ne);
+                atomicAdd(rg.rs_stat[1], sm);
+                atomicMax(rg.rs_stat[2], mx);
+            }
+        }
+    }
+    barrier();
+    if (pop == 0u && lid < 8u && s_reach[lid] != 0u) atomicOr(rg.reach[lid], s_reach[lid]);
+    if (!live) return;
+
+    const uint base = pop == 0u ? cell * (R + 1u) : rsCellWord(cell);
+    if (M == 0u || !(W > 0.0) || !(W < 3.0e38))
+    {
+        rg_cells[base] = uvec2(0u, 0u);
+        return;
+    }
+
+    // ---- walk 2 ----
+    // (population 1: an exact list whenever it fits the slots -- pass 15 then evaluates the whole
+    //  set: the cluster walk's exact RIS on a tighter list)
+    if (M <= (pop == 0u ? N : R))
+    {   // EXACT LIST: every candidate, weight 1
+        uint k = 0u;
+        for (uint li = 0u; li < count && k < M; ++li)
+        {
+            if ((pop == 0u || rsInSet(li)) && regirCellTarget(li, lo, hi) > 0.0)
+            {
+                rg_cells[base + 1u + k] = uvec2(li, floatBitsToUint(1.0));
+                ++k;
+            }
+        }
+        rg_cells[base] = uvec2(k | REGIR_CELL_EXACT, floatBitsToUint(W));
+        return;
+    }
+    uint rng = regirHash(cell ^ regirHash(rg.cfg.w + pop * 0x9E3779B9u));
+    const float xi = regirU01(rng);
+    const float strat = W / float(R);
+    uint r = 0u;
+    float cum = 0.0;
+    uint lastL = 0u;
+    float lastT = 0.0;
+    for (uint li = 0u; li < count && r < R; ++li)
+    {
+        const float t = (pop == 0u || rsInSet(li)) ? regirCellTarget(li, lo, hi) : 0.0;
+        if (!(t > 0.0)) continue;
+        cum += t;
+        lastL = li; lastT = t;
+        const float inv = W / t;
+        while (r < R && (float(r) + xi) * strat < cum)
+        {
+            rg_cells[base + 1u + r] = uvec2(li, floatBitsToUint(inv));
+            ++r;
+        }
+    }
+    if (!(lastT > 0.0))
+    {   // (walk 2 found nothing walk 1 did: rounding only -- an empty cell rather than stale slots)
+        rg_cells[base] = uvec2(0u, 0u);
+        return;
+    }
+    for (; r < R; ++r) rg_cells[base + 1u + r] = uvec2(lastL, floatBitsToUint(W / lastT));
+    rg_cells[base] = uvec2(min(M, REGIR_COUNT_MASK), floatBitsToUint(W));
+}

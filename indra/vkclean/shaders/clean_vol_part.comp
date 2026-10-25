@@ -1,0 +1,241 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_nonuniform_qualifier : require
+// vkclean -- VOLUMETRIC PARTICLES (#721, epic #722 phase 4): SELECTION + BINNING of the GPU
+// particle pool into the volumetric fog's froxel injection (RenderVKVolumetricParticles).
+//
+// SL particle content cannot change, so the viewer decides which particles are "volume
+// like": smoke / steam / dust / fog puffs (large, soft, alpha-blended billboards) become a
+// soft sphere of participating medium in the froxel grid, lit by the fog's light pass like
+// the rest of the fog -- sun / moon through the cascades (so shafts cut through smoke),
+// sky ambient, the clustered local lights with shadowed projectors -- and converged by the
+// fog's temporal filter. Glowing particles (SL EMISSIVE / glow, additive pairs) add emitted
+// light to the medium. Opt-in (the heuristic can misjudge stylised content).
+//
+// Two dispatches over the pool, one invocation per slot (push q2.z = pass):
+//   0 CLASSIFY  qualify (below) -> count candidates per distance bucket (pv_hist)
+//   1 BIN       take every bucket that fits under the cap whole, the straddling one by
+//               atomic claim (the cap keeps the NEAREST particles), write the PVol record,
+//               append it to every screen tile its bounding sphere projects onto, and write
+//               the particle's SPRITE FADE (glow.z, below) -- 0 for every live particle not
+//               injected this frame.
+//
+// QUALIFY (both passes run the same function; deterministic per particle and frame):
+//   alive billboard (no ribbon), texture resident, size >= q0.w, inside the fog grid's
+//   frustum and within q1.x (distance), blend pair ALPHA-OVER (density, + emission if SL
+//   EMISSIVE / glow) or ADDITIVE (SA/ONE, ONE/ONE: emission only, needs q1.w > 0).
+//   Mode 1 (smoke-like heuristic) also rejects velocity-aligned streaks and targeted beams,
+//   hard-edged / opaque sprites (texture mean alpha > 0.85), strongly saturated non-glowing
+//   colours (magic sparkles, confetti), and additive sprites under twice the minimum size.
+//   Mode 2 takes every billboard of those pairs that is large enough (A/B, stylised regions).
+//   The texture's MEAN colour / alpha is its last mip (one bindless tap, the 1x1 average).
+//
+// DENSITY (mass-conserving): the sprite's coverage a = tint.a x mean texel alpha over its
+// sx x sy quad becomes a sphere of radius R = max(size / 2, ~half a froxel at its depth --
+// the distance LOD: a sphere smaller than a cell would alias between the jittered samples)
+// with profile (1 - r^2/R^2)^2 whose PROJECTED integral equals the quad's optical depth
+// mass: sigma_core = -ln(1 - a_v) sx sy 105 / (32 pi R^3), a_v = a x q1.z (volume share).
+// Scattering albedo = the sprite's linear colour (dark smoke absorbs, steam scatters);
+// SL EMISSIVE sprites (fullbright) do not scatter, they emit lin x HDR scale x sigma
+// (a homogeneous slab of that emission shows exactly the sprite's lin x a_v).
+//
+// SPRITE FADE (Particle.glow.z, unused by the particle records otherwise -- the emit pass
+// writes 0 there on spawn): the fraction of the sprite's coverage that moved into the
+// volume, 1 - keep (q1.y). The main view's lit particle VS (clean_particle.vert
+// PART_VERTEX_LIGHT) scales the sprite by 1 - glow.z while vol_eye.w > 1.5 (the fog ran
+// the bin pass this frame with sprite replacement); the mirror / shadow passes ignore it.
+// Near the distance limit (last 30 %) the volume share fades out and the sprite fades back
+// in: no pop at the LOD edge.
+//
+// Set 0 binding 9 = frame info (the grid's vol_*), set 1 = the bindless textures, set 2 =
+// the fog's own set: 5 the particle pool (read-write: glow.z), 6 the particle volume buffer.
+layout(local_size_x = 64) in;
+
+#include "clean_frame_info.glsl"
+#include "clean_atmos_common.glsl"
+#include "clean_vol_common.glsl"
+#include "clean_particle_common.glsl"
+#include "clean_vol_part_common.glsl"
+
+layout(set = 1, binding = 0) uniform sampler2D uTextures[];
+layout(std430, set = 2, binding = 5) buffer Particles { Particle parts[]; };
+
+// The fog passes' 128 B push range, laid out for this pass (LLCleanVolFogVK::PartPush).
+layout(push_constant) uniform PartVolPush {
+    vec4 q0;   // x pool size, y mode (1 heuristic, 2 all), z record cap, w minimum size (m)
+    vec4 q1;   // x max distance (m), y sprite keep [0, 1], z volume share, w emission gain
+    vec4 q2;   // x tiles X, y tiles Y, z pass (0 classify, 1 bin), w froxel size per metre of depth
+    vec4 q3;   // xyz camera forward (world, unit), w 0
+    vec4 q4, q5, q6, q7;
+} pv;
+
+const uint PAIR_ALPHA = 55u;   // SOURCE_ALPHA * 8 + ONE_MINUS_SOURCE_ALPHA
+const uint PAIR_ADD_SA = 48u;  // SOURCE_ALPHA * 8 + ONE
+const uint PAIR_ADD_ONE = 0u;  // ONE * 8 + ONE
+const uint F_EMISSIVE = 0x100u;
+
+// The bounding sphere's screen tile rectangle (inclusive) on the grid; false = off-grid.
+bool pvTileRect(vec3 rel, float R, out uvec4 rect)
+{
+    const vec2 dims = ssr.vol_grid.xy;
+    vec2 lo = vec2(1e9), hi = vec2(-1e9);
+    bool full = false;
+    for (int k = 0; k < 8; ++k)
+    {
+        const vec3 s = vec3((k & 1) != 0 ? 1.0 : -1.0, (k & 2) != 0 ? 1.0 : -1.0, (k & 4) != 0 ? 1.0 : -1.0);
+        const vec4 cl = ssr.vol_vp * vec4(rel + s * R, 1.0);
+        if (cl.w <= 1e-3) { full = true; break; }   // straddles the eye plane: every column
+        const vec2 ndc = cl.xy / cl.w;
+        lo = min(lo, ndc); hi = max(hi, ndc);
+    }
+    const uvec2 tiles = uvec2(pv.q2.xy + 0.5);
+    if (full) { rect = uvec4(0u, 0u, tiles - 1u); return true; }
+    const vec2 c0 = (lo * 0.5 + 0.5) * dims, c1 = (hi * 0.5 + 0.5) * dims;
+    if (c1.x < 0.0 || c1.y < 0.0 || c0.x >= dims.x || c0.y >= dims.y) return false;
+    const uvec2 a = uvec2(clamp(floor(c0), vec2(0.0), dims - 1.0));
+    const uvec2 b = uvec2(clamp(floor(c1), vec2(0.0), dims - 1.0));
+    rect = uvec4(min(a / VP_TILE, tiles - 1u), min(b / VP_TILE, tiles - 1u));
+    return true;
+}
+
+bool pvQualify(uint i, out PVol rec, out float keep, out uint bucket, out uvec4 rect)
+{
+    rec = PVol(vec4(0.0), vec4(0.0), vec4(0.0));
+    keep = 1.0; bucket = 0u; rect = uvec4(0u);
+    const Particle p = parts[i];
+    if (p.misc.w == 0u) return false;
+    const uint flags = p.misc.x;
+    if ((flags & F_RIBBON) != 0u) return false;
+    if ((flags & F_PFOG) != 0u) return false;   // (#1003: a particle-fog system -- its density is in its brick)
+    const bool heuristic = pv.q0.y < 1.5;
+    if (heuristic && (flags & (F_FOLLOW_VELOCITY | F_TARGET_LIN)) != 0u) return false;
+    const uint pair = p.misc.y;
+    const bool over = pair == PAIR_ALPHA;
+    const bool additive = pair == PAIR_ADD_SA || pair == PAIR_ADD_ONE;
+    const float gain = max(pv.q1.w, 0.0);
+    if (!over && !(additive && gain > 0.0)) return false;
+    const uint tex = p.tex_handle.x;
+    if (tex == 0xFFFFFFFFu) return false;
+
+    const float t = partAgeT(p);
+    const vec2 scl = abs(partScaleAt(p, t));
+    const float size = max(scl.x, scl.y);
+    const float minSize = pv.q0.w * ((additive && heuristic) ? 2.0 : 1.0);
+    if (!(size >= minSize) || size > 64.0) return false;
+
+    const vec3 rel = p.pos_age.xyz - ssr.vol_eye.xyz;
+    const float dist = length(rel);
+    const float vz = dot(rel, pv.q3.xyz);
+    const float maxDist = pv.q1.x;
+    const float R = 0.5 * size;
+    if (vz + R <= 0.0 || dist - R >= maxDist) return false;
+
+    // The texture's mean (its last mip). Fewer than 3 levels (tiny / unmipped): the texel at
+    // the centre is no mean -- assume half coverage.
+    const int levels = textureQueryLevels(uTextures[nonuniformEXT(tex)]);
+    vec4 avg = textureLod(uTextures[nonuniformEXT(tex)], vec2(0.5), float(max(levels - 1, 0)));
+    if (levels < 3) avg.a = 0.5;
+    const vec4 col = partColorAt(p, t);
+    const vec4 c = clamp(avg * col, vec4(0.0), vec4(1.0));
+    const bool emissive = (flags & F_EMISSIVE) != 0u;
+    const float glow = clamp(mix(p.glow.x, p.glow.y, t), 0.0, 1.0);
+    if (heuristic && over && !emissive && glow <= 0.0)
+    {
+        if (avg.a > 0.85) return false;   // hard-edged / opaque cut-out sprite
+        const float mx = max(max(c.r, c.g), c.b), mn = min(min(c.r, c.g), c.b);
+        if (mx > 0.05 && (mx - mn) / mx > 0.7) return false;   // saturated: stylised, not a medium
+    }
+    const float a = additive && pair == PAIR_ADD_ONE ? 1.0 : c.a;
+    if (a < 0.004) return false;
+
+    // Distance LOD: the volume share fades out over the last 30 % of the range (the sprite
+    // fades back in by the same amount), and R grows to about half a froxel at its depth.
+    const float lodT = smoothstep(0.7 * maxDist, maxDist, dist);
+    const float share = max(pv.q1.z, 0.0) * (1.0 - lodT);
+    if (share <= 0.0) return false;
+    const float vzc = max(vz, 0.0);
+    const float cellXY = pv.q2.w * vzc;
+    const float cellZ = ssr.vol_slice.y * (vzc + ssr.vol_slice.x) / max(ssr.vol_grid.z, 1.0);
+    const float Reff = max(R, 0.5 * max(cellXY, cellZ));
+    if (!pvTileRect(rel, Reff, rect)) return false;
+    const float mass = scl.x * scl.y * (105.0 / (32.0 * ATMOS_PI)) / (Reff * Reff * Reff);
+
+    const vec3 lin = atmosSrgbToLinear(c.rgb);
+    vec3 scat = vec3(0.0), emit = vec3(0.0);
+    float sigma = 0.0;
+    if (over)
+    {
+        const float av = clamp(a * share, 0.0, 0.98);
+        sigma = -log(1.0 - av) * mass;
+        scat = emissive ? vec3(0.0) : clamp(lin, vec3(0.0), vec3(1.0)) * sigma;
+        const float e = gain * (emissive ? 1.0 : glow);
+        if (e > 0.0) emit = lin * (atmosHdrScale() * sigma * e);
+    }
+    else
+    {
+        // Additive: emitted light only (the sprite adds lin x a; the volume's emission
+        // integrates to the same over its projection).
+        emit = lin * (atmosHdrScale() * a * share * mass * gain);
+    }
+    if (!(sigma > 0.0) && !any(greaterThan(emit, vec3(0.0)))) return false;
+    if (any(isnan(emit)) || any(isinf(emit)) || isnan(sigma) || isinf(sigma)) return false;
+
+    rec.pos_r = vec4(p.pos_age.xyz, Reff);
+    rec.scat = vec4(scat, sigma);
+    rec.emit = vec4(min(emit, vec3(1e4)), float(i % 1021u) * 7.31);
+    keep = mix(clamp(pv.q1.y, 0.0, 1.0), 1.0, lodT);
+    bucket = min(uint(float(VP_HIST) * sqrt(clamp(dist / maxDist, 0.0, 1.0))), VP_HIST - 1u);
+    return true;
+}
+
+void main()
+{
+    const uint i = gl_GlobalInvocationID.x;
+    if (i >= uint(pv.q0.x + 0.5)) return;
+    PVol rec;
+    float keep;
+    uint bucket;
+    uvec4 rect;
+    const bool ok = pvQualify(i, rec, keep, bucket, rect);
+
+    if (pv.q2.z < 0.5)
+    {
+        // CLASSIFY.
+        if (ok)
+        {
+            atomicAdd(pv_hist[bucket], 1u);
+            atomicAdd(pv_hdr.w, 1u);
+        }
+        return;
+    }
+
+    // BIN.
+    float fade = 0.0;
+    if (ok)
+    {
+        const uint cap = uint(pv.q0.z + 0.5);
+        uint before = 0u;
+        for (uint b = 0u; b < bucket; ++b) before += pv_hist[b];
+        bool take = before + pv_hist[bucket] <= cap;
+        if (!take && before < cap) take = before + atomicAdd(pv_hdr.y, 1u) < cap;
+        if (take)
+        {
+            const uint slot = atomicAdd(pv_hdr.x, 1u);
+            if (slot < cap)
+            {
+                pv_rec[slot] = rec;
+                const uint tx = uint(pv.q2.x + 0.5);
+                for (uint ty = rect.y; ty <= rect.w; ++ty)
+                    for (uint tx0 = rect.x; tx0 <= rect.z; ++tx0)
+                    {
+                        const uint tl = ty * tx + tx0;
+                        const uint k = atomicAdd(pv_tile_n[tl], 1u);
+                        if (k < VP_TILE_CAP) pv_tile[tl * VP_TILE_CAP + k] = slot;
+                        else atomicAdd(pv_hdr.z, 1u);
+                    }
+                fade = 1.0 - keep;
+            }
+        }
+    }
+    if (parts[i].misc.w != 0u && parts[i].glow.z != fade) parts[i].glow.z = fade;
+}

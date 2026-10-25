@@ -1,0 +1,80 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// vkclean — bitonic sort of the particle draw list (clean_particle_compact.comp keys),
+// ascending by (key, pool index): the index tie-break keeps equal-depth particles
+// (PATTERN_DROP sprites stacked at the source) in a stable order instead of flickering.
+// The list is the pool size N (a power of two >= BLOCK) -- or, with the mirror list
+// (#518), the two N-entry halves [0, N) main and [N, 2N) mirror, sorted INDEPENDENTLY in
+// the same dispatches: no compare-exchange pair straddles the halves (j < N), and the
+// direction uses the index within its half, so both come out ascending. Stages:
+//   u_ctl.z == 0 && u_ctl.w == 0: sort each BLOCK-element block in shared memory
+//                                 (every k <= BLOCK);
+//   u_ctl.w >= BLOCK:             one global compare-exchange step (k, j);
+//   u_ctl.z  > BLOCK && u_ctl.w == 0: the rest of stage k (j < BLOCK) in shared memory.
+// 8192 particles: 10 dispatches (either length).
+#define THREADS 512u
+#define BLOCK   (2u * THREADS)
+layout(local_size_x = THREADS) in;
+#include "clean_particle_compute_common.glsl"
+
+shared uvec2 s_e[BLOCK];
+
+bool greater(uvec2 a, uvec2 b) { return a.x > b.x || (a.x == b.x && a.y > b.y); }
+
+// Ascending iff bit k of the index WITHIN its N-entry list is clear (k <= N).
+bool ascAt(uint g, uint k) { return ((g & (pp.u_max_particles - 1u)) & k) == 0u; }
+
+// Compare-exchange of local elements i < l (global index base + i decides direction).
+void cmpx(uint base, uint i, uint l, uint k)
+{
+    const bool asc = ascAt(base + i, k);
+    const uvec2 a = s_e[i], b = s_e[l];
+    if (greater(a, b) == asc) { s_e[i] = b; s_e[l] = a; }
+}
+
+void main()
+{
+    const uint L = pp.u_cull.y;   // sorted entries: N, or 2N with the mirror list
+    const uint k = pp.u_ctl.z, j = pp.u_ctl.w;
+    const uint t = gl_LocalInvocationID.x;
+
+    if (j != 0u)
+    {
+        // Global step: thread -> pair (i, i + j).
+        const uint g = gl_GlobalInvocationID.x;
+        const uint i = 2u * j * (g / j) + (g % j);
+        const uint l = i + j;
+        if (l >= L) return;
+        const bool asc = ascAt(i, k);
+        const uvec2 a = draw_list[i], b = draw_list[l];
+        if (greater(a, b) == asc) { draw_list[i] = b; draw_list[l] = a; }
+        return;
+    }
+
+    const uint base = gl_WorkGroupID.x * BLOCK;
+    if (base >= L) return;
+    s_e[t]           = draw_list[base + t];
+    s_e[t + THREADS] = draw_list[base + t + THREADS];
+    barrier();
+    if (k == 0u)
+    {
+        for (uint kk = 2u; kk <= BLOCK; kk <<= 1u)
+            for (uint jj = kk >> 1u; jj > 0u; jj >>= 1u)
+            {
+                const uint i = 2u * jj * (t / jj) + (t % jj);
+                cmpx(base, i, i + jj, kk);
+                barrier();
+            }
+    }
+    else
+    {
+        for (uint jj = BLOCK >> 1u; jj > 0u; jj >>= 1u)
+        {
+            const uint i = 2u * jj * (t / jj) + (t % jj);
+            cmpx(base, i, i + jj, k);
+            barrier();
+        }
+    }
+    draw_list[base + t]           = s_e[t];
+    draw_list[base + t + THREADS] = s_e[t + THREADS];
+}

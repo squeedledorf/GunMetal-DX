@@ -1,0 +1,122 @@
+<?xml version="1.0" ?>
+<!-- Pose Studio (#500) bone picker figure. Coordinates are normalised to the view
+     (0,0 = bottom-left, 1,1 = top-right); the view keeps its aspect ratio. "parent"
+     draws a line; a bone without one stands on its own. "image" (optional) is a UI
+     image drawn behind the dots. How each bone moves on its dials (the OP Pose HUD
+     model, ranges, followers) lives in bone_axes.xml, shared by all figures. -->
+<llsd>
+<map>
+  <key>name</key><string>Pony / quadruped</string>
+  <key>skeleton</key><string>quadruped</string>
+  <key>views</key>
+  <array>
+    <map>
+      <key>id</key><string>body</string>
+      <key>label</key><string>Pony (from above)</string>
+      <key>aspect</key><real>1.0</real>
+      <key>image</key><string></string>
+      <key>bones</key>
+      <array>
+        <map><key>joint</key><string>mHead</string><key>label</key><string>Head</string><key>x</key><real>0.5</real><key>y</key><real>0.86</real><key>parent</key><string>mNeck</string></map>
+        <map><key>joint</key><string>mNeck</string><key>label</key><string>Neck</string><key>x</key><real>0.5</real><key>y</key><real>0.77</real><key>parent</key><string>mChest</string></map>
+        <map><key>joint</key><string>mFaceEar1Left</string><key>label</key><string>Ear 1 Left</string><key>x</key><real>0.455</real><key>y</key><real>0.91</real><key>parent</key><string>mHead</string></map>
+        <map><key>joint</key><string>mFaceEar1Right</string><key>label</key><string>Ear 1 Right</string><key>x</key><real>0.545</real><key>y</key><real>0.91</real><key>parent</key><string>mHead</string></map>
+        <map><key>joint</key><string>mFaceEar2Left</string><key>label</key><string>Ear 2 Left</string><key>x</key><real>0.425</real><key>y</key><real>0.955</real><key>parent</key><string>mFaceEar1Left</string></map>
+        <map><key>joint</key><string>mFaceEar2Right</string><key>label</key><string>Ear 2 Right</string><key>x</key><real>0.575</real><key>y</key><real>0.955</real><key>parent</key><string>mFaceEar1Right</string></map>
+        <map><key>joint</key><string>mChest</string><key>label</key><string>Chest</string><key>x</key><real>0.5</real><key>y</key><real>0.67</real><key>parent</key><string>mTorso</string></map>
+        <map><key>joint</key><string>mCollarLeft</string><key>label</key><string>Collar Left</string><key>x</key><real>0.45</real><key>y</key><real>0.67</real><key>parent</key><string>mChest</string></map>
+        <map><key>joint</key><string>mCollarRight</string><key>label</key><string>Collar Right</string><key>x</key><real>0.55</real><key>y</key><real>0.67</real><key>parent</key><string>mChest</string></map>
+        <map><key>joint</key><string>mShoulderLeft</string><key>label</key><string>Shoulder Left</string><key>x</key><real>0.39</real><key>y</key><real>0.67</real><key>parent</key><string>mCollarLeft</string></map>
+        <map><key>joint</key><string>mShoulderRight</string><key>label</key><string>Shoulder Right</string><key>x</key><real>0.61</real><key>y</key><real>0.67</real><key>parent</key><string>mCollarRight</string></map>
+        <map><key>joint</key><string>mElbowLeft</string><key>label</key><string>Elbow Left</string><key>x</key><real>0.3</real><key>y</key><real>0.67</real><key>parent</key><string>mShoulderLeft</string></map>
+        <map><key>joint</key><string>mElbowRight</string><key>label</key><string>Elbow Right</string><key>x</key><real>0.7</real><key>y</key><real>0.67</real><key>parent</key><string>mShoulderRight</string></map>
+        <map><key>joint</key><string>mWristLeft</string><key>label</key><string>Wrist Left</string><key>x</key><real>0.21</real><key>y</key><real>0.67</real><key>parent</key><string>mElbowLeft</string></map>
+        <map><key>joint</key><string>mWristRight</string><key>label</key><string>Wrist Right</string><key>x</key><real>0.79</real><key>y</key><real>0.67</real><key>parent</key><string>mElbowRight</string></map>
+        <map><key>joint</key><string>mHandRing1Left</string><key>label</key><string>Ring 1 Left</string><key>x</key><real>0.13</real><key>y</key><real>0.67</real><key>parent</key><string>mWristLeft</string></map>
+        <map><key>joint</key><string>mHandRing1Right</string><key>label</key><string>Ring 1 Right</string><key>x</key><real>0.87</real><key>y</key><real>0.67</real><key>parent</key><string>mWristRight</string></map>
+        <map><key>joint</key><string>mTorso</string><key>label</key><string>Torso</string><key>x</key><real>0.5</real><key>y</key><real>0.53</real><key>parent</key><string>mPelvis</string></map>
+        <map><key>joint</key><string>mPelvis</string><key>label</key><string>Pelvis</string><key>x</key><real>0.5</real><key>y</key><real>0.39</real></map>
+        <map><key>joint</key><string>mHipLeft</string><key>label</key><string>Hip Left</string><key>x</key><real>0.43</real><key>y</key><real>0.39</real><key>parent</key><string>mPelvis</string></map>
+        <map><key>joint</key><string>mHipRight</string><key>label</key><string>Hip Right</string><key>x</key><real>0.57</real><key>y</key><real>0.39</real><key>parent</key><string>mPelvis</string></map>
+        <map><key>joint</key><string>mKneeLeft</string><key>label</key><string>Knee Left</string><key>x</key><real>0.34</real><key>y</key><real>0.39</real><key>parent</key><string>mHipLeft</string></map>
+        <map><key>joint</key><string>mKneeRight</string><key>label</key><string>Knee Right</string><key>x</key><real>0.66</real><key>y</key><real>0.39</real><key>parent</key><string>mHipRight</string></map>
+        <map><key>joint</key><string>mAnkleLeft</string><key>label</key><string>Ankle Left</string><key>x</key><real>0.25</real><key>y</key><real>0.39</real><key>parent</key><string>mKneeLeft</string></map>
+        <map><key>joint</key><string>mAnkleRight</string><key>label</key><string>Ankle Right</string><key>x</key><real>0.75</real><key>y</key><real>0.39</real><key>parent</key><string>mKneeRight</string></map>
+        <map><key>joint</key><string>mFootLeft</string><key>label</key><string>Foot Left</string><key>x</key><real>0.16</real><key>y</key><real>0.39</real><key>parent</key><string>mAnkleLeft</string></map>
+        <map><key>joint</key><string>mFootRight</string><key>label</key><string>Foot Right</string><key>x</key><real>0.84</real><key>y</key><real>0.39</real><key>parent</key><string>mAnkleRight</string></map>
+        <map><key>joint</key><string>mWing1Left</string><key>label</key><string>Wing 1 Left</string><key>x</key><real>0.12</real><key>y</key><real>0.76</real></map>
+        <map><key>joint</key><string>mWing1Right</string><key>label</key><string>Wing 1 Right</string><key>x</key><real>0.88</real><key>y</key><real>0.76</real></map>
+        <map><key>joint</key><string>mWing2Left</string><key>label</key><string>Wing 2 Left</string><key>x</key><real>0.07</real><key>y</key><real>0.8300000000000001</real><key>parent</key><string>mWing1Left</string></map>
+        <map><key>joint</key><string>mWing2Right</string><key>label</key><string>Wing 2 Right</string><key>x</key><real>0.93</real><key>y</key><real>0.8300000000000001</real><key>parent</key><string>mWing1Right</string></map>
+        <map><key>joint</key><string>mWing3Left</string><key>label</key><string>Wing 3 Left</string><key>x</key><real>0.03</real><key>y</key><real>0.9</real><key>parent</key><string>mWing2Left</string></map>
+        <map><key>joint</key><string>mWing3Right</string><key>label</key><string>Wing 3 Right</string><key>x</key><real>0.97</real><key>y</key><real>0.9</real><key>parent</key><string>mWing2Right</string></map>
+        <map><key>joint</key><string>mWing4Left</string><key>label</key><string>Wing 4 Left</string><key>x</key><real>0.0</real><key>y</key><real>0.98</real><key>parent</key><string>mWing3Left</string></map>
+        <map><key>joint</key><string>mWing4Right</string><key>label</key><string>Wing 4 Right</string><key>x</key><real>1.0</real><key>y</key><real>0.98</real><key>parent</key><string>mWing3Right</string></map>
+        <map><key>joint</key><string>mWing4FanLeft</string><key>label</key><string>Wing 4 Fan Left</string><key>x</key><real>-0.02</real><key>y</key><real>0.86</real><key>parent</key><string>mWing3Left</string></map>
+        <map><key>joint</key><string>mWing4FanRight</string><key>label</key><string>Wing 4 Fan Right</string><key>x</key><real>1.02</real><key>y</key><real>0.86</real><key>parent</key><string>mWing3Right</string></map>
+        <map><key>joint</key><string>mTail1</string><key>label</key><string>Tail 1</string><key>x</key><real>0.22</real><key>y</key><real>0.08</real></map>
+        <map><key>joint</key><string>mTail2</string><key>label</key><string>Tail 2</string><key>x</key><real>0.332</real><key>y</key><real>0.08</real><key>parent</key><string>mTail1</string></map>
+        <map><key>joint</key><string>mTail3</string><key>label</key><string>Tail 3</string><key>x</key><real>0.444</real><key>y</key><real>0.08</real><key>parent</key><string>mTail2</string></map>
+        <map><key>joint</key><string>mTail4</string><key>label</key><string>Tail 4</string><key>x</key><real>0.556</real><key>y</key><real>0.08</real><key>parent</key><string>mTail3</string></map>
+        <map><key>joint</key><string>mTail5</string><key>label</key><string>Tail 5</string><key>x</key><real>0.668</real><key>y</key><real>0.08</real><key>parent</key><string>mTail4</string></map>
+        <map><key>joint</key><string>mTail6</string><key>label</key><string>Tail 6</string><key>x</key><real>0.78</real><key>y</key><real>0.08</real><key>parent</key><string>mTail5</string></map>
+      </array>
+    </map>
+    <map>
+      <key>id</key><string>face</string>
+      <key>label</key><string>Face (from the front)</string>
+      <key>aspect</key><real>1.0</real>
+      <key>image</key><string></string>
+      <key>bones</key>
+      <array>
+        <map><key>joint</key><string>mHead</string><key>label</key><string>Head</string><key>x</key><real>0.5</real><key>y</key><real>0.97</real></map>
+        <map><key>joint</key><string>mFaceRoot</string><key>label</key><string>Root</string><key>x</key><real>0.5</real><key>y</key><real>0.62</real><key>parent</key><string>mHead</string></map>
+        <map><key>joint</key><string>mFaceForeheadLeft</string><key>label</key><string>Forehead Left</string><key>x</key><real>0.62</real><key>y</key><real>0.86</real><key>parent</key><string>mFaceRoot</string></map>
+        <map><key>joint</key><string>mFaceForeheadRight</string><key>label</key><string>Forehead Right</string><key>x</key><real>0.38</real><key>y</key><real>0.86</real><key>parent</key><string>mFaceRoot</string></map>
+        <map><key>joint</key><string>mFaceForeheadCenter</string><key>label</key><string>Forehead Center</string><key>x</key><real>0.5</real><key>y</key><real>0.89</real><key>parent</key><string>mFaceRoot</string></map>
+        <map><key>joint</key><string>mFaceEyebrowOuterLeft</string><key>label</key><string>Eyebrow Outer Left</string><key>x</key><real>0.71</real><key>y</key><real>0.76</real><key>parent</key><string>mFaceRoot</string></map>
+        <map><key>joint</key><string>mFaceEyebrowOuterRight</string><key>label</key><string>Eyebrow Outer Right</string><key>x</key><real>0.29</real><key>y</key><real>0.76</real><key>parent</key><string>mFaceRoot</string></map>
+        <map><key>joint</key><string>mFaceEyebrowCenterLeft</string><key>label</key><string>Eyebrow Center Left</string><key>x</key><real>0.635</real><key>y</key><real>0.78</real><key>parent</key><string>mFaceRoot</string></map>
+        <map><key>joint</key><string>mFaceEyebrowCenterRight</string><key>label</key><string>Eyebrow Center Right</string><key>x</key><real>0.365</real><key>y</key><real>0.78</real><key>parent</key><string>mFaceRoot</string></map>
+        <map><key>joint</key><string>mFaceEyebrowInnerLeft</string><key>label</key><string>Eyebrow Inner Left</string><key>x</key><real>0.56</real><key>y</key><real>0.77</real><key>parent</key><string>mFaceRoot</string></map>
+        <map><key>joint</key><string>mFaceEyebrowInnerRight</string><key>label</key><string>Eyebrow Inner Right</string><key>x</key><real>0.44</real><key>y</key><real>0.77</real><key>parent</key><string>mFaceRoot</string></map>
+        <map><key>joint</key><string>mEyeLeft</string><key>label</key><string>Eye Left</string><key>x</key><real>0.635</real><key>y</key><real>0.665</real><key>parent</key><string>mHead</string></map>
+        <map><key>joint</key><string>mEyeRight</string><key>label</key><string>Eye Right</string><key>x</key><real>0.365</real><key>y</key><real>0.665</real><key>parent</key><string>mHead</string></map>
+        <map><key>joint</key><string>mFaceEyeLidUpperLeft</string><key>label</key><string>Eye Lid Upper Left</string><key>x</key><real>0.635</real><key>y</key><real>0.715</real><key>parent</key><string>mFaceRoot</string></map>
+        <map><key>joint</key><string>mFaceEyeLidUpperRight</string><key>label</key><string>Eye Lid Upper Right</string><key>x</key><real>0.365</real><key>y</key><real>0.715</real><key>parent</key><string>mFaceRoot</string></map>
+        <map><key>joint</key><string>mFaceEyeLidLowerLeft</string><key>label</key><string>Eye Lid Lower Left</string><key>x</key><real>0.635</real><key>y</key><real>0.615</real><key>parent</key><string>mFaceRoot</string></map>
+        <map><key>joint</key><string>mFaceEyeLidLowerRight</string><key>label</key><string>Eye Lid Lower Right</string><key>x</key><real>0.365</real><key>y</key><real>0.615</real><key>parent</key><string>mFaceRoot</string></map>
+        <map><key>joint</key><string>mFaceEyecornerInnerLeft</string><key>label</key><string>Eyecorner Inner Left</string><key>x</key><real>0.565</real><key>y</key><real>0.655</real><key>parent</key><string>mFaceRoot</string></map>
+        <map><key>joint</key><string>mFaceEyecornerInnerRight</string><key>label</key><string>Eyecorner Inner Right</string><key>x</key><real>0.435</real><key>y</key><real>0.655</real><key>parent</key><string>mFaceRoot</string></map>
+        <map><key>joint</key><string>mFaceEar1Left</string><key>label</key><string>Ear 1 Left</string><key>x</key><real>0.86</real><key>y</key><real>0.62</real><key>parent</key><string>mFaceRoot</string></map>
+        <map><key>joint</key><string>mFaceEar1Right</string><key>label</key><string>Ear 1 Right</string><key>x</key><real>0.14</real><key>y</key><real>0.62</real><key>parent</key><string>mFaceRoot</string></map>
+        <map><key>joint</key><string>mFaceEar2Left</string><key>label</key><string>Ear 2 Left</string><key>x</key><real>0.9</real><key>y</key><real>0.74</real><key>parent</key><string>mFaceEar1Left</string></map>
+        <map><key>joint</key><string>mFaceEar2Right</string><key>label</key><string>Ear 2 Right</string><key>x</key><real>0.1</real><key>y</key><real>0.74</real><key>parent</key><string>mFaceEar1Right</string></map>
+        <map><key>joint</key><string>mFaceNoseBridge</string><key>label</key><string>Nose Bridge</string><key>x</key><real>0.5</real><key>y</key><real>0.69</real><key>parent</key><string>mFaceRoot</string></map>
+        <map><key>joint</key><string>mFaceNoseCenter</string><key>label</key><string>Nose Center</string><key>x</key><real>0.5</real><key>y</key><real>0.55</real><key>parent</key><string>mFaceRoot</string></map>
+        <map><key>joint</key><string>mFaceNoseBase</string><key>label</key><string>Nose Base</string><key>x</key><real>0.5</real><key>y</key><real>0.5</real><key>parent</key><string>mFaceRoot</string></map>
+        <map><key>joint</key><string>mFaceNoseLeft</string><key>label</key><string>Nose Left</string><key>x</key><real>0.555</real><key>y</key><real>0.53</real><key>parent</key><string>mFaceRoot</string></map>
+        <map><key>joint</key><string>mFaceNoseRight</string><key>label</key><string>Nose Right</string><key>x</key><real>0.445</real><key>y</key><real>0.53</real><key>parent</key><string>mFaceRoot</string></map>
+        <map><key>joint</key><string>mFaceCheekUpperLeft</string><key>label</key><string>Cheek Upper Left</string><key>x</key><real>0.71</real><key>y</key><real>0.55</real><key>parent</key><string>mFaceRoot</string></map>
+        <map><key>joint</key><string>mFaceCheekUpperRight</string><key>label</key><string>Cheek Upper Right</string><key>x</key><real>0.29</real><key>y</key><real>0.55</real><key>parent</key><string>mFaceRoot</string></map>
+        <map><key>joint</key><string>mFaceCheekLowerLeft</string><key>label</key><string>Cheek Lower Left</string><key>x</key><real>0.69</real><key>y</key><real>0.42</real><key>parent</key><string>mFaceRoot</string></map>
+        <map><key>joint</key><string>mFaceCheekLowerRight</string><key>label</key><string>Cheek Lower Right</string><key>x</key><real>0.31</real><key>y</key><real>0.42</real><key>parent</key><string>mFaceRoot</string></map>
+        <map><key>joint</key><string>mFaceTeethUpper</string><key>label</key><string>Teeth Upper</string><key>x</key><real>0.1</real><key>y</key><real>0.44</real><key>parent</key><string>mFaceRoot</string></map>
+        <map><key>joint</key><string>mFaceLipUpperLeft</string><key>label</key><string>Lip Upper Left</string><key>x</key><real>0.56</real><key>y</key><real>0.37</real><key>parent</key><string>mFaceTeethUpper</string></map>
+        <map><key>joint</key><string>mFaceLipUpperRight</string><key>label</key><string>Lip Upper Right</string><key>x</key><real>0.44</real><key>y</key><real>0.37</real><key>parent</key><string>mFaceTeethUpper</string></map>
+        <map><key>joint</key><string>mFaceLipUpperCenter</string><key>label</key><string>Lip Upper Center</string><key>x</key><real>0.5</real><key>y</key><real>0.385</real><key>parent</key><string>mFaceTeethUpper</string></map>
+        <map><key>joint</key><string>mFaceLipCornerLeft</string><key>label</key><string>Lip Corner Left</string><key>x</key><real>0.615</real><key>y</key><real>0.335</real><key>parent</key><string>mFaceTeethUpper</string></map>
+        <map><key>joint</key><string>mFaceLipCornerRight</string><key>label</key><string>Lip Corner Right</string><key>x</key><real>0.385</real><key>y</key><real>0.335</real><key>parent</key><string>mFaceTeethUpper</string></map>
+        <map><key>joint</key><string>mFaceJaw</string><key>label</key><string>Jaw</string><key>x</key><real>0.5</real><key>y</key><real>0.17</real><key>parent</key><string>mFaceRoot</string></map>
+        <map><key>joint</key><string>mFaceChin</string><key>label</key><string>Chin</string><key>x</key><real>0.5</real><key>y</key><real>0.08</real><key>parent</key><string>mFaceJaw</string></map>
+        <map><key>joint</key><string>mFaceTeethLower</string><key>label</key><string>Teeth Lower</string><key>x</key><real>0.1</real><key>y</key><real>0.3</real><key>parent</key><string>mFaceJaw</string></map>
+        <map><key>joint</key><string>mFaceLipLowerLeft</string><key>label</key><string>Lip Lower Left</string><key>x</key><real>0.56</real><key>y</key><real>0.29</real><key>parent</key><string>mFaceTeethLower</string></map>
+        <map><key>joint</key><string>mFaceLipLowerRight</string><key>label</key><string>Lip Lower Right</string><key>x</key><real>0.44</real><key>y</key><real>0.29</real><key>parent</key><string>mFaceTeethLower</string></map>
+        <map><key>joint</key><string>mFaceLipLowerCenter</string><key>label</key><string>Lip Lower Center</string><key>x</key><real>0.5</real><key>y</key><real>0.275</real><key>parent</key><string>mFaceTeethLower</string></map>
+        <map><key>joint</key><string>mFaceTongueBase</string><key>label</key><string>Tongue Base</string><key>x</key><real>0.1</real><key>y</key><real>0.18</real><key>parent</key><string>mFaceTeethLower</string></map>
+        <map><key>joint</key><string>mFaceTongueTip</string><key>label</key><string>Tongue Tip</string><key>x</key><real>0.1</real><key>y</key><real>0.08</real><key>parent</key><string>mFaceTongueBase</string></map>
+      </array>
+    </map>
+  </array>
+</map>
+</llsd>

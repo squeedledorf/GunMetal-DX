@@ -1,0 +1,71 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+// vkclean -- CLUSTER LOD RIG-LIST CULL for the MDI raster tiers (#748 perf pass, OWNER: 1b;
+// vkgfx/llcleanclusterselectvk.cpp recordRigCull).
+//
+// A shared rig list (the main view's un-culled cut of every switched avatar a secondary pass draws,
+// clean_cluster_select_common.glsl) is drawn by every sun cascade, projector tile, mirror and
+// probe face. The mesh tier drops the records outside the drawing view in its task stage
+// (clean_cluster_draw.task); the MDI tiers draw records straight from the list, so this pass
+// compacts list L for ONE secondary view before that view's rendering scope: one lane per record
+// (both buckets: workgroup row y = bucket), kept when clRigEntryInView says the entry's AVATAR
+// box, then its cluster box (the cluster pre-skin's skinned bounds), touches the view's four side
+// planes -- the view is the pass's own draw view (VKDrawPush in the renderer's param ring, by
+// device address: also a GPU-patched probe-face entry). Survivors are copied unchanged (the same
+// record format, firstInstance = the main view's selected index) into the culled region
+// (CL_B_DRAWS at push out_base, bucket b at out_base + b * rig cap), counted at the main view's
+// CLC_RIG_CULLED + b (the host zeroes both words before). Order is not kept (opaque / mask depth
+// draws: order-free). Unskinned records (rest pose) are kept, as everywhere.
+layout(local_size_x = 64) in;
+
+#define CLUSTER_SET 0
+#include "clean_cluster_common.glsl"
+#define CL_SELECT_WRITE
+#include "clean_cluster_select_common.glsl"
+#define CL_DECLARE_SKIN_OUT
+#define CL_DECLARE_SKIN_SCRATCH
+#include "clean_cluster_skin_common.glsl"
+
+// The rig lists' records (read; the culled region they are copied to is written through
+// cl_draws, CL_SELECT_WRITE): the same binding, read-only alias.
+layout(std430, set = CLUSTER_SET, binding = CL_B_DRAWS) readonly buffer ClDrawsRd { uint cl_draws_rd[]; };
+
+// = the renderer's VKDrawPush / clean_draw_view.glsl DrawView (256 B): view_proj at 0, origin at 240.
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer DrawViewRef
+{
+    mat4 view_proj;
+    vec4 mid[11];
+    vec4 origin;
+};
+
+layout(push_constant) uniform RigCullPush
+{
+    uvec2 view_addr;   // device address of the drawing pass's draw view
+    uint  list;        // rig list (CL_RIG_LIST_*)
+    uint  main_view;   // the main view (its counters hold the rig lists' counts)
+    uint  out_base;    // first record of the culled region (CL_B_DRAWS records)
+    uint  pad0, pad1, pad2;
+} pc;
+
+void main()
+{
+    const uint b = min(gl_WorkGroupID.y, 1u);
+    const uint k = gl_WorkGroupID.x * 64u + gl_LocalInvocationID.x;
+    if (pc.main_view >= CL_MAX_VIEWS || pc.list >= CL_RIG_LISTS) return;
+    const uint vb = pc.main_view * CLC_VIEW_WORDS;
+    const uint r = pc.list * 2u + b;
+    const uint cap = cl_aux.rig.y;
+    const uint count = min(cl_cnt[vb + CLC_RIG_DRAWS + r], cap);
+    if (k >= count) return;
+    const uint w = (cl_aux.rig.x + r * cap + k) * CLD_WORDS;
+    if (w + CLD_WORDS > uint(cl_draws_rd.length()) || cl_draws_rd[w] == 0u) return;   // (empty record)
+    const uint sel = cl_draws_rd[w + 4u];
+    DrawViewRef v = DrawViewRef(pc.view_addr);
+    if (!clRigEntryInView(sel, v.view_proj, clSkinEye() - v.origin.xyz, pc.list == CL_RIG_LIST_CAPTURE)) return;
+    const uint o = atomicAdd(cl_cnt[vb + CLC_RIG_CULLED + b], 1u);
+    if (o >= cap) return;   // (never: a subset of the list)
+    const uint ow = (pc.out_base + b * cap + o) * CLD_WORDS;
+    for (uint i = 0u; i < CLD_WORDS; ++i) cl_draws[ow + i] = cl_draws_rd[w + i];
+}

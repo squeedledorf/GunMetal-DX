@@ -1,0 +1,120 @@
+#version 460
+// vkclean -- GOD RAYS (#208): TEMPORAL ACCUMULATION of the in-scatter, at the march's
+// resolution, between clean_godrays.comp and clean_godrays_composite.frag
+// (RenderVKGodRaysTemporal).
+//
+// The march is stochastic by design (an IGN start offset per texel rotated per frame;
+// cascade-blend dither; ray-traced: one sun-disc-jittered shadow ray per step). At shaft
+// edges every step's visibility is a 0/1 coin flip, so the raw output has a per-frame
+// variance the main TAA cannot settle (its neighbourhood box comes from the same noisy
+// frame). This pass integrates the in-scatter itself, the standard volumetric way:
+//
+//   1. REPROJECT: the texel's view ray (unjittered texel centre) at the view distance
+//      the march stored in alpha -> a camera-relative point -> last frame's clip via ONE
+//      matrix (last frame's camera-relative view-proj x the camera's translation since).
+//      The in-scatter is a view-space quantity, so this is a camera-only reprojection.
+//   2. FETCH the history with a manual 2x2 bilinear whose taps must agree with the
+//      expected previous view distance (relative test): no history leaks across
+//      silhouettes; too little valid weight -> no history (disocclusion).
+//   3. CLAMP the history to a variance box (mean +/- gamma sigma) of the depth-weighted
+//      3x3 neighbourhood of the CURRENT frame -- wide, as the input is noisy by design.
+//   4. BLEND: history weight dims.z (~0.92). No history (reset / disocclusion): the 3x3
+//      depth-weighted mean, so newly revealed texels don't pop the raw dither.
+//
+// Output alpha = this frame's view distance, unchanged: the composite's bilateral
+// upsample keys on it.
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform sampler2D uCur;                      // march output (texelFetch)
+layout(set = 0, binding = 1) uniform sampler2D uHist;                     // last frame's result (texelFetch)
+layout(set = 0, binding = 2, rgba16f) writeonly uniform image2D uOut;     // this frame's result
+
+layout(push_constant) uniform GodRaysTemporalPush {
+    mat4 reproj;    // CURRENT camera-relative world -> PREVIOUS frame's (unjittered) clip
+    // View ray: xyz = inverse(view_proj_rel) applied to (ndc.x, ndc.y, 0.5, 1) as
+    // ray_a * ndc.x + ray_b * ndc.y + ray_c, pre-divided by its w (constant over x, y for
+    // a perspective projection with a rotation-only view); w = the camera's translation
+    // since last frame (x, y, z; current eye - previous eye).
+    vec4 ray_a;
+    vec4 ray_b;
+    vec4 ray_c;
+    vec4 dims;      // in-scatter w, h, history weight, 1 = no history this frame
+} tp;
+
+const float kSkyDist   = 65000.0;
+const float kGamma     = 1.75;   // variance box half-width (sigmas)
+const float kHistTol   = 0.08;   // relative view-distance agreement for a history tap
+const float kNbrSharp  = 24.0;   // neighbourhood depth weight (the composite's)
+
+float relErr(float a, float b) { return abs(a - b) / max(min(a, b), 0.1); }
+
+void main()
+{
+    const ivec2 opx = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 dim = ivec2(tp.dims.xy);
+    if (opx.x >= dim.x || opx.y >= dim.y) return;
+
+    const vec4 c0 = texelFetch(uCur, opx, 0);
+    const float dist = c0.a;
+
+    // 3x3 depth-weighted neighbourhood of the current frame: mean + variance (the clamp
+    // box) -- also the spatially denoised fallback when there is no history.
+    vec3 m1 = vec3(0.0), m2 = vec3(0.0);
+    float wsum = 0.0;
+    for (int y = -1; y <= 1; ++y)
+        for (int x = -1; x <= 1; ++x)
+        {
+            const ivec2 q = clamp(opx + ivec2(x, y), ivec2(0), dim - 1);
+            const vec4 s = texelFetch(uCur, q, 0);
+            const float w = ((x | y) == 0 ? 1.0 : 0.7) * exp(-relErr(s.a, dist) * kNbrSharp);
+            m1 += s.rgb * w;
+            m2 += s.rgb * s.rgb * w;
+            wsum += w;
+        }
+    m1 /= wsum;   // the centre tap alone is weight 1
+    m2 /= wsum;
+    const vec3 sigma = sqrt(max(m2 - m1 * m1, vec3(0.0)));
+
+    vec3 result = m1;
+    if (tp.dims.w < 0.5)
+    {
+        // Reproject this texel's sample (camera only: the in-scatter is view-space).
+        const vec2 ndc = (vec2(opx) + 0.5) / tp.dims.xy * 2.0 - 1.0;
+        const vec3 V = normalize(tp.ray_a.xyz * ndc.x + tp.ray_b.xyz * ndc.y + tp.ray_c.xyz);
+        const vec4 pc = tp.reproj * vec4(V * dist, 1.0);
+        // Expected previous view distance: the same point from last frame's eye.
+        const float expect = length(V * dist + vec3(tp.ray_a.w, tp.ray_b.w, tp.ray_c.w));
+        if (pc.w > 1e-4)
+        {
+            const vec2 puv = (pc.xy / pc.w) * 0.5 + 0.5;            // previous uv
+            const vec2 pp = puv * tp.dims.xy - 0.5;                   // texel space
+            const ivec2 b = ivec2(floor(pp));
+            const vec2 f = pp - vec2(b);
+            vec3 hsum = vec3(0.0);
+            float hw = 0.0;
+            for (int t = 0; t < 4; ++t)
+            {
+                const ivec2 o = ivec2(t & 1, t >> 1);
+                const ivec2 q = b + o;
+                if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, dim))) continue;
+                const vec4 s = texelFetch(uHist, q, 0);
+                if (relErr(s.a, expect) > kHistTol) continue;
+                const float w = (o.x == 1 ? f.x : 1.0 - f.x) * (o.y == 1 ? f.y : 1.0 - f.y);
+                hsum += s.rgb * w;
+                hw += w;
+            }
+            if (hw > 0.2)
+            {
+                vec3 hist = hsum / hw;
+                hist = clamp(hist, m1 - kGamma * sigma, m1 + kGamma * sigma);
+                // Fewer agreeing taps: trust the history proportionally less.
+                const float a = tp.dims.z * clamp(hw, 0.0, 1.0);
+                result = mix(c0.rgb, hist, a);
+            }
+        }
+    }
+    // fp16 guard (the history must never hold a NaN / Inf: it would persist).
+    result = max(result, vec3(0.0));
+    if (any(isnan(result)) || any(isinf(result))) result = vec3(0.0);
+    imageStore(uOut, opx, vec4(result, dist));
+}

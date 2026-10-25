@@ -1,0 +1,615 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<floater
+ positioning="cascading"
+ save_rect="true"
+ can_resize="false"
+ height="576"
+ width="764"
+ layout="topleft"
+ name="sl_ao_editor"
+ single_instance="true"
+ title="AO EDITOR">
+
+    <!-- Sets -->
+    <text
+     follows="left|top"
+     font.style="BOLD"
+     height="16"
+     layout="topleft"
+     left="8"
+     name="sets_label"
+     top="24"
+     width="220">
+        Sets
+    </text>
+    <scroll_list
+     draw_heading="true"
+     follows="left|top"
+     height="226"
+     layout="topleft"
+     left="6"
+     multi_select="false"
+     name="set_list"
+     tool_tip="Double-click a set to make it the active one. Sets from another viewer's #AO folder are used in place."
+     top="42"
+     width="222">
+        <scroll_list.columns
+         label=""
+         name="active"
+         width="18" />
+        <scroll_list.columns
+         label="Name"
+         name="name"
+         relative_width="1" />
+        <scroll_list.columns
+         label="Anims"
+         name="count"
+         width="44" />
+    </scroll_list>
+    <button
+     follows="left|top"
+     height="22"
+     label="New"
+     layout="topleft"
+     left="6"
+     name="new_btn"
+     tool_tip="Create an empty set"
+     top="274"
+     width="72" />
+    <button
+     follows="left|top"
+     height="22"
+     label="Rename"
+     layout="topleft"
+     left_pad="3"
+     name="rename_btn"
+     top_delta="0"
+     width="72" />
+    <button
+     follows="left|top"
+     height="22"
+     label="Delete"
+     layout="topleft"
+     left_pad="3"
+     name="delete_btn"
+     tool_tip="Move the set folder to the Trash. Only links are inside; your animations are not touched."
+     top_delta="0"
+     width="72" />
+    <button
+     follows="left|top"
+     font="SansSerifBold"
+     height="22"
+     label="Use This Set"
+     layout="topleft"
+     left="6"
+     name="activate_btn"
+     tool_tip="Make the selected set the active one"
+     top_pad="4"
+     width="109" />
+    <button
+     follows="left|top"
+     height="22"
+     label="Import..."
+     layout="topleft"
+     left_pad="4"
+     name="import_btn"
+     tool_tip="Import the AO notecard (ZHAO-II or Oracul) or AO folder selected in your inventory window. You can also drag one onto this window."
+     top_delta="0"
+     width="109" />
+    <button
+     follows="left|top"
+     height="22"
+     label="Import from Worn HUD..."
+     layout="topleft"
+     left="6"
+     name="import_object_btn"
+     tool_tip="Copy the animations out of a worn AO HUD or other attachment into a new set (copyable animations only; no-copy ones stay where they are)"
+     top_pad="4"
+     width="222" />
+
+    <!-- States -->
+    <text
+     follows="left|top"
+     font.style="BOLD"
+     height="16"
+     layout="topleft"
+     left="236"
+     name="states_label"
+     top="24"
+     width="220">
+        States
+    </text>
+    <scroll_list
+     draw_heading="true"
+     follows="left|top"
+     height="226"
+     layout="topleft"
+     left="234"
+     multi_select="false"
+     name="state_list"
+     tool_tip="States in bold have animations. The arrow marks the state playing now."
+     top="42"
+     width="222">
+        <scroll_list.columns
+         label=""
+         name="marker"
+         width="18" />
+        <scroll_list.columns
+         label="State"
+         name="name"
+         relative_width="1" />
+        <scroll_list.columns
+         label="#"
+         name="count"
+         width="30" />
+    </scroll_list>
+    <check_box
+     follows="left|top"
+     height="16"
+     label="Cycle"
+     layout="topleft"
+     left="236"
+     name="cycle_check"
+     tool_tip="Play different animations of this state: on a timer, or each time the state starts (below). Off: always the first one."
+     top="277"
+     width="60" />
+    <check_box
+     follows="left|top"
+     height="16"
+     label="Random"
+     layout="topleft"
+     left_pad="4"
+     name="random_check"
+     tool_tip="When cycling, pick at random (never the same twice in a row) instead of in list order"
+     top_delta="0"
+     width="74" />
+    <spinner
+     decimal_digits="0"
+     follows="left|top"
+     height="20"
+     increment="5"
+     initial_value="30"
+     label="Every"
+     label_width="36"
+     layout="topleft"
+     left="236"
+     max_val="3600"
+     min_val="1"
+     name="interval_spin"
+     tool_tip="Seconds between animations when cycling"
+     top_pad="6"
+     width="100" />
+    <text
+     follows="left|top"
+     height="16"
+     layout="topleft"
+     left_pad="4"
+     name="interval_unit"
+     top_delta="3"
+     width="60">
+        seconds
+    </text>
+    <check_box
+     follows="left|top"
+     height="16"
+     label="Change only when entering the state"
+     layout="topleft"
+     left="236"
+     name="pick_on_entry_check"
+     tool_tip="Pick the next animation (or a random one if Random is ticked) only when this state starts, and keep it for as long as the state lasts. Off: Cycle switches on the timer."
+     top_pad="4"
+     width="222" />
+
+    <!-- Animations -->
+    <text
+     follows="left|top"
+     font.style="BOLD"
+     height="16"
+     layout="topleft"
+     left="464"
+     name="anims_label"
+     top="24"
+     width="290">
+        Animations
+    </text>
+    <scroll_list
+     draw_heading="true"
+     follows="left|top"
+     height="226"
+     layout="topleft"
+     left="462"
+     multi_select="false"
+     name="anim_list"
+     tool_tip="Drag animations here from your inventory. Double-click to preview on your avatar (only you see it)."
+     top="42"
+     width="296">
+        <scroll_list.columns
+         label="#"
+         name="pos"
+         width="26" />
+        <scroll_list.columns
+         label="Animation"
+         name="name"
+         relative_width="1" />
+        <scroll_list.columns
+         label=""
+         name="status"
+         width="70" />
+    </scroll_list>
+    <button
+     follows="left|top"
+     height="22"
+     label="Up"
+     layout="topleft"
+     left="462"
+     name="up_btn"
+     tool_tip="Play this animation earlier"
+     top="274"
+     width="54" />
+    <button
+     follows="left|top"
+     height="22"
+     label="Down"
+     layout="topleft"
+     left_pad="3"
+     name="down_btn"
+     tool_tip="Play this animation later"
+     top_delta="0"
+     width="54" />
+    <button
+     follows="left|top"
+     height="22"
+     label="Remove"
+     layout="topleft"
+     left_pad="3"
+     name="remove_btn"
+     tool_tip="Remove the animation from this state. Only the link is removed; the animation stays in your inventory."
+     top_delta="0"
+     width="80" />
+    <button
+     follows="left|top"
+     height="22"
+     label="Preview"
+     layout="topleft"
+     left_pad="3"
+     name="preview_btn"
+     tool_tip="Play the selected animation on your avatar, locally (nobody else sees it)"
+     top_delta="0"
+     width="99" />
+    <combo_box
+     follows="left|top"
+     height="22"
+     layout="topleft"
+     left="462"
+     name="assign_combo"
+     tool_tip="State to put the selected unsorted animation in"
+     top_pad="4"
+     visible="false"
+     width="190" />
+    <button
+     follows="left|top"
+     height="22"
+     label="Assign"
+     layout="topleft"
+     left_pad="4"
+     name="assign_btn"
+     tool_tip="Use the selected animation for this state (you can add it to several states)"
+     top_delta="0"
+     visible="false"
+     width="102" />
+
+    <!-- Set options -->
+    <view_border
+     bevel_style="none"
+     follows="left|top"
+     height="0"
+     layout="topleft"
+     left="6"
+     name="separator1"
+     top="356"
+     width="752" />
+    <text
+     follows="left|top"
+     font.style="BOLD"
+     height="16"
+     layout="topleft"
+     left="8"
+     name="set_options_label"
+     top="362"
+     width="140">
+        This set
+    </text>
+    <check_box
+     follows="left|top"
+     height="16"
+     label="Override sits"
+     layout="topleft"
+     left="8"
+     name="sit_override_check"
+     tool_tip="Replace the sit on objects with this set's sit animations"
+     top="382"
+     width="120" />
+    <check_box
+     follows="left|top"
+     height="16"
+     label="Smart sit"
+     layout="topleft"
+     left_pad="6"
+     name="smart_sit_check"
+     tool_tip="Do not override sits on poseballs and furniture that animate you themselves"
+     top_delta="0"
+     width="100" />
+    <check_box
+     follows="left|top"
+     height="16"
+     label="No stands in mouselook"
+     layout="topleft"
+     left_pad="6"
+     name="no_mouselook_check"
+     tool_tip="Let the default stand play while in mouselook"
+     top_delta="0"
+     width="180" />
+    <check_box
+     follows="left|top"
+     height="16"
+     label="No stands while typing"
+     layout="topleft"
+     left_pad="6"
+     name="no_typing_check"
+     tool_tip="Pause stands while you type, so the typing animation shows"
+     top_delta="0"
+     width="168" />
+    <check_box
+     follows="left|top"
+     height="16"
+     label="Stop system animations"
+     layout="topleft"
+     left_pad="4"
+     name="stop_system_check"
+     tool_tip="Stop the built-in animation of each state while this set's replacement plays, so it cannot show through (given back as soon as the AO lets go). Turn off if your animations are made to blend with the built-ins."
+     top_delta="0"
+     width="160" />
+
+    <check_box
+     follows="left|top"
+     height="16"
+     label="Always animations"
+     layout="topleft"
+     left="8"
+     name="always_check"
+     tool_tip="Play the Always list (body fixes: hands, feet, deformers) the whole time the AO is on, whatever else plays"
+     top="406"
+     width="140" />
+    <check_box
+     follows="left|top"
+     height="16"
+     label="Idles every"
+     layout="topleft"
+     left_pad="6"
+     name="idle_check"
+     tool_tip="Now and then play a random animation from the Idle list in place of the stand, then go back to the stands"
+     top_delta="0"
+     width="92" />
+    <spinner
+     decimal_digits="0"
+     follows="left|top"
+     height="20"
+     increment="5"
+     initial_value="30"
+     layout="topleft"
+     left_pad="2"
+     max_val="3600"
+     min_val="5"
+     name="idle_min_spin"
+     tool_tip="Shortest wait between idles, in seconds"
+     top_delta="-2"
+     width="56" />
+    <text
+     follows="left|top"
+     height="16"
+     layout="topleft"
+     left_pad="4"
+     name="idle_to_label"
+     top_delta="3"
+     width="16">
+        to
+    </text>
+    <spinner
+     decimal_digits="0"
+     follows="left|top"
+     height="20"
+     increment="5"
+     initial_value="90"
+     layout="topleft"
+     left_pad="2"
+     max_val="3600"
+     min_val="5"
+     name="idle_max_spin"
+     tool_tip="Longest wait between idles, in seconds (the wait is random in between)"
+     top_delta="-3"
+     width="56" />
+    <text
+     follows="left|top"
+     height="16"
+     layout="topleft"
+     left_pad="4"
+     name="idle_cap_label"
+     top_delta="3"
+     width="70">
+        s, at most
+    </text>
+    <spinner
+     decimal_digits="0"
+     follows="left|top"
+     height="20"
+     increment="1"
+     initial_value="15"
+     layout="topleft"
+     left_pad="2"
+     max_val="300"
+     min_val="1"
+     name="idle_cap_spin"
+     tool_tip="Longest an idle plays, in seconds (looped idles always stop here)"
+     top_delta="-3"
+     width="50" />
+    <text
+     follows="left|top"
+     height="16"
+     layout="topleft"
+     left_pad="4"
+     name="idle_cap_unit"
+     top_delta="3"
+     width="12">
+        s
+    </text>
+    <check_box
+     follows="left|top"
+     height="16"
+     label="also when sitting"
+     layout="topleft"
+     left_pad="8"
+     name="idle_sit_check"
+     tool_tip="Idles may also replace the sit override"
+     top_delta="0"
+     width="130" />
+
+    <!-- Global behaviour -->
+    <text
+     follows="left|top"
+     font.style="BOLD"
+     height="16"
+     layout="topleft"
+     left="8"
+     name="behaviour_label"
+     top="432"
+     width="200">
+        Behaviour (all sets)
+    </text>
+    <check_box
+     control_name="SLAOPauseForScriptAnimations"
+     follows="left|top"
+     height="16"
+     label="Step aside for poses, dances and poseballs"
+     layout="topleft"
+     left="8"
+     name="pause_scripts_check"
+     tool_tip="While a script animation (collar pose, dance HUD, poseball, furniture) moves your hips or legs, stands and other idle states pause"
+     top="452"
+     width="300" />
+    <check_box
+     control_name="SLAOPredictLocomotion"
+     follows="left|top"
+     height="16"
+     label="Start walks and stands without waiting for the server"
+     layout="topleft"
+     left_pad="6"
+     name="predict_check"
+     tool_tip="Use your movement keys to start walk/run/stand/fly/hover replacements one round trip early (less flicker)"
+     top_delta="0"
+     width="340" />
+    <check_box
+     control_name="SLAOStopDefaultAnimations"
+     follows="left|top"
+     height="16"
+     label="Stop built-in animations that leak through"
+     layout="topleft"
+     left="8"
+     name="stop_defaults_check"
+     tool_tip="Also stop the built-in hover, fly, turn, landing, jump and sit animations while a replacement plays (avoids stray arm and leg poses)"
+     top="472"
+     width="300" />
+    <check_box
+     control_name="SLAOKeepHeadStill"
+     follows="left|top"
+     height="16"
+     label="Keep head still"
+     layout="topleft"
+     left="314"
+     name="keep_head_check"
+     tool_tip="No look-at head turning while the AO plays: your avatar's head does not follow the camera or mouse, and other viewers are sent no look-at target. Back to normal when the AO is off or paused."
+     top="512"
+     width="150" />
+    <check_box
+     left="314"
+     top="472"
+     control_name="SLAOAcceptScriptCommands"
+     follows="left|top"
+     height="16"
+     label="Accept @slao commands from my objects"
+     layout="topleft"
+     name="accept_commands_check"
+     tool_tip="Collars, HUDs and furniture you own can pause or control the AO with llOwnerSay(&quot;@slao=n&quot;) and similar. See the documentation for the command list."
+     width="300" />
+    <check_box
+     control_name="SLAODetectScriptedAO"
+     follows="left|top"
+     height="16"
+     label="Detect a worn scripted AO"
+     layout="topleft"
+     left="8"
+     name="detect_scripted_check"
+     tool_tip="Offer to pause this AO while a worn scripted AO HUD is fighting it. Off: no offers, and a scripted AO you chose to defer to no longer pauses this AO."
+     top="492"
+     width="300" />
+    <check_box
+     control_name="SLWalkBackwardsFacingForward"
+     follows="left|top"
+     height="16"
+     label="Walk backwards facing forward"
+     layout="topleft"
+     left="474"
+     name="back_facing_check"
+     tool_tip="On: moving backwards keeps your avatar facing forward and the AO plays its Walking Backwards animation (running: only in your own view). Off: your avatar turns round to face where it is going, walking or running, and the AO plays its forward Walking animation. Works with the AO off (then Off leaves the viewer default)."
+     top="512"
+     width="240" />
+    <check_box
+     control_name="SLSimulatedSwimming"
+     follows="left|top"
+     height="16"
+     label="Allow swimming"
+     layout="topleft"
+     left="8"
+     name="swim_check"
+     tool_tip="In deep water float at the surface, dive with crouch (C / Page Down), rise back when released, swim up with E / Page Up, and walk out onto land. Uses flying, so not where flying is blocked. Works with the AO off, but the swim animations come from the AO set."
+     top="512"
+     width="300" />
+    <button
+     follows="left|top"
+     height="20"
+     label="Remembered choices..."
+     layout="topleft"
+     left="314"
+     name="ignored_btn"
+     tool_tip="Animations from other objects that never pause the AO (added with &quot;Don't pause for this&quot;), and the scripted AOs you chose to pause for or keep alongside. Forget one to be asked again."
+     top="490"
+     width="150" />
+
+    <!-- Status -->
+    <check_box
+     follows="left|bottom"
+     height="16"
+     label="AO on"
+     layout="topleft"
+     left="8"
+     name="ao_enabled"
+     top="536"
+     width="70" />
+    <text
+     follows="left|bottom|right"
+     height="16"
+     layout="topleft"
+     left_pad="6"
+     name="status_text"
+     text_color="EmphasisColor"
+     top_delta="1"
+     width="672" />
+    <text
+     follows="left|bottom|right"
+     height="16"
+     layout="topleft"
+     left="8"
+     name="hint_text"
+     text_color="LabelDisabledColor"
+     top_pad="4"
+     width="748" />
+</floater>

@@ -1,0 +1,23 @@
+#version 460
+// vkclean -- #870 LLCleanDlssRRVK, after the reconstruction: the network takes PRE-EXPOSED
+// colour (clean_rr_guides.comp multiplied the scene by the exposure the FSR inputs pass
+// resolved: RenderExposure x the dynamic exposure); the post chain expects the unexposed
+// linear scene (as FSR / TAA leave it). Divides the display-size output in place.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0, rgba16f) uniform image2D ioColor;          // display size
+layout(set = 0, binding = 1, r32f) uniform readonly image2D uExposure;  // 1x1
+
+layout(push_constant) uniform Push { uvec4 size; } pc;   // x, y display extent
+
+void main()
+{
+    const ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+    if (q.x >= int(pc.size.x) || q.y >= int(pc.size.y)) return;
+    const float e = imageLoad(uExposure, ivec2(0)).x;
+    vec4 c = imageLoad(ioColor, q);
+    c.rgb = (e > 1e-8) ? c.rgb / e : c.rgb;
+    if (any(isnan(c.rgb)) || any(isinf(c.rgb))) c.rgb = vec3(0.0);
+    imageStore(ioColor, q, vec4(max(c.rgb, vec3(0.0)), 1.0));
+}

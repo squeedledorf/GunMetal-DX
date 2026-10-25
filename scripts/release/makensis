@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# makensis through Docker (image gmdx-nsis from nsis.Dockerfile, built on first use). Put this
+# directory first on PATH and scripts/wincross/make_installer.sh uses it like an installed makensis.
+# Every path makensis sees is under $HOME or /tmp, mounted at the same place.
+set -euo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+if ! docker image inspect gmdx-nsis >/dev/null 2>&1; then
+    docker build -q -t gmdx-nsis -f "$here/nsis.Dockerfile" "$here" >/dev/null
+fi
+exec docker run --rm -u "$(id -u):$(id -g)" -v "$HOME:$HOME" -v /tmp:/tmp -w "$PWD" gmdx-nsis "$@"

@@ -1,0 +1,71 @@
+#version 450
+// Stage 5 Part A — GPU-driven cull compute shader.
+//
+// One thread per instance. Each surviving instance appends a
+// VkDrawIndexedIndirectCommand into the indirect buffer and atomically bumps
+// the draw count (consumed by vkCmdDrawIndexedIndirectCount). Culled instances
+// (frustum-rejected — e.g. placed behind the camera) contribute nothing.
+//
+// The "gather" is compact: survivors are packed contiguously at the front of
+// the indirect buffer using the atomic counter as the write slot, so
+// firstInstance points each draw at its own instance record for bindless
+// texture lookup + model matrix.
+
+layout(local_size_x = 64) in;
+
+struct Instance {
+    mat4 model;      // 64 bytes
+    vec4 sphere;     // xyz = world-space bounding-sphere center, w = radius
+    uvec4 misc;      // x = texIndex, yzw = pad
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer Instances {
+    Instance instances[];
+};
+
+// One VkDrawIndexedIndirectCommand per survivor.
+struct DrawCmd {
+    uint indexCount;
+    uint instanceCount;
+    uint firstIndex;
+    int  vertexOffset;
+    uint firstInstance;
+};
+layout(std430, set = 0, binding = 1) writeonly buffer DrawCmds {
+    DrawCmd cmds[];
+};
+
+// Single uint at offset 0 = number of draws emitted (for DrawIndexedIndirectCount).
+layout(std430, set = 0, binding = 2) buffer DrawCount {
+    uint drawCount;
+};
+
+layout(push_constant) uniform Push {
+    vec4 planes[6];  // frustum planes (nx,ny,nz,d); point inside if dot(plane.xyz,p)+plane.w >= 0
+    uint instanceCount;
+    uint indexCount;
+} pc;
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= pc.instanceCount) return;
+
+    Instance inst = instances[id];
+    vec3 c = inst.sphere.xyz;
+    float r = inst.sphere.w;
+
+    // Frustum-sphere test: reject if the sphere is fully outside any plane.
+    bool visible = true;
+    for (int i = 0; i < 6; ++i) {
+        float dist = dot(pc.planes[i].xyz, c) + pc.planes[i].w;
+        if (dist < -r) { visible = false; break; }
+    }
+    if (!visible) return;
+
+    uint slot = atomicAdd(drawCount, 1u);
+    cmds[slot].indexCount    = pc.indexCount;
+    cmds[slot].instanceCount = 1u;
+    cmds[slot].firstIndex    = 0u;
+    cmds[slot].vertexOffset  = 0;
+    cmds[slot].firstInstance = id;   // bindless + model lookup key
+}

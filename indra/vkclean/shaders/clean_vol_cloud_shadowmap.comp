@@ -1,0 +1,46 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// vkclean -- VOLUMETRIC CLOUDS (#719): the CLOUD SHADOW MAP (top-down sun / moon transmittance).
+//
+// 512^2 texels over vc.shadow.z metres around the camera (centre snapped to the texel grid by
+// the CPU), rebuilt every few frames (and at once when the light turns or the camera leaves
+// the middle of the map); between rebuilds the lookup's centre follows the wind (the CPU
+// moves ssr.vol_clouds[1].xy with the EEP scroll), so the shadows drift with the clouds.
+//
+// Texel convention (clean_cloud_shadow_map.glsl): the light ray that crosses the BASE plane
+// at the texel's world xy, integrated from the base to the top of the shell along the light
+// direction the map is built for (ssr.vol_clouds[2].xyz, latched with it). The cheap shape
+// (no detail erosion: the shadow is soft at 39 m texels anyway), midpoint samples.
+// Out: r = transmittance, g = optical depth, b = 0, a = 1.
+layout(local_size_x = 8, local_size_y = 8) in;
+
+#include "clean_frame_info.glsl"
+#include "clean_atmos_common.glsl"
+#define VC_SET 1
+#include "clean_vol_cloud_common.glsl"
+
+layout(set = 1, binding = 11, rgba16f) writeonly uniform image2D uShadow;
+
+void main()
+{
+    const ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 sz = imageSize(uShadow);
+    if (px.x >= sz.x || px.y >= sz.y) return;
+    const vec2 xy = vc.shadow.xy + ((vec2(px) + 0.5) / vec2(sz) - 0.5) * vc.shadow.z;
+    const vec3 L = ssr.vol_clouds[2].xyz;
+    const float lz = max(L.z, 0.05);
+    const float base = vcBase(), top = vcTop();
+    const float len = (top - base) / lz;
+    const int n = max(int(vc.shadow.w), 4);
+    const float ds = len / float(n);
+    float od = 0.0;
+    for (int i = 0; i < n; ++i)
+    {
+        // (a light under 0.05 elevation: the path is capped at the 0.05 length; the lookup
+        //  fades those shadows out anyway)
+        const vec3 p = vec3(xy, base) + L * ((float(i) + 0.5) * ds);
+        od += vcDensity(p, false);
+    }
+    od *= ds * vc.shape1.z;
+    imageStore(uShadow, px, vec4(exp(-od), od, 0.0, 1.0));
+}

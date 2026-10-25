@@ -1,0 +1,126 @@
+#version 450
+// vkclean — glow downsample + separable blur (port of LL's glowExtractF + glowF).
+//
+// The world passes write each face's glow AMOUNT (LL: texel alpha * glow, blended) to a
+// full-res glow target. <SS:Skoomastream> As LL's glowExtract (screen rgb * screen
+// alpha), the extract multiplies that amount by the final tone-mapped LDR pixel (set 1,
+// uScene), so the halo has the colour the viewer sees there. </SS:Skoomastream>
+// This kernel runs RenderGlowIterations*2 + 1 times into a fixed 512x512 buffer:
+//   mode 0  extract: box-filter the full-res footprint into the 512 texel (scene rgb *
+//           amount per tap, which LL's BT_ADD_WITH_ALPHA extract blend produces). LL
+//           takes ONE bilinear tap per 512 texel; from a 4K target that
+//           reads 2x2 of a ~7.5x4.2 texel footprint, so thin glowing detail fell between
+//           taps and the halo crawled with every camera move or TAA jitter. Up to 4x4
+//           bilinear taps spread over the footprint cover it (512^2 x <=16 taps).
+//   mode 2  <SS:Skoomastream> HUD extract (SSHudGlow): the same box filter over the HUD
+//           glow target, which holds colour x amount already (no scene read).
+//   mode 1  blur: LL glowF -- 8 taps at +-0.5..3.5 * delta, kernel
+//           {0.25,0.5,0.8,1,1,0.8,0.5,0.25} (unnormalized, as LL), rgb * strength.
+// The composite (clean_glow_combine.frag) adds the result onto the scene.
+//
+// LL's extract (glowExtractF + BT_ADD_WITH_ALPHA) writes col.rgb * A with col the
+// display-space scene and
+//   A = max(col.a, mix(lum, warmth, RenderGlowWarmthAmount) * RenderGlowMaxExtractAlpha)
+//   lum    = smoothstep(min, min + 1, dot(col.rgb, RenderGlowLumWeights))
+//   warmth = smoothstep(min, min + 1, max(col.rgb * RenderGlowWarmthWeights))
+// (min = RenderGlowMinLuminance), after adding RenderGlowNoise's dither (a static
+// [-1,1]^3 texture tiled every 128 glow texels, / 64) to col. Per tap here col.rgb is the
+// tone-mapped scene (uScene) and col.a the glow amount from the target. RenderGlowHDR
+// off: LL's glow buffers are RGBA8, so every stage stores clamped to [0,1] at 8-bit
+// precision.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform sampler2D uSrc;
+layout(set = 0, binding = 1, rgba16f) uniform writeonly image2D uDst;
+layout(set = 1, binding = 0) uniform sampler2D uScene;   // <SS:Skoomastream> final LDR image (extract only)
+
+layout(push_constant) uniform Push {
+    vec2  delta;      // blur step in UV (x or y), LL glowDelta
+    float strength;   // LL RenderGlowStrength
+    uint  mode;       // 0 = extract, 1 = blur, 2 = extract the HUD glow (<SS:Skoomastream>)
+    vec4  extract;    // RenderGlowMinLuminance, RenderGlowMaxExtractAlpha, RenderGlowWarmthAmount,
+                      // unused (<SS:Skoomastream> uScene is display-space already)
+    vec4  lum_w;      // RenderGlowLumWeights.xyz, flags: 1 = LDR (RenderGlowHDR off),
+                      // 2 = noise (RenderGlowNoise), 4 = auto-glow can trigger
+    vec4  warm_w;     // RenderGlowWarmthWeights.xyz, 0
+} pc;
+
+vec4 storeFormat(vec4 v)
+{
+    v = max(v, vec4(0.0));
+    if ((uint(pc.lum_w.w + 0.5) & 1u) != 0u)
+        v = floor(clamp(v, 0.0, 1.0) * 255.0 + 0.5) / 255.0;   // RGBA8 (UNORM rounding)
+    return v;
+}
+
+// LL's mTrueNoiseMap: static white noise in [-1,1] per channel, 128x128, tiled.
+vec3 trueNoise(ivec2 p)
+{
+    uvec2 q = uvec2(p & 127);
+    uint h = q.x * 0x8da6b343u ^ q.y * 0xd8163841u;
+    vec3 r;
+    for (int c = 0; c < 3; ++c)
+    {
+        h ^= h >> 16; h *= 0x7feb352du; h ^= h >> 15; h *= 0x846ca68bu; h ^= h >> 16;
+        r[c] = float(h & 0xFFFFFFu) / 16777215.0;
+    }
+    return r * 2.0 - 1.0;
+}
+
+// <SS:Skoomastream> The tone-mapped image as displayed (LL's glowExtract input).
+vec3 sceneDisplay(vec2 uv)
+{
+    return clamp(texture(uScene, uv).rgb, vec3(0.0), vec3(1.0));
+}
+
+void main()
+{
+    ivec2 size = imageSize(uDst);
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= size.x || p.y >= size.y) return;
+    vec2 uv = (vec2(p) + 0.5) / vec2(size);
+
+    if (pc.mode != 1u)
+    {
+        const uint flags = uint(pc.lum_w.w + 0.5);
+        const bool hud = pc.mode == 2u;   // <SS:Skoomastream>
+        const bool autoglow = !hud && (flags & 4u) != 0u, noise = !hud && (flags & 2u) != 0u;
+        // Footprint of one destination texel, in source texels; each bilinear tap
+        // averages 2x2 of them, so ceil(fp / 2) taps per axis cover it (cap 4).
+        const vec2  fp = vec2(textureSize(uSrc, 0)) / vec2(size);
+        const ivec2 n  = clamp(ivec2(ceil(fp * 0.5)), ivec2(1), ivec2(4));
+        const vec2  st = 1.0 / (vec2(size) * vec2(n));   // tap spacing in uv
+        const vec2  o  = (vec2(p) / vec2(size)) + 0.5 * st;
+        vec4  acc = vec4(0.0);
+        for (int y = 0; y < n.y; ++y)
+            for (int x = 0; x < n.x; ++x)
+            {
+                const vec2 tuv = o + vec2(x, y) * st;
+                // <SS:Skoomastream> HUD glow target: already colour x amount (clean_draw.frag)
+                if (hud) { acc += vec4(texture(uSrc, tuv).rgb, 0.0); continue; }
+                // <SS:Skoomastream> world: the target holds the amount; colour = the scene
+                float a = max(texture(uSrc, tuv).r, 0.0);
+                const vec3 s = sceneDisplay(tuv);
+                if (autoglow)
+                {
+                    const float mn = pc.extract.x;
+                    const float lum    = smoothstep(mn, mn + 1.0, dot(s, pc.lum_w.xyz));
+                    const vec3  w      = s * pc.warm_w.xyz;
+                    const float warmth = smoothstep(mn, mn + 1.0, max(w.r, max(w.g, w.b)));
+                    a = max(a, mix(lum, warmth, pc.extract.z) * pc.extract.y);
+                }
+                acc += vec4(s * a, a);
+            }
+        acc *= 1.0 / float(n.x * n.y);
+        if (noise) acc.rgb += trueNoise(p) * (1.0 / 64.0) * acc.a;   // LL NOISE_DEPTH 64
+        imageStore(uDst, p, storeFormat(acc));
+        return;
+    }
+
+    const float kern[8] = float[8](0.25, 0.5, 0.8, 1.0, 1.0, 0.8, 0.5, 0.25);
+    vec4 col = vec4(0.0);
+    for (int i = 0; i < 8; ++i)
+        col += kern[i] * texture(uSrc, uv + pc.delta * (float(i) - 3.5));
+    imageStore(uDst, p, storeFormat(vec4(col.rgb * pc.strength, col.a)));
+}

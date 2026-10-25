@@ -1,0 +1,180 @@
+#version 460
+// vkclean -- MOTION BLUR (#118), pass 3: RECONSTRUCTION. One 16x16 workgroup per tile;
+// a tile whose NeighborMax is under the active threshold (~0.5 px: nothing near it moves)
+// returns at once and is not written -- the write-back skips it too.
+//
+// McGuire et al. 2012, "A Reconstruction Filter for Plausible Motion Blur", with the
+// refinements of Jimenez 2014 ("Next Generation Post Processing in Call of Duty: Advanced
+// Warfare") and Guertin et al. 2014 ("A Fast and Stable Feature-Aware Motion Blur
+// Filter"):
+//  - samples along the tile's dominant vector (NeighborMax) AND, alternating, the
+//    centre's own (rescaled to the same length when it is not much shorter): a pixel
+//    moving across the dominant direction still smears along its own motion;
+//  - mirrored pairs (+t, -t share one offset): the blur stays centred and the two
+//    halves share their noise;
+//  - each tap Y is weighted by how it can reach the centre X, with a soft depth test on
+//    linear depth (5% relative extent):
+//      Y in front of X : cone(|XY|, |V_Y|) -- a blurred foreground smears over X;
+//      Y behind X      : cone(|XY|, |V_X|) -- X's own smear shows what is behind it;
+//      both blurred    : 2 cylinder(V_Y) cylinder(V_X);
+//    each cone scaled by how well that pixel's motion lines up with the sampling line.
+//    A STILL foreground (the own avatar the camera follows: V_X ~ 0) gets no background
+//    weight at all and keeps a crisp silhouette; a moving background stops at it;
+//  - centre weight N / (kappa |V_X|): a still pixel keeps its colour under a passing
+//    smear in proportion to the coverage, a fast one spreads its colour thin;
+//  - uniform-motion fast path: when the slowest pixel of every tile the blur can reach
+//    (#836: was the 3x3, see clean_mblur_neighbor.comp) is within 10% of the dominant
+//    length and the centre moves with it, a plain box along the vector;
+//  - fewer taps for short blurs (at most one pair per pixel of radius);
+//  - #836: every tap (and the centre) also weighted by 1 / (1 + its exposed luma) (Karis
+//    2013 / 2014, the bloom / TAA range-compression weight): the scene is linear HDR before
+//    exposure + tonemap, and an emissive / fullbright surface can sit far above white -- a
+//    few such taps on a still or dark pixel used to swamp the normalised average (the
+//    rainbow-floor colour smeared into the own avatar and the prim it stood on while the
+//    camera turned; the soft depth test rightly gives a moving floor in front of / level
+//    with a still foot its cone weight, the brightness made that weight dominate). A
+//    region of one brightness blurs exactly as before (constant factor); bright streaks
+//    over dark ground come out dimmer than a physical shutter would make them. MbParams.p4.y
+//    0 = unweighted (RenderVKMotionBlurHdrWeight).
+// Tap offsets are a half-step interleaved-gradient-noise jitter: rotated every frame
+// when a temporal resolve (TAA / FSR) follows -- it integrates the noise -- and fixed
+// otherwise (a stable fine dither instead of crawling grain).
+//
+// Debug 1: TileMax (upper-left half of each tile) / NeighborMax (lower-right), hue =
+// direction, brightness = length over the max radius; tiles under the threshold dim.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+#include "clean_mblur_common.glsl"
+
+layout(rgba16f, set = 0, binding = 11) writeonly uniform image2D outRecon;
+
+const float kKappa = 10.0;
+
+float ign(vec2 p) { return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))); }
+
+float cone(float dist, float r)     { return clamp(1.0 - dist / max(r, 0.5), 0.0, 1.0); }
+// (#836: r floored like cone -- a still pixel stores exactly 0 and smoothstep(0, 0, x) is
+// undefined; a NaN there would poison the whole normalised sum.)
+float cylinder(float dist, float r) { r = max(r, 0.5); return 1.0 - smoothstep(0.95 * r, 1.05 * r, dist); }
+
+// |cos| between a pixel's motion and the sampling line (1 for a still pixel: its cone is
+// a point anyway).
+float alignment(vec2 v, float len, vec2 dir)
+{
+    return len > 0.5 ? abs(dot(v / len, dir)) : 1.0;
+}
+
+vec3 sanitize(vec3 c)
+{
+    return (any(isnan(c)) || any(isinf(c))) ? vec3(0.0) : clamp(c, vec3(0.0), vec3(65000.0));
+}
+
+// #836 Karis range-compression weight of a (sanitized) tap: 1 / (1 + exposed luma); e = 0
+// turns it off (weight 1).
+float hdrWeight(vec3 c, float e)
+{
+    return 1.0 / (1.0 + dot(c, vec3(0.2126, 0.7152, 0.0722)) * e);
+}
+
+void main()
+{
+    const vec4 nm = texelFetch(uNeighbor, ivec2(gl_WorkGroupID.xy), 0);
+    const int debug = int(mb.p1.y + 0.5);
+    if (nm.w < 0.5 || debug == 2) return;   // tile not active / the split view (pass 1)
+    const ivec2 rsize = renderSize();
+    const ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+    if (q.x >= rsize.x || q.y >= rsize.y) return;
+
+    if (debug == 1)
+    {
+        const ivec2 l = q % kTile;
+        const vec4 tm = texelFetch(uTileMax, ivec2(gl_WorkGroupID.xy), 0);
+        const bool upper = l.x + l.y < kTile - 1;
+        const vec2 v = upper ? tm.xy : nm.xy;
+        vec3 c = vectorColour(v, mb.p0.y);
+        if (length(nm.xy) < mb.p3.z) c = c * 0.5 + 0.03;   // would early-out
+        if (l.x == 0 || l.y == 0) c *= 0.4;                 // tile grid
+        imageStore(outRecon, q, vec4(c / debugExposure(), 1.0));
+        return;
+    }
+
+    const vec4 centre = texelFetch(uScene, q, 0);
+    const vec3 cv = texelFetch(uVel, q, 0).xyz;
+    const vec2 vn = nm.xy;
+    const float rn = length(vn);
+    if (rn < 0.5)
+    {
+        imageStore(outRecon, q, centre);
+        return;
+    }
+    const vec2 dn = vn / rn;
+    const float rc = length(cv.xy);
+    const float zc = cv.z;
+    const vec2 px = 1.0 / vec2(rsize);
+    const vec2 pc = vec2(q) + 0.5;
+    const int pairs = clamp(int(ceil(rn)), 1, max(int(mb.p0.z + 0.5) / 2, 1));
+    // Half-step jitter of the tap ring (p1.x: per-frame offset, 0 = a fixed pattern).
+    const float jit = ign(vec2(q) + mb.p1.x * vec2(5.588238, 5.588238));
+    // #836: exposure for the Karis tap weights (0 = off: every weight 1).
+    const float he = mb.p4.y > 0.5 ? sceneExposure() : 0.0;
+    const vec3 cc = sanitize(centre.rgb);
+    const float hc = hdrWeight(cc, he);
+
+    // ---- uniform motion: a box along the dominant vector ----
+    if (nm.z >= 0.9 * rn && rc >= 0.9 * rn && dot(cv.xy, dn) >= 0.95 * rc)
+    {
+        // (a box: equal weights, but for the #836 HDR weight; he = 0 -> the plain mean)
+        vec3 acc = cc * hc;
+        float bsum = hc;
+        for (int i = 0; i < pairs; ++i)
+        {
+            const float t = (float(i) + jit) / float(pairs);
+            const vec3 a = sanitize(textureLod(uScene, (pc + vn * t) * px, 0.0).rgb);
+            const vec3 b = sanitize(textureLod(uScene, (pc - vn * t) * px, 0.0).rgb);
+            const float wa = hdrWeight(a, he), wb = hdrWeight(b, he);
+            acc += a * wa + b * wb;
+            bsum += wa + wb;
+        }
+        imageStore(outRecon, q, vec4(sanitize(acc / bsum), centre.a));
+        return;
+    }
+
+    // ---- general: depth-aware gather ----
+    // Second direction: the centre's own motion at the dominant length, unless it is much
+    // shorter (then the dominant direction twice).
+    const vec2 valt = rc * 2.0 > rn ? cv.xy * (rn / rc) : vn;
+    const vec2 dalt = valt / rn;
+    float wsum = float(2 * pairs) / (kKappa * max(rc, 0.5)) * hc;
+    vec3 acc = cc * wsum;
+    for (int i = 0; i < pairs; ++i)
+    {
+        const float t = (float(i) + jit) / float(pairs);
+        const bool alt = (i & 1) == 1;
+        const vec2 d = alt ? valt : vn;
+        const vec2 dh = alt ? dalt : dn;
+        const float dist = t * rn;
+        const float ac = alignment(cv.xy, rc, dh);
+        for (int side = 0; side < 2; ++side)
+        {
+            const vec2 p = pc + d * (side == 0 ? t : -t);
+            const ivec2 tq = clamp(ivec2(floor(p)), ivec2(0), rsize - 1);
+            const vec3 sv = texelFetch(uVel, tq, 0).xyz;
+            const float ry = length(sv.xy);
+            const float zy = sv.z;
+            const float ext = max(0.05 * min(zc, zy), 0.02);
+            const float fg = clamp(1.0 - (zy - zc) / ext, 0.0, 1.0);   // Y in front of (or level with) X
+            const float bg = clamp(1.0 - (zc - zy) / ext, 0.0, 1.0);   // Y behind (or level with) X
+            const float ay = alignment(sv.xy, ry, dh);
+            const float w = fg * cone(dist, ry) * ay
+                          + bg * cone(dist, rc) * ac
+                          + 2.0 * cylinder(dist, ry) * cylinder(dist, rc) * min(ay, ac);
+            if (w <= 0.0) continue;
+            const vec3 sc = sanitize(textureLod(uScene, p * px, 0.0).rgb);
+            const float wh = w * hdrWeight(sc, he);
+            acc += sc * wh;
+            wsum += wh;
+        }
+    }
+    imageStore(outRecon, q, vec4(sanitize(acc / wsum), centre.a));   // (#836: never a NaN into the scene)
+}

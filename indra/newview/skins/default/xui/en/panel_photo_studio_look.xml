@@ -1,0 +1,1918 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<!--
+Photo Studio "Look" section: color science / tone.
+Full guide for adding sections: doc/LIGHTBOX.md. Quick reference:
+Row conventions:
+  scalar  = <slider label=... label_width="140" right="-32" control_name=.../> + an 18px reset <button>
+            (PhotoStudio.ResetControlDefault, parameter = the setting) at right="-8" top_delta="0"
+  vector  = <text> label + three <spinner name="vec3_<Setting>_<0|1|2>"> with PhotoStudio.CommitVec3;
+  color   = <color_swatch control_name=.../> (0-1 tints only)
+  section = <accordion_tab> "sec_<id>"; long tail in sibling "sec_<id>_adv"; "Reset All" resets
+            every bound control in the section (essential sections include their Advanced tab)
+  heights = (the floater re-fits every section when it opens, but keep these right for XUI Studio)
+            accordion_tab height MUST be its inner panel height + 29 (25 header + 2+2 padding);
+            the tab's rect is the expand height and fit_panel squeezes the panel into what is
+            left after the header, so an undersized tab clips the bottom rows. Compute panel
+            height from the LAST widget's bottom: top_pad chains from the previous widget,
+            and slider rows (18px, top_pad 8) pitch 26px
+-->
+<panel
+ name="panel_photo_studio_look"
+ layout="topleft"
+ width="450"
+ height="490"
+ follows="all">
+	<accordion
+	 follows="all"
+	 layout="topleft"
+	 left="2"
+	 top="2"
+	 right="-2"
+	 height="484"
+	 single_expansion="false"
+	 name="look_accordion">
+		<accordion_tab
+		 expanded="true"
+		 layout="topleft"
+		 height="142"
+		 name="atab_sec_tone"
+		 title="Exposure &amp; Tone"
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="113"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_tone">
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top="7"
+				 right="-32"
+				 height="18"
+				 label="Exposure"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.05"
+				 min_val="0.5"
+				 max_val="4"
+				 can_edit_text="true"
+				 name="tone_exposure"
+				 tool_tip="Overall image brightness applied by the tonemapper (off with Preferences &gt; Graphics &gt; HDR and Emissive off)"
+				 enabled_control="RenderHDREnabled"
+				 control_name="RenderExposure" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="tone_exposure_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderHDREnabled">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderExposure" />
+				</button>
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="9"
+				 width="140"
+				 height="15"
+				 name="tone_type_label"
+				 value="Tone mapping" />
+				<combo_box
+				 follows="left|top|right"
+				 layout="topleft"
+				 left_delta="140"
+				 top_pad="-16"
+				 right="-32"
+				 height="18"
+				 name="tone_type_combo"
+				 tool_tip="Which tonemapping operator maps scene brightness to your display (none with Preferences &gt; Graphics &gt; HDR and Emissive off)"
+				 enabled_control="RenderHDREnabled"
+				 control_name="SlipstreamRenderTonemapType">
+					<combo_box.item
+					 label="Khronos Neutral"
+					 name="0"
+					 value="0" />
+					<combo_box.item
+					 label="ACES"
+					 name="1"
+					 value="1" />
+					<combo_box.item
+					 label="ACES Boosted"
+					 name="2"
+					 value="2" />
+					<combo_box.item
+					 label="Reinhard"
+					 name="3"
+					 value="3" />
+					<combo_box.item
+					 label="Filmic"
+					 name="4"
+					 value="4" />
+					<combo_box.item
+					 label="GT"
+					 name="5"
+					 value="5" />
+					<combo_box.item
+					 label="AgX"
+					 name="6"
+					 value="6" />
+				</combo_box>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="18"
+				 right="-8"
+				 top_pad="-18"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="tone_type_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="SlipstreamRenderTonemapType" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Tonemap mix"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="tone_mix"
+				 tool_tip="Blend between linear (0) and tonemapped (1) color. Classic/legacy skies force this to 0."
+				 enabled_control="RenderHDREnabled"
+				 control_name="RenderTonemapMix" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="tone_mix_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderHDREnabled">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderTonemapMix" />
+				</button>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_pad="10"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_tone_reset"
+				 tool_tip="Reset this section (including Advanced) to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_tone" />
+				</button>
+			</panel>
+		</accordion_tab>
+		<accordion_tab
+		 expanded="false"
+		 layout="topleft"
+		 height="327"
+		 name="atab_sec_tone_adv"
+		 title="Exposure &amp; Tone - Advanced"
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="298"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_tone_adv">
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top="7"
+				 right="-32"
+				 height="18"
+				 label="ACES white point"
+				 label_width="140"
+				 decimal_digits="1"
+				 increment="0.1"
+				 min_val="1"
+				 max_val="16"
+				 can_edit_text="true"
+				 name="tone_aces_white"
+				 tool_tip="White point for the ACES Boosted operator (no effect on other operators)"
+				 control_name="RenderTonemapACESWhite" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="tone_aces_white_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderTonemapACESWhite" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Reinhard white point"
+				 label_width="140"
+				 decimal_digits="1"
+				 increment="0.1"
+				 min_val="1"
+				 max_val="16"
+				 can_edit_text="true"
+				 name="tone_reinhard_white"
+				 tool_tip="White point for the Reinhard operator (no effect on other operators)"
+				 control_name="RenderTonemapReinhardWhite" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="tone_reinhard_white_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderTonemapReinhardWhite" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Filmic white point"
+				 label_width="140"
+				 decimal_digits="1"
+				 increment="0.1"
+				 min_val="1"
+				 max_val="16"
+				 can_edit_text="true"
+				 name="tone_filmic_white"
+				 tool_tip="White point for the Filmic operator (no effect on other operators)"
+				 control_name="RenderTonemapFilmicWhite" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="tone_filmic_white_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderTonemapFilmicWhite" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="AgX contrast"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0.5"
+				 max_val="2.5"
+				 can_edit_text="true"
+				 name="tone_agx_contrast"
+				 tool_tip="Contrast for the AgX operator (no effect on other operators)"
+				 control_name="RenderTonemapAgxContrast" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="tone_agx_contrast_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderTonemapAgxContrast" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="AgX white point"
+				 label_width="140"
+				 decimal_digits="1"
+				 increment="0.1"
+				 min_val="1"
+				 max_val="32"
+				 can_edit_text="true"
+				 name="tone_agx_white"
+				 tool_tip="White point for the AgX operator (no effect on other operators)"
+				 control_name="RenderTonemapAgxWhite" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="tone_agx_white_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderTonemapAgxWhite" />
+				</button>
+				<check_box
+				 follows="left|top"
+				 layout="topleft"
+				 height="16"
+				 left="8"
+				 top_pad="10"
+				 width="300"
+				 label="Automatic exposure (HDR)"
+				 tool_tip="Dynamically adapt exposure to scene brightness. Requires HDR rendering."
+				 name="tone_autoexposure"
+				 enabled_control="RenderHDREnabled"
+				 control_name="RenderDynamicExposureEnabled" />
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="9"
+				 right="-32"
+				 height="18"
+				 label="Auto-exposure strength"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0.05"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="tone_autoexp_coeff"
+				 tool_tip="How strongly automatic exposure reacts to scene luminance"
+				 enabled_control="RenderDynamicExposureEnabled"
+				 control_name="RenderDynamicExposureCoefficient" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="tone_autoexp_coeff_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderDynamicExposureEnabled">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderDynamicExposureCoefficient" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Adapt speed (far)"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0.01"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="tone_autoexp_speed_error"
+				 tool_tip="How quickly exposure adapts while far from its target"
+				 enabled_control="RenderDynamicExposureEnabled"
+				 control_name="RenderDynamicExposureSpeedError" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="tone_autoexp_speed_error_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderDynamicExposureEnabled">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderDynamicExposureSpeedError" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Adapt speed (near)"
+				 label_width="140"
+				 decimal_digits="1"
+				 increment="0.1"
+				 min_val="0.1"
+				 max_val="10"
+				 can_edit_text="true"
+				 name="tone_autoexp_speed_target"
+				 tool_tip="How quickly exposure settles once near its target"
+				 enabled_control="RenderDynamicExposureEnabled"
+				 control_name="RenderDynamicExposureSpeedTarget" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="tone_autoexp_speed_target_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderDynamicExposureEnabled">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderDynamicExposureSpeedTarget" />
+				</button>
+				<check_box
+				 follows="left|top"
+				 layout="topleft"
+				 height="16"
+				 left="8"
+				 top_pad="10"
+				 width="300"
+				 label="Use sky exposure range"
+				 tool_tip="Let the active sky's HDR settings define the automatic exposure range"
+				 name="tone_autoexp_sky"
+				 control_name="RenderUseExposureSkySettings" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_pad="12"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_tone_adv_reset"
+				 tool_tip="Reset the advanced tone settings to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_tone_adv" />
+				</button>
+			</panel>
+		</accordion_tab>
+		<accordion_tab
+		 expanded="true"
+		 layout="topleft"
+		 height="179"
+		 name="atab_sec_grading"
+		 title="Color Grading"
+		 fit_panel="true">
+			<!-- The master switch is the first line of the section, and reads the
+			     same way as the five section switches below it: ticked is
+			     applied. Unlike those, this one is a real setting and says so with
+			     control_name; they are a viewing state and deliberately have none.
+			     No enabled_control either, for the obvious reason. -->
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="150"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_grading">
+				<check_box
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top="6"
+				 width="300"
+				 height="16"
+				 label="Enable color grading"
+				 name="grading_enable"
+				 control_name="RenderColorGrade"
+				 tool_tip="Master switch for ALL color grading: the 3D LUT plus every Basic, White Balance, Split Toning, Lift / Gamma / Gain and Tone Curve control. This one is a setting and is saved with the Look, unlike the per-section switches." />
+				<!-- This section opens by default, so what is in it is paid for on
+				     every look at the tab. All that is left is the one line that
+				     says the Apply boxes exist, since a control nobody
+				     finds may as well not. Which order the renderer applies the
+				     sections in is a maintainer's question, not a grader's, and
+				     it lives in doc/LIGHTBOX.md where the answer is useful. -->
+				<text
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top="32"
+				 right="-8"
+				 height="16"
+				 font="SansSerifSmall"
+				 name="grading_compare_note"
+				 tool_tip="Switching a section off saves nothing and does not mark the Look as changed, and every section comes back when Photo Studio closes."
+				 value="Untick a section's Apply box to switch it off while you look." />
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top="56"
+				 width="330"
+				 height="16"
+				 font="SansSerifSmallBold"
+				 name="reference_label"
+				 value="Reference still: freeze a frame and compare against it" />
+				<button
+				 follows="left|top"
+				 layout="topleft"
+				 height="18"
+				 width="64"
+				 left="8"
+				 top="76"
+				 label="Grab"
+				 name="reference_grab"
+				 tool_tip="Freeze the frame as it is now and compare against it while you keep grading. The still is taken where the scopes measure: after every post pass, before the vignette and grain, which are then applied to both sides so the comparison is about the grade. Cleared when Photo Studio closes or the window is resized.">
+					<button.commit_callback
+					 function="PhotoStudio.ReferenceGrab" />
+				</button>
+				<button
+				 follows="left|top"
+				 layout="topleft"
+				 height="18"
+				 width="64"
+				 left="76"
+				 top="76"
+				 label="Clear"
+				 name="reference_clear"
+				 tool_tip="Discard the reference still and return to the live image">
+					<button.commit_callback
+					 function="PhotoStudio.ReferenceClear" />
+				</button>
+				<combo_box
+				 follows="left|top"
+				 layout="topleft"
+				 left="148"
+				 top="75"
+				 width="130"
+				 height="20"
+				 name="reference_mode"
+				 tool_tip="How the still is shown against the live image"
+				 control_name="RenderReferenceWipeMode">
+					<combo_box.item
+					 label="Off"
+					 name="ref_off"
+					 value="0" />
+					<combo_box.item
+					 label="Wipe"
+					 name="ref_wipe"
+					 value="1" />
+					<combo_box.item
+					 label="Side by side"
+					 name="ref_side"
+					 value="2" />
+				</combo_box>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top="100"
+				 right="-8"
+				 height="16"
+				 label="Wipe position"
+				 label_width="140"
+				 can_edit_text="true"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="1"
+				 text_width="56"
+				 name="reference_position"
+				 tool_tip="Where the seam sits across the frame: the still to its left, the live image to its right"
+				 control_name="RenderReferenceWipePosition" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top="124"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_grading_reset"
+				 tool_tip="Reset this section to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_grading" />
+				</button>
+			</panel>
+		</accordion_tab>
+		<accordion_tab
+		 expanded="false"
+		 layout="topleft"
+		 height="490"
+		 name="atab_sec_basic"
+		 title="Basic"
+		 fit_panel="true">
+			<!-- Ticked is the section switched on (the Apply box at the top of
+			     the section). -->
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="461"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_basic">
+				<check_box
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top="6"
+				 width="300"
+				 height="16"
+				 label="Apply this section"
+				 name="section_basic"
+				 initial_value="true"
+				 enabled_control="RenderColorGrade"
+				 tool_tip="Whether Basic is applied. Untick to switch the section off while you compare: nothing is saved, the Look is not marked as changed, and it comes back when Photo Studio closes.">
+					<check_box.commit_callback
+					 function="PhotoStudio.ToggleSection"
+					 parameter="basic" />
+				</check_box>
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top="32"
+				 width="200"
+				 height="15"
+				 font="SansSerifBold"
+				 name="basic_hdr_wb"
+				 value="White Balance" />
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="7"
+				 right="-32"
+				 height="18"
+				 label="Temperature (K)"
+				 label_width="140"
+				 decimal_digits="0"
+				 increment="50"
+				 min_val="-5000"
+				 max_val="5000"
+				 can_edit_text="true"
+				 name="basic_temp"
+				 tool_tip="Temperature shift in Kelvin from neutral daylight. Negative warms, positive cools. Try -2500 tungsten, -1000 golden hour, 1500 blue hour."
+				 enabled_control="RenderColorGrade"
+				 control_name="RenderColorGradeWhiteBalanceCCT" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="basic_temp_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderColorGrade">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderColorGradeWhiteBalanceCCT" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Tint"
+				 label_width="140"
+				 text_width="56"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="-1"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="basic_tint"
+				 tool_tip="Green/magenta tint, perpendicular to temperature. Negative pushes magenta, positive pushes green."
+				 enabled_control="RenderColorGrade"
+				 control_name="RenderColorGradeWhiteBalanceDuv" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="basic_tint_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderColorGrade">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderColorGradeWhiteBalanceDuv" />
+				</button>
+				<button
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="9"
+				 height="20"
+				 width="140"
+				 label="Pick neutral..."
+				 name="basic_wb_pick"
+				 tool_tip="Click something in world that should look white or grey, and both sliders above are solved to make it so. Pick a well lit spot: a surface in deep shadow carries too little colour to read."
+				 enabled_control="RenderColorGrade">
+					<button.commit_callback
+					 function="PhotoStudio.PickWhiteBalance" />
+				</button>
+				<view_border
+				 bevel_style="none"
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="12"
+				 right="-8"
+				 height="0"
+				 name="basic_hdr_tone_div" />
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="6"
+				 width="200"
+				 height="15"
+				 font="SansSerifBold"
+				 name="basic_hdr_tone"
+				 value="Tone" />
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="7"
+				 right="-32"
+				 height="18"
+				 label="Contrast"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="2"
+				 can_edit_text="true"
+				 name="basic_contrast"
+				 tool_tip="S-curve around mid grey. 1 is identity; below flattens, above punches. Past 1.3 starts clipping."
+				 enabled_control="RenderColorGrade"
+				 control_name="RenderColorGradeContrast" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="basic_contrast_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderColorGrade">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderColorGradeContrast" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Highlights"
+				 label_width="140"
+				 text_width="56"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="-1"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="basic_highlights"
+				 tool_tip="Recovers (negative) or boosts (positive) the brightest tones without touching midtones. Use -0.3 to pull a blown sky back."
+				 enabled_control="RenderColorGrade"
+				 control_name="RenderColorGradeHighlights" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="basic_highlights_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderColorGrade">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderColorGradeHighlights" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Shadows"
+				 label_width="140"
+				 text_width="56"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="-1"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="basic_shadows"
+				 tool_tip="Lifts (positive) or crushes (negative) the darkest tones without touching midtones. Use +0.2 to open up a dark scene."
+				 enabled_control="RenderColorGrade"
+				 control_name="RenderColorGradeShadows" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="basic_shadows_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderColorGrade">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderColorGradeShadows" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="White point"
+				 label_width="140"
+				 text_width="56"
+				 decimal_digits="3"
+				 increment="0.005"
+				 min_val="0.5"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="basic_whites"
+				 tool_tip="The input level that becomes pure white. 1 is identity; lowering it blooms highlights and, further down, gives a bleach-bypass look."
+				 enabled_control="RenderColorGrade"
+				 control_name="RenderColorGradeWhitePoint" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="basic_whites_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderColorGrade">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderColorGradeWhitePoint" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Black point"
+				 label_width="140"
+				 text_width="56"
+				 decimal_digits="3"
+				 increment="0.005"
+				 min_val="0"
+				 max_val="0.5"
+				 can_edit_text="true"
+				 name="basic_blacks"
+				 tool_tip="The input level that becomes pure black. 0 is identity; 0.05 deepens blacks cinematically, beyond 0.1 starts losing shadow detail."
+				 enabled_control="RenderColorGrade"
+				 control_name="RenderColorGradeBlackPoint" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="basic_blacks_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderColorGrade">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderColorGradeBlackPoint" />
+				</button>
+				<view_border
+				 bevel_style="none"
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="12"
+				 right="-8"
+				 height="0"
+				 name="basic_hdr_presence_div" />
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="6"
+				 width="200"
+				 height="15"
+				 font="SansSerifBold"
+				 name="basic_hdr_presence"
+				 value="Presence" />
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="7"
+				 right="-32"
+				 height="18"
+				 label="Vibrance"
+				 label_width="140"
+				 text_width="56"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="-1"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="basic_vibrance"
+				 tool_tip="Saturation that pushes muted colours harder than already-saturated ones. Kinder to skin than Saturation; 0.3 is a subtle lift."
+				 enabled_control="RenderColorGrade"
+				 control_name="RenderColorGradeVibrance" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="basic_vibrance_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderColorGrade">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderColorGradeVibrance" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Saturation"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="2"
+				 can_edit_text="true"
+				 name="basic_saturation"
+				 tool_tip="Uniform saturation. 1 is identity, 0 is black and white, 1.2 is punchy."
+				 enabled_control="RenderColorGrade"
+				 control_name="RenderColorGradeSaturation" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="basic_saturation_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderColorGrade">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderColorGradeSaturation" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Brightness"
+				 label_width="140"
+				 text_width="56"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="-0.5"
+				 max_val="0.5"
+				 can_edit_text="true"
+				 name="basic_brightness"
+				 tool_tip="Shifts the whole image lighter or darker in display space, after the tonemap. For overall exposure, use Exposure &amp; Tone instead."
+				 enabled_control="RenderColorGrade"
+				 control_name="RenderColorGradeBrightness" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="basic_brightness_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderColorGrade">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderColorGradeBrightness" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Hue shift"
+				 label_width="140"
+				 decimal_digits="0"
+				 increment="1"
+				 min_val="-180"
+				 max_val="180"
+				 can_edit_text="true"
+				 name="basic_hue_shift"
+				 tool_tip="Rotates every hue around the colour wheel, in degrees. 30 warms everything; 180 is a full complement."
+				 enabled_control="RenderColorGrade"
+				 control_name="RenderColorGradeHueShift" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="basic_hue_shift_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderColorGrade">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderColorGradeHueShift" />
+				</button>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_pad="10"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_basic_reset"
+				 tool_tip="Reset this section to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_basic" />
+				</button>
+			</panel>
+		</accordion_tab>
+		<accordion_tab
+		 expanded="false"
+		 layout="topleft"
+		 height="272"
+		 name="atab_sec_primaries"
+		 title="Primaries"
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="243"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_primaries">
+				<check_box
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top="6"
+				 width="300"
+				 height="16"
+				 label="Apply this section"
+				 name="section_primaries"
+				 initial_value="true"
+				 enabled_control="RenderColorGrade"
+				 tool_tip="Whether Lift / Gamma / Gain is applied. Untick to switch the section off while you compare: nothing is saved, the Look is not marked as changed, and it comes back when Photo Studio closes.">
+					<check_box.commit_callback
+					 function="PhotoStudio.ToggleSection"
+					 parameter="primaries" />
+				</check_box>
+				<sl_color_wheel
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top="32"
+				 width="120"
+				 height="175"
+				 label="Lift"
+				 centre="0"
+				 min_value="-0.5"
+				 max_value="0.5"
+				 name="wheel_lift"
+				 tool_tip="Adds to every tone, which shows most in the shadows. Drag the puck to tint, the slider to raise or crush the black floor. Double-click the face to neutralise."
+				 enabled_control="RenderColorGrade"
+				 control_name="RenderColorGradeLift" />
+				<sl_color_wheel
+				 follows="left|top"
+				 layout="topleft"
+				 left="132"
+				 top="32"
+				 width="120"
+				 height="175"
+				 label="Gamma"
+				 centre="1"
+				 min_value="0.5"
+				 max_value="1.5"
+				 name="wheel_gamma"
+				 tool_tip="Bends the middle of the range without moving black or white. Above 1 opens the midtones, below 1 closes them."
+				 enabled_control="RenderColorGrade"
+				 control_name="RenderColorGradeGamma" />
+				<sl_color_wheel
+				 follows="left|top"
+				 layout="topleft"
+				 left="256"
+				 top="32"
+				 width="120"
+				 height="175"
+				 label="Gain"
+				 centre="1"
+				 min_value="0.5"
+				 max_value="1.5"
+				 name="wheel_gain"
+				 tool_tip="Multiplies every tone, which shows most in the highlights. Drag the puck to tint whites, the slider to boost or tame them."
+				 enabled_control="RenderColorGrade"
+				 control_name="RenderColorGradeGain" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_pad="10"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_primaries_reset"
+				 tool_tip="Reset this section to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_primaries" />
+				</button>
+			</panel>
+		</accordion_tab>
+		<accordion_tab
+		 expanded="false"
+		 layout="topleft"
+		 height="485"
+		 name="atab_sec_split"
+		 title="Split Toning"
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="456"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_split">
+				<check_box
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top="6"
+				 width="300"
+				 height="16"
+				 label="Apply this section"
+				 name="section_split"
+				 initial_value="true"
+				 enabled_control="RenderColorGrade"
+				 tool_tip="Whether Split Toning is applied. Untick to switch the section off while you compare: nothing is saved, the Look is not marked as changed, and it comes back when Photo Studio closes.">
+					<check_box.commit_callback
+					 function="PhotoStudio.ToggleSection"
+					 parameter="split" />
+				</check_box>
+				<sl_color_wheel
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top="32"
+				 width="120"
+				 height="175"
+				 label="Shadows"
+				 centre="0.5"
+				 min_value="0"
+				 max_value="1"
+				 lock_master="true"
+				 name="wheel_split_shadow"
+				 tool_tip="Colour pushed into the darker tones. Try a cool teal against warm highlights. There is no master here: the renderer normalises tint brightness away."
+				 enabled_control="RenderColorGrade"
+				 control_name="RenderSplitToneShadowTint" />
+				<sl_color_wheel
+				 follows="left|top"
+				 layout="topleft"
+				 left="132"
+				 top="32"
+				 width="120"
+				 height="175"
+				 label="Midtones"
+				 centre="0.5"
+				 min_value="0"
+				 max_value="1"
+				 lock_master="true"
+				 name="wheel_split_midtone"
+				 tool_tip="Colour pushed into the middle tones. Warm tints flatter skin."
+				 enabled_control="RenderColorGrade"
+				 control_name="RenderSplitToneMidtoneTint" />
+				<sl_color_wheel
+				 follows="left|top"
+				 layout="topleft"
+				 left="256"
+				 top="32"
+				 width="120"
+				 height="175"
+				 label="Highlights"
+				 centre="0.5"
+				 min_value="0"
+				 max_value="1"
+				 lock_master="true"
+				 name="wheel_split_highlight"
+				 tool_tip="Colour pushed into the brighter tones. Try warm amber against teal shadows."
+				 enabled_control="RenderColorGrade"
+				 control_name="RenderSplitToneHighlightTint" />
+				<sl_curve_editor
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="10"
+				 right="-8"
+				 height="72"
+				 grid_divisions="4"
+				 draw_diagonal="false"
+				 name="split_tone_graph"
+				 tool_tip="Which tones each tint reaches. Drag the middle handle to slide the split point (the Balance slider); drag the left and right handles to set how far the shadow and highlight tints reach (the Width sliders). Each band is drawn in the colour it applies and fades as its amount drops. A handle held at the edge of the graph is locked; use its Width slider."
+				 enabled_control="RenderColorGrade">
+					<sl_curve_editor.commit_callback
+					 function="PhotoStudio.CommitSplitToneGraph" />
+				</sl_curve_editor>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="9"
+				 right="-32"
+				 height="18"
+				 label="Amount"
+				 label_width="140"
+				 text_width="56"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="split_amount"
+				 tool_tip="Strength of the shadow and highlight tints. The midtone tint has its own amount below and works on its own."
+				 enabled_control="RenderColorGrade"
+				 control_name="RenderSplitToneAmount" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="split_amount_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderColorGrade">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderSplitToneAmount" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Midtone amount"
+				 label_width="140"
+				 text_width="56"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="split_midtone_amount"
+				 tool_tip="Strength of the midtone tint, separate from the shadow and highlight amount."
+				 enabled_control="RenderColorGrade"
+				 control_name="RenderSplitToneMidtoneAmount" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="split_midtone_amount_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderColorGrade">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderSplitToneMidtoneAmount" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Balance"
+				 label_width="140"
+				 text_width="56"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="-1"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="split_balance"
+				 tool_tip="Slides the split point between shadows and highlights. Negative widens the shadow range, positive widens the highlight range."
+				 enabled_control="RenderColorGrade"
+				 control_name="RenderSplitToneBalance" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="split_balance_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderColorGrade">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderSplitToneBalance" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Shadow width"
+				 label_width="140"
+				 text_width="56"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0.02"
+				 max_val="0.5"
+				 can_edit_text="true"
+				 name="split_shadow_width"
+				 tool_tip="How far below the split point the shadow tint reaches full strength. 0.02 is a hard edge, 0.5 a very soft one. The left handle on the graph."
+				 enabled_control="RenderColorGrade"
+				 control_name="RenderSplitToneShadowWidth" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="split_shadow_width_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderColorGrade">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderSplitToneShadowWidth" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Highlight width"
+				 label_width="140"
+				 text_width="56"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0.02"
+				 max_val="0.5"
+				 can_edit_text="true"
+				 name="split_highlight_width"
+				 tool_tip="How far above the split point the highlight tint reaches full strength. 0.02 is a hard edge, 0.5 a very soft one. The right handle on the graph."
+				 enabled_control="RenderColorGrade"
+				 control_name="RenderSplitToneHighlightWidth" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="split_highlight_width_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderColorGrade">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderSplitToneHighlightWidth" />
+				</button>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_pad="10"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_split_reset"
+				 tool_tip="Reset this section to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_split" />
+				</button>
+			</panel>
+		</accordion_tab>
+		<accordion_tab
+		 expanded="false"
+		 layout="topleft"
+		 height="140"
+		 name="atab_sec_lut"
+		 title="3D LUT"
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="111"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_lut">
+				<check_box
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top="6"
+				 width="300"
+				 height="16"
+				 label="Apply this section"
+				 name="section_lut"
+				 initial_value="true"
+				 enabled_control="RenderColorGrade"
+				 tool_tip="Whether the 3D LUT is applied. Untick to switch the section off while you compare: nothing is saved, the Look is not marked as changed, and it comes back when Photo Studio closes.">
+					<check_box.commit_callback
+					 function="PhotoStudio.ToggleSection"
+					 parameter="lut" />
+				</check_box>
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top="32"
+				 width="140"
+				 height="15"
+				 name="lut_label"
+				 value="LUT" />
+				<combo_box
+				 allow_text_entry="true"
+				 follows="left|top|right"
+				 layout="topleft"
+				 left_delta="140"
+				 top_pad="-16"
+				 right="-32"
+				 height="18"
+				 max_chars="200"
+				 name="colorlut_combo"
+				 tool_tip="Which color look-up table to grade with. Files dropped into the user 'colorlut' folder appear here."
+				 enabled_control="RenderColorGrade"
+				 control_name="RenderColorGradeLUT">
+					<combo_box.item
+					 label="None"
+					 name="lut_none"
+					 value="" />
+				</combo_box>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="18"
+				 right="-8"
+				 top_pad="-18"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="lut_combo_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderColorGradeLUT" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Strength"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="lut_strength"
+				 tool_tip="How strongly the LUT grades the image"
+				 enabled_control="RenderColorGrade"
+				 control_name="RenderColorGradeLUTStrength" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="lut_strength_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderColorGrade">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderColorGradeLUTStrength" />
+				</button>
+				<button
+				 follows="left|top"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 left="8"
+				 top_pad="10"
+				 label="Open Folder"
+				 name="lut_open_folder"
+				 tool_tip="Open your LUT folder in the file browser. Drop .cube or image LUTs there; new files are listed the next time Photo Studio opens.">
+					<button.commit_callback
+					 function="PhotoStudio.OpenLUTFolder" />
+				</button>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_delta="0"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_lut_reset"
+				 tool_tip="Reset this section to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_lut" />
+				</button>
+			</panel>
+		</accordion_tab>
+		<accordion_tab
+		 expanded="false"
+		 layout="topleft"
+		 height="309"
+		 name="atab_sec_curve"
+		 title="Tone Curve"
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="280"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_curve">
+				<check_box
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top="6"
+				 width="300"
+				 height="16"
+				 label="Apply this section"
+				 name="section_curve"
+				 initial_value="true"
+				 enabled_control="RenderColorGrade"
+				 tool_tip="Whether the Tone Curve is applied. Untick to switch the section off while you compare: nothing is saved, the Look is not marked as changed, and it comes back when Photo Studio closes.">
+					<check_box.commit_callback
+					 function="PhotoStudio.ToggleSection"
+					 parameter="curve" />
+				</check_box>
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top="32"
+				 width="110"
+				 height="15"
+				 name="tone_curve_channel_label"
+				 value="Channel" />
+				<combo_box
+				 follows="left|top"
+				 layout="topleft"
+				 left_delta="110"
+				 top_pad="-16"
+				 width="120"
+				 height="18"
+				 name="tone_curve_channel"
+				 tool_tip="Which curve the graph edits. Master applies to all three channels after their own curves; a channel shows its combined result and any other shaped channel behind it."
+				 enabled_control="RenderColorGrade">
+					<combo_box.item
+					 label="Master"
+					 name="master"
+					 value="-1" />
+					<combo_box.item
+					 label="Red"
+					 name="red"
+					 value="0" />
+					<combo_box.item
+					 label="Green"
+					 name="green"
+					 value="1" />
+					<combo_box.item
+					 label="Blue"
+					 name="blue"
+					 value="2" />
+					<combo_box.commit_callback
+					 function="PhotoStudio.RefreshToneCurve" />
+				</combo_box>
+				<menu_button
+				 follows="left|top"
+				 layout="topleft"
+				 left_pad="6"
+				 top_delta="0"
+				 width="84"
+				 height="18"
+				 label="Presets"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Arrow_Small_Down"
+				 image_overlay_alignment="right"
+				 menu_filename="menu_photo_studio_curve_presets.xml"
+				 menu_position="bottomleft"
+				 name="tone_curve_presets"
+				 tool_tip="Replace the selected curve with a starting shape"
+				 enabled_control="RenderColorGrade" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="18"
+				 right="-8"
+				 top_delta="0"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="tone_curve_channel_rst"
+				 tool_tip="Reset the selected curve to a straight line">
+					<button.commit_callback
+					 function="PhotoStudio.ResetToneCurveChannel" />
+				</button>
+				<sl_curve_editor
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-8"
+				 height="160"
+				 curve_samples="192"
+				 points_editable="true"
+				 edited_settings="RenderColorGradeCurveMaster,RenderColorGradeCurveRed,RenderColorGradeCurveGreen,RenderColorGradeCurveBlue"
+				 name="tone_curve_graph"
+				 tool_tip="Drag a point to shape the selected curve. Double-click empty space to add a point (up to 16), double-click a point to remove it; the two end points move only up and down. The straight line is no change. Behind the curve: what the channel gets once Master is applied, and any other channel that is not straight."
+				 enabled_control="RenderColorGrade">
+					<sl_curve_editor.commit_callback
+					 function="PhotoStudio.CommitToneCurve" />
+				</sl_curve_editor>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="9"
+				 right="-32"
+				 height="18"
+				 label="Amount"
+				 label_width="140"
+				 text_width="56"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="curve_amount"
+				 tool_tip="How much of the curves is applied. 0 leaves the image untouched, 1 applies them fully."
+				 enabled_control="RenderColorGrade"
+				 control_name="RenderColorGradeCurveAmount" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="curve_amount_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderColorGrade">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderColorGradeCurveAmount" />
+				</button>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_pad="10"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_curve_reset"
+				 tool_tip="Reset this section to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_curve" />
+				</button>
+			</panel>
+		</accordion_tab>
+	</accordion>
+</panel>

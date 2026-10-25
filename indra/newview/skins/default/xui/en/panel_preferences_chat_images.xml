@@ -1,0 +1,201 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<panel
+    border="false"
+    height="408"
+    layout="topleft"
+    name="chat_images_settings"
+    top="0"
+    left="13"
+    width="517">
+    <text
+        follows="left|top"
+        height="14"
+        layout="topleft"
+        left="10"
+        name="chat_images_label"
+        text_color="White"
+        top="10"
+        width="480">
+        Image previews
+    </text>
+    <check_box
+        control_name="ChatImagePreviews"
+        follows="left|top"
+        height="16"
+        label="Show pictures for image links in chat and IMs"
+        tool_tip="When someone posts a link to a picture (PNG, JPEG, GIF or WebP), show a small preview under the message. Click a preview to see it full size."
+        layout="topleft"
+        left="15"
+        name="ChatImagePreviews"
+        top_pad="6"
+        width="470" />
+    <text
+        follows="left|top"
+        height="14"
+        layout="topleft"
+        left="30"
+        name="chat_images_autoload_label"
+        top_pad="10"
+        width="455">
+        Load pictures automatically when they are posted by:
+    </text>
+    <check_box
+        control_name="ChatImageAutoLoadFriends"
+        enabled_control="ChatImagePreviews"
+        follows="left|top"
+        height="16"
+        label="My friends"
+        layout="topleft"
+        left="30"
+        name="ChatImageAutoLoadFriends"
+        top_pad="4"
+        width="455" />
+    <check_box
+        control_name="ChatImageAutoLoadTrusted"
+        enabled_control="ChatImagePreviews"
+        follows="left|top"
+        height="16"
+        label="Anyone, if the picture is on one of these sites:"
+        tool_tip="These picture sites see your IP address when a picture loads, but the person who posted it does not."
+        layout="topleft"
+        left="30"
+        name="ChatImageAutoLoadTrusted"
+        top_pad="4"
+        width="455" />
+    <line_editor
+        control_name="ChatImageTrustedHosts"
+        enabled_control="ChatImagePreviews"
+        border_style="line"
+        border_thickness="1"
+        follows="left|top"
+        font="SansSerif"
+        height="20"
+        layout="topleft"
+        left="50"
+        max_length_bytes="1024"
+        name="ChatImageTrustedHosts"
+        tool_tip="Site names separated by commas, for example: i.imgur.com, i.gyazo.com. A site also covers its subdomains."
+        top_pad="4"
+        width="420" />
+    <check_box
+        control_name="ChatImageAutoLoadAll"
+        enabled_control="ChatImagePreviews"
+        follows="left|top"
+        height="16"
+        label="Everyone"
+        layout="topleft"
+        left="30"
+        name="ChatImageAutoLoadAll"
+        top_pad="8"
+        width="455" />
+    <text
+        follows="left|top"
+        height="28"
+        layout="topleft"
+        left="50"
+        name="chat_images_autoload_all_warning"
+        text_color="AlertCautionTextColor"
+        top_pad="2"
+        width="430"
+        wrap="true">
+        Anyone who posts a link will see your IP address. Otherwise you get a "Click to load image" box and decide yourself.
+    </text>
+    <check_box
+        control_name="ChatImagePreviewsFromObjects"
+        enabled_control="ChatImagePreviews"
+        follows="left|top"
+        height="16"
+        label="Also show pictures linked by objects and scripts"
+        layout="topleft"
+        left="15"
+        name="ChatImagePreviewsFromObjects"
+        top_pad="10"
+        width="470" />
+    <text
+        follows="left|top"
+        height="16"
+        layout="topleft"
+        left="15"
+        name="ChatImagePreviewMaxHeight_label"
+        top_pad="12"
+        width="240">
+        Largest preview height (pixels):
+    </text>
+    <spinner
+        control_name="ChatImagePreviewMaxHeight"
+        enabled_control="ChatImagePreviews"
+        decimal_digits="0"
+        follows="left|top"
+        height="20"
+        increment="8"
+        label=""
+        label_width="0"
+        layout="topleft"
+        left_pad="2"
+        max_val="400"
+        min_val="64"
+        name="ChatImagePreviewMaxHeight"
+        top_delta="-3"
+        width="70" />
+    <text
+        follows="left|top"
+        height="16"
+        layout="topleft"
+        left="15"
+        name="ChatImageCacheMB_label"
+        top_pad="10"
+        width="240">
+        Memory for previews (MB):
+    </text>
+    <spinner
+        control_name="ChatImageCacheMB"
+        enabled_control="ChatImagePreviews"
+        decimal_digits="0"
+        follows="left|top"
+        height="20"
+        increment="16"
+        label=""
+        label_width="0"
+        layout="topleft"
+        left_pad="2"
+        max_val="1024"
+        min_val="1"
+        name="ChatImageCacheMB"
+        tool_tip="When previews use more than this, the oldest are dropped. Click a dropped preview to load it again."
+        top_delta="-3"
+        width="70" />
+    <text
+        follows="left|top"
+        height="16"
+        layout="topleft"
+        left="15"
+        name="ChatImageAnimate_label"
+        top_pad="10"
+        width="240">
+        Play animated GIFs / WebPs:
+    </text>
+    <combo_box
+        control_name="ChatImageAnimate"
+        enabled_control="ChatImagePreviews"
+        follows="left|top"
+        height="23"
+        layout="topleft"
+        left_pad="2"
+        name="ChatImageAnimate"
+        tool_tip="Animated pictures only play while you can see them. 'Never' shows the first picture of the animation."
+        top_delta="-4"
+        width="150">
+        <item
+            label="Never"
+            name="animate_never"
+            value="0" />
+        <item
+            label="When I point at it"
+            name="animate_hover"
+            value="1" />
+        <item
+            label="Always"
+            name="animate_always"
+            value="2" />
+    </combo_box>
+</panel>

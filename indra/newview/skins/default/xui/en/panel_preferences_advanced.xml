@@ -1,0 +1,643 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<panel
+ border="true"
+ follows="all"
+ height="408"
+ label="Advanced"
+ layout="topleft"
+ left="102"
+ name="advanced"
+ top="1"
+ width="517">
+	<panel.string
+     name="aspect_ratio_text">
+        [NUM]:[DEN]
+    </panel.string>
+  <!-- Slipstream: the sound cache rows (#176) pushed the tab past its 408 px; scroll it. -->
+  <scroll_container
+   follows="all"
+   layout="topleft"
+   left="0"
+   top="0"
+   width="517"
+   height="408"
+   reserve_scroll_corner="false"
+   name="advanced_scroll">
+  <panel
+   follows="left|top"
+   layout="topleft"
+   left="0"
+   top="0"
+   width="500"
+   height="750"
+   name="advanced_scroll_panel">
+  <text
+   type="string"
+   length="1"
+   follows="left|top"
+   height="12"
+   layout="topleft"
+   left="33"
+   name="Cache:"
+   top_pad="10"
+   width="100">
+    Cache:
+  </text>
+  <spinner
+   control_name="CacheSize"
+   decimal_digits="0"
+   follows="left|top"
+   height="23"
+   increment="1024"
+   initial_value="16384"
+   label="Cache size (896 - 262144MB)"
+   label_width="150"
+   layout="topleft"
+   left="80"
+   max_val="262144"
+   min_val="896"
+   top_pad="10"
+   name="cachesizespinner"
+   width="222" />
+  <text
+   type="string"
+   length="1"
+   follows="left|top"
+   height="23"
+   layout="topleft"
+   left_pad="5"
+   mouse_opaque="false"
+   name="text_box5"
+   width="20">
+    MB
+  </text>
+  <button
+   follows="left|top"
+   height="23"
+   label="Clear Cache"
+   label_selected="Clear Cache"
+   layout="topleft"
+   left_pad="20"
+   name="clear_cache"
+   top_delta="0"
+   width="100">
+  <button.commit_callback
+   function="Pref.ClearCache" />
+  </button>
+  <text
+   type="string"
+   length="1"
+   follows="left|top"
+   height="10"
+   layout="topleft"
+   left="80"
+   name="Cache location"
+   top_pad="5"
+   width="300">
+    Cache location:
+  </text>
+  <line_editor
+   control_name="CacheLocationTopFolder"
+   border_style="line"
+   border_thickness="1"
+   follows="left|top"
+   font="SansSerif"
+   height="23"
+   layout="topleft"
+   left="80"
+   max_length_bytes="4096"
+   name="cache_location"
+   top_pad="5"
+   width="205" />
+  <button
+   follows="left|top"
+   height="23"
+   label="Browse"
+   label_selected="Browse"
+   layout="topleft"
+   left_pad="5"
+   name="set_cache"
+   top_delta="0"
+   width="100">
+  <button.commit_callback
+   function="Pref.SetCache" />
+  </button>
+  <button
+    follows="left|top"
+    height="23"
+    label="Default Location"
+    label_selected="Default Location"
+    layout="topleft"
+    left_pad="3"
+    name="default_cache_location"
+    top_delta="0"
+    width="100">
+    <button.commit_callback
+     function="Pref.ResetCache" />
+  </button>
+  <!-- Decoded sounds (#176): own folder, LRU size budget, kept between sessions. -->
+  <text
+   type="string"
+   length="1"
+   follows="left|top"
+   height="10"
+   layout="topleft"
+   left="80"
+   name="Sound cache location"
+   top_pad="8"
+   width="300">
+    Sound cache location (decoded sounds):
+  </text>
+  <line_editor
+   border_style="line"
+   border_thickness="1"
+   follows="left|top"
+   font="SansSerif"
+   height="23"
+   layout="topleft"
+   left="80"
+   max_length_bytes="4096"
+   name="sound_cache_location"
+   top_pad="5"
+   width="205" />
+  <button
+   follows="left|top"
+   height="23"
+   label="Browse"
+   label_selected="Browse"
+   layout="topleft"
+   left_pad="5"
+   name="set_sound_cache"
+   tool_tip="Choose the folder decoded sounds are kept in. Takes effect after a restart."
+   top_delta="0"
+   width="100">
+  <button.commit_callback
+   function="Pref.SetSoundCache" />
+  </button>
+  <button
+    follows="left|top"
+    height="23"
+    label="Default Location"
+    label_selected="Default Location"
+    layout="topleft"
+    left_pad="3"
+    name="default_sound_cache_location"
+    tool_tip="Keep decoded sounds in a 'sounds' folder inside the cache folder. Takes effect after a restart."
+    top_delta="0"
+    width="100">
+    <button.commit_callback
+     function="Pref.ResetSoundCache" />
+  </button>
+  <spinner
+   control_name="SlipstreamSoundCacheSizeMB"
+   decimal_digits="0"
+   follows="left|top"
+   height="23"
+   increment="32"
+   initial_value="1024"
+   label="Sound cache size (32 - 4096MB)"
+   label_width="150"
+   layout="topleft"
+   left="80"
+   max_val="4096"
+   min_val="32"
+   top_pad="5"
+   name="soundcachesizespinner"
+   tool_tip="Disk space for decoded sounds. Past it, the least recently played sounds are deleted (and decoded again if they play later). Applies immediately."
+   width="222" />
+  <text
+   type="string"
+   length="1"
+   follows="left|top"
+   height="23"
+   layout="topleft"
+   left_pad="5"
+   mouse_opaque="false"
+   name="sound_cache_mb_text"
+   width="20">
+    MB
+  </text>
+  <text
+   type="string"
+   length="1"
+   follows="left|top"
+   height="23"
+   layout="topleft"
+   left_pad="20"
+   name="sound_cache_usage"
+   top_delta="0"
+   width="150">
+    0 MB used, 0 files
+  </text>
+  <check_box
+   control_name="SlipstreamKeepDecodedSounds"
+   follows="left|top"
+   height="15"
+   label="Keep decoded sounds between sessions"
+   layout="topleft"
+   left="80"
+   name="keep_decoded_sounds_check"
+   tool_tip="Sounds heard before play without being decoded again. Off: the sound cache folder is emptied when the viewer exits. Clear Cache empties it either way."
+   top_pad="5"
+   width="300" />
+  <!-- GPU-ready texture cache (#274, tier 2 of #405) and the RAM texture copies (tier 1). -->
+  <check_box
+   control_name="SlipstreamGpuTexCache"
+   follows="left|top"
+   height="15"
+   label="GPU-ready texture cache (textures seen before load without decoding)"
+   layout="topleft"
+   left="80"
+   name="gputex_cache_check"
+   tool_tip="Keeps the compressed textures the renderer made in a 'gputex' folder inside the cache folder, so textures seen before load straight from disk -- no JPEG2000 decode, no re-encode. Needs texture compression (Advanced Graphics). Clear Cache empties it."
+   top_pad="10"
+   width="420" />
+  <spinner
+   control_name="SlipstreamGpuTexCacheSizeMB"
+   decimal_digits="0"
+   enabled_control="SlipstreamGpuTexCache"
+   follows="left|top"
+   height="23"
+   increment="256"
+   initial_value="3072"
+   label="Texture cache (256 - 65536MB)"
+   label_width="150"
+   layout="topleft"
+   left="80"
+   max_val="65536"
+   min_val="256"
+   top_pad="5"
+   name="gputexcachesizespinner"
+   tool_tip="Disk space for the GPU-ready texture cache. Past it, the least recently used textures are deleted (they load from the regular cache again). Applies immediately."
+   width="222" />
+  <text
+   type="string"
+   length="1"
+   follows="left|top"
+   height="23"
+   layout="topleft"
+   left_pad="5"
+   mouse_opaque="false"
+   name="gputex_cache_mb_text"
+   width="20">
+    MB
+  </text>
+  <text
+   type="string"
+   length="1"
+   follows="left|top"
+   height="23"
+   layout="topleft"
+   left_pad="20"
+   name="gputex_cache_usage"
+   top_delta="0"
+   width="150">
+    0 MB used, 0 files
+  </text>
+  <text
+   type="string"
+   length="1"
+   follows="left|top"
+   height="12"
+   layout="topleft"
+   left="80"
+   name="texture_ram_usage"
+   top_pad="2"
+   width="420">
+    Texture copies in RAM: 0 MB
+  </text>
+   <text
+   type="string"
+   length="1"
+   follows="left|top"
+   height="12"
+   layout="topleft"
+   left="33"
+   name="UI Size:"
+   top_pad="20"
+   width="100">
+    UI size:
+  </text>
+  <slider
+   control_name="UIScaleFactor"
+   decimal_digits="2"
+   follows="left|top"
+   height="17"
+   increment="0.025"
+   initial_value="1"
+   layout="topleft"
+   left_pad="0"
+   max_val="4.0"
+   min_val="0.75"
+   name="ui_scale_slider"
+   top_pad="-14"
+   width="250" />
+  <text
+  type="string"
+  length="1"
+  follows="left|top"
+  height="12"
+  layout="topleft"
+  left="33"
+  name="HUD Size:"
+  top_pad="20"
+  width="100">
+    HUD Scale:
+  </text>
+  <slider
+   control_name="HUDScaleFactor"
+   decimal_digits="2"
+   follows="left|top"
+   height="17"
+   increment="0.1"
+   initial_value="1"
+   layout="topleft"
+   left_pad="0"
+   max_val="2.0"
+   min_val="1.0"
+   name="hud_scale_slider"
+   top_pad="-14"
+   width="250" />
+  <!-- Slipstream (#234): in-world hover tips, previously only in the hidden Advanced menu. -->
+  <check_box
+   control_name="ShowHoverTips"
+   follows="left|top"
+   height="15"
+   label="Show hover tips on objects, avatars and land"
+   layout="topleft"
+   left="30"
+   name="show_hover_tips_check"
+   tool_tip="Show a tooltip when the mouse rests on something in-world. Tooltips on buttons and other controls are not affected."
+   top_pad="15"
+   width="440" />
+  <check_box
+   control_name="ShowAllObjectHoverTip"
+   enabled_control="ShowHoverTips"
+   follows="left|top"
+   height="15"
+   label="Show tips on all objects, not just interactive ones"
+   layout="topleft"
+   left="50"
+   name="show_all_object_hover_tip_check"
+   top_pad="5"
+   width="420" />
+  <check_box
+   control_name="ShowLandHoverTip"
+   enabled_control="ShowHoverTips"
+   follows="left|top"
+   height="15"
+   label="Show tips on land"
+   layout="topleft"
+   left="50"
+   name="show_land_hover_tip_check"
+   top_pad="5"
+   width="420" />
+  <text
+   type="string"
+   length="1"
+   follows="left|top"
+   height="12"
+   layout="topleft"
+   left="33"
+   name="tooltip_delay_label"
+   top_pad="15"
+   width="100">
+    Tooltip delay:
+  </text>
+  <slider
+   control_name="ToolTipDelay"
+   decimal_digits="1"
+   follows="left|top"
+   height="17"
+   increment="0.1"
+   initial_value="0.7"
+   layout="topleft"
+   left_pad="0"
+   max_val="3.0"
+   min_val="0.0"
+   name="tooltip_delay_slider"
+   tool_tip="Seconds the mouse must rest before a tooltip appears, in-world and on buttons and other controls."
+   top_pad="-14"
+   width="250" />
+      <text
+       type="string"
+       left="30"
+       top_pad="15"
+       width="160"
+       follows="left|top"
+       height="16"
+       layout="topleft"
+       name="ScriptDialogsPerObjectLabel">
+        Script Dialogs per Object:
+      </text>
+      <combo_box
+       control_name="ScriptDialogLimitations"
+       height="23"
+       layout="topleft"
+       left_pad="10"
+       top_delta="-5"
+       name="ScriptDialogPerObjectDropdown"
+       width="290">
+        <combo_box.item
+         label="One per Object"
+         name="ScriptDialogOption_0"
+         value="0"/>
+        <combo_box.item
+         label="One per Channel"
+         name="ScriptDialogOption_1"
+         value="1"/>
+        <combo_box.item
+         label="One per Channel for Attachments"
+         name="ScriptDialogOption_2"
+         value="2"/>
+        <combo_box.item
+         label="One per Channel for HUDs"
+         name="ScriptDialogOption_3"
+         value="3"/>
+        <combo_box.item
+         label="Unconstrained for HUDs"
+         name="ScriptDialogOption_4"
+         value="4"/>
+        <combo_box.item
+         label="Unconstrained"
+         name="ScriptDialogOption_5"
+         value="5"/>
+      </combo_box>
+    <check_box
+     control_name="ShowScriptErrors"
+     follows="left|top"
+     height="20"
+     label="Show script errors in:"
+     layout="topleft"
+     left="30"
+     top_pad="10" 
+     name="show_script_errors"
+     width="256" />
+    <radio_group
+     enabled_control="ShowScriptErrors"
+     control_name="ShowScriptErrorsLocation"
+     follows="top|left"
+     height="16"
+     layout="topleft"
+     left_delta="50"
+     name="show_location"
+     top_pad="5"
+     width="364">
+        <radio_item
+         height="16"
+         label="Nearby chat"
+         layout="topleft"
+         left="3"
+         name="0"
+         top="0"
+         width="315" />
+        <radio_item
+         height="16"
+         label="Separate window"
+         layout="topleft"
+         left_delta="175"
+         name="1"
+         top_delta="0"
+         width="315" />
+    </radio_group>
+
+    <check_box
+     control_name="AllowMultipleViewers"
+     follows="top|left"
+     height="15"
+     label="Allow Multiple Viewers"
+     layout="topleft"
+     left="30"
+     name="allow_multiple_viewer_check"
+     top_pad="20"
+     width="237"/>
+    <check_box
+     control_name="ForceShowGrid"
+     follows="top|left"
+     height="15"
+     label="Show Grid Selection at login"
+     layout="topleft"
+     left="30"
+     name="show_grid_selection_check"
+     top_pad="5"
+     width="237"/>
+    <check_box
+     control_name="UseDebugMenus"
+     follows="top|left"
+     height="15"
+     label="Show Advanced Menu"
+     layout="topleft"
+     left="30"
+     name="show_advanced_menu_check"
+     top_pad="5"
+     width="237"/>
+    <check_box
+     control_name="QAMode"
+     follows="top|left"
+     height="15"
+     label="Show Develop Menu"
+     layout="topleft"
+     left="30"
+     name="show_develop_menu_check"
+     top_pad="5"
+     width="237"/>
+    <button
+     follows="top|left"
+     layout="topleft"
+     label="Remembered Usernames"
+     name="remembered_usernames"
+     height="20"
+     left="30"
+     top_pad="16"
+     width="200">
+    <button.commit_callback
+     function="Pref.RememberedUsernames" />
+  </button>
+  <button
+     follows="top|left"
+     layout="topleft"
+     label="Default Creation Permissions"
+     name="default_creation_permissions"
+     height="20"
+     left="30"
+     top_pad="16"
+     width="200">
+    <button.commit_callback
+     function="Pref.PermsDefault" />
+  </button>
+  <button
+     follows="top|left"
+     layout="topleft"
+     label="Import from Another Viewer..."
+     name="import_from_viewer"
+     tool_tip="Bring over settings, key bindings and chat logs from Firestorm, Alchemy, Black Dragon or the official viewer."
+     height="20"
+     left="30"
+     top_pad="16"
+     width="200">
+    <button.commit_callback
+     function="Floater.Show"
+     parameter="viewer_import" />
+  </button>
+  <!-- Right of the check boxes: top_delta climbs from the import button to
+       "Allow Multiple Viewers" (16 + 20 + 16 + 20 + 16 + 15 + 5 + 15 + 5 + 15 + 5 + 15). -->
+  <check_box
+   control_name="SLIgnoreFullbright"
+   follows="left|top"
+   height="15"
+   label="Ignore fullbright (light it normally)"
+   layout="topleft"
+   left="280"
+   name="ignore_fullbright_check"
+   tool_tip="Draw fullbright faces lit like everything else, so night-time glowing signs, bright-painted prims and 'always bright' avatars are dark when the world is. Glow and emissive materials, HUDs and the UI are not affected."
+   top_delta="-163"
+   width="300" />
+  <check_box
+   control_name="RenderVKRigWeld"
+   follows="left|top"
+   height="15"
+   label="Weld avatar mesh seams"
+   layout="topleft"
+   left="280"
+   name="rig_weld_check"
+   tool_tip="Join the edges of an avatar's mesh parts (body, head, hands, feet, add-ons) where they meet, closing seams and hairline gaps that open under animation and the lighting line across joins. Never welds between different avatars or onto the world. Uses about 9 MB of video memory."
+   top_pad="6"
+   width="300" />
+  <text
+   type="string"
+   length="1"
+   follows="left|top"
+   height="12"
+   layout="topleft"
+   left="280"
+   name="motion_blur_label"
+   top_pad="10"
+   width="220">
+    Motion blur:
+  </text>
+  <combo_box
+   control_name="SLMotionBlurPreset"
+   follows="left|top"
+   height="23"
+   layout="topleft"
+   left="280"
+   name="motion_blur_combo"
+   tool_tip="Blur along the direction things move on screen. Turning or orbiting the camera never blurs. Realistic: a camera-like exposure; fast flight streaks nearby objects and other avatars flying past. Cinematic: a longer exposure with stronger streaks from your own movement. Uses about 130 MB of video memory at 4K while on."
+   top_pad="4"
+   width="210">
+    <combo_box.item
+     label="Off"
+     name="motion_blur_off"
+     value="0" />
+    <combo_box.item
+     label="Realistic"
+     name="motion_blur_realistic"
+     value="1" />
+    <combo_box.item
+     label="Cinematic"
+     name="motion_blur_cinematic"
+     value="2" />
+  </combo_box>
+  </panel>
+  </scroll_container>
+</panel>

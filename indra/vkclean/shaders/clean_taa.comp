@@ -1,0 +1,549 @@
+#version 460
+// vkclean — TEMPORAL ANTI-ALIASING resolve (temporal #84, stage 3; RenderFSAAType 3
+// "TAA" or the RenderVKTAA debug switch). One dispatch per on-screen frame, on the
+// LINEAR HDR scene after pass 2 (opaque + alpha + water + particles) and before
+// everything that consumes it (SSR's previous-frame copy, eyedropper, DoF, bloom,
+// exposure, tonemap). Writes the new history; the renderer copies it back over the
+// HDR target, so the rest of the post chain is unchanged.
+//
+//   current : the jittered HDR scene at the RENDER resolution (RenderVKRenderScale,
+//             #181; equal to the display at scale 1). Render pixel q rasterized the
+//             scene at q + 0.5 - jitter, so the 3x3 around the render pixel under this
+//             output pixel is reweighted around the output pixel's UNJITTERED centre
+//             (Gaussian fit of Blackman-Harris, distance in render pixels; at scale 1
+//             exactly k - jitter). The output and the history are DISPLAY sized.
+//   motion  : the pre-pass target (UV, cur - prev, unjittered), dilated to the
+//             closest depth of the 3x3 (silhouettes follow the foreground). Sky /
+//             no-pre-pass frames: camera-only motion, reprojecting depth.
+//   WATER   : (#204) the water writes no depth and no motion (pass 2, read-only depth):
+//             where the water mask says water, the depth is the view ray's hit on the
+//             water plane (camera-only motion -- the plane is static), and the history
+//             test is one-sided: last frame's depth there is the seabed / sky BEHIND the
+//             surface, so the history is kept unless something was in FRONT of it.
+//   history : Catmull-Rom (5 bilinear taps) at uv - motion; rejected off-screen, on
+//             the reset flag, and softly where last frame's depth at that spot is not
+//             the surface this pixel sees (disocclusion; this pixel's own depth, 3x3
+//             search, slope-aware tolerance -- #204).
+//   clip    : variance box (3x3, YCoCg) with a clip toward its centre (Salvi / Playdead).
+//   blend   : in a Reinhard-compressed space (Karis' luminance weighting), inverted
+//             exactly afterwards; ~0.9 history.
+//   REACTIVE: alpha-blended faces and particles have no motion vectors (they are drawn
+//             after the pre-pass). Where they cover the pixel, the history weight drops
+//             toward ~0.5 and the clip box tightens, so they keep most of the
+//             anti-aliasing without dragging a trail. Two sources (params2.w):
+//             > 0 (F5, RenderVKReactiveMask): the coverage the post-water alpha and the
+//               particles wrote into R of pass 2's mask (MAX blend) x params2.w. The
+//               water writes only G (the water mask), so it is never reactive (#204).
+//             0: where the final colour differs from the scene as it was before
+//               post-water alpha + particles (mRefract, re-taken AFTER the water draw on
+//               TAA frames, #204 -- against the pre-water copy the water itself was
+//               reactive everywhere and never settled) x params1.y.
+//   GLOW    : (params2.y) the per-face glow target (clean_draw.frag outGlow: the glow
+//             amount, grey; the extracts multiply by the scene colour) is rasterized with the same jitter at the render resolution.
+//             Bloom's extract and the LDR glow sampled it raw, so the halo moved by the
+//             jitter every frame over the glowing face AND its surroundings (worse below
+//             native: a render pixel spans several display pixels). It is resolved here
+//             into its own display-sized history with this pixel's reconstruction
+//             weights, motion, rejection, reactive weight, lock and share -- only its
+//             variance box is its own. (No exposure: an amount, not a radiance.)
+//   NO HISTORY: (#605) live media (web pages, video on prims) and, by setting, animated
+//             textures change every frame with ZERO motion: any history is a ghost of an
+//             older frame (video smear, scrolling-text trails) that no depth / motion test
+//             can reject. Where the no-history mask covers the sample at this output
+//             pixel's centre -- R8 from the motion pre-pass (opaque / mask faces) or B of
+//             pass 2's mask (blended faces, x coverage) -- the history weight drops by that
+//             coverage: at 1 the output is this frame's reconstruction alone. Only the
+//             centre sample is tested, so the screen's outline against the scene keeps
+//             its anti-aliasing on the phases that land outside it (a ~1 px soft edge).
+//             Below native the reconstruction there uses the render-pixel kernel (the
+//             display-pixel one relies on the history to fill the gaps between samples).
+//
+// The history is stored linear and un-exposed (as the HDR target); the compressed
+// blend space is pre-exposed with this frame's exposure so the weighting does not
+// depend on the scene's absolute brightness.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform sampler2D uCur;        // HDR scene (texelFetch)
+layout(set = 0, binding = 1) uniform sampler2D uHist;       // previous history (LINEAR, clamp)
+layout(set = 0, binding = 2) uniform sampler2D uMotion;     // RG16F motion vectors (texelFetch)
+layout(set = 0, binding = 3) uniform sampler2D uDepth;      // this frame's depth (texelFetch)
+layout(set = 0, binding = 4) uniform sampler2D uPrevDepth;  // last frame's depth (texelFetch)
+layout(set = 0, binding = 5) uniform sampler2D uRef;        // scene before water / post-water alpha
+layout(rgba16f, set = 0, binding = 6) writeonly uniform image2D uOut;   // new history
+layout(r32f, set = 0, binding = 7) readonly uniform image2D uExposure;  // 1x1 dynamic exposure
+// ACCUMULATION WEIGHT (#182): per display pixel, how many frames' worth of samples the
+// history holds (coverage-weighted, capped at base / (1 - base)). Read at the history
+// spot, written alongside the history.
+layout(set = 0, binding = 8) uniform sampler2D uAccPrev;                 // LINEAR, clamp
+// TAA_ACC_FORMAT (r32f default / r16f variant, kWorldTaaAccR16Spv) matches the weight image's
+// format. The weight is a frame count in [0, wmax] (wmax = base / (1 - base) x the scale
+// ratio^2, ~10-200): fp16 holds that to ~3e-4 relative (the share 1 / W moves less than that).
+#ifndef TAA_ACC_FORMAT
+#define TAA_ACC_FORMAT r32f
+#endif
+layout(TAA_ACC_FORMAT, set = 0, binding = 9) writeonly uniform image2D uAccOut;
+// WATER MASK (#204) + REACTIVE MASK (F5): render pass 2's third attachment (RGBA8, render
+// resolution, texelFetch): G = 1 where the water surface is drawn (clean_water.frag),
+// R = the post-water alpha / particle coverage (clean_draw.frag / clean_particle.frag),
+// B = the coverage of blended no-history faces (#605, clean_draw.frag).
+layout(set = 0, binding = 10) uniform sampler2D uWaterMask;
+// GLOW RESOLVE: this frame's glow target (render resolution, texelFetch), last frame's
+// resolved glow (display, LINEAR clamp) and this frame's (display, storage).
+layout(set = 0, binding = 11) uniform sampler2D uGlowCur;
+layout(set = 0, binding = 12) uniform sampler2D uGlowHist;
+layout(rgba16f, set = 0, binding = 13) writeonly uniform image2D uGlowOut;
+// NO-HISTORY MASK (#605): the motion pre-pass's R8 target (render resolution, texelFetch),
+// 1 on live media / animated-texture faces. Blended ones are uWaterMask.b.
+layout(set = 0, binding = 15) uniform sampler2D uNoTemporal;
+
+// Resolve parameters (#238: push constants <= 128 B): a TAA-params ring entry (C++
+// TAAParams, std140 stride 192, UBO binding 14) selected by the pushed index; `pc.*` names
+// this dispatch's entry.
+struct TaaParams {
+    mat4 reproj;    // this frame's UNJITTERED clip -> last frame's clip (camera only)
+    vec4 screen;    // DISPLAY (output / history): width, height, 1/width, 1/height
+    vec4 jitter;    // this frame's jitter: render px x, px y (y down), uv x, uv y
+    vec4 lin;       // inverse projection terms: view z = (x d + y) / (z d + w)
+    vec4 params0;   // x history valid, y motion target valid, z static exposure, w dynamic exposure on
+    vec4 params1;   // x history weight, y reactive gain, z depth tolerance (relative), w debug view
+    vec4 rscreen;   // RENDER (current, motion, depth, previous depth, reference): same layout
+    vec4 wplane;    // the water plane z = water height in this frame's UNJITTERED clip space
+                    // (a x + b y + c d + e = 0 over NDC); all 0 = no water (#204)
+    vec4 params2;   // x native stability (RenderVKTAAStability: lock box widening in sigma,
+                    // and how much a locked pixel's share drops), y glow resolve on,
+                    // z glow history valid, w reactive-mask gain (F5; 0 = diff vs uRef)
+};
+layout(std140, set = 0, binding = 14) uniform TaaParamsRing { TaaParams taa_params[8]; };   // 4 per frame slot x 2
+layout(push_constant) uniform TaaPush { uint idx; uint pad0; uint pad1; uint pad2; } g_taa_push;   // 16 B
+#define pc taa_params[g_taa_push.idx]
+
+float luma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+
+vec3 toYCoCg(vec3 c)
+{
+    return vec3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b,
+                0.5 * c.r - 0.5 * c.b,
+               -0.25 * c.r + 0.5 * c.g - 0.25 * c.b);
+}
+vec3 fromYCoCg(vec3 c) { return vec3(c.x + c.y - c.z, c.x + c.z, c.x - c.y - c.z); }
+
+// Karis: c / (1 + luma) weights every sample by 1 / (1 + luma) -- fireflies cannot
+// dominate the blend. Exactly invertible: c = t / (1 - luma(t)).
+vec3 compress(vec3 c)   { return c / (1.0 + luma(c)); }
+vec3 decompress(vec3 t) { return t / max(1.0 - luma(t), 1e-4); }
+
+vec3 sanitize(vec3 c)
+{
+    return (any(isnan(c)) || any(isinf(c))) ? vec3(0.0) : clamp(c, vec3(0.0), vec3(65000.0));
+}
+
+bool isWater(ivec2 q) { return texelFetch(uWaterMask, q, 0).g > 0.5; }
+
+float linearDepth(float d) { return abs((pc.lin.x * d + pc.lin.y) / (pc.lin.z * d + pc.lin.w)); }
+
+// NDC depth (reversed-Z) of the water plane under unjittered screen uv; -1 = the ray
+// does not hit it in front of the camera (or no water / another region's height).
+float waterPlaneDepth(vec2 uvu)
+{
+    if (abs(pc.wplane.z) < 1e-20) return -1.0;
+    const vec2 n = uvu * 2.0 - 1.0;
+    const float d = -(pc.wplane.x * n.x + pc.wplane.y * n.y + pc.wplane.w) / pc.wplane.z;
+    return (d > 0.0 && d <= 1.0) ? d : -1.0;
+}
+
+// The depth this frame's sample at render pixel q stands for: the scene depth, or on
+// water the water surface in front of it (max: reversed-Z, near = 1). uvu = the
+// sample's unjittered uv.
+float surfDepth(ivec2 q, vec2 uvu, out bool water)
+{
+    const float d = texelFetch(uDepth, q, 0).r;
+    water = false;
+    if (isWater(q))
+    {
+        const float dw = waterPlaneDepth(uvu);
+        if (dw > d) { water = true; return dw; }
+    }
+    return d;
+}
+
+// How far last frame's depth in the 3x3 around render pixel b is from the expected
+// linear depth lexp, relative; best match. water:
+// one-sided (#204) -- last frame's depth there is what lies BEHIND the water surface,
+// so only a surface IN FRONT of it (closer than lexp) counts as a mismatch.
+float prevDepthMismatch(ivec2 b, float lexp, bool water)
+{
+    const ivec2 rmax = ivec2(pc.rscreen.xy) - 1;
+    float rel = 1e9;
+    for (int j = 0; j < 9; ++j)
+    {
+        const ivec2 q = clamp(b + ivec2(j % 3 - 1, j / 3 - 1), ivec2(0), rmax);
+        const float dp = texelFetch(uPrevDepth, q, 0).r;
+        if (water)
+            rel = min(rel, dp <= 0.0 ? 0.0 : max(lexp - linearDepth(dp), 0.0) / max(lexp, 1e-3));
+        else
+        {
+            // (sky, reversed-Z 0: the far plane's distance -- or inf / NaN under an
+            // infinite far plane, which must not poison the min)
+            const float lp = linearDepth(dp);
+            if (!isinf(lp) && !isnan(lp)) rel = min(rel, abs(lp - lexp) / max(lexp, 1e-3));
+        }
+    }
+    return rel;
+}
+
+// Catmull-Rom history sample from 5 bilinear taps (the 4 corner taps of the 9-tap
+// form carry negligible weight). Negative lobes can undershoot: clamped at 0, and the
+// variance clip bounds the rest.
+vec3 sampleHistory(sampler2D hist, vec2 uv)
+{
+    const vec2 pos = uv * pc.screen.xy;
+    const vec2 tc1 = floor(pos - 0.5) + 0.5;
+    const vec2 f   = pos - tc1;
+    const vec2 w0  = f * (-0.5 + f * (1.0 - 0.5 * f));
+    const vec2 w1  = 1.0 + f * f * (-2.5 + 1.5 * f);
+    const vec2 w2  = f * (0.5 + f * (2.0 - 1.5 * f));
+    const vec2 w3  = f * f * (-0.5 + 0.5 * f);
+    const vec2 w12 = w1 + w2;
+    const vec2 t0  = (tc1 - 1.0) * pc.screen.zw;
+    const vec2 t3  = (tc1 + 2.0) * pc.screen.zw;
+    const vec2 t12 = (tc1 + w2 / w12) * pc.screen.zw;
+    const float a = w12.x * w0.y, b = w0.x * w12.y, c = w12.x * w12.y, d = w3.x * w12.y, e = w12.x * w3.y;
+    vec3 r = textureLod(hist, vec2(t12.x, t0.y), 0.0).rgb * a
+           + textureLod(hist, vec2(t0.x, t12.y), 0.0).rgb * b
+           + textureLod(hist, t12, 0.0).rgb * c
+           + textureLod(hist, vec2(t3.x, t12.y), 0.0).rgb * d
+           + textureLod(hist, vec2(t12.x, t3.y), 0.0).rgb * e;
+    return max(sanitize(r / (a + b + c + d + e)), vec3(0.0));
+}
+
+// Clip h toward the centre of the box [mn, mx] (not a per-channel clamp: keeps hue).
+vec3 clipBox(vec3 mn, vec3 mx, vec3 h)
+{
+    const vec3 c = 0.5 * (mx + mn);
+    const vec3 e = 0.5 * (mx - mn) + 1e-5;
+    const vec3 v = h - c;
+    const vec3 a = abs(v / e);
+    const float m = max(a.x, max(a.y, a.z));
+    return m > 1.0 ? c + v / m : h;
+}
+
+void main()
+{
+    const ivec2 size  = ivec2(pc.screen.xy);    // display
+    const ivec2 rsize = ivec2(pc.rscreen.xy);   // render
+    const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= size.x || p.y >= size.y) return;
+    const vec2 uv = (vec2(p) + 0.5) * pc.screen.zw;
+    // This output pixel's centre in render pixels, and the render pixel under it. The
+    // ratio is exactly 1.0 at native (x / x), so pr = p + 0.5 there, bit for bit.
+    const vec2  pr = (vec2(p) + 0.5) * (pc.rscreen.xy / pc.screen.xy);
+    const ivec2 c  = clamp(ivec2(floor(pr)), ivec2(0), rsize - 1);
+
+    float expo = pc.params0.z;
+    if (pc.params0.w > 0.5) expo *= imageLoad(uExposure, ivec2(0)).r;
+    expo = (isnan(expo) || isinf(expo)) ? 1.0 : max(expo, 1e-6);
+
+    // ---- NO HISTORY (#605): the render pixel whose sample is nearest this output
+    // pixel's unjittered centre (qo below) ----
+    const ivec2 qn = clamp(ivec2(floor(pr + pc.jitter.xy)), ivec2(0), rsize - 1);
+    const float notemp = clamp(max(texelFetch(uNoTemporal, qn, 0).r, texelFetch(uWaterMask, qn, 0).b), 0.0, 1.0);
+
+    // ---- 3x3: unjittered reconstruction, variance statistics, closest depth ----
+    vec3  filt = vec3(0.0);
+    float wsum = 0.0;
+    vec3  m1 = vec3(0.0), m2 = vec3(0.0);
+    float dmin = -1.0;   // closest depth of the 3x3 (reversed-Z: largest)
+    ivec2 qmin = c;
+    bool  wmin = false;  // the closest is the water surface (#204)
+    float dl[9];         // each tap's surface depth, LINEAR (slope-aware tolerance)
+    vec3  cur_c[9];   // compressed, for the reactive test
+    // UPSCALE COVERAGE (#181/#182): below native, a render sample lands anywhere within
+    // ~(display / render) output pixels of this one. The spatial filter above still
+    // reconstructs a value, but only a sample that landed NEAR this output pixel should
+    // move it; otherwise the image would follow the jitter (a visible shake that grows
+    // as the scale drops). cov = the closest sample's kernel weight measured in DISPLAY
+    // pixels (1 = exact hit); it scales this frame's contribution below. Native: 1.
+    const bool  scaled = pc.rscreen.x != pc.screen.x || pc.rscreen.y != pc.screen.y;
+    const vec2  dscale = pc.screen.xy / pc.rscreen.xy;
+    float cov = scaled ? 0.0 : 1.0;
+    // No-history pixels below native: the render-pixel kernel's estimate (#605).
+    const bool nt_scaled = scaled && notemp > 0.0;
+    vec3  filt_r = vec3(0.0);
+    float wsum_r = 0.0;
+    // Glow: the same reconstruction, its own statistics (compressed, un-exposed).
+    const bool glow_on = pc.params2.y > 0.5;
+    vec4  gfilt = vec4(0.0);
+    vec3  gm1 = vec3(0.0), gm2 = vec3(0.0);
+    float gpeak = 0.0;   // any glow in the 3x3 (else the output is 0, no history read)
+    for (int j = 0; j < 9; ++j)
+    {
+        const ivec2 k = ivec2(j % 3 - 1, j / 3 - 1);
+        const ivec2 q = clamp(c + k, ivec2(0), rsize - 1);
+        const vec3 t = compress(sanitize(texelFetch(uCur, q, 0).rgb) * expo);
+        cur_c[j] = t;
+        const vec2 dk = vec2(c + k) + 0.5 - pc.jitter.xy - pr;   // sample shows the scene at q + 0.5 - jitter
+        // Reconstruction kernel. Native: in render (= display) pixels. Scaled (#182): in
+        // DISPLAY pixels (~0.47 px sigma) -- a render-pixel kernel spans display/render
+        // output pixels, blurring every frame's estimate before it accumulates (brick /
+        // fine texture detail came out smudged). The display-space kernel keeps each
+        // output pixel to the samples that landed on it; the history gathers the rest
+        // over the jitter cycle, and cov keeps far samples from counting much.
+        float w;
+        if (scaled)
+        {
+            const vec2 dd = dk * dscale;
+            w = exp(-2.29 * dot(dd, dd));
+            cov = max(cov, w);
+            // + a faint render-pixel kernel: where no sample landed near (low scales),
+            // the normalised estimate falls back to it instead of a flat 3x3 average.
+            const float wr = exp(-2.29 * dot(dk, dk));
+            w += 1e-3 * wr;
+            if (nt_scaled) { filt_r += t * wr; wsum_r += wr; }
+        }
+        else
+            w = exp(-2.29 * dot(dk, dk));
+        filt += t * w; wsum += w;
+        const vec3 y = toYCoCg(t);
+        m1 += y; m2 += y * y;
+        if (glow_on)
+        {
+            const vec4 g = texelFetch(uGlowCur, q, 0);
+            const vec3 gc = compress(sanitize(g.rgb));
+            gpeak = max(gpeak, max(gc.r, max(gc.g, gc.b)));
+            gfilt += vec4(gc, clamp(g.a, 0.0, 1.0)) * w;
+            const vec3 gy = toYCoCg(gc);
+            gm1 += gy; gm2 += gy * gy;
+        }
+        bool wq;
+        const float d = surfDepth(q, (vec2(q) + 0.5) * pc.rscreen.zw - pc.jitter.zw, wq);
+        if (d > dmin) { dmin = d; qmin = q; wmin = wq; }   // closest: REVERSED-Z (#188), near = 1
+        dl[j] = d > 0.0 ? linearDepth(d) : 1e9;
+    }
+    filt /= max(wsum, 1e-6);
+    gfilt /= max(wsum, 1e-6);
+    if (nt_scaled) filt = mix(filt, filt_r / max(wsum_r, 1e-6), notemp);
+    const vec3 mean  = m1 * (1.0 / 9.0);
+    const vec3 sigma = sqrt(max(m2 * (1.0 / 9.0) - mean * mean, vec3(0.0)));
+
+    // ---- REACTIVE (centre + cross, max) ----
+    float reactive = 0.0;
+    if (pc.params2.w > 0.0)
+    {
+        // F5: the post-water alpha / particle coverage mask (R8 taps, no reference copy).
+        for (int j = 1; j < 9; j += 2)   // 1, 3, 5, 7: the cross
+            reactive = max(reactive, texelFetch(uWaterMask, clamp(c + ivec2(j % 3 - 1, j / 3 - 1), ivec2(0), rsize - 1), 0).r);
+        reactive = max(reactive, texelFetch(uWaterMask, c, 0).r);
+        reactive = clamp(reactive * pc.params2.w, 0.0, 1.0);
+    }
+    else
+    {
+        // Final vs the pre-transparent scene (the reference copy).
+        for (int j = 1; j < 9; j += 2)   // 1, 3, 5, 7: the cross
+        {
+            const ivec2 k = ivec2(j % 3 - 1, j / 3 - 1);
+            const ivec2 q = clamp(c + k, ivec2(0), rsize - 1);
+            const vec3 r = compress(sanitize(texelFetch(uRef, q, 0).rgb) * expo);
+            const vec3 dd = abs(cur_c[j] - r);
+            reactive = max(reactive, max(dd.r, max(dd.g, dd.b)));
+        }
+        {
+            const vec3 r = compress(sanitize(texelFetch(uRef, c, 0).rgb) * expo);
+            const vec3 dd = abs(cur_c[4] - r);
+            reactive = max(reactive, max(dd.r, max(dd.g, dd.b)));
+        }
+        reactive = clamp(reactive * pc.params1.y, 0.0, 1.0);
+    }
+
+    // ---- MOTION (dilated) ----
+    const vec2 uvq = (vec2(qmin) + 0.5) * pc.rscreen.zw - pc.jitter.zw;   // unjittered
+    vec2 mv = vec2(0.0);
+    bool mv_ok = true;
+    if (pc.params0.y > 0.5 && dmin > 0.0 && !wmin)   // not sky (reversed-Z: far = 0), not water
+        mv = texelFetch(uMotion, qmin, 0).xy;
+    else
+    {
+        // Camera-only: this frame's (unjittered) position -> last frame's clip.
+        const vec4 pc0 = pc.reproj * vec4(uvq * 2.0 - 1.0, max(dmin, 0.0), 1.0);
+        if (pc0.w > 1e-6) mv = uvq - (pc0.xy / pc0.w * 0.5 + 0.5);
+        else mv_ok = false;
+    }
+    const vec2 huv = uv - mv;
+
+    // ---- HISTORY VALIDITY ----
+    float hist_w = pc.params1.x;
+    bool valid = pc.params0.x > 0.5 && mv_ok
+              && all(greaterThanEqual(huv, vec2(0.0))) && all(lessThanEqual(huv, vec2(1.0)));
+    float depth_conf = 1.0;
+    // The surface this test is about: this pixel's OWN depth -- the render pixel that
+    // sampled its unjittered centre (floor(pr + jitter), as clean_depth_up.comp; = c at
+    // native), at that sample's unjittered position. Testing the 3x3's closest depth (a
+    // neighbour's, reprojected at the wrong spot) flagged background pixels beside
+    // every foreground edge as disoccluded -- a different set each jitter phase: thin /
+    // sub-pixel / distant geometry flickered between rejected and kept (#204 at native;
+    // below native the band is ~2 x display / render pixels wide: door and window
+    // frames). The dilated closest depth still picks the motion vector.
+    const ivec2 qo = qn;   // (computed above for the no-history mask)
+    const vec2  uvt = (vec2(qo) + 0.5) * pc.rscreen.zw - pc.jitter.zw;
+    bool  wtest;
+    const float dtest = surfDepth(qo, uvt, wtest);
+    if (valid)
+    {
+        // Where last frame's surface should be (camera reprojection of the tested
+        // depth), against last frame's depth at the history spot (best of 3x3: the
+        // previous frame was rasterized with another jitter).
+        const vec4 pe = pc.reproj * vec4(uvt * 2.0 - 1.0, max(dtest, 0.0), 1.0);
+        if (pe.w > 1e-6 && dtest > 0.0)
+        {
+            const float lexp = linearDepth(pe.z / pe.w);
+            // Last frame sampled with ANOTHER jitter: its sample of this surface can be
+            // a whole render pixel away from this one's. 3x3 around the history spot
+            // (the 2x2 left false rejections along edges and on sub-pixel geometry).
+            // The history spot of the tested sample: its own uv minus the motion.
+            const vec2 huvt = uvt - mv;
+            const float rel = prevDepthMismatch(ivec2(floor(huvt * pc.rscreen.xy)), lexp, wtest);
+            // Scaled: one render pixel spans a wider depth range (thin / distant / grazing
+            // geometry), so the tolerance grows with display / render.
+            // SLOPE (#204): on a surface seen at a grazing angle (terrain, water and roofs
+            // toward the horizon) depth changes by many percent per pixel, so last frame's
+            // nearest sample sits at another depth than the reprojected one: the fixed
+            // relative tolerance rejected it on alternate jitter phases (shimmer). Add
+            // one pixel's depth step, from the SMALLER of the two sides per axis -- a
+            // silhouette has a jump on one side only, so disocclusions stay rejected.
+            const float lc = dl[4];
+            const float gx = min(abs(dl[3] - lc), abs(dl[5] - lc));
+            const float gy = min(abs(dl[1] - lc), abs(dl[7] - lc));
+            const float slope = lc < 1e8 ? min(max(gx, gy) / max(lc, 1e-3), 0.25) : 0.0;
+            const float tol = pc.params1.z * (scaled ? max(dscale.x, 1.0) : 1.0) + slope;
+            depth_conf = 1.0 - smoothstep(tol, 2.0 * tol, rel);
+        }
+        else if (dtest <= 0.0)   // sky (reversed-Z)
+        {
+            // Sky now: history must be sky too (an object that moved off it is gone).
+            float far_cnt = 0.0;
+            const ivec2 b = ivec2(floor((uvt - mv) * pc.rscreen.xy));
+            for (int j = 0; j < 9; ++j)
+                far_cnt += texelFetch(uPrevDepth, clamp(b + ivec2(j % 3 - 1, j / 3 - 1), ivec2(0), rsize - 1), 0).r <= 0.0 ? 1.0 : 0.0;
+            depth_conf = far_cnt > 0.0 ? 1.0 : 0.0;
+        }
+    }
+    hist_w *= depth_conf;
+    hist_w *= mix(1.0, 0.55, reactive);
+    hist_w *= 1.0 - notemp;   // #605: no history on media / animated-texture faces
+    if (!valid) hist_w = 0.0;
+
+    // ---- CLIP + BLEND ----
+    // This frame's share a. Native: 1 - hist_w (the fixed ~0.9 exponential history).
+    // Scaled (#182): a coverage-weighted running average -- the history holds W frames'
+    // worth of samples (scaled down by the rejection confidence), this frame adds cov:
+    // a = cov / (W + cov). A pixel the jitter barely reached takes little; after a
+    // rejection W is small and the first samples count fully. W saturates at
+    // base / (1 - base), where a well-covered pixel's share equals the native one.
+    const float base = pc.params1.x;
+    // Scaled: a display pixel gets a near sample on ~(render / display)^2 of the frames,
+    // so the cap grows with the square of the ratio (as the jitter cycle does); with
+    // the native cap the history held only a few real samples and sub-render-pixel
+    // detail (mortar lines, far brick) stayed smudged. Rejection still resets W.
+    const float wmax = base / max(1.0 - base, 1e-4) * (scaled ? dscale.x * dscale.y : 1.0);
+    const float conf = hist_w / max(base, 1e-4);
+    float wacc = cov;             // this frame's new accumulated weight
+    float a    = 1.0;             // this frame's share (debug view 5)
+    float clip = 0.0;             // how far the history was pulled (debug view 4)
+    vec3 outc = filt;
+    float glow_gamma = 1.0;       // the rectification box width the scene used (glow reuses it)
+    if (hist_w > 0.0)
+    {
+        float gamma = mix(1.0, 0.6, reactive);
+        // LOCKS (scaled, #182; FSR2-style): below native, detail finer than a render pixel
+        // (sills, frames, dense geometry) changes the 3x3 neighbourhood with every jitter
+        // phase, so a box built from it yanks a converged history around -- flicker with
+        // no rejection. A pixel that has accumulated a full history (W near its cap),
+        // passes the depth test and isn't reactive is locked: its box widens by up to
+        // (display / render - 1) sigma. Never unclamped: a real change still pulls it in,
+        // and any rejection lowers W, which releases the lock.
+        // (History reads are sanitized: a NaN / Inf that ever entered a history would
+        // otherwise survive every later frame's blend and bloom would spread it.)
+        const float wraw = textureLod(uAccPrev, huv, 0.0).r;
+        const float wprev = (isnan(wraw) || isinf(wraw)) ? 0.0 : clamp(wraw, 0.0, wmax);
+        float lock = smoothstep(0.6 * wmax, wmax, wprev) * depth_conf * (1.0 - reactive);
+        const vec3 h  = toYCoCg(compress(sanitize(sampleHistory(uHist, huv)) * expo));
+        // SHADING-CHANGE RELEASE (FSR2-style lock luma check): a static receiver whose
+        // LIGHTING changed -- a moving shadow, a light switched -- keeps depth_conf 1 and
+        // no reactive, so the lock held its widened box and its reduced share and the
+        // old shading trailed for dozens of frames (shadow ghosting, on top of the RT
+        // mask's own history). Released when the history's luma left this frame's
+        // UNWIDENED box by more than a few percent (compressed luma); the accumulated
+        // weight is capped too, so the pixel doesn't re-lock on the next frame.
+        const float shade = smoothstep(0.02, 0.08, max(abs(h.x - mean.x) - sigma.x, 0.0));
+        lock *= 1.0 - shade;
+        // NATIVE LOCK (#204 follow-up): the same flicker at native -- thin / distant
+        // geometry (rails, wires, far edges) covers a different part of the 3x3 on each
+        // jitter phase, so the 1-sigma box pulled a converged history toward each
+        // phase's sample. A pixel with a long uninterrupted history (W counts confident
+        // frames at native, reset by any rejection) widens its box by up to
+        // RenderVKTAAStability sigma and takes a smaller share of the new frame.
+        const float stab = scaled ? 0.0 : pc.params2.x;
+        if (scaled)
+            gamma *= 1.0 + lock * max(dscale.x - 1.0, 0.0);
+        else
+            gamma *= 1.0 + lock * stab;
+        vec3 hy = clipBox(mean - gamma * sigma, mean + gamma * sigma, h);
+        clip = length(h - hy);
+        // RenderVKTAADebug 3 (bisect): no rectification below native.
+        if (scaled && pc.params1.w > 2.5 && pc.params1.w < 3.5) hy = h;
+        const vec3 hc = fromYCoCg(hy);
+        if (scaled)
+        {
+            const float wh = wprev * conf;
+            wacc = min(wh + cov, wmax);
+            a = cov / max(wh + cov, 1e-4);
+        }
+        else
+        {
+            a = (1.0 - hist_w) * (1.0 - 0.5 * lock * min(stab, 1.0));
+            wacc = min(wprev * conf + 1.0, wmax);
+        }
+        wacc = mix(wacc, min(wacc, 1.0), shade);   // released: re-earn the lock
+        outc = mix(max(hc, vec3(0.0)), filt, a);
+        glow_gamma = gamma;
+    }
+    vec3 res = sanitize(decompress(outc) / expo);
+    imageStore(uAccOut, p, vec4(wacc));
+
+    // ---- GLOW: same history spot, rejection, lock and share; its own box ----
+    if (glow_on)
+    {
+        vec3 gout = vec3(0.0);
+        if (gpeak > 0.0)   // all-zero 3x3: the box is the point 0, so is the clipped history
+        {
+            gout = gfilt.rgb;
+            if (hist_w > 0.0 && pc.params2.z > 0.5)
+            {
+                const vec3 gmean  = gm1 * (1.0 / 9.0);
+                const vec3 gsigma = sqrt(max(gm2 * (1.0 / 9.0) - gmean * gmean, vec3(0.0)));
+                const vec3 gh = toYCoCg(compress(sanitize(sampleHistory(uGlowHist, huv))));
+                const vec3 ghc = fromYCoCg(clipBox(gmean - glow_gamma * gsigma, gmean + glow_gamma * gsigma, gh));
+                gout = mix(max(ghc, vec3(0.0)), gfilt.rgb, a);
+            }
+        }
+        imageStore(uGlowOut, p, vec4(sanitize(decompress(gout)), gfilt.a));
+    }
+
+    // RenderVKTAADebug: 1 = red reactive, green history rejected (1 - confidence),
+    // blue history weight; 2 = the motion actually used (|px| / 8).
+    // 4 = how far rectification pulled the history (x8, grey); 5 = this frame's share a
+    // (x5, grey; native ~0.5). 3 is a real resolve (no rectification below native).
+    // 6 = the water mask (#204): blue water, red where its history was rejected.
+    if (pc.params1.w > 5.5)
+        res = (isWater(c) ? vec3(valid ? 1.0 - depth_conf : 1.0, 0.0, 1.0) : vec3(filt.g * 0.5)) / expo;
+    else if (pc.params1.w > 3.5)
+        res = vec3(pc.params1.w < 4.5 ? clip * 8.0 : a * 5.0) / expo;
+    else if (pc.params1.w > 0.5 && pc.params1.w < 2.5)
+    {
+        if (pc.params1.w < 1.5)
+            res = vec3(reactive, valid ? 1.0 - depth_conf : 1.0, hist_w) / expo;
+        else
+            res = vec3(abs(mv * pc.screen.xy) / 8.0, 0.0) / expo;
+    }
+    imageStore(uOut, p, vec4(res, texelFetch(uCur, c, 0).a));
+}

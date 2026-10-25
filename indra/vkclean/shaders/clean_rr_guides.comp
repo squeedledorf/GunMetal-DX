@@ -1,0 +1,271 @@
+#version 460
+// vkclean -- GUIDE BUFFERS for a joint denoise + upscale network (#870: DLSS Ray
+// Reconstruction through LLCleanDlssRRVK; vendor-neutral -- the same guides serve our own
+// denoisers / debugging). One dispatch at the RENDER extent, after pass 2, from the G-buffer
+// ONLY (never from a stochastic pass: noisy guides confuse a reconstruction network):
+//
+//   DIFFUSE ALBEDO   linear (the G0 sRGB view decodes) base x (1 - metal); legacy: the
+//                    albedo; sky / no surface 0.5. RGBA8 UNORM (linear storage).
+//   SPECULAR ALBEDO  directional specular reflectance: our split-sum EnvBRDFApprox (the
+//                    one the deferred lighting shades with, clean_brdf.glsl) of F0 =
+//                    mix(0.04, base, metal) at (roughness, N.V); legacy: the specular colour
+//                    x the same term; fullbright / sky 0. RGBA16F.
+//   NORMAL+ROUGHNESS world-space shading normal (G1.xy, the agent frame the G-buffer is
+//                    written in) + linear roughness in .a (legacy 1 - glossiness,
+//                    fullbright 1); sky 0. RGBA16F ("roughness packed").
+//   SPEC HIT DIST    world distance from the surface to its specular hit: the RT reflection
+//                    trace's t where pass 11 traced this pixel (its tile listed, a > 0; a
+//                    traced miss = 65504), else -- where the lighting takes SSR (PBR roughness
+//                    <= 0.1, legacy gloss / shiny env) -- a short screen-space march of the mirror
+//                    ray against this frame's depth (the SSR path does not store its hit length),
+//                    else 65504 (probes / sky). R16F.
+//   COLOUR           pre-exposed (x the resolved exposure: the network does no auto-exposure).
+//                    TRANSPARENCY OVERLAY (p.flags.x bit 1): the OPAQUE scene (mRefract, copied
+//                    after the lighting, before pass 2's alpha / water / particles) -- the
+//                    surfaces the guides above describe; pass 2's transparents (alpha-blended
+//                    hair / fur cards, particles, glass) go to TRANSP instead, which the network
+//                    upscales WITHOUT denoising. Their pixels have no G-buffer entry of their
+//                    own (the guides show what is behind them): denoised as part of the colour,
+//                    their texture read as noise -- the "painterly" mane / wings. Without the
+//                    overlay: the final scene. RGBA16F.
+//   TRANSP           premultiplied: (final - opaque x (1 - a)) x exposure, a = pass 2b's
+//                    coverage (mReact.R; the water surface, G, counts as covered), raised to what
+//                    keeps the overlay non-negative; final = opaque x (1 - a) + TRANSP.rgb exactly.
+//                    RGBA16F.
+//   RESPONSIVITY     > 0 = less history: live media / animated-texture faces (the no-history
+//                    masks: the pre-pass's R8 + mReact.B) x p.march.w. R16F.
+//
+// p.flags.x bit 0: the RT trace + tile list are this frame's (else not read).
+
+#extension GL_EXT_samplerless_texture_functions : require
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+#include "clean_brdf.glsl"
+
+layout(set = 0, binding = 0) uniform texture2D uG0;      // RGBA8_SRGB albedo (decoded linear), a ao/env
+layout(set = 0, binding = 1) uniform texture2D uG1;      // RGBA16F oct(N), oct(Ng) (world)
+layout(set = 0, binding = 2) uniform texture2D uG2;      // RGBA8 rough|gloss, metal, glow, model byte
+layout(set = 0, binding = 3) uniform texture2D uG3;      // B10G11R11 PBR emissive | legacy specular colour
+layout(set = 0, binding = 4) uniform sampler2D uDepth;   // reversed-Z world depth (texelFetch)
+layout(set = 0, binding = 5, rgba16f) uniform readonly image2D uRtTrace;   // RT reflection trace (a = t)
+layout(std430, set = 0, binding = 6) readonly buffer RtTiles { uint rtt_words[]; };   // the RT tile list (whole buffer)
+layout(set = 0, binding = 7, rgba8)   uniform writeonly image2D oDiffuse;
+layout(set = 0, binding = 8, rgba16f) uniform writeonly image2D oSpecular;
+layout(set = 0, binding = 9, rgba16f) uniform writeonly image2D oNormalRough;
+layout(set = 0, binding = 10, r16f)   uniform writeonly image2D oHitDist;
+// PRE-EXPOSED COLOUR: the network takes pre-exposed input (no auto-exposure): the scene x
+// the exposure the FSR inputs pass resolved (clean_rr_unexpose.comp divides it back out).
+layout(set = 0, binding = 12) uniform sampler2D uScene;                  // jittered linear HDR scene
+layout(set = 0, binding = 13, r32f) uniform readonly image2D uExposure;  // 1x1 (inputs pass)
+layout(set = 0, binding = 14, rgba16f) uniform writeonly image2D oColor;
+layout(set = 0, binding = 15) uniform sampler2D uOpaque;                 // mRefract: the opaque scene
+layout(set = 0, binding = 16) uniform sampler2D uReact;                  // pass 2b: R coverage, B no-history (blended)
+layout(set = 0, binding = 17, rgba16f) uniform writeonly image2D oTransp;
+layout(set = 0, binding = 18, r16f) uniform writeonly image2D oResp;
+layout(set = 0, binding = 19) uniform sampler2D uNoTemporal;             // R8 no-history (pre-pass)
+
+// C++ LLCleanDlssRRVK::GuideParams (std140, 176 B), a dynamic-offset UBO entry.
+layout(std140, set = 0, binding = 11) uniform GuideParams
+{
+    mat4  clipToRel;   // inverse(jittered P x rotation-only V): clip -> camera-relative world
+    mat4  relToClip;   // jittered P x rotation-only V
+    vec4  size;        // render width, height, 1 / width, 1 / height
+    uvec4 flags;       // x bit 0 RT trace valid; y RT tiles per row; z RT tile count n (rtt_words base:
+                       // y/z describe the tile flags at rtt_words[hdr + tile]); w the header words
+    vec4  march;       // x max march distance (m), y steps, z thickness (fraction of view depth), w responsivity gain
+                       // (flags.x bit 1: the transparency overlay)
+} p;
+
+const float kFar = 65504.0;
+const uint SURF_NONE = 0u, SURF_PBR = 1u, SURF_LEGACY = 2u, SURF_FULLBRIGHT = 3u;
+
+vec3 octDecode(vec2 e)
+{
+    vec3 n = vec3(e, 1.0 - abs(e.x) - abs(e.y));
+    const float t = max(-n.z, 0.0);
+    n.xy += vec2(n.x >= 0.0 ? -t : t, n.y >= 0.0 ? -t : t);
+    return normalize(n);
+}
+
+// Camera-relative world position of pixel q at device depth d.
+vec3 relPosition(vec2 q, float d)
+{
+    const vec2 ndc = (q + 0.5) * p.size.zw * 2.0 - 1.0;
+    const vec4 h = p.clipToRel * vec4(ndc, d, 1.0);
+    return h.xyz / h.w;
+}
+
+// Screen-space hit distance of the mirror ray from P (camera-relative) along R, or kFar.
+float marchHit(vec3 P, vec3 R, float viewDist)
+{
+    const int steps = int(p.march.y);
+    const float maxD = p.march.x;
+    if (steps <= 0 || maxD <= 0.0) return kFar;
+    const float thick = max(p.march.z * viewDist, 0.05);
+    // Deterministic steps (no per-pixel jitter: a guide must not be noisy), growing with the
+    // distance so near contacts resolve finely and the far end is still reached.
+    float t = 0.0;
+    for (int i = 1; i <= steps; ++i)
+    {
+        const float f = float(i) / float(steps);
+        t = maxD * f * f;
+        const vec3 X = P + R * t;
+        const vec4 c = p.relToClip * vec4(X, 1.0);
+        if (c.w <= 1e-4) break;
+        const vec3 n = c.xyz / c.w;
+        if (any(greaterThan(abs(n.xy), vec2(1.0))) || n.z <= 0.0) break;
+        const ivec2 s = ivec2((n.xy * 0.5 + 0.5) * p.size.xy);
+        const float ds = texelFetch(uDepth, s, 0).r;
+        if (ds <= 0.0) continue;   // sky behind the sample
+        // depth comparison in camera distance (reversed-Z: larger d = nearer)
+        const vec3 S = relPosition(vec2(s), ds);
+        const float dRay = length(X), dScene = length(S);
+        if (dRay > dScene + 1e-3 && dRay - dScene < thick) return t;
+    }
+    return kFar;
+}
+
+void main()
+{
+    const ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+    if (q.x >= int(p.size.x) || q.y >= int(p.size.y)) return;
+
+    {
+        const float e = imageLoad(uExposure, ivec2(0)).x;
+        vec3 fin = texelFetch(uScene, q, 0).rgb;
+        if (any(isnan(fin)) || any(isinf(fin))) fin = vec3(0.0);
+        vec3 c = fin;
+        vec4 t = vec4(0.0);
+        if ((p.flags.x & 2u) != 0u)
+        {
+            vec3 opq = texelFetch(uOpaque, q, 0).rgb;
+            if (any(isnan(opq)) || any(isinf(opq))) opq = vec3(0.0);
+            const vec4 rc = texelFetch(uReact, q, 0);
+            // coverage: the blended faces' (R) and the water surface (G: it replaces what is
+            // behind it); then at least what makes the overlay non-negative -- a transparent that
+            // DARKENS the opaque scene by more than its recorded coverage (or one that wrote none)
+            // must still reproduce the final colour exactly
+            float a = clamp(max(rc.r, rc.g), 0.0, 1.0);
+            for (int k = 0; k < 3; ++k)
+                if (opq[k] > 1e-6) a = max(a, 1.0 - fin[k] / opq[k]);
+            a = clamp(a, 0.0, 1.0);
+            c = opq;
+            t = vec4(max(fin - opq * (1.0 - a), vec3(0.0)) * e, a);
+        }
+        imageStore(oColor, q, vec4(clamp(c * e, vec3(0.0), vec3(65000.0)), 1.0));
+        imageStore(oTransp, q, min(t, vec4(65000.0)));
+        const float nh = max(texelFetch(uNoTemporal, q, 0).r, texelFetch(uReact, q, 0).b);
+        imageStore(oResp, q, vec4(clamp(nh * p.march.w, -1.0, 1.0)));
+    }
+
+    const float d = texelFetch(uDepth, q, 0).r;
+    const vec4 g2 = texelFetch(uG2, q, 0);
+    const uint model = uint(g2.w * 255.0 + 0.5) & 3u;
+    if (d <= 0.0 || model == SURF_NONE)
+    {
+        imageStore(oDiffuse, q, vec4(0.5, 0.5, 0.5, 1.0));
+        imageStore(oSpecular, q, vec4(0.0));
+        imageStore(oNormalRough, q, vec4(0.0));
+        imageStore(oHitDist, q, vec4(kFar));
+        return;
+    }
+    const vec4 g0 = texelFetch(uG0, q, 0);
+    const vec4 g1 = texelFetch(uG1, q, 0);
+    const vec3 N = octDecode(g1.xy);
+    const vec3 P = relPosition(vec2(q), d);
+    const float viewDist = max(length(P), 1e-4);
+    const vec3 V = -P / viewDist;
+    const float NoV = clamp(abs(dot(N, V)), 1e-4, 1.0);
+
+    vec3 diff = g0.rgb, spec = vec3(0.0);
+    float rough = 1.0;
+    if (model == SURF_PBR)
+    {
+        rough = g2.x;
+        const float metal = g2.y;
+        diff = g0.rgb * (1.0 - metal);
+        spec = EnvBRDFApprox(mix(vec3(0.04), g0.rgb, metal), rough, NoV);
+    }
+    else if (model == SURF_LEGACY)
+    {
+        // clean_surface_light.glsl's legacy branch: diffuse = albedo x light, then the gloss env
+        // adds spec x gloss x fresnel / 4 and the shiny env MIXES in by env intensity (diffuse x
+        // (1 - env) + env x fresnel' / 2 x the sharp env).
+        const float gloss = g2.x, env = g0.a;
+        rough = 1.0 - gloss;
+        const vec3 sc = texelFetch(uG3, q, 0).rgb;
+        float fr = clamp(1.0 + dot(-V, N), 0.3, 1.0);
+        fr *= fr;
+        if (gloss > 0.0) spec = sc * (0.25 * gloss * fr);
+        if (env > 0.0)
+        {
+            float fe = 1.0 + dot(-V, N);
+            fe = min(fe * fe + env, 1.0);
+            diff *= 1.0 - env;
+            spec = spec * (1.0 - env) + vec3(0.5 * env * fe * env);
+            rough = mix(rough, 0.05, env);   // (the shiny env is a sharp, lod 0 sample, weighted by its share)
+        }
+    }
+    else if (model == SURF_FULLBRIGHT)
+    {
+        // unlit: colour = albedo (+ a shiny env mixed by G0.a as above)
+        const float env = g0.a;
+        if (env > 0.0) { diff *= 1.0 - env; spec = vec3(0.5 * env); rough = 0.05; }
+    }
+    imageStore(oDiffuse, q, vec4(clamp(diff, vec3(0.0), vec3(1.0)), 1.0));
+    imageStore(oSpecular, q, vec4(clamp(spec, vec3(0.0), vec3(1.0)), 1.0));
+    imageStore(oNormalRough, q, vec4(N, clamp(rough, 0.0, 1.0)));
+
+    float hit = kFar;
+    bool traced = false;
+    if (model != SURF_FULLBRIGHT && (p.flags.x & 1u) != 0u && p.flags.z > 0u)
+    {
+        // The RT rays are SPARSE (density gradient / strength lattice: not every pixel casts):
+        // one pixel's own t next to a neighbour's march / 65504 is a lattice pattern in a guide
+        // (structured noise the network smears). The guide takes the mean t of the traced hits
+        // in the 3x3 (listed tiles only: elsewhere the trace image is undefined) on this
+        // surface's plane; traced misses only -> 65504.
+        float tS = 0.0, tW = 0.0;
+        bool anyMiss = false;
+        const vec3 NgC = octDecode(g1.zw);
+        for (int dy = -1; dy <= 1; ++dy)
+            for (int dx = -1; dx <= 1; ++dx)
+            {
+                const ivec2 o = q + ivec2(dx, dy);
+                if (any(lessThan(o, ivec2(0))) || o.x >= int(p.size.x) || o.y >= int(p.size.y)) continue;
+                const uint tile = uint(o.y >> 3) * p.flags.y + uint(o.x >> 3);
+                if (tile >= p.flags.z || rtt_words[p.flags.w + tile] == 0u) continue;
+                const float a = imageLoad(uRtTrace, o).a;
+                if (!(a >= 0.0)) continue;   // (-1: not traced this frame)
+                if (o != q)
+                {
+                    const float dq = texelFetch(uDepth, o, 0).r;
+                    if (dq <= 0.0) continue;
+                    const vec3 Po = relPosition(vec2(o), dq);
+                    if (abs(dot(NgC, Po - P)) > 0.01 * viewDist + 0.02) continue;   // another surface
+                }
+                if (a > 0.0) { tS += a; tW += 1.0; } else anyMiss = true;
+            }
+        if (tW > 0.0) { hit = tS / tW; traced = true; }
+        else if (anyMiss) { hit = kFar; traced = true; }   // traced, nothing hit: the env
+    }
+    // The screen-space estimate only where the lighting itself takes a screen-space hit
+    // (clean_surface_light.glsl's SSR gates: PBR roughness <= 0.1; legacy faces with gloss or a
+    // shiny env). Elsewhere the specular comes from the probes: 65504, as the sky. (Before, every
+    // surface marched: on rough normal-mapped skin / fur the per-pixel normal-map detail turned
+    // into a hit distance jumping between ~5 cm self-hits and none -- a NOISY guide, which the
+    // network answers with smeared, "painterly" specular.) The ray starts off the GEOMETRIC
+    // surface and a mirror ray into it (a normal map tilted past the face) reports no hit.
+    bool ssrLike = false;
+    if (model == SURF_PBR) ssrLike = g2.x <= 0.1;
+    else if (model == SURF_LEGACY) ssrLike = g2.x > 0.0 || g0.a > 0.0;
+    if (!traced && ssrLike)
+    {
+        vec3 Ng = octDecode(g1.zw);
+        if (dot(Ng, V) < 0.0) Ng = -Ng;
+        const vec3 R = reflect(-V, N);
+        hit = dot(R, Ng) > 0.02 ? marchHit(P + Ng * (0.002 * viewDist + 0.01), R, viewDist) : kFar;
+    }
+    imageStore(oHitDist, q, vec4(min(hit, kFar)));
+}

@@ -1,0 +1,57 @@
+#version 450
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+// vkclean -- #568 RENDER-WORLD FRAME: move the GPU-resident instance rows by a region
+// crossing's agent-origin shift (new agent = old agent + off).
+//
+// The CPU instance store keeps a stable render frame (store = agent + d) and only changes
+// d on a crossing; the GPU rows stay AGENT space (every other shader unchanged). Rows
+// streamed this frame arrive already in the new agent frame (the upload writes row - d),
+// so this pass runs BEFORE the previous-instance copy and the stream, over every resident
+// row of the instance SSBO and of the previous-instance SSBO (motion vectors of statics
+// stay zero across the crossing). Lanes: LLCleanInstanceStore::rowAgentSpace -- a live
+// (lod_group_id != sentinel), non-HUD (8), non-worn (512) row: spin_pivot.xyz, and unless
+// rigged (1) the model_matrix translation. Float add is correctly rounded (as the CPU's).
+// No descriptor set: both buffers by device address.
+
+layout(local_size_x = 64) in;
+
+layout(buffer_reference, std430, buffer_reference_align = 16) buffer InstWords { uint w[]; };
+
+layout(push_constant) uniform ShiftPush {
+    uvec2 cur;      // instance SSBO
+    uvec2 prev;     // previous-instance SSBO (0 = none)
+    vec4  off;      // .xyz agent shift
+    uint  n_cur;    // rows resident in cur
+    uint  n_prev;   // rows resident in prev
+    uint  pad0;
+    uint  pad1;
+} sp;               // 48 B
+
+const uint kRowWords   = 56u;   // Instance = 224 B
+const uint kTransWord  = 12u;   // model_matrix column 3
+const uint kLodWord    = 44u;   // lod_group_id
+const uint kFlagsWord  = 46u;   // flags
+const uint kPivotWord  = 52u;   // spin_pivot
+
+void shiftRow(InstWords b, uint id)
+{
+    const uint base = id * kRowWords;
+    const uint lod = b.w[base + kLodWord];
+    const uint flags = b.w[base + kFlagsWord];
+    if (lod == 0xFFFFFFFFu || (flags & (8u | 512u)) != 0u) return;
+    if ((flags & 1u) == 0u)
+    {
+        for (uint k = 0u; k < 3u; ++k)
+            b.w[base + kTransWord + k] = floatBitsToUint(uintBitsToFloat(b.w[base + kTransWord + k]) + sp.off[k]);
+    }
+    for (uint k = 0u; k < 3u; ++k)
+        b.w[base + kPivotWord + k] = floatBitsToUint(uintBitsToFloat(b.w[base + kPivotWord + k]) + sp.off[k]);
+}
+
+void main()
+{
+    const uint i = gl_GlobalInvocationID.x;
+    if (i < sp.n_cur) shiftRow(InstWords(sp.cur), i);
+    if (i < sp.n_prev && (sp.prev.x | sp.prev.y) != 0u) shiftRow(InstWords(sp.prev), i);
+}

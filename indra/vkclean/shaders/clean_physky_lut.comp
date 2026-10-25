@@ -1,0 +1,227 @@
+#version 460
+// <GMDX> PHYSICAL SKY lookup tables (RenderVKPhysicalSky; gmdxphysskyvk.cpp records them).
+// One file, three passes chosen at compile time:
+//   PK_PASS_TRANS     transmittance to the top of the atmosphere, 256 x 64 (height, view zenith)
+//   PK_PASS_MS        multiple-scattering contribution, 32 x 32 (sun zenith, height); 64 sphere
+//                     directions per texel summed in shared memory (Hillaire's eq. 5-10)
+//   PK_PASS_SKYVIEW   sky radiance around the viewer, 192 x 108 (azimuth to the light, zenith),
+//                     single scattering + the multiple-scattering LUT, light illuminance applied
+// The maths and the integrator follow Epic Games' MIT-licensed reference
+// (clean_physky.glsl carries the notice).
+
+#ifdef PK_PASS_MS
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 64) in;
+#else
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+#endif
+
+layout(push_constant) uniform PkPush { vec4 p[8]; } pc;
+#define PHYSKY_P(i) pc.p[i]
+#include "clean_physky.glsl"
+
+layout(set = 0, binding = 0, rgba16f) uniform writeonly image2D uOut;
+layout(set = 0, binding = 1) uniform sampler2D uTrans;   // (the MS and sky-view passes)
+layout(set = 0, binding = 2) uniform sampler2D uMs;      // (the sky-view pass)
+
+struct PkResult
+{
+    vec3 L;
+    vec3 opticalDepth;
+    vec3 multiScatAs1;
+};
+
+// IntegrateScatteredLuminance without the depth buffer, shadow map and debug paths. globalL is
+// the light (1 while building the MS LUT); useMs adds the MS LUT's term at every sample.
+PkResult pkIntegrate(vec3 worldPos, vec3 worldDir, vec3 sunDir, bool ground, float sampleCount,
+                     bool variableSamples, bool mieRayPhase, bool useMs, vec3 globalL)
+{
+    PkResult r;
+    r.L = vec3(0.0); r.opticalDepth = vec3(0.0); r.multiScatAs1 = vec3(0.0);
+
+    float tBottom = pkRaySphere(worldPos, worldDir, pkBottom());
+    float tTop = pkRaySphere(worldPos, worldDir, pkTop());
+    float tMax = 0.0;
+    if (tBottom < 0.0)
+    {
+        if (tTop < 0.0) return r;
+        tMax = tTop;
+    }
+    else if (tTop > 0.0)
+    {
+        tMax = min(tTop, tBottom);
+    }
+
+    float count = sampleCount;
+    float countFloor = sampleCount;
+    float tMaxFloor = tMax;
+    if (variableSamples)
+    {
+        count = mix(8.0, 32.0, clamp(tMax * 0.01, 0.0, 1.0));
+        countFloor = floor(count);
+        tMaxFloor = tMax * countFloor / count;
+    }
+
+    float cosTheta = dot(sunDir, worldDir);
+    float miePhase = pkMiePhase(pkMieG(), cosTheta);
+    float rayPhase = pkRayleighPhase(cosTheta);
+    const float uniformPhase = 1.0 / (4.0 * PK_PI);
+
+    vec3 throughput = vec3(1.0);
+    float t = 0.0;
+    float dt = tMax / count;
+    const float segT = 0.3;
+    for (float s = 0.0; s < count; s += 1.0)
+    {
+        if (variableSamples)
+        {
+            float t0 = s / countFloor;
+            float t1 = (s + 1.0) / countFloor;
+            t0 = t0 * t0;
+            t1 = t1 * t1;
+            t0 = tMaxFloor * t0;
+            t1 = t1 > 1.0 ? tMax : tMaxFloor * t1;
+            t = t0 + (t1 - t0) * segT;
+            dt = t1 - t0;
+        }
+        else
+        {
+            float newT = tMax * (s + segT) / count;
+            dt = newT - t;
+            t = newT;
+        }
+        vec3 P = worldPos + t * worldDir;
+
+        PkMedium m = pkMedium(P);
+        vec3 sampleOd = m.extinction * dt;
+        vec3 sampleT = exp(-sampleOd);
+        r.opticalDepth += sampleOd;
+
+        float pHeight = length(P);
+        vec3 up = P / pHeight;
+        float sunZenithCos = dot(sunDir, up);
+        vec3 transToSun = vec3(1.0);
+#ifndef PK_PASS_TRANS
+        transToSun = textureLod(uTrans, pkTransUv(pHeight, sunZenithCos), 0.0).rgb;
+#endif
+        vec3 phaseScat = mieRayPhase ? m.scatMie * miePhase + m.scatRay * rayPhase
+                                     : m.scattering * uniformPhase;
+
+        float tEarth = pkRaySphere(P + PK_PLANET_OFFSET * up, sunDir, pkBottom());
+        float earthShadow = tEarth >= 0.0 ? 0.0 : 1.0;
+
+        vec3 ms = vec3(0.0);
+#ifdef PK_PASS_SKYVIEW
+        if (useMs)
+        {
+            vec2 muv = clamp(vec2(sunZenithCos * 0.5 + 0.5,
+                                  (pHeight - pkBottom()) / (pkTop() - pkBottom())), 0.0, 1.0);
+            muv = vec2(pkUnitToSub(muv.x, PK_MS_RES), pkUnitToSub(muv.y, PK_MS_RES));
+            ms = textureLod(uMs, muv, 0.0).rgb;
+        }
+#endif
+
+        vec3 S = globalL * (earthShadow * transToSun * phaseScat + ms * m.scattering);
+        vec3 ext = max(m.extinction, vec3(1e-7));
+
+        vec3 MS = m.scattering;
+        r.multiScatAs1 += throughput * (MS - MS * sampleT) / ext;
+
+        vec3 Sint = (S - S * sampleT) / ext;   // analytic integration over the step
+        r.L += throughput * Sint;
+        throughput *= sampleT;
+    }
+
+    if (ground && tMax == tBottom && tBottom > 0.0)
+    {
+        vec3 P = worldPos + tBottom * worldDir;
+        float pHeight = length(P);
+        vec3 up = P / pHeight;
+        float sunZenithCos = dot(sunDir, up);
+        vec3 transToSun = vec3(1.0);
+#ifndef PK_PASS_TRANS
+        transToSun = textureLod(uTrans, pkTransUv(pHeight, sunZenithCos), 0.0).rgb;
+#endif
+        float NdotL = clamp(dot(up, sunDir), 0.0, 1.0);
+        r.L += globalL * transToSun * throughput * NdotL * pkGroundAlbedo() / PK_PI;
+    }
+    return r;
+}
+
+#ifdef PK_PASS_MS
+shared vec3 sMs[64];
+shared vec3 sL[64];
+#endif
+
+void main()
+{
+#ifdef PK_PASS_TRANS
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    if (px.x >= int(PK_TRANS_W) || px.y >= int(PK_TRANS_H)) return;
+    vec2 uv = (vec2(px) + 0.5) / vec2(PK_TRANS_W, PK_TRANS_H);
+    float h, mu;
+    pkTransParams(uv, h, mu);
+    vec3 pos = vec3(0.0, 0.0, h);
+    vec3 dir = vec3(0.0, sqrt(max(1.0 - mu * mu, 0.0)), mu);
+    PkResult r = pkIntegrate(pos, dir, dir, false, 40.0, false, false, false, vec3(1.0));
+    imageStore(uOut, px, vec4(exp(-r.opticalDepth), 1.0));
+#endif
+
+#ifdef PK_PASS_MS
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    uint z = gl_LocalInvocationID.z;
+    vec2 uv = (vec2(px) + 0.5) / PK_MS_RES;
+    uv = vec2(pkSubToUnit(uv.x, PK_MS_RES), pkSubToUnit(uv.y, PK_MS_RES));
+    float sunZenithCos = uv.x * 2.0 - 1.0;
+    vec3 sunDir = vec3(0.0, sqrt(clamp(1.0 - sunZenithCos * sunZenithCos, 0.0, 1.0)), sunZenithCos);
+    float h = pkBottom() + clamp(uv.y + PK_PLANET_OFFSET, 0.0, 1.0)
+            * (pkTop() - pkBottom() - PK_PLANET_OFFSET);
+    vec3 pos = vec3(0.0, 0.0, h);
+
+    // One of 8 x 8 uniform sphere directions per thread.
+    float i = 0.5 + float(z / 8u);
+    float j = 0.5 + float(z % 8u);
+    float theta = 2.0 * PK_PI * (i / 8.0);
+    float phi = acos(1.0 - 2.0 * (j / 8.0));
+    vec3 dir = vec3(cos(theta) * sin(phi), sin(theta) * sin(phi), cos(phi));
+    PkResult r = pkIntegrate(pos, dir, sunDir, true, 20.0, false, false, false, vec3(1.0));
+    const float sphere = 4.0 * PK_PI;
+    sMs[z] = r.multiScatAs1 * sphere / 64.0;
+    sL[z] = r.L * sphere / 64.0;
+    barrier();
+    for (uint w = 32u; w > 0u; w >>= 1u)
+    {
+        if (z < w)
+        {
+            sMs[z] += sMs[z + w];
+            sL[z] += sL[z + w];
+        }
+        barrier();
+    }
+    if (z == 0u)
+    {
+        const float iso = 1.0 / sphere;
+        vec3 fms = sMs[0] * iso;     // f_ms (eq. 7)
+        vec3 l2 = sL[0] * iso;       // L_2nd order (eq. 5)
+        vec3 psi = l2 / max(vec3(1.0) - fms, vec3(1e-3));   // geometric series (eq. 10)
+        imageStore(uOut, px, vec4(psi, 1.0));
+    }
+#endif
+
+#ifdef PK_PASS_SKYVIEW
+    ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    if (px.x >= int(PK_SV_W) || px.y >= int(PK_SV_H)) return;
+    vec2 uv = (vec2(px) + 0.5) / vec2(PK_SV_W, PK_SV_H);
+    float viewHeight = pkBottom() + max(pkViewHeight(), 0.001);
+    float viewZenithCos, lightViewCos;
+    pkSkyViewParams(uv, viewHeight, viewZenithCos, lightViewCos);
+
+    // The light in the LUT's frame: its zenith angle kept, its azimuth at 0.
+    float sunZenithCos = clamp(pkLightDir().z, -1.0, 1.0);
+    vec3 sunDir = normalize(vec3(sqrt(max(1.0 - sunZenithCos * sunZenithCos, 0.0)), 0.0, sunZenithCos));
+    float vzs = sqrt(max(1.0 - viewZenithCos * viewZenithCos, 0.0));
+    vec3 dir = vec3(vzs * lightViewCos, vzs * sqrt(max(1.0 - lightViewCos * lightViewCos, 0.0)), viewZenithCos);
+    vec3 pos = vec3(0.0, 0.0, viewHeight);
+    PkResult r = pkIntegrate(pos, dir, sunDir, false, 30.0, true, true, true, pkLight());
+    imageStore(uOut, px, vec4(r.L, 1.0));
+#endif
+}

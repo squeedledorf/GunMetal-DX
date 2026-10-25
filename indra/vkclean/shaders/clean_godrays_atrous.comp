@@ -1,0 +1,179 @@
+#version 460
+// vkclean -- GOD RAYS DENOISER (#657, RenderVKGodRaysDenoise), spatial pass: an
+// SVGF-style edge-aware A-TROUS wavelet (Dammertz 2010 / Schied 2017; the RT shadow
+// mask's clean_rt_mask_spatial.comp atrousSun, shared kernel in clean_denoise_common.glsl)
+// over the temporally accumulated beam visibility v (clean_godrays_dn_temporal.comp), at
+// the march's resolution, then the FINALIZE: v x Lmax (the march's noise-free lit
+// in-scatter) into the march's own target, which the composite upsamples as before.
+//
+// N dispatches (RenderVKGodRaysAtrous = N, 0-4; 0 = one finalize-only dispatch), a 5x5
+// B3-spline kernel at step 1, 2, 4, 8, each tap weighted by
+//   * the DEPTH KEY: exp(-24 x relative view-distance gap) -- the composite's bilateral
+//     weight; the god-ray buffer is a view-space in-scatter integral, so there are no
+//     receiver normal / plane terms; sky texels (65000) only ever mix with sky,
+//   * luminance, relative to the centre's variance: sigma_l = 4 sqrt(var) -- the
+//     temporal variance of v's luminance (the fast moments, meta.yz), with RenderVKGodRays
+//     Svgf the variance of the ACCUMULATED estimate (sample variance / history length,
+//     at least m (1 - m) / rays: one binary ray per step), at least the 5x5 spatial
+//     variance while the history is young (disocclusion), filtered along with the signal
+//     (sum w^2 var / (sum w)^2) so later iterations stop where the noise is gone,
+//   * young texels (history < 4 frames): the neighbours' history length (HISTORY FIX,
+//     ReBLUR) -- a disoccluded strip takes the converged shaft beside it.
+// Gate: a texel filters only with variance left, a young history, or (non-SVGF) a
+// partial v; a fully lit / fully blocked converged segment passes through exactly.
+// The temporal result, not an a-trous iteration, stays the history (no blur feedback).
+//
+// Scratch (no extra VRAM, as the RT mask): last frame's history parity -- its acc (2) and
+// meta (3) images, dead once the temporal pass has read them. Iteration k reads the
+// accumulation (k = 0) or the scratch k - 1 wrote, and writes the other scratch; the last
+// iteration writes the march target (5): rgb = v x Lmax, a = the view distance -- and the
+// reactive into Lmax.a (4) for the composite. Neither is read at a neighbour here.
+//
+// DEBUG (RenderVKGodRaysDebug, added by the composite like the shafts): 1 the raw
+// one-frame march (v x Lmax), 2 the temporal accumulation without the spatial pass,
+// 3 history length (white = RenderVKGodRaysHistory), 4 variance (sqrt x 4), 5 events
+// (red = no history / disocclusion, blue = this frame's rays met a moving caster,
+// green = the reactive written for TAA / FSR).
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0, rgba16f) readonly uniform image2D uAcc;    // temporal acc (v, dist)
+layout(set = 0, binding = 1, rgba16f) readonly uniform image2D uMeta;   // temporal meta
+layout(set = 0, binding = 2, rgba16f) uniform image2D uScrA;            // scratch (v, var)
+layout(set = 0, binding = 3, rgba16f) uniform image2D uScrB;
+layout(set = 0, binding = 4, rgba16f) uniform image2D uLmax;            // rgb lit in-scatter; a <- reactive
+layout(set = 0, binding = 5, rgba16f) uniform image2D uFinal;           // the march target
+
+layout(push_constant) uniform GodRaysAtrousPush {
+    vec4 p0;   // x iteration k, y iteration count n, z flags (an exact integer: bit 0
+               // SVGF variance, bit 1 filter on (0: finalize only), bits 4-7 debug view),
+               // w max history (frames)
+    vec4 p1;   // x shadow rays per texel per frame (the march's steps), yzw unused
+} ap;
+
+#include "clean_denoise_common.glsl"
+
+const float kSkyDist = 65000.0;
+const float kMovFlag = 128.0;
+
+bool atSvgf()   { return (uint(ap.p0.z + 0.5) & 1u) != 0u; }
+bool atFilter() { return (uint(ap.p0.z + 0.5) & 2u) != 0u; }
+uint atDebug()  { return (uint(ap.p0.z + 0.5) >> 4u) & 15u; }
+
+float relErr(float a, float b) { return abs(a - b) / max(min(a, b), 0.1); }
+bool  isSky(float d) { return d >= kSkyDist * 0.5; }
+// Depth-key weight (the composite's): sky only with sky.
+float keyW(float a, float b)
+{
+    if (isSky(a) != isSky(b)) return 0.0;
+    return isSky(a) ? 1.0 : exp(-relErr(a, b) * 24.0);
+}
+float histLen(vec4 meta) { return meta.x >= kMovFlag - 0.5 ? meta.x - kMovFlag : meta.x; }
+bool  partial(vec3 v) { return any(greaterThan(v, vec3(0.002))) && any(lessThan(v, vec3(0.998))); }
+float tempVar(vec4 meta) { return max(meta.z - meta.y * meta.y, 0.0); }
+// Per-sample variance of v's luminance: the fast moments' sample variance, at least
+// m (1 - m) / rays (Bhatia-Davis, one binary ray per step; the RT mask's rawVar).
+float rawVar(vec3 acc, vec4 meta)
+{
+    const float mm = clamp(lum3(acc), 0.0, 1.0);
+    return max(tempVar(meta), mm * (1.0 - mm) / max(ap.p1.x, 1.0));
+}
+
+vec4 atrousSrc(int k, ivec2 t)
+{
+    if (k == 0)
+    {
+        const vec3 v = clamp(imageLoad(uAcc, t).rgb, vec3(0.0), vec3(1.0));
+        const vec4 mt = imageLoad(uMeta, t);
+        return vec4(v, atSvgf() ? rawVar(v, mt) / max(histLen(mt), 1.0) : tempVar(mt));
+    }
+    return ((k - 1) & 1) == 0 ? imageLoad(uScrA, t) : imageLoad(uScrB, t);
+}
+
+void main()
+{
+    const ivec2 m = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 dim = imageSize(uAcc);
+    if (m.x >= dim.x || m.y >= dim.y) return;
+    const int k = int(ap.p0.x + 0.5);
+    const int n = max(int(ap.p0.y + 0.5), 1);
+    const ivec2 mx = dim - 1;
+
+    const vec4 acc = imageLoad(uAcc, m);
+    const float dc = acc.a;
+    const vec4 meta = imageLoad(uMeta, m);
+    const float len = histLen(meta);
+    const bool sv = atSvgf();
+    const bool young = len < 4.0;
+    vec4 c = atrousSrc(k, m);
+    if (k == 0 && young && atFilter())
+    {
+        // Young history: the SPATIAL variance of the accumulation (same depth key; 5x5
+        // with SVGF, over the history length; else 3x3) -- the moments haven't converged.
+        const int rad = sv ? 2 : 1;
+        float s1 = 0.0, s2 = 0.0, nn = 0.0;
+        for (int j = -rad; j <= rad; ++j)
+            for (int i = -rad; i <= rad; ++i)
+            {
+                const ivec2 t = clamp(m + ivec2(i, j), ivec2(0), mx);
+                const vec4 a = imageLoad(uAcc, t);
+                if (keyW(a.a, dc) < 0.1) continue;
+                const float l = lum3(clamp(a.rgb, vec3(0.0), vec3(1.0)));
+                s1 += l; s2 += l * l; nn += 1.0;
+            }
+        if (nn > 0.0)
+        {
+            const float v2 = max(s2 / nn - (s1 / nn) * (s1 / nn), 0.0);
+            c.a = max(c.a, sv ? v2 / max(len, 1.0) : v2);
+        }
+    }
+    const int step = 1 << k;
+    const bool want = sv ? (partial(c.rgb) || young || c.a > 1e-5) : (partial(c.rgb) || young);
+    vec4 o = c;
+    if (atFilter() && want)
+    {
+        const float lc = lum3(c.rgb);
+        const float slw = 4.0 * sqrt(max(c.a, 0.0)) + 1e-3;
+        const float lenc = max(len, 1.0);
+        vec3 sum = vec3(0.0);
+        float wsum = 0.0, vsum = 0.0;
+        for (int j = -2; j <= 2; ++j)
+            for (int i = -2; i <= 2; ++i)
+            {
+                const ivec2 t = clamp(m + ivec2(i, j) * step, ivec2(0), mx);
+                const float wk = (t == m) ? 1.0 : keyW(imageLoad(uAcc, t).a, dc);
+                if (wk <= 1e-4) continue;
+                const vec4 v = (t == m) ? c : atrousSrc(k, t);
+                const float wl = exp(-abs(lum3(v.rgb) - lc) / slw);
+                float w = kB3[i + 2] * kB3[j + 2] * wk * wl;
+                if (young && t != m) w *= clamp(histLen(imageLoad(uMeta, t)) / lenc, 1.0, 8.0);
+                if (w <= 0.0) continue;
+                sum += w * v.rgb;
+                vsum += w * w * v.a;
+                wsum += w;
+            }
+        if (wsum > 1e-6) o = vec4(sum / wsum, vsum / (wsum * wsum));
+    }
+    o.rgb = clamp(o.rgb, vec3(0.0), vec3(1.0));
+    if (any(isnan(o)) || any(isinf(o))) o = vec4(clamp(acc.rgb, vec3(0.0), vec3(1.0)), 0.0);
+
+    if (k < n - 1)
+    {
+        if ((k & 1) == 0) imageStore(uScrA, m, o);
+        else              imageStore(uScrB, m, o);
+        return;
+    }
+
+    // ---- finalize: v x Lmax -> the march target; the reactive -> Lmax.a ----
+    const vec4 lmax = imageLoad(uLmax, m);
+    vec3 fin = o.rgb * lmax.rgb;
+    const uint dbg = atDebug();
+    if (dbg == 1u) fin = clamp(imageLoad(uFinal, m).rgb, vec3(0.0), vec3(1.0)) * lmax.rgb;   // raw (this texel only)
+    else if (dbg == 2u) fin = clamp(acc.rgb, vec3(0.0), vec3(1.0)) * lmax.rgb;
+    else if (dbg == 3u) fin = vec3(clamp(len / max(ap.p0.w, 1.0), 0.0, 1.0));
+    else if (dbg == 4u) fin = vec3(clamp(sqrt(max(o.a, 0.0)) * 4.0, 0.0, 1.0));
+    else if (dbg == 5u) fin = vec3(len <= 1.0 ? 1.0 : 0.0, clamp(meta.w * 4.0, 0.0, 1.0),
+                                   meta.x >= kMovFlag - 0.5 ? 1.0 : 0.0);
+    if (any(isnan(fin)) || any(isinf(fin))) fin = vec3(0.0);
+    imageStore(uFinal, m, vec4(max(fin, vec3(0.0)), dc));
+    imageStore(uLmax, m, vec4(lmax.rgb, clamp(meta.w, 0.0, 1.0)));
+}

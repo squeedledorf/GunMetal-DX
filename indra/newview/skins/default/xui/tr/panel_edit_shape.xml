@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<panel name="edit_shape_panel">
+	<string name="meters">
+		Metre
+	</string>
+	<string name="feet">
+		Ayak
+	</string>
+	<string name="height">
+		Boy:
+	</string>
+</panel>

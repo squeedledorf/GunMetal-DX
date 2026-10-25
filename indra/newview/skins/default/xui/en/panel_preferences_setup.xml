@@ -1,0 +1,267 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<panel
+ border="true"
+ follows="left|top|right|bottom"
+ height="408"
+ label="Setup"
+ layout="topleft"
+ left="102"
+ name="Input panel"
+ top="1"
+ width="517">
+  <string name="update_beta_build_tip">This is a beta build: it always offers beta versions (and final releases) when it checks for updates.</string>
+  <text
+     type="string"
+     length="1"
+     follows="left|top"
+     height="10"
+     layout="topleft"
+     left="30"
+     name="Network:"
+     mouse_opaque="false"
+     top="10"
+     width="300">
+    Network:
+  </text>
+  <text
+   type="string"
+   length="1"
+   follows="left|top"
+   height="10"
+   layout="topleft"
+   left_delta="50"
+   name="Maximum bandwidth"
+   mouse_opaque="false"
+   top_pad="10"
+   width="200">
+    Maximum bandwidth
+  </text>
+  <slider
+   can_edit_text="true"
+   control_name="ThrottleBandwidthKBPS"
+   decimal_digits="0"
+   follows="left|top"
+   height="15"
+   increment="100"
+   initial_value="500"
+   layout="topleft"
+   left_delta="150"
+   max_val="10000"
+   min_val="100"
+   name="max_bandwidth"
+   top_delta="0"
+   width="180" />
+  <text
+   type="string"
+   length="1"
+   follows="left|top"
+   height="10"
+   layout="topleft"
+   left_pad="6"
+   mouse_opaque="false"
+   name="text_box2"
+   top_delta="1"
+   width="200">
+    kbps
+  </text>
+  <check_box
+   control_name="ConnectionPortEnabled"
+ height="16"
+   label="Custom port"
+   layout="topleft"
+   left="77"
+   name="connection_port_enabled"
+   top_pad="10"
+   width="256">
+    <check_box.commit_callback
+     function="Notification.Show"
+ parameter="ChangeConnectionPort" />
+  </check_box>
+  <spinner
+   control_name="ConnectionPort"
+   enabled_control="ConnectionPortEnabled"
+   decimal_digits="0"
+   follows="left|top"
+   height="23"
+   increment="1"
+   initial_value="13000"
+   label="Port number:"
+   label_width="105"
+   layout="topleft"
+   left_delta="160"
+   max_val="13050"
+   min_val="13000"
+   name="connection_port"
+   top_delta="3"
+   width="170" />
+
+  <text
+         type="string"
+         length="1"
+         follows="left|top"
+         height="10"
+         layout="topleft"
+         left="30"
+         name="Web:"
+         top_pad="5"
+         width="300">
+    Web:
+  </text>
+  <radio_group
+   control_name="PreferredBrowserBehavior"
+   follows="left|top"
+   height="60"
+   layout="topleft"
+   left_delta="50"
+   name="preferred_browser_behavior"
+   top_pad="0"
+   width="480">
+    <radio_item
+      height="20"
+      label="Use the default system browser for all links"
+      layout="topleft"
+      left="0"
+      name="internal"
+      value="0"
+      tool_tip="Use the default system web browser for help, web links, etc. Not recommended if running full screen."
+      top="0"
+      width="480" />
+    <radio_item
+      height="20"
+      label="Use the built-in browser for Second Life links only"
+      layout="topleft"
+      left_delta="0"
+      name="external"
+      value="1"      
+      tool_tip="Use the default system web browser for help, web links, etc. The built-in browser will be used only for LindenLab/Second Life links."
+      top_delta="20"
+      width="480" />
+    <radio_item
+      height="20"
+      label="Use the built-in browser for all links"
+      layout="topleft"
+      left="0"
+      name="external_all"
+      value="2"
+      tool_tip="Use the built-in web browser for help, web links, etc. This browser opens as a new window inside [APP_NAME]."
+      top_delta="20"
+      width="480" />
+  </radio_group>
+
+  <check_box
+    top_delta="4"
+    enabled="true"
+    follows="left|top"
+    height="14"
+    initial_value="true"
+    control_name="BrowserJavascriptEnabled"
+    label="Enable Javascript"
+    left_delta="0"
+    mouse_opaque="true"
+    name="browser_javascript_enabled"
+    radio_style="false"
+    width="400"
+    top_pad="5"/>
+  <text
+     type="string"
+     length="1"
+     follows="left|top"
+     height="10"
+     layout="topleft"
+     left="30"
+     name="Software updates:"
+     mouse_opaque="false"
+     top_pad="5"
+     width="300">
+    Software updates:
+  </text>
+  <check_box
+    enabled="true"
+    follows="left|top"
+    height="16"
+    control_name="UpdateCheckEnabled"
+    label="Check for updates"
+    left_delta="50"
+    mouse_opaque="true"
+    name="update_check_enabled"
+    tool_tip="Once a day, ask slipstreamviewer.org whether a newer Slipstream is out and tell you if so. Nothing about you is sent. Nothing is downloaded or installed without you."
+    width="170"
+    top_pad="5"/>
+  <button
+    follows="left|top"
+    height="23"
+    label="Check now"
+    layout="topleft"
+    left_pad="10"
+    name="update_check_now"
+    top_delta="-3"
+    width="100">
+    <button.commit_callback
+      function="Pref.CheckForUpdatesNow" />
+  </button>
+  <check_box
+    top_delta="4"
+    enabled="true"
+    follows="left|top"
+    height="14"
+    control_name="UpdaterShowReleaseNotes"
+    label="Show Release Notes after update"
+    left="80"
+    mouse_opaque="true"
+    name="update_show_release_notes"
+    tool_tip="The first time a new version starts, open its release notes (slipstreamviewer.org)."
+    width="400"
+    top_pad="5"/>
+  <check_box
+    enabled="true"
+    follows="left|top"
+    height="14"
+    control_name="UpdaterWillingToTest"
+    label="Also offer beta versions"
+    left="80"
+    mouse_opaque="true"
+    name="update_willing_to_test"
+    tool_tip="The update check also tells you about beta versions, not only final releases. Beta builds always offer betas."
+    width="400"
+    top_pad="5"/>
+  <check_box
+    enabled="true"
+    follows="left|top"
+    height="14"
+    control_name="UpdateAutoInstall"
+    label="Install updates automatically (beta feature)"
+    left="80"
+    mouse_opaque="true"
+    name="update_auto_install"
+    tool_tip="Downloads updates in the background, checks them against a signed manifest and installs them the next time you start. Windows installer and Linux tarball installs only; otherwise you get the usual notice."
+    width="400"
+    top_pad="5"/>
+  <text
+     type="string"
+     length="1"
+     follows="left|top"
+     height="10"
+     layout="topleft"
+     left="30"
+     name="Proxy Settings:"
+     mouse_opaque="false"
+     top_pad="5"
+     width="300">
+    Proxy Settings:
+  </text>
+  <button
+	label="Adjust proxy settings"
+    follows="left|top"
+    height="23"
+	width="140"
+    label_selected="Browse"
+    layout="topleft"
+    left_delta="50"
+    name="set_proxy"
+    top_pad="5"
+    >
+    <button.commit_callback
+		  function="Pref.Proxy" />
+  </button>
+</panel>
+

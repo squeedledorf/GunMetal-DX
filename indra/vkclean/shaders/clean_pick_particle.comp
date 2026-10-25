@@ -1,0 +1,261 @@
+#version 460
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_GOOGLE_include_directive : require
+// vkclean -- GPU cursor pick of PARTICLES (#481). The particles live only in the GPU
+// pool (clean_particle_*.comp), so LL's CPU pick (LLPipeline::lineSegmentIntersectParticle
+// over the PARTITION_PARTICLE octree) has nothing to test. This pass tests the pick
+// segment against every live particle's quad, built exactly as clean_particle.vert
+// builds it (camera-facing billboard, FOLLOW_VELOCITY streak, ribbon segment to its
+// parent / the live source), with the draw's alpha rule (texel alpha x age-interpolated
+// colour alpha; transparent texels are empty). Dispatched only for a pending request
+// (LLCleanPickVK: the per-frame cursor request, or a click's synchronous one).
+//
+//   pass 0: one invocation per pool slot; each workgroup's nearest (t bits, index)
+//           -> partial[group];
+//   pass 1: one workgroup, the nearest over every group -> pick_out[entry].
+//
+// t >= 0, so a float's bits order as a uint; 0xFFFFFFFF = no hit (above every finite t).
+layout(local_size_x = 256) in;
+
+#include "clean_particle_common.glsl"
+
+// The particle compute set (LLCleanRendererVK::mDslPartC): 0 pool, 1 emitters.
+layout(std430, set = 0, binding = 0) readonly buffer Particles { Particle parts[]; };
+layout(std430, set = 0, binding = 1) readonly buffer Emitters  { Emitter emit[]; };
+// Draw set 1: the bindless texture table.
+layout(set = 1, binding = 0) uniform sampler2D uTextures[];
+
+// One request's answer. 48 B (LLCleanPickVK::kPartResultBytes).
+struct PartPickResult {
+    uvec4 hdr;    // x request serial, y 1 = hit, z pool index, w emitter slot (misc.z)
+    uvec4 ids;    // x source id (LLViewerPartSource mID, baked at emit: pad.y), y flags
+    vec4  pos_t;  // xyz hit position (agent space), w ray t (metres)
+};
+layout(std430, set = 2, binding = 0) buffer Partial { uvec2 partial[]; };   // (t bits, index)
+layout(std430, set = 2, binding = 1) buffer PickOut { PartPickResult pick_out[]; };
+
+layout(push_constant) uniform PartPickPush {
+    vec4  origin;   // xyz segment start (agent space), w segment length
+    vec4  dir;      // xyz unit direction, w alpha threshold (< 0: no texture test)
+    vec4  right;    // xyz camera right  (row 0 of the main view's rotation)
+    vec4  up;       // xyz camera up     (row 1)
+    vec4  fwd;      // xyz camera forward (-row 2)
+    uvec4 hdr;      // x serial, y result entry, z pass, w pool size
+} pc;
+
+const uint NO_HIT = 0xFFFFFFFFu;
+
+// Ray vs triangle, both sides (particles draw uncullled). t and barycentrics (b1, b2).
+bool rayTri(vec3 o, vec3 d, vec3 p0, vec3 p1, vec3 p2, out float t, out vec2 bc)
+{
+    t = 0.0; bc = vec2(0.0);
+    const vec3 e1 = p1 - p0, e2 = p2 - p0;
+    const vec3 pv = cross(d, e2);
+    const float det = dot(e1, pv);
+    if (abs(det) < 1e-12) return false;
+    const float inv = 1.0 / det;
+    const vec3 tv = o - p0;
+    const float u = dot(tv, pv) * inv;
+    if (u < 0.0 || u > 1.0) return false;
+    const vec3 qv = cross(tv, e1);
+    const float v = dot(d, qv) * inv;
+    if (v < 0.0 || u + v > 1.0) return false;
+    t = dot(e2, qv) * inv;
+    bc = vec2(u, v);
+    return true;
+}
+
+// The quad over strip corners 0..3 (clean_particle.vert: triangles (0,1,2) (2,1,3)).
+// Nearest hit on [0, tmax]: t and the interpolated texcoord.
+bool rayQuad(vec3 o, vec3 d, float tmax, vec3 q[4], vec2 uvq[4], out float t, out vec2 uv)
+{
+    t = 1e30; uv = vec2(0.0);
+    bool hit = false;
+    float tt; vec2 bc;
+    if (rayTri(o, d, q[0], q[1], q[2], tt, bc) && tt >= 0.0 && tt <= tmax)
+    {
+        t = tt; hit = true;
+        uv = uvq[0] * (1.0 - bc.x - bc.y) + uvq[1] * bc.x + uvq[2] * bc.y;
+    }
+    if (rayTri(o, d, q[2], q[1], q[3], tt, bc) && tt >= 0.0 && tt <= tmax && tt < t)
+    {
+        t = tt; hit = true;
+        uv = uvq[2] * (1.0 - bc.x - bc.y) + uvq[1] * bc.x + uvq[3] * bc.y;
+    }
+    return hit;
+}
+
+// Ray t of the segment against pool slot i as the draw renders it (1e30 = miss).
+float testParticle(uint i)
+{
+    const Particle p = parts[i];
+    if (p.misc.w == 0u) return 1e30;   // dead slot
+    // The draw's texture (clean_particle.vert: the particle's own index, refreshed by the
+    // sim from its emitter slot while that is still its source, #693); not resident ->
+    // the FS discards the whole sprite.
+    const uint e = p.misc.z;
+    if (e >= uint(emit.length())) return 1e30;
+    const uint tex = p.tex_handle.x;
+    if (tex == 0xFFFFFFFFu) return 1e30;
+
+    const float maxage = p.vel_maxage.w;
+    const float ta = (maxage > 0.0) ? clamp(p.pos_age.w / maxage, 0.0, 1.0) : 0.0;
+    const uint flags = p.misc.x;
+    const vec2 scl = ((flags & F_INTERP_SCALE) != 0u) ? mix(p.scale.xy, p.scale.zw, ta) : p.scale.xy;
+    const vec4 col = ((flags & F_INTERP_COLOR) != 0u) ? mix(p.start_color, p.end_color, ta) : p.start_color;
+    if (col.a <= 0.0) return 1e30;   // fully faded: c.a = texel * 0 -> discarded
+
+    vec3 q[4];
+    vec2 uvq[4];
+    if ((flags & F_RIBBON) != 0u)
+    {
+        // Ribbon segment: this particle's end -> its parent's (or the live source for the
+        // newest), each spanning its own width axis x its own scale.
+        const vec3  P0 = p.pos_age.xyz;
+        const vec3  A0 = p.axis.xyz;
+        const float s0 = scl.x;
+        vec3  P1 = vec3(0.0), A1 = vec3(0.0);
+        float s1 = 0.0;
+        bool  have = false;
+        const uint par  = floatBitsToUint(p.prev_pos.x);
+        const uint pser = floatBitsToUint(p.prev_pos.y);
+        if (par < pc.hdr.w && parts[par].misc.w != 0u && parts[par].pad.x == pser)
+        {
+            const Particle qp = parts[par];
+            const float qmax = qp.vel_maxage.w;
+            const float qt = (qmax > 0.0) ? clamp(qp.pos_age.w / qmax, 0.0, 1.0) : 0.0;
+            P1 = qp.pos_age.xyz;
+            A1 = qp.axis.xyz;
+            s1 = ((qp.misc.x & F_INTERP_SCALE) != 0u) ? mix(qp.scale.x, qp.scale.z, qt) : qp.scale.x;
+            have = true;
+        }
+        else if (par == 0xFFFFFFFFu)
+        {
+            const Emitter em = emit[e];
+            if (em.misc.w == p.pad.y)
+            {
+                P1 = em.pos.xyz;
+                const vec4 r = em.src_rot;
+                const vec3 zup = vec3(0.0, 0.0, 1.0);
+                A1 = zup + 2.0 * cross(r.xyz, cross(r.xyz, zup) + r.w * zup);
+                s1 = p.scale.x;
+                have = true;
+            }
+        }
+        if (!have || length(P1 - P0) > 64.0) return 1e30;   // the VS draws nothing
+        // Corners 0/1 = the parent end (+/- its axis), 2/3 = this end.
+        q[0] = P1 + A1 * (0.5 * s1); uvq[0] = vec2(0.0, 0.0);
+        q[1] = P1 - A1 * (0.5 * s1); uvq[1] = vec2(0.0, 1.0);
+        q[2] = P0 + A0 * (0.5 * s0); uvq[2] = vec2(1.0, 0.0);
+        q[3] = P0 - A0 * (0.5 * s0); uvq[3] = vec2(1.0, 1.0);
+    }
+    else
+    {
+        // Camera-facing billboard (FOLLOW_VELOCITY: height along the screen-space motion).
+        vec3 right = pc.right.xyz, up = pc.up.xyz;
+        const vec3 cam_fwd = pc.fwd.xyz;
+        if ((flags & F_FOLLOW_VELOCITY) != 0u)
+        {
+            const vec3 vel = p.vel_maxage.xyz;
+            const vec3 vscreen = vel - dot(vel, cam_fwd) * cam_fwd;
+            if (dot(vscreen, vscreen) > 1.0e-8)
+            {
+                up    = normalize(vscreen);
+                right = normalize(cross(up, cam_fwd));
+            }
+        }
+        // Corners 0..3 -> (-,-), (+,-), (-,+), (+,+); uv = corner + 0.5.
+        for (int c = 0; c < 4; ++c)
+        {
+            const vec2 k = vec2(((c & 1) == 0) ? -0.5 : 0.5, (c < 2) ? -0.5 : 0.5);
+            q[c] = p.pos_age.xyz + right * (k.x * scl.x) + up * (k.y * scl.y);
+            uvq[c] = k + 0.5;
+        }
+    }
+
+    float t;
+    vec2 uv;
+    if (!rayQuad(pc.origin.xyz, pc.dir.xyz, pc.origin.w, q, uvq, t, uv)) return 1e30;
+    if (pc.dir.w >= 0.0)
+    {
+        // clean_particle.frag: c = texel * colour, discarded at c.a <= 0; picks also
+        // treat alpha below the blend threshold as empty (PickAlphaThreshold, #276).
+        const float a = textureLod(uTextures[nonuniformEXT(tex)], uv, 0.0).a * col.a;
+        if (a <= 0.0 || a < pc.dir.w) return 1e30;
+    }
+    return t;
+}
+
+shared uint s_t[256];
+shared uint s_i[256];
+
+// Workgroup min of (s_t, s_i), ties to the lower index -> slot 0.
+void reduceMin(uint lid)
+{
+    for (uint s = 128u; s > 0u; s >>= 1u)
+    {
+        if (lid < s)
+        {
+            const uint ot = s_t[lid + s], oi = s_i[lid + s];
+            if (ot < s_t[lid] || (ot == s_t[lid] && oi < s_i[lid]))
+            {
+                s_t[lid] = ot;
+                s_i[lid] = oi;
+            }
+        }
+        barrier();
+    }
+}
+
+void passParticles()
+{
+    const uint lid = gl_LocalInvocationID.x;
+    const uint i = gl_GlobalInvocationID.x;
+    uint tb = NO_HIT;
+    if (i < pc.hdr.w && i < uint(parts.length()))
+    {
+        const float t = testParticle(i);
+        if (t < 1e29) tb = floatBitsToUint(max(t, 0.0));
+    }
+    s_t[lid] = tb;
+    s_i[lid] = i;
+    barrier();
+    reduceMin(lid);
+    if (lid == 0u) partial[gl_WorkGroupID.x] = uvec2(s_t[0], s_i[0]);
+}
+
+void passReduce()
+{
+    const uint lid = gl_LocalInvocationID.x;
+    const uint groups = (pc.hdr.w + 255u) / 256u;
+    uint bt = NO_HIT, bi = NO_HIT;
+    for (uint g = lid; g < groups; g += 256u)
+    {
+        const uvec2 h = partial[g];
+        if (h.x < bt || (h.x == bt && h.y < bi)) { bt = h.x; bi = h.y; }
+    }
+    s_t[lid] = bt;
+    s_i[lid] = bi;
+    barrier();
+    reduceMin(lid);
+    if (lid != 0u) return;
+    PartPickResult r;
+    r.hdr = uvec4(pc.hdr.x, 0u, NO_HIT, NO_HIT);
+    r.ids = uvec4(0u);
+    r.pos_t = vec4(0.0, 0.0, 0.0, 1e30);
+    if (s_t[0] != NO_HIT && s_i[0] < pc.hdr.w)
+    {
+        const uint i = s_i[0];
+        const float t = uintBitsToFloat(s_t[0]);
+        r.hdr = uvec4(pc.hdr.x, 1u, i, parts[i].misc.z);
+        r.ids = uvec4(parts[i].pad.y, parts[i].misc.x, 0u, 0u);
+        r.pos_t = vec4(pc.origin.xyz + pc.dir.xyz * t, t);
+    }
+    pick_out[pc.hdr.y] = r;
+}
+
+void main()
+{
+    if (pc.hdr.z == 0u) passParticles();
+    else passReduce();
+}

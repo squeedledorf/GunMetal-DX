@@ -1,0 +1,223 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// vkclean -- VOLUMETRIC FOG (#718), pass 1/4: DENSITY INJECTION.
+//
+// One invocation per froxel cell. At this frame's jittered sample point of the cell
+// (clean_vol_pass.glsl volSampleCoord) it sums every medium into scattering sigma_s (rgb,
+// /m: extinction x albedo) and extinction sigma_t (/m), written to uCur for the light pass:
+//   1. the HEIGHT FOG (clean_vol_common.glsl volFogDensity): sigma0 x exp(-k (z - base)),
+//      none below the water surface; EEP-derived by default (LLCleanVolFogVK);
+//   2. the LOCAL VOLUME PRIMITIVES (VolList below): boxes / ellipsoids with a soft edge and
+//      optional scrolling fBm noise shaping;
+//   3. the VOLUMETRIC PARTICLES (#721; clean_vol_part.comp selects + bins them per screen
+//      tile): every record of this cell's tile, a soft sphere (1 - r^2/R^2)^2 x its core
+//      sigma_s / sigma_t, shaped by one octave of value noise riding with the particle; their
+//      EMITTED light goes to uEmit (binding 7; the light pass adds it to the in-scatter);
+//   4. the CLOUD-LAYER HOOK (clean_vol_cloud_medium.glsl, #719 / #720: a no-op for now);
+//   5. #954 the PRECIPITATION (clean_weather_veil.glsl weatherPrecipMedium): rain / snow / blowing
+//      snow as a medium where it falls -- open sky only (the weather's roof maps at the cell's
+//      world point), moving with the wind (p1).
+// The haze is NOT injected: LL's analytic haze stays on the surfaces (clean_vol_apply.glsl),
+// the light pass adds only its shadowed sun scatter.
+//
+// LOCAL VOLUME LIST -- THE GPU APPEND INTERFACE. VolList = a 16 B header (x count, y
+// capacity) + `capacity` VolPrim records of 96 B. The C++ side (LLCleanVolFogVK) uploads the
+// CPU-side volumes (debug test volumes now; marked prims #720 later) and sets the header
+// every frame BEFORE this dispatch (transfer -> compute barrier). Later GPU producers
+// (weather, particles #721) append between that upload and this pass:
+//     uint i = atomicAdd(vol_hdr.x, 1u); if (i < vol_hdr.y) vol_prims[i] = rec;
+// with a compute -> compute barrier before this dispatch; this pass reads min(count,
+// capacity). Every cell walks the whole list (bounding-sphere early-out): fine for the tens
+// of volumes P1 targets -- a per-tile binning pass is the follow-up for hundreds.
+//
+// push p0: x 1 = local volumes on, y 1 = volumetric particles on (the bin pass ran; uEmit is
+//          written every cell), z particle noise amount [0, 1], w #954 the precipitation's motion
+//          strength [0, 1];
+//      p1: #954 xy the gusty wind (m/s, world), z the precipitation's mean fall speed (m/s), w 0.
+//      <OCOL> reproj[0] the mist's noise offsets (m; the region's global origin minus the wind
+//      drift, wrapped to the noise tile: xy the banks', zw the wisps'), reproj[1] xy its bank
+//      size (m) and roll height (m), z its breakup (0 = off: the plain height fog) (the inject
+//      reads no reprojection).
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+#include "clean_frame_info.glsl"
+#include "clean_atmos_common.glsl"
+#include "clean_vol_common.glsl"
+#include "clean_vol_pass.glsl"
+#include "clean_vol_cloud_medium.glsl"
+#include "clean_weather_veil.glsl"   // #954 the precipitation medium
+#define VOL_PART_READONLY
+#include "clean_vol_part_common.glsl"
+
+layout(set = VOL_SET, binding = 0, rgba16f) writeonly uniform image3D uCur;
+// The particles' emitted radiance per metre (rgb; a 0). Bound to uCur's image while the
+// particles are off (never touched then: p0.y gates every access).
+layout(set = VOL_SET, binding = 7, rgba16f) writeonly uniform image3D uEmit;
+
+struct VolPrim {
+    vec4 pos_shape;   // xyz centre (world), w shape: 0 box, 1 ellipsoid
+    vec4 axis_x;      // xyz unit local X (world), w half extent along X (m)
+    vec4 axis_y;      // xyz unit local Y (world, orthogonal to X), w half extent along Y (m)
+    vec4 ext_z;       // x half extent along Z = X x Y (m), y edge softness (0 hard .. 1 all
+                      // falloff), z extinction at the core (/m), w noise frequency (1/m; 0 = none)
+    vec4 albedo;      // rgb scattering albedo, a noise amount (0 none .. 1 fully noise-shaped)
+    vec4 scroll;      // xyz noise scroll velocity (m/s), w bounding radius (m)
+};                    // 96 B (LLCleanVolFogVK::VolPrimGPU)
+layout(std430, set = VOL_SET, binding = 1) readonly buffer VolList {
+    uvec4   vol_hdr;   // x count, y capacity
+    VolPrim vol_prims[];
+};
+
+// ---- value noise / fBm (our own: hashed lattice, quintic fade) ----
+float volHash(vec3 p)
+{
+    p = fract(p * 0.3183099 + vec3(0.1, 0.2, 0.3));
+    p *= 17.0;
+    return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+}
+float volNoise(vec3 x)
+{
+    const vec3 i = floor(x);
+    const vec3 f = fract(x);
+    const vec3 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    return mix(mix(mix(volHash(i + vec3(0, 0, 0)), volHash(i + vec3(1, 0, 0)), u.x),
+                   mix(volHash(i + vec3(0, 1, 0)), volHash(i + vec3(1, 1, 0)), u.x), u.y),
+               mix(mix(volHash(i + vec3(0, 0, 1)), volHash(i + vec3(1, 0, 1)), u.x),
+                   mix(volHash(i + vec3(0, 1, 1)), volHash(i + vec3(1, 1, 1)), u.x), u.y), u.z);
+}
+float volFbm(vec3 p)
+{
+    float a = 0.5, s = 0.0;
+    for (int o = 0; o < 3; ++o) { s += a * volNoise(p); p = p * 2.03 + vec3(1.7, 9.2, 3.1); a *= 0.5; }
+    return s / 0.875;   // [0, 1]
+}
+
+// <OCOL> OCOL MIST (OCOLHeightFog; the OCOL viewer's ocolMistF.glsl, ported): rolling banks and
+// wisps in the height fog -- tileable value noise from an integer hash, so the drift offsets
+// can wrap without seams. Large banks squashed vertically read as layers; the layer's top
+// rises and falls with them; the mix breaks the fog into banks and gaps.
+float ocolHash13(ivec3 c)
+{
+    uint h = uint(c.x) * 1664525u + uint(c.y) * 22695477u + uint(c.z) * 1103515245u;
+    h ^= h >> 16;
+    h *= 2246822519u;
+    h ^= h >> 13;
+    h *= 3266489917u;
+    h ^= h >> 16;
+    return float(h & 0x00ffffffu) / 16777215.0;
+}
+float ocolTileNoise(vec3 p, int period)
+{
+    const vec3 cell = floor(p);
+    const vec3 f = p - cell;
+    const vec3 u = f * f * (3.0 - 2.0 * f);
+    const ivec3 a = (ivec3(cell) + ivec3(period * 1024)) % period;   // (GLSL % is undefined below 0)
+    const ivec3 b = (a + ivec3(1)) % period;
+    return mix(mix(mix(ocolHash13(ivec3(a.x, a.y, a.z)), ocolHash13(ivec3(b.x, a.y, a.z)), u.x),
+                   mix(ocolHash13(ivec3(a.x, b.y, a.z)), ocolHash13(ivec3(b.x, b.y, a.z)), u.x), u.y),
+               mix(mix(ocolHash13(ivec3(a.x, a.y, b.z)), ocolHash13(ivec3(b.x, a.y, b.z)), u.x),
+                   mix(ocolHash13(ivec3(a.x, b.y, b.z)), ocolHash13(ivec3(b.x, b.y, b.z)), u.x), u.y), u.z);
+}
+const int OCOL_TILE_CELLS = 64;   // = LLCleanVolFogVK's (the offsets wrap at 64 x bank size)
+float ocolMistDensity(vec3 P)
+{
+    if (P.z < ssr.vol_misc.z) return 0.0;   // no mist under the water
+    const float size = max(vp.reproj[1].x, 1.0);
+    const vec3 p = P / size;
+    const float banks = ocolTileNoise((p + vec3(vp.reproj[0].xy, 0.0) / size) * vec3(1.0, 1.0, 2.0), OCOL_TILE_CELLS);
+    const float wisps = ocolTileNoise((p + vec3(vp.reproj[0].zw, 0.0) / size) * 3.0, OCOL_TILE_CELLS * 3);
+    const float n = banks * 0.7 + wisps * 0.3;
+    const float z = P.z - (banks - 0.5) * vp.reproj[1].y;   // the layer's top rolls with the banks
+    const float base = ssr.vol_fog.x * exp(-ssr.vol_fog.y * max(z - ssr.vol_fog.z, 0.0));
+    const float breakup = mix(1.0, smoothstep(0.25, 0.75, n) * 1.5, clamp(vp.reproj[1].z, 0.0, 1.0));
+    return base * breakup * smoothstep(ssr.vol_misc.z - 0.5, ssr.vol_misc.z + 0.5, P.z);
+}
+// </OCOL>
+
+// One primitive's extinction at P (0 outside).
+float volPrimDensity(VolPrim v, vec3 P, float t)
+{
+    const vec3 d = P - v.pos_shape.xyz;
+    if (dot(d, d) > v.scroll.w * v.scroll.w) return 0.0;
+    const vec3 az = cross(v.axis_x.xyz, v.axis_y.xyz);
+    const vec3 q = vec3(dot(d, v.axis_x.xyz) / max(v.axis_x.w, 1e-3),
+                        dot(d, v.axis_y.xyz) / max(v.axis_y.w, 1e-3),
+                        dot(d, az) / max(v.ext_z.x, 1e-3));
+    const float m = v.pos_shape.w > 0.5 ? length(q) : max(max(abs(q.x), abs(q.y)), abs(q.z));
+    if (m >= 1.0) return 0.0;
+    const float soft = clamp(v.ext_z.y, 0.0, 1.0);
+    float dens = v.ext_z.z * (soft > 0.0 ? smoothstep(1.0, 1.0 - soft, m) : 1.0);
+    if (v.ext_z.w > 0.0 && v.albedo.a > 0.0)
+    {
+        const float n = volFbm((P - v.scroll.xyz * t) * v.ext_z.w);
+        dens *= mix(1.0, smoothstep(0.35, 0.75, n), clamp(v.albedo.a, 0.0, 1.0));
+    }
+    return dens;
+}
+
+void main()
+{
+    const uvec3 c = gl_GlobalInvocationID;
+    if (any(greaterThanEqual(c, volDims()))) return;
+    const vec3 P = ssr.vol_eye.xyz + volRelPos(volSampleCoord(c));
+
+    // 1. Height fog.
+    const float fog = vp.reproj[1].z > 0.0 ? ocolMistDensity(P) : volFogDensity(P);   // <OCOL>
+    vec3  sigma_s = fog * ssr.vol_albedo.rgb;
+    float sigma_t = fog;
+
+    // 2. Local volumes.
+    if (vp.p0.x > 0.5)
+    {
+        const uint n = min(vol_hdr.x, vol_hdr.y);
+        for (uint i = 0u; i < n; ++i)
+        {
+            const VolPrim v = vol_prims[i];
+            const float d = volPrimDensity(v, P, vp.fwd.w);
+            if (d > 0.0)
+            {
+                sigma_t += d;
+                sigma_s += d * clamp(v.albedo.rgb, vec3(0.0), vec3(1.0));
+            }
+        }
+    }
+
+    // 3. Volumetric particles (#721): this cell's screen tile's records. The tile is
+    //    uniform across the 4x4x4 workgroup (VP_TILE is a multiple of 4): coherent loads.
+    if (vp.p0.y > 0.5)
+    {
+        const uint tilesX = (volDims().x + VP_TILE - 1u) / VP_TILE;
+        const uint tl = (c.y / VP_TILE) * tilesX + c.x / VP_TILE;
+        const uint n = min(pv_tile_n[tl], VP_TILE_CAP);
+        const float noiseAmt = clamp(vp.p0.z, 0.0, 1.0);
+        // (noise mean ~0.5 of smoothstep(0.2, 0.8, n): the shaped density is renormalized)
+        const float renorm = 1.0 / (1.0 - 0.5 * noiseAmt);
+        vec3 emit = vec3(0.0);
+        for (uint k = 0u; k < n; ++k)
+        {
+            const PVol r = pv_rec[pv_tile[tl * VP_TILE_CAP + k]];
+            const vec3 d = P - r.pos_r.xyz;
+            const float R2 = r.pos_r.w * r.pos_r.w;
+            const float d2 = dot(d, d);
+            if (d2 >= R2) continue;
+            float w = pvProfile(d2 / R2);
+            if (noiseAmt > 0.0)
+            {
+                const float nz = pvNoise(d * (1.7 / r.pos_r.w) + vec3(r.emit.a));
+                w *= mix(1.0, smoothstep(0.2, 0.8, nz), noiseAmt) * renorm;
+            }
+            sigma_t += r.scat.a * w;
+            sigma_s += r.scat.rgb * w;
+            emit += r.emit.rgb * w;
+        }
+        imageStore(uEmit, ivec3(c), vec4(min(emit, vec3(1e4)), 0.0));
+    }
+
+    // 4. Cloud layer (#719 / #720 hook).
+    volCloudLayerMedium(P, sigma_s, sigma_t);
+
+    // 5. Precipitation (#954): nothing while ssr.weather[16] is zero (no weather / fog-off fallback).
+    weatherPrecipMedium(P, vp.p1.xy, vp.p1.z, vp.fwd.w, clamp(vp.p0.w, 0.0, 1.0), sigma_s, sigma_t);
+
+    imageStore(uCur, ivec3(c), vec4(max(sigma_s, vec3(0.0)), max(sigma_t, 0.0)));
+}

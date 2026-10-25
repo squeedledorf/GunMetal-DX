@@ -1,0 +1,628 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<panel
+ border="true"
+ follows="left|top|right|bottom"
+ height="408"
+ label="Move"
+ layout="topleft"
+ left="102"
+ name="move_panel"
+ top="1"
+ width="517">
+  <tab_container
+   follows="all"
+   height="408"
+   layout="topleft"
+   left="0"
+   name="move_tabs"
+   tab_height="20"
+   tab_min_width="80"
+   tab_position="top"
+   tab_stop="false"
+   top="0"
+   width="517">
+    <panel
+     follows="all"
+     height="388"
+     label="Camera"
+     layout="topleft"
+     left="0"
+     name="move_camera_tab"
+     top="0"
+     width="517">
+      <icon
+       follows="left|top"
+       height="18"
+       image_name="Cam_FreeCam_Off"
+       layout="topleft"
+       name="camera_icon"
+       mouse_opaque="false"
+       visible="true"
+       width="18"
+       left="10"
+       top="8" />
+      <text
+       font="SansSerifSmallBold"
+       follows="left|top"
+       type="string"
+       length="1"
+       height="12"
+       layout="topleft"
+       left="32"
+       name="camera_lbl"
+       top="11"
+       width="200">
+        Camera
+      </text>
+      <slider
+       can_edit_text="true"
+       control_name="CameraAngle"
+       decimal_digits="2"
+       follows="left|top"
+       height="16"
+       increment="0.025"
+       initial_value="1.57"
+       layout="topleft"
+       label_width="80"
+       label="View angle"
+       left="20"
+       max_val="2.97"
+       min_val="0.17"
+       name="camera_fov"
+       show_text="false"
+       top="32"
+       width="230" />
+      <slider
+       can_edit_text="true"
+       control_name="CameraOffsetScale"
+       decimal_digits="2"
+       follows="left|top"
+       height="16"
+       increment="0.025"
+       initial_value="1"
+       layout="topleft"
+       label="Distance"
+       label_width="80"
+       max_val="3"
+       min_val="0.5"
+       name="camera_offset_scale"
+       show_text="false"
+       left="20"
+       top="54"
+       width="230" />
+      <text
+       follows="left|top"
+       type="string"
+       length="1"
+       height="12"
+       layout="topleft"
+       left="20"
+       name="heading2"
+       top="82"
+       width="230">
+        Automatic position for:
+      </text>
+      <check_box
+       control_name="EditCameraMovement"
+       follows="left|top"
+       height="16"
+       label="Build/Edit"
+       layout="topleft"
+       left="30"
+       name="edit_camera_movement"
+       tool_tip="Use automatic camera positioning when entering and exiting edit mode"
+       top="98"
+       width="100" />
+      <check_box
+       control_name="AppearanceCameraMovement"
+       follows="left|top"
+       height="16"
+       label="Appearance"
+       layout="topleft"
+       left="130"
+       name="appearance_camera_movement"
+       tool_tip="Use automatic camera positioning while in edit mode"
+       top="98"
+       width="110" />
+      <check_box
+       control_name="UseCinematicCamera"
+       follows="left|top"
+       height="16"
+       label="Cinematic head tracking"
+       layout="topleft"
+       left="20"
+       name="cinematic_camera"
+       tool_tip="In third person, the camera follows your head's motion and tilts with it (from Black Dragon)."
+       top="124"
+       width="230" />
+      <slider
+       can_edit_text="true"
+       control_name="CameraMaxRoll"
+       decimal_digits="2"
+       enabled_control="UseCinematicCamera"
+       follows="left|top"
+       height="16"
+       increment="0.01"
+       initial_value="0.85"
+       label="Roll damping"
+       label_width="80"
+       layout="topleft"
+       left="36"
+       max_val="1"
+       min_val="0"
+       name="camera_max_roll"
+       show_text="true"
+       tool_tip="How strongly head tilt is damped back to level (1 = the camera never rolls)."
+       top="144"
+       width="214" />
+      <text
+       follows="left|top"
+       type="string"
+       length="1"
+       height="12"
+       layout="topleft"
+       left="20"
+       name="follow_joint_lbl"
+       top="172"
+       width="230">
+        Camera follows bone:
+      </text>
+      <combo_box
+       control_name="CameraFollowJoint"
+       follows="left|top"
+       height="23"
+       layout="topleft"
+       left="20"
+       name="camera_follow_joint"
+       tool_tip="Pin the third-person camera focus to a skeleton bone (plus the camera preset's focus offset). Overrides cinematic head tracking."
+       top="188"
+       width="230" />
+      <check_box
+       control_name="SlipstreamMotionResetsCamera"
+       follows="left|top"
+       height="16"
+       label="Walking brings the camera back"
+       layout="topleft"
+       left="20"
+       name="motion_resets_camera"
+       tool_tip="After you move the camera away (Alt-orbit, middle-mouse, a click-to-look), walking, flying or click-to-walk eases it back behind you. Off: it stays where you put it until you press Esc or reset it. (Same setting as Photo Studio's camera page.)"
+       top="218"
+       width="230" />
+      <check_box
+       control_name="CameraSmoothZoom"
+       follows="left|top"
+       height="16"
+       label="Smooth camera zoom"
+       layout="topleft"
+       left="20"
+       name="camera_smooth_zoom_check"
+       tool_tip="Ease the wheel zoom toward its target distance and use fine touchpad / high-resolution wheel deltas. Tune with CameraSmoothZoomTime in Debug Settings."
+       top="240"
+       width="230" />
+      <check_box
+       control_name="UISmoothScroll"
+       follows="left|top"
+       height="16"
+       label="Smooth scrolling in lists and panels"
+       layout="topleft"
+       left="20"
+       name="ui_smooth_scroll_check"
+       tool_tip="Scroll lists, panels, chat and inventory by pixel from touchpad / high-resolution wheel deltas, and ease each wheel notch. Tune with UISmoothScrollTime in Debug Settings."
+       top="260"
+       width="230" />
+      <check_box
+       control_name="RightClickDragOrbit"
+       follows="left|top"
+       height="16"
+       label="Right-click drag orbits camera"
+       layout="topleft"
+       left="266"
+       name="right_drag_orbit"
+       tool_tip="Hold right-click in the world and drag to orbit the camera around its current focus; nothing happens until the mouse moves. With the camera following your avatar the drag turns the avatar (the camera stays behind it); after an Alt-click object view or an earlier orbit, the camera orbits that focus and your avatar does not turn. Ctrl+Shift pans, Alt zooms. A right-click without moving opens the context menu on release."
+       top="32"
+       width="220" />
+      <slider
+       can_edit_text="true"
+       control_name="RightClickOrbitSlopPx"
+       decimal_digits="0"
+       enabled_control="RightClickDragOrbit"
+       follows="left|top"
+       height="16"
+       increment="1"
+       initial_value="3"
+       label="Drag distance (px)"
+       label_width="110"
+       layout="topleft"
+       left="282"
+       max_val="24"
+       min_val="0"
+       name="right_drag_orbit_slop"
+       show_text="true"
+       tool_tip="How far the mouse may move (pixels) with the right button held before it counts as a drag instead of a click. 0: the first pixel starts the drag."
+       top="52"
+       width="204" />
+      <check_box
+       control_name="ClickOnAvatarKeepsCamera"
+       follows="left|top"
+       height="16"
+       label="Clicking my avatar keeps camera"
+       layout="topleft"
+       left="266"
+       name="click_avatar_keeps_camera"
+       tool_tip="Normally clicking your own avatar brings the camera back behind you. With this on the camera stays put, so a framed shot survives a stray click. (Also in Lightbox &gt; Cam.)"
+       top="74"
+       width="220" />
+      <check_box
+       control_name="FSIgnoreSimulatorCameraConstraints"
+       follows="left|top"
+       height="16"
+       label="Camera passes through prims"
+       layout="topleft"
+       left="266"
+       name="ignorecameraconstraints"
+       tool_tip="Allow the camera to move without constraints through prims. Ignores the 'push' the simulator applies to your camera to keep it out of objects."
+       top="94"
+       width="220" />
+      <check_box
+       control_name="SlipstreamMMBNav"
+       follows="left|top"
+       height="16"
+       label="Middle-mouse camera (Blender)"
+       layout="topleft"
+       left="266"
+       name="mmb_nav"
+       tool_tip="Drag with the middle mouse button to orbit around the point under the cursor. Shift+drag pans, Ctrl+drag dollies. A middle click or hold that does not move is still push-to-talk (it starts after a short hold, so a drag never keys the mic). Leaves the camera free, like an Alt-orbit; Esc or walking resets it."
+       top="118"
+       width="220" />
+      <slider
+       control_name="SlipstreamMMBNavSensitivity"
+       decimal_digits="2"
+       enabled_control="SlipstreamMMBNav"
+       follows="left|top"
+       height="16"
+       increment="0.05"
+       initial_value="1"
+       label="Sensitivity"
+       label_width="80"
+       layout="topleft"
+       left="282"
+       max_val="3"
+       min_val="0.25"
+       name="mmb_nav_sensitivity"
+       show_text="true"
+       tool_tip="Orbit and dolly speed of the middle-mouse camera. Pan keeps the grabbed point under the cursor."
+       top="138"
+       width="204" />
+      <check_box
+       control_name="SlipstreamSpeedFov"
+       follows="left|top"
+       height="16"
+       label="Widen FoV with speed"
+       layout="topleft"
+       left="266"
+       name="speed_fov"
+       tool_tip="Widen the field of view as you (or the vehicle you ride) move fast, and ease it back when you slow down. Uses your avatar's or vehicle's speed, not camera movement, and is off while building, in Pose Studio and Photo Studio, with the third-person shooter camera or a free (Alt) camera. Snapshots keep your normal field of view."
+       top="166"
+       width="220" />
+      <slider
+       control_name="SlipstreamSpeedFovMax"
+       decimal_digits="1"
+       enabled_control="SlipstreamSpeedFov"
+       follows="left|top"
+       height="16"
+       increment="0.5"
+       initial_value="10"
+       label="Extra FoV"
+       label_width="80"
+       layout="topleft"
+       left="282"
+       max_val="30"
+       min_val="0"
+       name="speed_fov_max"
+       show_text="true"
+       tool_tip="The most the field of view widens, in degrees, at the full-effect speed. Keep it modest: large kicks bother some people."
+       top="186"
+       width="204" />
+      <slider
+       control_name="SlipstreamSpeedFovStartSpeed"
+       decimal_digits="0"
+       enabled_control="SlipstreamSpeedFov"
+       follows="left|top"
+       height="16"
+       increment="1"
+       initial_value="8"
+       label="Starts at m/s"
+       label_width="80"
+       layout="topleft"
+       left="282"
+       max_val="60"
+       min_val="0"
+       name="speed_fov_start"
+       show_text="true"
+       tool_tip="Below this speed (m/s) the field of view does not change. Walking is about 3 m/s, running 5, flying 15 to 20."
+       top="206"
+       width="204" />
+      <slider
+       control_name="SlipstreamSpeedFovFullSpeed"
+       decimal_digits="0"
+       enabled_control="SlipstreamSpeedFov"
+       follows="left|top"
+       height="16"
+       increment="1"
+       initial_value="45"
+       label="Full at m/s"
+       label_width="80"
+       layout="topleft"
+       left="282"
+       max_val="150"
+       min_val="5"
+       name="speed_fov_full"
+       show_text="true"
+       tool_tip="At this speed (m/s) the full extra field of view applies. It eases in smoothly between the start and full speeds."
+       top="226"
+       width="204" />
+      <check_box
+       control_name="SlipstreamSpeedFovMouselook"
+       enabled_control="SlipstreamSpeedFov"
+       follows="left|top"
+       height="16"
+       label="Also in mouselook"
+       layout="topleft"
+       left="282"
+       name="speed_fov_mouselook"
+       tool_tip="Also widen the field of view in mouselook."
+       top="246"
+       width="204" />
+    </panel>
+    <panel
+     follows="all"
+     height="388"
+     label="Movement"
+     layout="topleft"
+     left="0"
+     name="move_movement_tab"
+     top="0"
+     width="517">
+      <icon
+       follows="left|top"
+       height="18"
+       image_name="Move_Walk_Off"
+       layout="topleft"
+       name="avatar_icon"
+       mouse_opaque="false"
+       visible="true"
+       width="18"
+       left="10"
+       top="8" />
+      <text
+       font="SansSerifSmallBold"
+       follows="left|top"
+       type="string"
+       length="1"
+       height="12"
+       layout="topleft"
+       left="32"
+       name="keyboard_lbl"
+       top="11"
+       width="208">
+        Movement
+      </text>
+      <check_box
+       control_name="ArrowKeysAlwaysMove"
+       follows="left|top"
+       height="16"
+       label="Arrow keys always move me while in chat"
+       layout="topleft"
+       left="20"
+       name="arrow_keys_move_avatar_check"
+       top="32"
+       width="470" />
+      <check_box
+       control_name="AllowTapTapHoldRun"
+       follows="left|top"
+       height="16"
+       label="Tap-tap-hold to run"
+       layout="topleft"
+       left="20"
+       name="tap_tap_hold_to_run"
+       top="52"
+       width="470" />
+      <check_box
+       control_name="AutomaticFly"
+       follows="left|top"
+       height="16"
+       label="Hold jump or crouch to start or stop flying"
+       layout="topleft"
+       left="20"
+       name="automatic_fly"
+       top="72"
+       width="470" />
+      <check_box
+       control_name="SlipstreamNimble"
+       follows="left|top"
+       height="16"
+       label="Skip the pre-jump crouch (jump instantly)"
+       layout="topleft"
+       left="20"
+       name="skip_prejump"
+       tool_tip="Jump immediately without the crouching pre-jump animation delay."
+       top="92"
+       width="470" />
+      <check_box
+       control_name="SLStrafeWithAD"
+       follows="left|top"
+       height="16"
+       label="A/D strafe instead of turn"
+       layout="topleft"
+       left="20"
+       name="strafe_with_ad"
+       tool_tip="A/D and the Left/Right arrow keys strafe (sidestep), and Shift+A/D turn, on foot and flying. Off: A/D turn and Shift+A/D strafe. Only the default key bindings are swapped. Mouselook already strafes with A/D."
+       top="112"
+       width="470" />
+      <slider
+       can_edit_text="true"
+       control_name="SlipstreamKeyboardTurnRate"
+       decimal_digits="2"
+       follows="left|top"
+       height="16"
+       increment="0.05"
+       initial_value="1"
+       label="Keyboard turn speed"
+       label_width="110"
+       layout="topleft"
+       left="266"
+       max_val="3"
+       min_val="0.25"
+       name="keyboard_turn_rate"
+       show_text="true"
+       tool_tip="How fast the A/D and Left/Right arrow keys turn your avatar (when they turn rather than strafe). 1.00 is the standard speed. Does not affect strafing, mouselook or the on-screen turn buttons."
+       top="112"
+       width="230" />
+      <check_box
+       control_name="SlipstreamMouseWalk"
+       follows="left|top"
+       height="16"
+       label="Both mouse buttons walk"
+       layout="topleft"
+       left="20"
+       name="mouse_walk"
+       tool_tip="While holding the left mouse button on your avatar to steer, also hold the right button to walk forward (runs or flies per your current mode). Release either button to stop. Not used with the third-person shooter camera."
+       top="132"
+       width="470" />
+      <check_box
+       control_name="FSBlockClickSit"
+       follows="left|top"
+       height="16"
+       label="Left-click never sits me"
+       layout="topleft"
+       left="20"
+       name="block_click_sit"
+       tool_tip="Ignore an object's 'sit on left-click' action, to avoid accidental sits. Left-clicking such an object touches it instead (if it responds to touch). To sit, right-click it and choose Sit Here."
+       top="152"
+       width="470" />
+      <check_box
+       control_name="EnableCollisionSounds"
+       follows="left|top"
+       height="16"
+       label="Play sound on collisions"
+       layout="topleft"
+       left="20"
+       name="sound_on_collisions"
+       top="172"
+       width="470" />
+      <text
+       font="SansSerifSmallBold"
+       follows="left|top"
+       type="string"
+       length="1"
+       height="12"
+       layout="topleft"
+       left="24"
+       name="mouse_lbl"
+       top="202"
+       width="208">
+        Clicking on land
+      </text>
+      <text
+       follows="left|top"
+       type="string"
+       length="1"
+       height="12"
+       layout="topleft"
+       left="20"
+       name="single_click_action_lbl"
+       top="226"
+       width="80">
+        Single click:
+      </text>
+      <combo_box
+       height="23"
+       layout="topleft"
+       left="110"
+       top="221"
+       name="single_click_action_combo"
+       width="220">
+        <combo_box.item
+         label="No action"
+         name="0"
+         value="0"/>
+        <combo_box.item
+         label="Move to clicked point"
+         name="1"
+         value="1"/>
+        <combo_box.commit_callback
+         function="Pref.ClickActionChange"/>
+      </combo_box>
+      <text
+       follows="left|top"
+       type="string"
+       length="1"
+       height="12"
+       layout="topleft"
+       left="20"
+       name="double_click_action_lbl"
+       top="254"
+       width="80">
+        Double click:
+      </text>
+      <combo_box
+       height="23"
+       layout="topleft"
+       left="110"
+       top="249"
+       name="double_click_action_combo"
+       width="220">
+        <combo_box.item
+         label="No action"
+         name="0"
+         value="0"/>
+        <combo_box.item
+         label="Move to clicked point"
+         name="1"
+         value="1"/>
+        <combo_box.item
+         label="Teleport to clicked point"
+         name="2"
+         value="2"/>
+        <combo_box.commit_callback
+         function="Pref.ClickActionChange"/>
+      </combo_box>
+      <check_box
+       control_name="RenderVKSystemAvatarBody"
+       follows="left|top"
+       height="16"
+       label="Show system avatar bodies"
+       layout="topleft"
+       left="20"
+       name="show_system_avatar_bodies"
+       tool_tip="Draw the classic system body (skin, eyes, eyelashes, hair, skirt) of every avatar, yours included. Turn off when everyone you see wears a mesh body: avatars without a mesh body will then show ONLY their attachments."
+       top="288"
+       width="470" />
+      <button
+       follows="left|top"
+       layout="topleft"
+       height="23"
+       label="3Dconnexion devices"
+       left="20"
+       name="joystick_setup_button"
+       top="314"
+       width="155">
+        <button.commit_callback
+         function="Floater.Show"
+         parameter="pref_joystick" />
+      </button>
+      <text
+       follows="left|top"
+       type="string"
+       length="1"
+       height="12"
+       layout="topleft"
+       left="20"
+       name="aim_moved_note"
+       top="348"
+       width="470">
+        Mouselook and the third-person shooter camera are on the Combat tab.
+      </text>
+    </panel>
+  </tab_container>
+</panel>

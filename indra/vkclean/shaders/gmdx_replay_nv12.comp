@@ -1,0 +1,42 @@
+#version 450
+// <GMDX> INSTANT REPLAY (vkgfx/gmdxreplayvk.cpp): the captured frame -> the encoder's 4:2:0 input.
+// One invocation per 2x2 luma block: four Y samples and their averaged CbCr. BT.709 limited range
+// over the display-encoded values (the swapchain copy is read through a UNORM view, so an sRGB
+// swapchain gives its stored bytes, not linear light). The picture is scaled to pc.size by the
+// sampler; the padding up to the coded (macroblock-aligned) size repeats the edge.
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform sampler2D u_src;
+layout(set = 0, binding = 1, r8) uniform writeonly image2D u_y;
+layout(set = 0, binding = 2, rg8) uniform writeonly image2D u_uv;
+
+layout(push_constant) uniform Push
+{
+    ivec2 size;    // picture size (the content)
+    ivec2 coded;   // coded size (multiple of 16)
+} pc;
+
+const vec3 kLuma = vec3(0.2126, 0.7152, 0.0722);
+
+void main()
+{
+    const ivec2 c = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(c * 2, pc.coded))) return;
+    vec3 acc = vec3(0.0);
+    for (int j = 0; j < 2; ++j)
+    {
+        for (int i = 0; i < 2; ++i)
+        {
+            const ivec2 o = c * 2 + ivec2(i, j);
+            const ivec2 p = min(o, pc.size - 1);
+            const vec3 rgb = clamp(textureLod(u_src, (vec2(p) + 0.5) / vec2(pc.size), 0.0).rgb, 0.0, 1.0);
+            imageStore(u_y, o, vec4((16.0 + 219.0 * dot(rgb, kLuma)) / 255.0));
+            acc += rgb;
+        }
+    }
+    acc *= 0.25;
+    const float y = dot(acc, kLuma);
+    const float cb = (acc.b - y) / 1.8556;
+    const float cr = (acc.r - y) / 1.5748;
+    imageStore(u_uv, c, vec4((128.0 + 224.0 * cb) / 255.0, (128.0 + 224.0 * cr) / 255.0, 0.0, 0.0));
+}

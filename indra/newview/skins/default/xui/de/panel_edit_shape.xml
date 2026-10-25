@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<panel name="edit_shape_panel">
+	<string name="meters">
+		Meter
+	</string>
+	<string name="feet">
+		Fuß
+	</string>
+	<string name="height">
+		Höhe:
+	</string>
+	<text name="avatar_height"/>
+</panel>

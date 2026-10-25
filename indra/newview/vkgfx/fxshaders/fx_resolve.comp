@@ -1,0 +1,122 @@
+#version 450
+// Slipstream FX host (#544 / #548): the renderer's inputs -> the effects' DISPLAY-RES,
+// UNJITTERED textures. One variant per input (-D FX_RESOLVE_*). Render-res inputs use
+// the clean_depth_up.comp mapping: render pixel q shows the scene at q + 0.5 - jitter, so
+// the one covering a display pixel's unjittered centre pr is floor(pr + jitter). This
+// runs at render scale 1 too (under TAA the world depth is jittered at any scale).
+//
+//  FX_RESOLVE_DEPTH  world depth (D32, reversed-Z) -> R32F "DEPTH" in ReShade's
+//                    convention: reversed, encoded so ReShade.fxh's GetLinearizedDepth()
+//                    (RESHADE_DEPTH_INPUT_IS_REVERSED 1, FAR_PLANE F) returns view depth / F
+//                    exactly: L = z / F, d' = L F / (1 + L (F - 1)), stored 1 - d'.
+//                    Sky / beyond F -> 0 (L = 1).
+//  FX_RESOLVE_NORMAL pre-pass view-space octahedral normals (RG16F) -> RGBA16F
+//                    (xyz view-space unit normal, w 1); frames without the pre-pass
+//                    normals reconstruct them from the depth (w 0.5 = reconstructed).
+//  FX_RESOLVE_MOTION motion vectors (RG16F, UV units, current - previous) -> RG16F.
+//  FX_RESOLVE_MASK   the avatar-id mask (R16_UINT, display res, unjittered) -> R32F id.
+//  FX_RESOLVE_HDR    the linear HDR scene (display res) x exposure -> RGBA16F.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+#if defined(FX_RESOLVE_MASK)
+layout(set = 0, binding = 0) uniform usampler2D uIn;
+#else
+layout(set = 0, binding = 0) uniform sampler2D uIn;
+#endif
+layout(set = 0, binding = 1) uniform sampler2D uDepth;   // render-res world depth (normal fallback)
+#if defined(FX_RESOLVE_DEPTH) || defined(FX_RESOLVE_MASK)
+layout(set = 0, binding = 2, r32f) uniform writeonly image2D uOut;
+#elif defined(FX_RESOLVE_MOTION)
+layout(set = 0, binding = 2, rg16f) uniform writeonly image2D uOut;
+#else
+layout(set = 0, binding = 2, rgba16f) uniform writeonly image2D uOut;
+#endif
+layout(set = 0, binding = 3, r32f) uniform readonly image2D uExposure;
+
+layout(push_constant) uniform Push {
+    ivec2 dsize;    // display extent
+    ivec2 rsize;    // render extent
+    vec2  ratio;    // render / display
+    vec2  jitter;   // this frame's jitter, render pixels (x right, y down)
+    vec4  lin;      // view z from raw depth: (d * lin.x + lin.y) / (d * lin.z + lin.w)
+    vec4  misc;     // x far plane F, y flags (normal: 1 = pre-pass normals valid; hdr: 1 = dynamic exposure),
+                    // z exposure constant, w unproj scale (normal fallback: 1 / P[0])
+    vec4  misc2;    // x unproj scale y (1 / P[5])
+} pc;
+
+ivec2 renderTexel(ivec2 p)
+{
+    const vec2 pr = (vec2(p) + 0.5) * pc.ratio;
+    return clamp(ivec2(floor(pr + pc.jitter)), ivec2(0), pc.rsize - 1);
+}
+
+float viewZ(float d)
+{
+    return abs((d * pc.lin.x + pc.lin.y) / (d * pc.lin.z + pc.lin.w));
+}
+
+#if defined(FX_RESOLVE_NORMAL)
+vec3 octDecode(vec2 e)
+{
+    vec3 n = vec3(e, 1.0 - abs(e.x) - abs(e.y));
+    if (n.z < 0.0) n.xy = (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+    return normalize(n);
+}
+// View-space position (right-handed, -z forward) of render texel q.
+vec3 viewPos(ivec2 q)
+{
+    const float d = texelFetch(uDepth, q, 0).r;
+    const float z = viewZ(d);
+    const vec2 ndc = (vec2(q) + 0.5) / vec2(pc.rsize) * 2.0 - 1.0;   // VK NDC, y down
+    return vec3(ndc.x * pc.misc.w * z, -ndc.y * pc.misc2.x * z, -z);
+}
+#endif
+
+void main()
+{
+    const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= pc.dsize.x || p.y >= pc.dsize.y) return;
+#if defined(FX_RESOLVE_DEPTH)
+    const float d = texelFetch(uIn, renderTexel(p), 0).r;
+    const float F = max(pc.misc.x, 1.0);
+    float L = d <= 0.0 ? 1.0 : clamp(viewZ(d) / F, 0.0, 1.0);
+    const float dp = L * F / (1.0 + L * (F - 1.0));
+    imageStore(uOut, p, vec4(1.0 - dp, 0.0, 0.0, 0.0));
+#elif defined(FX_RESOLVE_NORMAL)
+    const ivec2 q = renderTexel(p);
+    vec4 o;
+    if (pc.misc.y > 0.5)
+    {
+        o = vec4(octDecode(texelFetch(uIn, q, 0).rg), 1.0);
+    }
+    else
+    {
+        // Smallest-difference neighbours on each axis (avoids smearing across silhouettes).
+        const vec3 c = viewPos(q);
+        const ivec2 hi = pc.rsize - 1;
+        const vec3 l = viewPos(clamp(q - ivec2(1, 0), ivec2(0), hi)), r = viewPos(clamp(q + ivec2(1, 0), ivec2(0), hi));
+        const vec3 u = viewPos(clamp(q - ivec2(0, 1), ivec2(0), hi)), b = viewPos(clamp(q + ivec2(0, 1), ivec2(0), hi));
+        const vec3 dx = abs(r.z - c.z) < abs(c.z - l.z) ? r - c : c - l;
+        const vec3 dy = abs(b.z - c.z) < abs(c.z - u.z) ? b - c : c - u;
+        vec3 n = cross(dy, dx);
+        n = dot(n, n) > 0.0 ? normalize(n) : vec3(0.0, 0.0, 1.0);
+        if (n.z < 0.0) n = -n;   // face the camera (+z toward the eye in view space)
+        o = vec4(n, 0.5);
+    }
+    imageStore(uOut, p, o);
+#elif defined(FX_RESOLVE_MOTION)
+    imageStore(uOut, p, vec4(texelFetch(uIn, renderTexel(p), 0).rg, 0.0, 0.0));
+#elif defined(FX_RESOLVE_MASK)
+    const ivec2 ms = textureSize(uIn, 0);
+    const ivec2 q = clamp(ivec2((vec2(p) + 0.5) * vec2(ms) / vec2(pc.dsize)), ivec2(0), ms - 1);
+    imageStore(uOut, p, vec4(float(texelFetch(uIn, q, 0).r), 0.0, 0.0, 0.0));
+#elif defined(FX_RESOLVE_HDR)
+    float e = pc.misc.z;
+    if (pc.misc.y > 0.5) e *= imageLoad(uExposure, ivec2(0)).r;
+    const ivec2 hs = textureSize(uIn, 0);
+    const ivec2 q = clamp(ivec2((vec2(p) + 0.5) * vec2(hs) / vec2(pc.dsize)), ivec2(0), hs - 1);
+    const vec4 c = texelFetch(uIn, q, 0);
+    imageStore(uOut, p, vec4(c.rgb * e, 1.0));
+#endif
+}

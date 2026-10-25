@@ -1,0 +1,71 @@
+#version 460
+// vkclean -- MOTION BLUR (#118), pass 2: NEIGHBORMAX. One thread per tile.
+//
+// The dominant blur of a tile is the longest TileMax vector that can reach it: a moving
+// silhouette's blur spreads over the still pixels around it, so the tiles it can cover
+// must sample along it too. McGuire et al. 2012 take the 3x3 maximum and require the
+// tile to be at least the max radius; here the tile is fixed (16 px, the reconstruction
+// workgroup) and the neighbourhood grows with the radius instead: (2 reach + 1)^2 tiles,
+// reach = ceil(max radius / tile). Past the 3x3 a neighbour only counts when its vector,
+// laid through its centre, passes within ~1.5 tiles of this tile's centre (it can reach
+// some pixel here) -- a fast object three tiles away moving across the screen parallel
+// to this tile does not hijack its direction (the CoD: AW-style reach test).
+//
+// Out: xy the dominant radius vector, z the shortest pixel length over every tile the
+// blur can reach (the uniform-motion fast path in the reconstruction), w 1 = the reconstruction runs on this
+// tile (dominant length over the active threshold, or a debug view) -- the write-back
+// copies exactly those tiles.
+//
+// #836: z used to be the 3x3 minimum (McGuire's, valid there because his tile is the max
+// radius). Here the tile is 16 px and the radius up to reach x 16, so the fast path's
+// depth-blind box (+-rn along the vector) reached tiles nobody checked: a still avatar /
+// prim two tiles away was box-smeared into this tile and the smear stopped at its edge,
+// while the next tile (the depth-aware gather) kept the silhouette crisp -- blurred and
+// sharp 16 px blocks around every still silhouette once the radius passed 16 px (the
+// default 24 px at 1080 lines). Now the minimum covers the whole (2 reach + 1)^2 square
+// (exact: rn <= reach x 16, so no box leaves it), no reach test (a slow tile anywhere a
+// box can land vetoes it). MbParams.p4.x 0 = the old 3x3 (RenderVKMotionBlurWideUniformCheck).
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+#include "clean_mblur_common.glsl"
+
+layout(rgba16f, set = 0, binding = 9) writeonly uniform image2D outNeighbor;
+
+void main()
+{
+    const ivec2 tiles = tileCount();
+    const ivec2 t = ivec2(gl_GlobalInvocationID.xy);
+    if (t.x >= tiles.x || t.y >= tiles.y) return;
+    const int reach = int(mb.p2.y + 0.5);
+    const float tile = float(kTile);
+
+    const bool wide = mb.p4.x > 0.5;   // #836
+    const vec4 c = texelFetch(uTileMax, t, 0);
+    vec2 best = c.xy;
+    float best_len = c.w;
+    float min_len = c.z;
+    for (int oy = -reach; oy <= reach; ++oy)
+        for (int ox = -reach; ox <= reach; ++ox)
+        {
+            if (ox == 0 && oy == 0) continue;
+            const ivec2 s = t + ivec2(ox, oy);
+            if (s.x < 0 || s.y < 0 || s.x >= tiles.x || s.y >= tiles.y) continue;
+            const vec4 n = texelFetch(uTileMax, s, 0);
+            const bool ring1 = abs(ox) <= 1 && abs(oy) <= 1;
+            if (ring1 || wide) min_len = min(min_len, n.z);
+            if (n.w <= best_len) continue;
+            if (!ring1)
+            {
+                // Distance from this tile's centre to the neighbour's blur segment.
+                const vec2 p = vec2(-ox, -oy) * tile;
+                const vec2 dir = n.xy / max(n.w, 1e-6);
+                const float along = clamp(dot(p, dir), -n.w, n.w);
+                if (length(p - dir * along) > 1.5 * tile) continue;
+            }
+            best = n.xy;
+            best_len = n.w;
+        }
+    const bool runs = best_len >= mb.p3.z || mb.p1.y > 0.5;
+    imageStore(outNeighbor, t, vec4(best, min_len, runs ? 1.0 : 0.0));
+}

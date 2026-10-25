@@ -1,0 +1,223 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_nonuniform_qualifier : require
+// vkclean -- PARTICLE FOG (#1003): LIGHT GRID. One invocation per coarse voxel of every
+// brick (PF_NC^3 per slot, twice the fine voxel size), after the fine resolve:
+//
+//   * IN-BRICK SELF-OCCLUSION -- the optical depth from the voxel to the brick's surface
+//     (fine density x the brick's blend, trilinear taps):
+//       toward the SUN / MOON  -> uLightW.a (12 taps): the march's sun term takes a multiple-
+//                                 scattering sum over it (bright tops facing the light, dark
+//                                 bellies) and the beer-powder term
+//       AMBIENT OCCLUSION      -> uVelW.w: the transmittance out of the medium along six cone
+//                                 directions (straight up 0.3, four at 35 degrees elevation
+//                                 0.15 each, straight down 0.1; 8 taps each), 0..1 -- folds,
+//                                 cores and undersides see less of the sky / the room
+//     Other bricks / the scene are not part of it: the scene's shadow is the march's cascade
+//     tap per step, the clouds' the cloud shadow map.
+//   * LOCAL LIGHTS -- the main view's light clusters (draw set 0 bindings 3-6) at the voxel
+//     centre (a voxel off screen takes the nearest edge cluster): points with LL's legacy
+//     attenuation, projectors inside their frustum with their gobo and their SHADOW-MAP
+//     occlusion (ray-traced projector records are left unshadowed here). SELF-SHADOWING: the
+//     strongest RenderVKParticleFogShadowLights (push q.y, <= 4) lights at the voxel march a
+//     short shadow ray (8 taps) through the brick toward the light -- the lit side glows, the
+//     far side falls dark: the biggest cue at night, when the sun is gone. A multiple-
+//     scattering floor (a quarter of the light at a quarter of the depth) keeps a dense core
+//     from going black. -> uLightW.rgb: the isotropic in-scatter per unit of scattering
+//     coefficient (x pi: LL light colours are irradiance / pi, as clean_vol_light.comp; the
+//     march applies the HG phase with the direction below).
+//     -> uLDirW.xyz: the luminance-weighted mean unit direction toward the (shadowed) lights
+//     (length = concentration), .w their luminance-weighted optical depth (beer-powder).
+// Dispatch: (PF_NC / 4, PF_NC / 4, PF_NC / 4 x bricks) groups of 4^3.
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+#include "clean_frame_info.glsl"
+#include "clean_atmos_common.glsl"
+#include "clean_lights_common.glsl"
+#define PF_SAMPLERS
+#include "clean_pfog_common.glsl"
+
+layout(std430, set = 0, binding = 3) readonly buffer Lights { Light lights[]; };
+layout(std430, set = 0, binding = 4) readonly buffer CCount { uint cluster_count[]; };
+layout(std430, set = 0, binding = 5) readonly buffer CIndex { uint cluster_index[]; };
+layout(std140, set = 0, binding = 6) uniform LInfo { LightInfo linfo; };
+layout(set = 1, binding = 0) uniform sampler2D uTextures[];
+#include "clean_light_eval.glsl"   // legacyAtten, projDiffuse
+layout(set = 0, binding = 18) uniform sampler2DShadow uProjShadowAtlas;
+#include "clean_projshadow.glsl"
+
+layout(set = PF_SET, binding = 9, rgba16f) uniform image3D uVelW;
+layout(set = PF_SET, binding = 10, rgba16f) writeonly uniform image3D uLightW;
+layout(set = PF_SET, binding = 24, rgba16f) writeonly uniform image3D uLDirW;
+
+layout(push_constant) uniform PfPush { uvec4 q; } pp;   // y self-shadowed lights (0..4)
+
+#define PF_SHADOW_MAX 4
+
+// The main-view light cluster of a world point (clean_vol_light.comp volCluster).
+uint pfCluster(vec3 P)
+{
+    const vec4 v = linfo.view * vec4(P, 1.0);
+    const float z = max(-v.z, 1e-3);
+    const float sx = (v.x / z) / max(linfo.grid.z, 1e-4);
+    const float sy = (v.y / z) / max(linfo.grid.w, 1e-4);
+    const uint cx = uint(clamp((sx * 0.5 + 0.5) * float(GX), 0.0, float(GX) - 1.0));
+    const uint cy = uint(clamp((0.5 - sy * 0.5) * float(GY), 0.0, float(GY) - 1.0));
+    const float vz = -v.z;
+    const uint cz = (vz <= linfo.zinfo.x) ? 0u : min(uint(log(vz / linfo.zinfo.x) * linfo.zinfo.z), GZ - 1u);
+    return (cz * GY + cy) * GX + cx;
+}
+
+// Shadow-mapped projector visibility at a medium point (clean_vol_light.comp volProjShadowMap).
+float pfProjShadowMap(Light L, ProjShadow s, vec3 P)
+{
+    const vec3  tl = L.proj_origin.xyz - P;
+    const float d  = max(dot(-tl, L.proj_axis.xyz), 0.0);
+    const vec3  l  = tl / max(length(tl), 1e-4);
+    const vec3  Po = P + l * (s.params.x * d * s.texel.w);
+    const vec4  c  = s.vp * vec4(Po - ssr.cam_origin.xyz, 1.0);
+    if (c.w <= 0.0) return 1.0;
+    const vec3 ndc = c.xyz / c.w;
+    if (ndc.z >= 1.0 || ndc.z <= 0.0) return 1.0;
+    const vec2 uv = ndc.xy * 0.5 + 0.5;
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) return 1.0;
+    const vec2 t = s.texel.xy;
+    const vec2 lo = s.rect.xy + t * 0.5, hi = s.rect.xy + s.rect.zw - t * 0.5;
+    return texture(uProjShadowAtlas, vec3(clamp(s.rect.xy + uv * s.rect.zw, lo, hi), ndc.z));
+}
+
+// Optical depth from P along unit direction D to the brick's surface, at most maxLen (taps).
+float pfOpticalDepth(PfBrick br, vec3 P, vec3 D, float maxLen, int taps)
+{
+    const vec2 h = pfBoxHit(br, P, D);
+    const float len = min(max(h.y, 0.0), maxLen);
+    if (len <= 1e-4) return 0.0;
+    const float dt = len / float(taps);
+    float od = 0.0;
+    for (int k = 0; k < taps; ++k)
+        od += pfSigma(br, P + D * (dt * (float(k) + 0.5)));
+    return od * dt;
+}
+
+float pfLum(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+
+// The local lights at P (returns the isotropic in-scatter; ldir = direction / optical depth).
+vec3 pfLocalLights(PfBrick br, vec3 P, out vec4 ldir)
+{
+    const uint c = pfCluster(P);
+    const uint n = clusterLen(cluster_count[c]);
+    const uint count = uint(pf.light.y + 0.5);
+    const uint nrec = uint(pshadow.length());
+    const int nsh = min(int(pp.q.y), PF_SHADOW_MAX);
+    // the strongest lights (luminance) keep their contribution aside for the shadow ray
+    vec3  topE[PF_SHADOW_MAX];
+    vec3  topP[PF_SHADOW_MAX];
+    float topL[PF_SHADOW_MAX];
+    for (int k = 0; k < PF_SHADOW_MAX; ++k) { topE[k] = vec3(0.0); topP[k] = vec3(0.0); topL[k] = 0.0; }
+    vec3 sum = vec3(0.0), dsum = vec3(0.0);
+    float lsum = 0.0;
+    for (uint i = 0u; i < n; ++i)
+    {
+        const uint li = cluster_index[c * CLUSTER_CAP + i];
+        if (li >= count) continue;
+        const vec4 pr = lights[li].pos_radius;
+        const vec3 lv = pr.xyz - P;
+        const float d2 = dot(lv, lv);
+        if (d2 >= pr.w * pr.w) continue;
+        const float dist = sqrt(d2);
+        const vec4 cf = lights[li].color_falloff;
+        const float atten = legacyAtten(dist / pr.w, cf.w);
+        if (atten <= 0.0) continue;
+        vec3 E = vec3(0.0);
+        if (lights[li].proj_origin.w < 0.5) E = cf.rgb * atten;
+        else
+        {
+            const Light L = lights[li];
+            vec4 ptc = L.proj_mat * vec4(P, 1.0);
+            if (ptc.z < 0.0) continue;
+            ptc.xyz /= ptc.w;
+            if (ptc.z <= 0.0 || ptc.x <= 0.0 || ptc.x >= 1.0 || ptc.y <= 0.0 || ptc.y >= 1.0) continue;
+            const float l_dist = -dot(lv, L.proj_axis.xyz);
+            E = projDiffuse(L, l_dist, ptc.xy) * atten;
+            if (L.tex.z != 0u && L.tex.z - 1u < nrec)
+            {
+                const ProjShadow s = pshadow[L.tex.z - 1u];
+                if (!(s.params.w < 0.5) && s.params.z < 1.5) E *= pfProjShadowMap(L, s, P);
+            }
+        }
+        if (any(isnan(E)) || any(isinf(E))) continue;
+        const float lum = pfLum(E);
+        if (lum <= 1e-6) continue;
+        // into the top list (insertion; whatever falls off the end is summed unshadowed)
+        vec3 e = E, q = pr.xyz;
+        float l = lum;
+        for (int k = 0; k < nsh; ++k)
+        {
+            if (l > topL[k])
+            {
+                const vec3 te = topE[k], tq = topP[k];
+                const float tl = topL[k];
+                topE[k] = e; topP[k] = q; topL[k] = l;
+                e = te; q = tq; l = tl;
+            }
+        }
+        if (l > 0.0)
+        {
+            sum += e;
+            const vec3 dl = q - P;
+            dsum += l * dl / max(length(dl), 1e-3);
+            lsum += l;
+        }
+    }
+    // the shadow rays through the medium
+    float odsum = 0.0;
+    const float shK = max(pf.settle.w, 0.0);
+    for (int k = 0; k < nsh; ++k)
+    {
+        if (topL[k] <= 0.0) break;
+        const vec3 dl = topP[k] - P;
+        const float dist = length(dl);
+        const vec3 D = dl / max(dist, 1e-3);
+        const float od = pfOpticalDepth(br, P, D, dist, 8) * shK;
+        const float T = max(exp(-od), 0.25 * exp(-0.25 * od));
+        sum += topE[k] * T;
+        dsum += topL[k] * T * D;
+        lsum += topL[k] * T;
+        odsum += topL[k] * T * od;
+    }
+    ldir = lsum > 1e-6 ? vec4(dsum / lsum, odsum / lsum) : vec4(0.0);
+    if (any(isnan(sum)) || any(isinf(sum)) || any(isnan(ldir))) { sum = vec3(0.0); ldir = vec4(0.0); }
+    // pi x E x the isotropic phase 1 / (4 pi)
+    return min(sum, vec3(1e4)) * 0.25;
+}
+
+
+void main()
+{
+    const uint per = PF_NC / 4u;
+    const uint b = gl_WorkGroupID.z / per;
+    if (b >= uint(pf.counts.x + 0.5)) return;
+    const PfBrick br = pf.bricks[b];
+    const uvec3 v = uvec3(gl_GlobalInvocationID.xy, gl_GlobalInvocationID.z - b * PF_NC);
+    if (any(greaterThanEqual(v, pfDimsC(br)))) return;
+    const ivec3 at = ivec3(br.atlas.xyz * 0.5) + ivec3(v);
+    const vec3 P = br.org_vox.xyz + (vec3(v) + 0.5) * (2.0 * br.org_vox.w);
+    const vec3 L = atmosLightDir();
+    const float sunOD = L.z > 0.0 ? pfOpticalDepth(br, P, normalize(L), 1e4, 12) : 0.0;
+    // ambient occlusion: six cone directions, sky weighted
+    const float ce = 0.8191520, se = 0.5735764;   // cos / sin 35 degrees
+    float ao = 0.3 * exp(-pfOpticalDepth(br, P, vec3(0.0, 0.0, 1.0), 1e4, 8))
+             + 0.1 * exp(-pfOpticalDepth(br, P, vec3(0.0, 0.0, -1.0), 1e4, 8));
+    for (int k = 0; k < 4; ++k)
+    {
+        const float a = 0.7853982 + 1.5707963 * float(k);
+        ao += 0.15 * exp(-pfOpticalDepth(br, P, vec3(ce * cos(a), ce * sin(a), se), 1e4, 8));
+    }
+    vec3 loc = vec3(0.0);
+    vec4 ldir = vec4(0.0);
+    if (pf.light.x > 0.0 && pf.light.y > 0.5) loc = pfLocalLights(br, P, ldir) * pf.light.x;
+    const vec4 vel = imageLoad(uVelW, at);
+    imageStore(uVelW, at, vec4(vel.xyz, clamp(ao, 0.0, 1.0)));
+    imageStore(uLightW, at, vec4(loc, min(sunOD, 1e4)));
+    imageStore(uLDirW, at, vec4(ldir.xyz, min(ldir.w, 1e4)));
+}

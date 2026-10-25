@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<!--
+  Rebindable keyboard commands that are not menu items and not movement/camera actions
+  (#863). Every key check in code goes through SLKeyCommands::matches("<name>", key, mask)
+  for one of the commands declared here; the default key is the shortcut attribute, written
+  like the shortcut attribute of menu items. The user's changes are stored in key_bindings.xml
+  and listed in Preferences > Controls > Menu and other shortcuts.
+
+  Menu accelerators do not need an entry: every menu item with a shortcut attribute is
+  picked up from the menu XUI files by name (see slkeycommands.cpp).
+  scripts/ci/check_key_commands.py fails the build on a shortcut or a key check that is
+  not registered.
+-->
+<commands>
+  <group name="interface" label="Interface" />
+  <group name="chat" label="Chat" />
+  <group name="floaters" label="Floaters" />
+  <group name="slipstream" label="Slipstream features" />
+
+  <!-- Menu files that are not a menu bar of their own: one heading for the whole file -->
+  <scope_group scope="login" label="Login screen menu" prefix="true" />
+  <scope_group scope="edit" label="Standard editing" />
+  <scope_group scope="inventory_add" label="Inventory" />
+  <scope_group scope="inventory_gear" label="Inventory" />
+  <scope_group scope="script_editor" label="Script editor" prefix="true" />
+
+  <!-- Keys that stay fixed; listed read-only in the Controls panel (see key_compare_allowlist.txt) -->
+  <fixed_group label="Fixed keys (cannot be changed)" />
+  <fixed_key label="Say the typed chat" keys="Enter" />
+  <fixed_key label="Cancel chat typing, close dialogs and pickers" keys="Esc" />
+  <fixed_key label="Confirm a dialog" keys="Enter" />
+  <fixed_key label="Move between buttons of a dialog" keys="Tab, Shift+Tab, Left, Right" />
+  <fixed_key label="Earlier / later line of the chat history" keys="Ctrl+Up, Ctrl+Down" />
+  <fixed_key label="Previous / next conversation" keys="Alt+Up, Alt+Down, Alt+Left, Alt+Right" />
+  <fixed_key label="Expand the conversation" keys="Alt+Enter" />
+  <fixed_key label="Save a notecard, gesture or script" keys="Ctrl+S" />
+  <fixed_key label="Paste into the location bar" keys="Ctrl+V" />
+  <fixed_key label="Select all in a script or area list" keys="Ctrl+A" />
+  <fixed_key label="Copy from the area search list" keys="Ctrl+C" />
+  <fixed_key label="Move through lists and inventory" keys="Up, Down, Left, Right, PgUp, PgDn, Home, End" />
+  <fixed_key label="Rename or delete in inventory and galleries" keys="F2, Del, Backspace" />
+  <fixed_key label="Cancel setting a shortcut" keys="Esc, Ctrl+Q" />
+  <fixed_key label="Clear a shortcut while setting it" keys="Del" />
+
+  <command
+   name="restore_ui"
+   group="interface"
+   label="Show the interface again after it was hidden"
+   shortcut="Esc" />
+  <command
+   name="cycle_floaters_next"
+   group="interface"
+   label="Switch to the next window"
+   shortcut="control|Tab" />
+  <command
+   name="cycle_floaters_prev"
+   group="interface"
+   label="Switch to the previous window"
+   shortcut="control|shift|Tab" />
+
+  <command
+   name="chat_shout"
+   group="chat"
+   label="Send the typed chat as a shout"
+   shortcut="control|Enter" />
+  <command
+   name="chat_whisper"
+   group="chat"
+   label="Send the typed chat as a whisper"
+   shortcut="shift|Enter" />
+  <command
+   name="chat_ooc"
+   group="chat"
+   label="Send the typed chat out of character"
+   shortcut="alt|Enter" />
+
+  <command
+   name="find_in_floater"
+   group="floaters"
+   label="Jump to the search or filter field of a floater"
+   context="floaters"
+   shortcut="control|F" />
+
+  <command
+   name="photo_undo"
+   group="slipstream"
+   label="Photo Studio: undo"
+   context="photo_studio"
+   shortcut="control|Z" />
+  <command
+   name="photo_redo"
+   group="slipstream"
+   label="Photo Studio: redo"
+   context="photo_studio"
+   shortcut="control|Y" />
+  <command
+   name="photo_redo_alt"
+   group="slipstream"
+   label="Photo Studio: redo (alternate)"
+   context="photo_studio"
+   shortcut="control|shift|Z" />
+</commands>

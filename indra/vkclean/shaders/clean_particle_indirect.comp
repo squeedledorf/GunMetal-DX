@@ -1,0 +1,47 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// vkclean — per-segment indirect draw commands from the compacted counts: each sorted
+// draw list holds its segments back to back in segment order (dead / off-view slots
+// last), so an exclusive scan of the counts is each segment's offset, carried as
+// firstInstance (gl_InstanceIndex includes it) -- plus the list's base (main 0, mirror
+// N). The cascades' unsorted lists are one command each (base 2N + c * N). 6 vertices
+// per instance: the billboard / ribbon quad as two triangles (the VK pipelines use a
+// triangle list). Lists not built this frame (u_cull bits) get zero instances.
+#define MAX_SEGS 128u
+layout(local_size_x = MAX_SEGS) in;   // >= u_num_buckets
+#include "clean_particle_compute_common.glsl"
+
+shared uint s_off[2u * MAX_SEGS];
+
+void main()
+{
+    const uint b = gl_LocalInvocationID.x;
+    const uint n = min(pp.u_num_buckets, MAX_SEGS);
+    const uint N = pp.u_max_particles;
+    const bool mirror_on = (pp.u_cull.x & CULL_MIRROR) != 0u;
+    if (b < 2u)
+    {
+        // Thread 0: the main list's scan, thread 1: the mirror's.
+        uint acc = 0u;
+        for (uint k = 0u; k < n; ++k) { s_off[b * MAX_SEGS + k] = acc; acc += draw_count[b * n + k]; }
+    }
+    barrier();
+    if (b < 4u)
+    {
+        const uint c = 2u * n + b;
+        const bool on = (pp.u_cull.x & CULL_CASCADE(b)) != 0u;
+        cmds[c].vertexCount   = 6u;
+        cmds[c].instanceCount = on ? min(draw_count[c], N) : 0u;
+        cmds[c].firstVertex   = 0u;
+        cmds[c].firstInstance = 2u * N + b * N;
+    }
+    if (b >= n) return;
+    cmds[b].vertexCount   = 6u;
+    cmds[b].instanceCount = draw_count[b];
+    cmds[b].firstVertex   = 0u;
+    cmds[b].firstInstance = s_off[b];
+    cmds[n + b].vertexCount   = 6u;
+    cmds[n + b].instanceCount = mirror_on ? draw_count[n + b] : 0u;
+    cmds[n + b].firstVertex   = 0u;
+    cmds[n + b].firstInstance = N + s_off[MAX_SEGS + b];
+}

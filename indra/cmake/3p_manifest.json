@@ -1,0 +1,898 @@
+{
+  "comment": "Hand-edited source of truth for the 3p prebuilt packages read by indra/cmake/Prebuilt.cmake. Maintain with scripts/3p/manifest.py (add/update/remove/verify/list).",
+  "format": 1,
+  "packages": {
+    "SDL3": {
+      "copyright": "Copyright (C) 1997-2025 Sam Lantinga (slouken@libsdl.org)",
+      "description": "Simple DirectMedia Layer is a cross-platform multimedia library designed to provide low level access to audio, keyboard, mouse, joystick, 3D hardware via OpenGL, and 2D video framebuffer.",
+      "license": "zlib",
+      "license_file": "LICENSES/SDL3.txt",
+      "platforms": {
+        "linux64": {
+          "hash": "be8c534db2494bb5904bb769587b2d045ef6eaa01d73150fe6a1be56517879c1650a0ecaa8762bb476a28282b84fc0661ce61da7e0bd33e2addb8b6bab86326a",
+          "hash_algorithm": "blake2b",
+          "sha256": "fbf8c5fd1cc3154cc9bf52730256f0d8c0891a2fac771553c9b5b6a6e32be240",
+          "url": "https://github.com/squeedledorf/GunMetal-DX/releases/download/deps/SDL3-3.4.18-gmdx1-linux64-202610221640.tar.zst"
+        },
+        "windows64": {
+          "hash": "3acf5504f69dfddb902ccd2ec4c432928017ffe0798a5d4751807d58bb4f71029cbc246cdb60899efaf121f8751a0de21b4a18567c5580da6bb29181d59119dd",
+          "hash_algorithm": "blake2b",
+          "sha256": "47476e975c83287b60ee62c69cb40a4348fb011b0fc9a0c479ae1b33003ac6b7",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-sdl3/releases/download/v3.2.30-r1/SDL3-3.2.30-r1-windows64-202610061600.tar.zst"
+        }
+      },
+      "version": "3.2.30-r1"
+    },
+    "apr_suite": {
+      "copyright": "Copyright \u00a9 2012 The Apache Software Foundation, Licensed under the Apache License, Version 2.0.",
+      "description": "Apache portable runtime project",
+      "license": "apache",
+      "license_file": "LICENSES/apr_suite.txt",
+      "platforms": {
+        "darwin64": {
+          "hash": "e1c6911733008ae5335886cdccb3ac2be07e55c6ccca549645dc0dc0c2c5e425ef41c5dc317180289c2553e23f575a67fccd8acfe26c2ea05982b8dbefa77da8",
+          "hash_algorithm": "blake2b",
+          "url": "https://github.com/AlchemyViewer/3p-apr_suite/releases/download/v1.7.5-r1/apr_suite-1.7.5-13575960945-darwin64-13575960945.tar.zst"
+        },
+        "linux64": {
+          "hash": "76d21ecd945ccd8a08ca9594d2e7cc8fcede7e96691c2c3a34b026d91b230f49d7077add04aeb37f650e1442c9a4e25ec24b709755ae3f4ff8b4c20a631a4f80",
+          "hash_algorithm": "blake2b",
+          "sha256": "84d6cb908f847a19d26969087a2c7a5d3b3421b717728a5c0f6195c3b96fde36",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-apr_suite/releases/download/v1.7.5-r1/apr_suite-1.7.5-13575960945-linux64-13575960945.tar.zst"
+        },
+        "windows64": {
+          "hash": "2c93c09eaf9cc5999b19f65f7bcf8f0f24b7cecbd7e043100057078fe3af06e8c6b8de9fc01a28ac42ee933d1d4ba7575ab625a1d1de62a0b2949f2b7e699133",
+          "hash_algorithm": "blake2b",
+          "sha256": "a4deaabde36e1942acb6cc81c838b33b06fdb0a53ce8c6b7b9d147383802d886",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-apr_suite/releases/download/v1.7.5-r1/apr_suite-1.7.5-13575960945-windows64-13575960945.tar.zst"
+        }
+      },
+      "version": "1.7.5-13575960945"
+    },
+    "boost": {
+      "copyright": "(see individual source files)",
+      "description": "Boost C++ Libraries",
+      "license": "boost 1.0",
+      "license_file": "LICENSES/boost.txt",
+      "platforms": {
+        "darwin64": {
+          "hash": "a0de3ddeda6506727344e7027a10be22ff26ecc5f2bf40845db904c949ddd81784687c9573a83b51a4df872aafd1e589bd5dfca31ca82f0296955167ceb2e455",
+          "hash_algorithm": "blake2b",
+          "sha256": "8e6d88c1b7f70146b8336ea12abde36015b5d2cfa9fe7ed9b9acca80ffd95214",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-boost/releases/download/v1.89.0-r1/boost-1.89-darwin64-17294755128.tar.zst"
+        },
+        "linux64": {
+          "hash": "ee33cbdad700d1116c62cf169da1ddac67b35afaac37e761aadd3749bb19ba2554398190331fcc5ff4f44f66e9291df9d54749725d0bfc73e0e30a5ba9695406",
+          "hash_algorithm": "blake2b",
+          "sha256": "c11e18faa83b8f8c138e820eaac6ac02c55b1720fb7413adc2051955986dc5d2",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-boost/releases/download/v1.89.0-r1/boost-1.89-linux64-17294755128.tar.zst"
+        },
+        "windows64": {
+          "hash": "a8fab666b216ce4911da6560146b2aa64919dfe727e34d30114ce5d10ff64dea8527e3ccc08d53882e1899a669216837562cfea8f0577615cee5cf5026d6bf0a",
+          "hash_algorithm": "blake2b",
+          "sha256": "baabad7b8b4986f0a6dafbedda9e19e1325a20486708175790e8641a4082b73e",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-boost/releases/download/v1.89.0-r1/boost-1.89-windows64-17294755128.tar.zst"
+        }
+      },
+      "version": "1.89"
+    },
+    "brotli": {
+      "copyright": "Copyright (c) 2009, 2010, 2013-2016 by the Brotli Authors.",
+      "description": "Brotli is a generic-purpose lossless compression algorithm that compresses data using a combination of a modern variant of the LZ77 algorithm, Huffman coding and 2nd order context modeling.",
+      "license": "MIT",
+      "license_file": "LICENSES/brotli.txt",
+      "platforms": {
+        "darwin64": {
+          "hash": "5b11eae3dd740f9232d56ea3b014599351ed9a2bdaf751e023b726159648401813662cc7274f1c647086ebdb014ebdae6827a86ec57ab1a021cf8a99560d3099",
+          "hash_algorithm": "blake2b",
+          "sha256": "f398b0380bce67e8314740425a714198d07a315470222ae7967c0f64cf72e8a9",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-brotli/releases/download/v1.1.0-r1/brotli-1.1.0-darwin64-17287149281.tar.zst"
+        },
+        "linux64": {
+          "hash": "611bd6451f1fd2069300c5c0b4de1a235612d5647c1632484b71937d0a7e0c2f7ebcea562042a82582c7f0329cb960a5f595e49ccf80cd6165112d5fe14459b9",
+          "hash_algorithm": "blake2b",
+          "sha256": "6741479f422cdd8a948267ee951126dd788beea2cbc45c500521e79f0f28f9d0",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-brotli/releases/download/v1.1.0-r1/brotli-1.1.0-linux64-17287149281.tar.zst"
+        },
+        "windows64": {
+          "hash": "3bfc2caf73174a705bb281b73845e54165ca0d5230b381b7ee9c35d50b76b0f639df66609d5b104619b2c9aedb5d5abe39ffa6aeebf26a0f4c3a78e09c1725d8",
+          "hash_algorithm": "blake2b",
+          "sha256": "6c2cf321c265a4ed9370d40b386739af9e00545398ecb4a45cc2f315e4d37206",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-brotli/releases/download/v1.1.0-r1/brotli-1.1.0-windows64-17287149281.tar.zst"
+        }
+      },
+      "version": "1.1.0"
+    },
+    "colladadom": {
+      "copyright": "Copyright 2006 Sony Computer Entertainment Inc.",
+      "license": "SCEA",
+      "license_file": "LICENSES/collada.txt",
+      "platforms": {
+        "darwin64": {
+          "hash": "a84b8ce37e04073096348311995d5c677983843173f27edf9a22bff2045f6b36fd6bc0bd456d53cbe5aa1421b041de6dc07d01f4fba37a365476075f66a37e22",
+          "hash_algorithm": "blake2b",
+          "sha256": "d730d1935e4a22ea2808e567dc4822436a4f57b3dd0eacfa183d93e78f934d57",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-colladadom/releases/download/v2.3-r3/colladadom-2.3.0-r3-darwin64-17360550072.tar.zst"
+        },
+        "linux64": {
+          "hash": "40e44d698da116d29367490c2af65735fefb0f237e2793d334a548b5814d9990ef48a471061ac4f40b84d31e15a06d60dc811295b25cfd0ef0d95ba15c7f155c",
+          "hash_algorithm": "blake2b",
+          "sha256": "385e64bcbeb1605f1b41af4e46a4023f0804b94e638786aaedd2c07505405abe",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-colladadom/releases/download/v2.3-r3/colladadom-2.3.0-r3-linux64-17360550072.tar.zst"
+        },
+        "windows64": {
+          "hash": "d6dae00cdd2aa5173739fd1f27f1a36b46d902586796f5338727a3750b9aa48b22e2d4eb4127012369582f6a808dd9529c2a0878eef1d01713769a41c5d13046",
+          "hash_algorithm": "blake2b",
+          "sha256": "c1c4a5c4792b0cde1a85c4dad44b26ae15af444d7ac74623dd48fc391f2d0fd0",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-colladadom/releases/download/v2.3-r3/colladadom-2.3.0-r3-windows64-17360550072.tar.zst"
+        }
+      },
+      "version": "2.3.0-r3"
+    },
+    "cubemaptoequirectangular": {
+      "copyright": "Copyright (c) 2017 Jaume Sanchez Elias, http://www.clicktorelease.com",
+      "license": "MIT",
+      "license_file": "LICENSES/CUBEMAPTOEQUIRECTANGULAR_LICENSE.txt",
+      "platforms": {
+        "common": {
+          "hash": "2ec1f6d88628b8be1213514a2206db37885e9fde650d5ec66e3195d8fe876a291dda3dcb8da710247c1984eaf77d2f183cd2d90382fb4e9010df4fb9f3f7b0cc",
+          "hash_algorithm": "blake2b",
+          "sha256": "003005740da9f6388984cae658600509b4fd891e1a88926fc3619c0a97d7fbab",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-cubemap_to_eqr_js/releases/download/v1.1.0-r1/cubemaptoequirectangular-1.1.0-common-13506784672.tar.zst"
+        }
+      },
+      "version": "1.1.0"
+    },
+    "curl": {
+      "copyright": "Copyright (c) 1996 - 2026, Daniel Stenberg, <daniel@haxx.se>, and many contributors",
+      "description": "Library for transferring data specified with URL syntax",
+      "license": "curl",
+      "license_file": "LICENSES/curl.txt",
+      "platforms": {
+        "linux64": {
+          "hash": "69b5b1dd7e05e3f0e484b0fe97a6739bc69a791ed69b20218462450facbb268c99b30332e05f19c7cc1a73a01b7ac94b9826166ae991cf6b4ad085adac7a5358",
+          "hash_algorithm": "blake2b",
+          "sha256": "633ea67a1bf842e747b59a5a0fca848fae20ec788a1f4c25dce919a891468245",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-curl/releases/download/v8.22.0-r1/curl-8.22.0-r1-linux64-202610061000.tar.zst"
+        },
+        "windows64": {
+          "hash": "60642f5f6b05f6ee6ecaae59b177e2d4c912a78b36e4e4f49416883629827522bccf519d35be654209688ef39a4820cf5dd5a3737eb523f30784f5001ffb482a",
+          "hash_algorithm": "blake2b",
+          "sha256": "20b1b54fb1f9051cac1fc50e2526fd5b2acac3b5a3b96424ef55804330136509",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-curl/releases/download/v8.22.0-r1/curl-8.22.0-r1-windows64-202610061000.tar.zst"
+        }
+      },
+      "version": "8.22.0-r1"
+    },
+    "dictionaries": {
+      "copyright": "various contributors",
+      "description": "Spell checking dictionaries to bundle into the viewer",
+      "license": "various open source",
+      "license_file": "LICENSES/dictionaries.txt",
+      "platforms": {
+        "common": {
+          "hash": "0f03accad0b518bb3896b606edd66bfb64d3828a532316fdd7393c919f0f4c06160b0869fe3596833e41b90c584ca6fa820f7b99d917e2225b2e5b30b7dc0643",
+          "hash_algorithm": "blake2b",
+          "sha256": "1dc95e95968ecd642e1fac1c4bd1fab899d3d6e52b0b33464e89d5beda223318",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-dictionaries/releases/download/v1.0.1-r1/dictionaries-1.0.0-common-13540331603.tar.zst"
+        }
+      },
+      "version": "1.0.0"
+    },
+    "dullahan": {
+      "copyright": "Copyright (c) 2017, Linden Research, Inc.",
+      "description": "A headless browser SDK that uses the Chromium Embedded Framework (CEF). It is designed to make it easier to write applications that render modern web content directly to a memory buffer, inject synthesized mouse and keyboard events as well as interact with web based features like JavaScript or cookies.",
+      "license": "MPL",
+      "license_file": "LICENSES/LICENSE.txt",
+      "platforms": {
+        "linux64": {
+          "hash": "809f287525fbd783dfb9ea82a16273a9b879bbfba00fb3e7875c739f860def6dd4c7d5f918cfee33a2ed092d7b0bce00e0d71161ed03ec21e290536bcf65467e",
+          "hash_algorithm": "blake2b",
+          "sha256": "e51100d9aa7e4edc7c84be7c4dc2c402c0712b9e8c0dd53ddb02420199df3a46",
+          "url": "https://git.slipstreamviewer.org/sky_line/dullahan/releases/download/v1.50.0-CEF_152.0.6.83/dullahan-1.50.0.202609160023_152.0.6_g708dc14_chromium-152.0.7977.83-linux64-35039647119.tar.zst"
+        },
+        "windows64": {
+          "hash": "6c6471e0e05ae717de0450bed6e78a72e290f05fdb9066da9a5724c09e478ee2fbc8b2e4a7a0f03828413b05b22d6dd3203c3a50ee1abee9a70425035c169a27",
+          "hash_algorithm": "blake2b",
+          "sha256": "d95ba6d32eb64c9b3558fd46a3e4faf25fe85dea2f988265e0f1d8ccdf26aba3",
+          "url": "https://git.slipstreamviewer.org/sky_line/dullahan/releases/download/v1.50.0-CEF_152.0.6.83/dullahan-1.50.0.202609160023_152.0.6_g708dc14_chromium-152.0.7977.83-windows64-35039647119.tar.zst"
+        }
+      },
+      "version": "1.50.0.202609160023_152.0.6_g708dc14_chromium-152.0.7977.83"
+    },
+    "emoji_shortcodes": {
+      "copyright": "Copyright 2017-2019 Miles Johnson.",
+      "description": "Emoji shortcodes",
+      "license": "MIT",
+      "license_file": "LICENSES/emojibase-license.txt",
+      "platforms": {
+        "common": {
+          "hash": "0d5fe44c7ee465ee670ffadd5cf380041b9affeb653e9fbe2a2b23d290fbee2c4ac8508c8d7b05858c8a4564ab2a13d9c980a67534fa7b95f4044e8791c60d7b",
+          "hash_algorithm": "blake2b",
+          "sha256": "e0547ef33d29ee6b3e474b779c8efe9cfbd3387f013c4f04954a3f43ca02bd02",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-emoji-shortcodes/releases/download/v16.0.2-r1/emoji_shortcodes-16.0.2.13572527428-common-13572527428.tar.zst"
+        }
+      },
+      "version": "16.0.2.13572527428"
+    },
+    "expat": {
+      "copyright": "Copyright (c) 1998-2000 Thai Open Source Software Center Ltd and Clark Cooper - Copyright (c) 2001-2025 Expat maintainers.",
+      "description": "Expat is an XML parser library written in C",
+      "license": "expat",
+      "license_file": "LICENSES/expat.txt",
+      "platforms": {
+        "linux64": {
+          "hash": "26a0cfdf1237dcd3b587088cc42100d22036528bf8981cba93fc3da043d2c75cbd144b51a78553f0a0c07cf29faf18b8a70ee01af32f11fe8664b9148c9059b6",
+          "hash_algorithm": "blake2b",
+          "sha256": "4445fea45a038cb51fff8b4de7a58a4ec619768c346b264074c3512aacdaa771",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-expat/releases/download/v2.9.0-r1/expat-2.9.0-r1-linux64-202610061600.tar.zst"
+        },
+        "windows64": {
+          "hash": "958b47e5aa69663a95c3626e2b1e3ad1c5926305ec69be02932cb07aa6d11753532fb837ea9ff1c4880f082280cd7c1ebe1c1577073c8ae4f9fc9fbd4df9131d",
+          "hash_algorithm": "blake2b",
+          "sha256": "71d658ee26756b149f312fa980bf15eddc4972ebf5809e71c72bbab0c9f8c1f5",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-expat/releases/download/v2.9.0-r1/expat-2.9.0-r1-windows64-202610061600.tar.zst"
+        }
+      },
+      "version": "2.9.0-r1"
+    },
+    "freetype": {
+      "copyright": "Copyright (C) 1996-2024 by David Turner, Robert Wilhelm, and Werner Lemberg.",
+      "description": "Font rendering library",
+      "license": "FreeType",
+      "license_file": "LICENSES/freetype.txt",
+      "platforms": {
+        "linux64": {
+          "hash": "7f70ed9923e5860657033673c309daae42d24fa3d41062f2de9e8205d35813948ffa7b563385d247285a29c3eae0bd56637095052eedd1d3b38604ea96837c49",
+          "hash_algorithm": "blake2b",
+          "sha256": "c260cdca529fbf105e95273cec6243e75a6b112189d9be3a68932a4b5d5181ae",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-freetype/releases/download/v2.13.3-r3/freetype-2.13.3-r3-linux64-202610061600.tar.zst"
+        },
+        "windows64": {
+          "hash": "9a091200226bae0986deba81f74b59a7e34a0a9b77347c58ab5b83b992eda9d4cf6325edf62648dfd947cc9eec22a2888504750fa516bca18850115a53c8468f",
+          "hash_algorithm": "blake2b",
+          "sha256": "88c9bb18e7d9c631ba28e015c8666403f3e2a15cd635af15e7575d054459115a",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-freetype/releases/download/v2.13.3-r3/freetype-2.13.3-r3-windows64-202610061600.tar.zst"
+        }
+      },
+      "version": "2.13.3-r3"
+    },
+    "glm": {
+      "copyright": "Copyright (c) 2005 - G-Truc Creation",
+      "description": "OpenGL Mathematics",
+      "license": "MIT",
+      "license_file": "LICENSES/glm_license.txt",
+      "platforms": {
+        "common": {
+          "hash": "55cb3b725556933b77a2603a5abb9290f35e3a0b90dbd40e84561d56d1cf8426bcb6a1cb3907702a76c62719acf4a33a556a2a3af889bfd270c7e009f1aaa9eb",
+          "hash_algorithm": "blake2b",
+          "sha256": "04130977bad3e1a1c1cdd52a1226f535957e20cfb0812efd8ea13fcd714a68f5",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-glm/releases/download/v1.0.1-r1/glm-1.0.1-r1-common-13542126166.tar.zst"
+        }
+      },
+      "version": "1.0.1-r1"
+    },
+    "jpegencoderbasic": {
+      "copyright": "Andreas Ritter, www.bytestrom.eu, 11/2009",
+      "license": "NONE",
+      "license_file": "LICENSES/JPEG_ENCODER_BASIC_LICENSE.txt",
+      "platforms": {
+        "common": {
+          "hash": "31d503e153a52b823cf50923dee8da6871e0c35d8c93d44d511b24d6fd0b9a6f2490699acf84a2d992d7bedb0f8eed47f786784c1e673a433f14f380e25bbf0a",
+          "hash_algorithm": "blake2b",
+          "sha256": "77d2c365b84191b4ca1eedc9188bd797ad76aa7b6c7a45cd30bb60d258b76e86",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-jpeg_encoder_js/releases/download/v1.0-r1/jpegencoderbasic-1.0-common-13568493279.tar.zst"
+        }
+      },
+      "version": "1.0"
+    },
+    "libhunspell": {
+      "copyright": "LGPL 2.1",
+      "description": "Spell checking library",
+      "license": "LGPL",
+      "license_file": "LICENSES/hunspell.txt",
+      "platforms": {
+        "darwin64": {
+          "hash": "9eef2dee8fffc35c896e95890c643ab37748af9c6dc56efc6e66f0ca1caad544a5a8c7e57ef3f4642b9c0daf024559a922b65963e031d421d31383dcffa815f4",
+          "hash_algorithm": "blake2b",
+          "sha256": "8bccdded827482d6799f681b9cf4baacb854273bd93b83d23c65c4c42209da9b",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-libhunspell/releases/download/v1.7.2-r1/libhunspell-1.7.2.13573869087-darwin64-13573869087.tar.zst"
+        },
+        "linux64": {
+          "hash": "0eac884d22499b32bbe3a7040c92edac9cfaa7bfd0652427ea481f82dfc0e413b096b1243c4d87e423dd9052522d0bc4a2ba6465afcb4da3e0b705d48faf887e",
+          "hash_algorithm": "blake2b",
+          "sha256": "de31ef13598c0481b1673c1480bfd0c7a92709fa24b31b34cf6732b679b0a06c",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-libhunspell/releases/download/v1.7.2-r1/libhunspell-1.7.2.13573869087-linux64-13573869087.tar.zst"
+        },
+        "windows64": {
+          "hash": "da3bedeaba1aff6c0bd905d45eb1136061827d532b84e8540b68f4ed97b79f794ba168848cd9410d5b8673ef06085dc696a89ba4d26050a8c01f81fcb987c924",
+          "hash_algorithm": "blake2b",
+          "sha256": "c0857e542a830b24f4f40fba18831fb857615e9f0ee30e50ba28d0bbf1eb0f5e",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-libhunspell/releases/download/v1.7.2-r1/libhunspell-1.7.2.13573869087-windows64-13573869087.tar.zst"
+        }
+      },
+      "version": "1.7.2.13573869087"
+    },
+    "libjpeg-turbo": {
+      "copyright": "Copyright (C)2009-2026 D. R. Commander. All Rights Reserved. Copyright (C)2015 Viktor Szathm\u00e1ry. All Rights Reserved.",
+      "description": "JPEG encoding, decoding library",
+      "license": "libjpeg-turbo",
+      "license_file": "LICENSES/libjpeg-turbo.txt",
+      "platforms": {
+        "linux64": {
+          "hash": "df9a6b233f3814347c7dc3ba3a458b2472544c6e92627dbc39668238ae229b1bcb2d381d005df0a7f656f2225603020657a23e978b915aec77023e67e2d72140",
+          "hash_algorithm": "blake2b",
+          "sha256": "4e0568e42daf91dcf4e6504a5a59ac4fc0e137475f63d4a6fb49f2ab20725a6a",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-libjpeg-turbo/releases/download/v3.1.4.1-r1/libjpeg_turbo-3.1.4.1-r1-linux64-202610061600.tar.zst"
+        },
+        "windows64": {
+          "hash": "884bd55faaf24345face9c4f51cfeab85bb2638c95a2849ea3348d4b8b03340639af816eb875676d624df25ee0b954dedafe3bdabc0eae81b7cb9e112ecededa",
+          "hash_algorithm": "blake2b",
+          "sha256": "1ec2aaf060bb2d85232e19649b048e165f7e53edf3de9f0064aa4728f9253cad",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-libjpeg-turbo/releases/download/v3.1.4.1-r1/libjpeg_turbo-3.1.4.1-r1-windows64-202610061600.tar.zst"
+        }
+      },
+      "version": "3.1.4.1-r1"
+    },
+    "libndofdev": {
+      "copyright": "Copyright (c) 2007, 3Dconnexion, Inc. - All rights reserved.",
+      "description": "3DConnexion SDK",
+      "license": "BSD",
+      "license_file": "LICENSES/libndofdev.txt",
+      "platforms": {
+        "darwin64": {
+          "hash": "58bd09261cfe4d53d75009396ac60999e898d368becfe31268270d6b8d415e4107ebc81e5a7c176b77f3e344fc598c741e052ffc2b18e727e5aa34d6086adfa6",
+          "hash_algorithm": "blake2b",
+          "sha256": "4634efef1e5284a1bcf6c174d6a6d8ebe7099182fe0d4a18312ebe0fbc4fd303",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-libndofdev/releases/download/v0.1.0-r2/libndofdev-0.1.0.13572284760-darwin64-13572284760.tar.zst"
+        },
+        "windows64": {
+          "hash": "20844b860081ca050fd060bce457191e0df22606f027ba8d2c8e66e00f2c0cd487810cfa6281316b98799120655653678e671ae03d60d670e964e70d3e8332e6",
+          "hash_algorithm": "blake2b",
+          "sha256": "b074dd75f991edad4a7ddffc53ab7e77d8068e3ebb09c4471899f45ae130a437",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-libndofdev/releases/download/v0.1.0-r2/libndofdev-0.1.0.13572284760-windows64-13572284760.tar.zst"
+        }
+      },
+      "version": "0.1.0.13572284760"
+    },
+    "libpng": {
+      "copyright": "Copyright (c) 1995-2026 The PNG Reference Library Authors; Copyright (c) 2018-2026 Cosmin Truta; Copyright (c) 2000-2002, 2004, 2006-2018 Glenn Randers-Pehrson; Copyright (c) 1996-1997 Andreas Dilger; Copyright (c) 1995-1996 Guy Eric Schalnat, Group 42, Inc.",
+      "description": "PNG Reference library",
+      "license": "libpng",
+      "license_file": "LICENSES/libpng.txt",
+      "platforms": {
+        "linux64": {
+          "hash": "ba23b553cf2e532518371e9556f168a65b44c064f25bdb140093735ba32a1e28b67ef6ffbe8faa84625bdf6f4591fda075427b137a482e7a031310ce7d341595",
+          "hash_algorithm": "blake2b",
+          "sha256": "dc75d7889bb48363d3b511a3324d23a166d02e5c93c926e7e003a0c05ae4a390",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-libpng/releases/download/v1.6.59-r1/libpng-1.6.59-r1-linux64-202610061600.tar.zst"
+        },
+        "windows64": {
+          "hash": "13bf05cc0d3021a93a2848de2eacc94d8fed75ac8f10b63cf877aa722d02bbea1f4d23e7146968674ef5fa21f72f70342f4bb3f6b190c33a034cf75fa0b28f18",
+          "hash_algorithm": "blake2b",
+          "sha256": "64cd2779a33f24114d8ada08a5a7996b7ffd70b56e18f9b6c20884f1421125a7",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-libpng/releases/download/v1.6.59-r1/libpng-1.6.59-r1-windows64-202610061600.tar.zst"
+        }
+      },
+      "version": "1.6.59-r1"
+    },
+    "libxml2": {
+      "copyright": "Copyright (C) 1998-2012 Daniel Veillard.  All Rights Reserved.",
+      "description": "Libxml2 is the XML C parser and toolkit developed for the Gnome project.",
+      "license": "mit",
+      "license_file": "LICENSES/libxml2.txt",
+      "platforms": {
+        "darwin64": {
+          "hash": "f2a3bcfa4a645c88d63dae52614e436a865b0e7fd3f60d3896ad365282ecc6cbf059515d9185705809b34e32c39a48cefee98e6fc4e29013662dbaf0892237ed",
+          "hash_algorithm": "blake2b",
+          "sha256": "a8f512b4f3b6122883e8f039033bbaa9160db20d36073f97728b25c89b5f13d2",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-libxml2/releases/download/v2.14.5/libxml2-2.14.5-darwin64-17294740667.tar.zst"
+        },
+        "linux64": {
+          "hash": "a16c1cbf0726bf1ddaebafdc42ee0618a79058eb8b4957221d2be028b0fe07ff85134ae5654fbf5763495740511787929274b4d31040be8e2f675a0f240d459c",
+          "hash_algorithm": "blake2b",
+          "sha256": "4c728c3415d96e3fe77b0f92ee5eeccc38f5e0d0f507dd3ab90c127567af701b",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-libxml2/releases/download/v2.14.5/libxml2-2.14.5-linux64-17294740667.tar.zst"
+        },
+        "windows64": {
+          "hash": "198d4dd61179cbc6c06305adf2daa3d89a6d06d8c6d3ac8abfb191208a2d500e6ad1a004f60d1d8661b047e4e0d5a09f043511017267debc8b33da684d48228e",
+          "hash_algorithm": "blake2b",
+          "sha256": "618d48748f624fa98a17182c95e8afa8cfe9cdb1b4674f708443df485b2f47d5",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-libxml2/releases/download/v2.14.5/libxml2-2.14.5-windows64-17294740667.tar.zst"
+        }
+      },
+      "version": "2.14.5"
+    },
+    "llca": {
+      "copyright": "Copyright (c) 2020, Alchemy Development Group; data provided by the Mozilla NSS Project.\n      ",
+      "license": "mit",
+      "license_file": "LICENSES/ca-license.txt",
+      "platforms": {
+        "common": {
+          "hash": "1c0f313fe091dedab511c89780cca5989c19117506f91af2255beef2b0dc67825b0f90de68331830ab488d77406b87e3d8513d4aa33e20e8d6723c13ce9a8392",
+          "hash_algorithm": "blake2b",
+          "sha256": "46bce6f04e26f242f34345fa370376d5645425d70301dbfe652be89869794973",
+          "url": "https://git.slipstreamviewer.org/sky_line/llca/releases/download/v20250829-r1/llca-2025.0829.0516-common-17315329078.tar.zst"
+        }
+      },
+      "version": "2025.0829.0516"
+    },
+    "llphysicsextensions_stub": {
+      "copyright": "Copyright (c) 2010, Linden Research, Inc.",
+      "license": "internal",
+      "license_file": "LICENSES/llphysicsextensions.txt",
+      "platforms": {
+        "common": {
+          "hash": "bc41438b10ac6474cf5560465a3662a64f9e65a81342e4c33f18f6694581c7ee28c9ee6f091c36e80a0b1e10c68205be71eb5f8e40fef115d2c744fc2bbfcb43",
+          "hash_algorithm": "blake2b",
+          "sha256": "7530da803a836b53d13193425a4c0cdbb8641b02c1d190910522b521c25f83e7",
+          "url": "https://git.slipstreamviewer.org/sky_line/llphysicsextensions_stub/releases/download/v1.0-cb4900e/llphysicsextensions_stub-1.0-common-17836965684.tar.zst"
+        }
+      },
+      "version": "1.0"
+    },
+    "mikktspace": {
+      "copyright": "Copyright (C) 2011 by Morten S. Mikkelsen, Copyright (C) 2022 Blender Authors",
+      "description": "Mikktspace Tangent Generator",
+      "license": "Apache 2.0",
+      "license_file": "mikktspace.txt",
+      "platforms": {
+        "common": {
+          "hash": "41a84a0c444fa13ce8f20559d0bbf707bc9d590ed72d0b8c8055593be597b41f4e24824c6c114f6658893b4d1b5489eadca6a2ec06a8d7127ab70cbcb5674ef9",
+          "hash_algorithm": "blake2b",
+          "sha256": "cc440aae518804c42dc5e34011690fcf267aaa1bf50920b8566a42c525c15b38",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-mikktspace/releases/download/v2.0.0-r1/mikktspace-2-common-13568329490.tar.zst"
+        }
+      },
+      "version": "2"
+    },
+    "minizip-ng": {
+      "copyright": "This project uses the zlib license. Copyright (C) 1995-2013 Jean-loup Gailly and Mark Adler",
+      "description": "minizip-ng is a zip manipulation library. Based on work of Gilles Vollant.",
+      "license": "minizip-ng",
+      "license_file": "LICENSES/minizip-ng.txt",
+      "platforms": {
+        "darwin64": {
+          "hash": "a49c791cbf58c950538b3850945ad3dcb60221835ecb5708369dbaa04782deebf7e9c1c0e161ded8769c9038c1310049802ee211f6743ae9398e3e61cf5426a4",
+          "hash_algorithm": "blake2b",
+          "sha256": "fe0f98ccde51e0da1ca96c92ed596e0c7e5687c828627a36539739b03e4a3fb4",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-minizip-ng/releases/download/v4.0.10-r2/minizip_ng-4.0.10-dev0.g3cdd153.d20250828-darwin64-17304731670.tar.zst"
+        },
+        "linux64": {
+          "hash": "54918a165d6fe7411d9cb644b80ce63b71429f524823630e4dee5f817b50b97ee69e25b767de9cbcf7a1ded1c0bacdaeaacdb935018be2ebd52e00b2bf6686ce",
+          "hash_algorithm": "blake2b",
+          "sha256": "b9e14edf37c241e12c4c6095c91860b5d3a697e86f0305bc28f916f6ebcb5920",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-minizip-ng/releases/download/v4.0.10-r2/minizip_ng-4.0.10-dev0.g3cdd153.d20250828-linux64-17304731670.tar.zst"
+        },
+        "windows64": {
+          "hash": "61fcb4748541c6dc6a3ec3fab51e59481ba54ad59b798f85c25294e64446ebe8e1295d8f5bc6d5445e6db44b692e82c9ed7d049ce48094f8100d3b0571b0bf1c",
+          "hash_algorithm": "blake2b",
+          "sha256": "1593af61189c877d823c279cecdf508bba0a307fd015d72ee934159fd0146a93",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-minizip-ng/releases/download/v4.0.10-r2/minizip_ng-4.0.10-dev0.g3cdd153.d20250828-windows64-17304731670.tar.zst"
+        }
+      },
+      "version": "4.0.10-dev0.g3cdd153.d20250828"
+    },
+    "nanosvg": {
+      "copyright": "Copyright (c) 2013-14 Mikko Mononen",
+      "description": "NanoSVG is a simple single-header-file SVG parser and rasterizer",
+      "license": "Zlib",
+      "license_file": "LICENSES/nanosvg.txt",
+      "platforms": {
+        "common": {
+          "hash": "ad5277db881fbf29b75bc6138e78bb221d9d20806719f751ed0f3db341b95d21be20ee43b2e8d17b3fbb0d2c2c863c7b7481371589dacb6f60c15da28a968204",
+          "hash_algorithm": "blake2b",
+          "sha256": "56f80d39d69ba5868d0abdbd298ed7912d08946cb76d3aac0e331598ba52a6f1",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-nanosvg/releases/download/v2024.12.19-r1/nanosvg-2024.12.19-common-13542872204.tar.zst"
+        }
+      },
+      "version": "2024.12.19"
+    },
+    "nghttp2": {
+      "copyright": "Copyright (c) 2012, 2014, 2015, 2016 Tatsuhiro Tsujikawa\nCopyright (c) 2012, 2014, 2015, 2016 nghttp2 contributors",
+      "description": "Library providing HTTP 2 support for libcurl",
+      "license": "MIT",
+      "license_file": "LICENSES/nghttp2.txt",
+      "platforms": {
+        "darwin64": {
+          "hash": "1afbc368adf39531678ad4da777c89737915e4083f900f06982c066bc622e4f26fa71394034b1607907a54dcbd7137c775fb83e21acc7480e0d510a474a0880e",
+          "hash_algorithm": "blake2b",
+          "sha256": "b3feed46e74187155fd2cd8ef37d7ffed6f7511cac61624066bcb26b5c5e9a36",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-nghttp2/releases/download/v1.66.0-r1/nghttp2-1.66.0-dev0.g1c324ad.d20250828-darwin64-17288503089.tar.zst"
+        },
+        "linux64": {
+          "hash": "5eed7a5918097b2b7cd43a496f8c5a1b2caed1932f1f7ff3bc67968204be8c1f58adc089a7c1f3a2e1086b2c89a3e3ae491bef7486778fe3236621877a9f1643",
+          "hash_algorithm": "blake2b",
+          "sha256": "1251d577d09f4e6b970a6b359b5161201a7ef9ffacd42dc8abf27161e33b15c9",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-nghttp2/releases/download/v1.66.0-r1/nghttp2-1.66.0-dev0.g1c324ad.d20250828-linux64-17288503089.tar.zst"
+        },
+        "windows64": {
+          "hash": "cc31d24e82b549ad51287a50ed4f1787943260a0798b6fdbf75dbcc143598139f3c7298c33e682ca0d575b9b78678512520be03ffb3230620980c239b48c2401",
+          "hash_algorithm": "blake2b",
+          "sha256": "a9702db128ff2bee6252d437820e0cec9e1b12f789926c317484b12bba61cebc",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-nghttp2/releases/download/v1.66.0-r1/nghttp2-1.66.0-dev0.g1c324ad.d20250828-windows64-17288503089.tar.zst"
+        }
+      },
+      "version": "1.66.0-dev0.g1c324ad.d20250828"
+    },
+    "nvapi": {
+      "copyright": "Copyright (c) 2024 NVIDIA CORPORATION and AFFILIATES. All rights reserved.",
+      "description": "NVAPI provides an interface to NVIDIA devices.",
+      "license": "MIT",
+      "license_file": "LICENSES/nvapi.txt",
+      "platforms": {
+        "windows64": {
+          "hash": "3366f7f1d5faf984c75a5878e088869777e34e2627b936054b453adb8bca44200f4774d92f0db42bdaaa32bb9699b3778ea41dc1c4ce015f58a1fa484999eb63",
+          "hash_algorithm": "blake2b",
+          "sha256": "f85c0ab82ff731718b7aacffe389bacaff72ea402a9ac008f059f7ff48901a0b",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-nvapi/releases/download/v570-r1/nvapi-570.0.0-r1-windows64-13568815783.tar.zst"
+        }
+      },
+      "version": "570.0.0-r1"
+    },
+    "ogg_vorbis": {
+      "copyright": "Copyright (c) 2002, Xiph.org Foundation",
+      "description": "Audio encoding library",
+      "license": "ogg-vorbis",
+      "license_file": "LICENSES/ogg-vorbis.txt",
+      "platforms": {
+        "darwin64": {
+          "hash": "f71e2921a587ac32568547afcfacbcb7aaebc0cbcfd3d008bd89ddd6852a6c7f240e24dd839db142a18f6ca01be55bce9d998f72ce332bb04e3849fb39fcb226",
+          "hash_algorithm": "blake2b",
+          "sha256": "31ed2c1118ffb9862170b833819d30c9016357a532a34decf8872c0d33a78245",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-ogg_vorbis/releases/download/v1.3.5-1.3.7-r1/ogg_vorbis-1.3.5-1.3.7.13574871926-darwin64-13574871926.tar.zst"
+        },
+        "linux64": {
+          "hash": "a655524ac8b109c36b46ed42b793f8da068203c3335ae6a08b3f61639183e4f33db72ecaafc5da9ac9a4d37ab1e9068b5bb7adbff84d4e317a18511e1d20629c",
+          "hash_algorithm": "blake2b",
+          "sha256": "251cfb4cc7c1ef857c164a2b473f60fe742e18fea136b3b96d57c8bc7dfb5a6d",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-ogg_vorbis/releases/download/v1.3.5-1.3.7-r1/ogg_vorbis-1.3.5-1.3.7.13574871926-linux64-13574871926.tar.zst"
+        },
+        "windows64": {
+          "hash": "d99559fc3b43ac0bc590d5320144c43b56bafb8aeb10b9351d2827106651876145ea6f82ad94e48108b13c9274f91c8199f01ebd68f25ae16ccf044fc7f5f520",
+          "hash_algorithm": "blake2b",
+          "sha256": "3d70646cab6b7a85ccd7a60b5735943ae2e23e830ddbf907ee6ab0155cda31a3",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-ogg_vorbis/releases/download/v1.3.5-1.3.7-r1/ogg_vorbis-1.3.5-1.3.7.13574871926-windows64-13574871926.tar.zst"
+        }
+      },
+      "version": "1.3.5-1.3.7.13574871926"
+    },
+    "open-libndofdev": {
+      "copyright": "Copyright (c) 2008, Jan Ciger (jan.ciger (at) gmail.com)",
+      "description": "Open Source replacement for 3DConnection SDK",
+      "license": "BSD",
+      "license_file": "LICENSES/libndofdev.txt",
+      "platforms": {
+        "linux64": {
+          "hash": "d943ed1d139ba2b014ebf7210f20306d4fbb08847f72dcb75ece17d41683e243407c066c99ce02bb26ba73ff3cd09ead2f2c79bdfb966cd655ccc4e2d6601d13",
+          "hash_algorithm": "blake2b",
+          "sha256": "ef026172f27f1222792c60a34eaba4560b35d2a2d7b9a17de96827bba0c0686c",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-open-libndofdev/releases/download/v0.14.0-r2/open_libndofdev-0.14.0-linux64-17463841480.tar.zst"
+        }
+      },
+      "version": "0.14.0"
+    },
+    "openal": {
+      "copyright": "Copyright (C) 1999-2007 by authors.",
+      "description": "OpenAL Soft is a software implementation of the OpenAL 3D audio API.",
+      "license": "LGPL2",
+      "license_file": "LICENSES/openal-soft.txt",
+      "platforms": {
+        "darwin64": {
+          "hash": "b9c01fe06a441d6a0f5a3afa3587f37fc8371b783de0bc8bcd2e6cc6467d715c2fda5c5a382bed2c872f790cddf4f090c59e482295ab32da40ac54e9f1e99988",
+          "hash_algorithm": "blake2b",
+          "sha256": "5891e34e7ded983a94d125ac34d509ddb750b561363b341ad573bc20d0219b03",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-openal-soft/releases/download/v1.24.3-r1/openal-1.24.3-r1-darwin64-17464547283.tar.zst"
+        },
+        "linux64": {
+          "hash": "cd0dc7c4d269f22b1e8a8c6493ee158251275d3d220c12b1e7ed08713ae8356753034977f2784b197ade84badcc49ab93ec51f9bf1f57841fb29c015f2fbf123",
+          "hash_algorithm": "blake2b",
+          "sha256": "3157061593157a33d47130ceb92b2cfa0a6deb133b799f91e7cbb8b0ac695fce",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-openal-soft/releases/download/v1.24.3-r1/openal-1.24.3-r1-linux64-17464547283.tar.zst"
+        },
+        "windows64": {
+          "hash": "c6608f62c4adb411cff872e215d770974cf0fb8c93ce88b54498c262a730aae4f76e02685665faa4e4525aba6be31c6dd78ea7ba0f1c8a3fe2b3340d11479d00",
+          "hash_algorithm": "blake2b",
+          "sha256": "30ab50ce1e7ea158ae614fdbdacf56fdbd4cbc39f38fe71ea65eeb8974014328",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-openal-soft/releases/download/v1.24.3-r1/openal-1.24.3-r1-windows64-17464547283.tar.zst"
+        }
+      },
+      "version": "1.24.3-r1"
+    },
+    "openjpeg": {
+      "copyright": "Copyright (c) 2002-2014, Universite catholique de Louvain, Belgium, Copyright (c) 2002-2012, Professor Benoit Macq, Copyright (c) 2003-2012, Antonin Descampe, Copyright (c) 2003-2009, Francois-Olivier Devaux, Copyright (c) 2005, Herve Drolon, FreeImage Team, Copyright (c) 2002-2003, Yannick Verschueren, Copyright (c) 2001-2003, David Janssens",
+      "description": "The OpenJPEG library is an open-source JPEG 2000 codec written in C language.",
+      "license": "BSD",
+      "license_file": "LICENSES/openjpeg.txt",
+      "platforms": {
+        "darwin64": {
+          "hash": "3b20cd03de49469f8f769bd097021231ae9d891baa770fa1e1c59c6ed3851a79b213226885af4d34f98c4a1c40f569cca4ded27b914f1de982c0282a50fdf4b7",
+          "hash_algorithm": "blake2b",
+          "sha256": "39671be3780e2ca9725e49e3b9a3133d323755a504cd164cea6e0d262a5ccefc",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-openjpeg2/releases/download/v2.5.4-r1/openjpeg-2.5.4.18754730947-darwin64-18754730947.tar.zst"
+        },
+        "linux64": {
+          "hash": "fc64645a0aab0a443bc38ad5475e23cdf91549f784cbdd6db2b561881cf582c626dc58bb3d879f22396561c36684b038bb904f270485eb238ba1aee2703b5d9f",
+          "hash_algorithm": "blake2b",
+          "sha256": "d581267d31d64f0d67bf89a10fdc41f29ad4f14d2cf581b78c479859429bbb22",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-openjpeg2/releases/download/v2.5.4-r1/openjpeg-2.5.4.18754730947-linux64-18754730947.tar.zst"
+        },
+        "windows64": {
+          "hash": "0bb08aa5249c8e610a1c7133743f4cc0faae42fe0be3713fb07c7e46a6a31190c1ae8160511a9c49c8b67c2eb1cd9b97dacefdaa6a6fb820ae6804a64e46e99a",
+          "hash_algorithm": "blake2b",
+          "sha256": "445579e4de3e3e96fc270f0cef0339336f297da20c305363c8e8b8f816599c6d",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-openjpeg2/releases/download/v2.5.4-r1/openjpeg-2.5.4.18754730947-windows64-18754730947.tar.zst"
+        }
+      },
+      "version": "2.5.4"
+    },
+    "openssl": {
+      "copyright": "Copyright (c) 1998-2025 The OpenSSL Project Authors; Copyright (c) 1995-1998 Eric A. Young, Tim J. Hudson",
+      "description": "TLS/SSL and crypto library (OpenSSL 3.5 LTS)",
+      "license": "Apache-2.0",
+      "license_file": "LICENSES/openssl.txt",
+      "platforms": {
+        "linux64": {
+          "hash": "a0a955b590a1596ed34c29fc64e9e3a5f5abd64decad146733df54a0b00d9fd118ed5eeedef353b5626889b167c14386c95c9fbae0d2d814a002ed4203ee81be",
+          "hash_algorithm": "blake2b",
+          "sha256": "e5831a56d12dac7d42ec53abcf3ce46e1bbf7ae7565eba0ce1a0ca13e3bd29eb",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-openssl/releases/download/v3.5.9-r1/openssl-3.5.9-r1-linux64-202610061000.tar.zst"
+        },
+        "windows64": {
+          "hash": "6b4976910d3ba5fca5b44faa45f9ddbe410c57cb294e374a62044fdc3cc26faaf4e35196ed91cebe8eed5887ab579058adb581c2bc961ec8da72ade2657b577d",
+          "hash_algorithm": "blake2b",
+          "sha256": "e683348ab22bf946f29b9f203f12683d224ea3e0109bee07cbac952d42eb5116",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-openssl/releases/download/v3.5.9-r1/openssl-3.5.9-r1-windows64-202610061000.tar.zst"
+        }
+      },
+      "version": "3.5.9-r1"
+    },
+    "sse2neon": {
+      "copyright": "Copyright (c) 2015-2025 SSE2NEON Contributors.",
+      "description": "A translator from Intel SSE intrinsics to Arm/Aarch64 NEON implementation",
+      "license": "MIT",
+      "license_file": "LICENSES/sse2neon.txt",
+      "platforms": {
+        "common": {
+          "hash": "0b086c99d671129ba6001a4f87507d6c083251663a0b6aae2aad6893f13a2c7fb6962acef0df7ad64efda3c1553ddaaabebbe645b580f1d7be1dc434b5906f76",
+          "hash_algorithm": "blake2b",
+          "sha256": "ff93cbcf4779337b2107ed2aa63b10a89142086612646441ddbe0261cd526cb3",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-sse2neon/releases/download/v1.8.0-r2/sse2neon-1.8.0-r2-common-13506114516.tar.zst"
+        }
+      },
+      "version": "1.8.0-r2"
+    },
+    "threejs": {
+      "copyright": "Copyright \u00a9 2010-2021 three.js authors",
+      "license": "MIT",
+      "license_file": "LICENSES/THREEJS_LICENSE.txt",
+      "platforms": {
+        "common": {
+          "hash": "fa7dcb0a9a069dd1feb8309c65ee4618e5e31fe6d6d4e9d361fdede438ea2b5780ddd7a40ade1cab1db11a788f778f1ec88620210b287fb5e44122d43a0a4ec4",
+          "hash_algorithm": "blake2b",
+          "sha256": "e8f14986f084a1ea2ff0d65c234aafd9ee4d9a28c3b7f60eef14c527ecb8dae1",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-three_js/releases/download/v0.132.2-r1/threejs-0.132.2-common-13506759259.tar.zst"
+        }
+      },
+      "version": "0.132.2"
+    },
+    "tinyexr": {
+      "copyright": "Copyright (c) 2014 - 2021, Syoyo Fujita and many contributors.",
+      "description": "tinyexr import library",
+      "license": "3-clause BSD",
+      "license_file": "LICENSES/tinyexr_license.txt",
+      "platforms": {
+        "common": {
+          "hash": "d34dfc16b9daadbdd691da4884867757741215680427839d3a1a94cfc4c4461e8702fa37d9b5fecd06919f8c989e1c1cd95ac94706829896d7c3c20fc9f9c907",
+          "hash_algorithm": "blake2b",
+          "sha256": "f34122b699e92a5323f9483b746de4d67120f1b0d8cd4787c36436750d15682b",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-tinyexr/releases/download/v1.0.10-r1/tinyexr-1.0.10-r1-common-13542336513.tar.zst"
+        }
+      },
+      "version": "1.0.10-r1"
+    },
+    "tinygltf": {
+      "copyright": "// Copyright (c) 2015 - Present Syoyo Fujita, Aur\u00e9lien Chatelain and many contributors.",
+      "description": "tinygltf import library",
+      "license": "MIT",
+      "license_file": "LICENSES/tinygltf_license.txt",
+      "platforms": {
+        "common": {
+          "hash": "c690ed031e5696bb207fa9c5d1e2d64c75f2889d8e74af2f8d9ad71665f1b886f0a0fdc195358e7376e9bfde910f19a6668196288e6b02eb2d41201fa39d3d20",
+          "hash_algorithm": "blake2b",
+          "sha256": "a6c4302640388738eddee8370cbb5785584b56e613886ee4475ecf379154b445",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-tinygltf/releases/download/v2.9.5-r1/tinygltf-2.9.5-r1-common-13541792278.tar.zst"
+        }
+      },
+      "version": "2.9.5-r1"
+    },
+    "tracy": {
+      "copyright": "Copyright (c) 2017-2024, Bartosz Taudul (wolf@nereid.pl)",
+      "description": "Tracy Profiler Library",
+      "license": "bsd",
+      "license_file": "LICENSES/tracy_license.txt",
+      "platforms": {
+        "darwin64": {
+          "hash": "30a158c4ef5873d3609345241e8b226332d97fccf0f23423a0a0f9c016c8d07421119dee9ed145dd0e8ca82136d7da2844488e4502795a6bf197f2c851d1637b",
+          "hash_algorithm": "blake2b",
+          "sha256": "2d63b7432fb441a540373eeb211049577970880f4e26898ecbbe792ecafed24b",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-tracy/releases/download/v0.12.2-r1/tracy-v0.12.2.17448527925-darwin64-17448527925.tar.zst"
+        },
+        "linux64": {
+          "hash": "03e20532ab34d91db1837d0b115fb0d86c89484673e6094b42fc49200e6f635af4815c1fa40dad22265238f88b11491705eb976f7fe2211f70490287aa1c035a",
+          "hash_algorithm": "blake2b",
+          "sha256": "3263e968db48dc849eb7457a199e7efd837ddf6ce0699602ada93db7731349cf",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-tracy/releases/download/v0.12.2-r1/tracy-v0.12.2.17448527925-linux64-17448527925.tar.zst"
+        },
+        "windows64": {
+          "hash": "71c0bfc5034e1b36c480c253d94923883e288d66fd80a125a32525424ee477ae76488fff334d12912dd103f929b7fb52c981e97912081243dd5a4783a2877dfa",
+          "hash_algorithm": "blake2b",
+          "sha256": "0d82674f2fc205ee301194bc6e07e05a3d3189f765c616b54b7e1206e285eb52",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-tracy/releases/download/v0.12.2-r1/tracy-v0.12.2.17448527925-windows64-17448527925.tar.zst"
+        }
+      },
+      "version": "v0.12.2.17448527925"
+    },
+    "tut": {
+      "copyright": "Copyright 2002-2006 Vladimir Dyuzhev, Copyright 2007 Denis Kononenko, Copyright 2008-2009 Micha\u0142 Rzechonek",
+      "description": "TUT is a small and portable unit test framework for C++.",
+      "license": "bsd",
+      "license_file": "LICENSES/tut.txt",
+      "platforms": {
+        "common": {
+          "hash": "d6a58e633ddefb94df1d1b000cc90a76bdfd6ad5596c93a5a68b4e25449312e72ea962ab8b46813761dce7b89ae3953d0b251812b7b735c5e53f94589ac2888d",
+          "hash_algorithm": "blake2b",
+          "sha256": "2a14d81ad0f93e6014563367323f4b55d4a70ab26cc7d4b59512d4d6e6471894",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-tut/releases/download/v2008.11.30-da9df71/tut-2008.11.30-common-9430907772.tar.zst"
+        }
+      },
+      "version": "2008.11.30"
+    },
+    "vhacd": {
+      "copyright": "Copyright (c) 2011, Khaled Mamou",
+      "description": "Voxelized Hierarchical Approximate Convex Decomposition",
+      "license": "BSD",
+      "license_file": "LICENSES/vhacd.txt",
+      "platforms": {
+        "common": {
+          "hash": "140d8fc952a10edb5f2d72ab405336019ef32cadfa64f0cfce76c9de4bc6268cbc87cc8cd89d3417fb78b531d441701afc8d016bafe4bd275df2707f7daf1387",
+          "hash_algorithm": "blake2b",
+          "sha256": "cae25c7f0fcf8b4949459f97c2e0b24154fb20e6d8c46bd45097705e6720d060",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-vhacd/releases/download/v4.1.0-r2/vhacd-4.1.0-r2-common-18166921729.tar.zst"
+        }
+      },
+      "version": "4.1.0-r2"
+    },
+    "viewer-fonts": {
+      "copyright": "Copyright 2016-2022 Brad Erickson CC-BY-4.0/MIT, Copyright 2016-2022 Twitter, Inc. CC-BY-4.0, Copyright 2013 Joe Loughry and Terence Eden MIT",
+      "description": "Viewer fonts",
+      "license": "Various open source",
+      "license_file": "LICENSES/fonts.txt",
+      "platforms": {
+        "common": {
+          "hash": "e88a7c97a6843d43e0093388f211299ec2892790",
+          "hash_algorithm": "sha1",
+          "sha256": "dc54e457dc9183fbf421118719ea6adc4d3a86c61f8be4a9768caabf3de65bd4",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-viewer-fonts/releases/download/v1.1.0-r1/viewer_fonts-1.0.0.10204976553-common-10204976553.tar.zst"
+        }
+      },
+      "version": "1.0.0.10204976553"
+    },
+    "viewer-manager": {
+      "copyright": "Copyright (c) 2000-2012, Linden Research, Inc.",
+      "description": "Linden Lab Viewer Management Process suite.",
+      "license": "viewerlgpl",
+      "license_file": "LICENSE",
+      "platforms": {
+        "darwin64": {
+          "hash": "8a04e6b3c6ff7f645219955a1389035565eb10d8",
+          "hash_algorithm": "sha1",
+          "sha256": "c6a762d0a0c3c542671d414b7682205d4cc1b3f721f7402b7d50adb570290318",
+          "url": "https://git.slipstreamviewer.org/sky_line/viewer-manager/releases/download/v3.0-f14b5ec-D591/viewer_manager-3.0-f14b5ec-darwin64-f14b5ec.tar.zst"
+        },
+        "linux64": {
+          "hash": "a1e467c08ecbe6ab24fc8756a815a431a9b00f62",
+          "hash_algorithm": "sha1",
+          "sha256": "157cb6302a827842faf9f54669015d830ff23e71d9c56392dda7ada2cb5a19f0",
+          "url": "https://git.slipstreamviewer.org/sky_line/viewer-manager/releases/download/v3.0-f14b5ec-D591/viewer_manager-3.0-f14b5ec-linux64-f14b5ec.tar.zst"
+        },
+        "windows64": {
+          "hash": "56b613decdd36b2a17646bf3e2cfc2fed8456b8c",
+          "hash_algorithm": "sha1",
+          "sha256": "257add83e86d9630dab55042ac621c609b1d604b352d7e6bca8b69b5aa00f401",
+          "url": "https://git.slipstreamviewer.org/sky_line/viewer-manager/releases/download/v3.0-f14b5ec-D591/viewer_manager-3.0-f14b5ec-windows64-f14b5ec.tar.zst"
+        }
+      },
+      "version": "3.0-f14b5ec"
+    },
+    "vlc-bin": {
+      "copyright": "Copyright (C) 1998-2020 VLC authors and VideoLAN",
+      "license": "GPL2",
+      "license_file": "LICENSES/vlc.txt",
+      "platforms": {
+        "windows64": {
+          "hash": "165b73d4dbda8cb5f47bb3e3d67165e93f598f1f4319f6a59cdfa879ff21a6619905698666fdce8a7205fa297bbe9404033df52ae695953bdd0b08ecc567baa9",
+          "hash_algorithm": "blake2b",
+          "sha256": "3b51f31940f20bfcc26f69decd7a50773a50d5d9e429fb5ca36146d556c0424c",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-vlc-bin/releases/download/v3.0.24.22b238b/vlc_bin-3.0.24.37397947018-windows64-37397947018.tar.zst"
+        }
+      },
+      "version": "3.0.24.37397947018"
+    },
+    "webrtc": {
+      "copyright": "Copyright (c) 2011, The WebRTC project authors. All rights reserved.",
+      "license": "MIT",
+      "license_file": "LICENSES/webrtc-license.txt",
+      "platforms": {
+        "darwin64": {
+          "hash": "8590471da4019b8a6eb894747058466570c97785",
+          "hash_algorithm": "sha1",
+          "sha256": "1c1820ff3082ad656029c4515ef10f9a6d116b1ba4cc5cfb40bf4958e05fd53c",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-webrtc-build/releases/download/m144.7559.06.20/webrtc-m144.7559.06.20.36004322351-darwin64-36004322351.tar.zst"
+        },
+        "linux64": {
+          "hash": "2baa19cebc78b0009e919fb7a4fc74674ff44eae",
+          "hash_algorithm": "sha1",
+          "sha256": "9ebdc9b99435d30fa749931e303ba8ca086fb7c49512c0dd72241143dcfbde16",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-webrtc-build/releases/download/m144.7559.06.20/webrtc-m144.7559.06.20.36004322351-linux64-36004322351.tar.zst"
+        },
+        "windows64": {
+          "hash": "4838e91071b6cb8169f1987418a483b28d2513c7",
+          "hash_algorithm": "sha1",
+          "sha256": "b7d9a8d51cf0000b759f96f3379b212424d879502159bbe361b8856619183f38",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-webrtc-build/releases/download/m144.7559.06.20/webrtc-m144.7559.06.20.36004322351-windows64-36004322351.tar.zst"
+        }
+      },
+      "version": "m144.7559.06.20.36004322351"
+    },
+    "xxhash": {
+      "copyright": "Copyright (c) 2012-2021 Yann Collet",
+      "description": "Extremely fast non-cryptographic hash algorithm",
+      "license": "BSD 2-Clause",
+      "license_file": "LICENSES/xxhash.txt",
+      "platforms": {
+        "common": {
+          "hash": "bbca369d027ba99827cdacdb1464e4e2401fd2694ffa17ba70e1d717ad79cfc4c2727346ca86aadf5381ecb6110467068e56c034b86a5b4c50b768f9f3610bb3",
+          "hash_algorithm": "blake2b",
+          "sha256": "c83948182c4772f8140d507652e83c2bec2f1383678371642b4b60f33f281cc5",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-xxhash/releases/download/v0.8.3-r1/xxhash-0.8.3-r1-common-13542566844.tar.zst"
+        }
+      },
+      "version": "0.8.3-r1"
+    },
+    "zlib-ng": {
+      "copyright": "Copyright (C) 1995-2024 Jean-loup Gailly and Mark Adler",
+      "description": "zlib data compression library for the next generation systems",
+      "license": "zlib-ng",
+      "license_file": "LICENSES/zlib-ng.txt",
+      "platforms": {
+        "darwin64": {
+          "hash": "9f7d8340d62f81ec19715f630ffc0085c5be507533bfa3fa4373ae126eb1221a6efaf63f0fbea851bac314e0740f46e25ea6798f8972c57f72b1e996c07d6748",
+          "hash_algorithm": "blake2b",
+          "sha256": "45889edc9e0a6a5e89284b39b29e064d8898a9313a5c134a980f2967188df9ea",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-zlib-ng/releases/download/v2.2.5-r3/zlib_ng-2.2.5.17226175921-darwin64-17226175921.tar.zst"
+        },
+        "linux64": {
+          "hash": "47192a51e5fb98bface14204e375b01925cbc5c0444ba1815a46027a3d47a23e176b01da50583307b54a04b79da78268730066ad757c26bbcd5d4f3a1e34b375",
+          "hash_algorithm": "blake2b",
+          "sha256": "5a0322bac7f4af36dee297b24106b0e72fd06ca2ac2b2b154e723ff733ba8e66",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-zlib-ng/releases/download/v2.2.5-r3/zlib_ng-2.2.5.17226175921-linux64-17226175921.tar.zst"
+        },
+        "windows64": {
+          "hash": "c78169d1400c6dd35838b4f128614c92aa845d94d94aa2120c15cc4dc62b6c5c0b7d181f1e8acd0b4e311b677884ee346416bfed7d7f129c9212468cab78cb87",
+          "hash_algorithm": "blake2b",
+          "sha256": "12dad5eabbaf900dfe9ba90bea661d1986c626336cf99f318a95b31e23702294",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-zlib-ng/releases/download/v2.2.5-r3/zlib_ng-2.2.5.17226175921-windows64-17226175921.tar.zst"
+        }
+      },
+      "version": "2.2.5.17226175921"
+    }
+  },
+  "viewer": {
+    "canonical_repo": "https://git.slipstreamviewer.org/sky_line/Slipstream",
+    "copyright": "Copyright (c) 2026, Bluefast Studios. Based on the Second Life viewer, Copyright (c) Linden Research, Inc., and Alchemy Viewer, Copyright (c) 2013-2025, Alchemy Development Group.",
+    "license": "LGPL",
+    "license_file": "docs/LICENSE-source.txt",
+    "name": "Slipstream Viewer"
+  }
+}

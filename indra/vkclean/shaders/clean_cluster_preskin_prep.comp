@@ -1,0 +1,744 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+#include "clean_av_slots.glsl"
+// vkclean -- CLUSTER LOD skinning, the small passes around the cluster pre-skin (#747, OWNER: 2a).
+// Host side: vkgfx/llcleanclusterskinvk.cpp. Modes (push.mode):
+//
+//   0 STRETCH  (before the first selection; one 128-wide workgroup per skin) -- the joint-
+//              stretch table CL_B_JOINT_STRETCH the cut projection reads (llcleanclusterformat.h
+//              JOINT-STRETCH BOUND): row s, lane j = an upper bound of sigma_max of palette lane
+//              j's 3x3 -- the same composition clean_skin_palette.comp makes (joint world of
+//              joint_nums[j] x inv_bind[j]; lanes past joint_count repeat the last real one;
+//              identity world for an unresolved avatar), from THIS frame's joint table (the
+//              palettes themselves are built later in the frame). sigma_max(A) <= sqrt of the
+//              largest absolute row sum of A^T A (Gershgorin: exact for rotations and uniform
+//              scale), never below 1. Lanes 110..127 repeat lane 109 (the pre-skin clamps joint
+//              indices to 109). LAYERING (#611): a skin of an avatar in the layer bits (push layer_base) gets
+//              every lane x push.layer_scale (see llcleanclusterskinvk.h).
+//   1 MARGINS  (before the first selection; one 64-wide workgroup per ClusterInstance) -- the
+//              POSED-BOUND distance margin of each rigged instance: an upper bound of how far
+//              any vertex of the mesh moves from its rest-pose position (ClusterInstance::xform,
+//              which the selection projects and culls with). For a vertex p of the mesh sphere
+//              (c, R) skinned by convex weights over joints J (the mesh's joint mask: the union
+//              of its root clusters' and their generating groups' masks, G3),
+//                |sum_j w_j M_j B p - X p| <= max_j ( |M_j B c - X c| + ||M_j B - X||_F R )
+//              with M_j = joint world x inv_bind (lane j), B = bind shape, X = the rest xform.
+//              The selection adds it to every sphere radius (frustum / Hi-Z) and to the
+//              distance margin of the projection (anim_margin_m: one value per instance, so the
+//              cut stays monotonic and watertight). Also marks the render instances the cluster
+//              path owns (CLI1B_DRAW rigged) in the scratch's owned bitset (stats, mode 2).
+//   2 LEGACY   (after the legacy pre-skin; one thread per legacy work item) -- counts the
+//              legacy pre-skin vertices of the instances the cluster path owns (stats: what the
+//              legacy path skinned for the same avatars).
+//   3 ARGS     (before the cluster pre-skin) -- the skinned view's selected count -> the
+//              pre-skin's indirect dispatch (one workgroup per entry, rows of 32768) and the ALLOC
+//              pass's (one lane per entry), the scratch header for this frame (eye, map base,
+//              counters zeroed); every lane: the frame's clears (avatar boxes, weld heads, key hash).
+//   4 SWEEP    (one lane per arena slot) -- STABLE SLOTS (step 1): live slots -> the key hash,
+//              the others -> the free list.
+//   5 ALLOC    (one lane per selected entry, indirect) -- each skinned entry's KEPT stable slot -> map;
+//              (#1010) the entries new to the arena are only counted, per avatar row.
+//   7 GRANT    (#1010, one workgroup, after ALLOC) -- the free list cannot hold every new entry
+//              (SHORT): the avatar rows past the free list in the host's priority order are REFUSED.
+//   8 TAKE     (#1010, one lane per selected entry, indirect, after GRANT) -- free slots for the new
+//              entries of the rows not refused; every entry of a refused row -> CL_NONE (whole
+//              avatar: clean_cluster_skin_common.glsl WHOLE-AVATAR ARENA ADMISSION).
+//   6 CHAR     (one lane per character row, beside the sweep) -- CHARACTER SPACE (step 2): each
+//              avatar's pelvis frame, this frame's and the previous frame's, relative to this
+//              frame's eye, + the inverse (clean_cluster_skin_common.glsl CHARACTER SPACE).
+layout(local_size_x = 64) in;
+
+#define CLUSTER_SET 0
+#define CL_DECLARE_POOL
+#define CL_DECLARE_PAGE_TABLE
+#define CL_DECLARE_MESHES
+#define CL_DECLARE_GROUPS
+#define CL_DECLARE_INSTANCES
+#include "clean_cluster_common.glsl"
+#include "clean_cluster_select_common.glsl"
+#define CL_DECLARE_SKIN_SCRATCH
+#define CL_SKIN_SCRATCH_QUAL coherent
+#define CL_DECLARE_SKIN_OUT
+#define CL_SKIN_OUT_QUAL
+#include "clean_cluster_skin_common.glsl"
+
+// Writable twin of CL_DECLARE_JOINT_STRETCH (rows, pad x3, float[rows x 128]).
+layout(std430, set = CLUSTER_SET, binding = CL_B_JOINT_STRETCH) buffer ClJointStretchW
+{
+    uint js_rows; uint js_pad0; uint js_pad1; uint js_pad2;
+    float js[];
+};
+
+// Set 1: the renderer's rigged buffers (llcleanclusterskinvk.cpp writes it per frame slot).
+#define MAX_JOINTS        110
+#define MAX_AVATAR_JOINTS 216
+#include "clean_joint_table.glsl"   // mat3x4 joint world rows (jointWorld())
+layout(std430, set = 1, binding = 2) readonly buffer AvJoints { AvatarJoints av_joints[]; };
+layout(std430, set = 1, binding = 1) readonly buffer Meta { uint meta_w[]; };   // LLCleanSkinStore::SkinMeta
+layout(std430, set = 1, binding = 3) readonly buffer LegacyWork { uint work_w[]; };   // clean_preskin WorkItem (8 words)
+layout(std430, set = 1, binding = 4) readonly buffer LegacyAlloc { uint rig_alloc_w[]; };   // [0] = work items
+
+// SkinMeta word offsets (7568 B record).
+#define META_AVATAR     0u
+#define META_JCOUNT     1u
+#define META_JNUMS      4u
+#define META_INVBIND  116u
+#define META_BINDSHAPE 1876u
+
+layout(push_constant) uniform PrepPush
+{
+    uint  mode;
+    uint  count;          // 0: skins, 1: ClusterInstances, 2: legacy work capacity, 3: map capacity
+    uint  skin_count;     // live palettes
+    uint  avatar_count;   // joint-table rows the palette compute reads (= its avatar_count)
+    float layer_scale;    // 0: #611 error factor of layered avatars
+    uint  meta_words;     // SkinMeta stride (words)
+    uint  owned_base;     // owned bitset (scratch words)
+    uint  owned_words;
+    uint  layer_base;     // 0: scratch word of the AV_SLOT_WORDS layered-avatar bits (2026-10-14:
+                          //    1024 slots no longer fit the push block); CL_NONE = none
+    uint  clr_av_base;    // 3: SKIN_OUT word of the per-avatar skinned boxes (cleared here, step 0)
+    uint  clr_av_words;   // 3: ... their words
+    uint  clr_weld_heads; // 3: scratch word of the weld cell heads (filled with CL_NONE here)
+    uint  clr_weld_cells; // 3: ... their count (0 = no weld this frame: nothing cleared)
+    uint  grace;          // 4: frames a slot stays live after it left the cut (step 1)
+    uvec2 prev_joints;    // 6: device address of the PREVIOUS frame's joint table (0 = none: prev = current)
+    uint  view;           // 3: the skinned cluster view
+    uint  map_base;       // 3: first map word
+    uint  frame;          // 3
+    uint  cap;            // 3: arena capacity (clusters)
+    vec4  eye;            // 3: xyz = the palettes' eye
+} pc;
+
+shared uint s_mask[4];
+shared uint s_max;
+
+mat4 metaMat(uint skin, uint word)
+{
+    const uint b = skin * pc.meta_words + word;
+    return mat4(uintBitsToFloat(meta_w[b + 0u]),  uintBitsToFloat(meta_w[b + 1u]),  uintBitsToFloat(meta_w[b + 2u]),  uintBitsToFloat(meta_w[b + 3u]),
+                uintBitsToFloat(meta_w[b + 4u]),  uintBitsToFloat(meta_w[b + 5u]),  uintBitsToFloat(meta_w[b + 6u]),  uintBitsToFloat(meta_w[b + 7u]),
+                uintBitsToFloat(meta_w[b + 8u]),  uintBitsToFloat(meta_w[b + 9u]),  uintBitsToFloat(meta_w[b + 10u]), uintBitsToFloat(meta_w[b + 11u]),
+                uintBitsToFloat(meta_w[b + 12u]), uintBitsToFloat(meta_w[b + 13u]), uintBitsToFloat(meta_w[b + 14u]), uintBitsToFloat(meta_w[b + 15u]));
+}
+
+// Palette lane j of skin s in WORLD space (clean_skin_palette.comp without the eye shift).
+mat4 laneMatrix(uint s, uint j)
+{
+    const uint jc = meta_w[s * pc.meta_words + META_JCOUNT];
+    const uint lane = min(j, uint(MAX_JOINTS - 1));
+    const uint src_j = (jc > 0u) ? min(lane, jc - 1u) : 0u;
+    const int jn = clamp(int(meta_w[s * pc.meta_words + META_JNUMS + src_j]), 0, MAX_AVATAR_JOINTS - 1);
+    const uint av = meta_w[s * pc.meta_words + META_AVATAR];
+    const mat4 w = (av < pc.avatar_count && av < uint(av_joints.length())) ? jointWorld(av_joints[av].world[jn]) : mat4(1.0);
+    return w * metaMat(s, META_INVBIND + src_j * 16u);
+}
+
+bool layered(uint av)
+{
+    if (av >= AV_SLOT_CAP || pc.layer_base == CL_NONE || pc.layer_base + (av >> 5u) >= uint(cl_rig.length())) return false;
+    return ((cl_rig[pc.layer_base + (av >> 5u)] >> (av & 31u)) & 1u) != 0u;
+}
+
+void stretchSkin()
+{
+    const uint s = gl_WorkGroupID.x;
+    if (s == 0u && gl_LocalInvocationID.x == 0u) js_rows = min(pc.count, uint(js.length()) / 128u);
+    if (s >= pc.count || (s + 1u) * 128u > uint(js.length())) return;
+    const float lf = layered(meta_w[s * pc.meta_words + META_AVATAR]) ? max(pc.layer_scale, 1.0) : 1.0;
+    for (uint j = gl_LocalInvocationID.x; j < 128u; j += gl_WorkGroupSize.x)
+    {
+        const mat3 A = mat3(laneMatrix(s, j));
+        const mat3 G = transpose(A) * A;
+        float r = 0.0;
+        for (int i = 0; i < 3; ++i) r = max(r, abs(G[0][i]) + abs(G[1][i]) + abs(G[2][i]));
+        float st = sqrt(r);
+        if (!(st < 1.0e4)) st = 1.0e4;   // non-finite / absurd: a huge (finer-LOD) bound
+        js[s * 128u + j] = max(st, 1.0) * lf;
+    }
+}
+
+void marginInstance()
+{
+    const uint ii = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
+    if (ii >= pc.count) return;
+    const uint lid = gl_LocalInvocationID.x;
+    const ClInstance inst = cl_instances[ii];
+    const uint mw = CLK_INST_BASE + ii;
+    const bool rigged = (inst.flags & CLI_RIGGED) != 0u && inst.skin_id < pc.skin_count
+                     && inst.mesh < uint(cl_meshes.length());
+    if (!rigged || cl_meshes[inst.mesh].generation != inst.mesh_generation)
+    {
+        if (lid == 0u && mw < uint(cl_rig.length())) cl_rig[mw] = floatBitsToUint(0.0);
+        return;
+    }
+    if (lid == 0u)
+    {
+        s_mask[0] = 0u; s_mask[1] = 0u; s_mask[2] = 0u; s_mask[3] = 0u;
+        s_max = 0u;
+        // The render instance is drawn by the cluster path for real: its owned bit (stats).
+        const uint ri = inst.render_instance;
+        if ((inst.flags & CLI1B_DRAW) != 0u && (ri >> 5u) < pc.owned_words)
+            atomicOr(cl_rig[pc.owned_base + (ri >> 5u)], 1u << (ri & 31u));
+    }
+    barrier();
+    const ClMesh mesh = cl_meshes[inst.mesh];
+    // The mesh's joint set: its root clusters' masks + their generating groups' (G3: these
+    // contain every descendant's down to LOD0).
+    for (uint p = 0u; p < mesh.root_pages && p < mesh.page_count; ++p)
+    {
+        if (mesh.page_base + p >= uint(cl_page_table.length())) break;
+        const uint slot = cl_page_table[mesh.page_base + p];
+        if (slot == CL_NONE) continue;
+        const uint n = min(clPageClusterCount(slot), CL_MAX_CLUSTERS_PER_PAGE);
+        if (lid < n)
+        {
+            const ClRecord rec = clLoadRecord(slot, lid);
+            uvec4 m = rec.joint_mask;
+            if (rec.child_group < mesh.group_count) m |= cl_groups[mesh.group_base + rec.child_group].joint_mask;
+            if (m.x != 0u) atomicOr(s_mask[0], m.x);
+            if (m.y != 0u) atomicOr(s_mask[1], m.y);
+            if (m.z != 0u) atomicOr(s_mask[2], m.z);
+            if (m.w != 0u) atomicOr(s_mask[3], m.w);
+        }
+    }
+    barrier();
+    uvec4 mask = uvec4(s_mask[0], s_mask[1], s_mask[2], s_mask[3]);
+    const uint skin = inst.skin_id;
+    if (mask == uvec4(0u))
+    {
+        // No mask (never expected for a rigged mesh): every lane the skin has.
+        const uint jc = clamp(meta_w[skin * pc.meta_words + META_JCOUNT], 1u, uint(MAX_JOINTS));
+        for (uint j = 0u; j < jc; ++j) mask[j >> 5u] |= 1u << (j & 31u);
+    }
+    const mat4 B = metaMat(skin, META_BINDSHAPE);
+    const vec3 c = mesh.sphere.xyz;
+    const float R = mesh.sphere.w;
+    const vec3 rest_c = clXformPoint(inst, c);
+    const mat3 X = transpose(mat3(inst.xform_r0.xyz, inst.xform_r1.xyz, inst.xform_r2.xyz));
+    float dmax = 0.0;
+    for (uint j = lid; j < 128u; j += gl_WorkGroupSize.x)
+    {
+        if (((mask[j >> 5u] >> (j & 31u)) & 1u) == 0u) continue;
+        const mat4 MB = laneMatrix(skin, j) * B;
+        const vec3 posed_c = (MB * vec4(c, 1.0)).xyz;
+        const mat3 D = mat3(MB) - X;
+        const float fro = sqrt(dot(D[0], D[0]) + dot(D[1], D[1]) + dot(D[2], D[2]));
+        float d = length(posed_c - rest_c) + fro * R;
+        if (!(d < 1.0e5)) d = 1.0e5;
+        dmax = max(dmax, d);
+    }
+    atomicMax(s_max, floatBitsToUint(dmax));   // (non-negative floats order as uints)
+    barrier();
+    // + 1 per mille and 5 mm: the float error of the products above.
+    if (lid == 0u && mw < uint(cl_rig.length())) cl_rig[mw] = floatBitsToUint(uintBitsToFloat(s_max) * 1.001 + 0.005);
+}
+
+void legacyItem()
+{
+    const uint wi = gl_GlobalInvocationID.x;
+    const uint n = min(rig_alloc_w[0], pc.count);
+    if (wi >= n || (wi + 1u) * 8u > uint(work_w.length())) return;
+    const uint inst1 = work_w[wi * 8u + 6u];
+    if (inst1 == 0u || work_w[wi * 8u + 3u] == 0xFFFFFFFFu) return;   // no instance / dropped item
+    const uint ri = inst1 - 1u;
+    if ((ri >> 5u) >= pc.owned_words || ((cl_rig[pc.owned_base + (ri >> 5u)] >> (ri & 31u)) & 1u) == 0u) return;
+    atomicAdd(cl_rig[CLK_LEGACY_VERTS], work_w[wi * 8u + 2u]);
+    atomicAdd(cl_rig[CLK_LEGACY_ITEMS], 1u);
+}
+
+void args()
+{
+    // THE FRAME'S CLEARS (2026-10-14 step 0: were three vkCmdFillBuffer + their own pipeline
+    // barrier before this dispatch): every invocation of the (host-sized) grid strides over the
+    // per-avatar skinned boxes (0 = none yet), the weld cell heads (CL_NONE) and the weld's
+    // per-avatar drop bits (0). The pre-skin after the next barrier reads them.
+    // (#1010: + the PRIORITY region's per-row new-entry counts and refused flags -- the row order
+    // before them is the host's upload of this frame; push layer_base + AV_SLOT_WORDS = its base)
+    const uint prio = pc.layer_base != 0u ? pc.layer_base + AV_SLOT_WORDS : CL_NONE;
+    const bool prio_ok = prio != CL_NONE && prio + CL_SKIN_PRIO_WORDS <= uint(cl_rig.length());
+    {
+        const uint stride = gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+        if (prio_ok)
+            for (uint i = gl_GlobalInvocationID.x; i < 2u * CL_SKIN_AV_ROWS; i += stride)
+                cl_rig[prio + 1u + CL_SKIN_AV_ROWS + i] = 0u;
+        for (uint i = gl_GlobalInvocationID.x; i < pc.clr_av_words; i += stride)
+            if (pc.clr_av_base + i < uint(cl_skin_out.length())) cl_skin_out[pc.clr_av_base + i] = 0u;
+        if (pc.clr_weld_cells != 0u)
+        {
+            for (uint i = gl_GlobalInvocationID.x; i < pc.clr_weld_cells; i += stride)
+                if (pc.clr_weld_heads + i < uint(cl_rig.length())) cl_rig[pc.clr_weld_heads + i] = CL_NONE;
+            if (gl_GlobalInvocationID.x < CLW_AV_WORDS && pc.clr_weld_heads >= CLW_AV_WORDS)
+                cl_rig[pc.clr_weld_heads - CLW_AV_WORDS + gl_GlobalInvocationID.x] = 0u;
+            // (#798 diagnostics: the avatars with border-free weld candidates, right before the drop bits)
+            if (gl_GlobalInvocationID.x < CLW_AV_WORDS && pc.clr_weld_heads >= 2u * CLW_AV_WORDS)
+                cl_rig[pc.clr_weld_heads - 2u * CLW_AV_WORDS + gl_GlobalInvocationID.x] = 0u;
+        }
+        // HELD POSES (step 3): no row has a new cluster yet
+        if (gl_GlobalInvocationID.x < CL_SKIN_NEW_WORDS && clSkinNewBaseC(pc.cap) + gl_GlobalInvocationID.x < uint(cl_skin_out.length()))
+            cl_skin_out[clSkinNewBaseC(pc.cap) + gl_GlobalInvocationID.x] = 0u;
+        // STABLE SLOTS: this frame's key hash starts empty (the sweep rebuilds it)
+        const uint hb = clSkinHashBaseC(pc.cap), hw = clSkinHashWords(pc.cap);
+        for (uint i = gl_GlobalInvocationID.x; i < hw; i += stride)
+            if (hb + i < uint(cl_skin_out.length())) cl_skin_out[hb + i] = CL_NONE;
+    }
+    if (gl_GlobalInvocationID.x != 0u) return;
+    const uint v = min(pc.view, CL_MAX_VIEWS - 1u);
+    // (the map covers the arena 1b sized this frame; entries past it -- only after a failed
+    // scratch growth -- are not skinned and their draws keep the rest pose)
+    const uint sb = cl_views[v].sel_base;
+    const uint n = min(cl_cnt[v * CLC_VIEW_WORDS + CLC_SEL_CLAMPED], pc.count > sb ? pc.count - sb : 0u);
+    const uint x = min(max(n, 1u), CL_TASK_GRID_X);
+    cl_rig[CLK_USED] = 0u;
+    cl_rig[CLK_CAP] = pc.cap;
+    cl_rig[CLK_OVERFLOW] = 0u;
+    cl_rig[CLK_SKIN_VERTS] = 0u;
+    cl_rig[CLK_LEGACY_VERTS] = 0u;
+    cl_rig[CLK_LEGACY_ITEMS] = 0u;
+    cl_rig[CLK_WELD_N] = 0u;
+    cl_rig[CLK_WELD_DROP] = 0u;
+    cl_rig[CLK_WELD_APPLIED] = 0u;
+    cl_rig[CLK_WELD_SKIP] = 0u;
+    cl_rig[CLK_MAP_BASE] = pc.map_base;
+    cl_rig[CLK_SEL_BASE] = sb;
+    cl_rig[CLK_MAP_CAP] = pc.count;
+    cl_rig[CLK_SEL_COUNT] = n;
+    cl_rig[CLK_EYE + 0u] = floatBitsToUint(pc.eye.x);
+    cl_rig[CLK_EYE + 1u] = floatBitsToUint(pc.eye.y);
+    cl_rig[CLK_EYE + 2u] = floatBitsToUint(pc.eye.z);
+    cl_rig[CLK_FRAME] = pc.frame;
+    cl_rig[CLK_DISPATCH + 0u] = n == 0u ? 0u : x;
+    cl_rig[CLK_DISPATCH + 1u] = n == 0u ? 1u : (n + x - 1u) / x;
+    cl_rig[CLK_DISPATCH + 2u] = 1u;
+    cl_rig[CLK_SKIN_CLUSTERS] = 0u;
+    cl_rig[CLK_FREE_N] = 0u;
+    cl_rig[CLK_ALLOC_N] = 0u;
+    cl_rig[CLK_LIVE] = 0u;
+    cl_rig[CLK_REUSED] = 0u;
+    cl_rig[CLK_WELD_NOPAIR] = 0u;
+    cl_rig[CLK_WELD_WREJ] = 0u;
+    cl_rig[CLK_WELD_GREJ] = 0u;
+    cl_rig[CLK_WELD_BFREE] = 0u;
+    cl_rig[CLK_WELD_BFREE_AV] = 0u;
+    cl_rig[CLK_WELD_PAIRED] = 0u;
+    cl_rig[CLK_WELD_NOREST] = 0u;
+    cl_rig[CLK_WELD_NOOP] = 0u;
+    cl_rig[CLK_WELD_MULTI] = 0u;
+    cl_rig[CLK_WELD_CACHED] = 0u;
+    cl_rig[CLK_WELD_INVALID] = 0u;
+    cl_rig[CLK_WELD_SEARCHED] = 0u;
+    cl_rig[CLK_PRIO_BASE] = prio_ok ? prio : CL_NONE;
+    cl_rig[CLK_SHORT] = 0u;
+    cl_rig[CLK_REFUSED_AV] = 0u;
+    cl_rig[CLK_HIDDEN] = 0u;
+    {
+        const uint g = (n + 63u) / 64u;
+        const uint ax = min(max(g, 1u), CL_TASK_GRID_X);
+        cl_rig[CLK_ALLOC_DISPATCH + 0u] = g == 0u ? 0u : ax;
+        cl_rig[CLK_ALLOC_DISPATCH + 1u] = g == 0u ? 1u : (g + ax - 1u) / ax;
+        cl_rig[CLK_ALLOC_DISPATCH + 2u] = 1u;
+    }
+    cl_rig[CLK_WELD_DISPATCH + 0u] = 0u;
+    cl_rig[CLK_WELD_DISPATCH + 1u] = 1u;
+    cl_rig[CLK_WELD_DISPATCH + 2u] = 1u;
+}
+
+// ---- STABLE SLOTS (2026-10-14 step 1) ------------------------------------------------------------
+// The arena slot of a skinned cluster is keyed by (render instance, cluster mesh + generation, skin,
+// mesh-local cluster id) -- none of which changes while the cluster stays in the cut (the
+// ClusterInstance index is re-assigned every frame by the gatherer, the cluster_ref's pool slot
+// changes when its page is evicted and reloaded: neither is a key). Layout:
+// clean_cluster_skin_common.glsl STABLE SLOTS.
+shared uint s_n0;
+shared uint s_n1;
+shared uint s_b0;
+
+bool slotKeyIs(uint s, uint ri, uint mesh, uint gen, uint skin, uint local)
+{
+    const uint mb = clSkinMetaBaseC(pc.cap) + s * CL_SKIN_META_WORDS;
+    if (mb + CL_SKIN_META_WORDS > uint(cl_skin_out.length())) return false;
+    return cl_skin_out[mb] == ri && cl_skin_out[mb + 1u] == mesh && cl_skin_out[mb + 2u] == gen
+        && cl_skin_out[mb + 3u] == skin && cl_skin_out[mb + 4u] == local;
+}
+
+// mode 4 SWEEP (one lane per arena slot, after ARGS cleared the hash and zeroed the counters):
+// a slot in the cut within the grace period (push grace frames since it was last selected) is
+// LIVE -- its key goes into this frame's hash; any other slot is FREE -- its meta is cleared (so
+// no stale key can ever match) and it joins the free list (one global atomic per workgroup).
+void sweep()
+{
+    const uint s = gl_GlobalInvocationID.y * (gl_NumWorkGroups.x * gl_WorkGroupSize.x) + gl_GlobalInvocationID.x;
+    const uint lid = gl_LocalInvocationID.x;
+    if (lid == 0u) { s_n0 = 0u; s_n1 = 0u; }
+    barrier();
+    const uint cap = pc.cap;
+    bool is_free = false;
+    uint fl = 0u;
+    if (s < cap)
+    {
+        const uint mb = clSkinMetaBaseC(cap) + s * CL_SKIN_META_WORDS;
+        bool live = false;
+        if (mb + CL_SKIN_META_WORDS <= uint(cl_skin_out.length()))
+        {
+            const uint lu = cl_skin_out[mb + 5u];
+            if (lu != CL_NONE && pc.frame - lu < pc.grace)
+            {
+                const uint hw = clSkinHashWords(cap), hb = clSkinHashBaseC(cap);
+                uint h = clSkinKeyHash(cl_skin_out[mb], cl_skin_out[mb + 1u], cl_skin_out[mb + 2u], cl_skin_out[mb + 3u],
+                                       cl_skin_out[mb + 4u]);
+                for (uint i = 0u; i < 64u && !live; ++i)
+                {
+                    const uint w = hb + ((h + i) & (hw - 1u));
+                    if (w >= uint(cl_skin_out.length())) break;
+                    live = atomicCompSwap(cl_skin_out[w], CL_NONE, s) == CL_NONE;
+                }
+            }
+            if (!live && lu != CL_NONE)
+            {
+                cl_skin_out[mb + 1u] = CL_NONE;   // (no stale key: the mesh word never matches CL_NONE)
+                cl_skin_out[mb + 5u] = CL_NONE;
+            }
+            is_free = !live;
+        }
+        if (is_free) fl = atomicAdd(s_n0, 1u);
+        else if (live) atomicAdd(s_n1, 1u);
+    }
+    barrier();
+    if (lid == 0u)
+    {
+        s_b0 = s_n0 != 0u ? atomicAdd(cl_rig[CLK_FREE_N], s_n0) : 0u;
+        if (s_n1 != 0u) atomicAdd(cl_rig[CLK_LIVE], s_n1);
+    }
+    barrier();
+    if (is_free)
+    {
+        const uint fw = clSkinFreeBaseC(cap) + s_b0 + fl;
+        if (fw < uint(cl_skin_out.length())) cl_skin_out[fw] = s;
+    }
+}
+
+// The stable-slot key of a selected entry and its avatar row (ALLOC / TAKE). want = the entry is
+// skinned: rigged, drawn for real, its skin has a palette.
+bool entryKey(uint sel, out uint ri, out uint mesh, out uint gen, out uint skin, out uint local, out uint row)
+{
+    ri = 0u; mesh = 0u; gen = 0u; skin = 0u; local = 0u; row = CL_SKIN_AV_ROWS - 1u;
+    const ClSelected cs = cl_sel[sel];
+    const ClInstance inst = cl_instances[cs.instance];
+    const bool want = (inst.flags & CLI_RIGGED) != 0u && (inst.flags & CLI1B_DRAW) != 0u
+                   && inst.skin_id != 0xFFFFFFFFu && inst.skin_id < pc.skin_count;
+    if (!want) return false;
+    const uint ps = clRefSlot(cs.cluster_ref);
+    row = clSkinRow(inst.flags);
+    ri = inst.render_instance; mesh = inst.mesh; gen = inst.mesh_generation; skin = inst.skin_id;
+    local = cl_pool[ps * CL_PAGE_WORDS + 3u] * CL_MAX_CLUSTERS_PER_PAGE + clRefIndex(cs.cluster_ref);
+    return true;
+}
+
+// The cluster's row has a cluster new to the cut this frame (HELD POSES step 3: with the weld on,
+// the row is then re-skinned whole). Read before the atomic: one per row and frame, not per entry.
+void markRowNew(uint cap, uint row)
+{
+    const uint nw = clSkinNewBaseC(cap) + (row >> 5u);
+    const uint bit = 1u << (row & 31u);
+    if (nw < uint(cl_skin_out.length()) && (cl_skin_out[nw] & bit) == 0u) atomicOr(cl_skin_out[nw], bit);
+}
+
+// mode 5 ALLOC (one lane per entry of the skinned view's selected slice, indirect from ARGS):
+// the entry's KEPT slot -- its key in this frame's hash (the cluster stayed in the cut: the slot
+// keeps its skinned vertices, step 3 may reuse them) -> the map. An entry NEW to the arena (no key)
+// is only COUNTED (#1010): CLK_ALLOC_N (the host grows the arena from CLK_LIVE + CLK_ALLOC_N) and
+// its avatar row's count in the PRIORITY region; its map word stays CL_NONE until TAKE (mode 8)
+// gives it a slot -- or not, when GRANT (mode 7) refused its whole row. Entries not skinned
+// (static, not drawn for real, no palette): CL_NONE. Keys are unique within a frame (one cut per
+// instance), so a miss never races another lane for the same key.
+void allocEntry()
+{
+    const uint lid = gl_LocalInvocationID.x;
+    const uint e = (gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x) * gl_WorkGroupSize.x + lid;
+    if (lid == 0u) s_n0 = 0u;
+    barrier();
+    const uint n = cl_rig[CLK_SEL_COUNT];
+    const uint cap = pc.cap;
+    uint s = CL_NONE, mw = CL_NONE, row = CL_SKIN_AV_ROWS - 1u;
+    bool miss = false, stale = false;
+    uint ri = 0u, mesh = 0u, gen = 0u, skin = 0u, local = 0u;
+    if (e < n)
+    {
+        const uint sel = cl_rig[CLK_SEL_BASE] + e;
+        mw = cl_rig[CLK_MAP_BASE] + sel;
+        if (entryKey(sel, ri, mesh, gen, skin, local, row))
+        {
+            const uint hw = clSkinHashWords(cap), hb = clSkinHashBaseC(cap);
+            const uint h = clSkinKeyHash(ri, mesh, gen, skin, local);
+            for (uint i = 0u; i < 64u; ++i)
+            {
+                const uint w = hb + ((h + i) & (hw - 1u));
+                if (w >= uint(cl_skin_out.length())) break;
+                const uint v = cl_skin_out[w];
+                if (v == CL_NONE) break;
+                if (v < cap && slotKeyIs(v, ri, mesh, gen, skin, local)) { s = v; break; }
+            }
+            if (s != CL_NONE)
+            {
+                const uint mb = clSkinMetaBaseC(cap) + s * CL_SKIN_META_WORDS;
+                cl_skin_out[mb + 5u] = pc.frame;
+                // HELD POSES + WELD (#798): a KEPT slot the skin will not reuse -- skinned at another
+                // pose generation (it left the cut / the view for a few frames while its row's pose
+                // moved on, or it was skinned in an identity frame) -- re-skins its whole row like a
+                // new one. Re-skinned alone it would be welded against nothing (its row-mates are
+                // reused: they insert no weld candidates) and its row-mates keep the welds they got
+                // without it: an open seam until the row's next generation. (= clean_cluster_preskin
+                // .comp's reuse test; only read there with the weld on.)
+                const uint gw = clSkinGenBaseC(cap) + row;
+                const uint cw = clSkinCharBaseC(cap) + row * CL_SKIN_CHAR_WORDS + 33u;
+                if (row != CL_SKIN_AV_ROWS - 1u && gw < uint(cl_skin_out.length()) && cw < uint(cl_skin_out.length()))
+                {
+                    const uint g = cl_skin_out[gw];
+                    stale = g == CL_NONE || cl_skin_out[cw] != 1u || cl_skin_out[mb + 6u] != g;
+                }
+            }
+            else
+            {
+                miss = true;
+                atomicAdd(s_n0, 1u);
+            }
+        }
+    }
+    barrier();
+    if (lid == 0u && s_n0 != 0u) atomicAdd(cl_rig[CLK_ALLOC_N], s_n0);
+    if (miss)
+    {
+        // #1010: the row's new entries (GRANT's input). Per lane: misses are few once a cut settles.
+        const uint prio = cl_rig[CLK_PRIO_BASE];
+        if (prio != CL_NONE && row < CL_SKIN_AV_ROWS)
+        {
+            const uint mwr = prio + 1u + CL_SKIN_AV_ROWS + row;
+            if (mwr < uint(cl_rig.length())) atomicAdd(cl_rig[mwr], 1u);
+        }
+        markRowNew(cap, row);
+    }
+    if (stale) markRowNew(cap, row);   // (#798: see the hit above) the row is re-skinned whole this frame
+    if (e < n && mw < uint(cl_rig.length())) cl_rig[mw] = s;
+    // CLK_USED = the entries with a slot this frame (kept here + new in TAKE; stats), one atomic per workgroup
+    if (lid == 0u) s_n1 = 0u;
+    barrier();
+    if (s != CL_NONE) atomicAdd(s_n1, 1u);
+    barrier();
+    if (lid == 0u && s_n1 != 0u) atomicAdd(cl_rig[CLK_USED], s_n1);
+}
+
+// mode 7 GRANT (#1010; ONE 64-lane workgroup, after ALLOC): when this frame's new entries
+// (CLK_ALLOC_N) exceed the free list (CLK_FREE_N), the arena is SHORT -- instead of handing the free
+// slots to whichever lanes come first (random parts of random avatars missing: #1010), walk the
+// avatar rows in the host's priority order (own avatar first, then by on-screen size) and REFUSE
+// every row whose new entries no longer fit after the rows before it. Prefix-strict: past the first
+// refusal every row with a new entry is refused too (the order is the priority, never "smaller
+// ones first"). A row without new entries is never refused (its kept slots stay drawn); rows the
+// host did not list (no avatar: row none) are not refused and take what is left (TAKE: in the
+// order their lanes come, as before #1010 -- CLK_OVERFLOW, expected 0).
+shared uint s_scan[64];
+void grantRows()
+{
+    const uint lid = gl_LocalInvocationID.x;
+    const uint need = cl_rig[CLK_ALLOC_N], have = cl_rig[CLK_FREE_N];
+    const uint prio = cl_rig[CLK_PRIO_BASE];
+    const bool short_ = need > have;
+    if (lid == 0u) cl_rig[CLK_SHORT] = short_ ? 1u : 0u;
+    if (!short_ || prio == CL_NONE || prio + CL_SKIN_PRIO_WORDS > uint(cl_rig.length())) return;   // uniform
+    const uint n = min(cl_rig[prio], CL_SKIN_AV_ROWS);
+    const uint per = (n + 63u) / 64u;
+    const uint k0 = min(lid * per, n), k1 = min(k0 + per, n);
+    const uint mbase = prio + 1u + CL_SKIN_AV_ROWS, rbase = mbase + CL_SKIN_AV_ROWS;
+    uint sum = 0u;
+    for (uint k = k0; k < k1; ++k)
+    {
+        const uint row = cl_rig[prio + 1u + k];
+        if (row < CL_SKIN_AV_ROWS) sum += cl_rig[mbase + row];
+    }
+    // inclusive scan of the 64 lane sums (Hillis-Steele)
+    s_scan[lid] = sum;
+    barrier();
+    for (uint off = 1u; off < 64u; off <<= 1u)
+    {
+        const uint v = lid >= off ? s_scan[lid - off] : 0u;
+        barrier();
+        s_scan[lid] += v;
+        barrier();
+    }
+    uint run = s_scan[lid] - sum, refused = 0u;
+    for (uint k = k0; k < k1; ++k)
+    {
+        const uint row = cl_rig[prio + 1u + k];
+        if (row >= CL_SKIN_AV_ROWS) continue;
+        const uint m = cl_rig[mbase + row];
+        if (m == 0u) continue;
+        run += m;
+        if (run > have)
+        {
+            cl_rig[rbase + row] = 1u;
+            ++refused;
+        }
+    }
+    if (refused != 0u) atomicAdd(cl_rig[CLK_REFUSED_AV], refused);
+}
+
+// mode 8 TAKE (#1010; one lane per selected entry, indirect from ARGS, after GRANT): a new entry of a
+// row GRANT did not refuse takes a slot from the free list (one global atomic per workgroup) and
+// writes its key; EVERY entry of a refused row -- new or kept -- is CL_NONE in the map this frame
+// (its kept slots stay live: in the cut, they are skinned again when the row is admitted). A frame
+// that is not SHORT refuses nothing: kept entries leave at their first load.
+void takeEntry()
+{
+    const uint lid = gl_LocalInvocationID.x;
+    const uint e = (gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x) * gl_WorkGroupSize.x + lid;
+    if (lid == 0u) { s_n0 = 0u; s_n1 = 0u; }
+    barrier();
+    const uint n = cl_rig[CLK_SEL_COUNT];
+    const uint cap = pc.cap;
+    const bool short_ = cl_rig[CLK_SHORT] != 0u;
+    const uint prio = cl_rig[CLK_PRIO_BASE];
+    uint s = CL_NONE, mw = CL_NONE, ml = 0u, row = CL_SKIN_AV_ROWS - 1u;
+    bool miss = false, hide = false;
+    uint ri = 0u, mesh = 0u, gen = 0u, skin = 0u, local = 0u;
+    if (e < n)
+    {
+        const uint sel = cl_rig[CLK_SEL_BASE] + e;
+        mw = cl_rig[CLK_MAP_BASE] + sel;
+        const uint kept = mw < uint(cl_rig.length()) ? cl_rig[mw] : CL_NONE;
+        if ((kept == CL_NONE || short_) && entryKey(sel, ri, mesh, gen, skin, local, row))
+        {
+            const uint rw = prio + 1u + 2u * CL_SKIN_AV_ROWS + row;
+            const bool refused = short_ && prio != CL_NONE && row < CL_SKIN_AV_ROWS && rw < uint(cl_rig.length())
+                              && cl_rig[rw] != 0u;
+            if (refused)
+            {
+                if (kept != CL_NONE) cl_rig[mw] = CL_NONE;
+                hide = true;
+            }
+            else if (kept == CL_NONE)
+            {
+                miss = true;
+                ml = atomicAdd(s_n0, 1u);
+            }
+        }
+    }
+    barrier();
+    if (lid == 0u) s_b0 = s_n0 != 0u ? atomicAdd(cl_rig[CLK_ALLOC_TAKEN], s_n0) : 0u;
+    barrier();
+    if (miss)
+    {
+        const uint i = s_b0 + ml;
+        const uint fw = clSkinFreeBaseC(cap) + i;
+        if (i < cl_rig[CLK_FREE_N] && fw < uint(cl_skin_out.length()))
+        {
+            s = cl_skin_out[fw];
+            const uint mb = clSkinMetaBaseC(cap) + s * CL_SKIN_META_WORDS;
+            if (s < cap && mb + CL_SKIN_META_WORDS <= uint(cl_skin_out.length()))
+            {
+                cl_skin_out[mb] = ri;
+                cl_skin_out[mb + 1u] = mesh;
+                cl_skin_out[mb + 2u] = gen;
+                cl_skin_out[mb + 3u] = skin;
+                cl_skin_out[mb + 4u] = local;
+                cl_skin_out[mb + 5u] = pc.frame;
+                cl_skin_out[mb + 6u] = CL_NONE;   // never skinned: step 3 re-skins it
+                cl_skin_out[mb + 7u] = CL_NONE;
+                // #826 WELD PAIR CACHE: pairs made before this frame never name this slot's new key
+                const uint aw = clSkinAllocFrameBaseC(cap) + s;
+                if (aw < uint(cl_skin_out.length())) cl_skin_out[aw] = pc.frame;
+            }
+            else s = CL_NONE;
+        }
+        // (a PARTIAL drop: only an entry without an avatar row, or a host order missing a row, can
+        // get here -- GRANT kept every listed row inside the free list. Expected 0; logged.)
+        if (s == CL_NONE) atomicAdd(cl_rig[CLK_OVERFLOW], 1u);
+        else if (mw < uint(cl_rig.length())) cl_rig[mw] = s;
+        if (s != CL_NONE) atomicAdd(s_n1, 1u);
+    }
+    if (hide) atomicAdd(cl_rig[CLK_HIDDEN], 1u);   // (SHORT frames only)
+    barrier();
+    if (lid == 0u && s_n1 != 0u) atomicAdd(cl_rig[CLK_USED], s_n1);
+}
+
+// ---- mode 6 CHAR (2026-10-14 step 2) -------------------------------------------------------------
+// The previous frame's joint table (the renderer's copy, valid when it built the previous-frame
+// palettes this frame), by device address: rows = push count.
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer PrevJointsRef { AvatarJoints a[]; };
+
+// = clean_preskin.comp rigidRot (the #632 cache's pelvis frame): columns normalised.
+mat3 charRigidRot(mat4 m)
+{
+    vec3 c0 = m[0].xyz, c1 = m[1].xyz, c2 = m[2].xyz;
+    float l0 = length(c0), l1 = length(c1), l2 = length(c2);
+    if (!(l0 > 1e-8 && l1 > 1e-8 && l2 > 1e-8)) return mat3(1.0);
+    return mat3(c0 / l0, c1 / l1, c2 / l2);
+}
+bool charFinite(mat3 m, vec3 t)
+{
+    return !(any(isnan(m[0])) || any(isnan(m[1])) || any(isnan(m[2])) || any(isnan(t))
+          || any(isinf(m[0])) || any(isinf(m[1])) || any(isinf(m[2])) || any(isinf(t)));
+}
+void charRow()
+{
+    const uint r = gl_GlobalInvocationID.x;
+    if (r >= CL_SKIN_AV_ROWS) return;
+    mat3 M = mat3(1.0), Mi = mat3(1.0), PM = mat3(1.0);
+    vec3 t = vec3(0.0), pt = vec3(0.0);
+    uint frame_ok = 0u;
+    if (r < AV_SLOT_CAP && r < pc.avatar_count && r < uint(av_joints.length()))
+    {
+        const mat4 P = jointWorld(av_joints[r].world[0]);
+        mat3 m = charRigidRot(P);
+        // Camera-relative in float in agent space, exactly as clean_skin_palette.comp does.
+        vec3 tt = P[3].xyz - pc.eye.xyz;
+        const float det = determinant(m);
+        if (charFinite(m, tt) && abs(det) > 1.0e-6)
+        {
+            const mat3 mi = inverse(m);
+            if (charFinite(mi, vec3(0.0)))
+            {
+                M = m; Mi = mi; t = tt;
+                frame_ok = 1u;
+            }
+        }
+        PM = M; pt = t;
+        if (frame_ok != 0u && (pc.prev_joints.x | pc.prev_joints.y) != 0u && r < pc.count)
+        {
+            PrevJointsRef pj = PrevJointsRef(pc.prev_joints);
+            const mat4 PP = jointWorld(pj.a[r].world[0]);
+            const mat3 pm = charRigidRot(PP);
+            const vec3 ptt = PP[3].xyz - pc.eye.xyz;
+            if (charFinite(pm, ptt)) { PM = pm; pt = ptt; }
+        }
+    }
+    const uint b = clSkinCharBaseC(pc.cap) + r * CL_SKIN_CHAR_WORDS;
+    if (b + CL_SKIN_CHAR_WORDS > uint(cl_skin_out.length())) return;
+    for (uint c = 0u; c < 3u; ++c)
+        for (uint k = 0u; k < 3u; ++k)
+        {
+            cl_skin_out[b + c * 3u + k] = floatBitsToUint(M[c][k]);
+            cl_skin_out[b + 12u + c * 3u + k] = floatBitsToUint(PM[c][k]);
+            cl_skin_out[b + 24u + c * 3u + k] = floatBitsToUint(Mi[c][k]);
+        }
+    for (uint k = 0u; k < 3u; ++k)
+    {
+        cl_skin_out[b + 9u + k] = floatBitsToUint(t[k]);
+        cl_skin_out[b + 21u + k] = floatBitsToUint(pt[k]);
+    }
+    cl_skin_out[b + 33u] = frame_ok;
+}
+
+void main()
+{
+    if (pc.mode == 0u)      stretchSkin();
+    else if (pc.mode == 1u) marginInstance();
+    else if (pc.mode == 2u) legacyItem();
+    else if (pc.mode == 4u) sweep();
+    else if (pc.mode == 5u) allocEntry();
+    else if (pc.mode == 6u) charRow();
+    else if (pc.mode == 7u) grantRows();
+    else if (pc.mode == 8u) takeEntry();
+    else                    args();
+}

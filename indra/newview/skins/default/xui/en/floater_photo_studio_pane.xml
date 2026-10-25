@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<!-- A Photo Studio panel popped out into a window of its own. The panel
+     (panel_photo_studio_slot.xml) is created in C++ and fills "pane_body".
+     Closing the window puts the panel back in Photo Studio. The title follows
+     the panel's section. -->
+<floater
+ width="440"
+ height="520"
+ min_width="424"
+ min_height="260"
+ layout="topleft"
+ name="floater_photo_studio_pane"
+ positioning="cascading"
+ title="Photo Studio"
+ single_instance="false"
+ save_rect="false"
+ can_resize="true">
+	<floater.string
+	 name="title_format">
+		Photo Studio: [SECTION]
+	</floater.string>
+	<panel
+	 follows="all"
+	 layout="topleft"
+	 left="2"
+	 top="18"
+	 width="436"
+	 height="500"
+	 background_visible="false"
+	 name="pane_body" />
+</floater>

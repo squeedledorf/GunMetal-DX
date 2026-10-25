@@ -1,0 +1,854 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<panel
+ border="true"
+ follows="all"
+ height="438"
+ label="Sounds"
+ layout="topleft"
+ left="102"
+ name="Preference Media panel"
+ top="1"
+ width="517">
+    <panel.string
+     name="middle_mouse">
+     Middle Mouse
+    </panel.string>
+    <panel.string
+     name="button4_mouse">
+     Mouse Button 4
+    </panel.string>
+    <panel.string
+     name="button5_mouse">
+     Mouse Button 5
+    </panel.string>
+  <!-- Slipstream: the tab outgrew its 438 px once the device settings open; scroll it. -->
+  <scroll_container
+   follows="all"
+   layout="topleft"
+   left="0"
+   top="0"
+   width="517"
+   height="438"
+   reserve_scroll_corner="false"
+   name="sound_scroll">
+  <panel
+   follows="left|top"
+   layout="topleft"
+   left="0"
+   top="0"
+   width="500"
+   height="785"
+   name="sound_scroll_panel">
+    <slider
+     control_name="AudioLevelMaster"
+     follows="left|top"
+     font.style="BOLD"
+     height="15"
+     increment="0.025"
+     initial_value="0.5"
+     label="All volume"
+	   label_width="120"
+     layout="topleft"
+     left="0"
+     name="System Volume"
+     show_text="false"
+     slider_label.halign="right"
+     top="10"
+     volume="true"
+     width="300">
+        <slider.commit_callback
+         function="Pref.setControlFalse"
+         parameter="MuteAudio" />
+    </slider>
+    <button
+     control_name="MuteAudio"
+     follows="top|left"
+     height="16"
+     image_selected="AudioMute_Off"
+     image_unselected="Audio_Off"
+     is_toggle="true"
+     layout="topleft"
+	   left_pad="5"
+     name="mute_audio"
+     tab_stop="false"
+     width="16" />
+    <check_box
+     control_name="MuteWhenMinimized"
+     height="15"
+     initial_value="true"
+     layout="topleft"
+     name="mute_when_minimized"
+	   top_delta="3"
+     left_pad="5"
+     width="20"
+     label="Mute when minimized"
+     word_wrap="true"/>
+	<slider
+		control_name="AudioLevelUI"
+		disabled_control="MuteAudio"
+		follows="left|top"
+		height="15"
+		increment="0.025"
+		initial_value="0.5"
+		label="Buttons"
+		label_width="120"
+		layout="topleft"
+		left="0"
+		name="UI Volume"
+		show_text="false"
+		slider_label.halign="right"
+		top_pad="4"
+		volume="true"
+		width="300">
+	  <slider.commit_callback
+		  function="Pref.setControlFalse"
+		  parameter="MuteUI" />
+	</slider>
+	<button
+		control_name="MuteUI"
+		disabled_control="MuteAudio"
+		follows="top|left"
+		height="16"
+		image_selected="AudioMute_Off"
+		image_unselected="Audio_Off"
+		is_toggle="true"
+		layout="topleft"
+		left_pad="5"
+		name="mute_audio_ui"
+		tab_stop="false"
+		width="16" />
+    <slider
+     control_name="AudioLevelAmbient"
+     disabled_control="MuteAudio"
+     follows="left|top"
+     height="15"
+     increment="0.025"
+     initial_value="0.5"
+     label="Ambient"
+     label_width="120"
+     layout="topleft"
+     left="0"
+     name="Wind Volume"
+     show_text="false"
+     slider_label.halign="right"
+     top_pad="4"
+     volume="true"
+     width="300">
+        <slider.commit_callback
+         function="Pref.setControlFalse"
+         parameter="MuteAmbient" />
+    </slider>
+    <button
+     control_name="MuteAmbient"
+     disabled_control="MuteAudio"
+     follows="top|left"
+     height="16"
+     image_selected="AudioMute_Off"
+     image_unselected="Audio_Off"
+     is_toggle="true"
+     layout="topleft"
+     left_pad="5"
+     name="mute_audio_ambient"
+     tab_stop="false"
+     width="16" />
+    <check_box
+     control_name="AudioFlyingWind"
+     disabled_control="MuteAudio"
+     follows="left|top"
+     height="15"
+     label="Wind sound while flying"
+     layout="topleft"
+     left_pad="5"
+     name="flying_wind"
+     tool_tip="The rushing wind you hear while flying. Uncheck to turn it off; other ambient sounds are not affected."
+     top_delta="0"
+     width="180" />
+    <slider
+     control_name="AudioLevelSFX"
+     disabled_control="MuteAudio"
+     follows="left|top"
+     height="15"
+     increment="0.025"
+     initial_value="0.5"
+     label="Sound Effects"
+     label_width="120"
+     slider_label.halign="right"
+     layout="topleft"
+     left="0"
+     name="SFX Volume"
+     show_text="false"
+     top_pad="4"
+     volume="true"
+     width="300">
+        <slider.commit_callback
+         function="Pref.setControlFalse"
+         parameter="MuteSounds" />
+    </slider>
+    <button
+     control_name="MuteSounds"
+     disabled_control="MuteAudio"
+     follows="top|left"
+     height="16"
+     image_selected="AudioMute_Off"
+     image_unselected="Audio_Off"
+     is_toggle="true"
+     layout="topleft"
+     left_pad="5"
+     name="mute_audio_sounds"
+     tab_stop="false"
+     width="16">
+      <button.commit_callback
+      function="Pref.SetSounds"/>
+    </button>
+    <slider
+     control_name="AudioLevelMusic"
+     disabled_control="MuteAudio"
+     follows="left|top"
+     height="15"
+     increment="0.025"
+     initial_value="0.5"
+     label="Streaming music"
+     label_width="120"
+     layout="topleft"
+     left="0"
+     name="Music Volume"
+     slider_label.halign="right"
+     show_text="false"
+     top_pad="4"
+     volume="true"
+     width="300">
+        <slider.commit_callback
+         function="Pref.setControlFalse"
+         parameter="MuteMusic" />
+	</slider>
+    <button
+     control_name="MuteMusic"
+	   disabled_control="MuteAudio"
+     follows="top|left"
+     height="16"
+     image_selected="AudioMute_Off"
+     image_unselected="Audio_Off"
+     is_toggle="true"
+     layout="topleft"
+	   left_pad="5"
+     name="mute_audio_music"
+     tab_stop="false"
+	 width="16" />
+	<check_box
+		control_name="AudioStreamingMusic"
+		height="16"
+		label="Enabled"
+		layout="topleft"
+		left_pad="5"
+		name="enable_music"
+		top_delta="2"
+		width="350">
+		<check_box.commit_callback
+			function="Pref.updateMediaAutoPlayCheckbox"/>
+	</check_box>
+	<slider
+		control_name="AudioLevelMedia"
+		disabled_control="MuteAudio"
+		follows="left|top"
+		height="16"
+		increment="0.025"
+		initial_value="0.5"
+		label="Media"
+		label_width="120"
+		layout="topleft"
+		left="0"
+		name="Media Volume"
+		show_text="false"
+		slider_label.halign="right"
+		top_pad="4"
+		volume="true"
+		width="300">
+	  <slider.commit_callback
+		  function="Pref.setControlFalse"
+		  parameter="MuteMedia" />
+	</slider>
+	<button
+		control_name="MuteMedia"
+		disabled_control="MuteAudio"
+		follows="top|left"
+		height="16"
+		image_selected="AudioMute_Off"
+		image_unselected="Audio_Off"
+		is_toggle="true"
+		layout="topleft"
+		left_pad="5"
+		name="mute_audio_media"
+		tab_stop="false"
+		width="16" />
+	<check_box
+		label_text.halign="left"
+		follows="left|top"
+		height="16"
+		control_name ="AudioStreamingMedia"
+		label="Enabled"
+		layout="topleft"
+		top_delta="2"
+		left_pad="5"
+		name="enable_media"
+		width="110">
+		<check_box.commit_callback
+			function="Pref.updateMediaAutoPlayCheckbox"/>
+	</check_box>
+	<slider
+		control_name="AudioLevelVoice"
+		disabled_control="MuteAudio"
+		follows="left|top"
+		height="16"
+		increment="0.025"
+		initial_value="0.5"
+		label="Voice Chat"
+		label_width="120"
+		layout="topleft"
+		left="0"
+		top_pad="4"
+		name="Voice Volume"
+		show_text="false"
+		slider_label.halign="right"
+		volume="true"
+		width="300">
+	  <slider.commit_callback
+		  function="Pref.setControlFalse"
+		  parameter="MuteVoice" />
+	</slider>
+	<button
+		control_name="MuteVoice"
+		disabled_control="MuteAudio"
+		follows="top|left"
+		height="16"
+		image_selected="AudioMute_Off"
+		image_unselected="Audio_Off"
+		is_toggle="true"
+		layout="topleft"
+		left_pad="5"
+		name="mute_audio_voice"
+		tab_stop="false"
+		width="16" />
+	<check_box
+		label_text.halign="left"
+		follows="left|top"
+		height="16"
+		control_name ="EnableVoiceChat"
+		disabled_control="CmdLineDisableVoice"
+		label="Enabled"
+		layout="topleft"
+		top_delta="2"
+		left_pad="5"
+		name="enable_voice_check"
+		width="110"/>
+  <text
+   type="string"
+   length="1"
+   follows="left|top"
+   layout="topleft"
+   left="23"
+   top_delta="25"
+   name="Listen media from"
+   height="15"
+   width="165"
+   halign="right">
+      Hear media and sounds from
+  </text>
+  <combo_box
+   control_name="MediaSoundsEarLocation"
+   follows="left|top"
+   layout="topleft"
+   left_pad="5"
+   width="130"
+   height="23"
+   top_delta="-4"
+   name="media_ear_location_combo">
+   <item
+      label="Camera position"
+      name="camera_position"
+      value="0" />
+   <item
+      label="Avatar position"
+      name="avatar_position"
+      value="1" />
+</combo_box>
+  <text
+   follows="left|top"
+   layout="topleft"
+   height="15"
+   left="23"
+   width="165"
+   name="media_autoplay_label"
+   halign="right">
+    Auto-play media
+  </text>
+  <combo_box
+        control_name="ParcelMediaAutoPlayEnable"
+        enabled_control="AudioStreamingMedia"
+        follows="left|top"
+        layout="topleft"
+        height="23"
+        left_delta="170"
+        top_delta="-4"
+        name="media_auto_play_combo"
+        width="130">
+    <item
+        label="Never"
+        name="autoplay_disabled"
+        value="0"/>
+    <item
+        label="Always"
+        name="autoplay_enabled"
+        value="1"/>
+    <item
+        label="Ask"
+        name="autoplay_ask"
+        value="2"/>
+  </combo_box>
+    <text
+        follows="left|top"
+        layout="topleft"
+        height="15"
+        left="23"
+        width="165"
+        name="media_firstinteract_label"
+        halign="right">
+            Media first-interact
+    </text>
+    <combo_box
+    control_name="MediaFirstClickInteract"
+    enabled_control="AudioStreamingMedia"
+    follows="left|top"
+    layout="topleft"
+    height="23"
+    left_delta="170"
+    top_delta="-4"
+    width="130"
+    name="media_first_interact_combo"
+    tool_tip="This setting controls which media (once loaded) does not require a first click to focus before interaction can begin. This allows clicks to be passed directly to media bypassing the focus click requirement. Each option also inherits the previous ones.">
+        <item
+            label="Disabled"
+            name="media_first_click_none"
+            value="0"/>
+        <item
+            label="Worn HUDs only"
+            name="media_first_click_hud"
+            value="1"/>
+        <item
+            label="Owned objects"
+            name="media_first_click_own"
+            value="3"/>
+        <item
+            label="Friends' objects"
+            name="media_first_click_friend"
+            value="7"/>
+        <item
+            label="Group objects"
+            name="media_first_click_group"
+            value="15"/>
+        <item
+            label="Landowner objects"
+            name="media_first_click_land"
+            value="31"/>
+        <item
+            label="Anyone's objects"
+            name="media_first_interact_any"
+            value="32767"/>
+        <item
+            label="All MOAP"
+            name="media_first_click_all"
+            value="65535"/>
+    </combo_box>
+   <check_box
+    name="media_show_on_others_btn"
+    control_name="MediaShowOnOthers"
+    enabled_control="AudioStreamingMedia"
+    value="true"
+    follows="left|top"
+    tool_tip="Uncheck this to hide media attached to other avatars nearby"
+    label="Play media attached to other avatars"
+    left="23"
+    width="15"
+    top_delta="30"
+    height="15"/>
+  <check_box
+    name="media_huds_autoplay"
+    control_name="MediaAutoPlayHuds"
+    enabled_control="AudioStreamingMedia"
+    value="true"
+    follows="left|top"
+    layout="topleft"
+    tool_tip="Uncheck this to make HUDs follow the standard media auto-play setting"
+    label="Auto-play media attached to your HUD"
+    left="260"
+    top_pad="-15"
+    width="15"
+    height="15"/>
+  <text
+   layout="topleft"
+   follows="left"
+   height="15"
+   width="165"
+   name="noise_suppression_label"
+   left="23"
+   top_delta="22"
+   halign="right">
+     Microphone Noise Suppression
+  </text>
+  <combo_box
+   control_name="VoiceNoiseSuppressionLevel"
+   enabled_control="EnableVoiceChat"
+   follows="left|top"
+   layout="topleft"
+   left_delta="170"
+   top_delta="-6"
+   width="130"
+   height="23"
+   name="noise_suppression_combo">
+    <item
+     label="Off"
+     name="noise_suppression_none"
+     value="0"/>
+    <item
+     label="Low"
+     name="noise_suppression_low"
+     value="1"/>
+    <item
+     label="Moderate"
+     name="noise_suppression_moderate"
+     value="2"/>
+    <item
+     label="High"
+     name="noise_suppression_high"
+     value="3"/>
+    <item
+     label="Max"
+     name="noise_suppression_max"
+     value="4"/>
+  </combo_box>
+  <text
+   type="string"
+   length="1"
+   follows="left|top"
+   layout="topleft"
+   left="23"
+   top_delta="30"
+   name="Listen from"
+   width="165"
+   height="15"
+   halign="right">
+     Hear voice from
+  </text>
+  <combo_box
+   enabled_control="EnableVoiceChat"
+   control_name="VoiceEarLocation"
+   follows="left|top"
+   layout="topleft"
+   left_delta="170"
+   top_delta="-6"
+   width="130"
+   height="23"
+   name="ear_location_combo">
+   <item
+      label="Camera position"
+      name="camera_position"
+      value="0" />
+   <item
+      label="Avatar position"
+      name="avatar_position"
+      value="1" />
+</combo_box>
+  <check_box
+   control_name="VoiceHearEveryoneEqually"
+   enabled_control="EnableVoiceChat"
+   follows="left|top"
+   height="15"
+   label="Hear distant voices at closer to equal volume"
+   layout="topleft"
+   left="20"
+   name="voice_hear_equally"
+   tool_tip="Local listening option only. Raises the volume of distant speakers up to the maximum the voice server allows. Speakers beyond the voice range are still not heard, and the server's distance falloff cannot be fully removed. WebRTC voice only."
+   top_pad="8"
+   width="300"/>
+  <check_box
+   control_name="LipSyncEnabled"
+   enabled_control="EnableVoiceChat"
+   follows="left|top"
+   height="15"
+   label="Move avatar lips when speaking"
+   layout="topleft"
+   left="20"
+   name="enable_lip_sync"
+   top_pad="8"
+   width="237"/>
+  <check_box
+   control_name="VoiceEchoCancellation"
+   enabled_control="EnableVoiceChat"
+   height="15"
+   tool_tip="Check to enable voice echo cancellation"
+   label="Echo Cancellation"
+   layout="topleft"
+   left="260"
+   name="enable_echo_cancellation"
+   top_pad="-15"
+   width="200"/>
+  <check_box
+   follows="top|left"
+   enabled_control="EnableVoiceChat"
+   control_name="PushToTalkToggle"
+   height="15"
+   label="Toggle speak on/off with toolbar button"
+   layout="topleft"
+   left="20"
+   name="push_to_talk_toggle_check"
+   width="237"
+   tool_tip="When in toggle mode, press and release the trigger key ONCE to switch your microphone on or off. When not in toggle mode, the microphone broadcasts your voice only while the trigger is being held down."
+   top_pad="5"/>
+  <check_box
+   control_name="VoiceAutomaticGainControl"
+   enabled_control="EnableVoiceChat"
+   height="15"
+   tool_tip="Check to enable automatic gain control"
+   label="Automatic Gain Control"
+   layout="topleft"
+   name="voice_automatic_gain_control"
+   left="260"
+   top_pad="-15"
+   width="200"/>
+  <check_box
+   name="gesture_audio_play_btn"
+   control_name="EnableGestureSounds"
+   disabled_control="MuteAudio"
+   value="true"
+   follows="left|bottom|right"
+   height="15"
+   tool_tip="Check this to hear sounds from gestures"
+   label="Play sounds from gestures"
+   top_pad="5"
+   left="20"/>
+  <check_box
+   control_name="VoiceVisualizerEnabled"
+   enabled_control="EnableVoiceChat"
+   height="15"
+   tool_tip="Check to show voice dot indicator above avatars"
+   label="Show voice dot above avatars"
+   layout="topleft"
+   name="voice_dot_visualizer"
+   left="260"
+   top_pad="-15"
+   width="200"/>
+  <check_box
+   name="typing_sound_check"
+   control_name="PlayTypingSound"
+   disabled_control="MuteAudio"
+   height="15"
+   tool_tip="Play the typing sound when people (including you) type in nearby chat"
+   label="Play typing sound"
+   layout="topleft"
+   top_pad="5"
+   left="20"
+   width="200"/>
+  <check_box
+   name="teleport_sound_check"
+   control_name="PlayTeleportSound"
+   disabled_control="MuteAudio"
+   height="15"
+   tool_tip="Play the whoosh sound when a teleport starts"
+   label="Play teleport sound"
+   layout="topleft"
+   left="260"
+   top_pad="-15"
+   width="200"/>
+  <check_box
+   name="audio_acoustics_check"
+   control_name="AudioAcoustics"
+   disabled_control="MuteAudio"
+   height="15"
+   tool_tip="Reverb in rooms and muffling behind walls for in-world sounds, from rays traced against the scene. Needs ray tracing (Preferences &gt; Graphics &gt; ray tracing on); inactive while ray tracing is off or unavailable (including while the viewer has paused it under video memory pressure). Media and voice are not affected; parcel music played from in-world speakers is."
+   label="Room acoustics (reverb and muffling)"
+   layout="topleft"
+   top_pad="5"
+   left="20"
+   width="300"/>
+  <slider
+   control_name="AudioAcousticsReverbLevel"
+   enabled_control="AudioAcoustics"
+   follows="left|top"
+   height="16"
+   increment="0.05"
+   initial_value="0.6"
+   label="Reverb level"
+   label_width="100"
+   layout="topleft"
+   left="40"
+   max_val="1"
+   min_val="0"
+   name="audio_acoustics_reverb"
+   show_text="false"
+   slider_label.halign="right"
+   tool_tip="How much reverb a fully enclosed room gets. Outdoors stays dry."
+   top_pad="4"
+   width="260"/>
+  <check_box
+   name="audio_acoustics_bounce_check"
+   control_name="AudioAcousticsBounce"
+   enabled_control="AudioAcoustics"
+   height="15"
+   tool_tip="Experimental. Measures the room's reverb by bouncing sound rays off the surroundings (decay per frequency, early reflections and the direction they come from) instead of estimating it from the room's size. Can sound very different in large hard spaces."
+   label="Measured room reverb (experimental)"
+   layout="topleft"
+   top_pad="5"
+   left="40"
+   width="400"/>
+  <check_box
+   name="audio_acoustics_early_gain_check"
+   control_name="AudioAcousticsEarlyGain"
+   enabled_control="AudioAcoustics"
+   height="15"
+   tool_tip="Experimental. Sound reflected toward you in the first moments adds to a sound's loudness: a horn or a dish carries sound further, a small hard room makes sounds a little louder. Open ground is unchanged."
+   label="Reflections make sounds louder (horns, small rooms; experimental)"
+   layout="topleft"
+   top_pad="5"
+   left="40"
+   width="420"/>
+  <slider
+   control_name="AudioAcousticsBoundaryBass"
+   enabled_control="AudioAcoustics"
+   follows="left|top"
+   height="16"
+   increment="0.05"
+   initial_value="1.0"
+   label="Bass near walls"
+   label_width="100"
+   layout="topleft"
+   left="40"
+   max_val="1"
+   min_val="0"
+   name="audio_acoustics_boundary_bass"
+   show_text="false"
+   slider_label.halign="right"
+   tool_tip="Bass gets stronger close to hard walls, edges and corners, for both you and the sound source (up to about +9 dB in a corner). 0 turns it off."
+   top_pad="4"
+   width="260"/>
+  <slider
+   control_name="AudioAcousticsSnowAbsorb"
+   enabled_control="AudioAcoustics"
+   follows="left|top"
+   height="16"
+   increment="0.05"
+   initial_value="1.0"
+   label="Snow absorbs sound"
+   label_width="100"
+   layout="topleft"
+   left="40"
+   max_val="1"
+   min_val="0"
+   name="audio_acoustics_snow_absorb"
+   show_text="false"
+   slider_label.halign="right"
+   tool_tip="Lying snow soaks up sound: outdoors in deep fresh snow the reverb gets shorter and quieter and the ground reflects less. Packed snow (paths, tracks) and wet, slushy snow absorb less. Only where snow actually lies, with the weather on. 0 ignores snow."
+   top_pad="4"
+   width="260"/>
+  <check_box
+   name="parcel_speakers_check"
+   control_name="ParcelAudioSpeakers"
+   disabled_control="MuteAudio"
+   height="15"
+   tool_tip="When the parcel's owner has set up speaker objects, the parcel music plays from them: it comes from where they stand, gets quieter with distance, and goes through room acoustics. Parcels without speakers sound as before. Applies when the music next starts (a playing stream restarts)."
+   label="Play parcel music from in-world speakers when the parcel has them"
+   layout="topleft"
+   top_pad="5"
+   left="20"
+   width="420"/>
+  <check_box
+   name="parcel_speakers_doppler_check"
+   control_name="ParcelAudioSpeakerDoppler"
+   enabled_control="ParcelAudioSpeakers"
+   height="15"
+   tool_tip="Off (default): the speakers keep their pitch while you walk. On: they get the Doppler shift other moving sounds get, which detunes speakers in different directions against each other."
+   label="Speakers: Doppler pitch shift while moving"
+   layout="topleft"
+   top_pad="5"
+   left="40"
+   width="420"/>
+  <check_box
+   name="parcel_speakers_diffuse_check"
+   control_name="ParcelAudioDiffuseReverb"
+   enabled_control="ParcelAudioSpeakers"
+   height="15"
+   tool_tip="With room acoustics on: a speaker's reverb keeps its level however far you are from it (in a reverberant hall the reverb is about as loud everywhere; outdoors it stays low). Off: a speaker's reverb falls with distance like other in-world sounds."
+   label="Speakers: room reverb does not fade with distance (diffuse field)"
+   layout="topleft"
+   top_pad="5"
+   left="40"
+   width="420"/>
+  <check_box
+   name="audio_inverse_distance_check"
+   control_name="AudioInverseDistanceRolloff"
+   disabled_control="MuteAudio"
+   height="15"
+   tool_tip="In-world sounds already get quieter with distance like real sound (-6 dB each time the distance doubles). On: a sound whose script set a hearing radius fades out over the last part of that radius instead of cutting off at it."
+   label="Sounds with a set radius fade out at its edge instead of cutting off"
+   layout="topleft"
+   top_pad="5"
+   left="20"
+   width="420"/>
+  <text
+   follows="left|top"
+   layout="topleft"
+   height="15"
+   left="23"
+   width="165"
+   top_pad="10"
+   name="parcel_speakers_outside_label"
+   halign="right">
+    Out of speaker range
+  </text>
+  <combo_box
+   control_name="ParcelAudioSpeakersOutside"
+   enabled_control="ParcelAudioSpeakers"
+   follows="left|top"
+   layout="topleft"
+   height="23"
+   left_delta="170"
+   top_delta="-4"
+   width="130"
+   name="parcel_speakers_outside_combo"
+   tool_tip="What you hear on a parcel with speakers while you are out of range of all of them: what the parcel's owner chose (silence unless the parcel asks for a quiet bed), always the music as a quiet stereo bed, or always silence.">
+    <item
+     label="As the parcel sets"
+     name="parcel_speakers_outside_parcel"
+     value="0"/>
+    <item
+     label="Quiet stereo"
+     name="parcel_speakers_outside_ambient"
+     value="1"/>
+    <item
+     label="Silence"
+     name="parcel_speakers_outside_silent"
+     value="2"/>
+  </combo_box>
+  <button
+   control_name="ShowDeviceSettings"
+   enabled_control="EnableVoiceChat"
+   follows="left|top"
+   height="23"
+   is_toggle="true"
+   label="Voice Input/Output devices"
+   layout="topleft"
+   left="20"
+   top_pad="5"
+   name="device_settings_btn"
+   width="200">
+  </button>
+    <panel
+    layout="topleft"
+    filename="panel_sound_devices.xml"
+     visiblity_control="ShowDeviceSettings"
+     name="device_settings_panel"
+    top_pad="0"
+    width="480"
+    left="18"
+    class="panel_voice_device_settings"/>
+      </panel>
+  </scroll_container>
+</panel>

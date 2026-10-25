@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<panel
+   background_visible="true"
+   bg_alpha_color="DkGray"
+   border="false"
+   follows="all"
+   height="430"
+   name="Outfit Gallery"
+   layout="topleft"
+   left="0"
+   top="0"
+   width="318">
+  <string name="outfit_photo_string">
+    Photo of "[OUTFIT_NAME]" outfit
+  </string>
+  <string name="no_outfits_msg">
+    You don't have any outfits yet. Try [secondlife:///app/search/all/ Search]
+  </string>
+  <string name="no_matched_outfits_msg">
+    Didn't find what you're looking for? Try [secondlife:///app/search/all/[SEARCH_TERM] Search].
+  </string>
+  <string name="empty_folder_msg">
+    This folder is empty. Drag outfits onto it, or use "Save As" to save one here.
+  </string>
+  <string name="breadcrumb_root">My Outfits</string>
+  <text
+    type="string"
+    clip_partial="false"
+    follows="left|top"
+    layout="topleft"
+    left="13"
+    name="no_outfits_txt"
+    top="0"
+    height="32"
+    valign="center"
+    parse_urls="true"
+    wrap="true">
+    Searching...
+  </text> 
+  <panel
+   follows="left|top|right"
+   height="22"
+   layout="topleft"
+   left="4"
+   top="0"
+   width="312"
+   name="breadcrumb_panel"
+   visible="false" />
+  <scroll_container
+   follows="all"
+   height="401"
+   width="312"
+   layout="topleft"
+   left="4"
+   top="0"
+   tab_stop="true"
+   name="gallery_scroll_panel"
+   opaque="false"
+   top_pad="0">
+  </scroll_container>
+    <!-- #429 / #627 status bar (after Firestorm's Appearance window) -->
+    <panel
+     background_visible="false"
+     follows="bottom|left|right"
+     height="28"
+     layout="topleft"
+     left="4"
+     name="bottom_panel"
+     top_pad="0"
+     width="305">
+        <icon
+         follows="bottom|left|right"
+         height="25"
+         image_name="Toolbar_Middle_Off"
+         layout="topleft"
+         left="0"
+         name="dummy_icon"
+         top="0"
+         width="305" />
+        <text
+         follows="bottom|left"
+         font="SansSerifMedium"
+         height="25"
+         layout="topleft"
+         left="6"
+         name="OutfitcountText"
+         top="0"
+         v_pad="6"
+         width="130">
+            [COUNT] Outfits
+        </text>
+        <avatar_complexity_text
+         follows="bottom|right"
+         font="SansSerifMedium"
+         halign="right"
+         height="25"
+         layout="topleft"
+         right="-8"
+         name="avatar_complexity_label"
+         tool_tip="Your avatar complexity (ARC) as this viewer computes it. Per-item numbers are before the per-attachment cap, so they need not add up to this total."
+         top="0"
+         v_pad="6"
+         width="160">
+            Complexity: [WEIGHT]
+        </avatar_complexity_text>
+    </panel>
+</panel>

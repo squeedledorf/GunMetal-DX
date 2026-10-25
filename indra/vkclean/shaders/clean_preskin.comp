@@ -1,0 +1,409 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// vkclean — GPU pre-skinning compute kernel (Vulkan port of cleanSkinPreC.glsl).
+//
+// One workgroup per rigged WORK ITEM (= one visible rigged instance-face, emitted
+// by the cull, which also writes the indirect dispatch count). Each item skins into
+// its own PRIVATE output range, so instances sharing a mesh slot never collide. Threads within a workgroup cooperatively skin the item's vertices:
+// read bind-pose vertices (quantized QVertex from the static mega-VBO) +
+// 10 B skin weights (#582) + the per-skin bone palette, and write WORLD-space skinned
+// vertices (the compact 20 B SkinVertex, #616: clean_skinvert.glsl) into the skin-output
+// buffer. The rigged draw then reads those verts directly (no model_matrix, no LBS in the
+// VS); the texcoord stays in the source vertex (the VS reads it there).
+//
+// Byte-faithful to the GL source's skinning math: bind-shape transform, weight
+// decode (#582: u8 joints + unorm16 weights, the CPU encoder pre-normalizes exactly as the
+// old weight4 float decode did), 4-bone LBS with NO Gram-Schmidt (LL's
+// joint world matrices carry shape-slider scale by design). Normal and tangent are
+// skinned, then stored as unit octahedral directions (+ the bitangent sign).
+
+layout(local_size_x = 64) in;
+
+#define MAX_JOINTS 110
+
+// SOURCE: the static mega-VBO's QUANTIZED bind-pose vertices (#573, clean_qvertex.glsl: 5
+// words / vertex, the slot's decode header before src_vert_base). OUTPUT: llcleanrenderervk's
+// SkinVertex (#616, clean_skinvert.glsl: fp32 position + octahedral normal + octahedral
+// tangent with the bitangent sign == 20 B == 5 words), read as a flat uint array. The
+// position stays fp32: it is eye-relative world space (no static per-slot lattice).
+#include "clean_skinvert.glsl"
+layout(std430, binding = 0) readonly  buffer SrcVerts { uint src_q[]; };    // 5 words/vert (+ slot header)
+// SKIN WEIGHTS (#582, llcleanqvertex.h QWeight): 10 B per vertex, packed back to back --
+//   bytes 0..3 = joint index per influence (u8), bytes 4..9 = unorm16 weights of
+//   influences 0..2; influence 3's weight is implied: 65535 - (w0 + w1 + w2).
+// Read as words: a record starts on a 2-byte boundary, so it always spans exactly 3 words
+// (the host rounds the arena up to whole words). src_weight_base counts RECORDS.
+// Bit 7 of byte 3 (influence 3's joint) = open-boundary vertex for rigged welding (#574,
+// LLCleanQV::kWeldBoundaryBit; clean_rig_weld.comp) -- joint indices are < 128.
+layout(std430, binding = 1) readonly  buffer SrcWts   { uint  src_w[]; };    // 10 B/vert, rigged slots only
+
+// One vertex's joint indices + weights (sum 1). Little-endian byte order (host and GPU).
+void loadWeights(uint rec, out vec4 index, out vec4 weights)
+{
+    const uint b  = rec * 10u;
+    const uint wd = b >> 2u;
+    const uint a = src_w[wd], m = src_w[wd + 1u], c = src_w[wd + 2u];
+    uint jw, w01, w2;
+    if ((b & 2u) == 0u) { jw = a;                       w01 = m;                       w2 = c & 0xFFFFu; }
+    else                { jw = (a >> 16u) | (m << 16u); w01 = (m >> 16u) | (c << 16u); w2 = c >> 16u; }
+    // (Influence 3's joint byte carries the weld boundary flag in bit 7, #574: joints < 128.)
+    index = vec4(float(jw & 0xFFu), float((jw >> 8u) & 0xFFu), float((jw >> 16u) & 0xFFu), float((jw >> 24u) & 0x7Fu));
+    const uint q0 = w01 & 0xFFFFu, q1 = w01 >> 16u;
+    const uint qs = q0 + q1 + w2;
+    const uint q3 = qs >= 65535u ? 0u : 65535u - qs;
+    weights = vec4(float(q0), float(q1), float(w2), float(q3)) * (1.0 / 65535.0);
+}
+// (read too: F6 reads a cache item's OLD pelvis-local vertex before re-skinning it)
+layout(std430, binding = 2) buffer DstVerts { uint dst_v[]; };    // SV_WORDS (5) words/vert
+
+struct SkinBlock {
+    mat3x4 matrices[MAX_JOINTS];   // 48 B each
+    mat4   bind_shape;             // 64 B
+};
+layout(std430, binding = 3) readonly buffer SkinPalette { SkinBlock skins[]; };
+
+struct WorkItem {
+    uint dst_vert_base;
+    uint src_vert_base;
+    uint vert_count;
+    uint skin_id;        // resolved instance skin_id (cull writes it here)
+    uint src_weight_base; // slot's base in the rigged-only weight arena (0xFFFFFFFF = none)
+    uint _pad1;          // reduced-tier skin cache: 0x80000000 | joint-table slot (else 0)
+    uint inst1;          // instance id + 1 (the cull writes it for every item; 0 = none)
+    uint _pad3;          // F6: 1 = cache item whose range holds what was drawn last frame
+};
+layout(std430, binding = 4) readonly buffer Work { WorkItem items[]; };
+
+// TEMPORAL (#84, stage 2): rigged motion vectors. The PREVIOUS frame's palettes, built
+// by clean_skin_palette.comp from last frame's joint table but relative to THIS frame's
+// eye (so prev and current skinned positions share one origin), and the per-vertex
+// output: where each skinned vertex was last frame, eye-relative, at the SAME index as
+// its DstVerts entry -- the rigged VS reads it at gl_VertexIndex, so the per-frame
+// output ranges never need a remap. Written only on motion-vector frames (u_prev != 0);
+// otherwise both bindings alias buffers this kernel never touches through them.
+layout(std430, binding = 5) readonly  buffer PrevPalette { SkinBlock prev_skins[]; };
+// Tightly packed xyz (12 B / vertex; was a vec4 whose w nobody read).
+layout(std430, binding = 6) writeonly buffer PrevDst     { float prev_v[]; };
+
+// REDUCED-TIER SKIN CACHE (#31, clean_cull.comp): a work item flagged 0x80000000 in
+// _pad1 skins into a persistent cache range in its avatar's PELVIS frame -- joint 0 of
+// this joint table, rotation normalized (LLMatrix4::initAll bakes the local scale into
+// the columns) -- instead of eye-relative: local = R^T (p_eye - (t - eye)). The rigged
+// VS re-applies the pelvis's current transform every frame. prev_v stays eye-relative
+// (the VS reads it only on the frame the item was re-skinned).
+#include "clean_joint_table.glsl"   // mat3x4 joint world rows (jointWorld())
+layout(std430, binding = 7) readonly buffer AvJoints { AvatarJoints av_joints[]; };
+
+// F6 PREVIOUS POSITIONS FROM LAST FRAME'S OUTPUT (u_prev == 3, RenderVKPreskinPrevHistory):
+// instead of re-skinning every vertex with last frame's palettes (a 2nd palette dispatch
+// + a 2nd LBS per vertex), each item keeps its eye-relative skinned positions (before
+// the cache's pelvis-local transform) in a 2-slot history, and finds LAST frame's range
+// through a per-instance table (the cull hands out a fresh range every frame):
+//   hist_pos : xyz per vertex, slot s at [s * u_vert_cap + skin vertex index]
+//   hist_tab : per instance, per slot: {dst base, src_vert_base, skin_id, frame}
+// Slot = frame & 1. A hit needs last frame's entry (frame - 1) with the same source
+// range and skin; its positions are relative to last frame's eye: + u_eye_delta. Miss
+// (new / back in view / LOD or skin change / reused id) = previous = current (zero
+// object motion; the camera's motion still applies). Re-skinned skin-cache items whose
+// range held last frame's drawn pose (_pad3) take the OLD pelvis-local vertex under
+// last frame's pelvis instead -- exactly what the rigged VS drew last frame.
+layout(std430, binding = 8)  buffer HistPos { float hist_pos[]; };
+layout(std430, binding = 9)  buffer HistTab { uvec4 hist_tab[]; };
+layout(std430, binding = 10) readonly buffer PrevAvJoints { AvatarJoints prev_av_joints[]; };
+
+// RIGGED ALPHA ORDER: the item's POSED BOUNDING BOX (clean_cull.comp rig_cache, per instance
+// RC_WORDS words; this kernel writes only RC_CTR..RC_EXT + 2, the cull the words below them).
+// The rigged alpha sort placed a draw by its FIRST skinned vertex -- an arbitrary point of the
+// face -- so layered alpha faces of one mesh (a bang over hair) crossed keys as the camera
+// orbited and popped in front of / behind each other. It now uses the centre of the box of
+// every vertex this item wrote, in the SAME space as those vertices (eye-relative, or
+// pelvis-local for a skin-cache item, which the sort re-places with the current pelvis
+// exactly as it placed the first vertex) -- the cluster path's contract
+// (clean_cluster_preskin.comp's skinned boxes -> clean_cluster_alpha.comp). Keyed by the range
+// (dst_vert_base + 1): a held cache range keeps its centre while it is not re-skinned.
+layout(std430, binding = 11) buffer RigCache { uint rig_cache[]; };
+// Order-preserving float -> uint (as clean_cluster_skin_common.glsl clOrderEnc, own names:
+// clean_cluster_preskin.comp includes both): atomicMin / atomicMax on the words = on the floats.
+uint psOrderEnc(float f) { const uint u = floatBitsToUint(f); return (u & 0x80000000u) != 0u ? ~u : (u | 0x80000000u); }
+float psOrderDec(uint e) { return uintBitsToFloat((e & 0x80000000u) != 0u ? (e & 0x7FFFFFFFu) : ~e); }
+shared uint s_box[6];   // psOrderEnc min xyz (atomicMin), max xyz (atomicMax)
+
+layout(push_constant) uniform Push {
+    uint u_skin_count;
+    uint u_work_cap;     // work-list capacity; the indirect X may overshoot it
+    uint u_prev;         // 0 = off, 1 = write prev_v from prev_skins, 2 = write prev_v = current
+                         // (no history), 3 = F6 history (hist_pos / hist_tab)
+    uint u_flags;        // u_prev 3: bit0 = prev_av_joints valid (cache items' old pose)
+    vec4 u_eye;          // xyz: the palettes' eye (clean_skin_palette.comp)
+    uint u_frame;        // u_prev 3: this dispatch's history frame (slot = frame & 1)
+    uint u_vert_cap;     // u_prev 3: skin vertices per history slot
+    uint u_inst_cap;     // u_prev 3: hist_tab rows (instances)
+    uint u_stage_min;    // (#822) items with >= this many vertices stage their palette (0 = never)
+    vec4 u_eye_delta;    // u_prev 3: xyz = last frame's eye - this frame's eye
+} pc;
+
+// PALETTE STAGING (#822, RenderVKPreskinSharedPalette): each vertex's four joint fetches depend on
+// its weight load (the joint indices), so a lane waits on two dependent global loads per vertex.
+// An item with at least u_stage_min vertices first copies its skin's whole current palette
+// (MAX_JOINTS x 48 B = 5280 B) into shared memory -- 330 vec4 over 64 lanes, ~5 coalesced
+// loads per lane, one barrier -- and its vertices read the joints from there. Small items
+// (where the copy would cost more than it saves) read the buffer as before. Bit-identical: the
+// same floats, the same operation order. The PREVIOUS palette (u_prev 1) stays a buffer read.
+shared vec4 s_pal[MAX_JOINTS * 3];   // joint j = columns 3j .. 3j + 2 (mat3x4: rotation .xyz, translation .w)
+bool g_pal_staged = false;           // (workgroup-uniform: set from the item's vertex count)
+
+mat3 rigidRot(mat4 m)
+{
+    // Columns of a joint world matrix = world rotation axes x local scale.
+    vec3 c0 = m[0].xyz, c1 = m[1].xyz, c2 = m[2].xyz;
+    float l0 = length(c0), l1 = length(c1), l2 = length(c2);
+    if (!(l0 > 1e-8 && l1 > 1e-8 && l2 > 1e-8)) return mat3(1.0);
+    return mat3(c0 / l0, c1 / l1, c2 / l2);
+}
+
+void fetchJoint(uint sid, int j, out mat3 rot, out vec3 trans)
+{
+    j = clamp(j, 0, MAX_JOINTS - 1);
+    mat3x4 m;
+    if (g_pal_staged) m = mat3x4(s_pal[j * 3], s_pal[j * 3 + 1], s_pal[j * 3 + 2]);
+    else              m = skins[sid].matrices[j];
+    rot   = mat3(m);
+    trans = vec3(m[0].w, m[1].w, m[2].w);
+}
+
+// Last frame's skinned position of a bind-space point: the same 4-bone LBS over the
+// previous palette (same weights, same bind shape -- the skin meta is static), in the
+// same operation order as main() so an unchanged pose gives exactly zero motion.
+void fetchPrevJoint(uint sid, int j, out mat3 rot, out vec3 trans)
+{
+    j = clamp(j, 0, MAX_JOINTS - 1);
+    mat3x4 m = prev_skins[sid].matrices[j];
+    rot   = mat3(m);
+    trans = vec3(m[0].w, m[1].w, m[2].w);
+}
+
+vec3 prevSkin(uint sid, vec3 bind_pos, vec4 index, vec4 weights)
+{
+    mat3 r1, r2, r3, r4;
+    vec3 t1, t2, t3, t4;
+    fetchPrevJoint(sid, int(index.x), r1, t1);
+    fetchPrevJoint(sid, int(index.y), r2, t2);
+    fetchPrevJoint(sid, int(index.z), r3, t3);
+    fetchPrevJoint(sid, int(index.w), r4, t4);
+    mat3 rot   = r1*weights.x + r2*weights.y + r3*weights.z + r4*weights.w;
+    vec3 trans = t1*weights.x + t2*weights.y + t3*weights.z + t4*weights.w;
+    return rot * bind_pos + trans;
+}
+
+void main()
+{
+    uint wi = gl_WorkGroupID.x;
+    if (wi >= pc.u_work_cap) return;   // cull overflowed the list; item never written
+    WorkItem item = items[wi];
+
+    uint skin_id = item.skin_id;
+    bool has_skin = (skin_id != 0xFFFFFFFFu) && (skin_id < pc.u_skin_count);
+    if (!has_skin) return;
+    // (both returns above depend only on the workgroup's item: uniform, so the barriers
+    // around the posed-box reduction below are reached by every lane or by none)
+    if (gl_LocalInvocationID.x == 0u)
+    {
+        s_box[0] = 0xFFFFFFFFu; s_box[1] = 0xFFFFFFFFu; s_box[2] = 0xFFFFFFFFu;
+        s_box[3] = 0u; s_box[4] = 0u; s_box[5] = 0u;
+    }
+    // (#822) Stage the palette (the item's vertex count is workgroup-uniform: so is the branch,
+    // and the barrier below -- shared with the box init -- is reached by every lane).
+    g_pal_staged = pc.u_stage_min != 0u && item.vert_count >= pc.u_stage_min;
+    if (g_pal_staged)
+    {
+        for (uint i = gl_LocalInvocationID.x; i < uint(MAX_JOINTS * 3); i += gl_WorkGroupSize.x)
+            s_pal[i] = skins[skin_id].matrices[i / 3u][i % 3u];
+    }
+    barrier();
+
+    mat4 bind_shape = skins[skin_id].bind_shape;
+    // Normal matrix via the COFACTOR of bind_shape's 3x3 (== transpose(inverse)
+    // up to 1/det, removed by normalize). Stable for the highly non-uniform bind
+    // shapes where GLSL inverse() is fragile. Matches the GL source.
+    mat3 _bsm = mat3(bind_shape);
+    mat3 bs_n = mat3(cross(_bsm[1], _bsm[2]),
+                     cross(_bsm[2], _bsm[0]),
+                     cross(_bsm[0], _bsm[1]));
+
+    // Reduced-tier cache item: the pelvis frame (eye-relative translation).
+    const bool to_local = (item._pad1 & 0x80000000u) != 0u;
+    mat3 lrt = mat3(1.0);        // transpose(R): world -> pelvis-local
+    vec3 lt  = vec3(0.0);        // pelvis position - eye
+    if (to_local)
+    {
+        const uint slot = item._pad1 & 0xFFFFu;
+        if (slot < uint(av_joints.length()))
+        {
+            const mat4 P = jointWorld(av_joints[slot].world[0]);
+            lrt = transpose(rigidRot(P));
+            lt  = P[3].xyz - pc.u_eye.xyz;
+        }
+    }
+
+    // F6 history lookup (u_prev 3): last frame's range of this instance, and this frame's
+    // entry (written once per item; slot ws, read slot ws ^ 1: never the same words).
+    bool hist_hit = false, cache_old = false;
+    uint hist_rd = 0u, hist_wr = 0u;
+    mat3 pr_rot = mat3(1.0);
+    vec3 pr_t = vec3(0.0);
+    const bool hist_on = pc.u_prev == 3u;
+    if (hist_on)
+    {
+        const uint ws = pc.u_frame & 1u;
+        hist_wr = ws * pc.u_vert_cap + item.dst_vert_base;
+        const uint iid = item.inst1 - 1u;
+        if (item.inst1 != 0u && iid < pc.u_inst_cap)
+        {
+            const uvec4 e = hist_tab[iid * 2u + (ws ^ 1u)];
+            hist_hit = e.w == pc.u_frame - 1u && e.y == item.src_vert_base && e.z == skin_id
+                       && e.x + item.vert_count <= pc.u_vert_cap;
+            hist_rd = (ws ^ 1u) * pc.u_vert_cap + e.x;
+            if (gl_LocalInvocationID.x == 0u)
+                hist_tab[iid * 2u + ws] = uvec4(item.dst_vert_base, item.src_vert_base, skin_id, pc.u_frame);
+        }
+        // Cache item re-skinned over last frame's drawn pose: last frame's pelvis.
+        if (to_local && item._pad3 != 0u && (pc.u_flags & 1u) != 0u)
+        {
+            const uint slot = item._pad1 & 0xFFFFu;
+            if (slot < uint(prev_av_joints.length()))
+            {
+                const mat4 PP = jointWorld(prev_av_joints[slot].world[0]);
+                pr_rot = rigidRot(PP);
+                pr_t   = PP[3].xyz - pc.u_eye.xyz;
+                cache_old = true;
+            }
+        }
+    }
+
+    // The source slot's decode header (2 pseudo-vertices before its first real vertex).
+    const QvHeader qh = QV_LOAD_HEADER(src_q, max(item.src_vert_base, QV_HEADER_VERTS));
+    for (uint v = gl_LocalInvocationID.x; v < item.vert_count; v += gl_WorkGroupSize.x)
+    {
+        uint src_idx = item.src_vert_base + v;
+        uint dst_idx = item.dst_vert_base + v;
+        uint sb = src_idx * QV_WORDS;   // 5 words per quantized vertex
+
+        const uint q0 = src_q[sb], q1 = src_q[sb+1u], q3 = src_q[sb+3u], q4 = src_q[sb+4u];
+        vec3 pos = qvPos(qh, q0, q1);
+        vec3 nrm = qvNormal(q3);
+        vec4 tan = qvTangent(q1, q4);
+
+        // Bind-shape transform (per-mesh skew/scale) into skeleton space.
+        vec3 bind_pos = (bind_shape * vec4(pos, 1.0)).xyz;
+        vec3 bind_nrm = bs_n * nrm;
+
+        // Decode the 10 B weight record (#582); no weights = all on joint 0 (as before).
+        vec4 weights = vec4(0.0);
+        vec4 index   = vec4(0.0);
+        if (item.src_weight_base != 0xFFFFFFFFu) loadWeights(item.src_weight_base + v, index, weights);
+        index   = clamp(index, vec4(0.0), vec4(float(MAX_JOINTS - 1)));
+        float ws = weights.x + weights.y + weights.z + weights.w;
+        // LL (LLSkinningUtil::getPerVertexSkinMatrix): zero total weight -> full
+        // weight on the first influence (else rot=0 puts the vertex at the origin).
+        if (ws > 0.0) weights *= (1.0 / ws);
+        else          weights = vec4(1.0, 0.0, 0.0, 0.0);
+
+        mat3 r1, r2, r3, r4;
+        vec3 t1, t2, t3, t4;
+        fetchJoint(skin_id, int(index.x), r1, t1);
+        fetchJoint(skin_id, int(index.y), r2, t2);
+        fetchJoint(skin_id, int(index.z), r3, t3);
+        fetchJoint(skin_id, int(index.w), r4, t4);
+
+        mat3 rot   = r1*weights.x + r2*weights.y + r3*weights.z + r4*weights.w;
+        vec3 trans = t1*weights.x + t2*weights.y + t3*weights.z + t4*weights.w;
+
+        // NO re-orthonormalization (LL bakes shape-slider scale into the palette).
+        vec3 world_pos = rot * bind_pos + trans;
+        vec3 world_nrm = rot * bind_nrm;
+        // Tangent: LL skins it with the palette rotation after the bind-shape 3x3
+        // (no cofactor -- a tangent is a direction in the surface, not a normal).
+        vec3 world_tan = rot * (mat3(bind_shape) * tan.xyz);
+
+        // Non-finite guard only (NaN/Inf -> collapse to the joint). A distance cap
+        // here also collapsed LEGITIMATE vertices of meshes whose bind shape carries
+        // a large offset (|bind_pos| is not bounded by avatar size) -- LL has no cap.
+        // The joint translation can itself be non-finite (a NaN palette): then the
+        // vertex collapses to the origin, a finite point -- this stream feeds the rigged
+        // BLAS builds, which must never see NaN / Inf.
+        if (any(isnan(world_pos)) || any(isinf(world_pos)))
+            world_pos = (any(isnan(trans)) || any(isinf(trans))) ? vec3(0.0) : trans;
+
+        if (pc.u_prev != 0u)
+        {
+            vec3 prev_pos = world_pos;
+            if (pc.u_prev == 1u) prev_pos = prevSkin(skin_id, bind_pos, index, weights);
+            else if (hist_on)
+            {
+                if (cache_old)
+                {
+                    // (read before this thread overwrites it below)
+                    prev_pos = pr_rot * SV_POS(dst_v, dst_idx) + pr_t;
+                }
+                else if (hist_hit)
+                {
+                    const uint hb = (hist_rd + v) * 3u;
+                    prev_pos = vec3(hist_pos[hb+0u], hist_pos[hb+1u], hist_pos[hb+2u]) + pc.u_eye_delta.xyz;
+                }
+                const uint wb = (hist_wr + v) * 3u;
+                hist_pos[wb+0u] = world_pos.x; hist_pos[wb+1u] = world_pos.y; hist_pos[wb+2u] = world_pos.z;
+            }
+            if (any(isnan(prev_pos)) || any(isinf(prev_pos))) prev_pos = world_pos;
+            const uint pb = dst_idx * 3u;
+            prev_v[pb+0u] = prev_pos.x; prev_v[pb+1u] = prev_pos.y; prev_v[pb+2u] = prev_pos.z;
+        }
+
+        if (to_local)
+        {
+            world_pos = lrt * (world_pos - lt);
+            world_nrm = lrt * world_nrm;
+            world_tan = lrt * world_tan;
+            // (a non-finite local frame: collapse to the local origin)
+            if (any(isnan(world_pos)) || any(isinf(world_pos))) world_pos = vec3(0.0);
+        }
+
+        // The posed box: the position exactly as stored (finite: both guards above ran).
+        atomicMin(s_box[0], psOrderEnc(world_pos.x));
+        atomicMin(s_box[1], psOrderEnc(world_pos.y));
+        atomicMin(s_box[2], psOrderEnc(world_pos.z));
+        atomicMax(s_box[3], psOrderEnc(world_pos.x));
+        atomicMax(s_box[4], psOrderEnc(world_pos.y));
+        atomicMax(s_box[5], psOrderEnc(world_pos.z));
+
+        // (a zero source tangent stays "none"; normal / tangent are stored as unit directions)
+        const uint db = dst_idx * SV_WORDS;
+        dst_v[db+0u] = floatBitsToUint(world_pos.x);
+        dst_v[db+1u] = floatBitsToUint(world_pos.y);
+        dst_v[db+2u] = floatBitsToUint(world_pos.z);
+        dst_v[db+3u] = svPackNormal(world_nrm);
+        dst_v[db+4u] = tan.w == 0.0 ? SV_NO_TANGENT : svPackTangent(world_tan, tan.w);
+    }
+    // Lane 0: the box centre + extent -> the item's instance row (one work item per instance
+    // and frame: the main cull emits at most one rigged draw per instance). An empty item
+    // writes no key (0): the sort then falls back to the range's first vertex.
+    barrier();
+    const uint iid = item.inst1 - 1u;
+    const uint rb = iid * RC_WORDS;
+    if (gl_LocalInvocationID.x == 0u && item.inst1 != 0u && rb + RC_WORDS <= uint(rig_cache.length()))
+    {
+        const bool any_v = item.vert_count != 0u && s_box[0] != 0xFFFFFFFFu;
+        const vec3 lo = vec3(psOrderDec(s_box[0]), psOrderDec(s_box[1]), psOrderDec(s_box[2]));
+        const vec3 hi = vec3(psOrderDec(s_box[3]), psOrderDec(s_box[4]), psOrderDec(s_box[5]));
+        const vec3 ctr = 0.5 * (lo + hi);
+        const bool ok = any_v && !any(isnan(ctr)) && !any(isinf(ctr));
+        rig_cache[rb + RC_CTR + 0u] = floatBitsToUint(ok ? ctr.x : 0.0);
+        rig_cache[rb + RC_CTR + 1u] = floatBitsToUint(ok ? ctr.y : 0.0);
+        rig_cache[rb + RC_CTR + 2u] = floatBitsToUint(ok ? ctr.z : 0.0);
+        // (#835) The extent, for the sort's quarter-extent pull toward the camera.
+        const vec3 ext = ok ? max(hi - lo, vec3(0.0)) : vec3(0.0);
+        rig_cache[rb + RC_EXT + 0u] = floatBitsToUint(isinf(ext.x) ? 0.0 : ext.x);
+        rig_cache[rb + RC_EXT + 1u] = floatBitsToUint(isinf(ext.y) ? 0.0 : ext.y);
+        rig_cache[rb + RC_EXT + 2u] = floatBitsToUint(isinf(ext.z) ? 0.0 : ext.z);
+        rig_cache[rb + RC_CTR_KEY]  = ok ? item.dst_vert_base + 1u : 0u;
+    }
+}

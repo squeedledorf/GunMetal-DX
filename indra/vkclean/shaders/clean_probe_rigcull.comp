@@ -1,0 +1,239 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#include "clean_av_slots.glsl"
+#define CLEAN_PROBE_JOB_REF
+#include "clean_probe_job.glsl"
+// vkclean — per-face avatar culling for DYNAMIC reflection-probe captures.
+//
+// A dynamic probe face draws avatars from the main cull's pre-skinned rigged lists
+// (their counts snapshotted in mProbeRigCounters). Drawn whole into every face, that
+// was the full main-view rigged set -- millions of skinned vertices -- six times per
+// realtime probe, mostly outside the face. LL's cube snapshot culls with the face
+// camera, so an avatar outside a face (or beyond the capture far clip) isn't drawn
+// there. This pass does that per face: every draw of the six rigged lists is kept iff
+// its wearer's padded bounds (computeAvatarVis -> av_vis box tail) touch the face's
+// frustum (six planes, far = the capture far clip). Unknown wearer / no box -> kept.
+//
+// ONE dispatch per capture job: workgroup (L, k) culls list L for face u_face0 + k
+// (the realtime probe: all six faces at once, 36 workgroups, instead of six serial
+// six-workgroup dispatches). The face frusta are analytic, as clean_cull.comp's
+// probeFaceMask (face f looks down +X -X +Y -Y +Z -Z, 90 degrees, near / far = the
+// capture clips). An avatar whose padded box projects under u_min_px face texels
+// (bounding-sphere diameter over dominant-axis depth) is dropped from the face, as
+// the static cull's size cutoff does.
+// Stable compaction in chunks of 256 (list order kept: the rigged alpha is drawn in
+// the main view's back-to-front order). Output list L of face f at
+// out_cmds[(f * 6 + L) * stride], its count at out_counts[f * 6 + L].
+//   L: 0 r_opaque (3), 1 r_mask (4), 2 ds_r_opaque (8), 3 ds_r_mask (9),
+//      4 r_alpha pre-water (5), 5 r_alpha post-water (alpha post 1)
+// #517: each list is the main view's draws FOLLOWED BY the main cull's off-screen probe
+// region of the same rigged bucket (binding 12, clean_cull.comp OFF_PROBE): the avatars
+// the main view does not see but this frame's realtime capture reaches, pre-skinned for
+// it alone (the off-screen rigged alpha is unsorted; it joins list 4).
+layout(local_size_x = 256) in;
+
+struct DrawCmd { uint indexCount; uint instanceCount; uint firstIndex; int vertexOffset; uint firstInstance; };
+struct Instance {
+    mat4 model_matrix;
+    vec4 aabb_min;
+    vec4 aabb_max;
+    vec4 tint;
+    mat4 uv_matrix;
+    uint lod_group_id;
+    uint material_id;
+    uint flags;
+    uint skin_id;
+    vec4 spin_axis;
+    vec4 spin_pivot;
+};
+
+layout(std430, binding = 0) readonly buffer Instances { Instance instances[]; };
+layout(std430, binding = 1) readonly buffer AvatarVis { uint av_vis[]; };
+layout(std430, binding = 2) readonly buffer SkinMetaW { uint skin_meta_w[]; };
+layout(std430, binding = 3) readonly buffer Counts    { uint counts[]; };   // main-cull snapshot
+layout(std430, binding = 4) readonly buffer L0 { DrawCmd l0[]; };
+layout(std430, binding = 5) readonly buffer L1 { DrawCmd l1[]; };
+layout(std430, binding = 6) readonly buffer L2 { DrawCmd l2[]; };
+layout(std430, binding = 7) readonly buffer L3 { DrawCmd l3[]; };
+layout(std430, binding = 8) readonly buffer L4 { DrawCmd l4[]; };
+layout(std430, binding = 9) readonly buffer L5 { DrawCmd l5[]; };
+layout(std430, binding = 10) writeonly buffer OutCmds   { DrawCmd out_cmds[]; };
+layout(std430, binding = 11) writeonly buffer OutCounts { uint out_counts[]; };
+// The main cull's off-screen rigged regions (clean_cull.comp binding 28): counts, then
+// rigOffCap() draws per region (rigged bucket k, pass r) at (k * 4 + r) * rigOffCap().
+layout(std430, binding = 12) readonly buffer RigOff { uint rig_off_count[32]; DrawCmd rig_off_cmd[]; };
+
+layout(push_constant) uniform Push {
+    vec4  u_origin;       // .xyz probe origin, .w near clip
+    float u_far;          // far clip
+    float u_face_px;      // face px per unit at depth 1 (C / 2)
+    float u_min_px;       // projected-size cutoff in face texels (0 = off)
+    uint  u_face0;        // first face of this dispatch (workgroup y adds)
+    uint  u_stride;       // per-list output capacity (DrawCmds)
+    uint  u_skin_count;   // valid skin_id < this
+    uint  u_cap;          // main bucket capacity (counts are clamped to it)
+    uint  u_pad;          // bit 0 (#478): the camera comes from the GPU capture job (u_job), bit 1 its index,
+                          // bit 2: no face test (RenderVKProbeAvatarCull off: a dynamic job keeps the lists whole),
+                          // bit 8: the subgroup scan may run (full subgroups; clean_wg_scan.glsl)
+    uvec2 u_job;          // the capture job buffer's address
+    uint  u_off_cap;      // #517: draws per off-screen rigged region (binding 12; 0 = none)
+} pc;
+
+// The face camera: the push's, or (#478, GPU-driven probes) the capture job's -- a job
+// without avatars (not dynamic, sky only, ray-traced or empty) keeps no rigged draw.
+vec4  g_origin;
+float g_far;
+bool  g_none = false;
+
+// = clean_cull.comp / LLCleanRendererVK::kAv* layout.
+#define AV_VIS_SLOTS AV_SLOT_CAP
+#define SKIN_META_WORDS 1892u
+#define CASTER_BASE (AV_VIS_SLOTS + 4u)
+#define AV_DEM_BASE (CASTER_BASE + 102u)
+#define AV_BOX_BASE (AV_DEM_BASE + 2u * AV_VIS_SLOTS)
+
+#define OFF_REGIONS 4u
+#define OFF_PROBE   3u
+uint rigOffCap() { return pc.u_off_cap; }   // (LLCleanRendererVK::rigOffCap(), as the main cull's push)
+// List L's rigged index k (buckets 3 4 5 8 9 -> 0..4) for its off-screen probe region;
+// ~0 = none (the post-water alpha: the off-screen alpha is all in list 4).
+uint offIndex(uint L) { return L == 0u ? 0u : L == 1u ? 1u : L == 2u ? 3u : L == 3u ? 4u : L == 4u ? 2u : 0xFFFFFFFFu; }
+
+DrawCmd loadCmd(uint L, uint i)
+{
+    if (L == 0u) return l0[i];
+    if (L == 1u) return l1[i];
+    if (L == 2u) return l2[i];
+    if (L == 3u) return l3[i];
+    if (L == 4u) return l4[i];
+    return l5[i];
+}
+
+// The face's frustum against a world box (clean_cull.comp probeFaceMask, one face).
+bool faceTest(uint f, vec3 lo, vec3 hi)
+{
+    lo -= g_origin.xyz;
+    hi -= g_origin.xyz;
+    const uint a = f >> 1u;
+    const bool neg = (f & 1u) != 0u;
+    const float dmax = neg ? -lo[a] : hi[a];
+    const float dmin = neg ? -hi[a] : lo[a];
+    if (dmax < g_origin.w || dmin > g_far) return false;
+    const uint b = (a + 1u) % 3u, c = (a + 2u) % 3u;
+    return !(dmax + hi[b] < 0.0 || dmax - lo[b] < 0.0 || dmax + hi[c] < 0.0 || dmax - lo[c] < 0.0);
+}
+
+bool sizeOk(vec3 lo, vec3 hi)
+{
+    if (!(pc.u_min_px > 0.0)) return true;
+    const vec3 v = abs(0.5 * (lo + hi) - g_origin.xyz);
+    const float depth = max(v.x, max(v.y, v.z));
+    const float diam = length(hi - lo);
+    if (depth <= diam) return true;
+    return diam * pc.u_face_px >= pc.u_min_px * depth;
+}
+
+bool keepDraw(uint id, uint f)
+{
+    if (id >= uint(instances.length())) return true;
+    const uint sid = instances[id].skin_id;
+    if (av_vis[AV_VIS_SLOTS] == 0u || sid >= pc.u_skin_count
+        || sid * SKIN_META_WORDS >= uint(skin_meta_w.length()))
+        return true;
+    const uint av = skin_meta_w[sid * SKIN_META_WORDS];
+    if (av >= AV_VIS_SLOTS || AV_BOX_BASE + 6u * av + 5u >= uint(av_vis.length())) return true;
+    const uint b = AV_BOX_BASE + 6u * av;
+    const vec3 mn = vec3(uintBitsToFloat(av_vis[b]), uintBitsToFloat(av_vis[b + 1u]), uintBitsToFloat(av_vis[b + 2u]));
+    const vec3 mx = vec3(uintBitsToFloat(av_vis[b + 3u]), uintBitsToFloat(av_vis[b + 4u]), uintBitsToFloat(av_vis[b + 5u]));
+    if (!(mn.x <= mx.x)) return true;   // unknown box (or NaN): always drawn
+    return faceTest(f, mn, mx) && sizeOk(mn, mx);
+}
+
+shared uint s_scan[256];
+shared uint s_base;
+#include "clean_wg_scan.glsl"
+
+void main()
+{
+    const uint L = gl_WorkGroupID.x;
+    const uint f = pc.u_face0 + gl_WorkGroupID.y;
+    if (L >= 6u || f >= 6u) return;
+    g_origin = pc.u_origin;
+    g_far = pc.u_far;
+    if ((pc.u_pad & 1u) != 0u)
+    {
+        const PrbJob j = prbJob(pc.u_job, (pc.u_pad >> 1u) & 1u);
+        g_origin = j.origin;
+        g_far = j.clip.x;
+        g_none = j.info.x == 0u || (j.info.z & PJ_DYNAMIC) == 0u || (j.info.z & (PJ_SKY | PJ_TRACED)) != 0u;
+        // #834: lists 4 / 5 (rigged alpha) stay empty in a capture that skips its blended alpha.
+        if (L >= 4u && (j.info.z & PJ_NO_ALPHA) != 0u) g_none = true;
+    }
+    const uint ob = (f * 6u + L) * pc.u_stride;
+    const uint lid = gl_LocalInvocationID.x;
+    const uint slot = L == 0u ? 3u : L == 1u ? 4u : L == 2u ? 10u : L == 3u ? 11u : L == 4u ? 5u : 7u;
+    // the main view's list, then the off-screen probe region (i >= n0)
+    const uint n0 = g_none ? 0u : min(min(counts[slot], pc.u_cap), pc.u_stride);
+    const uint k = offIndex(L);
+    const uint ob1 = k == 0xFFFFFFFFu ? 0u : (k * OFF_REGIONS + OFF_PROBE) * rigOffCap();
+    const uint n1 = (g_none || k == 0xFFFFFFFFu) ? 0u : min(rig_off_count[k * OFF_REGIONS + OFF_PROBE], rigOffCap());
+    const uint n = min(n0 + n1, pc.u_stride);
+    // Subgroup scan (clean_wg_scan.glsl): one barrier per 256-draw chunk instead of 18 --
+    // these 36-workgroup dispatches are latency-bound. Same prefix sums -> the same
+    // compacted lists, entry for entry (element order = wgLinearId(), a bijection).
+    if (wgScanUsable(256u, (pc.u_pad & 256u) != 0u))
+    {
+        const uint lin = wgLinearId();
+        uint base = 0u;
+        for (uint c0 = 0u; c0 < n; c0 += 256u)
+        {
+            const uint i = c0 + lin;
+            DrawCmd c;
+            uint keep = 0u;
+            if (i < n)
+            {
+                c = i < n0 ? loadCmd(L, i) : rig_off_cmd[ob1 + (i - n0)];
+                keep = ((pc.u_pad & 4u) != 0u || keepDraw(c.firstInstance, f)) ? 1u : 0u;
+            }
+            uint total;
+            const uint incl = wgInclusiveScan(keep, total);
+            // (bounded like the shared-memory path: base + incl <= n <= stride; never trusted)
+            const uint o = base + incl - 1u;
+            if (keep != 0u && incl != 0u && o < pc.u_stride) out_cmds[ob + o] = c;
+            base += total;
+        }
+        if (lid == 0u) out_counts[f * 6u + L] = min(base, n);
+        return;
+    }
+    if (lid == 0u) s_base = 0u;
+    barrier();
+    for (uint c0 = 0u; c0 < n; c0 += 256u)
+    {
+        const uint i = c0 + lid;
+        DrawCmd c;
+        uint keep = 0u;
+        if (i < n)
+        {
+            c = i < n0 ? loadCmd(L, i) : rig_off_cmd[ob1 + (i - n0)];
+            keep = ((pc.u_pad & 4u) != 0u || keepDraw(c.firstInstance, f)) ? 1u : 0u;
+        }
+        s_scan[lid] = keep;
+        barrier();
+        // Hillis-Steele inclusive scan of the keep flags.
+        for (uint off = 1u; off < 256u; off <<= 1u)
+        {
+            const uint a = lid >= off ? s_scan[lid - off] : 0u;
+            barrier();
+            s_scan[lid] += a;
+            barrier();
+        }
+        const uint base = s_base;
+        if (keep != 0u) out_cmds[ob + base + s_scan[lid] - 1u] = c;
+        barrier();   // every lane has read s_base / s_scan
+        if (lid == 0u) s_base = base + s_scan[255];
+        barrier();
+    }
+    if (lid == 0u) out_counts[f * 6u + L] = s_base;
+}

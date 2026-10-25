@@ -1,0 +1,253 @@
+#version 460
+// vkclean — RT SUN SHADOW CACHE, tile classifier + finalize (#771; design:
+// clean_rt_mask_cache.glsl). One workgroup per TxT mask tile (T = 8 / 16: each thread
+// visits (T / 8)^2 texels), cheapest test first:
+//   1. receivers: one depth fetch per texel -> the tile's view-depth range (or sky-only);
+//   2. SHADOW FOOTPRINTS (host-projected rectangles + view-depth ranges, one per thread):
+//      a tile inside one re-traces without touching the history;
+//   3. only then the per-texel history tests (no history / young / mover / non-uniform 3x3
+//      / fade band), with an early out once any texel decided.
+// Then the tile's 8x8 blocks go to the trace list or the reuse list (rc_list). The finalize
+// pass (push p0.y bit 20, one workgroup) turns the two counts into indirect dispatch
+// arguments (2D past 32768 blocks: maxComputeWorkGroupCount[0] is only guaranteed 65535),
+// or -- when the traced share is above rc_f0.w -- one plain full dispatch in raster order
+// (rc_count[2]; the list indirection and the reuse dispatch then cost nothing extra).
+// Shared memory only (no subgroup ops: 64 threads span two NVIDIA subgroups). Every thread
+// reaches every barrier (no early return before the last one).
+layout(local_size_x = 8, local_size_y = 8) in;
+
+#include "clean_frame_info.glsl"
+
+layout(set = 3, binding = 0) uniform sampler2D uDepth;
+layout(set = 3, binding = 5) uniform sampler2D uHistSun;
+layout(set = 3, binding = 8) uniform sampler2D uHistDepth;
+layout(set = 3, binding = 9) uniform sampler2D uHistMeta;
+layout(set = 3, binding = 22) uniform sampler2D uHistDepthG;
+
+#include "clean_rt_mask_common.glsl"
+#define RT_CACHE_WORK_QUAL
+#include "clean_rt_mask_cache.glsl"
+
+#define RC_GROUP 32768u
+
+shared uint  sh_reason;   // per-texel reasons (1 << RC_ST_*)
+shared uint  sh_hit;      // footprint reasons
+shared uint  sh_recv;     // any receiver in the tile
+shared vec3  sh_mn[64];
+shared vec3  sh_mx[64];
+
+uint rcHash(uvec2 t)
+{
+    uint h = t.x * 0x8da6b343u ^ t.y * 0xd8163841u;
+    h ^= h >> 13u; h *= 0x5bd1e995u; h ^= h >> 15u;
+    return h;
+}
+
+// The receiver's reasons to re-trace (RC_ST_* bits), from last frame's accumulated history.
+// vz: its view depth. STATIC CARRY frames (stat): the history tests run on texel m itself
+// -- the camera did not move, so that is the texel the carry copies.
+uint rcPixelReasons(vec3 P, ivec2 m, ivec2 rp, float vz, float eps, float minlen, bool stat)
+{
+    // Fade band of the shadow range (and a margin past it): the trace's distance fade
+    // changes with the camera distance, not with the history.
+    const float clip = ssr.shadow_clip.w;
+    if (vz > 0.7 * clip && vz < 1.25 * clip) return 1u << RC_ST_FADE;
+    if (vz >= 1.25 * clip) return 0u;   // out of the sun's range: lit, nothing traced
+    ivec2 hn;
+    const uint nh = rcHistTapWhy(P, rp, hn);
+    if (nh != 0u) return (1u << RC_ST_NOHIST) | (1u << (27u + nh));   // (the cause: one-hot bits 28-30)
+    if (stat)
+    {
+        hn = m;
+        if (!(texelFetch(uHistDepth, m, 0).x > 0.0)) return (1u << RC_ST_NOHIST) | (1u << 29u);   // (sky there)
+    }
+    const float len = texelFetch(uHistMeta, hn, 0).x;
+    if (!(len >= minlen)) return 1u << RC_ST_YOUNG;
+    // Moving caster: the trace's bit 0 (rays met one) or the temporal pass's countdown
+    // (bits 5-7) at the tap -- a mover's shadow (leading / trailing) re-traces every frame.
+    if (rtSunMover(texelFetch(uHistDepthG, hn, 0).z)) return 1u << RC_ST_MOVER;
+    // Uniform 3x3 (all fully lit, or all fully blocked): a shadow edge anywhere around
+    // re-traces, so an edge creeping with the sun stays traced. (Sky texels hold "lit"
+    // (1, 1, 1): no depth test -- an umbra texel against the sky just traces.)
+    uint cls = 0u;
+    const ivec2 mxi = ivec2(mp.dims.zw) - 1;
+    for (int i = 0; i < 9; ++i)
+    {
+        const ivec2 t = clamp(hn + ivec2(i % 3 - 1, i / 3 - 1), ivec2(0), mxi);
+        const uint c = rcClass(texelFetch(uHistSun, t, 0).rgb, eps);
+        if (c == 0u || (cls != 0u && c != cls)) return 1u << RC_ST_EDGE;
+        cls = c;
+    }
+    return 0u;
+}
+
+void main()
+{
+    const uint lid = gl_LocalInvocationIndex;
+    if (rcFinalize())
+    {
+        if (lid == 0u)
+        {
+            const uint c0 = rc_count[0], c1 = rc_count[1], total = c0 + c1;
+            const bool full = total > 0u && float(c0) > rc_f0.w * float(total);
+            rc_count[2] = full ? 1u : 0u;
+            for (uint k = 0u; k < 2u; ++k)
+            {
+                const uint c = full ? (k == 0u ? total : 0u) : (k == 0u ? c0 : c1);
+                rc_args[k * 4u + 0u] = min(c, RC_GROUP);
+                rc_args[k * 4u + 1u] = c == 0u ? 1u : (c + RC_GROUP - 1u) / RC_GROUP;
+                rc_args[k * 4u + 2u] = 1u;
+            }
+            if (full && (rc_h0.w & 2u) != 0u) atomicAdd(rc_stats[RC_ST_FULL], 1u);
+        }
+        return;   // (a uniform branch: no barrier in this mode)
+    }
+    const uint T = rc_h0.x >= 16u ? 16u : 8u;
+    const uint per = T / 8u;   // texels per thread per axis
+    const uvec2 tile = gl_WorkGroupID.xy;
+    const ivec2 base = ivec2(tile) * int(T);
+    const ivec2 dims = ivec2(mp.dims.zw);
+    const bool sun_on = ssr.shadow_params.w > 1.5;
+    // (sun not ray traced this frame: nothing to save, the trace writes "lit" at no cost)
+    const bool force = (rc_h0.w & 1u) != 0u || !sun_on;
+    if (lid == 0u) { sh_reason = force ? (1u << RC_ST_FORCED) : 0u; sh_hit = 0u; sh_recv = 0u; }
+
+    // ---- 1. receivers: the tile's camera-relative world AABB ----
+    const vec3 cam = mp.cam_time.xyz;
+    vec3 mn = vec3(1e30), mx = vec3(-1e30);
+    for (uint j = 0u; j < per * per; ++j)
+    {
+        const ivec2 m = base + ivec2(gl_LocalInvocationID.xy) * int(per) + ivec2(int(j % per), int(j / per));
+        if (any(greaterThanEqual(m, dims))) continue;
+        const ivec2 rp = rtMaskRenderPx(m);
+        const float d = texelFetch(uDepth, rp, 0).r;
+        if (d <= 0.0) continue;   // sky: nothing is traced there
+        const vec3 Pr = worldAt(vec2(rp) + 0.5, d) - cam;
+        mn = min(mn, Pr); mx = max(mx, Pr);
+    }
+    sh_mn[lid] = mn;
+    sh_mx[lid] = mx;
+    barrier();
+    for (uint s = 32u; s > 0u; s >>= 1u)
+    {
+        if (lid < s)
+        {
+            sh_mn[lid] = min(sh_mn[lid], sh_mn[lid + s]);
+            sh_mx[lid] = max(sh_mx[lid], sh_mx[lid + s]);
+        }
+        barrier();
+    }
+    const vec3 tmn = sh_mn[0], tmx = sh_mx[0];
+    const bool recv = tmn.x <= tmx.x;
+
+    // ---- 2. swept caster volumes (the tile's screen cell's bin; one per thread) ----
+    if (!force && recv)
+    {
+        const vec3 D = rc_D.xyz;
+        const float tn = rc_D.w, pad = rc_f0.z;
+        uint first = 0u, cnt = rc_h0.y;
+        const bool binned = rc_h2.w != 0u;
+        if (binned)
+        {
+            const uvec2 cell = min(uvec2(base) / max(rc_h2.x, 16u), uvec2(rc_h2.y, rc_h2.z) - 1u);
+            const uvec2 fc = rc_cells[min(cell.y * rc_h2.y + cell.x, 4095u)];
+            first = fc.x; cnt = fc.y;
+        }
+        uint hit = 0u, tests = 0u;
+        for (uint i = lid; i < cnt && hit == 0u; i += 64u)
+        {
+            const uint ci = binned ? rc_bin[first + i] : i;
+            const RcCaster c = rc_cast[min(ci, 4095u)];
+            ++tests;
+            if (rcSweptHit(tmn, tmx, c, D, tn, pad))
+                hit = c.b.w > 0.5 ? (1u << RC_ST_CHANGE) : (1u << RC_ST_DYN);
+        }
+        if (hit != 0u) atomicOr(sh_hit, hit);
+        if (tests != 0u && (rc_h0.w & 2u) != 0u) atomicAdd(rc_stats[RC_ST_TESTS], tests);
+    }
+    barrier();
+
+    // ---- 3. per-texel history tests (only where nothing decided yet) ----
+    // (STATIC CARRY: sky-only tiles too -- a carried texel must be sky in both frames or in
+    // neither, else last frame's surface would be copied over newly revealed sky)
+    const bool stat = rcStaticCarry();
+    if (!force && (recv || stat) && sh_hit == 0u)
+    {
+        const float eps = rc_f0.x, minlen = rc_f0.y;
+        uint reason = 0u;
+        for (uint j = 0u; j < per * per; ++j)
+        {
+            const ivec2 m = base + ivec2(gl_LocalInvocationID.xy) * int(per) + ivec2(int(j % per), int(j / per));
+            if (any(greaterThanEqual(m, dims))) continue;
+            // (a verdict another thread already reached: skip -- an atomic read, an early out)
+            if (reason != 0u || atomicOr(sh_reason, 0u) != 0u) break;
+            const ivec2 rp = rtMaskRenderPx(m);
+            const float d = texelFetch(uDepth, rp, 0).r;
+            if (d <= 0.0)
+            {
+                if (stat && texelFetch(uHistDepth, m, 0).x > 0.0)
+                {
+                    reason = (1u << RC_ST_NOHIST) | (1u << 29u);   // (surface -> sky)
+                    atomicOr(sh_reason, reason);
+                }
+                continue;
+            }
+            const vec3 P = worldAt(vec2(rp) + 0.5, d);
+            reason = rcPixelReasons(P, m, rp, rcViewDepth(P - cam), eps, minlen, stat);
+            if (reason != 0u) atomicOr(sh_reason, reason);
+        }
+    }
+    barrier();
+    if (lid != 0u) return;
+    uint why = sh_reason | sh_hit;
+    const bool sky = !recv;
+    // PROGRESSIVE REFRESH: a hashed round-robin slice of the tiles (every tile once per period).
+    const uint period = max(rc_h1.x, 1u);
+    if (why == 0u && !sky && (period <= 1u || (rcHash(tile) % period) == (rc_h1.y % period))) why = 1u << RC_ST_REFRESH;
+    const bool trace = why != 0u;
+    // The tile's 8x8 blocks into a list.
+    const uint cap = rc_h1.w;
+    uint nb = 0u;
+    uvec2 blk[4];
+    for (uint j = 0u; j < per * per; ++j)
+    {
+        const uvec2 b = tile * per + uvec2(j % per, j / per);
+        if (b.x * 8u >= uint(dims.x) || b.y * 8u >= uint(dims.y)) continue;
+        blk[nb++] = b;
+    }
+    const uint k = trace ? 0u : 1u;
+    // STATIC CARRY (clean_rt_mask_cache.glsl): reused blocks of a still-camera frame.
+    const bool carry = !trace && rcStaticCarry();
+    const uint at = atomicAdd(rc_count[k], nb);
+    for (uint j = 0u; j < nb; ++j)
+    {
+        if (at + j < cap) rc_list[k * cap + at + j] = blk[j].x | (blk[j].y << 16u) | (carry ? 0x80000000u : 0u);
+        // (every block is visited by exactly one tile: set or clear its bit)
+        const uint bi = blk[j].y * rc_h1.z + blk[j].x;
+        const uint w = 2u * cap + (bi >> 5u), bit = 1u << (bi & 31u);
+        if (carry) atomicOr(rc_list[w], bit); else atomicAnd(rc_list[w], ~bit);
+    }
+    if (carry && (rc_h0.w & 2u) != 0u) atomicAdd(rc_stats[RC_ST_CARRY], 1u);
+    if ((rc_h0.w & 2u) != 0u)
+    {
+        atomicAdd(rc_stats[trace ? RC_ST_TRACED : RC_ST_REUSED], 1u);
+        atomicAdd(rc_stats[trace ? RC_ST_BTRACE : RC_ST_BREUSE], nb);
+        if (sky) atomicAdd(rc_stats[RC_ST_SKY], 1u);
+        if (trace)
+        {
+            // The primary reason (precedence order of the RC_ST_* slots).
+            for (uint s = RC_ST_FORCED; s <= RC_ST_REFRESH; ++s)
+                if ((why & (1u << s)) != 0u)
+                {
+                    atomicAdd(rc_stats[s], 1u);
+                    if (s == RC_ST_NOHIST)
+                    {
+                        for (uint c = 0u; c < 3u; ++c)   // (every cause seen in the tile)
+                            if ((why & (1u << (28u + c))) != 0u) atomicAdd(rc_stats[RC_ST_NH_PREV + c], 1u);
+                    }
+                    break;
+                }
+        }
+        if (tile == uvec2(0u)) atomicAdd(rc_stats[RC_ST_FRAMES], 1u);
+    }
+}

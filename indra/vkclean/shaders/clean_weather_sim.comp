@@ -1,0 +1,387 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_ballot : require
+// vkclean — WEATHER PRECIPITATION SIMULATION (#783; vkgfx/llcleanweathervk.cpp): one
+// invocation per particle. Moves it by its velocity (clean_weather_common.glsl), wraps it
+// into the box around the camera, and appends it to this frame's visible list (+ the
+// instance count of the draw's indirect arguments) when it is active, in the view, above
+// the water and NOT under cover: below the top surface the occlusion map holds for its
+// column (a roof, a tree canopy, the floor above), it is hidden until it wraps back to the
+// top. The list is compacted per subgroup (one atomic per subgroup).
+// LISTENER COVER (weather audio, slweatheraudio.h): invocation 0 also reports how open the sky
+// is at the audio listener (nine taps of the occlusion map around it, compared against its
+// height) into a host-visible word the CPU reads once the frame slot comes round again.
+// #954 BLOWING SNOW (clean_weather_common.glsl wxIsDrift): those slots stream with the wind (+ its
+// eddies) along the first surface under them (the near map, else the coarse one) at a few
+// decimetres -- their height a function of the slot and time, not integrated -- never under a
+// roof test (they ARE on the top surface), never splashing; over water / no surface: hidden.
+// M4 RUN-OFF DRIPS (clean_weather_common.glsl): the invocations past the rain (box.z) run the
+// drips -- each falls from its eave (wxDripAt), splashes and frees its slot on its landing
+// height, and is listed (0x80000000 | drip) when in the view. Drips are never hidden by the
+// roof test (they are born under a roof's edge by design).
+//
+// -DWX_RUNOFF_SPAWN (M4): one invocation per run-off emitter (indirect: the list's header).
+// Each discharges its catchment x the run-off strength as drips (a Poisson count per frame,
+// thinned to the drip budget across all emitters), jittered along its edge, into the drip
+// slots round-robin (the oldest goes); a STREAM (catchment x strength past the threshold, the
+// draw is its ribbon) drops fewer drips and splashes where it lands. It also sums how loud the
+// run-off near the audio listener is (x 1000) and this frame's spawns into the ring head's
+// spare words (device-local); the simulation's invocation 0 hands them, with the list's size,
+// to the host-visible listener words [1] / [3] / [2] and clears them.
+#ifdef WX_RUNOFF_SPAWN
+layout(local_size_x = 64) in;
+#else
+layout(local_size_x = 256) in;
+#endif
+#include "clean_weather_common.glsl"
+
+layout(std430, set = 0, binding = 3) buffer WxArgs { uint args[4]; };   // VkDrawIndirectCommand
+// The occlusion maps (D32 top-down depth: 0 = the map's top, 1 = its bottom; nearest,
+// border depth 1 = open sky), double-buffered: occl.w picks the published one. [2] / [3] the
+// near cascade (M2 splash heights; occlN.w picks, 0 = none).
+layout(set = 0, binding = 4) uniform sampler2D uOccl[4];
+// M2 SPLASHES: the ring's head (round-robin slot counter); M4 the drip slots' head.
+layout(std430, set = 0, binding = 7) buffer WxSplashHead { uint splash_head; uint drip_head; uint wx_pad0, wx_pad1; };
+#ifndef WX_RUNOFF_SPAWN
+// The listener's openness: 0 under cover .. 1 open sky, -1 = no map (host-visible); M4: the
+// run-off loudness at the listener (x 1000), the emitter appends, this frame's drips.
+layout(std430, set = 0, binding = 5) writeonly buffer WxListener { float l_open; uint l_runoff, l_emitters, l_drips; };
+// #901 PER-AVATAR SHELTER MAPS: the atlas (x the top height above the layer's pelvis) and the
+// layers' frames (clean_weather_shelter.glsl). Read only while wp.shelter.x > 0.
+layout(set = 0, binding = 9) uniform sampler2D uShAtlas[2];
+#define WX_SH_SET 0
+#define WX_SH_BINDING 10
+#define WX_SH_ACCESS     // (read-write: the hidden / splashed counters, sh_stat)
+#include "clean_weather_shelter.glsl"
+#endif
+
+// M2 / M4: a splash into the ring at P (round-robin: the oldest goes).
+void wxSplash(vec3 P)
+{
+    const uint n = uint(wp.splash.y + 0.5);
+    const uint slot = atomicAdd(splash_head, 1u) % max(n, 1u);
+    splashes[slot] = vec4(P, max(wp.eye.w, 1e-3));
+}
+
+#ifdef WX_RUNOFF_SPAWN
+void main()
+{
+    const uint e = gl_GlobalInvocationID.x;
+    const uint cap = uint(wp.runoff2.w + 0.5);
+    const uint count = min(em_head[3], cap);
+    const uint drips = uint(wp.runoff2.x + 0.5);
+    const float dt = wp.wind.w;
+    if (e >= count || drips == 0u || !(wp.runoff.x > 0.0)) return;
+    const vec4 e0 = emitters[2u * e], e1 = emitters[2u * e + 1u];
+    const float q = e0.w * wp.runoff.x;                 // the discharge (catchment m2 x strength)
+    // The drip budget across every emitter: all of them together at most runoff.w drips / s.
+    const float total = float(em_head[8]) * uintBitsToFloat(em_head[9]) * wp.runoff.x * wp.runoff.y;
+    const float thin = total > wp.runoff.w ? wp.runoff.w / total : 1.0;
+    const bool stream = wp.runoff2.z > 0.5 && q >= wp.runoff.z;
+    float rate = q * wp.runoff.y * thin * (stream ? 0.2 : 1.0);
+    const float salt = fract(wp.eye.w * 0.6180339);
+    const uint seed = wxHash(e * 0x9E3779B9u ^ uint(wp.misc.x) * 0x85EBCA6Bu);
+    const float u0 = float(seed >> 8) * (1.0 / 16777216.0);
+    const uint n = dt > 0.0 ? min(uint(rate * dt + u0), 3u) : 0u;
+    const vec2 out1 = e1.yz;                            // outward, one flow texel long
+    const vec2 along = vec2(-out1.y, out1.x);
+    const float land = wxDripLand(e1);
+    for (uint k = 0u; k < n; ++k)
+    {
+        const uint d = atomicAdd(drip_head, 1u) % drips;
+        const uint slot = uint(wp.runoff2.y + 0.5) + 2u * d;
+        const float r1 = wxRand(seed + k, 3u), r2 = wxRand(seed + k, 5u), r3 = wxRand(seed + k, 7u);
+        // Jittered along the edge (its flow texel), a hair outside it; born within this frame.
+        const vec3 o = vec3(e0.xy + along * (r1 - 0.5) + out1 * (0.05 + 0.1 * r2), e0.z - 0.005);
+        particles[slot] = vec4(o, max(wp.eye.w - r3 * dt, 1e-3));
+        particles[slot + 1u] = vec4(e1.x, r1 + salt, 0.0, 0.0);
+    }
+    if (n > 0u) atomicAdd(wx_pad1, n);
+    // A stream's landing: splashes where it hits (ringed with the rain's).
+    if (stream && wp.splash.x > 0.5 && dt > 0.0)
+    {
+        const vec2 dP = e0.xy - wp.eye.xy;
+        if (dot(dP, dP) < wp.splash.w * wp.splash.w)
+        {
+            const uint ns = min(uint(q * 6.0 * dt + wxRand(seed, 9u)), 2u);
+            const float tFall = sqrt(2.0 * max(e0.z - land, 0.0) / kWxGravity);
+            for (uint k = 0u; k < ns; ++k)
+            {
+                const vec2 j = (vec2(wxRand(seed + k, 11u), wxRand(seed + k, 13u)) - 0.5) * 0.08;
+                wxSplash(vec3(e0.xy + out1 * 0.15 + wp.wind.xy * (0.5 * tFall) + j, land));
+            }
+        }
+    }
+    // Loudness near the listener: the discharge, falling off with the square of the distance.
+    if (wp.ear.w > 0.0)
+    {
+        const vec3 dE = e0.xyz - wp.ear.xyz;
+        const float d2 = dot(dE, dE);
+        if (d2 < 144.0) atomicAdd(wx_pad0, uint(min(q / (1.0 + d2), 20.0) * 1000.0));
+    }
+}
+#else
+
+// The occlusion map's uv of P: its column, back along the (tilted, M2) fall direction to the
+// map's top plane.
+vec2 wxMapUV(vec3 P) { return (P.xy - (wp.occl2.x - P.z) * wp.tilt.xy - wp.occl.xy) * wp.occl.z; }
+
+// M2 SPLASHES: the height of the first surface the rain meets along P's column -- the near map
+// where it covers P (centimetre texels), else the coarse one; -1e9 = nothing (open / no map).
+float wxTopAt(vec3 P)
+{
+    if (wp.occlN.w > 0.5)
+    {
+        const vec2 uv = (P.xy - (wp.occlN2.x - P.z) * wp.tilt.zw - wp.occlN.xy) * wp.occlN.z;
+        if (all(greaterThanEqual(uv, vec2(0.0))) && all(lessThanEqual(uv, vec2(1.0))))
+        {
+            const float dn = wp.occlN.w > 1.5 ? textureLod(uOccl[3], uv, 0.0).r : textureLod(uOccl[2], uv, 0.0).r;
+            return dn >= 1.0 ? -1e9 : wp.occlN2.x - dn * wp.occlN2.y;
+        }
+    }
+    if (wp.occl.w > 0.5)
+    {
+        const vec2 uv = wxMapUV(P);
+        if (all(greaterThanEqual(uv, vec2(0.0))) && all(lessThanEqual(uv, vec2(1.0))))
+        {
+            const float dc = wp.occl.w > 1.5 ? textureLod(uOccl[1], uv, 0.0).r : textureLod(uOccl[0], uv, 0.0).r;
+            return dc >= 1.0 ? -1e9 : wp.occl2.x - dc * wp.occl2.y;
+        }
+    }
+    return -1e9;
+}
+
+// #901: the avatars' shelter maps (an umbrella, a hat, the avatar itself) over a drop at P that
+// falls with the shear sh (horizontal drift per metre of fall: its own velocity -- the wind tilts
+// it): the drop came down the line P + (-sh, 1) dz, so it is under cover when that line passed
+// below a map's top somewhere above it (a few points up the line; dz 0 is the plain column). The
+// return: the height of the surface it met (world z; -1e9: none -- no layer near, nothing over it).
+// A drop under it is hidden, one crossing it splashes on it. (The old test took the vertical
+// column alone: under any wind the drops slanted in under the canopy's upwind edge onto the
+// wearer, and the canopy's lee -- dry in the real rain shadow -- kept falling.)
+const float kWxShDz[5] = float[5](0.0, 0.35, 0.8, 1.4, 2.2);
+float wxShelterTop(vec3 P, vec2 sh)
+{
+    float top = -1e9;
+    const uint n = min(uint(wp.shelter.x + 0.5), WX_SH_LAYERS);
+    const float drift = length(sh) * kWxShDz[4];
+    for (uint L = 0u; L < n; ++L)
+    {
+        if (sh_info[L].x == 0xFFFFFFFFu) continue;
+        const float e = sh_ext[L].x;
+        const vec3 d = P - sh_frame[L].xyz;
+        if (abs(d.x) > 0.75 * e + drift || abs(d.y) > 0.75 * e + drift) continue;   // (the tile's bounding square, any yaw, + the path's drift)
+        for (int k = 0; k < 5; ++k)
+        {
+            const vec3 Q = vec3(P.xy - sh * kWxShDz[k], P.z + kWxShDz[k]);
+            const vec3 q = wxShLocal(L, Q);
+            ivec2 t;
+            if (!wxShTexel(L, q.xy, t)) continue;
+            const float h = wp.shelter.y > 0.5 ? texelFetch(uShAtlas[1], t, 0).r : texelFetch(uShAtlas[0], t, 0).r;
+            if (!(h > kShNoneTest)) continue;
+            const float zt = sh_frame[L].z + h;
+            // the path at this column is at Q.z: below the surface there = it went through it
+            if (zt >= Q.z - 0.01) { top = max(top, zt); break; }
+        }
+    }
+    return top;
+}
+
+// The occlusion map's openness at P (1 open .. 0 covered), wp.occl.w > 0.5.
+float wxOpenAt(vec3 P)
+{
+    const vec2 uv = wxMapUV(P);
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) return 1.0;
+    const float depth = wp.occl.w > 1.5 ? textureLod(uOccl[1], uv, 0.0).r : textureLod(uOccl[0], uv, 0.0).r;
+    const float top = wp.occl2.x - depth * wp.occl2.y;
+    return clamp((P.z - (top - 1.5 * wp.occl2.z)) / wp.occl2.z, 0.0, 1.0);
+}
+
+// M4: drip d (clean_weather_common.glsl): falls, splashes + frees its slot on landing, and is
+// visible when alive and in the view.
+bool wxDrip(uint d)
+{
+    const uint slot = uint(wp.runoff2.y + 0.5) + 2u * d;
+    const vec4 a = particles[slot];
+    if (!(a.w > 0.0)) return false;
+    const float t = wp.eye.w - a.w;
+    if (t < 0.0 || t > 8.0) { particles[slot].w = 0.0; return false; }   // (the clock wrapped / lost)
+    const vec4 b = particles[slot + 1u];
+    vec3 P, V;
+    wxDripAt(a, t, P, V);
+    const float land = wxDripLand(b);
+    if (P.z <= land)
+    {
+        // Landed this step (a live recording): a splash near the camera, the slot freed.
+        if (wp.wind.w > 0.0)
+        {
+            const vec2 dP = P.xy - wp.eye.xy;
+            if (wp.splash.x > 0.5 && dot(dP, dP) < wp.splash.w * wp.splash.w) wxSplash(vec3(P.xy, land));
+            particles[slot].w = 0.0;
+        }
+        return false;
+    }
+    const vec4 c = wp.view_proj * vec4(P - wp.eye.xyz, 1.0);
+    const float m = c.w * 1.05 + 1.0;
+    return c.w > 0.05 && abs(c.x) <= m && abs(c.y) <= m;
+}
+
+void main()
+{
+    const uint gi = gl_GlobalInvocationID.x;
+    const uint cap = uint(wp.box.z + 0.5);   // the rain's slots (M4: the drips follow)
+    const uint dripN = uint(wp.runoff2.x + 0.5);
+    const uint i = gi;
+    bool vis = false;
+    bool shHidC = false, shSplC = false;   // (#901 the counters)
+    uint entry = i;
+    if (i >= cap && i - cap < dripN)
+    {
+        vis = wxDrip(i - cap);
+        entry = 0x80000000u | (i - cap);
+    }
+    if (i < cap)
+    {
+        const vec3 R = vec3(wp.box.x, wp.box.x, wp.box.y);
+        vec3 d;
+        bool fresh = true;     // reset or wrapped this step: no continuous path (no splash)
+        vec3 Pold = vec3(0.0);
+        if (wp.misc.y > 0.5)
+        {
+            // Reset (first frame / re-created buffer): uniform in the box.
+            d = (vec3(wxRand(i, 1u), wxRand(i, 2u), wxRand(i, 3u)) * 2.0 - 1.0) * R;
+        }
+        else
+        {
+            const bool snow = wxIsSnow(i);
+            Pold = particles[i].xyz;
+            vec3 V = wxVelocity(i, snow, Pold);
+            // #954 blowing snow: along the ground at about the wind's speed (its height is set below)
+            if (wxIsDrift(i)) V = vec3(V.xy * (0.85 + 0.3 * wxRand(i, 61u)), 0.0);
+            d = Pold - wp.eye.xyz + V * wp.wind.w;
+            fresh = snow || any(greaterThan(abs(d), R));
+            if (d.z < -R.z || d.z > R.z)
+            {
+                // Out of the top / bottom: wrap; one that fell through re-enters at the top
+                // in a fresh column (no repeating curtain).
+                const bool fell = d.z < -R.z;
+                d.z = mod(d.z + R.z, 2.0 * R.z) - R.z;
+                if (fell)
+                {
+                    const uint salt = uint(wp.misc.x) * 7u;
+                    d.xy = (vec2(wxRand(i, salt + 5u), wxRand(i, salt + 6u)) * 2.0 - 1.0) * R.xy;
+                }
+            }
+            d.xy = mod(d.xy + R.xy, 2.0 * R.xy) - R.xy;
+        }
+        // #954 BLOWING SNOW: on the first surface under the slot, at its own height (a few
+        // decimetres, bouncing slowly); no surface / water there: hidden.
+        const bool drift = wxIsDrift(i);
+        bool driftOk = false;
+        if (drift)
+        {
+            const float zt = wxTopAt(wp.eye.xyz + d);
+            if (zt > -1e8 && zt > wp.occl2.w + 0.05)
+            {
+                const float ph = wxRand(i, 63u) * 6.2831853;
+                const float h = wp.fall.w * (0.03 + -log(1.0 - 0.95 * wxRand(i, 67u)))
+                              * (0.7 + 0.3 * sin(wp.eye.w * (1.5 + wxRand(i, 71u)) + ph));
+                d.z = zt + h - wp.eye.z;
+                driftOk = abs(d.z) < R.z;
+            }
+        }
+        const vec3 P = wp.eye.xyz + d;
+        particles[i] = vec4(P, 0.0);
+
+        // M2 SPLASH: an active rain drop that crossed the first surface along its column (the
+        // map top: ground, roof, a tree's canopy; or the water plane) this step, near the
+        // camera, leaves a splash in the ring at the surface (round-robin: the oldest goes).
+        // #901: the avatars' own shelter (an umbrella, a hat, shoulders): above the map's top along
+        // the column -- a drop crossing it splashes there, one under it is hidden.
+        bool shHid = false, shSplash = false;
+        float shTop = -1e9;
+        if (wp.shelter.x > 0.5 && wxActive(i))
+        {
+            const vec3 V = wxVelocity(i, wxIsSnow(i), P);
+            // (capped at 60 degrees from the vertical, as the maps' tilt: a light flake in a gust
+            // would otherwise widen the layers' test to every flake around)
+            vec2 sh = V.xy / max(-V.z, 0.3);
+            sh *= min(1.0, 1.7320508 / max(length(sh), 1e-6));
+            shTop = wxShelterTop(P, sh);
+        }
+        if (wp.splash.x > 0.5 && !fresh && wxActive(i) && wp.wind.w > 0.0
+            && dot(P.xy - wp.eye.xy, P.xy - wp.eye.xy) < wp.splash.w * wp.splash.w)
+        {
+            const float zHit = max(max(wxTopAt(P), wp.occl2.w), shTop);
+            if (Pold.z >= zHit && P.z < zHit)
+            {
+                wxSplash(vec3(P.xy, zHit));
+                shSplash = zHit == shTop;
+            }
+        }
+
+        shHid = wxActive(i) && P.z < shTop;
+        vis = (wxActive(i) && P.z > wp.occl2.w && !shHid) || driftOk;
+        shHidC = shHid;
+        shSplC = shSplash;
+        if (vis)
+        {
+            // In the view (generous margin: the streak tail and the minimum width).
+            const vec4 c = wp.view_proj * vec4(d, 1.0);
+            const float m = c.w * 1.05 + 1.0;
+            vis = c.w > 0.05 && abs(c.x) <= m && abs(c.y) <= m;
+        }
+        if (vis && !drift && wp.occl.w > 0.5)
+        {
+            const vec2 uv = wxMapUV(P);
+            if (all(greaterThanEqual(uv, vec2(0.0))) && all(lessThanEqual(uv, vec2(1.0))))
+            {
+                const float depth = wp.occl.w > 1.5 ? textureLod(uOccl[1], uv, 0.0).r : textureLod(uOccl[0], uv, 0.0).r;
+                const float top = wp.occl2.x - depth * wp.occl2.y;
+                vis = P.z >= top - wp.occl2.z;
+            }
+        }
+    }
+    // Compaction: one atomic per subgroup.
+    const uvec4 ballot = subgroupBallot(vis);
+    const uint n = subgroupBallotBitCount(ballot);
+    uint base = 0u;
+    if (subgroupElect() && n > 0u) base = atomicAdd(args[1], n);
+    base = subgroupBroadcastFirst(base);
+    if (vis) visible[base + subgroupBallotExclusiveBitCount(ballot)] = entry;
+    // #901 DIAGNOSTICS: drops the avatars' shelter hid / splashed this step (cumulative; the log).
+    if (wp.shelter.x > 0.5)
+    {
+        const uint nh = subgroupBallotBitCount(subgroupBallot(shHidC)), ns = subgroupBallotBitCount(subgroupBallot(shSplC));
+        if (subgroupElect())
+        {
+            if (nh > 0u) atomicAdd(sh_stat.x, nh);
+            if (ns > 0u) atomicAdd(sh_stat.y, ns);
+        }
+    }
+
+    if (i == 0u && wp.ear.w > 0.0)
+    {
+        float open = -1.0;
+        if (wp.occl.w > 0.5)
+        {
+            // The centre and a ring of eight: a roof edge overhead reads as partly covered.
+            open = wxOpenAt(wp.ear.xyz);
+            for (int k = 0; k < 8; ++k)
+            {
+                const float a = 0.78539816 * float(k);
+                open += wxOpenAt(wp.ear.xyz + vec3(cos(a), sin(a), 0.0) * wp.ear.w);
+            }
+            open *= 1.0 / 9.0;
+        }
+        l_open = open;
+        // M4: the spawn kernel's sums (it ran before this dispatch), cleared for the next frame.
+        const bool run = wp.runoff2.x > 0.5;
+        l_runoff = run ? wx_pad0 : 0u;
+        l_emitters = run ? em_head[3] : 0u;
+        l_drips = run ? wx_pad1 : 0u;
+    }
+    if (i == 0u) { wx_pad0 = 0u; wx_pad1 = 0u; }
+}
+#endif   // WX_RUNOFF_SPAWN

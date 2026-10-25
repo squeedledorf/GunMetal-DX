@@ -1,0 +1,170 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<panel
+ height="300"
+ layout="topleft"
+ mouse_opaque="true"
+ name="friends"
+ width="355">
+	<panel.string name="FontName" value="SANSSERIF"/>
+	<layout_stack
+	 default_tab_group="2"
+	 border_size="0"
+	 animate="true"
+	 follows="all"
+	 clip="false"
+	 bottom="-20"
+	 right="-4"
+	 left="4"
+	 layout="topleft"
+	 orientation="vertical"
+	 name="ls_friend_list"
+	 top="0">
+		<layout_panel
+		 name="lp_search"
+		 auto_resize="false"
+		 user_resize="false"
+		 top="0"
+		 layout="topleft"
+		 height="27"
+		 follows="left|top|right">
+			<filter_editor
+			 follows="left|top|right"
+			 height="23"
+			 layout="topleft"
+			 left="1"
+			 label="Filter Friends"
+			 max_length_chars="300"
+			 name="friend_filter_input"
+			 top="3"
+			 right="-86" />
+			<menu_button
+			 follows="top|right"
+			 height="23"
+			 image_hover_unselected="Toolbar_Middle_Over"
+			 image_overlay="Conv_toolbar_sort"
+			 image_selected="Toolbar_Middle_Selected"
+			 image_unselected="Toolbar_Middle_Off"
+			 layout="topleft"
+			 menu_filename="menu_fs_contacts_friends_options.xml"
+			 menu_position="bottomleft"
+			 name="friends_options_btn"
+			 right="-57"
+			 tool_tip="Contact list options"
+			 top="3"
+			 width="27" />
+			<button
+			 follows="top|right"
+			 height="23"
+			 image_hover_unselected="Toolbar_Middle_Over"
+			 image_overlay="AddItem_Off"
+			 image_selected="Toolbar_Middle_Selected"
+			 image_unselected="Toolbar_Middle_Off"
+			 layout="topleft"
+			 name="add_btn"
+			 right="-29"
+			 tool_tip="Offer friendship to a resident"
+			 top="3"
+			 width="27" />
+			<button
+			 follows="top|right"
+			 height="23"
+			 image_hover_unselected="Toolbar_Middle_Over"
+			 image_overlay="TrashItem_Off"
+			 image_selected="Toolbar_Middle_Selected"
+			 image_unselected="Toolbar_Middle_Off"
+			 layout="topleft"
+			 name="remove_btn"
+			 right="-1"
+			 tool_tip="Remove this person from your friends list"
+			 top="3"
+			 width="27" />
+		</layout_panel>
+		<layout_panel
+		 name="lp_friend_list"
+		 tab_group="2"
+		 auto_resize="true"
+		 user_resize="false"
+		 top="0"
+		 layout="topleft"
+		 bottom="-1"
+		 follows="all">
+			<fs_scroll_list
+			 left="0"
+			 right="-1"
+			 top="0"
+			 bottom="-2"
+			 follows="all"
+			 layout="topleft"
+			 column_padding="0"
+			 column_header_template="flat_column_header"
+			 draw_heading="true"
+			 heading_height="20"
+			 multi_select="true"
+			 content_type="Agents"
+			 name="friend_list">
+				<fs_scroll_list.column
+				 name="icon_online_status"
+				 width="-1" />
+				<fs_scroll_list.column
+				 name="avatar_icon"
+				 sort_column="icon_online_status"
+				 sort_direction="descending"
+				 tool_tip="Online status"
+				 width="20" />
+				<fs_scroll_list.column
+				 dynamicwidth="true"
+				 label="Username"
+				 name="user_name"
+				 tool_tip="This contact's username."/>
+				<fs_scroll_list.column
+				 dynamicwidth="true"
+				 label="Display name"
+				 name="display_name"
+				 tool_tip="This contact's display name."/>
+				<fs_scroll_list.column
+				 dynamicwidth="true"
+				 label="Name"
+				 name="full_name"
+				 tool_tip="This contact's chosen name." />
+				<fs_scroll_list.column
+				 name="icon_visible_online"
+				 icon="Permission_Visible_Online_h"
+				 tool_tip="Friend can see when you&apos;re online"
+				 width="16" />
+				<fs_scroll_list.column
+				 name="icon_visible_map"
+				 icon="Permission_Visible_Map_h"
+				 tool_tip="Friend can locate you on the map"
+				 width="16" />
+				<fs_scroll_list.column
+				 name="icon_edit_mine"
+				 icon="Permission_Edit_Objects_Mine_h"
+				 tool_tip="Friend can edit, delete or take objects"
+				 width="16" />
+				<fs_scroll_list.column
+				 name="icon_visible_map_theirs"
+				 icon="Permission_Visible_Map_h"
+				 tool_tip="You can locate them on the map"
+				 width="16" />
+				<fs_scroll_list.column
+				 name="icon_edit_theirs"
+				 icon="Permission_Edit_Objects_Theirs_h"
+				 tool_tip="You can edit this friend&apos;s objects"
+				 width="16" />
+				<fs_scroll_list.column
+				 name="friend_last_update_generation"
+				 width="-1" />
+			</fs_scroll_list>
+		</layout_panel>
+	</layout_stack>
+	<text
+	 bottom="-4"
+	 follows="left|bottom"
+	 layout="topleft"
+	 height="14"
+	 left="6"
+	 name="friend_count"
+	 width="200">
+	 Friends: [COUNT]
+	</text>
+</panel>

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<!-- The standalone Scopes window (toolbar button "Scopes"): the same panel a
+     Photo Studio panel shows when its dropdown says Scopes. -->
+<floater
+ width="420"
+ height="340"
+ min_width="260"
+ min_height="200"
+ layout="topleft"
+ name="floater_scopes"
+ positioning="cascading"
+ title="Scopes"
+ save_rect="true"
+ can_resize="true">
+	<panel
+	 class="photo_studio_scopes"
+	 filename="panel_photo_studio_scopes.xml"
+	 follows="all"
+	 layout="topleft"
+	 left="0"
+	 top="18"
+	 width="420"
+	 height="320"
+	 name="scopes_panel" />
+</floater>

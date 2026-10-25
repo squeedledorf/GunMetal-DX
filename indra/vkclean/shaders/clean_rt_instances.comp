@@ -1,0 +1,1162 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "clean_av_slots.glsl"
+// vkclean — ray tracing: TLAS instances from the instance SSBO (LLCleanRTVK).
+//
+// Six modes (push .mode), dispatched with barriers between them (3 runs after pass A, before
+// mode 2; 5 just before mode 2; 4 after the rigged builds, before pass B):
+//   0  TLAS pass A, one lane per clean Instance id: writes the dense 1:1 TLAS
+//      instance record (VkAccelerationStructureInstanceKHR, 64 B) at the SAME index.
+//      Static / worn-attachment instances reference their chosen LOD slot's BLAS
+//      (the cull's own LOD rule); everything else is written INACTIVE (reference 0).
+//      Marks each chosen slot in the `used` bitset (CPU lazy BLAS build + LRU).
+//   2  RIG COPY, one workgroup per rigged entry (entry = workgroup + pc.rig_first; the
+//      CPU dispatches one run per group span being refit / built this frame): copies this frame's pre-skinned
+//      positions (eye-relative, clean_preskin.comp, or the skin cache's pelvis-local
+//      ones) into the entry's range of the RT rig-position buffer -- the input of the
+//      rigged BLAS refit/build that follows -- in the GROUP's space: AVATAR-LOCAL (the
+//      owner avatar's pelvis frame, joint 0 of its joint-table row, rotation normalized:
+//      the skin cache's frame, #632) for an avatar-owned entry, else ABSOLUTE world (+
+//      palette eye). Validates against the main cull's candidate (cand/cand_meta) and
+//      records rig_valid. #973 INPUT CHECK: an entry with a non-finite skinned position or
+//      one beyond RIG_MAX_REACH of its group's origin is collapsed whole (as an invalid one)
+//      and counted / listed for the CPU (see rigCopy).
+//   1  TLAS pass B, one lane per rigged entry. Rigged entries come in GROUPS (one
+//      owner avatar + mask class, contiguous) sharing ONE multi-geometry BLAS (a
+//      geometry per entry, in entry order). The group's first entry (the one carrying
+//      the BLAS address) writes the group record at its instance id with custom index
+//      RT_RIG_GROUP | its entry index -- its transform is the owner's CURRENT pelvis
+//      (avatar-local BLAS; identity for a world-space group) -- every other member's own
+//      record is inactive. AVATAR-LOCAL BLAS (#632): a held animation frame (pose
+//      unchanged relative to the pelvis) needs no rig copy and no BLAS refit -- only
+//      this record's transform moves the avatar (LLCleanRTVK refit gate: slotPoseClean). All members keep their rt_geom row (consumers resolve a hit's
+//      geometry index back to the member's instance id: clean_rt_common rtHitInstance).
+//   4  CLUSTER-SWITCHED GROUP CHECK (#747 / #748 rigged cluster RT), one lane per rigged
+//      entry: a group of faces the cluster raster draws (binding 23) takes its members'
+//      cluster records in pass B only when every member has one (see clRigGroupCheck).
+//   5  RIGGED POSE MOTION (#1007), one workgroup per joint-table slot (slot = workgroup +
+//      pc.rig_first): the max change of every joint's PELVIS-RELATIVE transform (the
+//      avatar-local rigged BLAS's space, #632) since the previous mode-5 dispatch -- joint
+//      translation (m) and rotation (max 3x3 column delta, ~ radians for a small turn; a
+//      scale change shows too) -- written to pose_rb for the CPU's refit pose skip
+//      (LLCleanRTVK "POSE SKIP"), then this frame's rows replace the snapshot.
+//   3  TERRAIN MORPH COPY (#211 smooth terrain), one workgroup per terrain entry
+//      (entry = workgroup + pc.rig_first): the slot's vertices as clean_draw.vert draws
+//      them -- the geomorph step (texcoord0.y) blended in by the MAIN camera's distance
+//      (pc.lod_cam, the cull's = frame info terrain_lod) -- in LOCAL space (the TLAS
+//      record applies the model matrix) into the RT terrain position buffer, the input of
+//      that slot's morph BLAS build / refit (LLCleanRTVK terrain morph). Without it the
+//      BLAS held the unmorphed level while the raster drew the morphed one: shadow rays
+//      leaving the raster surface met BLAS triangles millimetres to centimetres above it.
+// Never CPU-written: every buffer this shader writes is GPU-only.
+//
+// TLAS REFIT (pc.tlas_update != 0: the CPU records MODE_UPDATE on this frame's records).
+// An update may change instance definitions (transform, mask, flags, BLAS reference)
+// but must not flip any instance between ACTIVE and INACTIVE (reference 0) relative to
+// the last BUILD (VUID-vkCmdBuildAccelerationStructuresKHR-pInfos-03663 / -03664). So
+// on update frames every record write first reads the record this buffer holds from
+// the previous frame (same activity as the last build, by induction):
+//   was inactive (ref 0) -> stays ref 0, even if it now wants in: counted as DEFERRED
+//                           (used_bits[counter_word + 1]); it joins at the next build.
+//   was active           -> wanted: the real record; unwanted: a never-hit PLACEHOLDER
+//                           (its previous transform -- no BVH node stretch --, mask 0,
+//                           the CPU's 1-triangle dummy BLAS pc.dummy_lo/hi).
+// Build frames write exactly the old records (inactive = ref 0, dropped by the builder).
+// Cross-frame read: relies on the previous frame's TLAS build and this pass running in
+// submission order on one queue (LLCleanRTVK::recordBuild's leading WAR barrier).
+
+layout(local_size_x = 64) in;
+
+struct Instance {
+    mat4 model_matrix;
+    vec4 aabb_min;       // .w = LL LOD radius
+    vec4 aabb_max;       // .w = attach bone index
+    vec4 tint;
+    mat4 uv_matrix;
+    uint lod_group_id;
+    uint material_id;
+    uint flags;
+    uint skin_id;
+    vec4 spin_axis;
+    vec4 spin_pivot;
+};                       // 224 B
+struct SlotInfo {
+    uint first_index;
+    uint index_count;
+    int  base_vertex;
+    uint has_weights;
+    uint vert_count;
+    uint _pad0; uint _pad1; uint _pad2;
+};
+struct LodGroup { uint slot[4]; };
+#include "clean_joint_table.glsl"   // mat3x4 joint world rows (jointWorld())
+// VkAccelerationStructureInstanceKHR (64 B): 3x4 row-major transform,
+// customIndex:24 | mask:8, sbtOffset:24 | flags:8, 64-bit BLAS address (lo, hi).
+struct TlasInstance {
+    vec4 row0; vec4 row1; vec4 row2;
+    uint custom_mask;
+    uint sbt_flags;
+    uint ref_lo;
+    uint ref_hi;
+};
+struct RigEntry {
+    uint inst;          // clean Instance id
+    uint dst_base;      // first vertex of this entry in rig_pos
+    uint vert_count;
+    uint first_index;   // expected cull candidate (same slot)
+    uint index_count;
+    uint uv_base;       // static base_vertex of the slot (UVs for the any-hit)
+    uint blas_lo;
+    uint blas_hi;
+};
+struct DrawCmd { uint indexCount; uint instanceCount; uint firstIndex; int vertexOffset; uint firstInstance; };
+
+layout(std430, binding = 0)  readonly buffer Instances { Instance instances[]; };
+layout(std430, binding = 1)  readonly buffer Slots     { SlotInfo slots[]; };
+layout(std430, binding = 2)  readonly buffer LodGroups { LodGroup lod_groups[]; };
+layout(std430, binding = 3)  readonly buffer Joints    { AvatarJoints avatar_joints[]; };
+layout(std430, binding = 4)  readonly buffer AvatarVis { uint av_vis[]; };
+layout(std430, binding = 5)  readonly buffer SlotAddr  { uvec2 slot_addr[]; };   // 0 = no BLAS
+layout(std430, binding = 6)  coherent buffer UsedBits  { uint used_bits[]; };
+layout(std430, binding = 7)  buffer Tlas               { TlasInstance tlas[]; };   // read: TLAS refit (above)
+layout(std430, binding = 8)  writeonly buffer RtGeom   { uvec4 rt_geom[]; };
+layout(std430, binding = 9)  readonly buffer Rig       { RigEntry rig[]; };
+layout(std430, binding = 10) buffer RigValid           { uint rig_valid[]; };
+layout(std430, binding = 11) readonly buffer Cand      { DrawCmd cand[]; };
+layout(std430, binding = 12) readonly buffer CandMeta  { uint cand_meta[]; };
+// The compact skinned vertex (#616, clean_skinvert.glsl): fp32 position in words 0..2.
+#define SKIN_VBO_WORDS 5u   // = SV_WORDS
+layout(std430, binding = 13) readonly buffer SkinVbo   { uint skin_vbo[]; };      // SkinVertex, 5 words
+// RIG_POS: 4 words per vertex (RT_RIGPOS_WORDS, clean_rt_common.glsl): the BLAS build
+// input's xyz (fp32 bits; vertexStride 16 in llcleanrtvk.cpp) + the SKINNED, WELDED
+// normal word of the SkinVertex (octahedral, clean_skinvert.glsl) -- the normal the
+// rigged raster lights with, for the RT shadow-terminator lift (clean_shadow_rt.glsl
+// rtTerminatorProbe). uint[] so the packed normal never passes through a float.
+layout(std430, binding = 14) writeonly buffer RigPos   { uint rig_pos[]; };
+// OPACITY MICROMAPS (#194, llcleanrtomm.cpp): per instance, OMM id + 1 per LOD level of
+// its group (0 = none); per OMM id, its BLAS address (0 = retired). An alpha-mask instance
+// with one for the level it uses references that BLAS -- the slot's triangles in the same
+// order plus a micromap baked from its material -- with no opacity override.
+layout(std430, binding = 15) readonly buffer OmmInst   { uvec4 omm_inst[]; };
+layout(std430, binding = 16) readonly buffer OmmAddr   { uvec4 omm_addr[]; };   // addr lo, hi, slot, 0
+// TERRAIN MORPH COPY (mode 3): the static VBO (quantized, #573: 5 words per vertex, the
+// slot's decode header before src_base), this frame's entries, and the GPU-only morphed
+// local positions (vec3).
+#include "clean_qvertex.glsl"
+struct TerrEntry { uint inst; uint src_base; uint dst_base; uint vert_count; };
+layout(std430, binding = 17) readonly buffer StaticVbo   { uint vbo[]; };
+layout(std430, binding = 18) readonly buffer TerrEntries { TerrEntry terr[]; };
+layout(std430, binding = 19) writeonly buffer TerrPos    { float terr_pos[]; };
+// AVATAR-LOCAL RIGGED BLAS (#632): the skin meta (avatar slot of a rigged instance's skin,
+// word 0 of the 1892-word LLCleanSkinStore::SkinMeta) and the main cull's per-instance
+// rig-cache words (RC_STATE: this draw's vertices are the skin cache's pelvis-local ones).
+layout(std430, binding = 20) readonly buffer SkinMetaW   { uint skin_meta_w[]; };
+layout(std430, binding = 21) readonly buffer RigCacheW   { uint rig_cache[]; };
+// CLUSTER LOD RT OVERRIDE (#748, vkgfx/llcleanclusterrtvk.h; written this frame by
+// clean_cluster_rt.comp mode 5, the 256 B zero dummy when the cluster RT is inactive): per
+// instance id {BLAS address lo, hi, hit-cut base, first pool vertex | 0x80000000 when the
+// geometry index is the cluster ref}. Address 0 = no override (the legacy slot BLAS).
+layout(std430, binding = 22) readonly buffer ClRtOvr     { uvec4 cl_ovr[]; };
+// CLUSTER LOD RIGGED RT (#747 / #748 integration, llcleanclusterrtvk.h RIGGED; host-written per
+// frame slot by LLCleanClusterRTVK::tlasRigMap, the 256 B zero dummy = none): [0] entries that
+// took their cluster record this frame, [1] cluster-switched entries that kept the legacy group,
+// [2] switched (rig-cache RC_CLUSTER) faces traced on their legacy geometry this frame | bit 31 (host:
+// valid), [3] 1 = a real map (the dummy is 0: nothing counted), [4..6] the RT origin of the
+// cluster arena's positions (float bits), [7] 1 = [4..6] valid (#748 perf pass 2), [CLRIG_HDR + e] rig entry e's group head + 1 when its group is CLUSTER-SWITCHED (the rigged
+// plan keys the faces of avatars the cluster raster draws apart: llcleanrtvk.cpp), 0 = not;
+// [CLRIG_HDR + rig_count + head] the group's "not all ready" flag (mode 4; host-zeroed).
+layout(std430, binding = 23) coherent buffer ClRtRig     { uint cl_rtrig[]; };
+// #874 READ GUARD: per instance id (= rt_geom row), RT_GEOM_VC_WORDS words: [0] the vertex count
+// of the geometry its record references (static slot / rig entry; 0 = unknown: cluster rows,
+// inactive) -- the consumers check every triangle index against it (clean_rt_common.glsl
+// RTG_VTX); (#1009) [1..3] a CLUSTER-TRACED STATIC's legacy row (first index, base vertex,
+// index count; 0 elsewhere) -- the emissive light build lists its triangles from it
+// (clean_rt_common.glsl rtGeomEmRow).
+#define RT_GEOM_VC_WORDS 4u
+layout(std430, binding = 24) writeonly buffer RtGeomVc   { uint rt_geom_vc[]; };
+void setGeomVc(uint id, uint vc)
+{
+    if (id >= uint(rt_geom_vc.length()) / RT_GEOM_VC_WORDS) return;
+    const uint b = id * RT_GEOM_VC_WORDS;
+    rt_geom_vc[b] = vc;
+    rt_geom_vc[b + 1u] = 0u; rt_geom_vc[b + 2u] = 0u; rt_geom_vc[b + 3u] = 0u;
+}
+// (#1009, after setGeomVc) a cluster-traced static's legacy row: words 1..3
+void setGeomEmRow(uint id, uint first, int base, uint count)
+{
+    if (id >= uint(rt_geom_vc.length()) / RT_GEOM_VC_WORDS) return;
+    const uint b = id * RT_GEOM_VC_WORDS;
+    rt_geom_vc[b + 1u] = first; rt_geom_vc[b + 2u] = uint(base); rt_geom_vc[b + 3u] = count;
+}
+// #1007 RIGGED POSE MOTION (mode 5): the joint table as of the last mode-5 dispatch (same
+// slots / stride as binding 3; GPU-only) and, per joint-table slot, the max pelvis-relative
+// change since then -- {translation (m), rotation (max column delta ~ radians)} as float bits
+// -- host-read by LLCleanRTVK when this frame slot comes round (the pose skip).
+layout(std430, binding = 25) buffer PoseSnap             { AvatarJoints pose_snap[]; };
+layout(std430, binding = 26) writeonly buffer PoseRb     { uint pose_rb[]; };
+#define CLRIG_HDR 40u   // (8 header words + the AV_SLOT_WORDS avatar mask; was 16 with 256 slots)
+#define CLOVR_RIG 0x40000000u   // = clean_cluster_rt.comp OVR_RIG
+// [8..15] (CLRIG_AV_TRACED, 2026-10-13): a 256-bit avatar mask (joint-table slot) written only
+// while the legacy avatar class is dropped from RT: the avatars whose switched groups pass B still
+// traces from their cluster cut -- pass A keeps their worn rigid attachments.
+#define CLRIG_AV_TRACED 8u
+bool clAvTraced(uint av)
+{
+    if (av >= AV_SLOT_CAP || uint(cl_rtrig.length()) < CLRIG_HDR || cl_rtrig[3] != 1u) return false;
+    return ((cl_rtrig[CLRIG_AV_TRACED + (av >> 5)] >> (av & 31u)) & 1u) != 0u;
+}
+#include "clean_skinvert.glsl"   // svPackNormal / RC_WORDS / RC_STATE
+#define SKIN_META_WORDS 1892u
+
+layout(push_constant) uniform Push {
+    vec4 lod_cam;       // xyz main camera (LOD distance), w lod_factor
+    vec4 cam_time;      // xyz camera (radius test), w time (spinners)
+    vec4 eye;           // xyz pre-skin palette eye, w RT radius (m)
+    uint instance_count;
+    uint slot_count;
+    uint rig_count;
+    uint mode;
+    uint idx_valid;     // indices uploaded (OOB guard, as the cull)
+    uint joint_count;   // valid avatar_joints entries
+    uint counter_word;  // used_bits[counter_word] counts active TLAS instances
+    uint dbg_on;        // bit 0 RenderVKRTDebugFlicker: record the membership stats below;
+                        // bit 1 RenderVKRTBlendCull (pass A); bit 2 RenderVKRTRiggedFacingParity
+                        // (FACING_RIG); bit 3 RenderVKRTFoliageTransmission != 0 (FACING_LEAF)
+    vec4 dbg_sphere;    // xyz focus centre (the focus projector's apex), w radius (m)
+    uint rig_first;     // mode 2: first rig entry of this dispatch's run
+    uint tlas_update;   // 1 = this frame's TLAS is a refit (activity preserved, see top)
+    uint dummy_lo;      // placeholder BLAS address (update frames only)
+    uint dummy_hi;
+    float small_size;   // pass A: the small static opaque class bound (m; maskClassSized), 0 = off
+} pc;
+
+// ---- FLICKER DIAGNOSTIC (RenderVKRTDebugFlicker; dbg_on bit 0 clear -> never touched) ----
+// Tail of used_bits after the counters -- [counter_word] active, [+1] deferred, [+2] rig
+// copy entries that failed their check (#692), [+3] the largest such instance id + 1,
+// [+4] #973 rig copy entries collapsed by the input check (low 16 bits: beyond the reach,
+// high 16 bits: non-finite), [+5] how many were listed, [+6 .. +13] their instance ids (the
+// first RIG_BAD_LIST) -- (read back with them, one frame slot later); offsets below are
+// relative to cw = counter_word + 13 (LLCleanRTVK kCounterWords - 1):
+//   [cw+1 .. cw+8]   active instances per mask class (bit index of maskClass)
+//   [cw+9]           focus: active instances whose bounding sphere meets dbg_sphere
+//   [cw+10]          focus: XOR of per-instance hashes (id, BLAS address, transform,
+//                    flags, material id, tint alpha)
+//   [cw+11]          focus: SUM of the same hashes (XOR alone cancels pairs)
+//   [cw+12 .. cw+19] focus: per mask class
+//   [cw+20 ..]       focus: (instance id, hash) pairs (first DBG_FOCUS_CAP, unordered)
+#define DBG_FOCUS_CAP 1024u
+uint dbgHash(uint x)
+{
+    x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16;
+    return x;
+}
+void dbgNote(uint id, uint cls, vec3 c, float r, uint ref_lo, mat4 M)
+{
+    const uint cw = pc.counter_word + 13u;   // the last counter word (see above)
+    const uint ci = uint(findLSB(cls)) & 7u;
+    atomicAdd(used_bits[cw + 1u + ci], 1u);
+    if (length(c - pc.dbg_sphere.xyz) - r > pc.dbg_sphere.w) return;
+    uint h = dbgHash(id * 0x9E3779B9u ^ ref_lo);
+    h = dbgHash(h ^ floatBitsToUint(M[3].x)); h = dbgHash(h ^ floatBitsToUint(M[3].y));
+    h = dbgHash(h ^ floatBitsToUint(M[3].z)); h = dbgHash(h ^ floatBitsToUint(M[0].x));
+    h = dbgHash(h ^ floatBitsToUint(M[1].y)); h = dbgHash(h ^ floatBitsToUint(M[2].z));
+    h = dbgHash(h ^ instances[id].flags); h = dbgHash(h ^ instances[id].material_id);
+    h = dbgHash(h ^ floatBitsToUint(instances[id].tint.a));
+    const uint n = atomicAdd(used_bits[cw + 9u], 1u);
+    atomicXor(used_bits[cw + 10u], h);
+    atomicAdd(used_bits[cw + 11u], h);
+    atomicAdd(used_bits[cw + 12u + ci], 1u);
+    if (n < DBG_FOCUS_CAP) { used_bits[cw + 20u + 2u * n] = id; used_bits[cw + 21u + 2u * n] = h; }
+}
+
+#define LOD_SENTINEL 0xFFFFFFFFu
+#define AV_VIS_SLOTS AV_SLOT_CAP
+// av_vis bits (= clean_cull.comp AVV_*, LLCleanRendererVK::kAvVis*): the TLAS holds the
+// avatars some CPU-decided pass draws (AVV_ANY: main view, sun, projector, mirror) plus
+// those a ray-traced probe capture may need (AVV_RT_PROBE, #517) -- the same set the CPU's
+// rigged BLAS walk takes (LLCleanRtVK).
+#define AVV_ANY      1u
+#define AVV_NOSHADOW 2u
+#define AVV_RT_PROBE 8192u
+// NO-SELF-SHADOW (LLCleanRendererVK::kAvVisRtNoSelf, set by LLCleanRTVK::classifyNoSelf): the
+// avatar's rigged RT update may be throttled (RenderVKRigRefitGate 2), so it never self-shadows
+// in RT (clean_rt_common.glsl rtSelfCandidate): pass B tags its group records (rigNoSelfOwner).
+#define AVV_RT_NOSELF 0x10000000u
+
+#define RT_MASK_OPAQUE    0x01u
+#define RT_MASK_ALPHAMASK 0x02u
+#define RT_MASK_BLEND     0x04u
+#define RT_MASK_RIGGED    0x08u
+#define RT_MASK_TERRAIN   0x10u
+#define RT_MASK_WATER     0x20u
+#define RT_MASK_ATTACH    0x40u
+#define RT_MASK_SMALL     0x80u   // small static opaque (clean_rt_common.glsl SIZE CLASS)
+
+// VkGeometryInstanceFlagBitsKHR
+#define GI_CULL_DISABLE     0x1u
+#define GI_FLIP_FACING      0x2u
+#define GI_FORCE_OPAQUE     0x4u
+#define GI_FORCE_NO_OPAQUE  0x8u
+
+#include "clean_terrain_lod.glsl"   // smooth terrain LOD (#211)
+
+uint detailFromTan(float tan_angle)
+{
+    tan_angle = floor(tan_angle * 100.0 + 0.5) * 0.01;   // ll_round(x,0.01)
+    if (tan_angle <= 0.03) return 0u;
+    if (tan_angle <= 0.06) return 1u;
+    if (tan_angle <= 0.24) return 2u;
+    return 3u;
+}
+
+// The record only (pass B members keep their rt_geom row).
+void writeInactiveRec(uint id)
+{
+    if (pc.tlas_update != 0u)
+    {
+        TlasInstance p = tlas[id];
+        if ((p.ref_lo | p.ref_hi) != 0u)
+        {
+            // Active at the last build: stays active, never hit (mask 0), in place.
+            p.custom_mask = id & 0xFFFFFFu;
+            p.sbt_flags = 0u;
+            p.ref_lo = pc.dummy_lo; p.ref_hi = pc.dummy_hi;
+            tlas[id] = p;
+            return;
+        }
+    }
+    TlasInstance t;
+    t.row0 = vec4(1, 0, 0, 0); t.row1 = vec4(0, 1, 0, 0); t.row2 = vec4(0, 0, 1, 0);
+    t.custom_mask = id & 0xFFFFFFu;   // mask 0: never hit even if a driver ignored ref 0
+    t.sbt_flags = 0u;
+    t.ref_lo = 0u; t.ref_hi = 0u;
+    tlas[id] = t;
+}
+
+void writeInactive(uint id)
+{
+    writeInactiveRec(id);
+    rt_geom[id] = uvec4(0u);
+    setGeomVc(id, 0u);
+}
+
+// May record `id` become active this frame? Always on build frames; on update frames
+// only if it was active at the last build (else: deferred to the next build).
+bool tlasMayActivate(uint id)
+{
+    if (pc.tlas_update == 0u) return true;
+    if ((tlas[id].ref_lo | tlas[id].ref_hi) != 0u) return true;
+    atomicAdd(used_bits[pc.counter_word + 1u], 1u);
+    return false;
+}
+
+// One mask class per instance (see clean_rt_common.glsl). The agent's own avatar (flag 8192:
+// rigged + worn attachments) takes the rigged bit (clean_rt_common.glsl SIZE CLASS).
+uint maskClass(uint f, bool rigged)
+{
+    if ((f & 2048u) != 0u) return RT_MASK_WATER;
+    if ((f & 32u)   != 0u) return RT_MASK_TERRAIN;
+    if ((f & 2u)    != 0u) return RT_MASK_BLEND;
+    if ((f & 8192u) != 0u) return RT_MASK_RIGGED;   // (own avatar)
+    if (rigged)            return RT_MASK_RIGGED;
+    if ((f & 512u)  != 0u) return RT_MASK_ATTACH;
+    if ((f & 4u)    != 0u) return RT_MASK_ALPHAMASK;
+    return RT_MASK_OPAQUE;
+}
+// SIZE CLASS (#859 perf; clean_rt_common.glsl SIZE CLASS): a static opaque instance (pass A's
+// class RT_MASK_OPAQUE: never rigged, worn, terrain, water, alpha-mask or blend) whose world
+// bounds -- the diagonal of its local box through the TLAS transform's axis scales, an upper
+// bound of its largest extent -- are below pc.small_size (m; RenderVKRTReflectionsSmallSize,
+// 0 = off) takes RT_MASK_SMALL instead. The local box: the instance's (its first-captured LOD's)
+// unioned with the traced slot's captured bounds when it has them (clean_cull.comp localBounds:
+// a larger LOD must not pass for small). Every ray mask holding static opaque holds both bits
+// (RT_MASK_OPAQUE), so only the reflection rays' far segment tells them apart. Evaluated every
+// frame from the record's own transform (moving / scaled prims re-class themselves; no CPU work).
+uint maskClassSized(uint id, uint f, mat4 M, uint slot)
+{
+    const uint c = maskClass(f, false);
+    if (c != RT_MASK_OPAQUE || !(pc.small_size > 0.0)) return c;
+    vec3 lo = instances[id].aabb_min.xyz, hi = instances[id].aabb_max.xyz;
+    if (slot < pc.slot_count)
+    {
+        const SlotInfo si = slots[slot];
+        if ((si._pad0 | si._pad1 | si._pad2) != 0u)
+        {
+            const vec2 a = unpackHalf2x16(si._pad0), b = unpackHalf2x16(si._pad1), d = unpackHalf2x16(si._pad2);
+            lo = min(lo, vec3(a.x, a.y, b.x));
+            hi = max(hi, vec3(b.y, d.x, d.y));
+        }
+    }
+    const vec3 e = abs(hi - lo) * vec3(length(M[0].xyz), length(M[1].xyz), length(M[2].xyz));
+    const float S = pc.small_size;
+    return (dot(e, e) < S * S) ? RT_MASK_SMALL : c;   // (NaN bounds: not small)
+}
+
+// FACING CULL GATES (dbg_on bits 2 / 3): which casters the sun / moon shadow rays' facing
+// culling may reach (clean_rt_common.glsl rt_fol_*; the rays always ask for it).
+//   FACING_RIG: single-sided rigged meshes and worn rigid attachments (shadow-map parity:
+//     the shadow pass draws them back-face culled -- mShadowRigPipe / mShadowRigMaskPipe,
+//     the dynamic casters' mShadowPipe / mShadowMaskPipe). Off = the old two-sided rule.
+//   FACING_LEAF: single-sided static alpha-mask leaves (#735; foliage mode != 0).
+#define FACING_RIG  4u
+#define FACING_LEAF 8u
+
+// Opaque unless the raster would alpha test it (mask / blend buckets).
+// FACING (#735, clean_rt_common.glsl rt_fol_*): only the sun / moon shadow rays request
+// facing culling, and it must reach the casters the shadow pass back-face culls: SINGLE-
+// SIDED STATIC ALPHA-MASK leaves (FACING_LEAF) and SINGLE-SIDED WORN ATTACHMENTS, opaque or
+// alpha-mask, own avatar's too (FACING_RIG; rigged groups below). Every other instance
+// (opaque walls / floors, terrain, water, blend) and every double-sided (bit 8) one is
+// CULL_DISABLE, so those stay two-sided occluders whatever the ray asks. (Static opaque
+// is back-face culled in the shadow pass too; it stays two-sided here, as before.)
+// (The RT helpers' camera-ray path tests facing itself, convention-free -- see
+// rtCandidateFront.) Hardware facing is decided in OBJECT space; a mirrored
+// (negative-determinant) transform turns the raster's winding over on screen, so it gets
+// FLIP_FACING and the rays see the faces the raster -- and the shadow pass -- sees. (A
+// worn attachment's transform includes its joint's: a mirrored joint scale flips it too.)
+uint geomFlags(uint f, mat3 m)
+{
+    bool opaque = (f & 6u) == 0u || (f & (32u | 2048u)) != 0u;
+    const uint cls = maskClass(f, false);
+    // (own worn attachments: the rigged class -- maskClass(f, false) returns it only for flag 8192)
+    const bool worn = (f & 512u) != 0u && (cls == RT_MASK_ATTACH || cls == RT_MASK_RIGGED);   // (blend: CULL_DISABLE)
+    const bool cullable = (f & 256u) == 0u
+        && ((cls == RT_MASK_ALPHAMASK && (pc.dbg_on & FACING_LEAF) != 0u) || (worn && (pc.dbg_on & FACING_RIG) != 0u));
+    const bool mirrored = dot(m[0], cross(m[1], m[2])) < 0.0;
+    return (cullable ? 0u : GI_CULL_DISABLE) | (mirrored ? GI_FLIP_FACING : 0u)
+         | (opaque ? GI_FORCE_OPAQUE : GI_FORCE_NO_OPAQUE);
+}
+
+bool badTransform(mat4 mm, vec3 amn, vec3 amx)
+{
+    for (int c = 0; c < 4; ++c)
+        if (any(isnan(mm[c])) || any(isinf(mm[c]))) return true;
+    float msc = max(length(mm[0].xyz), max(length(mm[1].xyz), length(mm[2].xyz)));
+    if (msc > 1.0e6) return true;
+    if (any(greaterThan(abs(mm[3].xyz), vec3(1.0e7)))) return true;
+    if (any(isnan(amn)) || any(isinf(amn)) || any(isnan(amx)) || any(isinf(amx))) return true;
+    return false;
+}
+
+// The static LOD rule's level (the cull's, clean_cull.comp): Linden trees / grass (bit 15) by the
+// cull's vegDetail (LL's trunk-LOD rule), every other static by detailFromTan(lod_factor x radius / dist).
+uint staticLodLevel(uint id, uint f, mat4 mm)
+{
+    const float dist = max(length(mm[3].xyz - pc.lod_cam.xyz), 0.001);
+    if ((f & 32768u) != 0u)
+    {
+        const mat4 um = instances[id].uv_matrix;
+        return um[3][3] < 0.0 ? 3u
+             : min(dist < um[0][3] ? 3u : dist < um[1][3] ? 2u : dist < um[2][3] ? 1u : 0u,
+                   detailFromTan(um[3][3] / dist));
+    }
+    return detailFromTan((pc.lod_cam.w * instances[id].aabb_min.w) / dist);
+}
+// (#1009) a CLUSTER-TRACED STATIC's legacy row for the emissive light build (setGeomEmRow): the slot the
+// static rule picks -- the level its legacy BLAS traces with the cluster path off, so the emitter's
+// triangles (and the A/B's counts) are the same -- else the finest present one. Statics keep their legacy
+// geometry under the cluster path (CLUSTER_LOD_CONTRACT.md: owned only while drawn), so the slot is
+// there; no BLAS is needed (the build reads the vertices). None: words 1..3 stay 0 (no emitter).
+void clusterStaticEmRow(uint id, uint gid, uint f, mat4 mm)
+{
+    if ((f & (1u | 32u | 512u | 2048u)) != 0u) return;   // (rigged / terrain / worn / water: never an emitter)
+    uint s = lod_groups[gid].slot[staticLodLevel(id, f, mm)];
+    if (s != LOD_SENTINEL && (s >= pc.slot_count || slots[s].index_count == 0u)) s = LOD_SENTINEL;
+    for (int L = 3; L >= 0 && s == LOD_SENTINEL; --L)
+    {
+        const uint c = lod_groups[gid].slot[L];
+        if (c != LOD_SENTINEL && c < pc.slot_count && slots[c].index_count != 0u) s = c;
+    }
+    if (s == LOD_SENTINEL || s >= pc.slot_count) return;
+    const SlotInfo si = slots[s];
+    if (si.index_count == 0u || si.index_count > pc.idx_valid || si.first_index > pc.idx_valid - si.index_count) return;
+    setGeomEmRow(id, si.first_index, si.base_vertex, si.index_count & 0x7FFFFFFFu);
+}
+
+void passA(uint id)
+{
+    const uint f = instances[id].flags;
+    const uint gid = instances[id].lod_group_id;
+    if (gid == LOD_SENTINEL || (f & 8u) != 0u) { writeInactive(id); return; }   // empty row / HUD
+    if ((f & 65536u) != 0u) { writeInactive(id); return; }   // water exclusion (invisiprim): never visible
+    if ((f & 0x00400000u) != 0u) { writeInactive(id); return; }   // <GMDX> dying (rez effects): no RT shadow / reflection
+    // FAINT ALPHA-BLEND FACES (RenderVKRTBlendCull, dbg_on bit 1): a blend face whose
+    // face alpha (tint.a; the texture can only lower it) is at most 1/255 is invisible --
+    // the 100%-transparent faces of SL builds. In the TLAS every shadow ray crossing one
+    // paid a non-opaque candidate (alpha test, texture fetch) to learn it is a hole; out of
+    // it, none. The cutoff was 0.05 (LL's shadow discard); it is 1/255 so faint but visible
+    // glass (0.4-5% opacity) stays in the TLAS: the RT acoustics block sound on any visible
+    // alpha (AudioAcousticsAlphaBlocks).
+    if ((pc.dbg_on & 2u) != 0u && (f & 2u) != 0u && (f & (32u | 2048u | 4096u)) == 0u
+        && instances[id].tint.a <= (1.0 / 255.0)) { writeInactive(id); return; }
+    if (gid >= uint(lod_groups.length())) { writeInactive(id); return; }          // no robustness: guard OOB
+    if ((f & 1u) != 0u && instances[id].skin_id != 0xFFFFFFFFu) { writeInactive(id); return; }  // rigged: pass B
+    mat4 mm = instances[id].model_matrix;
+    if (badTransform(mm, instances[id].aabb_min.xyz, instances[id].aabb_max.xyz)) { writeInactive(id); return; }
+
+    const bool attach = (f & 512u) != 0u;
+    mat4 M = mm;
+    if (attach && instances[id].skin_id != 0xFFFFFFFFu)
+    {
+        uint av = instances[id].skin_id;   // worn rigid attachment: joint-table slot
+        // The cull's avatar visibility (main frustum, its shadow reach, the projectors,
+        // the mirror; #517: + a ray-traced probe capture's).
+        if (av < AV_VIS_SLOTS && av < uint(av_vis.length()) && (av_vis[av] & (AVV_ANY | AVV_RT_PROBE)) == 0u)
+        { writeInactive(id); return; }
+        // Reduced-tier avatar casting no shadow (#31, av_vis bit1): every production ray
+        // here is a shadow ray, so it leaves the TLAS (all 8 mask bits are taken).
+        if (av < AV_VIS_SLOTS && av < uint(av_vis.length()) && (av_vis[av] & AVV_NOSHADOW) != 0u) { writeInactive(id); return; }
+        // joint_count 0 = the legacy avatar class is dropped from RT: only the avatars still traced
+        // from their cluster cut (group map words 8..15) keep their worn attachments.
+        if (av >= uint(avatar_joints.length()) || (av >= pc.joint_count && !clAvTraced(av))) { writeInactive(id); return; }
+        uint bone = min(uint(instances[id].aabb_max.w + 0.5), 215u);
+        M = jointWorld(avatar_joints[av].world[bone]) * mm;
+    }
+    else if (dot(instances[id].spin_axis.xyz, instances[id].spin_axis.xyz) > 0.0)
+    {
+        // GPU target omega (clean_draw.vert): rotate the un-spun pose about the pivot.
+        float rate = length(instances[id].spin_axis.xyz);
+        vec3  a    = instances[id].spin_axis.xyz / rate;
+        float ang  = mod(rate * (pc.cam_time.w - instances[id].spin_axis.w), 6.28318531);
+        float c = cos(ang), s = sin(ang), t = 1.0 - c;
+        mat3 R = mat3(t*a.x*a.x + c,     t*a.x*a.y + s*a.z, t*a.x*a.z - s*a.y,
+                      t*a.x*a.y - s*a.z, t*a.y*a.y + c,     t*a.y*a.z + s*a.x,
+                      t*a.x*a.z + s*a.y, t*a.y*a.z - s*a.x, t*a.z*a.z + c);
+        vec3 pv = instances[id].spin_pivot.xyz;
+        M = mat4(vec4(R * M[0].xyz, 0.0), vec4(R * M[1].xyz, 0.0), vec4(R * M[2].xyz, 0.0),
+                 vec4(pv + R * (M[3].xyz - pv), 1.0));
+    }
+    // The composed transform (joint x attachment, spinner rotation) can be non-finite or
+    // degenerate even when the instance's own matrix passed: re-check what the TLAS gets.
+    if (badTransform(M, instances[id].aabb_min.xyz, instances[id].aabb_max.xyz)) { writeInactive(id); return; }
+
+    // RADIUS POLICY: an instance enters the TLAS when any part of its LOD bounding
+    // sphere (LL radius about the origin) is within pc.eye.w of the camera --
+    // frustum-independent (shadow casters / reflections come from off-screen).
+    // Terrain and water are always in.
+    const float radius = max(instances[id].aabb_min.w, 0.0);
+    if ((f & (32u | 2048u)) == 0u && pc.eye.w > 0.0
+        && length(M[3].xyz - pc.cam_time.xyz) - radius > pc.eye.w) { writeInactive(id); return; }
+
+    // CLUSTER LOD RT (#748): an instance the cluster raster draws whose RT cut has a cluster BLAS
+    // this frame references it instead of a slot BLAS -- same transform, mask class and flags
+    // (opacity: the instance flags, as every legacy BLAS; no micromap). Its hits shade from the
+    // cluster page pool (clean_rt_common.glsl RT_GEOM_CLUSTER).
+    if (id < uint(cl_ovr.length()))
+    {
+        const uvec4 co = cl_ovr[id];
+        if ((co.x | co.y) != 0u)
+        {
+            if (!tlasMayActivate(id)) { writeInactive(id); return; }
+            TlasInstance t;
+            t.row0 = vec4(M[0][0], M[1][0], M[2][0], M[3][0]);
+            t.row1 = vec4(M[0][1], M[1][1], M[2][1], M[3][1]);
+            t.row2 = vec4(M[0][2], M[1][2], M[2][2], M[3][2]);
+            t.custom_mask = (id & 0xFFFFFFu) | (maskClassSized(id, f, M, LOD_SENTINEL) << 24);
+            t.sbt_flags = geomFlags(f, mat3(M)) << 24;
+            t.ref_lo = co.x; t.ref_hi = co.y;
+            tlas[id] = t;
+            atomicAdd(used_bits[pc.counter_word], 1u);
+            rt_geom[id] = uvec4(co.z, 0x80000000u | (co.w & 0x7FFFFFFFu),
+                                0x40000000u | ((co.w & 0x80000000u) != 0u ? 0x20000000u : 0u), 0u);
+            setGeomVc(id, 0u);
+            clusterStaticEmRow(id, gid, f, mm);   // (#1009: the emissive light build's triangles)
+            if ((pc.dbg_on & 1u) != 0u) dbgNote(id, maskClassSized(id, f, M, LOD_SENTINEL), M[3].xyz, radius, co.x, M);
+            return;
+        }
+    }
+
+    // LOD: exactly the cull's rule (clean_cull.comp): attachments -> highest resident
+    // entry; static -> detailFromTan(lod_factor * radius / dist) with the
+    // highest-resident fallback.
+    uint slot_id = LOD_SENTINEL;
+    uint lvl_used = 0u;
+    if ((f & 32u) != 0u)
+    {
+        // TERRAIN (#211): the cull's terrain rule (clean_terrain_lod.glsl). The level the
+        // raster draws (wanted, else the first present one, coarser first) is marked used
+        // so its BLAS gets built, but the record references the first level in that order
+        // whose BLAS exists -- a fine level coming into range must not drop the patch
+        // from the TLAS (shadow-ray flicker) while its BLAS waits for the build budget.
+        const uint want = terrainLevel(terrainBoxDist(mm, instances[id].aabb_min.xyz,
+                                                      instances[id].aabb_max.xyz, pc.lod_cam.xyz));
+        uint first = LOD_SENTINEL, first_lvl = 0u;
+        for (uint k = 0u; k < 4u && slot_id == LOD_SENTINEL; ++k)
+        {
+            const uint L = terrainLevelOrder(want, k);
+            const uint s = lod_groups[gid].slot[L];
+            if (s == LOD_SENTINEL || s >= pc.slot_count || slots[s].index_count == 0u) continue;
+            if (first == LOD_SENTINEL)
+            {
+                first = s; first_lvl = L;
+                atomicOr(used_bits[s >> 5], 1u << (s & 31u));
+            }
+            const uvec2 a = slot_addr[s];
+            if ((a.x | a.y) != 0u) { slot_id = s; lvl_used = L; }
+        }
+        if (slot_id == LOD_SENTINEL) { slot_id = first; lvl_used = first_lvl; }   // none built yet
+    }
+    else if (!attach)
+    {
+        const uint lvl = staticLodLevel(id, f, mm);   // (Linden trees / grass: vegDetail -- shared, #1009)
+        slot_id = lod_groups[gid].slot[lvl];
+        lvl_used = lvl;
+        if (slot_id != LOD_SENTINEL && (slot_id >= pc.slot_count || slots[slot_id].index_count == 0u))
+            slot_id = LOD_SENTINEL;   // empty level = absent (#88)
+    }
+    if (slot_id == LOD_SENTINEL)
+        for (int L = 3; L >= 0; --L)
+        {
+            uint s = lod_groups[gid].slot[L];
+            if (s != LOD_SENTINEL && s < pc.slot_count && slots[s].index_count != 0u) { slot_id = s; lvl_used = uint(L); break; }
+        }
+    if (slot_id == LOD_SENTINEL || slot_id >= pc.slot_count) { writeInactive(id); return; }
+    SlotInfo si = slots[slot_id];
+    if (si.index_count == 0u || si.index_count > pc.idx_valid || si.first_index > pc.idx_valid - si.index_count) { writeInactive(id); return; }   // (#238: no uint wrap)
+
+    atomicOr(used_bits[slot_id >> 5], 1u << (slot_id & 31u));
+    uvec2 addr = slot_addr[slot_id];
+    if ((addr.x | addr.y) == 0u && (f & 32u) == 0u)
+    {
+        // LAZY BLAS, LEVEL STAND-IN (as terrain above): the drawn level is marked used so
+        // its BLAS gets built (used-bits feedback + build budget: a few frames), and until
+        // then the record references the nearest level whose BLAS exists -- coarser
+        // first, then finer. A static / worn attachment switching LOD (or streaming in a
+        // finer level) used to leave the TLAS entirely for those frames: its shadow
+        // blinked off.
+        const uint want = lvl_used;
+        for (uint k = 1u; k < 4u; ++k)
+        {
+            const uint L = (want >= k) ? want - k : k;   // coarser first, then finer
+            if (L > 3u) continue;
+            const uint s = lod_groups[gid].slot[L];
+            if (s == LOD_SENTINEL || s >= pc.slot_count || s == slot_id) continue;
+            const SlotInfo ss = slots[s];
+            if (ss.index_count == 0u || ss.index_count > pc.idx_valid || ss.first_index > pc.idx_valid - ss.index_count) continue;
+            const uvec2 a = slot_addr[s];
+            if ((a.x | a.y) != 0u) { slot_id = s; si = ss; lvl_used = L; addr = a; break; }
+        }
+    }
+    if ((addr.x | addr.y) == 0u) { writeInactive(id); return; }   // BLAS not built yet (lazy)
+    if (!tlasMayActivate(id)) { writeInactive(id); return; }      // refit: joins at the next build
+
+    TlasInstance t;
+    t.row0 = vec4(M[0][0], M[1][0], M[2][0], M[3][0]);
+    t.row1 = vec4(M[0][1], M[1][1], M[2][1], M[3][1]);
+    t.row2 = vec4(M[0][2], M[1][2], M[2][2], M[3][2]);
+    t.custom_mask = (id & 0xFFFFFFu) | (maskClassSized(id, f, M, slot_id) << 24);
+    t.sbt_flags = geomFlags(f, mat3(M)) << 24;
+    t.ref_lo = addr.x; t.ref_hi = addr.y;
+    if (id < uint(omm_inst.length()))
+    {
+        // Row = OMM id + 1, top bits = DEBUG instance flags (RenderVKRTOmmDebugStage 4/5:
+        // force 2-state / disable micromaps).
+        const uint row = omm_inst[id][lvl_used];
+        const uint oid = row & 0x0FFFFFFFu;
+        if (oid != 0u && oid - 1u < uint(omm_addr.length()))
+        {
+            const uvec4 oa = omm_addr[oid - 1u];
+            // Built from THIS slot (a row a few frames stale can name another LOD's entry).
+            if ((oa.x | oa.y) != 0u && oa.z == slot_id)
+            {
+                // The micromap decides opacity: no FORCE_OPAQUE / FORCE_NO_OPAQUE (a forced
+                // no-opaque would turn known-opaque micro-triangles back into candidates).
+                t.ref_lo = oa.x; t.ref_hi = oa.y;
+                uint gf = geomFlags(f, mat3(M)) & (GI_CULL_DISABLE | GI_FLIP_FACING);
+                if ((row & 0x40000000u) != 0u) gf |= 0x10u;                        // FORCE_OPACITY_MICROMAP_2_STATE
+                if ((row & 0x20000000u) != 0u) gf |= 0x20u | GI_FORCE_NO_OPAQUE;   // DISABLE_OPACITY_MICROMAPS
+                t.sbt_flags = gf << 24;
+            }
+        }
+    }
+    tlas[id] = t;
+    atomicAdd(used_bits[pc.counter_word], 1u);
+    rt_geom[id] = uvec4(si.first_index, uint(si.base_vertex), 0u, si.index_count);
+    setGeomVc(id, si.vert_count);
+    if ((pc.dbg_on & 1u) != 0u) dbgNote(id, maskClassSized(id, f, M, slot_id), M[3].xyz, radius, addr.x, M);
+}
+
+#define RT_RIG_GROUP 0x800000u   // custom index flag: group record, low 23 bits = first entry
+
+// Rotation of a joint world matrix (LLMatrix4::initAll: columns = world axes x local
+// scale). Must match clean_preskin.comp / clean_draw_rigged.vert rigidRot exactly.
+mat3 rigidRot(mat4 m)
+{
+    vec3 c0 = m[0].xyz, c1 = m[1].xyz, c2 = m[2].xyz;
+    float l0 = length(c0), l1 = length(c1), l2 = length(c2);
+    if (!(l0 > 1e-8 && l1 > 1e-8 && l2 > 1e-8)) return mat3(1.0);
+    return mat3(c0 / l0, c1 / l1, c2 / l2);
+}
+
+// AVATAR-LOCAL RIGGED BLAS (#632): the frame of rigged instance `id`'s group -- its
+// owner avatar's (skin meta avatar slot) pelvis, joint 0 of the joint table: R = its
+// rotation (normalized), T = its absolute position. False = no avatar row (the group is
+// world space, identity). The CPU groups entries by that same slot (< 256), so every
+// member of a group gets the same answer.
+bool rigFrame(uint id, out mat3 R, out vec3 T)
+{
+    R = mat3(1.0);
+    T = vec3(0.0);
+    if (id >= pc.instance_count) return false;
+    const uint skin = instances[id].skin_id;
+    if (skin == 0xFFFFFFFFu || (skin + 1u) * SKIN_META_WORDS > uint(skin_meta_w.length())) return false;
+    const uint av = skin_meta_w[skin * SKIN_META_WORDS];
+    if (av >= AV_VIS_SLOTS || av >= uint(avatar_joints.length())) return false;
+    const mat4 P = jointWorld(avatar_joints[av].world[0]);
+    R = rigidRot(P);
+    T = P[3].xyz;
+    if (any(isnan(T)) || any(isinf(T)) || any(isnan(R[0])) || any(isnan(R[1])) || any(isnan(R[2])))
+    {
+        R = mat3(1.0);
+        T = vec3(0.0);
+        return false;
+    }
+    return true;
+}
+
+// NO-SELF-SHADOW TAG of rigged instance id's group record (clean_rt_common.glsl
+// rtSelfCandidate): its owner avatar slot + 1 -- the record's SBT record offset (ray queries
+// read it as the candidate's owner; nothing else uses it) -- when that avatar is flagged
+// AVV_RT_NOSELF this frame, else 0. Tagged records also force NO_OPAQUE (rigSbtFlags) so a
+// ray can skip its own character's faces in its candidate loop.
+uint rigNoSelfOwner(uint id)
+{
+    if (id >= pc.instance_count) return 0u;
+    const uint skin = instances[id].skin_id;
+    if (skin == 0xFFFFFFFFu || (skin + 1u) * SKIN_META_WORDS > uint(skin_meta_w.length())) return 0u;
+    const uint av = skin_meta_w[skin * SKIN_META_WORDS];
+    if (av >= AV_VIS_SLOTS || av >= uint(av_vis.length()) || (av_vis[av] & AVV_RT_NOSELF) == 0u) return 0u;
+    return av + 1u;
+}
+// sbtOffset:24 | flags:8 of a rigged record whose untagged flags are `gi`.
+uint rigSbtFlags(uint id, uint gi)
+{
+    const uint own = rigNoSelfOwner(id);
+    if (own == 0u) return gi << 24;
+    return (own & 0xFFFFFFu) | (((gi & ~GI_FORCE_OPAQUE) | GI_FORCE_NO_OPAQUE) << 24);
+}
+
+// FACING of a rigged record whose (first) face has flags f (FACING_RIG; clean_rt_common.glsl
+// rt_fol_rig): the shadow pass draws single-sided rigged opaque / mask faces back-face
+// culled (mShadowRigPipe / mShadowRigMaskPipe; double-sided ones -- bit 8 -- cull-none),
+// so with the gate on such a record is cullable: an inside-out "inverted hull" outline no
+// longer shadows the face it wraps, while light-facing layers (clothing over the body, an
+// arm over the torso) still occlude. Pre-skinned positions are drawn by the raster as they
+// are traced (same winding, joint scales included). Alpha-blend (its own group class) stays
+// CULL_DISABLE: its solid hits take the rule in the shader (rtFolAway).
+uint rigCullFlags(uint f)
+{
+    const bool cullable = (pc.dbg_on & FACING_RIG) != 0u && (f & (2u | 256u)) == 0u;
+    return cullable ? 0u : GI_CULL_DISABLE;
+}
+
+// CLUSTER-SWITCHED GROUPS (llcleanclusterrtvk.h RIGGED): rig entry e's group head + 1, 0 = a
+// legacy group.
+uint clRigHead(uint e)
+{
+    const uint w = CLRIG_HDR + e;
+    return w < uint(cl_rtrig.length()) ? cl_rtrig[w] : 0u;
+}
+// The cluster override row of rigged instance id (zero = none this frame).
+uvec4 clRigOvr(uint id)
+{
+    if (id >= pc.instance_count || id >= uint(cl_ovr.length())) return uvec4(0u);
+    const uvec4 co = cl_ovr[id];
+    return ((co.x | co.y) != 0u && (co.w & CLOVR_RIG) != 0u) ? co : uvec4(0u);
+}
+// Mode 4 (after pass A, before pass B), one lane per rig entry: a cluster-switched group goes
+// to its cluster records only when EVERY member has one this frame and (TLAS refit frames) every
+// member's record may be active (was active at the last build: pass A turned it into a
+// placeholder, never back to reference 0) -- never both, never neither, never half a group.
+void clRigGroupCheck(uint e)
+{
+    const uint h = clRigHead(e);
+    if (h == 0u) return;
+    const uint id = rig[e].inst;
+    bool ok = (clRigOvr(id).x | clRigOvr(id).y) != 0u;
+    if (ok && pc.tlas_update != 0u && (tlas[id].ref_lo | tlas[id].ref_hi) == 0u)
+    {
+        // Ready, but inactive at the last build (a refit cannot activate it): DEFERRED, counted as
+        // tlasMayActivate does -- the readback's deferred count forces the next TLAS build
+        // (kTlasDeferRebuild), so the group switches over within a few frames.
+        ok = false;
+        atomicAdd(used_bits[pc.counter_word + 1u], 1u);
+    }
+    const uint f = CLRIG_HDR + pc.rig_count + (h - 1u);
+    if (!ok && f < uint(cl_rtrig.length())) atomicOr(cl_rtrig[f], 1u);
+}
+
+void passB(uint e)
+{
+    uint id = rig[e].inst;
+    if (id >= pc.instance_count) return;
+    // CLUSTER-SWITCHED GROUP, all ready (mode 4): every member traces its own cluster BLAS -- the
+    // RT cut of the cluster path, skinned this frame in the palettes' eye-relative space (record
+    // = translation by that eye) -- and the legacy group record is not written.
+    {
+        const uint h = clRigHead(e);
+        const uint f = CLRIG_HDR + pc.rig_count + (h - 1u);
+        if (h != 0u && f < uint(cl_rtrig.length()))
+        {
+            if (cl_rtrig[f] == 0u)
+            {
+                const uvec4 co = clRigOvr(id);
+                const uint fl = instances[id].flags;
+                // rt_geom: x = first arena slot, y = the pool vertex the decode header comes from,
+                // z = rigged | cluster | cluster-rigged (clean_rt_common.glsl RT_GEOM_CLUSTER_RIG).
+                rt_geom[id] = uvec4(co.z, 0x80000000u | (co.w & 0x0FFFFFFFu), 0x80000000u | 0x40000000u | 0x10000000u, 0u);
+                setGeomVc(id, 0u);
+                TlasInstance t;
+                // (#748 perf pass 2: the cluster arena's positions are relative to the RT origin --
+                // group map words 4..6, word 7 = 1 -- which moves only on big camera moves)
+                const vec3 org = cl_rtrig[7] == 1u ? uintBitsToFloat(uvec3(cl_rtrig[4], cl_rtrig[5], cl_rtrig[6])) : pc.eye.xyz;
+                t.row0 = vec4(1, 0, 0, org.x); t.row1 = vec4(0, 1, 0, org.y); t.row2 = vec4(0, 0, 1, org.z);
+                t.custom_mask = (id & 0xFFFFFFu) | (maskClass(fl, true) << 24);
+                // Facing: the legacy group's rule (rigCullFlags), per face here (one record each;
+                // identity rotation -- the skinned positions keep the raster's winding).
+                // Opacity from the face's bucket as the legacy group's per-geometry flag.
+                const bool opaque = (fl & 6u) == 0u;
+                t.sbt_flags = rigSbtFlags(id, rigCullFlags(fl) | (opaque ? GI_FORCE_OPAQUE : GI_FORCE_NO_OPAQUE));
+                t.ref_lo = co.x; t.ref_hi = co.y;
+                tlas[id] = t;
+                atomicAdd(used_bits[pc.counter_word], 1u);
+                atomicAdd(cl_rtrig[0], 1u);
+                if ((pc.dbg_on & 1u) != 0u)
+                    dbgNote(id, maskClass(fl, true), instances[id].model_matrix[3].xyz,
+                            max(instances[id].aabb_min.w, 3.0), co.x, mat4(1.0));
+                return;
+            }
+            atomicAdd(cl_rtrig[1], 1u);   // switched, legacy this frame (the receiver lift applies)
+        }
+    }
+    // Every member keeps its geometry row (hits on it resolve to this id). w bit 31
+    // (RT_GEOM_W_CLUSTER_RIG, clean_rt_common.glsl): the cluster LOD path draws this face in
+    // the main view (the main cull's rig-cache RC_CLUSTER, #747) -- its legacy geometry here
+    // is not the surface on screen (clean_rt_shadow_mask.comp receiver lift).
+    uint cl_rig = 0u;
+    if ((id + 1u) * RC_WORDS <= uint(rig_cache.length()) && (rig_cache[id * RC_WORDS + RC_STATE] & RC_ST_CLUSTER) != 0u)
+        cl_rig = 0x80000000u;
+    // #747 lift gate (#748 perf pass): such a face traced on its legacy geometry this frame is
+    // counted in group-map word 2 (a real map: word 3 = 1; LLCleanClusterRTVK::recordLiftFlag
+    // hands the count to the shadow mask, which skips its receiver-lift probe ray at 0).
+    // (Counted per flagged entry whatever its group's BLAS: conservative -- the probe then runs.)
+    if (cl_rig != 0u && uint(cl_rtrig.length()) > 3u && cl_rtrig[3] == 1u) atomicAdd(cl_rtrig[2], 1u);
+    rt_geom[id] = uvec4(rig[e].first_index, rig[e].uv_base, 0x80000000u | rig[e].dst_base,
+                        (rig[e].index_count & 0x7FFFFFFFu) | cl_rig);
+    setGeomVc(id, rig[e].vert_count);
+    TlasInstance t;
+    t.row0 = vec4(1, 0, 0, 0); t.row1 = vec4(0, 1, 0, 0); t.row2 = vec4(0, 0, 1, 0);
+    // Group member (or a group whose BLAS failed): no record of its own. (Pass A wrote
+    // this rigged row inactive with the refit rule already; re-applying it is a no-op
+    // that keeps pass B self-contained.) A group record that may not activate on a
+    // refit frame waits for the next build the same way.
+    if ((rig[e].blas_lo | rig[e].blas_hi) == 0u || !tlasMayActivate(id))
+    {
+        writeInactiveRec(id);
+        return;
+    }
+    // The group's space (#632): the owner avatar's current pelvis (avatar-local BLAS).
+    {
+        mat3 R;
+        vec3 T;
+        if (rigFrame(id, R, T))
+        {
+            t.row0 = vec4(R[0].x, R[1].x, R[2].x, T.x);
+            t.row1 = vec4(R[0].y, R[1].y, R[2].y, T.y);
+            t.row2 = vec4(R[0].z, R[1].z, R[2].z, T.z);
+        }
+    }
+    const uint f = instances[id].flags;
+    t.custom_mask = (RT_RIG_GROUP | (e & 0x7FFFFFu)) | (maskClass(f, true) << 24);
+    // Opacity is per GEOMETRY in the group BLAS (mixed opaque / alpha-tested faces), so
+    // the record forces neither. Facing (rigCullFlags): instance-wide, so the CPU splits a
+    // group by double-sidedness (llcleanrtvk.cpp group key) -- its first member's flag
+    // speaks for every face. A mirrored pelvis frame (a reflection: rigidRot keeps the
+    // handedness) holds the BLAS in reflected local space: FLIP_FACING restores the world
+    // winding the raster culls by.
+    uint gi = rigCullFlags(f);
+    if (dot(vec3(t.row0.x, t.row1.x, t.row2.x), cross(vec3(t.row0.y, t.row1.y, t.row2.y), vec3(t.row0.z, t.row1.z, t.row2.z))) < 0.0)
+        gi |= GI_FLIP_FACING;
+    t.sbt_flags = rigSbtFlags(id, gi);
+    t.ref_lo = rig[e].blas_lo; t.ref_hi = rig[e].blas_hi;
+    tlas[id] = t;
+    atomicAdd(used_bits[pc.counter_word], 1u);
+    // Rigged: avatar-local (or world-space) BLAS; the instance's model matrix places
+    // the avatar, and a generous radius stands in for its skinned extent.
+    if ((pc.dbg_on & 1u) != 0u)
+        dbgNote(id, maskClass(f, true), instances[id].model_matrix[3].xyz,
+                max(instances[id].aabb_min.w, 3.0), rig[e].blas_lo, mat4(1.0));
+}
+
+shared uint s_ok;
+shared uint s_src;
+shared uint s_bad;    // #973: bit 0 a position beyond RIG_MAX_REACH, bit 1 a non-finite one
+
+// #973 RIG COPY INPUT CHECK. AMD traverses the BVH in the shader: a rigged BLAS refit / built
+// from garbage skinned positions (NaN / Inf, or wild finite values from a bad palette, an
+// uninitialised pre-skin range) can make traversal loop until the GPU is reset (TDR) or read far
+// outside the BLAS. The old per-vertex NaN patch moved one vertex to the group origin: a sliver
+// triangle metres long, still a valid BVH but not the face. Now the ENTRY is checked as a whole:
+// any non-finite position, or one farther than RIG_MAX_REACH from the group's origin (the
+// avatar's pelvis for an avatar-local group or a cached slot frame: no worn mesh legitimately
+// reaches 1 km from it; a world group without an avatar frame: from the palette eye, RT radius
+// + 1 km), and the whole entry is collapsed to one point like an
+// invalid entry -- zero-area triangles that never hit, inside sane bounds. The refit / build that
+// follows in the same command buffer never sees the garbage (the CPU learns of it only a frame
+// slot later, too late to skip this frame's refit). Counted in used_bits [+4], the first
+// RIG_BAD_LIST instance ids in [+6 ..]; LLCleanRTVK::readFeedback rebuilds those groups from
+// scratch once (no refit chain from a collapsed BVH) and logs them.
+#define RIG_MAX_REACH 1024.0
+#define RIG_BAD_LIST  8u
+shared uint s_mode;   // 0 world <- eye-relative, 1 local <- local, 2 local <- eye-relative, 3 world <- local
+shared vec3 s_r0, s_r1, s_r2, s_t;    // the group frame (local) / the source cache frame (mode 3)
+
+void rigCopy(uint e, uint lid)
+{
+    if (lid == 0u)
+    {
+        uint id = rig[e].inst;
+        uint ok = 0u, src = 0u;
+        // #632: the group's space, and the space of this draw's skinned vertices (the
+        // main cull's state word: the skin cache's pelvis-local range of that slot).
+        mat3 R;
+        vec3 T;
+        const bool local = rigFrame(id, R, T);
+        uint rs = 0u;
+        if (id < pc.instance_count && (id + 1u) * RC_WORDS <= uint(rig_cache.length())) rs = rig_cache[id * RC_WORDS + RC_STATE];
+        const bool src_local = (rs & RC_ST_LOCAL) != 0u;
+        uint mode = local ? (src_local ? 1u : 2u) : (src_local ? 3u : 0u);
+        if (mode == 1u && (rs & RC_ST_SLOT) != skin_meta_w[instances[id].skin_id * SKIN_META_WORDS])
+            mode = 0xFFFFFFFFu;   // (a cache frame of another slot: never expected) -> invalid
+        if (mode == 3u)
+        {
+            // world group (no avatar row) but cached vertices: place them with their slot
+            const uint sl = rs & RC_ST_SLOT;
+            if (sl < uint(avatar_joints.length()))
+            {
+                const mat4 P = jointWorld(avatar_joints[sl].world[0]);
+                R = rigidRot(P);
+                T = P[3].xyz;
+            }
+            else mode = 0xFFFFFFFFu;
+        }
+        s_mode = mode;
+        s_r0 = R[0]; s_r1 = R[1]; s_r2 = R[2]; s_t = T;
+        if (id < pc.instance_count)
+        {
+            uint meta = cand_meta[id];
+            uint b = meta >> 24;
+            // a rigged caster bucket, or (#517) an off-screen draw (clean_cull.comp OFF_META,
+            // rigged index < 5): pre-skinned for another pass, valid here too
+            const bool off = meta != 0xFFFFFFFFu && (meta & 0x80000000u) != 0u && ((meta >> 28u) & 7u) < 5u;
+            // <GMDX> a dying rigged draw (rez effects) is never traced, as the twin buckets
+            if ((instances[id].flags & 0x00400000u) == 0u
+                && (off || (meta != 0xFFFFFFFFu && (b == 3u || b == 4u || b == 5u || b == 8u || b == 9u))))
+            {
+                DrawCmd c = cand[id];
+                src = uint(c.vertexOffset);
+                if (c.firstIndex == rig[e].first_index && c.indexCount == rig[e].index_count
+                    && rig[e].vert_count <= uint(skin_vbo.length()) / SKIN_VBO_WORDS && src <= uint(skin_vbo.length()) / SKIN_VBO_WORDS - rig[e].vert_count   // (#238: no wrap)
+                    && mode != 0xFFFFFFFFu)
+                    ok = 1u;
+            }
+        }
+        s_ok = ok; s_src = src;
+        s_bad = 0u;   // #973
+        rig_valid[e] = ok;
+        // #692: read back (LLCleanRTVK::noteRigInvalid) -- these faces cast no RT shadow.
+        // 2026-10-13: two causes, packed in one word (low 16 bits: a real MISMATCH -- the cull drew
+        // this face from another slot / source; high 16 bits: UNDRAWN -- no pass of the cull drew
+        // it this frame (cand_meta ~0: an RT-probe-only candidate the realtime probe job did not
+        // pull in, the phase-2 rigged capacity drop, hidden avatars), nothing to trace then).
+        // The id (largest + 1) is kept for mismatches only.
+        if (ok == 0u)
+        {
+            const bool undrawn = id >= pc.instance_count || cand_meta[id] == 0xFFFFFFFFu;
+            atomicAdd(used_bits[pc.counter_word + 2u], undrawn ? 0x10000u : 1u);
+            if (!undrawn) atomicMax(used_bits[pc.counter_word + 3u], id + 1u);
+        }
+    }
+    barrier();
+    const uint n = rig[e].vert_count, dst = rig[e].dst_base, src = s_src;
+    const uint mode = s_mode;
+    const mat3 R = mat3(s_r0, s_r1, s_r2);
+    const vec3 T = s_t;
+    const bool group_local = mode == 1u || mode == 2u;
+    // The entry's collapse point: its instance position in the group's space.
+    const uint cid = rig[e].inst;
+    vec3 cp = cid < pc.instance_count ? instances[cid].model_matrix[3].xyz : pc.eye.xyz;
+    if (any(isnan(cp)) || any(isinf(cp))) cp = pc.eye.xyz;
+    if (group_local) cp = transpose(R) * (cp - T);   // (the group's space)
+    if (any(isnan(cp)) || any(isinf(cp))) cp = vec3(0.0);
+    if (s_ok == 0u)
+    {
+        // Invalid this frame, but its geometry is still part of the group BLAS (a refit
+        // can't drop it): collapse it to one point -- zero-area triangles never hit.
+        for (uint v = lid; v < n; v += 64u)
+        {
+            uint di = (dst + v) * 4u;
+            rig_pos[di] = floatBitsToUint(cp.x); rig_pos[di + 1u] = floatBitsToUint(cp.y);
+            rig_pos[di + 2u] = floatBitsToUint(cp.z); rig_pos[di + 3u] = 0u;
+        }
+        return;
+    }
+    // #973 input check reach, in the space q is tested in (below): from the group origin for
+    // local groups (modes 1 / 2) and for the cache's local positions (mode 3, tested before
+    // placing); for mode 0 (world <- eye-relative, no avatar frame: a rigged instance's model
+    // matrix need not sit at its mesh) from the palette eye, the RT radius further out.
+    const float reach = mode == 0u ? max(pc.eye.w, 0.0) + RIG_MAX_REACH : RIG_MAX_REACH;
+    uint bad = 0u;
+    // eye-relative -> avatar-local: R^T (p + (eye - T)); the eye and the pelvis are both
+    // large, their difference small (#555: the same subtraction class as the palettes).
+    const vec3 eye_t = pc.eye.xyz - T;
+    for (uint v = lid; v < n; v += 64u)
+    {
+        uint si = (src + v) * SKIN_VBO_WORDS, di = (dst + v) * 4u;
+        vec3 q = vec3(uintBitsToFloat(skin_vbo[si]), uintBitsToFloat(skin_vbo[si + 1u]),
+                      uintBitsToFloat(skin_vbo[si + 2u]));
+        uint nw = skin_vbo[si + 3u];
+        // #973 input check (in the source space for modes 0 / 3: before the large offsets)
+        if (mode == 0u || mode == 3u)
+        {
+            if (any(isnan(q)) || any(isinf(q))) bad |= 2u;
+            else if (any(greaterThan(abs(q), vec3(reach)))) bad |= 1u;
+        }
+        if (mode == 0u)      q += pc.eye.xyz;                    // world <- eye-relative
+        else if (mode == 2u)
+        {
+            q = transpose(R) * (q + eye_t);                       // local <- eye-relative
+            nw = svPackNormal(transpose(R) * svUnpackNormal(nw));
+        }
+        else if (mode == 3u)
+        {
+            q = R * q + T;                                        // world <- the cache's local
+            nw = svPackNormal(R * svUnpackNormal(nw));
+        }
+        // (mode 1: local <- local, as stored)
+        if (group_local)
+        {
+            if (any(isnan(q)) || any(isinf(q))) bad |= 2u;
+            else if (any(greaterThan(abs(q), vec3(RIG_MAX_REACH)))) bad |= 1u;
+        }
+        if (any(isnan(q)) || any(isinf(q))) q = cp;   // the BLAS build never sees NaN / Inf
+        rig_pos[di] = floatBitsToUint(q.x); rig_pos[di + 1u] = floatBitsToUint(q.y);
+        rig_pos[di + 2u] = floatBitsToUint(q.z); rig_pos[di + 3u] = nw;
+    }
+    // #973: a flagged entry is collapsed whole (each lane rewrites the vertices it wrote: no
+    // cross-lane write order), counted and listed. s_bad is uniform after the barrier.
+    if (bad != 0u) atomicOr(s_bad, bad);
+    barrier();
+    if (s_bad == 0u) return;
+    if (lid == 0u)
+    {
+        rig_valid[e] = 2u;   // (2 = collapsed by the input check; 0 = failed the cull check)
+        atomicAdd(used_bits[pc.counter_word + 4u], (s_bad & 2u) != 0u ? 0x10000u : 1u);
+        const uint k = atomicAdd(used_bits[pc.counter_word + 5u], 1u);
+        if (k < RIG_BAD_LIST) used_bits[pc.counter_word + 6u + k] = cid;
+    }
+    for (uint v = lid; v < n; v += 64u)
+    {
+        uint di = (dst + v) * 4u;
+        rig_pos[di] = floatBitsToUint(cp.x); rig_pos[di + 1u] = floatBitsToUint(cp.y);
+        rig_pos[di + 2u] = floatBitsToUint(cp.z); rig_pos[di + 3u] = 0u;
+    }
+}
+
+// Mode 3: EXACTLY clean_draw.vert's terrain geomorph (same expressions), local space.
+void terrainCopy(uint e, uint lid)
+{
+    if (e >= uint(terr.length())) return;
+    const TerrEntry te = terr[e];
+    const bool inst_ok = te.inst < pc.instance_count;
+    const mat4 M = inst_ok ? instances[te.inst].model_matrix : mat4(1.0);
+    const uint vlen = uint(vbo.length()) / QV_WORDS;
+    const bool src_ok = te.vert_count <= vlen && te.src_base <= vlen - te.vert_count   // (#238: no wrap)
+                        && te.src_base >= QV_HEADER_VERTS;
+    const QvHeader qh = QV_LOAD_HEADER(vbo, src_ok ? te.src_base : QV_HEADER_VERTS);
+    for (uint v = lid; v < te.vert_count; v += 64u)
+    {
+        const uint di = (te.dst_base + v) * 3u;
+        vec3 lpos = vec3(0.0);   // (bad entry: every vertex at one point -- zero-area, never hit)
+        if (src_ok)
+        {
+            const uint si = (te.src_base + v) * QV_WORDS;
+            // Same exact lattice decode as clean_draw.vert (bit-identical position / step).
+            const vec3 position = qvPos(qh, vbo[si], vbo[si + 1u]);
+            const float step = qvUV(qh, vbo[si + 2u]).y;   // texcoord0.y
+            lpos = position;
+            if (inst_ok && step != 0.0)
+            {
+                const float md = distance((M * vec4(position, 1.0)).xyz, pc.lod_cam.xyz);
+                lpos.z += step * terrainMorph(position.xy, md);
+            }
+        }
+        if (any(isnan(lpos)) || any(isinf(lpos))) lpos = vec3(0.0);
+        terr_pos[di] = lpos.x; terr_pos[di + 1u] = lpos.y; terr_pos[di + 2u] = lpos.z;
+    }
+}
+
+// ---- #1007 rigged pose motion (mode 5) ----
+shared float s_pm_t[64];
+shared float s_pm_r[64];
+// Pelvis-relative frame of joint world matrix J under pelvis P: rotation R^T * J3 and the
+// position R^T (J.t - P.t), R = rigidRot(P) (= the rig copy's local frame).
+void poseRel(mat4 P, mat4 J, out mat3 r, out vec3 t)
+{
+    const mat3 Rt = transpose(rigidRot(P));
+    r = Rt * mat3(J);
+    t = Rt * (J[3].xyz - P[3].xyz);
+}
+void poseMotion(uint slot, uint lid)
+{
+    const bool ok = slot < uint(avatar_joints.length()) && slot < uint(pose_snap.length())
+                    && 2u * slot + 1u < uint(pose_rb.length());
+    float mt = 0.0, mr = 0.0;
+    if (ok)
+    {
+        const mat4 Pc = jointWorld(avatar_joints[slot].world[0]);
+        const mat4 Pp = jointWorld(pose_snap[slot].world[0]);
+        for (uint j = lid; j < 216u; j += 64u)
+        {
+            mat3 rc, rp;
+            vec3 tc, tp;
+            poseRel(Pc, jointWorld(avatar_joints[slot].world[j]), rc, tc);
+            poseRel(Pp, jointWorld(pose_snap[slot].world[j]), rp, tp);
+            const float dt = length(tc - tp);
+            const float dr = max(max(length(rc[0] - rp[0]), length(rc[1] - rp[1])), length(rc[2] - rp[2]));
+            // (a non-finite row -- a slot never written, a bad joint -- can never be skipped)
+            mt = max(mt, (dt == dt && dt < 1e30) ? dt : 1e30);
+            mr = max(mr, (dr == dr && dr < 1e30) ? dr : 1e30);
+        }
+    }
+    s_pm_t[lid] = mt;
+    s_pm_r[lid] = mr;
+    barrier();   // (every lane has read the snapshot's pelvis row before any lane rewrites it)
+    for (uint w = 32u; w > 0u; w >>= 1u)
+    {
+        if (lid < w)
+        {
+            s_pm_t[lid] = max(s_pm_t[lid], s_pm_t[lid + w]);
+            s_pm_r[lid] = max(s_pm_r[lid], s_pm_r[lid + w]);
+        }
+        barrier();
+    }
+    if (!ok) return;
+    for (uint j = lid; j < 216u; j += 64u) pose_snap[slot].world[j] = avatar_joints[slot].world[j];
+    if (lid == 0u)
+    {
+        pose_rb[2u * slot] = floatBitsToUint(s_pm_t[0]);
+        pose_rb[2u * slot + 1u] = floatBitsToUint(s_pm_r[0]);
+    }
+}
+
+void main()
+{
+    if (pc.mode == 5u) { poseMotion(gl_WorkGroupID.x + pc.rig_first, gl_LocalInvocationID.x); return; }
+    if (pc.mode == 3u) { terrainCopy(gl_WorkGroupID.x + pc.rig_first, gl_LocalInvocationID.x); return; }
+    if (pc.mode == 2u) { rigCopy(gl_WorkGroupID.x + pc.rig_first, gl_LocalInvocationID.x); return; }
+    uint i = gl_GlobalInvocationID.x;
+    if (pc.mode == 0u) { if (i < pc.instance_count) passA(i); return; }
+    if (pc.mode == 4u) { if (i < pc.rig_count) clRigGroupCheck(i); return; }
+    if (i < pc.rig_count) passB(i);
+}

@@ -1,0 +1,123 @@
+#version 460
+// vkclean -- FSR 3.1 INPUT PREPARATION (RenderVKUpscaler 1-6, LLCleanFSR3VK). One
+// dispatch at the RENDER resolution, after pass 2, before the FSR passes. It turns this
+// renderer's temporal inputs into the ones AMD FidelityFX Super Resolution 3.1 expects,
+// with the same rules clean_taa.comp applies to them:
+//
+//   MOTION   : FSR reprojects with prev_uv = uv + mv (UV units, unjittered). The pre-pass
+//              motion target is cur - prev and is only written for pre-pass geometry:
+//              sky, water and frames without the pre-pass motion target take the camera
+//              reprojection of this sample's own depth (clean_taa.comp's fallback), so the
+//              output is complete. RG16F, FSR convention (fMotionVectorScale = 1).
+//   DEPTH    : reversed-Z device depth; where the water mask says water, the depth is the
+//              view ray's hit on the water plane when that is in front (the water draws
+//              no depth; clean_taa.comp surfDepth) -- the motion above matches it. R32F.
+//   REACTIVE : alpha-blended faces and particles have no motion vectors. p0.w > 0: the
+//              coverage pass 2b wrote into mReact.R (RenderVKReactiveMask) x p0.w; p0.w <=
+//              0: the difference of the final colour against the pre-transparent copy
+//              (mRefract) x p1.z (clean_taa.comp's reference mode). Capped at p1.y. R8.
+//              NO HISTORY (#605): live media / animated-texture faces (the motion pre-pass's
+//              R8 mask, or mReact.B x coverage for blended ones) go in UNCAPPED: FSR 3.1
+//              takes the reactive input as a shading change, and at 1 its accumulation
+//              (history weight) is 0 -- this frame only, no video smear / text trails. Its
+//              3x3 dilation softens the outline by ~1 render pixel.
+//   T&C MASK : the water surface (mReact.G) -> p1.x: its reflections / animated normals
+//              do not follow the surface motion, so FSR leans less on locks there. R8.
+//   EXPOSURE : 1x1 R32F, RenderExposure x the dynamic exposure (when on) -- the factor the
+//              TAA's compressed blend space uses; FSR's Exposure() reads .x.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform sampler2D uDepth;      // world depth (texelFetch)
+layout(set = 0, binding = 1) uniform sampler2D uMotion;     // RG16F pre-pass motion (cur - prev, UV)
+layout(set = 0, binding = 2) uniform sampler2D uReact;      // R reactive coverage, G water, B no-history (pass 2b)
+layout(set = 0, binding = 3) uniform sampler2D uScene;      // HDR scene (render size)
+layout(set = 0, binding = 4) uniform sampler2D uRef;        // scene before post-water alpha (mRefract)
+layout(set = 0, binding = 12) uniform sampler2D uNoTemporal; // R8 no-history mask (motion pre-pass, #605)
+layout(r32f,  set = 0, binding = 5) readonly  uniform image2D uExposureIn;   // 1x1 dynamic exposure
+layout(rg16f, set = 0, binding = 6) writeonly uniform image2D outMotion;
+layout(r32f,  set = 0, binding = 7) writeonly uniform image2D outDepth;
+layout(r8,    set = 0, binding = 8) writeonly uniform image2D outReactive;
+layout(r8,    set = 0, binding = 9) writeonly uniform image2D outTc;
+layout(r32f,  set = 0, binding = 10) writeonly uniform image2D outExposure;
+
+// C++ LLCleanFSR3VK::InputsParams (std140, 144 B), a dynamic-offset UBO entry.
+layout(std140, set = 0, binding = 11) uniform FsrInputs
+{
+    mat4 reproj;    // this frame's UNJITTERED clip -> last frame's clip (camera only)
+    vec4 rscreen;   // render width, height, 1/width, 1/height
+    vec4 jitter;    // this frame's jitter: render px x, px y (y down), uv x, uv y
+    vec4 wplane;    // water plane in this frame's unjittered clip space (all 0 = none)
+    vec4 p0;        // x motion target valid, y static exposure, z dynamic exposure on,
+                    // w reactive-mask gain (> 0: mReact.R; <= 0: diff against uRef)
+    vec4 p1;        // x water T&C value, y reactive cap, z reactive diff gain, w unused
+} pc;
+
+float luma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+vec3 compress(vec3 c) { return c / (1.0 + luma(c)); }
+vec3 sanitize(vec3 c)
+{
+    return (any(isnan(c)) || any(isinf(c))) ? vec3(0.0) : clamp(c, vec3(0.0), vec3(65000.0));
+}
+
+// NDC depth (reversed-Z) of the water plane under unjittered screen uv; -1 = no hit.
+float waterPlaneDepth(vec2 uvu)
+{
+    if (abs(pc.wplane.z) < 1e-20) return -1.0;
+    const vec2 n = uvu * 2.0 - 1.0;
+    const float d = -(pc.wplane.x * n.x + pc.wplane.y * n.y + pc.wplane.w) / pc.wplane.z;
+    return (d > 0.0 && d <= 1.0) ? d : -1.0;
+}
+
+void main()
+{
+    const ivec2 rsize = ivec2(pc.rscreen.xy);
+    const ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+
+    float expo = pc.p0.y;
+    if (pc.p0.z > 0.5) expo *= imageLoad(uExposureIn, ivec2(0)).r;
+    expo = max(expo, 1e-6);
+    if (q.x == 0 && q.y == 0) imageStore(outExposure, ivec2(0), vec4(expo, 0.0, 0.0, 0.0));
+    if (q.x >= rsize.x || q.y >= rsize.y) return;
+
+    // ---- depth (water surface substituted) ----
+    const vec2 uvu = (vec2(q) + 0.5) * pc.rscreen.zw - pc.jitter.zw;   // this sample, unjittered
+    const vec4 rm = texelFetch(uReact, q, 0);
+    float d = texelFetch(uDepth, q, 0).r;
+    bool water = false;
+    if (rm.g > 0.5)
+    {
+        const float dw = waterPlaneDepth(uvu);
+        if (dw > d) { water = true; d = dw; }   // reversed-Z: in front = larger
+    }
+
+    // ---- motion, FSR convention: prev_uv - uv ----
+    vec2 mv = vec2(0.0);
+    if (pc.p0.x > 0.5 && d > 0.0 && !water)
+        mv = -texelFetch(uMotion, q, 0).xy;
+    else
+    {
+        const vec4 pp = pc.reproj * vec4(uvu * 2.0 - 1.0, max(d, 0.0), 1.0);
+        if (pp.w > 1e-6) mv = (pp.xy / pp.w * 0.5 + 0.5) - uvu;
+    }
+    if (any(isnan(mv)) || any(isinf(mv))) mv = vec2(0.0);
+
+    // ---- reactive ----
+    float reactive;
+    if (pc.p0.w > 0.0)
+        reactive = rm.r * pc.p0.w;
+    else
+    {
+        const vec3 a = compress(sanitize(texelFetch(uScene, q, 0).rgb) * expo);
+        const vec3 b = compress(sanitize(texelFetch(uRef, q, 0).rgb) * expo);
+        const vec3 dd = abs(a - b);
+        reactive = max(dd.r, max(dd.g, dd.b)) * pc.p1.z;
+    }
+    reactive = clamp(reactive, 0.0, pc.p1.y);
+    reactive = max(reactive, clamp(max(texelFetch(uNoTemporal, q, 0).r, rm.b), 0.0, 1.0));   // #605: past the cap
+
+    imageStore(outMotion, q, vec4(mv, 0.0, 0.0));
+    imageStore(outDepth, q, vec4(d, 0.0, 0.0, 0.0));
+    imageStore(outReactive, q, vec4(reactive, 0.0, 0.0, 0.0));
+    imageStore(outTc, q, vec4(water ? pc.p1.x : 0.0, 0.0, 0.0, 0.0));
+}

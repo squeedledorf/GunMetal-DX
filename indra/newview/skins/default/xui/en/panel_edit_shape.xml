@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<!--
+The Shape page of the wearable editor: the avatar's height over the shape
+editor (SLPanelShapeEditor, panel_shape_editor.xml), which LLPanelEditWearable
+builds into "shape_editor_host". The sliders are in the editor's panels now,
+not in accordion tabs here.
+
+While the editor is out in a window of its own, the host shows the note and the
+way back (shown and hidden by SLPanelShapeEditor).
+-->
+ <panel
+     background_visible="true"
+	 follows="all"
+	 height="400"
+	 layout="topleft"
+	 left="0"
+	 name="edit_shape_panel"
+	 top_pad="10"
+	 width="333" >
+     <string name="meters">Meters</string>
+     <string name="feet">Feet</string>
+     <string name="height">Height:</string>
+     <string name="height_label_color" translate="false">White_50</string>
+     <string name="height_value_label_color" translate="false">White</string>
+     <text
+         follows="top|left|right"
+         font="SansSerifSmallBold"
+         halign="right"
+         height="12"
+         layout="topleft"
+         left="0"
+         name="avatar_height"
+         top="0"
+         width="310">
+     </text>
+     <panel
+         border="false"
+         bg_alpha_color="DkGray2"
+         bg_opaque_color="DkGray2"
+         background_visible="true"
+         background_opaque="true"
+         follows="all"
+         height="388"
+         label="Shape"
+         layout="topleft"
+		 left="10"
+         name="shape_editor_host"
+		 top_pad="0"
+         width="313">
+        <text
+         follows="left|top|right"
+         layout="topleft"
+         left="12"
+         top="14"
+         right="-12"
+         height="48"
+         word_wrap="true"
+         visible="false"
+         name="floated_note"
+         value="The shape editor is in a window of its own. Closing that window puts it back here, and so does the button below." />
+        <button
+         follows="left|top"
+         layout="topleft"
+         left="12"
+         top_pad="6"
+         width="140"
+         height="22"
+         visible="false"
+         label="Put it back"
+         name="floated_dock">
+            <button.commit_callback
+             function="ShapeEditor.Dock" />
+        </button>
+     </panel>
+</panel>

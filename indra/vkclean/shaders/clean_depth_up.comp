@@ -1,0 +1,31 @@
+#version 450
+// vkclean -- DISPLAY DEPTH for a scaled frame (render scale, #181). The selection
+// outline, LL's 3D overlays and the HUD pass run at the display resolution and depth-test
+// against this. The world depth is render-sized AND jittered (TAA); a plain nearest
+// upscale moves every depth edge by the jitter each frame (up to display / render pixels),
+// so the overlays' hidden parts flickered. Here each display pixel takes the depth of
+// the render pixel that sampled its UNJITTERED centre: render pixel q shows the scene at
+// q + 0.5 - jitter, so the one covering render position pr is floor(pr + jitter).
+// Depth images can't be storage-written: the result goes to a buffer, which the renderer
+// copies into the display depth image.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform sampler2D uDepth;              // world depth (texelFetch)
+layout(std430, set = 0, binding = 1) writeonly buffer Out { float depth_out[]; };
+
+layout(push_constant) uniform Push {
+    ivec2 dsize;    // display extent
+    ivec2 rsize;    // render extent
+    vec2  ratio;    // render / display
+    vec2  jitter;   // this frame's jitter, render pixels (x right, y down)
+} pc;
+
+void main()
+{
+    const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= pc.dsize.x || p.y >= pc.dsize.y) return;
+    const vec2  pr = (vec2(p) + 0.5) * pc.ratio;
+    const ivec2 q  = clamp(ivec2(floor(pr + pc.jitter)), ivec2(0), pc.rsize - 1);
+    depth_out[p.y * pc.dsize.x + p.x] = texelFetch(uDepth, q, 0).r;
+}

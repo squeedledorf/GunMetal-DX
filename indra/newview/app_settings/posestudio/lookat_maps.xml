@@ -1,0 +1,105 @@
+<?xml version="1.0" ?>
+<!-- Look-at sync (#902) bone maps: which bones turn an avatar's head toward what it looks
+     at, and how far each one goes. The sender names its map in every look-at line; a
+     receiver uses its own copy of that map (an unknown id falls back to "human"), so a line
+     can only ever move the bones listed here.
+
+     Per map:
+       id      [a-z0-9_], at most 24 characters; sent on the wire, keep it stable
+       label   shown in Pose Studio
+       figure  optional: the Pose Studio figure that implies this body for "Auto"
+       detect  optional: "Auto" picks this map when the worn rigged meshes are weighted to
+               every one of these bones (checked after the figure, in file order)
+       detect_any  optional: ... and to at least one of these (either list alone works)
+       detect_names  optional: when no map matched by rigging, "Auto" picks this map when
+               the name of a worn item (attachment or HUD) contains one of these (any case)
+       detect_names_exclude  optional: a worn item whose name contains one of these never
+               counts for detect_names
+       bones   root to tip, eyes last:
+                 joint       skeleton bone name
+                 priority    optional integer, lower fills first. Default by joint name:
+                             mHead 0, mNeck 10, mChest 20, mSpine4 30, mSpine3 40, mSpine2 50,
+                             mSpine1 60, any other bone 100+ (the one nearer the tip first).
+                 yaw, pitch  EYES ONLY (a bone with eye=true): that bone's own share of the
+                             turn. Ignored for chain bones, which are filled by priority (below);
+                             old maps that list them still load.
+                 yaw_limit   degrees either way
+                 pitch_up, pitch_down   degrees (pitch_down defaults to pitch_up)
+                 eye         true: aims with what the chain could not reach, without using
+                             it up (both eyes get the same). LL's own eye motion already aims
+                             mEyeLeft / mEyeRight / mFaceEyeAltLeft / mFaceEyeAltRight at the
+                             same target on every viewer, so list eyes only for rigs whose
+                             eyes are other bones.
+     How a turn is shared (head first): the requested yaw and pitch go to the highest priority
+     bone (the head) up to its limit, per axis. Only the rest goes to the next bone (the neck),
+     up to its limit, and so on down the chain (chest, spine); a bone this skeleton lacks, or
+     that a Pose Studio pose owns, takes none. There is no hard knee: every bone but the last
+     hands over smoothly, so the next bone starts taking a small share once the one before it
+     is at 75% of its limit (a tanh approach to the limit; the last bone clamps hard). Eyes
+     then aim with whatever the chain could not reach. Bones are listed root to tip as before;
+     the file order only matters for the tie-break and the skeleton parent chain.
+     Angles are turns about the avatar's own up (yaw) and left (pitch) axes, added on top of
+     whatever the animations do. -->
+<llsd>
+<map>
+  <key>maps</key>
+  <array>
+    <map>
+      <key>id</key><string>human</string>
+      <key>label</key><string>Human</string>
+      <key>bones</key>
+      <array>
+        <map><key>joint</key><string>mChest</string><key>yaw</key><real>0.08</real><key>pitch</key><real>0.05</real><key>yaw_limit</key><real>10</real><key>pitch_up</key><real>5</real><key>pitch_down</key><real>5</real></map>
+        <map><key>joint</key><string>mNeck</string><key>yaw</key><real>0.32</real><key>pitch</key><real>0.35</real><key>yaw_limit</key><real>35</real><key>pitch_up</key><real>25</real><key>pitch_down</key><real>25</real></map>
+        <map><key>joint</key><string>mHead</string><key>yaw</key><real>0.60</real><key>pitch</key><real>0.60</real><key>yaw_limit</key><real>50</real><key>pitch_up</key><real>35</real><key>pitch_down</key><real>35</real></map>
+      </array>
+    </map>
+    <map>
+      <key>id</key><string>bento_long_neck</string>
+      <key>label</key><string>Bento long neck</string>
+      <key>bones</key>
+      <array>
+        <map><key>joint</key><string>mSpine3</string><key>yaw</key><real>0.10</real><key>pitch</key><real>0.08</real><key>yaw_limit</key><real>12</real><key>pitch_up</key><real>8</real><key>pitch_down</key><real>8</real></map>
+        <map><key>joint</key><string>mSpine4</string><key>yaw</key><real>0.10</real><key>pitch</key><real>0.08</real><key>yaw_limit</key><real>12</real><key>pitch_up</key><real>8</real><key>pitch_down</key><real>8</real></map>
+        <map><key>joint</key><string>mChest</string><key>yaw</key><real>0.10</real><key>pitch</key><real>0.08</real><key>yaw_limit</key><real>12</real><key>pitch_up</key><real>8</real><key>pitch_down</key><real>8</real></map>
+        <map><key>joint</key><string>mNeck</string><key>yaw</key><real>0.30</real><key>pitch</key><real>0.36</real><key>yaw_limit</key><real>35</real><key>pitch_up</key><real>25</real><key>pitch_down</key><real>25</real></map>
+        <map><key>joint</key><string>mHead</string><key>yaw</key><real>0.40</real><key>pitch</key><real>0.40</real><key>yaw_limit</key><real>45</real><key>pitch_up</key><real>35</real><key>pitch_down</key><real>35</real></map>
+      </array>
+    </map>
+    <map>
+      <key>id</key><string>quadruped</string>
+      <key>label</key><string>Pony / quadruped</string>
+      <key>figure</key><string>figure_pony.xml</string>
+      <!-- Bento quadrupeds put the hind legs on mHindLimb*; any of them weighted is enough
+           (a light weight on the hip bones alone stays under the rigging threshold). Pony
+           bodies on the classic skeleton (forelegs on the arms) rig like a human, so the
+           worn item names are the fallback. -->
+      <key>detect_any</key>
+      <array>
+        <string>mHindLimb1Left</string>
+        <string>mHindLimb1Right</string>
+        <string>mHindLimb2Left</string>
+        <string>mHindLimb2Right</string>
+        <string>mHindLimb3Left</string>
+        <string>mHindLimb3Right</string>
+      </array>
+      <key>detect_names</key>
+      <array>
+        <string>openpony</string>
+        <string>pony</string>
+      </array>
+      <key>detect_names_exclude</key>
+      <array>
+        <string>ponytail</string>
+        <string>pony tail</string>
+        <string>pony-tail</string>
+      </array>
+      <key>bones</key>
+      <array>
+        <map><key>joint</key><string>mNeck</string><key>yaw</key><real>0.50</real><key>pitch</key><real>0.55</real><key>yaw_limit</key><real>45</real><key>pitch_up</key><real>35</real><key>pitch_down</key><real>30</real></map>
+        <map><key>joint</key><string>mHead</string><key>yaw</key><real>0.42</real><key>pitch</key><real>0.40</real><key>yaw_limit</key><real>40</real><key>pitch_up</key><real>30</real><key>pitch_down</key><real>30</real></map>
+      </array>
+    </map>
+  </array>
+</map>
+</llsd>

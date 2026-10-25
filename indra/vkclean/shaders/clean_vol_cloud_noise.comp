@@ -1,0 +1,108 @@
+#version 450
+// vkclean -- VOLUMETRIC CLOUDS (#719): the tiling 3D noises, generated once (module creation)
+// and kept for as long as the layer is on.
+//
+// NOISE_BASE (128^3 RGBA8): r = Perlin-Worley -- tiling gradient-noise fBm dilated by a
+// Worley fBm (Schneider's remap(perlin, 0, 1, worley, 1)): billowy connected cells; g / b / a
+// = Worley fBm at 2x / 4x / 8x the base cell frequency (the low-frequency erosion fBm).
+// NOISE_DETAIL (32^3 RGBA8): r / g / b = Worley fBm at three increasing frequencies (the
+// high-frequency edge erosion), a = 1.
+// Every noise is periodic over the texture (hash of the wrapped lattice coordinates), so a
+// REPEAT sampler tiles it seamlessly in all three axes.
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+#ifdef NOISE_DETAIL
+layout(set = 0, binding = 0, rgba8) uniform writeonly image3D uOut;
+const int SIZE = 32;
+#else
+layout(set = 0, binding = 0, rgba8) uniform writeonly image3D uOut;
+const int SIZE = 128;
+#endif
+
+uvec3 pcg3d(uvec3 v)
+{
+    v = v * 1664525u + 1013904223u;
+    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+    v ^= v >> 16u;
+    v.x += v.y * v.z; v.y += v.z * v.x; v.z += v.x * v.y;
+    return v;
+}
+vec3 hash3(ivec3 c, int period, uint seed)
+{
+    const uvec3 w = uvec3((c % period + period) % period);
+    return vec3(pcg3d(w + uvec3(seed, seed * 7u, seed * 13u))) * (1.0 / 4294967295.0);
+}
+
+// Tiling Worley (F1), inverted: 1 at feature points, 0 far from them. p in [0, 1)^3.
+float worley(vec3 p, int cells, uint seed)
+{
+    const vec3 x = p * float(cells);
+    const ivec3 ic = ivec3(floor(x));
+    const vec3 f = fract(x);
+    float d2 = 1e9;
+    for (int k = -1; k <= 1; ++k)
+        for (int j = -1; j <= 1; ++j)
+            for (int i = -1; i <= 1; ++i)
+            {
+                const ivec3 o = ivec3(i, j, k);
+                const vec3 fp = vec3(o) + hash3(ic + o, cells, seed) - f;
+                d2 = min(d2, dot(fp, fp));
+            }
+    return 1.0 - clamp(sqrt(d2), 0.0, 1.0);
+}
+float worleyFbm(vec3 p, int cells, uint seed)
+{
+    return worley(p, cells, seed) * 0.625 + worley(p, cells * 2, seed + 1u) * 0.25
+         + worley(p, cells * 4, seed + 2u) * 0.125;
+}
+
+// Tiling gradient (Perlin) noise in [-1, 1].
+float grad(ivec3 c, int period, vec3 f)
+{
+    const vec3 g = normalize(hash3(c, period, 91u) * 2.0 - 1.0 + 1e-4);
+    return dot(g, f);
+}
+float perlin(vec3 p, int period)
+{
+    const vec3 x = p * float(period);
+    const ivec3 i = ivec3(floor(x));
+    const vec3 f = fract(x);
+    const vec3 u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    const float n000 = grad(i, period, f);
+    const float n100 = grad(i + ivec3(1, 0, 0), period, f - vec3(1, 0, 0));
+    const float n010 = grad(i + ivec3(0, 1, 0), period, f - vec3(0, 1, 0));
+    const float n110 = grad(i + ivec3(1, 1, 0), period, f - vec3(1, 1, 0));
+    const float n001 = grad(i + ivec3(0, 0, 1), period, f - vec3(0, 0, 1));
+    const float n101 = grad(i + ivec3(1, 0, 1), period, f - vec3(1, 0, 1));
+    const float n011 = grad(i + ivec3(0, 1, 1), period, f - vec3(0, 1, 1));
+    const float n111 = grad(i + ivec3(1, 1, 1), period, f - vec3(1, 1, 1));
+    return mix(mix(mix(n000, n100, u.x), mix(n010, n110, u.x), u.y),
+               mix(mix(n001, n101, u.x), mix(n011, n111, u.x), u.y), u.z);
+}
+float perlinFbm(vec3 p, int period)
+{
+    float s = 0.0, a = 0.5;
+    for (int o = 0; o < 4; ++o)
+    {
+        s += a * perlin(p, period << o);
+        a *= 0.5;
+    }
+    return s / 0.9375;   // [-1, 1]
+}
+
+void main()
+{
+    const ivec3 c = ivec3(gl_GlobalInvocationID);
+    if (any(greaterThanEqual(c, ivec3(SIZE)))) return;
+    const vec3 p = (vec3(c) + 0.5) / float(SIZE);
+#ifdef NOISE_DETAIL
+    const vec4 o = vec4(worleyFbm(p, 2, 11u), worleyFbm(p, 4, 17u), worleyFbm(p, 8, 23u), 1.0);
+#else
+    const float pn = clamp(perlinFbm(p, 4) * 0.5 + 0.5, 0.0, 1.0);
+    const float wf = worleyFbm(p, 4, 3u);
+    // Perlin-Worley: the Perlin fBm remapped into [Worley, 1].
+    const float pw = clamp(wf + pn * (1.0 - wf), 0.0, 1.0);
+    const vec4 o = vec4(pw, worleyFbm(p, 8, 5u), worleyFbm(p, 16, 7u), worleyFbm(p, 32, 9u));
+#endif
+    imageStore(uOut, c, o);
+}

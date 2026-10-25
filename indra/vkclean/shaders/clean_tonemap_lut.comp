@@ -1,0 +1,22 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// vkclean -- TONEMAP / GRADE LUT BAKE (#820, RenderVKTonemapLut): evaluates clean_tonemap.frag's
+// post-exposure tail (clean_tonemap_common.glsl tonemapTail: grade linear stage, tonemapper + mix,
+// split tone, sRGB, legacy gamma, display grade incl. the user 3D LUT and tone curves) at every
+// lattice point of tmLutShape's domain and stores it -- display-space colour, RGBA16F -- for the
+// tonemap FS's tetrahedral lookup. Run by LLCleanRendererVK::recordTonemapLut only when the tail's
+// inputs changed (grade constants, tonemapper / mix / legacy gamma / no_post, the user LUT or curve
+// uploads, the size); one invocation per lattice point (N^3: 110 592 at N = 48 -- microseconds).
+// Same push block and set 1 (the grade) as the FS; set 0 binding 0 = the LUT image.
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+#include "clean_tonemap_common.glsl"
+layout(set = 0, binding = 0, rgba16f) uniform writeonly image3D uLutOut;
+
+void main()
+{
+    const int n = int(pc.p2.w + 0.5);
+    const ivec3 p = ivec3(gl_GlobalInvocationID);
+    if (n < 2 || any(greaterThanEqual(p, ivec3(n)))) return;
+    const vec3 c = tmLutUnshape(vec3(p) / float(n - 1));
+    imageStore(uLutOut, p, vec4(tonemapTail(c), 1.0));
+}

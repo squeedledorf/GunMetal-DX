@@ -1,0 +1,2565 @@
+#version 450
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_GOOGLE_include_directive : require
+#include "clean_av_slots.glsl"
+#define CLEAN_PROBE_JOB_REF
+#include "clean_probe_job.glsl"   // (first: it enables the buffer-reference extensions)
+// vkclean — native Vulkan port of the clean pipeline's GPU cull.
+//
+// This is a faithful transliteration of the REAL viewer shader
+//   indra/newview/app_settings/shaders/class1/deferred/cleanCullC.glsl
+// onto Vulkan std430 + Vulkan-native descriptor bindings. The Instance,
+// SlotInfo and LodGroup structs are byte-identical to the C++ stores
+// (LLCleanInstanceStore::Instance = 192 B, LLCleanMeshAsset::SlotInfo,
+// LLCleanMeshAsset::LodGroup). The cull logic — worldAABB (8-corner
+// transform), p-vertex frustum test, GPU LOD select via detailFromTan
+// (lod_factor*radius/dist), residency gating (SENTINEL / index_count==0),
+// OOB guard, HUD split, per-bucket emit — mirrors the GL version.
+//
+// Differences from the GL source, all mechanical (not behavioural):
+//   * GL `uniform`s become a single push-constant block (Vulkan has no
+//     default-block uniforms). LL's shader manager injects the uniforms;
+//     here we own them.
+//   * The GL version emits into GL DrawElementsIndirect (count first);
+//     Vulkan VkDrawIndexedIndirectCommand is {indexCount, instanceCount,
+//     firstIndex, vertexOffset, firstInstance} — same 5 words, same order.
+//   * The many #29 diagnostic SSBOs (dbg/verdicts/mat_vis/work) are dropped;
+//     they are instrumentation, not part of the render contract. The rigged
+//     skin-output allocation is likewise out of scope for the static proto
+//     (rigged instances route to the rigged buckets but skip pre-skin here).
+
+layout(local_size_x = 64) in;
+
+// 192 bytes — matches LLCleanInstanceStore::Instance exactly.
+struct Instance {
+    mat4 model_matrix;   //  64 B
+    vec4 aabb_min;       //  16 B  (.w = LL LOD radius)
+    vec4 aabb_max;       //  16 B  (.w = attach bone index, unused here)
+    vec4 tint;           //  16 B
+    mat4 uv_matrix;      //  64 B
+    uint lod_group_id;   //   4 B
+    uint material_id;    //   4 B
+    uint flags;          //   4 B
+    uint skin_id;        //   4 B  (rigged: skin; attach: joint slot; terrain: record)
+    vec4 spin_axis;     // xyz world axis*rate, w t0 (GPU target omega)
+    vec4 spin_pivot;    // xyz agent-space pivot, w = UV density / raw UV extent bits
+};                       // 192 B
+
+// 32 bytes — matches LLCleanMeshAsset::SlotInfo.
+struct SlotInfo {
+    uint first_index;
+    uint index_count;   // 0 => NOT RESIDENT
+    int  base_vertex;
+    uint has_weights;
+    uint vert_count;
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
+};
+
+// VkDrawIndexedIndirectCommand.
+struct DrawCmd {
+    uint indexCount;
+    uint instanceCount;
+    uint firstIndex;
+    int  vertexOffset;
+    uint firstInstance;
+};
+
+// 16 bytes — matches LLCleanMeshAsset::LodGroup (uvec4).
+struct LodGroup { uint slot[4]; };
+
+#define LOD_SENTINEL 0xFFFFFFFFu
+
+// Bindings mirror the GL binding-index intent, compacted to what the proto
+// actually uses. 10 buckets: 0=opaque 1=mask 2=alpha 3=r_opaque 4=r_mask 5=r_alpha,
+// then the DOUBLE-SIDED (glTF mDoubleSided, flag bit8) opaque/mask sets drawn without
+// back-face culling: 6=ds_opaque 7=ds_mask 8=ds_r_opaque 9=ds_r_mask. (Alpha-blend
+// stays one bucket per set -- its order matters; its FS discards single-sided back
+// faces.) Counter slots: bucket b<6 -> counters[b]; 6..9 -> counters[b+2] (slots 6/7
+// hold the alpha sort's post-water counts).
+layout(std430, binding = 0) readonly  buffer Instances  { Instance instances[]; };
+layout(std430, binding = 1) readonly  buffer Slots      { SlotInfo slots[]; };
+layout(std430, binding = 2) writeonly buffer CmdOpaque  { DrawCmd  cmd_opaque[]; };
+layout(std430, binding = 3) writeonly buffer CmdMask    { DrawCmd  cmd_mask[]; };
+layout(std430, binding = 4) writeonly buffer CmdAlpha   { DrawCmd  cmd_alpha[]; };
+layout(std430, binding = 5) writeonly buffer CmdROpaque { DrawCmd  cmd_r_opaque[]; };
+layout(std430, binding = 6) writeonly buffer CmdRMask   { DrawCmd  cmd_r_mask[]; };
+layout(std430, binding = 7) writeonly buffer CmdRAlpha  { DrawCmd  cmd_r_alpha[]; };
+layout(std430, binding = 8) coherent  buffer Counters   { uint counters[]; };   // 19 entries (12..16: shadowSlot)
+// [F2 waterlists] slots 17 / 18 = the alpha sort's water / exclusion lists; the cull never writes them.
+layout(std430, binding = 9) readonly  buffer LodGroups  { LodGroup lod_groups[]; };
+
+// DIAG (behavior-neutral): per-reason reject histogram. atomicAdd'd at every
+// early-return / emit so the CPU can see EXACTLY where the live instances die.
+// Zeroed each frame + read back host-visible like the draw counters. Indices:
+//  0 sentinel 1 degenerate 2 hud 3 frustum 4 noslot 5 oob 6 idxzero 7 bucketcap
+//  8 emitted.  (>=16 slots allocated for headroom.)
+layout(std430, binding = 10) coherent buffer DbgReasons { uint dbg[]; };
+#define R_SENTINEL  0u
+#define R_DEGEN     1u
+#define R_HUD       2u
+#define R_FRUSTUM   3u
+#define R_NOSLOT    4u
+#define R_OOB       5u
+#define R_IDXZERO   6u
+#define R_BUCKETCAP 7u
+#define R_EMITTED   8u
+#define R_RIGNOSKIN 9u    // rigged, but its skin palette isn't built this frame
+#define R_RIGCAP    10u   // rigged, skin-output / work-list capacity exhausted
+// Reduced-detail avatar tier (#31), main pass only: skinned vertices reserved for
+// full-detail / reduced avatars, and rigged draws withheld from every shadow view.
+#define R_SKINV_FULL    11u
+#define R_SKINV_REDUCED 12u
+#define R_RIG_NOSHADOW  13u
+// Reduced-tier SKIN CACHE (#31): a cached instance found no room in the persistent
+// arena (the CPU then resets it: new epoch), and cached vertices drawn WITHOUT a
+// re-skin this frame (held pose).
+#define R_RIGCACHE_FULL 14u
+#define R_RIGCACHE_HELD 15u
+// Per-pass avatar visibility (#517), main pass: rigged draws of avatars the main view
+// does not see, kept only for other passes (off-screen regions), and of those the ones
+// the realtime probe capture pulled in.
+#define R_RIG_OFFSCREEN 16u
+#define R_RIG_PROBE     17u
+// Rigged DEMAND (#559; always on, one atomic per cull from phase 1): skinned vertices the
+// visible rigged instances asked for in per-frame ranges, per distance tier (18..21), the
+// work items asked for (22) and the per-frame vertices dropped for capacity (23). The CPU
+// sizes the rigged buffers and its LOD pressure from these, not from an upper bound.
+#define R_RIGDEM_V0     18u
+#define R_RIGDEM_W      22u
+#define R_RIGDROP_V     23u
+// #561 screen-size rigged LOD (always on; one atomic per subgroup, phase 0): rigged
+// instances the main view draws at a DECIMATED step (24) and the skinned vertices that
+// saved against their source slot (25).
+#define R_RIGDEC_N      24u
+#define R_RIGDEC_SAVED  25u
+// CLUSTER LOD legacy-skin skip (always on; one atomic per subgroup, phase 0): rigged
+// instances of switched avatars that got NO legacy draw / pre-skin this frame (AVV_CL_SKIP:
+// every consumer is on the cluster path) (26) and the skinned vertices that saved (27). The
+// CPU keeps the legacy capacity sized for them (a switch back never drops) and reports them
+// in the CLOD A/B line.
+#define R_CLSKIP_N      26u
+#define R_CLSKIP_V      27u
+
+// RIGGED PRE-SKIN WORK (GPU-driven). For every visible rigged instance the cull
+// reserves a PRIVATE range of skinned vertices (so two instances sharing one mesh
+// slot -- the same body/outfit on two avatars -- never overwrite each other) and
+// appends one pre-skin work item. rig_alloc.dispatch_x doubles as the work count
+// and the vkCmdDispatchIndirect X for clean_preskin.comp. Zeroed per frame
+// (dispatch_x=0, y=z=1, skin_vert_used=0).
+// cache_used (word 4) is the reduced-tier skin cache's bump pointer: NOT reset per
+// frame (only on a new cache epoch, by the CPU).
+layout(std430, binding = 11) coherent buffer RigAlloc {
+    uint dispatch_x;
+    uint dispatch_y;
+    uint dispatch_z;
+    uint skin_vert_used;
+    uint cache_used;
+    uint v_base;     // #559: this cull's first per-frame skinned vertex (phase 1 -> phase 2)
+    uint w_base;     // #559: this cull's first work item (phase 1 -> phase 2)
+} rig_alloc;
+struct WorkItem {
+    uint dst_vert_base;
+    uint src_vert_base;
+    uint vert_count;
+    uint skin_id;
+    uint src_weight_base;   // rigged-only weight arena base (0xFFFFFFFF = no weights)
+    uint _pad1;             // RC_LOCAL | joint-table slot: skin into the slot's pelvis frame
+    uint _pad2;             // instance id + 1 (every item; 0 = none) -> pre-skin F6 history + posed centre
+    uint _pad3;             // F6: cache item whose range holds the pose drawn last frame
+};
+layout(std430, binding = 12) writeonly buffer Work { WorkItem work_items[]; };
+
+// REDUCED-TIER SKIN CACHE (#31). A reduced, no-shadow avatar's pose only changes when
+// its animation bucket ticks (RenderVKReducedAvatarAnimFPS), or when something else
+// edits its skeleton (base writes, seeding, CPU path: av_vis bit AVV_POSE_DIRTY, set by
+// the CPU per frame). #632: the same for every avatar with held animation frames
+// (AVV_HELD: distance / screen-size rate, hidden) -- shadow casters included: the
+// rigged VS (every pass), the alpha sort, the GPU pick, the weld and the RT rig copy all
+// read the state word below and place pelvis-local vertices with the current pelvis.
+// Its rigged instances are therefore skinned into a PERSISTENT range of the skin output -- the arena [u_cache_base, u_cache_base + u_cache_cap) above
+// the per-frame ranges -- in the avatar's PELVIS frame (joint 0 of the joint table,
+// rotation normalized), and only re-skinned when the pose or the instance's key (LOD
+// slot, skin, weights) changed. On held frames the rigged VS re-applies the pelvis's
+// CURRENT world transform (it moves with the root every frame), so the avatar still
+// moves smoothly. (Was: only no-shadow avatars, because the shadow views and the RT rig
+// copy read eye-relative positions; the shadow views draw through the same rigged VS and
+// the RT rig copy now writes avatar-local BLAS input for every avatar, #632.)
+// Per instance 16 words: 0 cache base (absolute vertex index), 1 capacity (verts),
+// 2 key: src_vert_base, 3 key: skin_id, 4 key: weight base, 5 epoch, 6 STATE (main
+// cull, this frame; read by the rigged VS / alpha sort), 7 the last frame the entry
+// was drawn from the cache, 8 SOURCE (#616, main cull, this frame, EVERY rigged draw --
+// per-frame range or cached): the static vertex base its skinned range was skinned from
+// (the drawn slot -- a decimated step's own -- or the morphed system-body slot). The
+// compact skinned vertex carries no texcoord: the rigged VS / GPU pick read it from
+// that source vertex (clean_skinvert.glsl; RC_WORDS / RC_STATE / RC_SRC mirror these).
+// 9..11 POSED BOX CENTRE + 12 its range key (vertex base + 1): written by the PRE-SKIN for
+// the rigged alpha sort, never by the cull (clean_skinvert.glsl RC_CTR / RC_CTR_KEY);
+// 13..15 that box's extent (#835, same writer, clean_skinvert.glsl RC_EXT).
+// An entry not drawn cached LAST frame (tier flip, off screen, culled) missed the pose
+// changes since: it is re-skinned, whatever the CPU bit says.
+layout(std430, binding = 24) buffer RigCache { uint rig_cache[]; };
+#define RC_WORDS   16u   // = clean_skinvert.glsl RC_WORDS = llcleanrenderervk.h kRigCacheWords
+#define RC_SRC     8u
+// (2026-10-14, 1024 avatar slots: the slot in bits 0..11, flags above -- clean_av_slots.glsl)
+#define RC_LOCAL   RC_ST_LOCAL     // state: drawn from the cache (pelvis-local), slot in RC_ST_SLOT
+#define RC_SKINNED RC_ST_SKINNED   // state: re-skinned this frame (prev positions written)
+#define RC_CLUSTER RC_ST_CLUSTER   // state: the cluster LOD path draws it in the MAIN view (#747)
+#define RC_WORK_LOCAL 0x80000000u   // work item flag (_pad1)
+
+// STABLE COMPACTION (deterministic draw order). An atomicAdd append ordered each
+// bucket by GPU scheduling -- different every frame -- so coincident surfaces (HUD
+// prims stacked in one plane, onion-skin layers duplicating a body mesh) swapped
+// depth-test winners every frame: z-fighting flicker GL never had (LL draws in a
+// stable order with GL_LEQUAL). Three phases instead, ordered by instance id:
+//   0: cull -> candidate draw + bucket + rank within the workgroup (instance order)
+//   1: one workgroup scans per-workgroup bucket counts into offsets + totals
+//   2: write each candidate at offset + rank
+layout(std430, binding = 13) buffer Cand     { DrawCmd cand[]; };
+layout(std430, binding = 14) buffer CandMeta { uint cand_meta[]; };   // bucket<<24 | rank, ~0 = culled
+layout(std430, binding = 15) buffer WgCounts { uint wg_counts[]; };   // [workgroup*NBI + internal bucket]
+layout(std430, binding = 16) writeonly buffer CmdDsOpaque  { DrawCmd cmd_ds_opaque[]; };
+layout(std430, binding = 17) writeonly buffer CmdDsMask    { DrawCmd cmd_ds_mask[]; };
+layout(std430, binding = 18) writeonly buffer CmdDsROpaque { DrawCmd cmd_ds_r_opaque[]; };
+layout(std430, binding = 19) writeonly buffer CmdDsRMask   { DrawCmd cmd_ds_r_mask[]; };
+// TEXTURE DEMAND FEEDBACK (world pass only): per material, the largest number of
+// texels any instance using it needs across the texture's width -- screen footprint
+// of the instance's bounds times its UV repeats. The CPU reads it back a few frames
+// later and sizes each texture's resident mip chain from it (visibility-driven
+// residency). Cleared per frame; atomicMax.
+layout(std430, binding = 20) coherent buffer TexDemand { uint tex_demand[]; };
+struct MaterialUV { vec4 rows[6]; };   // clean_mat_uv.glsl (per-map transforms)
+layout(std430, binding = 21) readonly buffer MaterialUVs { MaterialUV mat_uv[]; };
+
+// AVATAR VISIBILITY (CPU, per frame): av_vis[joint-table slot] = the passes that draw
+// the avatar (bounds = animated extents incl. rigged attachments, padded) -- one bit per
+// pass (#517, AVV_* below): the main view (the cull frustum, which is the frozen one
+// under "Freeze culling camera", or within 16 m of the LOD camera), and, for an avatar
+// the main view does not see, the sun cascades (its light-swept bounds), the projector
+// tiles, the planar mirror. av_vis[AV_VIS_SLOTS] = 1 when binding 23 holds the skin meta;
+// [258..259] = this frame's realtime probe capture job (avProbeHit). Rigged instances and
+// worn rigid attachments skip the frustum test (their bind or attach-relative boxes are
+// not world bounds), so without this every loaded avatar was pre-skinned and drawn
+// every frame, on screen or not.
+layout(std430, binding = 22) readonly buffer AvatarVis { uint av_vis[]; };
+// LLCleanSkinStore::SkinMeta records (7568 B = 1892 words); word 0 = avatar_idx.
+layout(std430, binding = 23) readonly buffer SkinMetaW { uint skin_meta_w[]; };
+#define SKIN_META_WORDS 1892u
+#define AV_VIS_SLOTS AV_SLOT_CAP
+#define DEMAND_FULL 0x00FFFFFFu
+#define NB 10u
+uint counterSlot(uint b) { return b < 6u ? b : b + 2u; }
+// REDUCED-DETAIL TIER (#31): av_vis[slot] bits (CPU LLCleanRendererVK::kAvVis*).
+#define AVV_ANY      1u       // drawn by some CPU-decided pass (any of MAIN SUN PROJ MIRROR)
+#define AVV_NOSHADOW 2u
+#define AVV_REDUCED  4u
+#define AVV_POSE_DIRTY 8u     // reduced tier: the skeleton pose changed this frame (re-skin)
+#define AVV_HELD     128u     // #632: held-frame skin cache (animation has held frames; casts shadows)
+// PER-PASS VISIBILITY (#517). Only an avatar WITHOUT AVV_MAIN carries SUN / PROJ / MIRROR:
+// a main-view avatar's draws (the rigged buckets) serve every pass, an off-screen one's
+// rigged draws go to the pass's own off-screen region (binding 28) and nowhere else.
+#define AVV_MAIN     256u     // the main view: drawn there
+#define AVV_SUN      512u     // off screen: casts into the sun / moon cascades
+#define AVV_PROJ     1024u    // off screen: inside a shadowed projector's frustum
+#define AVV_MIRROR   2048u    // off screen: seen by the dynamic planar mirror
+#define AVV_PROBE_OK 4096u    // off screen: the realtime probe capture may pull it in (avProbeHit)
+// #559 rigged capacity (CPU, LLCleanRendererVK::rigPressure): bits 16..18 = a pressure LOD
+// cap + 1 (0 = none): the rigged LOD pick takes that level or COARSER first; bits 20..21 =
+// the avatar's distance tier (0 nearest .. 3 farthest) for the allocation order.
+#define AVV_PRESS_SHIFT 16u
+#define AVV_TIER_SHIFT  20u
+// #561 screen-size rigged LOD (CPU, LLCleanRendererVK::rigPressure, the same controller):
+// bits 24..26 = the avatar's pixel tolerance level (0 = off -> always the source slot;
+// lvl -> 0.25 * 2^lvl px). Zero in ordinary scenes, for our own avatar and for the
+// nearest distance tier.
+#define AVV_SLOD_SHIFT  24u
+// CLUSTER LOD LEGACY-SKIN SKIP (CPU LLCleanRendererVK::clusterLegacySkipPlan, after the main
+// view's cluster selection): every consumer of this avatar's LEGACY pre-skinned vertices is
+// covered by the cluster path this frame (main view, shadow / capture rig lists, GPU pick, RT
+// cluster cut). Its cluster-owned rigged instances then get no legacy draw, no pre-skin work
+// item and no off-screen region entry (cullOne, main cull only): the legacy weld, the RT rig
+// copy and every bucket reader never see them. 0 = the legacy work runs exactly as before.
+#define AVV_CL_SKIP     0x08000000u
+// SHADOW-CASTER PARTITION. The shadow cascades / projector tiles draw the rigged
+// buckets (3 4 5 8 9) of THIS cull. A main-pass rigged draw of a no-shadow avatar
+// takes the internal "twin" bucket (10..14), which phase 1 places right AFTER its
+// bucket's casters in the same command array: counters[counterSlot(b)] = all draws
+// (main view), counters[shadowSlot(b)] = the leading casters only (shadow views).
+#define NBI 15u
+uint twinOf(uint b)    { return b == 3u ? 10u : b == 4u ? 11u : b == 5u ? 12u : b == 8u ? 13u : b == 9u ? 14u : 0xFFu; }
+uint primaryOf(uint b) { return b < NB ? b : (b == 10u ? 3u : b == 11u ? 4u : b == 12u ? 5u : b == 13u ? 8u : 9u); }
+uint shadowSlot(uint b) { return b == 3u ? 12u : b == 4u ? 13u : b == 5u ? 14u : b == 8u ? 15u : 16u; }
+
+// OFF-SCREEN RIGGED REGIONS (#517; main cull only). A rigged draw of an avatar the main
+// view does not see, kept for other passes, must not reach the main view's buckets: it
+// goes to the region (rigged bucket k, pass r) of every pass that needs it -- r 0 sun
+// cascades, 1 projector tiles, 2 planar mirror, 3 the realtime probe capture -- and is
+// pre-skinned once for all of them. Each region holds rigOffCap() draws at a fixed
+// offset, so each pass draws exactly its own off-screen avatars with one more indirect
+// draw (LLCleanRendererVK::drawRigOff). Counts lead the buffer, one word per region.
+// Stable compaction as the buckets (internal columns NBI.., ranked in instance order).
+#define OFF_REGIONS 4u
+#define OFF_SUN     0u
+#define OFF_PROJ    1u
+#define OFF_MIRROR  2u
+#define OFF_PROBE   3u
+#define OFF_COLS    (5u * OFF_REGIONS)   // rigged buckets 3 4 5 8 9 x regions
+#define NBW         (NBI + OFF_COLS)     // bucket + off-screen region columns
+// DETERMINISTIC RIGGED ALLOCATION (#559). Per workgroup, after the NBW draw columns: the
+// pre-skin demand per DISTANCE TIER (av_vis AVV_TIER_*): RIG_TIERS columns of skinned
+// vertices (per-frame ranges), then RIG_TIERS columns of work items. Phase 1 scans them
+// like the buckets, each tier starting after the nearer tiers' totals, and phase 2 hands
+// out the ranges / work indices in (tier, instance) order. When the capacity is short the
+// FARTHEST tier's instance-order tail goes -- the same instances every frame. (The old
+// atomic append gave the space to whichever instances got there first: a different
+// subset each frame, i.e. every avatar flickering at a packed venue.)
+#define RIG_TIERS   4u
+#define RIG_VCOL    NBW                  // + tier: skinned verts of the tier's dyn ranges
+#define RIG_WCOL    (NBW + RIG_TIERS)    // + tier: work items (dyn + skin-cache re-skins)
+// G-BUFFER TERRAIN LIST (RenderVKGbufTerrainSplit; main cull only). Every terrain draw (instance
+// flag bit5) the main cull puts in bucket 0 / 1 is ALSO written, in the same instance order, to
+// its own list (binding 30, mTerrList: count word, then the draws at byte 32). The deferred
+// G-buffer draws buckets 0 / 1 with a terrain-free pipeline (its VS collapses terrain draws:
+// clean_draw.vert CLEAN_VS_SKIP_TERRAIN) and terrain from this list with the terrain pipeline,
+// so the buckets every other pass reads stay exactly as they were. One more scan column ranks it.
+#define TERR_COL    (NBW + 2u * RIG_TIERS)   // terrain draws (bucket 0 / 1) of the workgroup
+#define WGS         (TERR_COL + 1u)          // wg_counts words per workgroup (C++ kCullScanBuckets)
+layout(std430, binding = 28) writeonly buffer RigOff { uint rig_off_count[32]; DrawCmd rig_off_cmd[]; };
+layout(std430, binding = 30) writeonly buffer TerrList { uint terr_count; uint terr_pad[7]; DrawCmd terr_cmd[]; };
+// #561 DECIMATED RIGGED STEPS (CPU LLCleanRigDecimator, uploaded on change): an
+// open-addressed hash keyed by the SOURCE slot id (the slot the pick below chose), two
+// uvec4 per entry: {src (~0 empty, ~0-1 deleted), step1, step2, step3 slot ids},
+// {half2(err1, err2), half2(err3, -), src index_count, src vert_count}. err = the step's
+// geometric error in metres (bind space). Steps are ~1/2, 1/4, 1/8 of the source's
+// triangles with only vertices REMOVED (skin weights / UVs / tangents of the kept ones
+// exact), compacted.
+layout(std430, binding = 29) readonly buffer RigDecim { uvec4 rig_decim[]; };
+#define RDEC_EMPTY  0xFFFFFFFFu
+#define RDEC_PROBES 16u
+uint rigIndex(uint b) { return b == 3u ? 0u : b == 4u ? 1u : b == 5u ? 2u : b == 8u ? 3u : 4u; }
+// cand_meta of an off-screen draw: bit31 set, bits 28..30 rigged index k, 24..27 region
+// mask, then a 6-bit rank per region (bits 6r..6r+5). ~0 (k = 7) stays "culled".
+#define OFF_META 0x80000000u
+bool offMeta(uint m) { return m != 0xFFFFFFFFu && (m & OFF_META) != 0u; }
+
+// Per-dispatch cull parameters (#238: push constants <= 128 B). C++ VKCullPush, an entry
+// of the cull-params ring (std430 stride 224, binding 25), selected by the pushed slot;
+// `pc.u_*` names this dispatch's entry. The compaction phase is pushed (one entry serves
+// every phase of a dispatch group): read it as g_cull_push.phase, never the entry's u_phase (0).
+struct CullParams {
+    vec4  u_frustum_planes[6]; // ax+by+cz+d>=0 means inside
+    vec4  u_cam_pos;           // .xyz THIS pass camera (unused-diag), .w lod_factor
+    vec4  u_lod_cam_pos;       // .xyz MAIN camera (LOD distance), .w px per unit at dist 1 (proj11*H/2)
+    uint  u_instance_count;
+    uint  u_bucket_cap;
+    uint  u_idx_valid;         // indicesUsed(): OOB guard
+    uint  u_hud_pass;          // 0 world, 1 HUD, 2 probe capture, 3 shadow cascade, 4 mirror
+    uint  u_skin_count;        // skin palettes built this frame (valid skin_id < this)
+    uint  u_skin_vert_cap;     // skin-output buffer capacity, in vertices
+    uint  u_work_cap;          // pre-skin work-list capacity, in items
+    uint  u_phase;           // always 0 in the ring (#238): read g_cull_push.phase
+    uint  u_cascade;         // shadow pass (3): cascade index (caster tail below); 4 = projector tile;
+                             // 5 = the cascades' dynamic-caster overlay (#567)
+    uint  u_flags;           // bit0: hide the agent's own world attachments (pass 0 only)
+                             // render types off (all world passes, not HUD): bit1 terrain,
+                             // bit2 water, bit3 alpha-blend, bit4 avatars (rigged + worn),
+                             // bit5 volumes (everything else), bit6 simple (opaque
+                             // non-mask non-alpha volumes), bit7 trees, bit8 grass
+                             // (vegetation, instance bit 15, is exempt from 5/6)
+                             // shadow passes (3) only, RenderAvatarShadowDetail: bit9 worn
+                             // attachments cast opaque only, bit10 no alpha-blend worn casters
+                             // probe capture (2) / mirror (4): bit11 dynamic (worn attachments drawn)
+                             // probe capture (2): bit12 worn attachments culled by their wearer's box
+                             // probe capture (2): bit13 missing LOD -> nearest resident level
+                             // probe capture (2): bit14 shared six-face pre-cull (phases 3 / 4)
+                             // shadow passes (3), #567: bit15 static casters only, bit16
+                             // dynamic casters only (SHADOW_SPLIT_*)
+                             // <GMDX> every pass: bit17 orthographic main view (CULL_ORTHO,
+                             // the region map capture): u_lod_cam_pos.w is px per metre at
+                             // any depth; every LOD at its finest
+                             // bit31: diagnostic reject histogram on (dbgAdd; RenderVKCullDiag)
+    uint  u_cache_base;      // reduced-tier skin cache arena: first vertex (pass 0)
+    uint  u_cache_cap;       // its capacity in vertices (0 = cache off)
+    uint  u_cache_epoch;     // entries of another epoch are invalid (never 0)
+    uint  u_frame;           // frame number (skin cache: entries must be maintained every frame)
+    // Probe capture (2) only (0 in every other pass): the capture's near / far clip, the
+    // face's LOD scale (face px / main-view px per unit at distance 1, <= 1) and the face
+    // index (0..5: +X -X +Y -Y +Z -Z, probeFaceMatrix's F rows) phases 4 / 2 select.
+    float u_probe_near;
+    float u_probe_far;
+    float u_probe_lod_scale;
+    uint  u_probe_face;
+    uint  u_vtx_valid;       // vertex-buffer extent in vertices (OOB guard, #238; 0 = unchecked)
+    uint  u_tex_demand;      // halfs: x texel demand bias, y sampler anisotropy (C++ VKCullPush::tex_demand)
+    uint  u_rig_off_cap;     // #517: draws per off-screen rigged region (binding 28; main cull; 0 = none)
+    // CLUSTER LOD legacy exclusion (#745, main cull with CULL_MODE_CLUSTER only): the device
+    // address (lo, hi) of the cluster module's per-instance bitset and its length in words
+    // (C++ VKCullPush::cluster_owned_*; 0 elsewhere). Was the std430 tail padding.
+    uint  u_cluster_owned_lo;
+    uint  u_cluster_owned_hi;
+    uint  u_cluster_owned_words;
+};
+layout(std430, binding = 25) readonly buffer CullParamsRing { CullParams cull_params[]; };
+layout(push_constant) uniform CullPush {
+    uint slot;    // absolute cull-params ring index
+    uint phase;   // stable-compaction phase (0 cull, 1 scan, 2 emit; probe pre-cull 3 / 4)
+    uint slot_b;  // multi-view probe cull: the scheduled face's params entry (~0 = none)
+    uint mode;    // CULL_MODE_* bits below (0 = the plain cull)
+} g_cull_push;    // 16 B
+// The params entry cullOne reads: the push's slot, except while the multi-view probe
+// cull evaluates its second origin (the scheduled face, slot_b).
+uint g_slot = g_cull_push.slot;
+#define pc cull_params[g_slot]
+// Entries per off-screen region (LLCleanRendererVK::rigOffCap(): the work-list capacity
+// when it was sized; 0 = no region buffer -> every off-screen draw counts as overflow).
+uint rigOffCap() { return pc.u_rig_off_cap; }
+// Dispatch mode bits (VKCullSlotPush::mode; C++ LLCleanRendererVK::kCullMode*).
+#define CULL_MODE_IDLIST 1u   // HUD: phases 0-2 walk the HUD instance list (binding 26), not every row
+#define CULL_MODE_STATS  2u   // probe capture: funnel counts (PROBE_STAT_*), one atomic per subgroup
+#define CULL_MODE_WIDTH  4u   // probe capture: size cutoff on the widest the object can look (oriented middle extent)
+#define CULL_MODE_TIGHT  8u   // probe capture: face masks from the (lightly padded) bounds, no origin box
+#define CULL_MODE_CLUSTER 16u  // skip static instances the cluster LOD path draws in this pass (#745, below)
+// CLUSTER LOD legacy exclusion (#745): bit i of the cluster module's bitset = instance i is
+// drawn by the cluster path in the main view this frame (llcleanclusterselectvk.h
+// legacyExclusion). Read through its device address (host-visible, per frame slot, written
+// before the submit): no cull-set binding, so the cull sets' layout is unchanged. The main
+// cull, and a re-rendered sun cascade's / the mirror's cull when that pass draws its cluster
+// view this frame (the renderer passes the bitset only then; probe faces and projector tiles
+// keep their legacy static draws). Static owned instances are skipped; RIGGED owned instances
+// (#747) stay (the secondary passes draw the main cull's rigged buckets) and get RC_CLUSTER in
+// their rig-cache state (main cull only): every rigged pass whose cluster rig list is drawn
+// this frame drops them (u_sky_zenith.w = 1, clean_draw_rigged.vert).
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer ClusterOwnedRef { uint w[]; };
+bool clusterOwned(uint id)
+{
+    if ((g_cull_push.mode & CULL_MODE_CLUSTER) == 0u || (id >> 5u) >= pc.u_cluster_owned_words) return false;
+    ClusterOwnedRef r = ClusterOwnedRef(uvec2(pc.u_cluster_owned_lo, pc.u_cluster_owned_hi));
+    return ((r.w[id >> 5u] >> (id & 31u)) & 1u) != 0u;
+}
+// Probe funnel counts, past the per-view counters of view 0 (the probe counter blocks
+// are MV_CTR_STRIDE words; other counter buffers are shorter and never get these).
+#define MV_CTR_STRIDE      32u
+#define PROBE_STAT_KEPT    28u   // instances kept in at least one face
+#define PROBE_STAT_SIZECUT 29u   // instances dropped by the size cutoff
+#define PROBE_STAT_OVER    30u   // multi-view: draws dropped by a full per-face region
+
+// DIAG histogram add. The CPU copies the histogram out right after the MAIN cull (and
+// zeroes it per frame), so the HUD (1) and probe (2) culls' adds were never observed --
+// and they cost: one same-address atomic per rejected instance, i.e. nearly every
+// instance (the HUD cull rejects the world, a probe face rejects all but its pyramid).
+// F10 / B6: the rest are diagnostics too, on only with u_flags bit31 (RenderVKCullDiag;
+// the funnel log + skinVerts* hitch counters). Always kept: the two reasons the CPU acts
+// on (buildRiggedFrame: rigged capacity drop -> re-size, skin-cache arena full -> reset).
+#define CULL_DIAG_BIT 0x80000000u
+void dbgAdd(uint r, uint v)
+{
+    if (pc.u_hud_pass == 1u || pc.u_hud_pass == 2u) return;
+    if ((pc.u_flags & CULL_DIAG_BIT) == 0u && r != R_RIGCAP && r != R_RIGCACHE_FULL && r < R_RIGDEM_V0) return;
+    atomicAdd(dbg[r], v);
+}
+
+// SHADOW-CASTER TAIL of av_vis (CPU: fillShadowCasterTail): per cascade 6 caster
+// planes (vec4 as uint bits) -- the view-slice planes a shadow can't cross, so a
+// caster must already be inside them -- then 4 cascade texel sizes, the min caster
+// size in texels, and an enable word.
+#define CASTER_BASE (AV_VIS_SLOTS + 4u)
+bool casterOk(uint c, vec3 wmin, vec3 wmax)
+{
+    // #567: wmin / wmax are worldAABB's (padded 1 m each side): the size tests take the
+    // UNPADDED extent -- with the pad every caster measured >= 2 m, so the sub-texel cull
+    // below never rejected anything.
+    const vec3 blo = wmin + vec3(1.0), bhi = max(wmax - vec3(1.0), blo);
+    const vec3 e = bhi - blo;
+    if (c >= 4u)
+    {
+        // Projector shadow tile (4) / the cascades' dynamic overlay (5, #567: k = 0): its own
+        // frustum is the cull; plus (#567, tiles) casters smaller
+        // than the tile's texel footprint at their nearest distance from the apex
+        // (u_probe_near / far / lod_scale = apex, u_probe_face = float bits of the world
+        // texel per unit distance x RenderVKShadowMinCasterTexels; 0 = off).
+        const float k = uintBitsToFloat(pc.u_probe_face);
+        if (!(k > 0.0)) return true;
+        const vec3 apex = vec3(pc.u_probe_near, pc.u_probe_far, pc.u_probe_lod_scale);
+        const float d = length(apex - clamp(apex, blo, bhi));
+        return max(e.x, max(e.y, e.z)) >= k * d;
+    }
+    if (uint(av_vis.length()) <= CASTER_BASE + 101u || av_vis[CASTER_BASE + 101u] == 0u) return true;
+    for (uint i = 0u; i < 6u; ++i)
+    {
+        uint b = CASTER_BASE + (min(c, 3u) * 6u + i) * 4u;
+        vec4 p = vec4(uintBitsToFloat(av_vis[b]), uintBitsToFloat(av_vis[b + 1u]),
+                      uintBitsToFloat(av_vis[b + 2u]), uintBitsToFloat(av_vis[b + 3u]));
+        vec3 v = vec3(p.x >= 0.0 ? wmax.x : wmin.x,
+                      p.y >= 0.0 ? wmax.y : wmin.y,
+                      p.z >= 0.0 ? wmax.z : wmin.z);
+        if (dot(p.xyz, v) + p.w < 0.0) return false;
+    }
+    // Sub-texel casters can't cast a resolvable shadow in this cascade.
+    float texel = uintBitsToFloat(av_vis[CASTER_BASE + 96u + min(c, 3u)]);
+    float mint  = uintBitsToFloat(av_vis[CASTER_BASE + 100u]);
+    return max(e.x, max(e.y, e.z)) >= texel * mint;
+}
+
+#include "clean_terrain_lod.glsl"   // smooth terrain LOD (#211)
+
+// Mirror LLVolumeLODGroup::getDetailFromTan (thresholds {0.03,0.06,0.24}).
+uint detailFromTan(float tan_angle)
+{
+    tan_angle = floor(tan_angle * 100.0 + 0.5) * 0.01;   // ll_round(x,0.01)
+    if (tan_angle <= 0.03) return 0u;
+    if (tan_angle <= 0.06) return 1u;
+    if (tan_angle <= 0.24) return 2u;
+    return 3u;
+}
+
+// LINDEN TREES / GRASS (instance bit 15, llcleaningest.cpp VK_VEGETATION_FLAG).
+// uv_matrix row 3 (unused by any UV transform) holds the LOD inputs: trees
+// (dist_lt0, dist_lt1, dist_lt2, detail_k), grass (0, 0, 0, -1).
+#define VEG_FLAG 32768u
+// Water exclusion surface / invisiprim (llvovolume.cpp registerCleanFace, #27).
+#define EXCL_FLAG 65536u
+// #567 dynamic shadow caster (instance bit21, LLCleanInstanceStore::DYNAMIC_CASTER_FLAG)
+// and the shadow-pass (3) split bits of u_flags (C++ kShadowSplitStatic / kShadowSplitDynamic).
+#define DYN_CASTER_FLAG      2097152u
+#define SHADOW_SPLIT_STATIC  32768u
+#define SHADOW_SPLIT_DYNAMIC 65536u
+#define CULL_ORTHO           131072u   // <GMDX> (C++ kCullOrtho; gmdxregioncapture.h)
+bool vegIsGrass(uint id) { return instances[id].uv_matrix[3][3] < 0.0; }
+// LL's LLVOTree::idleUpdate trunk LOD (0 best) as a group level (3 best): the apparent
+// angle term (origin distance under dist_lt[j] -> trunk LOD j, else 3), capped by the
+// billboard-size detail term. Grass has one slot at every level.
+uint vegDetail(uint id, float dist)
+{
+    mat4 um = instances[id].uv_matrix;
+    if (um[3][3] < 0.0) return 3u;
+    uint a = dist < um[0][3] ? 3u : dist < um[1][3] ? 2u : dist < um[2][3] ? 1u : 0u;
+    return min(a, detailFromTan(um[3][3] / dist));
+}
+
+// #238 bounds guards (no robustBufferAccess: an out-of-range SSBO read is undefined and
+// can fault / hang some GPUs): a LOD group / slot index past the uploaded tables (stale or
+// corrupt metadata) is treated as absent. SENTINEL (~0) fails the slot test by itself.
+bool groupOk(uint g) { return g < uint(lod_groups.length()); }
+bool slotOk(uint s)  { return s < uint(slots.length()) && slots[s].index_count != 0u; }
+// count elements from base fit in [0, cap) -- without the uint wrap of base + count.
+bool rangeOk(uint base, uint count, uint cap) { return count <= cap && base <= cap - count; }
+// SYSTEM AVATAR BODY PART (llcleansysavatar.cpp): a rigged LLPolyMesh part whose LOD
+// slot (indices, weights, base shape) is SHARED by every avatar. The avatar's morphed
+// vertex stream (shape sliders) is its own slot, id in uv_matrix[3][2] (unused by any
+// UV transform): pre-skin reads its vertices from there (a LOD indexes a prefix of the
+// reference vertex array, so the stream must hold at least the slot's vertex count).
+#define SYSAVI_FLAG 131072u
+uint sysaviSrcBase(uint id, SlotInfo s)
+{
+    if ((instances[id].flags & SYSAVI_FLAG) == 0u) return uint(s.base_vertex);
+    const uint ms = floatBitsToUint(instances[id].uv_matrix[3][2]);
+    if (!slotOk(ms)) return uint(s.base_vertex);
+    const SlotInfo m = slots[ms];
+    if (m.base_vertex < 0 || m.vert_count < s.vert_count
+        || (pc.u_vtx_valid != 0u && !rangeOk(uint(m.base_vertex), s.vert_count, pc.u_vtx_valid)))
+        return uint(s.base_vertex);
+    return uint(m.base_vertex);
+}
+
+// The instance's local bounds: its own box unioned with every resident LOD slot's
+// captured bounds (SlotInfo pads, halfs) -- the instance AABB is the first-captured
+// LOD's, and a larger LOD drawn up close was culled while on screen.
+void localBounds(uint id, out vec3 lo, out vec3 hi)
+{
+    lo = instances[id].aabb_min.xyz;
+    hi = instances[id].aabb_max.xyz;
+    uint gid = instances[id].lod_group_id;
+    if (gid != LOD_SENTINEL && groupOk(gid))
+    {
+        for (uint L = 0u; L < 4u; ++L)
+        {
+            uint sl = lod_groups[gid].slot[L];
+            if (sl >= uint(slots.length())) continue;   // (SENTINEL included)
+            SlotInfo si = slots[sl];
+            if (si.index_count == 0u || (si._pad0 | si._pad1 | si._pad2) == 0u) continue;
+            vec2 a = unpackHalf2x16(si._pad0), b = unpackHalf2x16(si._pad1), c = unpackHalf2x16(si._pad2);
+            lo = min(lo, vec3(a.x, a.y, b.x));
+            hi = max(hi, vec3(b.y, c.x, c.y));
+        }
+    }
+}
+
+// World AABB of the instance's local bounds (localBounds), padded 1 m.
+#define FLEXI_FLAG 524288u   // bit19: flexi chain (with bit0), C++ llvovolume.cpp
+void worldAABB(uint id, out vec3 wmin, out vec3 wmax)
+{
+    mat4 mm = instances[id].model_matrix;
+    if ((instances[id].flags & FLEXI_FLAG) != 0u)
+    {
+        // FLEXI CHAIN: skinned along the simulated chain, so the captured rest bounds
+        // say little. Its base is within half the scaled diagonal of the origin and the
+        // chain keeps its length: every pose lies within 1.5 x that diagonal.
+        const vec3 sc = vec3(length(mm[0].xyz), length(mm[1].xyz), length(mm[2].xyz));
+        const float r = 1.5 * length(sc) + 0.05;
+        wmin = mm[3].xyz - vec3(r) - vec3(1.0);
+        wmax = mm[3].xyz + vec3(r) + vec3(1.0);
+        return;
+    }
+    vec3 lo, hi;
+    localBounds(id, lo, hi);
+    wmin = vec3(1e30);
+    wmax = vec3(-1e30);
+    for (int i = 0; i < 8; ++i)
+    {
+        vec3 c = vec3((i & 1) != 0 ? hi.x : lo.x,
+                      (i & 2) != 0 ? hi.y : lo.y,
+                      (i & 4) != 0 ? hi.z : lo.z);
+        vec3 w = (mm * vec4(c, 1.0)).xyz;
+        wmin = min(wmin, w);
+        wmax = max(wmax, w);
+    }
+    // GPU target-omega spinner: the vertex shader rotates the static pose about
+    // spin_pivot, which preserves each point's distance to the pivot, so the swept
+    // volume lies inside the pivot-centred sphere through the farthest corner. Its box
+    // is the spinner's bounds in every pass (frustum, probe faces, texel demand).
+    if (dot(instances[id].spin_axis.xyz, instances[id].spin_axis.xyz) > 0.0)
+    {
+        const vec3 piv = instances[id].spin_pivot.xyz;
+        const vec3 far_c = max(abs(wmin - piv), abs(wmax - piv));
+        const float r = length(far_c);
+        wmin = piv - vec3(r);
+        wmax = piv + vec3(r);
+    }
+    wmin -= vec3(1.0);
+    wmax += vec3(1.0);
+}
+
+// Avatar demand block of av_vis (CPU computeAvatarVis): per joint-table slot {camera
+// distance to the avatar's bounds, their diameter} as float bits, 0 = unknown.
+#define AV_DEM_BASE (CASTER_BASE + 102u)
+void demandWrite(uint id, uint v)
+{
+    uint mid = instances[id].material_id;
+    if (mid < uint(tex_demand.length())) atomicMax(tex_demand[mid], v);
+}
+
+// UV SPAN across the face: how many texture-widths the face's UVs cover along its
+// narrowest-covering axis. The texels a texture needs across its width are the face's
+// screen pixels DIVIDED by this span (LL: LLFace::getTextureVirtualSize divides the
+// pixel area by the UV-extent area): a texture tiled 4x needs a quarter of the texels,
+// and a face showing a quarter of the texture (TE scale 0.25, a sprite-sheet frame)
+// needs 4x. (It used to MULTIPLY by the repeat: tiled textures over-requested, and
+// every sub-rectangle mapping -- texture-animation frames above all -- under-requested
+// by the frame count, so animated sprite sheets never sharpened.)
+// The smallest axis span of any transform in play is taken (conservative).
+// The transform acts on the face's RAW texcoords, whose range is not always 0..1 (path /
+// profile cut, hollow, mesh UVs): ext = that range per axis (LL: LLFace mTexExtents
+// scaled by LLVolumeFace::mTexCoordExtents). Prim-text glyph cells on cut faces were
+// under-requested by the face's partial range.
+float axisSpan(vec2 cu, vec2 cv, vec2 ext) { return min(length(cu) * ext.x, length(cv) * ext.y); }
+// spin_pivot.w: bit 28 = set, bit 29 = UV density word (uvDensityWorld), else the raw
+// UV extent (LLCleanInstanceStore::packUVExtent: 14 bits per axis of log2(extent) over
+// [-8, 8]). Unset / density -> 1 x 1.
+vec2 uvExtent(uint id)
+{
+    uint b = floatBitsToUint(instances[id].spin_pivot.w);
+    if ((b & 0x30000000u) != 0x10000000u) return vec2(1.0);
+    vec2 q = vec2(float(b & 0x3FFFu), float((b >> 14) & 0x3FFFu)) * (16.0 / 16383.0) - 8.0;
+    return exp2(q);
+}
+// The UV transforms' span (TE / glTF / texture animation / material), over raw UVs of
+// range ext.
+float uvXformSpan(uint id, vec2 ext)
+{
+    uint f = instances[id].flags;
+    mat4 um = instances[id].uv_matrix;
+    float span;
+    if ((f & 1024u) != 0u)
+    {
+        // GPU texture animation: uv_matrix holds the llSetTextureAnim params
+        // (clean_uv_common.glsl texAnimUV). Effective scale per mode, as LL's
+        // LLViewerTextureAnim::animateTextures drives it.
+        uint  mode  = uint(um[0][0] + 0.5);
+        float sizeX = um[0][1], sizeY = um[0][2];
+        float te    = min(abs(um[2][0]), abs(um[2][1]));
+        if ((mode & 0x20u) != 0u)          // ROTATE: TE scale kept
+            span = te;
+        else if ((mode & 0x40u) != 0u)     // SCALE: the frame counter IS the scale
+        {
+            float s0 = um[0][3], s1 = um[0][3] + max(um[1][0], 1.0);
+            span = (s0 * s1 <= 0.0) ? (1.0 / 256.0) : min(abs(s0), abs(s1));
+        }
+        else if (sizeX > 0.0 && sizeY > 0.0) // TRANSLATE over a frame grid: 1/size
+            span = min(1.0 / sizeX, 1.0 / sizeY);
+        else                                 // TRANSLATE (scroll), no grid: TE scale kept
+            span = te;
+    }
+    else
+        span = axisSpan(um[0].xy, um[1].xy, ext);
+    if (!(span > 1e-5)) span = 1.0;   // unset / degenerate transform
+    uint mid = instances[id].material_id;
+    if (mid < uint(mat_uv.length()))
+    {
+        for (int k = 0; k < 3; ++k)
+        {
+            vec4 r0 = mat_uv[mid].rows[k * 2];
+            if (r0.w <= 0.5) continue;
+            vec4 r1 = mat_uv[mid].rows[k * 2 + 1];
+            float ms = axisSpan(vec2(r0.x, r1.x), vec2(r0.y, r1.y), ext);
+            if (ms > 1e-5) span = min(span, ms);
+        }
+    }
+    return span;
+}
+// Fallback span (no UV density): the transforms over the raw UV extent, or planar
+// texgen's 2 UV per metre over the face's narrower in-plane world extent (the middle
+// of its three world extents). The demand divides the bounds' diameter by it.
+float uvSpan(uint id)
+{
+    uint f = instances[id].flags;
+    vec2 ext = (f & 64u) != 0u ? vec2(1.0) : uvExtent(id);
+    float span = uvXformSpan(id, ext);
+    if ((f & 64u) != 0u)
+    {
+        mat4 mm = instances[id].model_matrix;
+        vec3 e = abs(instances[id].aabb_max.xyz - instances[id].aabb_min.xyz)
+               * vec3(length(mm[0].xyz), length(mm[1].xyz), length(mm[2].xyz));
+        float mid_e = max(min(e.x, e.y), min(max(e.x, e.y), e.z));
+        span *= 2.0 * max(mid_e, 0.05);
+    }
+    return clamp(span, 1.0 / 256.0, 256.0);
+}
+
+// UV DENSITY (texture-streaming texel factor; LLCleanMeshAsset::computeUVDensity): world
+// metres per unit of SAMPLED UV on this face, 0 = no density word (fallback: uvSpan).
+// Captured per slot in object space: d (75th area-weighted percentile of
+// sqrt(world area / UV area) per triangle), the area-weighted squared normal w and the
+// mean UV stretch sigma_max / sigma_min. World: a triangle with unit normal n scales its
+// area by |cof(S) n| (cof = (sy sz, sx sz, sx sy) of the model matrix's axis scales S), so
+// the face's linear scale is sqrt(sqrt(w . cof^2)) -- exact for flat faces (a thin
+// notepad's top: sqrt(sx sy), not the geometric mean of all three axes), conservative
+// for curved ones. Then divided by the UV transforms' span (raw -> sampled UV).
+// Planar texgen ignores the raw UVs: 2 UV per metre, so 0.5 m per UV.
+// ANISOTROPY: d is the geometric mean of the mapping's two axes. With anisotropic
+// filtering at level A the GPU picks the mip from max(sigma_min-axis rate, sigma_max-axis
+// rate / A), so a mapping stretched by s (UV stretch x the face's in-plane scale ratio)
+// needs d * min(sqrt(s), A / sqrt(s)) -- floored at d (isotropic filtering would take
+// d / sqrt(s); kept at d, conservative). The view angle needs no term: the demand is the
+// face-on projection at the nearest distance, the axis AF samples at; obliquity only
+// coarsens the other one.
+float uvDensityWorld(uint id, float aniso)
+{
+    uint f = instances[id].flags;
+    if ((f & 64u) != 0u)
+        return 0.5 / clamp(uvXformSpan(id, vec2(1.0)), 1.0 / 256.0, 256.0);
+    uint b = floatBitsToUint(instances[id].spin_pivot.w);
+    if ((b & 0x30000000u) != 0x30000000u) return 0.0;
+    float d = exp2(float(b & 0xFFFu) * (32.0 / 4095.0) - 16.0);
+    vec2 wxy = vec2(float((b >> 12) & 31u), float((b >> 17) & 31u)) * (1.0 / 31.0);
+    vec3 w = vec3(wxy, max(1.0 - wxy.x - wxy.y, 0.0));
+    float uv_stretch = exp2(float((b >> 22) & 63u) * (8.0 / 63.0));
+    mat4 mm = instances[id].model_matrix;
+    vec3 sc = vec3(length(mm[0].xyz), length(mm[1].xyz), length(mm[2].xyz));
+    vec3 cof = sc.yxx * sc.zzy;
+    float area_scale = sqrt(dot(w, cof * cof));
+    float lin = sqrt(area_scale);
+    // In-plane scale ratio: the widest in-plane axis over the face's linear scale, squared.
+    vec3 inplane = sc * sqrt(max(vec3(1.0) - w, vec3(0.0)));
+    float major = max(inplane.x, max(inplane.y, inplane.z));
+    float s = uv_stretch * max(major * major / max(area_scale, 1e-20), 1.0);
+    float allow = max(min(sqrt(s), aniso / sqrt(s)), 1.0);
+    return d * lin * allow / clamp(uvXformSpan(id, vec2(1.0)), 1.0 / 256.0, 256.0);
+}
+
+// Texture-demand quality: x = bias (RenderVKTexDemandBias), y = the world sampler's
+// anisotropy level (1 = off). 0 (unset) -> 1, 1.
+vec2 texDemandParams()
+{
+    vec2 p = unpackHalf2x16(pc.u_tex_demand);
+    return vec2(p.x > 0.0 ? p.x : 1.0, max(p.y, 1.0));
+}
+// Texels needed across the texture at distance `dist`: the UV density projected there,
+// else the bounds' diameter over the UV span. `scale` < 1 for off-screen instances.
+void demandAt(uint id, float dist, float diam, float scale)
+{
+    vec2 q = texDemandParams();
+    float wpu = uvDensityWorld(id, q.y);
+    float size = wpu > 0.0 ? wpu : diam / uvSpan(id);
+    // <GMDX> orthographic (CULL_ORTHO): the same px per metre at every depth
+    float texels = size * pc.u_lod_cam_pos.w / ((pc.u_flags & CULL_ORTHO) != 0u ? 1.0 : dist) * scale * q.x;
+    demandWrite(id, uint(clamp(texels, 0.0, float(DEMAND_FULL))));
+}
+
+// Texels needed at the NEAREST point of the (unpadded) world AABB. Camera inside the
+// bounds -> full. `scale` < 1 for off-screen instances (turning around shows a softer
+// mip, not the floor).
+void demandFromBounds(uint id, vec3 wmin, vec3 wmax, float scale)
+{
+    if (pc.u_hud_pass != 0u) return;
+    vec3 lo = wmin + vec3(1.0), hi = wmax - vec3(1.0);   // worldAABB pads 1 m
+    hi = max(hi, lo);
+    vec3 cam = pc.u_lod_cam_pos.xyz;
+    float diam = length(hi - lo);
+    float dist = length(max(max(lo - cam, cam - hi), vec3(0.0)));
+    if (dist < 0.05) { demandWrite(id, DEMAND_FULL); return; }
+    demandAt(id, dist, diam, scale);
+}
+
+bool frustumTest(vec3 wmin, vec3 wmax)
+{
+    for (int i = 0; i < 6; ++i)
+    {
+        vec4 p = pc.u_frustum_planes[i];
+        vec3 v = vec3(p.x >= 0.0 ? wmax.x : wmin.x,
+                      p.y >= 0.0 ? wmax.y : wmin.y,
+                      p.z >= 0.0 ? wmax.z : wmin.z);
+        if (dot(p.xyz, v) + p.w < 0.0) return false;
+    }
+    return true;
+}
+
+// Avatar box tail of av_vis (CPU computeAvatarVis): per joint-table slot the wearer's
+// padded world bounds {min xyz, max xyz} as float bits; min.x > max.x = unknown.
+#define AV_BOX_BASE (AV_DEM_BASE + 2u * AV_VIS_SLOTS)
+// #561: then per slot the wearer's screen-LOD scale (float; CPU computeAvatarVis): metres
+// per pixel at the avatar's distance, with hysteresis (it only follows the true value once
+// that has moved more than 12% away, so a step does not flip back and forth while the
+// distance wobbles). 0 = none. The RT rigged plan replays the same choice from it.
+#define AV_LOD_BASE (AV_BOX_BASE + 6u * AV_VIS_SLOTS)
+// HIDE SELECTED (#29, LL markVisible with HideSelectedObjects): after the LOD scales,
+// [AV_HIDE_BASE] = n, then n sorted instance ids (CPU LLCleanRendererVK::kAvHideBase)
+// that every pass drops. n = 0 almost always: one load.
+#define AV_HIDE_BASE (AV_LOD_BASE + AV_VIS_SLOTS)
+bool avHidden(uint id)
+{
+    if (AV_HIDE_BASE >= uint(av_vis.length())) return false;
+    const uint n = min(av_vis[AV_HIDE_BASE], uint(av_vis.length()) - AV_HIDE_BASE - 1u);
+    uint lo = 0u, hi = n;
+    while (lo < hi)
+    {
+        const uint mid = (lo + hi) >> 1u;
+        if (av_vis[AV_HIDE_BASE + 1u + mid] < id) lo = mid + 1u; else hi = mid;
+    }
+    return lo < n && av_vis[AV_HIDE_BASE + 1u + lo] == id;
+}
+
+bool avBoxOutside(uint av)
+{
+    if (AV_BOX_BASE + 6u * av + 5u >= uint(av_vis.length())) return false;
+    const uint b = AV_BOX_BASE + 6u * av;
+    const vec3 mn = vec3(uintBitsToFloat(av_vis[b]), uintBitsToFloat(av_vis[b + 1u]), uintBitsToFloat(av_vis[b + 2u]));
+    const vec3 mx = vec3(uintBitsToFloat(av_vis[b + 3u]), uintBitsToFloat(av_vis[b + 4u]), uintBitsToFloat(av_vis[b + 5u]));
+    if (!(mn.x <= mx.x)) return false;
+    return !frustumTest(mn, mx);
+}
+
+// ---------------------------------------------------------------------------
+// REFLECTION-PROBE CAPTURE (u_hud_pass 2). u_cam_pos.xyz = the probe origin,
+// u_lod_cam_pos.w = the face's px per unit at depth 1 (C / 2 for a C x C face),
+// u_cascade = the minimum projected size in face texels x 100 (RenderVKProbeMinPixels).
+//
+// FACE FRUSTA, analytic. Face f looks down F_f = +X -X +Y -Y +Z -Z (f = 0..5, the F
+// rows of LLCleanRendererVK's probeFaceMatrix; its R / D rows are the other two axes):
+// with v = p - origin, clip x = R.v, y = D.v, w = F.v and a 90-degree face, so a point
+// is inside iff |v_b| <= F.v for both other axes b and near <= F.v <= far -- the same
+// six planes the CPU's Gribb-Hartmann extraction of that matrix yields. Box test:
+// per plane, its p-vertex (F.v and +-v_b are separable, so each takes its own max).
+uint probeFaceMask(vec3 lo, vec3 hi)
+{
+    lo -= pc.u_cam_pos.xyz;
+    hi -= pc.u_cam_pos.xyz;
+    uint m = 0u;
+    for (uint f = 0u; f < 6u; ++f)
+    {
+        const uint a = f >> 1u;
+        const bool neg = (f & 1u) != 0u;
+        const float dmax = neg ? -lo[a] : hi[a];   // max F.v over the box
+        const float dmin = neg ? -hi[a] : lo[a];   // min F.v
+        if (dmax < pc.u_probe_near || dmin > pc.u_probe_far) continue;
+        const uint b = (a + 1u) % 3u, c = (a + 2u) % 3u;
+        if (dmax + hi[b] < 0.0 || dmax - lo[b] < 0.0 || dmax + hi[c] < 0.0 || dmax - lo[c] < 0.0) continue;
+        m |= 1u << f;
+    }
+    return m;
+}
+
+// PROJECTED-SIZE CUTOFF: the object's size over its depth along the dominant axis --
+// the depth in the face holding its centre (radial distance would under-size objects
+// towards a face's edges) -- in face texels (u_lod_cam_pos.w = C / 2 per unit at depth
+// 1 for a 90-degree C x C face). Under u_cascade / 100 texels it can't show at this
+// face size (and after the GGX filter); sub-texel draws were most of a face's cost
+// (draw overhead + 2x2-quad shading).
+// (The first test used the 1 m-PADDED cull box: >= 3.46 m across, never under 2 px
+// inside a 64 m far clip at 64 px per unit -- it never fired.)
+// SIZE (CULL_MODE_WIDTH, RenderVKProbeSizeWidth): the WIDEST THE OBJECT CAN LOOK -- the
+// middle of its three oriented extents (local bounds x model-matrix column lengths).
+// The old size, the diagonal of the world AABB, kept anything LONG however thin: a 10 m
+// rail, trim strip, pole or wire 5 cm across counted as 10 m (and a rotated box's world
+// AABB adds up to sqrt(3) on top), although no view of it is wider than 5 cm -- a 64th
+// of a texel at 20 m. An instance is one face of an object (a prim side, a mesh
+// material), so most are flat or thin: their length kept them all. Off = the diagonal.
+float probeExtentMid(uint id)
+{
+    vec3 lo, hi;
+    localBounds(id, lo, hi);
+    const mat4 mm = instances[id].model_matrix;
+    const vec3 e = abs(hi - lo) * vec3(length(mm[0].xyz), length(mm[1].xyz), length(mm[2].xyz));
+    const float a = max(e.x, max(e.y, e.z)), c = min(e.x, min(e.y, e.z));
+    return e.x + e.y + e.z - a - c;
+}
+bool probeSizeOk(uint id, vec3 lo, vec3 hi)
+{
+    if (pc.u_cascade == 0u) return true;
+    const vec3 v = abs(0.5 * (lo + hi) - pc.u_cam_pos.xyz);
+    const float depth = max(v.x, max(v.y, v.z));
+    const float diam = length(hi - lo);
+    if (depth <= diam) return true;   // origin at / near the bounds
+    const float size = (g_cull_push.mode & CULL_MODE_WIDTH) != 0u ? probeExtentMid(id) : diam;
+    return size * pc.u_lod_cam_pos.w >= float(pc.u_cascade) * 0.01 * depth;
+}
+
+// The wearer's padded world box (computeAvatarVis box tail); false = unknown.
+bool avBox(uint av, out vec3 mn, out vec3 mx)
+{
+    mn = vec3(0.0); mx = vec3(0.0);
+    if (av >= AV_VIS_SLOTS || AV_BOX_BASE + 6u * av + 5u >= uint(av_vis.length())) return false;
+    const uint b = AV_BOX_BASE + 6u * av;
+    mn = vec3(uintBitsToFloat(av_vis[b]), uintBitsToFloat(av_vis[b + 1u]), uintBitsToFloat(av_vis[b + 2u]));
+    mx = vec3(uintBitsToFloat(av_vis[b + 3u]), uintBitsToFloat(av_vis[b + 4u]), uintBitsToFloat(av_vis[b + 5u]));
+    return mn.x <= mx.x;
+}
+
+// REALTIME PROBE AVATARS (#517), decided here for the capture actually scheduled: the CPU
+// puts this frame's realtime capture job record (clean_probe_job.glsl, written by
+// clean_probe_gpu.comp earlier in the frame) at av_vis[AV_VIS_SLOTS + 2..3] -- 0 when there
+// is none (probes off, detail < 2, no dynamic probe). An avatar no CPU pass draws is
+// pulled in (pre-skinned, its draws into the probe region) iff its padded box reaches
+// the job's six faces: the cube of half-size far clip around the origin (each face's far
+// plane is at the far clip ALONG its axis -- the box corners lie past a sphere of that
+// radius). A sky-only or non-dynamic job draws no avatar. Unknown box: not pulled in.
+bool avProbeHit(uint av)
+{
+    const uvec2 a = uvec2(av_vis[AV_VIS_SLOTS + 2u], av_vis[AV_VIS_SLOTS + 3u]);
+    if ((a.x | a.y) == 0u) return false;
+    vec3 mn, mx;
+    if (!avBox(av, mn, mx)) return false;
+    PrbJobRef r = PrbJobRef(a);
+    const uvec4 info = r.jobs[0].info;
+    if (info.x == 0u || (info.z & PJ_DYNAMIC) == 0u || (info.z & PJ_SKY) != 0u) return false;
+    const vec3 o = r.jobs[0].origin.xyz;
+    const float far = r.jobs[0].clip.x;
+    return all(greaterThanEqual(mx, o - vec3(far))) && all(lessThanEqual(mn, o + vec3(far)));
+}
+
+// Worn rigid attachment: its instance box is joint-local (its SIZE holds, its position
+// doesn't), placed at the nearest depth of its wearer's box.
+bool probeAttachSizeOk(uint id, vec3 mn, vec3 mx)
+{
+    if (pc.u_cascade == 0u) return true;
+    const mat4 mm = instances[id].model_matrix;
+    const vec3 e = abs(instances[id].aabb_max.xyz - instances[id].aabb_min.xyz)
+                 * vec3(length(mm[0].xyz), length(mm[1].xyz), length(mm[2].xyz));
+    const float diam = length(e);
+    const vec3 v = abs(0.5 * (mn + mx) - pc.u_cam_pos.xyz);
+    const vec3 h = 0.5 * (mx - mn);
+    const float depth = max(v.x, max(v.y, v.z)) - max(h.x, max(h.y, h.z));
+    if (!(diam > 0.0) || depth <= diam) return true;
+    // CULL_MODE_WIDTH: its widest look (middle oriented extent), as probeSizeOk.
+    const float size = (g_cull_push.mode & CULL_MODE_WIDTH) != 0u
+                     ? e.x + e.y + e.z - max(e.x, max(e.y, e.z)) - min(e.x, min(e.y, e.z)) : diam;
+    return size * pc.u_lod_cam_pos.w >= float(pc.u_cascade) * 0.01 * depth;
+}
+
+// The faces cullOne's caller keeps the instance in (probe capture; 0x3F elsewhere).
+uint g_face_mask = 0x3Fu;
+// cullOne dropped the instance on the probe size cutoff (PROBE_STAT_SIZECUT).
+bool g_size_cut = false;
+// Probe capture: keep only face u_probe_face (the per-face cull, phase 0, and the
+// multi-view cull's scheduled face) instead of every face the instance touches.
+bool g_one_face = false;
+// Main cull (#517): the off-screen regions (bit OFF_*) cullOne put a rigged draw of an
+// avatar the main view does not see into; 0 = the bucket it returned (main view).
+uint g_off_mask = 0u;
+// #559: a rigged draw whose pre-skin space phase 2 hands out (deterministic order):
+// 0 none (not rigged, or a skin-cache draw held from an earlier frame), 1 a per-frame
+// range of g_rig_verts vertices, 2 a skin-cache re-skin, 3 the same over the pose drawn
+// last frame (WorkItem._pad3). cullOne stashes the pending state in the draw itself
+// (instanceCount bits 26..31, firstInstance = the LOD slot); phase 2 restores it.
+uint g_rig_mode = 0u;
+uint g_rig_verts = 0u;
+uint g_rig_tier = 0u;
+#define RIG_PEND_SHIFT 26u   // instanceCount: 1 | tier << 26 | mode << 28 while pending
+// #561: this lane's main-view draw went to a decimated step (phase 0 counts them).
+uint g_dec_n = 0u;
+uint g_dec_saved = 0u;
+// CLUSTER LOD legacy-skin skip: the skinned vertices this lane's skipped instance would have
+// asked for (0 = not skipped; phase 0 counts them).
+uint g_clskip_v = 0u;
+// #567 BATCHED PROJECTOR TILE CULL (phases 8-10): cullOne's bounds test of a bounded,
+// non-attachment instance against THIS entry's planes (the batch's union box), for the
+// per-tile membership test that follows: g_tile_geo = it ran on a non-degenerate box
+// (else every tile keeps the instance, as each tile's own cull would), g_wmin / g_wmax its
+// padded world box (worldAABB).
+bool g_tile_geo = false;
+vec3 g_wmin = vec3(0.0), g_wmax = vec3(0.0);
+
+// #561: the RigDecim entry of source slot `src`, or RDEC_EMPTY (= LLCleanRigDecimator::
+// hashSlot + linear probing; a deleted entry continues the chain, an empty one ends it).
+uint rigDecimFind(uint src)
+{
+    const uint cap = uint(rig_decim.length()) / 2u;
+    if (cap < 2u || (cap & (cap - 1u)) != 0u) return RDEC_EMPTY;
+    const uint bits = uint(findMSB(cap));
+    const uint h = (src * 2654435761u) >> (32u - bits);
+    for (uint k = 0u; k < RDEC_PROBES; ++k)
+    {
+        const uint e = (h + k) & (cap - 1u);
+        const uint key = rig_decim[2u * e].x;
+        if (key == src) return e;
+        if (key == RDEC_EMPTY) break;
+    }
+    return RDEC_EMPTY;
+}
+
+// The skin's bind-shape scale (largest column of LLCleanSkinStore::SkinMeta::bind_shape,
+// the record's last 16 words): steps' errors are in the slot's bind space, the bind shape
+// scales them into the avatar's (metres). 1 when unknown / absurd. (= the CPU's
+// LLCleanRigDecimator::bindScale.)
+float rigBindScale(uint sid)
+{
+    const uint b = sid * SKIN_META_WORDS + SKIN_META_WORDS - 16u;
+    if (av_vis[AV_VIS_SLOTS] == 0u || sid >= pc.u_skin_count || b + 11u >= uint(skin_meta_w.length())) return 1.0;
+    const vec3 c0 = vec3(uintBitsToFloat(skin_meta_w[b + 0u]), uintBitsToFloat(skin_meta_w[b + 1u]), uintBitsToFloat(skin_meta_w[b + 2u]));
+    const vec3 c1 = vec3(uintBitsToFloat(skin_meta_w[b + 4u]), uintBitsToFloat(skin_meta_w[b + 5u]), uintBitsToFloat(skin_meta_w[b + 6u]));
+    const vec3 c2 = vec3(uintBitsToFloat(skin_meta_w[b + 8u]), uintBitsToFloat(skin_meta_w[b + 9u]), uintBitsToFloat(skin_meta_w[b + 10u]));
+    const float sc = max(length(c0), max(length(c1), length(c2)));
+    return (sc > 1.0e-4 && sc < 1.0e4) ? sc : 1.0;
+}
+
+// #573 regression guard: may step row d stand in for its source s? (= C++
+// LLCleanRigDecimator::stepRowOk.) Resident, weighted (pre-skin reads its weight range),
+// its decode header in range (base_vertex >= the 2 header pseudo-vertices,
+// clean_qvertex.glsl), no larger than the source, whole triangles, and its index /
+// vertex ranges inside the uploaded extents. A row failing this draws the SOURCE -- the
+// OOB guard in cullOne would otherwise drop the whole draw (a missing avatar part).
+bool rigStepOk(uint d, SlotInfo src)
+{
+    if (!slotOk(d)) return false;
+    const SlotInfo t = slots[d];
+    return t.index_count >= 3u && (t.index_count % 3u) == 0u && t.vert_count >= 3u && t.has_weights != 0u
+        && t.base_vertex >= 2 && t.index_count <= src.index_count && t.vert_count <= src.vert_count
+        && rangeOk(t.first_index, t.index_count, pc.u_idx_valid)
+        && (pc.u_vtx_valid == 0u || rangeOk(uint(t.base_vertex), t.vert_count, pc.u_vtx_valid));
+}
+
+// #561 SCREEN-SIZE RIGGED LOD (main cull only). The coarsest decimated step of `src`
+// whose geometric error -- bind space, times the skin's bind-shape scale, over the
+// wearer's metres per pixel (AV_LOD_BASE) -- stays under the avatar's pixel tolerance
+// (AVV_SLOD_SHIFT; 0 = off). A step not resident yet falls to the next finer one; a
+// source whose signature no longer matches the entry, or with no entry (not decimated /
+// still building), draws itself. Deterministic per (avatar state, slot), so the RT
+// rigged plan (llcleanrtvk.cpp) replays it exactly; the hysteresis lives in the CPU's
+// per-avatar scale, and every switch as the camera approaches happens below the tolerance.
+uint rigScreenLod(uint id, uint av, uint src, SlotInfo s)
+{
+    const uint lvl = (av_vis[av] >> AVV_SLOD_SHIFT) & 7u;
+    if (lvl == 0u || AV_LOD_BASE + av >= uint(av_vis.length())) return src;
+    const float mq = uintBitsToFloat(av_vis[AV_LOD_BASE + av]);
+    if (!(mq > 0.0)) return src;
+    const uint e = rigDecimFind(src);
+    if (e == RDEC_EMPTY) return src;
+    const uvec4 a = rig_decim[2u * e];
+    const uvec4 b = rig_decim[2u * e + 1u];
+    if (b.z != s.index_count || b.w != s.vert_count) return src;
+    const float lim = 0.25 * exp2(float(lvl)) * mq;                 // tolerance px * m per px
+    const float bs  = rigBindScale(instances[id].skin_id);
+    const vec2  e12 = unpackHalf2x16(b.x);
+    const float err[3] = float[3](e12.x, e12.y, unpackHalf2x16(b.y).x);
+    const uint  ds[3]  = uint[3](a.y, a.z, a.w);
+    for (int k = 2; k >= 0; --k)
+        if (err[k] * bs <= lim && rigStepOk(ds[k], s)) return ds[k];
+    return src;
+}
+bool oneFace() { return g_cull_push.phase == 0u || g_one_face; }
+
+// Cull one instance: returns its internal bucket (0..9, no-shadow twins 10..14) and
+// fills c, or 0xFFu if dropped.
+uint cullOne(uint id, out DrawCmd c)
+{
+
+    uint group_id = instances[id].lod_group_id;
+    if (group_id == LOD_SENTINEL) { dbgAdd(R_SENTINEL, 1u); return 0xFFu; }  // uncaptured
+    if (!groupOk(group_id)) { dbgAdd(R_OOB, 1u); return 0xFFu; }               // past the group table
+
+    // Defensive guard (#29): reject non-finite / absurd transforms & AABBs.
+    {
+        mat4 mm = instances[id].model_matrix;
+        bool bad = false;
+        for (int c = 0; c < 4; ++c)
+            if (any(isnan(mm[c])) || any(isinf(mm[c]))) bad = true;
+        float msc = max(length(mm[0].xyz), max(length(mm[1].xyz), length(mm[2].xyz)));
+        if (msc > 1.0e6) bad = true;
+        if (any(greaterThan(abs(mm[3].xyz), vec3(1.0e7)))) bad = true;
+        vec3 amn = instances[id].aabb_min.xyz;
+        vec3 amx = instances[id].aabb_max.xyz;
+        if (any(isnan(amn)) || any(isinf(amn)) || any(isnan(amx)) || any(isinf(amx))) bad = true;
+        if (any(greaterThan(abs(amx - amn), vec3(1.0e6)))) bad = true;
+        if (bad) { dbgAdd(R_DEGEN, 1u); return 0xFFu; }
+    }
+
+    uint _flags = instances[id].flags;
+
+    // Hide Selected (#29): selected objects leave every view (their outline still draws).
+    if (avHidden(id)) return 0xFFu;
+
+    // <GMDX> rez effects: a DYING object (bit 22, gmdx_rezfx.glsl) is drawn for its de-rez by the
+    // main view and the mirror only -- no shadow views, no probe captures.
+    if ((_flags & 0x00400000u) != 0u && (pc.u_hud_pass == 2u || pc.u_hud_pass == 3u)) return 0xFFu;
+
+    // HUD / world separation (flag bit3 = 8).
+    bool _is_hud = (_flags & 8u) != 0u;
+    // Demand: HUDs and the agent's own attachments (bit13) always want full res.
+    if (pc.u_hud_pass == 0u && (_is_hud || (_flags & 8192u) != 0u)) demandWrite(id, DEMAND_FULL);
+    // u_hud_pass: 0 world, 1 HUD, 2 reflection-probe capture (world, no avatars).
+    if (pc.u_hud_pass == 1u) { if (!_is_hud) { dbgAdd(R_HUD, 1u); return 0xFFu; } }
+    else                     { if (_is_hud)  { dbgAdd(R_HUD, 1u); return 0xFFu; } }
+    // Probe captures: rigged draws come from the main cull's pre-skinned buckets (a
+    // dynamic capture draws them; this cull never skins). Worn rigid attachments stay
+    // only in DYNAMIC captures (u_flags bit 11), as LL drops RENDER_TYPE_AVATAR for
+    // non-dynamic probes.
+    if (pc.u_hud_pass == 2u && ((_flags & 1u) != 0u
+                                || ((_flags & 512u) != 0u && (pc.u_flags & 2048u) == 0u))) return 0xFFu;
+    // Probe captures draw alpha-blend content as LL does (renderGeomPostDeferred runs
+    // in cube snapshots): their alpha bucket (2) holds the water surface (#36, drawn
+    // opaque first: clean_water.frag WATER_OPAQUE) and the alpha, sorted back-to-front.
+    // Water exclusion surfaces (invisiprims, bit 16) exist only for the main view's
+    // exclusion mask: no probe capture, shadow or mirror draws them (#27).
+    if ((pc.u_hud_pass == 2u || pc.u_hud_pass == 3u || pc.u_hud_pass == 4u) && (_flags & EXCL_FLAG) != 0u)
+        return 0xFFu;
+    // Shadow cascades (3): no rigged here -- skinned casters are drawn from the main
+    // cull's pre-skinned buckets -- and no water surface (bit 11); worn rigid
+    // attachments do cast.
+    if (pc.u_hud_pass == 3u && ((_flags & 1u) != 0u || (_flags & 2048u) != 0u)) return 0xFFu;
+    // #567 STATIC / DYNAMIC CASTER SPLIT (cached shadow views): the static layer takes no
+    // dynamic caster -- moving objects / GPU spinners (instance bit21, the ingest's mover
+    // tracker) and worn rigid attachments (bit9, placed by the joint table) -- and the
+    // per-frame overlay cull takes only those.
+    if (pc.u_hud_pass == 3u && (pc.u_flags & (SHADOW_SPLIT_STATIC | SHADOW_SPLIT_DYNAMIC)) != 0u)
+    {
+        const bool dyn = (_flags & (DYN_CASTER_FLAG | 512u)) != 0u;
+        if (dyn == ((pc.u_flags & SHADOW_SPLIT_STATIC) != 0u)) return 0xFFu;
+    }
+    // Avatar shadow detail: worn rigid attachments' mask / blend casters (the rigged
+    // buckets are gated on the CPU side, where they are drawn).
+    if (pc.u_hud_pass == 3u && (_flags & 512u) != 0u
+        && (((pc.u_flags & 512u) != 0u && (_flags & 6u) != 0u)
+            || ((pc.u_flags & 1024u) != 0u && (_flags & 2u) != 0u)))
+        return 0xFFu;
+    // Planar mirror capture (4): static world + (dynamic mirror, u_flags bit 11) worn
+    // rigid attachments. Rigged draws come from the main cull's pre-skinned buckets.
+    // Water stays (#36): it lands in the alpha bucket, where the opaque capture water
+    // FS draws it ahead of the alpha.
+    if (pc.u_hud_pass == 4u && ((_flags & 1u) != 0u
+                                || ((_flags & 512u) != 0u && (pc.u_flags & 2048u) == 0u))) return 0xFFu;
+    // Mouselook with "Show me in Mouselook" off: the agent's own worn rigid
+    // attachments (bit13, non-rigged) leave the MAIN view only. The mirror (4) and
+    // shadow (3) passes cull their own attachments, so they still draw them. Own
+    // RIGGED mesh can't be dropped here: shadows and mirrors reuse this pass's
+    // pre-skinned buckets -- the main-view rigged VS discards it instead.
+    if (pc.u_hud_pass == 0u && (pc.u_flags & 1u) != 0u && (_flags & 8192u) != 0u && (_flags & 1u) == 0u)
+        return 0xFFu;
+    // Render-type toggles (LLPipeline::RENDER_TYPE_*), every world view.
+    if (pc.u_hud_pass != 1u && (pc.u_flags & 510u) != 0u)
+    {
+        const bool terrain = (_flags & 32u) != 0u, water = (_flags & 2048u) != 0u;
+        const bool avatar  = (_flags & 1u) != 0u || (_flags & 512u) != 0u;
+        const bool veg     = (_flags & VEG_FLAG) != 0u;
+        const bool other   = !terrain && !water && !avatar && !veg && (_flags & EXCL_FLAG) == 0u;
+        if ((pc.u_flags & 2u)  != 0u && terrain) return 0xFFu;
+        if ((pc.u_flags & 4u)  != 0u && water) return 0xFFu;
+        const bool excl    = (_flags & EXCL_FLAG) != 0u;   // LL's PASS_INVISIBLE: not an alpha / volume type
+        if ((pc.u_flags & 8u)  != 0u && (_flags & 2u) != 0u && !excl) return 0xFFu;
+        if ((pc.u_flags & 16u) != 0u && avatar) return 0xFFu;
+        if ((pc.u_flags & 32u) != 0u && other) return 0xFFu;
+        if ((pc.u_flags & 64u) != 0u && other && (_flags & 6u) == 0u) return 0xFFu;
+        if (veg && (pc.u_flags & (vegIsGrass(id) ? 256u : 128u)) != 0u) return 0xFFu;
+    }
+
+    bool _rigged        = (_flags & 1u)   != 0u && instances[id].skin_id != 0xFFFFFFFFu;
+    // Flexi chains are skinned (rigged routing) but are world objects with a world
+    // transform: frustum-culled by their swept bounds (worldAABB), not "draw always".
+    bool _flexi         = (_flags & FLEXI_FLAG) != 0u;
+    uint _av            = 0xFFFFFFFFu;   // wearer's joint-table slot (rigged / worn; passes 0 3 4)
+    bool _bounds_unknown= (_flags & 128u) != 0u;
+    bool _attach        = (_flags & 512u) != 0u;
+    // GPU target-omega spinners: culled by their swept bounds (worldAABB).
+
+    // Rigged / worn attachments: the wearer's PER-PASS visibility (#517; world, shadow,
+    // mirror and dynamic probe passes; HUD unaffected). World (0): the main view's avatars;
+    // a rigged draw of an avatar only other passes need goes to their off-screen regions
+    // (g_off_mask) -- never into the main view's buckets. Worn rigid attachments are culled
+    // by each pass's own cull: shadow (3) cascades the main view's + AVV_SUN avatars,
+    // projector tiles (u_cascade 4) + AVV_PROJ; mirror (4) + AVV_MIRROR; dynamic probe
+    // faces (2) + the realtime capture's (avProbeHit) -- exactly the avatars whose rigged
+    // draws the pass gets, so a body never misses its attachments or the reverse.
+    g_off_mask = 0u;
+    if ((pc.u_hud_pass == 0u || pc.u_hud_pass == 3u || pc.u_hud_pass == 4u
+         || (pc.u_hud_pass == 2u && (pc.u_flags & 2048u) != 0u)) && (_rigged || _attach)
+        && instances[id].skin_id != 0xFFFFFFFFu)
+    {
+        uint av = 0xFFFFFFFFu;
+        uint sid = instances[id].skin_id;
+        if (_rigged)
+        {
+            if (av_vis[AV_VIS_SLOTS] != 0u && sid < pc.u_skin_count
+                && sid * SKIN_META_WORDS < uint(skin_meta_w.length()))
+                av = skin_meta_w[sid * SKIN_META_WORDS];
+        }
+        else av = sid;   // worn rigid attachment: skin_id holds the joint-table slot
+        if (av < AV_VIS_SLOTS)
+        {
+            const uint w = av_vis[av];
+            bool keep = (w & AVV_MAIN) != 0u;
+            if (!keep)
+            {
+                if (pc.u_hud_pass == 0u)
+                {
+                    if (_rigged)
+                    {
+                        uint m = 0u;
+                        if ((w & AVV_SUN) != 0u)    m |= 1u << OFF_SUN;
+                        if ((w & AVV_PROJ) != 0u)   m |= 1u << OFF_PROJ;
+                        if ((w & AVV_MIRROR) != 0u) m |= 1u << OFF_MIRROR;
+                        if ((w & AVV_PROBE_OK) != 0u && avProbeHit(av))
+                        {
+                            m |= 1u << OFF_PROBE;
+                            dbgAdd(R_RIG_PROBE, 1u);
+                        }
+                        if ((_flags & 0x00400000u) != 0u) m &= 1u << OFF_MIRROR;   // <GMDX> dying: no shadow / probe
+                        g_off_mask = m;
+                        keep = m != 0u;
+                        if (keep) dbgAdd(R_RIG_OFFSCREEN, 1u);
+                    }
+                }
+                // (u_cascade 4 = projector tile; 0..3 cascades, 5 the cascades' overlay, #567)
+                else if (pc.u_hud_pass == 3u) keep = (w & (pc.u_cascade == 4u ? AVV_PROJ : AVV_SUN)) != 0u;
+                else if (pc.u_hud_pass == 4u) keep = (w & AVV_MIRROR) != 0u;
+                else keep = (w & AVV_PROBE_OK) != 0u && avProbeHit(av);   // 2: dynamic probe face
+            }
+            if (!keep) { dbgAdd(R_FRUSTUM, 1u); return 0xFFu; }
+        }
+        // Reduced tier (#31): a no-shadow avatar's worn attachments leave the shadow
+        // cascades and projector tiles (its rigged draws: the partition below).
+        if (pc.u_hud_pass == 3u && av < AV_VIS_SLOTS && (av_vis[av] & AVV_NOSHADOW) != 0u)
+        { dbgAdd(R_FRUSTUM, 1u); return 0xFFu; }
+        // PER-CASCADE worn rigid attachments (sun cascades 0..3: the static cull and the
+        // #567 dynamic overlay's per-cascade cull): AVV_SUN only says the wearer casts into
+        // SOME cascade, so every worn attachment used to land in every cascade. Its wearer's
+        // padded box (the bounds clean_shadow_rigcull.comp culls the same avatar's rigged
+        // draws by -- a body never misses its attachments or the reverse) against this
+        // cascade's box, caster planes and minimum caster size. casterOk measures size on a
+        // box un-padded by 1 m: grown by 1 m first, it sees the box itself. Unknown box: kept.
+        if (pc.u_hud_pass == 3u && pc.u_cascade < 4u && _attach && av < AV_VIS_SLOTS
+            && AV_BOX_BASE + 6u * av + 5u < uint(av_vis.length()))
+        {
+            const uint bb = AV_BOX_BASE + 6u * av;
+            const vec3 bmn = vec3(uintBitsToFloat(av_vis[bb]), uintBitsToFloat(av_vis[bb + 1u]), uintBitsToFloat(av_vis[bb + 2u]));
+            const vec3 bmx = vec3(uintBitsToFloat(av_vis[bb + 3u]), uintBitsToFloat(av_vis[bb + 4u]), uintBitsToFloat(av_vis[bb + 5u]));
+            if (bmn.x <= bmx.x
+                && (!frustumTest(bmn, bmx) || !casterOk(pc.u_cascade, bmn - vec3(1.0), bmx + vec3(1.0))))
+            { dbgAdd(R_FRUSTUM, 1u); return 0xFFu; }
+        }
+        _av = av;
+    }
+
+    // Rigged / bounds-unknown / attach: skip the frustum test (draw always).
+    g_face_mask = 0x3Fu;
+    if (pc.u_hud_pass == 2u && !_rigged && !_bounds_unknown && !_attach)
+    {
+        // Probe face(s): the size cutoff, then the analytic face frusta -- every face
+        // (phase 3, the shared pre-cull) or the one being captured (phase 0).
+        vec3 wmin, wmax;
+        worldAABB(id, wmin, wmax);
+        const vec3 ext = wmax - wmin;
+        const bool degenerate = (ext.x + ext.y + ext.z) < 0.001;
+        const vec3 blo = wmin + vec3(1.0), bhi = max(wmax - vec3(1.0), blo);   // unpadded
+        if (!degenerate && !probeSizeOk(id, blo, bhi)) { g_size_cut = true; return 0xFFu; }
+        uint fm = 0x3Fu;
+        if (!degenerate && (g_cull_push.mode & CULL_MODE_TIGHT) != 0u)
+        {
+            // TIGHT (RenderVKProbeTightMask): the faces the bounds touch, padded 0.25 m
+            // (half-float slot bounds already round outward). The 1 m cull pad and the
+            // 4 m origin box below put every instance near a face edge into the
+            // neighbouring face as well -- draws with no pixel there, counted and paid
+            // per face (up to half of the near instances at a 10 m depth).
+            fm = probeFaceMask(blo - vec3(0.25), bhi + vec3(0.25));
+        }
+        else if (!degenerate)
+        {
+            fm = probeFaceMask(wmin, wmax);
+            // ORIGIN OVERRIDE (#29, as below): an object whose origin is in a face stays
+            // in it. Not terrain (the region's matrix).
+            if ((_flags & 32u) == 0u)
+            {
+                const vec3 org = instances[id].model_matrix[3].xyz;
+                fm |= probeFaceMask(org - vec3(2.0), org + vec3(2.0));
+            }
+        }
+        if (oneFace()) fm &= 1u << pc.u_probe_face;
+        if (fm == 0u) return 0xFFu;
+        g_face_mask = fm;
+    }
+    else if ((_flexi || (!_rigged && !_bounds_unknown)) && !_attach)
+    {
+        vec3 wmin, wmax;
+        worldAABB(id, wmin, wmax);
+        bool _in_view = frustumTest(wmin, wmax);
+        demandFromBounds(id, wmin, wmax, _in_view ? 1.0 : 0.25);
+        vec3 ext = wmax - wmin;
+        bool degenerate = (ext.x + ext.y + ext.z) < 0.001;
+        g_tile_geo = !degenerate;   // (#567 batched tile cull: the per-tile test below)
+        g_wmin = wmin; g_wmax = wmax;
+
+        // ORIGIN OVERRIDE (#29): never cull an object whose ORIGIN is in-frustum.
+        // Not terrain (bit5): its model matrix is the REGION's, so the origin is the
+        // region corner, never the patch -- the override kept every patch of a region
+        // whenever that corner was in view.
+        bool origin_visible = (_flags & 32u) == 0u;
+        if (origin_visible)
+        {
+            vec3 org = instances[id].model_matrix[3].xyz;
+            for (int i = 0; i < 6; ++i)
+            {
+                vec4 p = pc.u_frustum_planes[i];
+                if (dot(p.xyz, org) + p.w < -2.0) { origin_visible = false; break; }
+            }
+        }
+        if (!degenerate && !origin_visible && !_in_view) { dbgAdd(R_FRUSTUM, 1u); return 0xFFu; }
+        // Shadow cascades: only casters whose shadow can land in the visible slice.
+        if (pc.u_hud_pass == 3u && !degenerate && !casterOk(pc.u_cascade, wmin, wmax))
+        { dbgAdd(R_FRUSTUM, 1u); return 0xFFu; }
+    }
+    else if (pc.u_hud_pass == 0u && !_is_hud)
+    {
+        // Rigged meshes and worn attachments: model_matrix is not a world pose (the
+        // skin palette / the joint table place them), so their instance bounds say
+        // nothing about where they are. Size their textures from the WEARER: the CPU's
+        // camera distance to the avatar's bounds and their diameter (the whole body --
+        // a skin or clothing texture spans most of it). Unknown -> the bounds below.
+        uint av = 0xFFFFFFFFu;
+        if (_rigged)
+        {
+            uint sid = instances[id].skin_id;
+            if (av_vis[AV_VIS_SLOTS] != 0u && sid < pc.u_skin_count
+                && sid * SKIN_META_WORDS < uint(skin_meta_w.length()))
+                av = skin_meta_w[sid * SKIN_META_WORDS];
+        }
+        else if (_attach) av = instances[id].skin_id;   // worn rigid: the joint-table slot
+        float adist = 0.0, adiam = 0.0;
+        if (av < AV_VIS_SLOTS && AV_DEM_BASE + 2u * av + 1u < uint(av_vis.length()))
+        {
+            adist = uintBitsToFloat(av_vis[AV_DEM_BASE + 2u * av]);
+            adiam = uintBitsToFloat(av_vis[AV_DEM_BASE + 2u * av + 1u]);
+        }
+        if (adist > 0.0 && adiam > 0.0)
+        {
+            const float scale = (av_vis[av] & AVV_MAIN) != 0u ? 1.0 : 0.25;   // off-screen avatars softer
+            if (_rigged)
+            {
+                // The skin palette places (and scales) rigged geometry: no density.
+                const float texels = adiam * pc.u_lod_cam_pos.w / adist / uvSpan(id) * scale
+                                   * texDemandParams().x;
+                demandWrite(id, uint(clamp(texels, 0.0, float(DEMAND_FULL))));
+            }
+            else
+                demandAt(id, adist, adiam, scale);   // worn rigid: model_matrix carries the prim scale
+        }
+        else
+        {
+            // Unknown bounds (and avatars without a slot): approximate
+            // bounds, good enough for a distance-based texel demand.
+            vec3 wmin, wmax;
+            worldAABB(id, wmin, wmax);
+            demandFromBounds(id, wmin, wmax, frustumTest(wmin, wmax) ? 1.0 : 0.25);
+        }
+    }
+
+    // Dynamic probe face (2): a worn rigid attachment's instance bounds are joint-local,
+    // so it skipped the frustum test above and was drawn into every face. Test its
+    // WEARER's padded bounds (computeAvatarVis box tail) against the face instead, as
+    // LL's cube-snapshot camera culls the avatar. Unknown box -> drawn.
+    // Also its size there (probeAttachSizeOk).
+    if (pc.u_hud_pass == 2u && _attach && !_rigged)
+    {
+        uint fm = 0x3Fu;
+        vec3 amn, amx;
+        if ((pc.u_flags & 4096u) != 0u && _av < AV_VIS_SLOTS && avBox(_av, amn, amx))
+        {
+            if (!probeAttachSizeOk(id, amn, amx)) { g_size_cut = true; return 0xFFu; }
+            fm = probeFaceMask(amn, amx);
+        }
+        if (oneFace()) fm &= 1u << pc.u_probe_face;
+        if (fm == 0u) return 0xFFu;
+        g_face_mask = fm;
+    }
+
+    // ---- GPU LOD SELECT ----
+    uint slot_id;
+    if (_rigged || _is_hud || _attach)
+    {
+        // Highest RESIDENT LOD (avatars/HUD want best-available) -- except for a
+        // REDUCED-tier wearer (#31): its biased LOD (rigged: LL's rigged calcLOD with the
+        // scaled factor, from the CPU; worn rigid: this instance's LOD radius at the
+        // wearer's distance), else the nearest finer resident level, else coarser.
+        uint _want = 4u;
+        if (!_is_hud && _av < AV_VIS_SLOTS && (av_vis[_av] & AVV_REDUCED) != 0u)
+        {
+            if (_rigged)
+            {
+                uint _c = (av_vis[_av] >> 4u) & 7u;
+                if (_c != 0u) _want = _c - 1u;
+            }
+            else if (AV_DEM_BASE + 2u * _av < uint(av_vis.length()))
+            {
+                float _ad = uintBitsToFloat(av_vis[AV_DEM_BASE + 2u * _av]);
+                float _sc = uintBitsToFloat(av_vis[AV_VIS_SLOTS + 1u]);
+                if (_ad > 0.0) _want = detailFromTan(pc.u_cam_pos.w * _sc * instances[id].aabb_min.w / _ad);
+            }
+        }
+        slot_id = LOD_SENTINEL;
+        // #559 rigged capacity pressure (CPU, far avatars first): that level when resident,
+        // else the nearest FINER resident one, coarser only when nothing finer is resident.
+        // #734: never coarser than the cap while the capped level is still loading -- the
+        // cap is floored at the avatar's size (LL's own LOD at its size), and a coarser
+        // creator LOD left resident from farther away (dense avatars: whole sections empty)
+        // must not stand in for it; the finer level it replaces stays until it lands.
+        // (= LLCleanRendererVK::buildRiggedFrame's pick)
+        const uint _press = (_rigged && !_is_hud && _av < AV_VIS_SLOTS) ? ((av_vis[_av] >> AVV_PRESS_SHIFT) & 7u) : 0u;
+        if (_press != 0u)
+        {
+            const uint _cap = min(_want, _press - 1u);
+            for (uint _L = _cap; _L <= 3u && slot_id == LOD_SENTINEL; ++_L)
+            {
+                uint _s = lod_groups[group_id].slot[_L];
+                if (slotOk(_s)) slot_id = _s;
+            }
+            for (int _L = int(_cap) - 1; _L >= 0 && slot_id == LOD_SENTINEL; --_L)
+            {
+                uint _s = lod_groups[group_id].slot[_L];
+                if (slotOk(_s)) slot_id = _s;
+            }
+        }
+        if (_want < 3u && slot_id == LOD_SENTINEL)
+        {
+            // desired, then finer (ascending), then coarser (descending)
+            for (uint _k = 0u; _k < 4u && slot_id == LOD_SENTINEL; ++_k)
+            {
+                uint _L = (_want + _k <= 3u) ? _want + _k : 3u - _k;
+                uint _s = lod_groups[group_id].slot[_L];
+                if (slotOk(_s)) slot_id = _s;
+            }
+        }
+        for (int _L = 3; _L >= 0 && slot_id == LOD_SENTINEL; --_L)
+        {
+            uint _s = lod_groups[group_id].slot[_L];
+            if (slotOk(_s)) { slot_id = _s; break; }
+        }
+    }
+    else if ((_flags & 32u) != 0u)
+    {
+        // TERRAIN (#211): the level from the MAIN camera's distance to the patch box
+        // (clean_terrain_lod.glsl; the TLAS pass and the VS geomorph use the same rule),
+        // the coarsest in probe faces (their LOD camera is the probe origin, and the VS
+        // morphs by the main camera: level 0 has no morph). Absent level -> coarser
+        // first, then finer.
+        const uint _want = pc.u_hud_pass == 2u ? 0u
+            : (pc.u_flags & CULL_ORTHO) != 0u ? 3u   // <GMDX> orthographic: the finest level
+            : terrainLevel(terrainBoxDist(instances[id].model_matrix, instances[id].aabb_min.xyz,
+                                          instances[id].aabb_max.xyz, pc.u_lod_cam_pos.xyz));
+        slot_id = LOD_SENTINEL;
+        for (uint _k = 0u; _k < 4u && slot_id == LOD_SENTINEL; ++_k)
+        {
+            uint _s = lod_groups[group_id].slot[terrainLevelOrder(_want, _k)];
+            if (slotOk(_s)) slot_id = _s;
+        }
+    }
+    else
+    {
+        float _radius = instances[id].aabb_min.w;
+        vec3  _origin = instances[id].model_matrix[3].xyz;
+        float _dist   = max(length(_origin - pc.u_lod_cam_pos.xyz), 0.001);
+        float _lodf   = pc.u_cam_pos.w;                       // lod_factor
+        // Probe capture: Linden trees' LL LOD distances are main-view distances; at the
+        // face's coarser pixel density a tree at _dist looks as one _dist / scale away
+        // (meshes get the same through the scaled lod_factor).
+        const float _vdist = (pc.u_hud_pass == 2u && pc.u_probe_lod_scale > 0.0)
+                           ? _dist / pc.u_probe_lod_scale : _dist;
+        uint  _level  = (pc.u_flags & CULL_ORTHO) != 0u ? 3u   // <GMDX> orthographic: the finest level
+                      : (_flags & VEG_FLAG) != 0u ? vegDetail(id, _vdist)
+                                                   : detailFromTan((_lodf * _radius) / _dist);
+        slot_id = lod_groups[group_id].slot[_level];
+        // An EMPTY level (zeroed / not-resident slot) counts as ABSENT, not as "draw
+        // nothing": fall back like a SENTINEL level (#88).
+        if (!slotOk(slot_id)) slot_id = LOD_SENTINEL;
+        // RESIDENCY FALLBACK: the upload-once ingest captures only the ONE LOD level
+        // LL currently has per object, so the distance-derived _level usually != the
+        // resident level -> without this nearly every static prim drops. If the
+        // requested level isn't resident, take the highest resident LOD.
+        // (A diagnostic that disabled this proved the sim-surround fan is NOT a
+        // LOD-selection issue -- the coarse geometry renders at its exact requested
+        // level; the captured slot itself is coarse.)
+        // Probe capture (2, bit 13 = RenderVKProbeNearestLOD): the resident level
+        // NEAREST the requested one instead --
+        // coarser first, else the coarsest finer one. The face LOD is chosen for a
+        // 128 px face, and taking the highest resident level drew main-view detail
+        // into it whenever a coarser level was also resident.
+        if (slot_id == LOD_SENTINEL && pc.u_hud_pass == 2u && (pc.u_flags & 8192u) != 0u)
+        {
+            for (int _L = int(_level) - 1; _L >= 0 && slot_id == LOD_SENTINEL; --_L)
+            {
+                uint _s = lod_groups[group_id].slot[_L];
+                if (slotOk(_s)) slot_id = _s;
+            }
+            for (uint _L = _level + 1u; _L <= 3u && slot_id == LOD_SENTINEL; ++_L)
+            {
+                uint _s = lod_groups[group_id].slot[_L];
+                if (slotOk(_s)) slot_id = _s;
+            }
+        }
+        if (slot_id == LOD_SENTINEL)
+        {
+            for (int _L = 3; _L >= 0; --_L)
+            {
+                uint _s = lod_groups[group_id].slot[_L];
+                if (slotOk(_s)) { slot_id = _s; break; }
+            }
+        }
+    }
+    if (slot_id == LOD_SENTINEL) { dbgAdd(R_NOSLOT, 1u); return 0xFFu; }     // truly empty group
+
+    SlotInfo s = slots[slot_id];
+
+    // #561: far / small rigged meshes at a heavy venue -> a decimated step of the picked
+    // slot (main view; not HUD, not the shared system-body parts -- their morph stream is
+    // indexed by the reference vertex order -- nor flexi chains).
+    if (_rigged && !_is_hud && !_flexi && pc.u_hud_pass == 0u && _av < AV_VIS_SLOTS
+        && (_flags & SYSAVI_FLAG) == 0u && s.index_count != 0u)
+    {
+        const uint dsl = rigScreenLod(id, _av, slot_id, s);
+        if (dsl != slot_id)
+        {
+            const SlotInfo d = slots[dsl];
+            g_dec_n = 1u;
+            g_dec_saved = s.vert_count > d.vert_count ? s.vert_count - d.vert_count : 0u;
+            slot_id = dsl;
+            s = d;
+        }
+    }
+
+    // OOB guard (#29): a slot whose index range runs past the uploaded extent
+    // would make the whole bucket draw nothing. Drop just this slot. (#238: compared
+    // without the uint wrap of first + count; the vertex range too, when the CPU gave
+    // the extent -- a draw fetching past the vertex buffer is undefined without robust
+    // buffer access. The rigged paths read the same static range in pre-skin.)
+    if (s.index_count == 0u) { dbgAdd(R_IDXZERO, 1u); return 0xFFu; }        // not resident (or zeroed slot read)
+    if (!rangeOk(s.first_index, s.index_count, pc.u_idx_valid)
+        || (pc.u_vtx_valid != 0u && (s.base_vertex < 0 || !rangeOk(uint(s.base_vertex), s.vert_count, pc.u_vtx_valid))))
+        { dbgAdd(R_OOB, 1u); return 0xFFu; }
+
+    uint flags  = instances[id].flags;
+    bool rigged = (flags & 1u) != 0u && instances[id].skin_id != 0xFFFFFFFFu;
+
+    // CLUSTER LOD (#745): the cluster draw owns this instance (static only; after the texel
+    // demand above, so its textures keep streaming). Any pass whose push carries the bitset
+    // (CULL_MODE_CLUSTER): the main view, and the sun cascades / mirror whose own cluster draw
+    // runs this frame (the renderer sets it only then: "never half").
+    if (!rigged && clusterOwned(id)) return 0xFFu;
+    // CLUSTER LOD LEGACY-SKIN SKIP (AVV_CL_SKIP, main cull only): a switched avatar's owned
+    // rigged instance whose legacy vertices nothing reads this frame -- no draw, no pre-skin
+    // range / work item, no off-screen region (exactly as an excluded static, also after the
+    // texel demand). Its state word says RC_CLUSTER (pass B's receiver-lift flag); a skin-cache
+    // range is invalidated and keeps its old "last drawn" frame, so it re-skins in full the
+    // frame it comes back (never a stale pose; F6 history then misses: previous = current).
+    if (rigged && pc.u_hud_pass == 0u && _av < AV_VIS_SLOTS && (av_vis[_av] & AVV_CL_SKIP) != 0u && clusterOwned(id))
+    {
+        const uint cb = id * RC_WORDS;
+        if (cb + RC_WORDS <= uint(rig_cache.length()))
+        {
+            rig_cache[cb + 6u] = RC_CLUSTER;
+            rig_cache[cb + 2u] = 0xFFFFFFFFu;
+        }
+        g_clskip_v = max(s.vert_count, 1u);
+        return 0xFFu;
+    }
+
+    uint sub_bucket = 0u;                        // opaque
+    if      ((flags & 2u) != 0u) sub_bucket = 2u; // alpha-blend
+    else if ((flags & 4u) != 0u) sub_bucket = 1u; // alpha-mask
+    // <GMDX> rez effects: a build effect that may hide what is not built yet (slot bit 31, not
+    // dying; gmdx_rezfx.glsl rezfxHidden) runs in the mask buckets in the main view, so its depth
+    // pre-pass runs the same cut. Shadow views and probe captures route it as its own: whole.
+    // The 3D printer's slots (bits 31 + 30) also draw both sides there: its cut is capped by
+    // the back faces (gmdx_rezfx.glsl rezfxBack; static rows only; the FSs drop the rest).
+    // So do dying rows (their mask bucket: the store flags them 4), for the flying pieces of
+    // disintegrate and shatter, which tumble.
+    bool rz_ds = (flags & 0x00400000u) != 0u && (flags & 0xFF800000u) != 0u && !rigged && pc.u_hud_pass == 0u && g_off_mask == 0u;
+    if (sub_bucket == 0u && (flags & 0x80400000u) == 0x80000000u && pc.u_hud_pass == 0u && g_off_mask == 0u)
+        sub_bucket = 1u;
+    if ((flags & 0xC0400000u) == 0xC0000000u && !rigged && pc.u_hud_pass == 0u && g_off_mask == 0u)
+        rz_ds = true;   // (natively alpha-masked printer rows too; blend rows stay out: sub_bucket < 2)
+
+    // Rigged: validate the skin and decide how it is pre-skinned. Its private skinned
+    // range / work index is handed out by phase 2 in a deterministic order (#559); a
+    // capacity drop there leaves an empty draw in the bucket slot taken here.
+    int  draw_base_vertex = s.base_vertex;
+    bool rig_cached = false;
+    g_rig_mode = 0u; g_rig_verts = 0u; g_rig_tier = 0u;
+    if (rigged && _av < AV_VIS_SLOTS) g_rig_tier = (av_vis[_av] >> AVV_TIER_SHIFT) & (RIG_TIERS - 1u);
+    if (rigged)
+    {
+        if (instances[id].skin_id >= pc.u_skin_count) { dbgAdd(R_RIGNOSKIN, 1u); return 0xFFu; }
+        const uint skin_id = instances[id].skin_id;
+        const uint wbase = (s.has_weights != 0u) ? s.has_weights - 1u : 0xFFFFFFFFu;
+        const uint src_base = sysaviSrcBase(id, s);   // pre-skin source (morphed system body)
+        // Reduced-tier skin cache (main pass, world, reduced + no-shadow wearer).
+        if (pc.u_hud_pass == 0u)
+        {
+            const uint cb = id * RC_WORDS;
+            rig_cache[cb + 6u] = 0u;   // eye-relative per-frame range unless cached below
+            // (#616) the draw's source vertex base, whichever range it gets below (a held
+            // cached range's key equals it; a capacity drop leaves an empty draw)
+            if (cb + RC_WORDS <= uint(rig_cache.length())) rig_cache[cb + RC_SRC] = src_base;
+            const uint avb = _av < AV_VIS_SLOTS ? av_vis[_av] : 0u;
+            // (#632: also every avatar whose animation has held frames, AVV_HELD -- shadow
+            // casters too: every rigged consumer re-applies the pelvis from the state word)
+            if (pc.u_cache_cap != 0u && !_is_hud
+                && ((avb & (AVV_REDUCED | AVV_NOSHADOW)) == (AVV_REDUCED | AVV_NOSHADOW) || (avb & AVV_HELD) != 0u)
+                && cb + RC_WORDS <= uint(rig_cache.length()))
+            {
+                uint base = rig_cache[cb + 0u];
+                bool have = rig_cache[cb + 5u] == pc.u_cache_epoch && rig_cache[cb + 1u] >= s.vert_count
+                            && base >= pc.u_cache_base && rangeOk(base - pc.u_cache_base, s.vert_count, pc.u_cache_cap);
+                const uint last = rig_cache[cb + 7u];
+                bool key = have && rig_cache[cb + 2u] == src_base && rig_cache[cb + 3u] == skin_id
+                           && rig_cache[cb + 4u] == wbase && (last == pc.u_frame || last + 1u == pc.u_frame);
+                if (!have)
+                {
+                    // New range (a coarser slot reuses a larger one; a finer one leaks the old
+                    // range until the arena fills and the CPU starts a new epoch).
+                    const uint b = atomicAdd(rig_alloc.cache_used, s.vert_count);
+                    if (rangeOk(b, s.vert_count, pc.u_cache_cap))
+                    {
+                        base = pc.u_cache_base + b;
+                        rig_cache[cb + 0u] = base;
+                        rig_cache[cb + 1u] = s.vert_count;
+                        rig_cache[cb + 2u] = 0xFFFFFFFFu;   // contents invalid until skinned
+                        rig_cache[cb + 5u] = pc.u_cache_epoch;
+                        have = true;
+                        key = false;
+                    }
+                    else dbgAdd(R_RIGCACHE_FULL, 1u);
+                }
+                if (have)
+                {
+                    const bool reskin = !key || (avb & AVV_POSE_DIRTY) != 0u;
+                    if (reskin)
+                    {
+                        // The work item is written by phase 2 (its index comes from the
+                        // scan); it reads the key words below. A capacity drop there
+                        // invalidates the key again (re-skin next frame).
+                        dbgAdd(R_SKINV_REDUCED, s.vert_count);
+                        g_rig_mode = key ? 3u : 2u;
+                        rig_cache[cb + 2u] = src_base;
+                        rig_cache[cb + 3u] = skin_id;
+                        rig_cache[cb + 4u] = wbase;
+                    }
+                    else dbgAdd(R_RIGCACHE_HELD, s.vert_count);
+                    rig_cache[cb + 6u] = RC_LOCAL | _av | (reskin ? RC_SKINNED : 0u);
+                    rig_cache[cb + 7u] = pc.u_frame;
+                    draw_base_vertex = int(base);
+                    rig_cached = true;
+                }
+            }
+            // CLUSTER LOD (#747): the main view's cluster draw owns this rigged instance. It
+            // stays in every bucket and work list (shadows, probes, mirror, RT, pick, weld
+            // still use its legacy pre-skin: #749's views there are selection-only); only the
+            // MAIN-VIEW rigged passes drop it (clean_draw_rigged.vert, RC_CLUSTER).
+            if (clusterOwned(id) && cb + RC_WORDS <= uint(rig_cache.length()))
+                rig_cache[cb + 6u] |= RC_CLUSTER;
+        }
+    }
+    if (rigged && !rig_cached)
+    {
+        // A per-frame range of s.vert_count skinned vertices (phase 2 places it).
+        g_rig_mode  = 1u;
+        g_rig_verts = s.vert_count;
+        draw_base_vertex = 0;
+        if (pc.u_hud_pass == 0u)
+        {
+            const bool red = _av < AV_VIS_SLOTS && (av_vis[_av] & AVV_REDUCED) != 0u;
+            dbgAdd(red ? R_SKINV_REDUCED : R_SKINV_FULL, s.vert_count);
+        }
+    }
+
+    c.indexCount    = s.index_count;
+    c.instanceCount = 1u;
+    c.firstIndex    = s.first_index;
+    c.vertexOffset  = draw_base_vertex;
+    c.firstInstance = id;
+    if (g_rig_mode != 0u)
+    {
+        // Pending pre-skin space (#559): phase 2 restores instanceCount 1 / firstInstance id.
+        c.instanceCount = 1u | (g_rig_tier << RIG_PEND_SHIFT) | (g_rig_mode << (RIG_PEND_SHIFT + 2u));
+        c.firstInstance = slot_id;
+    }
+    // Double-sided opaque/mask -> the cull-none buckets.
+    // (HUD keeps its own back-culled buckets 0..2.)
+    uint bucket = rigged ? (3u + sub_bucket) : sub_bucket;
+    if ((((flags & 256u) != 0u && (flags & 8u) == 0u) || rz_ds) && sub_bucket < 2u)   // <GMDX> rz_ds
+        bucket = (rigged ? 8u : 6u) + sub_bucket;
+    // No-shadow avatar (#31): main-view only -> the twin bucket (after the casters). (An
+    // off-screen draw's regions are per pass already: phase 0 routes it by g_off_mask.)
+    // <GMDX> a dying rigged draw (rez effects) takes the twin too: the shadow views draw casters only.
+    if (rigged && pc.u_hud_pass == 0u && g_off_mask == 0u
+        && ((_av < AV_VIS_SLOTS && (av_vis[_av] & AVV_NOSHADOW) != 0u) || (flags & 0x00400000u) != 0u))
+    {
+        dbgAdd(R_RIG_NOSHADOW, 1u);
+        bucket = twinOf(bucket);
+    }
+    return bucket;
+}
+
+// Probe funnel counts (CULL_MODE_STATS): one atomic per subgroup and counter.
+void probeStats(bool kept, bool sizecut)
+{
+    if ((g_cull_push.mode & CULL_MODE_STATS) == 0u || uint(counters.length()) <= PROBE_STAT_OVER) return;
+    const uint nk = subgroupAdd(kept ? 1u : 0u);
+    const uint ns = subgroupAdd(sizecut ? 1u : 0u);
+    if (subgroupElect())
+    {
+        if (nk != 0u) atomicAdd(counters[PROBE_STAT_KEPT], nk);
+        if (ns != 0u) atomicAdd(counters[PROBE_STAT_SIZECUT], ns);
+    }
+}
+
+// HUD INSTANCE LIST (CULL_MODE_IDLIST, RenderVKHudCullList): the HUD cull walks the
+// CPU-kept ascending list of HUD-flagged instance ids (binding 26, from entry slot_b on;
+// u_instance_count = its length) instead of every instance row -- a handful of HUD
+// prims, not the whole world rejected one row at a time. Same rows, same order, same
+// buckets as the full scan (which rejects every non-HUD row in pass 1).
+layout(std430, binding = 26) readonly buffer IdList { uint id_list[]; };
+// Multi-view probe cull: the SCHEDULED face's candidate per instance (cull slot_b: its
+// own origin, so its own LOD / draw), as cand[] holds the realtime probe's.
+layout(std430, binding = 27) buffer CandB { DrawCmd cand_b[]; };
+uint listedId(uint k)
+{
+    return (g_cull_push.mode & CULL_MODE_IDLIST) != 0u ? id_list[g_cull_push.slot_b + k] : k;
+}
+
+shared uint s_bucket[64];
+shared uint s_off[64];           // phase 0: rigged index << 4 | off-screen region mask (0xFF none)
+shared uint s_rt[64];            // phases 0 / 2 (#559): the lane's pending rigged tier (0xFF none)
+shared uint s_rv[64];            // phases 0 / 2 (#559): its per-frame skinned vertices
+shared uint s_scan[64u * WGS];   // phase 1: [column * 64 + lane]
+shared uint s_terr[64];          // phases 0 / 2 (main cull): 1 = the lane's draw is a bucket 0 / 1 terrain draw
+
+// Phase 0 / 4: this workgroup's count for wg_counts column `col` -- internal bucket col
+// (< NBI), else off-screen region column NBI + k * OFF_REGIONS + r (phase 0 only).
+uint wgColCount(uint col, bool off)
+{
+    uint n = 0u;
+    if (col < NBI)
+    {
+        for (uint j = 0u; j < 64u; ++j) if (s_bucket[j] == col) ++n;
+    }
+    else if (off)
+    {
+        const uint k = (col - NBI) / OFF_REGIONS, r = (col - NBI) % OFF_REGIONS;
+        for (uint j = 0u; j < 64u; ++j)
+        {
+            const uint o = s_off[j];
+            if (o != 0xFFu && (o >> 4u) == k && ((o >> r) & 1u) != 0u) ++n;
+        }
+    }
+    return n;
+}
+// #559: this workgroup's rigged demand column (RIG_VCOL + t: verts, RIG_WCOL + t: items).
+uint rigColCount(uint col)
+{
+    const bool items = col >= RIG_WCOL;
+    const uint t = col - (items ? RIG_WCOL : RIG_VCOL);
+    uint n = 0u;
+    for (uint j = 0u; j < 64u; ++j)
+        if (s_rt[j] == t) n += items ? 1u : s_rv[j];
+    return n;
+}
+// The workgroup's G-buffer terrain-list column (TERR_COL; 0 outside the main cull).
+uint terrColCount()
+{
+    uint n = 0u;
+    for (uint j = 0u; j < 64u; ++j) n += s_terr[j];
+    return n;
+}
+
+// ---------------------------------------------------------------------------
+// MULTI-VIEW PROBE CULL (RenderVKMultiViewCull; audit S2 / I-2). The realtime probe's six
+// faces in ONE three-dispatch cull instead of a pre-cull plus three dispatches, a counter
+// reset and an alpha sort per face:
+//   5: cull every instance once from the probe origin (cullOne, all six faces: bucket +
+//      face mask in cand_meta, the draw in cand[]) and count, per workgroup, every
+//      (face, bucket) column -- and the UNION alpha column (alpha draws in any face);
+//   6: one workgroup per view scans its columns over the workgroups (as phase 1) into
+//      offsets + that view's counters (block view * MV_CTR_STRIDE of the probe counters);
+//   7: write each candidate into every face it is in, at that face's region (view * R,
+//      R = u_bucket_cap), ranked per workgroup in instance order -- each face's buckets
+//      are exactly what its own per-face cull compacted -- plus the union alpha list
+//      (region 6, face mask in instanceCount) that clean_alpha_sort.comp mode 4 sorts
+//      ONCE from the probe origin and splits per face.
+// With slot_b (RenderVKMultiViewScheduled) the frame's SCHEDULED probe face rides along as
+// view 7: a second cullOne from its own params entry (origin, clips, dynamic flag, its one
+// face) into cand_b[] and cand_meta bits 9..11, its buckets at region 7 (mode 4 sorts its
+// alpha in the same dispatch, from its origin).
+// Probe captures only ever bucket 0 1 2 6 7 (rigged draws come from the main cull):
+// compact buckets 0 opaque 1 mask 2 alpha 3 ds opaque 4 ds mask (= the private set's).
+#define MV_FACES      6u
+#define MV_VIEW_UNION 6u
+#define MV_NBK        5u
+#define MV_COL_UNION  30u   // wg_counts column of the union alpha list
+#define MV_COL_SCHED  31u   // first column of the scheduled face (cull slot_b)
+#define MV_WG_STRIDE  36u   // wg_counts words per workgroup (= C++ kMvWgStride)
+#define MV_NONE       0xFFFFFFFFu   // cand_meta: culled for every view (as every other phase: ~0)
+// #832 GPU jobs: clean_probe_patch.comp marks a job with no raster content (invalid, sky
+// only, ray-traced) by instance_count = 0 in ITS entry. With the scheduled face riding
+// along the two entries decide independently: phases 5-7 walk every instance either view
+// may keep (the larger count), and each cullOne runs only when its own entry has content
+// -- an empty realtime job must not empty the scheduled face, nor an empty scheduled job
+// (the sky-only default probe, a traced face) receive the realtime probe's world.
+uint mvSchedCount() { return g_cull_push.slot_b != 0xFFFFFFFFu ? cull_params[g_cull_push.slot_b].u_instance_count : 0u; }
+uint mvInstanceCount() { return max(pc.u_instance_count, mvSchedCount()); }
+uint mvCompact(uint b) { return b < 3u ? b : (b == 6u ? 3u : (b == 7u ? 4u : 7u)); }
+uint mvFull(uint k)    { return k < 3u ? k : k + 3u; }
+void mvStore(uint k, uint idx, DrawCmd c)
+{
+    if      (k == 0u) cmd_opaque[idx]    = c;
+    else if (k == 1u) cmd_mask[idx]      = c;
+    else if (k == 2u) cmd_alpha[idx]     = c;
+    else if (k == 3u) cmd_ds_opaque[idx] = c;
+    else              cmd_ds_mask[idx]   = c;
+}
+// The workgroup's count for wg_counts column `col` (s_bucket = its 64 metas):
+// face f bucket k = col f * 5 + k, the union alpha list, the scheduled face's buckets.
+uint mvColCount(uint col)
+{
+    uint n = 0u;
+    for (uint j = 0u; j < 64u; ++j)
+    {
+        const uint m = s_bucket[j];
+        const uint ka = m & 7u, fm = (m >> 3u) & 0x3Fu, kb = (m >> 9u) & 7u;
+        if (col < MV_COL_UNION)       { if (ka == col % MV_NBK && ((fm >> (col / MV_NBK)) & 1u) != 0u) ++n; }
+        else if (col == MV_COL_UNION) { if (ka == 2u && fm != 0u) ++n; }
+        else                          { if (kb == col - MV_COL_SCHED) ++n; }
+    }
+    return n;
+}
+
+// ---------------------------------------------------------------------------
+// #567 BATCHED PROJECTOR TILE CULL (RenderVKProjShadowBatchCull). Up to TL_MAX_VIEWS
+// projector tiles' STATIC caster culls in one three-dispatch cull instead of a counter
+// reset, three dispatches and four barriers per tile (the cull -> draw ping-pong that
+// serialised every re-rendered tile):
+//   8: cullOne every instance ONCE against the batch's union box (the push's slot: shadow
+//      pass 3, projector cascade 4, caster k 0), then -- bounded statics -- each tile's
+//      own frustum + origin override + sub-texel caster test (its own params entry,
+//      slot_b + v: planes, apex, texel k); cand_meta = compact bucket | tile mask << 3;
+//      per workgroup, every (tile, bucket) column (TL_NBK per tile, stride WGS);
+//   9: one workgroup per tile scans its columns (as phase 6) into offsets + that tile's
+//      counter block (v * MV_CTR_STRIDE; word TL_OVER_WORD = the largest bucket total,
+//      the CPU's overflow check: > the region, the tile re-renders alone);
+//  10: write each candidate into every tile it is in, at that tile's region (v * R,
+//      R = u_bucket_cap), ranked per workgroup in instance order -- each tile's buckets
+//      are exactly what its own per-tile cull compacted (bucket 2, alpha-blend, per tile
+//      too: tiles draw it directly / into the translucency layer, no union sort).
+// Mode bits: CULL_MODE_TILES + the tile count in bits 8..11; slot_b = tile 0's entry
+// (consecutive entries, ringReserve). Only buckets 0 1 2 6 7 (the static caster set).
+#define CULL_MODE_TILES  32u
+#define TL_MAX_VIEWS     8u
+#define TL_NBK           5u
+#define TL_OVER_WORD     31u
+uint tlViews() { return min((g_cull_push.mode >> 8u) & 15u, TL_MAX_VIEWS); }
+// The tiles (bit v) a bounded static instance cullOne kept (union box) is in -- each
+// tile's cullOne tests, from its own entry. Unbounded / degenerate / attachment
+// instances: every tile (their keep test does not depend on the tile's planes).
+uint tlMask(uint id)
+{
+    const uint n = tlViews();
+    const uint all = (1u << n) - 1u;
+    if (!g_tile_geo) return all;
+    const vec3 org = instances[id].model_matrix[3].xyz;
+    const bool org_chk = (instances[id].flags & 32u) == 0u;   // (terrain: no origin override)
+    uint m = 0u;
+    for (uint v = 0u; v < TL_MAX_VIEWS; ++v)
+    {
+        if (v >= n) break;
+        g_slot = g_cull_push.slot_b + v;
+        bool keep = frustumTest(g_wmin, g_wmax);
+        if (!keep && org_chk)
+        {
+            keep = true;
+            for (int i = 0; i < 6; ++i)
+            {
+                const vec4 p = pc.u_frustum_planes[i];
+                if (dot(p.xyz, org) + p.w < -2.0) { keep = false; break; }
+            }
+        }
+        if (keep && casterOk(4u, g_wmin, g_wmax)) m |= 1u << v;
+    }
+    g_slot = g_cull_push.slot;
+    return m;
+}
+// The workgroup's count for column col = tile (col / TL_NBK), compact bucket (col % TL_NBK).
+uint tlColCount(uint col)
+{
+    const uint v = col / TL_NBK, k = col % TL_NBK;
+    uint n = 0u;
+    for (uint j = 0u; j < 64u; ++j)
+    {
+        const uint m = s_bucket[j];
+        if (m != MV_NONE && (m & 7u) == k && ((m >> (3u + v)) & 1u) != 0u) ++n;
+    }
+    return n;
+}
+
+void main()
+{
+    uint id  = gl_GlobalInvocationID.x;
+    uint lid = gl_LocalInvocationID.x;
+    uint wg  = gl_WorkGroupID.x;
+
+    if (g_cull_push.phase == 0u)
+    {
+        // (HUD id list: invocation k culls instance id_list[k]; the per-instance scratch
+        // stays indexed by the instance id, as the full scan writes it)
+        const uint iid = id < pc.u_instance_count ? listedId(id) : id;
+        DrawCmd c;
+        uint b = 0xFFu, off = 0xFFu;
+        g_off_mask = 0u;
+        g_rig_mode = 0u;
+        g_dec_n = 0u; g_dec_saved = 0u;
+        g_clskip_v = 0u;
+        if (id < pc.u_instance_count) b = cullOne(iid, c);
+        // #561: decimated draws (always-on demand words; one atomic per subgroup).
+        if (pc.u_hud_pass == 0u)
+        {
+            const bool dk = b != 0xFFu && g_dec_n != 0u;
+            const uint dn = subgroupAdd(dk ? 1u : 0u);
+            const uint dv = subgroupAdd(dk ? g_dec_saved : 0u);
+            if (subgroupElect() && dn != 0u)
+            {
+                dbgAdd(R_RIGDEC_N, dn);
+                dbgAdd(R_RIGDEC_SAVED, dv);
+            }
+            // Cluster LOD legacy-skin skip (same always-on words).
+            const uint sn = subgroupAdd(g_clskip_v != 0u ? 1u : 0u);
+            const uint sv = subgroupAdd(g_clskip_v);
+            if (subgroupElect() && sn != 0u)
+            {
+                dbgAdd(R_CLSKIP_N, sn);
+                dbgAdd(R_CLSKIP_V, sv);
+            }
+        }
+        // #559: pending pre-skin demand of this lane's draw (counted per distance tier).
+        const bool rig_pend = b != 0xFFu && g_rig_mode != 0u;
+        s_rt[lid] = rig_pend ? g_rig_tier : 0xFFu;
+        s_rv[lid] = (rig_pend && g_rig_mode == 1u) ? g_rig_verts : 0u;
+        // #517: a rigged draw only off-screen passes need -> their regions, not bucket b.
+        if (b != 0xFFu && g_off_mask != 0u)
+        {
+            off = (rigIndex(primaryOf(b)) << 4u) | g_off_mask;
+            b = 0xFFu;
+        }
+        s_bucket[lid] = b;
+        s_off[lid] = off;
+        // G-buffer terrain list (main cull): a static opaque / mask terrain draw.
+        s_terr[lid] = (pc.u_hud_pass == 0u && b <= 1u && (instances[iid].flags & 32u) != 0u) ? 1u : 0u;
+        barrier();
+        if (id < pc.u_instance_count)
+        {
+            if (off != 0xFFu)
+            {
+                // per region: the rank among this workgroup's draws of that region
+                uint meta = OFF_META | ((off >> 4u) << 28u) | ((off & 15u) << 24u);
+                for (uint r = 0u; r < OFF_REGIONS; ++r)
+                {
+                    if (((off >> r) & 1u) == 0u) continue;
+                    uint rank = 0u;
+                    for (uint j = 0u; j < lid; ++j)
+                    {
+                        const uint o = s_off[j];
+                        if (o != 0xFFu && (o >> 4u) == (off >> 4u) && ((o >> r) & 1u) != 0u) ++rank;
+                    }
+                    meta |= rank << (6u * r);
+                }
+                cand_meta[iid] = meta;
+                cand[iid] = c;
+            }
+            else if (b == 0xFFu)
+            {
+                cand_meta[iid] = 0xFFFFFFFFu;
+            }
+            else
+            {
+                uint rank = 0u;
+                for (uint j = 0u; j < lid; ++j) if (s_bucket[j] == b) ++rank;
+                cand_meta[iid] = (b << 24) | rank;
+                cand[iid] = c;
+            }
+        }
+        if (lid < WGS) wg_counts[wg * WGS + lid] = lid < NBW ? wgColCount(lid, true)
+                                                 : lid < TERR_COL ? rigColCount(lid) : terrColCount();
+        return;
+    }
+
+    // SHARED PROBE PRE-CULL (probe capture, u_flags bit 14). Phase 3, once per capture
+    // job: the per-instance work -- reject tests, size cutoff, LOD, the draw -- for all
+    // six faces at once, keeping a face mask: cand_meta = bucket << 24 | faces << 8.
+    // Phase 4, per face: this face's instances ranked per workgroup as phase 0 does
+    // (rank into bits 0..7, the bucket / face bits kept for the next faces), then the
+    // usual phases 1 and 2. Six faces cost one per-instance pass, not six.
+    if (g_cull_push.phase == 3u)
+    {
+        uint b = 0xFFu;
+        if (id < pc.u_instance_count)
+        {
+            DrawCmd c;
+            b = cullOne(id, c);
+            if (b == 0xFFu) cand_meta[id] = 0xFFFFFFFFu;
+            else
+            {
+                cand_meta[id] = (b << 24) | ((g_face_mask & 0x3Fu) << 8);
+                cand[id] = c;
+            }
+        }
+        probeStats(b != 0xFFu, g_size_cut);
+        return;
+    }
+    if (g_cull_push.phase == 4u)
+    {
+        uint m = 0xFFFFFFFFu, b = 0xFFu;
+        if (id < pc.u_instance_count)
+        {
+            m = cand_meta[id];
+            if (m != 0xFFFFFFFFu && ((m >> (8u + pc.u_probe_face)) & 1u) != 0u) b = m >> 24;
+        }
+        s_bucket[lid] = b;
+        barrier();
+        if (b != 0xFFu)
+        {
+            uint rank = 0u;
+            for (uint j = 0u; j < lid; ++j) if (s_bucket[j] == b) ++rank;
+            cand_meta[id] = (m & 0xFFFFFF00u) | rank;
+        }
+        if (lid < NBW) wg_counts[wg * WGS + lid] = wgColCount(lid, false);   // (no off-screen / rigged columns)
+        return;
+    }
+
+    if (g_cull_push.phase == 5u)
+    {
+        // cand_meta: bits 0..2 bucket (7 none), 3..8 face mask, 9..11 the scheduled face's
+        // bucket (7 none); ~0 = culled for every view.
+        uint meta = MV_NONE;
+        bool kept = false;
+        if (id < mvInstanceCount())
+        {
+            uint ka = 7u, fm = 0u, kb = 7u;
+            DrawCmd c;
+            if (id < pc.u_instance_count) ka = mvCompact(cullOne(id, c));   // (#832: own entry's count)
+            if (ka != 7u)
+            {
+                fm = g_face_mask & 0x3Fu;
+                cand[id] = c;
+                kept = true;
+            }
+            // The scheduled face (view 7) in the same pass: its params entry (its origin,
+            // clips, dynamic flag -- #832: patched from the GPU's scheduled job), only its
+            // face (as the per-face cull's phase 0).
+            if (id < mvSchedCount())
+            {
+                const bool sc = g_size_cut;
+                g_slot = g_cull_push.slot_b;
+                g_one_face = true;
+                DrawCmd cb;
+                kb = mvCompact(cullOne(id, cb));
+                if (kb != 7u) cand_b[id] = cb;
+                g_slot = g_cull_push.slot;
+                g_one_face = false;
+                g_size_cut = sc;
+            }
+            if (ka != 7u || kb != 7u) meta = ka | (fm << 3u) | (kb << 9u);
+            cand_meta[id] = meta;
+        }
+        s_bucket[lid] = meta;
+        barrier();
+        if (lid < MV_WG_STRIDE) wg_counts[wg * MV_WG_STRIDE + lid] = mvColCount(lid);
+        probeStats(kept, g_size_cut);
+        return;
+    }
+    if (g_cull_push.phase == 6u)
+    {
+        // One workgroup per view (gl_WorkGroupID.x): phase 1's parallel scan over its
+        // columns (5 buckets; the union list 1), offsets back into wg_counts.
+        const uint v = wg;
+        const uint col0 = v < MV_FACES ? v * MV_NBK : (v == MV_VIEW_UNION ? MV_COL_UNION : MV_COL_SCHED);
+        const uint nb = v == MV_VIEW_UNION ? 1u : MV_NBK;
+        const uint groups = (mvInstanceCount() + 63u) / 64u;
+        const uint K  = (groups + 63u) / 64u;
+        const uint w0 = min(lid * K, groups);
+        const uint w1 = min(w0 + K, groups);
+        uint run[MV_NBK];
+        for (uint k = 0u; k < MV_NBK; ++k) run[k] = 0u;
+        for (uint w = w0; w < w1; ++w)
+            for (uint k = 0u; k < nb; ++k) run[k] += wg_counts[w * MV_WG_STRIDE + col0 + k];
+        for (uint k = 0u; k < MV_NBK; ++k) s_scan[k * 64u + lid] = run[k];
+        barrier();
+        for (uint off = 1u; off < 64u; off <<= 1u)
+        {
+            uint add[MV_NBK];
+            for (uint k = 0u; k < MV_NBK; ++k) add[k] = lid >= off ? s_scan[k * 64u + lid - off] : 0u;
+            barrier();
+            for (uint k = 0u; k < MV_NBK; ++k) s_scan[k * 64u + lid] += add[k];
+            barrier();
+        }
+        for (uint k = 0u; k < MV_NBK; ++k) run[k] = s_scan[k * 64u + lid] - run[k];
+        for (uint w = w0; w < w1; ++w)
+            for (uint k = 0u; k < nb; ++k)
+            {
+                const uint n = wg_counts[w * MV_WG_STRIDE + col0 + k];
+                wg_counts[w * MV_WG_STRIDE + col0 + k] = run[k];
+                run[k] += n;
+            }
+        if (lid < nb)
+        {
+            // Per-view region of R entries: a full one drops its tail (instance order),
+            // counted in PROBE_STAT_OVER.
+            const uint total = s_scan[lid * 64u + 63u];
+            const uint R = pc.u_bucket_cap;
+            counters[v * MV_CTR_STRIDE + (v == MV_VIEW_UNION ? 2u : counterSlot(mvFull(lid)))] = min(total, R);
+            if (total > R && uint(counters.length()) > PROBE_STAT_OVER) atomicAdd(counters[PROBE_STAT_OVER], total - R);
+        }
+        return;
+    }
+    if (g_cull_push.phase == 7u)
+    {
+        const uint meta = id < mvInstanceCount() ? cand_meta[id] : MV_NONE;
+        s_bucket[lid] = meta;
+        barrier();
+        if (id >= mvInstanceCount() || meta == MV_NONE) return;
+        const uint R = pc.u_bucket_cap;
+        const uint ka = meta & 7u, fm = (meta >> 3u) & 0x3Fu, kb = (meta >> 9u) & 7u;
+        // The scheduled face (view 7): its own bucket, ranked among its own.
+        if (kb != 7u)
+        {
+            uint rb = 0u;
+            for (uint j = 0u; j < lid; ++j) if (((s_bucket[j] >> 9u) & 7u) == kb) ++rb;
+            const uint o = wg_counts[wg * MV_WG_STRIDE + MV_COL_SCHED + kb] + rb;
+            if (o < R) mvStore(kb, 7u * R + o, cand_b[id]);
+        }
+        if (ka == 7u) return;
+        // Ranks within the workgroup (instance order), per face and in the union list.
+        uint rk[MV_FACES];
+        for (uint f = 0u; f < MV_FACES; ++f) rk[f] = 0u;
+        uint ru = 0u;
+        for (uint j = 0u; j < lid; ++j)
+        {
+            const uint m = s_bucket[j];
+            if ((m & 7u) != ka) continue;
+            const uint mfm = (m >> 3u) & 0x3Fu;
+            for (uint f = 0u; f < MV_FACES; ++f) rk[f] += (mfm >> f) & 1u;
+            if (mfm != 0u) ++ru;
+        }
+        const DrawCmd c = cand[id];
+        // (alpha: the faces' lists come from the sorted union list, mode 4)
+        if (ka != 2u)
+        {
+            for (uint f = 0u; f < MV_FACES; ++f)
+            {
+                if (((fm >> f) & 1u) == 0u) continue;
+                const uint o = wg_counts[wg * MV_WG_STRIDE + f * MV_NBK + ka] + rk[f];
+                if (o < R) mvStore(ka, f * R + o, c);
+            }
+        }
+        // The union alpha list: the draw with its face mask in instanceCount (sorted and
+        // split per face by clean_alpha_sort.comp mode 4; never drawn from here).
+        if (ka == 2u && fm != 0u)
+        {
+            const uint o = wg_counts[wg * MV_WG_STRIDE + MV_COL_UNION] + ru;
+            DrawCmd u = c;
+            u.instanceCount = fm;
+            if (o < R) cmd_alpha[MV_VIEW_UNION * R + o] = u;
+        }
+        return;
+    }
+
+    // #567 batched projector tile cull (see tlMask above).
+    if (g_cull_push.phase == 8u)
+    {
+        uint meta = MV_NONE;
+        if (id < pc.u_instance_count)
+        {
+            DrawCmd c;
+            g_tile_geo = false;
+            const uint k = mvCompact(cullOne(id, c));
+            if (k != 7u)
+            {
+                const uint vm = tlMask(id);
+                if (vm != 0u)
+                {
+                    meta = k | (vm << 3u);
+                    cand[id] = c;
+                }
+            }
+            cand_meta[id] = meta;
+        }
+        s_bucket[lid] = meta;
+        barrier();
+        if (lid < TL_MAX_VIEWS * TL_NBK) wg_counts[wg * WGS + lid] = tlColCount(lid);
+        return;
+    }
+    if (g_cull_push.phase == 9u)
+    {
+        // One workgroup per tile: phase 6's parallel scan over its TL_NBK columns.
+        const uint v = wg;
+        const uint col0 = v * TL_NBK;
+        const uint groups = (pc.u_instance_count + 63u) / 64u;
+        const uint K  = (groups + 63u) / 64u;
+        const uint w0 = min(lid * K, groups);
+        const uint w1 = min(w0 + K, groups);
+        uint run[TL_NBK];
+        for (uint k = 0u; k < TL_NBK; ++k) run[k] = 0u;
+        for (uint w = w0; w < w1; ++w)
+            for (uint k = 0u; k < TL_NBK; ++k) run[k] += wg_counts[w * WGS + col0 + k];
+        for (uint k = 0u; k < TL_NBK; ++k) s_scan[k * 64u + lid] = run[k];
+        barrier();
+        for (uint off = 1u; off < 64u; off <<= 1u)
+        {
+            uint add[TL_NBK];
+            for (uint k = 0u; k < TL_NBK; ++k) add[k] = lid >= off ? s_scan[k * 64u + lid - off] : 0u;
+            barrier();
+            for (uint k = 0u; k < TL_NBK; ++k) s_scan[k * 64u + lid] += add[k];
+            barrier();
+        }
+        for (uint k = 0u; k < TL_NBK; ++k) run[k] = s_scan[k * 64u + lid] - run[k];
+        for (uint w = w0; w < w1; ++w)
+            for (uint k = 0u; k < TL_NBK; ++k)
+            {
+                const uint n = wg_counts[w * WGS + col0 + k];
+                wg_counts[w * WGS + col0 + k] = run[k];
+                run[k] += n;
+            }
+        if (lid < TL_NBK)
+        {
+            // Per-tile region of R entries: a fuller one drops its tail (instance order);
+            // the largest total goes to the overflow word (the CPU re-renders that tile alone).
+            const uint total = s_scan[lid * 64u + 63u];
+            const uint R = pc.u_bucket_cap;
+            counters[v * MV_CTR_STRIDE + counterSlot(mvFull(lid))] = min(total, R);
+            atomicMax(counters[v * MV_CTR_STRIDE + TL_OVER_WORD], total);
+        }
+        return;
+    }
+    if (g_cull_push.phase == 10u)
+    {
+        const uint meta = id < pc.u_instance_count ? cand_meta[id] : MV_NONE;
+        s_bucket[lid] = meta;
+        barrier();
+        if (id >= pc.u_instance_count || meta == MV_NONE) return;
+        const uint R = pc.u_bucket_cap;
+        const uint n = tlViews();
+        const uint ka = meta & 7u, vm = (meta >> 3u) & 0xFFu;
+        uint rk[TL_MAX_VIEWS];
+        for (uint v = 0u; v < TL_MAX_VIEWS; ++v) rk[v] = 0u;
+        for (uint j = 0u; j < lid; ++j)
+        {
+            const uint m = s_bucket[j];
+            if (m == MV_NONE || (m & 7u) != ka) continue;
+            const uint mvm = (m >> 3u) & 0xFFu;
+            for (uint v = 0u; v < TL_MAX_VIEWS; ++v) rk[v] += (mvm >> v) & 1u;
+        }
+        const DrawCmd c = cand[id];
+        for (uint v = 0u; v < TL_MAX_VIEWS; ++v)
+        {
+            if (v >= n || ((vm >> v) & 1u) == 0u) continue;
+            const uint o = wg_counts[wg * WGS + v * TL_NBK + ka] + rk[v];
+            if (o < R) mvStore(ka, v * R + o, c);
+        }
+        return;
+    }
+
+    if (g_cull_push.phase == 1u)
+    {
+        // Single workgroup, PARALLEL scan. (Lane b used to walk bucket b over every
+        // workgroup serially -- a dependent load/add/store chain of instance_count/64
+        // steps, twice for the rigged lanes: ~0.6 ms per cull whatever it emitted, so the
+        // HUD cull cost what the main cull did and each probe face paid it again.)
+        // Each lane owns K consecutive workgroups: it sums all NBI internal buckets over
+        // its range, the 64 lane sums are scanned in shared memory, then the lane walks
+        // its range again writing running offsets. Offsets are identical to the serial
+        // scan: per bucket, the exclusive prefix over workgroups in order; a no-shadow
+        // twin continues after its primary bucket's total (casters first).
+        // (#517: plus, in the main cull, the off-screen region columns NBI..NBW-1, scanned
+        // the same way. Every other cull has none: its workgroup walks touch NBI columns
+        // only -- the loops keep constant bounds, so the arrays stay in registers.)
+        // #559: plus the rigged demand columns (WGS - NBW: per distance tier, skinned verts
+        // then work items) in the rigged (main) cull: tier t starts after tiers < t.
+        const bool rigcols = pc.u_skin_count != 0u;
+        const bool terrcol = pc.u_hud_pass == 0u;   // the G-buffer terrain list: main cull only
+        const uint ncols = pc.u_hud_pass == 0u ? NBW : NBI;
+        const uint groups = (pc.u_instance_count + 63u) / 64u;
+        const uint K  = (groups + 63u) / 64u;
+        const uint w0 = min(lid * K, groups);
+        const uint w1 = min(w0 + K, groups);
+        uint run[WGS];
+        for (uint b = 0u; b < WGS; ++b) run[b] = 0u;
+        for (uint w = w0; w < w1; ++w)
+            for (uint b = 0u; b < WGS; ++b)
+                if (b < ncols || (rigcols && b >= NBW && b < TERR_COL) || (terrcol && b == TERR_COL)) run[b] += wg_counts[w * WGS + b];
+        for (uint b = 0u; b < WGS; ++b) s_scan[b * 64u + lid] = run[b];
+        barrier();
+        // Hillis-Steele inclusive scan across the 64 lanes, all columns at once.
+        for (uint off = 1u; off < 64u; off <<= 1u)
+        {
+            uint add[WGS];
+            for (uint b = 0u; b < WGS; ++b) add[b] = lid >= off ? s_scan[b * 64u + lid - off] : 0u;
+            barrier();
+            for (uint b = 0u; b < WGS; ++b) s_scan[b * 64u + lid] += add[b];
+            barrier();
+        }
+        // This lane's exclusive base per column (twins after their primary's casters; a
+        // rigged tier after the nearer tiers).
+        for (uint b = 0u; b < WGS; ++b)
+        {
+            uint base = s_scan[b * 64u + lid] - run[b];
+            if (b >= NB && b < NBI) base += s_scan[primaryOf(b) * 64u + 63u];
+            if (b >= NBW && b < TERR_COL)
+            {
+                const uint c0 = b >= RIG_WCOL ? RIG_WCOL : RIG_VCOL;
+                for (uint k = c0; k < b; ++k) base += s_scan[k * 64u + 63u];
+            }
+            run[b] = base;
+        }
+        for (uint w = w0; w < w1; ++w)
+            for (uint b = 0u; b < WGS; ++b)
+            {
+                if (!(b < ncols || (rigcols && b >= NBW && b < TERR_COL) || (terrcol && b == TERR_COL))) continue;
+                uint n = wg_counts[w * WGS + b];
+                wg_counts[w * WGS + b] = run[b];
+                run[b] += n;
+            }
+        if (lid < NB)
+        {
+            const uint casters = s_scan[lid * 64u + 63u];
+            uint sum = casters;
+            const uint t = twinOf(lid);
+            if (t != 0xFFu)
+            {
+                sum += s_scan[t * 64u + 63u];
+                counters[shadowSlot(lid)] = min(casters, pc.u_bucket_cap);
+            }
+            counters[counterSlot(lid)] = min(sum, pc.u_bucket_cap);
+            if (sum > pc.u_bucket_cap) dbgAdd(R_BUCKETCAP, sum - pc.u_bucket_cap);
+        }
+        // G-buffer terrain list count (main cull; every other pass binds the same buffer and
+        // never writes it). Never above the list (= every bucket list's capacity).
+        if (terrcol && lid == 0u) terr_count = min(s_scan[TERR_COL * 64u + 63u], uint(terr_cmd.length()));
+        // Off-screen region counts (#517): the main cull's only (every other pass binds the
+        // same buffer and never writes it; the CPU zeroes the counts per frame).
+        if (pc.u_hud_pass == 0u && lid < OFF_COLS)
+        {
+            const uint total = s_scan[(NBI + lid) * 64u + 63u], cap = rigOffCap();
+            rig_off_count[lid] = min(total, cap);
+            if (total > cap) dbgAdd(R_BUCKETCAP, total - cap);
+        }
+        // #559: this cull's pre-skin space, in one place: phase 2 hands out
+        // [v_base, v_base + verts) and [w_base, w_base + items) by (tier, instance) order.
+        // The indirect X is the item total clamped to the capacity (the CPU keeps it <=
+        // maxComputeWorkGroupCount[0]); every index below it gets an item (an empty one
+        // for a draw dropped on the vertex capacity). The demand totals go to the CPU,
+        // unclamped: they size the buffers and the LOD pressure. Rigged culls only.
+        if (lid == 0u && rigcols)
+        {
+            uint tv = 0u, tw = 0u;
+            for (uint t = 0u; t < RIG_TIERS; ++t)
+            {
+                const uint v = s_scan[(RIG_VCOL + t) * 64u + 63u];
+                tv += v;
+                tw += s_scan[(RIG_WCOL + t) * 64u + 63u];
+                if (v != 0u) dbgAdd(R_RIGDEM_V0 + t, v);
+            }
+            if (tw != 0u) dbgAdd(R_RIGDEM_W, tw);
+            rig_alloc.v_base = rig_alloc.skin_vert_used;
+            rig_alloc.w_base = rig_alloc.dispatch_x;
+            rig_alloc.skin_vert_used = rig_alloc.skin_vert_used + tv;
+            rig_alloc.dispatch_x = min(rig_alloc.dispatch_x + tw, pc.u_work_cap);
+        }
+        return;
+    }
+
+    // phase 2: emit in instance order (HUD id list: list order = ascending ids).
+    // #559 rigged (main) cull: first hand out the pre-skin space phase 1 scanned -- every
+    // lane takes part (shared ranks), so no early return before the barrier.
+    DrawCmd rc;
+    bool rc_have = false;      // rc / rm: this lane's candidate, read (and finalized) here
+    uint rm = 0xFFFFFFFFu;
+    if (pc.u_skin_count != 0u)
+    {
+        uint rt = 0xFFu, rv = 0u, rmode = 0u, riid = 0u;
+        if (id < pc.u_instance_count)
+        {
+            riid = listedId(id);
+            rm = cand_meta[riid];
+            if (rm != 0xFFFFFFFFu)
+            {
+                rc = cand[riid];
+                rc_have = true;
+                rmode = rc.instanceCount >> (RIG_PEND_SHIFT + 2u);
+                if (rmode != 0u)
+                {
+                    rt = (rc.instanceCount >> RIG_PEND_SHIFT) & (RIG_TIERS - 1u);
+                    rv = rmode == 1u ? slots[rc.firstInstance].vert_count : 0u;
+                }
+            }
+        }
+        s_rt[lid] = rt;
+        s_rv[lid] = rv;
+        barrier();
+        if (rmode != 0u)
+        {
+            uint pv = 0u, pw = 0u;
+            for (uint j = 0u; j < lid; ++j)
+                if (s_rt[j] == rt) { pv += s_rv[j]; ++pw; }
+            const uint wi  = rig_alloc.w_base + wg_counts[wg * WGS + RIG_WCOL + rt] + pw;
+            const uint dst = rig_alloc.v_base + wg_counts[wg * WGS + RIG_VCOL + rt] + pv;
+            const SlotInfo s = slots[rc.firstInstance];
+            const uint cb = riid * RC_WORDS;
+            bool ok = wi < pc.u_work_cap;
+            if (rmode == 1u) ok = ok && rangeOk(dst, rv, pc.u_skin_vert_cap);
+            if (wi < pc.u_work_cap)
+            {
+                WorkItem w;
+                w.vert_count = s.vert_count;
+                w._pad2 = riid + 1u;
+                if (rmode == 1u)
+                {
+                    w.dst_vert_base = dst;
+                    w.src_vert_base = sysaviSrcBase(riid, s);
+                    w.skin_id       = ok ? instances[riid].skin_id : 0xFFFFFFFFu;   // dropped: empty item
+                    // SlotInfo.has_weights = weight_base + 1 (0 = slot has no weights).
+                    w.src_weight_base = (s.has_weights != 0u) ? s.has_weights - 1u : 0xFFFFFFFFu;
+                    w._pad1 = 0u; w._pad3 = 0u;
+                }
+                else
+                {
+                    // Skin-cache re-skin: into the instance's arena range (the draw's
+                    // vertexOffset); key words 2..4 were written by phase 0.
+                    w.dst_vert_base   = uint(rc.vertexOffset);
+                    w.src_vert_base   = rig_cache[cb + 2u];
+                    w.skin_id         = rig_cache[cb + 3u];
+                    w.src_weight_base = rig_cache[cb + 4u];
+                    w._pad1 = RC_WORK_LOCAL | (rig_cache[cb + 6u] & RC_ST_SLOT);
+                    w._pad3 = rmode == 3u ? 1u : 0u;
+                }
+                work_items[wi] = w;
+            }
+            if (ok)
+            {
+                if (rmode == 1u) rc.vertexOffset = int(dst);
+                rc.instanceCount = 1u;
+                rc.firstInstance = riid;
+                cand[riid] = rc;
+            }
+            else
+            {
+                // Capacity drop: the farthest tier's instance-order tail, the same draws
+                // every frame. Its bucket slot holds an empty draw; consumers of the
+                // candidate (selection, RT) see it culled.
+                dbgAdd(R_RIGCAP, 1u);
+                if (rv != 0u) dbgAdd(R_RIGDROP_V, rv);
+                if (rmode != 1u) { rig_cache[cb + 2u] = 0xFFFFFFFFu; rig_cache[cb + 6u] = 0u; }   // re-skin next frame
+                rc.indexCount = 0u;
+                rc.instanceCount = 0u;
+                rc.firstInstance = riid;
+                cand[riid] = rc;
+                cand_meta[riid] = 0xFFFFFFFFu;
+            }
+        }
+    }
+    // G-buffer terrain list (main cull): this lane's rank among the workgroup's bucket 0 / 1
+    // terrain draws -- phase 0's s_terr test again on the emitted meta (every lane takes part:
+    // no early return before the barrier). Terrain is never rigged, so rm / rc never apply.
+    uint t_rank = 0xFFFFFFFFu;
+    if (pc.u_hud_pass == 0u)
+    {
+        bool t = false;
+        if (id < pc.u_instance_count)
+        {
+            const uint tiid = listedId(id);
+            const uint tm = rc_have ? rm : cand_meta[tiid];
+            t = tm != 0xFFFFFFFFu && !offMeta(tm) && (tm >> 24) <= 1u && (instances[tiid].flags & 32u) != 0u;
+        }
+        s_terr[lid] = t ? 1u : 0u;
+        barrier();
+        if (t)
+        {
+            uint r = 0u;
+            for (uint j = 0u; j < lid; ++j) r += s_terr[j];
+            t_rank = r;
+        }
+    }
+    if (id >= pc.u_instance_count) return;
+    const uint iid = listedId(id);
+    // (a capacity-dropped rigged draw keeps its meta here: its slots get the empty draw)
+    uint m = rc_have ? rm : cand_meta[iid];
+    if (m == 0xFFFFFFFFu) return;
+    if (offMeta(m))
+    {
+        // #517: an off-screen rigged draw -> each of its passes' regions (main cull only).
+        const uint k = (m >> 28u) & 7u;
+        if (pc.u_hud_pass != 0u || k >= 5u) return;
+        const uint cap = rigOffCap();
+        const DrawCmd c = rc_have ? rc : cand[iid];
+        for (uint r = 0u; r < OFF_REGIONS; ++r)
+        {
+            if (((m >> (24u + r)) & 1u) == 0u) continue;
+            const uint o = wg_counts[wg * WGS + NBI + k * OFF_REGIONS + r] + ((m >> (6u * r)) & 63u);
+            if (o < cap)
+            {
+                dbgAdd(R_EMITTED, 1u);
+                rig_off_cmd[(k * OFF_REGIONS + r) * cap + o] = c;
+            }
+        }
+        return;
+    }
+    if ((m >> 24) >= NBI) return;   // #238: never index wg_counts with a foreign meta word
+    // Shared probe pre-cull: only the instances phase 4 ranked for this face.
+    if (pc.u_hud_pass == 2u && (pc.u_flags & 16384u) != 0u && ((m >> (8u + pc.u_probe_face)) & 1u) == 0u) return;
+    // Rank: bits 0..7 (< 64, a workgroup). Bits 8..23 are 0 outside the shared probe
+    // pre-cull (its face mask), so this is the old & 0xFFFFFF everywhere else.
+    uint out_idx = wg_counts[wg * WGS + (m >> 24)] + (m & 0xFFu);
+    uint b = primaryOf(m >> 24);
+    DrawCmd c = rc_have ? rc : cand[iid];
+    // The terrain list copy first: it has its own capacity (phase 1 counted every terrain
+    // draw), so a bucket overflow below never leaves a stale entry inside its count.
+    if (t_rank != 0xFFFFFFFFu)
+    {
+        const uint to = wg_counts[wg * WGS + TERR_COL] + t_rank;
+        if (to < uint(terr_cmd.length())) terr_cmd[to] = c;
+    }
+    if (out_idx >= pc.u_bucket_cap) return;
+    dbgAdd(R_EMITTED, 1u);
+    if      (b == 0u) cmd_opaque  [out_idx] = c;
+    else if (b == 1u) cmd_mask    [out_idx] = c;
+    else if (b == 2u) cmd_alpha   [out_idx] = c;
+    else if (b == 3u) cmd_r_opaque[out_idx] = c;
+    else if (b == 4u) cmd_r_mask  [out_idx] = c;
+    else if (b == 5u) cmd_r_alpha [out_idx] = c;
+    else if (b == 6u) cmd_ds_opaque  [out_idx] = c;
+    else if (b == 7u) cmd_ds_mask    [out_idx] = c;
+    else if (b == 8u) cmd_ds_r_opaque[out_idx] = c;
+    else              cmd_ds_r_mask  [out_idx] = c;
+}

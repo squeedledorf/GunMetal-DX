@@ -1,0 +1,224 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<!-- Quick Preferences (after Firestorm's): the settings people reach for mid-session,
+     in one small floater. Hover height reuses LLFloaterHoverHeight (live while
+     dragging, committed to the server on release); the rest bind to settings. -->
+<floater
+ positioning="cascading"
+ can_minimize="true"
+ can_close="true"
+ can_resize="false"
+ height="294"
+ width="320"
+ layout="topleft"
+ name="quick_prefs"
+ single_instance="true"
+ save_rect="true"
+ save_visibility="true"
+ title="QUICK PREFERENCES">
+  <slider
+     enabled="false"
+     decimal_digits="3"
+     follows="top|left"
+     height="15"
+     increment="0.001"
+     initial_value="0.0"
+     label="Hover height"
+     label_width="90"
+     left="10"
+     width="300"
+     layout="topleft"
+     name="HoverHeightSlider"
+     top="28"
+     can_edit_text="true"
+     tool_tip="Raise or lower your avatar. Updates live while dragging; sent to the region when you let go.">
+  </slider>
+  <check_box
+     control_name="HoverHeightAffectsCamera"
+     follows="left|top"
+     height="15"
+     label="Hover height moves the camera"
+     layout="topleft"
+     left="10"
+     name="BindCameraCheck"
+     top_pad="6"
+     width="280"/>
+  <view_border
+     bevel_style="none"
+     follows="left|top"
+     height="0"
+     layout="topleft"
+     left="10"
+     name="qp_border1"
+     top_pad="8"
+     width="300"/>
+  <slider
+     control_name="RenderFarClip"
+     decimal_digits="0"
+     follows="left|top"
+     height="16"
+     increment="8"
+     initial_value="160"
+     label="Draw distance"
+     label_width="90"
+     layout="topleft"
+     left="10"
+     min_val="8"
+     max_val="4096"
+     name="qp_draw_distance"
+     tool_tip="How far the world is drawn, in meters (up to 4096). Loaded regions are capped at a 5x5 square around yours (SlipstreamMaxRegionRing)."
+     top_pad="8"
+     width="300"/>
+  <slider
+     control_name="RenderFPSLimit"
+     decimal_digits="0"
+     follows="left|top"
+     height="16"
+     increment="1"
+     initial_value="0"
+     label="FPS limit"
+     label_width="90"
+     layout="topleft"
+     left="10"
+     min_val="0"
+     max_val="240"
+     name="qp_fps_limit"
+     tool_tip="Cap the frame rate (0 = unlimited)."
+     top_pad="6"
+     width="300"/>
+  <text
+     follows="left|top"
+     height="16"
+     layout="topleft"
+     left="10"
+     name="qp_shadows_label"
+     top_pad="8"
+     width="90">
+    Shadows
+  </text>
+  <combo_box
+     control_name="RenderShadowDetail"
+     height="18"
+     layout="topleft"
+     left_pad="0"
+     top_delta="-2"
+     name="qp_shadows"
+     width="180">
+    <combo_box.item label="None" name="0" value="0"/>
+    <combo_box.item label="Sun/Moon" name="1" value="1"/>
+    <combo_box.item label="Sun/Moon + Projectors" name="2" value="2"/>
+  </combo_box>
+  <text
+     follows="left|top"
+     height="16"
+     layout="topleft"
+     left="10"
+     name="qp_upscale_label"
+     top_pad="8"
+     width="90">
+    Upscaling
+  </text>
+  <combo_box
+     control_name="RenderVKUpscaler"
+     height="18"
+     layout="topleft"
+     left_pad="0"
+     top_delta="-2"
+     name="qp_upscale"
+     tool_tip="Render the world with AMD FidelityFX Super Resolution 3.1 temporal upscaling (turns TAA on). Native AA keeps full resolution and uses FSR for anti-aliasing only; the other presets render the world at a lower resolution: faster, softer. The interface always stays at full resolution. DLSS: NVIDIA DLSS (GeForce RTX; needs the separately built shim, see the DLSS page in the wiki); Ray Reconstruction is set in Preferences > Graphics > Advanced."
+     width="180">
+    <combo_box.item label="Off (native)" name="0" value="0"/>
+    <combo_box.item label="FSR Native AA (1x)" name="1" value="1"/>
+    <combo_box.item label="FSR Quality (1.5x)" name="2" value="2"/>
+    <combo_box.item label="FSR Balanced (1.7x)" name="3" value="3"/>
+    <combo_box.item label="FSR Performance (2x)" name="4" value="4"/>
+    <combo_box.item label="FSR Ultra Performance (3x)" name="5" value="5"/>
+    <combo_box.item label="FSR Custom (RenderVKRenderScale)" name="6" value="6"/>
+    <combo_box.item label="DLSS DLAA (1x)" name="7" value="7"/>
+    <combo_box.item label="DLSS Quality (1.5x)" name="8" value="8"/>
+    <combo_box.item label="DLSS Balanced (1.7x)" name="9" value="9"/>
+    <combo_box.item label="DLSS Performance (2x)" name="10" value="10"/>
+    <combo_box.item label="DLSS Ultra Performance (3x)" name="11" value="11"/>
+  </combo_box>
+  <check_box
+     control_name="RenderDeferredSSAO"
+     height="16"
+     label="Ambient occlusion"
+     layout="topleft"
+     left="10"
+     name="qp_ssao"
+     top_pad="8"
+     width="150"/>
+  <check_box
+     control_name="RenderDepthOfField"
+     height="16"
+     label="Depth of field"
+     layout="topleft"
+     left_pad="0"
+     name="qp_dof"
+     top_delta="0"
+     width="140"/>
+  <check_box
+     control_name="RenderGlow"
+     height="16"
+     label="Glow / bloom"
+     layout="topleft"
+     left="10"
+     name="qp_glow"
+     top_pad="4"
+     width="150"/>
+  <check_box
+     control_name="RenderHDREnabled"
+     height="16"
+     label="HDR"
+     layout="topleft"
+     left_pad="0"
+     name="qp_hdr"
+     top_delta="0"
+     width="140"/>
+  <button
+     follows="left|top"
+     height="22"
+     label="Photo Studio..."
+     layout="topleft"
+     left="10"
+     name="qp_photo_studio"
+     top_pad="10"
+     width="145">
+    <button.commit_callback function="Floater.ToggleOrBringToFront" parameter="photo_studio"/>
+  </button>
+  <button
+     follows="left|top"
+     height="22"
+     label="Preferences..."
+     layout="topleft"
+     left_pad="10"
+     name="qp_prefs"
+     top_delta="0"
+     width="145">
+    <button.commit_callback function="Floater.ToggleOrBringToFront" parameter="preferences"/>
+  </button>
+  <button
+     follows="left|top"
+     height="22"
+     label="AO Control..."
+     layout="topleft"
+     left="10"
+     name="qp_ao"
+     tool_tip="Animation Overrider: on/off, set, next stand"
+     top_pad="6"
+     width="145">
+    <button.commit_callback function="Floater.ToggleOrBringToFront" parameter="sl_ao"/>
+  </button>
+  <button
+     follows="left|top"
+     height="22"
+     label="AO Editor..."
+     layout="topleft"
+     left_pad="10"
+     name="qp_ao_editor"
+     tool_tip="Edit Animation Overrider sets, states and options"
+     top_delta="0"
+     width="145">
+    <button.commit_callback function="Floater.ToggleOrBringToFront" parameter="sl_ao_editor"/>
+  </button>
+</floater>

@@ -1,0 +1,90 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_nonuniform_qualifier : require
+// vkclean -- PARTICLE FOG (#1003): PER-TEXTURE STATS, computed once per particle texture
+// after it decoded (the CPU queues a job when the texture is resident and reads the result
+// back two frames later; LLCleanPartFogVK::TexStats). One workgroup per job.
+//
+// The texture is sampled on a 32 x 32 grid at the mip closest to 32 texels (bilinear, the
+// alpha the sprite FS would see at that scale):
+//   mean alpha        coverage of the quad (the splat mass and the "faint" term use it)
+//   mean colour       alpha-weighted mean texel (the volume's tint x the particle colour)
+//   edge sharpness    sum g^2 / sum |g| over the grid's neighbour differences g: the typical
+//                     size of an alpha STEP -- ~0.05 for a soft radial blob or a cloud puff,
+//                     0.3-1 for a hard-edged disc, a heart, a star, a snowflake, a letter
+//   HF residual       sum |a - its 4 x 4 block mean| / sum a: the share of the alpha in detail
+//                     finer than an eighth of the sprite (shapes, sparkle, text)
+// "Shaped" textures (opaque squares, hard edges, detail) stay particles; unknown stats too.
+layout(local_size_x = 256) in;
+
+#include "clean_pfog_common.glsl"
+
+layout(set = 1, binding = 0) uniform sampler2D uTextures[];
+
+shared float sA[1024];
+shared vec4  sRed[256];
+
+vec4 reduce4(vec4 v)
+{
+    const uint t = gl_LocalInvocationIndex;
+    sRed[t] = v;
+    barrier();
+    for (uint s = 128u; s > 0u; s >>= 1u)
+    {
+        if (t < s) sRed[t] += sRed[t + s];
+        barrier();
+    }
+    const vec4 r = sRed[0];
+    barrier();
+    return r;
+}
+
+void main()
+{
+    const uint job = gl_WorkGroupID.x;
+    if (job >= tb_hdr.y) return;   // (uniform per workgroup)
+    const uint tex = tb_job[job].x;
+    const uint t = gl_LocalInvocationIndex;
+    const ivec2 sz = textureSize(uTextures[nonuniformEXT(tex)], 0);
+    const int levels = textureQueryLevels(uTextures[nonuniformEXT(tex)]);
+    const float m = float(max(min(sz.x, sz.y), 1));
+    const float lod = clamp(floor(log2(max(m / 32.0, 1.0))), 0.0, float(max(levels - 1, 0)));
+
+    vec4 sum = vec4(0.0);   // x alpha, yzw rgb x alpha
+    vec3 rgbPlain = vec3(0.0);
+    for (uint k = 0u; k < 4u; ++k)
+    {
+        const uint idx = t + 256u * k;
+        const vec2 uv = (vec2(float(idx & 31u), float(idx >> 5u)) + 0.5) / 32.0;
+        const vec4 c = clamp(textureLod(uTextures[nonuniformEXT(tex)], uv, lod), vec4(0.0), vec4(1.0));
+        sA[idx] = c.a;
+        sum += vec4(c.a, c.rgb * c.a);
+        rgbPlain += c.rgb;
+    }
+    const vec4 tot = reduce4(sum);
+    const vec4 totPlain = reduce4(vec4(rgbPlain, 0.0));   // (barrier inside: sA complete)
+
+    // Neighbour differences and the 4 x 4 block residual over this thread's texels.
+    float s1 = 0.0, s2 = 0.0, res = 0.0;
+    for (uint k = 0u; k < 4u; ++k)
+    {
+        const uint idx = t + 256u * k;
+        const uint x = idx & 31u, y = idx >> 5u;
+        const float a = sA[idx];
+        if (x < 31u) { const float g = sA[idx + 1u] - a; s1 += abs(g); s2 += g * g; }
+        if (y < 31u) { const float g = sA[idx + 32u] - a; s1 += abs(g); s2 += g * g; }
+        const uint bx = x & ~3u, by = y & ~3u;
+        float bm = 0.0;
+        for (uint j = 0u; j < 4u; ++j)
+            for (uint i = 0u; i < 4u; ++i) bm += sA[(by + j) * 32u + bx + i];
+        res += abs(a - bm * (1.0 / 16.0));
+    }
+    const vec4 e = reduce4(vec4(s1, s2, res, 0.0));
+    if (t != 0u) return;
+    const float meanA = tot.x / 1024.0;
+    const vec3 meanC = tot.x > 1e-4 ? tot.yzw / tot.x : totPlain.rgb / 1024.0;
+    const float sharp = e.y / max(e.x, 1e-6);
+    const float hf = e.z / max(tot.x, 1e-4);
+    rs_tex[job * 2u]      = vec4(meanA, meanC);
+    rs_tex[job * 2u + 1u] = vec4(sharp, hf, float(sz.x), float(sz.y));
+}

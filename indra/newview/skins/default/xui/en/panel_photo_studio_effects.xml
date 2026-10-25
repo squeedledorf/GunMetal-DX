@@ -1,0 +1,315 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<!--
+Effects: the FX stack (ReShade FX effects run on the world, before the UI).
+A Photo Studio section ("Effects" in a panel's dropdown), built by
+SLPanelPhotoStudioEffects.
+
+Top to bottom: the master switch, the preset bar (ReShade .ini presets in
+~/.slipstreamviewer/fx/presets), the technique list (tick to enable, arrows to
+reorder, GPU time per technique), and the selected effect's controls, which
+are made from the effect's own annotations when it is selected (fx_controls is
+filled in code; nothing in it is declared here).
+-->
+<panel
+ name="panel_photo_studio_effects"
+ layout="topleft"
+ width="360"
+ height="400"
+ follows="all"
+ background_visible="false">
+	<panel.string name="no_effects">
+		No effects found. Put ReShade .fx files (and their .fxh includes) in the effects folder, then press Reload.
+	</panel.string>
+	<panel.string name="effects_off">
+		Effects are off. Tick Effects to load them.
+	</panel.string>
+	<panel.string name="select_effect">
+		Select a technique to see its effect's settings.
+	</panel.string>
+	<panel.string name="no_settings">
+		This effect has no settings.
+	</panel.string>
+	<panel.string name="failed_suffix">
+		(failed)
+	</panel.string>
+	<panel.string name="failed_title">
+		[FILE] failed to compile
+	</panel.string>
+	<panel.string name="ms_error">
+		error
+	</panel.string>
+	<panel.string name="reset_tooltip">
+		Reset to default
+	</panel.string>
+	<panel.string name="reset_effect_step">
+		Reset [EFFECT]
+	</panel.string>
+	<panel.string name="status_dirty">
+		Unsaved changes
+	</panel.string>
+	<panel.string name="status_autosave">
+		Changes are saved to this preset automatically
+	</panel.string>
+	<panel.string name="status_saved">
+		Saved
+	</panel.string>
+	<panel.string name="status_bad_name">
+		Type a preset name (no / \ : * ? " &lt; &gt; |)
+	</panel.string>
+	<panel.string name="confirm_overwrite">
+		Replace the preset "[NAME]" with the current effect settings?
+	</panel.string>
+	<panel.string name="confirm_delete">
+		Delete the preset "[NAME]"? This cannot be undone.
+	</panel.string>
+	<check_box
+	 follows="left|top"
+	 layout="topleft"
+	 left="6"
+	 top="4"
+	 height="18"
+	 width="90"
+	 label="Effects"
+	 control_name="SLFxEnabled"
+	 name="fx_enabled"
+	 tool_tip="Run the effects stack. Effects apply to the world only: never to name tags, HUDs or the UI. Also in Preferences > Graphics, and on a key you can set in Preferences > Controls (Toggle Effects)." />
+	<button
+	 follows="top|right"
+	 layout="topleft"
+	 right="-66"
+	 top="3"
+	 width="60"
+	 height="20"
+	 label="Reload"
+	 name="fx_reload"
+	 tool_tip="Look for new or changed effect files and compile them again" />
+	<button
+	 follows="top|right"
+	 layout="topleft"
+	 right="-4"
+	 top="3"
+	 width="60"
+	 height="20"
+	 label="Folder"
+	 name="fx_folder"
+	 tool_tip="Open the effects folder: .fx files go in it (subfolders are fine), with any textures they use" />
+	<text
+	 follows="left|top"
+	 layout="topleft"
+	 left="6"
+	 top="30"
+	 width="44"
+	 height="16"
+	 name="fx_preset_label"
+	 value="Preset" />
+	<combo_box
+	 follows="left|top|right"
+	 layout="topleft"
+	 left="50"
+	 top="27"
+	 right="-112"
+	 height="20"
+	 allow_text_entry="true"
+	 max_chars="64"
+	 name="fx_preset"
+	 tool_tip="ReShade presets (.ini). Pick one to load it; type a new name and press Save to save the current settings under it." />
+	<button
+	 follows="top|right"
+	 layout="topleft"
+	 right="-58"
+	 top="27"
+	 width="50"
+	 height="20"
+	 label="Save"
+	 name="fx_preset_save"
+	 tool_tip="Save the current effects to the preset named in the box (a new name makes a new preset)" />
+	<button
+	 follows="top|right"
+	 layout="topleft"
+	 right="-4"
+	 top="27"
+	 width="50"
+	 height="20"
+	 label="Delete"
+	 name="fx_preset_delete"
+	 tool_tip="Delete the preset named in the box" />
+	<button
+	 follows="left|top"
+	 layout="topleft"
+	 left="6"
+	 top="51"
+	 width="68"
+	 height="20"
+	 label="Import..."
+	 name="fx_preset_import"
+	 tool_tip="Copy a ReShade preset (.ini) from anywhere -- a ReShade install, a download -- into your presets, and load it" />
+	<button
+	 follows="left|top"
+	 layout="topleft"
+	 left_pad="4"
+	 top_delta="0"
+	 width="68"
+	 height="20"
+	 label="Export..."
+	 name="fx_preset_export"
+	 tool_tip="Save the current effects as a ReShade preset (.ini) somewhere else" />
+	<button
+	 follows="left|top"
+	 layout="topleft"
+	 left_pad="4"
+	 top_delta="0"
+	 width="24"
+	 height="20"
+	 label=""
+	 image_overlay="Inv_FolderClosed"
+	 name="fx_preset_folder"
+	 tool_tip="Open the presets folder" />
+	<check_box
+	 follows="left|top"
+	 layout="topleft"
+	 left_pad="8"
+	 top_delta="1"
+	 height="18"
+	 width="90"
+	 label="Auto-save"
+	 control_name="SLFxAutoSavePreset"
+	 name="fx_preset_autosave"
+	 tool_tip="Write changes to the current preset as you make them, the way ReShade does. Off: changes last until you load another preset or quit, unless you press Save." />
+	<text
+	 follows="left|top|right"
+	 layout="topleft"
+	 left="6"
+	 top="74"
+	 right="-6"
+	 height="14"
+	 font="SansSerifSmall"
+	 use_ellipses="true"
+	 name="fx_preset_status"
+	 value="" />
+	<!-- The list and the controls share what is left, split by a draggable
+	     divider, so the page works down to Photo Studio's smallest panel. -->
+	<layout_stack
+	 follows="all"
+	 layout="topleft"
+	 left="0"
+	 top="90"
+	 width="360"
+	 height="310"
+	 orientation="vertical"
+	 animate="false"
+	 name="fx_stack">
+		<layout_panel
+		 name="fx_list_panel"
+		 height="156"
+		 min_dim="48"
+		 auto_resize="false"
+		 user_resize="true">
+			<search_editor
+			 clear_button_visible="true"
+			 follows="left|top|right"
+			 layout="topleft"
+			 left="4"
+			 top="0"
+			 right="-58"
+			 height="20"
+			 label="Search techniques"
+			 max_length_bytes="255"
+			 name="fx_search" />
+			<button
+			 follows="top|right"
+			 layout="topleft"
+			 right="-30"
+			 top="0"
+			 width="24"
+			 height="20"
+			 label=""
+			 image_overlay="Arrow_Up"
+			 name="fx_move_up"
+			 tool_tip="Run the selected technique earlier" />
+			<button
+			 follows="top|right"
+			 layout="topleft"
+			 right="-4"
+			 top="0"
+			 width="24"
+			 height="20"
+			 label=""
+			 image_overlay="Arrow_Down"
+			 name="fx_move_down"
+			 tool_tip="Run the selected technique later" />
+			<scroll_list
+			 follows="all"
+			 layout="topleft"
+			 left="4"
+			 top="24"
+			 right="-4"
+			 height="130"
+			 column_padding="0"
+			 draw_heading="true"
+			 multi_select="false"
+			 name="fx_list"
+			 tool_tip="Effects run top to bottom. Tick a technique to run it; select one to edit its effect below.">
+				<scroll_list.columns
+				 name="on"
+				 label=""
+				 width="22" />
+				<scroll_list.columns
+				 name="name"
+				 label="Technique"
+				 dynamic_width="true" />
+				<scroll_list.columns
+				 name="ms"
+				 label="GPU ms"
+				 width="56" />
+			</scroll_list>
+		</layout_panel>
+		<layout_panel
+		 name="fx_controls_panel"
+		 height="150"
+		 min_dim="44"
+		 auto_resize="true"
+		 user_resize="true">
+			<text
+			 follows="left|top|right"
+			 layout="topleft"
+			 left="6"
+			 top="4"
+			 right="-92"
+			 height="16"
+			 font="SansSerifBold"
+			 use_ellipses="true"
+			 name="fx_effect_title"
+			 value="" />
+			<button
+			 follows="top|right"
+			 layout="topleft"
+			 right="-4"
+			 top="2"
+			 width="84"
+			 height="20"
+			 label="Reset effect"
+			 name="fx_reset_effect"
+			 tool_tip="Put every setting of this effect back to its default" />
+			<scroll_container
+			 follows="all"
+			 layout="topleft"
+			 left="2"
+			 top="26"
+			 right="-2"
+			 height="122"
+			 reserve_scroll_corner="false"
+			 opaque="false"
+			 name="fx_scroll">
+				<panel
+				 follows="left|top"
+				 layout="topleft"
+				 left="0"
+				 top="0"
+				 width="336"
+				 height="120"
+				 background_visible="false"
+				 name="fx_controls" />
+			</scroll_container>
+		</layout_panel>
+	</layout_stack>
+</panel>

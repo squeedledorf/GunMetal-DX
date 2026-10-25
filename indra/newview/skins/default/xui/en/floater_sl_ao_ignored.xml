@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<floater
+ positioning="cascading"
+ save_rect="true"
+ can_resize="false"
+ height="450"
+ width="440"
+ layout="topleft"
+ name="sl_ao_ignored"
+ single_instance="true"
+ title="AO: REMEMBERED CHOICES">
+    <text
+     follows="left|top"
+     height="30"
+     layout="topleft"
+     left="8"
+     name="intro_text"
+     top="22"
+     width="424"
+     word_wrap="true">
+        Animations from other objects that never pause the AO. Deformers and body fixes are recognised on their own; this list is for anything else.
+    </text>
+    <scroll_list
+     draw_heading="true"
+     follows="left|top"
+     height="170"
+     layout="topleft"
+     left="6"
+     multi_select="false"
+     name="ignored_list"
+     top_pad="4"
+     width="428">
+        <scroll_list.columns
+         label="Seen from"
+         name="label"
+         relative_width="1" />
+        <scroll_list.columns
+         label="Animation"
+         name="id"
+         width="250" />
+    </scroll_list>
+    <button
+     follows="left|top"
+     height="22"
+     label="Remove"
+     layout="topleft"
+     left="6"
+     name="remove_btn"
+     tool_tip="Pause for this animation again"
+     top_pad="6"
+     width="100" />
+    <text
+     follows="left|top"
+     font.style="BOLD"
+     height="16"
+     layout="topleft"
+     left="8"
+     name="scripted_label"
+     top_pad="14"
+     width="424">
+        Scripted AOs you answered the prompt for
+    </text>
+    <scroll_list
+     draw_heading="true"
+     follows="left|top"
+     height="110"
+     layout="topleft"
+     left="6"
+     multi_select="false"
+     name="scripted_list"
+     top_pad="4"
+     width="428">
+        <scroll_list.columns
+         label="Worn object"
+         name="name"
+         relative_width="1" />
+        <scroll_list.columns
+         label="Choice"
+         name="choice"
+         width="150" />
+    </scroll_list>
+    <button
+     follows="left|top"
+     height="22"
+     label="Forget"
+     layout="topleft"
+     left="6"
+     name="forget_btn"
+     tool_tip="Forget the choice for this object: the AO asks again if it fights this AO"
+     top_pad="6"
+     width="100" />
+</floater>

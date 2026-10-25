@@ -1,0 +1,1064 @@
+<llsd>
+    <map>
+    <key>RLVaLoginLastLocation</key>
+        <map>
+        <key>Comment</key>
+        <string>Determines whether the next login will be forced to the last logoff location (set by RLVa)</string>
+        <key>Persist</key>
+        <integer>1</integer>
+        <key>HideFromEditor</key>
+        <integer>1</integer>
+        <key>Type</key>
+        <string>Boolean</string>
+        <key>Value</key>
+        <boolean>1</boolean>
+    </map>
+    <key>SLBridgeHelperItem</key>
+    <map>
+      <key>Comment</key>
+      <string>Inventory item id of the #Slipstream Helper this viewer made (or verified) for this account; only that object is used as the helper</string>
+      <key>Persist</key>
+      <integer>1</integer>
+      <key>HideFromEditor</key>
+      <integer>1</integer>
+      <key>Type</key>
+      <string>String</string>
+      <key>Value</key>
+      <string></string>
+    </map>
+    <key>SLAOCurrentSet</key>
+    <map>
+      <key>Comment</key>
+      <string>Client AO: inventory folder id of the active AO set</string>
+      <key>Persist</key>
+      <integer>1</integer>
+      <key>Type</key>
+      <string>String</string>
+      <key>Value</key>
+      <string></string>
+    </map>
+    <key>SLAOEnabled</key>
+    <map>
+      <key>Comment</key>
+      <string>Client AO: animation overrider switched on</string>
+      <key>Persist</key>
+      <integer>1</integer>
+      <key>Type</key>
+      <string>Boolean</string>
+      <key>Value</key>
+      <integer>0</integer>
+    </map>
+    <key>AvatarHoverOffsetZ</key>
+    <map>
+      <key>Comment</key>
+      <string>After-everything-else fixup for avatar Z position.</string>
+      <key>Persist</key>
+      <integer>1</integer>
+      <key>Type</key>
+      <string>F32</string>
+      <key>Value</key>
+        <real>0.0</real>
+    </map>
+    <key>DoNotDisturbResponseChanged</key>
+        <map>
+        <key>Comment</key>
+            <string>Does user's do not disturb mode message differ from default?</string>
+        <key>Persist</key>
+            <integer>1</integer>
+        <key>Type</key>
+            <string>Boolean</string>
+        <key>Value</key>
+            <integer>0</integer>
+        </map>
+    <key>DoNotDisturbModeResponse</key>
+        <map>
+        <key>Comment</key>
+            <string>Auto response to instant messages while in do not disturb mode.</string>
+        <key>Persist</key>
+            <integer>1</integer>
+        <key>Type</key>
+            <string>String</string>
+        <key>Value</key>
+            <string>This resident has turned on &apos;Do Not Disturb&apos; and will see your message later.</string>
+        </map>
+    <key>ConversationsExpandMessagePaneFirst</key>
+    <map>
+        <key>Comment</key>
+            <string>Expand either messages or conversations list pane from Conversations compact mode.</string>
+        <key>Persist</key>
+            <integer>1</integer>
+        <key>Type</key>
+            <string>Boolean</string>
+        <key>Value</key>
+            <integer>1</integer>
+    </map>
+    <key>ConversationsListPaneCollapsed</key>
+    <map>
+        <key>Comment</key>
+            <string>Stores the expanded/collapsed state of the conversations list pane in Conversations floater.</string>
+        <key>Persist</key>
+            <integer>1</integer>
+        <key>Type</key>
+            <string>Boolean</string>
+        <key>Value</key>
+            <integer>0</integer>
+    </map>
+    <key>ConversationsListPaneWidth</key>
+    <map>
+        <key>Comment</key>
+            <string>Conversations floater list pane width.</string>
+        <key>Persist</key>
+            <integer>1</integer>
+        <key>Type</key>
+            <string>S32</string>
+        <key>Value</key>
+            <integer>205</integer>
+    </map>
+    <key>ConversationsMessagePaneCollapsed</key>
+    <map>
+        <key>Comment</key>
+            <string>Stores the expanded/collapsed state of Conversations floater message pane.</string>
+        <key>Persist</key>
+            <integer>1</integer>
+        <key>Type</key>
+            <string>Boolean</string>
+        <key>Value</key>
+            <integer>0</integer>
+    </map>
+    <key>ConversationsMessagePaneWidth</key>
+    <map>
+        <key>Comment</key>
+            <string>Conversations floater message pane width.</string>
+        <key>Persist</key>
+            <integer>1</integer>
+        <key>Type</key>
+            <string>S32</string>
+        <key>Value</key>
+            <integer>412</integer>
+    </map>
+    <key>ConversationsParticipantListCollapsed</key>
+    <map>
+        <key>Comment</key>
+            <string>Stores the expanded/collapsed state of Nearby chat participant list</string>
+        <key>Persist</key>
+            <integer>1</integer>
+        <key>Type</key>
+            <string>Boolean</string>
+        <key>Value</key>
+            <integer>1</integer>
+    </map>
+         <key>NavigationBarRatio</key>
+   	 <map>
+        <key>Comment</key>
+            <string>The ratio between the width of Navigation layout panel and the width of whole Navigation layout stack</string>
+        <key>Persist</key>
+            <integer>1</integer>
+        <key>Type</key>
+	            <string>F32</string>
+        <key>Value</key>
+            <real>0.6</real>
+    </map>
+    <key>SlipstreamStarterGesturesMigrated</key>
+        <map>
+        <key>Comment</key>
+            <string>Set once Linden's starter dance gestures (dance1..dance8 on bare function keys) have been deactivated for this account (done once at login; re-activating them afterwards is respected).</string>
+        <key>Persist</key>
+            <integer>1</integer>
+        <key>Type</key>
+            <string>Boolean</string>
+        <key>Value</key>
+            <integer>0</integer>
+    </map>
+    <key>SlipstreamLegacyChatMerged</key>
+        <map>
+        <key>Comment</key>
+            <string>Set once this account's transcripts from Alchemy's data directories have been merged into Slipstream's chat log folder (done automatically at login).</string>
+        <key>Persist</key>
+            <integer>1</integer>
+        <key>Type</key>
+            <string>Boolean</string>
+        <key>Value</key>
+            <integer>0</integer>
+        </map>
+    <key>InstantMessageLogPath</key>
+        <map>
+        <key>Comment</key>
+            <string>Path to your log files.</string>
+        <key>Persist</key>
+            <integer>1</integer>
+        <key>Type</key>
+            <string>String</string>
+        <key>Value</key>
+            <string />
+        </map>
+    <key>LastInventoryInboxActivity</key>
+        <map>
+        <key>Comment</key>
+            <string>When the user last opened the Received Items folder; what arrived after it counts as new on the folder label.</string>
+        <key>Persist</key>
+            <integer>1</integer>
+        <key>Type</key>
+            <string>U32</string>
+        <key>Value</key>
+            <integer>0</integer>
+        </map>
+    <key>LastLogoff</key>
+        <map>
+        <key>Comment</key>
+            <string>Last logoff</string>
+        <key>Persist</key>
+            <integer>1</integer>
+        <key>Type</key>
+            <string>U32</string>
+        <key>Value</key>
+            <integer>0</integer>
+        </map>
+    <key>LastPostcardRecipient</key>
+      <map>
+        <key>Comment</key>
+          <string>Last recipient of postcard</string>
+        <key>Persist</key>
+          <integer>1</integer>
+        <key>Type</key>
+          <string>String</string>
+        <key>Value</key>
+          <string />
+      </map>
+    <key>LogNearbyChat</key>
+        <map>
+        <key>Comment</key>
+            <string>Log Nearby Chat messages to a file. Is used instead of LogChat but with the "1" default value.</string>
+        <key>Persist</key>
+            <integer>1</integer>
+        <key>Type</key>
+            <string>Boolean</string>
+        <key>Value</key>
+            <integer>1</integer>
+        </map>
+    <key>LogTimestamp</key>
+        <map>
+        <key>Comment</key>
+            <string>Log Timestamp</string>
+        <key>Persist</key>
+            <integer>1</integer>
+        <key>Type</key>
+            <string>Boolean</string>
+        <key>Value</key>
+            <integer>1</integer>
+        </map>
+    <key>LogShowHistory</key>
+        <map>
+        <key>Comment</key>
+            <string>Log Show History</string>
+        <key>Persist</key>
+            <integer>1</integer>
+        <key>Type</key>
+            <string>Boolean</string>
+        <key>Value</key>
+            <integer>1</integer>
+        </map>
+    <key>LogTimestampDate</key>
+        <map>
+        <key>Comment</key>
+            <string>Include Date with Timestamp</string>
+        <key>Persist</key>
+            <integer>1</integer>
+        <key>Type</key>
+            <string>Boolean</string>
+        <key>Value</key>
+            <integer>1</integer>
+        </map>
+    <key>FetchGroupChatHistory</key>
+      <map>
+        <key>Comment</key>
+        <string>Fetch recent messages from group chat servers when a group window opens</string>
+        <key>Persist</key>
+        <integer>1</integer>
+        <key>Type</key>
+        <string>Boolean</string>
+        <key>Value</key>
+        <integer>1</integer>
+      </map>
+    <key>VoiceCallsFriendsOnly</key>
+    <map>
+        <key>Comment</key>
+        <string>Only accept voice calls and receive IMs from residents on your friends list</string>
+        <key>Persist</key>
+        <integer>1</integer>
+        <key>Type</key>
+        <string>Boolean</string>
+        <key>Value</key>
+        <integer>0</integer>
+    </map>
+    <key>VoiceEffectDefault</key>
+    <map>
+        <key>Comment</key>
+            <string>Selected Voice Morph</string>
+        <key>Persist</key>
+            <integer>1</integer>
+        <key>Type</key>
+            <string>String</string>
+        <key>Value</key>
+            <string>00000000-0000-0000-0000-000000000000</string>
+    </map>
+    <key>LogFileNamewithDate</key>
+      <map>
+        <key>Comment</key>
+        <string>Add Date Stamp to chat and IM Logs with format chat-YYYY-MM-DD and 'IM file name'-YYYY-MM. To view old logs goto ..\Second Life\[login name]</string>
+        <key>Persist</key>
+        <integer>1</integer>
+        <key>Type</key>
+        <string>Boolean</string>
+        <key>Value</key>
+        <integer>0</integer>
+      </map>
+    <key>PreviousScreenshotForReport</key>
+    <map>
+      <key>Comment</key>
+      <string>Use Previous Screenshot for Abuse report</string>
+      <key>Persist</key>
+      <integer>1</integer>
+      <key>Type</key>
+      <string>Boolean</string>
+      <key>Value</key>
+      <integer>0</integer>
+    </map>
+    <!-- Settings below are for back compatibility only.
+    They are not used in current viewer anymore. But they can't be removed to avoid
+    influence on previous versions of the viewer in case of settings are not used or default value
+    should be changed. See EXT-6661. -->
+
+    <!-- 1.23 settings -->
+    <key>LogChat</key>
+        <map>
+        <key>Comment</key>
+            <string>Obsolete - this setting is no longer used and has no effect.</string>
+        <key>Persist</key>
+            <integer>1</integer>
+        <key>Type</key>
+            <string>Boolean</string>
+        <key>Value</key>
+            <integer>0</integer>
+        </map>
+    <key>LogChatIM</key>
+        <map>
+        <key>Comment</key>
+            <string>Obsolete - this setting is no longer used and has no effect.</string>
+        <key>Persist</key>
+            <integer>1</integer>
+        <key>Type</key>
+            <string>Boolean</string>
+        <key>Value</key>
+            <integer>0</integer>
+        </map>
+    <key>LogChatTimestamp</key>
+        <map>
+        <key>Comment</key>
+            <string>Obsolete - this setting is no longer used and has no effect.</string>
+        <key>Persist</key>
+            <integer>1</integer>
+        <key>Type</key>
+            <string>Boolean</string>
+        <key>Value</key>
+            <integer>0</integer>
+        </map>
+    <!-- End of back compatibility settings -->
+    <key>TranslatingEnabled</key>
+        <map>
+        <key>Comment</key>
+            <string>Translation prefs are set</string>
+        <key>Persist</key>
+            <integer>1</integer>
+        <key>Type</key>
+            <string>Boolean</string>
+        <key>Value</key>
+            <integer>0</integer>
+        </map>
+    <key>KeepConversationLogTranscripts</key>
+    	<map>
+      	<key>Comment</key>
+      		<string>Keep a conversation log and transcripts 2 - both, 1 - logs, 0 - none</string>
+      	<key>Persist</key>
+      		<integer>1</integer>
+      	<key>Type</key>
+      		<string>S32</string>
+      	<key>Value</key>
+      		<integer>2</integer>
+    	</map>
+    <key>NearbyChatIsNotTornOff</key>
+    <map>
+      <key>Comment</key>
+      <string>saving torn-off state of the nearby chat between sessions</string>
+      <key>Persist</key>
+      <integer>1</integer>
+      <key>Type</key>
+      <string>Boolean</string>
+      <key>Value</key>
+      <integer>1</integer>
+    </map>
+    <key>NearbyChatIsNotCollapsed</key>
+    <map>
+      <key>Comment</key>
+      <string>Saving expanded/collapsed state of the nearby chat between sessions</string>
+      <key>Persist</key>
+      <integer>1</integer>
+      <key>Type</key>
+      <string>Boolean</string>
+      <key>Value</key>
+      <integer>0</integer>
+    </map>
+    <key>ShowFavoritesOnLogin</key>
+        <map>
+        <key>Comment</key>
+             <string>Determines whether favorites of last logged in user will be saved on exit from viewer and shown on login screen</string>
+        <key>Persist</key>
+             <integer>1</integer>
+        <key>Type</key>
+             <string>Boolean</string>
+        <key>Value</key>
+             <integer>1</integer>
+        </map>
+      <key>ModelUploadFolder</key>
+      <map>
+        <key>Comment</key>
+        <string>All model uploads will be stored in this directory (UUID)</string>
+        <key>Persist</key>
+        <integer>1</integer>
+        <key>Type</key>
+        <string>String</string>
+        <key>Value</key>
+        <string></string>
+      </map>
+      <key>PBRUploadFolder</key>
+      <map>
+        <key>Comment</key>
+        <string>All pbr uploads will be stored in this directory (UUID)</string>
+        <key>Persist</key>
+        <integer>1</integer>
+        <key>Type</key>
+        <string>String</string>
+        <key>Value</key>
+        <string></string>
+      </map>
+      <key>TextureUploadFolder</key>
+      <map>
+        <key>Comment</key>
+        <string>All image(texture) uploads will be stored in this directory (UUID)</string>
+        <key>Persist</key>
+        <integer>1</integer>
+        <key>Type</key>
+        <string>String</string>
+        <key>Value</key>
+        <string></string>
+      </map>
+      <key>SoundUploadFolder</key>
+      <map>
+        <key>Comment</key>
+        <string>All sound uploads will be stored in this directory (UUID)</string>
+        <key>Persist</key>
+        <integer>1</integer>
+        <key>Type</key>
+        <string>String</string>
+        <key>Value</key>
+        <string></string>
+      </map>
+      <key>AnimationUploadFolder</key>
+      <map>
+        <key>Comment</key>
+        <string>All animation uploads will be stored in this directory (UUID)</string>
+        <key>Persist</key>
+        <integer>1</integer>
+        <key>Type</key>
+        <string>String</string>
+        <key>Value</key>
+        <string></string>
+      </map>
+      <key>SnapshotBaseDir</key>
+      <map>
+        <key>Comment</key>
+        <string>Path to last snapshot save location</string>
+        <key>Persist</key>
+        <integer>1</integer>
+        <key>Type</key>
+        <string>String</string>
+        <key>Value</key>
+        <string></string>
+      </map>
+      <key>SnapshotBaseName</key>
+      <map>
+        <key>Comment</key>
+        <string>Pattern for naming snapshots</string>
+        <key>Persist</key>
+        <integer>1</integer>
+        <key>Type</key>
+        <string>String</string>
+        <key>Value</key>
+        <string>Snapshot</string>
+      </map>
+      <key>ExperienceSearchMaturity</key>
+      <map>
+        <key>Comment</key>
+        <string>Setting for the user's preferred Max Content rating for Experiences search (Default rating is General)</string>
+        <key>Persist</key>
+        <integer>1</integer>
+        <key>Type</key>
+        <string>U32</string>
+        <key>Value</key>
+        <integer>2</integer>
+      </map>
+      <!-- ALCHEMY BELOW -->
+    <key>SlipstreamMouselookAlternativeFOV</key>
+    <map>
+        <key>Comment</key>
+        <string>Adjusted when scrolling back and forth while holding rightclick in mouselook.</string>
+        <key>Persist</key>
+        <integer>1</integer>
+        <key>Type</key>
+        <string>F32</string>
+        <key>Value</key>
+        <real>0.5</real>
+    </map>
+    <key>SlipstreamRejectTeleportOffersMode</key>
+        <map>
+        <key>Comment</key>
+            <string>Has the user selected reject all teleport offers and requests mode?</string>
+        <key>Persist</key>
+            <integer>1</integer>
+        <key>Type</key>
+            <string>Boolean</string>
+        <key>Value</key>
+            <integer>0</integer>
+        </map>
+        <key>SlipstreamRejectTeleportOffersResponse</key>
+        <map>
+            <key>Comment</key>
+                <string>Auto response to instant messages from all avatars while in reject all teleport offers and requests mode.</string>
+            <key>Persist</key>
+                <integer>1</integer>
+            <key>Type</key>
+                <string>String</string>
+            <key>Value</key>
+            <string>The Resident you messaged has activated [APP_NAME]&apos;s &apos;reject all teleport offers and requests mode&apos; which means they have requested not to be disturbed with teleport offers and requests. You may still send an IM message manually.</string>
+        </map>
+        <key>SlipstreamRejectTeleportOffersResponseChanged</key>
+        <map>
+        <key>Comment</key>
+            <string>Does user's reject teleport offers and requests response message differ from default?</string>
+        <key>Persist</key>
+            <integer>1</integer>
+        <key>Type</key>
+            <string>Boolean</string>
+        <key>Value</key>
+            <integer>0</integer>
+        </map>
+    <key>SlipstreamDontRejectTeleportOffersFromFriends</key>
+        <map>
+        <key>Comment</key>
+            <string>Don't reject teleport offers and requests from friends.</string>
+        <key>Persist</key>
+            <integer>1</integer>
+        <key>Type</key>
+            <string>Boolean</string>
+        <key>Value</key>
+            <integer>0</integer>
+        </map>
+        <key>SlipstreamRejectFriendshipRequestsMode</key>
+        <map>
+            <key>Comment</key>
+            <string>Reject all user friendship requests?</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
+        <key>SlipstreamRejectFriendshipRequestsResponse</key>
+        <map>
+            <key>Comment</key>
+            <string>Auto response to instant message to all users while in reject all friends request mode enabled</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>String</string>
+            <key>Value</key>
+            <string>The resident you messaged has activated [APP_NAME]&apos;s &apos; reject all friendship requests mode&apos; which means they have requested not to be disturbed with friendship requests. You may still send an IM manually.</string>
+        </map>
+        <key>SlipstreamRejectFriendshipRequestsChanged</key>
+        <map>
+            <key>Comment</key>
+            <string>Does user's reject friendship requests response message differ from default?</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
+        <key>SlipstreamIgnoreAdHocSessions</key>
+        <map>
+            <key>Comment</key>
+            <string>Automatically ignore and leave all conference (ad-hoc) chats.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>S32</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
+        <key>SlipstreamReportIgnoredAdHocSession</key>
+        <map>
+            <key>Comment</key>
+            <string>Reports to nearby chat if a conference (ad-hoc) has been ignored.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
+        <key>SlipstreamAutoresponseChanged</key>
+        <map>
+            <key>Comment</key>
+            <string>Does user's autoresponse response message differ from default?</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
+        <key>SlipstreamAutoresponseEnable</key>
+        <map>
+            <key>Comment</key>
+            <string>Automatically respond when someone messages you</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
+        <key>SlipstreamAutoresponseNotFriendEnable</key>
+        <map>
+            <key>Comment</key>
+            <string>Automatically respond when someone messages you</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
+        <key>SlipstreamAutoresponse</key>
+        <map>
+            <key>Comment</key>
+            <string>Auto response to instant messages.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>String</string>
+            <key>Value</key>
+            <string>This resident has turned on &apos;Autorespond mode&apos; like a boss.</string>
+        </map>
+        <key>SlipstreamAutoresponseNotFriendChanged</key>
+        <map>
+            <key>Comment</key>
+            <string>Does user's autoresponse not friend response message differ from default?</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
+        <key>SlipstreamAutoresponseNotFriend</key>
+        <map>
+            <key>Comment</key>
+            <string>Auto response to instant messages to strangers. Stranger danger!</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>String</string>
+            <key>Value</key>
+            <string>This resident has turned on &apos;Autorespond mode&apos; like a boss.</string>
+        </map>
+        <key>SlipstreamStoredCameraPos</key>
+        <map>
+            <key>Comment</key>
+            <string>Stored camera position in camera tools</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Vector3D</string>
+            <key>Value</key>
+            <array>
+                <real>0.0</real>
+                <real>0.0</real>
+                <real>0.0</real>
+            </array>
+        </map>
+        <key>SlipstreamStoredCameraFocus</key>
+        <map>
+            <key>Comment</key>
+            <string>Stored camera focus position in camera tools</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Vector3D</string>
+            <key>Value</key>
+            <array>
+                <real>0.0</real>
+                <real>0.0</real>
+                <real>0.0</real>
+            </array>
+        </map>
+        <key>SlipstreamStoredCameraRoll</key>
+        <map>
+            <key>Comment</key>
+            <string>Stored camera roll in camera tools</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>F32</string>
+            <key>Value</key>
+            <real>0.0</real>
+        </map>
+        <key>SlipstreamStoredCameraFocusObjectId</key>
+        <map>
+            <key>Comment</key>
+            <string>Stored object ID of camera focus in camera tools</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>String</string>
+            <key>Value</key>
+            <string />
+        </map>
+        <key>FSFavoriteGroups</key>
+        <map>
+            <key>Comment</key>
+            <string>List of favorite/pinned group UUIDs</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>LLSD</string>
+            <key>Value</key>
+            <array></array>
+        </map>
+        <key>FSKeywordOn</key>
+        <map>
+            <key>Comment</key>
+            <string>Turns on keyword alerts. From Firestorm.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
+        <key>FSKeywordInChat</key>
+        <map>
+            <key>Comment</key>
+            <string>Look for keywords in nearby chat. From Firestorm.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
+        <key>FSKeywordInIM</key>
+        <map>
+            <key>Comment</key>
+            <string>Look for keywords in IMs and group chats. From Firestorm.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
+        <key>FSKeywordCaseSensitive</key>
+        <map>
+            <key>Comment</key>
+            <string>Keywords are case-sensitive. From Firestorm.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
+        <key>FSKeywordMatchWholeWords</key>
+        <map>
+            <key>Comment</key>
+            <string>Keywords only match whole words. From Firestorm.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
+        <key>FSKeywordSpeakersName</key>
+        <map>
+            <key>Comment</key>
+            <string>Also look for keywords in the names of speakers. From Firestorm.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
+        <key>FSKeywords</key>
+        <map>
+            <key>Comment</key>
+            <string>Comma separated list of keywords. From Firestorm.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>String</string>
+            <key>Value</key>
+            <string></string>
+        </map>
+        <key>FSKeywordChangeColor</key>
+        <map>
+            <key>Comment</key>
+            <string>Show messages containing a keyword in the keyword colour. From Firestorm.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
+        <key>FSKeywordColor</key>
+        <map>
+            <key>Comment</key>
+            <string>Colour of messages containing a keyword. From Firestorm.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Color4</string>
+            <key>Value</key>
+            <array>
+                <real>1.0</real>
+                <real>0.600000023842</real>
+                <real>0.0</real>
+                <real>1.0</real>
+            </array>
+        </map>
+        <key>PlayModeUISndFSKeywordSound</key>
+        <map>
+            <key>Comment</key>
+            <string>Play a sound when a keyword is found. From Firestorm.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
+        <key>UISndFSKeywordSound</key>
+        <map>
+            <key>Comment</key>
+            <string>UUID of the sound played on a keyword alert. From Firestorm.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>String</string>
+            <key>Value</key>
+            <string>a3f48b85-c29f-1f97-ebb6-644b7c053512</string>
+        </map>
+        <key>FSSendAwayAvatarResponse</key>
+        <map>
+            <key>Comment</key>
+            <string>Send FSAwayAvatarResponse to instant messages and teleport offers while you are away. From Firestorm.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
+        <key>FSAwayAvatarResponse</key>
+        <map>
+            <key>Comment</key>
+            <string>Autoresponse sent while away (see FSSendAwayAvatarResponse). From Firestorm.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>String</string>
+            <key>Value</key>
+            <string>The Resident you messaged is currently away from keyboard. Your message will still be shown in their IM panel for later viewing.</string>
+        </map>
+        <key>FSAwayAvatarResponseChanged</key>
+        <map>
+            <key>Comment</key>
+            <string>FSAwayAvatarResponse was edited (otherwise it follows the localized default). From Firestorm.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
+        <key>FSRejectAllGroupInvitesMode</key>
+        <map>
+            <key>Comment</key>
+            <string>Silently reject all incoming group invitations. From Firestorm.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>Boolean</string>
+            <key>Value</key>
+            <integer>0</integer>
+        </map>
+        <key>FSAutoresponseItemUUID</key>
+        <map>
+            <key>Comment</key>
+            <string>Inventory item given along with an autoresponse (empty: none). From Firestorm.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>String</string>
+            <key>Value</key>
+            <string></string>
+        </map>
+        <key>SlipstreamNewPrimEmbedItem</key>
+        <map>
+            <key>Comment</key>
+            <string>New prim defaults (#466): inventory item copied into every prim rezzed from the Build tool (empty: none). The item must be copyable; otherwise it is skipped with a warning</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>String</string>
+            <key>Value</key>
+            <string></string>
+        </map>
+        <key>SlipstreamDefaultScriptItem</key>
+        <map>
+            <key>Comment</key>
+            <string>Inventory script copied when creating a new script, in inventory or in an object's Contents, instead of the stock "Hello, Avatar!" script (empty: stock script). The script must be copy + modify</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>String</string>
+            <key>Value</key>
+            <string></string>
+        </map>
+        <key>FSLastOpenIMs</key>
+        <map>
+            <key>Comment</key>
+            <string>One-to-one conversations open at the last logout (FSRestoreOpenIMs). From Firestorm.</string>
+            <key>Persist</key>
+            <integer>1</integer>
+            <key>Type</key>
+            <string>LLSD</string>
+            <key>Value</key>
+            <array></array>
+        </map>
+        <key>SlipstreamSettingsMigration</key>
+    <map>
+      <key>Comment</key>
+      <string>Version of the renamed-settings table (app_settings/settings_renames.xml, #126) this settings file has been migrated with. 0 = values saved under old (Alchemy*) names are carried over at the next start.</string>
+      <key>HideFromEditor</key>
+      <integer>1</integer>
+      <key>Persist</key>
+      <integer>1</integer>
+      <key>Type</key>
+      <string>U32</string>
+      <key>Value</key>
+      <integer>0</integer>
+    </map>
+    <!-- <GMDX> loadouts (gmdxloadouts.cpp) -->
+    <key>GMDXLoadoutCategories</key>
+    <map>
+      <key>Comment</key>
+      <string>Loadout categories in slot order, separated by |. Each is a folder in Equipment; quick swap Alt+1..4 opens slots 1 to 4.</string>
+      <key>Persist</key>
+      <integer>1</integer>
+      <key>Type</key>
+      <string>String</string>
+      <key>Value</key>
+      <string>Layer 1|Layer 2|Layer 3|Utility</string>
+    </map>
+    <key>GMDXLoadoutWatchTags</key>
+    <map>
+      <key>Comment</key>
+      <string>Weapon sorter: tags (comma separated, any case, e.g. [Ash]) a group puts on its weapons. An object or folder that arrives with one is offered for Equipment, or to replace an older version there. Empty: off.</string>
+      <key>Persist</key>
+      <integer>1</integer>
+      <key>Type</key>
+      <string>String</string>
+      <key>Value</key>
+      <string />
+    </map>
+    <key>GMDXFolderEquipment</key>
+    <map>
+      <key>Comment</key>
+      <string>Id of the inventory folder GunMetal-DX uses as Equipment (shown like a system folder). Empty: found by name, or made, on first use.</string>
+      <key>HideFromEditor</key>
+      <integer>1</integer>
+      <key>Persist</key>
+      <integer>1</integer>
+      <key>Type</key>
+      <string>String</string>
+      <key>Value</key>
+      <string />
+    </map>
+    <key>GMDXFolderLoadouts</key>
+    <map>
+      <key>Comment</key>
+      <string>Id of the inventory folder GunMetal-DX uses as Loadouts (shown like a system folder). Empty: found by name, or made, on first use.</string>
+      <key>HideFromEditor</key>
+      <integer>1</integer>
+      <key>Persist</key>
+      <integer>1</integer>
+      <key>Type</key>
+      <string>String</string>
+      <key>Value</key>
+      <string />
+    </map>
+    <key>GMDXFolderOutdated</key>
+    <map>
+      <key>Comment</key>
+      <string>Id of the inventory folder GunMetal-DX uses as Outdated (shown like a system folder). Empty: found by name, or made, on first use.</string>
+      <key>HideFromEditor</key>
+      <integer>1</integer>
+      <key>Persist</key>
+      <integer>1</integer>
+      <key>Type</key>
+      <string>String</string>
+      <key>Value</key>
+      <string />
+    </map>
+    <key>GMDXLoadoutWorn</key>
+    <map>
+      <key>Comment</key>
+      <string>Folder id of the loadout last equipped (or saved from what is worn), in Loadouts.</string>
+      <key>HideFromEditor</key>
+      <integer>1</integer>
+      <key>Persist</key>
+      <integer>1</integer>
+      <key>Type</key>
+      <string>String</string>
+      <key>Value</key>
+      <string />
+    </map>
+    <!-- </GMDX> -->
+    <key>OCOLGestureControllerButtons</key>
+        <map>
+        <key>Comment</key>
+            <string>Game controller button that plays each gesture: map of gesture inventory item id to button index (see LLGameControl::Button).</string>
+        <key>Persist</key>
+            <integer>1</integer>
+        <key>Type</key>
+            <string>LLSD</string>
+        <key>Value</key>
+            <map/>
+        </map>
+</map>
+</llsd>

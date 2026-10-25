@@ -1,0 +1,726 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "clean_av_slots.glsl"
+#define CLEAN_PROBE_JOB_REF
+#include "clean_probe_job.glsl"
+// vkclean — alpha-blend ordering (LL sorts alpha back-to-front and splits it at the
+// water plane into pre-water / post-water pools). Runs after the cull's stable
+// compaction, one workgroup per alpha bucket (0 = static alpha / bucket 2,
+// 1 = rigged alpha / bucket 5):
+//   key = (near side of the water ? 1 : 0, distance DESCENDING, instance id)
+// sorted in shared memory (bitonic, up to 4096 draws; any overflow stays unsorted in
+// the post set). Far-side draws (below the water from above, above it from below)
+// stay in the alpha bucket as PRE-WATER -- drawn before the refraction copy, so they
+// show through the water; near-side draws move to the POST-WATER buffer, drawn over
+// the water. Counters: [2]/[5] = pre, [6]/[7] = post.
+// Mode 2 (PROBE FACE, #124): FRONT-TO-BACK in place, no split, counters untouched --
+// bindings 2/3 are then the probe cull's MASK / OPAQUE buckets (counters [1] / [0]).
+// Nearest first lets early depth reject what's behind: stacked alpha-mask content
+// (whose discard defeats early depth WRITES, not tests) was shaded ~23 layers deep.
+// Mode 3 (PROBE ALPHA, #34): the probe face's static alpha bucket (2) BACK-TO-FRONT
+// from the probe origin, in place, no water split (LL sorts a cube face's alpha by
+// distance from that face's camera). One workgroup: binding 3 is the main rigged alpha.
+// Mode 4 (MULTI-VIEW PROBE ALPHA): mode 3 for all six realtime faces in one sort (below).
+// Mode 3 also SPLITS OFF THE WATER: the face draws bucket 2 twice, the opaque capture
+// water pipe then the alpha pipe, each FS discarding the other's fragments -- so every
+// alpha draw was vertex-shaded twice. Water draws go to binding 11 (the WATER LIST, as
+// mode 0's below: the main one is free during the probe faces, which run after every
+// main-view pass; the private probe set binds the probe's own) with their count in
+// counters[WATER_SLOT], and bucket 2 keeps the alpha only. Overflow (> 4096 draws): the
+// water is COPIED to binding 11 and also left in bucket 2 (where the alpha FS discards it).
+// F2 -- DEDICATED WATER / EXCLUSION LISTS (mode 0, static bucket, u_pad bit 1;
+// RenderVKWaterLists): water (flag 2048) and invisiprims (65536) used to be forced into
+// the post-water list, and every consumer -- the water pipe, the TAA water mask, the
+// exclusion mask, the post-water alpha, the alpha-depth pre-pass -- drew that WHOLE list
+// and discarded the rest in its FS (~4.5 FS invocations per water pixel). They now sort
+// after every post-water draw (keys KEY_WATER / KEY_EXCL) and scatter to the water list
+// (binding 11, counters[17]) and the exclusion list (binding 12, counters[18]), out of
+// both alpha lists. Overflow past MAXS: the unsorted tail still goes to the post list
+// (where the alpha VS / FS drop them) AND its water / invisiprims are appended to the
+// lists. Rigged alpha (bucket 5) is untouched. clean_alpha_sort_large.comp keeps the
+// same keys and contract.
+layout(local_size_x = 1024) in;
+
+struct DrawCmd { uint indexCount; uint instanceCount; uint firstIndex; int vertexOffset; uint firstInstance; };
+struct Instance {
+    mat4 model_matrix;
+    vec4 aabb_min;
+    vec4 aabb_max;
+    vec4 tint;
+    mat4 uv_matrix;
+    uint lod_group_id;
+    uint material_id;
+    uint flags;
+    uint skin_id;
+    vec4 spin_axis;
+    vec4 spin_pivot;
+};
+
+layout(std430, binding = 0) readonly buffer Instances { Instance instances[]; };
+layout(std430, binding = 1) buffer Counters { uint counters[]; };
+layout(std430, binding = 2) buffer CmdAlpha   { DrawCmd cmd_alpha[]; };
+layout(std430, binding = 3) buffer CmdRAlpha  { DrawCmd cmd_r_alpha[]; };
+layout(std430, binding = 4) writeonly buffer CmdAlphaPost  { DrawCmd cmd_alpha_post[]; };
+layout(std430, binding = 5) writeonly buffer CmdRAlphaPost { DrawCmd cmd_r_alpha_post[]; };
+layout(std430, binding = 6) readonly buffer Cand { DrawCmd cand[]; };
+// Pre-skinned rigged vertices (#616 SkinVertex: fp32 pos3 + packed normal / tangent = 5 words), CAMERA-RELATIVE
+// (the rigged draws use the eye-relative view-projection). A rigged instance's
+// model_matrix is its bind-pose transform, so the skinned position is its world anchor.
+#include "clean_skinvert.glsl"   // SV_WORDS / RC_WORDS / RC_STATE (#616)
+layout(std430, binding = 7) readonly buffer SkinVerts { float skin_verts[]; };   // positions = words 0..2
+// Reduced-tier skin cache (#31, clean_cull.comp): a draw whose state word (rig_cache[id
+// * RC_WORDS + RC_STATE], main cull, this frame) has bit 8 holds PELVIS-LOCAL vertices of the avatar
+// in bits 0..7 -> world = R(pelvis) * local + pelvis position (joint table row 0).
+layout(std430, binding = 8) readonly buffer RigCache { uint rig_cache[]; };
+#include "clean_joint_table.glsl"   // mat3x4 joint world rows (jointWorld())
+layout(std430, binding = 9) readonly buffer AvJoints { AvatarJoints av_joints[]; };
+// (binding 10: clean_alpha_sort_large.comp's key scratch)
+// F2: the water list (mode 0 lists, mode 3 water split) and the exclusion list (mode 0).
+layout(std430, binding = 11) writeonly buffer CmdWater { DrawCmd cmd_water[]; };
+layout(std430, binding = 12) writeonly buffer CmdExcl  { DrawCmd cmd_excl[]; };
+const uint WATER_SLOT = 17u;   // = LLCleanRendererVK::WATER_LIST_SLOT
+const uint EXCL_SLOT  = 18u;   // = LLCleanRendererVK::EXCL_LIST_SLOT
+const uint KEY_WATER  = 0xFFFFFFFEu;   // after every post-water key ...
+const uint KEY_EXCL   = 0xFFFFFFFFu;   // ... (post keys are clamped below these)
+
+// A rigged alpha draw's sort position, in the space of its skinned range (eye-relative, or
+// pelvis-local when the state word says RC_ST_LOCAL): the centre of its POSED BOX, which the
+// pre-skin wrote for exactly this range (clean_preskin.comp, key = vertexOffset + 1) -- the
+// cluster path's key (clean_cluster_alpha.comp). Not the first skinned vertex any more: that
+// is an arbitrary point of the face, so layered alpha faces of one mesh (a bang over hair)
+// swapped order as the camera orbited. Space consistency: a LOCAL state = drawn from a
+// skin-cache range, whose centre was written pelvis-local (re-skinned now or held); any other
+// state = a per-frame range, re-skinned (and its centre rewritten) this frame, eye-relative.
+// No valid centre (an empty item, a cleared row): the range's first vertex, as before.
+// ext: the posed box's extent in the same space (RC_EXT, #835), 0 without a valid centre.
+vec3 riggedSortPos(DrawCmd c, uint rcb, bool rc_ok, out vec3 ext)
+{
+    if (rc_ok && rig_cache[rcb + RC_CTR_KEY] == uint(c.vertexOffset) + 1u)
+    {
+        ext = uintBitsToFloat(uvec3(rig_cache[rcb + RC_EXT], rig_cache[rcb + RC_EXT + 1u], rig_cache[rcb + RC_EXT + 2u]));
+        if (any(isnan(ext)) || any(isinf(ext))) ext = vec3(0.0);
+        return uintBitsToFloat(uvec3(rig_cache[rcb + RC_CTR], rig_cache[rcb + RC_CTR + 1u], rig_cache[rcb + RC_CTR + 2u]));
+    }
+    ext = vec3(0.0);
+    const uint vb = uint(c.vertexOffset) * SV_WORDS;
+    return vec3(skin_verts[vb], skin_verts[vb + 1u], skin_verts[vb + 2u]);
+}
+
+// RIGGED SIZE BIAS (#835, RenderVKRigAlphaSortSizeBias: u_pad / u_flags bit 2): the squared sort
+// distance of a rigged draw at world position w with posed extent ext (rot: range space ->
+// world, the pelvis rotation for a pelvis-local range, else identity). LL's alpha face distance
+// (LLDrawable::updateDistance): the centre minus a QUARTER of the extent along the view axis,
+// per component -- here along the ray to the centre, d = |w - cam| - 0.25 * dot(ext, u * u)
+// with u that ray in the range's axes. Nested layers of one mesh (fur / onion-skin shells over
+// a solid base, #835) have one centre: by the centre alone their keys differ by animation noise
+// and their order flipped frame to frame -- with the layers lit differently (the forward
+// visibility reuse on the inner ones), the stack flickered. The bias puts the enclosing layer
+// nearer (drawn later) by a quarter of the shell gap, every frame. Off: the centre alone.
+uint riggedSortDist2(vec3 w, vec3 cam, vec3 ext, mat3 rot, bool bias)
+{
+    const vec3 d = w - cam;
+    const float dd = dot(d, d);
+    if (!bias || !(dd > 0.0) || all(equal(ext, vec3(0.0)))) return floatBitsToUint(dd);
+    const float len = sqrt(dd);
+    const vec3 u = transpose(rot) * (d / len);
+    const float s = max(len - 0.25 * dot(ext, u * u), 0.0);
+    return floatBitsToUint(s * s);
+}
+
+mat3 rigidRot(mat4 m)
+{
+    vec3 c0 = m[0].xyz, c1 = m[1].xyz, c2 = m[2].xyz;
+    float l0 = length(c0), l1 = length(c1), l2 = length(c2);
+    if (!(l0 > 1e-8 && l1 > 1e-8 && l2 > 1e-8)) return mat3(1.0);
+    return mat3(c0 / l0, c1 / l1, c2 / l2);
+}
+
+layout(push_constant) uniform Push {
+    vec4 u_cam;        // .xyz camera world pos, .w water height
+    uint u_cam_under;  // camera below the water plane
+    uint u_cap;        // per-bucket command capacity
+    uint u_mode;       // 0 world (distance + water split), 1 HUD (LL group depth, no split),
+                       // 2 probe face (front-to-back in place), 3 probe alpha (back-to-front in place),
+                       // 4 multi-view probe alpha (u_cap = the per-view region, below)
+    uint u_pad;        // mode 3: 1 = split the water off (RenderVKProbeWaterSplit); mode 0: bit 0 = the large
+                       // sort handles buckets past MAXS (B9), bit 1 = water / exclusion lists (F2),
+                       // bit 2 = the rigged size bias (#835, riggedSortDist2)
+                       // mode 4: bit 0 split the water off, bit 1 the scheduled face's region too (workgroup 1)
+    mat4 u_vp;         // HUD mode: HUD view-projection (VK depth: smaller = nearer)
+    uvec2 u_job;       // GPU-driven probes (#478, u_pad bit 4): the capture job buffer's address
+} pc;
+
+// Probe modes 2-4: the probe origin. u_pad bit 4 (#478): the origins come from the GPU's
+// capture job records (clean_probe_job.glsl) -- modes 2 / 3 job (u_pad >> 5) & 1, mode 4
+// the realtime job and its riding scheduled face the scheduled job -- not from u_cam /
+// u_vp[0] (the CPU no longer knows which probe is captured).
+#define SORT_JOB_ORIGIN 16u
+vec3 g_cam;          // modes 2-4: the probe origin
+vec3 g_sched_cam;    // mode 4 workgroup 1: the scheduled face's origin
+
+// #834 (RenderVKProbeAlpha): the GPU capture job `job` skips its blended alpha (PJ_NO_ALPHA,
+// clean_probe_gpu.comp: a far scheduled probe). With the water split on, the probe modes then
+// only move the water to the water list and leave the alpha count 0 -- no sort; the draws
+// issue nothing. Without the split the water still rides in the alpha list (both pipes draw
+// it), so the alpha stays.
+bool sortJobNoAlpha(uint job)
+{
+    return (pc.u_pad & SORT_JOB_ORIGIN) != 0u && (prbJob(pc.u_job, job).info.z & PJ_NO_ALPHA) != 0u;
+}
+
+// Single-workgroup capacity. 4096 needs ~36 KiB of shared memory (2 x 16 KiB keys +
+// the 4 KiB mode-4 scan): over the 32 KiB maxComputeSharedMemorySize of AMD GCN /
+// Polaris (#238). The renderer builds the -DALPHA_SORT_MAXS=2048u variant (~20 KiB) for
+// such devices only; clean_alpha_sort_large.comp must use the same value.
+#ifndef ALPHA_SORT_MAXS
+#define ALPHA_SORT_MAXS 4096u
+#endif
+const uint MAXS = ALPHA_SORT_MAXS;
+shared uint s_k0[MAXS];
+shared uint s_k1[MAXS];
+shared uint s_pre;
+shared uint s_water;
+shared uint s_nw, s_ne;   // F2 lists: sorted water / exclusion draws
+shared uint s_tw, s_te;   // F2 lists: water / exclusion in the unsorted overflow tail
+shared uint s_nf;          // mode 4 overflow: the face's entries gathered so far
+shared uint s_sc[1024];    // mode 4: per-thread counts, scanned
+
+// ---------------------------------------------------------------------------
+// MODE 4: MULTI-VIEW PROBE ALPHA (RenderVKMultiViewCull; audit I-2). The mode-3 key is
+// the distance from the PROBE ORIGIN, the same for all six faces, so the realtime
+// probe's alpha is sorted ONCE: clean_cull.comp phase 7 wrote the union of the faces'
+// alpha draws (each with its face mask in instanceCount) at region 6 of binding 2
+// (region = u_cap entries, count in counters[6 * MV_CTR_STRIDE + 2]); after the sort each
+// face f takes its entries in sorted order into its own region f of binding 2 (alpha) and
+// of binding 11 (the water split off to the water list, as mode 3 does) with its counts
+// in its counter block (f * MV_CTR_STRIDE: [2] alpha, [WATER_SLOT] water). Filtering a
+// sorted list keeps its order, so
+// every face gets exactly the list its own mode-3 sort produced. Draws come from cand[]
+// (the cull's candidate per instance id). A union over MAXS draws: each face is gathered
+// from the union list (instance order) and sorted on its own, with mode 3's overflow
+// semantics -- the old per-face sort, inside this one dispatch.
+#define MV_CTR_STRIDE 32u
+#define MV_ID_BITS    0x03FFFFFFu   // union keys: k1 = face mask << 26 | instance id
+
+uint mvKey(uint id, bool split, vec3 cam)
+{
+    Instance inst = instances[id];
+    vec3 ctr = 0.5 * (inst.aabb_min.xyz + inst.aabb_max.xyz);
+    vec3 dp = (inst.model_matrix * vec4(ctr, 1.0)).xyz - cam;
+    uint k0 = 0x7FFFFFFFu - (floatBitsToUint(dot(dp, dp)) >> 1u);   // farthest first
+    if (split && (inst.flags & 2048u) != 0u) k0 = 0xFFFFFFFEu;      // water: last, "post"
+    return k0;
+}
+
+// Bitonic sort of s_k0 / s_k1 [0, N) ascending on (k0, k1 & idmask).
+void mvSort(uint N, uint idmask)
+{
+    const uint lid = gl_LocalInvocationID.x;
+    for (uint k = 2u; k <= N; k <<= 1u)
+    {
+        for (uint j = k >> 1u; j > 0u; j >>= 1u)
+        {
+            for (uint i = lid; i < N; i += 1024u)
+            {
+                uint ixj = i ^ j;
+                if (ixj > i)
+                {
+                    uint a0 = s_k0[i], a1 = s_k1[i], b0 = s_k0[ixj], b1 = s_k1[ixj];
+                    bool gt = (a0 > b0) || (a0 == b0 && (a1 & idmask) > (b1 & idmask));
+                    bool asc = (i & k) == 0u;
+                    if (gt == asc)
+                    {
+                        s_k0[i] = b0; s_k1[i] = b1;
+                        s_k0[ixj] = a0; s_k1[ixj] = a1;
+                    }
+                }
+            }
+            barrier();
+        }
+    }
+}
+
+// Inclusive scan of s_sc over the 1024 threads; returns this thread's exclusive prefix
+// of `v` (its own s_sc entry). Totals: s_sc[1023] (valid until the next barrier'd write).
+uint mvScan(uint v)
+{
+    const uint lid = gl_LocalInvocationID.x;
+    s_sc[lid] = v;
+    barrier();
+    for (uint off = 1u; off < 1024u; off <<= 1u)
+    {
+        const uint a = lid >= off ? s_sc[lid - off] : 0u;
+        barrier();
+        s_sc[lid] += a;
+        barrier();
+    }
+    return s_sc[lid] - v;
+}
+
+void mvProbeAlpha()
+{
+    const uint lid = gl_LocalInvocationID.x;
+    const uint R = pc.u_cap;
+    const uint U = 6u * R;   // the union list's region
+    const uint n = min(counters[6u * MV_CTR_STRIDE + 2u], R);
+    const bool split = (pc.u_pad & 1u) != 0u;
+    if (split && sortJobNoAlpha(PJ_REALTIME))
+    {
+        // #834: water only -- each face's union entries that are water, in union order.
+        if (lid < 6u) s_sc[lid] = 0u;
+        barrier();
+        for (uint i = lid; i < n; i += 1024u)
+        {
+            const DrawCmd c = cmd_alpha[U + i];
+            const uint id = c.firstInstance & MV_ID_BITS;
+            if ((instances[id].flags & 2048u) == 0u) continue;
+            for (uint f = 0u; f < 6u; ++f)
+                if (((c.instanceCount >> f) & 1u) != 0u) cmd_water[f * R + atomicAdd(s_sc[f], 1u)] = cand[id];
+        }
+        barrier();
+        if (lid < 6u)
+        {
+            counters[lid * MV_CTR_STRIDE + 2u] = 0u;
+            counters[lid * MV_CTR_STRIDE + WATER_SLOT] = s_sc[lid];
+        }
+        return;
+    }
+    if (n <= MAXS)
+    {
+        uint N = 1u;
+        while (N < n) N <<= 1u;
+        for (uint i = lid; i < N; i += 1024u)
+        {
+            uint k0 = 0xFFFFFFFFu, k1 = 0xFFFFFFFFu;
+            if (i < n)
+            {
+                const DrawCmd c = cmd_alpha[U + i];
+                k0 = mvKey(c.firstInstance, split, g_cam);
+                k1 = ((c.instanceCount & 0x3Fu) << 26u) | (c.firstInstance & MV_ID_BITS);
+            }
+            s_k0[i] = k0; s_k1[i] = k1;
+        }
+        barrier();
+        mvSort(N, MV_ID_BITS);
+        // Per face: its entries in sorted order -> alpha [0, pre) / water, 4 per thread.
+        for (uint f = 0u; f < 6u; ++f)
+        {
+            uint a = 0u, w = 0u;
+            for (uint q = 0u; q < 4u; ++q)
+            {
+                const uint i = lid * 4u + q;
+                if (i >= n || ((s_k1[i] >> (26u + f)) & 1u) == 0u) continue;
+                if (s_k0[i] == 0xFFFFFFFEu) ++w; else ++a;
+            }
+            const uint ex = mvScan(a | (w << 16u));
+            uint pa = ex & 0xFFFFu, pw = ex >> 16u;
+            for (uint q = 0u; q < 4u; ++q)
+            {
+                const uint i = lid * 4u + q;
+                if (i >= n || ((s_k1[i] >> (26u + f)) & 1u) == 0u) continue;
+                const DrawCmd c = cand[s_k1[i] & MV_ID_BITS];
+                if (s_k0[i] == 0xFFFFFFFEu) cmd_water[f * R + pw++] = c;
+                else                        cmd_alpha[f * R + pa++] = c;
+            }
+            if (lid == 0u)
+            {
+                const uint t = s_sc[1023];
+                counters[f * MV_CTR_STRIDE + 2u] = t & 0xFFFFu;
+                if (split) counters[f * MV_CTR_STRIDE + WATER_SLOT] = t >> 16u;
+            }
+            barrier();   // s_sc reused by the next face
+        }
+        return;
+    }
+    // Union over MAXS: per face, gather its entries (instance order) and sort them as
+    // mode 3 sorts one face's bucket -- head of MAXS sorted, the tail in place.
+    for (uint f = 0u; f < 6u; ++f)
+    {
+        if (lid == 0u) { s_nf = 0u; s_water = 0u; }
+        barrier();
+        for (uint base = 0u; base < n; base += 1024u)
+        {
+            const uint i = base + lid;
+            DrawCmd c;
+            bool infc = false;
+            if (i < n) { c = cmd_alpha[U + i]; infc = ((c.instanceCount >> f) & 1u) != 0u; }
+            const uint pos = s_nf + mvScan(infc ? 1u : 0u);
+            if (infc)
+            {
+                const uint id = c.firstInstance & MV_ID_BITS;
+                if (pos < MAXS)
+                {
+                    // distance key now; the water flag in k1 bit 31 (split decided below)
+                    s_k0[pos] = mvKey(id, false, g_cam);
+                    s_k1[pos] = id | ((instances[id].flags & 2048u) != 0u ? 0x80000000u : 0u);
+                }
+                else if (pos < R) cmd_alpha[f * R + pos] = cand[id];   // unsorted tail, in place
+            }
+            barrier();
+            if (lid == 0u) s_nf += s_sc[1023];
+            barrier();
+        }
+        const uint nf = s_nf;
+        const uint m = min(nf, MAXS);
+        const bool splitf = split && nf <= MAXS;
+        uint N = 1u;
+        while (N < m) N <<= 1u;
+        for (uint i = lid; i < N; i += 1024u)
+        {
+            if (i >= m) { s_k0[i] = 0xFFFFFFFFu; s_k1[i] = 0xFFFFFFFFu; }
+            else if (splitf && (s_k1[i] & 0x80000000u) != 0u) s_k0[i] = 0xFFFFFFFEu;
+        }
+        barrier();
+        mvSort(N, 0x7FFFFFFFu);
+        if (lid == 0u) s_pre = 0u;
+        barrier();
+        for (uint i = lid; i < m; i += 1024u)
+            if ((s_k0[i] >> 31u) == 0u) atomicAdd(s_pre, 1u);
+        barrier();
+        const uint pre = s_pre;
+        for (uint i = lid; i < m; i += 1024u)
+        {
+            const DrawCmd c = cand[s_k1[i] & 0x7FFFFFFFu];
+            if (i < pre) cmd_alpha[f * R + i] = c;
+            else         cmd_water[f * R + (i - pre)] = c;
+        }
+        if (splitf)
+        {
+            if (lid == 0u) { counters[f * MV_CTR_STRIDE + 2u] = pre; counters[f * MV_CTR_STRIDE + WATER_SLOT] = m - pre; }
+        }
+        else
+        {
+            if (lid == 0u) counters[f * MV_CTR_STRIDE + 2u] = min(nf, R);
+            if (split)
+            {
+                // Overflow: everything stayed in the alpha list (sorted head, unsorted
+                // tail); copy the water out for the water pipe (mode 3's overflow).
+                memoryBarrierBuffer();
+                barrier();
+                for (uint i = lid; i < min(nf, R); i += 1024u)
+                {
+                    const uint id = i < m ? (s_k1[i] & 0x7FFFFFFFu) : cmd_alpha[f * R + i].firstInstance;
+                    if ((instances[id].flags & 2048u) == 0u) continue;
+                    cmd_water[f * R + atomicAdd(s_water, 1u)] = cand[id];
+                }
+                barrier();
+                if (lid == 0u) counters[f * MV_CTR_STRIDE + WATER_SLOT] = s_water;
+            }
+        }
+        barrier();   // shared state reused by the next face
+    }
+}
+
+DrawCmd loadCmd(bool rigged, uint i) { return rigged ? cmd_r_alpha[i] : cmd_alpha[i]; }
+
+// Mode 4, workgroup 1 (u_pad bit 1, RenderVKMultiViewScheduled): the SCHEDULED face's
+// alpha, region 7 / counter block 7, back-to-front from ITS origin (u_vp[0].xyz) -- mode
+// 3 on that region, in place. Its draws come from the list itself (cand[] holds the
+// realtime probe's candidates): the keys carry the entry's index (= instance order, the
+// tie-break mode 3 takes from the id) and each thread holds its entries across the
+// barrier before the sorted writes.
+void mvSchedAlpha()
+{
+    const uint lid = gl_LocalInvocationID.x;
+    const uint R = pc.u_cap;
+    const uint B = 7u * R;
+    const uint CB = 7u * MV_CTR_STRIDE;
+    const vec3 cam = g_sched_cam;
+    const uint n = min(counters[CB + 2u], R);
+    const uint m = min(n, MAXS);
+    const bool split = (pc.u_pad & 1u) != 0u;
+    const bool splitm = split && n <= MAXS;
+    if (split && sortJobNoAlpha(PJ_SCHED))
+    {
+        // #834: water only (region 7 -> its water list), no sort.
+        if (lid == 0u) s_water = 0u;
+        barrier();
+        for (uint i = lid; i < n; i += 1024u)
+        {
+            const DrawCmd c = cmd_alpha[B + i];
+            if ((instances[c.firstInstance].flags & 2048u) != 0u) cmd_water[B + atomicAdd(s_water, 1u)] = c;
+        }
+        barrier();
+        if (lid == 0u) { counters[CB + 2u] = 0u; counters[CB + WATER_SLOT] = s_water; }
+        return;
+    }
+    uint N = 1u;
+    while (N < m) N <<= 1u;
+    for (uint i = lid; i < N; i += 1024u)
+    {
+        uint k0 = 0xFFFFFFFFu, k1 = 0xFFFFFFFFu;
+        if (i < m) { k0 = mvKey(cmd_alpha[B + i].firstInstance, splitm, cam); k1 = i; }
+        s_k0[i] = k0; s_k1[i] = k1;
+    }
+    if (lid == 0u) { s_pre = 0u; s_water = 0u; }
+    barrier();
+    mvSort(N, 0xFFFFFFFFu);
+    for (uint i = lid; i < m; i += 1024u)
+        if ((s_k0[i] >> 31u) == 0u) atomicAdd(s_pre, 1u);
+    DrawCmd t[4];
+    for (uint q = 0u; q < 4u; ++q)
+    {
+        const uint i = lid + q * 1024u;
+        if (i < m) t[q] = cmd_alpha[B + s_k1[i]];
+    }
+    barrier();   // every entry read before any sorted write (in place)
+    const uint pre = s_pre;
+    for (uint q = 0u; q < 4u; ++q)
+    {
+        const uint i = lid + q * 1024u;
+        if (i >= m) continue;
+        if (i < pre) cmd_alpha[B + i] = t[q];
+        else         cmd_water[B + (i - pre)] = t[q];
+    }
+    if (splitm)
+    {
+        if (lid == 0u) { counters[CB + 2u] = pre; counters[CB + WATER_SLOT] = m - pre; }
+        return;
+    }
+    if (!split) return;   // in place: the unsorted overflow tail (i >= m) stays put
+    // Overflow: everything stayed in the alpha list (sorted head, unsorted tail); copy
+    // the water out for the water pipe (mode 3's overflow).
+    memoryBarrierBuffer();
+    barrier();
+    for (uint i = lid; i < n; i += 1024u)
+    {
+        const DrawCmd c = cmd_alpha[B + i];
+        if ((instances[c.firstInstance].flags & 2048u) == 0u) continue;
+        cmd_water[B + atomicAdd(s_water, 1u)] = c;
+    }
+    barrier();
+    if (lid == 0u) counters[CB + WATER_SLOT] = s_water;
+}
+
+void main()
+{
+    g_cam = pc.u_cam.xyz;
+    g_sched_cam = pc.u_vp[0].xyz;
+    if (pc.u_mode >= 2u && (pc.u_pad & SORT_JOB_ORIGIN) != 0u)
+    {
+        g_cam = prbJob(pc.u_job, pc.u_mode == 4u ? PJ_REALTIME : ((pc.u_pad >> 5u) & 1u)).origin.xyz;
+        g_sched_cam = prbJob(pc.u_job, PJ_SCHED).origin.xyz;
+    }
+    if (pc.u_mode == 4u)
+    {
+        if (gl_WorkGroupID.x == 0u) mvProbeAlpha();
+        else if (gl_WorkGroupID.x == 1u && (pc.u_pad & 2u) != 0u) mvSchedAlpha();
+        return;
+    }
+    const bool rigged   = gl_WorkGroupID.x == 1u;
+    if (pc.u_mode == 1u && rigged) return;   // HUD pass draws no rigged alpha
+    if (pc.u_mode == 3u && rigged) return;   // probe alpha: the static bucket only
+    const bool probe    = pc.u_mode == 2u;
+    const bool probe_a  = pc.u_mode == 3u;
+    const uint bucket   = probe ? (rigged ? 0u : 1u) : (rigged ? 5u : 2u);
+    const uint post_ctr = rigged ? 7u : 6u;
+    // B9: u_pad = 1 -> clean_alpha_sort_large.comp sorts a main-view bucket past MAXS
+    // (recorded right after this dispatch); leave it untouched.
+    if (pc.u_mode == 0u && (pc.u_pad & 1u) != 0u && min(counters[bucket], pc.u_cap) > MAXS) return;
+    // F2: water / exclusion lists (main view, static bucket).
+    const bool lists = pc.u_mode == 0u && !rigged && (pc.u_pad & 2u) != 0u;
+    const uint lid = gl_LocalInvocationID.x;
+    const uint n = min(counters[bucket], pc.u_cap);
+    const uint m = min(n, MAXS);
+    const bool water_out = probe_a && (pc.u_pad & 1u) != 0u;
+    const bool split = water_out && n <= MAXS;   // mode 3: water sorts last, then moves out
+    if (water_out && sortJobNoAlpha((pc.u_pad >> 5u) & 1u))
+    {
+        // #834: water only -> the water list, alpha count 0, no sort.
+        if (lid == 0u) s_water = 0u;
+        barrier();
+        for (uint i = lid; i < n; i += 1024u)
+        {
+            const DrawCmd c = loadCmd(false, i);
+            if ((instances[c.firstInstance].flags & 2048u) != 0u) cmd_water[atomicAdd(s_water, 1u)] = c;
+        }
+        barrier();
+        if (lid == 0u) { counters[bucket] = 0u; counters[WATER_SLOT] = s_water; }
+        return;
+    }
+    uint N = 1u;
+    while (N < m) N <<= 1u;
+
+    for (uint i = lid; i < N; i += 1024u)
+    {
+        uint k0 = 0xFFFFFFFFu, k1 = 0xFFFFFFFFu;
+        if (i < m)
+        {
+            DrawCmd c = loadCmd(rigged, i);
+            Instance inst = instances[c.firstInstance];
+            vec3 ctr = 0.5 * (inst.aabb_min.xyz + inst.aabb_max.xyz);
+            if (pc.u_mode == 1u)
+            {
+                // HUD: LL's alpha-group depth (LLSpatialGroup::mDepth) -- the depth of
+                // the FRONT QUARTER of the box along the HUD camera axis, far first
+                // (CompareDepthGreater). Projected depth is linear under the ortho HUD
+                // camera, so front = centre - 0.25 * half extent along the view axis.
+                float zc = 0.0, zlo = 1e30, zhi = -1e30;
+                for (int q = 0; q < 8; ++q)
+                {
+                    vec3 lc = vec3((q & 1) != 0 ? inst.aabb_max.x : inst.aabb_min.x,
+                                   (q & 2) != 0 ? inst.aabb_max.y : inst.aabb_min.y,
+                                   (q & 4) != 0 ? inst.aabb_max.z : inst.aabb_min.z);
+                    vec4 cp = pc.u_vp * (inst.model_matrix * vec4(lc, 1.0));
+                    float z = cp.z / max(cp.w, 1e-6);
+                    zlo = min(zlo, z); zhi = max(zhi, z);
+                }
+                vec4 cc = pc.u_vp * (inst.model_matrix * vec4(ctr, 1.0));
+                zc = cc.z / max(cc.w, 1e-6);
+                float zf = clamp(zc - 0.125 * (zhi - zlo), 0.0, 1.0);
+                k0 = 0x7FFFFFFFu - (floatBitsToUint(zf) >> 1u);   // far (larger z) first; all pre
+                k1 = c.firstInstance;
+                s_k0[i] = k0; s_k1[i] = k1;
+                continue;
+            }
+            vec3 w = (inst.model_matrix * vec4(ctr, 1.0)).xyz;
+            if (probe || probe_a)
+            {
+                vec3 dp = w - g_cam;
+                uint db = floatBitsToUint(dot(dp, dp)) >> 1u;
+                // ascending: mode 2 nearest first, mode 3 farthest first; all "pre"
+                k0 = probe ? db : (0x7FFFFFFFu - db);
+                // Mode 3 water: after every alpha draw, in the "post" half (bit 31).
+                if (split && (inst.flags & 2048u) != 0u) k0 = 0xFFFFFFFEu;
+                k1 = c.firstInstance;
+                s_k0[i] = k0; s_k1[i] = k1;
+                continue;
+            }
+            vec3 r_ext = vec3(0.0);     // (#835) rigged: the posed extent + its axes
+            mat3 r_rot = mat3(1.0);
+            if (rigged)
+            {
+                const uint rcb = c.firstInstance * RC_WORDS;
+                const bool rc_ok = rcb + RC_WORDS <= uint(rig_cache.length());
+                const vec3 p = riggedSortPos(c, rcb, rc_ok, r_ext);
+                const uint rs = rc_ok ? rig_cache[rcb + RC_STATE] : 0u;
+                if ((rs & RC_ST_LOCAL) != 0u && (inst.flags & 8u) == 0u && (rs & RC_ST_SLOT) < uint(av_joints.length()))
+                {
+                    const mat4 P = jointWorld(av_joints[rs & RC_ST_SLOT].world[0]);
+                    r_rot = rigidRot(P);
+                    w = r_rot * p + P[3].xyz;
+                }
+                else w = p + pc.u_cam.xyz;
+            }
+            bool below = w.z < pc.u_cam.w;
+            bool far_side = (pc.u_cam_under != 0u) ? !below : below;
+            if ((inst.flags & 2048u) != 0u) far_side = false;   // water surface: post set (drawn by the water pipe)
+            // Water exclusion (invisiprim, bit 16): post set, where the exclusion-mask pass
+            // reads it -- whichever side of the water its bounds centre lies on.
+            if ((inst.flags & 65536u) != 0u) far_side = false;
+            vec3 d = w - pc.u_cam.xyz;
+            uint db = floatBitsToUint(dot(d, d));       // positive float: monotonic as uint
+            if (rigged) db = riggedSortDist2(w, pc.u_cam.xyz, r_ext, r_rot, (pc.u_pad & 4u) != 0u);
+            k0 = (far_side ? 0u : 0x80000000u) | (0x7FFFFFFFu - (db >> 1u));
+            k1 = c.firstInstance;
+            if (lists)
+            {
+                // F2: water, then invisiprims, after every post-water draw (a post key at
+                // distance ~0 is clamped below them).
+                k0 = (inst.flags & 2048u) != 0u ? KEY_WATER
+                   : (inst.flags & 65536u) != 0u ? KEY_EXCL : min(k0, KEY_WATER - 1u);
+            }
+        }
+        s_k0[i] = k0; s_k1[i] = k1;
+    }
+    if (lid == 0u) { s_pre = 0u; s_water = 0u; s_nw = 0u; s_ne = 0u; s_tw = 0u; s_te = 0u; }
+    barrier();
+
+    // Bitonic sort, ascending on (k0, k1).
+    for (uint k = 2u; k <= N; k <<= 1u)
+    {
+        for (uint j = k >> 1u; j > 0u; j >>= 1u)
+        {
+            for (uint i = lid; i < N; i += 1024u)
+            {
+                uint ixj = i ^ j;
+                if (ixj > i)
+                {
+                    uint a0 = s_k0[i], a1 = s_k1[i], b0 = s_k0[ixj], b1 = s_k1[ixj];
+                    bool gt = (a0 > b0) || (a0 == b0 && a1 > b1);
+                    bool asc = (i & k) == 0u;
+                    if (gt == asc)
+                    {
+                        s_k0[i] = b0; s_k1[i] = b1;
+                        s_k0[ixj] = a0; s_k1[ixj] = a1;
+                    }
+                }
+            }
+            barrier();
+        }
+    }
+
+    for (uint i = lid; i < m; i += 1024u)
+    {
+        const uint k = s_k0[i];
+        if ((k >> 31u) == 0u) atomicAdd(s_pre, 1u);
+        else if (lists && k == KEY_WATER) atomicAdd(s_nw, 1u);
+        else if (lists && k == KEY_EXCL) atomicAdd(s_ne, 1u);
+    }
+    barrier();
+    const uint pre = s_pre;
+    // Sorted layout: [0, pre) pre-water | [pre, wbeg) post-water | [wbeg, ebeg) water |
+    // [ebeg, m) exclusion (F2 lists; otherwise wbeg = ebeg = m).
+    const uint nw = s_nw, ne = s_ne;
+    const uint wbeg = m - nw - ne, ebeg = m - ne;
+
+    // Scatter from the per-instance candidates (the cull wrote cand[instance id]).
+    // Overflow reads (i >= m) and sorted writes (i < pre <= m) never alias.
+    for (uint i = lid; i < m; i += 1024u)
+    {
+        DrawCmd c = cand[s_k1[i]];
+        if (i < pre)
+        {
+            if (rigged) cmd_r_alpha[i] = c; else cmd_alpha[i] = c;
+        }
+        else if (water_out) cmd_water[i - pre] = c;   // mode 3 split: everything past pre is water
+        else if (i < wbeg)
+        {
+            if (rigged) cmd_r_alpha_post[i - pre] = c; else cmd_alpha_post[i - pre] = c;
+        }
+        else if (i < ebeg) cmd_water[i - wbeg] = c;
+        else               cmd_excl[i - ebeg] = c;
+    }
+    if (water_out)
+    {
+        if (split)
+        {
+            // [0, pre) the alpha back-to-front, the water in the water list.
+            if (lid == 0u) { counters[bucket] = pre; counters[WATER_SLOT] = m - pre; }
+            return;
+        }
+        // Overflow: everything stayed in bucket 2 (sorted head, unsorted tail); copy the
+        // water out for the water pipe.
+        for (uint i = lid; i < n; i += 1024u)
+        {
+            const uint id = i < m ? s_k1[i] : loadCmd(false, i).firstInstance;
+            if ((instances[id].flags & 2048u) == 0u) continue;
+            cmd_water[atomicAdd(s_water, 1u)] = i < m ? cand[id] : loadCmd(false, i);
+        }
+        barrier();
+        if (lid == 0u) counters[WATER_SLOT] = s_water;
+        return;
+    }
+    if (probe || probe_a) return;   // in place: the unsorted overflow tail (i >= m) stays put
+    for (uint i = m + lid; i < n; i += 1024u)
+    {
+        DrawCmd c = loadCmd(rigged, i);
+        if (rigged) cmd_r_alpha_post[(wbeg - pre) + (i - m)] = c;
+        else        cmd_alpha_post[(wbeg - pre) + (i - m)] = c;
+        if (lists)
+        {
+            // F2: the tail's water / invisiprims also reach their lists (the copy left in
+            // the post list is dropped by the alpha VS / FS).
+            const uint f = instances[c.firstInstance].flags;
+            if ((f & 2048u) != 0u)       cmd_water[nw + atomicAdd(s_tw, 1u)] = c;
+            else if ((f & 65536u) != 0u) cmd_excl[ne + atomicAdd(s_te, 1u)] = c;
+        }
+    }
+    barrier();
+    if (lid == 0u)
+    {
+        counters[bucket]   = pre;
+        counters[post_ctr] = (wbeg - pre) + (n - m);
+        if (lists) { counters[WATER_SLOT] = nw + s_tw; counters[EXCL_SLOT] = ne + s_te; }
+    }
+}

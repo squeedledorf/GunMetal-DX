@@ -1,0 +1,104 @@
+<?xml version="1.0" ?>
+<llsd>
+<!--
+  Viewer preset "Firestorm" (#132), applied from the welcome window (floater_sl_first_run.xml).
+
+  Format (shared by every file in this folder):
+    settings      map of setting name -> value. Names must exist in app_settings/settings.xml
+                  (unknown names are skipped with a warning). Every setting named in ANY preset is
+                  reset to Slipstream's default when a preset that does not name it is applied, so
+                  switching between presets never leaves another viewer's values behind.
+    key_bindings  array of {command, mouse, key, mask, instead_of[]}: in every key binding mode
+                  (first person, third person, sitting, appearance), give the input to `command`
+                  and take it away from the commands in `instead_of`. Inputs a preset does not
+                  list fall back to slipstream.xml.
+    restart       optional array of setting names that only take effect after a restart.
+
+  Only settings where Firestorm's out-of-the-box behaviour differs from ours, and that someone
+  coming from Firestorm would notice, are listed. Source: phoenix-firestorm master (2026-10)
+  app_settings/settings.xml plus settings_firestorm.xml (the "Firestorm" mode new Firestorm
+  installs start in, which overrides settings.xml). Anything a user changed in Firestorm is
+  brought over separately by the importer.
+-->
+  <map>
+    <key>settings</key>
+    <map>
+      <!-- In Firestorm (as in every viewer we know of) pressing / opens nearby chat with a
+           leading slash, for gestures and chat commands. Slipstream made that opt-in so a stray
+           / does not grab the keyboard (SlashStartsChat, "as in LL viewers"). -->
+      <key>SlashStartsChat</key>
+      <boolean>1</boolean>
+      <!-- Letter keys always move the avatar (WASD) on a new install, whatever the previous
+           viewer did; typing to chat stays a choice in Preferences > Move & View. -->
+      <!-- Firestorm UsePieMenu = 1: right-click opens the round pie menu. -->
+      <key>UsePieMenu</key>
+      <boolean>1</boolean>
+      <!-- Firestorm PlainTextChatHistory = 1 (both files): compact one-line-per-message chat
+           instead of the bubbles-with-icons layout. -->
+      <key>PlainTextChatHistory</key>
+      <boolean>1</boolean>
+      <!-- Firestorm mode EnableGroupChatPopups = 0: group chat does not pop up toasts;
+           it waits in Conversations. -->
+      <key>EnableGroupChatPopups</key>
+      <boolean>0</boolean>
+      <!-- Firestorm NotificationToastLifeTime = 30: notices stay on screen 30 s (ours 5 s). -->
+      <key>NotificationToastLifeTime</key>
+      <integer>30</integer>
+      <!-- Firestorm ShowInInventory = 0: accepting an item does not pop the inventory open. -->
+      <key>ShowInInventory</key>
+      <boolean>0</boolean>
+      <!-- Firestorm AFKTimeout = 0: never goes Away by itself (ours: after 5 minutes). -->
+      <key>AFKTimeout</key>
+      <integer>0</integer>
+      <!-- Firestorm DoubleClickTeleport = 0: double-clicking the minimap or a person does not
+           teleport. -->
+      <key>DoubleClickTeleport</key>
+      <boolean>0</boolean>
+      <!-- Firestorm PushToTalkToggle = 1: the Speak button switches the microphone on and off
+           (ours: hold to talk). Goes with the middle mouse button binding below. -->
+      <key>PushToTalkToggle</key>
+      <boolean>1</boolean>
+      <!-- Firestorm HoverHeightAffectsCamera = 0: the camera stays put when you change your
+           hover height. -->
+      <key>HoverHeightAffectsCamera</key>
+      <boolean>0</boolean>
+      <!-- #489: Firestorm (released 7.2.5) shows nearby chat as console lines over the world
+           view by default (FSUseNearbyChatConsole = 1), each line staying 20 s
+           (ChatPersistTime), up to 40 lines (ConsoleMaxLines). Ours: the console style of the
+           nearby chat overlay with the same timing (existing users may be on message cards). -->
+      <key>NearbyChatOverlayStyle</key>
+      <string>text</string>
+      <key>NearbyChatConsolePersistTime</key>
+      <real>20.0</real>
+      <key>NearbyChatConsoleMaxLines</key>
+      <integer>40</integer>
+      <!-- #489: should they switch to message cards, those let clicks through to the world too,
+           like the console. -->
+      <key>NearbyChatOverlayClickThrough</key>
+      <boolean>1</boolean>
+      <!-- #489: in Firestorm the contacts list is a tab of the Conversations window; the People
+           button opens it there instead of the separate People window. -->
+      <key>ContactsInConversations</key>
+      <boolean>1</boolean>
+    </map>
+    <key>key_bindings</key>
+    <array>
+      <!-- Firestorm key_bindings.xml binds the middle mouse button to toggle_voice in every
+           mode (click once to talk, again to stop); ours holds it to talk (voice_follow_key). -->
+      <map>
+        <key>command</key>
+        <string>toggle_voice</string>
+        <key>mouse</key>
+        <string>MMB</string>
+        <key>key</key>
+        <string />
+        <key>mask</key>
+        <string>NONE</string>
+        <key>instead_of</key>
+        <array>
+          <string>voice_follow_key</string>
+        </array>
+      </map>
+    </array>
+  </map>
+</llsd>

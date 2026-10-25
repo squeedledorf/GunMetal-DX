@@ -1,0 +1,175 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+// vkclean -- DRAWN-GEOMETRY QUERIES (#704): what the build tools asked the CPU geometry
+// mirror for, answered from the geometry the renderer draws.
+//
+// One workgroup per job (an instance id). The geometry is the instance's drawn slot -- the
+// main view's draw from the pick snapshot (LLCleanPickVK::recordSnapshot: the cull's own LOD
+// choice), else (not drawn this frame: off screen, worn, HUD) the highest resident level --
+// decoded from the quantized stream (clean_qvertex.glsl). Per job:
+//   - the sum of the vertex normals (volume space) and the vertex count: the face's
+//     approximate normal (LLVOVolume::getApproximateFaceNormal, media focus);
+//   - the first vertex's normal and tangent (volume space, w handedness): the face frame
+//     planar texture alignment derives the projection from (LLFace::getPlanarProjectedParams);
+//   - RECT (mode bit 0): whether any vertex, through the instance's model matrix, projects
+//     inside the screen rectangle, and whether any lies outside it or behind the camera
+//     (rectangle selection of prims the bounding box straddles, LLToolSelectRect).
+layout(local_size_x = 64) in;
+
+#include "clean_qvertex.glsl"
+
+struct Instance {
+    mat4 model_matrix;
+    vec4 aabb_min;
+    vec4 aabb_max;     // .w worn attachment: joint index
+    vec4 tint;
+    mat4 uv_matrix;
+    uint lod_group_id;
+    uint material_id;
+    uint flags;
+    uint skin_id;
+    vec4 spin_axis;
+    vec4 spin_pivot;
+};   // 224 B
+// Draw set 0 (clean_draw.vert's layouts).
+layout(std430, set = 0, binding = 0) readonly buffer Instances { Instance instances[]; };
+layout(std430, set = 0, binding = 39) readonly buffer QvWords { uint qv_words[]; };
+
+struct SlotInfo {
+    uint first_index;
+    uint index_count;   // 0 = not resident
+    int  base_vertex;
+    uint has_weights;
+    uint vert_count;
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
+};
+struct DrawCmd { uint indexCount; uint instanceCount; uint firstIndex; int vertexOffset; uint firstInstance; };
+struct LodGroup { uint slot[4]; };
+#define LOD_SENTINEL 0xFFFFFFFFu
+#define OFF_META     0x80000000u
+
+layout(std430, set = 1, binding = 0) readonly buffer Cand      { DrawCmd cand[]; };     // the pick snapshot
+layout(std430, set = 1, binding = 1) readonly buffer CandMeta  { uint cand_meta[]; };
+layout(std430, set = 1, binding = 2) readonly buffer Slots     { SlotInfo slots[]; };
+layout(std430, set = 1, binding = 3) readonly buffer LodGroups { LodGroup lod_groups[]; };
+layout(std430, set = 1, binding = 4) readonly buffer Jobs      { uint jobs[]; };        // instance ids
+struct QueryOut {
+    vec4  nsum;    // xyz sum of the vertex normals (volume space), w vertex count
+    vec4  n0;      // first vertex normal (volume space)
+    vec4  t0;      // first vertex tangent (volume space), w handedness (0: none)
+    uvec4 res;     // x QUERY_*, y slot id, z vertex count, w 0
+};
+layout(std430, set = 1, binding = 5) writeonly buffer Out { QueryOut outs[]; };
+
+#define QUERY_RESOLVED 1u   // a resident slot was found (the rest is valid)
+#define QUERY_IN       2u   // RECT: a vertex projects inside the rectangle
+#define QUERY_OUT      4u   // RECT: a vertex projects outside it, or lies behind the camera
+
+layout(push_constant) uniform PickQueryPush {
+    vec4  cam;     // RECT: xyz eye (agent space), w tan(half horizontal fov)
+    vec4  at;      // xyz view axis, w tan(half vertical fov)
+    vec4  left;    // xyz left axis, w viewport x
+    vec4  up;      // xyz up axis, w viewport y
+    vec4  rect;    // left, right, bottom, top (window pixels, as the viewport)
+    uvec4 job;     // x jobs, y snapshot rows, z mode (bit 0 RECT), w viewport width | height << 16
+} pc;
+
+shared vec4 s_sum[64];
+shared uint s_flags[64];
+
+bool slotOk(uint s) { return s < uint(slots.length()) && slots[s].index_count != 0u && slots[s].vert_count != 0u
+                             && slots[s].base_vertex >= int(QV_HEADER_VERTS); }
+
+// The slot the instance is drawn with (snapshot), else its highest resident level.
+uint drawnSlot(uint id)
+{
+    const uint gid = instances[id].lod_group_id;
+    if (gid == LOD_SENTINEL || gid >= uint(lod_groups.length())) return LOD_SENTINEL;
+    if (id < pc.job.y && id < uint(cand_meta.length()) && id < uint(cand.length()))
+    {
+        const uint m = cand_meta[id];
+        const DrawCmd c = cand[id];
+        if (m != 0xFFFFFFFFu && (m & OFF_META) == 0u && c.indexCount != 0u && (instances[id].flags & 1u) == 0u)
+        {
+            for (uint L = 0u; L < 4u; ++L)
+            {
+                const uint s = lod_groups[gid].slot[L];
+                if (slotOk(s) && slots[s].first_index == c.firstIndex && slots[s].index_count == c.indexCount) return s;
+            }
+        }
+    }
+    for (int L = 3; L >= 0; --L)
+    {
+        const uint s = lod_groups[gid].slot[L];
+        if (slotOk(s)) return s;
+    }
+    return LOD_SENTINEL;
+}
+
+void main()
+{
+    const uint j = gl_WorkGroupID.x;
+    const uint lane = gl_LocalInvocationID.x;
+    if (j >= pc.job.x) return;   // (uniform per workgroup)
+    const uint id = jobs[j];
+    uint slot = LOD_SENTINEL;
+    if (id < uint(instances.length())) slot = drawnSlot(id);
+    if (slot == LOD_SENTINEL || uint(slots[slot].base_vertex) + slots[slot].vert_count > uint(qv_words.length()) / QV_WORDS)
+    {
+        if (lane == 0u) outs[j].res = uvec4(0u);
+        return;
+    }
+    const SlotInfo si = slots[slot];
+    const uint base = uint(si.base_vertex);
+    const QvHeader h = QV_LOAD_HEADER(qv_words, base);
+    const mat4 M = instances[id].model_matrix;
+    const bool rect = (pc.job.z & 1u) != 0u;
+    const float vw = float(pc.job.w & 0xFFFFu), vh = float(pc.job.w >> 16u);
+    vec3 sum = vec3(0.0);
+    uint fl = 0u;
+    for (uint v = lane; v < si.vert_count; v += 64u)
+    {
+        const uint w = (base + v) * QV_WORDS;
+        sum += qvNormal(qv_words[w + 3u]);
+        if (rect)
+        {
+            const vec3 p = (M * vec4(qvPos(h, qv_words[w], qv_words[w + 1u]), 1.0)).xyz;
+            // LLToolSelectRect's to_screen: behind the near plane counts as outside.
+            const vec3 d = p - pc.cam.xyz;
+            const float z = dot(d, pc.at.xyz);
+            if (z <= 0.05)
+            {
+                fl |= QUERY_OUT;
+                continue;
+            }
+            const float nx = -dot(d, pc.left.xyz) / (z * pc.cam.w);
+            const float ny = dot(d, pc.up.xyz) / (z * pc.at.w);
+            const float sx = pc.left.w + (nx * 0.5 + 0.5) * vw;
+            const float sy = pc.up.w + (ny * 0.5 + 0.5) * vh;
+            const bool in_r = sx >= pc.rect.x && sx <= pc.rect.y && sy >= pc.rect.z && sy <= pc.rect.w;
+            fl |= in_r ? QUERY_IN : QUERY_OUT;
+        }
+    }
+    s_sum[lane] = vec4(sum, 0.0);
+    s_flags[lane] = fl;
+    barrier();
+    for (uint k = 32u; k > 0u; k >>= 1u)
+    {
+        if (lane < k)
+        {
+            s_sum[lane] += s_sum[lane + k];
+            s_flags[lane] |= s_flags[lane + k];
+        }
+        barrier();
+    }
+    if (lane == 0u)
+    {
+        const uint w0 = base * QV_WORDS;
+        outs[j].nsum = vec4(s_sum[0].xyz, float(si.vert_count));
+        outs[j].n0 = vec4(qvNormal(qv_words[w0 + 3u]), 0.0);
+        outs[j].t0 = qvTangent(qv_words[w0 + 1u], qv_words[w0 + 4u]);
+        outs[j].res = uvec4(QUERY_RESOLVED | s_flags[0], slot, si.vert_count, 0u);
+    }
+}

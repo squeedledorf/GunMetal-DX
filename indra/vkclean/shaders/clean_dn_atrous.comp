@@ -1,0 +1,391 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+// vkclean — DIFFUSE / SPECULAR DENOISER, spatial pass (#85 phase 2; LLCleanDenoiserVK): ONE
+// a-trous iteration (Dammertz 2010, variance-guided as SVGF -- Schied 2017) per dispatch,
+// step 2^k, 5x5 B3-spline taps. Iteration k reads OUT (k even) or IN (k odd) and writes the
+// other (IN is free: the temporal pass consumed it), so the final image alternates with the
+// iteration count (LLCleanDenoiserVK::finalIsIn).
+//
+// EDGE STOPS (per tap):
+//   depth   the centre's depth PLANE (view depth + its gradient per texel) predicts the tap's
+//           depth; the miss is measured against the plane's own change over the offset (so a
+//           grazing floor keeps its taps, a silhouette does not), prm1.x sigmas;
+//   normal  max(N.Nq, 0)^p: diffuse p = prm1.y, specular sharper with smoothness (a glossy lobe
+//           changes faster with the normal);
+//   rough   (specular) exp(-8 |r - rq|);
+//   lum     |l - lq| against prm0.w x the 3x3-prefiltered standard deviation of the signal's
+//           variance (SVGF): noise is averaged, real edges (light pools, gobo patterns) stay.
+// SEPARATE KERNELS: the diffuse runs every iteration; the specular only while k is below the
+// texel's specular a-trous depth (GEOM w; pdnSpecIters: 0 for a mirror -- no spatial blur --,
+// all of them for a rough lobe), so the kernel radius follows roughness and hit distance.
+// DISOCCLUSION HISTORY FIX (DN_HFIX_SHIFT; the GI denoiser): a centre younger than N frames widens
+// its luminance stop and weights its taps by their history length (converged neighbours fill it);
+// a settled centre down-weights taps younger than N (dnMaturity: no halo of a young sparkle).
+// Variance propagates as sum(w^2 var) / sum(w)^2. The final iteration stores the view depth
+// in the diffuse alpha (the consumer's depth-aware upsample) and the debug views.
+// (#869) THE SPLIT CHANNEL (dnSplitAtrous): each split light filtered over the taps that carry the
+// same light, its luminance stop from the one-ray estimate's Bernoulli bound; the final iteration
+// writes GEOM layer 4 for the consumer (and debug views 8 / 9 into layer 0).
+layout(local_size_x = 8, local_size_y = 8) in;
+#include "clean_dn_common.glsl"
+
+const float kB3[5] = float[5](1.0 / 16.0, 1.0 / 4.0, 3.0 / 8.0, 1.0 / 4.0, 1.0 / 16.0);
+
+bool dnSrcIsOut() { return (dp.ctl.y & 1u) == 0u; }
+vec4 dnSrc(ivec2 q, int l) { return dnSrcIsOut() ? imageLoad(uDnOut, ivec3(q, l)) : imageLoad(uDnIn, ivec3(q, l)); }
+void dnDst(ivec2 q, int l, vec4 v)
+{
+    if (dnSrcIsOut()) imageStore(uDnIn, ivec3(q, l), v);
+    else              imageStore(uDnOut, ivec3(q, l), v);
+}
+
+// 3x3 Gaussian of the variance (alpha) at unit offsets: the luminance edge-stop's sigma.
+vec2 dnPrefilterVar(ivec2 m, ivec2 D)
+{
+    const float kG[2] = float[2](1.0 / 4.0, 1.0 / 8.0);
+    vec2 v = vec2(0.0);
+    float ws = 0.0;
+    for (int dy = -1; dy <= 1; ++dy)
+        for (int dx = -1; dx <= 1; ++dx)
+        {
+            const ivec2 q = clamp(m + ivec2(dx, dy), ivec2(0), D - 1);
+            const float w = kG[abs(dx)] * kG[abs(dy)] * 4.0;   // (1/4, 1/8, 1/16 normalized below)
+            v += w * vec2(dnSrc(q, 0).a, dnSrc(q, 1).a);
+            ws += w;
+        }
+    return v / ws;
+}
+
+// ==================== SUN / MOON CHANNEL (DN_F_SUN; the merged RT shadow pass) ====================
+// The RT shadow mask's sun a-trous (clean_rt_mask_spatial.comp atrousSun, SVGF mode) on the
+// denoiser's guides, in the same dispatches: PENUMBRA-GATED -- a texel filters at step 2^k only
+// while its penumbra radius (the temporal pass's, from the blocker distance; half of it once the
+// history is long, capped at sun1.x texels) reaches the step (half a texel for step 1), and only
+// with something to filter (partial, young, or variance left) -- so contact shadows and lit /
+// umbra texels stay exactly as accumulated. Weights: B3 x the depth plane x the normal x the
+// luminance against the estimate's variance (4 sigma); YOUNG texels (disocclusion) take the widest
+// radius around them, the 3x3 spatial variance and the neighbours' history length as extra weight
+// (history fix) -- except young MOVING-caster texels (a shadow just arrived: their long-history
+// neighbours are the stale lit ground ahead of it), which keep their own radius and estimate.
+// The final iteration stores the view depth in alpha (the SHADOW kernel's depth-aware upsample).
+float dnSunBlurRadius(float r, float len)
+{
+    if (r < 0.0) return 0.0;
+    const float youth = 1.0 - clamp(len / 8.0, 0.0, 1.0);
+    return min(r * mix(0.5, 1.0, youth), dp.sun1.x);
+}
+bool dnSunPartial(vec3 v) { return any(greaterThan(v, vec3(0.002))) && any(lessThan(v, vec3(0.998))); }
+
+void dnSunAtrous(ivec2 m, ivec2 D, uint par, DnGeom g, uint k, bool last)
+{
+    vec4 c = dnSrc(m, 2);
+    const PdnSunHist h = pdnUnpackSunHist(imageLoad(uDnHist, ivec3(m, int(2u + par))));
+    const float lenc = max(h.len, 1.0);
+    const bool young = h.len < 4.0;
+    const bool myoung = young && h.cnt > 0u;   // (a moving caster's fresh shadow)
+    float rpen = h.r;
+    if (myoung)
+    {
+        if (k == 0u)
+        {
+            const float mm = clamp(dnLum3(c.rgb), 0.0, 1.0);
+            c.a = mm * (1.0 - mm) / dnSunRays() / lenc;
+        }
+    }
+    else if (young)
+    {
+        // the widest radius around it + the 3x3 spatial variance (same plane) of the source
+        float s1 = 0.0, s2 = 0.0, nn = 0.0;
+        for (int j = -1; j <= 1; ++j)
+            for (int i = -1; i <= 1; ++i)
+            {
+                const ivec2 o = ivec2(i, j);
+                const ivec2 q = clamp(m + o, ivec2(0), D - 1);
+                if (o != ivec2(0))
+                {
+                    const DnGeom gq = dnGeom(q, par);
+                    const float zp = g.z + dot(g.grad, vec2(o));
+                    if (gq.z <= 0.0 || abs(gq.z - zp) > max(0.04 * g.z, 0.02)) continue;
+                    rpen = max(rpen, pdnUnpackSunHist(imageLoad(uDnHist, ivec3(q, int(2u + par)))).r);
+                }
+                const float l = dnLum3((o == ivec2(0)) ? c.rgb : dnSrc(q, 2).rgb);
+                s1 += l; s2 += l * l; nn += 1.0;
+            }
+        if (k == 0u && nn > 0.0) c.a = max(c.a, max(s2 / nn - (s1 / nn) * (s1 / nn), 0.0) / lenc);
+    }
+    float r = dnSunBlurRadius(rpen, h.len);
+    if (myoung) r = max(r, min(1.0, dp.sun1.x));   // (a young mover texel: the step-1 pass)
+    const int step = 1 << int(min(k, 7u));
+    const bool want = dnSunPartial(c.rgb) || young || c.a > 1e-5;
+    const bool on = !dnSunRaw() && dp.sun1.x > 0.0 && want && r >= (step == 1 ? 0.5 : float(step));
+    vec4 o = c;
+    if (on)
+    {
+        const float lc = dnLum3(c.rgb);
+        const float sl = 4.0 * sqrt(max(c.a, 0.0)) + 1e-3;
+        vec3 sum = vec3(0.0);
+        float wsum = 0.0, vsum = 0.0;
+        for (int j = -2; j <= 2; ++j)
+            for (int i = -2; i <= 2; ++i)
+            {
+                const ivec2 off = ivec2(i, j) * step;
+                const ivec2 q = m + off;
+                if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, D))) continue;
+                float w = kB3[i + 2] * kB3[j + 2];
+                vec4 v = c;
+                if (off != ivec2(0))
+                {
+                    const DnGeom gq = dnGeom(q, par);
+                    if (gq.z <= 0.0) continue;
+                    const float dz = dot(g.grad, vec2(off));
+                    w *= exp(-abs(gq.z - (g.z + dz)) / (dp.prm1.x * (abs(dz) + 0.002 * g.z) + 1e-4));
+                    w *= pow(max(dot(g.n, gq.n), 0.0), 8.0);
+                    v = dnSrc(q, 2);
+                    w *= exp(-abs(dnLum3(v.rgb) - lc) / sl);
+                    if (young && !myoung)
+                        w *= clamp(pdnUnpackSunHist(imageLoad(uDnHist, ivec3(q, int(2u + par)))).len / lenc, 1.0, 8.0);
+                }
+                if (!(w > 1e-6)) continue;
+                sum += w * v.rgb;
+                vsum += w * w * v.a;
+                wsum += w;
+            }
+        if (wsum > 1e-6) o = vec4(sum / wsum, vsum / (wsum * wsum));
+    }
+    o.rgb = pdnSunVis(o.rgb);
+    dnDst(m, 2, vec4(o.rgb, last ? g.z : min(max(o.a, 0.0), 60000.0)));
+}
+
+// ==================== SPLIT CHANNEL (#869; clean_pdn_common.glsl SPLIT CHANNEL) ====================
+// Per slot: the diffuse kernel's geometric stops (B3 x the depth plane x the normal) over the taps
+// that carry the SAME LIGHT (by id, in whichever slot), x a luminance stop against the Bernoulli
+// bound of the one-ray-per-frame estimate, sqrt(v (1 - v) / length) -- floored at a quarter / length
+// while the history is young (< 4 frames: a fresh 0 / 1 sample must not keep its speckle). A slot at
+// exactly 0 or 1 with a settled history has nothing to filter (contact shadows, umbra and lit stay
+// exact); an UNKNOWN centre (length 0) takes its neighbours' mean (no stop anchored on its default).
+// The last iteration writes GEOM layer 4: the ids + the final visibilities (the consumer's view).
+// Returns the slots' output (empty slots 1) and their ids (the debug views).
+vec4 dnSplitAtrous(ivec2 m, ivec2 D, uint par, DnGeom g, uint it, bool last, out uvec2 idsOut)
+{
+    const int L = dnSplitLayer();
+    const int gl = PDN_SPLIT_GEOM_PAR + int(par);
+    idsOut = uvec2(0u);
+    if (g.z <= 0.0)
+    {
+        dnDst(m, L, vec4(1.0));
+        if (last) imageStore(uDnGeom, ivec3(m, PDN_SPLIT_GEOM_FINAL), uvec4(0u));
+        return vec4(1.0);
+    }
+    const uvec4 cur = imageLoad(uDnGeom, ivec3(m, gl));
+    idsOut = cur.xy;
+    const vec4 c = dnSrc(m, L);
+    vec4 o = c;
+    uvec4 cid;
+    vec4 phi = vec4(1.0), lsc = vec4(1.0);
+    bvec4 on = bvec4(false);
+    for (uint k = 0u; k < PDN_SPLIT_MAX; ++k)
+    {
+        cid[k] = pdnSplitWord(cur.xy, k);
+        if (cid[k] == 0u) { o[k] = 1.0; continue; }
+        const float len = pdnSplitHistLen(pdnSplitWord(cur.zw, k));
+        const float v = clamp(c[k], 0.0, 1.0);
+        const float var = max(v * (1.0 - v), len < 4.0 ? 0.25 : 0.0) / max(len, 1.0);
+        phi[k] = dp.prm0.w * sqrt(var) + 1e-4;
+        lsc[k] = len < 0.5 ? 0.0 : 1.0;   // (UNKNOWN centre: no luminance stop)
+        on[k] = var > 1e-6;
+    }
+    if (any(on) && !dnRawView())
+    {
+        const int step = 1 << int(min(it, 7u));
+        vec4 sum = vec4(0.0), ws = vec4(0.0);
+        for (int j = -2; j <= 2; ++j)
+            for (int i = -2; i <= 2; ++i)
+            {
+                const ivec2 off = ivec2(i, j) * step;
+                const ivec2 q = m + off;
+                if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, D))) continue;
+                const float h = kB3[i + 2] * kB3[j + 2];
+                if (off == ivec2(0))
+                {
+                    for (uint k = 0u; k < PDN_SPLIT_MAX; ++k)
+                    {
+                        const float hc = lsc[k] > 0.0 ? h : h * DN_UNKNOWN_W;
+                        sum[k] += hc * c[k]; ws[k] += hc;
+                    }
+                    continue;
+                }
+                const DnGeom gq = dnGeom(q, par);
+                if (gq.z <= 0.0) continue;
+                const float dz = dot(g.grad, vec2(off));
+                const float wg = h * exp(-abs(gq.z - (g.z + dz)) / (dp.prm1.x * (abs(dz) + 0.002 * g.z) + 1e-4))
+                               * pow(max(dot(g.n, gq.n), 0.0), dp.prm1.y);
+                if (!(wg > 1e-6)) continue;
+                const uvec4 qs = imageLoad(uDnGeom, ivec3(q, gl));
+                const vec4 qv = dnSrc(q, L);
+                for (uint k = 0u; k < PDN_SPLIT_MAX; ++k)
+                {
+                    if (!on[k]) continue;
+                    const int jj = pdnSplitFind(qs.xy, cid[k]);
+                    if (jj < 0) continue;
+                    const float v = qv[jj];
+                    const float w = wg * dnConf(pdnSplitHistLen(pdnSplitWord(qs.zw, uint(jj))))
+                                  * exp(-lsc[k] * abs(v - c[k]) / phi[k]);
+                    if (w > 1e-6) { sum[k] += w * v; ws[k] += w; }
+                }
+            }
+        for (uint k = 0u; k < PDN_SPLIT_MAX; ++k)
+            if (on[k] && ws[k] > 0.0) o[k] = sum[k] / ws[k];
+    }
+    o = clamp(o, vec4(0.0), vec4(1.0));
+    o = mix(o, vec4(1.0), isnan(o));   // (NaN -> lit)
+    dnDst(m, L, o);
+    if (last)
+        imageStore(uDnGeom, ivec3(m, PDN_SPLIT_GEOM_FINAL),
+                   uvec4(cur.xy, pdnSplitPack4(uvec4(pdnSplitFinalPack(o.x), pdnSplitFinalPack(o.y),
+                                                     pdnSplitFinalPack(o.z), pdnSplitFinalPack(o.w)))));
+    return o;
+}
+// RenderVKDenoiseDebug 8 / 9: the slots in 4-texel diagonal bands (cycling through the slots in
+// use), each band the hue of its light's id (9: x its denoised visibility); near-black = no split
+// light at this texel.
+vec3 dnSplitDebug(uint dbg, ivec2 m, uvec2 ids, vec4 v)
+{
+    uint n = 0u;
+    for (uint k = 0u; k < PDN_SPLIT_MAX; ++k) if (pdnSplitWord(ids, k) != 0u) n = k + 1u;
+    if (n == 0u) return vec3(0.03);
+    const uint k = (uint(m.x + m.y) / 4u) % n;
+    const uint id = pdnSplitWord(ids, k);
+    if (id == 0u) return vec3(0.03);
+    const vec3 hue = pdnSplitHue(id);
+    return dbg == PDN_DBG_SPLIT_ID ? hue : hue * clamp(v[k], 0.0, 1.0);
+}
+
+void main()
+{
+    const ivec2 m = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 D = ivec2(dp.dims.xy);
+    if (any(greaterThanEqual(m, D))) return;
+    const uint k = dp.ctl.y;
+    const bool last = k + 1u >= dp.ctl.z;
+    const uint dbg = dnDebug();
+    const uint par = dnParity();
+    const DnGeom g = dnGeom(m, par);
+    const vec4 cD = dnSrc(m, 0), cS = dnSrc(m, 1);
+    // (#869) the split lights' own visibility (its own stops; also on a texel without surface:
+    // the consumer's GEOM layer 4 is cleared there)
+    vec4 spV = vec4(1.0);
+    uvec2 spIds = uvec2(0u);
+    if (dnSplitOn()) spV = dnSplitAtrous(m, D, par, g, k, last, spIds);
+    if (g.z <= 0.0)
+    {
+        dnDst(m, 0, vec4(0.0));   // (a = 0: no depth for the consumer's upsample)
+        dnDst(m, 1, vec4(0.0));
+        if (dnSunOn()) dnDst(m, 2, vec4(1.0, 1.0, 1.0, last ? -1.0 : 0.0));   // (sun: lit, no surface)
+        return;
+    }
+    if (dnSunOn()) dnSunAtrous(m, D, par, g, k, last);   // (the merged RT shadow pass's sun / moon)
+    vec3 oD = cD.rgb, oS = cS.rgb;
+    float ovD = cD.a, ovS = cS.a;
+    // (DN_F_INFO) an UNKNOWN centre (length 0: never sampled, no estimate -- its value is the
+    // producer's default): weight DN_UNKNOWN_W and no luminance stop anchored on it, so its
+    // neighbours' geometry-stopped mean fills it; filled = it took neighbour weight.
+    const bool unkD = dnConf(pdnMetaLenD(g.meta)) < 1.0, unkS = dnConf(pdnMetaLenS(g.meta)) < 1.0;
+    bool fillD = !unkD;
+    // COST TRIMS: the 3x3 variance prefilter on the first iteration only (later ones read their
+    // already filtered variance), and no taps at all where nothing is left to filter -- no light
+    // (W 0) or a converged, noise-free texel (both variances ~0: fully lit / fully shadowed
+    // visibility, most of a converged frame).
+    const bool rawV = dnRawView();
+    const vec2 gv = (k == 0u && !rawV) ? dnPrefilterVar(m, D) : vec2(cD.a, cS.a);
+    // (#869 / #85) a ReSTIR-converged diffuse (GEOM meta bit 15) takes only dnConvIters() iterations
+    const uint convIt = dnConvIters();
+    const bool diffOn = convIt == 0u || !pdnMetaConv(g.meta) || k < convIt;
+    // (an unknown centre is never idle: its zero variance is no estimate's)
+    const bool idle = !(pdnMetaW(g.meta) > 0.0) || (gv.x < 1e-6 && gv.y < 1e-6 && !unkD && !unkS)
+                   || (!diffOn && k >= pdnMetaSpecIt(g.meta));
+    if (!rawV && !idle)
+    {
+        // (DN_HFIX_SHIFT) a YOUNG centre (a disocclusion, history < N frames): the luminance stop
+        // widened (up to 3x for a 1-frame history) and its taps weighted by their history length
+        // relative to its own (1 .. DN_HFIX_MAXW) -- converged neighbours fill it, ReBLUR's history fix
+        const float lcD = pdnMetaLenD(g.meta), lcS = pdnMetaLenS(g.meta);
+        const float yD = unkD ? 0.0 : dnYouth(lcD), yS = unkS ? 0.0 : dnYouth(lcS);
+        const float phiD = (dp.prm0.w * sqrt(max(gv.x, 0.0)) + 1e-4) * (1.0 + 2.0 * yD);
+        const float phiS = (dp.prm0.w * sqrt(max(gv.y, 0.0)) + 1e-4) * (1.0 + 2.0 * yS);
+        const float lD = pdnLum(cD.rgb), lS = pdnLum(cS.rgb);
+        const float lsD = unkD ? 0.0 : 1.0, lsS = unkS ? 0.0 : 1.0;   // (the luminance stop's scale)
+        const bool specOn = k < pdnMetaSpecIt(g.meta);
+        const float pS = mix(256.0, 32.0, smoothstep(0.0, 0.6, g.rough));   // specular normal power
+        const int step = 1 << int(min(k, 7u));
+        vec3 sD = vec3(0.0), sS = vec3(0.0);
+        float wD = 0.0, wS = 0.0, vD = 0.0, vS = 0.0, nbD = 0.0;
+        for (int j = -2; j <= 2; ++j)
+            for (int i = -2; i <= 2; ++i)
+            {
+                const ivec2 o = ivec2(i, j) * step;
+                const ivec2 q = m + o;
+                if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, D))) continue;
+                const float h = kB3[i + 2] * kB3[j + 2];
+                if (o == ivec2(0))
+                {
+                    const float hd = unkD ? h * DN_UNKNOWN_W : h, hs = unkS ? h * DN_UNKNOWN_W : h;
+                    if (diffOn) { sD += hd * cD.rgb; vD += hd * hd * cD.a; wD += hd; }
+                    if (specOn) { sS += hs * cS.rgb; vS += hs * hs * cS.a; wS += hs; }
+                    continue;
+                }
+                const DnGeom gq = dnGeom(q, par);
+                if (gq.z <= 0.0) continue;
+                const float dz = dot(g.grad, vec2(o));
+                const float wz = exp(-abs(gq.z - (g.z + dz)) / (dp.prm1.x * (abs(dz) + 0.002 * g.z) + 1e-4));
+                const float nn = max(dot(g.n, gq.n), 0.0);
+                const vec4 qD = diffOn ? dnSrc(q, 0) : vec4(0.0);
+                // (DN_F_INFO) every tap counts -- an unknown one at DN_UNKNOWN_W (dnConf); the
+                // depth plane and the normal stop what lies across a wall
+                float w0 = diffOn ? h * wz * pow(nn, dp.prm1.y) * dnConf(pdnMetaLenD(gq.meta))
+                                    * exp(-lsD * abs(pdnLum(qD.rgb) - lD) / phiD) : 0.0;
+                w0 *= yD > 0.0 ? clamp(pdnMetaLenD(gq.meta) / max(lcD, 1.0), 1.0, DN_HFIX_MAXW) : dnMaturity(pdnMetaLenD(gq.meta));
+                if (w0 > 1e-6) { sD += w0 * qD.rgb; vD += w0 * w0 * qD.a; wD += w0; if (dnConf(pdnMetaLenD(gq.meta)) >= 1.0) nbD += w0; }   // (fill: known taps only)
+                if (specOn)
+                {
+                    const vec4 qS = dnSrc(q, 1);
+                    float w1 = h * wz * pow(nn, pS) * exp(-8.0 * abs(g.rough - gq.rough)) * dnConf(pdnMetaLenS(gq.meta))
+                             * exp(-lsS * abs(pdnLum(qS.rgb) - lS) / phiS);
+                    w1 *= yS > 0.0 ? clamp(pdnMetaLenS(gq.meta) / max(lcS, 1.0), 1.0, DN_HFIX_MAXW) : dnMaturity(pdnMetaLenS(gq.meta));
+                    if (w1 > 1e-6) { sS += w1 * qS.rgb; vS += w1 * w1 * qS.a; wS += w1; }
+                }
+            }
+        if (diffOn) { oD = sD / wD; ovD = vD / (wD * wD); }   // (wD >= the centre's h DN_UNKNOWN_W > 0)
+        fillD = fillD || nbD > 1e-4;
+        if (specOn && wS > 0.0) { oS = sS / wS; ovS = vS / (wS * wS); }
+    }
+    if (last)
+    {
+        // The consumer's view: depth in the diffuse alpha (its upsample), debug overrides.
+        if (dbg == PDN_DBG_LEN)
+        {
+            oD = vec3(pdnMetaLenD(g.meta) / max(dp.prm0.x, 1.0), pdnMetaLenS(g.meta) / max(dp.prm0.y, 1.0),
+                      float(pdnMetaSpecIt(g.meta)) / 7.0);
+            oS = vec3(0.0);
+        }
+        else if (dbg == PDN_DBG_VAR)
+        {
+            const vec2 gv = dnPrefilterVar(m, D);
+            oD = vec3(clamp(sqrt(max(gv.x, 0.0)) / max(pdnLum(cD.rgb), 1e-3), 0.0, 1.0),
+                      clamp(sqrt(max(gv.y, 0.0)) / max(pdnLum(cS.rgb), 1e-3), 0.0, 1.0), 0.0);
+            oS = vec3(0.0);
+        }
+        else if (dnSplitOn() && (dbg == PDN_DBG_SPLIT_ID || dbg == PDN_DBG_SPLIT_RATIO))   // (#869: the split lights)
+        {
+            oD = dnSplitDebug(dbg, m, spIds, spV);
+            oS = vec3(0.0);
+        }
+        // (DN_F_INFO) a texel still UNKNOWN (length 0 and no neighbour filled it this iteration)
+        // hands the consumer its depth NEGATED: its upsample down-weights that tap (deferPdnFetch);
+        // every other texel -- a history, a seeded or a filled estimate -- is an ordinary tap
+        dnDst(m, 0, vec4(pdnSane(oD), fillD ? g.z : -g.z));
+        dnDst(m, 1, vec4(pdnSane(oS), min(ovS, 60000.0)));
+        return;
+    }
+    dnDst(m, 0, vec4(pdnSane(oD), min(ovD, 60000.0)));
+    dnDst(m, 1, vec4(pdnSane(oS), min(ovS, 60000.0)));
+}

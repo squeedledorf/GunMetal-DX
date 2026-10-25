@@ -1,0 +1,88 @@
+#version 450
+// vkclean — dynamic exposure (LL luminanceF + exposureF). Averages the scene
+// luminance over LL's sample window (the centre 60% of the screen, nudged down to
+// favour ground over sky), maps it into [exp_min, exp_max] and eases the 1x1
+// exposure value toward it over time. The tonemap pass reads the result.
+//
+// LUMINANCE WEIGHTING (#28, LL luminanceF): non-sky pixels are scaled by
+// RenderDiffuseLuminanceScale (LL: objects but not the sky, "prevents underexposing when
+// looking at bright environments while still allowing for realistically bright skies");
+// the sky is the reversed-Z far plane (LL keys it off the G-buffer HDRI / skip-atmos flags,
+// so LL also leaves fullbright faces unscaled -- here they scale like other surfaces).
+// The glow LL adds (its emissive / glow buffer) is the HDR bloom here, weighted as the
+// tonemap composites it. 1024 bilinear taps (each 16x16 cell sampled 2x2) stand in for
+// LL's mip-8 average of a full-resolution luminance map: far less shimmer than one
+// point tap per cell on high-frequency scenes.
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0) uniform sampler2D uHdr;
+layout(set = 0, binding = 1, r32f) uniform image2D uExposure;
+layout(set = 1, binding = 0) uniform sampler2D uDepth;   // world depth (reversed-Z: sky = 0)
+layout(set = 1, binding = 1) uniform sampler2D uBloom;   // HDR bloom mip 0 (when params3.z > 0)
+
+layout(push_constant) uniform Push {
+    vec4 params;    // coefficient (max_L), exp_min, exp_max, speed_error
+    vec4 params2;   // speed_target, dt, reset (1 = snap), 0
+    vec4 params3;   // diffuse luminance scale, sky detect (1 = depth bound), bloom weight, 0
+} pc;
+
+shared float s_lum[256];
+
+void main()
+{
+    uint li = gl_LocalInvocationIndex;
+    float acc = 0.0;
+    for (uint k = 0u; k < 4u; ++k)
+    {
+        vec2 tc = (vec2(gl_LocalInvocationID.xy) + vec2(0.25 + 0.5 * float(k & 1u), 0.25 + 0.5 * float(k >> 1u))) / 16.0;
+        tc = tc * 0.6 + 0.2;
+        tc.y -= 0.1;
+        // Vulkan image row 0 is the TOP; LL's tc.y is bottom-up, so "down" = +y here.
+        tc.y = 1.0 - tc.y;
+        vec3 c = textureLod(uHdr, tc, 0.0).rgb;
+        // Reversed-Z: the sky dome sits at ~1e-5 (clean_flarestate.frag); 2e-5 keeps
+        // surfaces out to ~2 km counted as surfaces (farther ones read as sky).
+        if (pc.params3.y > 0.5 && textureLod(uDepth, tc, 0.0).r > 2e-5)
+            c *= pc.params3.x;   // a surface, not the sky
+        if (pc.params3.z > 0.0)
+            c += textureLod(uBloom, tc, 0.0).rgb * pc.params3.z;
+        // NaN / Inf safety: one bad texel must not poison the 1x1 value every later frame
+        // eases from (max() with a NaN operand is implementation-defined).
+        float lum = dot(c, vec3(0.2126, 0.7152, 0.0722));
+        acc += (isnan(lum) || isinf(lum)) ? 0.0 : clamp(lum, 0.0, 65504.0);
+    }
+    s_lum[li] = acc * 0.25;
+    barrier();
+    for (uint s = 128u; s > 0u; s >>= 1u)
+    {
+        if (li < s) s_lum[li] += s_lum[li + s];
+        barrier();
+    }
+    if (li != 0u) return;
+
+    float L = s_lum[0] / 256.0;
+    float max_L = max(pc.params.x, 1e-4);
+    L = clamp(L, 0.0, max_L) / max_L;
+    L = L * L;
+    float s = mix(pc.params.z, pc.params.y, L);
+    // The adapted value always stays inside [exp_min, exp_max] (or 1 when those are bad).
+    const float lo = min(pc.params.y, pc.params.z), hi = max(pc.params.y, pc.params.z);
+    const bool range_ok = !(isnan(lo) || isinf(lo) || isnan(hi) || isinf(hi)) && hi > 0.0;
+    float prev = imageLoad(uExposure, ivec2(0)).r;
+    // A non-finite / non-positive previous value can't be eased from: snap.
+    const bool prev_ok = !(isnan(prev) || isinf(prev)) && prev > 0.0;
+    if (pc.params2.z < 0.5 && prev_ok)
+    {
+        float speed = -log(max(pc.params.w, 1e-4)) / max(pc.params2.x, 1e-4);
+        float dt = pc.params2.y;
+        dt = (isnan(dt) || isinf(dt)) ? 0.0 : clamp(dt, 0.0, 1.0);
+        s = mix(prev, s, 1.0 - exp(-speed * dt));
+    }
+    // Bounded by the range AND the (finite) previous value, so a range change (sky
+    // switch, legacy parcel) still eases over speed_target instead of popping.
+    if (isnan(s) || isinf(s)) s = prev_ok ? prev : (range_ok ? hi : 1.0);
+    const float blo = range_ok ? (prev_ok ? min(lo, prev) : lo) : (prev_ok ? min(prev, 1.0) : 1.0);
+    const float bhi = range_ok ? (prev_ok ? max(hi, prev) : hi) : (prev_ok ? max(prev, 1.0) : 1.0);
+    s = clamp(s, max(blo, 1e-4), max(bhi, 1e-4));
+    imageStore(uExposure, ivec2(0), vec4(s));
+}

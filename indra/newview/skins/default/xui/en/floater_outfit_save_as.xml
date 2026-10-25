@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<floater
+ can_close="true"
+ can_minimize="false"
+ height="175"
+ layout="topleft"
+ title="SAVE OUTFIT"
+ name="modal container"
+ width="300">
+    <string name="default_name">[DESC] (new)</string>
+    <string name="root_folder">My Outfits</string>
+    <text
+     type="string"
+     length="1"
+     follows="left|top"
+     height="30"
+     layout="topleft"
+     left="20"
+     word_wrap="true"
+     name="Save item as:"
+     top="10"
+     width="260">
+        Save what I'm wearing
+as a new Outfit:
+    </text>
+    <line_editor
+     type="string"
+     length="1"
+     border_style="line"
+     border_thickness="1"
+     follows="left|top"
+     height="23"
+     layout="topleft"
+     left_delta="0"
+     show_text_as_tentative="false"
+     top_pad="0"
+     max_length_bytes="63"
+     name="name ed"
+     width="260">
+        [DESC] (new)
+    </line_editor>
+    <text
+     type="string"
+     length="1"
+     follows="left|top"
+     height="16"
+     layout="topleft"
+     left_delta="0"
+     name="folder_label"
+     top_pad="8"
+     width="260">
+        In folder:
+    </text>
+    <combo_box
+     follows="left|top"
+     height="23"
+     layout="topleft"
+     left_delta="0"
+     name="folder_combo"
+     top_pad="0"
+     width="260" />
+    <button
+     height="23"
+     label="Save"
+     label_selected="Save"
+     layout="topleft"
+     left="20"
+     name="Save"
+     top_pad="10"
+     width="100" />
+    <button
+     height="23"
+     label="Cancel"
+     label_selected="Cancel"
+     layout="topleft"
+     left_pad="60"
+     name="Cancel"
+     top_delta="0"
+     width="100" />
+</floater>

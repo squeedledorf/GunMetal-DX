@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<!--
+The shape editor out of the Appearance sidebar (SLFloaterShapeEditor). The
+sidebar is 313 wide, enough for one panel; this window has room for two or
+four. The editor panel (panel_shape_editor.xml) is moved into "editor_body" in
+C++ and back to the Shape page when the window closes. The window's minimum
+size follows the editor's layout.
+-->
+<floater
+ width="680"
+ height="620"
+ min_width="344"
+ min_height="300"
+ layout="topleft"
+ name="floater_shape_editor"
+ help_topic="edit_wearable"
+ positioning="cascading"
+ title="Shape Editor"
+ single_instance="true"
+ save_rect="true"
+ can_resize="true">
+	<panel
+	 follows="all"
+	 layout="topleft"
+	 left="2"
+	 top="18"
+	 width="676"
+	 height="600"
+	 background_visible="false"
+	 name="editor_body" />
+</floater>

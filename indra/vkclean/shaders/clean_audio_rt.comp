@@ -1,0 +1,1001 @@
+#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_GOOGLE_include_directive : require
+// vkclean -- ACOUSTICS PROBE (#683 phase 0; vkgfx/llcleanaudiortvk.h, newview/llcleanacoustics.h).
+// One workgroup per frame against the renderer's scene TLAS (LLCleanRTVK), no hit shading:
+//
+//   * ROOM: AC_ROOM_RAYS rays from the listener over the whole sphere (spherical Fibonacci,
+//     rotated / jittered per frame by the push seed so the CPU's temporal average covers
+//     the sphere densely). Closest hit up to `listener.w` metres, ALPHA-MASK geometry
+//     included and alpha-tested like the raster's cut-out (foliage, hedges, fences block
+//     only where their texture renders), and with ALPHA BLOCKS on (pc.info.w bit 1,
+//     AudioAcousticsAlphaBlocks) ALPHA-BLEND geometry too: any visible alpha at the hit
+//     blocks and reflects (glass), only fully transparent faces / texels pass
+//     (rtWorldBlockCandidate, clean_rt_common.glsl). Per ray (AcRoomHit):
+//       - the hit distance (< 0 = miss) and the ray's world z (the CPU separates floor rays
+//         from wall / roof ones);
+//       - the hit's clean Instance id (the CPU resolves it to the prim's PHYSICAL material,
+//         LLPrimitive::getMaterial: stone / metal / glass / wood / flesh / plastic / rubber
+//         -- the one acoustic fact SL content carries) or AC_NO_INSTANCE;
+//       - a SURFACE HARDNESS HINT from the render material: 1 = metallic, very smooth
+//         (polished) dielectric, or a legacy material with environment reflection / high
+//         gloss; 0 = nothing says hard; -1 = terrain. Visual roughness is NOT acoustic
+//         absorption (concrete is visually rough and acoustically hard), so roughness only
+//         counts at the polished end; -2 = WATER (#953). One material fetch per hit; textured PBR / legacy
+//         specular maps are read ONCE at their smallest mip (the map's average), because
+//         textured glTF carries metallicFactor 1 and the factor alone would call every
+//         ORM-textured wood plank metal;
+//       - kind: 1 = the hit is an ALPHA-MASK instance (foliage: the CPU treats it as a soft,
+//         scattering, partly open surface unless the prim's physical material says hard;
+//         its hardness hint is not computed -- leaf gloss says nothing acoustically),
+//         2 = an ALPHA-BLEND instance (glass class on the CPU), 0 = opaque / terrain / miss;
+//       - a CLUTTER score (geometric, material-independent): the ray's three angular
+//         neighbours (Fibonacci index offsets 3 / 5 / 8 / 13) whose directions enclose it
+//         span a triangle of hit points; on a flat wall the ray lands exactly on it, and a
+//         convex (bare) room from inside always lands ON or BEYOND it (edges, corners).
+//         Landing in FRONT of it (deficit = 1 - d / d_plane) only happens on things that
+//         stick out into the room: furniture, shelves, log bulges, pillars. Score =
+//         smoothstep(0.03, 0.10, deficit); < 0 = no enclosing all-hit triangle.
+//   * OCCLUSION: one ray per traced source, listener -> source (jittered by up to 0.3 m
+//     across the line per frame: the CPU's average of the 0/1 answers is a soft fraction),
+//     ending `margin` metres short of the source so the emitter's own prim does not count.
+//     Out: the closest OPAQUE / terrain blocking hit distance (< 0 = clear) and, with alpha
+//     blocks on, the NEAREST visible alpha-blend and alpha-mask surface crossed (instance
+//     ids; never committed, so a glass pane in front of a stone wall still reports the
+//     wall): the CPU weighs glass as a thin pane and foliage as see-through, by the prim's
+//     physical material.
+//
+// OCCLUSION occluders: static opaque geometry and terrain (RT_MASK_OPAQUE | RT_MASK_TERRAIN,
+// committed by hardware); alpha blocks on adds RT_MASK_ALPHAMASK | RT_MASK_BLEND as
+// recorded candidates (RT_MASK_WORLD_BLOCK). Alpha blocks off = the old forced-opaque ray.
+// ROOM rays: RT_MASK_OPAQUE | RT_MASK_TERRAIN | RT_MASK_ALPHAMASK, + RT_MASK_BLEND with
+// alpha blocks on, + RT_MASK_WATER (#953: AC_ROOM_HIT_MASK; the water surface REFLECTS --
+// hint -2, the CPU scores it with the water class, as the bounce pass does -- instead of the
+// ray passing it and scoring the bed as terrain, or escaping over deep water as open area).
+// The same closest-hit mask for the source-room / guided RAY queries' first walk. Water never
+// BLOCKS: the occlusion rays, every shadow / visibility ray and the SEGMENT queries leave it
+// out (an air / water crossing is the CPU's per-source medium test, #953, not a wall). Every
+// avatar class (rigged, worn attachments, the agent's own) is left out of all of them --
+// sound passes them, and an avatar between the ears and a speaker must not muffle it;
+// avatar-owned BLEND faces share the blend class and are rejected in the candidate loop
+// (rtAvatarOwned). Instance ids go through rtHitInstance (blend rig groups exist in the
+// blend class).
+//
+// Set 0 = the RT consumer set (LLCleanRTVK::consumerLayout, clean_rt_common.glsl with
+// RT_SET 0); set 1 = the draw set 1 (bindless uTextures). The slot record (input sources
+// + outputs) is a host-visible buffer reached by device address; byte layout = AcSlot in
+// llcleanaudiortvk.cpp (static_assert'd).
+//
+//   * DIFFRACTION (#858, room frames, workgroup 0): each room ray's hit point P, stepped
+//     back 0.05 m along the ray (no normal needed), casts one shadow ray to each listed
+//     occluded source (dsrc, <= AC_MAX_DIFF; next-event estimation as in path tracing).
+//     Out per (room ray, source): |P - source| when nothing blocks (a one-bounce path
+//     listener -> P -> source exists: a doorway, a corner), < 0 otherwise. The CPU reduces
+//     (best detour, path count, apparent direction). Shadow rays use the room mask, first
+//     hit ends them (conservative: foliage / visible glass block an indirect path).
+//   * PATH QUERIES (#857 / #858, workgroups 1..AC_MAX_QUERIES/64, only as many as listed):
+//     a CPU-built list (qinfo.x entries), one query per lane, two kinds:
+//       - RAY (a.w > 0): trace from a.xyz along d.xyz (tmin d.w) up to a.w with the room
+//         mask; the end point P is the hit stepped back 0.1 m, or for a miss a.xyz + d * e.x.
+//         Then ONE visibility ray P -> b.xyz (ending b.w short: the target's own prim). Used
+//         for the source-room probe (from a source, target the listener: room estimate +
+//         coupling + one-bounce paths) and for guided path discovery (importance-sampled
+//         toward earlier paths and openings, either end).
+//       - SEGMENT (a.w <= 0): is the segment a.xyz -> b.xyz clear (ending b.w short)? The
+//         cached-path re-validation (each leg of a one- / two-bounce path) and the
+//         two-bounce joins between portal candidates.
+//     Out (AcQueryHit): hit distance (< 0 miss / segment), the tested point, visibility
+//     (|P - b| when clear, < 0 blocked), and for a hit the instance / hint / kind like the
+//     room rays (the RAY walk sees water as the room rays do, #953). Every shadow / visibility
+//     ray: room mask (no water), first hit ends it.
+//
+//   * BOUNCE PASS (#683 phase 1, AudioAcousticsBounce; a SECOND dispatch of this pipeline with
+//     pc.info.w bit 2 set, its own c_audio_bounce timer mark): multi-bounce ENERGY tracing for the
+//     reverb. Up to AC_MAX_BOUNCE_SETS ray sets: set 0 = the listener, the others = a few sound
+//     sources (#857: the source's own room); one lane = one ray, one workgroup = 64 rays of one
+//     set (bset[].cfg.y = the set's first workgroup). Origin = receiver (listener-centric, or
+//     source-centric for a source's room). Per ray, up to binfo.z (<= 8) bounces:
+//       - closest hit with the room mask + WATER (sound reflects off water; it never blocks),
+//         alpha-tested as the room rays; the hit's GEOMETRIC normal (rtTriPositions; a
+//         degenerate / unreadable triangle falls back to facing the ray);
+//       - the hit's MATERIAL CLASS: terrain / water by instance flag, else the CPU's
+//         instance -> class hash (bmat: the prim's physical material, as the CPU resolved it
+//         for the room rays / probes), alpha-blend = glass and alpha-mask = foliage unless the
+//         class says hard, default wood; the render-material hardness hint pulls the class's
+//         absorption toward hard (as the CPU does). bclass[class] = 3-band absorption
+//         (low ~250 Hz / mid ~1 kHz / high ~5 kHz: EAX's LF / HF references) + scattering;
+//       - air absorption per band over each segment (bair, energy per metre);
+//       - DIFFUSE RAIN (next-event estimation): from every hit, a shadow ray back to the
+//         receiver (bounce 1 needs none: it came from there); a Lambertian share
+//         scattering x cos x (r / d)^2 (r = bparam.x, the receiver radius; capped at 0.5)
+//         lands at t = (path + d) / c. SPECULAR returns: a segment leaving a specular
+//         reflection that passes within r of the receiver lands its whole energy.
+//         Energy-weighted arrival directions (from the receiver toward the arrival) are summed
+//         separately for orders 1-2 (early reflections) and >= 3 (late field);
+//       - the next direction: specular with probability 1 - scattering, else cosine-weighted
+//         about the normal (energy unchanged: the choice is the estimator);
+//       - a ray that hits nothing within bparam.y ESCAPES (open area: its energy is lost).
+//     Per workgroup a partial record (AC_PART_WORDS, accumulated in shared memory with
+//     integer atomics, fixed point AC_FIX per unit of ray energy, each ray starting at 1):
+//       hist[3][256]  per band, 5 ms bins (0 .. 1.28 s; later arrivals are dropped);
+//       early[128]    orders 1-2, mid band, 1 ms bins (the last bin holds everything later);
+//       late[64]      orders >= 3, mid band, 5 ms bins (the last bin holds everything later);
+//       cap[64]       rays ended by the bounce cap, by path time, 20 ms bins (the CPU's
+//                     survival correction / valid window of the echogram);
+//       early / late direction sums (signed); per band the energy arriving at hits, absorbed,
+//       escaped and lost to the air; counters: rays, hits, escapes, capped, shadow rays that
+//       saw the receiver, specular detections, the hit segments' total length (1/16 m).
+//     The CPU sums the partials, smooths them over time and fits the decay (llcleanacoustics.cpp).
+//   * EARLY-GAIN SETS (#683 early gain; bset[].cfg.z bit 0 = AC_SET_TO_LISTENER): rays from a
+//     SOURCE whose receiver is the LISTENER (pc.listener) instead of the origin -- the reflected
+//     energy that source sends to the listener, which the CPU adds to its direct level. The same
+//     estimator (diffuse rain + specular near-passes), with: a shadow ray at bounce 1 as well (the
+//     first hit did not come from the receiver); the set's own bounce cap (cfg.z bits 8..15) and
+//     receiver radius (bits 16..31, cm: larger for far listeners, fewer but unbiased-in-ratio
+//     detections -- the CPU's free-field reference uses the same sphere); and the FIRST-ORDER
+//     FLOOR / GROUND reflection left out (a first hit on terrain / water or a surface facing up,
+//     n.z > AC_FLOOR_NZ): the plain distance model already stands for "a sound over a floor", so
+//     open ground must not read as a boost. The direct segment never deposits (as before).
+//
+//   * LYING SNOW (#930, AudioAcousticsSnowAbsorb; the AC_SNOW variant of this shader, used only
+//     while snow lies and the weather's snow grids are published -- without it nothing below
+//     exists and every answer is today's). Set 2 = the weather's PUBLISHED snow depth grids, read
+//     only (LLCleanWeatherVK::acousticsSnow; the snow kernels write the other image of each pair
+//     this recording, and recordSnow's tail barrier makes last step's writes visible here): the
+//     inner cover grid (.a the snow depth, m), its filtered base (.x the base, m below the grid's
+//     top plane; D lies on THAT surface, as the snow mesh draws it) and the outer ring (.x base,
+//     .y depth; ~0.5 m texels out to ~64 m). Frames in the slot record (sfr). Per committed hit
+//     (room rays, source-room / guided RAY queries, every bounce / early-gain hit) ONE column
+//     lookup -- see acSnowHit for the rule -- gives (w, packed): w = how much the hit is snow
+//     (0 bare .. 1 at >= 10 cm, x the strength), packed = the compaction proxy. Room rays and
+//     queries return it (rsnow / qsnow) for the CPU's room model; the bounce pass blends the
+//     hit's class toward bclass[ACC_SNOW] / [ACC_SNOW_PACKED] (the CPU folds the wetness in).
+//     The snow mesh is NOT in the TLAS, so rays pass through drifts and hit the ground / wall
+//     under them: the depth at the hit's column says what really lies there.
+layout(local_size_x = 64) in;
+
+#define AC_ROOM_RAYS   64u
+#define AC_MAX_SOURCES 64u   // = the 64 lanes of workgroup 0 (one occlusion ray per lane): 30 channels + 34 channel-less (#892 speakers up to 32, #783 thunder)
+#define AC_NO_INSTANCE 0xFFFFFFFFu
+#define AC_MAX_DIFF       4u
+#define AC_MAX_QUERIES    128u   // = 2 workgroups
+
+// ---- #683 phase 1 bounce pass (see BOUNCE PASS above; llcleanaudiortvk.cpp mirrors all of it) ----
+#define AC_MAX_BOUNCE_SETS 5u      // listener + 4 sources
+#define AC_MAX_BOUNCE_WG   32u     // workgroups of the bounce dispatch (64 rays each)
+#define AC_MAX_BOUNCES     8u
+#define AC_PART_WORDS      1056u   // one workgroup's partial record (uint words)
+#define ACP_HIST   0u      // 3 x AC_BINS, band-major
+#define ACP_EARLY  768u    // AC_EBINS
+#define ACP_LATE   896u    // AC_LBINS
+#define ACP_CAP    960u    // AC_CBINS
+#define ACP_EDIR   1024u   // 3 (signed, two's complement)
+#define ACP_LDIR   1027u   // 3 (signed)
+#define ACP_EPRE   1030u   // 3: energy arriving at hits (before absorption)
+#define ACP_EABS   1033u   // 3: absorbed at hits
+#define ACP_EESC   1036u   // 3: escaped (open area)
+#define ACP_EAIR   1039u   // 3: lost to the air
+#define ACP_CNT    1042u   // rays, hits, escapes, capped, NEE visible, specular detections, segment length (1/16 m)
+#define AC_BINS    256u
+#define AC_BIN_S   0.005
+#define AC_EBINS   128u
+#define AC_EBIN_S  0.001
+#define AC_LBINS   64u
+#define AC_CBINS   64u
+#define AC_CBIN_S  0.02
+#define AC_FIX     1048576.0   // 2^20 per unit of energy: a workgroup bin stays < 2^31 (64 rays x 8 bounces x 2 deposits <= 1)
+#define AC_CLASSES   16u
+#define AC_MAT_SLOTS 256u
+#define AC_INST_TOMB 0xFFFFFFFEu   // a retired hash entry: never matches, never ends a probe
+#define ACC_WOOD    0u   // (the SL default prim material; also "light" and anything unknown)
+#define ACC_STONE   1u
+#define ACC_METAL   2u
+#define ACC_GLASS   3u
+#define ACC_FLESH   4u
+#define ACC_PLASTIC 5u
+#define ACC_RUBBER  6u
+#define ACC_TERRAIN 7u
+#define ACC_FOLIAGE 8u
+#define ACC_WATER   9u
+#define ACC_SNOW        10u   // #930 (AC_SNOW): fresh lying snow (the CPU folds wetness / slush in)
+#define ACC_SNOW_PACKED 11u   // #930: packed snow (footprints, tracks)
+#define ACC_NONE    0xFFu
+#define AC_SET_TO_LISTENER 1u    // bset[].cfg.z bit 0: the receiver is the listener (early gain)
+#define AC_FLOOR_NZ 0.9          // early-gain sets: a first-order reflection off a surface this upward is the floor
+
+layout(set = 1, binding = 0) uniform sampler2D uTextures[];
+#define RT_SET 0
+#include "clean_rt_common.glsl"
+#ifdef AC_SNOW
+// #930: the weather's PUBLISHED snow grids (read only; see LYING SNOW above).
+layout(set = 2, binding = 0, rgba32f) uniform readonly image2D uAcCover;   // inner grid: a = snow depth (m)
+layout(set = 2, binding = 1, rg32f)   uniform readonly image2D uAcBase;    // inner grid: x = filtered base (m below the top plane)
+layout(set = 2, binding = 2, rgba32f) uniform readonly image2D uAcRing;    // outer ring: x = base (m below its top plane), y = depth (m)
+#endif
+
+#define AC_MASK      (RT_MASK_OPAQUE | RT_MASK_TERRAIN)   // occlusion rays, alpha blocks off
+#define AC_ROOM_MASK (AC_MASK | RT_MASK_ALPHAMASK)        // room-class shadow / visibility rays (alpha-tested); + RT_MASK_BLEND with alpha blocks
+#define AC_ROOM_HIT_MASK(m) ((m) | RT_MASK_WATER)         // #953: room rays / RAY queries' closest hit: + the water surface (reflects, never blocks)
+
+struct AcRoomHit {
+    float dist;      // hit distance (< 0 miss)
+    float dir_z;     // the ray's world z
+    uint  inst;      // clean Instance id of the hit (AC_NO_INSTANCE: miss / unresolvable)
+    float hint;      // surface hardness hint 0..1, -1 terrain, -2 water (#953)
+    float clutter;   // geometric clutter score 0..1 (< 0: no enclosing neighbour triangle)
+    float kind;      // 1 = alpha-mask (foliage) hit, 2 = alpha-blend (glass) hit, 0 = other / miss
+    float dir_x, dir_y;   // the ray's world x / y (#858: the CPU rebuilds the hit point)
+};
+
+// #857 / #858 path query (64 B, in) and its answer (32 B, out). See PATH QUERIES above.
+struct AcQuery {
+    vec4 a;          // xyz origin; w > 0: RAY range (m), <= 0: SEGMENT a -> b
+    vec4 b;          // xyz visibility target; w end margin at the target (m)
+    vec4 d;          // RAY: xyz unit direction, w tmin (m)
+    vec4 e;          // RAY: x miss end distance (m); yzw unused
+};
+struct AcQueryHit {
+    float dist;      // RAY hit distance (< 0 miss); SEGMENT -1
+    float vis;       // |P - b| when P -> b is clear, < 0 blocked
+    uint  inst;      // the hit's instance (AC_NO_INSTANCE: none)
+    float hint;
+    float kind;
+    float px, py, pz;   // the tested point P (agent space)
+};
+
+// #683 phase 1: one bounce ray set (32 B).
+struct AcBounceSet {
+    vec4  origin;    // xyz origin (agent space; = receiver unless z bit 0), w first segment's tmin (the emitter's own size)
+    uvec4 cfg;       // x rays, y first workgroup, z flags (bit 0 receiver = listener; bits 8..15 bounce cap, 0 = binfo.z;
+                     // bits 16..31 receiver radius cm, 0 = bparam.x), w receiver end margin (float bits: the emitter's prim)
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 16) buffer AcSlotRef {
+    vec4      src[AC_MAX_SOURCES];    // in : xyz source (agent space), w end margin (m)
+    AcRoomHit room[AC_ROOM_RAYS];     // out
+    float     occ[AC_MAX_SOURCES];    // out: closest blocking hit distance along the source ray (< 0 clear)
+    uvec4     hdr;                    // out: x serial, y room rays, z sources traced, w 1
+    uvec2     occ_inst[AC_MAX_SOURCES];   // out: nearest visible (x) alpha-blend, (y) alpha-mask surface on the source ray (AC_NO_INSTANCE: none)
+    uvec4     dsrc;                   // in : #858 diffraction sources (indices into src, AC_NO_INSTANCE unused)
+    uvec4     qinfo;                  // in : x = path queries listed (<= AC_MAX_QUERIES)
+    vec4      nee[AC_ROOM_RAYS];      // out: per room ray, |hit - dsrc[k]| when visible (k = component), < 0 not
+    AcQuery   q[AC_MAX_QUERIES];      // in
+    AcQueryHit qh[AC_MAX_QUERIES];    // out
+    // ---- #683 phase 1 bounce pass (appended: the offsets above are unchanged) ----
+    uvec4     binfo;                  // in : x sets, y workgroups, z bounces (<= AC_MAX_BOUNCES), w unused
+    uvec4     bhdr;                   // out: x serial, y sets, z workgroups, w 1 (workgroup 0 writes it)
+    vec4      bparam;                 // in : x receiver radius (m), y ray range (m), z a hard surface's absorption, w a polished surface's scattering
+    vec4      bair;                   // in : xyz air absorption per band (energy, 1/m), w speed of sound (m/s)
+    vec4      bclass[AC_CLASSES];     // in : xyz absorption low / mid / high, w scattering
+    uvec2     bmat[AC_MAT_SLOTS];     // in : instance -> class (x instance, AC_NO_INSTANCE empty / AC_INST_TOMB retired; y class)
+    AcBounceSet bset[AC_MAX_BOUNCE_SETS];   // in
+    uint      bpart[AC_MAX_BOUNCE_WG * AC_PART_WORDS];   // out: one partial record per workgroup
+    // ---- #930 lying snow (appended; read / written only by the AC_SNOW variant) ----
+    vec4      sfr[4];                 // in : [0] inner grid corner xy (agent), 1 / extent, top plane z;
+                                      //      [1] its shear xy, resolution, height tolerance (m);
+                                      //      [2] outer ring as [0]; [3] its shear xy, resolution (0 = no ring), tolerance (m)
+    vec4      sprm;                   // in : x strength 0..1, y the global depth (m; informational), zw unused
+    vec2      rsnow[AC_ROOM_RAYS];    // out: per room ray (w snow share incl. strength, packed 0..1)
+    vec2      qsnow[AC_MAX_QUERIES];  // out: per path query's RAY hit (as rsnow)
+};
+
+layout(push_constant) uniform AcPush {
+    vec4  listener;   // xyz listener (agent space), w room ray length (m)
+    vec4  seed;       // x azimuth rotation (0..1 turns), y z-stratum jitter (0..1), z jitter angle (0..1), w foliage alpha-test distance (m)
+    uvec4 info;       // x serial, y source count, z frame counter, w bit 0 = trace the room rays this frame, bit 1 = alpha blocks, bit 2 = the bounce pass (#683 phase 1)
+    uvec2 slot;       // device address of this frame slot's AcSlot record
+    uvec2 pad;
+} pc;
+
+shared vec3  sDir[AC_ROOM_RAYS];
+shared float sDist[AC_ROOM_RAYS];
+
+// One walk for both ray kinds. Candidates (alpha-mask / alpha-blend instances; opaque and
+// terrain are FORCE_OPAQUE and commit in hardware) go through rtWorldBlockCandidate, except
+// alpha-mask candidates beyond `foliageDist`: those count as blockers WITHOUT the texture
+// read (conservative: the leaf's exact holes do not matter at that range, the CPU weighs
+// foliage as a partial wall / see-through anyway). Blend candidates are always tested
+// (fully transparent faces skip the fetch).
+//   commit = true  (ROOM): a blocking candidate is confirmed -> the closest blocker.
+//   commit = false (OCCLUSION): only opaque / terrain commit; the nearest blocking blend /
+//                   mask candidate is RECORDED (blend_* / mask_*), so a pane in front of a
+//                   wall does not hide the wall.
+struct AcWalk {
+    float dist;        // committed hit distance (< 0 none)
+    uint  inst;        // committed hit's instance id (AC_NO_INSTANCE none)
+    float blend_t;     // nearest blocking blend candidate (record mode)
+    uint  blend_inst;
+    float mask_t;      // nearest blocking alpha-mask candidate (record mode)
+    uint  mask_inst;
+    vec3  n;           // wantN: the committed hit's geometric normal, facing the ray (else -d)
+};
+
+AcWalk acWalk(vec3 o, vec3 d, float tmin, float tmax, uint mask, uint rflags, bool commit, float foliageDist, bool wantN)
+{
+    AcWalk w;
+    w.dist = -1.0; w.inst = AC_NO_INSTANCE;
+    w.n = -d;
+    w.blend_t = 1e30; w.blend_inst = AC_NO_INSTANCE;
+    w.mask_t = 1e30; w.mask_inst = AC_NO_INSTANCE;
+    if (!(tmax > tmin)) return w;
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(rq, uTLAS, rflags, mask & 0xFFu, o, tmin, d, tmax);
+    uint n_cand = 0u;
+    while (rayQueryProceedEXT(rq))
+    {
+        if (rayQueryGetIntersectionTypeEXT(rq, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
+        if (++n_cand > RT_CANDIDATE_BUDGET)
+        {
+            rayQueryTerminateEXT(rq);   // (the closest blocker so far stays committed)
+            break;
+        }
+        const float t = rayQueryGetIntersectionTEXT(rq, false);
+        const uint id = rtHitInstance(uint(rayQueryGetIntersectionInstanceCustomIndexEXT(rq, false)),
+                                      uint(rayQueryGetIntersectionGeometryIndexEXT(rq, false)));
+        if (id >= uint(rt_instances.length())) continue;
+        uint cls;
+        if ((rt_instances[id].flags & 2u) == 0u && t > foliageDist)
+            cls = 1u;   // far alpha-mask: a blocker, no alpha read
+        else
+            cls = rtWorldBlockCandidate(id, RT_HIT_PRIM(rq, false, id), rayQueryGetIntersectionBarycentricsEXT(rq, false),
+                                        t, d, rayQueryGetIntersectionObjectToWorldEXT(rq, false));
+        if (cls == 0u) continue;
+        if (commit) rayQueryConfirmIntersectionEXT(rq);
+        else if (cls == 2u) { if (t < w.blend_t) { w.blend_t = t; w.blend_inst = id; } }
+        else if (t < w.mask_t) { w.mask_t = t; w.mask_inst = id; }
+    }
+    if (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionTriangleEXT)
+    {
+        w.dist = rayQueryGetIntersectionTEXT(rq, true);
+        w.inst = rtHitInstance(uint(rayQueryGetIntersectionInstanceCustomIndexEXT(rq, true)),
+                               uint(rayQueryGetIntersectionGeometryIndexEXT(rq, true)));
+        // (#683 phase 1) The geometric normal of the transformed triangle, as rtCandidateFront
+        // builds it; a guarded / degenerate read keeps -d (a reflection straight back).
+        if (wantN && w.inst < uint(rt_instances.length()) && rtIdIn(w.inst))
+        {
+            vec3 p0, p1, p2;
+            rtTriPositions(w.inst, RT_HIT_PRIM(rq, true, w.inst), p0, p1, p2);
+            const mat3 M = mat3(rayQueryGetIntersectionObjectToWorldEXT(rq, true));
+            const vec3 g = cross(M * (p1 - p0), M * (p2 - p0));
+            const float gl = length(g);
+            if (gl > 1e-12) w.n = g / gl;
+            if (dot(w.n, d) > 0.0) w.n = -w.n;
+        }
+    }
+    return w;
+}
+
+uint acHash(uint x)
+{
+    x ^= x >> 16; x *= 0x7feb352du;
+    x ^= x >> 15; x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
+// Surface hardness hint of instance `id` (see the header): -1 terrain, -2 water (#953), else 0..1.
+float acSurfaceHint(uint id)
+{
+    if (!rtIdIn(id)) return 0.0;   // (#874 guard)
+    const uint fl = rt_instances[id].flags;
+    if ((fl & 32u) != 0u) return -1.0;   // terrain (its material_id is not the surface)
+    if ((fl & 2048u) != 0u) return -2.0; // water (#953; before any blend / mask flag it may carry)
+    const uint mid = rt_instances[id].material_id;
+    if (mid >= uint(rt_materials.length())) return 0.0;
+    const RtMaterial m = rt_materials[mid];
+    if ((m.flags & 64u) != 0u)
+    {
+        // glTF: metal, or a polished dielectric (glass, tile, lacquer). Any roughness above
+        // ~0.3 says nothing acoustically.
+        float rough = m.roughness_factor, metal = m.metallic_factor;
+        if ((m.flags & 4u) != 0u)
+        {
+            const vec3 t = textureLod(uTextures[nonuniformEXT(m.mr_handle.x)], vec2(0.5), 16.0).rgb;
+            rough *= t.g; metal *= t.b;
+        }
+        return clamp(max(metal, 1.0 - smoothstep(0.08, 0.3, rough)), 0.0, 1.0);
+    }
+    if ((m.flags & 16u) != 0u)
+    {
+        // Legacy Blinn-Phong: environment reflection, or a strong high-gloss specular.
+        // (No spec: default legacy surfaces -> 0, nothing says hard.)
+        float env = m.emissive_factor.a;
+        vec3 spec = m.spec_color_gloss.rgb;
+        if ((m.flags & 4u) != 0u)
+        {
+            const vec4 t = textureLod(uTextures[nonuniformEXT(m.mr_handle.x)], vec2(0.5), 16.0);
+            env *= t.a; spec *= t.rgb;
+        }
+        const float specLum = max(spec.r, max(spec.g, spec.b));
+        return clamp(max(env, smoothstep(0.5, 0.9, m.spec_color_gloss.a) * specLum), 0.0, 1.0);
+    }
+    return 0.0;   // plain (no material) face
+}
+
+#ifdef AC_SNOW
+// #930 LYING SNOW at a committed hit P (normal n, facing the ray; instance id). ONE column lookup:
+//   * a hit facing DOWN (n.z < -0.3: a ceiling, an overhang's underside) never holds snow;
+//   * the column is read off the surface along n (a full texel on the inner grid -- a wall face
+//     anywhere in its texel leaves it --, half a texel on the ~0.5 m ring): an upward face reads
+//     its own column, a WALL reads the column in front of it (the ground the drift lies on), not
+//     the building's roof column behind the face;
+//   * that column's snow lies on its BASE zb (the filtered surface the snow mesh stands on) up to
+//     zb + D. The hit is snow when it lies in that layer: dz = P.z - zb in [-tol, D + tol] --
+//     the top face itself (dz ~ 0), or a wall face below the drift's surface (a wall under a
+//     drift is IN the snow: the mesh is not traced, so the ray reached the wall through it). A
+//     wall face above the drift line (dz > D + tol) stays bare, and so does anything under the
+//     column's top (dz < -tol: the ground under a roof / canopy, a basement) -- the grid holds
+//     only the snow on the column's top surface;
+//   * water never (sound reflects off the water surface; snow does not lie on it).
+// The inner grid when it covers the column, else the outer ring, else none (no snow: the
+// global fallback would need the openness, and a far hit counts little). Depth weight: a dusting
+// is nothing, >= 10 cm full snow (smoothstep 3 .. 10 cm on the EFFECTIVE depth: packed snow is
+// denser, so a footprint's few cm count as a full layer). PACKED = a local press test (see
+// acSnowColumn: depth well below its same-sheet neighbours ~0.75 m away), else fresh; a refilled
+// track reads fresh again, as its new surface is. Returns (w x strength, packed); (0, 0) = no snow.
+
+// One grid's column at Q: (D, 1, packed) = the hit at height zP lies in the column's snow layer,
+// (0, 0, 0) = covered but bare there, (-1, ..) = Q outside this grid. F / G = sfr[0] / [1] (or [2] / [3]).
+vec3 acSnowColumn(vec4 F, vec4 G, bool ring, vec3 Q, float zP)
+{
+    const vec2 uv = (Q.xy - (F.w - Q.z) * G.xy - F.xy) * F.z;
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThanEqual(uv, vec2(1.0)))) return vec3(-1.0);
+    const int res = int(G.z);
+    const ivec2 t = clamp(ivec2(floor(uv * G.z)), ivec2(0), ivec2(res - 1));
+    float b, D;
+    if (ring) { const vec4 v = imageLoad(uAcRing, t); b = v.x; D = v.y; }
+    else { b = imageLoad(uAcBase, t).x; D = imageLoad(uAcCover, t).a; }
+    if (!(b < 1e29) || !(D > 0.0)) return vec3(0.0);   // (no base: kNoBase 1e30; no depth)
+    const float dz = zP - (F.w - b);
+    if (dz < -G.w || dz > D + G.w) return vec3(0.0);
+    // PACKED (inner grid only; the ring's ~0.5 m texels cannot resolve a footprint): no per-texel
+    // compaction state exists, so a texel reads packed only when it is CLEARLY a press -- its depth
+    // well below the mean of its neighbours ~0.75 m away on the same snow sheet (base within 0.25 m:
+    // not across a kerb / wall). A footprint / limb / narrow track (~0.2-0.3 x the depth around it)
+    // reads packed; open snow, drifts, slumped or uniformly shallow snow read FRESH whatever the
+    // global depth says (#930 follow-up: the old global-depth reference read fresh snow as packed
+    // under unusual weather settings -- deep max depth, fast build, slumping / ploughing).
+    float packed = 0.0;
+    if (!ring)
+    {
+        const int k = max(2, int(0.75 * F.z * G.z + 0.5));   // ~0.75 m in texels
+        const ivec2 off[4] = ivec2[4](ivec2(k, 0), ivec2(-k, 0), ivec2(0, k), ivec2(0, -k));
+        float sum = 0.0, n = 0.0;
+        for (int i = 0; i < 4; ++i)
+        {
+            const ivec2 q = t + off[i];
+            if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, ivec2(res)))) continue;
+            const float bq = imageLoad(uAcBase, q).x;
+            if (!(bq < 1e29) || abs(bq - b) > 0.25) continue;
+            sum += max(imageLoad(uAcCover, q).a, 0.0);
+            n += 1.0;
+        }
+        if (n >= 2.0)
+        {
+            const float local = sum / n;
+            if (local > 0.06) packed = 1.0 - smoothstep(0.35, 0.6, D / local);
+        }
+    }
+    return vec3(D, 1.0, packed);
+}
+
+vec2 acSnowHit(AcSlotRef s, vec3 P, vec3 n, uint id)
+{
+    if (!(s.sprm.x > 0.0) || n.z < -0.3) return vec2(0.0);
+    if (id < uint(rt_instances.length()) && rtIdIn(id) && (rt_instances[id].flags & 2048u) != 0u) return vec2(0.0);
+    const vec4 F0 = s.sfr[0], G0 = s.sfr[1];
+    vec3 c = vec3(-1.0);
+    if (G0.z > 0.5)
+        c = acSnowColumn(F0, G0, false, P + n * (1.05 / max(F0.z * G0.z, 1e-6)), P.z);   // (a full texel: a wall face leaves its own texel)
+    if (c.x < 0.0)
+    {
+        const vec4 F1 = s.sfr[2], G1 = s.sfr[3];
+        if (!(G1.z > 0.5)) return vec2(0.0);
+        c = acSnowColumn(F1, G1, true, P + n * (0.5 / max(F1.z * G1.z, 1e-6)), P.z);
+    }
+    if (c.y < 0.5) return vec2(0.0);
+    const float packed = c.z;
+    const float Deff = c.x / (1.0 - 0.7 * packed);   // (packed snow is denser: a footprint's few cm count as a layer)
+    return vec2(smoothstep(0.03, 0.10, Deff) * clamp(s.sprm.x, 0.0, 1.0), packed);
+}
+#endif
+
+// Geometric clutter score of room ray i (see the header). Shared sDir / sDist filled.
+float acClutter(uint i)
+{
+    const float di = sDist[i];
+    if (di < 0.0) return -1.0;
+    const int kOff[8] = int[8](-8, 8, -13, 13, -5, 5, -3, 3);   // nearest angular neighbours first
+    int nb[8];
+    int nn = 0;
+    for (int k = 0; k < 8; ++k)
+    {
+        const int j = int(i) + kOff[k];
+        if (j >= 0 && j < int(AC_ROOM_RAYS) && sDist[j] >= 0.0) nb[nn++] = j;
+    }
+    const vec3 D = sDir[i];
+    for (int a = 0; a < nn; ++a)
+    for (int b = a + 1; b < nn; ++b)
+    for (int c = b + 1; c < nn; ++c)
+    {
+        const vec3 A = sDir[nb[a]], B = sDir[nb[b]], C = sDir[nb[c]];
+        const float s1 = dot(cross(A, B), D), s2 = dot(cross(B, C), D), s3 = dot(cross(C, A), D);
+        if (!((s1 >= 0.0 && s2 >= 0.0 && s3 >= 0.0) || (s1 <= 0.0 && s2 <= 0.0 && s3 <= 0.0))) continue;
+        const vec3 PA = A * sDist[nb[a]], PB = B * sDist[nb[b]], PC = C * sDist[nb[c]];
+        const vec3 n = cross(PB - PA, PC - PA);
+        const float den = dot(n, D);
+        if (abs(den) < 1e-6 * max(dot(n, n), 1e-12)) continue;   // (degenerate / grazing)
+        const float t = dot(n, PA) / den;
+        if (!(t > 0.0)) continue;
+        return smoothstep(0.03, 0.10, 1.0 - di / t);
+    }
+    return -1.0;
+}
+
+// ---- #683 phase 1: BOUNCE PASS (see the header) ----
+shared uint sPart[AC_PART_WORDS];
+
+uint acFix(float e) { return uint(clamp(e, 0.0, 1.0) * AC_FIX + 0.5); }
+
+// Signed sum (two's complement in the uint words; |v| <= 1).
+void acAddDir(uint at, vec3 v)
+{
+    const ivec3 q = ivec3(round(clamp(v, vec3(-1.0), vec3(1.0)) * AC_FIX));
+    atomicAdd(sPart[at], uint(q.x));
+    atomicAdd(sPart[at + 1u], uint(q.y));
+    atomicAdd(sPart[at + 2u], uint(q.z));
+}
+
+void acAdd3(uint at, vec3 e)
+{
+    atomicAdd(sPart[at], acFix(e.x));
+    atomicAdd(sPart[at + 1u], acFix(e.y));
+    atomicAdd(sPart[at + 2u], acFix(e.z));
+}
+
+// One arrival at the receiver: per-band energy e (ray units), time t (s), reflection order,
+// direction it arrives from (unit, receiver -> where it comes from).
+void acDeposit(vec3 e, float t, uint order, vec3 from)
+{
+    t = clamp(t, 0.0, 1000.0);
+    const uint b = uint(t / AC_BIN_S);
+    if (b < AC_BINS)
+    {
+        atomicAdd(sPart[ACP_HIST + b], acFix(e.x));
+        atomicAdd(sPart[ACP_HIST + AC_BINS + b], acFix(e.y));
+        atomicAdd(sPart[ACP_HIST + 2u * AC_BINS + b], acFix(e.z));
+    }
+    if (order <= 2u)
+    {
+        atomicAdd(sPart[ACP_EARLY + min(uint(t / AC_EBIN_S), AC_EBINS - 1u)], acFix(e.y));
+        acAddDir(ACP_EDIR, from * e.y);
+    }
+    else
+    {
+        atomicAdd(sPart[ACP_LATE + min(b, AC_LBINS - 1u)], acFix(e.y));
+        acAddDir(ACP_LDIR, from * e.y);
+    }
+}
+
+// The CPU's instance -> material class (ACC_NONE: not listed).
+uint acMatClass(AcSlotRef s, uint id)
+{
+    const uint h = acHash(id) & (AC_MAT_SLOTS - 1u);
+    for (uint k = 0u; k < 8u; ++k)
+    {
+        const uvec2 e = s.bmat[(h + k) & (AC_MAT_SLOTS - 1u)];
+        if (e.x == id) return e.y;
+        if (e.x == AC_NO_INSTANCE) break;
+    }
+    return ACC_NONE;
+}
+
+// The hit's absorption (xyz: low / mid / high) and scattering (w). Mirrors the CPU's room rules
+// (llcleanacoustics.cpp measureRoom): terrain, water, glass for visible alpha-blend unless the
+// prim says otherwise, foliage for alpha-mask unless the prim says hard, the hint pulls hard.
+vec4 acHitMaterialBase(AcSlotRef s, uint id, bool alphaBlocks)
+{
+    if (id >= uint(rt_instances.length()) || !rtIdIn(id)) return s.bclass[ACC_WOOD];
+    const uint fl = rt_instances[id].flags;
+    if ((fl & 32u) != 0u) return s.bclass[ACC_TERRAIN];
+    if ((fl & 2048u) != 0u) return s.bclass[ACC_WATER];
+    uint cls = acMatClass(s, id);
+    if ((fl & 2u) != 0u)
+    {
+        if (cls == ACC_NONE || cls == ACC_WOOD) cls = ACC_GLASS;   // (wood / light = "not set")
+    }
+    else if ((fl & 4u) != 0u)
+    {
+        const bool hardCls = cls == ACC_STONE || cls == ACC_METAL || cls == ACC_GLASS || cls == ACC_PLASTIC;
+        if (!(alphaBlocks && hardCls)) return s.bclass[ACC_FOLIAGE];
+    }
+    if (cls >= AC_CLASSES) cls = ACC_WOOD;
+    vec4 m = s.bclass[cls];
+    const float h = clamp(acSurfaceHint(id), 0.0, 1.0);
+    m.xyz = mix(m.xyz, min(m.xyz, vec3(s.bparam.z)), h);
+    m.w = mix(m.w, min(m.w, s.bparam.w), h);
+    return m;
+}
+
+// #930: + the lying snow at the hit P (normal n; AC_SNOW only): toward the snow classes by its share.
+vec4 acHitMaterial(AcSlotRef s, uint id, bool alphaBlocks, vec3 P, vec3 n)
+{
+    vec4 m = acHitMaterialBase(s, id, alphaBlocks);
+#ifdef AC_SNOW
+    const vec2 sn = acSnowHit(s, P, n, id);
+    if (sn.x > 0.0) m = mix(m, mix(s.bclass[ACC_SNOW], s.bclass[ACC_SNOW_PACKED], sn.y), sn.x);
+#endif
+    return m;
+}
+
+void acBouncePass()
+{
+    AcSlotRef s = AcSlotRef(pc.slot);
+    const uint lane = gl_LocalInvocationID.x;
+    const uint wg = gl_WorkGroupID.x;
+    const uint nsets = min(s.binfo.x, AC_MAX_BOUNCE_SETS);
+    const uint nwg = min(s.binfo.y, AC_MAX_BOUNCE_WG);
+    if (wg >= nwg) return;   // (the whole workgroup: before any barrier)
+    // This workgroup's set (uniform per workgroup).
+    uint si = AC_MAX_BOUNCE_SETS;
+    for (uint k = 0u; k < nsets; ++k)
+    {
+        const uvec4 cf = s.bset[k].cfg;
+        const uint w1 = cf.y + (min(cf.x, AC_MAX_BOUNCE_WG * 64u) + 63u) / 64u;
+        if (wg >= cf.y && wg < w1) { si = k; break; }
+    }
+    for (uint i = lane; i < AC_PART_WORDS; i += 64u) sPart[i] = 0u;
+    barrier();
+    if (si < nsets)
+    {
+        const AcBounceSet bs = s.bset[si];
+        const uint rays = min(bs.cfg.x, AC_MAX_BOUNCE_WG * 64u);
+        const uint r = (wg - bs.cfg.y) * 64u + lane;
+        if (r < rays)
+        {
+            const bool toL = (bs.cfg.z & AC_SET_TO_LISTENER) != 0u;   // (#683 early gain)
+            const vec3 R = toL ? pc.listener.xyz : bs.origin.xyz;      // the receiver
+            const float rmargin = uintBitsToFloat(bs.cfg.w);
+            const uint rrCm = bs.cfg.z >> 16u;
+            const float rr = rrCm != 0u ? float(rrCm) * 0.01 : max(s.bparam.x, 0.05);
+            const float range = max(s.bparam.y, 1.0);
+            const float cs = max(s.bair.w, 1.0);
+            const vec3 air = max(s.bair.xyz, vec3(0.0));
+            const uint setB = (bs.cfg.z >> 8u) & 0xFFu;
+            const uint maxB = clamp(setB != 0u ? setB : s.binfo.z, 1u, AC_MAX_BOUNCES);
+            const bool alphaBlocks = (pc.info.w & 2u) != 0u;
+            const uint rmask = alphaBlocks ? (AC_ROOM_MASK | RT_MASK_BLEND) : AC_ROOM_MASK;
+            const uint bmask = rmask | RT_MASK_WATER;
+            // Spherical Fibonacci over the set's rays, rotated per frame (seed) and per set.
+            const float z = 1.0 - 2.0 * (float(r) + pc.seed.y) / float(rays);
+            const float phi = 6.28318530718 * fract(float(r) * 0.61803398875 + pc.seed.x + float(si) * 0.381966);
+            const float sz = sqrt(max(0.0, 1.0 - z * z));
+            vec3 d = vec3(sz * cos(phi), sz * sin(phi), z);
+            // The rays leave the set's ORIGIN (the source for an early-gain set; = the receiver
+            // otherwise). (#683: they used to leave R, so an early-gain set measured the LISTENER's
+            // own surroundings -- normalised by the source's free field, x D^2.)
+            vec3 p = bs.origin.xyz;
+            float tmin = max(bs.origin.w, 0.02);
+            float path = 0.0;
+            vec3 E = vec3(1.0);
+            bool spec = false;   // the last reflection was specular
+            uint rng = acHash(r * 7919u + pc.info.z * 104729u + si * 1299709u + 17u);
+            uint hits = 0u, nee = 0u, nspec = 0u;
+            float seg16 = 0.0;
+            bool escaped = false;
+            bool floor1 = false;   // early gain: the first hit is the floor / ground (its first-order return is left out)
+            uint k = 1u;
+            for (; k <= maxB; ++k)
+            {
+                const AcWalk h = acWalk(p, d, tmin, range, bmask, gl_RayFlagsNoneEXT, true, pc.seed.w, true);
+                const float segEnd = h.dist >= 0.0 ? h.dist : range;
+                // A specular return: this segment leaves a specular reflection and passes the receiver.
+                if (k >= 2u && spec)
+                {
+                    const float tc = clamp(dot(R - p, d), 0.0, segEnd);
+                    if (distance(p + d * tc, R) < rr && !(toL && k == 2u && floor1))
+                    {
+                        acDeposit(E * exp(-air * tc), (path + tc) / cs, k - 1u, -d);
+                        ++nspec;
+                    }
+                }
+                if (h.dist < 0.0)
+                {
+                    acAdd3(ACP_EESC, E);   // escaped: the open area takes it
+                    escaped = true;
+                    break;
+                }
+                const float t = h.dist;
+                path += t;
+                seg16 += t * 16.0;
+                ++hits;
+                const vec3 ta = exp(-air * t);
+                acAdd3(ACP_EAIR, E * (vec3(1.0) - ta));
+                E *= ta;
+                const vec3 P = p + d * t;
+                const vec3 nrm = h.n;
+                if (toL && k == 1u)
+                {
+                    bool ground = nrm.z > AC_FLOOR_NZ;
+                    if (h.inst < uint(rt_instances.length()) && rtIdIn(h.inst))
+                        ground = ground || (rt_instances[h.inst].flags & (32u | 2048u)) != 0u;   // terrain / water
+                    floor1 = ground;
+                }
+                const vec4 m = acHitMaterial(s, h.inst, alphaBlocks, P, nrm);
+                const vec3 a = clamp(m.xyz, vec3(0.0), vec3(1.0));
+                acAdd3(ACP_EPRE, E);
+                acAdd3(ACP_EABS, E * a);
+                E *= vec3(1.0) - a;
+                const float scat = clamp(m.w, 0.0, 1.0);
+                // Diffuse rain: the Lambertian share that reaches the receiver, if it sees P.
+                const vec3 toR = R - P;
+                const float dR = length(toR);
+                if (dR > 0.05 && scat > 0.0 && !(toL && k == 1u && floor1))
+                {
+                    const vec3 u = toR / dR;
+                    const float cosT = dot(nrm, u);
+                    if (cosT > 0.0)
+                    {
+                        bool vis = k == 1u && !toL;   // (bounce 1: the ray came from the receiver -- unless it is the listener)
+                        if (!vis)
+                        {
+                            const float margin = clamp(rmargin, 0.0, 0.5 * dR);
+                            const AcWalk v = acWalk(P + nrm * 0.02, u, 0.02, dR - margin, rmask,
+                                                    gl_RayFlagsTerminateOnFirstHitEXT, true, pc.seed.w, false);
+                            vis = v.dist < 0.0;
+                        }
+                        if (vis)
+                        {
+                            const float frac = scat * cosT * min(rr * rr / (dR * dR), 0.5);
+                            acDeposit(E * (frac * exp(-air * dR)), (path + dR) / cs, k, -u);
+                            ++nee;
+                        }
+                    }
+                }
+                // The next direction: specular, or cosine-weighted with probability `scat`.
+                rng = acHash(rng + 0x9E3779B9u);
+                const float u0 = float(rng & 0xFFFFFFu) / 16777216.0;
+                if (u0 < scat)
+                {
+                    rng = acHash(rng + 0x9E3779B9u);
+                    const float u1 = float(rng & 0xFFFFu) / 65536.0;
+                    const float u2 = float(rng >> 16) / 65536.0;
+                    const vec3 ax = abs(nrm.z) < 0.9 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
+                    const vec3 tu = normalize(cross(nrm, ax));
+                    const vec3 tv = cross(nrm, tu);
+                    const float rad = sqrt(u1);
+                    const float ph = 6.28318530718 * u2;
+                    d = normalize(tu * (rad * cos(ph)) + tv * (rad * sin(ph)) + nrm * sqrt(max(0.0, 1.0 - u1)));
+                    spec = false;
+                }
+                else
+                {
+                    d = reflect(d, nrm);
+                    spec = true;
+                }
+                p = P + nrm * 0.02;
+                tmin = 0.01;
+                if (max(E.x, max(E.y, E.z)) < 1e-6) break;   // (nothing left to carry)
+            }
+            atomicAdd(sPart[ACP_CNT + 0u], 1u);
+            atomicAdd(sPart[ACP_CNT + 1u], hits);
+            if (escaped) atomicAdd(sPart[ACP_CNT + 2u], 1u);
+            else if (k > maxB)
+            {
+                // Ended by the bounce cap: its future is missing from the echogram from here on.
+                atomicAdd(sPart[ACP_CNT + 3u], 1u);
+                atomicAdd(sPart[ACP_CAP + min(uint(clamp(path / cs, 0.0, 1000.0) / AC_CBIN_S), AC_CBINS - 1u)], 1u);
+            }
+            atomicAdd(sPart[ACP_CNT + 4u], nee);
+            atomicAdd(sPart[ACP_CNT + 5u], nspec);
+            atomicAdd(sPart[ACP_CNT + 6u], uint(seg16));
+        }
+    }
+    barrier();
+    const uint base = wg * AC_PART_WORDS;
+    for (uint i = lane; i < AC_PART_WORDS; i += 64u) s.bpart[base + i] = sPart[i];
+    if (wg == 0u && lane == 0u) s.bhdr = uvec4(pc.info.x, nsets, nwg, 1u);
+}
+
+void main()
+{
+    // #683 phase 1: the bounce pass is its own dispatch (pc.info.w bit 2; uniform).
+    if ((pc.info.w & 4u) != 0u)
+    {
+        acBouncePass();
+        return;
+    }
+    const uint lane = gl_LocalInvocationID.x;
+    AcSlotRef s = AcSlotRef(pc.slot);
+    const vec3 o = pc.listener.xyz;
+    const float kTwoPi = 6.28318530718;
+    const bool alphaBlocks = (pc.info.w & 2u) != 0u;
+    const uint ns = min(pc.info.y, AC_MAX_SOURCES);
+    // Room-class mask (alpha-tested cut-outs; alpha blocks: visible alpha-blend too): the room
+    // rays, the source-room rays and the #857 / #858 shadow rays.
+    const uint rmask = alphaBlocks ? (AC_ROOM_MASK | RT_MASK_BLEND) : AC_ROOM_MASK;
+    const uint kShadowFlags = gl_RayFlagsTerminateOnFirstHitEXT;
+
+    // ---- WORKGROUPS 1..: #857 / #858 path queries (each workgroup takes this branch whole) ----
+    if (gl_WorkGroupID.x >= 1u)
+    {
+        const uint qi = (gl_WorkGroupID.x - 1u) * 64u + lane;
+        if (qi >= min(s.qinfo.x, AC_MAX_QUERIES)) return;
+        const AcQuery q = s.q[qi];
+        AcQueryHit qh;
+        qh.dist = -1.0; qh.vis = -1.0; qh.inst = AC_NO_INSTANCE; qh.hint = 0.0; qh.kind = 0.0;
+        vec2 qsn = vec2(0.0);   // (#930 AC_SNOW: the RAY hit's lying snow)
+        vec3 P = q.a.xyz;
+        if (q.a.w > 0.0)
+        {
+            // RAY: find the end point P.
+            const vec3 dir = q.d.xyz;
+#ifdef AC_SNOW
+            const bool wantN = true;   // (#930: the snow rule reads the hit's normal)
+#else
+            const bool wantN = false;
+#endif
+            const AcWalk h = acWalk(q.a.xyz, dir, max(q.d.w, 0.02), q.a.w, AC_ROOM_HIT_MASK(rmask), gl_RayFlagsNoneEXT, true, pc.seed.w, wantN);
+            if (h.dist >= 0.0)
+            {
+                qh.dist = h.dist;
+#ifdef AC_SNOW
+                qsn = acSnowHit(s, q.a.xyz + dir * h.dist, h.n, h.inst);
+#endif
+                P = q.a.xyz + dir * max(h.dist - 0.1, 0.0);
+                const uint id = h.inst;
+                if (id < uint(rt_instances.length()) && rtIdIn(id))
+                {
+                    qh.inst = id;
+                    const uint fl = rt_instances[id].flags;
+                    if ((fl & 2048u) != 0u) qh.hint = -2.0;   // #953 water (kind 0, whatever else it carries)
+                    else if ((fl & 2u) != 0u && (fl & 32u) == 0u) { qh.kind = 2.0; qh.hint = acSurfaceHint(id); }
+                    else if ((fl & 4u) != 0u && (fl & 32u) == 0u) qh.kind = 1.0;
+                    else qh.hint = acSurfaceHint(id);
+                }
+            }
+            else
+                P = q.a.xyz + dir * max(q.e.x, 0.0);
+        }
+        // Visibility P -> b (both kinds).
+        const vec3 toB = q.b.xyz - P;
+        const float lenB = length(toB);
+        if (lenB > 0.1)
+        {
+            const float margin = clamp(q.b.w, 0.0, 0.5 * lenB);
+            const AcWalk v = acWalk(P, toB / lenB, 0.02, lenB - margin, rmask, kShadowFlags, true, pc.seed.w, false);
+            qh.vis = v.dist < 0.0 ? lenB : -1.0;
+        }
+        else
+            qh.vis = lenB;
+        qh.px = P.x; qh.py = P.y; qh.pz = P.z;
+        s.qh[qi] = qh;
+#ifdef AC_SNOW
+        s.qsnow[qi] = qsn;
+#endif
+        return;
+    }
+
+    // ---- room ray `lane` (only on room frames: pc.info.w bit 0; uniform, so the barrier is safe) ----
+    const bool roomOn = (pc.info.w & 1u) != 0u;
+    if (roomOn) {
+    float rdist = -1.0, rz = 0.0, rhint = 0.0, rkind = 0.0;
+    uint rinst = AC_NO_INSTANCE;
+    vec2 rsn = vec2(0.0);   // (#930 AC_SNOW: the hit's lying snow)
+    vec3 rdir = vec3(0.0, 0.0, 1.0);
+    if (lane < AC_ROOM_RAYS)
+    {
+        const float n = float(AC_ROOM_RAYS);
+        rz = 1.0 - 2.0 * (float(lane) + pc.seed.y) / n;                               // stratified in z
+        const float phi = kTwoPi * fract(float(lane) * 0.61803398875 + pc.seed.x);    // golden-angle azimuth
+        const float r = sqrt(max(0.0, 1.0 - rz * rz));
+        rdir = vec3(r * cos(phi), r * sin(phi), rz);
+        // Alpha-mask cut-outs honoured (the raster's alpha test at the candidate hit);
+        // alpha blocks: visible alpha-blend blocks too (rmask).
+#ifdef AC_SNOW
+        const AcWalk h = acWalk(o, rdir, 0.05, pc.listener.w, AC_ROOM_HIT_MASK(rmask), gl_RayFlagsNoneEXT, true, pc.seed.w, true);
+#else
+        const AcWalk h = acWalk(o, rdir, 0.05, pc.listener.w, AC_ROOM_HIT_MASK(rmask), gl_RayFlagsNoneEXT, true, pc.seed.w, false);
+#endif
+        if (h.dist >= 0.0)
+        {
+            rdist = h.dist;
+#ifdef AC_SNOW
+            rsn = acSnowHit(s, o + rdir * h.dist, h.n, h.inst);
+#endif
+            const uint id = h.inst;
+            if (id < uint(rt_instances.length()))
+            {
+                rinst = id;
+                // Flag 2 = alpha-blend (class RT_MASK_BLEND; only visible, non-avatar ones are
+                // committed): glass class. Flag 4 = alpha-mask; a non-terrain hit carrying it
+                // (and no flag 2) is the RT_MASK_ALPHAMASK class: foliage. Flag 2048 = water
+                // (#953): hint -2, kind 0, tested first.
+                const uint fl = rt_instances[id].flags;
+                if ((fl & 2048u) != 0u) rhint = -2.0;
+                else if ((fl & 2u) != 0u && (fl & 32u) == 0u) { rkind = 2.0; rhint = acSurfaceHint(id); }
+                else if ((fl & 4u) != 0u && (fl & 32u) == 0u) rkind = 1.0;
+                else rhint = acSurfaceHint(id);
+            }
+        }
+        sDir[lane] = rdir;
+        sDist[lane] = rdist;
+    }
+    barrier();
+    if (lane < AC_ROOM_RAYS)
+    {
+        AcRoomHit h;
+        h.dist = rdist;
+        h.dir_z = rz;
+        h.inst = rinst;
+        h.hint = rhint;
+        h.clutter = acClutter(lane);
+        h.kind = rkind;
+        h.dir_x = rdir.x; h.dir_y = rdir.y;
+        s.room[lane] = h;
+#ifdef AC_SNOW
+        s.rsnow[lane] = rsn;
+#endif
+        // #858: shadow rays from this ray's hit point to each listed (occluded) source.
+        vec4 nee = vec4(-1.0);
+        if (rdist >= 0.0)
+        {
+            const vec3 P = o + rdir * max(rdist - 0.05, 0.0);
+            for (uint k = 0u; k < AC_MAX_DIFF; ++k)
+            {
+                const uint sidx = s.dsrc[k];
+                if (sidx >= ns) continue;
+                const vec4 sp = s.src[sidx];
+                const vec3 toS = sp.xyz - P;
+                const float lenS = length(toS);
+                if (lenS < 0.1) { nee[k] = lenS; continue; }
+                const float margin = clamp(sp.w, 0.0, 0.5 * lenS);
+                const AcWalk w = acWalk(P, toS / lenS, 0.02, lenS - margin, rmask, kShadowFlags, true, pc.seed.w, false);
+                nee[k] = w.dist < 0.0 ? lenS : -1.0;
+            }
+        }
+        s.nee[lane] = nee;
+    }
+    }   // roomOn
+
+    // ---- source ray `lane` ----
+    if (lane < ns)
+    {
+        const vec4 sp = s.src[lane];
+        vec3 to = sp.xyz - o;
+        const float dist = length(to);
+        float hit = -1.0;
+        uvec2 oinst = uvec2(AC_NO_INSTANCE);
+        if (dist > 0.1)
+        {
+            vec3 dir = to / dist;
+            // Jitter the end point across the line (<= 0.3 m, never more than 5% of the
+            // distance): a source half behind a wall edge averages to partly occluded.
+            const vec3 a = abs(dir.z) < 0.9 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
+            const vec3 u = normalize(cross(dir, a));
+            const vec3 v = cross(dir, u);
+            const uint h = acHash(lane * 9781u + pc.info.z * 6271u + 1u);
+            const float ang = kTwoPi * fract(float(h & 0xFFFFu) / 65536.0 + pc.seed.z);
+            const float rad = min(0.3, 0.05 * dist) * sqrt(float(h >> 16) / 65536.0);
+            const vec3 tgt = sp.xyz + (u * cos(ang) + v * sin(ang)) * rad;
+            to = tgt - o;
+            const float len = length(to);
+            dir = to / max(len, 1e-4);
+            const float margin = clamp(sp.w, 0.0, 0.5 * len);
+            // Alpha blocks off: the old forced-opaque ray (no candidates).
+            const uint omask = alphaBlocks ? RT_MASK_WORLD_BLOCK : AC_MASK;
+            const uint oflags = alphaBlocks ? gl_RayFlagsNoneEXT : gl_RayFlagsOpaqueEXT;
+            const AcWalk w = acWalk(o, dir, 0.05, len - margin, omask, oflags, false, pc.seed.w, false);
+            hit = w.dist;
+            oinst = uvec2(w.blend_inst, w.mask_inst);
+        }
+        s.occ[lane] = hit;
+        s.occ_inst[lane] = oinst;
+    }
+
+    if (lane == 0u)
+        s.hdr = uvec4(pc.info.x, roomOn ? AC_ROOM_RAYS : 0u, ns, 1u);
+}

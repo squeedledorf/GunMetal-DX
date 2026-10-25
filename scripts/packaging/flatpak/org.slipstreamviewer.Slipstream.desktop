@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Slipstream Viewer
+GenericName=Second Life Viewer
+Comment=Vulkan viewer for Second Life
+Exec=slipstream %u
+Icon=org.slipstreamviewer.Slipstream
+Terminal=false
+Categories=Game;Simulation;
+Keywords=Second Life;SL;virtual world;metaverse;OpenSim;
+MimeType=x-scheme-handler/secondlife;x-scheme-handler/x-grid-location-info;
+StartupNotify=true
+StartupWMClass=org.slipstreamviewer.Slipstream

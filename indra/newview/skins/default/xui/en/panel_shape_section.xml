@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<!--
+One group of shape sliders in one panel (SLPanelShapeSection). The sliders are
+panels (panel_scrolling_param.xml) that SLPanelShapeSection fills "param_list"
+with, from the wearable.
+-->
+<panel
+ name="panel_shape_section"
+ layout="topleft"
+ width="309"
+ height="356"
+ follows="all"
+ border="false"
+ bg_alpha_color="DkGray2"
+ bg_opaque_color="DkGray2"
+ background_visible="true"
+ background_opaque="true">
+	<scroll_container
+	 color="DkGray2"
+	 opaque="true"
+	 follows="all"
+	 layout="topleft"
+	 left="0"
+	 top="0"
+	 width="309"
+	 height="356"
+	 reserve_scroll_corner="false"
+	 name="param_scroll">
+		<scrolling_panel_list
+		 follows="left|right"
+		 layout="topleft"
+		 left="0"
+		 top="0"
+		 width="293"
+		 height="2"
+		 name="param_list" />
+	</scroll_container>
+</panel>

@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<!--
+One shape editor panel: the group dropdown and the pop-out button on top, and
+the sliders in "slot_body" below, which SLShapeEditorSlot fills with a fresh
+instance of whichever group is chosen (panel_shape_section.xml, or
+panel_shape_section_all.xml for everything in an accordion).
+
+The dropdown's values are the section ids in SECTIONS (slpanelshapeeditor.cpp).
+The labels are the user's; the values are saved in SLShapeEditorPanels, so
+never change a value.
+-->
+<panel
+ name="panel_shape_editor_slot"
+ layout="topleft"
+ width="313"
+ height="388"
+ follows="all"
+ background_visible="false">
+	<panel.string
+	 name="pop_out_tooltip">
+		Show this panel in a window of its own
+	</panel.string>
+	<panel.string
+	 name="put_back_tooltip">
+		Put this panel back in the shape editor
+	</panel.string>
+	<view_border
+	 follows="all"
+	 layout="topleft"
+	 left="0"
+	 top="0"
+	 width="313"
+	 height="388"
+	 bevel_style="in"
+	 mouse_opaque="false"
+	 name="slot_border" />
+	<combo_box
+	 follows="left|top|right"
+	 layout="topleft"
+	 left="4"
+	 top="4"
+	 right="-32"
+	 height="22"
+	 max_chars="64"
+	 name="section_combo"
+	 tool_tip="What this panel shows (Ctrl+1 to Ctrl+4 jump to a panel's dropdown). Two panels may show the same group; they stay in step.">
+		<combo_box.item label="All groups" name="all" value="all" />
+		<combo_box.item label="Body" name="body" value="body" />
+		<combo_box.item label="Head" name="head" value="head" />
+		<combo_box.item label="Eyes" name="eyes" value="eyes" />
+		<combo_box.item label="Ears" name="ears" value="ears" />
+		<combo_box.item label="Nose" name="nose" value="nose" />
+		<combo_box.item label="Mouth" name="mouth" value="mouth" />
+		<combo_box.item label="Chin" name="chin" value="chin" />
+		<combo_box.item label="Torso" name="torso" value="torso" />
+		<combo_box.item label="Legs" name="legs" value="legs" />
+	</combo_box>
+	<button
+	 follows="top|right"
+	 layout="topleft"
+	 right="-4"
+	 top="4"
+	 width="24"
+	 height="22"
+	 label=""
+	 image_overlay="Conv_toolbar_arrow_ne"
+	 name="pop_out"
+	 tool_tip="Show this panel in a window of its own" />
+	<panel
+	 follows="all"
+	 layout="topleft"
+	 left="2"
+	 top="30"
+	 width="309"
+	 height="356"
+	 background_visible="false"
+	 name="slot_body" />
+	<!-- Shown in place of the body while the panel is in a window of its own. -->
+	<text
+	 follows="left|top|right"
+	 layout="topleft"
+	 left="12"
+	 top="44"
+	 right="-12"
+	 height="48"
+	 word_wrap="true"
+	 visible="false"
+	 name="popped_note"
+	 value="This panel is in a window of its own. Closing that window puts it back here, and so does the button below." />
+	<button
+	 follows="left|top"
+	 layout="topleft"
+	 left="12"
+	 top_pad="6"
+	 width="120"
+	 height="22"
+	 visible="false"
+	 label="Put it back"
+	 name="put_back" />
+</panel>

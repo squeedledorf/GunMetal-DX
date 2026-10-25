@@ -1,0 +1,326 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<panel
+ border="true"
+ follows="left|top|right|bottom"
+ height="408"
+ label="Skins"
+ layout="topleft"
+ left="102"
+ name="skins"
+ top="1"
+ width="517">
+  <text
+   type="string"
+   length="1"
+   follows="left|top"
+   height="12"
+   layout="topleft"
+   left="30"
+   name="select_skin_text"
+   top="12"
+   width="180">
+   Select a skin:
+  </text>
+  <!-- Chooser -->
+  <scroll_list
+   height="225"
+   follows="left|top"
+   layout="topleft"
+   left="40"
+   name="skin_list"
+   draw_heading="false"
+   top_pad="8"
+   width="170">
+    <scroll_list.commit_callback
+     function="Pref.SelectSkin" />
+  </scroll_list>
+  <button
+   enabled="true"
+   follows="left|top"
+   height="19"
+   label="Apply"
+   layout="topleft"
+   left="40"
+   name="apply_skin"
+   tool_tip="Changes will take effect after you restart [APP_NAME]"
+   top_pad="4"
+   width="75">
+    <button.commit_callback
+     function="Pref.ApplySkin" />
+  </button>
+  <button
+   enabled="true"
+   follows="left|top"
+   height="19"
+   image_disabled="AddItem_Disabled"
+   image_selected="AddItem_Press"
+   image_unselected="AddItem_Off"
+   layout="topleft"
+   left_pad="52"
+   name="add_skin"
+   top_delta="0"
+   tool_tip="Add a new skin..."
+   width="19">
+    <button.commit_callback
+     function="Pref.AddSkin" />
+  </button>
+  <button
+   enabled="false"
+   follows="left|top"
+   height="19"
+   image_disabled="TrashItem_Disabled"
+   image_selected="TrashItem_Press"
+   image_unselected="TrashItem_Off"
+   layout="topleft"
+   left_pad="4"
+   name="remove_skin"
+   top_delta="0"
+   tool_tip="Remove selected skin..."
+   width="19">
+    <button.commit_callback
+     function="Pref.RemoveSkin" />
+  </button>
+  <!-- Info/Preview -->
+  <text
+   type="string"
+   length="1"
+   follows="left|top"
+   height="20"
+   layout="topleft"
+   font="SansSerifLarge"
+   left="215"
+   name="skin_name"
+   top="10"
+   right="-10">
+   Boring skin!
+  </text>
+  <text
+   type="string"
+   length="1"
+   follows="left|top"
+   height="14"
+   layout="topleft"
+   name="skin_author_label"
+   top_pad="2"
+   width="90"
+   value="Author:" />
+  <text
+   type="string"
+   length="1"
+   follows="left|top"
+   height="14"
+   layout="topleft"
+   name="skin_homepage_label"
+   top_pad="2"
+   width="90"
+   value="Homepage:" />
+  <text
+   type="string"
+   length="1"
+   follows="left|top"
+   height="14"
+   layout="topleft"
+   name="skin_date_label"
+   top_pad="2"
+   width="90"
+   value="Date:" />
+  <text
+   type="string"
+   length="1"
+   follows="left|top"
+   height="14"
+   layout="topleft"
+   name="skin_compatibility_label"
+   top_pad="2"
+   width="90"
+   value="Compatiblity:" />
+  <text
+   type="string"
+   length="1"
+   follows="left|top"
+   height="14"
+   layout="topleft"
+   name="skin_author"
+   top_delta="-48"
+   left_pad="1"
+   width="200">
+Nobody
+  </text>
+  <text
+   type="string"
+   length="1"
+   follows="left|top"
+   height="14"
+   layout="topleft"
+   name="skin_homepage"
+   top_pad="2"
+   width="200">
+http://www.example.com/
+  </text>
+  <text
+   type="string"
+   length="1"
+   follows="left|top"
+   height="14"
+   layout="topleft"
+   name="skin_date"
+   top_pad="2"
+   width="200">
+Jan 1, 2001
+  </text>
+  <text
+   type="string"
+   length="1"
+   follows="left|top"
+   height="14"
+   layout="topleft"
+   name="skin_compatibility"
+   top_pad="2"
+   width="200">
+0.0.0
+  </text>
+  <text
+   type="string"
+   length="1"
+   follows="left|top"
+   height="14"
+   layout="topleft"
+   name="skin_notes_label"
+   top_pad="2"
+   left="215"
+   width="90"
+   value="Notes:" />
+  <text
+   type="string"
+   length="1"
+   follows="left|top"
+   height="70"
+   layout="topleft"
+   name="skin_notes"
+   top_pad="2"
+   word_wrap="true"
+   width="291" />
+  <!-- FONT (FSFontSettingsFile / FSFontSizeAdjustment, Firestorm-compatible) -->
+  <text
+   type="string"
+   length="1"
+   follows="left|top"
+   height="16"
+   layout="topleft"
+   left="30"
+   name="font_set_label"
+   top="300"
+   width="120">
+    Font:
+  </text>
+  <combo_box
+   control_name="FSFontSettingsFile"
+   follows="left|top"
+   height="20"
+   layout="topleft"
+   left="150"
+   name="font_set_combo"
+   tool_tip="Font used for the whole interface. Your own sets (a fonts_NAME.xml and its .ttf files) go in the fonts folder of your user settings."
+   top_delta="-3"
+   width="220" />
+  <button
+   follows="left|top"
+   height="20"
+   label="Add Font..."
+   layout="topleft"
+   left_pad="6"
+   name="add_font_btn"
+   tool_tip="Pick a .ttf / .otf font (or its Regular, Bold, Italic and Bold Italic files together) to use for the interface. It is copied into your settings and selected."
+   top_delta="0"
+   width="90">
+    <button.commit_callback function="Pref.AddFont" />
+  </button>
+  <text
+   type="string"
+   length="1"
+   follows="left|top"
+   height="16"
+   layout="topleft"
+   left="30"
+   name="font_size_label"
+   top_pad="10"
+   width="120">
+    Font size adjustment:
+  </text>
+  <spinner
+   control_name="FSFontSizeAdjustment"
+   decimal_digits="1"
+   follows="left|top"
+   height="20"
+   increment="0.5"
+   initial_value="0"
+   label_width="0"
+   layout="topleft"
+   left="150"
+   max_val="4"
+   min_val="-2"
+   name="font_size_spinner"
+   tool_tip="Points added to every interface font size (0 = default)."
+   top_delta="-3"
+   width="60" />
+  <text
+   type="string"
+   length="1"
+   follows="left|top"
+   height="16"
+   layout="topleft"
+   left_pad="6"
+   name="font_size_units"
+   top_delta="3"
+   width="40">
+    pt
+  </text>
+  <text
+   type="string"
+   length="1"
+   follows="left|top"
+   height="16"
+   layout="topleft"
+   left="30"
+   name="font_restart_note"
+   text_color="LabelDisabledColor"
+   top_pad="12"
+   width="460">
+    Font changes apply immediately. If some text looks off, reopen its window.
+  </text>
+  <check_box
+   control_name="UsePieMenu"
+   follows="left|top"
+   height="16"
+   label="Pie menus"
+   layout="topleft"
+   left="30"
+   name="use_pie_menu"
+   tool_tip="Right clicking land, avatars, objects or attachments opens a radial pie menu (as in Firestorm and the classic viewer) instead of a context menu."
+   top_pad="10"
+   width="110" />
+  <check_box
+   control_name="PieMenuPopupFontEffect"
+   enabled_control="UsePieMenu"
+   follows="left|top"
+   height="16"
+   label="Pop-up animation"
+   layout="topleft"
+   left_pad="10"
+   name="pie_popup_effect"
+   tool_tip="Slice labels move into place as the pie menu opens."
+   top_delta="0"
+   width="140" />
+  <check_box
+   control_name="PieMenuOuterRingShade"
+   enabled_control="UsePieMenu"
+   follows="left|top"
+   height="16"
+   label="Outer ring shade"
+   layout="topleft"
+   left_pad="10"
+   name="pie_outer_ring"
+   tool_tip="Shade the outer ring of slices that open a sub-pie."
+   top_delta="0"
+   width="140" />
+</panel>

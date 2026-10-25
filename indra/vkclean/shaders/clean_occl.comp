@@ -1,0 +1,260 @@
+#version 450
+// Occlusion culling (#167, RenderVKOcclusionCull; off by default).
+//
+// Runs between the depth pre-pass and pass 1, on the MAIN view's static world
+// buckets that the pre-pass just drew: 0 opaque, 1 mask, 6 double-sided opaque,
+// 7 double-sided mask. The pre-pass depth is complete (every opaque/mask/rigged
+// occluder of THIS frame), so a draw whose padded world box lies entirely behind the
+// farthest depth under its screen rectangle cannot produce a single pass-1 fragment
+// (pass 1 tests EQUAL against that depth) -- dropping it is exact, never late: no
+// previous-frame reprojection, no popping. The pre-pass itself still draws them.
+//
+// Conservative by construction: the box is the cull's worldAABB (union of every
+// resident LOD's bounds, +1 m padding) grown to include the object's origin; any
+// corner at/behind the near plane keeps the draw; the Hi-Z holds max depth and the
+// sampled rectangle covers the whole projected box. Instances whose bounds are not
+// world bounds (worn attachments, spinners, unknown bounds) and water always draw.
+//
+// Compacted in place, keeping draw order (the cull's stable order matters for
+// coincident surfaces): phase 0 tests + ranks within the workgroup (one bucket per
+// dispatch row y), phase 1 scans per-workgroup counts into offsets and rewrites the
+// bucket counters, phase 2 writes survivors back at offset + rank.
+
+layout(local_size_x = 64) in;
+
+struct Instance {
+    mat4 model_matrix;
+    vec4 aabb_min;
+    vec4 aabb_max;
+    vec4 tint;
+    mat4 uv_matrix;
+    uint lod_group_id;
+    uint material_id;
+    uint flags;
+    uint skin_id;
+    vec4 spin_axis;
+    vec4 spin_pivot;
+};
+struct SlotInfo {
+    uint first_index;
+    uint index_count;
+    int  base_vertex;
+    uint has_weights;
+    uint vert_count;
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
+};
+struct DrawCmd {
+    uint indexCount;
+    uint instanceCount;
+    uint firstIndex;
+    int  vertexOffset;
+    uint firstInstance;
+};
+struct LodGroup { uint slot[4]; };
+#define LOD_SENTINEL 0xFFFFFFFFu
+
+layout(std430, binding = 0) readonly buffer Instances { Instance instances[]; };
+layout(std430, binding = 1) readonly buffer Slots     { SlotInfo slots[]; };
+layout(std430, binding = 2) readonly buffer LodGroups { LodGroup lod_groups[]; };
+layout(std430, binding = 3) buffer Cmd0 { DrawCmd cmd0[]; };   // bucket 0 opaque
+layout(std430, binding = 4) buffer Cmd1 { DrawCmd cmd1[]; };   // bucket 1 mask
+layout(std430, binding = 5) buffer Cmd6 { DrawCmd cmd6[]; };   // bucket 6 ds opaque
+layout(std430, binding = 6) buffer Cmd7 { DrawCmd cmd7[]; };   // bucket 7 ds mask
+layout(std430, binding = 7) buffer Counters { uint counters[]; };
+layout(std430, binding = 8) buffer Cand     { DrawCmd cand[]; };     // [4 * cap]
+layout(std430, binding = 9) buffer CandMeta { uint cand_meta[]; };   // rank, ~0 = dropped/none
+layout(std430, binding = 10) buffer WgCounts { uint wg_counts[]; };  // [row * groups + wg]
+layout(binding = 11) uniform sampler2D u_hiz;                       // all mips, NEAREST
+layout(std430, binding = 12) buffer Stats { uint stats[]; };         // [slot*4]: tested, occluded
+
+layout(push_constant) uniform Push {
+    mat4  u_view_proj;     // the main view's world (agent-space) view-projection
+    vec4  u_hiz;           // .xy depth-buffer size (pixels), .z Hi-Z mip count, .w unused
+    uint  u_cap;           // bucket capacity (entries per bucket buffer)
+    uint  u_phase;         // 0 test+rank, 1 scan, 2 emit
+    uint  u_groups;        // workgroups per bucket row = ceil(cap / 64)
+    uint  u_stats_slot;    // readback ring slot for this frame's stats
+    uint  u_limit;         // entries examined per bucket (live instance count <= cap)
+    uint  _p0, _p1, _p2;
+} pc;
+
+uint bucketOf(uint row) { return row == 0u ? 0u : row == 1u ? 1u : row == 2u ? 6u : 7u; }
+uint counterSlot(uint b) { return b < 6u ? b : b + 2u; }
+
+DrawCmd loadCmd(uint row, uint i)
+{
+    if (row == 0u) return cmd0[i];
+    if (row == 1u) return cmd1[i];
+    if (row == 2u) return cmd6[i];
+    return cmd7[i];
+}
+void storeCmd(uint row, uint i, DrawCmd c)
+{
+    if      (row == 0u) cmd0[i] = c;
+    else if (row == 1u) cmd1[i] = c;
+    else if (row == 2u) cmd6[i] = c;
+    else                cmd7[i] = c;
+}
+
+// The cull's world bounds (clean_cull.comp worldAABB), grown to include the origin.
+void worldAABB(uint id, out vec3 wmin, out vec3 wmax)
+{
+    mat4 mm = instances[id].model_matrix;
+    vec3 lo = instances[id].aabb_min.xyz;
+    vec3 hi = instances[id].aabb_max.xyz;
+    uint gid = instances[id].lod_group_id;
+    if (gid < uint(lod_groups.length()))   // (#238: SENTINEL or past the table -> own box)
+    {
+        for (uint L = 0u; L < 4u; ++L)
+        {
+            uint sl = lod_groups[gid].slot[L];
+            if (sl >= uint(slots.length())) continue;   // (SENTINEL included)
+            SlotInfo si = slots[sl];
+            if (si.index_count == 0u || (si._pad0 | si._pad1 | si._pad2) == 0u) continue;
+            vec2 a = unpackHalf2x16(si._pad0), b = unpackHalf2x16(si._pad1), c = unpackHalf2x16(si._pad2);
+            lo = min(lo, vec3(a.x, a.y, b.x));
+            hi = max(hi, vec3(b.y, c.x, c.y));
+        }
+    }
+    wmin = vec3(1e30);
+    wmax = vec3(-1e30);
+    for (int i = 0; i < 8; ++i)
+    {
+        vec3 c = vec3((i & 1) != 0 ? hi.x : lo.x,
+                      (i & 2) != 0 ? hi.y : lo.y,
+                      (i & 4) != 0 ? hi.z : lo.z);
+        vec3 w = (mm * vec4(c, 1.0)).xyz;
+        wmin = min(wmin, w);
+        wmax = max(wmax, w);
+    }
+    wmin = min(wmin, mm[3].xyz) - vec3(1.0);
+    wmax = max(wmax, mm[3].xyz) + vec3(1.0);
+}
+
+// true = provably hidden behind this frame's pre-pass depth.
+bool occluded(uint id)
+{
+    uint f = instances[id].flags;
+    // Not world bounds / swept volumes / HUD / water: always draw.
+    if ((f & (1u | 8u | 128u | 512u | 2048u | 8192u)) != 0u) return false;
+    if (dot(instances[id].spin_axis.xyz, instances[id].spin_axis.xyz) > 0.0) return false;
+    mat4 mm = instances[id].model_matrix;
+    for (int c = 0; c < 4; ++c)
+        if (any(isnan(mm[c])) || any(isinf(mm[c]))) return false;
+
+    vec3 wmin, wmax;
+    worldAABB(id, wmin, wmax);
+
+    vec2 smin = vec2(1e30), smax = vec2(-1e30);
+    // REVERSED-Z (#188): the box's NEAREST depth is its max; the Hi-Z holds the
+    // farthest (min) depth under the rectangle.
+    float znear = -1e30;
+    for (int i = 0; i < 8; ++i)
+    {
+        vec3 c = vec3((i & 1) != 0 ? wmax.x : wmin.x,
+                      (i & 2) != 0 ? wmax.y : wmin.y,
+                      (i & 4) != 0 ? wmax.z : wmin.z);
+        vec4 p = pc.u_view_proj * vec4(c, 1.0);
+        if (p.w <= 1e-3) return false;           // crosses the near plane: keep
+        vec3 n = p.xyz / p.w;
+        smin = min(smin, n.xy);
+        smax = max(smax, n.xy);
+        znear = max(znear, n.z);
+    }
+    if (znear >= 1.0) return false;           // reaches the near plane: keep
+    // Entirely off screen: the frustum cull let it through on padding; keep it (cheap).
+    if (smax.x < -1.0 || smax.y < -1.0 || smin.x > 1.0 || smin.y > 1.0) return false;
+
+    // Screen rectangle in depth-buffer pixels, clamped to the screen.
+    vec2 size = pc.u_hiz.xy;
+    vec2 pmin = clamp((smin * 0.5 + 0.5) * size, vec2(0.0), size - 1.0);
+    vec2 pmax = clamp((smax * 0.5 + 0.5) * size, vec2(0.0), size - 1.0);
+
+    // Level where the rectangle spans at most 2x2 texels. Hi-Z level L texel = 2^(L+1)
+    // depth pixels.
+    float ext = max(pmax.x - pmin.x, pmax.y - pmin.y) + 1.0;
+    int levels = int(pc.u_hiz.z);
+    int L = clamp(int(ceil(log2(max(ext, 1.0)))) - 1, 0, levels - 1);
+    ivec2 lsize = textureSize(u_hiz, L);
+    float scale = 1.0 / float(1 << (L + 1));
+    // One texel of margin each side: rounding at the rectangle's edges can never drop
+    // an occluder-free texel from the test.
+    ivec2 t0 = clamp(ivec2(floor(pmin * scale)) - 1, ivec2(0), lsize - 1);
+    ivec2 t1 = clamp(ivec2(floor(pmax * scale)) + 1, ivec2(0), lsize - 1);
+    // At this level the rectangle covers at most 2 texels per axis (+ the margin).
+    float far_depth = 1.0;
+    for (int y = t0.y; y <= t1.y; ++y)
+        for (int x = t0.x; x <= t1.x; ++x)
+            far_depth = min(far_depth, texelFetch(u_hiz, ivec2(x, y), L).r);
+    return znear < far_depth;
+}
+
+shared uint s_keep[64];
+
+void main()
+{
+    uint lid = gl_LocalInvocationID.x;
+    uint row = gl_WorkGroupID.y;                 // 0..3 -> bucket 0,1,6,7
+    uint wg  = gl_WorkGroupID.x;
+    uint i   = wg * 64u + lid;                   // entry within the bucket
+    uint b   = bucketOf(row);
+    uint n   = min(counters[counterSlot(b)], pc.u_cap);
+    uint flat_id = row * pc.u_cap + i;
+
+    if (pc.u_phase == 0u)
+    {
+        uint keep = 0u;
+        if (i < n)
+        {
+            DrawCmd c = loadCmd(row, i);
+            cand[flat_id] = c;
+            atomicAdd(stats[pc.u_stats_slot * 4u + 0u], 1u);
+            if (occluded(c.firstInstance)) atomicAdd(stats[pc.u_stats_slot * 4u + 1u], 1u);
+            else keep = 1u;
+        }
+        s_keep[lid] = keep;
+        barrier();
+        // Every entry below the capacity is (re)written, so phase 2 never sees a
+        // previous frame's rank past this frame's count.
+        if (i < pc.u_limit)
+        {
+            uint rank = 0u;
+            for (uint j = 0u; j < lid; ++j) rank += s_keep[j];
+            cand_meta[flat_id] = keep != 0u ? rank : 0xFFFFFFFFu;
+        }
+        if (lid == 0u)
+        {
+            uint cnt = 0u;
+            for (uint j = 0u; j < 64u; ++j) cnt += s_keep[j];
+            wg_counts[row * pc.u_groups + wg] = cnt;
+        }
+        return;
+    }
+
+    if (pc.u_phase == 1u)
+    {
+        // One workgroup: lane r scans bucket row r.
+        if (lid < 4u)
+        {
+            uint sum = 0u;
+            for (uint w = 0u; w < pc.u_groups; ++w)
+            {
+                uint c = wg_counts[lid * pc.u_groups + w];
+                wg_counts[lid * pc.u_groups + w] = sum;
+                sum += c;
+            }
+            uint bb = bucketOf(lid);
+            // Only ever shrinks the count the pre-pass used.
+            counters[counterSlot(bb)] = min(sum, min(counters[counterSlot(bb)], pc.u_cap));
+        }
+        return;
+    }
+
+    // phase 2: survivors back into the bucket, in their original order.
+    if (i >= pc.u_limit) return;
+    uint m = cand_meta[flat_id];
+    if (m == 0xFFFFFFFFu) return;
+    storeCmd(row, wg_counts[row * pc.u_groups + wg] + m, cand[flat_id]);
+}

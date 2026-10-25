@@ -1,0 +1,214 @@
+#version 460
+// vkclean — SUN EXPOSURE CERTIFICATES (SXC, #771 Phase 2): the per-frame MAINTENANCE kernel,
+// one invocation per table slot, recorded right before the merged RT shadow pass (pass 15) on the
+// same queue (llcleansuncertvk.cpp sunCertRecord). It is the only writer of an entry's committed
+// state, so pass 15 (many texels per entry, atomics only on the round / flag words) never sees a
+// half-written certificate:
+//   * EVICTION: an entry no texel looked up for SXC_H_IDLE frames is cleared whole (bounded table:
+//     the host lowers SXC_H_IDLE while the live count nears the capacity -- LRU by age);
+//   * EPOCH: an entry from an older epoch (sun jump, sun <-> moon, origin shift, settings) is reset;
+//   * REVOCATION: the pass's flag (a lit ray in a certified cell: + the hysteresis count, which
+//     backs the cell's next round off x4 per revocation) or a CHANGE SPHERE whose sweep toward the
+//     sun crosses the cell (moved / re-registered / rezzed / deleted static objects; no count);
+//   * COMMIT: a round whose rays are all in (bins x RenderVKSunCertRays) becomes the certificate:
+//     blocked = the round's bins no ray found open, its coverage, its nearest blocker;
+//   * ROUNDS: a new round starts when wanted (new / reset / uncovered part / the sun's disc reaches
+//     the last certified bin / RenderVKSunCertMaxAge) and the cell's back-off allows -- at most
+//     SXC_H_BUDGET a frame (a teleport's thousands of new cells certify over several frames: no
+//     ray burst); a round whose bins the sun left restarts at the sun's bins;
+//   * the per-frame ticket counters are zeroed.
+#extension GL_GOOGLE_include_directive : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+
+#define SXC_MAINTENANCE
+#include "clean_sun_cert.glsl"
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+layout(push_constant) uniform SxcMaintPush {
+    uvec2 addr;    // the SXC buffer's device address
+    uint  slots;   // table slots (buckets x 8)
+    uint  pad;
+} pc;
+
+void stat(SxcBuf b, uint i, bool on)
+{
+    const uint n = subgroupAdd(on ? 1u : 0u);
+    if (n != 0u && subgroupElect()) atomicAdd(b.w[SXC_STATS + i], n);
+}
+
+// The cell's sweep toward the sun meets change sphere (S, r): the cell itself, or the cone of sun
+// directions around Ld (half angle SXC_H_SPREAD: every bin the cell holds or certifies) from it.
+bool sphereHits(vec3 C, float hc, vec3 Ld, float tspread, vec4 s)
+{
+    const vec3 v = s.xyz - C;
+    const float d2 = dot(v, v);
+    const float rr = s.w + hc;
+    if (d2 < rr * rr) return true;
+    const float t = dot(v, Ld);
+    if (t <= 0.0) return false;
+    const float allow = rr + t * tspread;
+    return d2 - t * t < allow * allow;
+}
+
+void main()
+{
+    const uint i = gl_GlobalInvocationID.x;
+    SxcBuf b = SxcBuf(pc.addr);
+    bool live = false, evict = false, epochReset = false, revFlag = false, revChg = false;
+    bool started = false, deferred = false, committedNow = false, blockedNow = false, restarted = false;
+    bool holds = false, certNow = false, inRound = false;
+    if (i < pc.slots)
+    {
+        const uint e = SXC_TABLE + i * SXC_WORDS;
+        const uint k1 = b.w[e + SXC_E_KEY1];
+        if (k1 != 0u)
+        {
+            const uint frame = b.w[SXC_H_FRAME];
+            const uint epoch16 = b.w[SXC_H_EPOCH] & 0xFFFFu;
+            const uint nb = clamp(b.w[SXC_H_NB], 1u, 32u);
+            const uint binLo = b.w[SXC_H_BINLO], binHi = b.w[SXC_H_BINHI];
+            uint fl = b.w[e + SXC_E_FLAGS];
+            if (frame - b.w[e + SXC_E_TOUCH] > b.w[SXC_H_IDLE] || b.w[e + SXC_E_KEY0] == 0u)
+            {
+                // EVICT: the whole entry back to zero (an empty slot is all zero: pass 15's claim
+                // relies on it)
+                for (uint j = 0u; j < SXC_WORDS; ++j) b.w[e + j] = 0u;
+                evict = true;
+            }
+            else
+            {
+                live = true;
+                if ((fl >> 16u) != epoch16)
+                {
+                    // EPOCH: a fresh entry (a new one too: its epoch field is 0)
+                    epochReset = (fl >> 16u) != 0u;
+                    b.w[e + SXC_E_BLOCK] = 0u; b.w[e + SXC_E_CB] = 0u; b.w[e + SXC_E_COV] = 0u;
+                    b.w[e + SXC_E_BT] = floatBitsToUint(1e30); b.w[e + SXC_E_CFRAME] = 0u;
+                    b.w[e + SXC_E_RS] = 0u; b.w[e + SXC_E_RRAYS] = 0u; b.w[e + SXC_E_ROPEN] = 0u;
+                    b.w[e + SXC_E_RCOV] = 0u; b.w[e + SXC_E_RBT] = floatBitsToUint(1e30);
+                    b.w[e + SXC_E_RFRAME] = frame - b.w[SXC_H_GAP];   // (a round may start now)
+                    fl = (epoch16 << 16u) | SXC_F_NEED;
+                }
+                else if ((fl & (SXC_F_COMMIT | SXC_F_ROUND | SXC_F_REVOKE)) != 0u)
+                {
+                    revFlag = (fl & SXC_F_REVOKE) != 0u;
+                    const uint ns = min(b.w[SXC_H_NSPH], SXC_MAX_SPHERES);
+                    if (!revFlag && ns > 0u)
+                    {
+                        const uint level = (k1 >> 3u) & 7u;
+                        const vec3 C = sxcCellCentre(b, b.w[e + SXC_E_KEY0], k1);
+                        const float hc = 0.8661 * sxcCellSize(b, level);
+                        const uint mid = (fl & SXC_F_COMMIT) != 0u ? b.w[e + SXC_E_CB] : binLo;
+                        const bool coneMode = uintBitsToFloat(b.w[SXC_H_CONE]) > 0.0;
+                        const vec3 Ld = sxcWedgeDir(b, mid + nb / 2u, coneMode ? vec2(0.0) : vec2(0.5, 0.0));   // (the range's centre)
+                        const float tspread = tan(min(uintBitsToFloat(b.w[SXC_H_SPREAD]), 1.4));
+                        for (uint s = 0u; s < ns && !revChg; ++s)
+                        {
+                            const uint sw = SXC_SPHERES + s * 4u;
+                            const vec4 sp = vec4(uintBitsToFloat(b.w[sw]), uintBitsToFloat(b.w[sw + 1u]),
+                                                 uintBitsToFloat(b.w[sw + 2u]), uintBitsToFloat(b.w[sw + 3u]));
+                            revChg = sphereHits(C, hc, Ld, tspread, sp);
+                        }
+                    }
+                    if (revFlag || revChg)
+                    {
+                        // REVOKE: nothing certified, the round dropped, a new one wanted after the
+                        // back-off (a lit-ray revocation counts toward the hysteresis: x4 per count)
+                        uint cnt = (fl >> 8u) & 3u;
+                        if (revFlag && (fl & SXC_F_COMMIT) != 0u) cnt = min(cnt + 1u, 3u);   // (a certificate proved wrong)
+                        b.w[e + SXC_E_BLOCK] = 0u; b.w[e + SXC_E_COV] = 0u;
+                        b.w[e + SXC_E_RRAYS] = 0u; b.w[e + SXC_E_ROPEN] = 0u; b.w[e + SXC_E_RCOV] = 0u;
+                        b.w[e + SXC_E_RBT] = floatBitsToUint(1e30);
+                        b.w[e + SXC_E_RFRAME] = frame;
+                        fl = (fl & 0xFFFF0000u) | (cnt << 8u) | SXC_F_NEED;
+                    }
+                }
+                // ---- the round ----
+                const uint cnt = (fl >> 8u) & 3u;
+                if ((fl & SXC_F_ROUND) != 0u)
+                {
+                    const uint rs = b.w[e + SXC_E_RS];
+                    if (b.w[e + SXC_E_RRAYS] >= nb * max(b.w[SXC_H_RPB], 1u))
+                    {
+                        // COMMIT (every ray of the round has reported: the pass that issued them ended)
+                        const uint mask = nb >= 32u ? 0xFFFFFFFFu : ((1u << nb) - 1u);
+                        const uint blocked = ~b.w[e + SXC_E_ROPEN] & mask;
+                        b.w[e + SXC_E_BLOCK] = blocked;
+                        b.w[e + SXC_E_CB] = rs;
+                        b.w[e + SXC_E_COV] = b.w[e + SXC_E_RCOV];
+                        b.w[e + SXC_E_BT] = b.w[e + SXC_E_RBT];
+                        b.w[e + SXC_E_CFRAME] = frame;
+                        // a certificate that held its back-off out: one revocation forgiven
+                        fl = (fl & ~(SXC_F_ROUND | (3u << 8u))) | SXC_F_COMMIT | ((cnt > 0u ? cnt - 1u : 0u) << 8u);
+                        committedNow = true;
+                        blockedNow = blocked != 0u;
+                    }
+                    else if (binLo < rs || binHi >= rs + nb)
+                    {
+                        // the sun left the round's bins before it completed (a cell out of view
+                        // for a while): start over at the sun's bins
+                        fl &= ~SXC_F_ROUND;
+                        fl |= SXC_F_NEED;
+                        restarted = true;
+                    }
+                }
+                if ((fl & SXC_F_ROUND) == 0u)
+                {
+                    const bool committed = (fl & SXC_F_COMMIT) != 0u;
+                    const uint cb = b.w[e + SXC_E_CB];
+                    const uint guard = nb >= 3u ? 1u : 0u;
+                    const bool due = (fl & SXC_F_NEED) != 0u || !committed
+                                  || (nb > 1u && binHi + guard >= cb + nb)
+                                  // (renewed at 7/8 of the age: the new round commits before the
+                                  // old certificate stops being used -- no traced gap)
+                                  || frame - b.w[e + SXC_E_CFRAME] >= b.w[SXC_H_MAXAGE] - (b.w[SXC_H_MAXAGE] >> 3u);
+                    const uint gap = b.w[SXC_H_GAP] << (2u * cnt);
+                    if (due && frame - b.w[e + SXC_E_RFRAME] >= gap)
+                    {
+                        if (atomicAdd(b.w[SXC_H_ROUNDS], 1u) < b.w[SXC_H_BUDGET])
+                        {
+                            b.w[e + SXC_E_RS] = binLo;
+                            b.w[e + SXC_E_RRAYS] = 0u; b.w[e + SXC_E_ROPEN] = 0u; b.w[e + SXC_E_RCOV] = 0u;
+                            b.w[e + SXC_E_RBT] = floatBitsToUint(1e30);
+                            b.w[e + SXC_E_RFRAME] = frame;
+                            fl = (fl & ~SXC_F_NEED) | SXC_F_ROUND;
+                            started = true;
+                        }
+                        else deferred = true;
+                    }
+                }
+                b.w[e + SXC_E_FLAGS] = fl & ~SXC_F_REVOKE;
+                b.w[e + SXC_E_TICKET] = 0u;
+                holds = (fl & SXC_F_COMMIT) != 0u;
+                inRound = (fl & SXC_F_ROUND) != 0u;
+                if (holds)
+                {
+                    const uint cb = b.w[e + SXC_E_CB];
+                    if (binLo >= cb && binHi < cb + nb && binHi >= binLo)
+                    {
+                        const uint n = binHi - binLo + 1u;
+                        const uint m = (n >= 32u ? 0xFFFFFFFFu : ((1u << n) - 1u)) << (binLo - cb);
+                        certNow = (b.w[e + SXC_E_BLOCK] & m) == m;
+                    }
+                }
+            }
+        }
+    }
+    stat(b, SXC_S_LIVE, live);
+    stat(b, SXC_S_EVICT, evict);
+    stat(b, SXC_S_EPOCH, epochReset);
+    stat(b, SXC_S_REVFLAG, revFlag);
+    stat(b, SXC_S_REVCHG, revChg && !revFlag);
+    stat(b, SXC_S_RSTART, started);
+    stat(b, SXC_S_DEFER, deferred);
+    stat(b, SXC_S_RDONE, committedNow);
+    stat(b, SXC_S_RBLOCK, blockedNow);
+    stat(b, SXC_S_RRESTART, restarted);
+    stat(b, SXC_S_COMMIT, holds);
+    stat(b, SXC_S_CERTNOW, certNow);
+    stat(b, SXC_S_RACTIVE, inRound);
+    const uint nl = subgroupAdd(live ? 1u : 0u);
+    if (nl != 0u && subgroupElect()) atomicAdd(b.w[SXC_H_LIVE], nl);
+    if (i == 0u) atomicAdd(b.w[SXC_STATS + SXC_S_FRAMES], 1u);
+}

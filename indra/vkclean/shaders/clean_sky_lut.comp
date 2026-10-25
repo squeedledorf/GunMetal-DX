@@ -1,0 +1,27 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// vkclean -- SKY-VIEW LUT (#819, RenderVKSkyLUT; LLCleanRendererVK::recordSkyLut): bakes
+// skyColor() -- the resolved linear HDR haze sky of this frame's atmosphere -- over its two
+// coordinates (clean_atmos_common.glsl skyLutUV: the dome direction's height and its angle to the
+// light norm) into a small RGBA16F table, once per frame right after the frame info is uploaded.
+// Texel centres, inverted mapping; the consumers sample it bilinearly (skyColor with
+// CLEAN_SKY_LUT). Set 0 = draw set 0 (the frame info, binding 9; binding 52 -- this table as a
+// sampler -- is never read here), set 1 binding 0 = the table as a storage image.
+layout(local_size_x = 8, local_size_y = 8) in;
+#include "clean_frame_info.glsl"
+#include "clean_atmos_common.glsl"
+layout(set = 1, binding = 0, rgba16f) uniform writeonly image2D uSkyLutOut;
+
+void main()
+{
+    const ivec2 sz = imageSize(uSkyLutOut);
+    const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, sz))) return;
+    const vec2 uv = (vec2(p) + 0.5) / vec2(sz);
+    // u = sqrt(theta / pi) -> n . lightnorm = cos(theta); v -> n.y = sign(s) s^2, s = 2 v - 1
+    const float nl = cos(uv.x * uv.x * 3.14159265);
+    const float s = uv.y * 2.0 - 1.0;
+    const float ny = sign(s) * s * s;
+    const vec3 c = skyResolve(clamp(skyHazeCore(ny, nl) * 2.0, vec3(0.0), vec3(5.0)));
+    imageStore(uSkyLutOut, p, vec4(c, 1.0));
+}

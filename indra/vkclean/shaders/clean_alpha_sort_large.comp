@@ -1,0 +1,343 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "clean_av_slots.glsl"
+// vkclean — alpha-blend ordering past the single-workgroup cap (B9).
+//
+// clean_alpha_sort.comp sorts each main-view alpha bucket in one workgroup's shared
+// memory, so it caps at MAXS (4096) draws and used to append the rest UNSORTED to the
+// post-water set (dense foliage sims pass that: blended foliage then drew in cull
+// order). When the renderer expects a bucket past the cap (RenderVKAlphaSortLarge,
+// hinted by the readback of the sort's own counters) it records this multi-workgroup
+// bitonic sort right after the small one, and the small one leaves buckets with
+// n > MAXS untouched (mode 0 only; the HUD and probe modes are unchanged).
+//
+// Same key and output contract as clean_alpha_sort.comp mode 0 (keep the two in step):
+//   key = (k0, k1), ascending: k0 = (near side of the water ? 1 : 0) << 31 |
+//   (0x7FFFFFFF - (squared distance bits >> 1)), k1 = instance id;
+//   [0, pre) stay in the alpha bucket (pre-water), [pre, n) go to the post-water list,
+//   counters[2 / 5] = pre, counters[6 / 7] = n - pre.
+//   F2 lists (u_flags bit 1, static bucket): water / invisiprims key KEY_WATER / KEY_EXCL
+//   (post keys clamped below), sorted to the end and scattered to the water list
+//   (binding 11, counters[17]) / exclusion list (binding 12, counters[18]); the
+//   unsorted tail past u_nmax also appends its water / invisiprims there (hdr[2] /
+//   hdr[3] count them), its post-list copy stays (dropped by the alpha VS / FS).
+// gl_WorkGroupID.y selects the bucket: 0 = static alpha (2), 1 = rigged alpha (5).
+//
+// Stages (u_stage), one dispatch each, compute -> compute barriers between them:
+//   0 KEYS   : header n (0 = the small sort handled it); keys of a 2048 chunk per
+//              workgroup, padded with (MAX, MAX) to N = pow2(ns), sorted in shared
+//              memory (bitonic steps k <= 2048; direction from the GLOBAL index).
+//   1 GLOBAL : one compare-exchange step (u_k, u_j >= 2048) over global memory.
+//   2 MERGE  : the remaining steps j = 1024 .. 1 of u_k, a chunk per workgroup.
+//   3 SCATTER: pre (binary search for the first near-side key), sorted draws from
+//              cand[instance id] into the bucket / post list, then the unsorted tail
+//              [ns, n) when the bucket outgrew this frame's sort capacity u_nmax.
+// ns = min(n, u_nmax): the CPU records stages for k <= u_nmax only (pow2, >= 8192).
+layout(local_size_x = 1024) in;   // stages 0 / 2: 2 elements per lane; 1: a pair per lane; 3: strided
+
+struct DrawCmd { uint indexCount; uint instanceCount; uint firstIndex; int vertexOffset; uint firstInstance; };
+struct Instance {
+    mat4 model_matrix;
+    vec4 aabb_min;
+    vec4 aabb_max;
+    vec4 tint;
+    mat4 uv_matrix;
+    uint lod_group_id;
+    uint material_id;
+    uint flags;
+    uint skin_id;
+    vec4 spin_axis;
+    vec4 spin_pivot;
+};
+
+layout(std430, binding = 0) readonly buffer Instances { Instance instances[]; };
+layout(std430, binding = 1) buffer Counters { uint counters[]; };
+layout(std430, binding = 2) buffer CmdAlpha   { DrawCmd cmd_alpha[]; };
+layout(std430, binding = 3) buffer CmdRAlpha  { DrawCmd cmd_r_alpha[]; };
+layout(std430, binding = 4) writeonly buffer CmdAlphaPost  { DrawCmd cmd_alpha_post[]; };
+layout(std430, binding = 5) writeonly buffer CmdRAlphaPost { DrawCmd cmd_r_alpha_post[]; };
+layout(std430, binding = 6) readonly buffer Cand { DrawCmd cand[]; };
+#include "clean_skinvert.glsl"   // SV_WORDS / RC_WORDS / RC_STATE (#616)
+layout(std430, binding = 7) readonly buffer SkinVerts { float skin_verts[]; };   // positions = words 0..2
+layout(std430, binding = 8) readonly buffer RigCache { uint rig_cache[]; };
+#include "clean_joint_table.glsl"   // mat3x4 joint world rows (jointWorld())
+layout(std430, binding = 9) readonly buffer AvJoints { AvatarJoints av_joints[]; };
+// Sort scratch: hdr[b] = bucket b's draw count for the large path (0 = not this frame),
+// keys[b * u_nmax + i].
+layout(std430, binding = 10) coherent buffer SortKeys { uint hdr[4]; uvec2 keys[]; };
+// F2: the water / exclusion lists (clean_alpha_sort.comp).
+layout(std430, binding = 11) writeonly buffer CmdWater { DrawCmd cmd_water[]; };
+layout(std430, binding = 12) writeonly buffer CmdExcl  { DrawCmd cmd_excl[]; };
+const uint WATER_SLOT = 17u;   // = LLCleanRendererVK::WATER_LIST_SLOT
+const uint EXCL_SLOT  = 18u;   // = LLCleanRendererVK::EXCL_LIST_SLOT
+const uint KEY_WATER  = 0xFFFFFFFEu;
+const uint KEY_EXCL   = 0xFFFFFFFFu;
+
+layout(push_constant) uniform Push {
+    vec4 u_cam;        // .xyz camera world pos, .w water height
+    uint u_cam_under;  // camera below the water plane
+    uint u_cap;        // per-bucket command capacity
+    uint u_stage;      // 0 keys + chunk sort, 1 global step, 2 chunk merge, 3 scatter
+    uint u_nmax;       // this frame's sort capacity (pow2) = the keys stride per bucket
+    uint u_k;          // bitonic block size (stages 1, 2)
+    uint u_j;          // compare distance (stage 1)
+    uint u_flags;      // bit 1: F2 water / exclusion lists (static bucket), bit 2: the rigged size bias
+                       // (#835); = clean_alpha_sort.comp u_pad
+    uint u_pad1;
+} pc;
+
+// clean_alpha_sort.comp's single-workgroup capacity (its ALPHA_SORT_MAXS: 2048 in the
+// small-shared-memory variant, #238 -- the passes below hold for any MAXS >= CHUNK).
+#ifndef ALPHA_SORT_MAXS
+#define ALPHA_SORT_MAXS 4096u
+#endif
+const uint MAXS  = ALPHA_SORT_MAXS;
+const uint CHUNK = 2048u;   // elements per workgroup in stages 0 / 2 (2 per lane)
+shared uvec2 s_k[CHUNK];
+shared uint  s_pre, s_wbeg, s_ebeg;
+
+mat3 rigidRot(mat4 m)
+{
+    vec3 c0 = m[0].xyz, c1 = m[1].xyz, c2 = m[2].xyz;
+    float l0 = length(c0), l1 = length(c1), l2 = length(c2);
+    if (!(l0 > 1e-8 && l1 > 1e-8 && l2 > 1e-8)) return mat3(1.0);
+    return mat3(c0 / l0, c1 / l1, c2 / l2);
+}
+
+DrawCmd loadCmd(bool rigged, uint i) { return rigged ? cmd_r_alpha[i] : cmd_alpha[i]; }
+
+// A rigged alpha draw's sort position, in the space of its skinned range (eye-relative, or
+// pelvis-local when the state word says RC_ST_LOCAL): the centre of its POSED BOX, which the
+// pre-skin wrote for exactly this range (clean_preskin.comp, key = vertexOffset + 1) -- the
+// cluster path's key (clean_cluster_alpha.comp). Not the first skinned vertex any more: that
+// is an arbitrary point of the face, so layered alpha faces of one mesh (a bang over hair)
+// swapped order as the camera orbited. Space consistency: a LOCAL state = drawn from a
+// skin-cache range, whose centre was written pelvis-local (re-skinned now or held); any other
+// state = a per-frame range, re-skinned (and its centre rewritten) this frame, eye-relative.
+// No valid centre (an empty item, a cleared row): the range's first vertex, as before.
+// ext: the posed box's extent in the same space (RC_EXT, #835), 0 without a valid centre.
+// (= clean_alpha_sort.comp riggedSortPos / riggedSortDist2, verbatim)
+vec3 riggedSortPos(DrawCmd c, uint rcb, bool rc_ok, out vec3 ext)
+{
+    if (rc_ok && rig_cache[rcb + RC_CTR_KEY] == uint(c.vertexOffset) + 1u)
+    {
+        ext = uintBitsToFloat(uvec3(rig_cache[rcb + RC_EXT], rig_cache[rcb + RC_EXT + 1u], rig_cache[rcb + RC_EXT + 2u]));
+        if (any(isnan(ext)) || any(isinf(ext))) ext = vec3(0.0);
+        return uintBitsToFloat(uvec3(rig_cache[rcb + RC_CTR], rig_cache[rcb + RC_CTR + 1u], rig_cache[rcb + RC_CTR + 2u]));
+    }
+    ext = vec3(0.0);
+    const uint vb = uint(c.vertexOffset) * SV_WORDS;
+    return vec3(skin_verts[vb], skin_verts[vb + 1u], skin_verts[vb + 2u]);
+}
+
+// RIGGED SIZE BIAS (#835, RenderVKRigAlphaSortSizeBias: u_pad / u_flags bit 2): the squared sort
+// distance of a rigged draw at world position w with posed extent ext (rot: range space ->
+// world, the pelvis rotation for a pelvis-local range, else identity). LL's alpha face distance
+// (LLDrawable::updateDistance): the centre minus a QUARTER of the extent along the view axis,
+// per component -- here along the ray to the centre, d = |w - cam| - 0.25 * dot(ext, u * u)
+// with u that ray in the range's axes. Nested layers of one mesh (fur / onion-skin shells over
+// a solid base, #835) have one centre: by the centre alone their keys differ by animation noise
+// and their order flipped frame to frame -- with the layers lit differently (the forward
+// visibility reuse on the inner ones), the stack flickered. The bias puts the enclosing layer
+// nearer (drawn later) by a quarter of the shell gap, every frame. Off: the centre alone.
+uint riggedSortDist2(vec3 w, vec3 cam, vec3 ext, mat3 rot, bool bias)
+{
+    const vec3 d = w - cam;
+    const float dd = dot(d, d);
+    if (!bias || !(dd > 0.0) || all(equal(ext, vec3(0.0)))) return floatBitsToUint(dd);
+    const float len = sqrt(dd);
+    const vec3 u = transpose(rot) * (d / len);
+    const float s = max(len - 0.25 * dot(ext, u * u), 0.0);
+    return floatBitsToUint(s * s);
+}
+
+bool keyGreater(uvec2 a, uvec2 b) { return (a.x > b.x) || (a.x == b.x && a.y > b.y); }
+
+uint nextPow2(uint v) { uint p = 1u; while (p < v) p <<= 1u; return p; }
+
+// clean_alpha_sort.comp mode 0, verbatim.
+uvec2 makeKey(bool rigged, uint i)
+{
+    DrawCmd c = loadCmd(rigged, i);
+    Instance inst = instances[c.firstInstance];
+    vec3 ctr = 0.5 * (inst.aabb_min.xyz + inst.aabb_max.xyz);
+    vec3 w = (inst.model_matrix * vec4(ctr, 1.0)).xyz;
+    vec3 r_ext = vec3(0.0);     // (#835) rigged: the posed extent + its axes
+    mat3 r_rot = mat3(1.0);
+    if (rigged)
+    {
+        const uint rcb = c.firstInstance * RC_WORDS;
+        const bool rc_ok = rcb + RC_WORDS <= uint(rig_cache.length());
+        const vec3 p = riggedSortPos(c, rcb, rc_ok, r_ext);
+        const uint rs = rc_ok ? rig_cache[rcb + RC_STATE] : 0u;
+        if ((rs & RC_ST_LOCAL) != 0u && (inst.flags & 8u) == 0u && (rs & RC_ST_SLOT) < uint(av_joints.length()))
+        {
+            const mat4 P = jointWorld(av_joints[rs & RC_ST_SLOT].world[0]);
+            r_rot = rigidRot(P);
+            w = r_rot * p + P[3].xyz;
+        }
+        else w = p + pc.u_cam.xyz;
+    }
+    bool below = w.z < pc.u_cam.w;
+    bool far_side = (pc.u_cam_under != 0u) ? !below : below;
+    if ((inst.flags & 2048u) != 0u) far_side = false;    // water surface: post set
+    if ((inst.flags & 65536u) != 0u) far_side = false;   // water exclusion: post set
+    vec3 d = w - pc.u_cam.xyz;
+    uint db = floatBitsToUint(dot(d, d));
+    if (rigged) db = riggedSortDist2(w, pc.u_cam.xyz, r_ext, r_rot, (pc.u_flags & 4u) != 0u);
+    uint k0 = (far_side ? 0u : 0x80000000u) | (0x7FFFFFFFu - (db >> 1u));
+    if (!rigged && (pc.u_flags & 2u) != 0u)   // F2 lists
+        k0 = (inst.flags & 2048u) != 0u ? KEY_WATER
+           : (inst.flags & 65536u) != 0u ? KEY_EXCL : min(k0, KEY_WATER - 1u);
+    return uvec2(k0, c.firstInstance);
+}
+
+// First index in the sorted [0, ns) whose key k0 >= v.
+uint lowerBound(uint kb, uint ns, uint v)
+{
+    uint lo = 0u, hi = ns;
+    while (lo < hi)
+    {
+        const uint mid = (lo + hi) >> 1u;
+        if (keys[kb + mid].x < v) lo = mid + 1u; else hi = mid;
+    }
+    return lo;
+}
+
+// Bitonic steps j = jstart .. 1 of block size k over this workgroup's shared chunk;
+// gbase = the chunk's global index (the direction is (global i & k) == 0).
+void chunkSteps(uint gbase, uint k, uint jstart)
+{
+    const uint lid = gl_LocalInvocationID.x;
+    for (uint j = jstart; j > 0u; j >>= 1u)
+    {
+        const uint i = ((lid & ~(j - 1u)) << 1u) | (lid & (j - 1u));   // 1024 pairs
+        const uint p = i | j;
+        const uvec2 a = s_k[i], b = s_k[p];
+        const bool asc = ((gbase + i) & k) == 0u;
+        if (keyGreater(a, b) == asc) { s_k[i] = b; s_k[p] = a; }
+        barrier();
+    }
+}
+
+void main()
+{
+    const bool rigged = gl_WorkGroupID.y == 1u;
+    const uint bucket   = rigged ? 5u : 2u;
+    const uint post_ctr = rigged ? 7u : 6u;
+    const uint lid  = gl_LocalInvocationID.x;
+    const uint kb   = gl_WorkGroupID.y * pc.u_nmax;   // this bucket's keys
+
+    if (pc.u_stage == 0u)
+    {
+        // The small sort ran first: it rewrote counters[bucket] (pre <= n <= MAXS)
+        // unless n > MAXS, where it left the bucket untouched for this pass.
+        const uint n = min(counters[bucket], pc.u_cap);
+        if (gl_WorkGroupID.x == 0u && lid == 0u) hdr[gl_WorkGroupID.y] = n > MAXS ? n : 0u;
+        if (gl_WorkGroupID.x == 0u && gl_WorkGroupID.y == 0u && lid == 0u) { hdr[2] = 0u; hdr[3] = 0u; }   // F2 tail counts
+        if (n <= MAXS) return;
+        const uint ns = min(n, pc.u_nmax);
+        const uint N  = nextPow2(ns);                     // >= 8192 > CHUNK
+        const uint base = gl_WorkGroupID.x * CHUNK;
+        if (base >= N) return;
+        for (uint e = lid; e < CHUNK; e += 1024u)
+        {
+            const uint i = base + e;
+            s_k[e] = i < ns ? makeKey(rigged, i) : uvec2(0xFFFFFFFFu);
+        }
+        barrier();
+        for (uint k = 2u; k <= CHUNK; k <<= 1u)
+            chunkSteps(base, k, k >> 1u);
+        for (uint e = lid; e < CHUNK; e += 1024u) keys[kb + base + e] = s_k[e];
+        return;
+    }
+
+    const uint n = hdr[gl_WorkGroupID.y];
+    if (n == 0u) return;
+    const uint ns = min(n, pc.u_nmax);
+    const uint N  = nextPow2(ns);
+
+    if (pc.u_stage == 1u)
+    {
+        if (pc.u_k > N) return;
+        const uint t = gl_GlobalInvocationID.x;          // one pair per lane
+        if (t >= N / 2u) return;
+        const uint j = pc.u_j;
+        const uint i = ((t & ~(j - 1u)) << 1u) | (t & (j - 1u));
+        const uint p = i | j;
+        const uvec2 a = keys[kb + i], b = keys[kb + p];
+        const bool asc = (i & pc.u_k) == 0u;
+        if (keyGreater(a, b) == asc) { keys[kb + i] = b; keys[kb + p] = a; }
+        return;
+    }
+
+    if (pc.u_stage == 2u)
+    {
+        if (pc.u_k > N) return;
+        const uint base = gl_WorkGroupID.x * CHUNK;
+        if (base >= N) return;
+        for (uint e = lid; e < CHUNK; e += 1024u) s_k[e] = keys[kb + base + e];
+        barrier();
+        chunkSteps(base, pc.u_k, CHUNK >> 1u);
+        for (uint e = lid; e < CHUNK; e += 1024u) keys[kb + base + e] = s_k[e];
+        return;
+    }
+
+    // ---- stage 3: scatter ----
+    const bool lists = !rigged && (pc.u_flags & 2u) != 0u;   // F2
+    if (lid == 0u)
+    {
+        // First near-side key (bit 31) in the sorted [0, ns): the pre-water count;
+        // F2: then the first water key and the first exclusion key.
+        s_pre  = lowerBound(kb, ns, 0x80000000u);
+        s_wbeg = lists ? lowerBound(kb, ns, KEY_WATER) : ns;
+        s_ebeg = lists ? lowerBound(kb, ns, KEY_EXCL) : ns;
+    }
+    barrier();
+    const uint pre = s_pre, wbeg = s_wbeg, ebeg = s_ebeg;
+    const uint stride = gl_NumWorkGroups.x * 1024u;
+    // Sorted draws from the per-instance candidates (the cull wrote cand[instance id]);
+    // the in-place writes (i < pre <= ns) never alias the tail reads below (i >= ns).
+    for (uint i = gl_GlobalInvocationID.x; i < ns; i += stride)
+    {
+        const DrawCmd c = cand[keys[kb + i].y];
+        if (i < pre)       { if (rigged) cmd_r_alpha[i] = c; else cmd_alpha[i] = c; }
+        else if (i < wbeg) { if (rigged) cmd_r_alpha_post[i - pre] = c; else cmd_alpha_post[i - pre] = c; }
+        else if (i < ebeg) cmd_water[i - wbeg] = c;
+        else               cmd_excl[i - ebeg] = c;
+    }
+    // Past this frame's sort capacity (the bucket grew faster than the hint): unsorted
+    // after the sorted post-water draws, as the small sort's overflow.
+    for (uint i = ns + gl_GlobalInvocationID.x; i < n; i += stride)
+    {
+        const DrawCmd c = loadCmd(rigged, i);
+        if (rigged) cmd_r_alpha_post[(wbeg - pre) + (i - ns)] = c;
+        else        cmd_alpha_post[(wbeg - pre) + (i - ns)] = c;
+        if (lists)
+        {
+            // F2: also into the lists, after the sorted ones (counters 17 / 18 start at 0:
+            // the frame's counter fill; the small sort left this bucket alone).
+            const uint f = instances[c.firstInstance].flags;
+            if ((f & 2048u) != 0u)
+            {
+                cmd_water[(ebeg - wbeg) + atomicAdd(hdr[2], 1u)] = c;
+                atomicAdd(counters[WATER_SLOT], 1u);
+            }
+            else if ((f & 65536u) != 0u)
+            {
+                cmd_excl[(ns - ebeg) + atomicAdd(hdr[3], 1u)] = c;
+                atomicAdd(counters[EXCL_SLOT], 1u);
+            }
+        }
+    }
+    if (gl_GlobalInvocationID.x == 0u)
+    {
+        counters[bucket]   = pre;
+        counters[post_ctr] = (wbeg - pre) + (n - ns);
+        if (lists)
+        {
+            atomicAdd(counters[WATER_SLOT], ebeg - wbeg);
+            atomicAdd(counters[EXCL_SLOT], ns - ebeg);
+        }
+    }
+}

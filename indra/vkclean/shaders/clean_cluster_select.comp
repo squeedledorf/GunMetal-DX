@@ -1,0 +1,553 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_ballot : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+// vkclean -- CLUSTER LOD selection, culling and emission for ONE view (#745, OWNER: 1b).
+//
+// One 64-invocation workgroup per ClusterInstance (row = gl_WorkGroupID.y * gl_NumWorkGroups.x
+// + gl_WorkGroupID.x). The workgroup walks its mesh's pages; for every RESIDENT page each
+// invocation takes one cluster of it (<= 64 per page, = kMaxClustersPerPage) and runs:
+//   1. THE CUT RULE (clean_cluster_common.glsl clCutRenders; group projections only, so both
+//      sides of every group boundary decide identically): render(C) = proj(group(C)) > tol
+//      AND (proj(child_group(C)) <= tol OR the child group's page is not resident). The last
+//      case is the FALLBACK: the coarser parent draws, never a hole.
+//   2. Page usage: every cluster in the cut stamps its pool slot (CL_B_PAGE_USAGE = frame),
+//      culled or not -- 1c's LRU keeps the cut resident while the camera turns.
+//   3. Culling of the cut: frustum (world sphere vs the view's world planes), backface cone
+//      (mesh space; not for rigged / double-sided / mirrored instances, ortho or CLV_NO_CONE
+//      views), Hi-Z occlusion (CLV_OCCLUSION: last frame's main-view pyramid reprojected with
+//      the view that built it, the 1b views tail).
+//   4. Emission: visible clusters of an instance the frame draws (debug overlay, or CLI1B_DRAW)
+//      append a ClusterSelected to the view's slice (overflow counted, never written past), its
+//      aux word and a draw record to their bucket (single / double-sided). (#748 perf pass 3: an
+//      instance not drawn -- a registered avatar not switched yet -- takes no entry: steps 2 and
+//      5 only, so a few switched avatars cost a few avatars' selection and pre-skin.)
+//      RIGGED ALPHA-BLEND (CLI1B_BLEND, main view): never a bucket / rig-bucket record; every
+//      record is STAGED with a deterministic rank inside its instance for the ordered alpha lists
+//      (clean_cluster_alpha.comp orders the instances back to front after the pre-skin).
+//   5. Requests: a VISIBLE fallback cluster in a view with CLV_REQUESTS asks 1c for its child
+//      group's page (priority = that group's projected error, px), deduplicated per frame by
+//      a stamp per virtual page (CL_B_COUNTERS tail).
+// Appends are subgroup-aggregated (one atomic per subgroup and counter); statistics are
+// accumulated per invocation and added once per subgroup at the end.
+//
+// SHARED RIG CUT (main view, cl_aux.rig.z bit 0): a rigged instance drawn for real whose avatar
+// is in a rig list (clRigLists: the renderer's per-pass avatar visibility) is selected WITHOUT
+// frustum / cone / Hi-Z culling -- its whole cut at the main view's LOD -- so the one cluster
+// pre-skin over the main slice skins everything every pass may draw. The main view's own
+// draw records keep the culling; each selected entry of such an instance also appends a record
+// to the rig lists it belongs to (shadow casters, mirror / probe captures), which those passes
+// draw (firstInstance = the main slice's entry: the pre-skin map covers it). Other views
+// (cascades, probe faces, mirror) skip rigged instances entirely, and with SelectPush flag
+// bit 1 the moving casters (#567 split: the dynamic overlay draws those legacy). Main view (CLV_MAIN),
+// instances drawn for real: per-INSTANCE counters too (CLS_MAIN_*: the face, whether its whole
+// cut is root clusters -- the DAG floor --, its cut triangles and its LOD0 triangles, the
+// summary's full-detail baseline), reduced over the workgroup in shared memory.
+//
+// RT CUT SUMMARY (#1011, clean_cluster_select_common.glsl; cl_aux.flags CLA_FLAG_RT_SUMMARY): a
+// shared instance of the main view also reduces its counted entries (count, the RT walk's hashes,
+// triangles) into its CL_B_INST_CUT row and ranks each of them (aux word): 2b's derived RT cut then
+// needs no re-gather (its mode 11) and places its slots by rank, not in atomic order.
+//
+// Method: published material only (SIGGRAPH 2021 Nanite talk: cut selection from group
+// errors; meshoptimizer's MIT demo: boundsError projection, cone culling with
+// meshopt_Bounds cone_axis_s8 / cone_cutoff_s8).
+layout(local_size_x = 64) in;
+
+#define CLUSTER_SET 0
+#define CL_DECLARE_POOL
+#define CL_DECLARE_PAGE_TABLE
+#define CL_DECLARE_MESHES
+#define CL_DECLARE_GROUPS
+#define CL_DECLARE_REQUESTS
+#define CL_DECLARE_PAGE_USAGE
+#define CL_DECLARE_INSTANCES
+#define CL_DECLARE_STATS
+#define CL_DECLARE_JOINT_STRETCH
+#define CL_DECLARE_HIZ
+#include "clean_cluster_common.glsl"
+#define CL_SELECT_WRITE
+#define CL_DECLARE_INST_CUT
+#include "clean_cluster_select_common.glsl"
+// 2a (#747): the rigged instances' posed-bound margins (clean_cluster_preskin_prep.comp mode 1).
+#define CL_DECLARE_SKIN_SCRATCH
+#include "clean_cluster_skin_common.glsl"
+
+layout(push_constant) uniform SelectPush
+{
+    uint view;             // cluster view index (cl_views)
+    uint instance_count;   // ClusterInstance rows this frame
+    uint tier;             // raster tier of the draw records (0 pull, 1 uint8, 2 mesh)
+    uint rig_bounds;       // bit 0 (2a, #747): this frame's rigged posed-bound margins are written;
+                           // bit 1: skip moving casters (CLI1B_DYN_CASTER; secondary views, #567 split)
+} sp;
+
+// Subgroup-aggregated append: one atomicAdd per subgroup on cl_cnt[counter]; returns this
+// invocation's index (meaningful where pred). Call in subgroup-uniform control flow.
+// CLS_MAIN_* reduction of this workgroup's instance (main view only).
+shared uint s_main_flags;      // 1: a cluster selected, 2: a non-root cluster in the cut
+shared uint s_main_cut_tris;
+// ALPHA LISTS (CLI1B_BLEND, main view): the instance's entry, per-invocation stage bits of the
+// current page (bit l = staged list l), the running per-list record counts (DETERMINISTIC local
+// indices: page order, then cluster order inside the page), the main list's triangles.
+shared uint s_al_entry;
+shared uint s_al_bits[64];
+shared uint s_al_run[CLA_STAGE_LISTS];
+shared uint s_al_tris;
+// RT CUT SUMMARY (#1011): the counted entries of the current page (bit = cluster index), the
+// instance's running rank, and the per-instance sums {count, hash a, hash b (xor), tris}.
+shared uint s_rk_bits[2];
+shared uint s_rk_run;
+shared uint s_rk_sum[4];
+
+// One draw record at word w (tier 0: VkDrawIndirectCommand + 1 spare word; tiers 1 / 2:
+// VkDrawIndexedIndirectCommand), firstInstance = the absolute selected index.
+void clWriteDraw(uint w, uint tris, uint first_idx, uint first_vtx, uint abs_sel)
+{
+    cl_draws[w + 0u] = tris * 3u;
+    cl_draws[w + 1u] = 1u;
+    cl_draws[w + 2u] = first_idx;
+    if (sp.tier == 0u)
+    {
+        cl_draws[w + 3u] = abs_sel;   // VkDrawIndirectCommand::firstInstance
+        cl_draws[w + 4u] = 0u;
+    }
+    else
+    {
+        cl_draws[w + 3u] = first_vtx; // vertexOffset
+        cl_draws[w + 4u] = abs_sel;   // firstInstance
+    }
+}
+
+uint clAppend(bool pred, uint counter)
+{
+    const uvec4 b = subgroupBallot(pred);
+    const uint n = subgroupBallotBitCount(b);
+    uint base = 0u;
+    if (n != 0u && subgroupElect()) base = atomicAdd(cl_cnt[counter], n);
+    base = subgroupBroadcastFirst(base);
+    return base + subgroupBallotExclusiveBitCount(b);
+}
+
+void clStat(uint idx, uint v)
+{
+    const uint s = subgroupAdd(v);
+    if (s != 0u && subgroupElect()) CL_STAT_ADD(idx, s);
+}
+
+// One staged alpha record (unordered position g; tag = entry | list << 30, the deterministic local
+// index): clean_cluster_alpha.comp scatters it to its ordered place. False = the staging is full.
+bool clStageAlpha(uint g, uint entry, uint list, uint local, uint tris, uint first_idx, uint first_vtx, uint abs_sel)
+{
+    if (g >= cl_aux.alpha.y) return false;
+    clWriteDraw((clAlphaStageRec() + g) * CLD_WORDS, tris, first_idx, first_vtx, abs_sel);
+    const uint tb = clAlphaTagBase() + g * 2u;
+    cl_draws[tb] = entry | (list << 30u);
+    cl_draws[tb + 1u] = local;
+    return true;
+}
+
+// Hi-Z occlusion of a world sphere against last frame's main-view pyramid (REVERSED-Z: the
+// pyramid holds the FARTHEST = smallest depth; the sphere's box is hidden when its NEAREST
+// depth is farther). Mirrors clean_occl.comp's rectangle / level choice. false = keep.
+bool clOccluded(vec4 ws)
+{
+    const vec3 c = ws.xyz - cl_aux.occ_origin.xyz;
+    vec2 smin = vec2(1e30), smax = vec2(-1e30);
+    float znear = -1e30;
+    for (int i = 0; i < 8; ++i)
+    {
+        const vec3 o = vec3((i & 1) != 0 ? ws.w : -ws.w, (i & 2) != 0 ? ws.w : -ws.w, (i & 4) != 0 ? ws.w : -ws.w);
+        const vec4 p = cl_aux.occ_view_proj * vec4(c + o, 1.0);
+        if (p.w <= 1e-3) return false;           // crosses the near plane
+        const vec3 n = p.xyz / p.w;
+        smin = min(smin, n.xy);
+        smax = max(smax, n.xy);
+        znear = max(znear, n.z);
+    }
+    if (znear >= 1.0) return false;
+    if (smax.x < -1.0 || smax.y < -1.0 || smin.x > 1.0 || smin.y > 1.0) return false;
+    const vec2 size = vec2(cl_aux.hiz.xy);
+    const vec2 pmin = clamp((smin * 0.5 + 0.5) * size, vec2(0.0), size - 1.0);
+    const vec2 pmax = clamp((smax * 0.5 + 0.5) * size, vec2(0.0), size - 1.0);
+    const float ext = max(pmax.x - pmin.x, pmax.y - pmin.y) + 1.0;
+    const int levels = max(int(cl_aux.hiz.w), 1);
+    const int L = clamp(int(ceil(log2(max(ext, 1.0)))) - 1, 0, levels - 1);
+    const ivec2 lsize = textureSize(cl_hiz, L);
+    const float scale = 1.0 / float(1 << (L + 1));
+    const ivec2 t0 = clamp(ivec2(floor(pmin * scale)) - 1, ivec2(0), lsize - 1);
+    const ivec2 t1 = clamp(ivec2(floor(pmax * scale)) + 1, ivec2(0), lsize - 1);
+    float far_depth = 1.0;
+    for (int y = t0.y; y <= t1.y; ++y)
+        for (int x = t0.x; x <= t1.x; ++x)
+            far_depth = min(far_depth, texelFetch(cl_hiz, ivec2(x, y), L).r);
+    return znear < far_depth;
+}
+
+void main()
+{
+    const uint lid = gl_LocalInvocationID.x;
+    const uint ii = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
+    if (ii >= sp.instance_count || sp.view >= CL_MAX_VIEWS) return;   // workgroup-uniform
+    const ClView v = cl_views[sp.view];
+    ClInstance inst = cl_instances[ii];
+    if (inst.mesh >= uint(cl_meshes.length())) return;
+    const ClMesh mesh = cl_meshes[inst.mesh];
+    if (mesh.generation != inst.mesh_generation || mesh.page_count == 0u) return;   // stale ref
+    const bool is_main = (v.flags & CLV_MAIN) != 0u;
+    // Secondary views: rigged instances come from the main view's shared rig lists; moving
+    // casters stay legacy under the cascades' static / dynamic split.
+    if (!is_main && (inst.flags & CLI_RIGGED) != 0u) return;
+    // <GMDX> Avatars render type off (CLV_NO_RIGGED, main view; Develop > Render Types, the region map
+    // capture): no rigged cut at all -- the shared rig lists (shadows, captures) and the RT cut derive from it.
+    if ((v.flags & CLV_NO_RIGGED) != 0u && (inst.flags & CLI_RIGGED) != 0u) return;
+    if (!is_main && (sp.rig_bounds & 2u) != 0u && (inst.flags & CLI1B_DYN_CASTER) != 0u) return;
+    if (lid == 0u) CL_STAT_ADD(CLS_INSTANCES, 1u);
+    // POSED BOUNDS (2a, #747): a rigged instance's xform is its REST pose; rig_m bounds how far
+    // any of its vertices is from its rest position under this frame's pose. It inflates every
+    // sphere the culling tests and is the projection's distance margin (one value per instance:
+    // the cut stays monotonic / watertight). Margins missing this frame (their pass could not
+    // run): an instance drawn for real is never culled and takes LOD0 (huge margin, correct
+    // and expensive); the debug overlay of a legacy-path avatar keeps the rest pose.
+    float rig_m = 0.0;
+    if ((inst.flags & CLI_RIGGED) != 0u)
+    {
+        rig_m = (sp.rig_bounds & 1u) != 0u ? clRigMargin(ii) : ((inst.flags & CLI1B_DRAW) != 0u ? 1.0e5 : 0.0);
+        inst.anim_margin_m = max(inst.anim_margin_m, rig_m);
+    }
+    // The shared rig cut (main view): the rig lists this instance's entries also go to.
+    const uint rig_lists = is_main ? clRigLists(inst.flags) : 0u;
+    const bool share = rig_lists != 0u;
+    // Whole-instance frustum test on the mesh sphere (nested: every cluster lies inside).
+    // A shared instance's whole cut is selected (its off-screen clusters cast / reflect).
+    const bool inst_in = clSphereInFrustum(v, clXformSphere(inst, mesh.sphere) + vec4(0.0, 0.0, 0.0, rig_m));
+    if (!inst_in && !share) return;
+
+    const float tol = clTolerance(inst, v);
+    const bool want_req = (v.flags & CLV_REQUESTS) != 0u && (inst.flags & CLI_NO_REQUEST) == 0u;
+    const bool cone_ok = (v.flags & (CLV_NO_CONE | CLV_ORTHO)) == 0u
+                      && (inst.flags & (CLI_RIGGED | CLI1B_DOUBLE_SIDED | CLI1B_NO_CONE)) == 0u;
+    const bool occl = (v.flags & CLV_OCCLUSION) != 0u && cl_aux.hiz.z != 0u;
+    // (the RenderVKClusterDebug overlay is the main view's only: a secondary view draws the
+    // instances drawn for real, whose legacy draws its cull skips)
+    const bool draw = (is_main && cl_aux.debug_mode != 0u) || (inst.flags & CLI1B_DRAW) != 0u;
+    // Our own avatar hidden in the main view (mouselook, CLV_HIDE_SELF): its cut is still
+    // selected (the shared rig lists -- shadows, captures -- and the RT cut derive from it) but
+    // the main view draws none of it.
+    const bool hide_main = (v.flags & CLV_HIDE_SELF) != 0u && (inst.flags & CLI_SELF) != 0u;
+    // (#748 perf pass 3) RESIDENCY ONLY for an instance no view draws this frame (a registered
+    // avatar not switched yet, a static not on the cluster path): the main view walks its cut
+    // every 4th frame, staggered (page usage stays well under the stream's kEvictMinAge, its
+    // requests keep the switch coming); secondary views skip it.
+    if (!draw && (!is_main || ((v.frame + ii) & 3u) != 0u)) return;   // (workgroup-uniform)
+    const uint bucket = (inst.flags & CLI1B_DOUBLE_SIDED) != 0u ? 1u : 0u;
+    const uint vb = sp.view * CLC_VIEW_WORDS;
+    // ALPHA-BLEND (CLI1B_BLEND): never in buckets 0 / 1 or the rig lists' buckets (those are drawn
+    // opaque); a drawn-for-real one in the main view stages its records for the alpha lists
+    // (workgroup-uniform). Its selected entries are kept as any rigged instance's (pre-skin, RT).
+    const bool blend_inst = (inst.flags & CLI1B_BLEND) != 0u;
+    bool blend = blend_inst && is_main && (inst.flags & CLI1B_DRAW) != 0u && (cl_aux.alpha.w & 1u) != 0u;
+    if (blend)
+    {
+        if (lid == 0u)
+        {
+            uint e = atomicAdd(cl_cnt[vb + CLC_AL_INST], 1u);
+            if (e < cl_aux.alpha.z)
+            {
+                const uint eb = clAlphaEntryBase() + e * CLA_ENTRY_WORDS;
+                cl_draws[eb + 0u] = ii;
+                cl_draws[eb + 1u] = 1u;
+                for (uint k = 2u; k < 5u; ++k) cl_draws[eb + k] = 0xFFFFFFFFu;   // box lo (atomicMin)
+                for (uint k = 5u; k < CLA_ENTRY_WORDS; ++k) cl_draws[eb + k] = 0u;
+            }
+            else e = CL_NONE;
+            s_al_entry = e;
+            for (uint l = 0u; l < CLA_STAGE_LISTS; ++l) s_al_run[l] = 0u;
+            s_al_tris = 0u;
+        }
+        barrier();
+    }
+    const uint al_entry = blend ? s_al_entry : CL_NONE;
+    uint n_al_drop = 0u;
+    // Camera in MESH space (cone test): the inverse of the instance's 3x4 transform.
+    vec3 cam_mesh = vec3(0.0);
+    if (cone_ok)
+    {
+        const mat3 A = transpose(mat3(inst.xform_r0.xyz, inst.xform_r1.xyz, inst.xform_r2.xyz));
+        const vec3 t = vec3(inst.xform_r0.w, inst.xform_r1.w, inst.xform_r2.w);
+        cam_mesh = inverse(A) * (v.cam_pos.xyz - t);
+    }
+    const uint stamp = v.frame + 1u;   // request dedupe (0 = never stamped)
+    // (workgroup-uniform: view and instance are the same for every invocation)
+    const bool main_stats = is_main && draw;
+    if (main_stats)
+    {
+        if (lid == 0u) { s_main_flags = 0u; s_main_cut_tris = 0u; }
+        barrier();
+    }
+    // RT CUT SUMMARY (#1011; workgroup-uniform): the main view's shared instances (the RT cut of
+    // such an instance derives from this cut).
+    const bool rt_sum = is_main && share && (cl_aux.flags & CLA_FLAG_RT_SUMMARY) != 0u;
+    if (rt_sum)
+    {
+        if (lid == 0u) { s_rk_run = 0u; s_rk_sum[0] = 0u; s_rk_sum[1] = 0u; s_rk_sum[2] = 0u; s_rk_sum[3] = 0u; }
+        barrier();
+    }
+    uint n_rk = 0u, n_rk_tris = 0u, h_rk_a = 0u, h_rk_b = 0u;
+    uint n_main_cut = 0u;
+    bool main_nonroot = false;
+    uint n_drawn = 0u, n_drawn_tris = 0u;   // main view: drawn (emitted) clusters / triangles
+
+    uint n_tested = 0u, n_cut = 0u, n_fb = 0u, n_cf = 0u, n_co = 0u, n_cc = 0u;
+    uint n_sel = 0u, n_selov = 0u, n_tris = 0u, n_verts = 0u, n_req = 0u, n_reqov = 0u;
+    for (uint p = 0u; p < mesh.page_count; ++p)
+    {
+        if (mesh.page_base + p >= uint(cl_page_table.length())) break;
+        const uint slot = cl_page_table[mesh.page_base + p];
+        if (slot == CL_NONE) continue;                         // not resident (uniform)
+        const uint n = min(clPageClusterCount(slot), CL_MAX_CLUSTERS_PER_PAGE);
+        bool sel = false, fallback = false, visible = false;
+        uint ref = 0u, tris = 0u, verts = 0u, aux = 0u, first_idx = 0u, first_vtx = 0u;
+        if (lid < n)
+        {
+            const ClRecord rec = clLoadRecord(slot, lid);
+            ++n_tested;
+            if (rec.group < mesh.group_count && rec.child_group < mesh.group_count)
+            {
+                const ClGroup gp = cl_groups[mesh.group_base + rec.group];
+                const ClGroup gc = cl_groups[mesh.group_base + rec.child_group];
+                const float parent_px = clProjectGroupError(gp.sphere, gp.error, inst, v,
+                                                            clJointStretch(inst.skin_id, gp.joint_mask));
+                const float self_px = clProjectGroupError(gc.sphere, gc.error, inst, v,
+                                                          clJointStretch(inst.skin_id, gc.joint_mask));
+                const bool child_res = clGroupResident(inst.mesh, rec.child_group);
+                if (clCutRenders(parent_px, self_px, child_res, tol))
+                {
+                    ++n_cut;
+                    n_main_cut += clRecTriCount(rec);
+                    main_nonroot = main_nonroot || rec.group != CL_GROUP_ROOT;
+                    fallback = self_px > tol;   // (=> the finer page is missing)
+                    if (fallback) ++n_fb;
+                    if (slot < uint(cl_page_usage.length())) cl_page_usage[slot] = v.frame;
+                    const vec4 ws = clXformSphere(inst, rec.sphere) + vec4(0.0, 0.0, 0.0, rig_m);
+                    visible = inst_in;
+                    if (!visible) ++n_cf;
+                    else if (!clSphereInFrustum(v, ws)) { visible = false; ++n_cf; }
+                    else if (cone_ok && clConeBackfacing(rec.cone, rec.sphere.xyz, rec.sphere.w, cam_mesh))
+                    { visible = false; ++n_cc; }
+                    else if (occl && clOccluded(ws)) { visible = false; ++n_co; }
+                    // (#748 perf pass 3) Only an instance this frame DRAWS (for real, or the debug
+                    // overlay) takes selected entries: a registered avatar not switched yet (legacy
+                    // draws it) keeps its cut's page usage and its requests (residency for the
+                    // switch) but no entry -- no slice, no pre-skin group, no map word for it.
+                    if (draw && (visible || share))
+                    {
+                        sel = true;
+                        ref = clMakeRef(slot, lid);
+                        tris = clRecTriCount(rec);
+                        verts = clRecVertCount(rec);
+                        aux = min(clRecLevel(rec), CLA_LEVEL_MASK) | (fallback ? CLA_FALLBACK : 0u)
+                            | ((gc.flags & CLG_FACE_BORDER_FREE) != 0u ? CLA_BORDER_FREE : 0u);
+                        first_idx = clFirstIndexByte(slot, rec);
+                        first_vtx = clFirstVertex(slot, rec);
+                    }
+                    {
+                        if (visible && fallback && want_req && gc.page != CL_NONE)
+                        {
+                            const uint vpage = mesh.page_base + gc.page;
+                            if (vpage < CL_MAX_VIRTUAL_PAGES
+                                && atomicExchange(cl_cnt[CLC_DEDUP_BASE + vpage], stamp) != stamp)
+                            {
+                                ++n_req;
+                                const uint r = atomicAdd(cl_req_count, 1u);
+                                if (r < cl_req_cap) cl_requests[r] = ClRequest(vpage, self_px);
+                                else ++n_reqov;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // ---- emission (every invocation: subgroup-uniform) ----
+        const uint idx = clAppend(sel, vb + CLC_SELECTED);
+        const bool written = sel && idx < v.sel_cap;
+        if (sel && !written) ++n_selov;
+        // RT CUT SUMMARY (#1011, workgroup-uniform branch): rank = the instance's counted entries in
+        // the pages before this one + those of lower cluster index in this page (deterministic: the
+        // cut set alone decides it, not the order the appends ran in).
+        if (rt_sum)
+        {
+            const bool rk = written && tris != 0u;
+            if (lid == 0u) { s_rk_bits[0] = 0u; s_rk_bits[1] = 0u; }
+            barrier();
+            if (rk) atomicOr(s_rk_bits[lid >> 5u], 1u << (lid & 31u));
+            barrier();
+            const uint b0 = s_rk_bits[0], b1 = s_rk_bits[1];
+            const uint below = lid < 32u ? bitCount(b0 & ((1u << lid) - 1u))
+                                         : bitCount(b0) + bitCount(b1 & ((1u << (lid - 32u)) - 1u));
+            const uint run = s_rk_run;
+            if (rk)
+            {
+                const uint r = run + below;
+                if (r <= CLA_RANK_MASK) aux |= CLA_RANKED | (r << CLA_RANK_SHIFT);
+                ++n_rk;
+                n_rk_tris += tris;
+                h_rk_a += clCutHashA(ref);
+                h_rk_b ^= clCutHashB(ref);
+            }
+            barrier();
+            if (lid == 0u) s_rk_run = run + bitCount(b0) + bitCount(b1);
+        }
+        if (written)
+        {
+            const uint abs_sel = v.sel_base + idx;
+            cl_sel[abs_sel] = ClSelected(ref, ii);
+            cl_draws[cl_aux.aux_base + abs_sel] = aux;
+            ++n_sel; n_tris += tris; n_verts += verts;
+        }
+        // (the main view draws only what it sees; the shared cut's off-screen entries are
+        // for the rig lists and the pre-skin)
+        const bool emit = written && draw && tris != 0u && visible && !hide_main && !blend_inst;
+        const uint bidx = clAppend(emit, vb + CLC_DRAWS0 + bucket);
+        if (emit)
+        {
+            clWriteDraw((v.draw_base + bucket * v.draw_cap + bidx) * CLD_WORDS, tris, first_idx, first_vtx,
+                        v.sel_base + idx);
+            n_drawn_tris += tris;
+            ++n_drawn;
+        }
+        // The shared rig lists (rig_lists is workgroup-uniform: the appends stay uniform).
+        if (share)
+        {
+            for (uint l = 0u; l < CL_RIG_LISTS; ++l)
+            {
+                const bool in_l = ((rig_lists >> l) & 1u) != 0u;
+                const uint r = l * 2u + bucket;
+                const bool emit_r = in_l && written && tris != 0u && ((cl_aux.rig.w >> l) & 1u) != 0u && !blend_inst;
+                const uint ridx = clAppend(emit_r, vb + CLC_RIG_DRAWS + r);
+                if (emit_r)
+                {
+                    if (ridx < cl_aux.rig.y)
+                        clWriteDraw((cl_aux.rig.x + r * cl_aux.rig.y + ridx) * CLD_WORDS, tris, first_idx, first_vtx,
+                                    v.sel_base + idx);
+                    else ++n_selov;
+                }
+            }
+        }
+        // ALPHA LISTS (workgroup-uniform branch): stage this page's records of the main view
+        // (visible) and of the rig lists; each list's local index is the record's rank in
+        // (page, cluster) order -- the same order every frame for the same cut, so overlapping
+        // cards of ONE mesh keep their draw order (LL draws a face in index order).
+        if (blend)
+        {
+            uint bits = 0u;
+            if (written && tris != 0u)
+            {
+                if (visible && !hide_main) bits |= 1u;   // (mouselook: own avatar hidden in the main view only)
+                for (uint l = 0u; l < CL_RIG_LISTS; ++l)
+                    if (((rig_lists >> l) & 1u) != 0u && ((cl_aux.rig.w >> l) & 1u) != 0u) bits |= 2u << l;
+            }
+            s_al_bits[lid] = bits;
+            barrier();
+            uint local[CLA_STAGE_LISTS];
+            for (uint l = 0u; l < CLA_STAGE_LISTS; ++l) local[l] = s_al_run[l];
+            for (uint j = 0u; j < lid; ++j)
+            {
+                const uint b = s_al_bits[j];
+                for (uint l = 0u; l < CLA_STAGE_LISTS; ++l) local[l] += (b >> l) & 1u;
+            }
+            barrier();
+            if (lid == 0u)
+            {
+                for (uint j = 0u; j < 64u; ++j)
+                {
+                    const uint b = s_al_bits[j];
+                    for (uint l = 0u; l < CLA_STAGE_LISTS; ++l) s_al_run[l] += (b >> l) & 1u;
+                }
+            }
+            barrier();
+            if (al_entry == CL_NONE) { if (bits != 0u) ++n_al_drop; }
+            for (uint l = 0u; l < CLA_STAGE_LISTS; ++l)
+            {
+                const bool st = al_entry != CL_NONE && ((bits >> l) & 1u) != 0u;
+                const uint g = clAppend(st, vb + CLC_AL_STAGED);
+                if (st)
+                {
+                    if (!clStageAlpha(g, al_entry, l, local[l], tris, first_idx, first_vtx, v.sel_base + idx)) ++n_al_drop;
+                    else if (l == 0u) { atomicAdd(s_al_tris, tris); n_drawn_tris += tris; ++n_drawn; }
+                }
+            }
+        }
+    }
+    if (blend)
+    {
+        const uint drop = subgroupAdd(n_al_drop);
+        if (drop != 0u && subgroupElect()) atomicAdd(cl_cnt[vb + CLC_AL_OVERFLOW], drop);
+        barrier();
+        if (lid == 0u && al_entry != CL_NONE)
+        {
+            const uint eb = clAlphaEntryBase() + al_entry * CLA_ENTRY_WORDS;
+            for (uint l = 0u; l < CLA_STAGE_LISTS; ++l) cl_draws[eb + 8u + l] = s_al_run[l];
+            cl_draws[eb + 11u] = s_al_tris;
+            if (s_al_run[0] != 0u)
+            {
+                atomicAdd(cl_cnt[vb + CLC_AL_MAIN_INST], 1u);
+                atomicAdd(cl_cnt[vb + CLC_AL_MAIN_TRIS], s_al_tris);
+            }
+        }
+    }
+    // RT CUT SUMMARY (#1011): the instance's row (every lane past the loop: workgroup-uniform)
+    if (rt_sum)
+    {
+        const uint a = subgroupAdd(n_rk), t = subgroupAdd(n_rk_tris), ha = subgroupAdd(h_rk_a), hb = subgroupXor(h_rk_b);
+        if (subgroupElect())
+        {
+            atomicAdd(s_rk_sum[0], a);
+            atomicAdd(s_rk_sum[1], ha);
+            atomicXor(s_rk_sum[2], hb);
+            atomicAdd(s_rk_sum[3], t);
+        }
+        barrier();
+        const uint b = ii * CL_INST_CUT_WORDS;
+        if (lid == 0u && b + CL_INST_CUT_WORDS <= uint(cl_inst_cut.length()))
+        {
+            cl_inst_cut[b] = s_rk_sum[0];
+            cl_inst_cut[b + 1u] = s_rk_sum[1];
+            cl_inst_cut[b + 2u] = s_rk_sum[2];
+            cl_inst_cut[b + 3u] = s_rk_sum[3];
+            cl_inst_cut[b + 4u] = v.frame + 1u;   // (the RT build reads only this frame's rows)
+        }
+    }
+    clStat(CLS_TESTED, n_tested);
+    clStat(CLS_CUT, n_cut);
+    clStat(CLS_FALLBACK, n_fb);
+    clStat(CLS_CULL_FRUSTUM, n_cf);
+    clStat(CLS_CULL_OCCLUSION, n_co);
+    clStat(CLS_CULL_CONE, n_cc);
+    clStat(CLS_SELECTED, n_sel);
+    clStat(CLS_SEL_OVERFLOW, n_selov);
+    clStat(CLS_TRIANGLES, n_tris);
+    clStat(CLS_VERTICES, n_verts);
+    clStat(CLS_REQUESTS, n_req);
+    clStat(CLS_REQ_OVERFLOW, n_reqov);
+    if (main_stats)
+    {
+        clStat(CLS_MAIN_SEL_TRIS, n_drawn_tris);
+        const uint f = subgroupOr((n_drawn != 0u ? 1u : 0u) | (main_nonroot ? 2u : 0u));
+        const uint t = subgroupAdd(n_main_cut);
+        if (subgroupElect())
+        {
+            if (f != 0u) atomicOr(s_main_flags, f);
+            if (t != 0u) atomicAdd(s_main_cut_tris, t);
+        }
+        barrier();
+        if (lid == 0u && (s_main_flags & 1u) != 0u)
+        {
+            CL_STAT_ADD(CLS_MAIN_INST, 1u);
+            if ((s_main_flags & 2u) == 0u) CL_STAT_ADD(CLS_MAIN_ROOT, 1u);
+            CL_STAT_ADD(CLS_MAIN_CUT_TRIS, s_main_cut_tris);
+            CL_STAT_ADD(CLS_MAIN_FULL_TRIS, clMeshLod0Tris(mesh));
+        }
+    }
+}

@@ -1,0 +1,1352 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// vkclean -- GPU-DRIVEN REFLECTION PROBES (#478, "option B"). Placement, residency and
+// capture scheduling of every reflection probe run here; the CPU only uploads world data
+// (manual probe objects, region land / water heights) and records a fixed command stream.
+// No probe decision is read back.
+//
+// CANDIDATES (one index space, every frame):
+//   [0]                         the default sky probe (camera + 64 m up, cube slot 0)
+//   [PRB_C_MAN,  +PRB_MAN_CAP)  manual probe objects (CPU-uploaded at stable positions)
+//   [PRB_C_GRID, +PRB_GRID_CAP) terrain / water grid: 8 x 8 per region, 32 m spacing,
+//                               z = max(water, land) + 2 (LLViewerRegion::updateReflectionProbes)
+//   [PRB_C_AUTO, +PRB_CELLS)    AUTOMATIC probes (level 3): one per occupied 16 m cell
+//
+// AUTOMATIC PROBES (LLReflectionMapManager::registerSpatialGroup + LLReflectionMap::
+// autoAdjustOrigin, without the octree). The clean instances are binned into a WORLD-
+// ANCHORED 16 m grid (global cell = the agent frame's origin cell + floor(agent pos / 16):
+// the agent frame's origin is a region corner, a multiple of 256 m, so the key is exact and
+// survives region crossings / origin shifts). The grid is a camera-centred TOROIDAL window
+// of PRB_WX x PRB_WX x PRB_WZ cells: a cell's slot is its global cell modulo the window, so
+// a cell keeps its slot (and its probe) while it stays in the window, and a cell leaving it
+// is evicted when another global cell claims the slot. Only static volumes whose largest
+// extent is at most PRB_MAX_OBJ seed a cell (LL: such objects live in octree nodes of
+// ~16 m; bigger ones sit higher up and never create a 16 m probe), binned by their centre.
+// Per cell: content bounds (cell-relative, ordered-float atomics) + an order-independent
+// content hash (quantized cell-relative centre / extent). A cell whose content changed is
+// queued for PLACEMENT: 8 rays from the content-bounds centre to its corners against the
+// static instances' boxes (an instance pass, only on frames with queued cells), origin =
+// the centre of the box spanned by the hits and the unhit corners (LL's open-space centre),
+// lifted to land + 2 m, radius = max(farthest corner, 8 m), lifted again so the near clip
+// (radius / 2) clears the ground. Unchanged cells cost nothing but the periodic re-bin.
+//
+// RESIDENCY (LLCleanRendererVK::setProbes, formerly CPU): the nearest candidates by LL's
+// mDistance (|camera - origin| - radius) hold the cube slots -- a distance histogram gives
+// the entry cut (slots - 1 non-default) and the keep cut (1.5 x slots: HYSTERESIS, a
+// resident probe keeps its slot while it stays inside it); manual probes in the keep window
+// are seated first (#249). Slots are recycled through a GPU free list.
+//
+// SCHEDULING (LLReflectionMapManager::update): the scheduled job captures one face per
+// frame (the CPU's face cycle); a new probe is picked at face 0 by LL's priority (incomplete
+// nearest first; complete by age - distance / 10; every third pick a complete probe may cut
+// in), extended with visibility, screen coverage and dirtiness (moved since its capture);
+// the default probe's period rule. The realtime job is the nearest resident dynamic probe
+// (detail >= 2). OFF-SCREEN probes (#517: influence volume outside the main CULL frustum)
+// are neither scheduled nor realtime -- nothing on screen samples them; one that comes
+// back after missing updates is STALE and refreshed first. Each job record carries its
+// origin / clips / slot, the six face view-projections, the light list and the indirect
+// dispatch sizes (clean_probe_job.glsl).
+//
+// IDLE SCHEDULER (#772, PF_IDLE; RenderVKProbeIdleScheduler): a probe is recaptured only
+// on CHANGE. Every resident probe keeps per-slot change bits, set here each frame from the
+// CPU's change lists (binding 13): a changed static region (the instance store's changed
+// spheres -- edits, registrations, settled movers; overflow = everything) reaching its
+// capture (inside the far clip and either touching the influence volume or at least
+// chg_p0.w radians wide from the origin) -> CONTENT dirty; a moved / re-placed probe ->
+// CONTENT dirty; an environment reset -> ENV urgent; a small environment drift (PF_ENV_DRIFT)
+// -> ENV dirty, drained nearest first at most one pick per chg_p0.z s; dynamic contents
+// (movers, and avatars for Dynamic probes -- only those draw avatars) MOVING inside ->
+// a refresh every chg_p0.x s while they move, and one last one when they stop or leave.
+// A complete probe is eligible only with such a reason, or past the safety age chg_p0.y;
+// otherwise the job stays empty (zero-sized cull / filter / trace, no encode). OFF-SCREEN
+// probes keep collecting bits, so a STALE probe only ranks first among eligible ones (its
+// missed changes are its bits). The bits are cleared at the pick: a change during the
+// six faces dirties it again. The default probe keeps LL's period rule.
+// REALTIME (PF_RT_IDLE, six faces per frame only): the realtime job is left empty on a
+// frame when the probe is the one captured last frame, nothing changed (SF_RTDIRTY), no
+// dynamic contents move inside, still dynamic contents were refreshed within chg_p1.x s
+// and the capture is younger than chg_p1.y s.
+
+layout(local_size_x = 256) in;
+
+#include "clean_lights_common.glsl"
+#include "clean_probes_common.glsl"
+#include "clean_probe_job.glsl"
+
+// ---- sizes (= LLCleanRendererVK::kPrb*) ----
+#define PRB_WX        48u                    // window cells along x / y
+#define PRB_WZ        16u                    // window cells along z
+#define PRB_CELLS     (PRB_WX * PRB_WX * PRB_WZ)
+#define PRB_CELL_M    16.0
+#define PRB_MAN_CAP   256u
+#define PRB_REG_CAP   32u
+#define PRB_GRID_CAP  (PRB_REG_CAP * 64u)
+#define PRB_C_MAN     1u
+#define PRB_C_GRID    (PRB_C_MAN + PRB_MAN_CAP)
+#define PRB_C_AUTO    (PRB_C_GRID + PRB_GRID_CAP)
+#define PRB_CANDS     (PRB_C_AUTO + PRB_CELLS)
+#define PRB_SLOT_CAP  256u
+#define PRB_BATCH     64u
+#define PRB_HIST      512u
+#define PRB_BIN_NONE  0xFFFFFFFFu
+#define PRB_MAX_OBJ   16.0
+
+// ---- phases (= LLCleanRendererVK::PrbPhase) ----
+#define PH_CLEAR   0u   // per cell: reset (allocation / teleport-sized reset)
+#define PH_BIN     1u   // per instance: occupancy + content hash
+#define PH_RESOLVE 2u   // per cell: evict / commit / queue for placement
+#define PH_PREP    3u   // 1 workgroup: placement batch + the ray pass's indirect size
+#define PH_RAYS    4u   // per instance (indirect): the batch's 8 rays against the boxes
+#define PH_FINAL   5u   // 1 workgroup: the batch's origins / radii
+#define PH_RANK_A  6u   // per candidate: distance + histogram
+#define PH_RANK_B  7u   // 1 workgroup: cuts, slot release, free list
+#define PH_RANK_C  8u   // per candidate (range): slot allocation
+#define PH_RANK_D  9u   // 1 workgroup: shading list, scheduling, job records
+#define PH_LIGHTS  10u  // PJ_COUNT workgroups: each job's light list
+
+// ---- push flags ----
+#define PF_ENABLED   1u   // probes on (RenderReflectionsEnabled, detail >= 0)
+#define PF_ENV_RESET 2u   // the environment changed: every capture is stale
+#define PF_RT_OK     4u   // ray-traced faces possible this frame (detail 3, RT, TLAS valid)
+#define PF_REALTIME  8u   // the realtime job is recorded (detail >= 2, level > 0)
+#define PF_MANUAL    16u  // RANK_C: the manual range (seated first)
+// #565 RenderVKProbeFormat 3 (BC6H): the radiance array is split -- the default probe
+// (slot 0) and the realtime probe's latest capture live UNCOMPRESSED in the live array
+// (cube 0 / cube 1); the shading list says which (Probe.idx.y bits 1-2, clean_draw_common
+// probeRadiance). PF_RTU: the previous frame recorded the realtime filter, which wrote
+// live cube 1 for the job record at index flags >> 16 (its slot / key).
+#define PF_SPLIT     32u
+#define PF_RTU       64u
+// #772: small environment drift (env-dirty, trickled); the idle scheduler; realtime skips.
+#define PF_ENV_DRIFT 128u
+#define PF_IDLE      256u
+#define PF_RT_IDLE   512u
+
+// ---- cell state ----
+#define CS_PLACED 1u
+#define CS_QUEUED 2u
+
+// Instance (192 B) = LLCleanInstanceStore::Instance.
+struct Instance {
+    mat4 model_matrix;
+    vec4 aabb_min;
+    vec4 aabb_max;
+    vec4 tint;
+    mat4 uv_matrix;
+    uint lod_group_id;
+    uint material_id;
+    uint flags;
+    uint skin_id;
+    vec4 spin_axis;
+    vec4 spin_pivot;
+};
+
+// = LLCleanRendererVK::kPrbGlobalsFixed (5568 B), then the placement queue.
+struct PrbGlobals {
+    uvec4 place_args;      // VkDispatchIndirectCommand of PH_RAYS (x, 1, 1)
+    uint  q_head, q_tail, batch_n, upd_count;
+    uint  entry_cut, entry_quota, keep_cut, quota_ctr;
+    uint  free_n, free_head, sched_active, sched_slot;
+    uvec2 sched_key; uint sched_cand; uint sched_flags;
+    ivec4 sched_cell;      // the agent origin cell when the job started
+    vec4  sched_pos;       // job origin (agent space of sched_cell), w near clip
+    vec4  sched_clip;      // x far clip, y radius
+    uint  stat[16];        // debug counters (RenderVKProbeGPUStats)
+    uint  hist[PRB_HIST];
+    uint  free_list[PRB_SLOT_CAP];
+    uint  batch[PRB_BATCH];
+    uint  ray_t[PRB_BATCH * 8u];
+    // #772 (128 B): cumulative counters (CNT_*; the CPU logs their rates), the env trickle's
+    // next allowed pick, the last realtime capture's slot / key.
+    uint  cnt[16];
+    float env_next;
+    uint  rt_valid, rt_slot, pad_r;
+    uvec2 rt_key;
+    uint  pad_g[10];
+};
+// cnt[]: indices = RS_* reasons (faces) + frame / realtime counters.
+#define CNT_FRAMES    0u
+#define CNT_IDLE      1u    // frames without a scheduled capture
+#define RS_INCOMPLETE 2u    // never captured
+#define RS_CONTENT    3u    // a change reached it (or it moved)
+#define RS_ENV        4u    // environment reset
+#define RS_ENV_TRICKLE 5u   // environment drift (budgeted)
+#define RS_DYNAMIC    6u    // moving dynamic contents, due
+#define RS_SAFETY     7u    // past the safety age
+#define RS_SKY        8u    // the default probe's period
+#define RS_LEGACY     9u    // the old scheduler (age order)
+#define CNT_STALE     10u   // faces of picks that were stale-boosted
+#define CNT_RT_CAP    11u   // realtime frames captured
+#define CNT_RT_SKIP   12u   // realtime frames skipped
+#define CNT_CDIRTY    13u   // slots newly content-dirtied
+#define RS_STALE_BIT  0x100u
+
+// = LLCleanRendererVK::PrbCellGPU (112 B).
+struct PrbCell {
+    uvec2 key;             // committed global cell key (0 = never used)
+    uint  hash;            // committed content hash
+    uint  count;           // committed content count
+    uint  acc_min[3];      // this re-bin's content bounds (cell-relative, ordered float bits)
+    uint  acc_max[3];
+    uint  acc_hash;
+    uint  acc_count;
+    vec4  bmin;            // committed content bounds (cell-relative)
+    vec4  bmax;
+    vec4  probe;           // placed origin (cell-relative) .xyz, radius .w
+    uint  state;           // CS_*
+    uint  gen;             // bumps on every placement / eviction
+    uint  pad0, pad1;
+};
+
+// = LLCleanRendererVK::PrbRegionGPU (1456 B).
+struct PrbRegion {
+    ivec4 cell;            // x, y: SW corner in global 16 m cells; z width (cells); w 1 = valid
+    vec4  info;            // x water height, y land sample spacing (m)
+    float grid_z[64];      // the grid probes' heights (CPU: max(water, land) + 2)
+    float land[289];       // 17 x 17 land heights, row-major (y * 17 + x), at info.y spacing
+    float pad[3];
+};
+
+// = LLCleanRendererVK::PrbManualGPU (112 B).
+struct PrbManual {
+    vec4  sphere;          // agent-space origin, influence radius
+    mat4  box;             // world -> unit cube (box probes)
+    vec4  params;          // x ambiance, y near clip, z 1 = box
+    uvec4 key;             // x key lo, y key hi, z MF_* flags
+};
+#define MF_VALID    1u
+#define MF_DYNAMIC  2u
+#define MF_PARALLAX 4u
+
+// = LLCleanRendererVK::PrbCandGPU (32 B).
+struct PrbCand {
+    uint  slot1;           // cube slot + 1 (0 = none)
+    float dist;            // LL mDistance this frame
+    uint  bin;             // histogram bin (PRB_BIN_NONE = not a candidate this frame)
+    uint  pad0;
+    uvec2 key;
+    uint  pad1, pad2;
+};
+
+// = LLCleanRendererVK::PrbSlotGPU (64 B).
+struct PrbSlot {
+    uvec4 a;               // x candidate + 1 (0 = free), y / z key, w SF_* flags
+    ivec4 cap_cell;        // agent origin cell at the last completed capture
+    vec4  cap_pos;         // origin at that capture (agent space of cap_cell), w radius
+    vec4  t;               // x last update (s), y first completion (s)
+};
+#define SF_COMPLETE 1u
+#define SF_STALE    2u   // #517: went off screen since its last capture (refreshed first when back)
+#define SF_RTU      4u   // #565 (PF_SPLIT): live cube 1 holds this slot's latest (realtime) capture
+#define SF_CDIRTY   8u   // #772: content changed since the pick of its last capture
+#define SF_EDIRTY   16u  // #772: environment drifted (trickled)
+#define SF_EURGENT  32u  // #772: environment reset
+#define SF_RTDIRTY  64u  // #772: changed since its last realtime capture
+#define SF_DYNWAS   128u // #772: moving dynamic contents were inside last frame
+// A probe captured less than this long ago (s) is not stale for having blinked off screen.
+#define PRB_STALE_MIN_AGE 1.0
+
+layout(std430, set = 0, binding = 0)  coherent buffer Globals { PrbGlobals g; uint queue[]; };
+layout(std430, set = 0, binding = 1)  coherent buffer Cells   { PrbCell cells[]; };
+layout(std430, set = 0, binding = 2)  readonly buffer Regions { PrbRegion regions[]; };
+layout(std430, set = 0, binding = 3)  readonly buffer Manual  { PrbManual manual[]; };
+layout(std430, set = 0, binding = 4)  coherent buffer Cands   { PrbCand cands[]; };
+layout(std430, set = 0, binding = 5)  coherent buffer Slots   { PrbSlot slots[]; };
+layout(std430, set = 0, binding = 6)  readonly buffer Instances { Instance instances[]; };
+layout(std430, set = 0, binding = 7)  writeonly buffer Probes { ProbeHeader phdr; Probe probes[]; };
+layout(std430, set = 0, binding = 8)  readonly buffer Lights  { Light lights[]; };
+layout(std430, set = 0, binding = 9)  readonly buffer LInfo   { LightInfo linfo; };
+layout(std430, set = 0, binding = 10) writeonly buffer CCount { uint cluster_count[]; };
+layout(std430, set = 0, binding = 11) writeonly buffer CIndex { uint cluster_index[]; };
+layout(std430, set = 0, binding = 12) buffer Jobs { PrbJob jobs[]; };
+// #772 CHANGE LISTS (= LLCleanRendererVK::PrbChangeHdr + lists; uploaded every frame):
+//   chg_n: x changed spheres, y dynamic entries, z 1 = changed overflow (everything changed),
+//          w lit-guard heal: slot + 1 (0 none; phaseRankD)
+//   chg_p0: x dynamic refresh (s), y safety age (s), z env trickle interval (s), w min angle (rad)
+//   chg_p1: x realtime still-dynamic refresh (s), y realtime safety age (s), z churn refresh (s)
+//   chg_sph: agent-space spheres of this frame's static changes
+//   dyn: dynamic contents -- sphere, f.x DYN_* flags
+#define PRB_CHG_CAP 1024u
+#define PRB_DYN_CAP 512u
+#define DYN_MOVING  1u
+#define DYN_AVATAR  2u
+#define DYN_CHURN   4u   // a repeating static change held as dynamic: refreshed every chg_p1.z s
+struct DynEnt { vec4 s; uvec4 f; };
+layout(std430, set = 0, binding = 13) readonly buffer Change {
+    uvec4  chg_n;
+    vec4   chg_p0;
+    vec4   chg_p1;
+    vec4   chg_sph[PRB_CHG_CAP];
+    DynEnt dyn[PRB_DYN_CAP];
+};
+
+layout(push_constant) uniform PrbPush {
+    uint  phase;        // PH_*
+    uint  count;        // items of this dispatch (instances / cells / candidates)
+    uint  first;        // first item (PH_RANK_C range)
+    uint  flags;        // PF_*
+    ivec4 agent_cell;   // xyz: the agent frame's origin in global 16 m cells; w: probe level
+    vec4  cam;          // xyz camera (agent space), w now (s)
+    vec4  eye_rt;       // xyz main eye, w TLAS radius (0 = unlimited)
+    uint  slot_n;       // cube slots (mProbeSlotsN)
+    uint  face;         // the scheduled face this frame (CPU face cycle, 0..5)
+    uint  detail;       // RenderReflectionProbeDetail
+    uint  mips;         // radiance mips
+    float far_clip;     // capture far clip (RenderReflectionProbeDrawDistance)
+    float period;       // RenderDefaultProbeUpdatePeriod
+    float sky_amb;      // sky probe ambiance (probe header .z)
+    uint  res;          // radiance resolution
+    uint  cap_res;      // capture resolution
+    uint  light_count;  // the frame's local lights
+    uint  rt_faces;     // realtime faces per frame (the trace's z)
+    uint  inst_groups;  // PH_PREP: the ray pass's workgroups ((instances + 255) / 256)
+    uint  job_base;     // this frame slot's first job record (the records are double-buffered:
+                        // last frame's filters may still read theirs on the async queue)
+    uint  alpha_pol;    // #834 RenderVKProbeAlpha: 0 no blended alpha in any capture, 1 the realtime probe
+                        // + scheduled probes near the camera, 2 every capture (PJ_NO_ALPHA)
+    float alpha_dist;   // #834 RenderVKProbeAlphaDist: "near" = the camera within this many metres of
+                        // the probe's influence sphere
+} pc;                   // 124 B
+
+// ---------------------------------------------------------------------------------------
+// helpers
+uint ordF(float f)
+{
+    const uint u = floatBitsToUint(f);
+    return (u & 0x80000000u) != 0u ? ~u : (u | 0x80000000u);
+}
+float unordF(uint u) { return uintBitsToFloat((u & 0x80000000u) != 0u ? (u & 0x7FFFFFFFu) : ~u); }
+
+// Non-negative modulo for global cell coordinates (|a| < 2^29): the bias is a multiple of
+// both window sizes (48 and 16).
+uint pmod(int a, uint m) { return uint(a + 805306368) % m; }
+
+uint hashU(uint x)
+{
+    x ^= x >> 16u; x *= 0x7feb352du;
+    x ^= x >> 15u; x *= 0x846ca68bu;
+    x ^= x >> 16u;
+    return x;
+}
+
+ivec3 camCell() { return pc.agent_cell.xyz + ivec3(floor(pc.cam.xyz / PRB_CELL_M)); }
+ivec3 windowMin() { return camCell() - ivec3(int(PRB_WX / 2u), int(PRB_WX / 2u), int(PRB_WZ / 2u)); }
+
+uint cellIndex(uvec3 s) { return (s.z * PRB_WX + s.y) * PRB_WX + s.x; }
+uvec3 cellSlot(uint i) { return uvec3(i % PRB_WX, (i / PRB_WX) % PRB_WX, i / (PRB_WX * PRB_WX)); }
+
+// The global cell window slot i stands for this frame.
+ivec3 expectedCell(uint i, ivec3 wmin)
+{
+    const uvec3 s = cellSlot(i);
+    return wmin + ivec3(int(pmod(int(s.x) - wmin.x, PRB_WX)),
+                        int(pmod(int(s.y) - wmin.y, PRB_WX)),
+                        int(pmod(int(s.z) - wmin.z, PRB_WZ)));
+}
+
+// Class 3 (automatic) key of a global cell: x, y 20 bits, z 10 bits (+512).
+uvec2 cellKey(ivec3 gc)
+{
+    return uvec2(uint(gc.x), (uint(gc.y) & 0xFFFFFu) | ((uint(gc.z + 512) & 0x3FFu) << 20u) | (3u << 30u));
+}
+ivec3 keyCell(uvec2 k)
+{
+    return ivec3(int(k.x), int(k.y & 0xFFFFFu), int((k.y >> 20u) & 0x3FFu) - 512);
+}
+// Agent-space minimum corner of a global cell (exact: small integers times 16).
+vec3 cellOrigin(ivec3 gc) { return vec3(gc - pc.agent_cell.xyz) * PRB_CELL_M; }
+
+// Land height (agent space z) under an agent-space point, from the region table (bilinear
+// over the 17 x 17 samples); -1e30 outside every known region.
+float landHeight(vec3 p)
+{
+    for (uint r = 0u; r < PRB_REG_CAP; ++r)
+    {
+        if (regions[r].cell.w == 0) continue;
+        const vec2 lo = vec2(regions[r].cell.xy - pc.agent_cell.xy) * PRB_CELL_M;
+        const float w = float(regions[r].cell.z) * PRB_CELL_M;
+        const vec2 rp = p.xy - lo;
+        if (rp.x < 0.0 || rp.y < 0.0 || rp.x >= w || rp.y >= w) continue;
+        const float sp = max(regions[r].info.y, 1.0);
+        const vec2 q = clamp(rp / sp, vec2(0.0), vec2(15.999));
+        const ivec2 i0 = ivec2(q);
+        const vec2 f = q - vec2(i0);
+        const float h00 = regions[r].land[i0.y * 17 + i0.x];
+        const float h10 = regions[r].land[i0.y * 17 + i0.x + 1];
+        const float h01 = regions[r].land[(i0.y + 1) * 17 + i0.x];
+        const float h11 = regions[r].land[(i0.y + 1) * 17 + i0.x + 1];
+        return mix(mix(h00, h10, f.x), mix(h01, h11, f.x), f.y);
+    }
+    return -1e30;
+}
+
+// World AABB (unpadded) of an instance's local box.
+void worldBox(uint id, out vec3 wmin, out vec3 wmax)
+{
+    const mat4 mm = instances[id].model_matrix;
+    const vec3 lo = instances[id].aabb_min.xyz, hi = instances[id].aabb_max.xyz;
+    wmin = vec3(1e30); wmax = vec3(-1e30);
+    for (int i = 0; i < 8; ++i)
+    {
+        const vec3 c = vec3((i & 1) != 0 ? hi.x : lo.x, (i & 2) != 0 ? hi.y : lo.y, (i & 4) != 0 ? hi.z : lo.z);
+        const vec3 w = (mm * vec4(c, 1.0)).xyz;
+        wmin = min(wmin, w); wmax = max(wmax, w);
+    }
+}
+
+#define LOD_SENTINEL 0xFFFFFFFFu
+// Static volume geometry (LL's volume partition): not rigged (1), HUD (8), terrain (32),
+// bounds-unknown (128), worn (512), water (2048), vegetation (32768), invisiprim (65536).
+bool staticVolume(uint id)
+{
+    if (instances[id].lod_group_id == LOD_SENTINEL) return false;
+    const uint f = instances[id].flags;
+    if ((f & (1u | 8u | 32u | 128u | 512u | 2048u | 32768u | 65536u)) != 0u) return false;
+    return dot(instances[id].spin_axis.xyz, instances[id].spin_axis.xyz) == 0.0;   // spinners sweep
+}
+
+bool finite3(vec3 v) { return !any(isnan(v)) && !any(isinf(v)); }
+
+// ---------------------------------------------------------------------------------------
+// Candidates
+struct Cand {
+    vec3  pos;       // agent space
+    float radius;
+    float near;
+    uvec2 key;
+    uint  cls;       // 0 default, 1 manual, 2 grid, 3 automatic
+    bool  dynamic;   // manual Dynamic flag
+};
+
+bool candidate(uint c, out Cand d)
+{
+    d.pos = vec3(0.0); d.radius = 0.0; d.near = 1.0; d.key = uvec2(0u); d.cls = 0u; d.dynamic = false;
+    const int level = pc.agent_cell.w;
+    if (c == 0u)
+    {
+        d.pos = pc.cam.xyz + vec3(0.0, 0.0, 64.0);
+        d.radius = 4096.0;
+        return true;
+    }
+    if (c < PRB_C_GRID)
+    {
+        const uint m = c - PRB_C_MAN;
+        if (level < 1 || (manual[m].key.z & MF_VALID) == 0u) return false;
+        d.pos = manual[m].sphere.xyz; d.radius = manual[m].sphere.w;
+        d.near = max(manual[m].params.y, 0.1);
+        d.key = manual[m].key.xy; d.cls = 1u;
+        d.dynamic = (manual[m].key.z & MF_DYNAMIC) != 0u;
+        return finite3(d.pos) && d.radius > 0.0;
+    }
+    if (c < PRB_C_AUTO)
+    {
+        const uint gi = c - PRB_C_GRID;
+        const uint r = gi / 64u, ij = gi % 64u;
+        if (level < 2 || regions[r].cell.w == 0) return false;
+        const uint i = ij / 8u, j = ij % 8u;
+        d.pos = vec3(regions[r].cell.xy - pc.agent_cell.xy, 0) * PRB_CELL_M
+              + vec3(16.0 + 32.0 * float(i), 16.0 + 32.0 * float(j), regions[r].grid_z[ij]);
+        d.radius = 27.712812;   // sqrt(16^2 * 3)
+        d.key = uvec2(uint(regions[r].cell.x), (uint(regions[r].cell.y) & 0x3FFFFFu) | (ij << 22u) | (2u << 30u));
+        d.cls = 2u;
+        return true;
+    }
+    const uint ci = c - PRB_C_AUTO;
+    if (level < 3 || (cells[ci].state & CS_PLACED) == 0u || cells[ci].probe.w <= 0.0) return false;
+    const uvec2 k = cells[ci].key;
+    d.pos = cellOrigin(keyCell(k)) + cells[ci].probe.xyz;
+    d.radius = cells[ci].probe.w;
+    d.near = max(d.radius * 0.5, 0.1);   // LLReflectionMap::getNearClip (group)
+    d.key = k; d.cls = 3u;
+    return true;
+}
+
+// Histogram bin of LL's mDistance: sqrt scale from -32 m (finer near the camera).
+uint distBin(float dist)
+{
+    const float x = sqrt(max(dist + 32.0, 0.0)) * 8.0;
+    return uint(clamp(x, 0.0, float(PRB_HIST - 1u)));
+}
+
+// ---------------------------------------------------------------------------------------
+// Occupancy
+void phaseClear(uint i)
+{
+    if (i >= PRB_CELLS) return;
+    cells[i].key = uvec2(0u); cells[i].hash = 0u; cells[i].count = 0u;
+    for (int k = 0; k < 3; ++k) { cells[i].acc_min[k] = 0xFFFFFFFFu; cells[i].acc_max[k] = 0u; }
+    cells[i].acc_hash = 0u; cells[i].acc_count = 0u;
+    cells[i].bmin = vec4(0.0); cells[i].bmax = vec4(0.0); cells[i].probe = vec4(0.0);
+    cells[i].state = 0u; cells[i].gen = 0u;
+}
+
+void phaseBin(uint id)
+{
+    if (id == 0u) { g.stat[0] = 0u; g.stat[1] = 0u; }
+    if (id >= pc.count || !staticVolume(id)) return;
+    vec3 lo, hi;
+    worldBox(id, lo, hi);
+    if (!finite3(lo) || !finite3(hi)) return;
+    const vec3 ext = hi - lo;
+    if (max(ext.x, max(ext.y, ext.z)) > PRB_MAX_OBJ) return;   // lives in a bigger octree node (LL)
+    const vec3 ctr = 0.5 * (lo + hi);
+    const ivec3 gc = pc.agent_cell.xyz + ivec3(floor(ctr / PRB_CELL_M));
+    const ivec3 d = gc - windowMin();
+    if (any(lessThan(d, ivec3(0))) || d.x >= int(PRB_WX) || d.y >= int(PRB_WX) || d.z >= int(PRB_WZ)) return;
+    const uint ci = cellIndex(uvec3(pmod(gc.x, PRB_WX), pmod(gc.y, PRB_WX), pmod(gc.z, PRB_WZ)));
+    const vec3 o = cellOrigin(gc);
+    const vec3 rlo = lo - o, rhi = hi - o;
+    for (int k = 0; k < 3; ++k)
+    {
+        atomicMin(cells[ci].acc_min[k], ordF(rlo[k]));
+        atomicMax(cells[ci].acc_max[k], ordF(rhi[k]));
+    }
+    // Order-independent content hash: the cell-relative centre / extent at 1/4 m.
+    const uvec3 qc = uvec3(ivec3(round((ctr - o) * 4.0)) + 4096);
+    const uvec3 qe = uvec3(round(ext * 4.0));
+    const uint h = hashU(qc.x ^ hashU(qc.y ^ hashU(qc.z ^ hashU(qe.x ^ hashU(qe.y ^ hashU(qe.z + 0x9E3779B9u))))));
+    atomicAdd(cells[ci].acc_hash, h);
+    atomicAdd(cells[ci].acc_count, 1u);
+}
+
+void phaseResolve(uint i)
+{
+    if (i >= PRB_CELLS) return;
+    const uvec2 want = cellKey(expectedCell(i, windowMin()));
+    if (any(notEqual(cells[i].key, want)))
+    {
+        // Another global cell claims the slot (the window moved, a teleport): evict. The
+        // queued bit stays (its queue entry will place whatever the slot then holds).
+        cells[i].key = want;
+        cells[i].hash = 0u; cells[i].count = 0u;
+        cells[i].probe = vec4(0.0);
+        cells[i].state &= CS_QUEUED;
+        cells[i].gen += 1u;
+    }
+    const uint n = cells[i].acc_count, h = cells[i].acc_hash;
+    if (n == 0u)
+    {
+        if (cells[i].count != 0u)
+        {
+            cells[i].count = 0u; cells[i].hash = 0u;
+            cells[i].probe = vec4(0.0);
+            cells[i].state &= ~CS_PLACED;
+            cells[i].gen += 1u;
+        }
+    }
+    else
+    {
+        atomicAdd(g.stat[0], 1u);
+        if (n != cells[i].count || h != cells[i].hash || (cells[i].state & (CS_PLACED | CS_QUEUED)) == 0u)
+        {
+            cells[i].count = n; cells[i].hash = h;
+            cells[i].bmin = vec4(unordF(cells[i].acc_min[0]), unordF(cells[i].acc_min[1]), unordF(cells[i].acc_min[2]), 0.0);
+            cells[i].bmax = vec4(unordF(cells[i].acc_max[0]), unordF(cells[i].acc_max[1]), unordF(cells[i].acc_max[2]), 0.0);
+            if ((cells[i].state & CS_QUEUED) == 0u)
+            {
+                // At most one entry per cell (CS_QUEUED): the ring of PRB_CELLS never overflows.
+                const uint q = atomicAdd(g.q_tail, 1u);
+                queue[q % PRB_CELLS] = i;
+                cells[i].state |= CS_QUEUED;
+            }
+        }
+        if ((cells[i].state & CS_PLACED) != 0u) atomicAdd(g.stat[1], 1u);
+    }
+    for (int k = 0; k < 3; ++k) { cells[i].acc_min[k] = 0xFFFFFFFFu; cells[i].acc_max[k] = 0u; }
+    cells[i].acc_hash = 0u; cells[i].acc_count = 0u;
+}
+
+// ---------------------------------------------------------------------------------------
+// Placement
+void phasePrep(uint lid)
+{
+    const uint pending = g.q_tail - g.q_head;
+    const uint n = min(pending, PRB_BATCH);
+    if (lid < n)
+    {
+        const uint ci = queue[(g.q_head + lid) % PRB_CELLS];
+        cells[ci].state &= ~CS_QUEUED;
+        g.batch[lid] = cells[ci].count != 0u ? ci : 0xFFFFFFFFu;
+    }
+    for (uint k = lid; k < PRB_BATCH * 8u; k += 256u) g.ray_t[k] = floatBitsToUint(1.0);
+    barrier();
+    if (lid == 0u)
+    {
+        g.q_head += n;
+        g.batch_n = n;
+        g.place_args = uvec4(n > 0u ? pc.inst_groups : 0u, 1u, 1u, 0u);
+        g.stat[2] = n;
+        g.stat[3] = pending - n;
+    }
+}
+
+shared vec3  s_bc[PRB_BATCH];   // batch: content-bounds centre (agent space)
+shared vec3  s_bh[PRB_BATCH];   // half size
+shared uint  s_bn;
+
+// Box entry parameter of the segment o + t (c - o), t in (0, 1]; 2 = no hit. Origins inside
+// the box do not hit it (LL's casts start in the open space of the node).
+float segBox(vec3 o, vec3 dir, vec3 lo, vec3 hi)
+{
+    const vec3 inv = 1.0 / dir;   // (+-inf on a zero component: the slab test still holds)
+    const vec3 t0 = (lo - o) * inv, t1 = (hi - o) * inv;
+    const vec3 tn = min(t0, t1), tf = max(t0, t1);
+    const float te = max(tn.x, max(tn.y, tn.z));
+    const float tx = min(tf.x, min(tf.y, tf.z));
+    if (te > tx || te <= 1e-4 || te > 1.0) return 2.0;
+    return te;
+}
+
+void phaseRays(uint id, uint lid)
+{
+    if (lid == 0u) s_bn = g.batch_n;
+    if (lid < PRB_BATCH)
+    {
+        const uint ci = lid < g.batch_n ? g.batch[lid] : 0xFFFFFFFFu;
+        if (ci != 0xFFFFFFFFu)
+        {
+            const vec3 o = cellOrigin(keyCell(cells[ci].key));
+            const vec3 lo = cells[ci].bmin.xyz + o, hi = cells[ci].bmax.xyz + o;
+            s_bc[lid] = 0.5 * (lo + hi);
+            s_bh[lid] = 0.5 * (hi - lo);
+        }
+        else
+        {
+            s_bc[lid] = vec3(0.0);
+            s_bh[lid] = vec3(-1.0);   // empty: never overlaps
+        }
+    }
+    barrier();
+    if (id >= pc.count || !staticVolume(id)) return;
+    if ((instances[id].flags & 2u) != 0u) return;   // alpha blend: see-through (LL: no transparent)
+    vec3 lo, hi;
+    worldBox(id, lo, hi);
+    if (!finite3(lo) || !finite3(hi)) return;
+    const uint n = s_bn;
+    for (uint b = 0u; b < n; ++b)
+    {
+        const vec3 c = s_bc[b], h = s_bh[b];
+        if (h.x < 0.0) continue;
+        if (any(greaterThan(lo, c + h)) || any(lessThan(hi, c - h))) continue;
+        for (uint k = 0u; k < 8u; ++k)
+        {
+            const vec3 sgn = vec3((k & 1u) != 0u ? -1.0 : 1.0, (k & 2u) != 0u ? -1.0 : 1.0, (k & 4u) != 0u ? -1.0 : 1.0);
+            const float t = segBox(c, sgn * h, lo, hi);
+            if (t <= 1.0) atomicMin(g.ray_t[b * 8u + k], floatBitsToUint(t));
+        }
+    }
+}
+
+void phaseFinal(uint lid)
+{
+    if (lid >= g.batch_n) return;
+    const uint ci = g.batch[lid];
+    if (ci == 0xFFFFFFFFu || cells[ci].count == 0u) return;
+    const vec3 o = cellOrigin(keyCell(cells[ci].key));
+    const vec3 lo = cells[ci].bmin.xyz + o, hi = cells[ci].bmax.xyz + o;
+    const vec3 c = 0.5 * (lo + hi), h = 0.5 * (hi - lo);
+    // LL autoAdjustOrigin: the box spanned by the hit points and the unhit corners.
+    vec3 emin = c + h, emax = c - h;
+    bool hit = false;
+    vec3 corner[8];
+    for (uint k = 0u; k < 8u; ++k)
+    {
+        const vec3 sgn = vec3((k & 1u) != 0u ? -1.0 : 1.0, (k & 2u) != 0u ? -1.0 : 1.0, (k & 4u) != 0u ? -1.0 : 1.0);
+        corner[k] = c + sgn * h;
+        const float t = uintBitsToFloat(g.ray_t[lid * 8u + k]);
+        vec3 p = corner[k];
+        if (t < 1.0) { hit = true; p = c + t * (corner[k] - c); }
+        emin = min(emin, p); emax = max(emax, p);
+    }
+    vec3 org = hit ? 0.5 * (emin + emax) : c;
+    const float height = landHeight(org) + 2.0;   // not under ground
+    org.z = max(org.z, height);
+    float r2 = 0.0;   // the radius encompasses all objects
+    for (uint k = 0u; k < 8u; ++k) { const vec3 dd = corner[k] - org; r2 = max(r2, dot(dd, dd)); }
+    const float radius = max(sqrt(r2), 8.0);
+    org.z = max(org.z, height + radius * 0.5);   // the near clip clears the ground
+    if (!finite3(org) || !(radius < 1e6)) return;
+    cells[ci].probe = vec4(org - o, radius);
+    cells[ci].state |= CS_PLACED;
+    cells[ci].gen += 1u;
+}
+
+// ---------------------------------------------------------------------------------------
+// Residency
+void phaseRankA(uint c)
+{
+    if (c >= PRB_CANDS) return;
+    Cand d;
+    if (c == 0u || (pc.flags & PF_ENABLED) == 0u || !candidate(c, d))
+    {
+        cands[c].bin = PRB_BIN_NONE;
+        if (c == 0u) { cands[c].key = uvec2(0u); cands[c].dist = 0.0; }
+        return;
+    }
+    const float dist = length(pc.cam.xyz - d.pos) - d.radius;
+    const uint b = distBin(dist);
+    cands[c].dist = dist;
+    cands[c].bin = b;
+    cands[c].key = d.key;
+    atomicAdd(g.hist[b], 1u);
+}
+
+shared uint s_scan[256];
+
+// Exclusive prefix over the workgroup (one value per thread); total in s_scan[255] after.
+uint wgScan(uint lid, uint v)
+{
+    s_scan[lid] = v;
+    barrier();
+    for (uint off = 1u; off < 256u; off <<= 1u)
+    {
+        const uint a = lid >= off ? s_scan[lid - off] : 0u;
+        barrier();
+        s_scan[lid] += a;
+        barrier();
+    }
+    return s_scan[lid] - v;
+}
+
+shared uint s_cut[4];
+
+void phaseRankB(uint lid)
+{
+    // Cuts: bins of 2 per thread, inclusive cumulative counts.
+    const uint h0 = g.hist[2u * lid], h1 = g.hist[2u * lid + 1u];
+    const uint ex = wgScan(lid, h0 + h1);
+    const uint total = s_scan[255];
+    const uint slotN = min(pc.slot_n, PRB_SLOT_CAP);
+    const uint kin = slotN > 0u ? slotN - 1u : 0u;
+    const uint kkeep = slotN > 0u ? slotN + slotN / 2u - 1u : 0u;
+    if (lid == 0u) { s_cut[0] = PRB_HIST; s_cut[1] = 0u; s_cut[2] = PRB_HIST; }
+    barrier();
+    // The first bin whose inclusive count reaches k (unique: counts are monotonic).
+    if (total >= kin && kin > 0u)
+    {
+        if (ex < kin && ex + h0 >= kin) { s_cut[0] = 2u * lid;      s_cut[1] = kin - ex; }
+        else if (ex + h0 < kin && ex + h0 + h1 >= kin) { s_cut[0] = 2u * lid + 1u; s_cut[1] = kin - ex - h0; }
+    }
+    if (total >= kkeep && kkeep > 0u)
+    {
+        if (ex < kkeep && ex + h0 >= kkeep) s_cut[2] = 2u * lid;
+        else if (ex + h0 < kkeep && ex + h0 + h1 >= kkeep) s_cut[2] = 2u * lid + 1u;
+    }
+    barrier();
+    if (lid == 0u)
+    {
+        g.entry_cut = s_cut[0];
+        g.entry_quota = s_cut[0] == PRB_HIST ? 0xFFFFFFFFu : s_cut[1];
+        g.keep_cut = s_cut[2];
+        g.quota_ctr = 0u;
+        g.free_head = 0u;
+    }
+    // Slots: the default probe holds slot 0; a resident probe keeps its slot while it is a
+    // candidate with the same key inside the keep window (HYSTERESIS).
+    bool freeSlot = false;
+    if (lid < slotN)
+    {
+        if (lid == 0u)
+        {
+            if (slots[0].a.x != 1u)
+            {
+                slots[0].a = uvec4(1u, 0u, 0u, 0u);
+                slots[0].t = vec4(-1e9, -1e9, 0.0, 0.0);
+            }
+            cands[0].slot1 = 1u;
+        }
+        else if (slots[lid].a.x != 0u)
+        {
+            const uint c = slots[lid].a.x - 1u;
+            const bool keep = c < PRB_CANDS && cands[c].bin != PRB_BIN_NONE
+                           && all(equal(cands[c].key, slots[lid].a.yz)) && cands[c].bin <= s_cut[2];
+            if (!keep)
+            {
+                if (c < PRB_CANDS && cands[c].slot1 == lid + 1u) cands[c].slot1 = 0u;
+                slots[lid].a = uvec4(0u);
+                freeSlot = true;
+            }
+        }
+        else freeSlot = true;
+    }
+    else if (lid < PRB_SLOT_CAP && slots[lid].a.x != 0u)
+    {
+        // Past the configured count (a smaller allocation): release.
+        const uint c = slots[lid].a.x - 1u;
+        if (c < PRB_CANDS && cands[c].slot1 == lid + 1u) cands[c].slot1 = 0u;
+        slots[lid].a = uvec4(0u);
+    }
+    // Free list in ascending slot order (deterministic).
+    const uint pos = wgScan(lid, freeSlot ? 1u : 0u);
+    if (freeSlot) g.free_list[pos] = lid;
+    if (lid == 0u) g.free_n = s_scan[255];
+}
+
+void phaseRankC(uint c)
+{
+    if (c >= pc.first + pc.count || c == 0u || c >= PRB_CANDS) return;
+    const uint b = cands[c].bin;
+    if (b == PRB_BIN_NONE || cands[c].slot1 != 0u) return;
+    bool want;
+    if ((pc.flags & PF_MANUAL) != 0u) want = b <= g.keep_cut;   // #249: manual first, keep window
+    else want = b < g.entry_cut || (b == g.entry_cut && atomicAdd(g.quota_ctr, 1u) < g.entry_quota);
+    if (!want) return;
+    const uint k = atomicAdd(g.free_head, 1u);
+    if (k >= g.free_n) return;
+    const uint s = g.free_list[k];
+    slots[s].a = uvec4(c + 1u, cands[c].key, SF_RTDIRTY);   // (#772: never realtime-captured)
+    slots[s].cap_cell = ivec4(0); slots[s].cap_pos = vec4(0.0);
+    slots[s].t = vec4(-1e9, -1e9, -1e9, 0.0);   // z: last realtime capture (#772)
+    cands[c].slot1 = s + 1u;
+}
+
+// ---------------------------------------------------------------------------------------
+// Shading list + scheduling
+shared float s_key[256];
+shared uint  s_tier[256];
+shared uint  s_arg[256];
+shared uint  s_pick[4];   // [0] scheduled slot, [1] realtime slot (~0 none)
+shared uint  s_why[256];  // #772: per slot, the RS_* reason a pick would have (| RS_STALE_BIT)
+shared uint  s_dyn[256];  // #772: per slot, 1 dynamic contents inside, 2 moving
+
+// #772: does a changed / dynamic sphere (agent space, w radius) show in a capture at o --
+// inside the far clip, and touching the influence volume or at least minAng radians wide?
+bool reaches(vec4 sp, vec3 o, float farc, float rad, float minAng)
+{
+    if (!(sp.w >= 0.0)) return false;
+    const float dd = distance(sp.xyz, o);
+    if (dd - sp.w > farc) return false;
+    if (dd <= rad + sp.w) return true;
+    return sp.w >= minAng * dd;
+}
+
+// LL's face matrices (LLCleanRendererVK probeFaceMatrix, rel = false).
+mat4 faceMatrix(uint f, vec3 o, float n, float fa)
+{
+    const vec3 R[6] = vec3[6](vec3(0, 0, -1), vec3(0, 0, 1), vec3(1, 0, 0), vec3(1, 0, 0), vec3(1, 0, 0), vec3(-1, 0, 0));
+    const vec3 D[6] = vec3[6](vec3(0, -1, 0), vec3(0, -1, 0), vec3(0, 0, 1), vec3(0, 0, -1), vec3(0, -1, 0), vec3(0, -1, 0));
+    const vec3 F[6] = vec3[6](vec3(1, 0, 0), vec3(-1, 0, 0), vec3(0, 1, 0), vec3(0, -1, 0), vec3(0, 0, 1), vec3(0, 0, -1));
+    const float A = fa / (fa - n), B = -fa * n / (fa - n);
+    const vec3 rows[4] = vec3[4](R[f], D[f], F[f], F[f]);
+    const float sc[4] = float[4](1.0, 1.0, A, 1.0);
+    mat4 M;
+    for (int r = 0; r < 4; ++r)
+    {
+        for (int c = 0; c < 3; ++c) M[c][r] = rows[r][c] * sc[r];
+        M[3][r] = -sc[r] * dot(rows[r], o) + (r == 2 ? B : 0.0);
+    }
+    return M;
+}
+
+// OFF-SCREEN PROBES (#517): does the probe's influence volume touch the main CULL frustum
+// (linfo.cull_planes: the frozen planes under "Freeze culling camera")? Its sphere (a box
+// probe's is circumscribed), then a box probe's oriented box: the unit cube [-1,1]^3 of
+// inverse(box), centre + half axes against each plane. Degenerate / unset -> on screen.
+bool probeOnScreen(vec3 p, float r, bool isBox, mat4 box)
+{
+    for (int i = 0; i < 6; ++i)
+    {
+        const vec4 pl = linfo.cull_planes[i];
+        if (dot(pl.xyz, p) + pl.w < -r * length(pl.xyz)) return false;
+    }
+    if (isBox)
+    {
+        const mat4 u = inverse(box);   // unit cube -> world
+        for (int i = 0; i < 6; ++i)
+        {
+            const vec4 pl = linfo.cull_planes[i];
+            const float e = abs(dot(pl.xyz, u[0].xyz)) + abs(dot(pl.xyz, u[1].xyz)) + abs(dot(pl.xyz, u[2].xyz));
+            if (dot(pl.xyz, u[3].xyz) + pl.w < -e) return false;   // (NaN: kept)
+        }
+    }
+    return true;
+}
+
+// Main-view visibility of a sphere (the light clusters' camera: view matrix + half tangents).
+bool sphereVisible(vec3 p, float r)
+{
+    const vec3 v = (linfo.view * vec4(p, 1.0)).xyz;
+    const float z = -v.z;
+    if (z < -r) return false;
+    const float tx = linfo.grid.z, ty = linfo.grid.w;
+    return abs(v.x) <= z * tx + r * sqrt(1.0 + tx * tx) && abs(v.y) <= z * ty + r * sqrt(1.0 + ty * ty);
+}
+
+void writeJob(uint j, bool valid, uint slot, uint cand, uint flags, vec3 o, float nearc, float farc, float radius,
+              uvec2 key, uint lid)
+{
+    const uint J = pc.job_base + j;
+    // (several threads: the matrices / dispatch sizes split across them; fields by lane 0)
+    if (lid == j * 64u)
+    {
+        jobs[J].origin = vec4(o, nearc);
+        jobs[J].clip = vec4(farc, radius, 0.0, 0.0);
+        jobs[J].info = uvec4(valid ? 1u : 0u, slot, flags, cand);
+        jobs[J].info2 = uvec4(key, j, 0u);
+        const uint z = j == PJ_SCHED ? 1u : clamp(pc.rt_faces, 1u, 6u);
+        const uint tg = (pc.cap_res + 7u) / 8u;
+        jobs[J].trace = (valid && (flags & PJ_TRACED) != 0u) ? uvec4(tg, tg, z, 0u) : uvec4(0u, 1u, 1u, 0u);
+    }
+    const uint l = lid - j * 64u;
+    if (l < 6u) jobs[J].vp[l] = faceMatrix(l, o, nearc, farc);
+    else if (l >= 8u && l < 8u + PJ_FILTER_ARGS)
+    {
+        const uint m = l - 8u;
+        uvec4 a = uvec4(0u, 1u, 1u, 0u);
+        if (valid)
+        {
+            if (m < pc.mips && m < PJ_IRR_ARG)
+            {
+                const uint r = max(pc.res >> m, 1u);
+                a = uvec4((r + 7u) / 8u, (r + 7u) / 8u, 6u, 0u);
+            }
+            else if (m == PJ_IRR_ARG) a = uvec4(4u, 4u, 6u, 0u);   // PROBE_IRR_RES 32 / 8
+        }
+        jobs[J].filt[m] = a;
+    }
+}
+
+void phaseRankD(uint lid)
+{
+    const float now = pc.cam.w;
+    const uint slots_n = min(pc.slot_n, PRB_SLOT_CAP);
+    const int level = pc.agent_cell.w;
+    const bool on = (pc.flags & PF_ENABLED) != 0u;
+    // Next frame's histogram.
+    g.hist[2u * lid] = 0u; g.hist[2u * lid + 1u] = 0u;
+
+    // ---- this slot ----
+    bool used = on && lid < slots_n && slots[lid].a.x != 0u;
+    Cand d;
+    d.pos = vec3(0.0); d.radius = 0.0; d.near = 1.0; d.key = uvec2(0u); d.cls = 0u; d.dynamic = false;
+    uint cand = 0u, mi = 0u;
+    if (used)
+    {
+        cand = slots[lid].a.x - 1u;
+        used = candidate(cand, d);
+        if (d.cls == 1u) mi = cand - PRB_C_MAN;
+    }
+    if (used && (pc.flags & PF_ENV_RESET) != 0u) slots[lid].t.x = -1e9;   // every capture stale
+    // #565 split (BC6H): which slot live cube 1 now holds. The realtime filter the previous
+    // frame recorded wrote it for that frame's job (an empty job dispatched nothing: no
+    // change). A probe that loses it falls back to its BC6H slot, whose capture is older
+    // than what it showed: aged so the scheduler refreshes it soon. (Each lane writes only
+    // its own slot's flags here; lane 0's writes below come after the barriers.)
+    if (used && (pc.flags & (PF_SPLIT | PF_RTU)) == (PF_SPLIT | PF_RTU))
+    {
+        const uint rj = pc.flags >> 16u;
+        if (jobs[rj].info.x != 0u)
+        {
+            const bool mine = jobs[rj].info.y == lid && all(equal(jobs[rj].info2.xy, slots[lid].a.yz));
+            if (mine) slots[lid].a.w |= SF_RTU;
+            else if ((slots[lid].a.w & SF_RTU) != 0u)
+            {
+                slots[lid].a.w = (slots[lid].a.w & ~SF_RTU) | SF_CDIRTY;   // (#772: the idle scheduler's reason)
+                slots[lid].t.x = -1e9;
+            }
+        }
+    }
+    // LIT-GUARD HEAL (chg_n.w = slot + 1; LLCleanRendererVK::readLitGuardStats): the
+    // deferred lighting found non-finite / out-of-range texels in this slot's stored cube.
+    // It drops out of the shading list this frame (incomplete: idx.y 0) and is recaptured
+    // as a never-captured probe (the CPU cleared its layers before this pass); a scheduled
+    // job on it is abandoned below, so a capture filtered before the heal can't complete it.
+    const uint healSlot = chg_n.w;
+    if (used && healSlot == lid + 1u)
+    {
+        slots[lid].a.w = (slots[lid].a.w & ~(SF_COMPLETE | SF_RTU | SF_STALE)) | SF_CDIRTY | SF_RTDIRTY;
+        slots[lid].t.x = -1e9;
+        slots[lid].t.y = -1e9;
+    }
+    const bool complete = used && (slots[lid].a.w & SF_COMPLETE) != 0u;
+    const float last = used ? slots[lid].t.x : -1e9;
+    const float done = used ? slots[lid].t.y : -1e9;
+    // Live cube for the shading list: 1 = cube 0 (the default probe), 2 = cube 1 (the
+    // realtime probe's capture), 0 = the probe's own slot in the radiance array.
+    const uint live = (pc.flags & PF_SPLIT) == 0u || !used ? 0u
+                    : (lid == 0u ? 1u : ((slots[lid].a.w & SF_RTU) != 0u ? 2u : 0u));
+
+    // ---- shading list (slot order: the default probe is entry 0) ----
+    const uint idx = wgScan(lid, used ? 1u : 0u);
+    const uint count = on ? s_scan[255] : 0u;
+    if (used)
+    {
+        Probe p;
+        p.sphere = vec4(d.pos, d.radius);
+        p.box = d.cls == 1u ? manual[mi].box : mat4(1.0);
+        const bool is_box = d.cls == 1u && manual[mi].params.z > 0.5;
+        p.params = vec4(d.cls == 1u ? manual[mi].params.x : 0.0,
+                        complete ? clamp(now - done, 0.0, 1.0) : 0.0,   // 1 s fade-in
+                        is_box ? 1.0 : 0.0, d.cls == 1u ? 1.0 : 0.0);
+        p.idx = ivec4(int(lid), complete ? int(1u | (live << 1u)) : 0,   // (#565: bits 1-2 the live cube)
+                      d.cls == 1u && (manual[mi].key.z & MF_PARALLAX) != 0u ? 1 : 0,
+                      int(d.cls));   // class (RenderVKDebugView 20)
+        probes[idx] = p;
+    }
+    if (lid == 0u)
+    {
+        phdr.info = vec4(float(count), float(max(pc.mips, 1u) - 1u), pc.sky_amb, on ? 1.0 : 0.0);
+        g.stat[5] = count;
+    }
+
+    // ---- scheduled job (LLReflectionMapManager::update) ----
+    // Captured-position drift: a probe that moved (re-placed automatic, moved manual) since
+    // its capture is DIRTY and ranks up.
+    bool dirty = false;
+    if (complete && lid > 0u)
+    {
+        const vec3 cp = vec3(slots[lid].cap_cell.xyz - pc.agent_cell.xyz) * PRB_CELL_M + slots[lid].cap_pos.xyz;
+        const float rr = slots[lid].cap_pos.w;
+        dirty = distance(cp, d.pos) > 1.0 || abs(rr - d.radius) > 0.15 * max(rr, 1.0);
+    }
+    // #772 CHANGE TRACKING (every resident probe, on screen or not; the lists are empty when
+    // the CPU tracks nothing): the slot's change bits (header comment).
+    uint dynBits = 0u;
+    if (used && lid > 0u)
+    {
+        const float farc = max(pc.far_clip, d.near + 1.0);
+        const float minAng = max(chg_p0.w, 0.0);
+        bool hit = chg_n.z != 0u;
+        const uint nc = min(chg_n.x, PRB_CHG_CAP);
+        for (uint i = 0u; i < nc && !hit; ++i) hit = reaches(chg_sph[i], d.pos, farc, d.radius, minAng);
+        // Avatars are drawn only into a Dynamic probe's captures (clean_probe_patch.comp).
+        const bool avOk = d.dynamic && pc.detail >= 1u;
+        const uint nd = min(chg_n.y, PRB_DYN_CAP);
+        for (uint i = 0u; i < nd && (dynBits & 3u) != 3u; ++i)
+        {
+            const uint f = dyn[i].f.x;
+            if ((f & DYN_AVATAR) != 0u && !avOk) continue;
+            if (reaches(dyn[i].s, d.pos, farc, d.radius, minAng))
+                dynBits |= 1u | ((f & DYN_MOVING) != 0u ? 2u : 0u) | ((f & DYN_CHURN) != 0u ? 4u : 0u);
+        }
+        uint w = slots[lid].a.w;
+        if (hit && (w & SF_CDIRTY) == 0u) atomicAdd(g.cnt[CNT_CDIRTY], 1u);
+        // (moved: not while its own job is capturing it -- at the position it moved to; the
+        // completion re-stamps cap_pos, so a probe still moving stays dirty after it)
+        const bool inJob = g.sched_active != 0u && g.sched_slot == lid && all(equal(g.sched_key, slots[lid].a.yz));
+        if (hit || (dirty && !inJob)) w |= SF_CDIRTY | SF_RTDIRTY;
+        if ((pc.flags & PF_ENV_RESET) != 0u) w |= SF_EURGENT | SF_RTDIRTY;
+        else if ((pc.flags & PF_ENV_DRIFT) != 0u) w |= SF_EDIRTY | SF_RTDIRTY;
+        if ((dynBits & 6u) != 0u) w |= SF_DYNWAS;   // (moving or churning: once more when it ends)
+        else if ((w & SF_DYNWAS) != 0u) w = (w & ~SF_DYNWAS) | SF_CDIRTY | SF_RTDIRTY;   // stopped / left: once more
+        slots[lid].a.w = w;
+    }
+    else if (used && (pc.flags & PF_ENV_RESET) != 0u) slots[lid].a.w |= SF_EURGENT;   // (the default probe)
+    // OFF SCREEN (#517; the default probe is exempt): no scheduled pick, no realtime capture.
+    // A complete probe going off screen turns STALE; back on screen it ranks first (tier 3,
+    // nearest first) until a job picks it -- unless it was captured within
+    // PRB_STALE_MIN_AGE (a blink). (Each lane writes only its own slot's flags here; lane
+    // 0's writes below come after the reductions' barriers.)
+    const bool offScreen = used && lid > 0u
+        && !probeOnScreen(d.pos, d.radius, d.cls == 1u && manual[mi].params.z > 0.5, d.cls == 1u ? manual[mi].box : mat4(1.0));
+    bool stale = used && (slots[lid].a.w & SF_STALE) != 0u;
+    if (offScreen && complete && !stale) { slots[lid].a.w |= SF_STALE; stale = true; }
+    else if (!offScreen && stale && now - last < PRB_STALE_MIN_AGE) { slots[lid].a.w &= ~SF_STALE; stale = false; }
+    const bool staleBoost = !offScreen && stale && complete;
+    memoryBarrierBuffer();
+    barrier();   // (every lane has read the shading list's total from s_scan)
+    {
+        wgScan(lid, (offScreen ? 1u : 0u) | (staleBoost ? 0x10000u : 0u));
+        if (lid == 0u) { g.stat[8] = s_scan[255] & 0xFFFFu; g.stat[9] = s_scan[255] >> 16u; }
+    }
+    const bool vis = used && sphereVisible(d.pos, d.radius);
+    // LL mDistance: the default probe counts as 64 m once generated, -4096 before.
+    const float dist = lid == 0u ? (complete ? 64.0 : -4096.0) : (used ? length(pc.cam.xyz - d.pos) - d.radius : 0.0);
+    // check_priority as a total order: tier first (every third pick a complete probe may
+    // cut in front of an incomplete one, SL-20258), then incomplete: nearest (visible
+    // first), complete: LL's update_score + visibility, coverage and dirtiness.
+    const bool third = (g.upd_count % 3u) == 0u;
+    // #772 idle scheduler: the reason this slot may be picked (0 = none: not scheduled).
+    const bool idle = (pc.flags & PF_IDLE) != 0u;
+    const uint aw = used ? slots[lid].a.w : 0u;
+    const float age = now - last;
+    uint why = 0u;
+    if (used && idle)
+    {
+        if (!complete) why = RS_INCOMPLETE;
+        else if (lid == 0u) why = (aw & SF_EURGENT) != 0u ? RS_ENV : (age >= pc.period ? RS_SKY : 0u);
+        else if ((aw & SF_CDIRTY) != 0u) why = RS_CONTENT;
+        else if ((aw & SF_EURGENT) != 0u) why = RS_ENV;
+        else if (((dynBits & 2u) != 0u && age >= chg_p0.x) || ((dynBits & 4u) != 0u && age >= chg_p1.z)) why = RS_DYNAMIC;
+        else if ((aw & SF_EDIRTY) != 0u && now >= g.env_next) why = RS_ENV_TRICKLE;
+        else if (age >= chg_p0.y) why = RS_SAFETY;
+        // The realtime job captured this probe last frame and keeps it current (its own
+        // change test): a scheduled capture only to complete it (LL: realtime never does).
+        const bool rtLive = lid > 0u && (pc.flags & PF_REALTIME) != 0u && g.rt_valid != 0u && g.rt_slot == lid
+                         && all(equal(g.rt_key, slots[lid].a.yz));
+        if (rtLive && why != RS_INCOMPLETE) why = 0u;
+    }
+    s_why[lid] = why | (staleBoost ? RS_STALE_BIT : 0u);
+    s_dyn[lid] = dynBits;
+    if (!used || (level == 0 && lid != 0u) || offScreen) s_tier[lid] = 0u;
+    else if (!idle) s_tier[lid] = staleBoost ? 3u : ((third ? complete : !complete) ? 2u : 1u);
+    else if (why == 0u) s_tier[lid] = 0u;
+    else if (why == RS_SAFETY) s_tier[lid] = 1u;        // lowest: nothing changed
+    else if (why == RS_ENV_TRICKLE) s_tier[lid] = 2u;   // drift: after every real change
+    else s_tier[lid] = staleBoost ? 5u : ((third ? complete : !complete) ? 4u : 3u);
+    float key;
+    if (staleBoost || (idle && why == RS_ENV_TRICKLE)) key = -dist;   // (trickle: nearest first)
+    else if (!complete) key = -dist + (vis ? 32.0 : 0.0);
+    else
+    {
+        const float cov = clamp(d.radius / max(length(pc.cam.xyz - d.pos), 1.0), 0.0, 1.0);
+        key = (now - last) - dist * 0.1 + (vis ? 1.0 : 0.0) + 2.0 * cov + (dirty ? 4.0 : 0.0);
+    }
+    s_key[lid] = key;
+    s_arg[lid] = lid;
+    barrier();
+    for (uint off = 128u; off > 0u; off >>= 1u)
+    {
+        if (lid < off)
+        {
+            const uint o2 = lid + off;
+            const bool better = s_tier[o2] > s_tier[lid] || (s_tier[o2] == s_tier[lid] && s_tier[o2] != 0u
+                                && (s_key[o2] > s_key[lid] || (s_key[o2] == s_key[lid] && s_arg[o2] < s_arg[lid])));
+            if (better) { s_tier[lid] = s_tier[o2]; s_key[lid] = s_key[o2]; s_arg[lid] = s_arg[o2]; }
+        }
+        barrier();
+    }
+    const uint best = s_tier[0] != 0u ? s_arg[0] : 0xFFFFFFFFu;
+    barrier();
+
+    // Realtime (LL closestDynamic): the nearest resident dynamic probe, detail >= 2, level > 0.
+    const bool rtCand = used && lid > 0u && !offScreen && d.dynamic && (pc.flags & PF_REALTIME) != 0u
+                     && pc.detail >= 2u && level > 0;
+    s_key[lid] = rtCand ? -dist : -3e38;
+    s_tier[lid] = rtCand ? 1u : 0u;
+    s_arg[lid] = lid;
+    barrier();
+    for (uint off = 128u; off > 0u; off >>= 1u)
+    {
+        if (lid < off)
+        {
+            const uint o2 = lid + off;
+            const bool better = s_tier[o2] > s_tier[lid] || (s_tier[o2] == s_tier[lid] && s_tier[o2] != 0u
+                                && (s_key[o2] > s_key[lid] || (s_key[o2] == s_key[lid] && s_arg[o2] < s_arg[lid])));
+            if (better) { s_tier[lid] = s_tier[o2]; s_key[lid] = s_key[o2]; s_arg[lid] = s_arg[o2]; }
+        }
+        barrier();
+    }
+    const uint rtBest = s_tier[0] != 0u ? s_arg[0] : 0xFFFFFFFFu;
+
+    // Lane 0: the scheduled job's life cycle (one face per frame; a job starts at face 0).
+    if (lid == 0u)
+    {
+        uint pick = 0xFFFFFFFFu;
+        bool jactive = on && g.sched_active != 0u;
+        const uint js = g.sched_slot;
+        // (a slot healed this frame: its job is abandoned -- not completed at face 0)
+        const bool jobSlotOk = jactive && js < slots_n && slots[js].a.x != 0u && all(equal(slots[js].a.yz, g.sched_key))
+                            && healSlot != js + 1u;
+        if (pc.face == 0u)
+        {
+            // The previous job's six faces are in and filtered (face 5, last frame): complete.
+            if (jobSlotOk)
+            {
+                if ((slots[js].a.w & SF_COMPLETE) == 0u) slots[js].t.y = now;
+                slots[js].a.w |= SF_COMPLETE;
+                // #565 split: a fresh scheduled (BC6H) capture supersedes an old realtime
+                // one in live cube 1 -- unless the probe is still the realtime one.
+                if (js != rtBest) slots[js].a.w &= ~SF_RTU;
+                slots[js].t.x = now;
+                slots[js].cap_cell = g.sched_cell;
+                slots[js].cap_pos = vec4(g.sched_pos.xyz, g.sched_clip.y);
+            }
+            jactive = false;
+            if (on)
+            {
+                pick = best;
+                // RenderDefaultProbeUpdatePeriod: at level 0 the default probe never updates
+                // more often than the period; above it, never less often.
+                if (slots_n > 0u && slots[0].a.x != 0u)
+                {
+                    if (now - slots[0].t.x < pc.period) { if (level == 0) pick = 0xFFFFFFFFu; }
+                    else if (level > 0) pick = 0u;
+                }
+            }
+            if (pick != 0xFFFFFFFFu)
+            {
+                Cand pd;
+                if (candidate(slots[pick].a.x - 1u, pd))
+                {
+                    jactive = true;
+                    g.sched_slot = pick;
+                    g.sched_key = slots[pick].a.yz;
+                    g.sched_cand = slots[pick].a.x - 1u;
+                    g.sched_cell = ivec4(pc.agent_cell.xyz, 0);
+                    g.sched_pos = vec4(pd.pos, pd.near);
+                    g.sched_clip = vec4(max(pc.far_clip, pd.near + 1.0), pd.radius, 0.0, 0.0);
+                    g.sched_flags = (pick == 0u ? PJ_SKY : 0u) | (pd.dynamic && pc.detail >= 1u ? PJ_DYNAMIC : 0u);
+                    g.upd_count += 1u;
+                    // #517: being refreshed; #772: its change bits are consumed (a change
+                    // during the six faces sets them again)
+                    slots[pick].a.w &= ~(SF_STALE | SF_CDIRTY | SF_EDIRTY | SF_EURGENT);
+                    const uint wy = s_why[pick];
+                    uint r = (pc.flags & PF_IDLE) != 0u ? (wy & 0xFFu) : RS_LEGACY;
+                    if (pick == 0u && r != RS_INCOMPLETE && r != RS_ENV) r = RS_SKY;   // (the period rule)
+                    if (r < RS_INCOMPLETE || r > RS_LEGACY) r = RS_LEGACY;
+                    if (r == RS_ENV_TRICKLE) g.env_next = now + max(chg_p0.z, 0.0);
+                    g.cnt[r] += 6u;
+                    if ((wy & RS_STALE_BIT) != 0u) g.cnt[CNT_STALE] += 6u;
+                }
+            }
+        }
+        else if (!jobSlotOk) jactive = false;   // its slot was re-assigned: abandon (LL doProbeUpdate)
+        g.sched_active = jactive ? 1u : 0u;
+        s_pick[0] = jactive ? g.sched_slot : 0xFFFFFFFFu;
+        g.cnt[CNT_FRAMES] += 1u;
+        if (!jactive) g.cnt[CNT_IDLE] += 1u;
+        // Realtime: captured, or (#772 PF_RT_IDLE) skipped while the same probe has nothing new.
+        uint rtPick = rtBest;
+        if (rtBest != 0xFFFFFFFFu)
+        {
+            const bool same = g.rt_valid != 0u && g.rt_slot == rtBest && all(equal(g.rt_key, slots[rtBest].a.yz));
+            bool cap = true;
+            if ((pc.flags & PF_RT_IDLE) != 0u && same)
+            {
+                const uint db = s_dyn[rtBest];
+                const float rage = now - slots[rtBest].t.z;
+                cap = (slots[rtBest].a.w & SF_RTDIRTY) != 0u || (db & 2u) != 0u
+                   || ((db & 1u) != 0u && rage >= chg_p1.x) || rage >= chg_p1.y;
+            }
+            if (cap)
+            {
+                slots[rtBest].t.x = now;   // refreshed (never marked complete, as LL)
+                slots[rtBest].t.z = now;
+                slots[rtBest].a.w &= ~SF_RTDIRTY;
+                g.rt_valid = 1u; g.rt_slot = rtBest; g.rt_key = slots[rtBest].a.yz;
+                g.cnt[CNT_RT_CAP] += 1u;
+            }
+            else
+            {
+                rtPick = 0xFFFFFFFFu;      // an empty realtime job this frame
+                g.cnt[CNT_RT_SKIP] += 1u;
+            }
+        }
+        else g.rt_valid = 0u;
+        s_pick[1] = rtPick;
+        g.stat[6] = s_pick[0];
+        g.stat[7] = rtPick;
+    }
+    // Lane 0's SSBO writes (the scheduled job's state) -> every lane's reads below:
+    // barrier() orders shared memory only.
+    memoryBarrierBuffer();
+    barrier();
+
+    // ---- job records ----
+    {
+        const bool sv = s_pick[0] != 0xFFFFFFFFu;
+        const vec3 so = vec3(g.sched_cell.xyz - pc.agent_cell.xyz) * PRB_CELL_M + g.sched_pos.xyz;
+        uint sf = g.sched_flags;
+        const float sfar = g.sched_clip.x;
+        if (sv && (sf & PJ_SKY) == 0u && (pc.flags & PF_RT_OK) != 0u
+            && (pc.eye_rt.w <= 0.0 || distance(so, pc.eye_rt.xyz) + sfar <= pc.eye_rt.w))
+            sf |= PJ_TRACED;
+        // #834 BLENDED ALPHA DISTANCE POLICY: a scheduled probe whose influence sphere lies farther
+        // than alpha_dist from the camera covers few screen pixels -- its blended alpha (glass,
+        // translucent prims, alpha hair) skips the capture (the water and the alpha-MASK content
+        // stay). A probe the camera is inside of, or near (a glass dome, a big window), keeps it.
+        if (pc.alpha_pol == 0u
+            || (pc.alpha_pol == 1u && max(distance(so, pc.cam.xyz) - g.sched_clip.y, 0.0) > pc.alpha_dist))
+            sf |= PJ_NO_ALPHA;
+        if (lid < 64u)
+            writeJob(PJ_SCHED, sv, sv ? s_pick[0] : 0u, g.sched_cand, sf, sv ? so : vec3(1e9), g.sched_pos.w,
+                     sv ? sfar : 1.0, g.sched_clip.y, g.sched_key, lid);
+    }
+    {
+        const uint rs = s_pick[1];
+        const bool rv = rs != 0xFFFFFFFFu;
+        Cand rd;
+        rd.pos = vec3(1e9); rd.radius = 0.0; rd.near = 1.0; rd.key = uvec2(0u); rd.cls = 0u; rd.dynamic = false;
+        bool ok = rv && candidate(slots[rs].a.x - 1u, rd);
+        const float rfar = max(pc.far_clip, rd.near + 1.0);
+        uint rf = PJ_DYNAMIC;   // only a dynamic probe is ever realtime
+        if (ok && (pc.flags & PF_RT_OK) != 0u
+            && (pc.eye_rt.w <= 0.0 || distance(rd.pos, pc.eye_rt.xyz) + rfar <= pc.eye_rt.w))
+            rf |= PJ_TRACED;
+        if (pc.alpha_pol == 0u) rf |= PJ_NO_ALPHA;   // (#834: the realtime probe keeps its alpha under 1 / 2)
+        if (lid >= 64u && lid < 128u)
+            writeJob(PJ_REALTIME, ok, ok ? rs : 0u, ok ? slots[rs].a.x - 1u : 0u, rf, ok ? rd.pos : vec3(1e9),
+                     rd.near, ok ? rfar : 1.0, rd.radius, rd.key, lid);
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// Per-job light lists (LL culls the light set per probe camera): the frame's lights whose
+// sphere reaches the capture sphere (origin, far clip), nearest CLUSTER_CAP, at cluster
+// CLUSTER_COUNT + job (clean_draw_common.glsl localLights, clean_rt_shade.glsl).
+shared float s_ld[256];
+shared uint  s_li[256];
+shared uint  s_ln;
+
+void phaseLights(uint j, uint lid)
+{
+    if (lid == 0u) s_ln = 0u;
+    barrier();
+    const bool valid = jobs[pc.job_base + j].info.x != 0u && (jobs[pc.job_base + j].info.z & PJ_SKY) == 0u;
+    const vec3 o = jobs[pc.job_base + j].origin.xyz;
+    const float farc = jobs[pc.job_base + j].clip.x;
+    s_ld[lid] = 3e38; s_li[lid] = 0xFFFFFFFFu;
+    barrier();
+    const uint nl = min(pc.light_count, 256u);
+    if (valid && lid < nl)
+    {
+        const vec4 pr = lights[lid].pos_radius;
+        const float dd = distance(pr.xyz, o);
+        if (dd < farc + pr.w)
+        {
+            const uint k = atomicAdd(s_ln, 1u);
+            s_ld[k] = dd; s_li[k] = lid;
+        }
+    }
+    barrier();
+    const uint n = s_ln;
+    // Sorted nearest first whenever the list holds more than the capture FS walks (#829:
+    // CAPTURE_LIGHT_CAP; past CLUSTER_CAP the cap keeps the nearest too). One 256-lane
+    // workgroup per job; the full FS and the traced capture sum the same lights either way.
+    if (n > CAPTURE_LIGHT_CAP)
+    {
+        // Bitonic sort of the 256 entries (ascending distance; empty entries at 3e38).
+        for (uint k = 2u; k <= 256u; k <<= 1u)
+            for (uint jj = k >> 1u; jj > 0u; jj >>= 1u)
+            {
+                const uint ixj = lid ^ jj;
+                if (ixj > lid)
+                {
+                    const bool asc = (lid & k) == 0u;
+                    const float a = s_ld[lid], b = s_ld[ixj];
+                    if ((a > b) == asc)
+                    {
+                        s_ld[lid] = b; s_ld[ixj] = a;
+                        const uint t = s_li[lid]; s_li[lid] = s_li[ixj]; s_li[ixj] = t;
+                    }
+                }
+                barrier();
+            }
+    }
+    const uint m = min(n, CLUSTER_CAP);
+    const uint cl = CLUSTER_COUNT + j;
+    if (lid < m) cluster_index[cl * CLUSTER_CAP + lid] = s_li[lid];
+    if (lid == 0u) cluster_count[cl] = m;
+}
+
+void main()
+{
+    const uint id = gl_GlobalInvocationID.x;
+    const uint lid = gl_LocalInvocationID.x;
+    switch (pc.phase)
+    {
+    case PH_CLEAR:   phaseClear(id); break;
+    case PH_BIN:     phaseBin(id); break;
+    case PH_RESOLVE: phaseResolve(id); break;
+    case PH_PREP:    phasePrep(lid); break;
+    case PH_RAYS:    phaseRays(id, lid); break;
+    case PH_FINAL:   phaseFinal(lid); break;
+    case PH_RANK_A:  phaseRankA(id); break;
+    case PH_RANK_B:  phaseRankB(lid); break;
+    case PH_RANK_C:  phaseRankC(pc.first + id); break;
+    case PH_RANK_D:  phaseRankD(lid); break;
+    case PH_LIGHTS:  phaseLights(gl_WorkGroupID.x, lid); break;
+    default: break;
+    }
+}

@@ -1,0 +1,141 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<context_menu
+	layout="topleft"
+	name="Multi-Selected People Context Menu">
+	<menu_item_call
+		label="Add to Set"
+		layout="topleft"
+		name="Add to Set">
+		<menu_item_call.on_click
+			function="Avatar.AddToContactSet" />
+	</menu_item_call>
+	<menu_item_call
+		label="Remove Friends"
+		layout="topleft"
+		name="Remove Friend">
+		<menu_item_call.on_click
+			function="Avatar.RemoveFriend" />
+		<menu_item_call.on_enable
+			function="Avatar.EnableItem"
+			parameter="can_delete" />
+	</menu_item_call>
+	<menu_item_call
+		label="IM"
+		layout="topleft"
+		name="IM">
+		<on_click
+			function="Avatar.IM" />
+	</menu_item_call>
+	<menu_item_call
+		enabled="false"
+		label="Call"
+		layout="topleft"
+		name="Call">
+		<on_click
+			function="Avatar.Call" />
+		<on_enable
+			function="Avatar.EnableItem"
+			parameter="can_call" />
+	</menu_item_call>
+	<menu_item_call
+		label="Offer Teleport"
+		name="teleport">
+		<menu_item_call.on_click
+			function="Avatar.OfferTeleport"/>
+		<menu_item_call.on_enable
+			function="Avatar.EnableItem"
+			parameter="can_offer_teleport"/>
+	</menu_item_call>
+
+	<menu_item_separator />
+
+	<menu_item_call
+		label="Freeze"
+		name="freeze">
+		<menu_item_call.on_click
+			function="Avatar.Freeze"/>
+		<menu_item_call.on_visible
+			function="Avatar.VisibleFreezeEject"/>
+	</menu_item_call>
+	<menu_item_call
+		label="Parcel Eject"
+		name="eject">
+		<menu_item_call.on_click
+			function="Avatar.Eject"/>
+		<menu_item_call.on_visible
+			function="Avatar.VisibleFreezeEject"/>
+	</menu_item_call>
+	<menu_item_call
+		label="Estate Kick"
+		name="kick">
+		<menu_item_call.on_click
+			function="Avatar.Kick"/>
+		<menu_item_call.on_visible
+			function="Avatar.VisibleKickTeleportHome"/>
+	</menu_item_call>
+	<menu_item_call
+		label="Estate Teleport Home"
+		name="teleport_home">
+		<menu_item_call.on_click
+			function="Avatar.TeleportHome"/>
+		<menu_item_call.on_visible
+			function="Avatar.VisibleKickTeleportHome"/>
+	</menu_item_call>
+	<menu_item_call
+		label="Estate Ban"
+		name="estate_ban">
+		<menu_item_call.on_click
+			function="Avatar.EstateBan"/>
+		<menu_item_call.on_visible
+			function="Avatar.VisibleKickTeleportHome"/>
+	</menu_item_call>
+	<context_menu label="Render Settings" name="render_settings">
+		<menu_item_call
+			label="Render Normally"
+			name="av_render_normal">
+			<menu_item_call.on_click
+				function="Nearby.People.SetRenderMode"
+				parameter="0" />
+		</menu_item_call>
+		<menu_item_call
+			label="Do Not Render"
+			name="av_render_never">
+			<menu_item_call.on_click
+				function="Nearby.People.SetRenderMode"
+				parameter="1" />
+		</menu_item_call>
+		<menu_item_call
+			label="Render Fully"
+			name="av_render_always">
+			<menu_item_call.on_click
+				function="Nearby.People.SetRenderMode"
+				parameter="2" />
+		</menu_item_call>
+	</context_menu>
+	<menu_item_separator />
+	<context_menu
+		label="Copy"
+		name="copy_menu">
+		<menu_item_call
+			label="Copy Names"
+			name="copy_username">
+			<menu_item_call.on_click
+				function="Avatar.CopyData"
+				parameter="user_name"/>
+		</menu_item_call>
+		<menu_item_call
+			label="Copy SLurls"
+			name="copy_slurl">
+			<menu_item_call.on_click
+				function="Avatar.CopyData"
+				parameter="slurl"/>
+		</menu_item_call>
+		<menu_item_call
+			label="Copy UUIDs"
+			name="copy_uuid">
+			<menu_item_call.on_click
+				function="Avatar.CopyData"
+				parameter="id"/>
+		</menu_item_call>
+	</context_menu>
+</context_menu>

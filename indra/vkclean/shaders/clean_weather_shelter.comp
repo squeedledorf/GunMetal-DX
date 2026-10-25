@@ -1,0 +1,766 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+// vkclean — PER-AVATAR SHELTER MAPS (#901; vkgfx/llcleanweathervk_shelter.cpp recordShelter): a
+// small top-down height map per avatar near the camera, of the avatar itself and what it wears,
+// in the avatar's own frame (clean_weather_shelter.glsl has the record and the atlas). One
+// GPU-driven chain per recording, right after the MAIN cull (its per-instance candidates cand[]
+// hold the drawn LOD's index range and, for rigged draws, this frame's pre-skinned vertex range)
+// and before the G-buffer, which reads the result the same recording:
+//
+//   -DWX_SH_PREP     one invocation per joint-table slot: a slot that owns a layer computes the
+//                    layer's frame from its pelvis (centre, heading), its extent (the last
+//                    raster's reach + a margin, from the minimum up to the cap; sticky: grows at
+//                    once, shrinks only by a clear margin, in 25 cm steps), a teleport / new
+//                    assignment reset; and every slot writes its four PER-SLOT ROWS at the bottom
+//                    of BOTH atlas images (the lit FS finds an avatar's tile by its slot there):
+//                    (centre x, y), (centre z, yaw), (extent, tile resolution -- 0: no layer),
+//                    (tile corner x, y), and #901 the PER-AVATAR WETNESS (top, body) it integrates
+//                    from the slot's exposure (the roof maps over a few joints x the avatar's own
+//                    cover in its previous map, traced along the fall) and the exposure itself,
+//                    and the layer directory (row + 6, columns 0..15).
+//   -DWX_SH_FILTER   one invocation per instance id: a visible (main cull) rigged draw (its
+//                    avatar's slot from the skin meta; not the cluster path -- -DWX_SH_CL_FILTER --,
+//                    not a flexi chain)
+//                    or worn rigid attachment (bit9: skin_id = the wearer's slot) of an avatar
+//                    whose layer is DUE this step, not HUD, not invisible (tint alpha) -> the
+//                    work list (bounded; the raster's indirect dispatch counts it). An item's y:
+//                    the layer | 0x100 raster due | 0x200 its avatar's REST-POSE GRID is due (#901:
+//                    clean_weather_accum.comp -DWX_AC_ACCUM runs over the same list).
+//   -DWX_SH_CL_FILTER (#901 / #909 follow-up, with RenderVKClusterLOD) one invocation per selected
+//                    entry of the cluster pre-skin's view (its indirect grid): an avatar's skinned
+//                    cluster whose layer is due for the raster counts as work for it (CLEAR clears
+//                    and frames it; an avatar drawn wholly by the cluster path had no work at all).
+//   -DWX_SH_CLEAR    one invocation per atlas texel: the due layers that found work are cleared
+//                    (a due layer with nothing drawn -- the own avatar hidden in mouselook --
+//                    keeps its last map).
+//                    #783 BODY CONTACT: with the bottom map, its texels too, and each layer's
+//                    raster-time frame rows (clean_weather_shelter.glsl WX_SH_BODY_ROWS).
+//   -DWX_SH_RASTER   one workgroup per work item (indirect): every triangle of the draw (the
+//                    mega index buffer; rigged: the skinned vertices -- eye-relative, or pelvis-
+//                    local for a skin-cache range --, static: the quantized vertices x the model
+//                    matrix) into the layer's frame, rasterized top-down onto the tile (texel
+//                    centres inside the triangle, either winding): atomicMax of the encoded
+//                    height. Big triangles (an umbrella's canopy panels) are walked in blocks past
+//                    kShTriTexels. Also the farthest horizontal reach (the next extent).
+//                    #901 / #909 follow-up -DWX_SH_CL_RASTER: the same for the CLUSTER LOD parts, one
+//                    workgroup per selected entry (clean_weather_cluster.glsl: the skinned arena's
+//                    vertices, the cluster's triangles) -- the body, its clothes, wings, tail drawn
+//                    by the cluster path are in the top and the bottom map like any other draw.
+//                    #783 BODY CONTACT: the same texels' LOWEST surface into the bottom map
+//                    (atomicMax of the encoded -height, under the top map in the same image):
+//                    the snow passes press the snow down to the body's real underside.
+//   -DWX_SH_PUBLISH  one invocation per atlas texel of a layer: the rasterized height (relative
+//                    to the pelvis; kShNone where nothing) into the written atlas image, with the
+//                    PER-AVATAR SNOW integrated on it (the world snow's model at avatar scale, in
+//                    the avatar's frame: it rides along): the snowfall fills a texel toward its
+//                    level (the global depth x the slope factor, only as far as the sky over it is
+//                    open), the SUPPORT CAP (cohesion + tan 35 x the distance to where the surface
+//                    drops away: domes on shoulders, a cone on a hat, the full depth only on wide
+//                    tops), the REPOSE between joined neighbours, slide-off on steep surfaces; it
+//                    MELTS with the world's snow and -- #903 -- under cover whether or not it still
+//                    snows (the sky over the texel), is SHED by running / flying / jumping (the
+//                    avatar's speed), dropped where its surface moved away, and cleared on a
+//                    teleport / new layer. The previous step's depth is resampled when the extent
+//                    changed.
+//   -DWX_SH_MESH     one invocation per mesh vertex (every second texel of the atlas): the snow
+//                    top in the world (the layer's current frame), its normal; and per cell whose
+//                    corners all have a surface, are joined (no 6 cm step) and hold some snow, two
+//                    triangles appended to the AVATAR SNOW MESH (drawn with the world snow mesh's
+//                    pipelines: the G-buffer, the sun cascades, the forward pass).
+//
+// Set 0 = draw set 0 (0 the instances, 2 the joint table, 9 the frame info, 35 the rigged
+// state words, 39 the mega-VBO's words, 49 the weather maps). Set 1 (own): 0 the raster target
+// (r32ui; #783 2 x the tiles' rows + WX_SH_BODY_ROWS: the top map, the bottom map, the layers' raster-time
+// frames), 1 the two atlas images (rg32f), 2 the record, 3 / 4 the main cull's candidates and
+// their meta, 5 the skinned vertices, 6 the mega index buffer (words), 7 the skin meta words,
+// 8 the avatars' motion state (clean_weather_snow.comp -DWX_SNOW_AVATAR; a stand-in without it),
+// 9 / 10 / 11 the avatar snow mesh's vertices, indices and indexed indirect arguments.
+#include "clean_frame_info.glsl"
+#include "clean_joint_table.glsl"
+#include "clean_skinvert.glsl"   // (+ clean_qvertex.glsl, clean_av_slots.glsl)
+
+#define WX_SH_SET 1
+#define WX_SH_BINDING 2
+#define WX_SH_ACCESS
+#include "clean_weather_shelter.glsl"
+#if defined(WX_SH_CL_FILTER) || defined(WX_SH_CL_RASTER)
+#include "clean_weather_cluster.glsl"   // (set 2: the cluster set; the pipelines' own layout)
+#endif
+
+struct WxShInstance
+{
+    mat4 model_matrix;
+    vec4 aabb_min;
+    vec4 aabb_max;
+    vec4 tint;
+    mat4 uv_matrix;
+    uint lod_group_id;
+    uint material_id;
+    uint flags;
+    uint skin_id;
+    vec4 spin_axis;
+    vec4 spin_pivot;
+};
+layout(std430, set = 0, binding = 0) readonly buffer WxShInstances { WxShInstance instances[]; };
+layout(std430, set = 0, binding = 2) readonly buffer WxShJoints { AvatarJoints avatar_joints[]; };
+layout(std430, set = 0, binding = 35) readonly buffer WxShRigCache { uint rig_cache[]; };
+layout(std430, set = 0, binding = 39) readonly buffer WxShQv { uint qv_words[]; };
+
+struct WxShDraw { uint indexCount; uint instanceCount; uint firstIndex; int vertexOffset; uint firstInstance; };
+layout(set = 1, binding = 0, r32ui) uniform uimage2D uShH;
+layout(set = 1, binding = 1, rg32f) uniform image2D uShS[2];
+layout(std430, set = 1, binding = 3) readonly buffer WxShCand { WxShDraw cand[]; };
+layout(std430, set = 1, binding = 4) readonly buffer WxShCandMeta { uint cand_meta[]; };
+layout(std430, set = 1, binding = 5) readonly buffer WxShSkinV { uint skin_v[]; };
+layout(std430, set = 1, binding = 6) readonly buffer WxShIbo { uint ibo[]; };
+layout(std430, set = 1, binding = 7) readonly buffer WxShSkinMeta { uint skin_meta[]; };
+layout(std430, set = 1, binding = 8) readonly buffer WxShAvState { vec4 av_state[]; };   // per slot 2 x vec4: [1] x / y smoothed speed (m/s)
+struct WxShMeshVert { float x, y, z; uint n; };   // (clean_weather_snowmesh.vert: world xyz + the octahedral normal word)
+layout(std430, set = 1, binding = 9) writeonly buffer WxShMeshV { WxShMeshVert sh_mv[]; };
+layout(std430, set = 1, binding = 10) writeonly buffer WxShMeshI { uint sh_mi[]; };
+layout(std430, set = 1, binding = 11) buffer WxShMeshA { uint sh_ma[8]; };   // VkDrawIndexedIndirectCommand (index count appended), [5] the index capacity
+
+layout(push_constant) uniform ShPush
+{
+    uvec4 a;   // x instance count, y flags (1 skinned vertices bound, 2 skin meta bound, 4 snow, 8 mesh), z the per-slot rows' first row, w unused
+    vec4  b;   // xyz the palettes' eye (the skinned vertices' origin, world), w dt (s)
+    vec4  c;   // x extent minimum (m), y extent cap (m), z teleport distance (m), w unused
+    vec4  d;   // snow: x the global depth (m), y the depth build this step (m), z the global melt this step (m), w the cover melt this step (m)
+    vec4  e;   // x shed speed horizontal, y vertical (m/s), z the mesh lift (m), w the mesh's least depth (m)
+    vec4  f;   // x the publish's previous atlas image (0 / 1; < 0 none)
+    vec4  g;   // PER-AVATAR WETNESS (PREP): x the rain falling 0..1, y wetting per s (full rain, fully
+               // exposed: 1 / the soak time), z drying per s (fully dry air: the conditions' boost /
+               // the drying time), w the global surface wetness 0..1 (a first-seen avatar's guess)
+    vec4  h;   // xy the precipitation's mean fall shear (m drift per m of fall), z 1 = wetness on, w unused
+} sp;
+
+const uint kShFlagSkinV = 1u, kShFlagSkinMeta = 2u, kShFlagSnow = 4u, kShFlagMesh = 8u, kShFlagMotion = 16u;
+const uint kSkinMetaWords = 1892u;   // LLCleanSkinStore::SkinMeta / 4 (word 0 = the avatar's slot)
+const uint kShTriTexels = 4096u;     // a triangle's texel budget before it is walked in blocks
+
+uint wxShLayerOf(uint slot)
+{
+    const uint n = min(sh_cfg.x, WX_SH_LAYERS);
+    for (uint L = 0u; L < n; ++L)
+        if (sh_info[L].x == slot) return L;
+    return 0xFFFFFFFFu;
+}
+// The layer whose tile holds atlas texel t (0xFFFFFFFF: none).
+uint wxShLayerAt(ivec2 t)
+{
+    const uint n = min(sh_cfg.x, WX_SH_LAYERS);
+    for (uint L = 0u; L < n; ++L)
+    {
+        if (sh_info[L].x == 0xFFFFFFFFu) continue;
+        const ivec2 o = ivec2(int(sh_info[L].z & 0xFFFFu), int(sh_info[L].z >> 16u));
+        const int r = int(sh_info[L].y);
+        if (all(greaterThanEqual(t, o)) && all(lessThan(t, o + ivec2(r)))) return L;
+    }
+    return 0xFFFFFFFFu;
+}
+
+#if defined(WX_SH_PREP) || defined(WX_SH_PUBLISH)   // (the roof maps: the avatars' exposure, the snow's sky)
+layout(set = 0, binding = 49) uniform sampler2D uWeatherOccl[10];
+
+// The roof maps' openness at P (as clean_weather_snow.comp wxSkyAt: one tap per cascade).
+float shOpenAt(vec4 fr, vec4 fz, vec2 s, uint base, vec3 P)
+{
+    const vec2 uv = (P.xy - (fz.x - P.z) * s - fr.xy) * fr.z;
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) return -1.0;
+    const uint m = base + uint(fr.w + 0.5) - 1u;
+    vec4 d;
+    if (m == 0u) d = textureGather(uWeatherOccl[0], uv, 0);
+    else if (m == 1u) d = textureGather(uWeatherOccl[1], uv, 0);
+    else if (m == 2u) d = textureGather(uWeatherOccl[2], uv, 0);
+    else d = textureGather(uWeatherOccl[3], uv, 0);
+    const vec4 top = fz.x - d * fz.y;
+    return dot(clamp((vec4(P.z) - (top - 1.5 * fz.z)) / fz.z, 0.0, 1.0), vec4(0.25));
+}
+float shSkyAt(vec3 P)
+{
+    float o = -1.0;
+    if (ssr.weather[3].w > 0.5) o = shOpenAt(ssr.weather[3], ssr.weather[4], ssr.weather[7].xy, 2u, P);
+    if (o < 0.0 && ssr.weather[1].w > 0.5) o = shOpenAt(ssr.weather[1], ssr.weather[2], ssr.weather[6].xy, 0u, P);
+    return o < 0.0 ? 1.0 : o;
+}
+
+#endif
+
+#if defined(WX_SH_PREP)
+layout(local_size_x = 64) in;
+
+// ---- PER-AVATAR WETNESS (#901; LLCleanWeatherVK::planShelter has the settings) ----
+// Every joint-table slot carries its own wetness in its per-slot rows (row + 4: top, body; both
+// images, so the next step reads it from either): it WETS while rain falls on it -- at the rain's
+// intensity x how exposed it is, a full soak in the soak time at full rain fully exposed -- and
+// DRIES otherwise (slower; faster in wind / sun: the CPU's boost). Two states: the TOP (whatever is
+// the avatar's highest surface: its head, its shoulders, an umbrella's canopy -- open unless a
+// roof is over it) and the BODY (what the rain reaches past the avatar's own cover: an umbrella
+// over it keeps it dry). The lit FS blends them per fragment (a column's top takes the top state,
+// a part under the avatar's own cover the body's) and wets upward surfaces first.
+// EXPOSURE from a few joints of the skeleton (LL joint numbers, as clean_weather_snow.comp): the
+// roof maps' openness over each (shSkyAt: a porch, a club's ceiling) x, with a shelter layer, the
+// avatar's own cover there -- the previous step's map traced back along the fall (the mean wind's
+// shear): a surface well above the head (an umbrella, not a hat) over the drop's path.
+const int kWxJoints = 7;
+const int kWxJoint[kWxJoints] = int[kWxJoints](8, 6, 0, 59, 78, 112, 107);   // head, chest, pelvis, shoulders, hips
+const float kWxCoverAbove = 0.45;   // m above the head joint: a surface higher than this is cover (an umbrella)
+const float kWxDz[5] = float[5](0.0, 0.3, 0.7, 1.2, 1.9);   // m up the drop's path, sampled
+
+vec3 shJointPos(uint slot, int j) { return jointWorld(avatar_joints[slot].world[j])[3].xyz; }
+bool shFinite(vec3 v) { return !any(isnan(v)) && !any(isinf(v)) && all(lessThan(abs(v), vec3(1.0e6))); }
+
+// The previous step's map of layer L (image `src`, its frame fr / extent e): the world top over
+// xy (-1e9: nothing / off the tile).
+float shPrevTop(uint L, uint src, vec4 fr, float e, vec2 xy)
+{
+    const int res = int(sh_info[L].y);
+    if (!(e > 0.0) || res <= 0) return -1.0e9;
+    const vec2 cs = vec2(cos(fr.w), sin(fr.w));
+    const vec2 d = xy - fr.xy;
+    const vec2 q = vec2(cs.x * d.x + cs.y * d.y, cs.x * d.y - cs.y * d.x);
+    const vec2 uv = q / e + 0.5;
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThanEqual(uv, vec2(1.0)))) return -1.0e9;
+    const ivec2 t = ivec2(int(sh_info[L].z & 0xFFFFu), int(sh_info[L].z >> 16u)) + ivec2(uv * float(res));
+    const float h = imageLoad(uShS[src], t).x;
+    return h > kShNoneTest ? fr.z + h : -1.0e9;
+}
+
+void main()
+{
+    const uint slot = gl_GlobalInvocationID.x;
+    if (slot >= AV_SLOT_CAP) return;
+    const int row = int(sp.a.z);
+    const uint L = wxShLayerOf(slot);
+    vec4 r0 = vec4(0.0), r1 = vec4(0.0), r2 = vec4(0.0), r3 = vec4(0.0);
+    // (the layer's frame the previous step's map was built in: the own-cover test below)
+    const vec4 oldFr = L != 0xFFFFFFFFu ? sh_frame[L] : vec4(0.0);
+    const float oldE = L != 0xFFFFFFFFu ? sh_ext[L].x : 0.0;
+    bool histOk = false;
+    if (L != 0xFFFFFFFFu && slot < uint(avatar_joints.length()))
+    {
+        const mat4 M = jointWorld(avatar_joints[slot].world[0]);
+        const vec3 c = M[3].xyz;
+        // The heading: the pelvis's forward (+X) projected flat; lying / tumbling, its left axis.
+        const vec3 X = M[0].xyz, Y = M[1].xyz;
+        const float yaw = length(X.xy) > 0.3 * length(X) ? atan(X.y, X.x) : atan(-Y.x, Y.y);
+        const vec4 pv = sh_prev[L];
+        const bool reset = (sh_info[L].w & 2u) != 0u || pv.w < 0.5 || distance(c, pv.xyz) > sp.c.z;
+        histOk = !reset && sp.f.x > -0.5;
+        const float reach = uintBitsToFloat(sh_reach[L]);
+        const float prevE = reset ? 0.0 : sh_ext[L].x;
+        const float want = clamp(2.0 * reach + 0.3, sp.c.x, sp.c.y);
+        float e = prevE;
+        if (!(e > 0.0)) e = reach > 0.0 ? want : sp.c.x;
+        else if (reach > 0.0 && (want > e + 0.1 || want < e - 0.75)) e = want;
+        e = clamp(ceil(e * 4.0) * 0.25, sp.c.x, sp.c.y);
+        sh_frame[L] = vec4(c, yaw);
+        sh_ext[L] = vec4(e, prevE > 0.0 ? prevE : e, reset ? 1.0 : 0.0, 0.0);
+        sh_prev[L] = vec4(c, 1.0);
+        if ((sh_info[L].w & 1u) != 0u) { sh_reach[L] = 0u; sh_attach[L] = 0u; }   // (the raster this step measures them again)
+        r0 = vec4(c.xy, 0.0, 0.0);
+        r1 = vec4(c.z, yaw, 0.0, 0.0);
+        r2 = vec4(e, float(sh_info[L].y), 0.0, 0.0);
+        r3 = vec4(float(sh_info[L].z & 0xFFFFu), float(sh_info[L].z >> 16u), 0.0, 0.0);
+    }
+    // ---- PER-AVATAR WETNESS (every slot; a slot no avatar uses computes nothing anyone reads) ----
+    vec2 wet = imageLoad(uShS[0], ivec2(int(slot), row + 4)).xy;
+    vec2 expo = vec2(0.0);
+    if (sp.h.z > 0.5 && slot < uint(avatar_joints.length()))
+    {
+        const vec3 head = shJointPos(slot, 8);
+        if (shFinite(head))
+        {
+            const uint src = histOk ? (uint(sp.f.x + 0.5) & 1u) : 0u;   // (histOk: sp.f.x >= 0)
+            const vec2 sh = sp.h.xy;   // a drop now at P was at P.xy - sh * dz, dz above it
+            float body = 0.0, n = 0.0;
+            for (int k = 0; k < kWxJoints; ++k)
+            {
+                const vec3 P = shJointPos(slot, kWxJoint[k]);
+                if (!shFinite(P) || distance(P, head) > 4.0) continue;   // (an unposed / garbage joint)
+                const float sky = shSkyAt(P + vec3(0.0, 0.0, 0.15));
+                float cov = 0.0;
+                if (histOk)
+                    for (int i = 0; i < 5; ++i)
+                    {
+                        const vec3 Q = vec3(P.xy - sh * kWxDz[i], P.z + kWxDz[i]);
+                        const float top = shPrevTop(L, src, oldFr, oldE, Q.xy);
+                        if (top >= Q.z - 0.02 && top > head.z + kWxCoverAbove) { cov = 1.0; break; }
+                    }
+                body += sky * (1.0 - cov);
+                n += 1.0;
+                if (k == 0) expo.x = shSkyAt(head + vec3(0.0, 0.0, 0.35));   // the top: the sky over the head
+            }
+            expo.y = n > 0.0 ? body / n : 0.0;
+        }
+        // resets: a new avatar in the slot (the guess), a re-created atlas (the CPU's last value)
+        bool init = !(wet.x > kShNoneTest);
+        float seedBits = -1.0;
+        const uint nr = min(sh_rhead.x, 8u);
+        for (uint i = 0u; i < nr; ++i)
+            if (sh_rst[i].x == slot)
+            {
+                init = true;
+                if (sh_rst[i].y != 0xFFFFFFFFu) { wet = clamp(unpackHalf2x16(sh_rst[i].y), 0.0, 1.0); seedBits = 1.0; }
+                atomicAdd(sh_stat.z, 1u);
+            }
+        if (init && seedBits < 0.0) wet = clamp(sp.g.w * expo, 0.0, 1.0);   // (standing in the rain a while: already wet)
+        // wet while rain falls on it, dry otherwise (partly exposed: both, in proportion)
+        const float dt = sp.b.w;
+        const vec2 hit = sp.g.x * expo;
+        wet += dt * (hit * sp.g.y - (1.0 - clamp(hit * 4.0, 0.0, 1.0)) * sp.g.z);
+        wet = clamp(wet, 0.0, 1.0);
+    }
+    else
+        wet = vec2(kShNone, 0.0);   // (off / no joints: none -- the lit FS keeps the world's wetness)
+    if (L != 0xFFFFFFFFu) sh_wet[L] = vec4(wet, expo);
+    for (int k = 0; k < 2; ++k)
+    {
+        imageStore(uShS[k], ivec2(int(slot), row), r0);
+        imageStore(uShS[k], ivec2(int(slot), row + 1), r1);
+        imageStore(uShS[k], ivec2(int(slot), row + 2), r2);
+        imageStore(uShS[k], ivec2(int(slot), row + 3), r3);
+        imageStore(uShS[k], ivec2(int(slot), row + 4), vec4(wet, 0.0, 0.0));
+        imageStore(uShS[k], ivec2(int(slot), row + 5), vec4(expo, 0.0, 0.0));
+        // the layer directory (the debug overlay over the scene): column L = layer L's slot
+        if (slot < WX_SH_LAYERS)
+        {
+            const bool used = slot < min(sh_cfg.x, WX_SH_LAYERS) && sh_info[slot].x != 0xFFFFFFFFu;
+            imageStore(uShS[k], ivec2(int(slot), row + 6), vec4(used ? float(sh_info[slot].x) : -1.0, 0.0, 0.0, 0.0));
+        }
+    }
+}
+
+#elif defined(WX_SH_FILTER)
+layout(local_size_x = 64) in;
+void main()
+{
+    const uint id = gl_GlobalInvocationID.x;
+    if (id >= sp.a.x || id >= uint(cand_meta.length()) || id >= uint(instances.length())) return;
+    if (cand_meta[id] == 0xFFFFFFFFu) return;          // not drawn by the main view
+    if (cand[id].indexCount < 3u) return;              // (a capacity drop's empty draw)
+    const uint fl = instances[id].flags;
+    // rigged (bit0) or a worn rigid attachment (bit9); never HUD (bit3) or a flexi chain (bit19)
+    if ((fl & (1u | 512u)) == 0u || (fl & 8u) != 0u || (fl & 524288u) != 0u) return;
+    if (instances[id].tint.a < 0.05) return;           // invisible prims shelter nothing
+    uint slot = 0xFFFFFFFFu;
+    if ((fl & 1u) != 0u)
+    {
+        if ((sp.a.y & (kShFlagSkinV | kShFlagSkinMeta)) != (kShFlagSkinV | kShFlagSkinMeta)) return;
+        if (id * RC_WORDS + RC_STATE < uint(rig_cache.length())
+            && (rig_cache[id * RC_WORDS + RC_STATE] & RC_ST_CLUSTER) != 0u) return;   // (cluster LOD draws it: -DWX_SH_CL_RASTER from the arena)
+        const uint sid = instances[id].skin_id;
+        if (sid >= 0x100000u || sid * kSkinMetaWords >= uint(skin_meta.length())) return;
+        slot = skin_meta[sid * kSkinMetaWords];
+    }
+    else
+        slot = instances[id].skin_id;
+    if (slot >= AV_SLOT_CAP) return;
+    const uint L = wxShLayerOf(slot);
+    if (L == 0xFFFFFFFFu) return;
+    // due for the raster (bit 0) and / or -- #901 rest-pose accumulation -- for its avatar's grid
+    // update (bit 2: clean_weather_accum.comp -DWX_AC_ACCUM reads the same list); the item says which
+    const uint due = sh_info[L].w & 5u;
+    if (due == 0u) return;
+    const uint n = atomicAdd(sh_head.x, 1u);
+    if (n >= sh_head.y) return;   // full (the readback counts the overflow)
+    sh_items[n] = uvec2(id, L | ((due & 1u) != 0u ? 0x100u : 0u) | ((due & 4u) != 0u ? 0x200u : 0u));
+    if ((due & 1u) != 0u) atomicAdd(sh_count[L], 1u);
+    atomicAdd(sh_disp.x, 1u);
+}
+
+#elif defined(WX_SH_CL_FILTER)
+layout(local_size_x = 1) in;
+// (#901 / #909 follow-up) A CLUSTER LOD avatar's skinned cluster: work for its layer when the layer
+// is due for the raster (CLEAR clears / frames only the layers that found work). The filter's other
+// tests on the renderer row (visible, not HUD / a flexi chain); one count per cluster (the log's
+// "draws" counts clusters for these).
+void main()
+{
+    WxClEntry x;
+    if (!wxClEntry(x) || x.ri >= uint(instances.length())) return;
+    const uint fl = instances[x.ri].flags;
+    if ((fl & 1u) == 0u || (fl & 8u) != 0u || (fl & 524288u) != 0u || instances[x.ri].tint.a < 0.05) return;
+    const uint L = wxShLayerOf(x.slot);
+    if (L == 0xFFFFFFFFu || (sh_info[L].w & 1u) == 0u) return;
+    atomicAdd(sh_count[L], 1u);
+}
+
+#elif defined(WX_SH_CLEAR)
+layout(local_size_x = 8, local_size_y = 8) in;
+void main()
+{
+    const ivec2 t = ivec2(gl_GlobalInvocationID.xy);
+    // #783 BODY CONTACT: the raster target is 2 x the tiles' rows + WX_SH_BODY_ROWS (the bottom
+    // map under the top map, then each layer's raster-time frame); without them, the top alone.
+    const int th = int(sp.a.z);
+    const bool body = imageSize(uShH).y >= 2 * th + WX_SH_BODY_ROWS;
+    if (body && t.y == 0 && t.x < int(WX_SH_LAYERS))
+    {
+        // Layer t.x's raster-time frame (the snow passes read the bottom map in it): rewritten
+        // when the layer is rasterized this step; its slot word zeroed when the layer is free or
+        // went to another avatar (the old map is not that avatar's).
+        const uint L = uint(t.x);
+        const bool used = L < min(sh_cfg.x, WX_SH_LAYERS) && sh_info[L].x != 0xFFFFFFFFu;
+        const int r0 = 2 * th;
+        if (used && (sh_info[L].w & 1u) != 0u && sh_count[L] != 0u)
+        {
+            const vec4 fr = sh_frame[L];
+            imageStore(uShH, ivec2(t.x, r0), uvec4(sh_info[L].x + 1u));
+            imageStore(uShH, ivec2(t.x, r0 + 1), uvec4(floatBitsToUint(fr.x)));
+            imageStore(uShH, ivec2(t.x, r0 + 2), uvec4(floatBitsToUint(fr.y)));
+            imageStore(uShH, ivec2(t.x, r0 + 3), uvec4(floatBitsToUint(fr.z)));
+            imageStore(uShH, ivec2(t.x, r0 + 4), uvec4(floatBitsToUint(fr.w)));
+            imageStore(uShH, ivec2(t.x, r0 + 5), uvec4(floatBitsToUint(sh_ext[L].x)));
+            imageStore(uShH, ivec2(t.x, r0 + 6), uvec4(sh_info[L].y));
+            imageStore(uShH, ivec2(t.x, r0 + 7), uvec4(sh_info[L].z));
+        }
+        else if (!used || imageLoad(uShH, ivec2(t.x, r0)).r != sh_info[L].x + 1u)
+            imageStore(uShH, ivec2(t.x, r0), uvec4(0u));
+    }
+    if (t.y >= th || any(greaterThanEqual(t, ivec2(imageSize(uShH))))) return;
+    const uint L = wxShLayerAt(t);
+    if (L == 0xFFFFFFFFu || (sh_info[L].w & 1u) == 0u || sh_count[L] == 0u) return;
+    imageStore(uShH, t, uvec4(0u));
+    if (body) imageStore(uShH, t + ivec2(0, th), uvec4(0u));   // (#783 the bottom map)
+}
+
+#elif defined(WX_SH_RASTER) || defined(WX_SH_CL_RASTER)
+layout(local_size_x = 64) in;
+shared uint sReach;
+
+// One triangle q (the layer's frame) onto layer tile o (res texels over extent e): every texel centre
+// inside it (either winding) takes the atomicMax of its encoded height; #783 body: the bottom map
+// (th rows under the top map) the encoded -height.
+void shRasterTri(vec3 q[3], float e, int res, ivec2 o, int th, bool body)
+{
+    // texel coordinates (texel centres at + 0.5)
+    const vec2 a = (q[0].xy / e + 0.5) * float(res), b = (q[1].xy / e + 0.5) * float(res), c = (q[2].xy / e + 0.5) * float(res);
+    const float area = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+    if (abs(area) < 1e-6) return;   // (seen edge-on from above: its neighbours hold the top)
+    const ivec2 lo = max(ivec2(floor(min(a, min(b, c)))), ivec2(0));
+    const ivec2 hi = min(ivec2(ceil(max(a, max(b, c)))), ivec2(res - 1));
+    if (any(greaterThan(lo, hi))) return;
+    const uint span = uint(hi.x - lo.x + 1) * uint(hi.y - lo.y + 1);
+    const int stp = span > kShTriTexels ? int(ceil(sqrt(float(span) / float(kShTriTexels)))) : 1;
+    const float inv = 1.0 / area;
+    for (int y = lo.y; y <= hi.y; y += stp)
+        for (int x = lo.x; x <= hi.x; x += stp)
+        {
+            const vec2 p = vec2(x, y) + 0.5 * float(stp);
+            // barycentrics (either winding)
+            const float w0 = ((b.x - p.x) * (c.y - p.y) - (b.y - p.y) * (c.x - p.x)) * inv;
+            const float w1 = ((c.x - p.x) * (a.y - p.y) - (c.y - p.y) * (a.x - p.x)) * inv;
+            const float w2 = 1.0 - w0 - w1;
+            if (w0 < -1e-4 || w1 < -1e-4 || w2 < -1e-4) continue;
+            const float zi = w0 * q[0].z + w1 * q[1].z + w2 * q[2].z;
+            const uint z = wxShEnc(zi), zb = wxShEnc(-zi);   // (#783 zb: the bottom map's -height)
+            for (int by = 0; by < stp; ++by)
+                for (int bx = 0; bx < stp; ++bx)
+                {
+                    const ivec2 t = ivec2(x + bx, y + by);
+                    if (t.x > hi.x || t.y > hi.y) continue;
+                    imageAtomicMax(uShH, o + t, z);
+                    if (body) imageAtomicMax(uShH, o + t + ivec2(0, th), zb);
+                }
+        }
+}
+
+#if defined(WX_SH_CL_RASTER)
+// (#901 / #909 follow-up) A CLUSTER LOD avatar's skinned cluster into its layer (due for the raster):
+// its triangles from the skinned arena (world: the character's frame + the palettes' eye), exactly as
+// a legacy rigged draw's skinned vertices. Every return before the barrier is workgroup-uniform.
+void main()
+{
+    const uint lid = gl_LocalInvocationIndex;
+    if (lid == 0u) sReach = 0u;
+    barrier();
+    WxClEntry x;
+    if (!wxClEntry(x) || x.ri >= uint(instances.length())) return;
+    const uint fl = instances[x.ri].flags;
+    if ((fl & 1u) == 0u || (fl & 8u) != 0u || (fl & 524288u) != 0u || instances[x.ri].tint.a < 0.05) return;
+    const uint L = wxShLayerOf(x.slot);
+    if (L == 0xFFFFFFFFu || (sh_info[L].w & 1u) == 0u || sh_count[L] == 0u) return;
+    const float e = sh_ext[L].x;
+    const int res = int(sh_info[L].y);
+    if (!(e > 0.0) || res <= 0) return;
+    const ivec2 o = ivec2(int(sh_info[L].z & 0xFFFFu), int(sh_info[L].z >> 16u));
+    const int th = int(sp.a.z);
+    const bool body = imageSize(uShH).y >= 2 * th + WX_SH_BODY_ROWS;
+    float reach = 0.0;
+    for (uint k = lid; k < x.tc; k += 64u)
+    {
+        vec3 q[3];
+        for (uint j = 0u; j < 3u; ++j)
+        {
+            q[j] = wxShLocal(L, wxClPos(x, wxClCorner(x, k, j)));
+            reach = max(reach, max(abs(q[j].x), abs(q[j].y)));
+        }
+        shRasterTri(q, e, res, o, th, body);
+    }
+    atomicMax(sReach, floatBitsToUint(min(reach, 0.5 * sp.c.y)));
+    barrier();
+    if (lid == 0u && sReach != 0u) atomicMax(sh_reach[L], sReach);
+}
+#else
+
+// Vertex `v` of the draw (index buffer value + vertexOffset) in world space.
+vec3 wxShVertex(uint id, bool rigged, bool local, mat4 Mp, mat4 Mi, QvHeader qh, uint v)
+{
+    if (rigged)
+    {
+        if (v * SV_WORDS + 2u >= uint(skin_v.length())) return Mp[3].xyz;
+        const vec3 p = SV_POS(skin_v, v);
+        // A skin-cache range is pelvis-local (rotation normalized); a per-frame one eye-relative.
+        if (local)
+            return normalize(Mp[0].xyz) * p.x + normalize(Mp[1].xyz) * p.y + normalize(Mp[2].xyz) * p.z + Mp[3].xyz;
+        return sp.b.xyz + p;
+    }
+    if (v * QV_WORDS + 1u >= uint(qv_words.length())) return Mi[3].xyz;
+    return (Mi * vec4(qvPos(qh, qv_words[v * QV_WORDS], qv_words[v * QV_WORDS + 1u]), 1.0)).xyz;
+}
+
+void main()
+{
+    const uint k = gl_WorkGroupID.x;
+    const uint lid = gl_LocalInvocationIndex;
+    if (lid == 0u) sReach = 0u;
+    barrier();
+    if (k >= min(sh_head.x, sh_head.y)) return;   // (uniform per workgroup)
+    const uvec2 item = sh_items[k];
+    if ((item.y & 0x100u) == 0u) return;   // (#901: an accumulation-only item)
+    const uint id = item.x, L = item.y & 0xFFu;
+    const WxShDraw dc = cand[id];
+    const bool rigged = (instances[id].flags & 1u) != 0u;
+    if (lid == 0u && !rigged) atomicAdd(sh_attach[L], 1u);   // (a worn rigid attachment: the log; PREP zeroed it)
+    const uint st = (rigged && id * RC_WORDS + RC_STATE < uint(rig_cache.length())) ? rig_cache[id * RC_WORDS + RC_STATE] : 0u;
+    const bool local = rigged && (st & RC_ST_LOCAL) != 0u;
+    const uint pslot = st & RC_ST_SLOT;
+    const mat4 Mp = (local && pslot < uint(avatar_joints.length())) ? jointWorld(avatar_joints[pslot].world[0]) : mat4(1.0);
+    // A WORN rigid attachment's model matrix is its constant offset from the joint it rides on
+    // (clean_draw.vert ATTACHMENT SKINNING: the joint in aabb_max.w, the wearer's slot in skin_id):
+    // its world pose is that joint's world matrix x it. (Using the offset alone put every worn
+    // umbrella / hat near the region's origin, off the tile: #901 "the umbrella does nothing".)
+    mat4 Mi = instances[id].model_matrix;
+    if (!rigged && (instances[id].flags & 512u) != 0u && instances[id].skin_id < uint(avatar_joints.length()))
+    {
+        const uint bone = min(uint(instances[id].aabb_max.w + 0.5), 215u);
+        Mi = jointWorld(avatar_joints[instances[id].skin_id].world[bone]) * Mi;
+    }
+    const uint vb = uint(max(dc.vertexOffset, 0));
+    QvHeader qh;
+    qh.pos_c = vec3(0.0); qh.pos_s = vec3(0.0); qh.uv_c = vec2(0.0); qh.uv_s = vec2(0.0);
+    if (!rigged) qh = QV_LOAD_HEADER(qv_words, max(vb, QV_HEADER_VERTS));
+    const float e = sh_ext[L].x;
+    const int res = int(sh_info[L].y);
+    const ivec2 o = ivec2(int(sh_info[L].z & 0xFFFFu), int(sh_info[L].z >> 16u));
+    // #783 BODY CONTACT: the BOTTOM map (the lowest surface per texel, atomicMax of the encoded
+    // -height) th rows under the top map (clean_weather_shelter.glsl WX_SH_BODY_ROWS).
+    const int th = int(sp.a.z);
+    const bool body = imageSize(uShH).y >= 2 * th + WX_SH_BODY_ROWS;
+    float reach = 0.0;
+    const uint nTri = dc.indexCount / 3u;
+    const uint nIdx = uint(ibo.length()) * 2u;
+    if (e > 0.0 && res > 0)
+        for (uint tri = lid; tri < nTri; tri += 64u)
+        {
+            const uint i0 = dc.firstIndex + 3u * tri;
+            if (i0 + 2u >= nIdx) break;
+            vec3 q[3];
+            for (uint j = 0u; j < 3u; ++j)
+            {
+                const uint v = vb + QV_INDEX16(ibo, i0 + j);
+                q[j] = wxShLocal(L, wxShVertex(id, rigged, local, Mp, Mi, qh, v));
+                reach = max(reach, max(abs(q[j].x), abs(q[j].y)));
+            }
+            shRasterTri(q, e, res, o, th, body);
+        }
+    atomicMax(sReach, floatBitsToUint(min(reach, 0.5 * sp.c.y)));
+    barrier();
+    if (lid == 0u && sReach != 0u) atomicMax(sh_reach[L], sReach);
+}
+#endif   // WX_SH_CL_RASTER
+
+#elif defined(WX_SH_MESH)
+layout(local_size_x = 8, local_size_y = 8) in;
+
+uint shOctPack(vec3 n)
+{
+    n /= max(abs(n.x) + abs(n.y) + abs(n.z), 1e-20);
+    vec2 e = n.z >= 0.0 ? n.xy : (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+    const ivec2 q = ivec2(round(clamp(e, vec2(-1.0), vec2(1.0)) * 2047.0));
+    return (uint(q.x) & 0xFFFu) | ((uint(q.y) & 0xFFFu) << 12u);   // band byte 0 (clean_weather_snowmesh.vert)
+}
+
+// The published texel t of the current atlas image (x height, y depth); false: no surface.
+bool shAt(uint dst, ivec2 t, out vec2 hd)
+{
+    hd = imageLoad(uShS[dst], t).xy;
+    return hd.x > kShNoneTest;
+}
+
+void main()
+{
+    // vertex (i, j) = atlas texel (2i, 2j); the grid is (W / 2) wide
+    const ivec2 g = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 sz = imageSize(uShH);
+    const ivec2 t = 2 * g;
+    if (any(greaterThanEqual(t, sz))) return;
+    const uint L = wxShLayerAt(t);
+    if (L == 0xFFFFFFFFu) return;
+    const uint dst = sh_cfg.y & 1u;
+    const int res = int(sh_info[L].y);
+    const ivec2 o = ivec2(int(sh_info[L].z & 0xFFFFu), int(sh_info[L].z >> 16u));
+    const float e = sh_ext[L].x;
+    const float w = e / float(res);
+    const uint vid = uint(g.y) * uint(sz.x / 2) + uint(g.x);
+    vec2 hd;
+    const bool has = shAt(dst, t, hd);
+    const float lift = sp.e.z, least = sp.e.w;
+    // the snow top (its surface + lift where there is none) in the layer's frame -> world
+    const vec2 q = ((vec2(t - o) + 0.5) / float(res) - 0.5) * e;
+    const float top = has ? hd.x + max(hd.y, 0.0) + lift : 0.0;
+    // normal: the snow top's gradient over the neighbouring vertices (one-sided at the tile edge / a gap)
+    vec2 grad = vec2(0.0);
+    if (has)
+    {
+        vec2 a, b;
+        const ivec2 tx0 = t - ivec2(2, 0), tx1 = t + ivec2(2, 0), ty0 = t - ivec2(0, 2), ty1 = t + ivec2(0, 2);
+        const bool ax = tx0.x >= o.x && shAt(dst, tx0, a), bx = tx1.x < o.x + res && shAt(dst, tx1, b);
+        const float hx0 = ax ? a.x + max(a.y, 0.0) : top - lift, hx1 = bx ? b.x + max(b.y, 0.0) : top - lift;
+        grad.x = (hx1 - hx0) / (((ax ? 2.0 : 0.0) + (bx ? 2.0 : 0.0)) * w + 1e-6);
+        const bool ay = ty0.y >= o.y && shAt(dst, ty0, a), by = ty1.y < o.y + res && shAt(dst, ty1, b);
+        const float hy0 = ay ? a.x + max(a.y, 0.0) : top - lift, hy1 = by ? b.x + max(b.y, 0.0) : top - lift;
+        grad.y = (hy1 - hy0) / (((ay ? 2.0 : 0.0) + (by ? 2.0 : 0.0)) * w + 1e-6);
+    }
+    const vec3 nl = normalize(vec3(-grad, 1.0));
+    const vec2 cs = vec2(cos(sh_frame[L].w), sin(sh_frame[L].w));
+    const vec3 nw = vec3(cs.x * nl.x - cs.y * nl.y, cs.y * nl.x + cs.x * nl.y, nl.z);
+    const vec3 P = wxShWorld(L, vec3(q, top));
+    sh_mv[vid] = WxShMeshVert(P.x, P.y, P.z, shOctPack(nw));
+    // the cell (i, j) .. (i + 1, j + 1): inside the tile, every corner a surface, joined, some snow
+    const ivec2 lt = t - o;
+    if (!has || lt.x + 2 >= res || lt.y + 2 >= res) return;
+    vec2 c1, c2, c3;
+    if (!shAt(dst, t + ivec2(2, 0), c1) || !shAt(dst, t + ivec2(0, 2), c2) || !shAt(dst, t + ivec2(2, 2), c3)) return;
+    const float hmin = min(min(hd.x, c1.x), min(c2.x, c3.x)), hmax = max(max(hd.x, c1.x), max(c2.x, c3.x));
+    if (hmax - hmin > 0.06 + 1.4 * w) return;   // (a step: a shoulder's edge over an arm far below)
+    if (max(max(hd.y, c1.y), max(c2.y, c3.y)) < least) return;
+    const uint n = atomicAdd(sh_ma[0], 6u);
+    if (n + 6u > sh_ma[5]) return;
+    const uint gw = uint(sz.x / 2);
+    const uint v00 = vid, v10 = vid + 1u, v01 = vid + gw, v11 = vid + gw + 1u;
+    sh_mi[n] = v00; sh_mi[n + 1u] = v10; sh_mi[n + 2u] = v11;
+    sh_mi[n + 3u] = v00; sh_mi[n + 4u] = v11; sh_mi[n + 5u] = v01;
+}
+
+#else   // WX_SH_PUBLISH
+layout(local_size_x = 8, local_size_y = 8) in;
+// The model at avatar scale (clean_weather_snow.comp's constants).
+const float kShSlide = 0.7;        // base slope (dz / dx) where the level starts to fall (~35 degrees; 0 at 2 x)
+const float kShRepose = 0.7;       // tan 35
+const float kShCohesion = 0.015;   // m (wet snow stands a little proud of the repose on a small support)
+const float kShStep = 0.04;        // m: a drop this steep (+ the snow there) ends a support
+const int   kShEdgeSearch = 10;    // texels searched for a support's edge, per direction
+const float kShMoved = 0.12;       // m: the surface under a texel moved this much -> its snow fell off
+
+// The rasterized height at tile texel t (false: nothing there / outside the tile).
+bool shH(ivec2 t, ivec2 o, int res, out float h)
+{
+    h = kShNone;
+    if (any(lessThan(t, o)) || any(greaterThanEqual(t, o + ivec2(res)))) return false;
+    const uint hz = imageLoad(uShH, t).r;
+    if (hz == 0u) return false;
+    h = wxShDec(hz);
+    return true;
+}
+
+void main()
+{
+    const ivec2 t = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(t, ivec2(imageSize(uShH))))) return;
+    const uint L = wxShLayerAt(t);
+    if (L == 0xFFFFFFFFu) return;
+    const uint dst = sh_cfg.y & 1u;
+    const int res = int(sh_info[L].y);
+    const ivec2 o = ivec2(int(sh_info[L].z & 0xFFFFu), int(sh_info[L].z >> 16u));
+    float h;
+    const bool has = shH(t, o, res, h);
+    float D = 0.0;
+    const bool snowOn = (sp.a.y & kShFlagSnow) != 0u;
+    if (has && snowOn && sh_ext[L].z < 0.5 && sp.f.x > -0.5)
+    {
+        const float e = sh_ext[L].x, ePrev = sh_ext[L].y;
+        const float w = e / float(res);
+        const uint src = uint(sp.f.x + 0.5) & 1u;
+        // the previous step's depth at this texel's point (resampled when the extent changed)
+        ivec2 tp = t;
+        const vec2 q = ((vec2(t - o) + 0.5) / float(res) - 0.5) * e;
+        if (abs(ePrev - e) > 1e-3 && ePrev > 0.0)
+            tp = o + clamp(ivec2((q / ePrev + 0.5) * float(res)), ivec2(0), ivec2(res - 1));
+        const vec2 prev = imageLoad(uShS[src], tp).xy;
+        D = (prev.x > kShNoneTest && abs(prev.x - h) < kShMoved) ? max(prev.y, 0.0) : 0.0;
+        // the surface's slope and the level the snowfall fills toward
+        float hn[4];
+        bool on[4];
+        const ivec2 kN[4] = ivec2[4](ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1));
+        for (int i = 0; i < 4; ++i)
+            on[i] = shH(t + kN[i], o, res, hn[i]) && abs(hn[i] - h) <= 0.03 + kShRepose * w;
+        const float gx = (on[0] && on[1]) ? (hn[1] - hn[0]) / (2.0 * w) : on[1] ? (hn[1] - h) / w : on[0] ? (h - hn[0]) / w : 0.0;
+        const float gy = (on[2] && on[3]) ? (hn[3] - hn[2]) / (2.0 * w) : on[3] ? (hn[3] - h) / w : on[2] ? (h - hn[2]) / w : 0.0;
+        const float slope = length(vec2(gx, gy));
+        const float level = sp.d.x * (1.0 - smoothstep(kShSlide, 2.0 * kShSlide, slope));
+        // the sky over it (the static roof maps: a porch, a room)
+        const float sky = shSkyAt(wxShWorld(L, vec3(q, h + 0.05)));
+        // REPOSE between joined neighbours (the previous step's snow tops)
+        for (int i = 0; i < 4; ++i)
+        {
+            if (!on[i]) continue;
+            const vec2 pn = imageLoad(uShS[src], clamp(tp + kN[i], o, o + ivec2(res - 1))).xy;
+            if (!(pn.x > kShNoneTest)) continue;
+            const float dn = max(pn.y, 0.0);
+            const float dS = (hn[i] + dn) - (h + D);
+            const float ex = abs(dS) - kShRepose * w;
+            if (ex <= 0.0) continue;
+            const float f = 0.1 * ex;
+            D += dS > 0.0 ? min(f, 0.2 * dn) : -min(f, 0.2 * D);
+        }
+        // the snowfall fills it toward its level where the sky is open (never above: piles come
+        // from the repose alone); the world's melt; #903 under cover it melts, snowing or not
+        if (D < level) D = min(D + sp.d.y * sky, level);
+        D -= sp.d.z;
+        D -= sp.d.w * clamp(1.0 - 2.0 * sky, 0.0, 1.0);
+        // SUPPORT CAP: the nearest edge (a drop of the surface, or nothing) in 8 directions
+        float edge = float(kShEdgeSearch) * w;
+        for (int k = 0; k < 8; ++k)
+        {
+            const ivec2 dir = ivec2(k < 3 ? k - 1 : k < 5 ? (k == 3 ? -1 : 1) : k - 6, k < 3 ? -1 : k < 5 ? 0 : 1);
+            const float stepLen = w * length(vec2(dir));
+            for (int r = 1; r <= kShEdgeSearch; ++r)
+            {
+                if (float(r) * stepLen >= edge) break;
+                float hr;
+                if (!shH(t + dir * r, o, res, hr) || hr < h - kShStep - float(r) * stepLen * kShRepose)
+                {
+                    edge = min(edge, (float(r) - 0.5) * stepLen);
+                    break;
+                }
+            }
+        }
+        D = min(D, kShCohesion + kShRepose * edge);
+        if (slope > kShSlide) D = min(D, level + kShCohesion);   // slides off steep surfaces
+        // SHED: running / flying / jumping
+        if ((sp.a.y & kShFlagMotion) != 0u)
+        {
+            const uint slot = sh_info[L].x;
+            if (2u * slot + 1u < uint(av_state.length()))
+            {
+                const vec4 v = av_state[2u * slot + 1u];
+                if (v.x > sp.e.x || v.y > sp.e.y) D *= exp(-sp.b.w * 2.5);
+            }
+        }
+        D = clamp(D, 0.0, max(sp.d.x, 0.0));
+    }
+    imageStore(uShS[dst], t, vec4(has ? h : kShNone, D, 0.0, 0.0));
+}
+#endif

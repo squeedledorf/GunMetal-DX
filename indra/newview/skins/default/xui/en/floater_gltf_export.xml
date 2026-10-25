@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<floater
+ legacy_header_height="18"
+ can_resize="false"
+ can_minimize="true"
+ height="110"
+ layout="topleft"
+ name="gltf_export"
+ help_topic="gltf_export"
+ save_rect="true"
+ single_instance="true"
+ title="EXPORT AS GLTF"
+ width="360">
+    <text
+     type="string"
+     length="1"
+     follows="left|top|right"
+     height="34"
+     layout="topleft"
+     left="12"
+     name="status"
+     top="26"
+     width="336"
+     word_wrap="true">
+        Preparing export...
+    </text>
+    <progress_bar
+     follows="left|top|right"
+     height="16"
+     layout="topleft"
+     left="12"
+     name="progress"
+     top_pad="4"
+     width="336" />
+    <button
+     follows="right|bottom"
+     height="23"
+     label="Cancel"
+     layout="topleft"
+     left="258"
+     name="cancel_btn"
+     top_pad="8"
+     width="90" />
+</floater>

@@ -1,0 +1,195 @@
+#version 450
+// vkclean — CONTENT-ADAPTIVE SHADING RATE for the opaque lit pass (RenderVKOpaqueShadingRate;
+// VK_KHR_fragment_shading_rate attachment, "VRS tier 2").
+//
+// One workgroup per rate texel (T x T render pixels, T = the device's attachment texel size,
+// specialization constant 0). After the depth pre-pass, before pass 1b:
+//
+//   * LUMINANCE of LAST frame's lit scene (mPrevColor, linear HDR at render size),
+//     reprojected through THIS frame's motion vectors (UV, cur - prev), exposure-scaled
+//     and mapped to a perceptual 0..1 scale p = sqrt(L / (1 + L)).
+//   * ERROR of halving the rate along x (y): the RMS of the per-pixel luminance step in
+//     that direction (after Yang et al. 2019, "Visually Lossless Content and Motion
+//     Adaptive Shading", NVIDIA Adaptive Shading). A direction goes coarse when that
+//     error is under a Weber threshold tau * (mean p + 0.05): equal visibility in dark and
+//     bright tiles.
+//   * MOTION relaxes the threshold (the eye and TAA both blur moving content).
+//   * EDGES: a tile whose receivers span a large depth ratio (a silhouette against far
+//     background) stays 1x1; so does a tile mostly disoccluded (no valid history).
+//   * FEEDBACK: a tile shaded coarse last frame shows flat 2-pixel blocks, so only the
+//     steps ACROSS block boundaries are measured (halved: two pixels apart) -- otherwise
+//     the coarse frame would read as smooth and lock itself coarse. A small hysteresis
+//     keeps a tile from flickering between rates on the threshold.
+//
+// Coverage, depth and the EQUAL test stay per pixel under coarse shading -- geometric
+// edges stay sharp; only shading within one triangle is shared. The HUD / UI never see
+// the attachment (other passes, other pipelines), and the mask buckets draw with the
+// attachment ignored (a coarse fragment would discard as a unit, holing cutouts).
+//
+// Rate texel encoding (VK spec): (log2 w << 2) | log2 h -> 1x1 0, 1x2 1, 2x1 4, 2x2 5.
+
+#extension GL_GOOGLE_include_directive : require
+
+layout(constant_id = 0) const uint T = 16u;   // rate texel size in render pixels (8, 16 or 32)
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform sampler2D uPrevColor;   // last frame's lit scene (linear, clamp)
+layout(set = 0, binding = 1) uniform sampler2D uDepth;       // this frame's pre-pass depth (texelFetch)
+layout(set = 0, binding = 2) uniform sampler2D uMotion;      // this frame's motion, UV cur - prev (texelFetch)
+layout(set = 0, binding = 3, r8ui) uniform uimage2D uRate;   // read: last frame's rate, write: this frame's
+layout(set = 0, binding = 4, r32f) uniform readonly image2D uExposure;   // 1x1 dynamic exposure
+
+layout(push_constant) uniform Push {
+    vec4 size;     // render w, h, 1 / w, 1 / h
+    vec4 params;   // x threshold tau, y motion relax per px/frame, z depth-edge ratio (0 off), w RenderExposure
+    vec4 flags;    // x history valid, y motion valid, z dynamic exposure on, w reversed-Z (1) / conventional (0)
+    vec4 mode;     // x 0 adaptive, 1 force 2x1, 2 force 1x2, 3 force 2x2
+} pc;
+
+const uint TB = T + 1u;                        // tile + one border row / column
+shared float s_p[TB * TB];                     // perceptual luminance; < 0 = no data
+shared float s_red[11][64];                    // reduction lanes
+
+const float SKY = -1.0, NOHIST = -2.0;
+
+void main()
+{
+    const uint tid = gl_LocalInvocationIndex;
+    const ivec2 tile = ivec2(gl_WorkGroupID.xy);
+    const ivec2 org = tile * int(T);
+    const ivec2 maxPx = ivec2(pc.size.xy) - 1;
+    const float expo = pc.params.w * (pc.flags.z > 0.5 ? imageLoad(uExposure, ivec2(0)).r : 1.0);
+    const bool rz = pc.flags.w > 0.5;
+
+    // ---- the tile's pixels (+ right / bottom border) -> perceptual luminance ----
+    float mot = 0.0, dmin = 1e30, dmax = 0.0, nGeo = 0.0, nHole = 0.0;
+    for (uint i = tid; i < TB * TB; i += 64u)
+    {
+        const ivec2 q = ivec2(int(i % TB), int(i / TB));
+        const ivec2 px = min(org + q, maxPx);
+        const float d = texelFetch(uDepth, px, 0).r;
+        const bool sky = rz ? (d <= 0.0) : (d >= 1.0);
+        float p = SKY;
+        if (!sky)
+        {
+            const vec2 uv = (vec2(px) + 0.5) * pc.size.zw;
+            const vec2 mv = pc.flags.y > 0.5 ? texelFetch(uMotion, px, 0).xy : vec2(0.0);
+            const vec2 puv = uv - mv;
+            const bool inTile = q.x < int(T) && q.y < int(T);
+            if (any(lessThan(puv, vec2(0.0))) || any(greaterThan(puv, vec2(1.0))))
+            {
+                p = NOHIST;
+            }
+            else
+            {
+                const vec3 c = textureLod(uPrevColor, puv, 0.0).rgb;
+                const float L = max(dot(c, vec3(0.2126, 0.7152, 0.0722)), 0.0) * expo;
+                p = sqrt(L / (1.0 + L));
+                if (!(p >= 0.0)) p = NOHIST;   // NaN / inf guard
+            }
+            if (inTile)
+            {
+                // Reversed-Z: view depth ~ 1 / d; conventional: monotonic too -- the
+                // ratio test only needs order + scale, taken in linear-ish depth below.
+                const float vz = rz ? 1.0 / max(d, 1e-7) : 1.0 / max(1.0 - d, 1e-7);
+                dmin = min(dmin, vz); dmax = max(dmax, vz);
+                nGeo += 1.0;
+                if (p == NOHIST) nHole += 1.0;
+                mot += length(mv * pc.size.xy);
+            }
+        }
+        s_p[i] = p;
+    }
+    barrier();
+
+    // Last frame's rate of this tile (feedback correction + hysteresis).
+    const uint old = imageLoad(uRate, tile).r;
+    const bool oldX = (old & 4u) != 0u, oldY = (old & 1u) != 0u;
+
+    // ---- per-direction luminance steps ----
+    float sx = 0.0, cx = 0.0, sy = 0.0, cy = 0.0, sp = 0.0, cp = 0.0;
+    for (uint i = tid; i < T * T; i += 64u)
+    {
+        const uint x = i % T, y = i / T;
+        const float p = s_p[y * TB + x];
+        if (p < 0.0) continue;
+        sp += p; cp += 1.0;
+        const uint gx = uint(org.x) + x, gy = uint(org.y) + y;
+        // Coarse last frame along x: only the steps across 2-pixel block boundaries carry
+        // information (x odd -> x + 1 even), and they span two pixels.
+        if (!oldX || (gx & 1u) == 1u)
+        {
+            const float pr = s_p[y * TB + x + 1u];
+            if (pr >= 0.0)
+            {
+                const float dx = (pr - p) * (oldX ? 0.5 : 1.0);
+                sx += dx * dx; cx += 1.0;
+            }
+        }
+        if (!oldY || (gy & 1u) == 1u)
+        {
+            const float pd = s_p[(y + 1u) * TB + x];
+            if (pd >= 0.0)
+            {
+                const float dy = (pd - p) * (oldY ? 0.5 : 1.0);
+                sy += dy * dy; cy += 1.0;
+            }
+        }
+    }
+
+    // ---- reduce (sums; min / max for the depth range) ----
+    s_red[0][tid] = sx;   s_red[1][tid] = cx;   s_red[2][tid] = sy;    s_red[3][tid] = cy;
+    s_red[4][tid] = sp;   s_red[5][tid] = cp;   s_red[6][tid] = nGeo;  s_red[7][tid] = nHole;
+    s_red[8][tid] = mot;  s_red[9][tid] = dmin; s_red[10][tid] = dmax;
+    barrier();
+    for (uint st = 32u; st > 0u; st >>= 1u)
+    {
+        if (tid < st)
+        {
+            for (int k = 0; k < 9; ++k) s_red[k][tid] += s_red[k][tid + st];
+            s_red[9][tid]  = min(s_red[9][tid],  s_red[9][tid + st]);
+            s_red[10][tid] = max(s_red[10][tid], s_red[10][tid + st]);
+        }
+        barrier();
+    }
+    if (tid != 0u) return;
+    const float SX = s_red[0][0], CX = s_red[1][0], SY = s_red[2][0], CY = s_red[3][0];
+    const float SP = s_red[4][0], CP = s_red[5][0], NGEO = s_red[6][0], NHOLE = s_red[7][0];
+    const float MOT = s_red[8][0], DMIN = s_red[9][0], DMAX = s_red[10][0];
+
+    uint rate = 0u;
+    if (pc.mode.x > 0.5)
+    {
+        const uint m = uint(pc.mode.x + 0.5);
+        rate = m == 1u ? 4u : (m == 2u ? 1u : 5u);
+    }
+    else if (pc.flags.x < 0.5)
+    {
+        rate = 0u;                                   // no history (cut / first frame): full rate
+    }
+    else if (NGEO <= 0.0)
+    {
+        rate = 5u;                                   // all sky: the lit pass draws nothing here
+    }
+    else if (NHOLE > 0.25 * NGEO || CP <= 0.0)
+    {
+        rate = 0u;                                   // mostly disoccluded: nothing to judge by
+    }
+    else if (pc.params.z > 0.0 && DMAX > DMIN * (1.0 + pc.params.z))
+    {
+        rate = 0u;                                   // depth edge: silhouette over a far background
+    }
+    else
+    {
+        const float mean = SP / CP;
+        const float v = MOT / NGEO;                  // mean motion, render px / frame
+        const float relax = min(1.0 + pc.params.y * max(v - 1.0, 0.0), 3.0);
+        const float thr = pc.params.x * (mean + 0.05) * relax;
+        const float ex = CX > 0.0 ? sqrt(SX / CX) : 0.0;
+        const float ey = CY > 0.0 ? sqrt(SY / CY) : 0.0;
+        const bool coarseX = ex < thr * (oldX ? 1.15 : 1.0);
+        const bool coarseY = ey < thr * (oldY ? 1.15 : 1.0);
+        rate = (coarseX ? 4u : 0u) | (coarseY ? 1u : 0u);
+    }
+    imageStore(uRate, tile, uvec4(rate));
+}

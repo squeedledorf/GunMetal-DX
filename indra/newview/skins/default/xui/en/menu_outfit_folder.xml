@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<context_menu
+ layout="topleft"
+ name="Outfit Folder">
+    <menu_item_call
+     label="New folder..."
+     layout="topleft"
+     name="new_folder">
+        <on_click
+         function="OutfitFolder.NewFolder" />
+    </menu_item_call>
+    <menu_item_call
+     label="Save current outfit here..."
+     layout="topleft"
+     name="save_here">
+        <on_click
+         function="OutfitFolder.SaveHere" />
+        <on_enable
+         function="OutfitFolder.OnEnable"
+         parameter="save_here" />
+    </menu_item_call>
+    <menu_item_separator />
+    <menu_item_call
+     label="Add to favorites"
+     layout="topleft"
+     name="favorites_add">
+       <on_visible
+        function="OutfitFolder.OnEnable"
+        parameter="favorites_add" />
+       <on_click
+        function="OutfitFolder.Favorite" />
+    </menu_item_call>
+    <menu_item_call
+     label="Remove from favorites"
+     layout="topleft"
+     name="favorites_remove">
+       <on_visible
+        function="OutfitFolder.OnEnable"
+        parameter="favorites_remove" />
+       <on_click
+        function="OutfitFolder.Favorite" />
+    </menu_item_call>
+    <menu_item_call
+     label="Rename folder"
+     layout="topleft"
+     name="rename">
+        <on_click
+         function="OutfitFolder.Rename" />
+        <on_enable
+         function="OutfitFolder.OnEnable"
+         parameter="rename" />
+    </menu_item_call>
+    <menu_item_separator />
+    <menu_item_call
+     label="Delete folder"
+     layout="topleft"
+     name="delete">
+        <on_click
+         function="OutfitFolder.Delete" />
+        <on_enable
+         function="OutfitFolder.OnEnable"
+         parameter="delete" />
+    </menu_item_call>
+</context_menu>

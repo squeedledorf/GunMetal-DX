@@ -1,0 +1,1472 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+// vkclean — SNOW SURFACE MESH BUILD (#783 M3; vkgfx/llcleanweathervk.cpp recordMeshBuild,
+// RenderVKWeatherSnowMesh). Two LAYERS in one dispatch (z): 0 the INNER grid (the published
+// snow grid: the cover's A the depth, the base image the FILTERED base B), 1 the OUTER RING
+// (RenderVKWeatherSnowOuterRing: rgba32f base, depth, support cap, coverage on the coarse map's plane, ~0.5 m
+// texels). Recorded at the weather module's prepare() -- before the depth pre-pass, the sun
+// cascades and the G-buffer, which all draw both layers with ONE indexed indirect draw each
+// (clean_weather_snowmesh.vert / .frag).
+//
+// VERTICES: TWO per grid texel (per layer). [i] the snow top S = B + depth -- #783 SMOOTHED:
+// an edge-preserving filter over the joined neighbours (wxSmoothTop) -- + a small lift against
+// z-fighting; SPIKE CLAMP: at most the highest JOINED 4-neighbour's top + the seam + the
+// repose slope over a texel; [R^2 + i] the base B (+ the lift): a skirt's foot; [2 R^2 + i] #783
+// the APRON vertex under a cover (all-zero: none; see THE APRON). The normal from the joined
+// 4-neighbours' filtered tops (12-bit octahedral) + an 8-bit BAND byte (the hand-over: the
+// ring's FS cut, the cascades' ring sink). #783 RING GATES: a ring texel whose footprint is
+// mostly not its filtered base, or whose support is narrow, is drawn bare (texelHD). #783 TWO
+// PHASES: a dispatch for the vertices, then one for the cells (they read the apron vertices).
+// CONNECTIVITY (clean_weather_snow_join.glsl, shared with the depth's transport).
+//
+// LOD WITHOUT POPS (all in WORLD space around the camera, never in grid space, so nothing
+// jumps when a grid snaps):
+//   INNER -> RING  a band at radius rIn .. rOut (rOut: the inner grid's guaranteed reach,
+//                  half its extent - half a snap cell - 0.5 m; rIn = 0.75 rOut): the inner
+//                  vertices GEOMORPH onto the ring's surface there -- its height on the ring's
+//                  own triangle (ringTopAt) and its normal -- reaching it at t = 1; the ring is
+//                  drawn only from t = kRingCut (0.98) on (its cells wholly below are skipped,
+//                  its FS discards below), so the two meet on one surface with a few cm of
+//                  overlap and no gap (the band byte's 7-bit step stays inside the overlap). #783:
+//                  this replaced a complementary screen-space DITHER crossfade over the band,
+//                  which interleaved two surfaces of different heights pixel by pixel (the inner
+//                  near the band's start is still its own fine surface) -- a noisy depth buffer
+//                  the screen-space AO read as creases: a thin dark line along the fine grid's
+//                  hand-over (on a bridge, along a ridge); the sun cascades likewise (the ring
+//                  sinks under the inner layer there: clean_weather_snowmesh.vert). t also rises
+//                  over the inner grid's own outer 2 - 6 % (a heavy wind tilt can pull its
+//                  footprint off the band). Without a ring the inner depth fades to the coating
+//                  over the band.
+//   RING -> COATING  the ring's depth fades to 0 over 0.8 .. 1 x its own reach (and its grid
+//                  edge): the sheet sinks into the coating, which continues beyond.
+//   STRIDES  4 x 4-texel blocks take a stride 1 / 2 / 4 by their distance (inner: 10 / 20 m;
+//                  ring: 0.3 / 0.45 x its extent); the vertices that a coarser stride drops
+//                  MORPH onto the coarser lattice (the mean of their joined lattice neighbours)
+//                  over 75 .. 92 % of the switch distance, so a block changing stride is seamless.
+// CELLS: (stride st, corners 0 (0,0) 1 (st,0) 2 (0,st) 3 (st,st)) split along one diagonal
+// into two triangles, each emitted when its three corners have a base, ANY of them carries
+// snow past the visual threshold and its edges are joined texel by texel. The inner layer
+// skips cells wholly past its band, the ring cells wholly inside the inner band's start. The
+// diagonal: the one keeping more triangles; on a tie MARCHING SQUARES (a lone snowy / bare
+// corner gets its own triangle); else the flatter one. SKIRTS: a triangle edge whose other
+// side has no triangle (a cut, the cell's other triangle dropped, or a stride seam) gets a
+// vertical wall down to ITS OWN base, wound to face outward. One allocation per cell
+// (prefix-safe on overflow). CULLING: blocks behind the view cone (with a margin: the sun
+// cascades draw the same list) are skipped.
+//
+// Own set: 0 the two inner grids (rgba32f), 1 the vertices (vec4: xyz world, w the packed
+// normal + band; inner 3 x R^2 then ring 3 x Rr^2 -- #783 the apron slot), 2 the indices, 3 the draw's
+// VkDrawIndexedIndirectCommand + [5] the triangle counter + (from [8]) the inner TILE TABLE, 4 the
+// two inner bases (r32f), 5 the two rings (rg32f), 6 the LOCAL-EDIT MARKS (see below), 7 #783 the SNOW DUMP.
+//
+// #946 LOCAL PATCHES (RenderVKWeatherSnowMeshPatch; llcleanweathervk.cpp recordMeshPatch). The full
+// build runs every RenderVKWeatherSnowMeshInterval recordings (#946); a footprint / a plough / a limb
+// or body press must show at once. TILES: one workgroup = one 8 x 8-texel tile, and every tile's
+// triangles are ONE contiguous index range (a workgroup allocation; the inner layer's ranges in the
+// tile table: mesh_args[8 + 2 tile] first triangle, [9 + 2 tile] its capacity). MARKS: the snow
+// passes that press or raise the grid locally (clean_weather_snow.comp: the cover's mover / limb /
+// body presses, the berms, the footprint stamps) set the tile's bit in the mask of the grid they write
+// (binding 6: [kMkHead + which x W ..]). PATCH (the next recording, when that grid is published and
+// the full build is not due): EXPAND (u0.y bit 29) turns the mask into two tile lists -- the VERTEX
+// tiles (a marked tile within 2 tiles: a vertex reads texels up to kAK + 1 = 13 texels out, the
+// apron field and its normal) and the CELL tiles (within 3: a cell reads texels and vertices up to 8
+// texels out -- its block's stride, the neighbour cells' strides and corners) -- with indirect
+// dispatches; then the VERTICES phase over the vertex tiles and the CELLS phase over the cell tiles
+// (u0.y bit 30). (THE MARGINS ARE TIGHT: the cell tiles reach exactly one tile -- 8 texels -- past
+// the vertex tiles, and a cell reads vertices up to 7 texels out; widening blockStride / apronCell /
+// cellEval's reach, or the apron field past kAK, must widen expandTiles' radii too.) They run with the LAST FULL BUILD's push block (its camera, view cone, strides, bands: the
+// patched tiles agree with their neighbours exactly) and this recording's grids. A patched tile
+// rewrites its own index range in place (the rest padded with degenerate triangles) or, when it
+// grew, takes a new range past the end (the old one degenerated); over the budget it keeps its range
+// and the prefix of its cells that fit. A patched cell also drops a triangle whose corner vertex is
+// empty (a vertex outside the patch, built from an older grid). Cells outside the cell tiles never
+// index a rewritten vertex (the cell tiles reach a tile past the vertex tiles), so the mesh stays
+// closed. Over the tile cap (RenderVKWeatherSnowMeshPatchTiles) the patch does nothing: the next
+// full build takes the edit.
+layout(local_size_x = 8, local_size_y = 8) in;
+#include "clean_weather_snow_join.glsl"
+
+layout(set = 0, binding = 0, rgba32f) uniform readonly image2D uGrid[2];
+// (uvec4: the packed normal / band word must reach the vertex stream bit-exact -- stored through
+// a float it could be a NaN or a denormal, which a store may canonicalise / flush: garbage
+// normals and band bytes, i.e. tints and stray dither)
+// (#783: read back by the CELLS phase -- the apron's vertices are its topology's input)
+layout(std430, set = 0, binding = 1) buffer WxMeshVerts { uvec4 mesh_verts[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer WxMeshIdx { uint mesh_idx[]; };
+layout(std430, set = 0, binding = 3) buffer WxMeshArgs { uint mesh_args[]; };
+layout(set = 0, binding = 4, rg32f) uniform readonly image2D uBase[2];
+layout(set = 0, binding = 5, rgba32f) uniform readonly image2D uRing[2];
+// (the local-edit marks: [0..2] the vertex tiles' dispatch, [3..5] the cell tiles', [6] the list
+// overflow, [7] the list cap; then the two grids' masks (W words each), the vertex list, the cell
+// list (T^2 entries each: tx | ty << 16); llcleanweathervk.cpp kMkHead)
+layout(std430, set = 0, binding = 6) buffer WxMeshMarks { uint mk[]; };
+const uint kMkHead = 8u;
+// #783 THE SNOW DUMP (RenderVKWeatherSnowDump; llcleanweathervk.cpp dumpArm / readDump;
+// scripts/dev/snowdump.py): a one-shot numeric readback of what this build did around the camera's
+// focus. Armed by u0.x bit 30 (one build: a uniform branch, nothing written when clear). The head
+// (written by the host before the dispatch): [0] magic, [1] the window W (texels), [2..3] the inner
+// window's first texel, [4..5] the ring's (int bits); then per layer W x W records of kDbgRec words
+// (the inner layer first). Fields: see kD* below and snowdump.py FIELDS (keep them in step).
+layout(std430, set = 0, binding = 7) buffer WxMeshDump { uint dbg[]; };
+const uint kDbgHead = 64u, kDbgRec = 32u;
+
+layout(push_constant) uniform MeshPush
+{
+    vec4 g0;    // the inner grid: xy corner (on its top plane), z 1 / extent, w which (0 / 1)
+    vec4 g1;    // x its top plane (m), yz its shear, w the map box's span
+    vec4 cam;   // xyz the camera (world), w cos of the kept cone's half angle
+    vec4 fwd;   // xyz the view direction, w radius always kept (m)
+    vec4 p0;    // x depth threshold (m), y tan of the angle of repose (#783), z stride-2 distance, w stride-4 distance (inner)
+    uvec4 u0;   // x inner resolution (bit 31: #783 the depth debug), y max triangles (bit 31: #783 the CELLS phase), z #783 options (opt*), w lift (m, float bits)
+    vec4 r0;    // the outer ring: xy corner, z +-1 / extent (the sign names it: + 0, - 1; 0 none), w top
+    vec4 r1;    // xy its shear, z its resolution, w span
+} mp;
+
+bool dumpOn() { return (mp.u0.x & 0x40000000u) != 0u; }
+// The record of texel t of a layer in the dump's window (-1: outside it).
+int dumpSlot(uint layer, ivec2 t)
+{
+    const int W = int(dbg[1]);
+    const ivec2 l = t - ivec2(int(dbg[2u + 2u * layer]), int(dbg[3u + 2u * layer]));
+    if (any(lessThan(l, ivec2(0))) || any(greaterThanEqual(l, ivec2(W)))) return -1;
+    return (int(layer) * W + l.y) * W + l.x;
+}
+void dumpU(int slot, uint f, uint v) { dbg[kDbgHead + uint(slot) * kDbgRec + f] = v; }
+void dumpF(int slot, uint f, float v) { dbg[kDbgHead + uint(slot) * kDbgRec + f] = floatBitsToUint(v); }
+// (the record's words; snowdump.py FIELDS)
+const uint kDVFlags = 0u, kDH = 1u, kDD = 2u, kDDImg = 3u, kDRawTop = 4u, kDSupCap = 5u, kDCovR = 6u, kDCovG = 7u,
+           kDSmooth = 8u, kDS0 = 9u, kDLift = 10u, kDBand = 11u, kDX = 12u, kDY = 13u, kDZa = 14u, kDFa = 15u,
+           kDGa = 16u, kDWg = 17u, kDNbMasks = 18u, kDCyan = 19u, kDToeEx = 20u, kDSink = 21u, kDRepose = 22u, kDDn = 23u,
+           kDCFlags = 24u, kDCExtra = 25u, kDCDmin = 26u, kDCTri = 27u, kDCZap = 28u, kDCRej = 29u;
+
+const float kLiftPerM = 0.0004;      // the lift's growth with the distance to the camera (m / m)
+const float kBandIn = 0.75;          // the inner band starts at this x its reach
+const float kRingBandIn = 0.8;       // the ring's fade starts at this x its reach
+// #783 options (u0.z; llcleanweathervk.cpp recordMeshBuild): bits 0..15 the APRON's longest
+// reach (cm; 0: the CLOSURE only, RenderVKWeatherSnowToeReach), bit 16 the SMOOTH reconstruction
+// (RenderVKWeatherSnowMeshSmooth), bits 17..23 the ring's least SUPPORT half-width (x 0.1 m,
+// RenderVKWeatherSnowRingMinSupport), bits 24..31 the ring's least SUPPORT COVERAGE x 255
+// (RenderVKWeatherSnowRingMinCoverage).
+float optToeReach()    { return float(mp.u0.z & 0xFFFFu) * 0.01; }
+bool  optSmooth()      { return (mp.u0.z & 0x10000u) != 0u; }
+float optRingSupport() { return float((mp.u0.z >> 17u) & 0x7Fu) * 0.1; }
+float optRingCov()     { return float(mp.u0.z >> 24u) / 255.0; }
+float tanRepose()      { return mp.p0.y; }
+// #946 the BOUNDARY LOD (u0.x bits 16..17; RenderVKWeatherSnowMeshEdgeLod): 0 a block holding a
+// boundary is stride 1 at any distance (#783 b7d86bc899), 1 stride 1 only inside the stride-2
+// distance and at most stride 2 beyond it, 2 boundaries take the distance LOD like the interior
+// (Beta 4: wall panels at the coarse strides, the cheapest).
+uint  optEdgeLod()     { return (mp.u0.x >> 16u) & 3u; }
+// #783 TWO PHASES (two dispatches, a barrier between): VERTICES (u0.y bit 31 clear: the tops /
+// bases / apron vertices) then CELLS (set: the triangles -- the apron's need its neighbours'
+// finished vertices). Bit 30: a LOCAL PATCH (the tile lists), bit 29: its EXPAND step.
+bool  phaseCells()     { return (mp.u0.y & 0x80000000u) != 0u; }
+bool  modePatch()      { return (mp.u0.y & 0x40000000u) != 0u; }
+bool  modeExpand()     { return (mp.u0.y & 0x20000000u) != 0u; }
+uint  maxTris()        { return mp.u0.y & 0x1FFFFFFFu; }
+const float kRingCut = 0.98;         // the ring is drawn from this hand-over t on (the FS cuts below it)
+// (clean_weather_snow.comp's support cap: cohesion + tan 35 x the distance to the support's edge)
+const float kSupCohesion = 0.04, kSupRepose = 0.7;
+
+// ---- the layers ----
+struct Grid
+{
+    vec2 xy; float inv; float top; vec2 s;
+    int res; uint which; bool ring;
+    float lod1, lod2;
+    uint vbase;      // its first vertex
+};
+
+Grid gridOf(uint layer)
+{
+    Grid G;
+    if (layer == 0u)
+    {
+        G.xy = mp.g0.xy; G.inv = mp.g0.z; G.top = mp.g1.x; G.s = mp.g1.yz;
+        G.res = int(mp.u0.x & 0xFFFFu); G.which = mp.g0.w < 0.5 ? 0u : 1u; G.ring = false;
+        G.lod1 = mp.p0.z; G.lod2 = mp.p0.w; G.vbase = 0u;
+    }
+    else
+    {
+        G.xy = mp.r0.xy; G.inv = abs(mp.r0.z); G.top = mp.r0.w; G.s = mp.r1.xy;
+        G.res = int(mp.r1.z); G.which = mp.r0.z > 0.0 ? 0u : 1u; G.ring = true;
+        G.lod1 = 0.3 / G.inv; G.lod2 = 0.45 / G.inv;
+        G.vbase = 3u * (mp.u0.x & 0xFFFFu) * (mp.u0.x & 0xFFFFu);   // (#783: three vertices per inner texel)
+    }
+    return G;
+}
+
+bool ringOn() { return mp.r0.z != 0.0; }
+
+// The world point of a texel's column at height h.
+vec3 columnPoint(Grid G, ivec2 t, float h)
+{
+    const vec2 u = G.xy + (vec2(t) + 0.5) / (float(G.res) * G.inv);
+    return vec3(u + (G.top - h) * G.s, h);
+}
+
+// A grid's edge fade at world point P (1 within 2 % of its border, 0 inside 6 %).
+float edgeFade(Grid G, vec3 P)
+{
+    const vec2 uv = (P.xy - (G.top - P.z) * G.s - G.xy) * G.inv;
+    const vec2 e = min(uv, 1.0 - uv);
+    return 1.0 - smoothstep(0.02, 0.06, min(e.x, e.y));
+}
+
+// The inner band's t at P (0 inner only, 1 ring only); the ring's outer fade at P.
+float innerBand(vec3 P)
+{
+    const Grid G = gridOf(0u);
+    const float E = 1.0 / G.inv;
+    const float rOut = 0.5 * E - E / 16.0 - 0.5;
+    const float r = length(P.xy - mp.cam.xy);
+    return max(smoothstep(kBandIn * rOut, rOut, r), edgeFade(G, P));
+}
+float ringFade(vec3 P)
+{
+    const Grid G = gridOf(1u);
+    const float E = 1.0 / G.inv;
+    const float rOut = 0.5 * E - E / 16.0 - 1.0;
+    const float r = length(P.xy - mp.cam.xy);
+    return max(smoothstep(kRingBandIn * rOut, rOut, r), edgeFade(G, P));
+}
+
+// A texel's filtered base h and its depth d as drawn (the bands' fades applied); false:
+// outside the grid / no base.
+bool texelHD(Grid G, ivec2 t, out float h, out float d)
+{
+    h = 0.0; d = 0.0;
+    if (any(lessThan(t, ivec2(0))) || any(greaterThanEqual(t, ivec2(G.res)))) return false;
+    float b;
+    if (G.ring)
+    {
+        const vec4 v = G.which == 0u ? imageLoad(uRing[0], t) : imageLoad(uRing[1], t);
+        b = v.x; d = v.y;
+        // #783 SUPPORT COVERAGE (clean_weather_snow.comp -DWX_SNOW_RING): a texel whose footprint
+        // is mostly NOT its filtered base (a canopy tier, a trunk, a post the close bridged into a
+        // slab) carries no sheet -- drawn bare, the coating holds its snow; the sheet around it
+        // tapers to it (no skirt), and the inner grid's hand-over morphs onto the same surface.
+        if (v.w < optRingCov()) d = 0.0;
+        // #783 SMALL SUPPORTS: the support cap (z, clean_weather_snow.comp) is the cohesion + tan 35
+        // x the distance to the support's nearest drop -- so it names a raised support's half-width.
+        // At the ring's 0.5 m texels a tree's canopy tier or a crown over its trunk is one solid
+        // raster patch (the coverage cannot see its holes: the coarse map's texel is the ring's
+        // size), and its snow was a texel-sized plate floating in the tree. A support narrower than
+        // the setting carries no ring sheet (the coating holds it; the fine grid near the camera
+        // resolves the real tiers).
+        if (v.z < 1e29 && (v.z - kSupCohesion) / kSupRepose < optRingSupport()) d = 0.0;
+    }
+    else
+    {
+        b = G.which == 0u ? imageLoad(uBase[0], t).r : imageLoad(uBase[1], t).r;
+        d = G.which == 0u ? imageLoad(uGrid[0], t).a : imageLoad(uGrid[1], t).a;
+    }
+    if (b > 1e29) return false;
+    h = G.top - b;
+    d = max(d, 0.0);
+    const vec3 P = columnPoint(G, t, h);
+    if (G.ring) d *= 1.0 - ringFade(P);
+    else if (!ringOn()) d *= 1.0 - innerBand(P);
+    return true;
+}
+
+// The drawn snow top of a texel. #906: its true depth, also under the visual threshold (the
+// threshold only decides which cells are emitted: a cell whose corners are all thin is the
+// coating's). Before, a thin texel's vertex dropped to its BASE: a mover track pressed to its
+// packed floor (0.3 x the level: under the 2 cm threshold in snow up to ~7 cm deep) became a
+// trench cut down to the ground, its floor the flat coated surface and its sides vertical skirts
+// -- smooth bright bands where a vehicle had driven instead of a packed rut; a thin edge of a
+// snowfield likewise ended in a cliff instead of tapering to the ground.
+float drawnTop(float h, float d) { return h + d; }
+
+// #783 SMOOTH RECONSTRUCTION (RenderVKWeatherSnowMeshSmooth): a vertex's drawn top is an
+// EDGE-PRESERVING 3 x 3 filter of the texel tops -- binomial weights (4 / 2 / 1) x a range weight
+// exp(-(dS / sigma)^2), sigma 1.5 x the repose's rise over a texel, over the JOINED 8-neighbours
+// only (a cut stays a cut: roof snow never smears onto the ground). A slope at or under the
+// repose (a few cm per texel) is smoothed -- the terraces and diagonal stairs of the texel grid
+// round off, and the normals (central differences of the filtered field) shade it as one surface
+// instead of facets; a step much taller than that (a footprint's rim, a snow angel, a fresh
+// divot) keeps its edge. Thin texels (under the visual threshold) keep their raw top (the sheet
+// meets the ground where the depth says). Never below the texel's base.
+float wxSmoothTop(float h, float d, float nh[8], float nd[8], uint okMask, float w)
+{
+    const float S = h + d;
+    if (!optSmooth() || d <= mp.p0.x) return S;
+    const float sig = 1.5 * tanRepose() * w + 0.005;
+    float acc = 4.0 * S, ws = 4.0;
+    for (int i = 0; i < 8; ++i)
+    {
+        if ((okMask & (1u << uint(i))) == 0u) continue;
+        const float Sn = nh[i] + nd[i];
+        if (!snowJoined(h, S, nh[i], Sn, i < 4 ? w : 1.41421356 * w)) continue;
+        const float k = (Sn - S) / sig;
+        const float r = (i < 4 ? 2.0 : 1.0) * exp(-k * k);
+        acc += r * Sn;
+        ws += r;
+    }
+    return max(acc / ws, h);
+}
+
+// The same from the images (a texel outside this workgroup's tile: the ring's hand-over taps).
+float smoothTopG(Grid G, ivec2 t, float h, float d)
+{
+    float nh[8], nd[8];
+    uint m = 0u;
+    for (int i = 0; i < 8; ++i)
+        if (texelHD(G, t + kSnowN8[i], nh[i], nd[i])) m |= 1u << uint(i);
+    return wxSmoothTop(h, d, nh, nd, m, 1.0 / (G.inv * float(G.res)));
+}
+
+uint cellEval(Grid G, ivec2 o, int st, out uint diag, out bool ok[4], out float h[4], out float d[4]);
+
+// The ring's drawn (filtered) snow top at world point P (base near h) -- #783: on the ring's OWN
+// TRIANGLE there (its cell's diagonal and emitted triangles, stride 1: the ring's stride in the
+// band) when all four taps are on that base, so the inner layer's hand-over morph ends exactly
+// on the surface the ring draws; else bilinear over its texels on the same base -- and its
+// gradient there (bilinear; g.x < -1e29: not all four taps on that base); false: none there.
+bool ringTopAt(vec3 P, float h, out float S, out vec2 g)
+{
+    S = 0.0;
+    g = vec2(-1e30);
+    if (!ringOn()) return false;
+    const Grid G = gridOf(1u);
+    const vec2 f = (P.xy - (G.top - h) * G.s - G.xy) * G.inv * float(G.res) - 0.5;
+    const ivec2 i0 = ivec2(floor(f));
+    const vec2 fr = f - vec2(i0);
+    float acc = 0.0, ws = 0.0;
+    float T[4];
+    int n = 0;
+    for (int k = 0; k < 4; ++k)
+    {
+        const ivec2 o = ivec2(k & 1, k >> 1);
+        float hq, dq;
+        T[k] = 0.0;
+        if (!texelHD(G, i0 + o, hq, dq) || abs(hq - h) > 0.5) continue;
+        T[k] = smoothTopG(G, i0 + o, hq, dq);
+        const float wk = (o.x == 1 ? fr.x : 1.0 - fr.x) * (o.y == 1 ? fr.y : 1.0 - fr.y);
+        acc += wk * T[k];
+        ws += wk;
+        ++n;
+    }
+    if (ws < 0.25) return false;
+    S = acc / ws;
+    if (n == 4)
+    {
+        const float wr = 1.0 / (G.inv * float(G.res));
+        g = vec2(mix(T[1] - T[0], T[3] - T[2], fr.y), mix(T[2] - T[0], T[3] - T[1], fr.x)) / wr;
+        uint diag;
+        bool cok[4];
+        float ch[4], cd[4];
+        const uint mask = cellEval(G, i0, 1, diag, cok, ch, cd);
+        // (corners 0 (0,0) 1 (1,0) 2 (0,1) 3 (1,1); kTri: diag 0 -> (0,1,3) | (0,3,2), diag 1 -> (0,1,2) | (1,3,2))
+        const uint tri = diag == 0u ? (fr.x >= fr.y ? 1u : 2u) : (fr.x + fr.y <= 1.0 ? 1u : 2u);
+        if ((mask & tri) != 0u)
+        {
+            if (diag == 0u)
+                S = tri == 1u ? T[0] + fr.x * (T[1] - T[0]) + fr.y * (T[3] - T[1])
+                              : T[0] + fr.y * (T[2] - T[0]) + fr.x * (T[3] - T[2]);
+            else
+                S = tri == 1u ? T[0] + fr.x * (T[1] - T[0]) + fr.y * (T[2] - T[0])
+                              : T[3] + (1.0 - fr.x) * (T[2] - T[3]) + (1.0 - fr.y) * (T[1] - T[3]);
+        }
+    }
+    return true;
+}
+
+// The normal (12-bit octahedral x / y) + the band byte (bit 7: the ring; 0..6: t).
+uint packVertex(vec3 n, float band, bool ring)
+{
+    n /= max(abs(n.x) + abs(n.y) + abs(n.z), 1e-20);
+    vec2 e = n.z >= 0.0 ? n.xy : (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+    const ivec2 q = ivec2(round(clamp(e, vec2(-1.0), vec2(1.0)) * 2047.0));
+    const uint b = uint(round(clamp(band, 0.0, 1.0) * 127.0)) | (ring ? 128u : 0u);
+    return (uint(q.x) & 0xFFFu) | ((uint(q.y) & 0xFFFu) << 12u) | (b << 24u);
+}
+
+// ---- the cells ----
+
+// A block's stride and its centre's offset from the camera (from the block's corner texel:
+// a pure function of the grid, the same for every texel of the block and every neighbour).
+// #783: the block's distance is the NEAREST of its four corner texels' surfaces (it took the first
+// corner's base alone: a block whose corner lay under a high cover -- an airship's top, 100 m up --
+// measured from up there and went to stride 4 a few metres from the camera), and a block holding
+// a BOUNDARY is always stride 1 -- a CUT between its corners (not joined), a texel without a base,
+// or an apron / closure vertex: a stride cell is all sheet or all skirt, so a
+// boundary resolved at stride 2 / 4 became 0.25 - 0.5 m wall panels with notches between them, and
+// the closure / apron (2+ texels) never met a lattice corner. Interior blocks keep their LOD; the
+// stride seams are closed by the existing seam skirts. (Cells phase only: it reads the apron slots.)
+int blockStrideW(Grid G, ivec2 blk, out vec3 toB, out uint why);
+int blockStride(Grid G, ivec2 blk, out vec3 toB) { uint why; return blockStrideW(G, blk, toB, why); }
+// (why, the dump: bit 0 a hole, 1 a cut, 2 an apron / closure vertex in the block, bits 4..6 the
+// distance LOD's stride; bits 8.. dmin's cm)
+int blockStrideW(Grid G, ivec2 blk, out vec3 toB, out uint why)
+{
+    float dmin = 1e30;
+    bool hole = false;
+    bool okc[4];
+    float hc[4], sc[4];
+    toB = vec3(0.0);
+    for (int k = 0; k < 4; ++k)
+    {
+        const ivec2 q = blk + 3 * ivec2(k & 1, k >> 1);
+        float h, d;
+        okc[k] = texelHD(G, q, h, d);
+        hc[k] = h; sc[k] = h + d;
+        if (!okc[k])
+        {
+            // (outside the grid: no boundary of its own; inside: a texel without a base)
+            if (all(greaterThanEqual(q, ivec2(0))) && all(lessThan(q, ivec2(G.res)))) hole = true;
+            continue;
+        }
+        const vec3 v = columnPoint(G, q, h) - mp.cam.xyz;
+        if (length(v) < dmin) { dmin = length(v); toB = v; }
+    }
+    // (a CUT between the corners -- not a mere slope: a curved roof / hull keeps its LOD and the
+    // triangle budget)
+    bool cut = false;
+    const float wq = 3.0 / (float(G.res) * G.inv);
+    const ivec2 kPair[4] = ivec2[4](ivec2(0, 1), ivec2(2, 3), ivec2(0, 2), ivec2(1, 3));
+    for (int k = 0; k < 4; ++k)
+    {
+        const int a = kPair[k].x, b = kPair[k].y;
+        if (okc[a] && okc[b] && !snowJoined(hc[a], sc[a], hc[b], sc[b], wq)) cut = true;
+    }
+    if (dmin > 1e29)
+    {
+        const vec2 bc = G.xy + (vec2(blk) + 2.0) / (float(G.res) * G.inv);
+        toB = vec3(bc + (G.top - mp.cam.z) * G.s, mp.cam.z) - mp.cam.xyz;
+        dmin = length(toB);
+    }
+    // Any closure / apron vertex in the block (the slots the VERTICES phase wrote): stride 1, and the
+    // block's POSITION is also its nearest apron vertex. #783: a block wholly under a high cover had
+    // only the cover's top (an airship's, ~100 m up) for its corners, so the cells phase's view-cone
+    // cull ("behind the view cone") measured it 100 m overhead and dropped it -- with its apron cells
+    // at floor height right in front of the camera: the inner apron stopped after the 1-3 texels of
+    // the blocks straddling the outline (the sawtooth, the stray quad). The ring's 2-texel apron fits
+    // inside its 2 m straddling block, so the ring never showed it.
+    bool apron = false;
+    const uint nvl = uint(G.res) * uint(G.res);
+    for (int k = 0; k < 16; ++k)
+    {
+        const ivec2 q = blk + ivec2(k & 3, k >> 2);
+        if (any(greaterThanEqual(q, ivec2(G.res)))) continue;
+        const uvec4 v = mesh_verts[2u * nvl + G.vbase + uint(q.y) * uint(G.res) + uint(q.x)];
+        if ((v.x | v.y | v.z) == 0u) continue;
+        apron = true;
+        const vec3 a = uintBitsToFloat(v.xyz) - mp.cam.xyz;
+        if (length(a) < dmin) { dmin = length(a); toB = a; }
+    }
+    const int lodSt = dmin < G.lod1 ? 1 : (dmin < G.lod2 ? 2 : 4);
+    why = (hole ? 1u : 0u) | (cut ? 2u : 0u) | (apron ? 4u : 0u) | (uint(lodSt) << 4u);
+    if (hole || cut || apron)
+    {
+        const uint e = optEdgeLod();
+        if (e == 0u) return 1;
+        if (e == 1u) return min(lodSt, 2);
+    }
+    return lodSt;
+}
+
+// Triangle corner ids: [diag][tri] (diag 0: the 0-3 diagonal, 1: the 1-2 one); CCW from above.
+const ivec3 kTri[4] = ivec3[4](ivec3(0, 1, 3), ivec3(0, 3, 2), ivec3(0, 1, 2), ivec3(1, 3, 2));
+
+// One edge of a cell (corners a -> b, cell origin o, stride st) is joined texel by texel
+// (st steps; the texels between the corners read too at a coarse stride).
+bool edgeJoined(Grid G, ivec2 o, int st, int a, int b, float ha, float da, float hb, float db, float w)
+{
+    const ivec2 ca = ivec2(a & 1, a >> 1), cb = ivec2(b & 1, b >> 1);
+    const ivec2 dir = cb - ca;
+    const float step = w * length(vec2(dir));
+    float ph = ha, ps = ha + da;
+    for (int k = 1; k <= st; ++k)
+    {
+        float hq = hb, dq = db;
+        if (k < st && !texelHD(G, o + ca * st + dir * k, hq, dq)) return false;
+        if (!snowJoined(ph, ps, hq, hq + dq, step)) return false;
+        ph = hq; ps = hq + dq;
+    }
+    return true;
+}
+
+bool triOK(Grid G, ivec3 c, ivec2 o, int st, bool ok[4], float h[4], float d[4], float w)
+{
+    if (!ok[c.x] || !ok[c.y] || !ok[c.z]) return false;
+    if (max(max(d[c.x], d[c.y]), d[c.z]) <= mp.p0.x) return false;   // all bare: the base itself
+    return edgeJoined(G, o, st, c.x, c.y, h[c.x], d[c.x], h[c.y], d[c.y], w)
+        && edgeJoined(G, o, st, c.y, c.z, h[c.y], d[c.y], h[c.z], d[c.z], w)
+        && edgeJoined(G, o, st, c.z, c.x, h[c.z], d[c.z], h[c.x], d[c.x], w);
+}
+
+// A cell's corners, its diagonal and its emitted triangles (bit 0 / 1).
+uint cellEval(Grid G, ivec2 o, int st, out uint diag, out bool ok[4], out float h[4], out float d[4])
+{
+    for (int i = 0; i < 4; ++i)
+        ok[i] = texelHD(G, o + st * ivec2(i & 1, i >> 1), h[i], d[i]);
+    const float w = 1.0 / (G.inv * float(G.res));
+    const uint a = (triOK(G, kTri[0], o, st, ok, h, d, w) ? 1u : 0u) | (triOK(G, kTri[1], o, st, ok, h, d, w) ? 2u : 0u);
+    const uint b = (triOK(G, kTri[2], o, st, ok, h, d, w) ? 1u : 0u) | (triOK(G, kTri[3], o, st, ok, h, d, w) ? 2u : 0u);
+    const uint na = bitCount(a), nb = bitCount(b);
+    if (na != nb) diag = na > nb ? 0u : 1u;
+    else
+    {
+        // Marching squares: a lone snowy (or lone bare) corner keeps its own triangle.
+        uint snowy = 0u;
+        for (int i = 0; i < 4; ++i)
+            if (ok[i] && d[i] > mp.p0.x) snowy |= 1u << uint(i);
+        const uint ns = bitCount(snowy);
+        if (ns == 1u || ns == 3u)
+        {
+            const uint lone = ns == 1u ? snowy : (~snowy & 15u);
+            diag = (lone == 2u || lone == 4u) ? 0u : 1u;   // corner 1 / 2 alone: cut along 0-3
+        }
+        else
+        {
+            const float t0 = h[0] + d[0], t1 = h[1] + d[1], t2 = h[2] + d[2], t3 = h[3] + d[3];
+            diag = abs(t0 - t3) <= abs(t1 - t2) ? 0u : 1u;
+        }
+    }
+    return diag == 0u ? a : b;
+}
+
+// ---- #783 the workgroup's tile: the raw texels (h, d; h < -1e29 none) around its 8 x 8
+// texels (apron kTAp: the filter's ring around the filtered apron) and their FILTERED tops
+// (apron 2: the normals' and the stride morphs' lattice neighbours) ----
+const int kTAp = 3;
+const int kTW = 8 + 2 * kTAp;
+const int kFW = 8 + 4;
+shared float sRh[kTW * kTW];
+shared float sRd[kTW * kTW];
+shared float sFt[kFW * kFW];
+// (l: the texel relative to the workgroup's first, -kTAp .. 7 + kTAp)
+bool tileRaw(ivec2 l, out float h, out float d)
+{
+    const int k = (l.y + kTAp) * kTW + l.x + kTAp;
+    h = sRh[k]; d = sRd[k];
+    return h > -1e29;
+}
+// (-2 .. 9; -1e30 none)
+float tileTop(ivec2 l) { return sFt[(l.y + 2) * kFW + l.x + 2]; }
+
+// #783 a sheet's EDGE texel (the tile's l, the grid's t): snowy, with a 4-neighbour that it cannot
+// join and that is LOWER than its base (a drop: its skirt stays) or has no base inside the grid. A
+// cut toward a HIGHER base is not an edge: the CLOSURE continues the sheet into that column.
+bool edgeTexel(Grid G, ivec2 t, ivec2 l, float w, float thr)
+{
+    float h, d;
+    if (!tileRaw(l, h, d) || d <= thr) return false;
+    const ivec2 kN[4] = ivec2[4](ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1));
+    for (int i = 0; i < 4; ++i)
+    {
+        const ivec2 q = t + kN[i];
+        if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, ivec2(G.res)))) continue;   // (the grid's border: no edge)
+        float hn, dn;
+        if (!tileRaw(l + kN[i], hn, dn)) return true;
+        if (hn < h && !snowJoined(h, h + d, hn, hn + dn, w)) return true;
+    }
+    return false;
+}
+
+// The stride morph: a vertex that the next coarser stride (lattice step 2 x step) drops moves
+// onto that lattice -- the mean of its joined lattice neighbours' drawn (filtered) tops. false:
+// it is on the lattice, or a neighbour is missing / cut (no morph). t the texel, l its tile spot.
+bool latticeTarget(ivec2 t, ivec2 l, int step, float h, float S, float w, out float target)
+{
+    target = S;
+    const bool ox = (t.x % (2 * step)) != 0, oy = (t.y % (2 * step)) != 0;
+    if (!ox && !oy) return false;
+    ivec2 q[4];
+    int n = 0;
+    if (ox && oy) { q[0] = t + ivec2(-step, -step); q[1] = t + ivec2(step, -step); q[2] = t + ivec2(-step, step); q[3] = t + ivec2(step, step); n = 4; }
+    else if (ox) { q[0] = t - ivec2(step, 0); q[1] = t + ivec2(step, 0); n = 2; }
+    else { q[0] = t - ivec2(0, step); q[1] = t + ivec2(0, step); n = 2; }
+    float sum = 0.0;
+    for (int i = 0; i < n; ++i)
+    {
+        float hq, dq;
+        const ivec2 lq = l + (q[i] - t);
+        if (!tileRaw(lq, hq, dq) || !snowJoined(h, S, hq, hq + dq, w * float(step) * (ox && oy ? 1.4142 : 1.0)))
+            return false;
+        sum += tileTop(lq);
+    }
+    target = sum / float(n);
+    return true;
+}
+
+// ---- #783 THE CLOSURE and THE APRON: the sheet's continuation into the columns it CANNOT
+// join -- a base above its snow top: a deck or a step higher than the snow, a wall, a block, the
+// cover over a sheltered floor. Before, the sheet ended at the last texel centre on its side with a
+// vertical skirt, and the texel-wide cell between the two sides was left empty: along a stepped
+// outline a row of per-texel wall panels with triangular notches between them, the ground showing
+// through (the higher side's skirt stood a texel away from the lower side's). Now the lower sheet
+// continues as a second, SLOPED HEIGHT FIELD over those blocked texels: a grey-scale dilation of the
+// snow tops by a cone at the angle of repose (8-neighbour chamfer in the workgroup's tile), carrying
+// its source's base as its floor. One vertex per blocked texel (the third slot), meshed by the
+// ordinary grid triangulation with the sheet's own tops (the CELLS phase reads the finished
+// vertices): one continuous surface, its cells filled, the outline the blocking geometry's own face
+// (the field lies inside the block / under the cover) -- no texel stairs, no notches.
+//   CLOSURE (always): kClosureSteps texels from ANY snow (the stride-2 lattice still finds an apron
+//     corner across every cut), while the block stands at least kSnowSeam above it.
+//   APRON (RenderVKWeatherSnowToeReach, 1 m): further, at the angle of repose, as far as the
+//     snow would run, from any snow (#783: it always ends ON its floor -- the source's base, assumed to
+//     continue under the cover; the floor itself is not in the top-down maps) and only under a COVER kApronClear above it: the
+//     slope in under an eave / a table. LIMIT: a heightfield cannot tell an eave from a wall;
+//     against a thin wall of a room whose roof is in the map, the apron's end can show inside.
+// A blocked texel the source's sheet JOINS (a step it fills, clean_weather_snow_join.glsl) takes
+// none: the sheet itself spans it.
+const float kApronClear = 0.25;      // an APRON's cover stands at least this far above it (m)
+const int   kClosureSteps = 2;       // the CLOSURE's reach (texels: >= the coarsest stride in use)
+const int   kAK = kSnowApronTexels;  // the tile's apron (texels): the dilation's reach bound (12)
+const int   kAW = 8 + 2 * kAK;
+// The field per tile entry, ping-pong: its floor (the source's base, m) and, packed as two halves,
+// its height above that floor and its SOURCE'S DEPTH (m; negative: not from a wide support). Its
+// DROP RATE (dz / dx; fieldAt) is the steeper of the repose and what still reaches the floor within
+// the field's reach (the source's depth / its reach): the field always ENDS ON ITS FLOOR -- a last
+// ring of vertices at the floor -- so where it is visible (under a cover) its end is closed, never a
+// ledge in the air.
+// #783 ONE SHEET PER TEXEL (round 10, measured: RenderVKWeatherSnowDump at the boardwalk). A blocked
+// texel can be reached by the fields of several sheets -- the floor's deep snow running in under a
+// roof AND the thin snow on each step of the roof's curved edge (each step stands over the one below
+// it: a cut, so a source of its own). The field took the HIGHEST candidate, so one texel past the
+// roof's edge the edge step's 6 cm of snow won (z 16.76 over a floor at 15.37) against the floor's
+// apron (15.76): the floor's apron ended after one texel and the mesh stitched it to the step's --
+// 0.95 m in one texel, 86-degree grey curtains under the roof edge (327 of 352 APRON_GEOM walls in the
+// dump; every corner an apron vertex, every drop rate the repose). The mesh now stitches two corners
+// only where the surface is CONTINUOUS at the field's own drop rate (apronCell: the side array of drop
+// rates, aprSideWord), and the field keeps ONE sheet per texel -- round 11: the LOWEST FLOOR's
+// (aprBetter). Round 10 let a deeper source win unless the other floor stood a "storey" (6 m) over
+// it; the boardwalk's roof is 31 m over its floor (re-dumped: 4 dumps, 53-70 floor-level outline
+// edges per dump, every one of them a floor sheet whose cover column held the roof's own 6 cm field
+// at 44.9 - 46.4 m: no apron, its skirt the wall). Under a cover only the lowest sheet's snow can
+// lie: a higher sheet beside a higher column of its own (a roof step, a wall) keeps its skirt --
+// snow lies flat against a wall. Floors within kAprFloorSep are one sheet: the higher candidate
+// (the envelope of its cones).
+const float kAprFloorSep = 0.15;     // floors further apart than this (m) are different sheets: the lower wins
+const float kAprSheetSlack = 0.02;   // a sheet corner's top vs the raw top its apron came from (the smoothing)
+int   gAprN = kAK;                   // (this workgroup's dilation reach, for fieldAt's drop rate)
+float gAprW = 0.0625;
+shared float sAf0[kAW * kAW], sAf1[kAW * kAW];
+shared uint  sAp0[kAW * kAW], sAp1[kAW * kAW];   // (0xFFFFFFFF: none)
+shared float sAb[kAW * kAW];                      // the texel's own base (-1e30 none)
+shared float sAd[kAW * kAW];                      // its depth (raw; negative: not a wide support)
+// #946 CONVERGENCE: an iteration that changed no entry ends the dilation (the next ones would
+// write the same field). Three slots, rotating: iteration `it` ORs into [it % 3] and clears
+// [(it + 1) % 3] (read last after iteration it - 2: every invocation passed a barrier since).
+shared uint sAChg[3];
+const uint kAprNone = 0xFFFFFFFFu;
+float aprDrop(float dn, bool wide)
+{
+    return max(tanRepose(), dn / (float(wide ? gAprN : kClosureSteps) * gAprW));
+}
+bool fieldAt(int k, int src, out float z, out float f, out float g, out bool wide)
+{
+    const uint pk = src == 0 ? sAp0[k] : sAp1[k];
+    f = src == 0 ? sAf0[k] : sAf1[k];
+    z = -1e30; g = 0.0; wide = false;
+    if (pk == kAprNone) return false;
+    const vec2 v = unpackHalf2x16(pk);
+    z = f + v.x; wide = v.y > 0.0; g = aprDrop(abs(v.y), wide);
+    return true;
+}
+// The field's source depth (m; 0 none).
+float fieldDn(int k, int src)
+{
+    const uint pk = src == 0 ? sAp0[k] : sAp1[k];
+    return pk == kAprNone ? 0.0 : abs(unpackHalf2x16(pk).y);
+}
+// Candidate (z, its source depth dn, its floor f) over the current field (zc, dc, fc; zc < -1e29
+// none): the LOWER floor (#783 round 11; see ONE SHEET PER TEXEL), else the higher candidate. (dn /
+// dc: kept for the dump, scripts/dev/snowdump_resim.py replays every round's rule.)
+bool aprBetter(float z, float dn, float f, float zc, float dc, float fc)
+{
+    if (zc < -1e29) return true;
+    if (abs(f - fc) > kAprFloorSep) return f < fc;
+    return z > zc;
+}
+// #783 the SIDE ARRAY: each texel's apron drop rate (0: no apron vertex), for the CELLS phase's
+// continuity test -- the last (inner R^2 + ring R^2) words of the vertex buffer (the inner grid's
+// last; llcleanweathervk.cpp ensureMesh sizes it; never read by the draws).
+uint aprSideWord(Grid G, ivec2 t)
+{
+    const uint total = uint(mesh_verts.length()) * 4u;
+    const uint resI = mp.u0.x & 0xFFFFu;
+    const uint i = uint(t.y) * uint(G.res) + uint(t.x);
+    return G.ring ? total - resI * resI - uint(G.res) * uint(G.res) + i : total - resI * resI + i;
+}
+float aprSideG(Grid G, ivec2 t)
+{
+    const uint wd = aprSideWord(G, t);
+    return uintBitsToFloat(mesh_verts[wd >> 2u][wd & 3u]);
+}
+
+// A texel's support cap (m; 1e30 none). (#783: no longer read by the apron -- kept for diagnostics.)
+float supCapAt(Grid G, ivec2 q)
+{
+    if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, ivec2(G.res)))) return 0.0;
+    if (G.ring) return (G.which == 0u ? imageLoad(uRing[0], q) : imageLoad(uRing[1], q)).z;
+    return (G.which == 0u ? imageLoad(uBase[0], q) : imageLoad(uBase[1], q)).g;
+}
+
+// A written vertex (CELLS phase): false where none (all-zero record).
+bool vertZ(uint idx, out float z)
+{
+    const uvec4 v = mesh_verts[idx];
+    z = uintBitsToFloat(v.z);
+    return (v.x | v.y | v.z) != 0u;
+}
+
+// The apron view of a texel: its apron vertex where it has one, else its snow top vertex.
+bool apronCorner(Grid G, ivec2 q, out uint idx, out float z, out bool ap)
+{
+    idx = 0u; z = 0.0; ap = false;
+    if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, ivec2(G.res)))) return false;
+    const uint nvl = uint(G.res) * uint(G.res);
+    const uint vi = G.vbase + uint(q.y) * uint(G.res) + uint(q.x);
+    if (vertZ(2u * nvl + vi, z)) { idx = 2u * nvl + vi; ap = true; return true; }
+    idx = vi;
+    return vertZ(vi, z);
+}
+
+// The apron triangles of the cell at o (stride st; bit 0 / 1 as kTri): each needs all three
+// corners, at least one of them an apron vertex, and edges within the join slope (a roof's own
+// snow top beside the apron is never stitched to it). The diagonal: the main sheet's where it has
+// triangles in this cell (forceDiag < 2: the two halves of a cell never overlap), else the one
+// keeping more, then the flatter. apc: the corners that are apron vertices (bit i) -- an apron
+// triangle closes a sheet edge only where it shares that edge's own vertices (two non-apron
+// corners): a roof's snow edge beside an apron that runs under it keeps its skirt.
+// (rej, the dump: bits 0..3 the corners with a vertex, 4..7 the sheet corners dropped for a base
+// above the apron, 8 any apron corner, 9..10 / 11..12 the masks of diagonal 0 / 1, 13..16 the
+// triangles (diag x 2 + k) dropped for an edge steeper than the apron's / the join slope; zap out)
+uint apronCell(Grid G, ivec2 o, int st, float w, uint forceDiag, out uint diag, out uint gi[4], out uint apc,
+               out uint rej, out float zapOut)
+{
+    bool ok[4], ap[4];
+    float z[4], ga[4];
+    bool anyAp = false;
+    apc = 0u;
+    rej = 0u;
+    zapOut = 1e30;
+    float zap = 1e30;   // the cell's lowest apron vertex
+    for (int i = 0; i < 4; ++i)
+    {
+        ok[i] = apronCorner(G, o + st * ivec2(i & 1, i >> 1), gi[i], z[i], ap[i]);
+        anyAp = anyAp || (ok[i] && ap[i]);
+        ga[i] = 0.0;
+        if (ok[i] && ap[i]) { apc |= 1u << uint(i); zap = min(zap, z[i]); ga[i] = aprSideG(G, o + st * ivec2(i & 1, i >> 1)); }
+    }
+    for (int i = 0; i < 4; ++i) if (ok[i]) rej |= 1u << uint(i);
+    zapOut = zap;
+    diag = 0u;
+    if (!anyAp) return 0u;
+    rej |= 0x100u;
+    // A sheet corner beside the apron must be snow the apron can come from: its BASE under the
+    // apron (a source's base is the apron's floor). A corner whose base stands above the apron is
+    // the cover / block itself (a roof's or a bench's own snow top) -- never stitched to it.
+    for (int i = 0; i < 4; ++i)
+    {
+        if (!ok[i] || ap[i]) continue;
+        float hb, db;
+        if (!texelHD(G, o + st * ivec2(i & 1, i >> 1), hb, db) || hb > zap + kSnowSeam) { ok[i] = false; rej |= 16u << uint(i); }
+    }
+    uint m[2] = uint[2](0u, 0u);
+    for (uint dg = 0u; dg < 2u; ++dg)
+        for (uint k = 0u; k < 2u; ++k)
+        {
+            const ivec3 c = kTri[dg * 2u + k];
+            if (!ok[c.x] || !ok[c.y] || !ok[c.z] || !(ap[c.x] || ap[c.y] || ap[c.z])) continue;
+            bool joined = true;
+            for (int j = 0; j < 3; ++j)
+            {
+                const int a = c[j], b = c[(j + 1) % 3];
+                const float len = float(st) * w * (((a ^ b) == 3) ? 1.41421356 : 1.0);
+                // (an edge with an apron end: #783 round 10 -- CONTINUOUS at the field's own drop rate
+                // (the steeper end's; + the smoothing's slack where a sheet top ends it): the two ends
+                // are one surface. Before, any apron edge up to 32 dz / dx: the apron of the floor's
+                // snow was stitched to the apron of a roof step's, 0.95 m up in one texel. A
+                // sheet-only edge of this triangle: the join slope.)
+                const float lim = (ap[a] || ap[b])
+                    ? kSnowSeam + ((ap[a] && ap[b]) ? 0.0 : kAprSheetSlack) + max(ga[a], ga[b]) * len
+                    : kSnowSeam + kSnowJoinSlope * len;
+                joined = joined && abs(z[a] - z[b]) <= lim;
+            }
+            if (joined) m[dg] |= 1u << k;
+            else rej |= 1u << (13u + dg * 2u + k);
+        }
+    rej |= (m[0] << 9u) | (m[1] << 11u);
+    if (forceDiag < 2u) diag = forceDiag;
+    else if (bitCount(m[0]) != bitCount(m[1])) diag = bitCount(m[0]) > bitCount(m[1]) ? 0u : 1u;
+    else diag = abs(z[0] - z[3]) <= abs(z[1] - z[2]) ? 0u : 1u;
+    return m[diag];
+}
+
+// ---- #946 LOCAL PATCHES: the EXPAND step (one invocation per inner tile; see the header) ----
+// The mask's TILE INDEX (x + y T) of the published grid (g0.w) -> the vertex tiles (a marked tile
+// within 2) and the cell tiles (within 3), appended with their indirect dispatch counts.
+void expandTiles()
+{
+    const uint resI = mp.u0.x & 0xFFFFu;
+    const int T = int((resI + 7u) / 8u);
+    const uint NT = uint(T * T), W = (NT + 31u) / 32u;
+    const ivec2 x = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(x, ivec2(T)))) return;
+    const uint mb = kMkHead + (mp.g0.w < 0.5 ? 0u : W);
+    bool vt = false, ct = false;
+    for (int dy = -3; dy <= 3; ++dy)
+        for (int dx = -3; dx <= 3; ++dx)
+        {
+            const ivec2 q = x + ivec2(dx, dy);
+            if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, ivec2(T)))) continue;
+            const uint k = uint(q.y * T + q.x);
+            if ((mk[mb + (k >> 5u)] & (1u << (k & 31u))) == 0u) continue;
+            ct = true;
+            if (max(abs(dx), abs(dy)) <= 2) vt = true;
+        }
+    const uint cap = mk[7];
+    const uint e = uint(x.x) | (uint(x.y) << 16u);
+    if (vt)
+    {
+        const uint i = atomicAdd(mk[0], 1u);
+        if (i < cap) mk[kMkHead + 2u * W + i] = e; else atomicOr(mk[6], 1u);
+    }
+    if (ct)
+    {
+        const uint i = atomicAdd(mk[3], 1u);
+        if (i < cap) mk[kMkHead + 2u * W + NT + i] = e; else atomicOr(mk[6], 1u);
+    }
+}
+
+// #946 the CELLS phase's tile allocation (one contiguous index range per workgroup)
+shared uint sCellTri;        // the tile's triangles (the cells' local offsets)
+shared uint sCellBase;       // its range's first triangle (0xFFFFFFFF: none)
+shared uint sCellLim;        // the triangles it may write there (a cell past it is dropped: a prefix)
+shared uint sPadLo, sPadN;   // a patch: the old range to degenerate (first, count)
+
+void main()
+{
+    if (modeExpand()) { expandTiles(); return; }
+    // The tile: the workgroup's own on a full build; on a patch (#946) a list entry, inner layer only
+    // (uniform per workgroup: the returns come before any barrier).
+    uint layer = gl_WorkGroupID.z;
+    ivec2 wgT = ivec2(gl_WorkGroupID.xy);
+    if (modePatch())
+    {
+        const uint resI = mp.u0.x & 0xFFFFu;
+        const uint T = (resI + 7u) / 8u, NT = T * T, W = (NT + 31u) / 32u;
+        const uint n = min(phaseCells() ? mk[3] : mk[0], mk[7]);
+        if (mk[6] != 0u || gl_WorkGroupID.x >= n) return;   // (over the cap: the full build takes it)
+        const uint e = mk[kMkHead + 2u * W + (phaseCells() ? NT : 0u) + gl_WorkGroupID.x];
+        wgT = ivec2(int(e & 0xFFFFu), int(e >> 16u));
+        layer = 0u;
+    }
+    if (layer == 1u && !ringOn()) return;   // (uniform per workgroup)
+    const Grid G = gridOf(layer);
+    const int res = G.res;
+    const ivec2 t = wgT * 8 + ivec2(gl_LocalInvocationID.xy);
+    const float w = 1.0 / (G.inv * float(res));
+    const float thr = mp.p0.x;
+    const float tanR = tanRepose();
+    const uint nv = uint(res) * uint(res);
+    const bool apronOn = true;   // (#783: the CLOSURE always; the APRON's reach is the option)
+    if (!phaseCells())
+    {
+    // ---- #783 the tile: raw texels, then their filtered tops (every invocation reaches the
+    // barriers; the dispatch covers the larger layer, the other's surplus workgroups load
+    // nothing but empties) ----
+    {
+        const ivec2 wg0 = wgT * 8;
+        for (int k = int(gl_LocalInvocationIndex); k < kTW * kTW; k += 64)
+        {
+            float h, d;
+            const bool ok = texelHD(G, wg0 + ivec2(k % kTW, k / kTW) - kTAp, h, d);
+            sRh[k] = ok ? h : -1e30;
+            sRd[k] = ok ? d : 0.0;
+        }
+        barrier();
+        for (int k = int(gl_LocalInvocationIndex); k < kFW * kFW; k += 64)
+        {
+            const ivec2 l = ivec2(k % kFW, k / kFW) - 2;
+            float h, d;
+            if (!tileRaw(l, h, d)) { sFt[k] = -1e30; continue; }
+            float nh[8], nd[8];
+            uint m = 0u;
+            for (int i = 0; i < 8; ++i)
+                if (tileRaw(l + kSnowN8[i], nh[i], nd[i])) m |= 1u << uint(i);
+            sFt[k] = wxSmoothTop(h, d, nh, nd, m, w);
+        }
+        barrier();
+    }
+    // ---- #783 THE CLOSURE / APRON field (every invocation reaches the barriers) ----
+    // #946 (Beta 5/6 regression: the 3050 Laptop's 15 fps with snow): the field used to load and
+    // iterate the whole 32 x 32 tile (16 texels and 8 x 16 neighbour tests per invocation per
+    // iteration, 12 iterations at the default 1 m reach, 26 KB of shared memory per 64
+    // invocations) on EVERY workgroup, every recording -- also where no column blocks any snow.
+    // Now (a) only the window the vertices can read is loaded and iterated: the n iterations'
+    // reach + 1 (the vertices take the field's central differences one texel out), identical
+    // results; (b) the dilation stops at the first iteration that changes nothing (most tiles:
+    // after the first -- no source at all -- or a few).
+    int apronSrc = 0;
+    int dbgN = 0, dbgIt = 0;      // (the dump: the field's iterations planned / run, converged)
+    bool dbgConv = false;
+    {
+        const ivec2 wg0 = wgT * 8;
+        // (#783: at least the depth's TOE LENGTH -- clean_weather_snow_join.glsl snowToeLength: the
+        // depth slumps to the repose x that length beside a blocked column, so the apron reaches the
+        // floor at the repose; RenderVKWeatherSnowToeReach can only lengthen it. At ToeReach 0 the
+        // 2-texel closure alone dropped the inner grid's edge in 12.5 cm: a vertical wall)
+        const int n = clamp(int(ceil(max(optToeReach(), snowToeLength(w)) / w - 0.001)), kClosureSteps, kAK);
+        const int m = min(n + 1, kAK);              // the window's margin around the 8 x 8 core
+        dbgN = n;
+        gAprN = n; gAprW = w;
+        const int win = 8 + 2 * m, off = kAK - m;
+        for (int k = int(gl_LocalInvocationIndex); k < kAW * kAW; k += 64)
+        {
+            const ivec2 c = ivec2(k % kAW, k / kAW);
+            float h = 0.0, d = 0.0;
+            const bool inWin = all(greaterThanEqual(c, ivec2(off))) && all(lessThan(c, ivec2(off + win)));
+            const bool ok = inWin && texelHD(G, wg0 + c - kAK, h, d);
+            sAb[k] = ok ? h : -1e30;
+            // (#783: every snow texel is a full source -- the field always ends on its floor, so
+            // the old wide-support gate only turned the slope into an 80-degree sliver beside
+            // supports near a drop; its sign stays the "wide" flag for the far rule)
+            sAd[k] = !ok ? 0.0 : d;
+            sAp0[k] = kAprNone; sAf0[k] = 0.0;
+            sAp1[k] = kAprNone; sAf1[k] = 0.0;   // (#946: the window's outside is never iterated)
+        }
+        if (gl_LocalInvocationIndex == 0u) { sAChg[0] = 0u; sAChg[1] = 0u; sAChg[2] = 0u; }
+        barrier();
+        for (int it = 0; it < n; ++it)
+        {
+            const bool far = it >= kClosureSteps;   // (past the closure: the apron's rules)
+            bool changed = false;
+            if (gl_LocalInvocationIndex == 0u) sAChg[(it + 1) % 3] = 0u;
+            for (int j = int(gl_LocalInvocationIndex); j < win * win; j += 64)
+            {
+                const int k = (off + j / win) * kAW + off + j % win;
+                float zc, fc, gc;
+                bool wc;
+                if (!fieldAt(k, apronSrc, zc, fc, gc, wc)) zc = -1e30;
+                float dc = fieldDn(k, apronSrc);   // (its source's depth: aprBetter)
+                const float hb = sAb[k];
+                if (hb > -1e29)
+                {
+                    const float Sc = hb + abs(sAd[k]);
+                    const ivec2 c = ivec2(k % kAW, k / kAW);
+                    for (int i = 0; i < 8; ++i)
+                    {
+                        const ivec2 qn = c + kSnowN8[i];
+                        if (any(lessThan(qn, ivec2(0))) || any(greaterThanEqual(qn, ivec2(kAW)))) continue;
+                        const int kn = qn.y * kAW + qn.x;
+                        const float dist = w * (i < 4 ? 1.0 : 1.41421356);
+                        // (a) from the snow of a neighbour (the first step): a column it cannot join
+                        const float hn = sAb[kn], dn = sAd[kn];
+                        if (it == 0 && hn > -1e29 && abs(dn) > thr)
+                        {
+                            const float Sn = hn + abs(dn);
+                            const bool wide = dn > 0.0;
+                            // (steeper than the repose only for a source deeper than the repose
+                            // over the reach -- beside a blocked column the depth never is: its edge
+                            // slumped to the toe height, clean_weather_snow_join.glsl snowCoverSink)
+                            const float g = aprDrop(abs(dn), wide);
+                            float cand = Sn - g * dist;
+                            if (cand <= hn + 0.005) cand = hn;   // (on the floor: the field's last vertex)
+                            if (aprBetter(cand, abs(dn), hn, zc, dc, fc) && hb > cand + kSnowSeam && !snowJoined(hn, Sn, hb, Sc, dist))
+                            { zc = cand; fc = hn; gc = g; wc = wide; dc = abs(dn); }
+                        }
+                        // (b) on from the field around it (past the closure: wide sources under a cover only)
+                        float zn, fn, gn;
+                        bool wn;
+                        if (!fieldAt(kn, apronSrc, zn, fn, gn, wn) || zn <= fn + 0.005) continue;   // (none / it ended on its floor)
+                        if (far && !wn) continue;
+                        float cand = zn - gn * dist;
+                        if (cand <= fn + 0.005) cand = fn;
+                        const float dnn = fieldDn(kn, apronSrc);
+                        if (aprBetter(cand, dnn, fn, zc, dc, fc) && hb > cand + (far ? kApronClear : kSnowSeam))
+                        { zc = cand; fc = fn; gc = gn; wc = wn; dc = dnn; }
+                    }
+                }
+                const uint pk = zc > -1e29 ? packHalf2x16(vec2(zc - fc, wc ? dc : -dc)) : kAprNone;
+                const uint pOld = apronSrc == 0 ? sAp0[k] : sAp1[k];
+                const float fOld = apronSrc == 0 ? sAf0[k] : sAf1[k];
+                changed = changed || pk != pOld || (pk != kAprNone && fc != fOld);
+                if (apronSrc == 0) { sAp1[k] = pk; sAf1[k] = fc; }
+                else               { sAp0[k] = pk; sAf0[k] = fc; }
+            }
+            if (changed) atomicOr(sAChg[it % 3], 1u);
+            barrier();
+            apronSrc ^= 1;
+            dbgIt = it + 1;
+            if (sAChg[it % 3] == 0u) { dbgConv = true; break; }   // (#946: converged -- the same value in every invocation)
+        }
+    }
+    if (t.x >= res || t.y >= res) return;
+    const ivec2 l = ivec2(gl_LocalInvocationID.xy);
+    // ---- the vertices ----
+    {
+        // (the dump's view of this vertex: the final top's z / xy, its lift and band, flags)
+        float dbS0 = 0.0, dbLift = 0.0, dbBand = 0.0, dbX = 0.0, dbY = 0.0;
+        uint dbFl = 0u;
+        const uint vi = G.vbase + uint(t.y) * uint(res) + uint(t.x);
+        float h, d;
+        if (!tileRaw(l, h, d))
+        {
+            mesh_verts[vi] = uvec4(0u);
+            mesh_verts[nv + vi] = uvec4(0u);
+        }
+        else
+        {
+            const vec3 P = columnPoint(G, t, h);
+            const float dist = distance(P, mp.cam.xyz);
+            const float lift = uintBitsToFloat(mp.u0.w) + kLiftPerM * dist;
+            const float S = h + d;   // (the raw top: the joins are the depth's)
+            // The joined 4-neighbours: their filtered tops (the normal) and the highest (the clamp).
+            float tops[4];
+            bool have[4];
+            float nbMax = -1e30;
+            const ivec2 kN[4] = ivec2[4](ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1));
+            for (int i = 0; i < 4; ++i)
+            {
+                float hn, dn;
+                have[i] = tileRaw(l + kN[i], hn, dn) && snowJoined(h, S, hn, hn + dn, w);
+                tops[i] = have[i] ? tileTop(l + kN[i]) : 0.0;
+                if (have[i]) nbMax = max(nbMax, tops[i]);
+            }
+            float s0 = tileTop(l);
+            if (nbMax > -1e29) s0 = max(min(s0, nbMax + kSnowSeam + tanR * w), h);   // the spike clamp
+            if (s0 != tileTop(l)) dbFl |= 8u;
+            float gx = (have[0] && have[1]) ? (tops[1] - tops[0]) / (2.0 * w) : have[1] ? (tops[1] - s0) / w : have[0] ? (s0 - tops[0]) / w : 0.0;
+            float gy = (have[2] && have[3]) ? (tops[3] - tops[2]) / (2.0 * w) : have[3] ? (tops[3] - s0) / w : have[2] ? (s0 - tops[2]) / w : 0.0;
+            // The stride morphs (onto the stride-2 lattice before 10 m, the stride-4 one before
+            // 20 m; the ring's at its own distances).
+            float target;
+            if (latticeTarget(t, l, 1, h, S, w, target))
+            {
+                s0 = mix(s0, max(target, h), smoothstep(0.75 * G.lod1, 0.92 * G.lod1, dist));
+                if (dist > 0.75 * G.lod1) dbFl |= 0x80u;
+            }
+            else if (latticeTarget(t, l, 2, h, S, w, target))
+            {
+                s0 = mix(s0, max(target, h), smoothstep(0.75 * G.lod2, 0.92 * G.lod2, dist));
+                if (dist > 0.75 * G.lod2) dbFl |= 0x100u;
+            }
+            // The band: the inner layer morphs onto the ring's surface while it hands over --
+            // its height AND (#783) its normal, so the two layers the dither interleaves there
+            // shade alike.
+            float band = 0.0;
+            if (ringOn())
+            {
+                band = innerBand(P);
+                float Sr;
+                vec2 gr;
+                if (!G.ring && ringTopAt(P, h, Sr, gr))
+                {
+                    s0 = mix(s0, max(Sr, h), band);
+                    if (gr.x > -1e29) { gx = mix(gx, gr.x, band); gy = mix(gy, gr.y, band); }
+                }
+                // (no ring surface on this base -- the coarse map took another one: the sheet
+                // tapers to its own base over the band, the coating continues; with the dither
+                // gone it would otherwise end in an open edge at the band's end)
+                else if (!G.ring) s0 = mix(s0, h, band);
+            }
+            const uint nb = packVertex(normalize(vec3(-gx, -gy, 1.0)), band, G.ring);
+            // #783 SMOOTH OUTLINE: a sheet's EDGE texel (one with a skirt: a drop or no base beside
+            // it) moves half way to the mean of its joined edge neighbours (one Laplacian step along
+            // the outline) -- a texel staircase becomes a diagonal; a straight edge stays put. Its
+            // skirt's foot moves with it (the wall stays vertical and attached); the triangles share
+            // the moved vertex, so the mesh stays closed.
+            vec2 xy = P.xy;
+            if (edgeTexel(G, t, l, w, thr))
+            {
+                vec2 acc = vec2(0.0);
+                int ne = 0;
+                for (int i = 0; i < 8; ++i)
+                {
+                    float hq, dq;
+                    if (!tileRaw(l + kSnowN8[i], hq, dq) || !snowJoined(h, S, hq, hq + dq, i < 4 ? w : 1.41421356 * w)) continue;
+                    if (!edgeTexel(G, t + kSnowN8[i], l + kSnowN8[i], w, thr)) continue;
+                    acc += vec2(kSnowN8[i]);
+                    ++ne;
+                }
+                if (ne >= 2) xy += 0.5 * w * acc / float(ne);
+                dbFl |= 4u;
+            }
+            uint nbd = (mp.u0.x & 0x80000000u) != 0u ? (nb & ~15u) : nb;   // (debug: the tint bits start clear)
+            // (debug bit 3: a snowy sheet texel beside a column it cannot join that got NO apron /
+            // closure vertex -- the field failed there; cyan on the mesh)
+            if ((mp.u0.x & 0x80000000u) != 0u && d > thr)
+            {
+                for (int i = 0; i < 4; ++i)
+                {
+                    float hq, dq;
+                    if (!tileRaw(l + kN[i], hq, dq) || hq <= S + kSnowSeam || snowJoined(h, S, hq, hq + dq, w)) continue;
+                    const int kq = (l.y + kN[i].y + kAK) * kAW + l.x + kN[i].x + kAK;
+                    float zq, fq, gq;
+                    bool wq;
+                    if (!fieldAt(kq, apronSrc, zq, fq, gq, wq)) nbd |= 8u;
+                }
+            }
+            if ((nbd & 8u) != 0u) dbFl |= 0x400u;
+            dbS0 = s0; dbLift = lift; dbBand = band; dbX = xy.x; dbY = xy.y;
+            mesh_verts[vi] = uvec4(floatBitsToUint(xy.x), floatBitsToUint(xy.y), floatBitsToUint(s0 + lift), nbd);
+            mesh_verts[nv + vi] = uvec4(floatBitsToUint(xy.x), floatBitsToUint(xy.y), floatBitsToUint(min(h, s0) + lift), nbd);
+        }
+        // #783 the CLOSURE / APRON vertex (the third slot; all-zero: none): a blocked texel the field
+        // reached -- its column at the floor's height, the field's top, the normal from the field /
+        // the sources' snow tops around it (central differences; one-sided at its ends).
+        uvec4 av = uvec4(0u);
+        {
+            const int ka = (l.y + kAK) * kAW + l.x + kAK;
+            float za, fa, ga;
+            bool wa;
+            if (fieldAt(ka, apronSrc, za, fa, ga, wa))
+            {
+                const vec3 P = columnPoint(G, t, fa);
+                const float lift = uintBitsToFloat(mp.u0.w) + kLiftPerM * distance(P, mp.cam.xyz);
+                float zn[4];
+                bool hn[4];
+                const ivec2 kN[4] = ivec2[4](ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1));
+                for (int i = 0; i < 4; ++i)
+                {
+                    const int kq = ka + kN[i].y * kAW + kN[i].x;
+                    float fq, gq;
+                    bool wq;
+                    if (!fieldAt(kq, apronSrc, zn[i], fq, gq, wq)) zn[i] = -1e30;
+                    // (no field there: the neighbour's own snow top, if it is snow)
+                    if (zn[i] < -1e29 && sAb[kq] > -1e29 && abs(sAd[kq]) > thr) zn[i] = sAb[kq] + abs(sAd[kq]);
+                    // (#783 round 10: the same surface only -- continuous at the field's own drop rate)
+                    hn[i] = zn[i] > -1e29 && abs(zn[i] - za) <= kSnowSeam + kAprSheetSlack + max(ga, gq) * w;
+                }
+                const float gx = (hn[0] && hn[1]) ? (zn[1] - zn[0]) / (2.0 * w) : hn[1] ? (zn[1] - za) / w : hn[0] ? (za - zn[0]) / w : 0.0;
+                const float gy = (hn[2] && hn[3]) ? (zn[3] - zn[2]) / (2.0 * w) : hn[3] ? (zn[3] - za) / w : hn[2] ? (za - zn[2]) / w : 0.0;
+                const float band = ringOn() ? innerBand(P) : 0.0;
+                av = uvec4(floatBitsToUint(P.x), floatBitsToUint(P.y), floatBitsToUint(za + lift),
+                           packVertex(normalize(vec3(-gx, -gy, 1.0)), band, G.ring));
+                // (RenderVKWeatherSnowDepthDebug: an apron / closure vertex -- bit 2 of the octahedral x)
+                if ((mp.u0.x & 0x80000000u) != 0u) av.w = (av.w & ~15u) | 4u;
+            }
+        }
+        mesh_verts[2u * nv + G.vbase + uint(t.y) * uint(res) + uint(t.x)] = av;
+        {
+            // #783 round 10: the apron's drop rate -> the side array (apronCell's continuity test)
+            float zs, fs, gs;
+            bool ws;
+            const bool has = fieldAt((l.y + kAK) * kAW + l.x + kAK, apronSrc, zs, fs, gs, ws);
+            const uint wd = aprSideWord(G, t);
+            mesh_verts[wd >> 2u][wd & 3u] = floatBitsToUint(has ? gs : 0.0);
+        }
+        // #783 THE SNOW DUMP: this texel's inputs and what the build did with them (snowdump.py)
+        const int ds = dumpOn() ? dumpSlot(layer, t) : -1;
+        if (ds >= 0)
+        {
+            float hr, dr;
+            const bool okr = tileRaw(l, hr, dr);
+            const float Sr = hr + dr;
+            uint fl = dbFl | 0x80000000u | (okr ? 1u : 0u) | (okr && dr > thr ? 2u : 0u) | (dbgConv ? 0x1000u : 0u);
+            // the image's own values (unfaded: texelHD fades by the bands and gates the ring)
+            float dImg = 0.0, rawTop = 0.0, sup = 0.0, cr = 0.0, cg = 0.0;
+            if (G.ring)
+            {
+                const vec4 v = G.which == 0u ? imageLoad(uRing[0], t) : imageLoad(uRing[1], t);
+                dImg = v.y; sup = v.z; cr = v.w;
+            }
+            else
+            {
+                const vec4 c = G.which == 0u ? imageLoad(uGrid[0], t) : imageLoad(uGrid[1], t);
+                dImg = c.a; cr = c.r; cg = c.g; rawTop = G.top - c.b;
+                sup = (G.which == 0u ? imageLoad(uBase[0], t) : imageLoad(uBase[1], t)).g;
+            }
+            // the field here
+            const int ka = (l.y + kAK) * kAW + l.x + kAK;
+            float za = -1e30, fa = 0.0, ga = 0.0;
+            bool wa = false;
+            if (fieldAt(ka, apronSrc, za, fa, ga, wa)) fl |= 0x10u | (wa ? 0x20u : 0u) | (za <= fa + 0.005 ? 0x40u : 0u);
+            // the 8 neighbours: joined / cut / no base / a COVER (snowCoverSink's test) / a field
+            // there; the depth relaxation's pulls (share 1: the sink and the repose, as the depth
+            // kernel's from this grid); per 4-neighbour the CLOSURE / APRON first step (a) re-evaluated
+            uint jm = 0u, cm = 0u, nbm = 0u, covm = 0u, fm = 0u, cy = 0u;
+            float sink = 0.0, rep = 0.0;
+            if (okr)
+            {
+                for (int i = 0; i < 8; ++i)
+                {
+                    float hq, dq;
+                    const float dist = i < 4 ? w : 1.41421356 * w;
+                    const int kq = (l.y + kSnowN8[i].y + kAK) * kAW + l.x + kSnowN8[i].x + kAK;
+                    float zq, fq, gq;
+                    bool wq;
+                    const bool fq0 = fieldAt(kq, apronSrc, zq, fq, gq, wq);
+                    if (fq0) fm |= 1u << uint(i);
+                    if (!tileRaw(l + kSnowN8[i], hq, dq)) { nbm |= 1u << uint(i); continue; }
+                    const bool j = snowJoined(hr, Sr, hq, hq + dq, dist);
+                    if (j) jm |= 1u << uint(i); else cm |= 1u << uint(i);
+                    if (hq > Sr + kSnowSeam && !j) covm |= 1u << uint(i);
+                    sink += snowCoverSink(hr, dr, hq, dq, dist, w, tanR, 1.0);
+                    rep += snowReposeFlow(hr, dr, hq, dq, dist, tanR, 1.0);
+                    if (i < 4)
+                    {
+                        // nibble i: 1 a higher column it cannot join (the cyan test), 2 no field there,
+                        // 4 step (a) from this texel passes there (cand under its base, not joined, snowy),
+                        // 8 a LOWER base it cannot join (a drop: a skirt by design)
+                        uint nb4 = 0u;
+                        if (hq > Sr + kSnowSeam && !j) nb4 |= 1u;
+                        if (!fq0) nb4 |= 2u;
+                        const float g = max(tanR, dr / (float(dbgN) * w));
+                        float cand = Sr - g * dist;
+                        if (cand <= hr + 0.005) cand = hr;
+                        if (dr > thr && hq > cand + kSnowSeam && !j) nb4 |= 4u;
+                        if (hq < hr && !j) nb4 |= 8u;
+                        cy |= nb4 << (4u * uint(i));
+                    }
+                }
+                if (covm != 0u) fl |= 0x800u;
+            }
+            dumpU(ds, kDVFlags, fl);
+            dumpF(ds, kDH, okr ? hr : -1e30);
+            dumpF(ds, kDD, dr);
+            dumpF(ds, kDDImg, dImg);
+            dumpF(ds, kDRawTop, rawTop);
+            dumpF(ds, kDSupCap, sup);
+            dumpF(ds, kDCovR, cr);
+            dumpF(ds, kDCovG, cg);
+            dumpF(ds, kDSmooth, okr ? tileTop(l) : -1e30);
+            dumpF(ds, kDS0, dbS0);
+            dumpF(ds, kDLift, dbLift);
+            dumpF(ds, kDBand, dbBand);
+            dumpF(ds, kDX, dbX);
+            dumpF(ds, kDY, dbY);
+            dumpF(ds, kDZa, za);
+            dumpF(ds, kDFa, fa);
+            dumpF(ds, kDGa, wa ? ga : -ga);
+            dumpF(ds, kDDn, fieldDn(ka, apronSrc));   // (#783 round 10: the field's source depth)
+            dumpU(ds, kDWg, uint(dbgN) | (uint(dbgIt) << 8u) | (dbgConv ? 0x10000u : 0u));
+            dumpU(ds, kDNbMasks, jm | (cm << 8u) | (nbm << 16u) | (fm << 24u));
+            dumpU(ds, kDCyan, cy | (covm << 16u));
+            dumpF(ds, kDToeEx, dr - tanR * snowToeLength(w));
+            dumpF(ds, kDSink, sink);
+            dumpF(ds, kDRepose, rep);
+        }
+    }
+    return;
+    }   // (the VERTICES phase)
+    // ---- the cell anchored here (when t is on its block's stride) ----
+    // #946 no return before the tile's allocation (its barriers): a cell that emits nothing has ntri 0.
+    const bool isPatch = modePatch();
+    int st = 1;
+    uint mask = 0u, diag = 0u, amask = 0u, adiag = 0u, skirts = 0u, ntri = 0u;
+    uint agi[4] = uint[4](0u, 0u, 0u, 0u);
+    // (the dump: the cell's path -- bit 3 on its block's stride, 4 cone-culled, 5 band-culled, 6 a
+    // patch, 7 written; the block's why; apronCell's rej; the block's distance; the lowest apron z)
+    uint dbC = 0x80u | (isPatch ? 0x40u : 0u), dbWhy = 0u, dbRej = 0u;
+    float dbDmin = 0.0, dbZap = 1e30;
+    bool dbOpen[4] = bool[4](false, false, false, false);
+    do
+    {
+        if (t.x >= res || t.y >= res) break;
+        vec3 toB;
+        st = blockStrideW(G, t & ~3, toB, dbWhy);
+        dbDmin = length(toB);
+        if ((t.x & (st - 1)) != 0 || (t.y & (st - 1)) != 0) break;
+        dbC |= 8u;
+        const float dist = length(toB);
+        if (dist > mp.fwd.w && dot(toB, mp.fwd.xyz) < mp.cam.w * dist) { dbC |= 0x10u; break; }   // behind the view cone
+        bool ok[4];
+        float h[4], d[4];
+        mask = cellEval(G, t, st, diag, ok, h, d);
+        if (isPatch && mask != 0u)
+        {
+            // #946 a patched cell indexes vertices outside the patch too (built from an older grid):
+            // a triangle with an empty corner vertex is dropped (never one stretched to the origin).
+            uint have = 0u;
+            for (int i = 0; i < 4; ++i)
+            {
+                float zq;
+                const ivec2 q = t + st * ivec2(i & 1, i >> 1);
+                if (vertZ(G.vbase + uint(q.y) * uint(res) + uint(q.x), zq)) have |= 1u << uint(i);
+            }
+            for (uint k = 0u; k < 2u; ++k)
+            {
+                const ivec3 tc = kTri[diag * 2u + k];
+                const uint need = (1u << uint(tc.x)) | (1u << uint(tc.y)) | (1u << uint(tc.z));
+                if ((have & need) != need) mask &= ~(1u << k);
+            }
+        }
+        uint aapc = 0u;
+        amask = apronOn ? apronCell(G, t, st, w, mask != 0u ? diag : 2u, adiag, agi, aapc, dbRej, dbZap) : 0u;
+        dbC |= aapc << 14u;
+        if (mask == 0u && amask == 0u) break;
+        if (ringOn())
+        {
+            // The hand-over: the inner layer stops past its band, the ring starts at it.
+            float lo = 1.0, hi = 0.0;
+            for (int i = 0; i < 4; ++i)
+            {
+                const ivec2 q = t + st * ivec2(i & 1, i >> 1);
+                const float b = innerBand(columnPoint(G, q, h[i]));
+                lo = min(lo, b); hi = max(hi, b);
+            }
+            if (!G.ring && lo >= 0.999) { mask = 0u; amask = 0u; dbC |= 0x20u; break; }
+            // (#783: the ring draws only from t >= kRingCut on -- below the inner layer's own end by
+            // more than the band byte's 7-bit step, so the two always overlap a little, never gap)
+            if (G.ring && hi < kRingCut) { mask = 0u; amask = 0u; dbC |= 0x20u; break; }
+        }
+        // The four sides (bottom, right, top, left): open = no triangle across (a cut) or a seam
+        // with a block of another stride (T-junctions).
+        const ivec2 kSide[4] = ivec2[4](ivec2(0, -1), ivec2(1, 0), ivec2(0, 1), ivec2(-1, 0));
+        bool open[4];
+        for (int s = 0; s < 4; ++s)
+        {
+            const ivec2 o = t + kSide[s] * st;
+            open[s] = true;
+            vec3 tb;
+            if ((o & ~3) != (t & ~3))
+            {
+                if (blockStride(G, o & ~3, tb) != st) continue;
+                // (#783: a neighbour block the view cone drops emits nothing -- its side is open)
+                const float lb = length(tb);
+                if (lb > mp.fwd.w && dot(tb, mp.fwd.xyz) < mp.cam.w * lb) continue;
+            }
+            uint nd;
+            bool nok[4];
+            float nh[4], ndp[4];
+            const uint nm = cellEval(G, o, st, nd, nok, nh, ndp);
+            // the neighbour's triangle on the shared edge
+            const uint tri = s == 0 ? 2u : s == 2 ? 1u : s == 1 ? (nd == 0u ? 2u : 1u) : (nd == 0u ? 1u : 2u);
+            open[s] = (nm & tri) == 0u;
+            dbOpen[s] = open[s];
+            // (#783 SAFETY NET: an apron beside the edge does NOT close it -- the skirt is always drawn.
+            // Under an apron it lies inside the slope (hidden); without one -- the apron's anchor cell
+            // dropped by the band, the cone, the budget, or never built -- the edge is still a wall, never
+            // an open rim you can see under. Before, the side test trusted the neighbour's apron and
+            // left the edge open whenever that apron did not actually get emitted.)
+        }
+        // The skirts: per triangle, per edge (in its winding), bit (3 k + j).
+        for (uint k = 0u; k < 2u; ++k)
+        {
+            if ((mask & (1u << k)) == 0u) continue;
+            const ivec3 tc = kTri[diag * 2u + k];
+            for (int j = 0; j < 3; ++j)
+            {
+                const int a = tc[j], b = tc[(j + 1) % 3];
+                if (d[a] <= thr && d[b] <= thr) continue;   // a bare edge: on the ground already
+                const int m = (1 << a) | (1 << b);
+                const bool o = m == 3 ? open[0] : m == 10 ? open[1] : m == 12 ? open[2] : m == 5 ? open[3]
+                             : (mask & (1u << (1u - k))) == 0u;   // the diagonal: the cell's other triangle (#783: an apron half never closes it -- the safety net)
+                if (o) skirts |= 1u << (3u * k + uint(j));
+            }
+        }
+        ntri = bitCount(mask) + 2u * bitCount(skirts) + bitCount(amask);
+    } while (false);
+
+    // ---- #946 the tile's ONE index range (every invocation reaches the barriers) ----
+    if (gl_LocalInvocationIndex == 0u) sCellTri = 0u;
+    barrier();
+    const uint loc = ntri > 0u ? atomicAdd(sCellTri, ntri) : 0u;
+    barrier();
+    if (gl_LocalInvocationIndex == 0u)
+    {
+        const uint total = sCellTri;
+        const uint T = (uint(res) + 7u) / 8u;
+        const uint tile = uint(wgT.y) * T + uint(wgT.x);
+        const bool table = layer == 0u && wgT.x < int(T) && wgT.y < int(T);
+        sCellBase = 0xFFFFFFFFu; sCellLim = 0u; sPadLo = 0u; sPadN = 0u;
+        if (!isPatch)
+        {
+            // A full build: the next range past the end (over the budget: none -- every later one
+            // fails too, so the drawn ranges stay a prefix).
+            uint base = 0u;
+            bool okA = false;
+            if (total > 0u)
+            {
+                base = atomicAdd(mesh_args[5], total);
+                okA = base + total <= maxTris();
+                if (okA) { atomicAdd(mesh_args[0], 3u * total); sCellBase = base; sCellLim = total; }
+            }
+            if (table) { mesh_args[8u + 2u * tile] = okA ? base : 0u; mesh_args[9u + 2u * tile] = okA ? total : 0u; }
+        }
+        else
+        {
+            // A patch: in place when it fits its range; else a new range past the end (the old one
+            // degenerated); over the budget: in place, the prefix of its cells that fit.
+            const uint first = mesh_args[8u + 2u * tile], cap = mesh_args[9u + 2u * tile];
+            sCellBase = first; sCellLim = cap; sPadLo = first; sPadN = cap;
+            if (total > cap)
+            {
+                const uint n = atomicAdd(mesh_args[5], total);
+                if (n + total <= maxTris())
+                {
+                    atomicAdd(mesh_args[0], 3u * total);
+                    sCellBase = n; sCellLim = total;
+                    mesh_args[8u + 2u * tile] = n; mesh_args[9u + 2u * tile] = total;
+                }
+            }
+        }
+    }
+    barrier();
+    if (isPatch)
+    {
+        // The tile's old range -> degenerate triangles (its cells write theirs over it below).
+        const uint lo = sPadLo, nPad = sPadN;
+        for (uint i = gl_LocalInvocationIndex; i < 3u * nPad; i += 64u) mesh_idx[3u * lo + i] = 0u;
+        memoryBarrierBuffer();
+        barrier();
+    }
+    {
+        const int ds = dumpOn() ? dumpSlot(layer, t) : -1;
+        if (ds >= 0)
+        {
+            const bool over = ntri > 0u && (sCellBase == 0xFFFFFFFFu || loc + ntri > sCellLim);
+            uint c = dbC | uint(st) | (mask << 8u) | (diag << 10u) | (amask << 11u) | (adiag << 13u) | (skirts << 22u)
+                   | (over ? 0x10000000u : 0u) | ((dbWhy & 7u) << 29u);
+            for (int i = 0; i < 4; ++i) if (dbOpen[i]) c |= 1u << (18u + uint(i));
+            dumpU(ds, kDCFlags, c);
+            dumpU(ds, kDCExtra, ((dbWhy >> 4u) & 7u) | (optEdgeLod() << 3u) | (ntri << 24u));
+            dumpU(ds, kDCRej, dbRej);
+            dumpF(ds, kDCDmin, dbDmin);
+            dumpU(ds, kDCTri, (ntri > 0u && !over) ? sCellBase + loc : 0xFFFFFFFFu);
+            dumpF(ds, kDCZap, dbZap);
+        }
+    }
+    if (ntri == 0u || sCellBase == 0xFFFFFFFFu || loc + ntri > sCellLim) return;   // (nothing / over the budget)
+    uint gi[4];
+    for (int i = 0; i < 4; ++i)
+    {
+        const ivec2 q = t + st * ivec2(i & 1, i >> 1);
+        gi[i] = G.vbase + uint(q.y) * uint(res) + uint(q.x);
+    }
+    uint o = 3u * (sCellBase + loc);
+    for (uint k = 0u; k < 2u; ++k)
+    {
+        if ((mask & (1u << k)) == 0u) continue;
+        const ivec3 tc = kTri[diag * 2u + k];
+        mesh_idx[o] = gi[tc.x]; mesh_idx[o + 1u] = gi[tc.y]; mesh_idx[o + 2u] = gi[tc.z];
+        o += 3u;
+        for (int j = 0; j < 3; ++j)
+        {
+            if ((skirts & (1u << (3u * k + uint(j)))) == 0u) continue;
+            // Edge a -> b (the triangle on its left, seen from above): the wall CCW seen from
+            // outside -- top a, base a, base b; top a, base b, top b.
+            const uint a = gi[tc[j]], b = gi[tc[(j + 1) % 3]];
+            mesh_idx[o] = a; mesh_idx[o + 1u] = nv + a; mesh_idx[o + 2u] = nv + b;
+            mesh_idx[o + 3u] = a; mesh_idx[o + 4u] = nv + b; mesh_idx[o + 5u] = b;
+            o += 6u;
+        }
+    }
+    // #783 the APRON's triangles (CCW from above, as the sheet's: kTri)
+    for (uint k = 0u; k < 2u; ++k)
+    {
+        if ((amask & (1u << k)) == 0u) continue;
+        const ivec3 tc = kTri[adiag * 2u + k];
+        mesh_idx[o] = agi[tc.x]; mesh_idx[o + 1u] = agi[tc.y]; mesh_idx[o + 2u] = agi[tc.z];
+        o += 3u;
+    }
+    // #783 RenderVKWeatherSnowDepthDebug: the cell's stride into its corners' normal words (the two
+    // low bits of the octahedral x: 1 stride 2, 2 stride 4, 3 both; bit 2: an apron vertex) -- the
+    // mesh FS tints by them. (The vertices phase cleared the bits.)
+    if ((mp.u0.x & 0x80000000u) != 0u && st > 1)
+    {
+        const uint code = st == 2 ? 1u : 2u;
+        for (int i = 0; i < 4; ++i)
+        {
+            atomicOr(mesh_verts[gi[i]].w, code);
+            atomicOr(mesh_verts[nv + gi[i]].w, code);
+        }
+    }
+}

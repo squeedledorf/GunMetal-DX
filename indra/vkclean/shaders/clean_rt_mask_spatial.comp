@@ -1,0 +1,537 @@
+#version 460
+// vkclean — RT SHADOW DENOISER, spatial pass (C). Edge-aware blur of the PENUMBRAE of
+// the temporally accumulated mask (clean_rt_mask_temporal.comp) into the final rgba8
+// mask the lit FS reads (clean_shadow_mask_read.glsl). Its output is NOT fed back (the
+// history is the temporal pass's), so blur never compounds frame over frame.
+//
+//   * Only PARTIAL texels blur (some channel strictly between 0 and 1): fully lit and
+//     umbra texels pass through, so contact shadows and umbra edges stay crisp whatever
+//     radius a neighbour reports, and a lit area never darkens toward a shadow.
+//   * Radius = the penumbra's own (from the blocker distance the trace measured: sun
+//     disc t * tan(a), projector disc R * t / (D - t)), half of it once the history is
+//     long (only residual noise left), all of it while young (disocclusion, fast
+//     changes), capped by RenderVKRTShadowSpatial (mask texels). A blocker-near contact
+//     shadow has a ~0 radius and is left alone.
+//   * 12-tap Vogel disc, rotated per pixel and per frame (TAA integrates the rotation; static without a TAA / FSR resolve, #666);
+//     taps on another surface (off the centre's depth PLANE) are rejected.
+//   * Projector slots blur only with taps that traced the same light.
+//   * Moving-caster texels (clean_rt_mask_temporal.comp) are not special-cased: the
+//     anti-lag snap leaves them ~binary for a hard shadow (no blur: not partial, and a
+//     contact / hard radius is under the 0.5-texel floor), and a soft penumbra's radius
+//     is its real width -- the blur reconstructs it, it doesn't drag the old position.
+//     The trail used to come from the stale partial history this pass then blurred.
+// Legacy mode / radius cap 0: a straight copy.
+//
+// A-TROUS MODE (#85, RenderVKRTShadowAtrous = N iterations, 1-4): the SUN's spatial
+// filter becomes an SVGF-style edge-aware a-trous wavelet (Dammertz 2010 / Schied 2017):
+// N dispatches of a 5x5 B3-spline kernel at step 1, 2, 4, 8, each tap weighted by
+//   * the centre's depth PLANE (as the disc above; another surface fails),
+//   * a slope term from the plane gradients (a crease between two planes),
+//   * luminance, relative to the centre's VARIANCE: sigma_l = 4 sqrt(var) -- the
+//     temporal variance of the raw luminance (meta.zw moments) where the history is 4+
+//     frames, at least the 3x3 spatial variance of the accumulation while young
+//     (disocclusion), filtered along with the signal (sum w^2 var / (sum w)^2) so later
+//     iterations stop where the noise is gone;
+// and still PENUMBRA-GATED: a texel filters at step s only while its penumbra radius
+// (blurRadius, the cap RenderVKRTShadowSpatial included) reaches s, and only if it is
+// partial -- contact shadows and umbra / lit texels stay exactly as accumulated.
+// Scratch: last mask frame's history slot (bindings 16 / 17 = the READ slot's sun
+// accumulation and meta, rgba16f), dead once the temporal pass has read it -- no extra
+// VRAM. Iteration k reads the accumulation (k = 0) or scratch, writes scratch, the last
+// writes the final mask (its alpha = the temporal pass's reactive, kept). Projector
+// slots keep the disc blur (iteration 0) unless on the sun path (below).
+// PROJECTORS (#666, RenderVKRTShadowProjDenoise -> push p0.y bit 2, rtProjFull): every
+// ray-traced projector slot runs the same a-trous iterations in the same dispatches (a
+// loop over the texel's slots; a slot's taps take only texels that traced the SAME light,
+// in whichever slot), on the SVGF-mode weights: depth plane, slope, luminance against the
+// slot's variance -- the Bhatia-Davis bound m (1 - m) / rays of its accumulation over its
+// OWN history length (binding 19, the temporal pass's per-slot history; projectors keep no
+// temporal moments), the 5x5 spatial variance of that light's accumulation while young --,
+// the history-length weight for young texels, and the same penumbra gate (partial / young
+// / variance left, radius reaching the step). Texels with no projector, sky, and lit /
+// umbra slots with no variance left pass through untouched (early out). Scratch, no extra
+// VRAM: the READ slot's projector accumulation (binding 18, rgba16f[4], dead after the
+// temporal pass) and the final projector image itself (binding 2, rgba8; its raw content
+// is dead once the temporal pass read it): iteration k writes 18 when n - 1 - k is odd,
+// else 2 (the last always 2), so no iteration reads the image it writes; through the
+// rgba8 hop the variance rides as 2 sigma in alpha. Off (or no a-trous): the disc below.
+// The iteration / count / debug view ride in the push's spatial cap: p1.z = cap +
+// 32 x code, code = 1 + k + 8 N + 64 debug (0 = the plain disc pass, no debug).
+// SVGF MODE (RenderVKRTShadowSvgf, push flag bit 1): the luminance weight runs on the
+// variance of the ACCUMULATED estimate (rawVar / history length, estVar), the gate is
+// "has variance left or a young history" instead of "partial", step 1 starts at half a
+// texel of penumbra radius, and young texels take the widest radius around them and
+// weight neighbours by their history length (history fix) -- see atrousSun.
+// The temporal result, not an a-trous iteration, stays the history (SVGF feeds back
+// iteration 1): here the radius is the penumbra's physical width, and a blurred
+// feedback would widen every penumbra by ~sqrt(history) kernel widths over time.
+// DEBUG (#85, RenderVKRTShadowDebug, shown through the sun term of the lighting):
+// 1 raw one-frame trace, 2 temporal accumulation (no spatial), 3 history length
+// (white = RenderVKRTShadowHistory), 4 variance (sqrt x 4; SVGF mode: of the filtered
+// estimate), 5 final mask, 6 the temporal pass's events (red disocclusion, green the
+// history clamped / cut, blue the moving-caster detector), 7 the fast history.
+layout(local_size_x = 8, local_size_y = 8) in;
+
+#include "clean_frame_info.glsl"
+
+// Read-write: alpha = the temporal pass's shading change (the TAA / FSR reactive),
+// passed through untouched (clean_rt_mask_temporal.comp; the same texel, B -> C barrier).
+layout(set = 3, binding = 1, rgba8) uniform image2D uSunOut;
+// (Read-write: the projector a-trous's rgba8 scratch hop, #666 -- header.)
+layout(set = 3, binding = 2, rgba8) uniform image2DArray uProjOut;
+layout(set = 3, binding = 3, rgba16ui) readonly uniform uimage2D uIds;
+layout(set = 3, binding = 4, r32f) readonly uniform image2D uMDepthZ;        // view depth (32-bit)
+layout(set = 3, binding = 21, rgba16f) readonly uniform image2D uMDepthG;    // d/dx, d/dy, flags
+vec4 loadMD(ivec2 t) { return vec4(imageLoad(uMDepthZ, t).x, imageLoad(uMDepthG, t).xyz); }
+layout(set = 3, binding = 12, rgba16f) readonly uniform image2D uAccSun;
+layout(set = 3, binding = 13, rgba16f) readonly uniform image2DArray uAccProj;
+layout(set = 3, binding = 14, rgba16f) readonly uniform image2D uMeta;
+layout(set = 3, binding = 10, rgba8) readonly uniform image2D uRawSun;   // A's raw estimate (debug 1)
+// A-trous scratch (the read slot's sun accumulation / meta: dead after the temporal pass).
+layout(set = 3, binding = 16, rgba16f) uniform image2D uScrA;
+layout(set = 3, binding = 17, rgba16f) uniform image2D uScrB;
+// #666: the projector a-trous scratch (the read slot's projector accumulation) and this
+// frame's projector slot history (temporal pass: per-slot length, rtPMLen).
+layout(set = 3, binding = 18, rgba16f) uniform image2DArray uScrP;
+layout(set = 3, binding = 19, rgba16ui) readonly uniform uimage2D uProjPM;
+
+#include "clean_rt_mask_common.glsl"
+
+// #771 STATIC CARRY (clean_rt_mask_cache.glsl rcCarried): a carried block's history slot
+// was copied by the reuse dispatch and its final texels keep last frame's -- skip it whole
+// (one 8x8 workgroup = one mask block; no barriers in this pass).
+#define RT_CACHE_WORK_QUAL readonly
+#define RC_NO_HIST
+#include "clean_rt_mask_cache.glsl"
+
+const int kTaps = 12;
+
+bool partial(vec3 v) { return any(greaterThan(v, vec3(0.002))) && any(lessThan(v, vec3(0.998))); }
+
+// p1.z = cap + 32 x code (header).
+uint  spCode() { return uint(max(floor(mp.p1.z / 32.0), 0.0) + 0.5); }
+float spCap()  { return max(mp.p1.z - 32.0 * float(spCode()), 0.0); }
+
+float blurRadius(float r, float len)
+{
+    if (r < 0.0) return 0.0;
+    const float youth = 1.0 - clamp(len / 8.0, 0.0, 1.0);
+    return min(r * mix(0.5, 1.0, youth), spCap());
+}
+
+#include "clean_denoise_common.glsl"   // lum3, kB3 (shared with the god rays' denoiser)
+float tempVar(vec4 meta) { return max(meta.w - meta.z * meta.z, 0.0); }
+
+// SVGF mode (RenderVKRTShadowSvgf, header): the per-sample variance of the raw sun
+// luminance -- the fast moments' sample variance, but at least m (1 - m) / rays where
+// the disc met a caster (the most a [0, 1] signal of mean m can vary, Bhatia-Davis;
+// exact for one binary ray). A 3-frame sample variance is 0 by chance on about a
+// quarter of 50 % penumbra texels, and those then refused to filter (salt-and-pepper
+// left in a smoothed penumbra). m = the long history's mean, so the bound is stable.
+float rawVar(vec4 acc, vec4 meta)
+{
+    float v = tempVar(meta);
+    if (acc.a >= 0.0)
+    {
+        const float mm = clamp(lum3(acc.rgb), 0.0, 1.0);
+        v = max(v, mm * (1.0 - mm) / max(ssr.sun_rt.y, 1.0));
+    }
+    return v;
+}
+// ... and the variance of the ACCUMULATED estimate (what is left to filter): the sample
+// variance over the history length. Converged texels keep their detail; young ones
+// (disocclusion, #608) are filtered hard.
+float estVar(vec4 acc, vec4 meta) { return rawVar(acc, meta) / max(meta.x, 1.0); }
+
+// Debug view override of the final sun mask (header). var < 0: from the meta.
+vec3 debugSun(uint dbg, ivec2 m, vec3 final_vis, float var)
+{
+    if (dbg == 1u) return imageLoad(uRawSun, m).rgb;
+    if (dbg == 2u) return clamp(imageLoad(uAccSun, m).rgb, vec3(0.0), vec3(1.0));
+    if (dbg == 3u) return vec3(clamp(imageLoad(uMeta, m).x / max(mp.p0.w, 1.0), 0.0, 1.0));
+    if (dbg == 4u)
+    {
+        const float v = var >= 0.0 ? var : tempVar(imageLoad(uMeta, m));
+        return vec3(clamp(sqrt(v) * 4.0, 0.0, 1.0));
+    }
+    // 6: the temporal pass's events, written into this image's rgb (clean_rt_mask_temporal.comp).
+    if (dbg == 6u) return imageLoad(uSunOut, m).rgb;
+    if (dbg == 7u) return vec3(clamp(imageLoad(uMeta, m).z, 0.0, 1.0));   // the fast history
+    return final_vis;
+}
+
+// ---- A-trous iteration k of n for the sun (header) ----
+
+vec4 atrousSrc(int k, ivec2 t)
+{
+    if (k == 0)
+    {
+        const vec4 a = imageLoad(uAccSun, t);
+        const vec3 v = clamp(a.rgb, vec3(0.0), vec3(1.0));
+        const vec4 mt = imageLoad(uMeta, t);
+        return vec4(v, rtSvgf() ? estVar(vec4(v, a.a), mt) : tempVar(mt));
+    }
+    return ((k - 1) & 1) == 0 ? imageLoad(uScrA, t) : imageLoad(uScrB, t);
+}
+
+void atrousSun(ivec2 m, int k, int n, uint dbg)
+{
+    const ivec2 mx = ivec2(mp.dims.zw) - 1;
+    const vec4 dc = loadMD(m);
+    const vec4 acc = imageLoad(uAccSun, m);
+    const vec4 meta = imageLoad(uMeta, m);
+    vec4 c = atrousSrc(k, m);
+    const vec2 sm = rtMaskScale();
+    const int step = 1 << k;
+    const bool sv = rtSvgf();
+    // SVGF mode: YOUNG history (disocclusion -- a wing moving off the ground, #608 --,
+    // a moving caster's snap): filtered whether partial or not (one binary sample is
+    // never "partial"), at the widest penumbra radius around it (a lit sample met no
+    // caster: r < 0), with the neighbours' history length as extra weight (HISTORY
+    // FIX, ReBLUR): a disoccluded strip takes the converged ground beside it.
+    const bool young = sv && meta.x < 4.0;
+    // #674 MOVING-CASTER YOUNG TEXELS (RenderVKRTShadowMoverYoungFix): the history fix
+    // below is for DISOCCLUSION (a strip uncovered next to converged ground of the same
+    // signal). A texel young because a moving caster's shadow just reached it (the anti-
+    // lag / dark-snap cut it to length 1) is the opposite case: its converged neighbours
+    // are the stale LIT ground ahead of the shadow. With the 5x5 spatial variance of an
+    // edge (~0.2: a luminance stop of ~1.8, i.e. none), the widest radius around it and
+    // up to 8x weight for the long-history neighbours, the a-trous pulled every fresh
+    // shadow texel toward the lit ground in front -- the shadow "blending into the area
+    // in front" of a walking avatar, whatever the temporal settings. Mover texels keep
+    // their own radius, no history weight, and the Bhatia-Davis variance of their own
+    // estimate (m (1 - m) / rays / length: 0 in a fresh umbra, so it stays crisp; the
+    // ray pattern of a partial texel still smooths among like neighbours).
+    const bool myoung = young && rtMoverYoungFix() && dc.x > 0.0 && rtSunMover(dc.w);
+    float rpen = acc.a;
+    if (myoung)
+    {
+        if (k == 0)
+        {
+            const float mm = clamp(lum3(c.rgb), 0.0, 1.0);
+            c.a = mm * (1.0 - mm) / max(ssr.sun_rt.y, 1.0) / max(meta.x, 1.0);
+        }
+    }
+    else if (dc.x > 0.0 && (young || (!sv && k == 0 && meta.x < 4.0)))
+    {
+        // Young history: the SPATIAL variance (same plane) -- the temporal moments have
+        // not converged yet. SVGF mode: 5x5 of the raw one-frame luminance (the sample
+        // variance, over the history length), every iteration (it also widens the
+        // radius); else 3x3 of the accumulation at iteration 0, as before.
+        const float tolN = max(dc.x * 0.02, 0.03);
+        const int rad = sv ? 2 : 1;
+        float s1 = 0.0, s2 = 0.0, nn = 0.0;
+        for (int j = -rad; j <= rad; ++j)
+            for (int i = -rad; i <= rad; ++i)
+            {
+                const ivec2 o = ivec2(i, j);
+                const ivec2 t = clamp(m + o, ivec2(0), mx);
+                const vec4 dt = loadMD(t);
+                const float zp = dc.x + clamp(dot(dc.yz, vec2(o) / sm), -0.25 * dc.x, 0.25 * dc.x);
+                if (dt.x <= 0.0 || abs(dt.x - zp) >= tolN) continue;
+                float l;
+                if (sv)
+                {
+                    l = lum3(imageLoad(uRawSun, t).rgb);
+                    if (abs(i) <= 1 && abs(j) <= 1) rpen = max(rpen, imageLoad(uAccSun, t).a);
+                }
+                else
+                    l = lum3(clamp(imageLoad(uAccSun, t).rgb, vec3(0.0), vec3(1.0)));
+                s1 += l; s2 += l * l; nn += 1.0;
+            }
+        if (nn > 0.0)
+        {
+            const float sv2 = max(s2 / nn - (s1 / nn) * (s1 / nn), 0.0);
+            if (!sv) c.a = max(c.a, sv2);
+            else if (k == 0) c.a = max(c.a, sv2 / max(meta.x, 1.0));
+        }
+    }
+    float r = blurRadius(rpen, meta.x);
+    // #674: a young mover texel takes the step-1 pass whatever its penumbra radius.
+    if (young && rtMoverSpatial() && dc.x > 0.0 && rtSunMover(dc.w)) r = max(r, min(1.0, spCap()));
+    // SVGF mode: step 1 from half a texel of radius on (a converged 1-2 texel penumbra
+    // is noisy too), and any texel with variance left -- converged lit / umbra texels
+    // have none and stay exact through the luminance weight, not a hard gate.
+    const bool want = sv ? (partial(c.rgb) || young || c.a > 1e-5) : partial(c.rgb);
+    const bool on = rtDenoise() && spCap() > 0.0 && dc.x > 0.0 && want
+                 && r >= (sv && step == 1 ? 0.5 : float(step));
+    vec4 o = c;
+    if (on)
+    {
+        const float tol = max(dc.x * 0.01, 0.02);
+        const vec2 sc = dc.yz / max(dc.x, 1e-3);
+        const float lc = lum3(c.rgb);
+        const float sl = 4.0 * sqrt(max(c.a, 0.0)) + 1e-3;
+        const float lenc = max(meta.x, 1.0);
+        vec3 sum = vec3(0.0);
+        float wsum = 0.0, vsum = 0.0;
+        for (int j = -2; j <= 2; ++j)
+            for (int i = -2; i <= 2; ++i)
+            {
+                const ivec2 off = ivec2(i, j) * step;
+                const ivec2 t = clamp(m + off, ivec2(0), mx);
+                const vec4 dt = loadMD(t);
+                if (dt.x <= 0.0) continue;
+                const vec2 orp = vec2(t - m) / sm;   // render px
+                const float zp = dc.x + clamp(dot(dc.yz, orp), -0.25 * dc.x, 0.25 * dc.x);
+                const float wz = exp(-abs(dt.x - zp) / tol);
+                const float wn = 1.0 / (1.0 + 200.0 * length(dt.yz / max(dt.x, 1e-3) - sc));
+                const vec4 v = (t == m) ? c : atrousSrc(k, t);
+                const float wl = exp(-abs(lum3(v.rgb) - lc) / sl);
+                float w = kB3[i + 2] * kB3[j + 2] * wz * wn * wl;
+                if (young && !myoung && t != m) w *= clamp(imageLoad(uMeta, t).x / lenc, 1.0, 8.0);
+                if (w <= 0.0) continue;
+                sum += w * v.rgb;
+                vsum += w * w * v.a;
+                wsum += w;
+            }
+        if (wsum > 1e-6) o = vec4(sum / wsum, vsum / (wsum * wsum));
+    }
+    o.rgb = clamp(o.rgb, vec3(0.0), vec3(1.0));
+    if (k == n - 1)
+    {
+        const vec3 fin = debugSun(dbg, m, dc.x > 0.0 ? o.rgb : vec3(1.0), o.a);
+        imageStore(uSunOut, m, vec4(fin, imageLoad(uSunOut, m).a));
+    }
+    else if ((k & 1) == 0)
+        imageStore(uScrA, m, o);
+    else
+        imageStore(uScrB, m, o);
+}
+
+// ---- A-trous iteration k of n for the projector slots (#666, header) ----
+
+int projSlotOf(uvec4 ids, uint id)
+{
+    for (int s = 0; s < 4; ++s)
+        if (ids[s] == id) return s;
+    return -1;
+}
+// Iteration k writes the scratch 18 (else the final image 2): n - 1 - k odd, never the last.
+bool projDstScr(int k, int n) { return k < n - 1 && ((n - 1 - k) & 1) == 1; }
+// The variance of a slot's accumulated estimate: the Bhatia-Davis bound of its mean where
+// a caster was met (r >= 0; exact for one binary ray), over its own history length.
+float projEstVar(vec3 v, float r, float len)
+{
+    if (r < 0.0) return 0.0;
+    const float mm = clamp(lum3(v), 0.0, 1.0);
+    return mm * (1.0 - mm) / max(ssr.sun_rt.y, 1.0) / max(len, 1.0);
+}
+// Iteration k's input for slot s at t (len: that slot's history length).
+vec4 projSrc(int k, int n, ivec2 t, int s, float len)
+{
+    if (k == 0)
+    {
+        const vec4 a = imageLoad(uAccProj, ivec3(t, s));
+        const vec3 v = clamp(a.rgb, vec3(0.0), vec3(1.0));
+        return vec4(v, projEstVar(v, a.a, len));
+    }
+    if (projDstScr(k - 1, n)) return imageLoad(uScrP, ivec3(t, s));
+    const vec4 f = imageLoad(uProjOut, ivec3(t, s));
+    const float sd = f.a * 0.5;
+    return vec4(f.rgb, sd * sd);
+}
+
+void atrousProj(ivec2 m, int k, int n)
+{
+    const vec4 dc = loadMD(m);
+    if (dc.x <= 0.0) return;   // sky: no projector traced
+    const uvec4 ids = imageLoad(uIds, m);
+    if (all(equal(ids, uvec4(0u)))) return;
+    const uvec4 pmc = imageLoad(uProjPM, m);
+    const ivec2 mx = ivec2(mp.dims.zw) - 1;
+    const vec2 sm = rtMaskScale();
+    const int step = 1 << k;
+    const bool toScr = projDstScr(k, n);
+    const bool last = k == n - 1;
+    const float tol = max(dc.x * 0.01, 0.02);
+    const float tolN = max(dc.x * 0.02, 0.03);
+    const vec2 sc = dc.yz / max(dc.x, 1e-3);
+    for (int s = 0; s < 4; ++s)
+    {
+        const uint id = ids[s];
+        if (id == 0u) continue;
+        const float len = rtPMLen(pmc[s]);
+        const vec4 acc = imageLoad(uAccProj, ivec3(m, s));
+        vec4 c = projSrc(k, n, m, s, len);
+        // YOUNG history (disocclusion, a mover's snap): filtered whether partial or not, at
+        // the widest penumbra radius around it, with the spatial variance of this light's
+        // accumulation (5x5 at iteration 0, same plane) -- the sun's SVGF young rule.
+        const bool young = len < 4.0;
+        // #674: a young MOVING-CASTER slot keeps its own radius / BD variance and takes no
+        // history weight (the sun's myoung above).
+        const bool myoung = young && rtMoverYoungFix() && rtProjMover(dc.w, s);
+        float rpen = acc.a;
+        if (young && !myoung)
+        {
+            const int rad = k == 0 ? 2 : 1;
+            float s1 = 0.0, s2 = 0.0, nn = 0.0;
+            for (int j = -rad; j <= rad; ++j)
+                for (int i = -rad; i <= rad; ++i)
+                {
+                    const ivec2 o = ivec2(i, j);
+                    const ivec2 t = clamp(m + o, ivec2(0), mx);
+                    const vec4 dt = loadMD(t);
+                    const float zp = dc.x + clamp(dot(dc.yz, vec2(o) / sm), -0.25 * dc.x, 0.25 * dc.x);
+                    if (dt.x <= 0.0 || abs(dt.x - zp) >= tolN) continue;
+                    const int ts = (t == m) ? s : projSlotOf(imageLoad(uIds, t), id);
+                    if (ts < 0) continue;
+                    const vec4 at = imageLoad(uAccProj, ivec3(t, ts));
+                    if (abs(i) <= 1 && abs(j) <= 1) rpen = max(rpen, at.a);
+                    const float l = lum3(clamp(at.rgb, vec3(0.0), vec3(1.0)));
+                    s1 += l; s2 += l * l; nn += 1.0;
+                }
+            if (k == 0 && nn > 0.0)
+                c.a = max(c.a, max(s2 / nn - (s1 / nn) * (s1 / nn), 0.0) / max(len, 1.0));
+        }
+        float r = blurRadius(rpen, len);
+        if (young && rtMoverSpatial() && rtProjMover(dc.w, s)) r = max(r, min(1.0, spCap()));   // #674
+        const bool want = partial(c.rgb) || young || c.a > 1e-5;
+        const bool on = spCap() > 0.0 && want && r >= (step == 1 ? 0.5 : float(step));
+        vec4 o = c;
+        if (on)
+        {
+            const float lc = lum3(c.rgb);
+            const float sl = 4.0 * sqrt(max(c.a, 0.0)) + 1e-3;
+            vec3 sum = vec3(0.0);
+            float wsum = 0.0, vsum = 0.0;
+            for (int j = -2; j <= 2; ++j)
+                for (int i = -2; i <= 2; ++i)
+                {
+                    const ivec2 off = ivec2(i, j) * step;
+                    const ivec2 t = clamp(m + off, ivec2(0), mx);
+                    const bool self = t == m;
+                    const vec4 dt = self ? dc : loadMD(t);
+                    if (dt.x <= 0.0) continue;
+                    const int ts = self ? s : projSlotOf(imageLoad(uIds, t), id);
+                    if (ts < 0) continue;   // that texel did not trace this light
+                    const vec2 orp = vec2(t - m) / sm;   // render px
+                    const float zp = dc.x + clamp(dot(dc.yz, orp), -0.25 * dc.x, 0.25 * dc.x);
+                    const float wz = exp(-abs(dt.x - zp) / tol);
+                    const float wn = 1.0 / (1.0 + 200.0 * length(dt.yz / max(dt.x, 1e-3) - sc));
+                    const float lt = self ? len : rtPMLen(imageLoad(uProjPM, t)[ts]);
+                    const vec4 v = self ? c : projSrc(k, n, t, ts, lt);
+                    const float wl = exp(-abs(lum3(v.rgb) - lc) / sl);
+                    float w = kB3[i + 2] * kB3[j + 2] * wz * wn * wl;
+                    if (young && !myoung && !self) w *= clamp(lt / len, 1.0, 8.0);
+                    if (w <= 0.0) continue;
+                    sum += w * v.rgb;
+                    vsum += w * w * v.a;
+                    wsum += w;
+                }
+            if (wsum > 1e-6) o = vec4(sum / wsum, vsum / (wsum * wsum));
+        }
+        o.rgb = clamp(o.rgb, vec3(0.0), vec3(1.0));
+        if (toScr) imageStore(uScrP, ivec3(m, s), o);
+        else imageStore(uProjOut, ivec3(m, s), vec4(o.rgb, last ? 1.0 : clamp(2.0 * sqrt(max(o.a, 0.0)), 0.0, 1.0)));
+    }
+}
+
+void main()
+{
+    if (rcCarried(gl_WorkGroupID.xy)) return;   // #771
+    const ivec2 m = ivec2(gl_GlobalInvocationID.xy);
+    if (m.x >= int(mp.dims.z) || m.y >= int(mp.dims.w)) return;
+    // A-trous iteration / count / debug view (header).
+    const uint code = spCode();
+    int ak = 0, an = 0;
+    uint dbg = 0u;
+    if (code > 0u)
+    {
+        const uint cc = code - 1u;
+        ak = int(cc & 7u);
+        an = int((cc >> 3u) & 7u);
+        dbg = (cc >> 6u) & 7u;
+    }
+    if (an > 0)
+    {
+        atrousSun(m, ak, an, dbg);
+        // #666: projector slots on the same iterations (header); else the disc blur below,
+        // once (iteration 0).
+        if (rtProjFull()) { atrousProj(m, ak, an); return; }
+        if (ak != 0) return;
+    }
+    const vec4 c = imageLoad(uAccSun, m);
+    const vec4 dc = loadMD(m);
+    const uvec4 ids = imageLoad(uIds, m);
+    const bool on = rtDenoise() && spCap() > 0.0 && dc.x > 0.0;
+    const vec4 meta = on ? imageLoad(uMeta, m) : vec4(0.0);
+    const ivec2 mx = ivec2(mp.dims.zw) - 1;
+    const vec2 sm = rtMaskScale();
+    const float tol = max(dc.x * 0.01, 0.02);
+    // Per-pixel, per-frame rotation of the tap disc.
+    // (Only while a TAA / FSR resolve integrates it, #666: without one a per-frame rotation
+    // just crawls -- the mask's own history is the temporal pass's, never this output.)
+    const float rot = 6.2831853 * fract(rtMaskIGN(vec2(m)) + (rtMaskResolved() ? mp.p0.x * 0.6180339887 : 0.0));
+
+    // ---- sun / moon (the disc; a-trous mode wrote it above) ----
+    vec3 sun = c.rgb;
+    if (an == 0)
+    {
+    const float rs = on && partial(c.rgb) ? blurRadius(c.a, meta.x) : 0.0;
+    if (rs >= 0.5)
+    {
+        vec3 acc = c.rgb;
+        float ws = 1.0;
+        for (int i = 0; i < kTaps; ++i)
+        {
+            const float u = sqrt((float(i) + 0.5) / float(kTaps));
+            const float a = rot + 2.3999632 * float(i);
+            const vec2 o = vec2(cos(a), sin(a)) * (u * rs);
+            const ivec2 t = clamp(m + ivec2(round(o)), ivec2(0), mx);
+            if (t == m) continue;
+            const vec4 dt = loadMD(t);
+            if (dt.x <= 0.0) continue;
+            const vec2 orp = vec2(t - m) / sm;   // render px
+            const float zp = dc.x + clamp(dot(dc.yz, orp), -0.25 * dc.x, 0.25 * dc.x);
+            float w = clamp(1.0 - abs(dt.x - zp) / tol, 0.0, 1.0);
+            w *= w * exp(-2.0 * u * u);
+            if (w <= 0.0) continue;
+            acc += w * imageLoad(uAccSun, t).rgb;
+            ws += w;
+        }
+        sun = acc / ws;
+    }
+    imageStore(uSunOut, m, vec4(debugSun(dbg, m, sun, -1.0), imageLoad(uSunOut, m).a));
+    }
+
+    // ---- projector slots ----
+    for (int k = 0; k < 4; ++k)
+    {
+        const uint id = ids[k];
+        if (id == 0u) continue;
+        const vec4 pc = imageLoad(uAccProj, ivec3(m, k));
+        vec3 v = pc.rgb;
+        // meta.y: the shortest projector history length at this texel (temporal pass).
+        const float rp = on && partial(pc.rgb) ? blurRadius(pc.a, meta.y) : 0.0;
+        if (rp >= 0.5)
+        {
+            vec3 acc = pc.rgb;
+            float ws = 1.0;
+            for (int i = 0; i < kTaps; ++i)
+            {
+                const float u = sqrt((float(i) + 0.5) / float(kTaps));
+                const float a = rot + 2.3999632 * float(i);
+                const vec2 o = vec2(cos(a), sin(a)) * (u * rp);
+                const ivec2 t = clamp(m + ivec2(round(o)), ivec2(0), mx);
+                if (t == m) continue;
+                const vec4 dt = loadMD(t);
+                if (dt.x <= 0.0) continue;
+                const uvec4 tid = imageLoad(uIds, t);
+                int s = -1;
+                for (int j = 0; j < 4; ++j)
+                    if (tid[j] == id) { s = j; break; }
+                if (s < 0) continue;
+                const vec2 orp = vec2(t - m) / sm;
+                const float zp = dc.x + clamp(dot(dc.yz, orp), -0.25 * dc.x, 0.25 * dc.x);
+                float w = clamp(1.0 - abs(dt.x - zp) / tol, 0.0, 1.0);
+                w *= w * exp(-2.0 * u * u);
+                if (w <= 0.0) continue;
+                acc += w * imageLoad(uAccProj, ivec3(t, s)).rgb;
+                ws += w;
+            }
+            v = acc / ws;
+        }
+        imageStore(uProjOut, ivec3(m, k), vec4(v, 1.0));
+    }
+}

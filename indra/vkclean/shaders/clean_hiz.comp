@@ -1,0 +1,38 @@
+#version 450
+// Hi-Z pyramid for occlusion culling (#167, RenderVKOcclusionCull).
+//
+// Each level holds, per texel, the FARTHEST depth (REVERSED-Z, #188: far = 0, so min) of
+// the texels below it. Level 0 is ceil(depth / 2); later levels are Vulkan's own mip
+// sizes, floor(previous / 2), so an odd source leaves one row/column over: the LAST
+// texel of the level absorbs it (reads 3 instead of 2). Every source texel is covered,
+// which keeps the occlusion test conservative.
+// One dispatch per level: from_depth=1 reads the pre-pass depth, else the level above.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(binding = 0) uniform sampler2D u_depth;                 // pre-pass depth (NEAREST)
+layout(binding = 1, r32f) uniform readonly  image2D u_src;     // previous level
+layout(binding = 2, r32f) uniform writeonly image2D u_dst;     // this level
+
+layout(push_constant) uniform Push {
+    ivec2 src_size;
+    ivec2 dst_size;
+    uint  from_depth;
+} pc;
+
+void main()
+{
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= pc.dst_size.x || p.y >= pc.dst_size.y) return;
+    ivec2 a = p * 2;
+    // Last texel of the row/column: everything that's left of the source (1..3 texels).
+    ivec2 e = min(a + 1, pc.src_size - 1);
+    if (p.x == pc.dst_size.x - 1) e.x = pc.src_size.x - 1;
+    if (p.y == pc.dst_size.y - 1) e.y = pc.src_size.y - 1;
+    float m = 1.0;
+    for (int y = a.y; y <= e.y; ++y)
+        for (int x = a.x; x <= e.x; ++x)
+            m = min(m, pc.from_depth != 0u ? texelFetch(u_depth, ivec2(x, y), 0).r
+                                           : imageLoad(u_src, ivec2(x, y)).r);
+    imageStore(u_dst, p, vec4(m));
+}

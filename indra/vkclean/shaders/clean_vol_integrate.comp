@@ -1,0 +1,56 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// vkclean -- VOLUMETRIC FOG (#718), pass 4/4: FRONT-TO-BACK INTEGRATION.
+//
+// One invocation per froxel COLUMN (x, y), walking its slices from the eye outward over the
+// temporally filtered cells (uHistCur: rgb in-scatter per metre Ls, a extra-medium sigma_e).
+// Per slice of ray length ds (view-depth thickness / cos of the column's ray to the camera
+// axis), with the haze's extinction sigma_h (LL's atten.r rate) added to the cell's:
+//   sigma = sigma_e + sigma_h
+//   S     = Ls (1 - exp(-sigma ds)) / sigma        (energy-conserving: the in-scatter of a
+//                                                  homogeneous slab, Hillaire 2015 --
+//                                                  no step-size dependence)
+//   L    += T_all S,   T_all *= exp(-sigma ds),   T *= exp(-sigma_e ds)
+// and stores (L, T) at the slice: the in-scatter reaching the eye from [eye, the slice's FAR
+// boundary] and the EXTRA medium's transmittance over it. The haze's transmittance weights
+// the in-scatter (light scattered far away is dimmed by the haze in front of it) but is not
+// stored: LL's haze already put atten.r on every surface (clean_vol_apply.glsl contract).
+layout(local_size_x = 8, local_size_y = 8) in;
+
+#include "clean_frame_info.glsl"
+#include "clean_atmos_common.glsl"
+#include "clean_vol_common.glsl"
+#include "clean_vol_pass.glsl"
+
+layout(set = VOL_SET, binding = 3, rgba16f) readonly uniform image3D uHistCur;
+layout(set = VOL_SET, binding = 4, rgba16f) writeonly uniform image3D uInteg;
+
+void main()
+{
+    const uvec2 xy = gl_GlobalInvocationID.xy;
+    const uvec3 dims = volDims();
+    if (any(greaterThanEqual(xy, dims.xy))) return;
+    // Ray length per metre of view depth for this column (its centre ray).
+    const vec3 rel = volRelPos(vec3(vec2(xy) + 0.5, float(dims.z)));
+    const float k = length(rel) / max(dot(rel, vp.fwd.xyz), 1e-6);
+    const float sigma_h = volHazeExt();
+    vec3  L = vec3(0.0);
+    float Tall = 1.0, T = 1.0;
+    float z0 = 0.0;
+    const float invD = 1.0 / float(dims.z);
+    for (uint s = 0u; s < dims.z; ++s)
+    {
+        const float z1 = volDepthOfSlice(float(s + 1u) * invD);
+        const float ds = (z1 - z0) * k;
+        z0 = z1;
+        const vec4 v = imageLoad(uHistCur, ivec3(xy, s));
+        const float se = max(v.a, 0.0);
+        const float sg = se + sigma_h;
+        const float tr = exp(-sg * ds);
+        const vec3 S = sg > 1e-7 ? v.rgb * ((1.0 - tr) / sg) : v.rgb * ds;
+        L += Tall * S;
+        Tall *= tr;
+        T *= exp(-se * ds);
+        imageStore(uInteg, ivec3(xy, s), vec4(atmosClampHDR(L), T));
+    }
+}

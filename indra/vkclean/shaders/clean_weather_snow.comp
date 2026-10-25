@@ -1,0 +1,1961 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+// vkclean — PERSISTENT SNOW (#783 M2 / M3; vkgfx/llcleanweathervk.cpp recordSnow). Four kernels:
+//
+// COVER (default build; RenderVKWeatherSnowCover): one invocation per texel of the snow-cover
+// grid, which lies on the near occlusion cascade's top plane (the cascade's own columns: a
+// texel is "the first surface the snow meets along this column", the near map's depth).
+// The cover is INTEGRATED, never recomputed from the current shelter (rgba32f, M3):
+//   R  the cover on the column's top surface: grows at the state's build rate while it snows
+//      (the top of a column is open by definition), capped by the global (open-sky) cover,
+//      so it melts with it;
+//   G  the cover on what lies UNDER the top: set when something new appears on top of a
+//      snowy surface (a moved table on the lawn: the lawn keeps its snow under it), capped
+//      by the global cover;
+//   B  the top surface's (raw) height, as metres below the grid's top plane (the coating's
+//      top test, clean_weather_surface.glsl);
+//   A  M3 SNOW DEPTH (m) on the FILTERED BASE (RenderVKWeatherSnowDepth; 0 when off).
+// M3 FILTERED BASE (own set binding 5, r32f, m below the plane; kNoBase: none): the surface the
+// snow rests on -- the column tops closed then opened at kSnowBaseR texels (square: close
+// fills gaps up to 2R = 4 texels, ~25 cm; open drops anything narrower than 2R + 1 = 5 texels,
+// ~30 cm, in either axis), computed every step from a shared-memory tile of the near map. Gaps
+// between xylophone bars / deck planks are bridged (no aliased "hole" texels along their
+// edges), thin bars / pickets / posts / rails are not surfaces (they poke through the sheet).
+// Everything of the depth (fill, transport, the mesh, footprints) uses it, never the raw top.
+// Each frame a texel follows its SURFACE POINT back into the previous grid (the previous
+// frame's map plane, shear and corner: the grid scrolls with the cascade's snap and survives
+// a tilt change), then compares heights: the top rose (something new on top) -> the old top's
+// cover is buried (G) and the new top starts at the open-sky cover; the top dropped (the
+// shelter left) -> what it covered shows again (G, bare when it was never seen open) -- so a
+// moved object leaves its old spot bare and refilling, and never erases the snow where it now
+// stands. Texels entering the grid start at the global cover on top and nothing below. Movers
+// never enter the maps (static casters only), so they neither shelter nor erase anything here.
+//
+// M3 DEPTH (on the filtered base, followed back by ITS point): a texel the grid has not seen
+// (entering it, a camera cut, a new base) starts at its fill LEVEL: the GLOBAL depth
+// (SLWeather::State::snowDepth) x the base's slope factor (1 under ~35 degrees, 0 past ~55;
+// the gradient one-sided across a step past the join allowance: a curb is not a slope) -- the
+// same on every open surface, so a path and the grass fill alike. Taps past the grid's border
+// replicate it (no border band for a snap to carry inward). A carried texel:
+//   TRANSPORT (gather form, from the PREVIOUS grid -- the ping-pong makes neighbour reads
+//   safe; every exchange is computed identically by both texels, so mass is conserved; only
+//   between JOINED texels, clean_weather_snow_join.glsl):
+//     settle / slide (RenderVKWeatherSnowSettle / Slide)  REPOSE: where two snow tops differ
+//                     by more than the angle of repose (RenderVKWeatherSnowReposeAngle, 38
+//                     degrees), half the excess (x the share) moves down, over all 8
+//                     neighbours (#783), at most kSnowReposeDonor of the donor's depth. It only
+//                     lowers peaks (no single texel can pile up) and slumps a step into a ramp;
+//     drift  (RenderVKWeatherSnowDrift)   the mean wind (8 directions) carries a share of the
+//                                         exposed snow one texel downwind per step: a texel in
+//                                         the lee of a higher snow top upwind (up to ~1 m) is
+//                                         sheltered; a downwind base above this snow top blocks
+//                                         the flow (it piles against walls until it reaches
+//                                         over), a lower one takes it (blown off a roof).
+//   then the snowfall fills it toward its level (never above: only drifts / repose piles
+//   are higher; footprints refill), and the melt lowers it (uniform), capped at the drift cap
+//   x the global depth.
+//
+// INSTANCES (-DWX_SNOW_INST; RenderVKWeatherSnowMovers): one invocation per instance slot.
+// Moving objects (the ingest's mover tracker, instance bit21; not rigged / HUD / worn /
+// terrain) carry their OWN snow: an amount per instance slot that grows while the instance
+// is still and sky-open at the top of its box (the maps hold only static shelter), is capped
+// by the global cover (melting with it) and is shed above a speed. An instance that starts
+// moving takes the cover lying where its top was (the grid, else the open-sky amount); a
+// static slot holds -1. clean_weather_surface.glsl draws it with object-space noise.
+//
+// AVATARS (-DWX_SNOW_AVATAR, M3; RenderVKWeatherSnowAvatars): one invocation per avatar
+// (joint-table) slot. Avatars never enter the roof map and never read the static grid: each
+// carries its own amount, which builds while the avatar stands still (pelvis speed, smoothed;
+// idle animation barely moves the pelvis) with its head open to the sky, holds while it walks,
+// and is shed while it moves fast (running, flying, falling, jumping: horizontal / vertical
+// speed past a threshold); capped by the global cover. Also written: the avatar's anchor (the
+// chest joint's position and yaw) -- the lit FS takes the patch pattern in that frame, so the
+// snow rides on the shoulders through the animation. The CPU hands the alive / sitting bits
+// (one word per 32 slots). FOOTPRINTS (RenderVKWeatherSnowFootprints): each live, standing
+// avatar's two feet (ankle -> toe joints, the sole a little under the foot joint) are appended
+// to the stamp list + the stamp kernel's indirect dispatch. LIMB CONTACT (#783 follow-up,
+// RenderVKWeatherSnowLimbs): every other limb segment that dips below the snow top goes to the
+// mover list's limb range as a box (limbContact) -- this pass runs BEFORE the cover pass now.
+//
+// STAMPS (-DWX_SNOW_STAMP, M3): one 8 x 8-texel workgroup per foot (indirect), on the grid
+// the cover kernel just wrote: where the sole sits in the snow (below its top, above the
+// ground), the snow under the foot's ellipse is pressed down to the sole (at least a fifth of
+// it stays, compacted). Visual only. Refilled by the snowfall (the cover kernel's fill).
+//
+// MOVER TRACKS (M5, RenderVKWeatherSnowMovers + RenderVKWeatherSnowMoverPress / MoverBerm): the
+// INSTANCES kernel (it already walks every instance slot with this and the previous frame's
+// model matrix) appends each mover instance (bit21; not rigged / HUD / worn / terrain; a GPU
+// spinner only while its box centre travels) whose box centre moved faster than a threshold
+// this step and whose box bottom reaches the snow (the published inner grid or the outer ring at
+// its centre) to a bounded stamp list (own set binding 7): its world box (centre + three
+// half-axes) and its horizontal motion this step. Per-instance boxes are per FACE / prim, so
+// wheels, skids and treads that are their own prims or faces stamp their own narrow tracks; a
+// body whose underside clears the snow stamps nothing.
+// COMPACTION FIRST (wheels and bodies pack snow, they do not shovel it): the COVER kernel gathers
+// the list (each 8 x 8 workgroup culls it to its tile in shared memory) and presses a texel whose
+// vertical meets a box below its snow top down to a FLOOR = max(the box's underside, the packed
+// layer level x mv_prm.w -- fresh / packed density, ~0.3: snow packs ~3x), never raising it:
+// idempotent, so a box standing or creeping over a pressed track removes nothing more, and a
+// second pass over a packed track removes nothing. The lowest floor wins; the snow it took is
+// counted, in fixed point, against THAT box alone (mv_vol: no face / prim double counts) and in
+// the step's total.
+// BERMS (-DWX_SNOW_BERM, a second gather after the cover pass, inner grid only): only the berm
+// share (mv_prm.y, ~0.15) of the volume a box ACTUALLY removed this step is displaced -- 1 - bow
+// share to the two side bands along its length, the rest to a small bow band ahead -- spread with
+// a 2 (1 - x) edge-peaked profile over the bands' area, so a step deposits at most what it
+// removed (mv_tot: removed vs deposited, read back for the stats). The band is at least as wide as
+// the berm's height over the angle of repose; a berm texel may rise at most kMvBermRise x the
+// undisturbed depth of the snow the box is ploughing (its removed thickness / (1 - packed share)),
+// never past the drift cap; texels on another surface (a base above the contact: a wall top) or
+// under a box take nothing. The repose relaxation (every texel, every step) then rounds the
+// berms and the trench walls; the snowfall refills the track to its level. Movers are never in
+// the maps, so the filtered base under a mover is its true support.
+// The OUTER RING (-DWX_SNOW_RING) presses the same boxes at its texel centres (no berms: ~0.5 m
+// texels) where the inner grid does not cover it -- coarse, on its own step cadence.
+//
+// Set 0 = draw set 0 (frame info: ssr.weather; binding 49: the maps and the published cover;
+// the instance rows 0 / 23; M3: the joint table 2). Set 1 (own): 0 the two cover grids
+// (storage, rgba32f), 1 the per-instance image (storage, rgba32f, width sp.c.y: instance
+// slots in .r, then M3 two avatar rows from row sp.c.z: [slot, row] = (amount, yaw), [slot,
+// row + 1] = (anchor xyz)), M3: 2 the avatars' CPU bits, 3 their motion state, 4 the stamps.
+// M3: 5 the two FILTERED BASE images (storage, r32f), paired with the grids, 6 the outer rings.
+// M5: 7 the mover stamp list (+ the per-box removed volumes and the step's totals).
+// #783 8 the avatars' bottom maps; #946 9 the snow mesh's local-edit marks.
+#include "clean_frame_info.glsl"
+
+layout(set = 0, binding = 49) uniform sampler2D uWeatherOccl[10];  // ([7] M4 the run-off flow map, [8] / [9] #901 the shelter atlas: unused here)
+layout(set = 1, binding = 0, rgba32f) uniform image2D uCover[2];
+layout(set = 1, binding = 1, rgba32f) uniform image2D uInstSnow;
+layout(set = 1, binding = 5, rg32f) uniform image2D uBase[2];   // M3: x the filtered snow base (m below the grid's top plane); y the SUPPORT CAP (m, kNoBase none)
+layout(set = 1, binding = 6, rgba32f) uniform image2D uRing[2]; // M3: the outer ring (x its filtered base, y the depth; z the support cap)
+// M5 MOVER TRACKS: the stamp list (llcleanweathervk.cpp recordSnow resets the head / totals /
+// volumes and writes the parameters each step). head: x appends (past y: dropped), y the cap, z
+// the cap for boxes outside the inner grid (ring only: they take what the near ones leave), w
+// unused. prm: x press (0..1), y berm share (0..1), z least speed (m/s), w the packed share
+// (fresh / packed density). tot (fixed point, kMvVolUnit m3): x removed by the presses, y
+// deposited by the berms, z texels pressed, w texels deposited on. vol[4k]: the volume box k
+// removed this step, [4k + 1] the texels it pressed, [4k + 2] their depth before (x area: the
+// undisturbed depth it ploughs), [4k + 3] #783 BODY CONTACT: a body box's layer + 1 (0: an ordinary
+// box). Per stamp 4 x vec4: [0] the world box
+// centre xyz, w its horizontal reach (the projected box + the berm / bow bands: the tile cull; -1
+// a refused slot); [1] [2] [3] the box's world half-axes xyz, w: [1] / [2] the horizontal motion
+// direction x / y, [3] the horizontal distance swept this step (m; 0: pressed only).
+// LIMB CONTACT (#783 follow-up, RenderVKWeatherSnowLimbs): the avatar pass appends limb boxes to
+// their own slot range [kMvLimbBase, kMvLimbBase + kMvLimbMax) -- mv_head.w counts them (past
+// kMvLimbMax: dropped) -- so the movers' cap never starves them and vice versa. A limb box with a
+// zero motion direction ([1].w = [2].w = 0) and a swept length > 0 is a STATIC press: its berm is a
+// small rim all around its footprint (a knee / hand / paw pushed straight down) instead of side
+// bands along a motion.
+// #783 BODY CONTACT (RenderVKWeatherSnowBodyContact): bprm (CPU, with the head): x the support
+// height (m above the snow's base: a contact that low STANDS -- full weight), y the most a layer's
+// raster-time pelvis may lie from the current one (m; past it the joints stand in), z the
+// quadruped fallback's arm-to-ground distance (m above the snow top: an arm that low is a leg; 0
+// off), w the fallback's hoof margin below the hand joint (m at the default scale). bd0 / bd1 (GPU,
+// zeroed with the head; the weather log): bd0 x avatars on the bottom map, y their SUPPORTING
+// contacts, z their other contacts, w their stamps; bd1 x avatars on the joint fallback, y their
+// stamps, z arms that stood as legs, w the most contacts on one avatar.
+layout(std430, set = 1, binding = 7) buffer WxMovers { uvec4 mv_head; vec4 mv_prm; uvec4 mv_tot; vec4 mv_bprm; uvec4 mv_bd0; uvec4 mv_bd1; uint mv_vol[3072]; vec4 mv[]; };
+// #783 BODY CONTACT: the shelter chain's raster target (llcleanweathervk_shelter.cpp; r32ui): its
+// BOTTOM map -- the lowest surface of each avatar with a shelter layer, per texel of its tile -- and
+// the layers' raster-time frames (clean_weather_shelter.glsl WX_SH_BODY_ROWS). A 1 x 1 stand-in
+// without the shelter atlas (never read then: WX_F_BODY off).
+layout(set = 1, binding = 8, r32ui) uniform readonly uimage2D uBody;
+// #946 LOCAL PATCHES (clean_weather_snowmesh.comp; RenderVKWeatherSnowMeshPatch): a texel a press /
+// a berm / a footprint changed by more than kMeshMarkEps sets its 8 x 8 tile's bit in the mask of
+// the grid it writes ([kMkHead + dst x W ..], W = ceil(T^2 / 32), T = ceil(res / 8); cleared by
+// llcleanweathervk.cpp recordSnow before the cover pass) -- the snow mesh rebuilds those tiles the
+// next recording instead of waiting for its interval build. The snowfall's refill, the melt and the
+// repose (slow, everywhere) are not marked: the interval build takes them.
+layout(std430, set = 1, binding = 9) buffer WxMeshMarks { uint mk[]; };
+const float kMeshMarkEps = 0.002;   // (m: a refill step under a foot standing still is far below it)
+void wxMarkMesh(uint dst, ivec2 t, int res)
+{
+    const uint T = (uint(res) + 7u) / 8u;
+    const uint W = (T * T + 31u) / 32u;
+    const uint tile = (uint(t.y) >> 3u) * T + (uint(t.x) >> 3u);
+    atomicOr(mk[8u + dst * W + (tile >> 5u)], 1u << (tile & 31u));
+}
+
+#ifndef WX_SNOW_RING
+layout(push_constant) uniform SnowPush
+{
+    vec4 a;    // x the grid written (0 / 1), y grid resolution, z cover build this frame, w global cover
+    vec4 b;    // x height tolerance (m), y 1 = no previous grid, z dt (s), w mover shed speed (m/s)
+    uvec4 c;   // x instance count, y per-instance image width, z the avatar rows' first row, w feature bits
+    vec4 d;    // M3 x global depth (m), y depth build this frame (m), z depth melt this frame (m), w drift share this frame
+    ivec4 e;   // M3 xy drift step (texels, -1..1; 0 0 = no drift), z max stamps, w unused
+    vec4 f;    // M3 x the repose relaxation's avalanche share (0: settle and slide both off), y tan of the angle of repose (#783), z drift pile cap (x global), w the limbs' range (m)
+    vec4 g;    // M3 avatars: x still speed, y shed speed (horizontal), z shed speed (vertical) (m/s), w the outer ring's shear x
+    vec4 h;    // M3 the published outer ring: x0, y0, +-1 / extent (the sign names it: + ring 0, - ring 1; 0 none), top
+} sp;          // (e.w: the bits of the outer ring's shear y)
+#else
+layout(push_constant) uniform RingPush
+{
+    vec4 a;    // x the ring written (0 / 1), y its resolution, z the previous ring + 1 (0: none), w height tolerance (m)
+    vec4 f0;   // this step's frame: x0, y0, extent, top (the coarse map's)
+    vec4 f1;   // span, texel, shear x, y
+    vec4 q0;   // the previous ring's frame: x0, y0, extent, top
+    vec4 q1;   // span, texel, shear x, y
+    vec4 d;    // x global depth (m), y snowfall since its last step (m), z melt (m), w repose share
+    vec4 m;    // x feature bits (uint bits), y drift pile cap (x global), z tan of the angle of repose (#783), w unused
+    vec4 r;    // unused
+} rp;
+#endif
+
+// Feature bits (sp.c.w; llcleanweathervk.cpp planSnow).
+const uint WX_F_DEPTH = 1u, WX_F_DRIFT = 2u, WX_F_SLIDE = 4u, WX_F_SETTLE = 8u, WX_F_FOOT = 16u, WX_F_AVATAR = 32u;
+const uint WX_F_MOVER = 64u;   // M5: the instance pass appends mover boxes this step
+const uint WX_F_LIMB = 128u;   // #783 follow-up: the avatar pass appends limb boxes this step (the list is live)
+const uint WX_F_LIST = WX_F_MOVER | WX_F_LIMB;   // the stamp list is live (the cover / ring / berm passes gather it)
+const uint WX_F_BODY = 256u;   // #783 BODY CONTACT: the bottom maps stand in for the joints (with WX_F_LIMB)
+
+// M5 MOVER TRACKS: the berm band beside a box (at least kMvBermK x its half-width, clamped;
+// wider when the berm would stand steeper than the repose), the bow band ahead of it (m), the
+// share of the displaced snow pushed ahead (the rest goes to the two sides), the most a berm
+// may rise above the undisturbed depth (x it), how far below the snow's base a box's underside
+// may reach and still be its contact (a sunk wheel; deeper: a tunnel / another surface), how
+// far above the contact a berm texel's base may lie (a curb; higher: a wall top -- no deposit
+// there), the volume counters' unit (m3).
+const float kMvBermK = 0.75, kMvBermMin = 0.15, kMvBermMax = 2.0;
+const float kMvBow = 0.4;
+const float kMvBowShare = 0.15;
+const float kMvBermRise = 0.4;
+const float kMvRepose = 0.7;      // (clean_weather_snow_join.glsl kSnowRepose: the band's slope bound)
+const float kMvSink = 0.5;
+const float kMvBermStep = 0.3;
+const float kMvVolUnit = 1e-6;
+const uint  kMvTile = 32u;   // the boxes one workgroup keeps after its cull
+const uint  kMvLimbBase = 512u;   // the limbs' first slot (llcleanweathervk.h kMoverStampMax)
+const uint  kMvLimbMax = 256u;    // their slots (llcleanweathervk.h kLimbStampMax)
+const uint  kMvVolSlots = 768u;   // mv_vol holds 4 words per box (movers + limbs)
+
+// The underside of stamp k along the vertical through X (world xy): true when that vertical meets
+// the box (slab test on its three half-axes), zb its lowest point there.
+bool mvUnder(uint k, vec2 X, out float zb)
+{
+    const vec3 c = mv[4u * k].xyz;
+    float lo = -1e30, hi = 1e30;
+    zb = 0.0;
+    for (uint i = 0u; i < 3u; ++i)
+    {
+        const vec3 a = mv[4u * k + 1u + i].xyz;
+        const float n = dot(a, a);   // (half extents >= 1 cm: never 0)
+        const float kk = dot(X - c.xy, a.xy);
+        if (abs(a.z) < 1e-5 * sqrt(n))
+        {
+            if (abs(kk) > n) return false;   // a horizontal axis: the vertical is outside its slab
+            continue;
+        }
+        const float t0 = (-n - kk) / a.z, t1 = (n - kk) / a.z;
+        lo = max(lo, min(t0, t1));
+        hi = min(hi, max(t0, t1));
+    }
+    zb = c.z + lo;
+    return lo <= hi;
+}
+
+// The floor box k presses a texel to (base B, fill level `level`, depth D; the vertical through
+// X meets it at underside zb): its underside, but never below the packed layer of the level
+// (x the press strength). Idempotent: depends on nothing the press changes. < 0: no press.
+float mvFloor(float zb, float B, float D, float level)
+{
+    if (zb < B - kMvSink || zb >= B + D) return -1.0;   // another surface's / above the snow
+    const float press = clamp(mv_prm.x, 0.0, 1.0);
+    return max(zb - B, level * mix(1.0, mv_prm.w, press));
+}
+
+// M5: the stamps that reach this workgroup's tile (mvCull).
+shared uint sMv[kMvTile];
+shared uint sMvN;
+
+// M5: cull the stamp list to this workgroup's tile (world xy rect lo..hi of its texels' surface
+// points); every invocation calls it (barriers). Returns the kept count.
+uint mvCull(vec2 lo, vec2 hi, bool on, bool bermOnly)
+{
+    if (gl_LocalInvocationIndex == 0u) sMvN = 0u;
+    barrier();
+    if (on)
+    {
+        // the movers [0, min(appends, cap)), then the limbs [kMvLimbBase, + min(their appends, kMvLimbMax))
+        const uint nm = min(mv_head.x, min(mv_head.y, kMvLimbBase));
+        const uint n = nm + min(mv_head.w, kMvLimbMax);
+        for (uint q = gl_LocalInvocationIndex; q < n; q += 64u)
+        {
+            const uint k = q < nm ? q : kMvLimbBase + (q - nm);
+            const vec4 c = mv[4u * k];
+            if (distance(clamp(c.xy, lo, hi), c.xy) <= c.w 
+                && (!bermOnly || (k < kMvVolSlots && mv_vol[4u * k] > 0u && mv[4u * k + 3u].w > 0.0)))
+            {
+                const uint j = atomicAdd(sMvN, 1u);
+                if (j < kMvTile) sMv[j] = k;
+            }
+        }
+    }
+    barrier();
+    return min(sMvN, kMvTile);
+}
+
+
+// The map gather / the published cover (dynamically uniform indices: frame info / push).
+vec4 wxGather(uint m, vec2 uv)
+{
+    if (m == 0u) return textureGather(uWeatherOccl[0], uv, 0);
+    if (m == 1u) return textureGather(uWeatherOccl[1], uv, 0);
+    if (m == 2u) return textureGather(uWeatherOccl[2], uv, 0);
+    return textureGather(uWeatherOccl[3], uv, 0);
+}
+vec4 wxCoverFetch(uint which, ivec2 t)
+{
+    return which == 0u ? texelFetch(uWeatherOccl[4], t, 0) : texelFetch(uWeatherOccl[5], t, 0);
+}
+
+// The top surface's height along the column through grid uv of a cascade (fr / fz: its
+// ssr.weather rows; base: its first map). false: the column is empty within the box.
+bool wxColumnTop(vec4 fr, vec4 fz, uint base, vec2 uv, out float zTop)
+{
+    const vec4 d = wxGather(base + uint(fr.w + 0.5) - 1u, uv);
+    const float dmin = min(min(d.x, d.y), min(d.z, d.w));
+    zTop = fz.x - dmin * fz.y;
+    return dmin < 1.0;
+}
+
+// Openness at P from a cascade (single tap: the box top of a moving object, an avatar's head).
+float wxOpenAt(vec4 fr, vec4 fz, vec2 s, uint base, vec3 P)
+{
+    const vec2 uv = (P.xy - (fz.x - P.z) * s - fr.xy) * fr.z;
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) return -1.0;   // not covered
+    const vec4 d = wxGather(base + uint(fr.w + 0.5) - 1u, uv);
+    const vec4 top = fz.x - d * fz.y;
+    const vec4 op = clamp((vec4(P.z) - (top - 1.5 * fz.z)) / fz.z, 0.0, 1.0);
+    return dot(op, vec4(0.25));
+}
+float wxSkyAt(vec3 P)
+{
+    float o = -1.0;
+    if (ssr.weather[3].w > 0.5) o = wxOpenAt(ssr.weather[3], ssr.weather[4], ssr.weather[7].xy, 2u, P);
+    if (o < 0.0 && ssr.weather[1].w > 0.5) o = wxOpenAt(ssr.weather[1], ssr.weather[2], ssr.weather[6].xy, 0u, P);
+    return o < 0.0 ? 1.0 : o;
+}
+
+#ifndef WX_SNOW_RING
+// M5 MOVER TRACKS: the snow top (m, world z) under world point P from the published inner grid
+// (its filtered base + depth) or, outside it, the published outer ring. false: neither covers P
+// (or has a base there). inner: the inner grid answered.
+bool mvSnowTop(vec3 P, out float top, out bool inner)
+{
+    top = 0.0;
+    inner = false;
+    const int res = int(sp.a.y + 0.5);
+    if (ssr.weather[10].w > 0.5)
+    {
+        const vec4 pr = ssr.weather[10], pz = ssr.weather[12];
+        const vec2 puv = (P.xy - (pz.x - P.z) * pz.yz - pr.xy) * pr.z;
+        if (all(greaterThanEqual(puv, vec2(0.0))) && all(lessThan(puv, vec2(1.0))))
+        {
+            inner = true;
+            const uint which = uint(pr.w + 0.5) - 1u;
+            const ivec2 q = ivec2(puv * float(res));
+            const float b = which == 0u ? imageLoad(uBase[0], q).r : imageLoad(uBase[1], q).r;
+            if (b > 1e29) return false;
+            top = pz.x - b + max(wxCoverFetch(which, q).a, 0.0);
+            return true;
+        }
+    }
+    if (sp.h.z != 0.0)
+    {
+        const uint which = sp.h.z > 0.0 ? 0u : 1u;
+        const vec2 rs = vec2(sp.g.w, intBitsToFloat(sp.e.w));
+        const int rres = imageSize(uRing[0]).x;
+        const vec2 ruv = (P.xy - (sp.h.w - P.z) * rs - sp.h.xy) * abs(sp.h.z);
+        if (all(greaterThanEqual(ruv, vec2(0.0))) && all(lessThan(ruv, vec2(1.0))))
+        {
+            const ivec2 q = ivec2(ruv * float(rres));
+            const vec4 v = which == 0u ? imageLoad(uRing[0], q) : imageLoad(uRing[1], q);
+            if (v.x > 1e29) return false;
+            top = sp.h.w - v.x + max(v.y, 0.0);
+            return true;
+        }
+    }
+    return false;
+}
+
+// Write stamp slot k: the world box (centre c, half-axes a0..a2), its horizontal motion direction
+// (zero: a static press -- a limb's rim all around) and the distance swept this step (0: pressed
+// only, no berm). The reach (the tile cull) covers the projected box + the berm / bow bands.
+void mvWrite(uint k, vec3 c, vec3 a0, vec3 a1, vec3 a2, vec2 dir, float swept)
+{
+    const float hr = length(a0.xy) + length(a1.xy) + length(a2.xy);   // (bounds the box's projection)
+    const uint o = 4u * k;
+    mv[o] = vec4(c, hr + kMvBermMax + kMvBow);
+    mv[o + 1u] = vec4(a0, dir.x);
+    mv[o + 2u] = vec4(a1, dir.y);
+    mv[o + 3u] = vec4(a2, swept);
+}
+
+// ---- #783 BODY CONTACT: an avatar's real underside (the shelter chain's BOTTOM map) ----
+// Every avatar with a shelter layer has its lowest skinned / worn surface per texel of its tile
+// (clean_weather_shelter.comp RASTER), in the layer's frame AT THE RASTER (a layer not re-rastered
+// this step stays where its avatar was). The avatar pass turns its contacts with the snow into
+// BODY BOXES on the limb list (their footprint, mv_vol[4k + 3] = the layer + 1); the cover pass
+// presses a body box's texels down to the bottom map itself (mvPress), not to the box: hooves rigged
+// to the arm bones, a hoof mesh below its joint, a belly, a tail all press where they really are.
+const int  kBodyRows = 8;         // (clean_weather_shelter.glsl WX_SH_BODY_ROWS)
+const uint kBodyLayers = 16u;     // (WX_SH_LAYERS)
+const float kBodyStand = 0.2;     // a STANDING contact packs the snow to this share of its level (the footprints')
+struct WxBody { uint slot; vec3 c; float yaw; float e; int res; ivec2 o; int th; };
+
+float wxBodyDec(uint e) { return uintBitsToFloat((e & 0x80000000u) != 0u ? (e & 0x7FFFFFFFu) : ~e); }
+uint bodyWord(ivec2 t) { return imageLoad(uBody, t).r; }
+
+// Layer L's raster-time frame (false: no layer / no bottom map).
+bool bodyLayer(uint L, out WxBody b)
+{
+    b.slot = 0xFFFFFFFFu; b.c = vec3(0.0); b.yaw = 0.0; b.e = 0.0; b.res = 0; b.o = ivec2(0); b.th = 0;
+    const ivec2 sz = imageSize(uBody);
+    const int th = (sz.y - kBodyRows) / 2;
+    if (th <= 0 || L >= kBodyLayers || int(L) >= sz.x) return false;
+    const int r0 = 2 * th;
+    const uint s1 = bodyWord(ivec2(int(L), r0));
+    if (s1 == 0u) return false;
+    b.slot = s1 - 1u;
+    b.c = vec3(uintBitsToFloat(bodyWord(ivec2(int(L), r0 + 1))), uintBitsToFloat(bodyWord(ivec2(int(L), r0 + 2))),
+               uintBitsToFloat(bodyWord(ivec2(int(L), r0 + 3))));
+    b.yaw = uintBitsToFloat(bodyWord(ivec2(int(L), r0 + 4)));
+    b.e = uintBitsToFloat(bodyWord(ivec2(int(L), r0 + 5)));
+    b.res = int(bodyWord(ivec2(int(L), r0 + 6)));
+    const uint oc = bodyWord(ivec2(int(L), r0 + 7));
+    b.o = ivec2(int(oc & 0xFFFFu), int(oc >> 16u));
+    b.th = th;
+    return b.e > 0.0 && b.e < 64.0 && b.res > 0 && b.res <= th && b.o.x + b.res <= sz.x && b.o.y + b.res <= th
+        && all(lessThan(abs(b.c), vec3(1.0e6))) && !isnan(b.yaw);
+}
+// Layer-local xy -> world xy.
+vec2 bodyToWorld(WxBody b, vec2 q)
+{
+    const vec2 cs = vec2(cos(b.yaw), sin(b.yaw));
+    return b.c.xy + vec2(cs.x * q.x - cs.y * q.y, cs.y * q.x + cs.x * q.y);
+}
+// The world height of the avatar's underside at world xy X (1e30: nothing there / off the tile).
+float bodyBottomAt(WxBody b, vec2 X)
+{
+    const vec2 cs = vec2(cos(b.yaw), sin(b.yaw));
+    const vec2 d = X - b.c.xy;
+    const vec2 uv = vec2(cs.x * d.x + cs.y * d.y, cs.x * d.y - cs.y * d.x) / b.e + 0.5;
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThanEqual(uv, vec2(1.0)))) return 1e30;
+    const uint w = bodyWord(b.o + ivec2(uv * float(b.res)) + ivec2(0, b.th));
+    return w == 0u ? 1e30 : b.c.z - wxBodyDec(w);
+}
+// The lowest of four taps a quarter grid texel (r) around X: a snow texel takes the lowest part of
+// the body over it (a hoof narrower than the texel still reaches it).
+float bodyBottom4(WxBody b, vec2 X, float r)
+{
+    return min(min(bodyBottomAt(b, X + vec2(-r, -r)), bodyBottomAt(b, X + vec2(r, -r))),
+               min(bodyBottomAt(b, X + vec2(-r, r)), bodyBottomAt(b, X + vec2(r, r))));
+}
+// Whether world xy X lies in box k's horizontal footprint (its first two half-axes: a body box's
+// are horizontal).
+bool mvFootprint(uint k, vec2 X)
+{
+    const vec2 r = X - mv[4u * k].xy;
+    for (uint i = 0u; i < 2u; ++i)
+    {
+        const vec2 a = mv[4u * k + 1u + i].xy;
+        const float n = dot(a, a);
+        if (n > 1e-10 && abs(dot(r, a)) > n) return false;
+    }
+    return true;
+}
+#endif
+
+#if !defined(WX_SNOW_INST) && !defined(WX_SNOW_AVATAR) && !defined(WX_SNOW_STAMP) && !defined(WX_SNOW_BERM)
+layout(local_size_x = 8, local_size_y = 8) in;
+#include "clean_weather_snow_join.glsl"
+
+// OBLIQUE SHELTER (#783): while snow falls or lies the maps hold VERTICAL column tops (the
+// support the snow rests on); the snow arriving along the fall direction d ~ (s, -1)
+// (ssr.weather[7].zw) is shadowed by any column top above its path -- march upwind from P,
+// the path rising 1 / |s| per metre, n steps growing as k^1.6 x step (a map's frame rows /
+// shear / first slot). 1 open, 0 sheltered (soft over 5 cm). Straight down (|s| ~ 0) a column
+// top is open by definition.
+float wxFallOpen(vec4 fr, vec4 fz, vec2 ms, uint base, vec3 P, float step, int n)
+{
+    const vec2 sf = ssr.weather[7].zw;
+    const float ls = length(sf);
+    if (ls < 0.02) return 1.0;
+    const vec2 dir = -sf / ls;   // upwind: where the snow comes from
+    float occ = 0.0;
+    for (int k = 1; k <= n; ++k)
+    {
+        const float dh = step * pow(float(k), 1.6);
+        const float zr = P.z + 0.05 + dh / ls;   // the path's height there (+ a little: no self-shadow)
+        if (zr > fz.x) break;                    // above the map's box: open
+        const vec2 xy = P.xy + dir * dh;
+        const vec2 uv = (xy - (fz.x - zr) * ms - fr.xy) * fr.z;
+        if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) break;
+        float zt;
+        if (wxColumnTop(fr, fz, base, uv, zt)) occ = max(occ, clamp((zt - zr) / 0.05, 0.0, 1.0));
+        if (occ >= 1.0) break;
+    }
+    return 1.0 - occ;
+}
+
+const float kSlideSlope = 0.7;   // the base slope (dz / dx) past which the fill level falls (~35 degrees; 0 at 2 x)
+// SUPPORT CAP (#783): loose snow on a raised support cannot stand taller than the angle of repose
+// allows over the support's own extent -- at most kSupCohesion (wet snow's cohesion) + kSupRepose
+// (tan ~35 degrees) x the distance along the support's top to where its base drops away. A drop
+// is an EDGE when the base falls by more than kSupStep and the lower side's snow does not reach
+// up to this base (a curb the road's snow fills is no edge). The cap is a chamfer distance carried
+// with the grid (stored with the filtered base, .y / the ring's .z): each step a texel takes the
+// least of its own edge cap and its same-support neighbours' previous caps + kSupRepose x their
+// distance, so it converges over a support's half-width in texels (a few steps) and only changes
+// where the base does; ordinary ground has no edge and stays uncapped. The excess slides off
+// (dropped). On a base steeper than the repose the snow is held to its (falling) fill level +
+// the cohesion: it slides off a sphere's flanks. The mesh follows the depth: a dome / cone.
+const float kSupRepose = 0.7;
+const float kSupCohesion = 0.04;
+const float kSupStep = 0.1;
+// #783 round 12 OPENED FEATURES AT A DROP. The filtered base OPENS (erode then dilate) away anything
+// narrower than 2 kSnowBaseR + 1 texels so a post or a picket pokes through the sheet around it --
+// its texels take the base around it. Where such a feature stands at a DROP, the base it takes is the
+// level on ONE side of it, carried out to the drop. Measured on a hollow tree (snowdump
+// 20261023-015808 / 015817 / 015822): its foliage shell, 4 - 5 texels thick, raw top 19.5 - 20.2 m, was
+// opened to the level of the tier inside it (18.3 - 19.4 m) right out to its outer face over a 3 - 4 m
+// drop to the ground (and its sloped rim to the rim's lowest edge), so the inner tier's sheet ran out
+// through the foliage and ended in the air in skirts: the slabs with dark undersides on the tree's
+// sides (210 - 260 drop skirts per dump, 3 - 4 m up). A texel whose raw column top stands more than
+// kOpenedSkin over its filtered base (inside an opened feature) with a drop (a base lower by
+// kSupStep, or none) within 2 kSnowBaseR texels -- the widest feature the open removes -- holds no
+// depth: the sheet ends inside the feature, which hides its end; the coating (the cover's R) still
+// whitens the feature. A post in a lawn (no drop near) keeps the lawn's sheet through it as before
+// (no crater around it). (The outer ring, -DWX_SNOW_RING, already drops narrow supports.)
+const float kOpenedSkin = 0.25;
+// #906 LEE: the oblique fall shelter (wxFallOpen) ATTENUATES the snowfall's fill level and cover
+// growth, down to this share, instead of zeroing them: falling snow eddies into the lee of walls
+// and hedges (where drifts collect); it does not leave the ground there bare. Zeroed, every kerb,
+// hedge and building threw a bare "snow shadow" metres long downwind, with texel-staircase edges
+// from the upwind march.
+const float kLeeShare = 0.5;
+// A texel's own previous cap relaxes by this much per step (m; must stay under kSupRepose x the
+// texel so a live edge's chamfer wins): a cap whose edge went away (the lower side's snow filled
+// up to it, a support removed) grows back within seconds instead of holding forever.
+#ifndef WX_SNOW_RING
+const float kSupRelax = 0.01;
+#else
+const float kSupRelax = 0.05;
+#endif
+#ifndef WX_SNOW_RING
+const int   kSnowBaseR = 2;      // the base filter's radius (texels): close fills gaps <= 2R, open drops features < 2R + 1
+#else
+const int   kSnowBaseR = 1;      // (the outer ring: one ring texel, ~50 cm)
+#endif
+const int   kAp = 4 * kSnowBaseR + 1;   // the tile's apron: four morphology steps of R + the fill gradient's ring
+const int   kTs = 8 + 2 * kAp;
+const float kNoBase = 1e30;      // the base image's "no base" (and its clear value)
+const float kDriftErodible = 0.05;   // the loose surface layer the wind can take (m)
+const float kDriftCover = kSnowCoverAbove;   // (6 m) #783: a downwind base this far above the snow top is a COVER (m): above
+                                     // any house / shed / fence / wall top, so drift still piles against those;
+                                     // airships, bridges, tall canopies pass
+// #783 WATER: no snow below the region's water surface (ssr.water[3].w) -- a base under it is a
+// river / lake bed: its fill level and depth are 0 (snow falling onto open water is gone), the
+// coating's cover too, and the repose exchanges nothing with it (no slumping into the water).
+// kWaterSkin: a surface this far under the water line still counts as dry (a shore at the level).
+const float kWaterSkin = 0.02;
+bool wxSubmerged(float z) { return z < ssr.water[3].w - kWaterSkin; }
+
+shared float sA[kTs * kTs];
+shared float sB[kTs * kTs];
+// M5: the press of a texel (base B, fill level `level`, depth D, its surface point X) by the
+// kept boxes: the lowest floor of every box whose underside sits in its snow (mvFloor), never
+// raising it. account (the inner grid): the snow it took (x the texel's area) is counted against
+// the box with that floor and in the step's totals.
+float mvPress(uint nk, vec2 X, float B, float D, float level, bool account, float area)
+{
+    float best = D;
+    uint kb = 0xFFFFFFFFu;
+    for (uint j = 0u; j < nk; ++j)
+    {
+        const uint k = sMv[j];
+        float zb;
+        bool stand = false;
+#ifndef WX_SNOW_RING
+        const uint bl = (k >= kMvLimbBase && k < kMvVolSlots) ? mv_vol[4u * k + 3u] : 0u;
+        if (bl != 0u)
+        {
+            // #783 BODY CONTACT: the avatar's own underside over this texel (its bottom map), inside
+            // the body box's footprint; a contact that low on the snow's base STANDS on it.
+            WxBody b;
+            if (!mvFootprint(k, X) || !bodyLayer(bl - 1u, b)) continue;
+            zb = bodyBottom4(b, X, 0.25 * sqrt(max(area, 0.0)));
+            if (zb > 1e29) continue;
+            stand = zb < B + mv_bprm.x;
+        }
+        else
+#endif
+        if (!mvUnder(k, X, zb)) continue;
+        float fl = mvFloor(zb, B, D, level);
+        if (fl < 0.0) continue;
+#ifndef WX_SNOW_RING
+        if (stand) fl = min(fl, max(zb - B, kBodyStand * level));   // (full weight: the footprints' packing)
+#endif
+        // (equal floors -- the face plates of one prim, a mesh's faces: the box with the larger
+        // reach takes the count, deterministically, never a thin plate's one-texel band)
+        const bool tie = kb != 0xFFFFFFFFu && abs(fl - best) <= 1e-3;
+        if ((!tie && fl < best) || (tie && mv[4u * k].w > mv[4u * kb].w)) { best = min(best, fl); kb = k; }
+    }
+    if (kb == 0xFFFFFFFFu) return D;
+    if (account)
+    {
+        const uint q = uint((D - best) * area / kMvVolUnit + 0.5);
+        if (q > 0u)
+        {
+            if (kb < kMvVolSlots)
+            {
+                atomicAdd(mv_vol[4u * kb], q);
+                atomicAdd(mv_vol[4u * kb + 1u], 1u);
+                atomicAdd(mv_vol[4u * kb + 2u], uint(D * area / kMvVolUnit + 0.5));
+            }
+            atomicAdd(mv_tot.x, q);
+            atomicAdd(mv_tot.z, 1u);
+        }
+    }
+    return best;
+}
+
+// One separable morphology step over the tile (even steps sA -> sB, odd sB -> sA; taps
+// clamped to the tile: the apron absorbs the error). The sequence: dilate x / y, erode x / y
+// (CLOSE), erode x / y, dilate x / y (OPEN).
+void morphStep(int p)
+{
+    const bool dil = p < 2 || p >= 6;
+    const bool horiz = (p & 1) == 0;
+    for (int k = int(gl_LocalInvocationIndex); k < kTs * kTs; k += 64)
+    {
+        const int x = k % kTs, y = k / kTs;
+        float v = dil ? -kNoBase : kNoBase;
+        for (int j = -kSnowBaseR; j <= kSnowBaseR; ++j)
+        {
+            const int q = horiz ? y * kTs + clamp(x + j, 0, kTs - 1) : clamp(y + j, 0, kTs - 1) * kTs + x;
+            const float a = (p & 1) == 0 ? sA[q] : sB[q];
+            v = dil ? max(v, a) : min(v, a);
+        }
+        if ((p & 1) == 0) sB[k] = v; else sA[k] = v;
+    }
+}
+
+#ifndef WX_SNOW_RING
+// A texel of the PREVIOUS grid (which): its filtered base h and depth d. ok = false outside
+// the grid or where it had no base.
+struct WxNb { float h; float d; bool ok; };
+WxNb wxPrev(uint which, ivec2 q, int res, float top)
+{
+    WxNb n; n.h = 0.0; n.d = 0.0; n.ok = false;
+    if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, ivec2(res)))) return n;
+    const float b = imageLoad(uBase[which], q).r;
+    n.ok = b < 0.5 * kNoBase;
+    n.h = top - b;
+    n.d = max(wxCoverFetch(which, q).a, 0.0);
+    return n;
+}
+
+// How exposed a texel (snow top sq) is to the wind: 1 open, 0 in the lee of a snow top
+// higher upwind (taps 2 .. 16 texels up the drift step; higher than 0.3 x the distance
+// shelters fully).
+float wxExposure(uint which, ivec2 q, float sq, ivec2 st, float wStep, int res, float top)
+{
+    float sh = 0.0;
+    for (int k = 2; k <= 16; k *= 2)
+    {
+        const WxNb u = wxPrev(which, q - st * k, res, top);
+        if (u.ok) sh = max(sh, clamp((u.h + u.d - sq - 0.05) / (0.3 * float(k) * wStep), 0.0, 1.0));
+    }
+    return 1.0 - sh;
+}
+
+// The change of a carried texel's depth this step, all from the previous grid around its
+// previous texel pt (base bx, depth dx), every exchange computed identically from both sides
+// (mass conserved):
+//   REPOSE (settle / slide; snowReposeFlow): between JOINED neighbours (clean_weather_snow_join.glsl;
+//     #783: all EIGHT, the diagonals at their true distance) whose snow tops differ by more than
+//     the angle of repose (RenderVKWeatherSnowReposeAngle), half the excess x the avalanche share
+//     (a fifth per step, NOT scaled by the frame time: an avalanche is fast next to the wind's
+//     supply) moves down, at most kSnowReposeDonor of the donor's depth (past the grid's border a
+//     neighbour mirrored from the opposite one) -- the snow top stays at <= the repose; it only
+//     ever lowers a peak, so it cannot pile a single texel up. Same-base steps (a lee, a pressed
+//     track, a spot a moved object left) slump into ramps: the open floor beside them RECEIVES
+//     snow it got no snowfall for. A cut (a base above the snow top: a wall, a raised slab, the
+//     roof over a sheltered floor) exchanges nothing -- the heightfield has no floor under a
+//     roof; the mesh's TOE apron (clean_weather_snowmesh.comp) draws the slope in under it.
+//     #783 THE COVER TOE (snowCoverSink): beside a column it cannot join that stands over its snow top (a cover or a wall, any height)
+//     the texel slumps toward the toe's height, so the sheet behind it lies at the repose down to
+//     the outline and the apron continues that slope onto the floor;
+//   DRIFT: the wind takes the LOOSE SURFACE LAYER only (kDriftErodible of the exposed depth,
+//     x the drift share) one texel downwind, and only where the downwind snow top is not above
+//     this one's (snow is never blown up a face higher than the snow it comes from: a lee pile
+//     grows to its obstacle's snow top, no higher); past the grid's upwind border a field
+//     like this texel's (outside: its fill level). Before (#783 walls): the whole depth was
+//     erodible and the base alone gated the flow -- a roof refilled to its level every frame
+//     poured its snowfall into a one-texel lee row faster than the (frame-time scaled) repose
+//     could spread it, up to the 3 x global cap: vertical columns of snow.
+float wxTransport(uint which, ivec2 pt, float bx, float dx, int res, float top, float w, float outside)
+{
+    const uint feat = sp.c.w;
+    float dD = 0.0;
+    const float sx = bx + dx;
+    const bool settle = (feat & WX_F_SETTLE) != 0u, slide = (feat & WX_F_SLIDE) != 0u;
+    if (settle || slide)
+    {
+        // (sp.f.x: the avalanche share, 0 with both off; sp.f.y: tan of the angle of repose)
+        const float share = sp.f.x, tanR = sp.f.y;
+        for (int i = 0; i < 8; ++i)
+        {
+            const ivec2 q = pt + kSnowN8[i];
+            WxNb n = wxPrev(which, q, res, top);
+            if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, ivec2(res))))
+            {
+                // Past the grid's border: the field continues -- mirrored through this texel
+                // from its opposite neighbour (a uniform slope nets to zero here as inside; a
+                // one-sided border row would deplete / pile, and a snap carries it inward).
+                const WxNb op = wxPrev(which, pt - kSnowN8[i], res, top);
+                if (!op.ok) continue;
+                n.h = 2.0 * bx - op.h; n.d = dx; n.ok = true;
+            }
+            if (!n.ok || wxSubmerged(n.h) || wxSubmerged(bx)) continue;   // (#783 water: no exchange)
+            dD += snowReposeFlow(bx, dx, n.h, n.d, w * (i < 4 ? 1.0 : 1.41421356), tanR, share);
+            dD += snowCoverSink(bx, dx, n.h, n.d, w * (i < 4 ? 1.0 : 1.41421356), w, tanR, share);   // (#783 the cover toe: a slope in under a cover)
+        }
+    }
+    const ivec2 st = sp.e.xy;
+    if ((feat & WX_F_DRIFT) != 0u && (st.x != 0 || st.y != 0) && sp.d.w > 0.0)
+    {
+        const float wStep = w * length(vec2(st));
+        const ivec2 qd = pt + st;
+        const WxNb nd = wxPrev(which, qd, res, top);
+        const bool inGrid = all(greaterThanEqual(qd, ivec2(0))) && all(lessThan(qd, ivec2(res)));
+        // (#783: a downwind base FAR above this snow top -- kDriftCover: an airship, a high roof, a
+        // canopy -- is a cover the wind blows on under, not a wall: the snow leaves the field there
+        // instead of piling into a cliff at the shelter's edge up to the drift cap)
+        const bool acceptOut = !inGrid || (nd.ok && (nd.h + nd.d <= sx + kSnowSeam || nd.h > sx + kDriftCover));
+        if (acceptOut) dD -= sp.d.w * min(dx, kDriftErodible) * wxExposure(which, pt, sx, st, wStep, res, top);
+        // In: the upwind neighbour's out (the same expression it evaluates for itself).
+        const ivec2 qu = pt - st;
+        if (any(lessThan(qu, ivec2(0))) || any(greaterThanEqual(qu, ivec2(res))))
+            dD += sp.d.w * min(outside, kDriftErodible);
+        else
+        {
+            const WxNb nu = wxPrev(which, qu, res, top);
+            // (#783: never from a COVER -- kDriftCover over this snow top: what the wind takes off an
+            // airship / a high canopy is carried off, not dropped into the one-texel row under its
+            // edge, which it piled toward the drift cap: the cliff the cover toe had to slump)
+            if (nu.ok && sx <= nu.h + nu.d + kSnowSeam && nu.h <= sx + kDriftCover)
+                dD += sp.d.w * min(nu.d, kDriftErodible) * wxExposure(which, qu, nu.h + nu.d, st, wStep, res, top);
+        }
+    }
+    return dD;
+}
+
+// M3 OUTER RING: the published ring's depth at surface point X on base Bf (bilinear over its
+// texels on the same base) -- a texel entering the inner grid takes what the ring kept; the
+// level where the ring has nothing.
+float wxRingDepth(vec2 X, float Bf, float level, float tol)
+{
+    if (sp.h.z == 0.0) return level;
+    const uint which = sp.h.z > 0.0 ? 0u : 1u;
+    const float rtop = sp.h.w;
+    const vec2 rs = vec2(sp.g.w, intBitsToFloat(sp.e.w));
+    const int rres = imageSize(uRing[0]).x;
+    const vec2 f = (X - (rtop - Bf) * rs - sp.h.xy) * abs(sp.h.z) * float(rres) - 0.5;
+    const ivec2 i0 = ivec2(floor(f));
+    const vec2 fr = f - vec2(i0);
+    float acc = 0.0, ws = 0.0;
+    for (int k = 0; k < 4; ++k)
+    {
+        const ivec2 o = ivec2(k & 1, k >> 1);
+        const ivec2 q = i0 + o;
+        if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, ivec2(rres)))) continue;
+        const vec4 v = which == 0u ? imageLoad(uRing[0], q) : imageLoad(uRing[1], q);
+        if (v.x > 1e29 || abs(rtop - v.x - Bf) >= tol) continue;
+        const float wk = (o.x == 1 ? fr.x : 1.0 - fr.x) * (o.y == 1 ? fr.y : 1.0 - fr.y);
+        acc += wk * v.y;
+        ws += wk;
+    }
+    return ws > 0.25 ? acc / ws : level;
+}
+
+// #783 round 13 NO SHEET WHERE THE COARSE SURFACE HAS NONE. The outer ring's filtered base (0.5 m
+// texels, closed then opened at one ring texel: anything narrower than ~1.5 m goes) is the surface a
+// wide support gives; a tree's crown and its tiers, a lamp's cap, a narrow ledge are not in it (the
+// ring sees the ground under them, its coverage gate drawing them bare). Round 12 cleared only an
+// opened feature's texels next to a drop; the owner's tree still showed thin plates on its tier rims and
+// a ragged plate round the canopy's bottom -- the inner tiers themselves, 1.2 - 2 m across, enclosed by
+// the shell (replayed on dumps 015808 / 015817 / 015822: every snowy texel on both trees stands 2.8 -
+// 4.4 m over the highest ring base of its 2 x 2 taps, the ground at 15.2). A texel whose filtered base
+// stands more than kCanopyLift over the highest base of the ring's taps there holds no depth: no sheet,
+// no skirts, no apron sources -- the coating (the cover's R) whitens it. A deck, a roof, the
+// boardwalk under its roof (the ring's surface there is that deck / roof, or higher) and a table or a
+// bench (lower than kCanopyLift over the ground) keep their snow. No published ring: no test.
+const float kCanopyLift = 1.0;
+float wxRingBaseMax(vec2 X, float Bf)
+{
+    if (sp.h.z == 0.0) return 1e30;
+    const uint which = sp.h.z > 0.0 ? 0u : 1u;
+    const float rtop = sp.h.w;
+    const vec2 rs = vec2(sp.g.w, intBitsToFloat(sp.e.w));
+    const int rres = imageSize(uRing[0]).x;
+    const ivec2 i0 = ivec2(floor((X - (rtop - Bf) * rs - sp.h.xy) * abs(sp.h.z) * float(rres) - 0.5));
+    float best = -1e30;
+    for (int k = 0; k < 4; ++k)
+    {
+        const ivec2 q = i0 + ivec2(k & 1, k >> 1);
+        if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, ivec2(rres)))) continue;
+        const float b = (which == 0u ? imageLoad(uRing[0], q) : imageLoad(uRing[1], q)).x;
+        if (b < 1e29) best = max(best, rtop - b);
+    }
+    return best > -1e29 ? best : 1e30;   // (no ring surface at all here: no test)
+}
+
+void main()
+{
+    const int res = int(sp.a.y + 0.5);
+    const ivec2 t = ivec2(gl_GlobalInvocationID.xy);
+    const uint dst = uint(sp.a.x + 0.5);
+    // This frame's grid = the near cascade's published frame.
+    const vec4 fr = ssr.weather[3], fz = ssr.weather[4];
+    const vec2 s = ssr.weather[7].xy;
+    const float zEmpty = fz.x - fz.y;   // an empty column: the box's bottom
+    // THE FILTERED BASE: the column tops of the tile (taps past the grid's border replicate
+    // the nearest texel: the field continues), closed then opened (every invocation reaches
+    // the barriers: the grid need not be a multiple of 8).
+    {
+        const ivec2 go = ivec2(gl_WorkGroupID.xy) * 8 - kAp;
+        for (int k = int(gl_LocalInvocationIndex); k < kTs * kTs; k += 64)
+        {
+            const ivec2 g = clamp(go + ivec2(k % kTs, k / kTs), ivec2(0), ivec2(res - 1));
+            float z;
+            sA[k] = wxColumnTop(fr, fz, 2u, (vec2(g) + 0.5) / float(res), z) ? z : zEmpty;
+        }
+        barrier();
+        for (int p = 0; p < 8; ++p)
+        {
+            morphStep(p);
+            barrier();
+        }
+    }
+    // M5: the mover boxes reaching this tile (its texels' columns on the map's top plane, widened
+    // by the shear's reach over the box's span: a surface point is its column + (top - z) s).
+    uint nMv;
+    {
+        const float tw = 1.0 / (float(res) * fr.z);
+        const vec2 g0 = fr.xy + vec2(gl_WorkGroupID.xy * 8u) * tw;
+        const float sh = length(s) * fz.y;
+        nMv = mvCull(g0 - sh, g0 + 8.0 * tw + sh, (sp.c.w & WX_F_LIST) != 0u && (sp.c.w & WX_F_DEPTH) != 0u, false);
+    }
+    if (t.x >= res || t.y >= res) return;
+    const ivec2 c = ivec2(gl_LocalInvocationID.xy) + kAp;
+    const float Bf = sA[c.y * kTs + c.x];
+    const bool baseOk = Bf > zEmpty + 0.5;
+    const vec2 uv = (vec2(t) + 0.5) / float(res);
+    const vec2 u = fr.xy + uv / fr.z;    // the column on the map's top plane
+    float zs;
+    const bool rawOk = wxColumnTop(fr, fz, 2u, uv, zs);
+    const uint feat = sp.c.w;
+    const bool depthOn = (feat & WX_F_DEPTH) != 0u;
+    const float global = sp.a.w;
+    const float tol = sp.b.x;
+    const float w = 1.0 / (fr.z * float(res));   // grid texel (m)
+    // M3: the fill level -- the global depth x the base's slope factor (the gradient one-sided
+    // where a neighbour is past the grid's border, has no base, or is a step past the join
+    // allowance: a curb is not a slope) -- and the drift piles' cap.
+    float level = 0.0;
+    float slopeB = 0.0;          // the base's slope (dz / dx)
+    float supCap = kNoBase;      // the support cap (m of depth; kNoBase: none)
+    const float cap = sp.d.x * sp.f.z;
+    if (depthOn && baseOk)
+    {
+        float hn[4];
+        bool on[4];
+        const ivec2 kN[4] = ivec2[4](ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1));
+        for (int i = 0; i < 4; ++i)
+        {
+            const ivec2 g = t + kN[i];
+            hn[i] = sA[(c.y + kN[i].y) * kTs + c.x + kN[i].x];
+            on[i] = all(greaterThanEqual(g, ivec2(0))) && all(lessThan(g, ivec2(res))) && hn[i] > zEmpty + 0.5
+                 && abs(hn[i] - Bf) <= kSnowSeam + kSnowJoinSlope * w;
+        }
+        const float gx = (on[0] && on[1]) ? (hn[1] - hn[0]) / (2.0 * w) : on[1] ? (hn[1] - Bf) / w : on[0] ? (Bf - hn[0]) / w : 0.0;
+        const float gy = (on[2] && on[3]) ? (hn[3] - hn[2]) / (2.0 * w) : on[3] ? (hn[3] - Bf) / w : on[2] ? (Bf - hn[2]) / w : 0.0;
+        slopeB = length(vec2(gx, gy));
+        level = sp.d.x * (1.0 - smoothstep(kSlideSlope, 2.0 * kSlideSlope, slopeB));
+        // (the snowfall reaches it only where the fall direction is open: a lee is filled by
+        // the repose from its snowy neighbours on the same base, never by the sky)
+        // (#906: attenuated, never zeroed -- see kLeeShare)
+        level *= mix(kLeeShare, 1.0, wxFallOpen(fr, fz, s, 2u, vec3(u + (fz.x - Bf) * s, Bf), w, 16));
+        // SUPPORT CAP: a 4-neighbour whose base falls away further than the snow there can fill
+        // (its level at most: no carried state needed, so a texel new to the grid is capped too)
+        // makes this texel a support edge.
+        for (int i = 0; i < 4; ++i)
+        {
+            const ivec2 g = t + kN[i];
+            if (any(lessThan(g, ivec2(0))) || any(greaterThanEqual(g, ivec2(res)))) continue;
+            if (hn[i] < Bf - kSupStep - sp.d.x) supCap = kSupCohesion + kSupRepose * 0.5 * w;
+        }
+    }
+    // The cover's openness (the raw top along the fall direction).
+    const float openR = rawOk ? mix(kLeeShare, 1.0, wxFallOpen(fr, fz, s, 2u, vec3(u + (fz.x - zs) * s, zs), w, 16)) : 0.0;
+    float R = global * openR, G = 0.0;   // a texel new to the grid: the open-sky cover on top, unknown below
+    float D = -1.0;              // ... and the outer ring's depth there, else its level
+    if (sp.b.y < 0.5 && ssr.weather[10].w > 0.5)
+    {
+        const vec4 pr = ssr.weather[10], pz = ssr.weather[12];
+        const uint which = uint(pr.w + 0.5) - 1u;
+        // COVER: the raw top's surface point in the previous grid (its plane, shear, corner).
+        if (rawOk)
+        {
+            const vec2 X = u + (fz.x - zs) * s;
+            const vec2 puv = (X - (pz.x - zs) * pz.yz - pr.xy) * pr.z;
+            if (all(greaterThanEqual(puv, vec2(0.0))) && all(lessThan(puv, vec2(1.0))))
+            {
+                const vec4 p = wxCoverFetch(which, ivec2(puv * float(res)));
+                const float hOld = pz.x - p.b;
+                // Something new on top: the old top's snow lies under it; the new top starts at the
+                // open-sky cover (a parked car that stops being a mover keeps a snowy roof instead of
+                // popping bare, and a rezzed object matches a rezzed mover; an alpha-tested canopy
+                // flipping leaf / ground between map renders keeps its snow too).
+                if (zs > hOld + tol) { G = p.r; R = global * openR; }
+                else if (zs < hOld - tol) { R = p.g; G = 0.0; }   // the top left: what it covered shows again
+                else { R = p.r; G = p.g; }
+            }
+        }
+        // DEPTH: the filtered base's point in the previous grid -- carried (+ transport) while
+        // its base stays (an aliased bar edge or gap does not flip it: the filter closed it).
+        if (depthOn && baseOk)
+        {
+            const vec2 X = u + (fz.x - Bf) * s;
+            const vec2 puv = (X - (pz.x - Bf) * pz.yz - pr.xy) * pr.z;
+            if (all(greaterThanEqual(puv, vec2(0.0))) && all(lessThan(puv, vec2(1.0))))
+            {
+                const ivec2 pt = ivec2(puv * float(res));
+                const WxNb o = wxPrev(which, pt, res, pz.x);
+                if (o.ok && abs(Bf - o.h) < tol)
+                    D = o.d + wxTransport(which, pt, o.h, o.d, res, pz.x, w, level);
+                // SUPPORT CAP: the previous grid's 8 neighbours -- a drop the snow there does not
+                // fill is an edge; a neighbour on the same support passes its cap on (chamfer).
+                if (o.ok)
+                {
+                    const float own = (which == 0u ? imageLoad(uBase[0], pt) : imageLoad(uBase[1], pt)).y;
+                    if (own < 0.5 * kNoBase) supCap = min(supCap, own + kSupRelax);   // (relaxing)
+                }
+                if (o.ok)
+                {
+                    for (int k = 0; k < 8; ++k)
+                    {
+                        const ivec2 off = ivec2(k < 3 ? k - 1 : k < 5 ? (k == 3 ? -1 : 1) : k - 6, k < 3 ? -1 : k < 5 ? 0 : 1);
+                        const ivec2 q = pt + off;
+                        if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, ivec2(res)))) continue;
+                        const float dist = w * length(vec2(off));
+                        const vec2 bc = (which == 0u ? imageLoad(uBase[0], q) : imageLoad(uBase[1], q)).xy;
+                        if (bc.x > 0.5 * kNoBase) { supCap = min(supCap, kSupCohesion + kSupRepose * 0.5 * dist); continue; }   // no base: a drop
+                        const float hq = pz.x - bc.x;
+                        if (hq < o.h - kSupStep && hq + max(wxCoverFetch(which, q).a, 0.0) < o.h)
+                            supCap = min(supCap, kSupCohesion + kSupRepose * 0.5 * dist);           // the edge
+                        else if (bc.y < 0.5 * kNoBase && abs(hq - o.h) <= kSnowSeam + kSnowJoinSlope * dist)
+                            supCap = min(supCap, hq + bc.y + kSupRepose * dist - o.h);             // the chamfer
+                    }
+                    // the base dropped (the shelter left): as deep as its buried cover says (#906: this
+                    // was the `else` of `if (o.ok)` -- unreachable: the spot took its full level)
+                    if (Bf < o.h - tol)
+                        D = global > 1e-4 ? level * clamp(wxCoverFetch(which, pt).g / global, 0.0, 1.0) : 0.0;
+                }
+            }
+        }
+    }
+    // (#906: a lee builds slower but toward the same cover, and snow already lying stays when the
+    // wind turns -- the old cap global x openR stripped a texel bare the moment a gust put it in
+    // some wall's oblique shadow: bare blotches with the upwind march's staircase edges)
+    R = min(R + sp.a.z * openR, global);
+    G = min(G, global);
+    if (!rawOk || wxSubmerged(zs)) { R = 0.0; G = 0.0; }   // (#783 water: no cover under it)
+    if (depthOn && baseOk)
+    {
+        if (D < 0.0) D = wxRingDepth(u + (fz.x - Bf) * s, Bf, level, tol);   // new to the inner grid
+        if (D < level) D = min(D + sp.d.y, level);    // the snowfall fills it to its level (footprints refill)
+        D = clamp(D - sp.d.z, 0.0, max(cap, level));  // the melt; drift / repose piles up to the cap
+        // SUPPORT CAP: no taller than the repose allows over the support; on a base steeper than
+        // the repose, no deeper than its fill level (+ cohesion): the excess slides off.
+        if (slopeB > kSlideSlope) D = min(D, level + kSupCohesion);
+        D = min(D, max(supCap, 0.0));
+        // #783 round 12: none inside an opened feature at a drop (kOpenedSkin)
+        if (rawOk && zs > Bf + kOpenedSkin && D > 0.0)
+        {
+            const ivec2 kN[4] = ivec2[4](ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1));
+            bool drop = false;
+            for (int i = 0; i < 4 && !drop; ++i)
+                for (int k = 1; k <= 2 * kSnowBaseR; ++k)
+                {
+                    const ivec2 g = t + kN[i] * k;
+                    if (any(lessThan(g, ivec2(0))) || any(greaterThanEqual(g, ivec2(res)))) break;
+                    const float hq = sA[(c.y + kN[i].y * k) * kTs + c.x + kN[i].x * k];
+                    if (hq <= zEmpty + 0.5 || hq < Bf - kSupStep) { drop = true; break; }
+                }
+            if (drop) D = 0.0;
+        }
+        // #783 round 13: none on a surface the outer ring has nothing near (kCanopyLift)
+        if (D > 0.0 && Bf > wxRingBaseMax(u + (fz.x - Bf) * s, Bf) + kCanopyLift) D = 0.0;
+        // M5 MOVER TRACKS: pressed under a moving box (packed, counted against it: the berm pass
+        // below displaces a share of it); the snowfall above refills the track.
+        if (nMv > 0u)
+        {
+            const float D0 = D;
+            D = mvPress(nMv, u + (fz.x - Bf) * s, Bf, D, level, true, w * w);
+            if (D0 - D > kMeshMarkEps) wxMarkMesh(dst, t, res);   // (#946: the mesh's local patch)
+        }
+        if (wxSubmerged(Bf)) D = 0.0;   // (#783 water: a river / lake bed holds none)
+    }
+    else D = 0.0;
+    imageStore(uCover[dst], t, vec4(R, G, rawOk ? fz.x - zs : fz.y, D));
+    imageStore(uBase[dst], t, vec4(baseOk ? fz.x - Bf : kNoBase, baseOk ? supCap : kNoBase, 0.0, 0.0));
+}
+
+#else   // WX_SNOW_RING
+// THE OUTER RING (-DWX_SNOW_RING, M3; RenderVKWeatherSnowOuterRing; llcleanweathervk.cpp
+// planRing): one invocation per texel of the ring grid -- rgba32f (x the filtered base, m below
+// its top plane, kNoBase none; y the depth; z the support cap; w #783 the SUPPORT COVERAGE, the
+// mesh's gate) on the COARSE map's top plane and shear (its
+// columns), centred on the camera's column snapped to an eighth of its extent. The same model
+// as the inner grid at the ring's own scale: the coarse map's column tops (nearest texel)
+// closed then opened at kSnowBaseR = 1 ring texel, the fill level from the base's slope, the
+// depth followed back to the previous ring by its surface point (exact over a snap: whole
+// texels) and relaxed to the angle of repose between joined texels (no drift: optional, left
+// out); a texel neither ring has seen starts at its level. Stepped every few recordings with
+// the time since its last step (the push block's shares). THE INNER GRID IS AUTHORITATIVE:
+// where the published inner grid covers a ring texel's whole footprint, the ring takes the
+// mean depth of its inner texels on the same base (4 x 4 taps) -- so snow leaving the inner
+// grid keeps its depth in the ring, and the inner grid's entering texels resample the ring.
+
+// A ring texel (which): its base h and depth d; ok = false outside / no base.
+vec4 ringLoad(uint which, ivec2 q)
+{
+    return which == 0u ? imageLoad(uRing[0], q) : imageLoad(uRing[1], q);
+}
+struct WxNb { float h; float d; bool ok; };
+WxNb ringPrev(uint which, ivec2 q, int res, float top)
+{
+    WxNb n; n.h = 0.0; n.d = 0.0; n.ok = false;
+    if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, ivec2(res)))) return n;
+    const vec4 v = ringLoad(which, q);
+    n.ok = v.x < 0.5 * kNoBase;
+    n.h = top - v.x;
+    n.d = max(v.y, 0.0);
+    return n;
+}
+
+// The coarse map's column top (nearest texel) at map uv; zEmpty: outside / an empty column.
+float ringMapTop(vec2 muv, float zEmpty)
+{
+    if (any(lessThan(muv, vec2(0.0))) || any(greaterThanEqual(muv, vec2(1.0)))) return zEmpty;
+    const vec4 cz = ssr.weather[2];
+    const uint m = uint(ssr.weather[1].w + 0.5) - 1u;
+    const ivec2 q = ivec2(muv * vec2(textureSize(uWeatherOccl[0], 0)));
+    const float dd = m == 0u ? texelFetch(uWeatherOccl[0], q, 0).r : texelFetch(uWeatherOccl[1], q, 0).r;
+    return dd < 1.0 ? cz.x - dd * cz.y : zEmpty;
+}
+
+// The repose relaxation (as the inner grid's wxTransport; neighbours past the ring's border
+// mirrored from the opposite one).
+float ringRelax(uint which, ivec2 pt, float bx, float dx, int res, float top, float w)
+{
+    const uint feat = floatBitsToUint(rp.m.x);
+    if ((feat & (WX_F_SETTLE | WX_F_SLIDE)) == 0u) return 0.0;
+    float dD = 0.0;
+    for (int i = 0; i < 8; ++i)
+    {
+        const ivec2 q = pt + kSnowN8[i];
+        WxNb n = ringPrev(which, q, res, top);
+        if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, ivec2(res))))
+        {
+            const WxNb op = ringPrev(which, pt - kSnowN8[i], res, top);
+            if (!op.ok) continue;
+            n.h = 2.0 * bx - op.h; n.d = dx; n.ok = true;
+        }
+        if (!n.ok || wxSubmerged(n.h) || wxSubmerged(bx)) continue;   // (#783 water: no exchange)
+        dD += snowReposeFlow(bx, dx, n.h, n.d, w * (i < 4 ? 1.0 : 1.41421356), rp.m.z, rp.d.w);   // (rp.m.z: tan of the repose)
+        dD += snowCoverSink(bx, dx, n.h, n.d, w * (i < 4 ? 1.0 : 1.41421356), w, rp.m.z, rp.d.w);   // (#783 the cover toe)
+    }
+    return dD;
+}
+
+// The inner grid's mean depth over this ring texel's footprint (surface point X at base Bf),
+// when the published inner grid covers all of it; else D.
+float innerSync(vec2 X, float Bf, float tol, float D, float texel, out bool covered)
+{
+    covered = false;
+    const vec4 pr = ssr.weather[10], pz = ssr.weather[12];
+    if (pr.w < 0.5) return D;
+    const uint iw = uint(pr.w + 0.5) - 1u;
+    const int ires = imageSize(uBase[0]).x;
+    const vec2 c = (X - (pz.x - Bf) * pz.yz - pr.xy) * pr.z;
+    const float hw = 0.5 * texel * pr.z;
+    const float m = 2.0 / float(ires);
+    if (any(lessThan(c - hw, vec2(m))) || any(greaterThan(c + hw, vec2(1.0 - m)))) return D;
+    float sum = 0.0;
+    int n = 0;
+    for (int j = 0; j < 4; ++j)
+        for (int i = 0; i < 4; ++i)
+        {
+            const ivec2 q = ivec2((c + hw * (vec2(i, j) * 0.5 - 0.75)) * float(ires));
+            const float b = iw == 0u ? imageLoad(uBase[0], q).r : imageLoad(uBase[1], q).r;
+            if (b > 1e29 || abs(pz.x - b - Bf) >= tol) continue;
+            sum += max(wxCoverFetch(iw, q).a, 0.0);
+            ++n;
+        }
+    covered = n >= 8;
+    return covered ? sum / float(n) : D;
+}
+
+void main()
+{
+    const int res = int(rp.a.y + 0.5);
+    const ivec2 t = ivec2(gl_GlobalInvocationID.xy);
+    const uint dst = uint(rp.a.x + 0.5);
+    const float top = rp.f0.w, texel = rp.f1.y;
+    const vec2 s = rp.f1.zw;
+    const float zEmpty = top - rp.f1.x;
+    const vec4 cfr = ssr.weather[1];
+    {
+        const ivec2 go = ivec2(gl_WorkGroupID.xy) * 8 - kAp;
+        for (int k = int(gl_LocalInvocationIndex); k < kTs * kTs; k += 64)
+        {
+            const ivec2 g = clamp(go + ivec2(k % kTs, k / kTs), ivec2(0), ivec2(res - 1));
+            const vec2 u = rp.f0.xy + (vec2(g) + 0.5) * texel;
+            sA[k] = cfr.w > 0.5 ? ringMapTop((u - cfr.xy) * cfr.z, zEmpty) : zEmpty;
+        }
+        barrier();
+        for (int p = 0; p < 8; ++p)
+        {
+            morphStep(p);
+            barrier();
+        }
+    }
+    // M5: the mover boxes reaching this tile (pressed at the texel centres; no berms at this scale).
+    uint nMv;
+    {
+        const vec2 g0 = rp.f0.xy + vec2(gl_WorkGroupID.xy * 8u) * texel;
+        const float sh = length(s) * rp.f1.x;
+        nMv = mvCull(g0 - sh, g0 + 8.0 * texel + sh, (floatBitsToUint(rp.m.x) & WX_F_LIST) != 0u, false);
+    }
+    if (t.x >= res || t.y >= res) return;
+    const ivec2 c = ivec2(gl_LocalInvocationID.xy) + kAp;
+    const float Bf = sA[c.y * kTs + c.x];
+    const bool baseOk = Bf > zEmpty + 0.5;
+    const float tol = rp.a.w;
+    const float w = texel;
+    float level = 0.0;
+    float slopeB = 0.0;
+    float supCap = kNoBase;   // SUPPORT CAP (as the inner grid's, at the ring's scale)
+    if (baseOk)
+    {
+        float hn[4];
+        bool on[4];
+        const ivec2 kN[4] = ivec2[4](ivec2(-1, 0), ivec2(1, 0), ivec2(0, -1), ivec2(0, 1));
+        for (int i = 0; i < 4; ++i)
+        {
+            const ivec2 g = t + kN[i];
+            hn[i] = sA[(c.y + kN[i].y) * kTs + c.x + kN[i].x];
+            on[i] = all(greaterThanEqual(g, ivec2(0))) && all(lessThan(g, ivec2(res))) && hn[i] > zEmpty + 0.5
+                 && abs(hn[i] - Bf) <= kSnowSeam + kSnowJoinSlope * w;
+        }
+        const float gx = (on[0] && on[1]) ? (hn[1] - hn[0]) / (2.0 * w) : on[1] ? (hn[1] - Bf) / w : on[0] ? (Bf - hn[0]) / w : 0.0;
+        const float gy = (on[2] && on[3]) ? (hn[3] - hn[2]) / (2.0 * w) : on[3] ? (hn[3] - Bf) / w : on[2] ? (Bf - hn[2]) / w : 0.0;
+        slopeB = length(vec2(gx, gy));
+        level = rp.d.x * (1.0 - smoothstep(kSlideSlope, 2.0 * kSlideSlope, slopeB));
+        for (int i = 0; i < 4; ++i)
+        {
+            const ivec2 g = t + kN[i];
+            if (any(lessThan(g, ivec2(0))) || any(greaterThanEqual(g, ivec2(res)))) continue;
+            if (hn[i] < Bf - kSupStep - rp.d.x) supCap = kSupCohesion + kSupRepose * 0.5 * w;
+        }
+    }
+    const vec2 u = rp.f0.xy + (vec2(t) + 0.5) * texel;
+    const vec2 X = u + (top - Bf) * s;   // the base's surface point (world xy)
+    if (baseOk && cfr.w > 0.5) level *= mix(kLeeShare, 1.0, wxFallOpen(cfr, ssr.weather[2], ssr.weather[6].xy, 0u, vec3(X, Bf), texel, 12));
+    float D = 0.0;
+    if (baseOk)
+    {
+        D = -1.0;
+        if (rp.a.z > 0.5)
+        {
+            const uint pw = uint(rp.a.z + 0.5) - 1u;
+            const vec2 puv = (X - (rp.q0.w - Bf) * rp.q1.zw - rp.q0.xy) / rp.q0.z;
+            if (all(greaterThanEqual(puv, vec2(0.0))) && all(lessThan(puv, vec2(1.0))))
+            {
+                const ivec2 pt = ivec2(puv * float(res));
+                const WxNb o = ringPrev(pw, pt, res, rp.q0.w);
+                if (o.ok && abs(Bf - o.h) < tol)
+                    D = o.d + ringRelax(pw, pt, o.h, o.d, res, rp.q0.w, rp.q1.y);
+                if (o.ok && ringLoad(pw, pt).z < 0.5 * kNoBase) supCap = min(supCap, ringLoad(pw, pt).z + kSupRelax);   // (relaxing)
+                if (o.ok)
+                    for (int k = 0; k < 8; ++k)
+                    {
+                        const ivec2 off = ivec2(k < 3 ? k - 1 : k < 5 ? (k == 3 ? -1 : 1) : k - 6, k < 3 ? -1 : k < 5 ? 0 : 1);
+                        const ivec2 q = pt + off;
+                        if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, ivec2(res)))) continue;
+                        const float dist = rp.q1.y * length(vec2(off));
+                        const vec4 v = ringLoad(pw, q);
+                        if (v.x > 0.5 * kNoBase) { supCap = min(supCap, kSupCohesion + kSupRepose * 0.5 * dist); continue; }
+                        const float hq = rp.q0.w - v.x;
+                        if (hq < o.h - kSupStep && hq + max(v.y, 0.0) < o.h)
+                            supCap = min(supCap, kSupCohesion + kSupRepose * 0.5 * dist);
+                        else if (v.z < 0.5 * kNoBase && abs(hq - o.h) <= kSnowSeam + kSnowJoinSlope * dist)
+                            supCap = min(supCap, hq + v.z + kSupRepose * dist - o.h);
+                    }
+            }
+        }
+        if (D < 0.0) D = level;   // unseen: its level
+        if (D < level) D = min(D + rp.d.y, level);
+        D = clamp(D - rp.d.z, 0.0, max(rp.m.y * rp.d.x, level));
+        if (slopeB > kSlideSlope) D = min(D, level + kSupCohesion);
+        D = min(D, max(supCap, 0.0));
+        bool inner;
+        D = innerSync(X, Bf, tol, D, texel, inner);
+        // M5: movers out here press the ring (the inner grid, where it covers, is authoritative).
+        if (!inner && nMv > 0u) D = mvPress(nMv, X, Bf, D, level, false, 0.0);
+        if (wxSubmerged(Bf)) D = 0.0;   // (#783 water: a river / lake bed holds none)
+    }
+    // #783 SUPPORT COVERAGE (the snow mesh's: clean_weather_snowmesh.comp builds no ring sheet where
+    // it is low -- the coating carries the snow there): the share of the texel's footprint whose
+    // RAW column top (3 x 3 sub-samples of the coarse map, before the close / open) lies on the
+    // filtered base. The close bridges the gaps of a tree's canopy tiers, a lattice, a sparse
+    // roof into one solid ring base -- a texel-sized slab of snow floating in the canopy. A
+    // narrow support (a trunk, a canopy tier, a post) or a patchy / uneven one covers little of
+    // its texel; a roof, a road, a lawn covers it all (a support's edge texels about half).
+    float cov = 0.0;
+    if (baseOk && cfr.w > 0.5)
+    {
+        const float tolC = 0.15 + 0.5 * slopeB * texel;   // (a slope's own rise over a third of a texel, x 1.5)
+        for (int k = 0; k < 9; ++k)
+        {
+            const vec2 su = u + (vec2(k % 3, k / 3) - 1.0) * (texel / 3.0);
+            const float zr = ringMapTop((su - cfr.xy) * cfr.z, zEmpty);
+            if (zr > zEmpty + 0.5 && abs(zr - Bf) <= tolC) cov += 1.0 / 9.0;
+        }
+    }
+    imageStore(uRing[dst], t, vec4(baseOk ? top - Bf : kNoBase, D, baseOk ? supCap : kNoBase, cov));
+}
+#endif   // WX_SNOW_RING
+
+#elif defined(WX_SNOW_BERM)
+// BERMS (-DWX_SNOW_BERM, M5): one invocation per texel of the grid the cover pass just wrote (in
+// place: each texel only ever writes itself), after it. The kept boxes are those that removed
+// snow this step and moved sideways. A texel under a box takes nothing (it was pressed).
+layout(local_size_x = 8, local_size_y = 8) in;
+
+// Box k's deposit (m) at X on a texel of base B this step (grid texel w): the berm share of the
+// volume it removed, spread over its side bands (both sides, along its length) and its bow band
+// with a 2 (1 - x) edge-peaked profile -- the step deposits at most what it removed. capK: the
+// most the texel may hold from this box (kMvBermRise above the undisturbed depth it ploughs).
+float mvBermDep(uint k, vec2 X, float B, float w, out float capK)
+{
+    capK = 0.0;
+    const vec3 c = mv[4u * k].xyz;
+    const vec4 a0 = mv[4u * k + 1u], a1 = mv[4u * k + 2u], a2 = mv[4u * k + 3u];
+    // (a static limb press -- no motion direction: the rim runs all around it, laid out along its
+    // own longest horizontal axis)
+    const bool radial = a0.w == 0.0 && a1.w == 0.0;
+    vec2 dir = vec2(a0.w, a1.w);
+    if (radial)
+    {
+        const vec2 ax = length(a0.xy) >= length(a1.xy) ? a0.xy : a1.xy;
+        dir = dot(ax, ax) > 1e-8 ? normalize(ax) : vec2(1.0, 0.0);
+    }
+    const vec2 perp = vec2(-dir.y, dir.x);
+    const float zc = c.z - (abs(a0.z) + abs(a1.z) + abs(a2.z));   // the contact (the box's lowest corner)
+    if (B > zc + kMvBermStep || B < zc - 1.0) return 0.0;        // another surface (a wall top / a deck below)
+    const float hl = max(abs(dot(a0.xy, dir)) + abs(dot(a1.xy, dir)) + abs(dot(a2.xy, dir)), 0.5 * w);
+    const float hw = max(abs(dot(a0.xy, perp)) + abs(dot(a1.xy, perp)) + abs(dot(a2.xy, perp)), 0.5 * w);
+    const float vol = float(mv_vol[4u * k]) * kMvVolUnit;
+    const float cnt = float(mv_vol[4u * k + 1u]);
+    if (!(vol > 0.0) || !(cnt > 0.0)) return 0.0;
+    const float hRem = vol / (cnt * w * w);                      // the mean thickness it took
+    const float dUnd = float(mv_vol[4u * k + 2u]) * kMvVolUnit / (cnt * w * w);   // the mean depth before: what it ploughs
+    const float vd = vol * clamp(mv_prm.y, 0.0, 1.0);            // the displaced share
+    // The side band: at least kMvBermK x the half-width, and wide enough that the berm a whole
+    // passage builds (its peak = 2 x its mean = 2 (1 - bow) x berm x hRem x hw / bw) stands no
+    // steeper than the repose.
+    const float bw = clamp(max(kMvBermK * hw, sqrt(2.0 * (1.0 - kMvBowShare) * mv_prm.y * hRem * hw / kMvRepose)),
+                           kMvBermMin, kMvBermMax);
+    capK = (1.0 + kMvBermRise) * dUnd;
+    const vec2 r = X - c.xy;
+    const float al = dot(r, dir), ac = abs(dot(r, perp));
+    if (radial)
+    {
+        // RIM: a band of width bw all around the footprint's rectangle (hl x hw), the same 2 (1 - x)
+        // edge-peaked profile; normalised by the band's area-weighted integral (the sides' perimeter
+        // x bw + the rounded corners' 2 pi bw^2 / 3), so a step deposits at most the berm share.
+        const float e = length(max(vec2(abs(al) - hl, ac - hw), vec2(0.0)));
+        if (!(e > 0.0) || e >= bw) return 0.0;
+        return vd * 2.0 * (1.0 - e / bw) / (4.0 * (hl + hw) * bw + 2.0943951 * bw * bw);
+    }
+    // (the side band spans at least the bow's length: a thin plate never piles its removal into a
+    // one-texel strip; the normalisation is the area actually spread over)
+    const float hs = max(hl, kMvBow);
+    if (abs(al) <= hs && ac > hw && ac < hw + bw)
+        return vd * (1.0 - kMvBowShare) * 2.0 * (1.0 - (ac - hw) / bw) / (2.0 * 2.0 * hs * bw);
+    if (al > hs && al < hs + kMvBow && ac <= hw)
+        return vd * kMvBowShare * 2.0 * (1.0 - (al - hl) / kMvBow) / (2.0 * hw * kMvBow);
+    return 0.0;
+}
+
+void main()
+{
+    const int res = int(sp.a.y + 0.5);
+    const ivec2 t = ivec2(gl_GlobalInvocationID.xy);
+    const uint dst = uint(sp.a.x + 0.5);
+    const vec4 fr = ssr.weather[3], fz = ssr.weather[4];
+    const vec2 s = ssr.weather[7].xy;
+    const float w = 1.0 / (float(res) * fr.z);   // grid texel (m)
+    uint nk;
+    {
+        const vec2 g0 = fr.xy + vec2(gl_WorkGroupID.xy * 8u) * w;
+        const float sh = length(s) * fz.y;
+        nk = mvCull(g0 - sh, g0 + 8.0 * w + sh, (sp.c.w & WX_F_LIST) != 0u, true);
+    }
+    if (nk == 0u || t.x >= res || t.y >= res) return;
+    const float bz = imageLoad(uBase[dst], t).r;
+    if (bz > 1e29) return;   // no base
+    const float B = fz.x - bz;
+    const vec4 v = imageLoad(uCover[dst], t);
+    const float D = max(v.a, 0.0);
+    const vec2 X = fr.xy + (vec2(t) + 0.5) * w + (fz.x - B) * s;   // its surface point
+    float dep = 0.0, capT = 0.0;
+    for (uint j = 0u; j < nk; ++j)
+    {
+        const uint k = sMv[j];
+        float zb;
+        if (mvUnder(k, X, zb) && zb >= B - kMvSink && zb < B + D + 0.05) return;   // under a box: pressed
+        float ck;
+        const float d = mvBermDep(k, X, B, w, ck);
+        if (d > 0.0) { dep += d; capT = max(capT, ck); }
+    }
+    if (!(dep > 0.0)) return;
+    const float Dn = max(D, min(D + dep, min(capT, sp.d.x * sp.f.z)));   // (never past the drift cap)
+    if (!(Dn > D)) return;
+    imageStore(uCover[dst], t, vec4(v.rgb, Dn));
+    if (Dn - D > kMeshMarkEps) wxMarkMesh(dst, t, res);   // (#946: the mesh's local patch)
+    atomicAdd(mv_tot.y, uint((Dn - D) * w * w / kMvVolUnit + 0.5));
+    atomicAdd(mv_tot.w, 1u);
+}
+
+#elif defined(WX_SNOW_INST)
+layout(local_size_x = 64) in;
+
+struct WxInstance
+{
+    mat4 model_matrix;
+    vec4 aabb_min;
+    vec4 aabb_max;
+    vec4 tint;
+    mat4 uv_matrix;
+    uint lod_group_id;
+    uint material_id;
+    uint flags;
+    uint skin_id;
+    vec4 spin_axis;
+    vec4 spin_pivot;
+};
+layout(std430, set = 0, binding = 0) readonly buffer WxInstances { WxInstance instances[]; };
+layout(std430, set = 0, binding = 23) readonly buffer WxPrevInstances { WxInstance prev_instances[]; };
+
+const uint kMoverFlag = 2097152u;                  // bit21: the ingest's mover tracker (#567)
+const uint kNotMover = 1u | 8u | 32u | 512u;       // rigged, HUD, terrain, worn rigid attachment
+
+// M5: append instance i's world box to the stamp list when it moved faster than the least speed
+// this step (its box centre: a turning / swinging part counts) and its bottom reaches the snow
+// at its centre (a slope allowance by its size: the cover kernel presses per texel exactly).
+// #906 AT REST: a mover box standing still (under the least speed; not a spinner) still presses
+// (no motion direction, nothing swept: no berm) -- a vehicle that stops keeps sitting in its own
+// hollow instead of the refill drawing the snow back through its wheels while it settles.
+void mvAppend(mat4 M, vec3 lc, vec3 le, vec3 wc, vec3 wp, float ez, bool spin)
+{
+    const float dt = sp.b.z;
+    if (!(dt > 0.0)) return;
+    const float spd = distance(wc, wp) / dt;
+    if (spd > 50.0) return;                       // > 50 m/s: a teleport / region shift
+    const bool rest = spd < mv_prm.z;             // still / jitter: pressed in place
+    if (rest && spin) return;                     // (a spinner turning in place presses nothing)
+    const vec3 he = max(le, vec3(0.01));        // (a face's flat box: a 1 cm slab, never degenerate)
+    const vec3 a0 = M[0].xyz * he.x, a1 = M[1].xyz * he.y, a2 = M[2].xyz * he.z;
+    const float zc = wc.z - (abs(a0.z) + abs(a1.z) + abs(a2.z));
+    const float hr = length(a0.xy) + length(a1.xy) + length(a2.xy);   // (bounds the box's projection)
+    float top;
+    bool inner;
+    if (!mvSnowTop(vec3(wc.xy, zc), top, inner)) return;
+    if (zc > top + 0.15 + 0.25 * min(hr, 4.0)) return;   // its bottom clears the snow
+    if (zc < top - 2.0 - 0.5 * min(hr, 4.0)) return;     // far under it: a tunnel / another surface
+    vec2 mvd = rest ? vec2(0.0) : wc.xy - wp.xy;
+    const float ml = length(mvd);
+    mvd = ml > 1e-4 ? mvd / ml : vec2(0.0);
+    const uint n = atomicAdd(mv_head.x, 1u);
+    if (n >= mv_head.y) return;   // full
+    const uint o = 4u * n;
+    if ((!inner || rest) && n >= mv_head.z)
+    {
+        // The ring's boxes (#906: and boxes at rest) take only the first half -- moving boxes in
+        // the inner grid always find a slot: the slot is claimed, so it is written as a sentinel
+        // no cull accepts (reach -1).
+        mv[o] = vec4(0.0, 0.0, 0.0, -1.0);
+        return;
+    }
+    mvWrite(n, wc, a0, a1, a2, mvd, ml > 1e-4 ? ml : 0.0);
+}
+
+void main()
+{
+    const uint i = gl_GlobalInvocationID.x;
+    if (i >= sp.c.x || i >= uint(instances.length())) return;
+    const uint w = max(sp.c.y, 1u);
+    const ivec2 at = ivec2(int(i % w), int(i / w));
+    const vec4 prev4 = imageLoad(uInstSnow, at);   // r the amount (-1: static), gba #906 the box centre last step
+    const float prev = prev4.r;
+    const uint fl = instances[i].flags;
+    if ((fl & kMoverFlag) == 0u || (fl & kNotMover) != 0u)
+    {
+        if (prev != -1.0) imageStore(uInstSnow, at, vec4(-1.0));   // static: the ground cover's business
+        return;
+    }
+    const mat4 M = instances[i].model_matrix;
+    // The world box's top centre (the local box through the model's absolute axes).
+    const vec3 lc = 0.5 * (instances[i].aabb_min.xyz + instances[i].aabb_max.xyz);
+    const vec3 le = 0.5 * abs(instances[i].aabb_max.xyz - instances[i].aabb_min.xyz);
+    const vec3 wc = (M * vec4(lc, 1.0)).xyz;
+    const float ez = abs(M[0].z) * le.x + abs(M[1].z) * le.y + abs(M[2].z) * le.z;
+    const vec3 topP = vec3(wc.xy, wc.z + ez);
+    const bool spin = dot(instances[i].spin_axis.xyz, instances[i].spin_axis.xyz) > 0.0;
+    const mat4 P = i < uint(prev_instances.length()) ? prev_instances[i].model_matrix : M;
+    // #906 THE MOTION SOURCE: the box centre this pass stored for the slot last step (gba), the
+    // previous frame's rows (binding 23) only for a slot that just became a mover. Binding 23
+    // ALIASES THE LIVE ROWS whenever the renderer keeps no temporal history (no TAA / FSR, no RT
+    // shadow mask, no AO accumulation, no motion blur -- e.g. shadows off with FXAA): every mover
+    // read as still -- no tracks, no shedding. The weather no longer depends on the AA / shadow
+    // settings. A stored centre more than 2 m off (a missed step, an origin shift) is not trusted.
+    vec3 wp = (P * vec4(lc, 1.0)).xyz;
+    if (prev >= 0.0 && distance(prev4.gba, wc) < 2.0) wp = prev4.gba;
+    // M5 MOVER TRACKS: a moving box that reaches the snow goes to the stamp list (a target-omega
+    // wheel on a moving vehicle included: its box translates with it; one turning in place does
+    // not move its centre and stays under the least speed; #906: a still one presses in place).
+    if ((sp.c.w & WX_F_MOVER) != 0u) mvAppend(M, lc, le, wc, wp, ez, spin);
+    const float open = wxSkyAt(topP);
+    const float global = sp.a.w;
+    float amt = prev;
+    if (prev < 0.0)
+    {
+        // Just started moving: the cover lying on its top's column (the published grid), else
+        // the open-sky amount there.
+        amt = global * open;
+        if (ssr.weather[10].w > 0.5)
+        {
+            const vec4 pr = ssr.weather[10], pz = ssr.weather[12];
+            const vec2 puv = (topP.xy - (pz.x - topP.z) * pz.yz - pr.xy) * pr.z;
+            if (all(greaterThanEqual(puv, vec2(0.0))) && all(lessThan(puv, vec2(1.0))))
+            {
+                const int res = int(sp.a.y + 0.5);
+                const vec4 p = wxCoverFetch(uint(pr.w + 0.5) - 1u, ivec2(puv * float(res)));
+                if (abs((pz.x - p.b) - topP.z) < max(sp.b.x, 0.5)) amt = p.r;   // it was the column's top
+            }
+        }
+    }
+    else
+    {
+        const float moved = distance(wc, wp);
+        const bool still = !spin && moved < 1e-4 && M[0].xyz == P[0].xyz && M[1].xyz == P[1].xyz
+                        && M[2].xyz == P[2].xyz;
+        if (still)
+            amt += sp.a.z * open;   // settles while it stands in the open
+        else if (spin || moved > sp.b.w * max(sp.b.z, 1e-3))
+            amt *= exp(-sp.b.z * 1.5);   // shed: fast movers / spinners lose it within seconds
+    }
+    amt = clamp(min(amt, global), 0.0, 1.0);
+    if (amt != prev || prev4.gba != wc) imageStore(uInstSnow, at, vec4(amt, wc));
+}
+
+#elif defined(WX_SNOW_AVATAR)
+layout(local_size_x = 64) in;
+#include "clean_av_slots.glsl"
+#include "clean_joint_table.glsl"
+layout(std430, set = 0, binding = 2) readonly buffer WxAvatarJoints { AvatarJoints avatar_joints[]; };
+// The CPU's bits (llcleanweathervk.cpp writeAvatarBits): [0, AV_SLOT_WORDS) alive (an avatar /
+// animesh is in the slot), [AV_SLOT_WORDS, 2 x) sitting.
+layout(std430, set = 1, binding = 2) readonly buffer WxAvatarBits { uint av_bits[]; };
+// Per slot 2 x vec4: [0] the pelvis last step (xyz, w 1 = valid), [1] x horizontal / y vertical
+// speed (m/s, smoothed).
+layout(std430, set = 1, binding = 3) buffer WxAvatarState { vec4 av_state[]; };
+// The stamps: head (x workgroups = stamps, y 1, z 1: the stamp kernel's indirect dispatch, w
+// the appends), then per stamp 2 x vec4 (sole centre xyz, w half length; heel -> toe xy, w half
+// width).
+layout(std430, set = 1, binding = 4) buffer WxStamps { uvec4 st_head; vec4 st[]; };
+
+// LL joint numbers (avatar_skeleton.xml bone order; LLVOAvatar::getJoint).
+const int kJPelvis = 0, kJChest = 6, kJHead = 8;
+const int kJAnkle[2] = int[2](114, 109), kJFoot[2] = int[2](115, 110), kJToe[2] = int[2](116, 111);
+// LIMB CONTACT (#783 follow-up): the limb chains (left, right).
+const int kJHip[2] = int[2](112, 107), kJKnee[2] = int[2](113, 108);
+const int kJShoulder[2] = int[2](59, 78), kJElbow[2] = int[2](60, 79), kJWrist[2] = int[2](61, 80), kJHandMid[2] = int[2](62, 81);
+const int kJHindRoot = 124;
+const int kJHind1[2] = int[2](125, 129), kJHind2[2] = int[2](126, 130), kJHind3[2] = int[2](127, 131), kJHind4[2] = int[2](128, 132);
+const int kJTail1 = 117, kJTail3 = 119, kJTail6 = 122;
+const float kLimbThigh = 0.491;   // the default hip -> knee length (m): the avatar's scale
+const float kAvCoverMelt = 1.0 / 90.0;   // #903: a full coat melts in ~90 s fully under cover
+
+vec3 jPos(uint i, int j) { return jointWorld(avatar_joints[i].world[j])[3].xyz; }
+
+// A FOOTPRINT on the stamp list: the sole's centre c (z: the sole), the print's long axis dir (unit,
+// horizontal), half length / half width (m). Only near the near cascade (the stamp kernel checks the
+// grid itself). false: off the cascade / the list is full.
+bool pushStamp(vec3 c, vec2 dir, float hl, float hw)
+{
+    if (ssr.weather[3].w < 0.5) return false;   // (no published near cascade)
+    const vec2 uv = (c.xy - (ssr.weather[4].x - c.z) * ssr.weather[7].xy - ssr.weather[3].xy) * ssr.weather[3].z;
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) return false;
+    const uint n = atomicAdd(st_head.w, 1u);
+    if (n >= uint(sp.e.z)) return false;
+    st[2u * n] = vec4(c, hl);
+    st[2u * n + 1u] = vec4(dir, hw, 0.0);
+    atomicAdd(st_head.x, 1u);
+    return true;
+}
+
+// Whether joint j is POSED away from its rest orientation relative to the pelvis (Rp: the pelvis's
+// unit x / z axes). The Bento hind limbs and the tail rest with the pelvis's orientation and hang
+// to the ground behind a biped that does not use them (phantom paw prints / a dragged tail): they
+// only count once an animation turns them (> ~4 degrees).
+bool jPosed(uint i, int j, vec3 px, vec3 pz)
+{
+    const mat4 M = jointWorld(avatar_joints[i].world[j]);
+    const float lx = length(M[0].xyz), lz = length(M[2].xyz);
+    if (!(lx > 1e-6) || !(lz > 1e-6)) return false;
+    return dot(M[0].xyz / lx, px) < 0.9976 || dot(M[2].xyz / lz, pz) < 0.9976;
+}
+
+// One limb segment A -> B as a box (half-length along it + `ext` past each end, half-width rw
+// horizontally across it, half-thickness rt): appended to the limb range when its lowest point dips
+// below the snow top under its lower end (the published inner grid only: the outer ring's ~0.5 m
+// texels cannot hold a knee). The cover pass then presses it compaction-first, the berm pass
+// lays the rim from what it removed (mvdir / swept: the avatar's motion this step).
+void limbSeg(vec3 A, vec3 B, float ext, float rw, float rt, vec2 mvdir, float swept)
+{
+    const vec3 ax = B - A;
+    const float L = length(ax);
+    if (!(L > 0.01) || L > 4.0) return;   // (broken / degenerate joints)
+    const vec3 u = ax / L;
+    const vec3 lo = A.z < B.z ? A : B;
+    const float zc = lo.z - max(rw, rt);  // (conservative: the cover pass tests the box exactly)
+    float top;
+    bool inner;
+    if (!mvSnowTop(vec3(lo.xy, zc), top, inner) || !inner) return;
+    if (zc >= top || zc < top - 2.0) return;   // clears the snow / far under it (another surface)
+    const vec3 h = abs(u.z) > 0.95 ? vec3(1.0, 0.0, 0.0) : normalize(cross(u, vec3(0.0, 0.0, 1.0)));
+    const vec3 v = cross(u, h);
+    const uint n = atomicAdd(mv_head.w, 1u);
+    if (n >= kMvLimbMax) return;   // full (counted: the readback's dropped)
+    mvWrite(kMvLimbBase + n, 0.5 * (A + B), u * (0.5 * L + ext), h * rw, v * rt, mvdir, swept);
+}
+
+// Every limb of slot i that reaches the snow (the scale k from the thigh). footOn: the feet stamp
+// this step (the shins stop short of the sole, no foot box) -- else the foot is a box too.
+void limbContact(uint i, float k, bool footOn, vec2 mvdir, float swept)
+{
+    const mat4 Mp = jointWorld(avatar_joints[i].world[kJPelvis]);
+    const float lpx = length(Mp[0].xyz), lpz = length(Mp[2].xyz);
+    const vec3 px = lpx > 1e-6 ? Mp[0].xyz / lpx : vec3(1.0, 0.0, 0.0);
+    const vec3 pz = lpz > 1e-6 ? Mp[2].xyz / lpz : vec3(0.0, 0.0, 1.0);
+    const vec3 pel = Mp[3].xyz;
+    // the body lying / sitting in the snow: pelvis -> chest, chest -> head
+    const vec3 chest = jPos(i, kJChest);
+    limbSeg(pel, chest, 0.06 * k, 0.15 * k, 0.11 * k, mvdir, swept);
+    limbSeg(chest, jPos(i, kJHead), 0.06 * k, 0.1 * k, 0.1 * k, mvdir, swept);
+    for (int s = 0; s < 2; ++s)
+    {
+        // legs: thigh, shin (short of the sole while the feet stamp), foot
+        const vec3 hip = jPos(i, kJHip[s]), knee = jPos(i, kJKnee[s]), an = jPos(i, kJAnkle[s]);
+        limbSeg(hip, knee, 0.0, 0.075 * k, 0.075 * k, mvdir, swept);
+        if (footOn)
+        {
+            const vec3 d = knee - an;
+            const float L = length(d);
+            if (L > 0.02) limbSeg(knee, an + d * min((0.06 + 0.12 * k) / L, 0.6), 0.03 * k, 0.055 * k, 0.055 * k, mvdir, swept);
+        }
+        else
+        {
+            limbSeg(knee, an, 0.03 * k, 0.055 * k, 0.055 * k, mvdir, swept);
+            limbSeg(an, jPos(i, kJToe[s]), 0.04 * k, 0.05 * k, 0.04 * k, mvdir, swept);
+        }
+        // arms (a quadruped's front legs, a crawl, a hand on the ground): upper arm, forearm, hand
+        const vec3 sh = jPos(i, kJShoulder[s]), el = jPos(i, kJElbow[s]), wr = jPos(i, kJWrist[s]);
+        const vec3 hd = jPos(i, kJHandMid[s]);
+        limbSeg(sh, el, 0.0, 0.05 * k, 0.05 * k, mvdir, swept);
+        limbSeg(el, wr, 0.02 * k, 0.045 * k, 0.045 * k, mvdir, swept);
+        // #783 QUADRUPED FRONT LEGS (the joint fallback: no bottom map): an arm whose wrist / hand
+        // comes within mv_bprm.z of the snow top stands on it like a foot -- the hand box reaches
+        // the hoof's margin below the hand joint (a hoof's mesh hangs below it), foot-sized, and
+        // it leaves a footprint. Otherwise the thin hand box.
+        bool armLeg = false;
+        if (mv_bprm.z > 0.0)
+        {
+            const vec3 lo = wr.z < hd.z ? wr : hd;
+            float top;
+            bool inner;
+            armLeg = mvSnowTop(lo, top, inner) && inner && lo.z < top + mv_bprm.z && lo.z > top - 2.0
+                  && distance(wr, hd) < 0.6 * max(k, 0.25);
+        }
+        if (armLeg)
+        {
+            const float m = mv_bprm.w * k;
+            limbSeg(wr, hd - vec3(0.0, 0.0, m), 0.03 * k, 0.06 * k, 0.06 * k, mvdir, swept);
+            atomicAdd(mv_bd1.z, 1u);
+            if (footOn)
+            {
+                vec2 dir = hd.xy - wr.xy;
+                const float len = length(dir);
+                dir = len > 0.02 ? dir / len : (length(px.xy) > 1e-3 ? normalize(px.xy) : vec2(1.0, 0.0));
+                if (pushStamp(vec3(hd.xy, min(wr.z, hd.z) - m), dir, clamp(0.06 * k + 0.03, 0.06, 0.15),
+                              clamp(0.05 * k, 0.04, 0.12)))
+                    atomicAdd(mv_bd1.y, 1u);
+            }
+        }
+        else
+            limbSeg(wr, hd, 0.07 * k, 0.045 * k, 0.025 * k, mvdir, swept);
+        // the Bento hind limbs, only when an animation poses them
+        if (jPosed(i, kJHindRoot, px, pz) || jPosed(i, kJHind1[s], px, pz) || jPosed(i, kJHind2[s], px, pz)
+            || jPosed(i, kJHind3[s], px, pz))
+        {
+            const vec3 h1 = jPos(i, kJHind1[s]), h2 = jPos(i, kJHind2[s]), h3 = jPos(i, kJHind3[s]);
+            limbSeg(h1, h2, 0.0, 0.07 * k, 0.07 * k, mvdir, swept);
+            limbSeg(h2, h3, 0.03 * k, 0.055 * k, 0.055 * k, mvdir, swept);
+            limbSeg(h3, jPos(i, kJHind4[s]), 0.05 * k, 0.05 * k, 0.04 * k, mvdir, swept);
+        }
+    }
+    // the tail, only when posed
+    if (jPosed(i, kJTail1, px, pz) || jPosed(i, kJTail3, px, pz))
+    {
+        const vec3 t3 = jPos(i, kJTail3);
+        limbSeg(jPos(i, kJTail1), t3, 0.0, 0.04 * k, 0.04 * k, mvdir, swept);
+        limbSeg(t3, jPos(i, kJTail6), 0.03 * k, 0.035 * k, 0.035 * k, mvdir, swept);
+    }
+}
+
+// ---- #783 BODY CONTACT (RenderVKWeatherSnowBodyContact) ----
+// An avatar whose shelter layer was rasterized where it stands now (its raster-time pelvis within
+// mv_bprm.y of the current one) presses the snow with its BOTTOM MAP; otherwise (no layer: past the
+// layer cap, the shelter off; or a stale map while it moves) the joint boxes stand in. (#901 / #909
+// follow-up: cluster LOD parts are in the bottom map too -- clean_weather_shelter.comp
+// -DWX_SH_CL_RASTER; before it an avatar drawn by the cluster path had an empty or partial map: no
+// hooves pressed, and one with nothing legacy at all fell to the joint boxes -- where a posed Bento
+// tail chain reaching the snow below a short tail mesh CAN leave a divot.)
+// The avatar pass's dispatch carries kBodyLayers extra workgroups (llcleanweathervk.cpp recordSnow),
+// one per layer: they find the layer's contacts with the snow and append them (bodyContact).
+const uint kAvGroups = (AV_SLOT_CAP + 63u) / 64u;   // the slots' workgroups; the layers' follow
+const uint kBodyBoxMax = 32u;     // body boxes per avatar (supporting contacts first)
+const uint kBodyStampMax = 8u;    // footprints per avatar from its bottom map
+const float kBodyPrintMax = 0.3;  // m: a supporting contact up to this half size leaves a footprint (a hoof / foot / hand)
+const uint kBodyN = 16u;          // blocks per tile side (16 x 16; a block ~16 cm on a 2.5 m tile)
+
+bool avAlive(uint i) { return ((av_bits[i >> 5u] >> (i & 31u)) & 1u) != 0u; }
+// The limb contact's gate (the slot pass and the layer workgroups decide alike).
+bool limbGate(uint i, vec3 P)
+{
+    return (sp.c.w & WX_F_LIMB) != 0u && sp.b.z > 0.0 && ssr.weather[10].w > 0.5 && distance(P, ssr.cam_origin.xyz) < sp.f.w;
+}
+// The layer whose bottom map stands in for slot i's joints this step (0xFFFFFFFF: none).
+uint bodyLayerOf(uint i, vec3 P)
+{
+    if ((sp.c.w & WX_F_BODY) == 0u) return 0xFFFFFFFFu;
+    for (uint L = 0u; L < kBodyLayers; ++L)
+    {
+        WxBody b;
+        if (bodyLayer(L, b) && b.slot == i) return distance(P, b.c) <= mv_bprm.y ? L : 0xFFFFFFFFu;
+    }
+    return 0xFFFFFFFFu;
+}
+
+// Per block of the tile: its lowest point (world z, 1e30: no contact), the snow top there, the
+// patch of its samples in the snow (tile texels lo / hi: x | y << 16), flags (1 contact, 2
+// supporting); the contacts' union-find and their aggregates.
+shared float sBz[256];
+shared float sBt[256];
+shared uint  sBlo[256], sBhi[256], sBf[256];
+shared uint  sCp[256];
+shared uint  sBodyN;
+
+uint bodyFind(uint q) { while (sCp[q] != q) { sCp[q] = sCp[sCp[q]]; q = sCp[q]; } return q; }
+bool bodyTouch(uint a, uint b, int gap)
+{
+    const ivec2 la = ivec2(int(sBlo[a] & 0xFFFFu), int(sBlo[a] >> 16u)), ha = ivec2(int(sBhi[a] & 0xFFFFu), int(sBhi[a] >> 16u));
+    const ivec2 lb = ivec2(int(sBlo[b] & 0xFFFFu), int(sBlo[b] >> 16u)), hb = ivec2(int(sBhi[b] & 0xFFFFu), int(sBhi[b] >> 16u));
+    return all(lessThanEqual(la, hb + gap)) && all(lessThanEqual(lb, ha + gap));
+}
+
+// Layer L's contacts (one workgroup; every exit is uniform: each invocation reads the same).
+void bodyContact(uint L)
+{
+    const uint lid = gl_LocalInvocationIndex;
+    WxBody b;
+    if (!bodyLayer(L, b) || b.slot >= AV_SLOT_CAP || b.slot >= uint(avatar_joints.length())) return;
+    const uint i = b.slot;
+    if (!avAlive(i)) return;
+    const vec3 P = jPos(i, kJPelvis);
+    if (!limbGate(i, P) || bodyLayerOf(i, P) != L) return;   // (the slot pass uses the joints then)
+    // BLOCKS: kBodyN^2 over the tile, 4 per invocation, each sampled on an 8 x 8 lattice (stp).
+    const int bs = max(b.res / int(kBodyN), 1);
+    const int stp = max(bs / 8, 1);
+    for (uint q = lid; q < kBodyN * kBodyN; q += 64u)
+    {
+        sBf[q] = 0u; sBz[q] = 1e30; sBt[q] = 0.0; sBlo[q] = 0u; sBhi[q] = 0u; sCp[q] = q;
+        const ivec2 t0 = ivec2(int(q % kBodyN), int(q / kBodyN)) * bs;
+        uint wmax = 0u;   // (the lowest surface: the largest encoded -height)
+        ivec2 am = t0;
+        for (int y = 0; y < bs; y += stp)
+            for (int x = 0; x < bs; x += stp)
+            {
+                const uint w = bodyWord(b.o + t0 + ivec2(x, y) + ivec2(0, b.th));
+                if (w > wmax) { wmax = w; am = t0 + ivec2(x, y); }
+            }
+        if (wmax == 0u) continue;
+        const float zb = b.c.z - wxBodyDec(wmax);
+        float top;
+        bool inner;
+        const vec3 A = vec3(bodyToWorld(b, ((vec2(am) + 0.5) / float(b.res) - 0.5) * b.e), zb);
+        if (!mvSnowTop(A, top, inner) || !inner || zb >= top || zb < top - 2.0) continue;
+        // the base under it (the support test): the published inner grid's
+        const vec4 pr = ssr.weather[10], pz = ssr.weather[12];
+        const vec2 puv = (A.xy - (pz.x - A.z) * pz.yz - pr.xy) * pr.z;
+        const ivec2 gq = clamp(ivec2(puv * sp.a.y), ivec2(0), ivec2(int(sp.a.y + 0.5) - 1));
+        const uint which = uint(pr.w + 0.5) - 1u;
+        const float base = pz.x - (which == 0u ? imageLoad(uBase[0], gq).r : imageLoad(uBase[1], gq).r);
+        if (zb < base - kMvSink) continue;   // (under the ground: another surface)
+        // the PATCH: its samples whose underside is in the snow
+        ivec2 lo = ivec2(1 << 20), hi = ivec2(-1);
+        for (int y = 0; y < bs; y += stp)
+            for (int x = 0; x < bs; x += stp)
+            {
+                const uint w = bodyWord(b.o + t0 + ivec2(x, y) + ivec2(0, b.th));
+                if (w != 0u && b.c.z - wxBodyDec(w) < top) { lo = min(lo, t0 + ivec2(x, y)); hi = max(hi, t0 + ivec2(x, y)); }
+            }
+        if (any(greaterThan(lo, hi))) continue;
+        hi = min(hi + stp - 1, t0 + bs - 1);
+        sBz[q] = zb; sBt[q] = top;
+        sBlo[q] = uint(lo.x) | (uint(lo.y) << 16u);
+        sBhi[q] = uint(hi.x) | (uint(hi.y) << 16u);
+        sBf[q] = 1u | (zb < base + mv_bprm.x ? 2u : 0u);
+    }
+    if (lid == 0u) sBodyN = 0u;
+    barrier();
+    // BODY BOXES (supporting contacts first: the per-avatar cap drops the rest first): the patch's
+    // footprint in the layer's axes, from the lowest point up to the snow top. The cover pass
+    // presses its texels to the bottom map; the berm pass lays the rim around it (the avatar's
+    // motion: its heading while it walks, all around while it stands).
+    const float spd = av_state[2u * i + 1u].x;   // (the smoothed speed: the slot pass may update it this dispatch -- either step's)
+    const vec2 cs = vec2(cos(b.yaw), sin(b.yaw));
+    const bool moving = spd > sp.g.x;
+    const vec2 mvdir = moving ? cs : vec2(0.0);
+    const float swept = moving ? max(spd * sp.b.z, 1e-3) : 1e-3;
+    for (uint pass = 0u; pass < 2u; ++pass)
+    {
+        for (uint q = lid; q < kBodyN * kBodyN; q += 64u)
+        {
+            const uint f = sBf[q];
+            if ((f & 1u) == 0u || ((f & 2u) != 0u) != (pass == 0u)) continue;
+            if (atomicAdd(sBodyN, 1u) >= kBodyBoxMax) continue;
+            const uint n = atomicAdd(mv_head.w, 1u);
+            if (n >= kMvLimbMax) continue;   // full (counted: the readback's dropped)
+            const vec2 l0 = (vec2(float(sBlo[q] & 0xFFFFu), float(sBlo[q] >> 16u)) / float(b.res) - 0.5) * b.e;
+            const vec2 l1 = (vec2(float((sBhi[q] & 0xFFFFu) + 1u), float((sBhi[q] >> 16u) + 1u)) / float(b.res) - 0.5) * b.e;
+            const vec2 hh = max(0.5 * (l1 - l0), vec2(0.01));
+            const float hz = max(0.5 * (sBt[q] - sBz[q]), 0.01);
+            const vec3 a0 = vec3(cs * hh.x, 0.0), a1 = vec3(-cs.y * hh.y, cs.x * hh.y, 0.0), a2 = vec3(0.0, 0.0, hz);
+            const uint k = kMvLimbBase + n;
+            mvWrite(k, vec3(bodyToWorld(b, 0.5 * (l0 + l1)), sBz[q] + hz), a0, a1, a2, mvdir, swept);
+            mv[4u * k].w = length(a0.xy) + length(a1.xy) + 0.6 + (moving ? kMvBow : 0.0);   // (its rim / bow reach: a tight cull)
+            mv_vol[4u * k + 3u] = L + 1u;
+        }
+        barrier();
+    }
+    // CONTACTS: the blocks joined into blobs (8-neighbours whose patches touch); a SUPPORTING blob
+    // (any of its blocks within the support height of the base) of a hoof's / foot's / hand's size
+    // leaves a FOOTPRINT (with footprints on). One invocation: a few dozen contact blocks at most.
+    if (lid == 0u)
+    {
+        const int gap = stp + 1;
+        for (uint q = 0u; q < kBodyN * kBodyN; ++q)
+        {
+            if ((sBf[q] & 1u) == 0u) continue;
+            const uint qx = q % kBodyN, qy = q / kBodyN;
+            for (int k = 0; k < 4; ++k)
+            {
+                const ivec2 d = k == 0 ? ivec2(1, 0) : k == 1 ? ivec2(0, 1) : k == 2 ? ivec2(1, 1) : ivec2(-1, 1);
+                const ivec2 r = ivec2(int(qx), int(qy)) + d;
+                if (any(lessThan(r, ivec2(0))) || any(greaterThanEqual(r, ivec2(int(kBodyN))))) continue;
+                const uint rq = uint(r.y) * kBodyN + uint(r.x);
+                if ((sBf[rq] & 1u) == 0u || !bodyTouch(q, rq, gap)) continue;
+                const uint a = bodyFind(q), c = bodyFind(rq);
+                if (a != c) sCp[max(a, c)] = min(a, c);
+            }
+        }
+        uint nSup = 0u, nOther = 0u, nStamp = 0u;
+        const bool prints = (sp.c.w & WX_F_FOOT) != 0u;
+        for (uint q = 0u; q < kBodyN * kBodyN; ++q)
+        {
+            if ((sBf[q] & 1u) == 0u || bodyFind(q) != q) continue;
+            // the blob rooted at q: its footprint (tile texels), lowest point, support
+            ivec2 lo = ivec2(1 << 20), hi = ivec2(-1);
+            float zb = 1e30;
+            bool sup = false;
+            for (uint r = q; r < kBodyN * kBodyN; ++r)
+            {
+                if ((sBf[r] & 1u) == 0u || bodyFind(r) != q) continue;
+                lo = min(lo, ivec2(int(sBlo[r] & 0xFFFFu), int(sBlo[r] >> 16u)));
+                hi = max(hi, ivec2(int(sBhi[r] & 0xFFFFu), int(sBhi[r] >> 16u)));
+                zb = min(zb, sBz[r]);
+                sup = sup || (sBf[r] & 2u) != 0u;
+            }
+            if (sup) ++nSup; else ++nOther;
+            if (!sup || !prints || nStamp >= kBodyStampMax) continue;
+            const vec2 l0 = (vec2(lo) / float(b.res) - 0.5) * b.e, l1 = (vec2(hi + 1) / float(b.res) - 0.5) * b.e;
+            const vec2 hh = 0.5 * (l1 - l0);
+            if (max(hh.x, hh.y) > kBodyPrintMax) continue;   // (a body lying in the snow: pressed, no print)
+            const vec2 dir = hh.x >= hh.y ? cs : vec2(-cs.y, cs.x);
+            if (pushStamp(vec3(bodyToWorld(b, 0.5 * (l0 + l1)), zb), dir, clamp(max(hh.x, hh.y), 0.05, 0.25),
+                          clamp(min(hh.x, hh.y), 0.04, 0.15)))
+                ++nStamp;
+        }
+        atomicAdd(mv_bd0.x, 1u);
+        if (nSup > 0u) atomicAdd(mv_bd0.y, nSup);
+        if (nOther > 0u) atomicAdd(mv_bd0.z, nOther);
+        if (nStamp > 0u) atomicAdd(mv_bd0.w, nStamp);
+        atomicMax(mv_bd1.w, nSup + nOther);
+    }
+}
+
+void main()
+{
+    if (gl_WorkGroupID.x >= kAvGroups)
+    {
+        // #783 BODY CONTACT: the layers' workgroups (only dispatched with WX_F_BODY)
+        bodyContact(gl_WorkGroupID.x - kAvGroups);
+        return;
+    }
+    const uint i = gl_GlobalInvocationID.x;
+    if (i >= AV_SLOT_CAP || i >= uint(avatar_joints.length())) return;
+    const int row = int(sp.c.z);
+    const ivec2 at0 = ivec2(int(i), row), at1 = ivec2(int(i), row + 1);
+    const bool alive = ((av_bits[i >> 5u] >> (i & 31u)) & 1u) != 0u;
+    const bool sitting = ((av_bits[AV_SLOT_WORDS + (i >> 5u)] >> (i & 31u)) & 1u) != 0u;
+    const vec4 a0 = imageLoad(uInstSnow, at0);
+    if (!alive)
+    {
+        if (av_state[2u * i].w != 0.0) { av_state[2u * i] = vec4(0.0); av_state[2u * i + 1u] = vec4(0.0); }
+        if (a0.r != 0.0) imageStore(uInstSnow, at0, vec4(0.0));
+        return;
+    }
+    const mat4 chest = jointWorld(avatar_joints[i].world[kJChest]);
+    const vec3 P = jointWorld(avatar_joints[i].world[kJPelvis])[3].xyz;
+    const vec3 head = jointWorld(avatar_joints[i].world[kJHead])[3].xyz;
+    vec4 s0 = av_state[2u * i], s1 = av_state[2u * i + 1u];
+    const float dt = sp.b.z;
+    // (the pelvis's horizontal motion this step: the limbs' berm direction)
+    vec2 pmove = s0.w > 0.5 ? P.xy - s0.xy : vec2(0.0);
+    if (dot(pmove, pmove) > 2500.0 * dt * dt) pmove = vec2(0.0);   // (> 50 m/s: a teleport / sit jump)
+    float amt = a0.r > 0.0 ? a0.r : 0.0;   // (-1: the image's clear value)
+    if (dt > 0.0)
+    {
+        if (s0.w > 0.5)
+        {
+            const vec3 v = (P - s0.xyz) / dt;
+            if (dot(v, v) > 2500.0) s1 = vec4(0.0);   // > 50 m/s: a teleport / sit jump, not motion
+            else
+            {
+                const float k = 1.0 - exp(-dt * 5.0);
+                s1.x = mix(s1.x, length(v.xy), k);
+                s1.y = mix(s1.y, abs(v.z), k);
+            }
+        }
+        s0 = vec4(P, 1.0);
+        av_state[2u * i] = s0;
+        av_state[2u * i + 1u] = s1;
+        const bool shed = s1.x > sp.g.y || s1.y > sp.g.z;
+        const bool still = s1.x < sp.g.x && s1.y < 0.5 * sp.g.z;
+        // #903: the sky over the head decides, not the snowfall: under cover nothing builds and the
+        // snow melts (kAvCoverMelt of a full coat per second, by how covered), snowfall or not --
+        // the same as after the snow stops. Open: it builds while standing / sitting still.
+        const float sky = wxSkyAt(head + vec3(0.0, 0.0, 0.25));
+        if (shed) amt *= exp(-dt * 1.5);                       // running / flying / jumping
+        else if (still) amt += sp.a.z * sky;                   // standing / sitting under the open sky
+        amt -= dt * kAvCoverMelt * clamp(1.0 - 2.0 * sky, 0.0, 1.0);
+    }
+    amt = clamp(min(amt, sp.a.w), 0.0, 1.0);
+    // The anchor: the chest (the shoulders' frame), its yaw from its forward (+X) axis.
+    const float yaw = atan(chest[0].y, chest[0].x);
+    imageStore(uInstSnow, at0, vec4(amt, yaw, 0.0, 0.0));
+    imageStore(uInstSnow, at1, vec4(chest[3].xyz, 1.0));
+
+    const bool footOn = (sp.c.w & WX_F_FOOT) != 0u && !sitting;
+    // LIMB CONTACT (#783 follow-up, RenderVKWeatherSnowLimbs): every limb that reaches the snow, for
+    // the avatars / animesh within the limb range of the camera (sp.f.w, m) inside the published
+    // inner grid. The berms follow the pelvis's motion; standing still, a rim all around.
+    // #783 BODY CONTACT: an avatar on its bottom map is pressed (and printed) by its layer's
+    // workgroup (bodyContact) instead -- no joint boxes, no joint footprints.
+    const bool limbs = limbGate(i, P);
+    if (limbs && bodyLayerOf(i, P) != 0xFFFFFFFFu) return;
+    if (limbs)
+    {
+        atomicAdd(mv_bd1.x, 1u);
+        const float k = clamp(distance(jPos(i, kJHip[0]), jPos(i, kJKnee[0])) / kLimbThigh, 0.25, 4.0);
+        const float ml = length(pmove);
+        limbContact(i, k, footOn, ml > 0.002 ? pmove / ml : vec2(0.0), max(ml, 1e-3));
+    }
+
+    // FOOTPRINTS: the feet of a standing (not sitting) avatar inside the published near field.
+    if (!footOn || dt <= 0.0 || ssr.weather[3].w < 0.5) return;
+    for (int f = 0; f < 2; ++f)
+    {
+        const vec3 an = jointWorld(avatar_joints[i].world[kJAnkle[f]])[3].xyz;
+        const vec3 ft = jointWorld(avatar_joints[i].world[kJFoot[f]])[3].xyz;
+        const vec3 to = jointWorld(avatar_joints[i].world[kJToe[f]])[3].xyz;
+        vec2 dir = to.xy - an.xy;
+        const float len = length(dir);
+        if (!(len > 0.03) || len > 0.6) continue;   // (no usable foot: identity / broken joints)
+        dir /= len;
+        const vec3 c = vec3(0.5 * (an.xy + to.xy), min(ft.z, to.z) - 0.03);
+        if (pushStamp(c, dir, clamp(0.5 * len + 0.06, 0.09, 0.2), 0.065) && limbs) atomicAdd(mv_bd1.y, 1u);
+    }
+}
+
+#else   // WX_SNOW_STAMP
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(std430, set = 1, binding = 4) readonly buffer WxStamps { uvec4 st_head; vec4 st[]; };
+
+void main()
+{
+    const uint k = gl_WorkGroupID.x;
+    const int res = int(sp.a.y + 0.5);
+    const uint dst = uint(sp.a.x + 0.5);
+    const vec4 c = st[2u * k], e = st[2u * k + 1u];
+    const vec4 fr = ssr.weather[3], fz = ssr.weather[4];
+    const vec2 s = ssr.weather[7].xy;
+    const vec2 uvc = (c.xy - (fz.x - c.z) * s - fr.xy) * fr.z;
+    const ivec2 t = ivec2(floor(uvc * float(res))) + ivec2(gl_LocalInvocationID.xy) - ivec2(4);
+    if (any(lessThan(t, ivec2(0))) || any(greaterThanEqual(t, ivec2(res)))) return;
+    const vec4 v = imageLoad(uCover[dst], t);
+    const float bz = imageLoad(uBase[dst], t).r;
+    if (bz > 1e29 || !(v.a > 0.0)) return;   // no base / no snow
+    const float zs = fz.x - bz;   // the snow's (filtered) base
+    if (c.z > zs + v.a + 0.04 || c.z < zs - 0.25) return;   // the foot is above the snow / under the ground
+    // The texel's surface point (its column at the surface's height) in the foot's frame.
+    const vec2 u = fr.xy + (vec2(t) + 0.5) / (float(res) * fr.z);
+    const vec2 d = u + (fz.x - zs) * s - c.xy;
+    const float al = dot(d, e.xy) / c.w, ac = dot(d, vec2(-e.y, e.x)) / e.z;
+    const float m = 1.0 - smoothstep(0.7, 1.0, length(vec2(al, ac)));
+    if (m <= 0.0) return;
+    const float pressed = max(c.z - zs, 0.2 * v.a);
+    const float D = mix(v.a, min(v.a, pressed), m);
+    if (D < v.a) imageStore(uCover[dst], t, vec4(v.rgb, D));
+    if (v.a - D > kMeshMarkEps) wxMarkMesh(dst, t, res);   // (#946: the mesh's local patch)
+}
+#endif

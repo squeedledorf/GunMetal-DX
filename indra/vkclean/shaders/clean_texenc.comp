@@ -1,0 +1,914 @@
+#version 460
+// clean_texenc.comp -- real-time GPU block-compression encoder for sampled textures
+// (RenderVKTextureCompression, #263). One invocation per 4x4 block of one mip level:
+// the source level is read through a sampled UNORM view (texelFetch, so the source may be
+// RGBA8 or an already block-compressed image: a format switch re-encodes from what the GPU
+// holds) and the finished blocks are written to a buffer the host side copies into the
+// BC image (vkCmdCopyBufferToImage). No storage view of the BC image is needed.
+//
+// Formats (push mode):
+//   ENC_RAW      : decode copy, RGBA8 texels row-major (BC -> uncompressed switch)
+//   ENC_BC1      : RGB 4 bpp, four-colour mode (opaque colour)
+//   ENC_BC3      : BC4-style alpha block + four-colour BC1 colour block, 8 bpp
+//   ENC_BC4      : one channel (R), 4 bpp
+//   ENC_BC5      : two channels (R, G: tangent-space normal maps; Z reconstructed in the FS)
+//   ENC_BC7_FAST : BC7 mode 6 (+ mode 5 for blocks whose alpha varies), 8 bpp
+//   ENC_BC7_HQ   : BC7 modes 6 (all p-bit pairs, 2 refinements), 5 (all 4 rotations) and
+//                  1 (best-estimated of the 64 two-subset partitions), best per block
+//
+// Algorithms, written for this renderer after well-known open designs:
+//   - BC1 / BC4 / BC5: principal-axis endpoint fit by power iteration, nearest-palette
+//     indices, least-squares endpoint refinement -- the approach of stb_dxt (Fabian
+//     "ryg" Giesen / Sean Barrett, public domain) and its descendants.
+//   - BC7: single-subset principal-axis fit + least-squares refinement + p-bit search, the
+//     per-mode strategy of bc7enc / bc7e (Rich Geldreich, MIT / public domain), with the
+//     two-subset partition chosen by the cheap "residual off the principal line" estimate.
+//   - The BC7 partition / anchor tables are the format's own (Khronos Data Format spec,
+//     BPTC), not anyone's code.
+// No source was copied; the attribution is for the methods.
+//
+// Error statistics (FLAG_STATS): the chosen candidate's squared error (encoder-side, over
+// the channels the format stores) is reduced per workgroup and added to a 64-bit counter
+// (lo/hi carry) of the item's stats record; the host turns it into PSNR (VKTex log).
+// Two more measures feed the Adaptive level's per-texture format choice (BC1/BC3 vs BC7):
+//  - SMOOTH blocks (source range 2..32 levels on every stored channel: gradients, skin,
+//    sky -- where BC1's 565 endpoints band): their squared error and count, so the host
+//    gets a PSNR over the smooth area alone (flat blocks, range <= 1, are left out: BC1
+//    stores them near-exactly and they would dilute the gradient error);
+//  - BAD blocks: per-channel block MSE > 100 (RMS 10 levels) -- a small high-contrast
+//    logo or text on a flat field that the whole-image PSNR doesn't see.
+//
+// ALPHA-MASK CUTOFF (#840; EncPush.flags bits [8,16) = the 8-bit cutoff of an alpha-MASK
+// image -- the #804 mask variant, its highest material cutoff -- 0 = none): the encoder
+// keeps every texel on its side of the alpha test. Plain least-squares error happily
+// trades a few alpha levels for colour (BC7 mode 6 fits RGBA as one line, and a flat
+// alpha 255 lands on 254 with an even p-bit; BC4 / mode 5 interpolants sit up to
+// range/14 / range/6 off), harmless on a blended face but, on a texel near the cutoff
+// (J2C noise under a high cutoff, an anti-aliased cutout edge), a hole -- or a stray
+// opaque speck -- in the alpha test. With a cutoff: alpha indices are chosen nearest ON
+// THE SAME SIDE (a source above the cutoff decodes at least a level above it, one at it
+// at or above it, one below at least a level below: aSide), candidates rank by sides kept first and error second, BC7
+// mode 5 (alpha endpoints = the block's exact min / max, so a same-side index always
+// exists) is tried whenever mode 6 loses a side, and the alpha rotations (alpha on the
+// colour line) are tried only for an opaque block; BC3's alpha block keeps its exact min / max fit as the
+// fallback. A masked block never crosses its cutoff in BC3 / BC7 fast / BC7 HQ
+// (scripts/texenc_test: offline round trip against a reference decoder).
+#extension GL_EXT_samplerless_texture_functions : require
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform texture2D uSrc;
+layout(std430, set = 0, binding = 1) writeonly buffer OutBlocks { uint outw[]; };
+layout(std430, set = 0, binding = 2) buffer EncStats { uint stats[]; };
+
+layout(push_constant) uniform EncPush
+{
+    uint lod;       // source mip level (relative to the view)
+    uint w, h;      // that level's extent (texels)
+    uint bx;        // blocks across
+    uint by;        // blocks down
+    uint out_word;  // first output uint of this level
+    uint mode;      // ENC_*
+    uint flags;     // FLAG_*
+    uint stat_rec;  // stats record (8 uints: sse lo, sse hi, max texel sq error, blocks,
+                    //  smooth-block sse lo, hi, smooth blocks, bad blocks)
+} pc;
+
+#define ENC_RAW      0u
+#define ENC_BC1      1u
+#define ENC_BC3      2u
+#define ENC_BC4      3u
+#define ENC_BC5      4u
+#define ENC_BC7_FAST 5u
+#define ENC_BC7_HQ   6u
+#define FLAG_STATS   1u
+
+// #840 alpha-mask cutoff (see the header): 0 = not a mask image.
+float maskCut() { return float((pc.flags >> 8u) & 255u); }
+// May source alpha s (integer) decode as d under cutoff c? A whole level of margin on
+// either side: d is BC7's exact integer interpolant, or BC4's real-valued one
+// (((8-k) e0 + (k-1) e1) / 7, which decoders round or truncate). The cutoff the FS
+// applies lies within half a level of c (c = its 8-bit rounding).
+bool aSide(float s, float d, float c) { return s > c ? d >= c + 1.0 : (s == c ? d >= c : d <= c - 1.0); }
+
+const float kBig = 3.0e38;
+
+vec4 px[16];   // the block, 0..255 per channel
+
+// ---- bit writer (128-bit block) ----
+uvec4 gBits;
+uint  gPos;
+void bitsReset() { gBits = uvec4(0u); gPos = 0u; }
+void put(uint v, uint n)
+{
+    const uint w = gPos >> 5u, o = gPos & 31u;
+    gBits[w] |= v << o;
+    if (o + n > 32u) gBits[w + 1u] |= v >> (32u - o);
+    gPos += n;
+}
+
+void loadBlock(uvec2 b)
+{
+    const ivec2 base = ivec2(b * 4u);
+    const ivec2 mx = ivec2(int(pc.w) - 1, int(pc.h) - 1);
+    for (int i = 0; i < 16; ++i)
+    {
+        const ivec2 c = min(base + ivec2(i & 3, i >> 2), mx);
+        px[i] = floor(texelFetch(uSrc, c, int(pc.lod)) * 255.0 + 0.5);
+    }
+}
+
+// Dominant eigenvector of a symmetric covariance by power iteration, started from the
+// column with the largest diagonal (a fixed start vector can be orthogonal to the axis).
+vec3 principal3(mat3 C)
+{
+    vec3 v = C[0];
+    if (C[1][1] > C[0][0] && C[1][1] >= C[2][2]) v = C[1];
+    else if (C[2][2] > C[0][0] && C[2][2] > C[1][1]) v = C[2];
+    for (int k = 0; k < 6; ++k)
+    {
+        const vec3 nv = C * v;
+        const float l = max(abs(nv.x), max(abs(nv.y), abs(nv.z)));
+        if (l < 1e-6) break;
+        v = nv / l;
+    }
+    const float n = dot(v, v);
+    return n > 1e-12 ? v * inversesqrt(n) : vec3(0.57735);
+}
+vec4 principal4(mat4 C)
+{
+    int bi = 0;
+    float bd = C[0][0];
+    for (int i = 1; i < 4; ++i) if (C[i][i] > bd) { bd = C[i][i]; bi = i; }
+    vec4 v = C[bi];
+    for (int k = 0; k < 6; ++k)
+    {
+        const vec4 nv = C * v;
+        const float l = max(max(abs(nv.x), abs(nv.y)), max(abs(nv.z), abs(nv.w)));
+        if (l < 1e-6) break;
+        v = nv / l;
+    }
+    const float n = dot(v, v);
+    return n > 1e-12 ? v * inversesqrt(n) : vec4(0.5);
+}
+
+// ===========================================================================
+// BC1 colour block (four-colour mode)
+// ===========================================================================
+uint q565(vec3 c)
+{
+    const uvec3 q = uvec3(clamp(floor(c * (vec3(31.0, 63.0, 31.0) / 255.0) + 0.5), vec3(0.0), vec3(31.0, 63.0, 31.0)));
+    return (q.r << 11) | (q.g << 5) | q.b;
+}
+vec3 e565(uint v)
+{
+    const uint r = (v >> 11) & 31u, g = (v >> 5) & 63u, b = v & 31u;
+    return vec3(float((r << 3) | (r >> 2)), float((g << 2) | (g >> 4)), float((b << 3) | (b >> 2)));
+}
+// Nearest of the four palette colours per texel; returns (sse, max texel sq error).
+vec2 bc1Indices(vec3 p0, vec3 p1, out uint bits)
+{
+    const vec3 pal[4] = vec3[4](p0, p1, floor((2.0 * p0 + p1) / 3.0), floor((p0 + 2.0 * p1) / 3.0));
+    bits = 0u;
+    float err = 0.0, mx = 0.0;
+    for (int i = 0; i < 16; ++i)
+    {
+        float bd = kBig; uint bk = 0u;
+        for (uint k = 0u; k < 4u; ++k)
+        {
+            const vec3 d = px[i].rgb - pal[k];
+            const float e = dot(d, d);
+            if (e < bd) { bd = e; bk = k; }
+        }
+        bits |= bk << (2 * i);
+        err += bd; mx = max(mx, bd);
+    }
+    return vec2(err, mx);
+}
+// Least-squares endpoints for fixed indices (index k -> weight of endpoint 0).
+void bc1Refine(uint bits, inout vec3 e0, inout vec3 e1)
+{
+    float aa = 0.0, ab = 0.0, bb = 0.0;
+    vec3 ax = vec3(0.0), bx = vec3(0.0);
+    for (int i = 0; i < 16; ++i)
+    {
+        const uint k = (bits >> (2 * i)) & 3u;
+        const float a = k == 0u ? 1.0 : (k == 1u ? 0.0 : (k == 2u ? 2.0 / 3.0 : 1.0 / 3.0));
+        const float b = 1.0 - a;
+        aa += a * a; ab += a * b; bb += b * b;
+        ax += a * px[i].rgb; bx += b * px[i].rgb;
+    }
+    const float det = aa * bb - ab * ab;
+    if (abs(det) < 1e-4) return;
+    e0 = clamp((ax * bb - bx * ab) / det, vec3(0.0), vec3(255.0));
+    e1 = clamp((bx * aa - ax * ab) / det, vec3(0.0), vec3(255.0));
+}
+// Encodes px.rgb; out = (c0 | c1 << 16, index bits). c0 > c1 always (four-colour mode)
+// except a constant block, which uses index 0 only (valid in either mode).
+vec2 encodeBC1(int iters, out uvec2 blk)
+{
+    vec3 mn = vec3(255.0), mx = vec3(0.0), mean = vec3(0.0);
+    for (int i = 0; i < 16; ++i) { mn = min(mn, px[i].rgb); mx = max(mx, px[i].rgb); mean += px[i].rgb; }
+    mean *= 1.0 / 16.0;
+    if (all(lessThan(mx - mn, vec3(0.5))))
+    {
+        // Flat block: per channel, the endpoint pair (around the rounded value) whose
+        // 2/3 interpolant lands closest -- the single-colour fit of stb_dxt's tables,
+        // searched instead of tabulated. Index 2 everywhere (or 0 if the pair collapses).
+        const vec3 lim = vec3(31.0, 63.0, 31.0);
+        const vec3 r = floor(mn * (lim / 255.0) + 0.5);
+        vec3 bq0 = r, bq1 = r, be = vec3(kBig);
+        for (int a = -1; a <= 1; ++a)
+            for (int b = -1; b <= 1; ++b)
+            {
+                const vec3 q0 = clamp(r + float(a), vec3(0.0), lim), q1 = clamp(r + float(b), vec3(0.0), lim);
+                const uint c0 = (uint(q0.r) << 11) | (uint(q0.g) << 5) | uint(q0.b);
+                const uint c1 = (uint(q1.r) << 11) | (uint(q1.g) << 5) | uint(q1.b);
+                const vec3 v = floor((2.0 * e565(c0) + e565(c1)) / 3.0);
+                const vec3 e = abs(v - mn);
+                for (int c = 0; c < 3; ++c)
+                    if (e[c] < be[c]) { be[c] = e[c]; bq0[c] = q0[c]; bq1[c] = q1[c]; }
+            }
+        uint c0 = (uint(bq0.r) << 11) | (uint(bq0.g) << 5) | uint(bq0.b);
+        uint c1 = (uint(bq1.r) << 11) | (uint(bq1.g) << 5) | uint(bq1.b);
+        uint k = 2u;
+        if (c0 == c1) k = 0u;
+        else if (c0 < c1) { const uint t = c0; c0 = c1; c1 = t; k = 3u; }
+        const vec3 p0 = e565(c0), p1 = e565(c1);
+        const vec3 v = k == 0u ? p0 : (k == 2u ? floor((2.0 * p0 + p1) / 3.0) : floor((p0 + 2.0 * p1) / 3.0));
+        uint bits = 0u;
+        for (int i = 0; i < 16; ++i) bits |= k << (2 * i);
+        blk = uvec2(c0 | (c1 << 16), bits);
+        const vec3 d = mn - v;
+        return vec2(dot(d, d) * 16.0, dot(d, d));
+    }
+    mat3 C = mat3(0.0);
+    for (int i = 0; i < 16; ++i) { const vec3 d = px[i].rgb - mean; C += outerProduct(d, d); }
+    const vec3 ax = principal3(C);
+    float tmin = kBig, tmax = -kBig;
+    for (int i = 0; i < 16; ++i) { const float t = dot(px[i].rgb - mean, ax); tmin = min(tmin, t); tmax = max(tmax, t); }
+    vec3 e0 = clamp(mean + ax * tmax, vec3(0.0), vec3(255.0));
+    vec3 e1 = clamp(mean + ax * tmin, vec3(0.0), vec3(255.0));
+    vec2 best = vec2(kBig);
+    blk = uvec2(0u);
+    for (int it = 0; it <= iters; ++it)
+    {
+        uint c0 = q565(e0), c1 = q565(e1);
+        if (c0 == c1) { if (c0 < 0xFFFFu) c0 += 1u; else c1 -= 1u; }
+        if (c0 < c1) { const uint t = c0; c0 = c1; c1 = t; const vec3 te = e0; e0 = e1; e1 = te; }
+        uint bits;
+        const vec2 r = bc1Indices(e565(c0), e565(c1), bits);
+        if (r.x < best.x) { best = r; blk = uvec2(c0 | (c1 << 16), bits); }
+        if (it < iters) bc1Refine(bits, e0, e1);
+    }
+    return best;
+}
+
+// ===========================================================================
+// BC4 single-channel block (eight-value mode: e0 > e1)
+// ===========================================================================
+float bc4Val(float e0, float e1, uint k)
+{
+    if (k == 0u) return e0;
+    if (k == 1u) return e1;
+    return floor(((8.0 - float(k)) * e0 + (float(k) - 1.0) * e1) / 7.0 + 0.5);
+}
+// The unrounded interpolant (the format defines it in real arithmetic; #840 side test).
+float bc4Exact(float e0, float e1, uint k)
+{
+    if (k == 0u) return e0;
+    if (k == 1u) return e1;
+    return ((8.0 - float(k)) * e0 + (float(k) - 1.0) * e1) / 7.0;
+}
+// Indices for channel ch with endpoints e0 > e1 (integers); bits lo = texels 0..9 (30
+// bits), hi = the rest, packed later. Returns (sse, max). cut > 0 (#840, the alpha of a
+// mask image): the nearest level on the texel's side of the cutoff; flips = texels that
+// had none.
+vec2 bc4Indices(int ch, float e0, float e1, float cut, out uvec2 idx, out uint flips)
+{
+    idx = uvec2(0u);
+    flips = 0u;
+    float err = 0.0, mx = 0.0;
+    const float rng = e0 - e1;
+    for (int i = 0; i < 16; ++i)
+    {
+        const float v = px[i][ch];
+        // nearest level j along e1 (j=0) -> e0 (j=7), then check its neighbours
+        const int j0 = clamp(int(floor((v - e1) / rng * 7.0 + 0.5)), 0, 7);
+        float bd = kBig; uint bk = 0u;
+        for (int j = max(j0 - 1, 0); j <= min(j0 + 1, 7); ++j)
+        {
+            const uint k = j == 7 ? 0u : (j == 0 ? 1u : uint(8 - j));
+            const float d = v - bc4Val(e0, e1, k);
+            if (d * d < bd) { bd = d * d; bk = k; }
+        }
+        if (cut > 0.0 && !aSide(v, bc4Exact(e0, e1, bk), cut))
+        {
+            float sd = kBig; uint sk = bk;
+            for (uint k = 0u; k < 8u; ++k)
+            {
+                const float d = v - bc4Val(e0, e1, k);
+                if (aSide(v, bc4Exact(e0, e1, k), cut) && d * d < sd) { sd = d * d; sk = k; }
+            }
+            if (sd < kBig) { bd = sd; bk = sk; } else ++flips;
+        }
+        if (i < 10) idx.x |= bk << (3 * i); else idx.y |= bk << (3 * (i - 10));
+        err += bd; mx = max(mx, bd);
+    }
+    return vec2(err, mx);
+}
+uint bc4Idx(uvec2 idx, int i) { return i < 10 ? (idx.x >> (3 * i)) & 7u : (idx.y >> (3 * (i - 10))) & 7u; }
+// Channel ch -> (e0, e1, indices); returns (sse, max). cut > 0: side-preserving indices
+// (#840) -- the first fit (the exact min / max) always keeps every side, a refined one
+// wins only if it keeps as many.
+vec2 encodeBC4(int ch, float cut, out uint oe0, out uint oe1, out uvec2 oidx)
+{
+    float mn = 255.0, mx = 0.0;
+    for (int i = 0; i < 16; ++i) { mn = min(mn, px[i][ch]); mx = max(mx, px[i][ch]); }
+    if (mx - mn < 0.5)
+    {
+        oe0 = oe1 = uint(mx); oidx = uvec2(0u);   // e0 == e1: index 0 everywhere = e0
+        return vec2(0.0);
+    }
+    float e0 = mx, e1 = mn;
+    vec2 best = vec2(kBig);
+    uint bestFlips = 0xFFFFu;
+    oe0 = uint(mx); oe1 = uint(mn); oidx = uvec2(0u);
+    for (int it = 0; it < 3; ++it)
+    {
+        float q0 = clamp(floor(e0 + 0.5), 0.0, 255.0), q1 = clamp(floor(e1 + 0.5), 0.0, 255.0);
+        if (q0 <= q1)
+        {
+            if (q0 == q1) { if (q0 < 255.0) q0 += 1.0; else q1 -= 1.0; }
+            else { const float t = q0; q0 = q1; q1 = t; }
+        }
+        uvec2 idx;
+        uint flips;
+        const vec2 r = bc4Indices(ch, q0, q1, cut, idx, flips);
+        if (flips < bestFlips || (flips == bestFlips && r.x < best.x))
+        { best = r; bestFlips = flips; oe0 = uint(q0); oe1 = uint(q1); oidx = idx; }
+        if (it == 2) break;
+        // least squares on (e0, e1) for the chosen indices
+        float aa = 0.0, ab = 0.0, bb = 0.0, ax = 0.0, bx = 0.0;
+        for (int i = 0; i < 16; ++i)
+        {
+            const uint k = bc4Idx(idx, i);
+            const float a = k == 0u ? 1.0 : (k == 1u ? 0.0 : (8.0 - float(k)) / 7.0);
+            const float b = 1.0 - a;
+            aa += a * a; ab += a * b; bb += b * b; ax += a * px[i][ch]; bx += b * px[i][ch];
+        }
+        const float det = aa * bb - ab * ab;
+        if (abs(det) < 1e-4) break;
+        e0 = clamp((ax * bb - bx * ab) / det, 0.0, 255.0);
+        e1 = clamp((bx * aa - ax * ab) / det, 0.0, 255.0);
+    }
+    return best;
+}
+void putBC4(uint e0, uint e1, uvec2 idx)
+{
+    put(e0, 8u); put(e1, 8u);
+    put(idx.x, 30u); put(idx.y, 18u);
+}
+
+// ===========================================================================
+// BC7
+// ===========================================================================
+const float kW2[4]  = float[4](0.0, 21.0, 43.0, 64.0);
+const float kW3[8]  = float[8](0.0, 9.0, 18.0, 27.0, 37.0, 46.0, 55.0, 64.0);
+const float kW4[16] = float[16](0.0, 4.0, 9.0, 13.0, 17.0, 21.0, 26.0, 30.0,
+                                34.0, 38.0, 43.0, 47.0, 51.0, 55.0, 60.0, 64.0);
+// Two-subset partitions: bit i = subset of texel i (row-major).
+const uint kPart2[64] = uint[64](
+    0xCCCCu, 0x8888u, 0xEEEEu, 0xECC8u, 0xC880u, 0xFEECu, 0xFEC8u, 0xEC80u,
+    0xC800u, 0xFFECu, 0xFE80u, 0xE800u, 0xFFE8u, 0xFF00u, 0xFFF0u, 0xF000u,
+    0xF710u, 0x008Eu, 0x7100u, 0x08CEu, 0x008Cu, 0x7310u, 0x3100u, 0x8CCEu,
+    0x088Cu, 0x3110u, 0x6666u, 0x366Cu, 0x17E8u, 0x0FF0u, 0x718Eu, 0x399Cu,
+    0xAAAAu, 0xF0F0u, 0x5A5Au, 0x33CCu, 0x3C3Cu, 0x55AAu, 0x9696u, 0xA55Au,
+    0x73CEu, 0x13C8u, 0x324Cu, 0x3BDCu, 0x6996u, 0xC33Cu, 0x9966u, 0x0660u,
+    0x0272u, 0x04E4u, 0x4E40u, 0x2720u, 0xC936u, 0x936Cu, 0x39C6u, 0x639Cu,
+    0x9336u, 0x9CC6u, 0x817Eu, 0xE718u, 0xCCF0u, 0x0FCCu, 0x7744u, 0xEE22u);
+// Anchor texel of subset 1 for each two-subset partition (subset 0's is texel 0).
+const uint kAnchor2[64] = uint[64](
+    15u, 15u, 15u, 15u, 15u, 15u, 15u, 15u, 15u, 15u, 15u, 15u, 15u, 15u, 15u, 15u,
+    15u,  2u,  8u,  2u,  2u,  8u,  8u, 15u,  2u,  8u,  2u,  2u,  8u,  8u,  2u,  2u,
+    15u, 15u,  6u,  8u,  2u,  8u, 15u, 15u,  2u,  8u,  2u,  2u,  2u, 15u, 15u,  6u,
+     6u,  2u,  6u,  8u, 15u, 15u,  2u,  2u, 15u, 15u, 15u, 15u, 15u,  2u,  2u, 15u);
+
+vec4 bc7Lerp(vec4 a, vec4 b, float w) { return floor(((64.0 - w) * a + w * b + 32.0) * (1.0 / 64.0)); }
+vec3 bc7Lerp3(vec3 a, vec3 b, float w) { return floor(((64.0 - w) * a + w * b + 32.0) * (1.0 / 64.0)); }
+float bc7Lerp1(float a, float b, float w) { return floor(((64.0 - w) * a + w * b + 32.0) * (1.0 / 64.0)); }
+uint get4(uvec2 p, int i) { return (p[i >> 3] >> (4 * (i & 7))) & 15u; }
+
+// ---- mode 6: one subset, RGBA 7.7.7.7 + unique p-bit per endpoint, 4-bit indices ----
+vec4 m6Quant(vec4 e, uint p, out uvec4 q)
+{
+    q = uvec4(clamp(floor((e - float(p)) * 0.5 + 0.5), vec4(0.0), vec4(127.0)));
+    return vec4(q) * 2.0 + float(p);
+}
+// cut > 0 (#840): the nearest index whose alpha is on the texel's side of the cutoff;
+// flips = texels with none.
+vec2 m6Indices(vec4 a, vec4 b, float cut, out uvec2 idx, out uint flips)
+{
+    idx = uvec2(0u);
+    flips = 0u;
+    const vec4 d = b - a;
+    const float dd = dot(d, d);
+    float err = 0.0, mx = 0.0;
+    for (int i = 0; i < 16; ++i)
+    {
+        const float t = dd > 0.0 ? dot(px[i] - a, d) / dd : 0.0;
+        const int k0 = clamp(int(floor(t * 15.0 + 0.5)), 0, 15);
+        float bd = kBig; uint bk = 0u;
+        for (int k = max(k0 - 1, 0); k <= min(k0 + 1, 15); ++k)
+        {
+            const vec4 e = px[i] - bc7Lerp(a, b, kW4[k]);
+            const float ee = dot(e, e);
+            if (ee < bd) { bd = ee; bk = uint(k); }
+        }
+        if (cut > 0.0 && !aSide(px[i].a, bc7Lerp1(a.a, b.a, kW4[bk]), cut))
+        {
+            float sd = kBig; uint sk = bk;
+            for (int k = 0; k < 16; ++k)
+            {
+                const vec4 q = bc7Lerp(a, b, kW4[k]), e = px[i] - q;
+                const float ee = dot(e, e);
+                if (aSide(px[i].a, q.a, cut) && ee < sd) { sd = ee; sk = uint(k); }
+            }
+            if (sd < kBig) { bd = sd; bk = sk; } else ++flips;
+        }
+        idx[i >> 3] |= bk << (4 * (i & 7));
+        err += bd; mx = max(mx, bd);
+    }
+    return vec2(err, mx);
+}
+struct M6 { uvec4 q0, q1; uint p0, p1; uvec2 idx; vec2 err; uint flips; };
+M6 encodeMode6(bool hq, float cut)
+{
+    vec4 mean = vec4(0.0);
+    for (int i = 0; i < 16; ++i) mean += px[i];
+    mean *= 1.0 / 16.0;
+    mat4 C = mat4(0.0);
+    for (int i = 0; i < 16; ++i) { const vec4 d = px[i] - mean; C += outerProduct(d, d); }
+    const vec4 ax = principal4(C);
+    float tmin = kBig, tmax = -kBig;
+    for (int i = 0; i < 16; ++i) { const float t = dot(px[i] - mean, ax); tmin = min(tmin, t); tmax = max(tmax, t); }
+    vec4 e0 = clamp(mean + ax * tmin, vec4(0.0), vec4(255.0));
+    vec4 e1 = clamp(mean + ax * tmax, vec4(0.0), vec4(255.0));
+    // Flat channels: straddle the value so quantization can still hit it exactly
+    // (7-bit + p-bit endpoints cannot represent an arbitrary RGBA in one endpoint).
+    for (int c = 0; c < 4; ++c)
+        if (abs(e1[c] - e0[c]) < 2.0) { e0[c] = max(mean[c] - 1.0, 0.0); e1[c] = min(mean[c] + 1.0, 255.0); }
+    M6 best;
+    best.err = vec2(kBig); best.flips = 0xFFFFu;
+    best.q0 = best.q1 = uvec4(0u); best.p0 = best.p1 = 0u; best.idx = uvec2(0u);
+    const int iters = hq ? 3 : 2;
+    for (int it = 0; it < iters; ++it)
+    {
+        // every p-bit pair (cheap next to the index search, and it is what lets an
+        // odd/even channel mix -- or a flat block -- land between two representable
+        // endpoints at a mid weight)
+        uvec2 idx = uvec2(0u);
+        float itErr = kBig;
+        uint itFlips = 0xFFFFu;
+        for (uint pp = 0u; pp < 4u; ++pp)
+        {
+            uvec4 q0, q1;
+            const vec4 a = m6Quant(e0, pp & 1u, q0), b = m6Quant(e1, pp >> 1u, q1);
+            uvec2 ti;
+            uint fl;
+            const vec2 r = m6Indices(a, b, cut, ti, fl);
+            if (fl < itFlips || (fl == itFlips && r.x < itErr)) { itErr = r.x; itFlips = fl; idx = ti; }
+            if (fl < best.flips || (fl == best.flips && r.x < best.err.x))
+            { best.err = r; best.flips = fl; best.q0 = q0; best.q1 = q1; best.p0 = pp & 1u; best.p1 = pp >> 1u; best.idx = ti; }
+        }
+        if (it == iters - 1) break;
+        // least squares for the chosen indices
+        float aa = 0.0, ab = 0.0, bb = 0.0;
+        vec4 sa = vec4(0.0), sb = vec4(0.0);
+        for (int i = 0; i < 16; ++i)
+        {
+            const float b = kW4[get4(idx, i)] * (1.0 / 64.0), a = 1.0 - b;
+            aa += a * a; ab += a * b; bb += b * b; sa += a * px[i]; sb += b * px[i];
+        }
+        const float det = aa * bb - ab * ab;
+        if (abs(det) < 1e-4) break;
+        e0 = clamp((sa * bb - sb * ab) / det, vec4(0.0), vec4(255.0));
+        e1 = clamp((sb * aa - sa * ab) / det, vec4(0.0), vec4(255.0));
+    }
+    return best;
+}
+void putMode6(M6 m)
+{
+    // anchor (texel 0) index MSB must be 0
+    if (get4(m.idx, 0) >= 8u)
+    {
+        const uvec4 tq = m.q0; m.q0 = m.q1; m.q1 = tq;
+        const uint tp = m.p0; m.p0 = m.p1; m.p1 = tp;
+        m.idx = ~m.idx;   // 15 - k in every nibble
+    }
+    put(1u << 6, 7u);
+    for (int c = 0; c < 4; ++c) { put(m.q0[c], 7u); put(m.q1[c], 7u); }
+    put(m.p0, 1u); put(m.p1, 1u);
+    put(get4(m.idx, 0), 3u);
+    for (int i = 1; i < 16; ++i) put(get4(m.idx, i), 4u);
+}
+
+// ---- mode 5: one subset, RGB 7.7.7 + A 8, 2-bit colour and alpha indices, rotation ----
+vec4 rot(vec4 c, uint r)
+{
+    if (r == 1u) return c.agbr;
+    if (r == 2u) return c.rabg;
+    if (r == 3u) return c.rgab;
+    return c;
+}
+vec3 q7(vec3 e, out uvec3 q)
+{
+    q = uvec3(clamp(floor(e * (127.0 / 255.0) + 0.5), vec3(0.0), vec3(127.0)));
+    return vec3((q << 1) | (q >> 6));
+}
+struct M5 { uint r; uvec3 c0, c1; uint a0, a1; uint ci, ai; vec2 err; uint flips; };
+// cut > 0 (#840; rotation 0 only): side-preserving alpha indices -- the first alpha fit
+// (the block's exact min / max) always keeps every side, a refined one wins only if it
+// keeps as many.
+M5 encodeMode5(uint r, bool hq, float cut)
+{
+    vec4 p[16];
+    for (int i = 0; i < 16; ++i) p[i] = rot(px[i], r);
+    M5 m;
+    m.r = r;
+    // colour line
+    vec3 mean = vec3(0.0);
+    for (int i = 0; i < 16; ++i) mean += p[i].rgb;
+    mean *= 1.0 / 16.0;
+    mat3 C = mat3(0.0);
+    for (int i = 0; i < 16; ++i) { const vec3 d = p[i].rgb - mean; C += outerProduct(d, d); }
+    const vec3 ax = principal3(C);
+    float tmin = kBig, tmax = -kBig;
+    for (int i = 0; i < 16; ++i) { const float t = dot(p[i].rgb - mean, ax); tmin = min(tmin, t); tmax = max(tmax, t); }
+    vec3 e0 = clamp(mean + ax * tmin, vec3(0.0), vec3(255.0));
+    vec3 e1 = clamp(mean + ax * tmax, vec3(0.0), vec3(255.0));
+    float cerr = kBig, cmx = 0.0;
+    m.c0 = m.c1 = uvec3(0u); m.ci = 0u;
+    const int iters = hq ? 3 : 2;
+    for (int it = 0; it < iters; ++it)
+    {
+        uvec3 qa, qb;
+        const vec3 a = q7(e0, qa), b = q7(e1, qb);
+        uint ci = 0u; float er = 0.0, mx = 0.0;
+        for (int i = 0; i < 16; ++i)
+        {
+            float bd = kBig; uint bk = 0u;
+            for (uint k = 0u; k < 4u; ++k)
+            {
+                const vec3 d = p[i].rgb - bc7Lerp3(a, b, kW2[k]);
+                const float e = dot(d, d);
+                if (e < bd) { bd = e; bk = k; }
+            }
+            ci |= bk << (2 * i); er += bd; mx = max(mx, bd);
+        }
+        if (er < cerr) { cerr = er; cmx = mx; m.c0 = qa; m.c1 = qb; m.ci = ci; }
+        if (it == iters - 1) break;
+        float aa = 0.0, ab = 0.0, bb = 0.0;
+        vec3 sa = vec3(0.0), sb = vec3(0.0);
+        for (int i = 0; i < 16; ++i)
+        {
+            const float w = kW2[(ci >> (2 * i)) & 3u] * (1.0 / 64.0), u = 1.0 - w;
+            aa += u * u; ab += u * w; bb += w * w; sa += u * p[i].rgb; sb += w * p[i].rgb;
+        }
+        const float det = aa * bb - ab * ab;
+        if (abs(det) < 1e-4) break;
+        e0 = clamp((sa * bb - sb * ab) / det, vec3(0.0), vec3(255.0));
+        e1 = clamp((sb * aa - sa * ab) / det, vec3(0.0), vec3(255.0));
+    }
+    // scalar (alpha after rotation)
+    float amn = 255.0, amx = 0.0;
+    for (int i = 0; i < 16; ++i) { amn = min(amn, p[i].a); amx = max(amx, p[i].a); }
+    float f0 = amn, f1 = amx;
+    float aerr = kBig, amxe = 0.0;
+    const float acut = r == 0u ? cut : 0.0;
+    m.flips = 0xFFFFu;
+    m.a0 = uint(amn); m.a1 = uint(amx); m.ai = 0u;
+    for (int it = 0; it < 2; ++it)
+    {
+        const float a = clamp(floor(f0 + 0.5), 0.0, 255.0), b = clamp(floor(f1 + 0.5), 0.0, 255.0);
+        uint ai = 0u, fl = 0u; float er = 0.0, mx = 0.0;
+        for (int i = 0; i < 16; ++i)
+        {
+            float bd = kBig, sd = kBig; uint bk = 0u, sk = 0u;
+            for (uint k = 0u; k < 4u; ++k)
+            {
+                const float q = bc7Lerp1(a, b, kW2[k]), d = p[i].a - q;
+                if (d * d < bd) { bd = d * d; bk = k; }
+                if (acut > 0.0 && aSide(p[i].a, q, acut) && d * d < sd) { sd = d * d; sk = k; }
+            }
+            if (acut > 0.0) { if (sd < kBig) { bd = sd; bk = sk; } else ++fl; }
+            ai |= bk << (2 * i); er += bd; mx = max(mx, bd);
+        }
+        if (fl < m.flips || (fl == m.flips && er < aerr))
+        { aerr = er; amxe = mx; m.flips = fl; m.a0 = uint(a); m.a1 = uint(b); m.ai = ai; }
+        if (it == 1 || amx - amn < 0.5) break;
+        float aa = 0.0, ab = 0.0, bb = 0.0, sa = 0.0, sb = 0.0;
+        for (int i = 0; i < 16; ++i)
+        {
+            const float w = kW2[(ai >> (2 * i)) & 3u] * (1.0 / 64.0), u = 1.0 - w;
+            aa += u * u; ab += u * w; bb += w * w; sa += u * p[i].a; sb += w * p[i].a;
+        }
+        const float det = aa * bb - ab * ab;
+        if (abs(det) < 1e-4) break;
+        f0 = clamp((sa * bb - sb * ab) / det, 0.0, 255.0);
+        f1 = clamp((sb * aa - sa * ab) / det, 0.0, 255.0);
+    }
+    m.err = vec2(cerr + aerr, cmx + amxe);
+    return m;
+}
+void putMode5(M5 m)
+{
+    if (((m.ci >> 1) & 1u) != 0u) { const uvec3 t = m.c0; m.c0 = m.c1; m.c1 = t; m.ci = ~m.ci; }
+    if (((m.ai >> 1) & 1u) != 0u) { const uint t = m.a0; m.a0 = m.a1; m.a1 = t; m.ai = ~m.ai; }
+    put(1u << 5, 6u);
+    put(m.r, 2u);
+    for (int c = 0; c < 3; ++c) { put(m.c0[c], 7u); put(m.c1[c], 7u); }
+    put(m.a0, 8u); put(m.a1, 8u);
+    put(m.ci & 1u, 1u); put((m.ci >> 2) & 0x3FFFFFFFu, 30u);
+    put(m.ai & 1u, 1u); put((m.ai >> 2) & 0x3FFFFFFFu, 30u);
+}
+
+// ---- mode 1: two subsets (64 partitions), RGB 6.6.6 + shared p-bit per subset, 3-bit ----
+// How far the subset's colours lie off their principal line (cheap partition estimate).
+float lineResidual(uint mask, uint want)
+{
+    float n = 0.0;
+    vec3 s = vec3(0.0);
+    for (int i = 0; i < 16; ++i) if (((mask >> i) & 1u) == want) { s += px[i].rgb; n += 1.0; }
+    if (n < 1.0) return 0.0;
+    const vec3 mean = s / n;
+    mat3 C = mat3(0.0);
+    for (int i = 0; i < 16; ++i)
+        if (((mask >> i) & 1u) == want) { const vec3 d = px[i].rgb - mean; C += outerProduct(d, d); }
+    const vec3 ax = principal3(C);
+    return max(C[0][0] + C[1][1] + C[2][2] - dot(ax, C * ax), 0.0);
+}
+vec3 m1Quant(vec3 e, uint p, out uvec3 q)
+{
+    q = uvec3(clamp(floor((e - 2.0 * float(p)) * 0.25 + 0.5), vec3(0.0), vec3(63.0)));
+    const uvec3 v7 = (q << 1) | p;
+    return vec3((v7 << 1) | (v7 >> 6));
+}
+struct M1 { uint part; uvec3 q[4]; uint p[2]; uvec2 idx; vec2 err; };
+uint get3(uvec2 p, int i) { return i < 10 ? (p.x >> (3 * i)) & 7u : (p.y >> (3 * (i - 10))) & 7u; }
+// Encodes subset `s` of partition mask; fills q[2s], q[2s+1], p[s], its indices; (sse, max).
+vec2 m1Subset(uint mask, uint s, inout M1 m)
+{
+    float n = 0.0;
+    vec3 mean = vec3(0.0);
+    for (int i = 0; i < 16; ++i) if (((mask >> i) & 1u) == s) { mean += px[i].rgb; n += 1.0; }
+    mean /= max(n, 1.0);
+    mat3 C = mat3(0.0);
+    for (int i = 0; i < 16; ++i)
+        if (((mask >> i) & 1u) == s) { const vec3 d = px[i].rgb - mean; C += outerProduct(d, d); }
+    const vec3 ax = principal3(C);
+    float tmin = kBig, tmax = -kBig;
+    for (int i = 0; i < 16; ++i)
+        if (((mask >> i) & 1u) == s) { const float t = dot(px[i].rgb - mean, ax); tmin = min(tmin, t); tmax = max(tmax, t); }
+    vec3 e0 = clamp(mean + ax * tmin, vec3(0.0), vec3(255.0));
+    vec3 e1 = clamp(mean + ax * tmax, vec3(0.0), vec3(255.0));
+    vec2 best = vec2(kBig);
+    uvec2 bidx = uvec2(0u);
+    for (int it = 0; it < 2; ++it)
+    {
+        uvec2 lastIdx = uvec2(0u);
+        for (uint p = 0u; p < 2u; ++p)
+        {
+            uvec3 qa, qb;
+            const vec3 a = m1Quant(e0, p, qa), b = m1Quant(e1, p, qb);
+            uvec2 idx = uvec2(0u);
+            float er = 0.0, mx = 0.0;
+            for (int i = 0; i < 16; ++i)
+            {
+                if (((mask >> i) & 1u) != s) continue;
+                float bd = kBig; uint bk = 0u;
+                for (uint k = 0u; k < 8u; ++k)
+                {
+                    const vec3 d = px[i].rgb - bc7Lerp3(a, b, kW3[k]);
+                    const float e = dot(d, d);
+                    if (e < bd) { bd = e; bk = k; }
+                }
+                if (i < 10) idx.x |= bk << (3 * i); else idx.y |= bk << (3 * (i - 10));
+                er += bd; mx = max(mx, bd);
+            }
+            if (er < best.x) { best = vec2(er, mx); bidx = idx; m.q[2 * s] = qa; m.q[2 * s + 1] = qb; m.p[s] = p; }
+            if (p == 0u || er <= best.x) lastIdx = idx;
+        }
+        if (it == 1) break;
+        float aa = 0.0, ab = 0.0, bb = 0.0;
+        vec3 sa = vec3(0.0), sb = vec3(0.0);
+        for (int i = 0; i < 16; ++i)
+        {
+            if (((mask >> i) & 1u) != s) continue;
+            const float w = kW3[get3(lastIdx, i)] * (1.0 / 64.0), u = 1.0 - w;
+            aa += u * u; ab += u * w; bb += w * w; sa += u * px[i].rgb; sb += w * px[i].rgb;
+        }
+        const float det = aa * bb - ab * ab;
+        if (abs(det) < 1e-4) break;
+        e0 = clamp((sa * bb - sb * ab) / det, vec3(0.0), vec3(255.0));
+        e1 = clamp((sb * aa - sa * ab) / det, vec3(0.0), vec3(255.0));
+    }
+    m.idx |= bidx;   // disjoint texel sets
+    return best;
+}
+M1 encodeMode1()
+{
+    // best partition by the line-residual estimate
+    uint bp = 0u; float be = kBig;
+    for (uint p = 0u; p < 64u; ++p)
+    {
+        const float e = lineResidual(kPart2[p], 0u) + lineResidual(kPart2[p], 1u);
+        if (e < be) { be = e; bp = p; }
+    }
+    M1 m;
+    m.part = bp; m.idx = uvec2(0u); m.p[0] = m.p[1] = 0u;
+    for (int i = 0; i < 4; ++i) m.q[i] = uvec3(0u);
+    const vec2 r0 = m1Subset(kPart2[bp], 0u, m);
+    const vec2 r1 = m1Subset(kPart2[bp], 1u, m);
+    m.err = vec2(r0.x + r1.x, max(r0.y, r1.y));
+    return m;
+}
+void putMode1(M1 m)
+{
+    const uint mask = kPart2[m.part];
+    const uint anc1 = kAnchor2[m.part];
+    // each subset's anchor index MSB must be 0: swap that subset's endpoints + invert
+    for (uint s = 0u; s < 2u; ++s)
+    {
+        const int a = s == 0u ? 0 : int(anc1);
+        if (get3(m.idx, a) < 4u) continue;
+        const uvec3 t = m.q[2 * s]; m.q[2 * s] = m.q[2 * s + 1]; m.q[2 * s + 1] = t;
+        for (int i = 0; i < 16; ++i)
+        {
+            if (((mask >> i) & 1u) != s) continue;
+            const uint k = 7u - get3(m.idx, i);
+            if (i < 10) m.idx.x = (m.idx.x & ~(7u << (3 * i))) | (k << (3 * i));
+            else        m.idx.y = (m.idx.y & ~(7u << (3 * (i - 10)))) | (k << (3 * (i - 10)));
+        }
+    }
+    put(2u, 2u);
+    put(m.part, 6u);
+    for (int c = 0; c < 3; ++c) for (int e = 0; e < 4; ++e) put(m.q[e][c], 6u);
+    put(m.p[0], 1u); put(m.p[1], 1u);
+    for (int i = 0; i < 16; ++i)
+    {
+        const bool anchor = i == 0 || uint(i) == anc1;
+        put(get3(m.idx, i), anchor ? 2u : 3u);
+    }
+}
+
+// ===========================================================================
+shared uint sErrLo[64];
+shared uint sMax[64];
+shared uint sSmErr[64];
+shared uint sSmBad[64];   // smooth blocks (low 16 bits) | bad blocks (high 16 bits)
+
+void main()
+{
+    const uint gid = gl_GlobalInvocationID.x;
+    const uint lid = gl_LocalInvocationIndex;
+    const uvec2 b = uvec2(gid % max(pc.bx, 1u), gid / max(pc.bx, 1u));
+    const bool live = b.y < pc.by;
+    vec2 err = vec2(0.0);
+    float range = 0.0;   // the source block's largest channel range (stats only)
+    if (live)
+    {
+        if (pc.mode == ENC_RAW)
+        {
+            const ivec2 base = ivec2(b * 4u);
+            for (int i = 0; i < 16; ++i)
+            {
+                const ivec2 c = base + ivec2(i & 3, i >> 2);
+                if (c.x >= int(pc.w) || c.y >= int(pc.h)) continue;
+                outw[pc.out_word + uint(c.y) * pc.w + uint(c.x)] = packUnorm4x8(texelFetch(uSrc, c, int(pc.lod)));
+            }
+        }
+        else
+        {
+            loadBlock(b);
+            if ((pc.flags & FLAG_STATS) != 0u)
+            {
+                vec4 mn = px[0], mx = px[0];
+                for (int i = 1; i < 16; ++i) { mn = min(mn, px[i]); mx = max(mx, px[i]); }
+                const vec4 d = mx - mn;
+                range = pc.mode == ENC_BC1 ? max(d.r, max(d.g, d.b))
+                      : pc.mode == ENC_BC4 ? d.r
+                      : pc.mode == ENC_BC5 ? max(d.r, d.g)
+                      : max(max(d.r, d.g), max(d.b, d.a));
+            }
+            bitsReset();
+            uint words = 4u;
+            if (pc.mode == ENC_BC1)
+            {
+                uvec2 blk;
+                err = encodeBC1(2, blk);
+                gBits.xy = blk; words = 2u;
+            }
+            else if (pc.mode == ENC_BC3)
+            {
+                uint e0, e1; uvec2 ix;
+                const vec2 ea = encodeBC4(3, maskCut(), e0, e1, ix);
+                putBC4(e0, e1, ix);
+                uvec2 blk;
+                const vec2 ec = encodeBC1(2, blk);
+                gBits.zw = blk;
+                err = vec2(ea.x + ec.x, ea.y + ec.y);
+            }
+            else if (pc.mode == ENC_BC4)
+            {
+                uint e0, e1; uvec2 ix;
+                err = encodeBC4(0, 0.0, e0, e1, ix);
+                putBC4(e0, e1, ix);
+                words = 2u;
+            }
+            else if (pc.mode == ENC_BC5)
+            {
+                uint e0, e1; uvec2 ix;
+                const vec2 er = encodeBC4(0, 0.0, e0, e1, ix);
+                putBC4(e0, e1, ix);
+                const vec2 eg = encodeBC4(1, 0.0, e0, e1, ix);
+                putBC4(e0, e1, ix);
+                err = vec2(er.x + eg.x, er.y + eg.y);
+            }
+            else
+            {
+                const bool hq = pc.mode == ENC_BC7_HQ;
+                float amin = 255.0;
+                for (int i = 0; i < 16; ++i) amin = min(amin, px[i].a);
+                const bool opaque = amin > 254.5;
+                const float cut = maskCut();   // #840: 0 = not a mask image
+                const M6 m6 = encodeMode6(hq, cut);
+                int pick = 6;
+                err = m6.err;
+                uint flips = cut > 0.0 ? m6.flips : 0u;   // sides the pick loses
+                M5 m5;
+                if (!opaque || hq || flips > 0u)
+                {
+                    m5 = encodeMode5(0u, hq, cut);
+                    // (the rotations put alpha on the colour line: masked, only for an
+                    // opaque block -- a constant 255 channel stays on 255 there)
+                    if (hq && (cut == 0.0 || opaque))
+                        for (uint r = 1u; r < 4u; ++r)
+                        {
+                            const M5 t = encodeMode5(r, true, 0.0);
+                            if (t.err.x < m5.err.x) m5 = t;
+                        }
+                    const uint f5 = cut > 0.0 ? m5.flips : 0u;
+                    if (f5 < flips || (f5 == flips && m5.err.x < err.x)) { err = m5.err; flips = f5; pick = 5; }
+                }
+                M1 m1;
+                if (hq && opaque && (err.x > 0.0 || flips > 0u))
+                {
+                    m1 = encodeMode1();   // (no alpha: decodes 255, keeps every side)
+                    if (flips > 0u || m1.err.x < err.x) { err = m1.err; flips = 0u; pick = 1; }
+                }
+                if (pick == 6) putMode6(m6);
+                else if (pick == 5) putMode5(m5);
+                else putMode1(m1);
+            }
+            const uint base = pc.out_word + (b.y * pc.bx + b.x) * words;
+            for (uint k = 0u; k < words; ++k) outw[base + k] = gBits[k];
+        }
+    }
+    // Error statistics: workgroup reduction -> one 64-bit add per group.
+    if ((pc.flags & FLAG_STATS) != 0u)
+    {
+        const float ch = pc.mode == ENC_BC1 ? 3.0 : pc.mode == ENC_BC4 ? 1.0 : pc.mode == ENC_BC5 ? 2.0 : 4.0;
+        const bool smb = live && range > 1.5 && range < 32.5;
+        const bool bad = live && err.x > 100.0 * 16.0 * ch;
+        sErrLo[lid] = live ? uint(min(err.x, 4.0e6)) : 0u;
+        sMax[lid] = live ? uint(min(err.y, 4.0e6)) : 0u;
+        sSmErr[lid] = smb ? uint(min(err.x, 4.0e6)) : 0u;
+        sSmBad[lid] = (smb ? 1u : 0u) | (bad ? 65536u : 0u);
+        barrier();
+        for (uint s = 32u; s > 0u; s >>= 1u)
+        {
+            if (lid < s)
+            {
+                sErrLo[lid] += sErrLo[lid + s]; sMax[lid] = max(sMax[lid], sMax[lid + s]);
+                sSmErr[lid] += sSmErr[lid + s]; sSmBad[lid] += sSmBad[lid + s];
+            }
+            barrier();
+        }
+        if (lid == 0u)
+        {
+            const uint r = pc.stat_rec * 8u;
+            const uint v = sErrLo[0];
+            const uint old = atomicAdd(stats[r], v);
+            if (old > 0xFFFFFFFFu - v) atomicAdd(stats[r + 1u], 1u);
+            atomicMax(stats[r + 2u], sMax[0]);
+            const uint nb = min(64u, pc.bx * pc.by - min(gl_WorkGroupID.x * 64u, pc.bx * pc.by));
+            atomicAdd(stats[r + 3u], nb);
+            const uint sv = sSmErr[0];
+            const uint sold = atomicAdd(stats[r + 4u], sv);
+            if (sold > 0xFFFFFFFFu - sv) atomicAdd(stats[r + 5u], 1u);
+            atomicAdd(stats[r + 6u], sSmBad[0] & 0xFFFFu);
+            atomicAdd(stats[r + 7u], sSmBad[0] >> 16u);
+        }
+    }
+}

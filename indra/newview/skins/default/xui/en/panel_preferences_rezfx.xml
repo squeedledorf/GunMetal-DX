@@ -1,0 +1,563 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<!--
+  <GMDX> Rez Effects preferences (gmdxrezfx.cpp): what objects do when they appear and when
+  they disappear. Every control is bound to a GMDXRezFx* setting; nothing here needs code.
+-->
+<panel
+ border="true"
+ follows="left|top|right|bottom"
+ height="438"
+ label="Rez Effects"
+ layout="topleft"
+ left="102"
+ name="rezfx"
+ top="1"
+ width="517">
+    <text
+     type="string"
+     follows="left|top" font="SansSerifSmallBold"
+     height="16"
+     layout="topleft"
+     left="10"
+     top="10"
+     width="240"
+     wrap="true">
+        Rez-in: objects appearing
+    </text>
+    <text
+     type="string"
+     follows="left|top" font="SansSerifSmallBold"
+     height="16"
+     layout="topleft"
+     left="265"
+     top="10"
+     width="240"
+     wrap="true">
+        De-rez: objects disappearing
+    </text>
+    <combo_box
+     control_name="GMDXRezFxInEffect"
+     follows="left|top"
+     height="20"
+     layout="topleft"
+     left="12"
+     name="rezfx_in_combo"
+     tool_tip="What objects do when they appear. They are drawn whole and solid from their first frame: the effect only paints the surface. Exception: the 3D printer and the transporter hide what is not built yet (it cannot be clicked), unless combat-safe applies."
+     top="30"
+     width="216">
+        <combo_box.item
+         label="None"
+         name="none"
+         value="0" />
+        <combo_box.item
+         label="Tron"
+         name="in_tron"
+         value="1" />
+        <combo_box.item
+         label="Fire"
+         name="in_fire"
+         value="2" />
+        <combo_box.item
+         label="Hologram"
+         name="in_hologram"
+         value="3" />
+        <combo_box.item
+         label="Voxel assemble"
+         name="in_voxel"
+         value="4" />
+        <combo_box.item
+         label="3D printer"
+         name="in_printer"
+         value="5" />
+        <combo_box.item
+         label="Transporter"
+         name="in_transporter"
+         value="6" />
+        <combo_box.item
+         label="Random mix of the ticked ones"
+         name="in_random"
+         value="7" />
+    </combo_box>
+    <combo_box
+     control_name="GMDXRezFxOutEffect"
+     follows="left|top"
+     height="20"
+     layout="topleft"
+     left="265"
+     name="rezfx_out_combo"
+     tool_tip="What objects do when they are removed. A removed object keeps drawing only for the effect: it casts no shadow and cannot be clicked."
+     top="30"
+     width="216">
+        <combo_box.item
+         label="None"
+         name="none"
+         value="0" />
+        <combo_box.item
+         label="Ember burn"
+         name="out_ember"
+         value="1" />
+        <combo_box.item
+         label="Disintegrate"
+         name="out_disintegrate"
+         value="2" />
+        <combo_box.item
+         label="Ash on the wind"
+         name="out_ash"
+         value="3" />
+        <combo_box.item
+         label="Glitch out"
+         name="out_glitch"
+         value="4" />
+        <combo_box.item
+         label="Implode"
+         name="out_implode"
+         value="5" />
+        <combo_box.item
+         label="Tron de-rez"
+         name="out_tron"
+         value="7" />
+        <combo_box.item
+         label="Shatter"
+         name="out_shatter"
+         value="8" />
+        <combo_box.item
+         label="Random mix of the ticked ones"
+         name="out_random"
+         value="6" />
+    </combo_box>
+    <text
+     type="string"
+     follows="left|top"
+     height="16"
+     layout="topleft"
+     left="12"
+     top="56"
+     width="480"
+     wrap="true">
+        Tick = in the random mix. Swatch = glow colour.
+    </text>
+    <check_box
+     control_name="GMDXRezFxMixTron"
+     follows="left|top"
+     height="16"
+     label="Tron"
+     layout="topleft"
+     left="12"
+     name="rezfx_mix_tron"
+     tool_tip="A cyan wireframe scan climbs the object, then a second scan fills in its textured surface. Ticked: part of the random mix."
+     top="78"
+     width="170" />
+    <color_swatch
+     can_apply_immediately="true"
+     control_name="GMDXRezFxColorTron"
+     follows="left|top"
+     height="20"
+     label_height="0"
+     layout="topleft"
+     left="192"
+     name="rezfx_color_tron"
+     tool_tip="Glow colour of Tron."
+     top="76"
+     width="36" />
+    <check_box
+     control_name="GMDXRezFxMixFire"
+     follows="left|top"
+     height="16"
+     label="Fire"
+     layout="topleft"
+     left="12"
+     name="rezfx_mix_fire"
+     tool_tip="The object burns into view: a glowing front eats away a charred skin. Ticked: part of the random mix."
+     top="102"
+     width="170" />
+    <color_swatch
+     can_apply_immediately="true"
+     control_name="GMDXRezFxColorFire"
+     follows="left|top"
+     height="20"
+     label_height="0"
+     layout="topleft"
+     left="192"
+     name="rezfx_color_fire"
+     tool_tip="Glow colour of Fire."
+     top="100"
+     width="36" />
+    <check_box
+     control_name="GMDXRezFxMixHologram"
+     follows="left|top"
+     height="16"
+     label="Hologram"
+     layout="topleft"
+     left="12"
+     name="rezfx_mix_hologram"
+     tool_tip="Scanlines, flicker and a slight colour split that settle into the real surface. Ticked: part of the random mix."
+     top="126"
+     width="170" />
+    <color_swatch
+     can_apply_immediately="true"
+     control_name="GMDXRezFxColorHologram"
+     follows="left|top"
+     height="20"
+     label_height="0"
+     layout="topleft"
+     left="192"
+     name="rezfx_color_hologram"
+     tool_tip="Glow colour of Hologram."
+     top="124"
+     width="36" />
+    <check_box
+     control_name="GMDXRezFxMixVoxel"
+     follows="left|top"
+     height="16"
+     label="Voxel assemble"
+     layout="topleft"
+     left="12"
+     name="rezfx_mix_voxel"
+     tool_tip="The surface assembles from glowing cubes, bottom to top. Ticked: part of the random mix."
+     top="150"
+     width="170" />
+    <color_swatch
+     can_apply_immediately="true"
+     control_name="GMDXRezFxColorVoxel"
+     follows="left|top"
+     height="20"
+     label_height="0"
+     layout="topleft"
+     left="192"
+     name="rezfx_color_voxel"
+     tool_tip="Glow colour of Voxel assemble."
+     top="148"
+     width="36" />
+    <check_box
+     control_name="GMDXRezFxMixPrinter"
+     follows="left|top"
+     height="16"
+     label="3D printer"
+     layout="topleft"
+     left="12"
+     name="rezfx_mix_printer"
+     tool_tip="Prints the object layer by layer under a print head on a gantry that zig-zags across each layer: the cut top is solid, with infill lines and a glowing fresh bead; fresh layers cool as filament ridges; the unprinted part is a faint ghost. Ticked: part of the random mix."
+     top="174"
+     width="170" />
+    <color_swatch
+     can_apply_immediately="true"
+     control_name="GMDXRezFxColorPrinter"
+     follows="left|top"
+     height="20"
+     label_height="0"
+     layout="topleft"
+     left="192"
+     name="rezfx_color_printer"
+     tool_tip="Glow colour of 3D printer."
+     top="172"
+     width="36" />
+    <check_box
+     control_name="GMDXRezFxMixTransporter"
+     follows="left|top"
+     height="16"
+     label="Transporter"
+     layout="topleft"
+     left="12"
+     name="rezfx_mix_transporter"
+     tool_tip="A beam of light with spiralling sparkles; the object shimmers in from sparkles and interference bands, flashes as it becomes solid and glows off. Ticked: part of the random mix."
+     top="198"
+     width="170" />
+    <color_swatch
+     can_apply_immediately="true"
+     control_name="GMDXRezFxColorTransporter"
+     follows="left|top"
+     height="20"
+     label_height="0"
+     layout="topleft"
+     left="192"
+     name="rezfx_color_transporter"
+     tool_tip="Glow colour of Transporter."
+     top="196"
+     width="36" />
+    <check_box
+     control_name="GMDXRezFxMixEmber"
+     follows="left|top"
+     height="16"
+     label="Ember burn"
+     layout="topleft"
+     left="265"
+     name="rezfx_mix_ember"
+     tool_tip="Burns away from glowing edges. Ticked: part of the random mix."
+     top="78"
+     width="170" />
+    <color_swatch
+     can_apply_immediately="true"
+     control_name="GMDXRezFxColorEmber"
+     follows="left|top"
+     height="20"
+     label_height="0"
+     layout="topleft"
+     left="445"
+     name="rezfx_color_ember"
+     tool_tip="Glow colour of Ember burn."
+     top="76"
+     width="36" />
+    <check_box
+     control_name="GMDXRezFxMixDisintegrate"
+     follows="left|top"
+     height="16"
+     label="Disintegrate"
+     layout="topleft"
+     left="265"
+     name="rezfx_mix_disintegrate"
+     tool_tip="Glowing seams split it into cubes that break loose in a wave and fly apart, spinning and falling, with glow trails. Ticked: part of the random mix."
+     top="102"
+     width="170" />
+    <color_swatch
+     can_apply_immediately="true"
+     control_name="GMDXRezFxColorDisintegrate"
+     follows="left|top"
+     height="20"
+     label_height="0"
+     layout="topleft"
+     left="445"
+     name="rezfx_color_disintegrate"
+     tool_tip="Glow colour of Disintegrate."
+     top="100"
+     width="36" />
+    <check_box
+     control_name="GMDXRezFxMixAsh"
+     follows="left|top"
+     height="16"
+     label="Ash on the wind"
+     layout="topleft"
+     left="265"
+     name="rezfx_mix_ash"
+     tool_tip="Burns away behind a curling, flickering ember edge; glowing flakes peel off, drift with the region wind, cool to grey and fade, with a little smoke. Ticked: part of the random mix."
+     top="126"
+     width="170" />
+    <color_swatch
+     can_apply_immediately="true"
+     control_name="GMDXRezFxColorAsh"
+     follows="left|top"
+     height="20"
+     label_height="0"
+     layout="topleft"
+     left="445"
+     name="rezfx_color_ash"
+     tool_tip="Glow colour of Ash on the wind."
+     top="124"
+     width="36" />
+    <check_box
+     control_name="GMDXRezFxMixGlitch"
+     follows="left|top"
+     height="16"
+     label="Glitch out"
+     layout="topleft"
+     left="265"
+     name="rezfx_mix_glitch"
+     tool_tip="Blocks jump, the colours split, then it blinks out. Ticked: part of the random mix."
+     top="150"
+     width="170" />
+    <color_swatch
+     can_apply_immediately="true"
+     control_name="GMDXRezFxColorGlitch"
+     follows="left|top"
+     height="20"
+     label_height="0"
+     layout="topleft"
+     left="445"
+     name="rezfx_color_glitch"
+     tool_tip="Glow colour of Glitch out."
+     top="148"
+     width="36" />
+    <check_box
+     control_name="GMDXRezFxMixImplode"
+     follows="left|top"
+     height="16"
+     label="Implode"
+     layout="topleft"
+     left="265"
+     name="rezfx_mix_implode"
+     tool_tip="Collapses into its centre and ends in a short flash. Ticked: part of the random mix."
+     top="174"
+     width="170" />
+    <color_swatch
+     can_apply_immediately="true"
+     control_name="GMDXRezFxColorImplode"
+     follows="left|top"
+     height="20"
+     label_height="0"
+     layout="topleft"
+     left="445"
+     name="rezfx_color_implode"
+     tool_tip="Glow colour of Implode."
+     top="172"
+     width="36" />
+    <check_box
+     control_name="GMDXRezFxMixTronOut"
+     follows="left|top"
+     height="16"
+     label="Tron de-rez"
+     layout="topleft"
+     left="265"
+     name="rezfx_mix_tron_out"
+     tool_tip="Tron in reverse: a scan turns the surface back into a glowing wireframe, it flickers, then the lines wink out from the top down. Uses the Tron glow strength and line width. Ticked: part of the random mix."
+     top="198"
+     width="170" />
+    <color_swatch
+     can_apply_immediately="true"
+     control_name="GMDXRezFxColorTronOut"
+     follows="left|top"
+     height="20"
+     label_height="0"
+     layout="topleft"
+     left="445"
+     name="rezfx_color_tron_out"
+     tool_tip="Glow colour of Tron de-rez."
+     top="196"
+     width="36" />
+    <check_box
+     control_name="GMDXRezFxMixShatter"
+     follows="left|top"
+     height="16"
+     label="Shatter"
+     layout="topleft"
+     left="265"
+     name="rezfx_mix_shatter"
+     tool_tip="Glowing cracks race across it from the side facing you, then it breaks into glass shards that fall, tumble, glint and fade. Ticked: part of the random mix."
+     top="222"
+     width="170" />
+    <color_swatch
+     can_apply_immediately="true"
+     control_name="GMDXRezFxColorShatter"
+     follows="left|top"
+     height="20"
+     label_height="0"
+     layout="topleft"
+     left="445"
+     name="rezfx_color_shatter"
+     tool_tip="Glow colour of Shatter."
+     top="220"
+     width="36" />
+    <text
+     type="string"
+     follows="left|top" font="SansSerifSmallBold"
+     height="16"
+     layout="topleft"
+     left="10"
+     top="256"
+     width="240"
+     wrap="true">
+        Options
+    </text>
+    <slider
+     can_edit_text="true"
+     control_name="GMDXRezFxDuration"
+     decimal_digits="2"
+     follows="left|top"
+     height="15"
+     increment="0.05"
+     initial_value="0.6"
+     label="Effect duration (s):"
+     label_width="180"
+     layout="topleft"
+     left="30"
+     max_val="3.0"
+     min_val="0.1"
+     name="rezfx_duration"
+     show_text="true"
+     tool_tip="How long an effect takes. Tron: the fill scan (its wireframe scan takes 0.6 of this, and the wireframe waits up to 2 s more for textures, or longer with Finish rez-ins only after textures have loaded). The 3D printer takes about 5.8 times this (3.5 s at the default, 8 s at most) and the transporter 1.5 times (6 s at most). Disintegrate takes 1.8 times this; ash, Tron de-rez and shatter twice; a de-rez lasts 1.2 s at most."
+     top="278"
+     width="440" />
+    <check_box
+     control_name="GMDXRezFxOnlyLoading"
+     follows="left|top"
+     height="16"
+     label="Rez-in only for objects still loading their textures"
+     layout="topleft"
+     left="12"
+     name="rezfx_only_loading"
+     tool_tip="An object whose textures are already loaded (one you rez while building) just appears. Avatars and attachments always play the rez-in."
+     top="302"
+     width="490" />
+    <check_box
+     control_name="GMDXRezFxAvatars"
+     follows="left|top"
+     height="16"
+     label="Avatars and attachments too (rigged mesh included)"
+     layout="topleft"
+     left="12"
+     name="rezfx_avatars"
+     tool_tip="Avatars arriving and what they wear play the rez-in; an attachment taken off plays the de-rez. A leaving avatar just goes."
+     top="324"
+     width="490" />
+    <!-- <GMDX> -->
+    <check_box
+     control_name="GMDXRezFxWaitForTextures"
+     follows="left|top"
+     height="16"
+     label="Finish rez-ins only after textures have loaded"
+     layout="topleft"
+     left="12"
+     name="rezfx_wait_textures"
+     tool_tip="A two-part rez-in plays its first part, then holds there, idling, until the object's textures have loaded (an avatar: its skin and clothes), then finishes. Tron holds its wireframe, the hologram its projection, voxel its blocks, the 3D printer before its final layers, the transporter its sparkles, fire its smouldering shell. Never longer than 30 s from the start, and never on combat-safe land. Off: Tron's wireframe waits at most 2 s, the others never wait."
+     top="346"
+     width="490" />
+    <!-- </GMDX> -->
+    <slider
+     can_edit_text="true"
+     control_name="GMDXRezFxTronGlow"
+     decimal_digits="2"
+     follows="left|top"
+     height="15"
+     increment="0.05"
+     initial_value="1.0"
+     label="Tron glow strength:"
+     label_width="180"
+     layout="topleft"
+     left="30"
+     max_val="4.0"
+     min_val="0.0"
+     name="rezfx_tron_glow"
+     show_text="true"
+     tool_tip="How brightly Tron's wireframe and scan line glow. 0: plain lines with no glow; 1: the default; up to 4."
+     top="366"
+     width="440" />
+    <slider
+     can_edit_text="true"
+     control_name="GMDXRezFxTronLineWidth"
+     decimal_digits="1"
+     follows="left|top"
+     height="15"
+     increment="0.1"
+     initial_value="1.5"
+     label="Tron line width (px):"
+     label_width="180"
+     layout="topleft"
+     left="30"
+     max_val="5.0"
+     min_val="0.5"
+     name="rezfx_tron_line_width"
+     show_text="true"
+     tool_tip="Width of Tron's wireframe lines on screen, in pixels."
+     top="386"
+     width="440" />
+    <check_box
+     control_name="GMDXRezFxCombatSafe"
+     follows="left|top"
+     height="16"
+     label="Combat-safe: on damage-enabled land, shorten every effect to 0.25 s"
+     layout="topleft"
+     left="12"
+     name="rezfx_combat_safe"
+     tool_tip="Where the land you stand on allows damage, no effect lasts longer than 0.25 s (no rez-in waits for textures there), and the 3D printer and transporter keep the object whole and solid, paint only."
+     top="406"
+     width="490" />
+    <text
+     type="string"
+     follows="left|top"
+     height="14"
+     layout="topleft"
+     left="12"
+     top="424"
+     width="490"
+     wrap="true">
+        Printer and transporter hide unbuilt parts. Temp objects never play effects.
+    </text>
+</panel>

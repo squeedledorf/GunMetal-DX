@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<toggleable_menu
+ name="menu_fs_contacts_groups_plus"
+ left="0" bottom="0" visible="false"
+ mouse_opaque="false">
+    <menu_item_call
+     label="Join Group..."
+     name="join_group">
+        <menu_item_call.on_click
+         function="Contacts.Groups.Plus"
+         parameter="join"/>
+    </menu_item_call>
+    <menu_item_call
+     label="New Group..."
+     name="new_group">
+        <menu_item_call.on_click
+         function="Contacts.Groups.Plus"
+         parameter="new"/>
+        <menu_item_call.on_enable
+         function="Contacts.Groups.PlusEnable"
+         parameter="new"/>
+    </menu_item_call>
+    <menu_item_separator/>
+    <menu_item_call
+     label="Invite to Group..."
+     name="invite">
+        <menu_item_call.on_click
+         function="Contacts.Groups.Plus"
+         parameter="invite"/>
+        <menu_item_call.on_enable
+         function="Contacts.Groups.PlusEnable"
+         parameter="invite"/>
+    </menu_item_call>
+    <menu_item_call
+     label="Group Titles..."
+     name="titles">
+        <menu_item_call.on_click
+         function="Contacts.Groups.Plus"
+         parameter="titles"/>
+    </menu_item_call>
+</toggleable_menu>

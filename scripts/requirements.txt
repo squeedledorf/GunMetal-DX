@@ -1,0 +1,2 @@
+# Python packages the build needs (viewer_manifest.py); `make venv` installs these.
+llsd

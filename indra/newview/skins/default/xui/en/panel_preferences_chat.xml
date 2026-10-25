@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<panel
+    border="true"
+    height="430"
+    label="Text Chat"
+    layout="topleft"
+    left="102"
+    name="chat"
+    top="1"
+    width="517">
+    <tab_container
+        top_pad="0"
+        enabled="true"
+        follows="left|top"
+        height="430"
+        left_delta="0"
+        mouse_opaque="false"
+        name="chat_tab_container"
+        tab_position="top"
+        tab_stop="false"
+        tab_min_width="40"
+        width="517">
+        <panel
+            label="General"
+            name="chat_prefs_general"
+            filename="panel_preferences_chat_general.xml"
+            layout="topleft"
+            follows="top|left" />
+        <panel
+            label="Alerts"
+            name="chat_prefs_alerts"
+            filename="panel_preferences_chat_alerts.xml"
+            layout="topleft"
+            follows="top|left" />
+        <panel
+            label="Chat Bar"
+            name="chat_prefs_bar"
+            filename="panel_preferences_chat_bar.xml"
+            layout="topleft"
+            follows="top|left" />
+        <panel
+            label="Chat Windows"
+            name="chat_prefs_im"
+            filename="panel_preferences_chat_im.xml"
+            layout="topleft"
+            follows="top|left" />
+        <panel
+            label="Groups"
+            name="chat_prefs_group"
+            filename="panel_preferences_chat_group.xml"
+            layout="topleft"
+            follows="top|left" />
+        <panel
+            label="Images"
+            name="chat_prefs_images"
+            filename="panel_preferences_chat_images.xml"
+            layout="topleft"
+            follows="top|left" />
+        <panel
+            label="Commands"
+            name="chat_prefs_cmd"
+            filename="panel_preferences_chat_cmd.xml"
+            layout="topleft"
+            follows="top|left" />
+        <panel
+            label="Reject"
+            name="chat_prefs_moderation"
+            filename="panel_preferences_chat_rejection.xml"
+            layout="topleft"
+            follows="top|left" />
+        <panel
+            label="Autoresponse"
+            name="chat_pref_autoreponse"
+            filename="panel_preferences_chat_autoresponse.xml"
+            layout="topleft"
+            follows="top|left" />
+    </tab_container>
+</panel>

@@ -1,0 +1,309 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<!-- Pose Creator (#117): keyframes over the Pose Studio target -> .anim (slposecreator.h). -->
+<floater
+ positioning="cascading"
+ save_rect="true"
+ can_resize="false"
+ height="420"
+ width="360"
+ layout="topleft"
+ name="sl_pose_creator"
+ help_topic="poser"
+ single_instance="true"
+ title="Pose Creator">
+    <string name="status_idle">Pose in Pose Studio, set a time, then Add keyframe.</string>
+    <string name="status_no_target">Nothing to capture: pick a target in Pose Studio.</string>
+    <string name="status_capture_failed">Could not capture the pose (target gone or not posing).</string>
+    <string name="status_need_posing">Start posing in Pose Studio to apply a keyframe.</string>
+    <string name="status_stop_posing">Stop posing in Pose Studio to preview: the poser outranks every animation.</string>
+    <string name="status_added">Keyframe [N] added.</string>
+    <string name="status_updated">Keyframe [N] updated from the current pose.</string>
+    <string name="status_saved">Saved [FILE].</string>
+    <string name="status_previewing">Previewing on the target (Stop to end it).</string>
+    <string name="status_preview_failed">The preview could not be played.</string>
+    <string name="status_error">Not written: [REASON]</string>
+    <string name="reason_no_keyframes">there are no keyframes.</string>
+    <string name="reason_no_bones">no bone is animated (edit some in Pose Studio, or untick Edited bones only).</string>
+    <string name="reason_pack_failed">the animation could not be encoded.</string>
+    <string name="reason_write_failed">the file could not be written.</string>
+    <text
+     follows="left|top"
+     height="16"
+     layout="topleft"
+     left="10"
+     name="keys_label"
+     top="24"
+     width="200">
+        Keyframes
+    </text>
+    <scroll_list
+     draw_heading="true"
+     follows="left|top"
+     height="150"
+     layout="topleft"
+     left="10"
+     multi_select="false"
+     name="key_list"
+     top="42"
+     width="230">
+        <scroll_list.columns
+         label="#"
+         name="index"
+         width="30" />
+        <scroll_list.columns
+         label="Time (s)"
+         name="time"
+         relative_width="1" />
+        <scroll_list.columns
+         label="Bones"
+         name="bones"
+         width="50" />
+    </scroll_list>
+    <button
+     follows="left|top"
+     height="22"
+     label="Add keyframe"
+     layout="topleft"
+     left="248"
+     name="add_btn"
+     tool_tip="Capture the target's current pose at the time below"
+     top="42"
+     width="102" />
+    <button
+     follows="left|top"
+     height="22"
+     label="Update"
+     layout="topleft"
+     left="248"
+     name="update_btn"
+     tool_tip="Re-capture the selected keyframe from the current pose"
+     top_pad="4"
+     width="102" />
+    <button
+     follows="left|top"
+     height="22"
+     label="Pose to"
+     layout="topleft"
+     left="248"
+     name="goto_btn"
+     tool_tip="Pose the target (while posing) to the selected keyframe's edited bones"
+     top_pad="4"
+     width="102" />
+    <button
+     follows="left|top"
+     height="22"
+     label="Delete"
+     layout="topleft"
+     left="248"
+     name="delete_btn"
+     tool_tip="Remove the selected keyframe"
+     top_pad="4"
+     width="102" />
+    <button
+     follows="left|top"
+     height="22"
+     label="Clear all"
+     layout="topleft"
+     left="248"
+     name="clear_btn"
+     tool_tip="Remove every keyframe"
+     top_pad="4"
+     width="102" />
+    <spinner
+     decimal_digits="2"
+     follows="left|top"
+     height="20"
+     increment="0.1"
+     initial_value="0"
+     label="Time"
+     label_width="40"
+     layout="topleft"
+     left="10"
+     max_val="60"
+     min_val="0"
+     name="key_time"
+     tool_tip="Seconds from the start: the time of the next keyframe you add, or of the selected keyframe (moves it)"
+     top="200"
+     width="120" />
+    <text
+     follows="left|top"
+     height="16"
+     layout="topleft"
+     left="10"
+     name="options_label"
+     top="230"
+     width="200">
+        Animation
+    </text>
+    <spinner
+     decimal_digits="2"
+     follows="left|top"
+     height="20"
+     increment="0.5"
+     initial_value="0"
+     label="Length (0 = auto)"
+     label_width="110"
+     layout="topleft"
+     left="10"
+     max_val="60"
+     min_val="0"
+     name="duration_spin"
+     tool_tip="Length in seconds. 0 = up to the last keyframe (one second for a single pose)."
+     top="250"
+     width="180" />
+    <check_box
+     follows="left|top"
+     height="16"
+     initial_value="true"
+     label="Loop"
+     layout="topleft"
+     left="210"
+     name="loop_check"
+     tool_tip="Play the animation in a loop (a single pose is always a looped pose)"
+     top="252"
+     width="80" />
+    <spinner
+     decimal_digits="0"
+     follows="left|top"
+     height="20"
+     increment="1"
+     initial_value="4"
+     label="Priority"
+     label_width="110"
+     layout="topleft"
+     left="10"
+     max_val="4"
+     min_val="0"
+     name="priority_spin"
+     tool_tip="Animation priority (0-4). 4 overrides most AOs."
+     top="276"
+     width="160" />
+    <spinner
+     decimal_digits="2"
+     follows="left|top"
+     height="20"
+     increment="0.1"
+     initial_value="0.5"
+     label="Ease in"
+     label_width="110"
+     layout="topleft"
+     left="10"
+     max_val="10"
+     min_val="0"
+     name="ease_in_spin"
+     tool_tip="Seconds the animation blends in"
+     top="302"
+     width="170" />
+    <spinner
+     decimal_digits="2"
+     follows="left|top"
+     height="20"
+     increment="0.1"
+     initial_value="0.5"
+     label="Out"
+     label_width="30"
+     layout="topleft"
+     left="190"
+     name="ease_out_spin"
+     max_val="10"
+     min_val="0"
+     tool_tip="Seconds the animation blends out"
+     top="302"
+     width="90" />
+    <combo_box
+     follows="left|top"
+     height="22"
+     layout="topleft"
+     left="10"
+     name="hand_combo"
+     tool_tip="Hand pose the animation asks for (fingers you did not key)"
+     top="328"
+     width="170">
+        <combo_box.item label="Hands: spread" name="0" value="0" />
+        <combo_box.item label="Hands: relaxed" name="1" value="1" />
+        <combo_box.item label="Hands: point" name="2" value="2" />
+        <combo_box.item label="Hands: fist" name="3" value="3" />
+        <combo_box.item label="Hands: relaxed left" name="4" value="4" />
+        <combo_box.item label="Hands: point left" name="5" value="5" />
+        <combo_box.item label="Hands: fist left" name="6" value="6" />
+        <combo_box.item label="Hands: relaxed right" name="7" value="7" />
+        <combo_box.item label="Hands: point right" name="8" value="8" />
+        <combo_box.item label="Hands: fist right" name="9" value="9" />
+        <combo_box.item label="Hands: salute right" name="10" value="10" />
+        <combo_box.item label="Hands: typing" name="11" value="11" />
+        <combo_box.item label="Hands: peace right" name="12" value="12" />
+        <combo_box.item label="Hands: palm right" name="13" value="13" />
+    </combo_box>
+    <check_box
+     follows="left|top"
+     height="16"
+     initial_value="true"
+     label="Edited bones only"
+     layout="topleft"
+     left="190"
+     name="edited_only_check"
+     tool_tip="Key only the bones you edited in Pose Studio (and bones that move between keyframes); off keys every bone"
+     top="331"
+     width="160" />
+    <check_box
+     follows="left|top"
+     height="16"
+     initial_value="true"
+     label="Pelvis position (when it moves)"
+     layout="topleft"
+     left="10"
+     name="pelvis_pos_check"
+     tool_tip="Write pelvis position keys when the pelvis moves between keyframes or was edited"
+     top="356"
+     width="240" />
+    <button
+     follows="left|top"
+     height="22"
+     label="Preview"
+     layout="topleft"
+     left="10"
+     name="preview_btn"
+     tool_tip="Play the animation on the target locally (stop posing first)"
+     top="378"
+     width="70" />
+    <button
+     follows="left|top"
+     height="22"
+     label="Stop"
+     layout="topleft"
+     left_pad="4"
+     name="stop_preview_btn"
+     tool_tip="End the preview"
+     top_delta="0"
+     width="50" />
+    <button
+     follows="left|top"
+     height="22"
+     label="Save .anim..."
+     layout="topleft"
+     left_pad="4"
+     name="save_btn"
+     tool_tip="Write the animation to a .anim file (uploadable, playable as a local animation)"
+     top_delta="0"
+     width="100" />
+    <button
+     follows="left|top"
+     height="22"
+     label="Upload..."
+     layout="topleft"
+     left_pad="4"
+     name="upload_btn"
+     tool_tip="Open the animation upload with this animation"
+     top_delta="0"
+     width="74" />
+    <text
+     follows="left|top"
+     height="16"
+     layout="topleft"
+     left="10"
+     name="status_text"
+     top="402"
+     width="340"
+     word_wrap="true">
+    </text>
+</floater>

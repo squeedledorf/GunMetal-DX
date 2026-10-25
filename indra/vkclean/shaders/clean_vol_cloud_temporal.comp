@@ -1,0 +1,128 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// vkclean -- VOLUMETRIC CLOUDS (#719): TEMPORAL RECONSTRUCTION (march resolution).
+//
+// The march updates only a pattern of texels per frame (clean_vol_cloud_march.comp); this
+// pass rebuilds the full quarter-resolution image and accumulates the march's dither:
+//  - REPROJECTION by the texel's cloud distance (the transmittance-weighted mean distance of
+//    its march; unmarched texels take it from the history at the rotation-only reprojected
+//    point first): current camera-relative world -> last frame's clip (vc.reproj, built in
+//    double on the CPU from last frame's view-projection and the eye's move).
+//  - NEIGHBOURHOOD CLAMP: the history is clamped to the min / max box of THIS frame's marched
+//    texels in a 5x5 window (3x3 when every texel is marched), widened by vc.temporal.z for
+//    the sparse patterns -- moving clouds / a turning camera never smear.
+//  - ADAPTIVE HISTORY LENGTH (the RT shadow denoiser's model): the history counts its frames
+//    (B.z); a marched texel blends in with weight 1 / len up to vc.temporal.x frames, a reset
+//    or a disoccluded texel starts again at 1.
+//  - Unmarched texels keep the (clamped) reprojected history; without one (reset, off
+//    screen last frame) they take the mean of the marched neighbours.
+// Snapshots skip this pass (every texel marched, the composite reads the march directly).
+layout(local_size_x = 8, local_size_y = 8) in;
+
+#include "clean_frame_info.glsl"
+#include "clean_atmos_common.glsl"
+#define VC_SET 1
+#include "clean_vol_cloud_common.glsl"
+
+layout(set = 1, binding = 5, rgba16f) readonly uniform image2D uMarchA;
+layout(set = 1, binding = 6, rgba16f) readonly uniform image2D uMarchB;
+layout(set = 1, binding = 7) uniform sampler2D uHistA;                  // last frame (bilinear)
+layout(set = 1, binding = 8) uniform sampler2D uHistB;
+layout(set = 1, binding = 9, rgba16f) writeonly uniform image2D uOutA;
+layout(set = 1, binding = 10, rgba16f) writeonly uniform image2D uOutB;
+
+vec3 viewDir(ivec2 px)
+{
+    const vec2 ndc = (vec2(px) + 0.5) / vc.dims.zw * 2.0 - 1.0;
+    const vec4 w = vc.inv_vp * vec4(ndc, 0.5, 1.0);
+    const vec3 r = w.xyz / w.w;
+    return r / max(length(r), 1e-6);
+}
+
+// Last frame's uv of the point at distance d along V; false = behind / off screen.
+bool reprojectUV(vec3 V, float d, out vec2 uv)
+{
+    const vec4 c = vc.reproj * vec4(V * d, 1.0);
+    if (c.w <= 1e-6) { uv = vec2(-1.0); return false; }
+    uv = (c.xy / c.w) * 0.5 + 0.5;
+    return all(greaterThanEqual(uv, vec2(0.0))) && all(lessThanEqual(uv, vec2(1.0)));
+}
+
+void main()
+{
+    const ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 sz = ivec2(vc.dims.zw);
+    if (px.x >= sz.x || px.y >= sz.y) return;
+
+    const bool cur = vcMarchedNow(px);
+    const vec3 V = viewDir(px);
+    const bool reset = vc.temporal.y > 0.5;
+
+    // This frame's marched neighbourhood: min / max box and mean (A), mean of B.
+    const int mode = int(vc.pat.x + 0.5);
+    const int rad = mode == 0 ? 1 : 2;
+    vec4 mn = vec4(1e9), mx = vec4(-1e9), mean = vec4(0.0);
+    vec2 meanB = vec2(0.0);
+    float n = 0.0;
+    for (int dy = -rad; dy <= rad; ++dy)
+        for (int dx = -rad; dx <= rad; ++dx)
+        {
+            const ivec2 q = px + ivec2(dx, dy);
+            if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, sz)) || !vcMarchedNow(q)) continue;
+            const vec4 a = imageLoad(uMarchA, q);
+            mn = min(mn, a); mx = max(mx, a);
+            mean += a;
+            meanB += imageLoad(uMarchB, q).xy;
+            n += 1.0;
+        }
+    if (n > 0.0) { mean /= n; meanB /= n; }
+    else { mean = vec4(0.0, 0.0, 0.0, 1.0); meanB = vec2(VC_FAR); mn = mean; mx = mean; }
+
+    vec4 curA = vec4(0.0, 0.0, 0.0, 1.0);
+    vec4 curB = vec4(VC_FAR, VC_FAR, 0.0, 0.0);
+    if (cur) { curA = imageLoad(uMarchA, px); curB = imageLoad(uMarchB, px); }
+
+    // Reprojection distance: this frame's march, else the history's (found through the
+    // rotation-only reprojection first: clouds are far, the eye's move is a small correction).
+    float d = cur ? curB.y : meanB.y;
+    vec2 uv;
+    if (!cur)
+    {
+        if (reprojectUV(V, VC_FAR, uv)) d = textureLod(uHistB, uv, 0.0).y;
+    }
+    d = clamp(d, 50.0, VC_FAR);
+    const bool valid = !reset && reprojectUV(V, d, uv);
+    vec4 hA = vec4(0.0, 0.0, 0.0, 1.0), hB = vec4(VC_FAR, VC_FAR, 0.0, 0.0);
+    if (valid) { hA = textureLod(uHistA, uv, 0.0); hB = textureLod(uHistB, uv, 0.0); }
+
+    const vec4 widen = (mx - mn) * vc.temporal.z + vec4(vec3(0.002), 0.01);
+    vec4 outA, outB;
+    if (cur)
+    {
+        if (!valid)
+        {
+            outA = curA;
+            outB = vec4(curB.xy, 1.0, 0.0);
+        }
+        else
+        {
+            const vec4 hc = clamp(hA, mn - widen, mx + widen);
+            const float len = min(max(hB.z, 0.0) + 1.0, max(vc.temporal.x, 1.0));
+            outA = mix(hc, curA, 1.0 / len);
+            outB = vec4(curB.xy, len, 0.0);
+        }
+    }
+    else if (valid)
+    {
+        outA = clamp(hA, mn - widen, mx + widen);
+        outB = vec4(hB.xy, max(hB.z, 1.0), 0.0);
+    }
+    else
+    {
+        outA = mean;
+        outB = vec4(meanB, 1.0, 0.0);
+    }
+    outA = vec4(max(outA.rgb, vec3(0.0)), clamp(outA.a, 0.0, 1.0));
+    imageStore(uOutA, px, outA);
+    imageStore(uOutB, px, outB);
+}

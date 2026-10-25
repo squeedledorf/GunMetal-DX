@@ -1,0 +1,309 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<floater
+ can_close="true"
+ can_minimize="true"
+ can_resize="true"
+ height="580"
+ min_height="480"
+ width="800"
+ min_width="720"
+ layout="topleft"
+ name="mesh_bulk_upload"
+ single_instance="true"
+ reuse_instance="true"
+ save_rect="true"
+ help_topic="upload_model"
+ title="BULK MODEL UPLOAD">
+    <string name="pause_label">Pause</string>
+    <string name="resume_label">Resume</string>
+    <string name="default_folder">Objects</string>
+    <string name="created_on_first_upload">created at the first upload</string>
+
+    <text
+     type="string"
+     follows="left|top|right"
+     height="30"
+     layout="topleft"
+     left="10"
+     right="-10"
+     name="intro_text"
+     top="22"
+     word_wrap="true">
+Each model file is loaded into the model uploader in turn. Files and objects named like the model plus _phys, _physics, _col or _collision (or starting with UCX_, UBX_, UCP_) become its physics shape; _LOD0-_LOD2 or _lowest / _low / _med become its LODs.
+    </text>
+
+    <button
+     follows="left|top"
+     height="23"
+     label="Add files..."
+     layout="topleft"
+     left="10"
+     name="add_files_btn"
+     top="56"
+     width="100" />
+    <button
+     follows="left|top"
+     height="23"
+     label="Add folder..."
+     layout="topleft"
+     left_pad="5"
+     name="add_folder_btn"
+     tool_tip="Adds the model files in a folder (not its subfolders)"
+     top_delta="0"
+     width="100" />
+    <button
+     follows="left|top"
+     height="23"
+     label="Remove"
+     layout="topleft"
+     left_pad="15"
+     name="remove_btn"
+     top_delta="0"
+     width="80" />
+    <button
+     follows="left|top"
+     height="23"
+     label="Skip / unskip"
+     layout="topleft"
+     left_pad="5"
+     name="skip_btn"
+     tool_tip="Skipped models stay in the list but are not loaded or uploaded"
+     top_delta="0"
+     width="100" />
+    <button
+     follows="left|top"
+     height="23"
+     label="Clear list"
+     layout="topleft"
+     left_pad="5"
+     name="clear_btn"
+     top_delta="0"
+     width="90" />
+
+    <scroll_list
+     background_visible="true"
+     draw_border="true"
+     draw_heading="true"
+     follows="all"
+     height="215"
+     layout="topleft"
+     left="10"
+     right="-10"
+     multi_select="false"
+     name="model_list"
+     top="84">
+        <scroll_list.columns
+         label="#"
+         name="num"
+         width="30" />
+        <scroll_list.columns
+         label="Model"
+         name="name"
+         width="130" />
+        <scroll_list.columns
+         label="LODs"
+         name="lods"
+         width="120" />
+        <scroll_list.columns
+         label="Physics"
+         name="physics"
+         width="130" />
+        <scroll_list.columns
+         label="LI"
+         name="li"
+         width="45" />
+        <scroll_list.columns
+         label="Fee"
+         name="fee"
+         width="90" />
+        <scroll_list.columns
+         label="Status"
+         name="status"
+         relative_width="1" />
+    </scroll_list>
+
+    <button
+     follows="left|bottom"
+     height="23"
+     label="Set physics file..."
+     layout="topleft"
+     left="10"
+     name="set_physics_btn"
+     tool_tip="Use another file as the physics shape of the selected model"
+     top="305"
+     width="130" />
+    <combo_box
+     follows="left|bottom"
+     height="23"
+     layout="topleft"
+     left_pad="15"
+     name="lod_choice_combo"
+     top_delta="0"
+     width="90">
+        <combo_box.item
+         label="Medium"
+         name="lod_medium"
+         value="2" />
+        <combo_box.item
+         label="Low"
+         name="lod_low"
+         value="1" />
+        <combo_box.item
+         label="Lowest"
+         name="lod_lowest"
+         value="0" />
+    </combo_box>
+    <button
+     follows="left|bottom"
+     height="23"
+     label="Set LOD file..."
+     layout="topleft"
+     left_pad="5"
+     name="set_lod_btn"
+     tool_tip="Use a file for the chosen LOD of the selected model"
+     top_delta="0"
+     width="110" />
+    <button
+     follows="left|bottom"
+     height="23"
+     label="Clear LOD / physics files"
+     layout="topleft"
+     left_pad="15"
+     name="clear_companions_btn"
+     tool_tip="Forget the selected model's LOD and physics files; the carried settings apply instead"
+     top_delta="0"
+     width="170" />
+
+    <check_box
+     follows="left|bottom"
+     height="18"
+     initial_value="true"
+     label="Carry each uploaded model's settings (scale, LOD sources and limits, physics, options) to the next model"
+     layout="topleft"
+     left="10"
+     name="carry_settings_check"
+     top="334"
+     width="700" />
+    <check_box
+     follows="left|bottom"
+     height="18"
+     initial_value="true"
+     label="Put the uploads in a new inventory folder named:"
+     layout="topleft"
+     left="10"
+     name="new_folder_check"
+     top="356"
+     width="300" />
+    <line_editor
+     follows="left|bottom"
+     height="20"
+     layout="topleft"
+     left_pad="5"
+     max_length_bytes="63"
+     name="folder_name_editor"
+     top_delta="-1"
+     width="220" />
+    <text
+     type="string"
+     follows="left|bottom|right"
+     height="16"
+     layout="topleft"
+     left="10"
+     right="-10"
+     name="destination_text"
+     top="380"
+     use_ellipses="true">
+Destination: [FOLDER]
+    </text>
+    <text
+     type="string"
+     follows="left|bottom|right"
+     height="30"
+     layout="topleft"
+     left="10"
+     right="-10"
+     name="totals_text"
+     top="398"
+     word_wrap="true">
+    </text>
+
+    <button
+     follows="left|bottom"
+     height="23"
+     label="Load in uploader"
+     layout="topleft"
+     left="10"
+     name="load_btn"
+     tool_tip="Loads the selected (or next) model into the model uploader with the carried settings and gets its fee. Press Upload there."
+     top="432"
+     width="120" />
+    <button
+     follows="left|bottom"
+     height="23"
+     label="Apply settings to remaining"
+     layout="topleft"
+     left_pad="5"
+     name="apply_settings_btn"
+     tool_tip="Use the uploader's current settings for every remaining model"
+     top_delta="0"
+     width="175" />
+    <button
+     follows="left|bottom"
+     height="23"
+     label="Get all fees"
+     layout="topleft"
+     left_pad="5"
+     name="quote_all_btn"
+     tool_tip="Gets the fee and land impact of every remaining model without uploading anything"
+     top_delta="0"
+     width="95" />
+    <button
+     follows="left|bottom"
+     height="23"
+     label="Upload all remaining..."
+     layout="topleft"
+     left_pad="5"
+     name="upload_all_btn"
+     tool_tip="Gets every remaining fee, asks you to confirm the total, then uploads the models one after another"
+     top_delta="0"
+     width="160" />
+    <button
+     follows="left|bottom"
+     height="23"
+     label="Pause"
+     layout="topleft"
+     left_pad="5"
+     name="pause_btn"
+     tool_tip="Stops between models; an upload already sent always finishes"
+     top_delta="0"
+     width="80" />
+    <button
+     follows="left|bottom"
+     height="23"
+     label="Stop"
+     layout="topleft"
+     left_pad="5"
+     name="cancel_batch_btn"
+     tool_tip="Stops the batch and writes a report of what was uploaded and charged"
+     top_delta="0"
+     width="70" />
+
+    <text_editor
+     type="string"
+     length="1"
+     embedded_items="false"
+     follows="left|bottom|right"
+     font="SansSerif"
+     height="112"
+     layout="topleft"
+     left="10"
+     right="-10"
+     max_length="65536"
+     name="batch_log"
+     parse_urls="false"
+     read_only="true"
+     spellcheck="false"
+     top="461"
+     word_wrap="true">
+    </text_editor>
+</floater>

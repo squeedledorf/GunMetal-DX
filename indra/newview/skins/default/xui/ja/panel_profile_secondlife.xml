@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<panel name="panel_profile" label="プロフィール">
+	<!--
+	Date from server comes already converted to stl timezone,
+	so display it as an UTC+0
+	-->
+	<string name="date_format_full" value="ＳＬ誕生日：[year,datetime,utc]年[mth,datetime,utc]月[day,datetime,utc]日"/>
+	<string name="date_format_short" value="ＳＬ誕生日：[mth,datetime,utc]月[day,datetime,utc]日"/>
+	<string name="age_format" value="[AGE]経過"/>
+	<string name="partner_text" value="パートナー：[LINK]"/>
+	<string name="CaptionTextAcctInfo">
+		アカウント：[ACCTTYPE]
+[PAYMENTINFO]
+	</string>
+	<!--Badges-->
+	<string name="BadgeBeta" value="オリジナルβテスター"/>
+	<string name="BadgeBetaLifetime" value="β会員"/>
+	<string name="BadgeLifetime" value="会員"/>
+	<string name="BadgeLinden" value="Linden Lab社員"/>
+	<string name="BadgePremiumLifetime" value="生涯プレミアム会員"/>
+	<string name="BadgePremiumPlusLifetime" value="生涯プレミアム・プラス会員"/>
+	<string name="BadgePremium" value="プレミアム会員"/>
+	<string name="BadgePremiumPlus" value="プレミアム・プラス会員"/>
+	<layout_stack name="image_stack">
+		<layout_panel name="basics_panel">
+			<line_editor name="user_name" value="（読み込んでいます…）"/>
+			<line_editor name="sl_birth_date" value="（読み込んでいます…）"/>
+			<line_editor name="user_age" value="（読み込んでいます…）"/>
+		</layout_panel>
+		<layout_panel name="partner_layout">
+			<text name="partner_link" value="パートナー：（読み込んでいます…）"/>
+		</layout_panel>
+		<layout_panel name="badge_layout">
+			<text name="badge_text" value="バッチのテスト"/>
+		</layout_panel>
+		<layout_panel name="friend_layout">
+			<text name="friend_text" value="あなたはフレンドです。"/>
+		</layout_panel>
+		<layout_panel name="online_layout">
+			<icon name="online_icon"/>
+			<text name="online_text" value="オンライン"/>
+		</layout_panel>
+		<layout_panel name="offline_layout">
+			<icon name="offline_icon"/>
+			<text name="offline_text" value="オフライン"/>
+		</layout_panel>
+		<layout_panel name="account_layout">
+			<text name="account_info" value="アカウント：（読み込んでいます…）"/>
+		</layout_panel>
+		<layout_panel name="settings_panel">
+			<!-- only for self -->
+			<combo_box name="show_in_search" tool_tip="検索結果から、あなたを見つけてもらいましょう。">
+				<combo_box.item name="Hide" label="表示しない"/>
+				<combo_box.item name="Show" label="表示する"/>
+			</combo_box>
+			<combo_box name="hide_age" tool_tip="他の人から、あなたのＳＬ年齢をどのように表示するかを決めましょう。">
+				<combo_box.item name="Show" label="ＳＬ誕生日と年齢を表示"/>
+				<combo_box.item name="Hide" label="月日のみ"/>
+			</combo_box>
+		</layout_panel>
+		<layout_panel name="menu_panel">
+			<menu_button label="アクション" name="agent_actions_menu"/>
+		</layout_panel>
+	</layout_stack>
+	<layout_stack name="main_stack">
+		<layout_panel name="display_name_panel">
+			<line_editor name="display_name" value="（読み込んでいます…）"/>
+			<icon tool_tip="フレンドは、自分のオンライン状況を見ることができます。" name="can_see_online"/>
+			<icon tool_tip="フレンドは、自分のオンライン状況を見ることができません。" name="cant_see_online"/>
+			<icon tool_tip="フレンドは、自分がマップのどこにいるかを知ることができます。" name="can_see_on_map"/>
+			<icon tool_tip="フレンドは、自分がマップのどこにいるかを知ることができません。" name="cant_see_on_map"/>
+			<icon tool_tip="フレンドは、自分のオブジェクトを編集できます。" name="can_edit_objects"/>
+			<icon tool_tip="フレンドは、自分のオブジェクトを編集できません。" name="cant_edit_objects"/>
+			<text name="Key:" value="キー：" width="36"/>
+			<line_editor name="user_key" value="00000000-0000-0000-0000-000000000000"/>
+			<menu_button name="clipboard_avatar_params" tool_tip="ペースト時のオプション"/>
+		</layout_panel>
+		<layout_panel name="about_buttons_panel">
+			<button name="save_description_changes" label="保存"/>
+			<button name="discard_description_changes" label="破棄"/>
+		</layout_panel>
+		<layout_panel name="groups_panel">
+			<text name="group_label" value="グループのメンバーシップ"/>
+		</layout_panel>
+	</layout_stack>
+</panel>

@@ -1,0 +1,3456 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<floater
+  can_resize="true"
+  height="800"
+  layout="topleft"
+  min_height="300"
+  min_width="740"
+  name="prefs_graphics_advanced"
+  help_topic="Preferences_Graphics_Advanced"
+  single_instance="true"
+  save_rect="true"
+  title="ADVANCED GRAPHICS PREFERENCES"
+  width="800">
+  <string
+    name="BackgroundFPSOff">
+    Off
+  </string>
+  <string
+    name="BackgroundFPSValue">
+    [FPS] fps
+  </string>
+  <string
+    name="aa_by_upscaler">
+    The upscaler (Render Scale / FSR) does its own temporal antialiasing; this setting applies when upscaling is off.
+  </string>
+  <string
+    name="upscale_rr_unavailable">
+DLSS is unavailable ([REASON]); the DLSS choices run the matching FSR preset. Setting up DLSS: https://slipstreamviewer.org/wiki/dlss-rr/
+  </string>
+  <string
+    name="dlss_rr_unavailable">
+Ray Reconstruction is unavailable ([REASON]); On and Auto use Super Resolution. Setting up DLSS: https://slipstreamviewer.org/wiki/dlss-rr/
+  </string>
+  <string
+    name="dlss_sr_unavailable">
+Super Resolution is unavailable ([REASON]); Off falls back to FSR, Auto uses Ray Reconstruction. Setting up DLSS: https://slipstreamviewer.org/wiki/dlss-rr/
+  </string>
+  <string
+    name="dlss_rr_needs_dlss">
+Only used with a DLSS upscaling mode.
+  </string>
+  <!-- Advanced settings, one tab per area (#410). Each tab scrolls on its own, so on a short window (handheld / high UI scale, #728)
+     the tabs shrink to fit and their contents scroll while the footer (Defaults / OK / Cancel) below stays on screen. -->
+  <tab_container
+    follows="all"
+    height="763"
+    layout="topleft"
+    left="0"
+    mouse_opaque="false"
+    name="adv_tab_container"
+    tab_min_width="40"
+    tab_position="top"
+    tab_stop="false"
+    top="0"
+    width="800">
+    <panel
+      border="false"
+      follows="all"
+      height="735"
+      label="General"
+      layout="topleft"
+      left="0"
+      name="adv_tab_general"
+      top="0"
+      width="800">
+      <scroll_container
+        follows="all"
+        height="731"
+        layout="topleft"
+        left="0"
+        name="adv_scroll"
+        reserve_scroll_corner="false"
+        top="0"
+        width="800">
+        <panel
+          background_visible="false"
+          follows="left|top"
+          height="729"
+          layout="topleft"
+          left="0"
+          name="adv_scroll_panel"
+          top="0"
+          width="780">
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            name="GeneralText"
+            width="128"
+            left="10"
+            top="8">
+            General
+          </text>
+          <slider
+            control_name="RenderFarClip"
+            decimal_digits="0"
+            follows="left|top"
+            height="16"
+            increment="8"
+            initial_value="160"
+            label="Draw distance:"
+            label_width="185"
+            layout="topleft"
+            min_val="8"
+            max_val="4096"
+            name="DrawDistance"
+            tool_tip="How far the world is drawn, in meters (up to 4096). Loaded regions are capped at a 5x5 square around yours (SlipstreamMaxRegionRing)."
+            width="330"
+            left="30"
+            top="30" />
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            name="DrawDistanceMeterText2"
+            width="20"
+            left="360"
+            top="30">
+            m
+          </text>
+          <slider
+            control_name="SLNetDrawDistanceMax"
+            decimal_digits="0"
+            follows="left|top"
+            height="16"
+            increment="32"
+            initial_value="512"
+            label="Load neighbouring regions within:"
+            label_width="185"
+            layout="topleft"
+            min_val="64"
+            max_val="512"
+            name="NetDrawDistanceMax"
+            tool_tip="How far from you neighbouring regions are connected and loaded, in meters (64 to 512; never more than 512, and never more than your Draw distance). Lower values save network, simulator and memory load. Neighbours still connect near a region edge, so crossing works. How far you see is the separate Draw distance."
+            width="330"
+            left="400"
+            top="30" />
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            name="NetDrawDistanceMeterText"
+            width="20"
+            left="735"
+            top="30">
+            m
+          </text>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="14"
+            layout="topleft"
+            text_readonly_color="LabelDisabledColor"
+            name="NetDrawDistanceStatus"
+            tool_tip="Slide to 0 for no limit. Moving fast (boosted flight, vehicles) lowers what is asked for temporarily so far regions are not requested at every crossing."
+            width="380"
+            left="400"
+            top="46">
+            Limit 512 m
+          </text>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            font="SansSerifBold"
+            name="FrameRateText"
+            width="300"
+            left="10"
+            top="60">
+            Frame rate
+          </text>
+          <check_box
+            control_name="RenderVSyncEnable"
+            height="16"
+            initial_value="true"
+            label="Enable VSync"
+            layout="topleft"
+            name="vsync"
+            tool_tip="Synchronizes the frame rate to the refresh rate of the monitor, which results in smooth performance."
+            width="120"
+            left="30"
+            top="82" />
+          <slider
+            control_name="RenderFPSLimit"
+            decimal_digits="0"
+            follows="left|top"
+            height="16"
+            increment="1"
+            initial_value="0"
+            label="FPS limit:"
+            label_width="60"
+            layout="topleft"
+            min_val="0"
+            max_val="240"
+            name="FPSLimit"
+            tool_tip="Cap the frame rate. The viewer only waits when it is running faster than this, so it never slows a frame that is already below the limit. 0 = unlimited. With VSync on, the lower of the two applies."
+            width="200"
+            left="155"
+            top="82" />
+          <slider
+            control_name="BackgroundFPSLimit"
+            decimal_digits="0"
+            follows="left|top"
+            height="16"
+            increment="1"
+            initial_value="25"
+            label="Background FPS limit:"
+            label_width="185"
+            layout="topleft"
+            min_val="0"
+            max_val="60"
+            name="BackgroundFPSLimit"
+            show_text="true"
+            tool_tip="Cap the frame rate while the viewer window is in the background (unfocused or minimized), to save power and leave CPU/GPU time for other programs. Like the FPS limit, it only waits for the unused part of each frame. 0 = off."
+            width="300"
+            left="30"
+            top="106" />
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            text_readonly_color="LabelDisabledColor"
+            name="BackgroundFPSLimitText"
+            width="65"
+            left="334"
+            top="106">
+            25 fps
+          </text>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            name="HardwareText"
+            width="128"
+            left="10"
+            top="136">
+            Hardware
+          </text>
+          <!-- Graphics card (#277): the list is filled in LLFloaterPreferenceGraphicsAdvanced::postBuild
+       from the Vulkan pre-flight; takes effect after a restart. -->
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="20"
+            layout="topleft"
+            name="GraphicsCardText"
+            tool_tip="Which graphics card Slipstream renders on. Automatic picks the most capable type that meets the requirements (discrete before integrated). Pick a card to force it, for example the integrated GPU to save battery.&#10;If the chosen card is not found next time Slipstream starts, it uses Automatic and tells you.&#10;On Windows the system Graphics settings (Settings &gt; System &gt; Display &gt; Graphics) can override the choice for hybrid laptops; on Linux, MESA_VK_DEVICE_SELECT / DRI_PRIME still work when this is Automatic.&#10;Requires a restart."
+            width="165"
+            left="30"
+            top="158">
+            Graphics card:
+          </text>
+          <combo_box
+            control_name="RenderVKDeviceSelect"
+            height="20"
+            layout="topleft"
+            name="GraphicsCardSelect"
+            tool_tip="Requires a restart. Cards that do not meet Slipstream's requirements are greyed out."
+            width="180"
+            left="205"
+            top="158">
+            <combo_box.item
+              label="Automatic (recommended)"
+              name="GraphicsCardAuto"
+              value="auto" />
+          </combo_box>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            name="GraphicsCardRestart"
+            width="150"
+            left="391"
+            top="158">
+            (requires restart)
+          </text>
+          <check_box
+            control_name="RenderHiDPI"
+            height="16"
+            initial_value="true"
+            label="Enable support for HiDPI displays (requires restart)"
+            layout="topleft"
+            name="use HiDPI"
+            tool_tip="Enable OpenGL for High-Resolution Drawing."
+            width="315"
+            left="30"
+            top="184" />
+          <!-- Linux only (hidden elsewhere in postBuild); shares the row of the
+       macOS-only HiDPI checkbox, so neither platform gets a gap. -->
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="20"
+            layout="topleft"
+            name="DisplayBackendText"
+            tool_tip="Auto: native Wayland (sharp at fractional scaling) when the window gets a title bar there -- the desktop draws it, or libdecor is available -- otherwise X11 (XWayland).&#10;Wayland / X11: always use that one.&#10;The SDL_VIDEO_DRIVER environment variable overrides this."
+            width="165"
+            left="30"
+            top="184">
+            Display backend:
+          </text>
+          <combo_box
+            control_name="LinuxDisplayBackend"
+            height="20"
+            layout="topleft"
+            name="DisplayBackend"
+            tool_tip="Auto: native Wayland (sharp at fractional scaling) when the window gets a title bar there -- the desktop draws it, or libdecor is available -- otherwise X11 (XWayland).&#10;Wayland / X11: always use that one.&#10;The SDL_VIDEO_DRIVER environment variable overrides this."
+            width="76"
+            left="205"
+            top="184">
+            <combo_box.item
+              label="Auto"
+              name="DisplayBackendAuto"
+              value="auto" />
+            <combo_box.item
+              label="Wayland"
+              name="DisplayBackendWayland"
+              value="wayland" />
+            <combo_box.item
+              label="X11"
+              name="DisplayBackendX11"
+              value="x11" />
+          </combo_box>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            font="SansSerifSmall"
+            height="20"
+            layout="topleft"
+            name="DisplayBackendRestart"
+            width="100"
+            left="285"
+            top="184">
+            (requires restart)
+          </text>
+          <!-- #919: the kind of fullscreen World > Fullscreen (F11) enters. Live. -->
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="20"
+            layout="topleft"
+            name="FullScreenModeText"
+            tool_tip="What World > Fullscreen (F11) switches to, on the display the window is on.&#10;Automatic: the fastest for this computer. Windows: exclusive where the graphics card and monitor support it, otherwise borderless. Linux: borderless (the desktop shows a fullscreen window directly, without compositing it).&#10;Borderless: a window covering the screen. Instant switching to other windows.&#10;Exclusive: the viewer owns the display. Windows: Vulkan exclusive fullscreen. Linux: a display-mode fullscreen on X11; Wayland has no exclusive mode and uses borderless.&#10;Takes effect immediately, also while fullscreen."
+            width="165"
+            left="30"
+            top="210">
+            Fullscreen mode:
+          </text>
+          <combo_box
+            control_name="FullScreenMode"
+            height="20"
+            layout="topleft"
+            name="FullScreenMode"
+            tool_tip="Automatic: Windows exclusive where supported, else borderless; Linux borderless. Borderless: a window covering the screen. Exclusive: the viewer owns the display (Wayland: borderless). Takes effect immediately."
+            width="180"
+            left="205"
+            top="210">
+            <combo_box.item
+              label="Automatic (recommended)"
+              name="FullScreenModeAuto"
+              value="0" />
+            <combo_box.item
+              label="Borderless"
+              name="FullScreenModeBorderless"
+              value="1" />
+            <combo_box.item
+              label="Exclusive"
+              name="FullScreenModeExclusive"
+              value="2" />
+          </combo_box>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            font="SansSerifSmall"
+            height="20"
+            layout="topleft"
+            name="FullScreenModeHint"
+            width="150"
+            left="391"
+            top="210">
+            (World &gt; Fullscreen)
+          </text>
+        </panel>
+      </scroll_container>
+    </panel>
+    <panel
+      border="false"
+      follows="all"
+      height="735"
+      label="Avatars"
+      layout="topleft"
+      left="0"
+      name="adv_tab_avatars"
+      top="0"
+      width="800">
+      <scroll_container
+        follows="all"
+        height="731"
+        layout="topleft"
+        left="0"
+        name="adv_tab_avatars_scroll"
+        reserve_scroll_corner="false"
+        top="0"
+        width="800">
+        <panel
+          background_visible="false"
+          follows="left|top"
+          height="729"
+          layout="topleft"
+          left="0"
+          name="adv_tab_avatars_scroll_panel"
+          top="0"
+          width="780">
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            name="AvatarText"
+            width="128"
+            left="10"
+            top="8">
+            Avatar
+          </text>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            width="165"
+            name="AvatarComplexityModeLabel"
+            text_readonly_color="LabelDisabledColor"
+            left="30"
+            top="30">
+            Avatar display:
+          </text>
+          <combo_box
+            control_name="RenderAvatarComplexityMode"
+            height="19"
+            layout="topleft"
+            name="AvatarComplexityMode"
+            width="150"
+            left="205"
+            top="30">
+            <combo_box.item
+              label="Limit by complexity"
+              name="0"
+              value="0" />
+            <combo_box.item
+              label="Always show friends"
+              name="1"
+              value="1" />
+            <combo_box.item
+              label="Only show friends"
+              name="2"
+              value="2" />
+          </combo_box>
+          <slider
+            control_name="IndirectMaxComplexity"
+            tool_tip="Controls at what point a visually complex avatar is drawn as a JellyDoll"
+            follows="left|top"
+            height="16"
+            initial_value="101"
+            increment="1"
+            label="Maximum complexity:"
+            label_width="185"
+            layout="topleft"
+            min_val="1"
+            max_val="101"
+            name="IndirectMaxComplexity"
+            show_text="false"
+            width="300"
+            left="30"
+            top="56">
+            <slider.commit_callback
+              function="Pref.UpdateIndirectMaxComplexity"
+              parameter="IndirectMaxComlexityText" />
+          </slider>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            text_readonly_color="LabelDisabledColor"
+            name="IndirectMaxComplexityText"
+            width="65"
+            left="334"
+            top="56">
+            0
+          </text>
+          <slider
+            control_name="IndirectMaxNonImpostors"
+            decimal_digits="0"
+            follows="left|top"
+            height="16"
+            increment="1"
+            initial_value="12"
+            label="Max. # animated avatars:"
+            label_width="185"
+            layout="topleft"
+            min_val="1"
+            max_val="66"
+            name="IndirectMaxNonImpostors"
+            show_text="false"
+            width="300"
+            left="30"
+            top="78">
+            <slider.commit_callback
+              function="Pref.UpdateIndirectMaxNonImpostors"
+              parameter="IndirectNonImpostorsText" />
+          </slider>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            text_readonly_color="LabelDisabledColor"
+            name="IndirectMaxNonImpostorsText"
+            width="65"
+            left="334"
+            top="78">
+            0
+          </text>
+          <check_box
+            control_name="RenderVKReducedAvatars"
+            height="16"
+            label="Reduced-detail avatars past the limit"
+            layout="topleft"
+            name="ReducedAvatars"
+            tool_tip='Avatars past the "Max. # animated avatars" limit still draw, but cast no shadows, animate at a reduced rate and drop to lower detail sooner. Off draws every avatar in full.'
+            width="300"
+            left="30"
+            top="100" />
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            font="SansSerifBold"
+            name="AvatarDetailText"
+            width="300"
+            left="10"
+            top="132">
+            Avatar detail
+          </text>
+          <slider
+            control_name="RenderAvatarLODFactor"
+            follows="left|top"
+            height="16"
+            increment="0.125"
+            initial_value="160"
+            label="Detail:"
+            label_width="185"
+            layout="topleft"
+            name="AvatarMeshDetail"
+            show_text="false"
+            width="300"
+            left="30"
+            top="154">
+            <slider.commit_callback
+              function="Pref.UpdateSliderText"
+              parameter="AvatarMeshDetailText" />
+          </slider>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            name="AvatarMeshDetailText"
+            width="65"
+            left="334"
+            top="154">
+            Low
+          </text>
+          <slider
+            control_name="RenderAvatarPhysicsLODFactor"
+            follows="left|top"
+            height="16"
+            initial_value="100"
+            increment=".05"
+            label="Physics:"
+            label_width="185"
+            layout="topleft"
+            name="AvatarPhysicsDetail"
+            show_text="false"
+            width="300"
+            left="30"
+            top="176">
+            <slider.commit_callback
+              function="Pref.UpdateSliderText"
+              parameter="AvatarPhysicsDetailText" />
+          </slider>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            name="AvatarPhysicsDetailText"
+            width="65"
+            left="334"
+            top="176">
+            Low
+          </text>
+          <check_box
+            control_name="RenderVKClusterLOD"
+            height="16"
+            initial_value="false"
+            label="Cluster LOD for avatars (experimental)"
+            tool_tip="EXPERIMENTAL. Draws rigged mesh (avatars and their attachments) as clusters whose detail follows their size on screen, instead of the whole-mesh level of detail. Off by default: today it can use more video memory and be a little slower than the standard path in crowds. Takes effect immediately; a few faster GPU paths only switch on after a restart."
+            layout="topleft"
+            name="ClusterLOD"
+            width="300"
+            left="30"
+            top="198" />
+          <!-- <GMDX> -->
+          <check_box
+            control_name="GMDXDrawLoadingAvatars"
+            height="16"
+            initial_value="true"
+            label="Draw avatars while they load (no loading cloud)"
+            tool_tip="An avatar arriving or changing outfit is drawn as far as it has loaded -- plain grey where its skin and clothes have not arrived yet, attachments as they come in -- instead of the cloud of particles until everything is there. Off: the loading cloud (Second Life's default)."
+            layout="topleft"
+            name="DrawLoadingAvatars"
+            width="340"
+            left="30"
+            top="214" />
+          <!-- </GMDX> -->
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            font="SansSerifBold"
+            name="AvatarAttachmentsText"
+            width="300"
+            left="10"
+            top="230">
+            Attachments
+          </text>
+          <check_box
+            control_name="RenderAttachedLights"
+            height="16"
+            label="Render lights attached to avatars"
+            layout="topleft"
+            name="AttachedLights"
+            tool_tip="Draw lighted prims that are attached to avatars. Same as Develop &gt; Rendering &gt; Attached Lights."
+            width="300"
+            left="30"
+            top="252" />
+          <check_box
+            control_name="RenderAttachedParticles"
+            height="16"
+            label="Render particles attached to avatars"
+            layout="topleft"
+            name="AttachedParticles"
+            tool_tip="Draw particle systems that are attached to avatars. Same as Develop &gt; Rendering &gt; Attached Particles."
+            width="300"
+            left="30"
+            top="274" />
+        </panel>
+      </scroll_container>
+    </panel>
+    <panel
+      border="false"
+      follows="all"
+      height="735"
+      label="Textures &amp; memory"
+      layout="topleft"
+      left="0"
+      name="adv_tab_textures"
+      top="0"
+      width="800">
+      <scroll_container
+        follows="all"
+        height="731"
+        layout="topleft"
+        left="0"
+        name="adv_tab_textures_scroll"
+        reserve_scroll_corner="false"
+        top="0"
+        width="800">
+        <panel
+          background_visible="false"
+          follows="left|top"
+          height="729"
+          layout="topleft"
+          left="0"
+          name="adv_tab_textures_scroll_panel"
+          top="0"
+          width="780">
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            font="SansSerifBold"
+            name="TexturesText"
+            width="300"
+            left="10"
+            top="8">
+            Textures
+          </text>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="20"
+            layout="topleft"
+            name="TextureCompressionText"
+            tool_tip="Stores textures block-compressed in video memory (encoded on the GPU as they load): 4 to 8 times less texture memory, so busy places keep sharper textures on smaller cards, at some cost in colour accuracy. Applies live: textures already loaded are re-encoded over the next seconds."
+            width="165"
+            left="30"
+            top="30">
+            Texture compression:
+          </text>
+          <combo_box
+            control_name="RenderVKTextureCompression"
+            height="20"
+            layout="topleft"
+            name="texture compression"
+            tool_tip="Off: uncompressed (4 bytes per texel).&#10;High quality: BC7 with the best encoder (1 byte per texel); no visible difference.&#10;Balanced: BC7 with a faster encoder; small textures still use the best one.&#10;Max savings: BC1 for opaque textures (half a byte per texel), BC3 with alpha; slight banding on smooth gradients.&#10;Adaptive: picks per texture -- BC1 / BC3 where it measured as good as BC7, BC7 for gradients, skin, text and sharp detail; far-away textures use the smaller formats.&#10;Normal maps without alpha use BC5 at every level. Applies live."
+            width="150"
+            left="205"
+            top="30">
+            <combo_box.item
+              label="Off"
+              name="TexCompOff"
+              value="0" />
+            <combo_box.item
+              label="High quality"
+              name="TexCompHigh"
+              value="1" />
+            <combo_box.item
+              label="Balanced"
+              name="TexCompBalanced"
+              value="2" />
+            <combo_box.item
+              label="Max savings"
+              name="TexCompMax"
+              value="3" />
+            <combo_box.item
+              label="Adaptive"
+              name="TexCompAdaptive"
+              value="4" />
+          </combo_box>
+          <!-- Texture storage tiers (#405): RAM copies while memory is plentiful, or always
+       the GPU-ready disk cache. -->
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="20"
+            layout="topleft"
+            name="TextureMemoryText"
+            tool_tip="Where loaded textures are kept for reuse besides video memory.&#10;Auto: on machines with 24 GB of RAM or more, a decoded copy stays in RAM while the system has plenty free (fastest when a texture is needed again), and is dropped when memory gets tight -- textures then reload from the GPU-ready disk cache. With less RAM, Auto works like Prefer disk cache.&#10;Prefer disk cache: lowest RAM use -- copies are dropped as soon as the texture is in video memory and reload from the disk cache.&#10;Never changed automatically."
+            width="165"
+            left="30"
+            top="54">
+            Texture memory:
+          </text>
+          <combo_box
+            control_name="SlipstreamTextureMemoryMode"
+            height="20"
+            layout="topleft"
+            name="TextureMemoryMode"
+            tool_tip="Auto: keep decoded texture copies in RAM while memory is plentiful (24 GB of RAM or more), drop them when it gets tight; with less RAM, works like Prefer disk cache.&#10;Prefer disk cache: lowest RAM -- reload textures from the GPU-ready disk cache instead of keeping copies in RAM."
+            width="180"
+            left="205"
+            top="54">
+            <combo_box.item
+              label="Auto"
+              name="TexMemAuto"
+              value="0" />
+            <combo_box.item
+              label="Prefer disk (lowest RAM)"
+              name="TexMemDisk"
+              value="1" />
+          </combo_box>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            width="165"
+            name="MaxTextureResolutionLabel"
+            text_readonly_color="LabelDisabledColor"
+            left="30"
+            top="78">
+            Maximum LOD resolution:
+          </text>
+          <combo_box
+            control_name="RenderMaxTextureResolution"
+            height="19"
+            layout="topleft"
+            name="MaxTextureResolution"
+            tool_tip="Maximum resolution for 'level of detail' textures"
+            width="90"
+            left="205"
+            top="78">
+            <combo_box.item
+              label="512"
+              name="512"
+              value="512" />
+            <combo_box.item
+              label="1024"
+              name="1024"
+              value="1024" />
+            <combo_box.item
+              label="2048"
+              name="2048"
+              value="2048" />
+          </combo_box>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="20"
+            layout="topleft"
+            name="af strength label"
+            width="165"
+            left="30"
+            top="102">
+            Anisotropic Filtering:
+          </text>
+          <combo_box
+            control_name="RenderAnisotropicLevel"
+            height="20"
+            label="Anisotropic Filtering"
+            layout="topleft"
+            name="anisotropic_filter"
+            width="90"
+            left="205"
+            top="102">
+            <combo_box.item
+              label="Disabled"
+              name="disabled"
+              value="0" />
+            <combo_box.item
+              label="2x"
+              name="2x"
+              value="2" />
+            <combo_box.item
+              label="4x"
+              name="4x"
+              value="4" />
+            <combo_box.item
+              label="8x"
+              name="8x"
+              value="8" />
+            <combo_box.item
+              label="16x"
+              name="16x"
+              value="16" />
+          </combo_box>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            font="SansSerifBold"
+            name="VideoMemoryHeaderText"
+            width="300"
+            left="10"
+            top="134">
+            Video memory
+          </text>
+          <!-- Slipstream #405: one VRAM budget. The cap + a live readout of the budget and what
+       the soft ladder is holding back (refreshed once a second while open). -->
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            name="VideoMemoryText"
+            tool_tip="The most video memory the viewer plans to use. Auto: what the system gives this program (it shrinks while other programs use the graphics card). The budget is this minus a 10% reserve; over it the viewer temporarily lowers texture detail, reflections, shadows, ray tracing, mirrors and finally the render resolution -- your settings stay as you set them -- and restores them when memory frees up."
+            width="165"
+            left="30"
+            top="156">
+            Maximum video memory:
+          </text>
+          <combo_box
+            control_name="RenderMaxVideoMemoryMB"
+            height="19"
+            layout="topleft"
+            name="MaxVideoMemory"
+            tool_tip="The most video memory the viewer plans to use. Auto: what the system gives this program (it shrinks while other programs use the graphics card). Lower it to leave room for other programs (a second viewer, a game, a browser)."
+            width="120"
+            left="205"
+            top="156">
+            <combo_box.item
+              label="Auto"
+              name="VramAuto"
+              value="0" />
+            <combo_box.item
+              label="2 GB"
+              name="Vram2"
+              value="2048" />
+            <combo_box.item
+              label="3 GB"
+              name="Vram3"
+              value="3072" />
+            <combo_box.item
+              label="4 GB"
+              name="Vram4"
+              value="4096" />
+            <combo_box.item
+              label="6 GB"
+              name="Vram6"
+              value="6144" />
+            <combo_box.item
+              label="8 GB"
+              name="Vram8"
+              value="8192" />
+            <combo_box.item
+              label="12 GB"
+              name="Vram12"
+              value="12288" />
+            <combo_box.item
+              label="16 GB"
+              name="Vram16"
+              value="16384" />
+            <combo_box.item
+              label="24 GB"
+              name="Vram24"
+              value="24576" />
+            <combo_box.item
+              label="32 GB"
+              name="Vram32"
+              value="32768" />
+          </combo_box>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            font="SansSerifSmall"
+            height="52"
+            layout="topleft"
+            name="VideoMemoryStatus"
+            word_wrap="true"
+            width="700"
+            left="30"
+            top="182">
+            Video memory: not measured yet
+          </text>
+        </panel>
+      </scroll_container>
+    </panel>
+    <panel
+      border="false"
+      follows="all"
+      height="735"
+      label="Lighting &amp; atmosphere"
+      layout="topleft"
+      left="0"
+      name="adv_tab_lighting"
+      top="0"
+      width="800">
+      <scroll_container
+        follows="all"
+        height="731"
+        layout="topleft"
+        left="0"
+        name="adv_tab_lighting_scroll"
+        reserve_scroll_corner="false"
+        top="0"
+        width="800">
+        <panel
+          background_visible="false"
+          follows="left|top"
+          height="884"
+          layout="topleft"
+          left="0"
+          name="adv_tab_lighting_scroll_panel"
+          top="0"
+          width="780">
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            font="SansSerifBold"
+            name="LightingText"
+            width="300"
+            left="10"
+            top="8">
+            Lighting
+          </text>
+          <slider
+            control_name="RenderLocalLightCount"
+            decimal_digits="0"
+            follows="left|top"
+            height="16"
+            increment="1"
+            initial_value="256"
+            label="Max. nearby lights:"
+            label_width="185"
+            layout="topleft"
+            min_val="0"
+            max_val="256"
+            name="MaxLights"
+            tool_tip="How many local lights (point lights and projectors) are drawn at once, up to 256. When more are in view, the brightest and widest-reaching lights nearest the camera are kept. Reflections and mirrors use the same set."
+            width="336"
+            left="30"
+            top="30" />
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            font="SansSerifBold"
+            name="ShadowsText"
+            width="300"
+            left="10"
+            top="60">
+            Shadows
+          </text>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            name="RenderShadowDetailText"
+            text_readonly_color="LabelDisabledColor"
+            width="165"
+            left="30"
+            top="82">
+            Shadows:
+          </text>
+          <combo_box
+            control_name="RenderShadowDetail"
+            height="18"
+            layout="topleft"
+            name="ShadowDetail"
+            width="150"
+            left="205"
+            top="82">
+            <combo_box.item
+              label="None"
+              name="0"
+              value="0" />
+            <combo_box.item
+              label="Sun/Moon"
+              name="1"
+              value="1" />
+            <combo_box.item
+              label="Sun/Moon + Projectors"
+              name="2"
+              value="2" />
+          </combo_box>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            name="ShadowQualityText"
+            text_readonly_color="LabelDisabledColor"
+            width="165"
+            left="30"
+            top="106">
+            Shadow quality:
+          </text>
+          <combo_box
+            control_name="RenderVKShadowResolution"
+            height="18"
+            layout="topleft"
+            name="ShadowQuality"
+            tool_tip="Sun/moon shadow map resolution (each of the 4 cascades). Lower is much faster on integrated GPUs and handhelds, at the cost of softer, blockier shadow edges. With ray-traced shadows it sets the rays per pixel instead (Low 1, Medium 2, High 3, Ultra 4): more rays give smoother soft edges."
+            width="150"
+            left="205"
+            top="106">
+            <combo_box.item
+              label="Low"
+              name="256"
+              value="256" />
+            <combo_box.item
+              label="Medium"
+              name="512"
+              value="512" />
+            <combo_box.item
+              label="High"
+              name="1024"
+              value="1024" />
+            <combo_box.item
+              label="Ultra"
+              name="2048"
+              value="2048" />
+          </combo_box>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            name="ShadowUpdateText"
+            text_readonly_color="LabelDisabledColor"
+            width="165"
+            left="30"
+            top="130">
+            Shadow updates:
+          </text>
+          <combo_box
+            control_name="RenderVKShadowUpdate"
+            height="18"
+            layout="topleft"
+            name="ShadowUpdate"
+            tool_tip="How often distant sun/moon shadows are redrawn. Nearby shadows (you, nearby avatars, your vehicle) always update every frame. Balanced and Performance reuse distant shadow maps for a few frames, which is much faster on integrated GPUs and handhelds; far-away moving objects' shadows may lag slightly."
+            width="150"
+            left="205"
+            top="130">
+            <combo_box.item
+              label="Realtime"
+              name="0"
+              value="0" />
+            <combo_box.item
+              label="Balanced"
+              name="1"
+              value="1" />
+            <combo_box.item
+              label="Performance"
+              name="2"
+              value="2" />
+          </combo_box>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            name="SunShadowsText"
+            text_readonly_color="LabelDisabledColor"
+            width="165"
+            left="30"
+            top="154">
+            Sun/moon shadows:
+          </text>
+          <combo_box
+            control_name="RenderVKSunShadows"
+            height="18"
+            layout="topleft"
+            name="SunShadows"
+            tool_tip="How the sun and moon cast shadows (needs Shadows: Sun/Moon or higher). Shadow maps are the classic cascades. Ray traced traces a ray toward the sun per pixel: pixel-exact contact shadows with soft edges and no cascade seams or shimmer, at a higher GPU cost. Needs a GPU with hardware ray queries."
+            width="150"
+            left="205"
+            top="154">
+            <combo_box.item
+              label="Shadow maps"
+              name="1"
+              value="1" />
+            <combo_box.item
+              label="Ray traced"
+              name="2"
+              value="2" />
+          </combo_box>
+          <check_box
+            control_name="RenderVKTranslucentShadows"
+            height="16"
+            label="Translucent"
+            layout="topleft"
+            name="TranslucentShadows"
+            tool_tip="Translucent shadows: glass and other see-through objects cast partial shadows tinted by their colour (stained glass throws coloured light), for shadow maps and ray traced shadows alike. Off: they cast hard, cut-out shadows, which is cheaper."
+            width="100"
+            left="363"
+            top="154" />
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            name="ProjectorShadowsText"
+            text_readonly_color="LabelDisabledColor"
+            width="165"
+            left="30"
+            top="178">
+            Projector shadows:
+          </text>
+          <combo_box
+            control_name="RenderVKProjectorShadows"
+            height="18"
+            layout="topleft"
+            name="ProjectorShadows"
+            tool_tip="How projector lights stop at the first surface they hit (needs Shadows: Sun/Moon + Projectors). Ray traced needs a GPU with hardware ray queries."
+            width="150"
+            left="205"
+            top="178">
+            <combo_box.item
+              label="Off"
+              name="0"
+              value="0" />
+            <combo_box.item
+              label="Shadow maps"
+              name="1"
+              value="1" />
+            <combo_box.item
+              label="Ray traced"
+              name="2"
+              value="2" />
+          </combo_box>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            name="RtShadowResText"
+            text_readonly_color="LabelDisabledColor"
+            width="165"
+            left="30"
+            top="202">
+            RT shadow resolution:
+          </text>
+          <combo_box
+            control_name="RenderVKRTShadowMaskScale"
+            height="19"
+            layout="topleft"
+            name="RtShadowRes"
+            tool_tip="Resolution ray-traced shadows (sun, moon, projectors) are traced at, relative to the screen. Lower is faster; the shadow edges are upscaled following the scene depth so they don't bleed across objects. Only used with ray-traced shadows."
+            width="120"
+            left="205"
+            top="202">
+            <combo_box.item
+              label="Full"
+              name="1"
+              value="1.0" />
+            <combo_box.item
+              label="Three quarter"
+              name="0.75"
+              value="0.75" />
+            <combo_box.item
+              label="Half"
+              name="0.5"
+              value="0.5" />
+            <combo_box.item
+              label="Quarter"
+              name="0.25"
+              value="0.25" />
+          </combo_box>
+          <slider
+            control_name="RenderVKRTShadowSoftness"
+            decimal_digits="2"
+            follows="left|top"
+            height="16"
+            increment="0.01"
+            initial_value="0.01"
+            label="Shadow softness:"
+            label_width="128"
+            layout="topleft"
+            min_val="0"
+            max_val="1"
+            name="ShadowSoftness"
+            tool_tip="How soft the edges of ray-traced shadows are (sun, moon and projectors). 0 = razor sharp. Higher values widen the penumbra, more so the further a shadow falls from its caster. Applies with Sun/moon shadows or Projector shadows set to Ray traced."
+            width="310"
+            left="30"
+            top="226" />
+          <slider
+            control_name="RenderVKProjShadowMax"
+            decimal_digits="0"
+            follows="left|top"
+            height="16"
+            increment="1"
+            initial_value="16"
+            label="Projector shadow budget:"
+            label_width="128"
+            layout="topleft"
+            min_val="0"
+            max_val="32"
+            name="ProjectorShadowBudget"
+            tool_tip="Shadow maps: how many projector lights cast shadows at once (brightest and closest first). Each one re-renders its shadow when the light or something in its cone moves, so busy scenes with moving stage lights cost more per projector. 0 = no projector shadows. Values above 16 need a restart."
+            width="310"
+            left="30"
+            top="248" />
+          <!-- Ray-traced lighting: the RT lighting pipelines (GI, ReSTIR DI, stochastic projector shadows,
+               merged RT shadows). Tuning / debug knobs (thresholds, histories, debug views) stay in Debug
+               Settings. Enable rules + the "why greyed" tooltips: refreshEnabledState(). -->
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            font="SansSerifBold"
+            name="RtLightingText"
+            width="180"
+            left="10"
+            top="278">
+            Ray-traced lighting
+          </text>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            name="RtLightingStatus"
+            text_color="LabelDisabledColor"
+            width="560"
+            left="195"
+            top="278">
+          </text>
+          <check_box
+            control_name="RenderVKRayTracing"
+            height="16"
+            label="Hardware ray tracing (applies after a restart)"
+            layout="topleft"
+            name="RayTracingEnabled"
+            tool_tip="Uses the graphics card's ray-tracing hardware. Every ray-traced option needs it: ray-traced shadows, reflections and ambient occlusion, global illumination and the shadows from all lights. Off saves video memory and GPU time on cards where ray tracing is slow. Takes effect after you restart the viewer."
+            width="400"
+            left="30"
+            top="300" />
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            name="GIText"
+            text_readonly_color="LabelDisabledColor"
+            width="165"
+            left="30"
+            top="324">
+            Global illumination:
+          </text>
+          <combo_box
+            control_name="RenderVKGI"
+            height="18"
+            layout="topleft"
+            name="GlobalIllumination"
+            tool_tip="Ray-traced bounce light: sunlight and lamps bounce off walls, floors and objects and light what is around them (a sunlit floor brightens the room, a coloured wall tints its surroundings), and a closed room without lights goes dark instead of glowing with sky light. Replaces the flat ambient light of the reflection probes. Expensive; needs hardware ray tracing.&#10;Off: reflection-probe ambient light only.&#10;Low: one bounce traced each frame; the noisiest.&#10;Medium: also reuses each pixel's best bounce from the last frame; much less noise.&#10;High: also borrows neighbouring pixels' bounces, each checked with an extra ray so no light leaks through walls; the smoothest.&#10;Applies live."
+            width="150"
+            left="205"
+            top="324">
+            <combo_box.item
+              label="Off"
+              name="0"
+              value="0" />
+            <combo_box.item
+              label="Low"
+              name="1"
+              value="1" />
+            <combo_box.item
+              label="Medium"
+              name="2"
+              value="2" />
+            <combo_box.item
+              label="High"
+              name="3"
+              value="3" />
+          </combo_box>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            name="GIScaleText"
+            text_readonly_color="LabelDisabledColor"
+            width="72"
+            left="363"
+            top="324">
+            Resolution:
+          </text>
+          <combo_box
+            control_name="RenderVKGIScale"
+            height="18"
+            layout="topleft"
+            name="GIScale"
+            tool_tip="Resolution global illumination is traced and denoised at, relative to the screen. Lower is faster and gives softer bounce light: Quarter costs about a quarter of Half. Applies live."
+            width="100"
+            left="440"
+            top="324">
+            <combo_box.item
+              label="Quarter"
+              name="0.25"
+              value="0.25" />
+            <combo_box.item
+              label="Half"
+              name="0.5"
+              value="0.5" />
+            <combo_box.item
+              label="Full"
+              name="1"
+              value="1.0" />
+          </combo_box>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            name="GITraceEveryText"
+            text_readonly_color="LabelDisabledColor"
+            width="145"
+            left="50"
+            top="348">
+            Bounce rays:
+          </text>
+          <combo_box
+            control_name="RenderVKGITraceEvery"
+            height="18"
+            layout="topleft"
+            name="GITraceEvery"
+            tool_tip="How many pixels trace a new global illumination ray each frame; the others reuse what they had. Tracing is most of the global illumination cost: Every 2nd pixel roughly halves it and Every 4th pixel roughly quarters it, for a little more noise and a slower response when the lighting changes. Applies live."
+            width="150"
+            left="205"
+            top="348">
+            <combo_box.item
+              label="Every pixel"
+              name="1"
+              value="1" />
+            <combo_box.item
+              label="Every 2nd pixel"
+              name="2"
+              value="2" />
+            <combo_box.item
+              label="Every 4th pixel"
+              name="4"
+              value="4" />
+          </combo_box>
+          <check_box
+            control_name="RenderVKProjStochastic"
+            height="16"
+            label="Stochastic projector shadows"
+            layout="topleft"
+            name="ProjStochastic"
+            tool_tip="With ray-traced projector shadows, every projector reaching a pixel casts a shadow: each frame the pixel traces a shadow ray toward one or two projectors picked by how much light they bring, and a denoiser smooths the result over time. Cheaper than exact shadows in clubs and venues with many projectors. Off: exact shadows for the four most important projectors at a pixel; the rest share one combined shadow. Needs hardware ray tracing and Projector shadows set to Ray traced. Applies live."
+            width="300"
+            left="30"
+            top="372" />
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            name="ProjStochasticSamplesText"
+            text_readonly_color="LabelDisabledColor"
+            width="72"
+            left="363"
+            top="372">
+            Rays:
+          </text>
+          <combo_box
+            control_name="RenderVKProjStochasticSamples"
+            height="18"
+            layout="topleft"
+            name="ProjStochasticSamples"
+            tool_tip="Projector shadow rays per pixel each frame. 2 is less noisy where several projectors overlap, at up to twice the shadow-ray cost. Applies live."
+            width="60"
+            left="440"
+            top="372">
+            <combo_box.item
+              label="1"
+              name="1"
+              value="1" />
+            <combo_box.item
+              label="2"
+              name="2"
+              value="2" />
+          </combo_box>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            name="DenoiseScaleText"
+            text_readonly_color="LabelDisabledColor"
+            width="145"
+            left="50"
+            top="396">
+            Shadow denoiser:
+          </text>
+          <combo_box
+            control_name="RenderVKDenoiseScale"
+            height="18"
+            layout="topleft"
+            name="DenoiseScale"
+            tool_tip="Resolution of the denoiser that smooths the stochastic projector shadows and the shadows from all lights. Full gives crisper shadow edges and uses four times the video memory (about 100 MB at Half and 410 MB at Full on a 2560x1440 screen; it steps down to Half when the video memory is short). Applies live."
+            width="150"
+            left="205"
+            top="396">
+            <combo_box.item
+              label="Half resolution"
+              name="0.5"
+              value="0.5" />
+            <combo_box.item
+              label="Full resolution"
+              name="1"
+              value="1.0" />
+          </combo_box>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            name="ReSTIRDIText"
+            text_readonly_color="LabelDisabledColor"
+            width="150"
+            left="50"
+            top="420">
+            Shadows from all lights:
+          </text>
+          <combo_box
+            control_name="RenderVKReSTIRDI"
+            height="18"
+            layout="topleft"
+            name="ReSTIRDI"
+            tool_tip="Ray-traced shadows from every point light and every projector, not only the shadow-casting projectors: a lamp behind a wall no longer lights the room, and objects cast shadows from every lamp near them. A light's own lamp shade or lantern never blocks it, and lights worn on avatars (facelights) stay unshadowed. Expensive; needs hardware ray tracing and Stochastic projector shadows.&#10;Off: only projectors cast ray-traced shadows.&#10;Low: each pixel weighs a few lights picked from a world grid, so the cost no longer grows with the number of lights.&#10;Medium: also keeps each pixel's best light pick from the last frame; much less noise at the same cost.&#10;High: also borrows the picks of neighbouring pixels on the same surface.&#10;Applies live."
+            width="150"
+            left="205"
+            top="420">
+            <combo_box.item
+              label="Off"
+              name="0"
+              value="0" />
+            <combo_box.item
+              label="Low"
+              name="1"
+              value="1" />
+            <combo_box.item
+              label="Medium"
+              name="2"
+              value="2" />
+            <combo_box.item
+              label="High"
+              name="3"
+              value="3" />
+          </combo_box>
+          <check_box
+            control_name="RenderVKRTShadowMerge"
+            height="16"
+            label="Trace sun and projector shadows together"
+            layout="topleft"
+            name="RTShadowMerge"
+            tool_tip="When the sun/moon shadows and the projector shadows are both ray traced (with Stochastic projector shadows on), trace both in one pass and smooth them with one denoiser instead of two separate passes: less GPU time for the same look. Off: separate passes. Needs hardware ray tracing. Applies live."
+            width="400"
+            left="50"
+            top="444" />
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            font="SansSerifBold"
+            name="AOText"
+            width="300"
+            left="10"
+            top="474">
+            Ambient occlusion
+          </text>
+          <check_box
+            control_name="RenderDeferredSSAO"
+            height="16"
+            initial_value="true"
+            label="Screen Space Ambient Occlusion"
+            layout="topleft"
+            name="UseSSAO"
+            width="240"
+            left="30"
+            top="496">
+            <check_box.commit_callback
+              function="Pref.RenderOptionUpdate" />
+          </check_box>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            name="AOMethodText"
+            width="60"
+            left="50"
+            top="520">
+            Method:
+          </text>
+          <combo_box
+            control_name="RenderVKAOMethod"
+            enabled_control="RenderDeferredSSAO"
+            height="18"
+            layout="topleft"
+            name="AOMethod"
+            tool_tip="Ambient occlusion algorithm.&#10;SSAO: the classic screen-space method.&#10;GTAO: ground-truth ambient occlusion; more accurate contact shadowing and fewer halos, at a slightly higher cost.&#10;Ray traced: true occlusion from the scene, including objects off screen or hidden; needs a ray-tracing GPU (uses GTAO otherwise). Applies live."
+            width="170"
+            left="112"
+            top="520">
+            <combo_box.item
+              label="SSAO"
+              name="AOMethodSSAO"
+              value="0" />
+            <combo_box.item
+              label="GTAO (ground truth)"
+              name="AOMethodGTAO"
+              value="1" />
+            <combo_box.item
+              label="Ray traced (RTAO)"
+              name="AOMethodRTAO"
+              value="2" />
+          </combo_box>
+          <check_box
+            control_name="RenderVKAOStandard"
+            enabled_control="RenderDeferredSSAO"
+            height="16"
+            initial_value="true"
+            label="Standard AO strength"
+            tool_tip="Ambient occlusion multiplies ambient light (as modern engines do). Off: the subtler blend used by Alchemy and the official viewer."
+            layout="topleft"
+            name="AOStandard"
+            width="190"
+            left="50"
+            top="544" />
+          <slider
+            control_name="RenderVKAOStrength"
+            enabled_control="RenderDeferredSSAO"
+            decimal_digits="1"
+            follows="left|top"
+            height="16"
+            increment="0.1"
+            initial_value="1"
+            label=""
+            label_width="0"
+            layout="topleft"
+            min_val="0.5"
+            max_val="4"
+            name="AOStrength"
+            tool_tip="Ambient occlusion strength (1 = default). Higher darkens creases and contact areas more; fully lit and fully occluded areas are unchanged."
+            width="160"
+            left="242"
+            top="544" />
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            name="AOQualityText"
+            text_readonly_color="LabelDisabledColor"
+            width="100"
+            left="50"
+            top="568">
+            GTAO quality:
+          </text>
+          <combo_box
+            control_name="RenderVKGTAOQuality"
+            height="18"
+            layout="topleft"
+            name="AOQuality"
+            tool_tip="GTAO sample budget (Method: GTAO). Full uses the full slice and step counts; the lower tiers cap them for slower GPUs (noisier)."
+            width="120"
+            enabled_control="RenderDeferredSSAO"
+            left="152"
+            top="568">
+            <combo_box.item
+              label="Full"
+              name="0"
+              value="0" />
+            <combo_box.item
+              label="Reduced"
+              name="1"
+              value="1" />
+            <combo_box.item
+              label="Minimal"
+              name="2"
+              value="2" />
+          </combo_box>
+          <check_box
+            control_name="RenderVKSpecularOcclusion"
+            enabled_control="RenderDeferredSSAO"
+            height="16"
+            initial_value="true"
+            label="Specular occlusion"
+            tool_tip="Ambient occlusion also darkens reflections in crevices and contact areas (most visible on glossy and metallic surfaces)."
+            layout="topleft"
+            name="SpecularOcclusion"
+            width="220"
+            left="30"
+            top="592" />
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            name="ShadersText"
+            width="128"
+            left="10"
+            top="624">
+            Shaders
+          </text>
+          <check_box
+            control_name="RenderTransparentWater"
+            height="16"
+            initial_value="true"
+            label="Transparent Water"
+            layout="topleft"
+            name="TransparentWater"
+            width="300"
+            left="30"
+            top="646">
+            <check_box.commit_callback
+              function="Pref.RenderOptionUpdate" />
+          </check_box>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            font="SansSerifBold"
+            name="AtmosphereText"
+            width="300"
+            left="10"
+            top="678">
+            Atmosphere
+          </text>
+          <check_box
+            control_name="RenderVKVolumetricFog"
+            height="16"
+            initial_value="false"
+            label="Volumetric fog"
+            layout="topleft"
+            name="VolumetricFog"
+            tool_tip="Lit 3D fog: the region's haze plus local fog, with sun shafts and shadows through it (replaces god rays while on). Off = the classic haze only, no extra cost."
+            width="150"
+            left="30"
+            top="700" />
+          <combo_box
+            control_name="RenderVKVolumetricFogQuality"
+            height="18"
+            layout="topleft"
+            name="VolFogQuality"
+            tool_tip="Volumetric fog grid resolution. Higher is smoother and uses more video memory (about 14, 30 or 64 MB)."
+            width="110"
+            enabled_control="RenderVKVolumetricFog"
+            left="185"
+            top="700">
+            <combo_box.item
+              label="Low"
+              name="0"
+              value="0" />
+            <combo_box.item
+              label="Medium"
+              name="1"
+              value="1" />
+            <combo_box.item
+              label="High"
+              name="2"
+              value="2" />
+          </combo_box>
+          <!-- <OCOL> -->
+          <button
+            follows="left|top"
+            height="20"
+            label="Mist..."
+            layout="topleft"
+            left="305"
+            name="OCOLMistButton"
+            tool_tip="OCOL rolling mist and the fog's sliders (density, banks, drift, light, range)."
+            top="502"
+            width="80">
+            <button.commit_callback
+              function="Floater.Show"
+              parameter="ocol_mist" />
+          </button>
+          <!-- </OCOL> -->
+          <check_box
+            control_name="RenderVKVolumetricClouds"
+            height="16"
+            initial_value="false"
+            label="Volumetric clouds"
+            layout="topleft"
+            name="VolumetricClouds"
+            tool_tip="Raymarched 3D cloud layer shaped by the region's sky settings, with cloud shadows on the ground and in the fog. Off = the classic 2D cloud dome, no extra cost."
+            width="150"
+            left="30"
+            top="724" />
+          <combo_box
+            control_name="RenderVKVolCloudQuality"
+            height="18"
+            layout="topleft"
+            name="VolCloudQuality"
+            tool_tip="Volumetric cloud march quality. Higher is smoother and costs more GPU time."
+            width="110"
+            enabled_control="RenderVKVolumetricClouds"
+            left="185"
+            top="724">
+            <combo_box.item
+              label="Low"
+              name="1"
+              value="1" />
+            <combo_box.item
+              label="Medium"
+              name="2"
+              value="2" />
+            <combo_box.item
+              label="High"
+              name="3"
+              value="3" />
+          </combo_box>
+          <check_box
+            control_name="RenderVKVolCloudShadows"
+            height="16"
+            label="Clouds shadow the ground"
+            layout="topleft"
+            name="VolCloudShadows"
+            tool_tip="The volumetric cloud layer casts sun and moon shadows onto the world."
+            width="250"
+            enabled_control="RenderVKVolumetricClouds"
+            left="50"
+            top="748" />
+          <check_box
+            control_name="RenderVKParticleFog"
+            height="16"
+            initial_value="true"
+            label="Fog from particles"
+            layout="topleft"
+            name="ParticleFog"
+            tool_tip="Fog machines, smoke, steam and mist made of particles become real lit volumetric fog with depth and shape (other particles stay as they are). Needs volumetric fog. Fine tuning is in Photo Studio > Scene > Particle Fog."
+            width="150"
+            enabled_control="RenderVKVolumetricFog"
+            left="30"
+            top="772" />
+          <combo_box
+            control_name="RenderVKParticleFogQuality"
+            height="18"
+            layout="topleft"
+            name="ParticleFogQuality"
+            tool_tip="Particle fog detail: march steps, render resolution and how many lights the fog shadows itself from. Higher is smoother and costs more GPU time."
+            width="110"
+            enabled_control="RenderVKVolumetricFog"
+            left="185"
+            top="772">
+            <combo_box.item
+              label="Low"
+              name="0"
+              value="0" />
+            <combo_box.item
+              label="Medium"
+              name="1"
+              value="1" />
+            <combo_box.item
+              label="High"
+              name="2"
+              value="2" />
+          </combo_box>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            name="GodRaysText"
+            text_readonly_color="LabelDisabledColor"
+            width="100"
+            tool_tip="Volumetric light shafts from the sun and moon through gaps in trees, windows and other geometry. They need shadows on. Higher tiers cost more GPU time and look smoother."
+            left="30"
+            top="796">
+            God rays:
+          </text>
+          <combo_box
+            control_name="RenderVKGodRays"
+            height="18"
+            layout="topleft"
+            name="GodRays"
+            tool_tip="Volumetric light shafts from the sun and moon through gaps in trees, windows and other geometry. They need shadows on. Higher tiers cost more GPU time and look smoother."
+            width="110"
+            left="135"
+            top="796">
+            <combo_box.item
+              label="Off"
+              name="0"
+              value="0" />
+            <combo_box.item
+              label="Low"
+              name="1"
+              value="1" />
+            <combo_box.item
+              label="Medium"
+              name="2"
+              value="2" />
+            <combo_box.item
+              label="High"
+              name="3"
+              value="3" />
+          </combo_box>
+          <slider
+            control_name="RenderVKGodRaysIntensity"
+            decimal_digits="2"
+            follows="left|top"
+            height="16"
+            increment="0.05"
+            initial_value="1"
+            label="God ray intensity:"
+            label_width="185"
+            layout="topleft"
+            max_val="4"
+            min_val="0"
+            name="GodRaysIntensity"
+            tool_tip="God ray strength (1 = default). It scales with how hazy the environment is."
+            width="300"
+            left="30"
+            top="820" />
+          <!-- Weather quality (#946): RenderVKWeatherVramTier. -->
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="20"
+            layout="topleft"
+            name="WeatherQualityText"
+            tool_tip="Detail of rain and snow: the snow cover and its edges, the area it is simulated over, and snow and wetness on avatars.&#10;High: full detail (about 95 MB of video memory).&#10;Low: coarser snow and smaller areas (about 25 MB) and less GPU time -- for cards with 4 GB of video memory or less.&#10;Auto: Low on cards with less than 4.5 GB of video memory, High otherwise.&#10;Changing it starts the lying snow over."
+            width="120"
+            left="30"
+            top="846">
+            Weather quality:
+          </text>
+          <combo_box
+            control_name="RenderVKWeatherVramTier"
+            height="18"
+            layout="topleft"
+            name="WeatherQuality"
+            tool_tip="Detail of rain and snow: the snow cover and its edges, the area it is simulated over, and snow and wetness on avatars.&#10;High: full detail (about 95 MB of video memory).&#10;Low: coarser snow and smaller areas (about 25 MB) and less GPU time -- for cards with 4 GB of video memory or less.&#10;Auto: Low on cards with less than 4.5 GB of video memory, High otherwise.&#10;Changing it starts the lying snow over."
+            width="110"
+            left="155"
+            top="846">
+            <combo_box.item
+              label="Auto"
+              name="0"
+              value="0" />
+            <combo_box.item
+              label="High"
+              name="1"
+              value="1" />
+            <combo_box.item
+              label="Low"
+              name="2"
+              value="2" />
+          </combo_box>
+          <!-- <GMDX> physical sky (gmdxphysskyvk.cpp) -->
+          <check_box
+            control_name="RenderVKPhysicalSky"
+            height="16"
+            label="Physical sky (Hillaire atmosphere)"
+            tool_tip="Off: the Classic WindLight sky, as other viewers draw it. On: a physically based sky (multiple scattering, sunsets, altitude) made from the region's sky settings; haze amount and lighting stay the same."
+            layout="topleft"
+            name="PhysicalSky"
+            width="300"
+            left="30"
+            top="652" />
+          <!-- </GMDX> -->
+        </panel>
+      </scroll_container>
+    </panel>
+    <panel
+      border="false"
+      follows="all"
+      height="735"
+      label="Reflections"
+      layout="topleft"
+      left="0"
+      name="adv_tab_reflections"
+      top="0"
+      width="800">
+      <scroll_container
+        follows="all"
+        height="731"
+        layout="topleft"
+        left="0"
+        name="adv_tab_reflections_scroll"
+        reserve_scroll_corner="false"
+        top="0"
+        width="800">
+        <panel
+          background_visible="false"
+          follows="left|top"
+          height="729"
+          layout="topleft"
+          left="0"
+          name="adv_tab_reflections_scroll_panel"
+          top="0"
+          width="780">
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            font="SansSerifBold"
+            name="ReflectionProbesText"
+            width="300"
+            left="10"
+            top="8">
+            Reflection probes
+          </text>
+          <check_box
+            control_name="RenderReflectionsEnabled"
+            height="16"
+            label="Reflection probes"
+            layout="topleft"
+            name="ReflectionsEnabled"
+            tool_tip="Environment reflections from reflection probes (sky, surroundings, placed probes). Off matches the Low preset; the detail, coverage and probe settings below apply when this is on."
+            width="200"
+            left="30"
+            top="30" />
+          <check_box
+            control_name="RenderVKRTReflections"
+            height="16"
+            initial_value="true"
+            label="Ray-traced reflection fallback"
+            layout="topleft"
+            name="RTReflections"
+            tool_tip="Hybrid ray-traced reflections: screen-space reflections stay primary, and where they have no answer (off screen, behind something, or a smooth surface they don't trace) a ray against the scene fills in instead of the reflection probe. Needs ray tracing. Off = reflection probes only where screen-space reflections miss."
+            width="300"
+            left="50"
+            top="54" />
+          <check_box
+            control_name="RenderVKLightGrid"
+            height="16"
+            label="Sampled light in reflections"
+            layout="topleft"
+            name="RTReflLightGrid"
+            tool_tip="Ray-traced reflections light what they reflect with a few lights sampled from a world grid instead of every light in range: faster where many lights shine, with a little grain in rough (blurry) reflections. Close-up mirrors keep the exact lighting. Off: every light is evaluated for every reflected point (exact, slower with many lights). Needs Ray-traced reflection fallback. Applies live."
+            width="300"
+            left="363"
+            top="54" />
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            name="ReflectionDetailText"
+            text_readonly_color="LabelDisabledColor"
+            width="165"
+            left="30"
+            top="78">
+            Reflection Detail:
+          </text>
+          <combo_box
+            control_name="RenderReflectionProbeDetail"
+            height="18"
+            layout="topleft"
+            name="ReflectionDetail"
+            width="150"
+            left="205"
+            top="78">
+            <combo_box.item
+              label="Static Only"
+              name="0"
+              value="0" />
+            <combo_box.item
+              label="Static+Dynamic"
+              name="1"
+              value="1" />
+            <combo_box.item
+              label="Realtime"
+              name="2"
+              value="2" />
+            <combo_box.item
+              label="Raytraced"
+              name="3"
+              value="3" />
+          </combo_box>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            name="ReflectionProbeText"
+            text_readonly_color="LabelDisabledColor"
+            width="165"
+            left="30"
+            top="102">
+            Reflection Coverage:
+          </text>
+          <combo_box
+            control_name="RenderReflectionProbeLevel"
+            height="18"
+            layout="topleft"
+            name="ReflectionLevel"
+            width="150"
+            left="205"
+            top="102">
+            <combo_box.item
+              label="None"
+              name="0"
+              value="0" />
+            <combo_box.item
+              label="Manual only"
+              name="1"
+              value="1" />
+            <combo_box.item
+              label="Manual + terrain"
+              name="2"
+              value="2" />
+            <combo_box.item
+              label="Full scene"
+              name="3"
+              value="3" />
+          </combo_box>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            name="ReflectionProbeCount"
+            text_readonly_color="LabelDisabledColor"
+            width="165"
+            left="30"
+            top="126">
+            Max Reflection Probes:
+          </text>
+          <combo_box
+            control_name="RenderReflectionProbeCount"
+            height="18"
+            layout="topleft"
+            label="Max. Reflection Probes:"
+            name="ProbeCount"
+            width="100"
+            left="205"
+            top="126">
+            <combo_box.item
+              label="None"
+              name="1"
+              value="1" />
+            <combo_box.item
+              label="Low"
+              name="32"
+              value="32" />
+            <combo_box.item
+              label="Medium"
+              name="64"
+              value="64" />
+            <combo_box.item
+              label="High"
+              name="128"
+              value="128" />
+            <combo_box.item
+              label="Ultra"
+              name="256"
+              value="256" />
+          </combo_box>
+          <combo_box
+            control_name="RenderReflectionProbeResolution"
+            height="18"
+            layout="topleft"
+            name="ProbeResolution"
+            tool_tip="Reflection probe resolution (per cube face). Only mirror-like, glossy surfaces look sharper at higher resolutions; matte surfaces and ambient light don't change. Video memory grows with resolution squared times Max Reflection Probes: per probe about 0.3 MB (64 px), 1 MB (128), 4 MB (256), 17 MB (512). The figures shown are at Ultra (256 probes)."
+            width="135"
+            left="310"
+            top="126">
+            <combo_box.item
+              label="64 px"
+              name="64"
+              value="64" />
+            <combo_box.item
+              label="128 px"
+              name="128"
+              value="128" />
+            <combo_box.item
+              label="256 px (~1.1 GB)"
+              name="256"
+              value="256" />
+            <combo_box.item
+              label="512 px (~4.3 GB)"
+              name="512"
+              value="512" />
+          </combo_box>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            name="ProbeCompressionText"
+            text_readonly_color="LabelDisabledColor"
+            tool_tip="Stores the reflection probe images in a smaller format in video memory. Applies live: probes are re-captured when it changes."
+            width="165"
+            left="30"
+            top="150">
+            Probe compression:
+          </text>
+          <combo_box
+            control_name="RenderVKProbeFormat"
+            height="18"
+            layout="topleft"
+            name="ProbeCompression"
+            tool_tip="Off: uncompressed (8 bytes per texel), the reference.&#10;Shared exponent (RGB9E5): 4 bytes per texel; weaker on saturated colours next to dim ones.&#10;Packed float (R11G11B10): 4 bytes per texel; slight banding on smooth gradients.&#10;Block compressed (BC6H): 1 byte per texel; 4x4 block artifacts on mirror-like surfaces. Falls back to a simpler format if unsupported. Applies live."
+            width="190"
+            left="205"
+            top="150">
+            <combo_box.item
+              label="Off"
+              name="ProbeCompOff"
+              value="0" />
+            <combo_box.item
+              label="Shared exponent (RGB9E5)"
+              name="ProbeCompRGB9E5"
+              value="1" />
+            <combo_box.item
+              label="Packed float (R11G11B10)"
+              name="ProbeCompR11G11B10"
+              value="2" />
+            <combo_box.item
+              label="Block compressed (BC6H)"
+              name="ProbeCompBC6H"
+              value="3" />
+          </combo_box>
+          <check_box
+            control_name="RenderScreenSpaceReflections"
+            height="16"
+            initial_value="true"
+            label="Screen Space Reflections"
+            layout="topleft"
+            name="ScreenSpaceReflections"
+            width="190"
+            left="30"
+            top="174">
+            <check_box.commit_callback
+              function="Pref.RenderOptionUpdate" />
+          </check_box>
+          <check_box
+            control_name="RenderMirrors"
+            height="16"
+            initial_value="false"
+            label="Mirrors"
+            layout="topleft"
+            name="Mirrors"
+            width="240"
+            left="30"
+            top="204">
+            <check_box.commit_callback
+              function="Pref.RenderOptionUpdate" />
+          </check_box>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            name="MirrorResolutionText"
+            text_readonly_color="LabelDisabledColor"
+            width="165"
+            left="30"
+            top="228">
+            Mirror Resolution:
+          </text>
+          <combo_box
+            control_name="RenderHeroProbeResolution"
+            height="18"
+            layout="topleft"
+            name="MirrorResolution"
+            width="150"
+            left="205"
+            top="228">
+            <combo_box.item
+              label="256"
+              name="0"
+              value="256" />
+            <combo_box.item
+              label="512"
+              name="1"
+              value="512" />
+            <combo_box.item
+              label="1024"
+              name="2"
+              value="1024" />
+            <combo_box.item
+              label="2048"
+              name="3"
+              value="2048" />
+          </combo_box>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            name="HeroProbeUpdateText"
+            text_readonly_color="LabelDisabledColor"
+            width="165"
+            left="30"
+            top="252">
+            Mirror Update Rate:
+          </text>
+          <combo_box
+            control_name="RenderHeroProbeUpdateRate"
+            height="18"
+            layout="topleft"
+            name="HeroProbeUpdateRate"
+            width="150"
+            left="205"
+            top="252">
+            <combo_box.item
+              label="Low"
+              name="6"
+              value="6" />
+            <combo_box.item
+              label="Medium"
+              name="3"
+              value="3" />
+            <combo_box.item
+              label="High"
+              name="1"
+              value="2" />
+            <combo_box.item
+              label="Ultra"
+              name="0"
+              value="1" />
+          </combo_box>
+          <slider
+            control_name="RenderHeroProbeDistance"
+            decimal_digits="0"
+            follows="left|top"
+            height="16"
+            increment="1"
+            initial_value="8"
+            label="Mirror distance:"
+            label_width="128"
+            layout="topleft"
+            min_val="1"
+            max_val="64"
+            name="HeroProbeDistance"
+            tool_tip="How far, in metres, mirrors reflect the scene. Shorter is faster: less of the world is drawn into each mirror."
+            width="310"
+            left="30"
+            top="276" />
+          <slider
+            control_name="RenderVKMirrorResScale"
+            decimal_digits="2"
+            follows="left|top"
+            height="16"
+            increment="0.05"
+            initial_value="0.75"
+            label="Mirror capture scale:"
+            label_width="185"
+            layout="topleft"
+            max_val="1"
+            min_val="0.25"
+            name="MirrorResScale"
+            tool_tip="Mirror capture resolution as a fraction of the window (0.25 - 1). Lower is cheaper but softer."
+            width="310"
+            enabled_control="RenderMirrors"
+            left="30"
+            top="298" />
+        </panel>
+      </scroll_container>
+    </panel>
+    <panel
+      border="false"
+      follows="all"
+      height="735"
+      label="Geometry &amp; terrain"
+      layout="topleft"
+      left="0"
+      name="adv_tab_geometry"
+      top="0"
+      width="800">
+      <scroll_container
+        follows="all"
+        height="731"
+        layout="topleft"
+        left="0"
+        name="adv_tab_geometry_scroll"
+        reserve_scroll_corner="false"
+        top="0"
+        width="800">
+        <panel
+          background_visible="false"
+          follows="left|top"
+          height="729"
+          layout="topleft"
+          left="0"
+          name="adv_tab_geometry_scroll_panel"
+          top="0"
+          width="780">
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            name="MeshText"
+            width="128"
+            left="10"
+            top="8">
+            Mesh
+          </text>
+          <slider
+            control_name="RenderVolumeLODFactor"
+            follows="left|top"
+            height="16"
+            increment="0.125"
+            initial_value="160"
+            label="Objects:"
+            label_width="185"
+            layout="topleft"
+            min_val="0"
+            max_val="8"
+            name="ObjectMeshDetail"
+            show_text="false"
+            width="300"
+            left="30"
+            top="30">
+            <slider.commit_callback
+              function="Pref.UpdateSliderText"
+              parameter="ObjectMeshDetailText" />
+          </slider>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            name="ObjectMeshDetailText"
+            width="65"
+            left="334"
+            top="30">
+            Low
+          </text>
+          <slider
+            control_name="RenderFlexTimeFactor"
+            follows="left|top"
+            height="16"
+            initial_value="160"
+            label="Flexiprims:"
+            label_width="185"
+            layout="topleft"
+            min_val="0"
+            max_val="2"
+            name="FlexibleMeshDetail"
+            show_text="false"
+            width="300"
+            left="30"
+            top="52">
+            <slider.commit_callback
+              function="Pref.UpdateSliderText"
+              parameter="FlexibleMeshDetailText" />
+          </slider>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            name="FlexibleMeshDetailText"
+            width="65"
+            left="334"
+            top="52">
+            Low
+          </text>
+          <slider
+            control_name="RenderTreeLODFactor"
+            follows="topleft"
+            height="16"
+            increment="0.125"
+            initial_value="160"
+            label="Trees:"
+            label_width="185"
+            layout="topleft"
+            min_val="0"
+            max_val="2"
+            name="TreeMeshDetail"
+            show_text="false"
+            width="300"
+            left="30"
+            top="74">
+            <slider.commit_callback
+              function="Pref.UpdateSliderText"
+              parameter="TreeMeshDetailText" />
+          </slider>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            name="TreeMeshDetailText"
+            width="65"
+            left="334"
+            top="74">
+            Low
+          </text>
+          <slider
+            control_name="RenderTerrainLODFactor"
+            follows="topleft"
+            height="16"
+            increment="0.125"
+            initial_value="160"
+            label="Terrain Mesh Detail:"
+            label_width="185"
+            layout="topleft"
+            min_val="1"
+            max_val="4"
+            name="TerrainMeshDetail"
+            show_text="false"
+            width="300"
+            left="30"
+            top="96">
+            <slider.commit_callback
+              function="Pref.UpdateSliderText"
+              parameter="TerrainMeshDetailText" />
+          </slider>
+          <text
+            type="string"
+            length="1"
+            follows="topleft"
+            height="16"
+            layout="topleft"
+            name="TerrainMeshDetailText"
+            text_readonly_color="LabelDisabledColor"
+            width="65"
+            left="334"
+            top="96">
+            Low
+          </text>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            font="SansSerifBold"
+            name="TerrainText"
+            width="300"
+            left="10"
+            top="126">
+            Terrain
+          </text>
+          <check_box
+            control_name="SlipstreamRenderTerrainHexTiling"
+            height="16"
+            initial_value="false"
+            label="Hex-tile terrain textures"
+            tool_tip="Hides the repeating pattern of terrain textures: each cell of a hexagonal lattice shows the texture at its own offset and rotation. PBR and legacy terrain. Small extra cost in the blend bands between cells."
+            layout="topleft"
+            name="TerrainHexTiling"
+            width="300"
+            left="30"
+            top="148" />
+          <check_box
+            control_name="RenderVKTerrainSmooth"
+            height="16"
+            initial_value="true"
+            label="Smooth terrain"
+            tool_tip="Draws the terrain as a smooth surface through its height samples instead of flat triangles, finely subdivided near the camera with seamless distance detail. Picks, foot placement and parcel lines follow the smooth surface; the simulator still collides with the flat one, so feet and objects can sit a few centimetres off on rough ground. Small GPU cost. Takes effect immediately."
+            layout="topleft"
+            name="TerrainSmooth"
+            width="170"
+            left="30"
+            top="172" />
+          <combo_box
+            control_name="RenderVKTerrainSmoothDetail"
+            enabled_control="RenderVKTerrainSmooth"
+            height="19"
+            layout="topleft"
+            name="TerrainSmoothDetail"
+            tool_tip="Smooth terrain detail: the finest subdivision built near the camera. Normals only keeps the 1 m height grid and only smooths the shading; each finer level halves the cell size closer in (0.5 m out to about 120 m, 0.25 m to about 56 m, 0.125 m to about 12 m) and keeps the coarser ones further out. Takes effect immediately."
+            width="150"
+            left="205"
+            top="172">
+            <combo_box.item
+              label="Normals only"
+              name="0"
+              value="0" />
+            <combo_box.item
+              label="Medium (0.5 m)"
+              name="1"
+              value="1" />
+            <combo_box.item
+              label="High (0.25 m)"
+              name="2"
+              value="2" />
+            <combo_box.item
+              label="Ultra (0.125 m)"
+              name="3"
+              value="3" />
+          </combo_box>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            name="TerrainPBRDetailText"
+            text_readonly_color="LabelDisabledColor"
+            width="165"
+            left="30"
+            top="196">
+            PBR terrain detail:
+          </text>
+          <combo_box
+            control_name="RenderTerrainPBRDetail"
+            height="19"
+            layout="topleft"
+            name="TerrainPBRDetail"
+            tool_tip="Which texture maps PBR terrain materials use. Lower settings skip maps: emissive first, then ambient occlusion, then normal maps, then roughness / metallic (Colour only draws matte base colour). Fewer texture reads on the GPU; legacy (non-PBR) terrain is unaffected."
+            width="150"
+            left="205"
+            top="196">
+            <combo_box.item
+              label="Full"
+              name="0"
+              value="0" />
+            <combo_box.item
+              label="No emissive"
+              name="-1"
+              value="-1" />
+            <combo_box.item
+              label="No emissive, AO"
+              name="-2"
+              value="-2" />
+            <combo_box.item
+              label="Colour + roughness"
+              name="-3"
+              value="-3" />
+            <combo_box.item
+              label="Colour only"
+              name="-4"
+              value="-4" />
+          </combo_box>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            font="SansSerifBold"
+            name="ParticlesText"
+            width="300"
+            left="10"
+            top="228">
+            Particles
+          </text>
+          <slider
+            control_name="RenderMaxPartCount"
+            decimal_digits="0"
+            follows="left|top"
+            height="16"
+            increment="256"
+            initial_value="4096"
+            label="Max. particle count:"
+            label_width="185"
+            layout="topleft"
+            max_val="8192"
+            name="MaxParticleCount"
+            width="336"
+            left="30"
+            top="250" />
+          <check_box
+            control_name="RenderVKParticleShadows"
+            height="16"
+            label="Particles cast shadows"
+            layout="topleft"
+            name="ParticleShadows"
+            tool_tip="Alpha and premultiplied-alpha particles cast sun/moon shadows (not by ray-traced sun shadows). Costs GPU time where there are many particles."
+            width="300"
+            left="30"
+            top="272" />
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            name="ParticleLowResText"
+            text_readonly_color="LabelDisabledColor"
+            width="165"
+            tool_tip="Draw particles into a reduced-resolution target and composite them back. Adaptive does it only while particles are costing a lot."
+            left="30"
+            top="296">
+            Low-resolution particles:
+          </text>
+          <combo_box
+            control_name="RenderVKParticleLowRes"
+            height="18"
+            layout="topleft"
+            name="ParticleLowRes"
+            tool_tip="Draw particles into a reduced-resolution target and composite them back. Adaptive does it only while particles are costing a lot."
+            width="150"
+            left="205"
+            top="296">
+            <combo_box.item
+              label="Off"
+              name="0"
+              value="0" />
+            <combo_box.item
+              label="Always"
+              name="1"
+              value="1" />
+            <combo_box.item
+              label="Adaptive"
+              name="2"
+              value="2" />
+          </combo_box>
+        </panel>
+      </scroll_container>
+    </panel>
+    <panel
+      border="false"
+      follows="all"
+      height="735"
+      label="Post &amp; upscaling"
+      layout="topleft"
+      left="0"
+      name="adv_tab_post"
+      top="0"
+      width="800">
+      <scroll_container
+        follows="all"
+        height="731"
+        layout="topleft"
+        left="0"
+        name="adv_tab_post_scroll"
+        reserve_scroll_corner="false"
+        top="0"
+        width="800">
+        <panel
+          background_visible="false"
+          follows="left|top"
+          height="773"
+          layout="topleft"
+          left="0"
+          name="adv_tab_post_scroll_panel"
+          top="0"
+          width="780">
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            font="SansSerifBold"
+            name="AntialiasingText"
+            width="300"
+            left="10"
+            top="8">
+            Antialiasing
+          </text>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="20"
+            layout="topleft"
+            name="antialiasing label"
+            width="165"
+            left="30"
+            top="30">
+            Antialiasing:
+          </text>
+          <combo_box
+            control_name="RenderFSAAType"
+            height="20"
+            initial_value="false"
+            label="Antialiasing"
+            layout="topleft"
+            name="fsaa"
+            width="90"
+            left="205"
+            top="30">
+            <combo_box.item
+              label="Disabled"
+              name="FSAADisabled"
+              value="0" />
+            <combo_box.item
+              label="FXAA"
+              name="FXAA"
+              value="1" />
+            <combo_box.item
+              label="SMAA"
+              name="SMAA"
+              value="2" />
+            <combo_box.item
+              label="TAA"
+              name="TAA"
+              value="3" />
+          </combo_box>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="20"
+            layout="topleft"
+            name="antialiasing quality label"
+            width="165"
+            left="30"
+            top="54">
+            Antialiasing Quality:
+          </text>
+          <combo_box
+            control_name="RenderFSAASamples"
+            height="20"
+            initial_value="false"
+            label="Antialiasing"
+            layout="topleft"
+            name="fsaa quality"
+            width="90"
+            left="205"
+            top="54">
+            <combo_box.item
+              label="Low"
+              name="Low"
+              value="0" />
+            <combo_box.item
+              label="Medium"
+              name="Medium"
+              value="1" />
+            <combo_box.item
+              label="High"
+              name="High"
+              value="2" />
+            <combo_box.item
+              label="Ultra"
+              name="Ultra"
+              value="3" />
+          </combo_box>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            name="antialiasing restart"
+            width="130"
+            left="305"
+            top="54">
+            (requires restart)
+          </text>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            font="SansSerifBold"
+            name="UpscalingText"
+            width="300"
+            left="10"
+            top="86">
+            Upscaling and sharpening
+          </text>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            name="UpscaleModeText"
+            width="165"
+            left="30"
+            top="108">
+            Upscaling:
+          </text>
+          <combo_box
+            control_name="RenderVKUpscaler"
+            height="18"
+            layout="topleft"
+            name="UpscaleMode"
+            tool_tip="Render the world with AMD FidelityFX Super Resolution 3.1 temporal upscaling (turns TAA on). Native AA keeps full resolution and uses FSR for anti-aliasing only; the other presets render the world at a lower resolution: faster, softer. The interface always stays at full resolution. DLSS: NVIDIA DLSS upscaling, DLAA at native size (GeForce RTX only; needs the separately built shim, see the DLSS page in the wiki; falls back to the matching FSR preset when unavailable). Ray Reconstruction (next to it) picks the DLSS network."
+            width="230"
+            left="205"
+            top="108">
+            <combo_box.commit_callback
+              function="Pref.RenderOptionUpdate" />
+            <combo_box.item
+              label="Off (native)"
+              name="0"
+              value="0" />
+            <combo_box.item
+              label="FSR Native AA (1x)"
+              name="1"
+              value="1" />
+            <combo_box.item
+              label="FSR Quality (1.5x)"
+              name="2"
+              value="2" />
+            <combo_box.item
+              label="FSR Balanced (1.7x)"
+              name="3"
+              value="3" />
+            <combo_box.item
+              label="FSR Performance (2x)"
+              name="4"
+              value="4" />
+            <combo_box.item
+              label="FSR Ultra Performance (3x)"
+              name="5"
+              value="5" />
+            <combo_box.item
+              label="FSR Custom (RenderVKRenderScale)"
+              name="6"
+              value="6" />
+            <combo_box.item
+              label="DLSS DLAA (1x)"
+              name="7"
+              value="7" />
+            <combo_box.item
+              label="DLSS Quality (1.5x)"
+              name="8"
+              value="8" />
+            <combo_box.item
+              label="DLSS Balanced (1.7x)"
+              name="9"
+              value="9" />
+            <combo_box.item
+              label="DLSS Performance (2x)"
+              name="10"
+              value="10" />
+            <combo_box.item
+              label="DLSS Ultra Performance (3x)"
+              name="11"
+              value="11" />
+          </combo_box>
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            name="DlssRayReconstructionText"
+            width="125"
+            left="450"
+            top="108">
+            Ray Reconstruction:
+          </text>
+          <combo_box
+            control_name="RenderVKDlssRayReconstruction"
+            height="18"
+            layout="topleft"
+            name="DlssRayReconstruction"
+            tool_tip="Which DLSS network runs. Ray Reconstruction denoises the ray-traced lighting and upscales in one step, in place of the viewer's own denoisers: best with ray-traced reflections, GI or ReSTIR lighting on, but it costs more than Super Resolution. Off: always Super Resolution (cheaper; the viewer's own denoisers stay on). Auto: Ray Reconstruction while a noisy ray-traced effect is on, Super Resolution otherwise."
+            width="110"
+            left="580"
+            top="108">
+            <combo_box.commit_callback
+              function="Pref.RenderOptionUpdate" />
+            <combo_box.item
+              label="Auto"
+              name="2"
+              value="2" />
+            <combo_box.item
+              label="On"
+              name="1"
+              value="1" />
+            <combo_box.item
+              label="Off"
+              name="0"
+              value="0" />
+          </combo_box>
+          <slider
+            control_name="RenderVKRenderScale"
+            decimal_digits="2"
+            follows="left|top"
+            height="16"
+            increment="0.05"
+            initial_value="1"
+            label="Custom render scale:"
+            label_width="185"
+            layout="topleft"
+            max_val="1"
+            min_val="0.25"
+            name="RenderScale"
+            tool_tip="Fraction of the window resolution the world is rendered at (0.25 - 1) before FSR upscales it. Only used with the upscaler set to FSR Custom."
+            width="310"
+            left="30"
+            top="132" />
+          <slider
+            control_name="RenderCASSharpness"
+            decimal_digits="1"
+            follows="left|top"
+            height="16"
+            increment="0.1"
+            initial_value="160"
+            label="Sharpening:"
+            label_width="145"
+            layout="topleft"
+            min_val="0.0"
+            max_val="1.0"
+            name="RenderSharpness"
+            show_text="true"
+            width="260"
+            left="30"
+            top="154" />
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            font="SansSerifBold"
+            name="ColorExposureText"
+            width="300"
+            left="10"
+            top="184">
+            Color and exposure
+          </text>
+          <check_box
+            control_name="RenderDisableVintageMode"
+            height="16"
+            initial_value="false"
+            label="HDR and Emissive"
+            tool_tip="On: high dynamic range with exposure, tonemapping and bloom, and glowing emissive PBR materials. Off (vintage mode, as the official viewer's): the image is clamped instead of tonemapped, glow replaces bloom, reflections are low dynamic range, and opaque PBR materials lose their emissive glow."
+            layout="topleft"
+            name="VintageMode"
+            width="240"
+            left="30"
+            top="206">
+            <check_box.commit_callback
+              function="Pref.RenderOptionUpdate" />
+          </check_box>
+          <check_box
+            control_name="RenderDynamicExposureEnabled"
+            height="16"
+            label="Automatic exposure"
+            layout="topleft"
+            name="DynamicExposure"
+            tool_tip="Adapt exposure to the brightness of the scene. Needs HDR and Emissive."
+            width="240"
+            enabled_control="RenderDisableVintageMode"
+            left="30"
+            top="230" />
+          <slider
+            control_name="RenderExposure"
+            decimal_digits="1"
+            follows="left|top"
+            height="16"
+            increment="0.1"
+            initial_value="160"
+            label="Exposure:"
+            label_width="145"
+            layout="topleft"
+            min_val="0.5"
+            max_val="4.0"
+            name="RenderExposure"
+            show_text="true"
+            width="260"
+            left="30"
+            top="254" />
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            name="TonemapTypeText"
+            text_readonly_color="LabelDisabledColor"
+            width="165"
+            left="30"
+            top="278">
+            Tone Mapper:
+          </text>
+          <combo_box
+            control_name="SlipstreamRenderTonemapType"
+            height="18"
+            layout="topleft"
+            name="TonemapType"
+            width="150"
+            left="205"
+            top="278">
+            <combo_box.item
+              label="Khronos Neutral"
+              name="0"
+              value="0" />
+            <combo_box.item
+              label="ACES (Hill)"
+              name="1"
+              value="1" />
+            <combo_box.item
+              label="ACES (Boosted)"
+              name="2"
+              value="2" />
+            <combo_box.item
+              label="Reinhard"
+              name="3"
+              value="3" />
+            <combo_box.item
+              label="Filmic"
+              name="4"
+              value="4" />
+            <combo_box.item
+              label="Uchimura (GT)"
+              name="5"
+              value="5" />
+            <combo_box.item
+              label="AgX"
+              name="6"
+              value="6" />
+          </combo_box>
+          <slider
+            control_name="RenderTonemapMix"
+            decimal_digits="1"
+            follows="left|top"
+            height="16"
+            increment="0.1"
+            initial_value="1"
+            label="Tone Mapping Mix:"
+            tool_tip="Mix between linear and tone mapped colors"
+            label_width="145"
+            layout="topleft"
+            min_val="0.0"
+            max_val="1.0"
+            name="TonemapMix"
+            show_text="true"
+            width="260"
+            left="30"
+            top="302" />
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            font="SansSerifBold"
+            name="EffectsText"
+            width="300"
+            left="10"
+            top="332">
+            Effects
+          </text>
+          <check_box
+            control_name="RenderGlow"
+            height="16"
+            label="Bloom / glow"
+            layout="topleft"
+            name="Bloom"
+            tool_tip="The bloom post effect: bright areas and glowing materials spill light around them."
+            width="240"
+            left="30"
+            top="354" />
+          <slider
+            control_name="RenderBloomStrength"
+            decimal_digits="3"
+            follows="left|top"
+            height="16"
+            increment="0.025"
+            initial_value="0.325"
+            label="Bloom strength:"
+            label_width="185"
+            layout="topleft"
+            max_val="2"
+            min_val="0"
+            name="BloomStrength"
+            tool_tip="How strongly the HDR bloom is added to the scene."
+            width="310"
+            enabled_control="RenderGlow"
+            left="30"
+            top="378" />
+          <slider
+            control_name="RenderBloomThreshold"
+            decimal_digits="1"
+            follows="left|top"
+            height="16"
+            increment="0.1"
+            initial_value="2.5"
+            label="Bloom threshold:"
+            label_width="185"
+            layout="topleft"
+            max_val="8"
+            min_val="0"
+            name="BloomThreshold"
+            tool_tip="Luminance above which things bloom (1 is roughly brighter than white)."
+            width="310"
+            enabled_control="RenderGlow"
+            left="30"
+            top="400" />
+          <slider
+            control_name="SlipstreamBloomSaturationPreserve"
+            decimal_digits="2"
+            follows="left|top"
+            height="16"
+            increment="0.01"
+            initial_value="0"
+            label="Bloom keeps colour:"
+            label_width="185"
+            layout="topleft"
+            max_val="1"
+            min_val="0"
+            name="BloomSatPreserve"
+            tool_tip="Keeps bloomed coloured highlights (a glowing pink eye) close to their own colour instead of washing out toward white or the surrounding colours. 0 = plain bloom."
+            width="310"
+            enabled_control="RenderGlow"
+            left="30"
+            top="424" />
+          <check_box
+            control_name="SlipstreamBloomHuePreserveHighlights"
+            height="16"
+            label="Hue-preserving highlights"
+            layout="topleft"
+            name="BloomHueHighlights"
+            tool_tip="Stronger mode, scaled by 'Bloom keeps colour': tonemap only the brightness of bloomed pixels and keep their colour, so very bright coloured light does not bleach to white."
+            width="250"
+            enabled_control="RenderGlow"
+            left="50"
+            top="446" />
+          <check_box
+            control_name="RenderDepthOfField"
+            height="16"
+            initial_value="true"
+            label="Depth of Field"
+            layout="topleft"
+            name="UseDoF"
+            width="240"
+            left="30"
+            top="468">
+            <check_box.commit_callback
+              function="Pref.RenderOptionUpdate" />
+          </check_box>
+          <check_box
+            control_name="RenderDepthOfFieldNearBlur"
+            height="16"
+            label="Blur things in front of the focus"
+            layout="topleft"
+            name="DoFNearBlur"
+            tool_tip="Depth of Field also blurs objects nearer than the focus point."
+            width="250"
+            enabled_control="RenderDepthOfField"
+            left="50"
+            top="492" />
+          <check_box
+            control_name="RenderVKMotionBlur"
+            height="16"
+            label="Motion blur"
+            layout="topleft"
+            name="MotionBlur"
+            tool_tip="Things that move on screen streak along their motion (another avatar flying past; the world when you fly or drive fast)."
+            width="240"
+            left="30"
+            top="516" />
+          <slider
+            control_name="RenderVKMotionBlurShutter"
+            decimal_digits="3"
+            follows="left|top"
+            height="16"
+            increment="0.001"
+            initial_value="0.0166667"
+            label="Shutter time (s):"
+            label_width="185"
+            layout="topleft"
+            max_val="0.05"
+            min_val="0"
+            name="MotionBlurShutter"
+            tool_tip="Exposure time in seconds, i.e. how long a streak is. 1/60 s is the default; 0 is no blur."
+            width="310"
+            enabled_control="RenderVKMotionBlur"
+            left="30"
+            top="540" />
+          <text
+            type="string"
+            length="1"
+            follows="left|top"
+            height="16"
+            layout="topleft"
+            font="SansSerifBold"
+            name="StyleText"
+            width="300"
+            left="10"
+            top="572">
+            Style
+          </text>
+          <!-- Cel shading (#550): master switch, scope, outline width. The rest: RenderVKCel* settings. -->
+          <check_box
+            control_name="RenderVKCel"
+            height="16"
+            initial_value="false"
+            label="Cel shading"
+            tool_tip="Toon lighting (banded light, flat ambient, rim light) plus outlines. Fine-tune with the RenderVKCel* debug settings; right-click an avatar for Cel Shade This Avatar."
+            layout="topleft"
+            name="CelShading"
+            width="128"
+            left="30"
+            top="594" />
+          <combo_box
+            control_name="RenderVKCelScope"
+            enabled_control="RenderVKCel"
+            height="18"
+            layout="topleft"
+            name="CelScope"
+            tool_tip="What cel shading applies to"
+            width="150"
+            left="160"
+            top="594">
+            <combo_box.item
+              label="Whole scene"
+              name="0"
+              value="0" />
+            <combo_box.item
+              label="All avatars"
+              name="1"
+              value="1" />
+            <combo_box.item
+              label="Only me"
+              name="2"
+              value="2" />
+            <combo_box.item
+              label="Chosen avatars"
+              name="3"
+              value="3" />
+            <combo_box.item
+              label="Friends"
+              name="4"
+              value="4" />
+          </combo_box>
+          <slider
+            control_name="RenderVKCelOutlineWidth"
+            enabled_control="RenderVKCel"
+            decimal_digits="1"
+            follows="left|top"
+            height="16"
+            increment="0.5"
+            initial_value="1.5"
+            label="Cel Outline Width:"
+            tool_tip="Outline width in pixels at 1080p (scales with the output); 0 = no outlines"
+            label_width="145"
+            layout="topleft"
+            min_val="0.0"
+            max_val="6.0"
+            name="CelOutlineWidth"
+            show_text="true"
+            width="260"
+            left="30"
+            top="618" />
+        </panel>
+      </scroll_container>
+    </panel>
+  </tab_container>
+  <!-- End of Advanced Settings block -->
+  <!-- Footer: outside the scroll area, pinned to the bottom of the floater. -->
+  <view_border
+    bevel_style="in"
+    follows="left|right|bottom"
+    height="0"
+    layout="topleft"
+    left="13"
+    name="horiz_border"
+    top="763"
+    width="774" />
+  <button
+    follows="bottom|left"
+    height="23"
+    label="Reset to recommended settings"
+    layout="topleft"
+    left="20"
+    name="Defaults"
+    top="770"
+    width="210">
+    <button.commit_callback
+      function="Pref.HardwareDefaults" />
+  </button>
+  <button
+    follows="right|bottom"
+    height="23"
+    label="OK"
+    label_selected="OK"
+    layout="topleft"
+    right="-115"
+    name="OK"
+    top="770"
+    width="80">
+    <button.commit_callback
+      function="Pref.OK"
+      parameter="closeadvanced" />
+  </button>
+  <button
+    follows="right|bottom"
+    height="23"
+    label="Cancel"
+    label_selected="Cancel"
+    layout="topleft"
+    left_pad="5"
+    right="-20"
+    name="Cancel"
+    top="770"
+    width="80">
+    <button.commit_callback
+      function="Pref.Cancel"
+      parameter="closeadvanced" />
+  </button>
+  <!-- These two check boxes are dummies and will never be displayed.  They are here so the control variables
+are saved in a preset file. -->
+  <check_box
+    control_name="RenderAvatarMaxComplexity"
+    visible="false"
+    height="0"
+    label="RenderAvatarMaxComplexity"
+    layout="topleft"
+    left="0"
+    name="RenderAvatarMaxComplexity"
+    top_delta="0"
+    width="0" />
+  <check_box
+    control_name="RenderAvatarMaxNonImpostors"
+    visible="false"
+    height="0"
+    label="RenderAvatarMaxNonImpostors"
+    layout="topleft"
+    left="0"
+    name="RenderAvatarMaxNonImpostors"
+    top_delta="0"
+    width="0" />
+  <!-- Setting specialization (RenderVKSpecPipelines): shown while a changed setting's optimized
+     shaders compile in the background (LLFloaterPreferenceGraphicsAdvanced::draw). -->
+  <text
+    type="string"
+    length="1"
+    follows="left|bottom"
+    height="16"
+    layout="topleft"
+    left="240"
+    name="SpecApplyingText"
+    text_color="EmphasisColor"
+    top="774"
+    visible="false"
+    width="380">
+    Applying graphics settings...
+  </text>
+</floater>

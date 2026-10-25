@@ -1,0 +1,235 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<floater
+ legacy_header_height="18"
+ can_resize="true"
+ height="600"
+ min_height="460"
+ layout="topleft"
+ name="viewer_import"
+ help_topic="viewer_import"
+ save_rect="true"
+ title="IMPORT FROM ANOTHER VIEWER"
+ min_width="660"
+ width="800">
+    <floater.string name="status_ready">Nothing in the other viewer is changed. Tick what you want, use Preview for a summary, then Import. Every import is backed up first and can be undone.</floater.string>
+    <floater.string name="status_none">No other viewer's data was found on this computer (Firestorm, Black Dragon, Alchemy or Second Life).</floater.string>
+    <floater.string name="status_nothing">Nothing selected to import.</floater.string>
+    <floater.string name="status_logged_out">You are not logged in: per-account data (per-account settings, toolbars, contact sets, teleport history, chat) can be imported after login.</floater.string>
+    <floater.string name="preview_header">Preview (nothing has been changed yet):</floater.string>
+    <floater.string name="preview_line">[CATEGORY]: [APPLY] to import, [CONFLICT] key conflicts left unticked, [SAME] already the same, [SKIP] not importable</floater.string>
+    <floater.string name="preview_off">[CATEGORY]: not ticked ([APPLY] would be imported)</floater.string>
+    <floater.string name="undo_none">There is no import to undo.</floater.string>
+    <floater.string name="undo_tooltip">Undo the import of [WHEN]: settings go back to their previous values, changed files are restored from the backup and added files are removed. Chat transcripts are not undone (each changed one has a .pre-import copy).</floater.string>
+    <floater.string name="restart_what">Some of what you imported (colours, window positions, display and language settings, or undone dictionaries / lists) takes full effect after you restart.</floater.string>
+    <floater.string name="state_offer">import</floater.string>
+    <floater.string name="state_conflict">conflict</floater.string>
+    <floater.string name="state_same">same</floater.string>
+    <floater.string name="state_skip">skipped</floater.string>
+    <floater.string name="cat_settings">Settings</floater.string>
+    <floater.string name="cat_account">Per-account settings</floater.string>
+    <floater.string name="cat_notifications">Notifications (don't-show-again)</floater.string>
+    <floater.string name="cat_colors">Colours</floater.string>
+    <floater.string name="cat_layout">Window positions</floater.string>
+    <floater.string name="cat_toolbars">Toolbars</floater.string>
+    <floater.string name="cat_keys">Key bindings (merged)</floater.string>
+    <floater.string name="cat_contact_sets">Contact sets</floater.string>
+    <floater.string name="cat_teleport_history">Teleport history</floater.string>
+    <floater.string name="cat_graphics_presets">Graphics presets</floater.string>
+    <floater.string name="cat_camera_presets">Camera presets</floater.string>
+    <floater.string name="cat_poses">Poser poses</floater.string>
+    <floater.string name="cat_fonts">Font sets</floater.string>
+    <floater.string name="cat_windlight">Windlight presets</floater.string>
+    <floater.string name="cat_autoreplace">Auto-replace lists</floater.string>
+    <floater.string name="cat_spelling">Spelling dictionaries</floater.string>
+    <floater.string name="cat_chat">Chat transcripts</floater.string>
+    <text
+     follows="left|top"
+     height="16"
+     layout="topleft"
+     left="12"
+     name="viewer_label"
+     top="30"
+     width="70">
+        Viewer:
+    </text>
+    <combo_box
+     follows="left|top|right"
+     height="23"
+     layout="topleft"
+     left_pad="4"
+     name="source_viewer"
+     top_delta="-4"
+     width="702" />
+    <text
+     follows="left|top"
+     height="16"
+     layout="topleft"
+     left="12"
+     name="account_label"
+     top="62"
+     width="70">
+        Account:
+    </text>
+    <combo_box
+     follows="left|top|right"
+     height="23"
+     layout="topleft"
+     left_pad="4"
+     name="source_account"
+     tool_tip="The other viewer's account folder to read per-account data from. It is imported into the account you are logged in as."
+     top_delta="-4"
+     width="702" />
+    <scroll_list
+     draw_heading="true"
+     follows="left|top|bottom"
+     height="356"
+     layout="topleft"
+     left="12"
+     multi_select="false"
+     name="category_list"
+     tool_tip="Tick a category to import it; select one to review its rows on the right."
+     top="94"
+     width="250">
+        <scroll_list.columns
+         label=""
+         name="on"
+         width="22" />
+        <scroll_list.columns
+         label="Category"
+         name="name"
+         width="150" />
+        <scroll_list.columns
+         label="Import"
+         name="count"
+         tool_tip="Rows that will be imported"
+         width="48" />
+        <scroll_list.columns
+         label=""
+         name="cat_index"
+         width="-1" />
+    </scroll_list>
+    <filter_editor
+     follows="left|top|right"
+     height="23"
+     label="Filter"
+     layout="topleft"
+     left="270"
+     max_length_bytes="64"
+     name="item_filter"
+     top="94"
+     width="210" />
+    <check_box
+     follows="left|top"
+     height="16"
+     initial_value="false"
+     label="Show unchanged and skipped"
+     layout="topleft"
+     left_pad="8"
+     name="show_all"
+     tool_tip="Also list what is already the same here and what cannot be imported, with the reason."
+     top_delta="4"
+     width="190" />
+    <button
+     follows="right|top"
+     height="23"
+     label="All"
+     layout="topleft"
+     left_pad="4"
+     name="select_all"
+     tool_tip="Tick every importable row in this category (key conflicts included)"
+     top="94"
+     width="50" />
+    <button
+     follows="right|top"
+     height="23"
+     label="None"
+     layout="topleft"
+     left_pad="4"
+     name="select_none"
+     tool_tip="Untick every row in this category"
+     top="94"
+     width="50" />
+    <scroll_list
+     draw_heading="true"
+     follows="all"
+     height="326"
+     layout="topleft"
+     left="270"
+     multi_select="false"
+     name="item_list"
+     top="124"
+     width="518">
+        <scroll_list.columns
+         label=""
+         name="apply"
+         width="22" />
+        <scroll_list.columns
+         label="Item"
+         name="name"
+         width="170" />
+        <scroll_list.columns
+         label="Now"
+         name="current"
+         width="90" />
+        <scroll_list.columns
+         label="Imported"
+         name="imported"
+         width="90" />
+        <scroll_list.columns
+         dynamic_width="true"
+         label="Note"
+         name="note" />
+        <scroll_list.columns
+         label=""
+         name="item_index"
+         width="-1" />
+    </scroll_list>
+    <text_editor
+     follows="left|right|bottom"
+     height="92"
+     layout="topleft"
+     left="12"
+     max_length="65536"
+     name="report"
+     read_only="true"
+     top="460"
+     width="776"
+     word_wrap="true" />
+    <button
+     follows="left|bottom"
+     height="23"
+     label="Undo last import"
+     layout="topleft"
+     left="12"
+     name="undo_btn"
+     top="564"
+     width="140" />
+    <button
+     follows="right|bottom"
+     height="23"
+     label="Preview"
+     layout="topleft"
+     left="476"
+     name="preview_btn"
+     tool_tip="Summarise what Import would do, without changing anything"
+     top="564"
+     width="100" />
+    <button
+     follows="right|bottom"
+     height="23"
+     label="Import"
+     layout="topleft"
+     left_pad="6"
+     name="import_btn"
+     top="564"
+     width="100" />
+    <button
+     follows="right|bottom"
+     height="23"
+     label="Close"
+     layout="topleft"
+     left_pad="6"
+     name="close_btn"
+     top="564"
+     width="100" />
+</floater>

@@ -1,0 +1,71 @@
+<?xml version="1.0" ?>
+<llsd>
+<!--
+  Viewer preset "Black Dragon" (#132). File format: see firestorm.xml.
+
+  Source: NiranV/Black-Dragon-Viewer master (2026-10) app_settings/settings.xml and
+  key_bindings.xml. Black Dragon renames or re-implements many camera options (its camera
+  smoothing and right-click orbit do not map onto ours one to one), so only settings with the
+  same name and meaning here are listed.
+-->
+  <map>
+    <key>settings</key>
+    <map>
+      <!-- In Black Dragon (as in every viewer we know of) pressing / opens nearby chat with a
+           leading slash, for gestures and chat commands. Slipstream made that opt-in so a stray
+           / does not grab the keyboard (SlashStartsChat, "as in LL viewers"). -->
+      <key>SlashStartsChat</key>
+      <boolean>1</boolean>
+      <!-- Black Dragon AutomaticFly = 0: holding jump does not start flying (use Fly). -->
+      <key>AutomaticFly</key>
+      <boolean>0</boolean>
+      <!-- Black Dragon FirstPersonAvatarVisible = 1: your body stays visible in mouselook. -->
+      <key>FirstPersonAvatarVisible</key>
+      <boolean>1</boolean>
+      <!-- Black Dragon DisableCameraConstraints = 1: the camera is not held close to the
+           avatar or above the ground. -->
+      <key>DisableCameraConstraints</key>
+      <boolean>1</boolean>
+      <!-- Black Dragon MouseSmooth = 1: smoothed mouse movement in mouselook. -->
+      <key>MouseSmooth</key>
+      <boolean>1</boolean>
+      <!-- Black Dragon NameTagShowGroupTitles = 0: no group titles in name tags. -->
+      <key>NameTagShowGroupTitles</key>
+      <boolean>0</boolean>
+      <!-- Black Dragon QuietSnapshotsToDisk = 1: saving a snapshot plays no shutter sound or
+           animation. -->
+      <key>QuietSnapshotsToDisk</key>
+      <boolean>1</boolean>
+      <!-- Black Dragon AFKTimeout = 0: never goes Away by itself (ours: after 5 minutes). -->
+      <key>AFKTimeout</key>
+      <integer>0</integer>
+      <!-- Black Dragon DoubleClickTeleport = 0: double-clicking the minimap or a person does
+           not teleport. -->
+      <key>DoubleClickTeleport</key>
+      <boolean>0</boolean>
+      <!-- Black Dragon PushToTalkToggle = 1: the Speak button switches the microphone on and
+           off (ours: hold to talk). -->
+      <key>PushToTalkToggle</key>
+      <boolean>1</boolean>
+    </map>
+    <key>key_bindings</key>
+    <array>
+      <!-- Black Dragon key_bindings.xml binds the middle mouse button to toggle_voice in every
+           mode; ours holds it to talk (voice_follow_key). -->
+      <map>
+        <key>command</key>
+        <string>toggle_voice</string>
+        <key>mouse</key>
+        <string>MMB</string>
+        <key>key</key>
+        <string />
+        <key>mask</key>
+        <string>NONE</string>
+        <key>instead_of</key>
+        <array>
+          <string>voice_follow_key</string>
+        </array>
+      </map>
+    </array>
+  </map>
+</llsd>

@@ -1,0 +1,120 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<panel
+    height="408"
+    layout="topleft"
+    name="autoresponse_rejection_settings"
+    top="0"
+    left="13"
+    width="517">
+    <text
+        top_pad="20"
+        follows="left|top"
+        height="18"
+        type="string"
+        length="1"
+        layout="topleft"
+        left="15"
+        name="autorespond_reject_friends_response_label"
+        width="500">
+        Automatic response to all avatars when in REJECT FRIENDSHIP REQUESTS mode
+        </text>
+        <text_editor
+          control_name="SlipstreamRejectFriendshipRequestsResponse"
+          use_ellipses="false"
+          commit_on_focus_lost="true"
+          follows="left|top"
+          height="55"
+          layout="topleft"
+          left="15"
+          top_pad="5"
+          name="autorespond_reject_friends_response"
+          width="475"
+          word_wrap="true">
+          log_in_to_change
+        </text_editor>
+    <text
+        top_pad="15"
+        follows="left|top"
+        height="18"
+        type="string"
+        length="1"
+        layout="topleft"
+        left="15"
+        name="autorespond_rto_response_label"
+        mouse_opaque="false"
+        width="500">
+        Automatic response to all avatars when in REJECT TELEPORT OFFERS mode:
+    </text>
+    <text_editor
+        control_name="SlipstreamRejectTeleportOffersResponse"
+        use_ellipses="false"
+        commit_on_focus_lost = "true"
+        follows="left|top"
+        height="45"
+        layout="topleft"
+        left="15"
+        name="autorespond_rto_response"
+        width="475"
+        word_wrap="true">
+          log_in_to_change
+    </text_editor>
+    <check_box
+          top_pad="5"
+          left="15"
+          follows="left|top"
+          height="16"
+          label="Don't reject teleport offers (and send response) from people on friends list"
+          name="SlipstreamDontRejectTeleportOffersFromFriends"
+          width="500"
+          control_name="SlipstreamDontRejectTeleportOffersFromFriends" />
+    <check_box
+          top_pad="10"
+          left="15"
+          follows="left|top"
+          height="16"
+          label="Reject all group invitations (silently, no notification)"
+          name="FSRejectAllGroupInvitesMode"
+          width="500"
+          control_name="FSRejectAllGroupInvitesMode" />
+    <text
+        top_pad="15"
+        follows="left|top"
+        height="18"
+        type="string"
+        length="1"
+        layout="topleft"
+        left="15"
+        name="adhoc_ignore_label"
+        mouse_opaque="false"
+        width="500">
+        Reject Ad-Hoc (conferences):
+        </text>
+    <combo_box
+      control_name="SlipstreamIgnoreAdHocSessions"
+      follows="left|top"
+      layout="topleft"
+      height="23"
+      name="adhoc_preference_combo"
+      width="115">
+      <item
+        label="Off"
+        name="adhoc_preference_allow_none"
+        value="0"/>
+      <item
+        label="Friends Only"
+        name="adhoc_preference_allow_friends"
+        value="1"/>
+      <item
+        label="All"
+        name="adhoc_preference_allow_all"
+        value="2"/>
+    </combo_box>
+    <check_box
+      layout="topleft"
+      follows="left|top"
+      left_delta="125"
+      height="18"
+      name="SlipstreamReportIgnoredAdHocSession"
+      control_name="SlipstreamReportIgnoredAdHocSession"
+      label="Report ignored conference chats"/>
+</panel>

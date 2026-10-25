@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<panel
+ background_visible="true"
+ bg_alpha_color="DkGray"
+ follows="all"
+ height="430"
+ layout="topleft"
+ left="0"
+ name="Wearing"
+ top="0"
+ width="312">
+<panel.string
+    name="no_attachments">
+    No attachments worn.
+   </panel.string>
+     <accordion
+     fit_parent="true"
+     follows="all"
+     height="400"
+     layout="topleft"
+     left="3"
+     single_expansion="true"
+     top="0"
+     name="wearables_accordion"
+     background_visible="true"
+     bg_alpha_color="DkGray2"
+     width="309">
+     <accordion_tab
+     layout="topleft"
+     name="tab_wearables"
+     title="Wearables">
+    <wearable_items_list
+     follows="all"
+     height="400"
+     layout="topleft"
+     left="3"
+     multi_select="true"
+     name="cof_items_list"
+     show_item_widgets="true"
+     standalone="false"
+     top="0"
+     width="309"
+     show_complexity="true"
+     worn_indication_enabled="false" />
+     </accordion_tab>
+     <accordion_tab
+     layout="topleft"
+     name="tab_temp_attachments"
+     title="Temporary attachments">
+    <scroll_list
+     draw_heading="false"
+     left="3"
+     width="309"
+     height="400"
+     follows="all"
+     name="temp_attachments_list">
+        <scroll_list.columns
+         name="icon"
+         width="15" />
+        <scroll_list.columns
+         name="text"
+         dynamic_width="true" />
+        <scroll_list.columns
+         name="weight"
+         width="70" />
+  </scroll_list>
+     </accordion_tab>
+     </accordion>
+    <!-- #429 / #627 status bar (after Firestorm's Appearance window) -->
+    <panel
+     background_visible="false"
+     follows="bottom|left|right"
+     height="28"
+     layout="topleft"
+     left="4"
+     name="bottom_panel"
+     top_pad="0"
+     width="305">
+        <icon
+         follows="bottom|left|right"
+         height="25"
+         image_name="Toolbar_Middle_Off"
+         layout="topleft"
+         left="0"
+         name="dummy_icon"
+         top="0"
+         width="305" />
+        <text
+         follows="bottom|left"
+         font="SansSerifMedium"
+         height="25"
+         layout="topleft"
+         left="6"
+         name="clothing_count_label"
+         tool_tip="Clothing layers worn / the most that can be worn at once"
+         top="0"
+         v_pad="6"
+         width="130">
+            Clothing: [USED] / [MAX]
+        </text>
+        <avatar_complexity_text
+         follows="bottom|right"
+         font="SansSerifMedium"
+         halign="right"
+         height="25"
+         layout="topleft"
+         right="-8"
+         name="avatar_complexity_label"
+         tool_tip="Your avatar complexity (ARC) as this viewer computes it. Per-item numbers are before the per-attachment cap, so they need not add up to this total."
+         top="0"
+         v_pad="6"
+         width="160">
+            Complexity: [WEIGHT]
+        </avatar_complexity_text>
+    </panel>
+</panel>

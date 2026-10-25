@@ -1,0 +1,170 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<panel
+    border="false"
+    height="408"
+    layout="topleft"
+    name="chat_bar_settings"
+    top="0"
+    left="13"
+    width="517">
+    <text
+        follows="left|top"
+        height="14"
+        layout="topleft"
+        left="10"
+        name="chat_bar_channel_label"
+        text_color="White"
+        width="480"
+        top="10">
+        Channel
+    </text>
+    <check_box
+        control_name="FSShowChatChannel"
+        follows="left|top"
+        height="16"
+        label="Show the channel selector in the nearby chat bar"
+        tool_tip="Adds a channel spinner next to the nearby chat input. Chat without a /channel prefix goes to the selected channel (the same setting /setchannel changes)."
+        layout="topleft"
+        left="15"
+        name="FSShowChatChannel"
+        top_pad="4"
+        width="470" />
+    <text
+        follows="left|top"
+        height="14"
+        layout="topleft"
+        left="10"
+        name="chat_bar_keys_label"
+        text_color="White"
+        top_pad="14"
+        width="480">
+        Enter shortcuts
+    </text>
+    <check_box
+        control_name="FSUseCtrlShout"
+        follows="left|top"
+        height="16"
+        label="Ctrl+Enter shouts"
+        tool_tip="Off: Ctrl+Enter just says the line."
+        layout="topleft"
+        left="15"
+        name="FSUseCtrlShout"
+        top_pad="4"
+        width="150" />
+    <check_box
+        control_name="FSUseShiftWhisper"
+        follows="left|top"
+        height="16"
+        label="Shift+Enter whispers"
+        tool_tip="Nearby chat in the Conversations window. Off: Shift+Enter just says the line. 'Shift+Enter: new line' on the General tab takes precedence."
+        layout="topleft"
+        left_pad="5"
+        name="FSUseShiftWhisper"
+        top_delta="0"
+        width="160" />
+    <check_box
+        control_name="FSUseAltOOC"
+        follows="left|top"
+        height="16"
+        label="Alt+Enter sends OOC"
+        tool_tip="Alt+Enter wraps the line in the OOC prefix and postfix below (nearby chat and IMs). While on, Alt+Enter no longer expands the conversation."
+        layout="topleft"
+        left_pad="5"
+        name="FSUseAltOOC"
+        top_delta="0"
+        width="160" />
+    <text
+        follows="left|top"
+        height="14"
+        layout="topleft"
+        left="10"
+        name="chat_bar_ooc_label"
+        text_color="White"
+        top_pad="14"
+        width="480">
+        Out of character and poses
+    </text>
+    <text
+        follows="left|top"
+        height="16"
+        layout="topleft"
+        left="15"
+        name="FSOOCPrefix_label"
+        top_pad="6"
+        width="80">
+        OOC prefix:
+    </text>
+    <line_editor
+        control_name="FSOOCPrefix"
+        follows="left|top"
+        height="20"
+        layout="topleft"
+        left_pad="2"
+        max_length_chars="16"
+        name="FSOOCPrefix"
+        top_delta="-3"
+        width="60" />
+    <text
+        follows="left|top"
+        height="16"
+        layout="topleft"
+        left_pad="15"
+        name="FSOOCPostfix_label"
+        top_delta="3"
+        width="80">
+        OOC postfix:
+    </text>
+    <line_editor
+        control_name="FSOOCPostfix"
+        follows="left|top"
+        height="20"
+        layout="topleft"
+        left_pad="2"
+        max_length_chars="16"
+        name="FSOOCPostfix"
+        top_delta="-3"
+        width="60" />
+    <check_box
+        control_name="AutoCloseOOC"
+        follows="left|top"
+        height="16"
+        label="Auto-close OOC: add the missing )) when a line opens (("
+        layout="topleft"
+        left="15"
+        name="AutoCloseOOC"
+        top_pad="6"
+        width="470" />
+    <check_box
+        control_name="AllowMUpose"
+        follows="left|top"
+        height="16"
+        label="MU* poses: a line starting with ':' is sent as /me"
+        layout="topleft"
+        left="15"
+        name="AllowMUpose"
+        top_pad="4"
+        width="470" />
+    <text
+        follows="left|top"
+        height="14"
+        layout="topleft"
+        left="10"
+        name="chat_bar_mouselook_label"
+        text_color="White"
+        top_pad="14"
+        width="480">
+        Mouselook
+    </text>
+    <check_box
+        control_name="SlipstreamMouselookChatWindow"
+        follows="left|top"
+        height="16"
+        label="Enter in mouselook opens the chat window with history"
+        tool_tip="In mouselook, Enter opens the Conversations window with nearby chat history instead of the small chat bar, so you can read the conversation while you type. Escape, or Enter on an empty line, hides it again and gives the keys back to movement."
+        layout="topleft"
+        left="15"
+        name="SlipstreamMouselookChatWindow"
+        top_pad="4"
+        width="470" />
+
+</panel>

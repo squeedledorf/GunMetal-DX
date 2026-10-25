@@ -1,0 +1,807 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#include "clean_av_slots.glsl"
+// vkclean — RIGGED VERTEX WELDING (#574, RenderVKRigWeld). Runs right after the pre-skin
+// (clean_preskin.comp), on its output, so every consumer of the skinned stream -- the
+// rigged draws, shadow casters (#564), probe faces, the RT rigged BLAS, the GPU pick --
+// sees the welded vertices.
+//
+// Mesh avatars are separate rigged meshes (body, head, hands, feet, add-ons) whose
+// edges meet at nearly the same position but shade with their own normals: a lighting
+// line and hairline gaps that open under animation. Welding gives coincident edge
+// vertices of the SAME avatar one position and (below an angle) one normal.
+//
+// CANDIDATES: only OPEN-BOUNDARY vertices (an edge used by one triangle, by position --
+// UV seams inside a mesh are not boundaries), flagged at ingest in the skin weight
+// record (#582: bit 7 of influence 3's joint byte, LLCleanQV::markWeldBoundary). A
+// shirt's hem lying over the body's interior never welds (the body there is no boundary).
+//
+// PAIRING in BIND space (pose independent): each candidate's bind-shape position
+// (skeleton space; different meshes have different bind shapes) is hashed with its
+// avatar into a cell grid of 2 x epsilon, so pairs found at the rest pose stay paired
+// however far animation pulls them apart -- exactly the gaps to close. Stateless: the
+// grid is rebuilt from this frame's work list every frame (boundary vertices only), so
+// attachment changes, LOD flips and decimated steps (#561: their own slots, flagged on
+// their own topology) need no invalidation.
+//
+// Three modes (push.mode), one workgroup size:
+//   0 INSERT  one workgroup per pre-skin work item (the same indirect dispatch): append
+//             each flagged vertex {skinned index, avatar key, bind position} and link it
+//             into its cell (atomic exchange of the cell head).
+//   1 WELD    one thread per entry: gather every entry of the same avatar key within
+//             epsilon in bind space (8 cells around it; buckets deduped) whose SKINNED
+//             position is within max_gap of ours (meshes that move apart for real --
+//             different weights -- are left alone) AND that comes from ANOTHER MESH (see
+//             below): average positions; average normals within the angle threshold
+//             (hard edges stay). Writes a result per entry: no write to the stream while
+//             others read it.
+//   2 APPLY   one thread per entry with a result: position, normal, tangent
+//             re-orthogonalized against the new normal (Gram-Schmidt, handedness kept),
+//             normal / tangent re-encoded (#616: the compact stream stores unit
+//             octahedral directions, clean_skinvert.glsl).
+//
+// ONLY BETWEEN MESHES. "Mesh" = one pre-skin WORK ITEM: one face (slot = mesh asset +
+// LOD + face, or a decimated step) of one attachment instance, this frame. Two worn
+// copies of the same asset are two instances -> two work items -> they weld; separate
+// faces / linked parts of a body weld to each other (body + head + hands + feet). A face
+// never welds to ITSELF: a slit's two sides, a hem and a lining shell of one face,
+// UV-seam split vertices all keep their own positions and normals. This is also the
+// granularity of the boundary flag (markWeldBoundary runs per face, on its own
+// triangles). No coincident boundary vertex of another mesh -> no weld.
+//
+// SYMMETRIC AVERAGE: neighbours are grouped per other mesh (up to MAX_OTHER meshes) and
+// the result is the mean of {own position, each other mesh's centroid}. A mesh's own
+// UV-split duplicates at a seam are coincident, so both sides of the seam land on the
+// same point (a plain per-vertex mean would weight a mesh by its duplicate count and
+// leave a residual gap). Normals the same way: own unit normal + each other mesh's
+// normalized sum of its normals within the angle threshold of ours.
+//
+// Avatar key: skin meta avatar_idx, plus bit 31 for reduced-tier skin-cache items (#31:
+// pelvis-local output, never mixed with eye-relative output).
+// Weld buffer (uint[]): [0] entries appended, [1] dropped (over capacity), [2..3] pad,
+// [4, 4 + cells) cell heads (0xFFFFFFFF = empty), then cap entries x 8 words
+// {dst vertex, key, next, work item, bind x, y, z, -}, then cap results x 8 words
+// {x, y, z, valid, nx, ny, nz, -}.
+//
+// ---------------------------------------------------------------------------------------
+// REST-POSE PAIRS (#641, RenderVKRigWeldMode 1, the default). Modes 0..2 above rediscover
+// the same pairs every frame (hash + 8-cell search of ~43k boundary vertices: most of
+// c_rigweld in a crowd). Mode 1 decides them ONCE per avatar, at the avatar's REST pose
+// (bind pose skinned with its own shape: identity joint rotations, the shape's joint
+// positions / scales and joint overrides -- uploaded by the CPU per discovered avatar),
+// keeps a compact per-avatar list in the persistent PAIR POOL (binding 11), and per frame
+// only gathers each record's partners from the skinned stream (no hash, no search):
+//   6 INSERT_REST  (discovery) one workgroup per pre-skin work item of an avatar in this
+//                  frame's discovery list (push disc): the item becomes a MESH of the
+//                  avatar's pending region (mesh table entry {instance, source base, skin,
+//                  vertex count}), and its boundary vertices -- rest-skinned here from the
+//                  skin meta's joint_nums / inv_bind and the uploaded rest joints -- go into
+//                  the hash grid with their resolved avatar joints + weights.
+//   7 PAIR         (discovery) one thread per grid entry: partners = vertices of ANOTHER
+//                  mesh of the same avatar within epsilon at rest AND with similar skin
+//                  weights (#626: overlap sum_j min(w_a[j], w_b[j]) over resolved avatar
+//                  joints >= RenderVKRigWeldWeightMatch -- cavity rims / onion-skin layers
+//                  weighted differently are never paired). The nearest vertex per other
+//                  mesh (<= 6 meshes) -> one RECORD in the pending region.
+//   8 PUBLISH      (discovery) per discovered avatar: a complete, non-empty pending list
+//                  (no mesh / record overflow) becomes the ACTIVE one; otherwise the old
+//                  list stays active (status for the CPU: retry / grow).
+//   3 VALIDATE     per frame, one workgroup per pool segment (active region): each mesh
+//                  entry finds THIS frame's skinned range of its instance (main cull's
+//                  candidate), and is valid only when that draw was skinned from the SAME
+//                  source slot (rig_cache RC_SRC: a LOD / decimated-step switch, a slot
+//                  re-allocation) with the same skin -- a stale list is never applied to
+//                  re-allocated vertices; a drawn-but-mismatched mesh counts as STALE (the
+//                  CPU re-discovers the avatar).
+//   4 GATHER       per record: own + each valid partner (same space: pelvis-local skin
+//                  cache vs eye-relative) within max_gap -> averaged position / normal
+//                  (the symmetric rule of mode 1). Records whose meshes were all HELD this
+//                  frame (skin-cache ranges not re-skinned, #632) are skipped: their
+//                  persistent vertices are still welded from the frame they were skinned.
+//   5 APPLY        per record with a result: position, normal, tangent (as mode 2).
+// Pool (uint[], binding 11): [0, 256 x 16) per-avatar headers (POOL_H_*), [4096, 4096 +
+// 256 x 4) per-avatar per-frame counters {stale, applied, held, noop (#798)} (cleared by the host
+// every frame), then the regions the CPU allocates (free list): mesh_cap x 8-word mesh
+// entries {instance, source base, skin, vertex count, this frame's dst base, flags, -, -}
+// then rec_cap x 16-word records {own mesh << 16 | vertex, partner count, 6 x partner
+// (mesh << 16 | vertex), result x y z, result normal (octahedral), result valid, -, -, -}.
+// Upload ring (binding 12, host-visible, slot at push up_base): [0, 512 x 8) segments
+// {avatar, region base, mesh cap, record cap, first gather workgroup, -, -, -}, then at
+// UP_REST 8 rest rows x 216 joints x {pos xyz, -, scale xyz, -}.
+
+layout(local_size_x = 64) in;
+
+#include "clean_skinvert.glsl"
+
+#define MAX_JOINTS 110
+
+layout(std430, set = 0, binding = 0) readonly buffer SrcVerts { uint src_q[]; };
+layout(std430, set = 0, binding = 1) readonly buffer SrcWts   { uint src_w[]; };
+layout(std430, set = 0, binding = 2) buffer DstVerts { uint dst_v[]; };    // SkinVertex, SV_WORDS words / vertex
+struct SkinBlock { mat3x4 matrices[MAX_JOINTS]; mat4 bind_shape; };
+layout(std430, set = 0, binding = 3) readonly buffer SkinPalette { SkinBlock skins[]; };
+struct WorkItem {
+    uint dst_vert_base;
+    uint src_vert_base;
+    uint vert_count;
+    uint skin_id;
+    uint src_weight_base;
+    uint _pad1;          // 0x80000000 | joint slot: reduced-tier skin-cache item
+    uint inst1;
+    uint _pad3;
+};
+layout(std430, set = 0, binding = 4) readonly buffer Work { WorkItem items[]; };
+// LLCleanSkinStore::SkinMeta, read as words: avatar_idx is word 0 of each record.
+layout(std430, set = 0, binding = 5) readonly buffer Meta { uint meta_w[]; };
+layout(std430, set = 0, binding = 6) buffer Weld { uint weld[]; };
+// #641 rest-pose pairs (modes 3..8). The main cull's candidates (this frame's skinned
+// range per instance), its per-instance rig-cache words (RC_SRC: the source the draw was
+// skinned from; RC_STATE: pelvis-local / re-skinned this frame), the instance rows (skin
+// id, word 47 of the 56-word Instance), the pair pool, the host upload ring.
+struct DrawCmd { uint indexCount; uint instanceCount; uint firstIndex; int vertexOffset; uint firstInstance; };
+layout(std430, set = 0, binding = 7)  readonly buffer Cand     { DrawCmd cand[]; };
+layout(std430, set = 0, binding = 8)  readonly buffer CandMeta { uint cand_meta[]; };
+layout(std430, set = 0, binding = 9)  readonly buffer RigCache { uint rig_cache[]; };
+layout(std430, set = 0, binding = 10) readonly buffer InstW    { uint inst_w[]; };
+layout(std430, set = 0, binding = 11) buffer Pool              { uint pool[]; };
+layout(std430, set = 0, binding = 12) readonly buffer Upload   { uint up[]; };
+
+layout(push_constant) uniform Push {
+    uint  mode;          // 0 insert, 1 weld, 2 apply (per-frame search); 3..8 rest-pose pairs
+    uint  work_cap;      // pre-skin work-list capacity
+    uint  cap;           // entry capacity
+    uint  cell_mask;     // cells - 1 (power of two)
+    float cell;          // cell size (2 x epsilon), bind-space metres
+    float eps;           // pairing distance, bind space
+    float cos_n;         // normals average within this cosine
+    float max_gap;       // skinned distance past which a pair is left alone
+    uint  skin_count;    // live palettes
+    uint  meta_words;    // SkinMeta stride (words)
+    uint  inst_count;    // instance rows (modes 3..8)
+    float wmatch;        // #626: minimum skin-weight overlap of a pair (mode 7)
+    // SCREEN-SIZE SKIP (RenderVKRigWeldMinPx, crowd perf): bit a = joint-table slot a is
+    // too small on screen for a seam to show -- its items insert nothing (so they weld to
+    // nothing; welding never crosses avatars, so no partner of another avatar is lost).
+    // Modes 4 / 5: its records are not gathered / applied. 2026-10-14 (1024 slots): the AV_SLOT_WORDS
+    // bits live in the weld buffer after the results (weldSkipBase; host-written per frame) -- they
+    // no longer fit the 128 B push block.
+    uint  skip_pad[8];
+    // Modes 6..8: this frame's discovered avatars, 16 bits each (0xFFFF = none); the
+    // position in the list is the avatar's rest row in the upload ring.
+    uvec4 disc;
+    uint  up_base;       // the upload ring slot this frame (words)
+    uint  seg_count;     // pool segments in the upload slot (modes 3..5)
+    uint  pad2, pad3;
+} pc;
+
+
+const uint kHeads = 4u;
+uint entryBase()  { return kHeads + pc.cell_mask + 1u; }
+uint resultBase() { return entryBase() + pc.cap * 8u; }
+// The screen-size skip bits (AV_SLOT_WORDS words after the results; LLCleanRendererVK writes them).
+uint weldSkipBase() { return resultBase() + pc.cap * 8u; }
+bool weldSkipped(uint avatar)
+{
+    if (avatar >= AV_SLOT_CAP || weldSkipBase() + (avatar >> 5u) >= uint(weld.length())) return false;
+    return ((weld[weldSkipBase() + (avatar >> 5u)] >> (avatar & 31u)) & 1u) != 0u;
+}
+
+// The pairing rules shared with the cluster LOD weld (#798): cell hash, rest-pose position, #626
+// weight overlap -- clean_rig_weld_common.glsl.
+#define RW_META(w) meta_w[(w)]
+#define RW_REST(w) up[(w)]
+#include "clean_rig_weld_common.glsl"
+
+uint cellHash(ivec3 c, uint avatar) { return rwCellHash(c, avatar, pc.cell_mask); }
+
+vec3 skinnedPos(uint v) { return SV_POS(dst_v, v); }
+vec3 skinnedNrm(uint v) { return SV_NRM(dst_v, v); }   // unit
+
+void insertItem()
+{
+    const uint wi = gl_WorkGroupID.x;
+    if (wi >= pc.work_cap) return;
+    const WorkItem item = items[wi];
+    if (item.src_weight_base == 0xFFFFFFFFu) return;
+    if (item.skin_id == 0xFFFFFFFFu || item.skin_id >= pc.skin_count) return;
+    const uint avatar = meta_w[item.skin_id * pc.meta_words];
+    if (weldSkipped(avatar & 0x7FFFFFFFu)) return;
+    const uint key = (avatar & 0x7FFFFFFFu) | ((item._pad1 & 0x80000000u) != 0u ? 0x80000000u : 0u);
+    const mat4 bind_shape = skins[item.skin_id].bind_shape;
+    const QvHeader qh = QV_LOAD_HEADER(src_q, max(item.src_vert_base, QV_HEADER_VERTS));
+    const uint ebase = entryBase();
+    for (uint v = gl_LocalInvocationID.x; v < item.vert_count; v += gl_WorkGroupSize.x)
+    {
+        // Boundary flag: bit 7 of influence 3's joint byte (byte 3 of the 10 B record).
+        const uint b = (item.src_weight_base + v) * 10u + 3u;
+        if (((src_w[b >> 2u] >> ((b & 3u) * 8u)) & 0x80u) == 0u) continue;
+        const uint sb = (item.src_vert_base + v) * QV_WORDS;
+        const vec3 pos = qvPos(qh, src_q[sb], src_q[sb + 1u]);
+        const vec3 bp = (bind_shape * vec4(pos, 1.0)).xyz;
+        if (any(isnan(bp)) || any(isinf(bp))) continue;
+        const uint e = atomicAdd(weld[0], 1u);
+        if (e >= pc.cap) { atomicAdd(weld[1], 1u); continue; }
+        const uint eb = ebase + e * 8u;
+        weld[eb + 0u] = item.dst_vert_base + v;
+        weld[eb + 1u] = key;
+        weld[eb + 3u] = wi;
+        weld[eb + 4u] = floatBitsToUint(bp.x);
+        weld[eb + 5u] = floatBitsToUint(bp.y);
+        weld[eb + 6u] = floatBitsToUint(bp.z);
+        const uint h = cellHash(ivec3(floor(bp / pc.cell)), avatar & 0x7FFFFFFFu);
+        weld[eb + 2u] = atomicExchange(weld[kHeads + h], e);
+    }
+}
+
+#define MAX_OTHER 6   // distinct other meshes averaged per vertex (further ones are ignored)
+
+void weldEntry()
+{
+    const uint e = gl_GlobalInvocationID.x;
+    const uint n = min(weld[0], pc.cap);
+    if (e >= n) return;
+    const uint ebase = entryBase();
+    const uint eb = ebase + e * 8u;
+    const uint dst = weld[eb + 0u];
+    const uint key = weld[eb + 1u];
+    const uint own = weld[eb + 3u];   // work item = this vertex's mesh (face instance)
+    const vec3 bp = vec3(uintBitsToFloat(weld[eb + 4u]), uintBitsToFloat(weld[eb + 5u]), uintBitsToFloat(weld[eb + 6u]));
+    const vec3 p0 = skinnedPos(dst);
+    const vec3 n0 = skinnedNrm(dst);
+    const float l0 = length(n0);
+    const vec3 u0 = l0 > 1e-12 ? n0 / l0 : vec3(0.0, 0.0, 1.0);
+    // Per other mesh: its work item, position sum + count, normal sum (within the angle).
+    uint om[MAX_OTHER];
+    vec3 op_sum[MAX_OTHER];
+    vec3 on_sum[MAX_OTHER];
+    uint op_cnt[MAX_OTHER];
+    uint meshes = 0u;
+    // The 8 cells (size 2 eps) covering bp +- eps; a bucket reached twice (hash
+    // collision) is walked once.
+    const ivec3 c0 = ivec3(floor((bp - vec3(pc.eps)) / pc.cell));
+    uint seen[8];
+    for (int i = 0; i < 8; ++i)
+    {
+        const ivec3 c = c0 + ivec3(i & 1, (i >> 1) & 1, i >> 2);
+        const uint h = cellHash(c, key & 0x7FFFFFFFu);
+        seen[i] = h;
+        bool dup = false;
+        for (int j = 0; j < i; ++j) dup = dup || seen[j] == h;
+        if (dup) continue;
+        uint k = weld[kHeads + h];
+        for (uint steps = 0u; k != 0xFFFFFFFFu && k < pc.cap && steps < 64u; ++steps)
+        {
+            const uint kb = ebase + k * 8u;
+            const uint next = weld[kb + 2u];
+            const uint kw = weld[kb + 3u];
+            // Same avatar key and ANOTHER mesh: never two vertices of our own mesh
+            // (this also excludes k == e).
+            if (kw != own && weld[kb + 1u] == key)
+            {
+                const vec3 q = vec3(uintBitsToFloat(weld[kb + 4u]), uintBitsToFloat(weld[kb + 5u]), uintBitsToFloat(weld[kb + 6u]));
+                if (distance(q, bp) <= pc.eps)
+                {
+                    const uint od = weld[kb + 0u];
+                    const vec3 op = skinnedPos(od);
+                    if (distance(op, p0) <= pc.max_gap)
+                    {
+                        uint m = 0u;
+                        while (m < meshes && om[m] != kw) ++m;
+                        if (m == meshes && meshes < MAX_OTHER)
+                        {
+                            om[m] = kw;
+                            op_sum[m] = vec3(0.0);
+                            on_sum[m] = vec3(0.0);
+                            op_cnt[m] = 0u;
+                            ++meshes;
+                        }
+                        if (m < meshes)
+                        {
+                            op_sum[m] += op;
+                            ++op_cnt[m];
+                            const vec3 on = skinnedNrm(od);
+                            const float ol = length(on);
+                            if (ol > 1e-12 && dot(on / ol, u0) >= pc.cos_n) on_sum[m] += on / ol;
+                        }
+                    }
+                }
+            }
+            k = next;
+        }
+    }
+    const uint rb = resultBase() + e * 8u;
+    if (meshes == 0u)
+    {
+        weld[rb + 3u] = 0u;
+        return;
+    }
+    vec3 psum = p0, nsum = u0;
+    for (uint m = 0u; m < meshes; ++m)
+    {
+        psum += op_sum[m] / float(op_cnt[m]);
+        const float sl = length(on_sum[m]);
+        if (sl > 1e-12) nsum += on_sum[m] / sl;
+    }
+    const vec3 p = psum / float(meshes + 1u);
+    const float nl = length(nsum);
+    const vec3 nn = nl > 1e-12 ? nsum / nl : u0;
+    weld[rb + 0u] = floatBitsToUint(p.x);
+    weld[rb + 1u] = floatBitsToUint(p.y);
+    weld[rb + 2u] = floatBitsToUint(p.z);
+    weld[rb + 3u] = 1u;
+    weld[rb + 4u] = floatBitsToUint(nn.x);
+    weld[rb + 5u] = floatBitsToUint(nn.y);
+    weld[rb + 6u] = floatBitsToUint(nn.z);
+}
+
+void applyEntry()
+{
+    const uint e = gl_GlobalInvocationID.x;
+    const uint n = min(weld[0], pc.cap);
+    if (e >= n) return;
+    const uint rb = resultBase() + e * 8u;
+    if (weld[rb + 3u] == 0u) return;
+    const uint dst = weld[entryBase() + e * 8u];
+    const vec3 p = vec3(uintBitsToFloat(weld[rb + 0u]), uintBitsToFloat(weld[rb + 1u]), uintBitsToFloat(weld[rb + 2u]));
+    const vec3 nn = vec3(uintBitsToFloat(weld[rb + 4u]), uintBitsToFloat(weld[rb + 5u]), uintBitsToFloat(weld[rb + 6u]));
+    if (any(isnan(p)) || any(isinf(p)) || any(isnan(nn)) || any(isinf(nn))) return;
+    const uint b = dst * SV_WORDS;
+    dst_v[b + 0u] = floatBitsToUint(p.x); dst_v[b + 1u] = floatBitsToUint(p.y); dst_v[b + 2u] = floatBitsToUint(p.z);
+    dst_v[b + 3u] = svPackNormal(nn);
+    // Tangent: Gram-Schmidt against the welded normal, handedness (w) kept; none stays none.
+    const vec4 t = svUnpackTangent(dst_v[b + 4u]);
+    if (t.w != 0.0)
+    {
+        const vec3 to = t.xyz - nn * dot(nn, t.xyz);
+        if (length(to) > 1e-6) dst_v[b + 4u] = svPackTangent(to, t.w);
+    }
+}
+
+// ======================================================================================
+// #641 REST-POSE PAIRS (modes 3..8; see the header). Layout constants mirror
+// llcleanrigweldvk.cpp (kPool* / kUp*).
+// ======================================================================================
+#define POOL_H_WORDS      16u
+#define POOL_H_ACT_BASE   0u    // active region base (words; 0 = none)
+#define POOL_H_ACT_MESH   1u    // active mesh count
+#define POOL_H_ACT_REC    2u    // active record count
+#define POOL_H_ACT_MCAP   3u    // active mesh cap (records start at base + mcap * 8)
+#define POOL_H_PEND_BASE  4u    // pending region (host-written before a discovery)
+#define POOL_H_PEND_MESH  5u    // pending mesh count (atomic)
+#define POOL_H_PEND_REC   6u    // pending record count (atomic)
+#define POOL_H_PEND_MCAP  7u
+#define POOL_H_PEND_RCAP  8u
+#define POOL_H_STATUS     9u    // last publish: 1 ok, 2 mesh overflow, 3 record overflow, 4 empty
+#define POOL_H_DSERIAL    10u   // discovery serial (host) -- echoed for the readback
+#define POOL_H_ASERIAL    11u   // serial of the active list
+#define POOL_CNT_BASE     (AV_SLOT_CAP * POOL_H_WORDS) // per avatar 4 counters {stale, applied, held, noop} (cleared every frame)
+#define POOL_MESH_WORDS   8u
+#define POOL_REC_WORDS    16u
+#define POOL_MAXP         6u
+#define UP_SEG_WORDS      8u
+#define UP_REST           (2u * AV_SLOT_CAP * UP_SEG_WORDS)   // = kUpRest (the segment table of every avatar)
+#define UP_REST_ROW       (216u * 8u)
+#define ENT_WORDS         12u   // discovery grid entry (modes 6 / 7)
+#define MESH_VALID   1u
+#define MESH_LOCAL   2u
+#define MESH_SKINNED 4u
+
+uint hdrW(uint av, uint k) { return av * POOL_H_WORDS + k; }
+uint cntW(uint av, uint k) { return POOL_CNT_BASE + av * 4u + k; }
+
+// Segment s of the upload slot: {avatar, region base, mesh cap, record cap, first workgroup}.
+uint segW(uint s, uint k) { return pc.up_base + s * UP_SEG_WORDS + k; }
+
+// Gather / apply: workgroup -> (segment, record). Segments are listed in ascending
+// first-workgroup order and each starts on a workgroup boundary (one avatar per
+// workgroup); binary search. True when the record is in the avatar's ACTIVE list.
+bool recordOf(out uint av, out uint base, out uint mcap, out uint r)
+{
+    av = 0xFFFFFFFFu; base = 0u; mcap = 0u; r = 0u;
+    const uint w = gl_WorkGroupID.x;
+    if (pc.seg_count == 0u) return false;
+    uint lo = 0u, hi = pc.seg_count - 1u;
+    while (lo < hi)
+    {
+        const uint mid = (lo + hi + 1u) >> 1u;
+        if (up[segW(mid, 4u)] <= w) lo = mid; else hi = mid - 1u;
+    }
+    if (up[segW(lo, 4u)] > w) return false;
+    av   = up[segW(lo, 0u)];
+    base = up[segW(lo, 1u)];
+    mcap = up[segW(lo, 2u)];
+    const uint rcap = up[segW(lo, 3u)];
+    r = (w - up[segW(lo, 4u)]) * gl_WorkGroupSize.x + gl_LocalInvocationID.x;
+    if (av >= AV_SLOT_CAP || r >= rcap) return false;
+    // Only the ACTIVE list (a pending region is listed too: it may be published this frame).
+    if (pool[hdrW(av, POOL_H_ACT_BASE)] != base || pool[hdrW(av, POOL_H_ACT_MCAP)] != mcap) return false;
+    return r < pool[hdrW(av, POOL_H_ACT_REC)];
+}
+
+uint recBase(uint base, uint mcap, uint r) { return base + mcap * POOL_MESH_WORDS + r * POOL_REC_WORDS; }
+
+// ---- 3 VALIDATE: one workgroup per segment ----
+void validateSegment()
+{
+    const uint s = gl_WorkGroupID.x;
+    if (s >= pc.seg_count) return;
+    const uint av = up[segW(s, 0u)], base = up[segW(s, 1u)], mcap = up[segW(s, 2u)];
+    if (av >= AV_SLOT_CAP || pool[hdrW(av, POOL_H_ACT_BASE)] != base || pool[hdrW(av, POOL_H_ACT_MCAP)] != mcap) return;
+    const uint mc = min(pool[hdrW(av, POOL_H_ACT_MESH)], mcap);
+    const uint skin_verts = uint(dst_v.length()) / SV_WORDS;
+    const uint rc_len = uint(rig_cache.length());
+    const uint n_inst = min(pc.inst_count, min(uint(cand_meta.length()), uint(inst_w.length()) / 56u));
+    for (uint m = gl_LocalInvocationID.x; m < mc; m += gl_WorkGroupSize.x)
+    {
+        const uint mb = base + m * POOL_MESH_WORDS;
+        const uint inst = pool[mb + 0u], src = pool[mb + 1u], skin = pool[mb + 2u], vc = pool[mb + 3u];
+        uint flags = 0u, dst = 0u;
+        if (inst < n_inst && inst < uint(cand.length()))
+        {
+            const uint cm = cand_meta[inst];
+            const uint b = cm >> 24u;
+            // a rigged bucket (casters 3 4 5 8 9 or the no-shadow twins 10..14), or an
+            // off-screen rigged draw (#517 OFF_META, rigged index < 5)
+            const bool off = cm != 0xFFFFFFFFu && (cm & 0x80000000u) != 0u && ((cm >> 28u) & 7u) < 5u;
+            const bool rb = cm != 0xFFFFFFFFu && (cm & 0x80000000u) == 0u
+                            && (b == 3u || b == 4u || b == 5u || (b >= 8u && b <= 14u));
+            if (off || rb)
+            {
+                const DrawCmd c = cand[inst];
+                const uint cb = inst * RC_WORDS;
+                if (c.indexCount != 0u && c.instanceCount != 0u && c.vertexOffset >= 0 && cb + RC_WORDS <= rc_len)
+                {
+                    dst = uint(c.vertexOffset);
+                    if (rig_cache[cb + RC_SRC] != src || inst_w[inst * 56u + 47u] != skin)
+                        atomicAdd(pool[cntW(av, 0u)], 1u);   // drawn from another slot / skin: stale
+                    else if (vc <= skin_verts && dst <= skin_verts - vc)
+                    {
+                        const uint rs = rig_cache[cb + RC_STATE];
+                        const bool local = (rs & RC_ST_LOCAL) != 0u;
+                        flags = MESH_VALID | (local ? MESH_LOCAL : 0u)
+                              | ((!local || (rs & RC_ST_SKINNED) != 0u) ? MESH_SKINNED : 0u);
+                    }
+                }
+            }
+        }
+        pool[mb + 4u] = dst;
+        pool[mb + 5u] = flags;
+    }
+}
+
+// ---- 4 GATHER: one thread per record ----
+shared uint s_applied, s_held, s_noop;
+void gatherRecord()
+{
+    if (gl_LocalInvocationID.x == 0u) { s_applied = 0u; s_held = 0u; s_noop = 0u; }
+    barrier();
+    uint av, base, mcap, r;
+    const bool have = recordOf(av, base, mcap, r);
+    bool applied = false, held = false, noop = false;
+    if (have)
+    {
+        const uint rb = recBase(base, mcap, r);
+        uint valid = 0u;
+        const uint own = pool[rb + 0u];
+        const uint om = own >> 16u, ol = own & 0xFFFFu;
+        const uint omb = base + om * POOL_MESH_WORDS;
+        const uint of = om < mcap ? pool[omb + 5u] : 0u;
+        if (!weldSkipped(av) && (of & MESH_VALID) != 0u && ol < pool[omb + 3u])
+        {
+            const uint dst = pool[omb + 4u] + ol;
+            const uint np = min(pool[rb + 1u], POOL_MAXP);
+            bool any_skinned = (of & MESH_SKINNED) != 0u;
+            uint pd[POOL_MAXP];
+            uint n = 0u;
+            for (uint k = 0u; k < np; ++k)
+            {
+                const uint p = pool[rb + 2u + k];
+                const uint pm = p >> 16u, pl = p & 0xFFFFu;
+                if (pm >= mcap) continue;
+                const uint pmb = base + pm * POOL_MESH_WORDS;
+                const uint pf = pool[pmb + 5u];
+                // valid, the same space (pelvis-local skin cache vs eye-relative), in range
+                if ((pf & MESH_VALID) == 0u || ((pf ^ of) & MESH_LOCAL) != 0u || pl >= pool[pmb + 3u]) continue;
+                any_skinned = any_skinned || (pf & MESH_SKINNED) != 0u;
+                pd[n] = pool[pmb + 4u] + pl;
+                ++n;
+            }
+            if (!any_skinned) held = n != 0u;   // all HELD: still welded from their skin frame
+            else if (n != 0u)
+            {
+                // THE RESOLVE (clean_rig_weld_common.glsl, shared with the cluster weld): own +
+                // each partner within the max gap; nothing written when every partner is already
+                // seamless (#798 NO-OP)
+                RwBlend bl = rwBlendBegin(skinnedPos(dst), skinnedNrm(dst));
+                for (uint k = 0u; k < n; ++k) rwBlendAdd(bl, skinnedPos(pd[k]), skinnedNrm(pd[k]), pc.max_gap, pc.cos_n);
+                vec3 p, nn;
+                const uint res = rwBlendEnd(bl, p, nn);
+                if (res == 1u)
+                {
+                    pool[rb + 8u]  = floatBitsToUint(p.x);
+                    pool[rb + 9u]  = floatBitsToUint(p.y);
+                    pool[rb + 10u] = floatBitsToUint(p.z);
+                    pool[rb + 11u] = svPackNormal(nn);
+                    valid = 1u;
+                    applied = true;
+                }
+                noop = res == 2u;
+            }
+        }
+        pool[rb + 12u] = valid;
+    }
+    if (applied) atomicAdd(s_applied, 1u);
+    if (held) atomicAdd(s_held, 1u);
+    if (noop) atomicAdd(s_noop, 1u);
+    barrier();
+    if (gl_LocalInvocationID.x == 0u && (s_applied | s_held | s_noop) != 0u)
+    {
+        // A workgroup's records all belong to one segment (= one avatar): lane 0's mapping
+        // names it even when its own record is past the count.
+        uint a2, b2, m2, r2;
+        recordOf(a2, b2, m2, r2);
+        if (a2 < AV_SLOT_CAP)
+        {
+            if (s_applied != 0u) atomicAdd(pool[cntW(a2, 1u)], s_applied);
+            if (s_held != 0u)    atomicAdd(pool[cntW(a2, 2u)], s_held);
+            if (s_noop != 0u)    atomicAdd(pool[cntW(a2, 3u)], s_noop);   // (#798 already seamless)
+        }
+    }
+}
+
+// ---- 5 APPLY: one thread per record with a result ----
+void applyRecord()
+{
+    uint av, base, mcap, r;
+    if (!recordOf(av, base, mcap, r)) return;
+    const uint rb = recBase(base, mcap, r);
+    if (pool[rb + 12u] == 0u) return;
+    const uint own = pool[rb + 0u];
+    const uint om = own >> 16u;
+    if (om >= mcap) return;
+    const uint omb = base + om * POOL_MESH_WORDS;
+    if ((pool[omb + 5u] & MESH_VALID) == 0u) return;
+    const uint dst = pool[omb + 4u] + (own & 0xFFFFu);
+    const vec3 p = vec3(uintBitsToFloat(pool[rb + 8u]), uintBitsToFloat(pool[rb + 9u]), uintBitsToFloat(pool[rb + 10u]));
+    const uint nw = pool[rb + 11u];
+    const vec3 nn = svUnpackNormal(nw);
+    const uint b = dst * SV_WORDS;
+    dst_v[b + 0u] = floatBitsToUint(p.x); dst_v[b + 1u] = floatBitsToUint(p.y); dst_v[b + 2u] = floatBitsToUint(p.z);
+    dst_v[b + 3u] = nw;
+    // Tangent: Gram-Schmidt against the welded normal, handedness kept; none stays none.
+    const vec4 t = svUnpackTangent(dst_v[b + 4u]);
+    if (t.w != 0.0)
+    {
+        const vec3 to = t.xyz - nn * dot(nn, t.xyz);
+        if (length(to) > 1e-6) dst_v[b + 4u] = svPackTangent(to, t.w);
+    }
+}
+
+// ---- 6 INSERT_REST: one workgroup per pre-skin work item ----
+// This frame's discovery list: the row (0..7) of avatar slot `av`, or 0xFFFFFFFF.
+uint discRow(uint av)
+{
+    for (uint i = 0u; i < 8u; ++i)
+    {
+        const uint w = pc.disc[i >> 1u];
+        const uint a = (i & 1u) != 0u ? (w >> 16u) : (w & 0xFFFFu);
+        if (a == av) return i;
+    }
+    return 0xFFFFFFFFu;
+}
+
+// SkinMeta words (LLCleanSkinStore::SkinMeta): 0 avatar_idx, 1 joint_count, 4.. joint_nums[110],
+// 116.. inv_bind[110] (mat4, column-major), 1876.. bind_shape.
+uint metaW(uint skin, uint k) { return skin * pc.meta_words + k; }
+mat4 metaMat(uint skin, uint w0)
+{
+    const uint b = metaW(skin, w0);
+    return mat4(uintBitsToFloat(meta_w[b + 0u]),  uintBitsToFloat(meta_w[b + 1u]),  uintBitsToFloat(meta_w[b + 2u]),  uintBitsToFloat(meta_w[b + 3u]),
+                uintBitsToFloat(meta_w[b + 4u]),  uintBitsToFloat(meta_w[b + 5u]),  uintBitsToFloat(meta_w[b + 6u]),  uintBitsToFloat(meta_w[b + 7u]),
+                uintBitsToFloat(meta_w[b + 8u]),  uintBitsToFloat(meta_w[b + 9u]),  uintBitsToFloat(meta_w[b + 10u]), uintBitsToFloat(meta_w[b + 11u]),
+                uintBitsToFloat(meta_w[b + 12u]), uintBitsToFloat(meta_w[b + 13u]), uintBitsToFloat(meta_w[b + 14u]), uintBitsToFloat(meta_w[b + 15u]));
+}
+
+// One vertex's mesh-local joints + weights (sum 1): clean_preskin.comp loadWeights and its
+// normalization (zero total -> all on the first influence).
+void restWeights(uint rec, out uvec4 jl, out vec4 w)
+{
+    const uint b  = rec * 10u;
+    const uint wd = b >> 2u;
+    const uint a = src_w[wd], m = src_w[wd + 1u], c = src_w[wd + 2u];
+    uint jw, w01, w2;
+    if ((b & 2u) == 0u) { jw = a;                       w01 = m;                       w2 = c & 0xFFFFu; }
+    else                { jw = (a >> 16u) | (m << 16u); w01 = (m >> 16u) | (c << 16u); w2 = c >> 16u; }
+    jl = uvec4(jw & 0xFFu, (jw >> 8u) & 0xFFu, (jw >> 16u) & 0xFFu, (jw >> 24u) & 0x7Fu);
+    const uint q0 = w01 & 0xFFFFu, q1 = w01 >> 16u;
+    const uint qs = q0 + q1 + w2;
+    const uint q3 = qs >= 65535u ? 0u : 65535u - qs;
+    w = vec4(float(q0), float(q1), float(w2), float(q3)) * (1.0 / 65535.0);
+    const float ws = w.x + w.y + w.z + w.w;
+    if (ws > 0.0) w *= 1.0 / ws; else w = vec4(1.0, 0.0, 0.0, 0.0);
+}
+
+shared uint s_mesh;
+void insertRestItem()
+{
+    const uint wi = gl_WorkGroupID.x;
+    if (wi >= pc.work_cap) return;
+    const WorkItem item = items[wi];
+    if (item.skin_id == 0xFFFFFFFFu || item.skin_id >= pc.skin_count || item.inst1 == 0u) return;
+    // (a HUD-drawn rigged item -- instance flag 8 -- is no part of the avatar's body)
+    const uint iid = item.inst1 - 1u;
+    if (iid >= pc.inst_count || iid >= uint(inst_w.length()) / 56u || (inst_w[iid * 56u + 46u] & 8u) != 0u) return;
+    const uint av = meta_w[metaW(item.skin_id, 0u)] & 0x7FFFFFFFu;
+    if (av >= AV_SLOT_CAP) return;
+    const uint row = discRow(av);
+    if (row == 0xFFFFFFFFu) return;
+    // This item = one MESH of the avatar's pending list (thread 0 allocates; uniform below).
+    if (gl_LocalInvocationID.x == 0u)
+    {
+        const uint m = atomicAdd(pool[hdrW(av, POOL_H_PEND_MESH)], 1u);
+        const uint pbase = pool[hdrW(av, POOL_H_PEND_BASE)];
+        uint ok = 0xFFFFFFFFu;
+        if (pbase != 0u && m < pool[hdrW(av, POOL_H_PEND_MCAP)] && m < 65536u)
+        {
+            const uint mb = pbase + m * POOL_MESH_WORDS;
+            pool[mb + 0u] = item.inst1 - 1u;
+            pool[mb + 1u] = item.src_vert_base;
+            pool[mb + 2u] = item.skin_id;
+            pool[mb + 3u] = item.vert_count;
+            pool[mb + 4u] = 0u; pool[mb + 5u] = 0u; pool[mb + 6u] = 0u; pool[mb + 7u] = 0u;
+            ok = m;
+        }
+        s_mesh = ok;
+    }
+    barrier();
+    const uint m = s_mesh;
+    if (m == 0xFFFFFFFFu || item.src_weight_base == 0xFFFFFFFFu) return;
+    const uint skin = item.skin_id;
+    const mat4 bind_shape = metaMat(skin, 1876u);
+    const uint rest = pc.up_base + UP_REST + row * UP_REST_ROW;
+    const QvHeader qh = QV_LOAD_HEADER(src_q, max(item.src_vert_base, QV_HEADER_VERTS));
+    const uint ebase = entryBase();
+    for (uint v = gl_LocalInvocationID.x; v < item.vert_count && v < 65536u; v += gl_WorkGroupSize.x)
+    {
+        // Boundary flag: bit 7 of influence 3's joint byte (byte 3 of the 10 B record).
+        const uint bb = (item.src_weight_base + v) * 10u + 3u;
+        if (((src_w[bb >> 2u] >> ((bb & 3u) * 8u)) & 0x80u) == 0u) continue;
+        const uint sb = (item.src_vert_base + v) * QV_WORDS;
+        const vec3 pb = (bind_shape * vec4(qvPos(qh, src_q[sb], src_q[sb + 1u]), 1.0)).xyz;
+        uvec4 jl;
+        vec4 w;
+        restWeights(item.src_weight_base + v, jl, w);
+        // REST skin (clean_rig_weld_common.glsl rwRestPos, = the cluster weld's pairing space)
+        const vec3 p = rwRestPos(metaW(skin, 0u), rest, pb, jl, w);
+        if (any(isnan(p)) || any(isinf(p))) continue;
+        const uint e = atomicAdd(weld[0], 1u);
+        if (e >= pc.cap) { atomicAdd(weld[1], 1u); continue; }
+        const uint eb = ebase + e * ENT_WORDS;
+        weld[eb + 0u] = (m << 16u) | v;
+        weld[eb + 1u] = av;
+        weld[eb + 3u] = 0u;
+        weld[eb + 4u] = floatBitsToUint(p.x);
+        weld[eb + 5u] = floatBitsToUint(p.y);
+        weld[eb + 6u] = floatBitsToUint(p.z);
+        weld[eb + 7u] = rwJoints(metaW(skin, 0u), jl);
+        const uvec2 qw = rwPackWeights(w);
+        weld[eb + 8u] = qw.x;
+        weld[eb + 9u] = qw.y;
+        const uint h = cellHash(ivec3(floor(p / pc.cell)), av);
+        weld[eb + 2u] = atomicExchange(weld[kHeads + h], e);
+    }
+}
+
+// #626 skin-weight overlap of two grid entries (word bases ea / eb): clean_rig_weld_common.glsl.
+float weightOverlap(uint ea, uint eb)
+{
+    return rwWeightOverlap(weld[ea + 7u], uvec2(weld[ea + 8u], weld[ea + 9u]),
+                           weld[eb + 7u], uvec2(weld[eb + 8u], weld[eb + 9u]));
+}
+
+// ---- 7 PAIR: one thread per grid entry ----
+void pairEntry()
+{
+    const uint e = gl_GlobalInvocationID.x;
+    const uint n = min(weld[0], pc.cap);
+    if (e >= n) return;
+    const uint ebase = entryBase();
+    const uint eb = ebase + e * ENT_WORDS;
+    const uint own = weld[eb + 0u];
+    const uint key = weld[eb + 1u];
+    const uint om = own >> 16u;
+    const vec3 bp = vec3(uintBitsToFloat(weld[eb + 4u]), uintBitsToFloat(weld[eb + 5u]), uintBitsToFloat(weld[eb + 6u]));
+    uint pm[POOL_MAXP];
+    uint pv[POOL_MAXP];
+    float pdist[POOL_MAXP];
+    uint meshes = 0u;
+    // The 8 cells (size 2 eps) covering bp +- eps; a bucket reached twice is walked once.
+    const ivec3 c0 = ivec3(floor((bp - vec3(pc.eps)) / pc.cell));
+    uint seen[8];
+    for (int i = 0; i < 8; ++i)
+    {
+        const ivec3 c = c0 + ivec3(i & 1, (i >> 1) & 1, i >> 2);
+        const uint h = cellHash(c, key);
+        seen[i] = h;
+        bool dup = false;
+        for (int j = 0; j < i; ++j) dup = dup || seen[j] == h;
+        if (dup) continue;
+        uint k = weld[kHeads + h];
+        for (uint steps = 0u; k != 0xFFFFFFFFu && k < pc.cap && steps < 64u; ++steps)
+        {
+            const uint kb = ebase + k * ENT_WORDS;
+            const uint next = weld[kb + 2u];
+            const uint ko = weld[kb + 0u];
+            const uint km = ko >> 16u;
+            // the same avatar, ANOTHER mesh (never a vertex of our own face: slits, hems /
+            // linings, UV splits keep their own positions -- this also excludes k == e)
+            if (km != om && weld[kb + 1u] == key)
+            {
+                const vec3 q = vec3(uintBitsToFloat(weld[kb + 4u]), uintBitsToFloat(weld[kb + 5u]), uintBitsToFloat(weld[kb + 6u]));
+                const float d = distance(q, bp);
+                if (d <= pc.eps && weightOverlap(eb, kb) >= pc.wmatch)
+                {
+                    uint m = 0u;
+                    while (m < meshes && pm[m] != km) ++m;
+                    if (m == meshes && meshes < POOL_MAXP)
+                    {
+                        pm[m] = km; pv[m] = ko & 0xFFFFu; pdist[m] = d;
+                        ++meshes;
+                    }
+                    else if (m < meshes && d < pdist[m])
+                    {
+                        pv[m] = ko & 0xFFFFu; pdist[m] = d;   // the nearest vertex of that mesh
+                    }
+                }
+            }
+            k = next;
+        }
+    }
+    if (meshes == 0u) return;
+    const uint r = atomicAdd(pool[hdrW(key, POOL_H_PEND_REC)], 1u);
+    if (r >= pool[hdrW(key, POOL_H_PEND_RCAP)]) return;   // overflow: PUBLISH keeps the old list
+    const uint rb = recBase(pool[hdrW(key, POOL_H_PEND_BASE)], pool[hdrW(key, POOL_H_PEND_MCAP)], r);
+    pool[rb + 0u] = own;
+    pool[rb + 1u] = meshes;
+    for (uint m = 0u; m < POOL_MAXP; ++m) pool[rb + 2u + m] = m < meshes ? ((pm[m] << 16u) | pv[m]) : 0u;
+    pool[rb + 12u] = 0u;
+}
+
+// ---- 8 PUBLISH: one lane per discovered avatar ----
+void publishAvatars()
+{
+    const uint i = gl_LocalInvocationID.x;
+    if (i >= 8u) return;
+    const uint w = pc.disc[i >> 1u];
+    const uint av = (i & 1u) != 0u ? (w >> 16u) : (w & 0xFFFFu);
+    if (av >= AV_SLOT_CAP) return;
+    const uint mc = pool[hdrW(av, POOL_H_PEND_MESH)], rc = pool[hdrW(av, POOL_H_PEND_REC)];
+    const uint mcap = pool[hdrW(av, POOL_H_PEND_MCAP)], rcap = pool[hdrW(av, POOL_H_PEND_RCAP)];
+    const uint pbase = pool[hdrW(av, POOL_H_PEND_BASE)];
+    uint status = 1u;
+    if (pbase == 0u || mc == 0u) status = 4u;   // nothing of it drawn this frame: keep the old list
+    else if (mc > mcap) status = 2u;
+    else if (rc > rcap) status = 3u;
+    if (status == 1u)
+    {
+        pool[hdrW(av, POOL_H_ACT_BASE)] = pbase;
+        pool[hdrW(av, POOL_H_ACT_MESH)] = mc;
+        pool[hdrW(av, POOL_H_ACT_REC)]  = rc;
+        pool[hdrW(av, POOL_H_ACT_MCAP)] = mcap;
+        pool[hdrW(av, POOL_H_ASERIAL)]  = pool[hdrW(av, POOL_H_DSERIAL)];
+    }
+    pool[hdrW(av, POOL_H_STATUS)] = status;
+}
+
+void main()
+{
+    if (pc.mode == 0u)      insertItem();
+    else if (pc.mode == 1u) weldEntry();
+    else if (pc.mode == 2u) applyEntry();
+    else if (pc.mode == 3u) validateSegment();
+    else if (pc.mode == 4u) gatherRecord();
+    else if (pc.mode == 5u) applyRecord();
+    else if (pc.mode == 6u) insertRestItem();
+    else if (pc.mode == 7u) pairEntry();
+    else                    publishAvatars();
+}

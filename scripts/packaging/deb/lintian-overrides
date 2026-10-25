@@ -1,0 +1,25 @@
+# Expected lintian findings for slipstream-viewer, which repackages the
+# prebuilt official release tarball (#278). Installed as
+# /usr/share/lintian/overrides/slipstream-viewer by build_deb.sh.
+
+# The release tree lives in /opt/slipstream, as in the tarball and the Arch
+# package; the launcher finds its files relative to itself.
+slipstream-viewer: dir-or-file-in-opt
+# CEF, SDL3, OpenAL, WebRTC, the Vulkan loader, SwiftShader and others are
+# bundled at the versions the viewer was built and tested against.
+slipstream-viewer: embedded-library
+# Prebuilt third-party binaries as their upstreams ship them.
+slipstream-viewer: unstripped-binary-or-object
+slipstream-viewer: shared-library-is-executable
+slipstream-viewer: custom-library-search-path
+slipstream-viewer: hardening-no-relro
+slipstream-viewer: hardening-no-pie
+slipstream-viewer: specific-address-in-shared-library
+# Data files the viewer loads by path (CEF .bin/.pak, scripts without a shebang).
+slipstream-viewer: executable-not-elf-or-script
+slipstream-viewer: national-encoding
+# Fonts the viewer loads from its own fonts/ directory.
+slipstream-viewer: duplicate-font-file
+slipstream-viewer: truetype-font-prohibits-installable-embedding
+# A GUI program started from the menu.
+slipstream-viewer: no-manual-page

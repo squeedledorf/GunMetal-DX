@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<!-- Flat scroll list column header (scroll_list column_header_template="flat_column_header").
+     Layered over scroll_column_header.xml: no button images, the header shares the list's
+     background, a 1px rule underneath, short dividers between columns and a drawn sort
+     triangle. Used by the People / Radar nearby list. -->
+<scroll_column_header name="column_header"
+                      flat="true"
+                      font="SansSerifSmall"
+                      label_color="ColumnHeaderFlatTextColor"
+                      label_color_selected="ColumnHeaderFlatSortedTextColor"
+                      label_color_disabled="ColumnHeaderFlatDisabledTextColor"
+                      bg_color="ColumnHeaderFlatBgColor"
+                      bg_hover_color="ColumnHeaderFlatHoverColor"
+                      bg_pressed_color="ColumnHeaderFlatPressedColor"
+                      separator_color="ColumnHeaderFlatSeparatorColor"
+                      sort_arrow_color="ColumnHeaderFlatSortArrowColor"
+                      icon_size="12" />

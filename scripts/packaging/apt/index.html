@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Slipstream apt repository</title>
+<style>
+  :root { color-scheme: light dark; --bg: #fff; --fg: #1b1d22; --code: #f1f3f6; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #121419; --fg: #e4e6eb; --code: #1e2129; } }
+  body { background: var(--bg); color: var(--fg); font: 16px/1.55 system-ui, sans-serif; margin: 0 auto; max-width: 52rem; padding: 2rem 16px; }
+  pre { background: var(--code); padding: .8rem 1rem; overflow-x: auto; border-radius: 6px; }
+  code { font-family: ui-monospace, monospace; }
+  a { color: #3b82f6; }
+</style>
+</head>
+<body>
+<h1>Slipstream apt repository</h1>
+<p>Signed apt repository for the <a href="https://slipstreamviewer.org">Slipstream</a> Second Life viewer.
+Ubuntu 24.04+, Debian 13+, Linux Mint 22+ (amd64). Slipstream is not provided or supported by Linden Lab.</p>
+
+<h2>Install</h2>
+<p>Pick <b>one</b> suite: <code>stable</code> (releases only) or <code>beta</code> (betas and releases,
+always the newest). For beta, use <code>slipstream-beta.sources</code> below.</p>
+<pre><code>sudo wget -qO @KEYRING_FILE@ @APT_URL@/slipstream-archive-keyring.asc
+sudo wget -qO /etc/apt/sources.list.d/slipstream.sources @APT_URL@/slipstream.sources
+sudo apt update &amp;&amp; sudo apt install slipstream-viewer slipstream-archive-keyring</code></pre>
+<p>Updates then arrive with <code>sudo apt upgrade</code>. The <code>slipstream-archive-keyring</code> package keeps
+the signing key current.</p>
+
+<h2>Verify the key</h2>
+<pre><code>gpg --show-keys @KEYRING_FILE@</code></pre>
+<p>The primary key fingerprint must match the one published on
+<a href="https://slipstreamviewer.org/wiki/verify/">slipstreamviewer.org/wiki/verify</a>.</p>
+
+<h2>Remove</h2>
+<pre><code>sudo apt remove slipstream-viewer slipstream-archive-keyring
+sudo rm /etc/apt/sources.list.d/slipstream.sources @KEYRING_FILE@</code></pre>
+</body>
+</html>

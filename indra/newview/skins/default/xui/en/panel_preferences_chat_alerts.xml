@@ -1,0 +1,986 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<panel
+    border="false"
+    height="408"
+    layout="topleft"
+    name="chat_alerts_settings"
+    top="0"
+    left="13"
+    width="517">
+    <scroll_container
+        follows="all"
+        height="408"
+        layout="topleft"
+        left="0"
+        name="chat_alerts_scroll"
+        reserve_scroll_corner="false"
+        top="0"
+        width="517">
+        <panel
+            follows="left|top"
+            height="990"
+            layout="topleft"
+            left="0"
+            name="chat_alerts_scroll_panel"
+            top="0"
+            width="500">
+            <text
+                follows="left|top"
+                height="14"
+                layout="topleft"
+                left="10"
+                name="chat_notifications_label"
+                text_color="White"
+                top="10"
+                width="480">
+                New messages
+            </text>
+            <panel
+                border="false"
+                follows="left|top"
+                height="176"
+                layout="topleft"
+                left="10"
+                name="chat_notification_types"
+                top_pad="4"
+                width="485">
+                <text
+                    follows="left|top"
+                    font="SansSerifSmall"
+                    height="28"
+                    layout="topleft"
+                    halign="center"
+                    left="135"
+                    name="notify_flash_header"
+                    tool_tip="Flash the conversation in the Conversations list, and the Conversations button, while its messages aren't on screen. Mentions of you can flash it even when this is unchecked."
+                    top="0"
+                    width="77"
+                    wrap="true">
+                    Flash conversation
+                </text>
+                <text
+                    follows="left|top"
+                    font="SansSerifSmall"
+                    height="28"
+                    layout="topleft"
+                    halign="center"
+                    left="228"
+                    name="notify_taskbar_header"
+                    tool_tip="Flash the viewer's taskbar icon while you're in another window, until you switch back. Never for objects."
+                    top="0"
+                    width="51"
+                    wrap="true">
+                    Flash taskbar
+                </text>
+                <text
+                    follows="left|top"
+                    font="SansSerifSmall"
+                    height="14"
+                    layout="topleft"
+                    halign="center"
+                    left="301"
+                    name="notify_sound_header"
+                    tool_tip="Play a sound for each message."
+                    top="14"
+                    width="45"
+                    wrap="true">
+                    Sound
+                </text>
+                <text
+                    follows="left|top"
+                    font="SansSerifSmall"
+                    height="14"
+                    layout="topleft"
+                    left="350"
+                    name="notify_show_header"
+                    tool_tip="Show a pop-up or nearby overlay, or open Conversations. Messages count as visible when their window is open and not minimized, with the conversation selected and its message pane expanded, or in a separate conversation window. Chat bubbles don't count."
+                    top="14"
+                    width="135"
+                    wrap="true">
+                    Show
+                </text>
+                <text
+                    follows="left|top"
+                    height="16"
+                    layout="topleft"
+                    left="5"
+                    name="notify_friend_i_m_label"
+                    top="35"
+                    width="130">
+                    IMs from friends:
+                </text>
+                <check_box
+                    control_name="NotificationFriendIMFlashConversation"
+                    follows="left|top"
+                    height="16"
+                    label=""
+                    layout="topleft"
+                    left="165"
+                    name="NotificationFriendIMFlashConversation"
+                    tool_tip="Flash the conversation in the Conversations list, and the Conversations button, while its messages aren't on screen. Mentions of you can flash it even when this is unchecked."
+                    top="34"
+                    width="20" />
+                <check_box
+                    control_name="NotificationFriendIMFlashTaskbar"
+                    follows="left|top"
+                    height="16"
+                    label=""
+                    layout="topleft"
+                    left="245"
+                    name="NotificationFriendIMFlashTaskbar"
+                    tool_tip="Flash the viewer's taskbar icon while you're in another window, until you switch back. Never for objects."
+                    top="34"
+                    width="20" />
+                <check_box
+                    control_name="PlaySoundFriendIM"
+                    follows="left|top"
+                    height="16"
+                    label=""
+                    layout="topleft"
+                    left="315"
+                    name="play_sound_friend_im"
+                    tool_tip="Play a sound for each message."
+                    top="34"
+                    width="20" />
+                <combo_box
+                    control_name="NotificationFriendIMOptions"
+                    follows="left|top"
+                    height="20"
+                    layout="topleft"
+                    left="345"
+                    name="FriendIMOptions"
+                    tool_tip="Show a pop-up or nearby overlay, or open Conversations. Messages count as visible when their window is open and not minimized, with the conversation selected and its message pane expanded, or in a separate conversation window. Chat bubbles don't count."
+                    top="32"
+                    width="140">
+                    <item label="Nothing" name="NoAction" value="noaction" />
+                    <item label="Pop-up" name="PopUpMessage" value="toast" />
+                    <item label="Open Conversations" name="OpenConversationsWindow" value="openconversations" />
+                </combo_box>
+                <text
+                    follows="left|top"
+                    height="16"
+                    layout="topleft"
+                    left="5"
+                    name="notify_non_friend_i_m_label"
+                    top="59"
+                    width="130">
+                    Other IMs:
+                </text>
+                <check_box
+                    control_name="NotificationNonFriendIMFlashConversation"
+                    follows="left|top"
+                    height="16"
+                    label=""
+                    layout="topleft"
+                    left="165"
+                    name="NotificationNonFriendIMFlashConversation"
+                    tool_tip="Flash the conversation in the Conversations list, and the Conversations button, while its messages aren't on screen. Mentions of you can flash it even when this is unchecked."
+                    top="58"
+                    width="20" />
+                <check_box
+                    control_name="NotificationNonFriendIMFlashTaskbar"
+                    follows="left|top"
+                    height="16"
+                    label=""
+                    layout="topleft"
+                    left="245"
+                    name="NotificationNonFriendIMFlashTaskbar"
+                    tool_tip="Flash the viewer's taskbar icon while you're in another window, until you switch back. Never for objects."
+                    top="58"
+                    width="20" />
+                <check_box
+                    control_name="PlaySoundNonFriendIM"
+                    follows="left|top"
+                    height="16"
+                    label=""
+                    layout="topleft"
+                    left="315"
+                    name="play_sound_non_friend_im"
+                    tool_tip="Play a sound for each message."
+                    top="58"
+                    width="20" />
+                <combo_box
+                    control_name="NotificationNonFriendIMOptions"
+                    follows="left|top"
+                    height="20"
+                    layout="topleft"
+                    left="345"
+                    name="NonFriendIMOptions"
+                    tool_tip="Show a pop-up or nearby overlay, or open Conversations. Messages count as visible when their window is open and not minimized, with the conversation selected and its message pane expanded, or in a separate conversation window. Chat bubbles don't count."
+                    top="56"
+                    width="140">
+                    <item label="Nothing" name="NoAction" value="noaction" />
+                    <item label="Pop-up" name="PopUpMessage" value="toast" />
+                    <item label="Open Conversations" name="OpenConversationsWindow" value="openconversations" />
+                </combo_box>
+                <text
+                    follows="left|top"
+                    height="16"
+                    layout="topleft"
+                    left="5"
+                    name="notify_conference_i_m_label"
+                    top="83"
+                    width="130">
+                    Conference chat:
+                </text>
+                <check_box
+                    control_name="NotificationConferenceIMFlashConversation"
+                    follows="left|top"
+                    height="16"
+                    label=""
+                    layout="topleft"
+                    left="165"
+                    name="NotificationConferenceIMFlashConversation"
+                    tool_tip="Flash the conversation in the Conversations list, and the Conversations button, while its messages aren't on screen. Mentions of you can flash it even when this is unchecked."
+                    top="82"
+                    width="20" />
+                <check_box
+                    control_name="NotificationConferenceIMFlashTaskbar"
+                    follows="left|top"
+                    height="16"
+                    label=""
+                    layout="topleft"
+                    left="245"
+                    name="NotificationConferenceIMFlashTaskbar"
+                    tool_tip="Flash the viewer's taskbar icon while you're in another window, until you switch back. Never for objects."
+                    top="82"
+                    width="20" />
+                <check_box
+                    control_name="PlaySoundConferenceIM"
+                    follows="left|top"
+                    height="16"
+                    label=""
+                    layout="topleft"
+                    left="315"
+                    name="play_sound_conference_im"
+                    tool_tip="Play a sound for each message."
+                    top="82"
+                    width="20" />
+                <combo_box
+                    control_name="NotificationConferenceIMOptions"
+                    follows="left|top"
+                    height="20"
+                    layout="topleft"
+                    left="345"
+                    name="ConferenceIMOptions"
+                    tool_tip="Show a pop-up or nearby overlay, or open Conversations. Messages count as visible when their window is open and not minimized, with the conversation selected and its message pane expanded, or in a separate conversation window. Chat bubbles don't count."
+                    top="80"
+                    width="140">
+                    <item label="Nothing" name="NoAction" value="noaction" />
+                    <item label="Pop-up" name="PopUpMessage" value="toast" />
+                    <item label="Open Conversations" name="OpenConversationsWindow" value="openconversations" />
+                </combo_box>
+                <text
+                    follows="left|top"
+                    height="16"
+                    layout="topleft"
+                    left="5"
+                    name="notify_group_chat_label"
+                    top="107"
+                    width="130">
+                    Group chat:
+                </text>
+                <check_box
+                    control_name="NotificationGroupChatFlashConversation"
+                    follows="left|top"
+                    height="16"
+                    label=""
+                    layout="topleft"
+                    left="165"
+                    name="NotificationGroupChatFlashConversation"
+                    tool_tip="Flash the conversation in the Conversations list, and the Conversations button, while its messages aren't on screen. Mentions of you can flash it even when this is unchecked."
+                    top="106"
+                    width="20" />
+                <check_box
+                    control_name="NotificationGroupChatFlashTaskbar"
+                    follows="left|top"
+                    height="16"
+                    label=""
+                    layout="topleft"
+                    left="245"
+                    name="NotificationGroupChatFlashTaskbar"
+                    tool_tip="Flash the viewer's taskbar icon while you're in another window, until you switch back. Never for objects."
+                    top="106"
+                    width="20" />
+                <check_box
+                    control_name="PlaySoundGroupChatIM"
+                    follows="left|top"
+                    height="16"
+                    label=""
+                    layout="topleft"
+                    left="315"
+                    name="play_sound_group_chat_im"
+                    tool_tip="Play a sound for each message."
+                    top="106"
+                    width="20" />
+                <combo_box
+                    control_name="NotificationGroupChatOptions"
+                    follows="left|top"
+                    height="20"
+                    layout="topleft"
+                    left="345"
+                    name="GroupChatOptions"
+                    tool_tip="Show a pop-up or nearby overlay, or open Conversations. Messages count as visible when their window is open and not minimized, with the conversation selected and its message pane expanded, or in a separate conversation window. Chat bubbles don't count."
+                    top="104"
+                    width="140">
+                    <item label="Nothing" name="NoAction" value="noaction" />
+                    <item label="Pop-up" name="PopUpMessage" value="toast" />
+                    <item label="Open Conversations" name="OpenConversationsWindow" value="openconversations" />
+                </combo_box>
+                <text
+                    follows="left|top"
+                    height="16"
+                    layout="topleft"
+                    left="5"
+                    name="notify_nearby_chat_label"
+                    top="131"
+                    width="130">
+                    Nearby chat:
+                </text>
+                <check_box
+                    control_name="NotificationNearbyChatFlashConversation"
+                    follows="left|top"
+                    height="16"
+                    label=""
+                    layout="topleft"
+                    left="165"
+                    name="NotificationNearbyChatFlashConversation"
+                    tool_tip="Flash the conversation in the Conversations list, and the Conversations button, while its messages aren't on screen. Mentions of you can flash it even when this is unchecked."
+                    top="130"
+                    width="20" />
+                <check_box
+                    control_name="NotificationNearbyChatFlashTaskbar"
+                    follows="left|top"
+                    height="16"
+                    label=""
+                    layout="topleft"
+                    left="245"
+                    name="NotificationNearbyChatFlashTaskbar"
+                    tool_tip="Flash the viewer's taskbar icon while you're in another window, until you switch back. Never for objects."
+                    top="130"
+                    width="20" />
+                <check_box
+                    control_name="PlaySoundNearbyChatIM"
+                    follows="left|top"
+                    height="16"
+                    label=""
+                    layout="topleft"
+                    left="315"
+                    name="play_sound_nearby_chat_im"
+                    tool_tip="Play a sound for each message."
+                    top="130"
+                    width="20" />
+                <combo_box
+                    control_name="NotificationNearbyChatOptions"
+                    follows="left|top"
+                    height="20"
+                    layout="topleft"
+                    left="345"
+                    name="NearbyChatOptions"
+                    tool_tip="Show a pop-up or nearby overlay, or open Conversations. Messages count as visible when their window is open and not minimized, with the conversation selected and its message pane expanded, or in a separate conversation window. Chat bubbles don't count."
+                    top="128"
+                    width="140">
+                    <item label="Nothing" name="NoAction" value="noaction" />
+                    <item label="Overlay" name="PopUpMessage" value="toast" />
+                    <item label="Open Conversations" name="OpenConversationsWindow" value="openconversations" />
+                </combo_box>
+                <text
+                    follows="left|top"
+                    height="16"
+                    layout="topleft"
+                    left="5"
+                    name="notify_object_i_m_label"
+                    top="155"
+                    width="130">
+                    Nearby objects:
+                </text>
+                <check_box
+                    control_name="NotificationObjectIMFlashConversation"
+                    follows="left|top"
+                    height="16"
+                    label=""
+                    layout="topleft"
+                    left="165"
+                    name="NotificationObjectIMFlashConversation"
+                    tool_tip="Flash the conversation in the Conversations list, and the Conversations button, while its messages aren't on screen. Mentions of you can flash it even when this is unchecked."
+                    top="154"
+                    width="20" />
+                <check_box
+                    control_name="PlaySoundObjectIM"
+                    follows="left|top"
+                    height="16"
+                    label=""
+                    layout="topleft"
+                    left="315"
+                    name="play_sound_object_im"
+                    tool_tip="Play a sound for each message."
+                    top="154"
+                    width="20" />
+                <combo_box
+                    control_name="NotificationObjectIMOptions"
+                    follows="left|top"
+                    height="20"
+                    layout="topleft"
+                    left="345"
+                    name="ObjectIMOptions"
+                    tool_tip="Show a pop-up or nearby overlay, or open Conversations. Messages count as visible when their window is open and not minimized, with the conversation selected and its message pane expanded, or in a separate conversation window. Chat bubbles don't count."
+                    top="152"
+                    width="140">
+                    <item label="Nothing" name="NoAction" value="noaction" />
+                    <item label="Overlay" name="PopUpMessage" value="toast" />
+                    <item label="Open Conversations" name="OpenConversationsWindow" value="openconversations" />
+                </combo_box>
+            </panel>
+            <check_box
+                control_name="PlaySoundChatMention"
+                follows="left|top"
+                height="16"
+                label="Play the mention sound when someone mentions me"
+                tool_tip="Replaces the usual message sound. Mentions also flash the conversation in a different colour."
+                layout="topleft"
+                left="15"
+                name="chat_mention"
+                top_pad="4"
+                width="470" />
+            <check_box
+                control_name="ChatPingOnlyUnfocused"
+                follows="left|top"
+                height="16"
+                label="No sound for the conversation I'm typing in"
+                tool_tip="While that conversation has keyboard focus and the viewer is in front."
+                layout="topleft"
+                left="15"
+                name="ping_only_unfocused"
+                top_pad="4"
+                width="470" />
+            <check_box
+                control_name="ChatNeverPingNearby"
+                follows="left|top"
+                height="16"
+                label="Treat mentions of me in nearby chat like any other nearby chat"
+                tool_tip="No mention sound, and Nearby Chat only flashes if it's ticked above."
+                layout="topleft"
+                left="15"
+                name="never_ping_nearby"
+                top_pad="4"
+                width="470" />
+            <check_box
+                control_name="IMFlashOnFriendStatusChange"
+                follows="left|top"
+                height="16"
+                label="Flash a friend's IM when they come online or go offline"
+                tool_tip="Only flashes an IM that is already open. These notices never play a sound or pop up."
+                layout="topleft"
+                left="15"
+                name="IMFlashOnFriendStatusChange"
+                top_pad="4"
+                width="470" />
+            <text
+                follows="left|top"
+                height="16"
+                layout="topleft"
+                left="15"
+                name="nearby_overlay_style_label"
+                tool_tip="Nearby chat shown over the world view, for the nearby rows above whose Show choice is Overlay. Console: plain lines of &quot;Name: message&quot; over the world view, which never take mouse input. Message cards: each message in its own box. Not shown during Do Not Disturb."
+                top_pad="8"
+                width="150">
+                Nearby chat overlay:
+            </text>
+            <combo_box
+                control_name="NearbyChatOverlayStyle"
+                follows="left|top"
+                height="20"
+                layout="topleft"
+                left_pad="5"
+                name="nearby_overlay_style"
+                tool_tip="Nearby chat shown over the world view, for the nearby rows above whose Show choice is Overlay. Console: plain lines of &quot;Name: message&quot; over the world view, which never take mouse input. Message cards: each message in its own box. Not shown during Do Not Disturb."
+                top_delta="-3"
+                width="140">
+                <item label="GunMetal-DX chat log" name="GMDXLog" value="gmdx" />
+                <item label="Console (plain text)" name="PlainText" value="text" />
+                <item label="Message cards" name="MessageCards" value="cards" />
+            </combo_box>
+            <check_box
+                control_name="NearbyChatOverlayHideWhenVisible"
+                follows="left|top"
+                height="16"
+                label="Hide the overlay while Nearby Chat is visible"
+                tool_tip="Visible means the Nearby Chat messages are showing: torn off and not minimized, or selected in an open Conversations window with the messages pane expanded."
+                layout="topleft"
+                left="15"
+                name="nearby_overlay_hide_when_visible"
+                top_pad="6"
+                width="470" />
+            <text
+                follows="left|top"
+                height="16"
+                layout="topleft"
+                left="15"
+                name="nearby_console_persist_label"
+                tool_tip="How long each console line stays over the world view, fading included (setting NearbyChatConsolePersistTime). Only for the Console overlay."
+                top_pad="10"
+                width="180">
+                Console lines stay for (s):
+            </text>
+            <spinner
+                control_name="NearbyChatConsolePersistTime"
+                decimal_digits="0"
+                follows="left|top"
+                height="20"
+                increment="1"
+                label=""
+                label_width="0"
+                layout="topleft"
+                left_pad="2"
+                max_val="3600"
+                min_val="1"
+                name="nearby_console_persist"
+                tool_tip="How long each console line stays over the world view, fading included (setting NearbyChatConsolePersistTime). Only for the Console overlay."
+                top_delta="-3"
+                width="60" />
+            <text
+                follows="left|top"
+                height="16"
+                layout="topleft"
+                left_pad="14"
+                name="nearby_console_fade_label"
+                tool_tip="How long a console line takes to fade out at the end of that time (setting NearbyChatConsoleFadeTime). Only for the Console overlay."
+                top_delta="3"
+                width="90">
+                last fade (s):
+            </text>
+            <spinner
+                control_name="NearbyChatConsoleFadeTime"
+                decimal_digits="1"
+                follows="left|top"
+                height="20"
+                increment="0.5"
+                label=""
+                label_width="0"
+                layout="topleft"
+                left_pad="2"
+                max_val="60"
+                min_val="0"
+                name="nearby_console_fade"
+                tool_tip="How long a console line takes to fade out at the end of that time (setting NearbyChatConsoleFadeTime). Only for the Console overlay."
+                top_delta="-3"
+                width="60" />
+            <text
+                follows="left|top"
+                height="16"
+                layout="topleft"
+                left="15"
+                name="nearby_console_lines_label"
+                tool_tip="Most lines the console shows at once; older ones drop off the top (setting NearbyChatConsoleMaxLines). Only for the Console overlay."
+                top_pad="8"
+                width="180">
+                Console shows at most (lines):
+            </text>
+            <spinner
+                control_name="NearbyChatConsoleMaxLines"
+                decimal_digits="0"
+                follows="left|top"
+                height="20"
+                increment="1"
+                label=""
+                label_width="0"
+                layout="topleft"
+                left_pad="2"
+                max_val="200"
+                min_val="1"
+                name="nearby_console_lines"
+                tool_tip="Most lines the console shows at once; older ones drop off the top (setting NearbyChatConsoleMaxLines). Only for the Console overlay."
+                top_delta="-3"
+                width="60" />
+            <text
+                follows="left|top"
+                height="16"
+                layout="topleft"
+                left_pad="14"
+                name="nearby_console_font_label"
+                tool_tip="Size of the console text (setting NearbyChatConsoleFontSize). Only for the Console overlay."
+                top_delta="3"
+                width="60">
+                Text size:
+            </text>
+            <combo_box
+                control_name="NearbyChatConsoleFontSize"
+                follows="left|top"
+                height="20"
+                layout="topleft"
+                left_pad="2"
+                name="nearby_console_font"
+                tool_tip="Size of the console text (setting NearbyChatConsoleFontSize). Only for the Console overlay."
+                top_delta="-3"
+                width="120">
+                <item label="Same as chat" name="SameAsChat" value="-1" />
+                <item label="Small" name="Small" value="0" />
+                <item label="Medium" name="Medium" value="1" />
+                <item label="Large" name="Large" value="2" />
+                <item label="Huge" name="Huge" value="3" />
+            </combo_box>
+            <check_box
+                control_name="NearbyChatConsoleBackground"
+                follows="left|top"
+                height="16"
+                label="Dark band behind console lines"
+                tool_tip="Draws a translucent band behind each console message so it reads on bright scenes. Off: plain text with a drop shadow only."
+                layout="topleft"
+                left="15"
+                name="nearby_console_background"
+                top_pad="6"
+                width="470" />
+            <text
+                follows="left|top"
+                height="16"
+                layout="topleft"
+                left="15"
+                name="nearby_cards_lifetime_label"
+                tool_tip="How long each message card stays on screen before it starts to fade (setting NearbyToastLifeTime). Only for the Message cards overlay."
+                top_pad="10"
+                width="180">
+                Message cards stay for (s):
+            </text>
+            <spinner
+                control_name="NearbyToastLifeTime"
+                decimal_digits="0"
+                follows="left|top"
+                height="20"
+                increment="1"
+                label=""
+                label_width="0"
+                layout="topleft"
+                left_pad="2"
+                max_val="600"
+                min_val="1"
+                name="nearby_cards_lifetime"
+                tool_tip="How long each message card stays on screen before it starts to fade (setting NearbyToastLifeTime). Only for the Message cards overlay."
+                top_delta="-3"
+                width="60" />
+            <text
+                follows="left|top"
+                height="16"
+                layout="topleft"
+                left_pad="14"
+                name="nearby_cards_fade_label"
+                tool_tip="How long a message card takes to fade out (setting NearbyToastFadingTime). Only for the Message cards overlay."
+                top_delta="3"
+                width="90">
+                then fade (s):
+            </text>
+            <spinner
+                control_name="NearbyToastFadingTime"
+                decimal_digits="0"
+                follows="left|top"
+                height="20"
+                increment="1"
+                label=""
+                label_width="0"
+                layout="topleft"
+                left_pad="2"
+                max_val="30"
+                min_val="0"
+                name="nearby_cards_fade"
+                tool_tip="How long a message card takes to fade out (setting NearbyToastFadingTime). Only for the Message cards overlay."
+                top_delta="-3"
+                width="60" />
+            <check_box
+                control_name="NearbyChatOverlayClickThrough"
+                follows="left|top"
+                height="16"
+                label="Clicks go through message cards to the world"
+                tool_tip="Message cards take no mouse input: clicking, scrolling or hovering over one reaches whatever is behind it, and hovering does not keep a card on screen. Links in cards can't be clicked then; open Nearby Chat for those. The console overlay always lets clicks through."
+                layout="topleft"
+                left="15"
+                name="nearby_overlay_click_through"
+                top_pad="6"
+                width="470" />
+            <text
+                follows="left|top"
+                height="14"
+                layout="topleft"
+                left="10"
+                name="other_notifications_label"
+                text_color="White"
+                top_pad="16"
+                width="480">
+                Other notifications
+            </text>
+            <text
+                follows="left|top"
+                height="16"
+                layout="topleft"
+                left="15"
+                name="play_sound"
+                top_pad="6"
+                width="90">
+                Play a sound:
+            </text>
+            <check_box
+                control_name="PlaySoundNewConversation"
+                follows="left|top"
+                height="16"
+                label="New conversation"
+                layout="topleft"
+                left_pad="5"
+                name="new_conversation"
+                top_delta="-1"
+                width="130" />
+            <check_box
+                control_name="PlaySoundIncomingVoiceCall"
+                follows="left|top"
+                height="16"
+                label="Incoming voice call"
+                layout="topleft"
+                left_pad="5"
+                name="incoming_voice_call"
+                top_delta="0"
+                width="130" />
+            <check_box
+                control_name="PlaySoundTeleportOffer"
+                follows="left|top"
+                height="16"
+                label="Teleport offer"
+                layout="topleft"
+                left="110"
+                name="teleport_offer"
+                top_pad="4"
+                width="130" />
+            <check_box
+                control_name="PlaySoundInventoryOffer"
+                follows="left|top"
+                height="16"
+                label="Inventory offer"
+                layout="topleft"
+                left_pad="5"
+                name="inventory_offer"
+                top_delta="0"
+                width="130" />
+            <check_box
+                control_name="SlipstreamFlashTaskbarOnOffers"
+                follows="left|top"
+                height="16"
+                label="Flash the taskbar icon for teleport, friendship and inventory offers"
+                tool_tip="While you're in another window. Includes teleport requests. Inventory from objects and auto-accepted items never flash the icon. Not while Do Not Disturb is on."
+                layout="topleft"
+                left="15"
+                name="SlipstreamFlashTaskbarOnOffers"
+                top_pad="6"
+                width="470" />
+            <text
+                follows="left|top"
+                height="28"
+                layout="topleft"
+                left="15"
+                name="notifications_alert"
+                text_color="DrYellow"
+                top_pad="8"
+                width="470"
+                wrap="true">
+                To pause all of these, use Communicate &gt; Do Not Disturb. Messages that arrive meanwhile are marked when you turn it off.
+            </text>
+            <text
+                follows="left|top"
+                height="14"
+                layout="topleft"
+                left="10"
+                name="keyword_alerts_label"
+                text_color="White"
+                top_pad="16"
+                width="480">
+                Keyword alerts
+            </text>
+            <check_box
+                control_name="FSKeywordOn"
+                follows="left|top"
+                height="16"
+                label="Enable keyword alerts"
+                layout="topleft"
+                left="15"
+                name="FSKeywordOn"
+                top_pad="4"
+                width="230" />
+            <check_box
+                control_name="FSKeywordInChat"
+                enabled_control="FSKeywordOn"
+                follows="left|top"
+                height="16"
+                label="Look in nearby chat"
+                layout="topleft"
+                left="30"
+                name="FSKeywordInChat"
+                top_pad="4"
+                width="215" />
+            <check_box
+                control_name="FSKeywordInIM"
+                enabled_control="FSKeywordOn"
+                follows="left|top"
+                height="16"
+                label="Look in IMs and group chat"
+                layout="topleft"
+                left="250"
+                name="FSKeywordInIM"
+                top_delta="0"
+                width="235" />
+            <check_box
+                control_name="FSKeywordSpeakersName"
+                enabled_control="FSKeywordOn"
+                follows="left|top"
+                height="16"
+                label="Check the sender's name too"
+                layout="topleft"
+                left="30"
+                name="FSKeywordSpeakersName"
+                top_pad="4"
+                width="215" />
+            <check_box
+                control_name="FSKeywordCaseSensitive"
+                enabled_control="FSKeywordOn"
+                follows="left|top"
+                height="16"
+                label="Case-sensitive"
+                layout="topleft"
+                left="250"
+                name="FSKeywordCaseSensitive"
+                top_delta="0"
+                width="110" />
+            <check_box
+                control_name="FSKeywordMatchWholeWords"
+                enabled_control="FSKeywordOn"
+                follows="left|top"
+                height="16"
+                label="Whole words only"
+                layout="topleft"
+                left_pad="5"
+                name="FSKeywordMatchWholeWords"
+                top_delta="0"
+                width="120" />
+            <text
+                follows="left|top"
+                height="14"
+                layout="topleft"
+                left="30"
+                name="FSKeywords_label"
+                top_pad="8"
+                width="455">
+                Keywords (separated by commas):
+            </text>
+            <text_editor
+                control_name="FSKeywords"
+                enabled_control="FSKeywordOn"
+                commit_on_focus_lost="true"
+                follows="left|top"
+                height="45"
+                layout="topleft"
+                left="30"
+                max_length="20480"
+                name="FSKeywords"
+                top_pad="2"
+                use_ellipses="false"
+                width="455"
+                word_wrap="true" />
+            <check_box
+                control_name="FSKeywordChangeColor"
+                enabled_control="FSKeywordOn"
+                follows="left|top"
+                height="16"
+                label="Show matching messages in this colour:"
+                layout="topleft"
+                left="30"
+                name="FSKeywordChangeColor"
+                top_pad="8"
+                width="250" />
+            <color_swatch
+                control_name="FSKeywordColor"
+                enabled_control="FSKeywordOn"
+                can_apply_immediately="true"
+                follows="left|top"
+                height="20"
+                label_height="0"
+                layout="topleft"
+                left_pad="5"
+                name="FSKeywordColor"
+                tool_tip="Click to open the colour picker"
+                top_delta="-2"
+                width="32">
+                <color_swatch.caption_text
+                    height="0" />
+            </color_swatch>
+            <check_box
+                control_name="PlayModeUISndFSKeywordSound"
+                enabled_control="FSKeywordOn"
+                follows="left|top"
+                height="16"
+                label="Play a sound, UUID:"
+                layout="topleft"
+                left="30"
+                name="FSKeywordPlaySound"
+                top_pad="6"
+                width="150" />
+            <line_editor
+                control_name="UISndFSKeywordSound"
+                enabled_control="PlayModeUISndFSKeywordSound"
+                follows="left|top"
+                height="20"
+                layout="topleft"
+                left_pad="5"
+                max_length_chars="36"
+                name="FSKeywordSound"
+                top_delta="-2"
+                width="270" />
+            <text
+                follows="left|top"
+                height="14"
+                layout="topleft"
+                left="10"
+                name="radar_alerts_label"
+                text_color="White"
+                top_pad="14"
+                width="480">
+                Radar reports in nearby chat
+            </text>
+            <check_box
+                control_name="RadarReportChatRangeEnter"
+                follows="left|top"
+                height="16"
+                label="Avatar enters chat range"
+                tool_tip="Post a line in nearby chat when someone comes within chat range (same as People &gt; Nearby options)."
+                layout="topleft"
+                left="15"
+                name="RadarReportChatRangeEnter"
+                top_pad="4"
+                width="230" />
+            <check_box
+                control_name="RadarReportChatRangeLeave"
+                follows="left|top"
+                height="16"
+                label="Avatar leaves chat range"
+                layout="topleft"
+                left="250"
+                name="RadarReportChatRangeLeave"
+                top_delta="0"
+                width="235" />
+            <text
+                follows="left|top"
+                height="14"
+                layout="topleft"
+                left="10"
+                name="window_title_label"
+                text_color="White"
+                top_pad="14"
+                width="480">
+                Window title
+            </text>
+            <check_box
+                control_name="FSShowMessageCountInWindowTitle"
+                follows="left|top"
+                height="16"
+                label="Show the number of unread IMs in the window title"
+                layout="topleft"
+                left="15"
+                name="FSShowMessageCountInWindowTitle"
+                top_pad="4"
+                width="470" />
+        </panel>
+    </scroll_container>
+</panel>

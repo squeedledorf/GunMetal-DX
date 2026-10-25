@@ -1,0 +1,58 @@
+#version 450
+// vkclean -- SNAPSHOT SUPERSAMPLING (#417; RenderSnapshotTemporalFrames, SnapshotAntialias).
+// An offscreen snapshot renders the same frozen scene N times, each frame with a
+// different sub-pixel projection jitter (Halton(2,3), the live TAA's convention), and
+// this pass averages them with EQUAL weights -- a running mean:
+//     n == 1: acc = cur;   n > 1: acc += (cur - acc) / n
+// No neighbourhood clamp, no motion reprojection, no reactive mask: the scene does not
+// move between the frames, so after N frames the result is a true N-sample box-filtered
+// supersample of the pixel. Runs where the TAA resolve would (after pass 2, before the
+// SSR copy); the renderer copies the mean back over the HDR scene, so the post chain
+// (DoF, bloom, exposure, tonemap, sharpening) reads the image converged so far and the
+// last frame's output is the converged one. The per-face glow target is rasterized with
+// the same jitter: it is averaged alongside (the bloom extract / LDR glow read it).
+// Both accumulators are the snapshot's own images (GENERAL): the live view's TAA history
+// is never touched.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform sampler2D uCur;                    // HDR scene (texelFetch)
+layout(rgba16f, set = 0, binding = 1) uniform image2D uAcc;             // running mean (read-modify-write)
+layout(set = 0, binding = 2) uniform sampler2D uGlowCur;                // glow target (texelFetch)
+layout(rgba16f, set = 0, binding = 3) uniform image2D uGlowAcc;         // running mean of the glow
+
+layout(push_constant) uniform Push {
+    uvec4 params;   // x, y: size; z: n (1-based index of this frame); w: 1 = average the glow too
+} pc;
+
+// A NaN / Inf sample would poison every later frame's mean (as in clean_taa.comp).
+vec4 sanitize(vec4 c)
+{
+    return (any(isnan(c)) || any(isinf(c))) ? vec4(0.0) : clamp(c, vec4(0.0), vec4(65000.0));
+}
+
+void main()
+{
+    const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (uint(p.x) >= pc.params.x || uint(p.y) >= pc.params.y) return;
+    const uint n = max(pc.params.z, 1u);
+    const float w = 1.0 / float(n);
+
+    const vec4 c = sanitize(texelFetch(uCur, p, 0));
+    if (n == 1u) imageStore(uAcc, p, c);
+    else
+    {
+        const vec4 h = imageLoad(uAcc, p);
+        imageStore(uAcc, p, h + (c - h) * w);
+    }
+    if (pc.params.w != 0u)
+    {
+        const vec4 g = sanitize(texelFetch(uGlowCur, p, 0));
+        if (n == 1u) imageStore(uGlowAcc, p, g);
+        else
+        {
+            const vec4 gh = imageLoad(uGlowAcc, p);
+            imageStore(uGlowAcc, p, gh + (g - gh) * w);
+        }
+    }
+}

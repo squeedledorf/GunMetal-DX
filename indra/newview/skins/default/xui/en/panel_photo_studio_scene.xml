@@ -1,0 +1,3112 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<!--
+Photo Studio "Scene" section: render quality and performance.
+Row and height conventions are documented in panel_photo_studio_look.xml.
+RenderHDREnabled is deliberately not exposed here (it cascades probe resets,
+buffer reallocation, and a shader rebuild); it stays a prefs-level switch.
+-->
+<panel
+ name="panel_photo_studio_scene"
+ layout="topleft"
+ width="450"
+ height="490"
+ follows="all">
+	<accordion
+	 follows="all"
+	 layout="topleft"
+	 left="2"
+	 top="2"
+	 right="-2"
+	 height="484"
+	 single_expansion="false"
+	 name="scene_accordion">
+		<accordion_tab
+		 expanded="true"
+		 layout="topleft"
+		 height="116"
+		 name="atab_sec_aa"
+		 title="Anti-Aliasing"
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="87"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_aa">
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top="8"
+				 width="140"
+				 height="15"
+				 name="aa_method_label"
+				 value="Method" />
+				<combo_box
+				 follows="left|top|right"
+				 layout="topleft"
+				 left_delta="140"
+				 top_pad="-16"
+				 right="-32"
+				 height="18"
+				 name="aa_method_combo"
+				 tool_tip="Anti-aliasing method. Changing causes a brief hitch."
+				 control_name="RenderFSAAType">
+					<combo_box.item
+					 label="Disabled"
+					 name="0"
+					 value="0" />
+					<combo_box.item
+					 label="FXAA"
+					 name="1"
+					 value="1" />
+					<combo_box.item
+					 label="SMAA"
+					 name="2"
+					 value="2" />
+					<combo_box.item
+					 label="TAA"
+					 name="3"
+					 value="3" />
+				</combo_box>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="18"
+				 right="-8"
+				 top_pad="-18"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="aa_method_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderFSAAType" />
+				</button>
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="9"
+				 width="140"
+				 height="15"
+				 name="aa_quality_label"
+				 value="Quality" />
+				<combo_box
+				 follows="left|top|right"
+				 layout="topleft"
+				 left_delta="140"
+				 top_pad="-16"
+				 right="-32"
+				 height="18"
+				 name="aa_quality_combo"
+				 tool_tip="Quality preset for the selected anti-aliasing method"
+				 control_name="RenderFSAASamples">
+					<combo_box.item
+					 label="Low"
+					 name="0"
+					 value="0" />
+					<combo_box.item
+					 label="Medium"
+					 name="1"
+					 value="1" />
+					<combo_box.item
+					 label="High"
+					 name="2"
+					 value="2" />
+					<combo_box.item
+					 label="Ultra"
+					 name="3"
+					 value="3" />
+				</combo_box>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="18"
+				 right="-8"
+				 top_pad="-18"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="aa_quality_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderFSAASamples" />
+				</button>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_pad="10"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_aa_reset"
+				 tool_tip="Reset this section to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_aa" />
+				</button>
+			</panel>
+		</accordion_tab>
+		<accordion_tab
+		 expanded="false"
+		 layout="topleft"
+		 height="142"
+		 name="atab_sec_reflect"
+		 title="Reflections"
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="113"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_reflect">
+				<check_box
+				 follows="left|top"
+				 layout="topleft"
+				 height="16"
+				 left="8"
+				 top="8"
+				 width="300"
+				 label="Screen space reflections"
+				 tool_tip="Ray-marched reflections of on-screen geometry. Toggling rebuilds shaders (brief hitch)."
+				 name="reflect_ssr"
+				 control_name="RenderScreenSpaceReflections" />
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="10"
+				 width="140"
+				 height="15"
+				 name="reflect_detail_label"
+				 value="Probe detail" />
+				<combo_box
+				 follows="left|top|right"
+				 layout="topleft"
+				 left_delta="140"
+				 top_pad="-16"
+				 right="-32"
+				 height="18"
+				 name="reflect_detail_combo"
+				 tool_tip="How reflection probes update. Raytraced: as Realtime, but the probe faces are ray traced (Vulkan, ray-tracing GPUs; otherwise Realtime). Changing causes a brief hitch."
+				 control_name="RenderReflectionProbeDetail">
+					<combo_box.item
+					 label="Static only"
+					 name="0"
+					 value="0" />
+					<combo_box.item
+					 label="Static + dynamic"
+					 name="1"
+					 value="1" />
+					<combo_box.item
+					 label="Realtime"
+					 name="2"
+					 value="2" />
+					<combo_box.item
+					 label="Raytraced"
+					 name="3"
+					 value="3" />
+				</combo_box>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="18"
+				 right="-8"
+				 top_pad="-18"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="reflect_detail_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderReflectionProbeDetail" />
+				</button>
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="9"
+				 width="140"
+				 height="15"
+				 name="reflect_level_label"
+				 value="Coverage" />
+				<combo_box
+				 follows="left|top|right"
+				 layout="topleft"
+				 left_delta="140"
+				 top_pad="-16"
+				 right="-32"
+				 height="18"
+				 name="reflect_level_combo"
+				 tool_tip="How much of the scene gets probe coverage"
+				 control_name="RenderReflectionProbeLevel">
+					<combo_box.item
+					 label="None"
+					 name="0"
+					 value="0" />
+					<combo_box.item
+					 label="Manual only"
+					 name="1"
+					 value="1" />
+					<combo_box.item
+					 label="Manual + terrain"
+					 name="2"
+					 value="2" />
+					<combo_box.item
+					 label="Full scene"
+					 name="3"
+					 value="3" />
+				</combo_box>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="18"
+				 right="-8"
+				 top_pad="-18"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="reflect_level_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderReflectionProbeLevel" />
+				</button>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_pad="10"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_reflect_reset"
+				 tool_tip="Reset this section (including Advanced) to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_reflect" />
+				</button>
+			</panel>
+		</accordion_tab>
+		<accordion_tab
+		 expanded="false"
+		 layout="topleft"
+		 height="327"
+		 name="atab_sec_reflect_adv"
+		 title="Reflections - Advanced"
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="298"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_reflect_adv">
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top="8"
+				 width="200"
+				 height="15"
+				 font="SansSerifBold"
+				 name="reflect_hdr_ssr"
+				 value="Screen Space Reflections" />
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="7"
+				 right="-32"
+				 height="18"
+				 label="Iterations"
+				 label_width="140"
+				 decimal_digits="0"
+				 increment="1"
+				 min_val="1"
+				 max_val="100"
+				 can_edit_text="true"
+				 name="ssr_iterations"
+				 tool_tip="Ray-march steps to find a hit; more is more accurate but slower"
+				 enabled_control="RenderScreenSpaceReflections"
+				 control_name="RenderScreenSpaceReflectionIterations" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="ssr_iterations_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderScreenSpaceReflections">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderScreenSpaceReflectionIterations" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Ray step"
+				 label_width="140"
+				 decimal_digits="2"
+				 text_width="56"
+				 increment="0.01"
+				 min_val="0.01"
+				 max_val="0.5"
+				 can_edit_text="true"
+				 name="ssr_raystep"
+				 tool_tip="Distance covered by each ray-march step"
+				 enabled_control="RenderScreenSpaceReflections"
+				 control_name="RenderScreenSpaceReflectionRayStep" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="ssr_raystep_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderScreenSpaceReflections">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderScreenSpaceReflectionRayStep" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Distance bias"
+				 label_width="140"
+				 decimal_digits="3"
+				 text_width="56"
+				 increment="0.001"
+				 min_val="0"
+				 max_val="0.1"
+				 can_edit_text="true"
+				 name="ssr_distance_bias"
+				 tool_tip="Bias used when rejecting a potential reflection sample"
+				 enabled_control="RenderScreenSpaceReflections"
+				 control_name="RenderScreenSpaceReflectionDistanceBias" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="ssr_distance_bias_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderScreenSpaceReflections">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderScreenSpaceReflectionDistanceBias" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Depth reject bias"
+				 label_width="140"
+				 decimal_digits="4"
+				 text_width="56"
+				 increment="0.0005"
+				 min_val="0"
+				 max_val="0.01"
+				 can_edit_text="true"
+				 name="ssr_depth_bias"
+				 tool_tip="Bias against the depth buffer before rejecting a sample"
+				 enabled_control="RenderScreenSpaceReflections"
+				 control_name="RenderScreenSpaceReflectionDepthRejectBias" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="ssr_depth_bias_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderScreenSpaceReflections">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderScreenSpaceReflectionDepthRejectBias" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Adaptive step"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.05"
+				 min_val="1"
+				 max_val="4"
+				 can_edit_text="true"
+				 name="ssr_adaptive_step"
+				 tool_tip="Multiplier for adaptive ray-march stepping"
+				 enabled_control="RenderScreenSpaceReflections"
+				 control_name="RenderScreenSpaceReflectionAdaptiveStepMultiplier" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="ssr_adaptive_step_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderScreenSpaceReflections">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderScreenSpaceReflectionAdaptiveStepMultiplier" />
+				</button>
+				<view_border
+				 bevel_style="none"
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="12"
+				 right="-8"
+				 height="0"
+				 name="reflect_div_probes" />
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="6"
+				 width="200"
+				 height="15"
+				 font="SansSerifBold"
+				 name="reflect_hdr_probes"
+				 value="Reflection Probes" />
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 width="140"
+				 height="15"
+				 name="reflect_count_label"
+				 value="Max probes" />
+				<combo_box
+				 follows="left|top|right"
+				 layout="topleft"
+				 left_delta="140"
+				 top_pad="-16"
+				 right="-32"
+				 height="18"
+				 name="reflect_count_combo"
+				 tool_tip="Maximum number of reflection probes"
+				 control_name="RenderReflectionProbeCount">
+					<combo_box.item
+					 label="None"
+					 name="1"
+					 value="1" />
+					<combo_box.item
+					 label="Low (32)"
+					 name="32"
+					 value="32" />
+					<combo_box.item
+					 label="Medium (64)"
+					 name="64"
+					 value="64" />
+					<combo_box.item
+					 label="High (128)"
+					 name="128"
+					 value="128" />
+					<combo_box.item
+					 label="Ultra (256)"
+					 name="256"
+					 value="256" />
+				</combo_box>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="18"
+				 right="-8"
+				 top_pad="-18"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="reflect_count_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderReflectionProbeCount" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Probe distance"
+				 label_width="140"
+				 decimal_digits="0"
+				 increment="8"
+				 min_val="16"
+				 max_val="256"
+				 can_edit_text="true"
+				 name="reflect_distance"
+				 tool_tip="How far away probes are drawn and updated (meters)"
+				 control_name="RenderReflectionProbeDrawDistance" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="reflect_distance_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderReflectionProbeDrawDistance" />
+				</button>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_pad="10"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_reflect_adv_reset"
+				 tool_tip="Reset the advanced reflection settings to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_reflect_adv" />
+				</button>
+			</panel>
+		</accordion_tab>
+		<accordion_tab
+		 expanded="false"
+		 layout="topleft"
+		 height="142"
+		 name="atab_sec_mirrors"
+		 title="Mirrors"
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="113"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_mirrors">
+				<check_box
+				 follows="left|top"
+				 layout="topleft"
+				 height="16"
+				 left="8"
+				 top="8"
+				 width="300"
+				 label="Mirrors"
+				 tool_tip="High-quality planar mirror surfaces. Toggling causes a brief hitch."
+				 name="reflect_mirrors"
+				 control_name="RenderMirrors" />
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="10"
+				 width="140"
+				 height="15"
+				 name="mirrors_res_label"
+				 value="Resolution" />
+				<combo_box
+				 follows="left|top|right"
+				 layout="topleft"
+				 left_delta="140"
+				 top_pad="-16"
+				 right="-32"
+				 height="18"
+				 name="mirrors_res_combo"
+				 tool_tip="Resolution of mirror (hero probe) surfaces"
+				 enabled_control="RenderMirrors"
+				 control_name="RenderHeroProbeResolution">
+					<combo_box.item
+					 label="256"
+					 name="256"
+					 value="256" />
+					<combo_box.item
+					 label="512"
+					 name="512"
+					 value="512" />
+					<combo_box.item
+					 label="1024"
+					 name="1024"
+					 value="1024" />
+					<combo_box.item
+					 label="2048"
+					 name="2048"
+					 value="2048" />
+				</combo_box>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="18"
+				 right="-8"
+				 top_pad="-18"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="mirrors_res_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderHeroProbeResolution" />
+				</button>
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="9"
+				 width="140"
+				 height="15"
+				 name="mirrors_rate_label"
+				 value="Update rate" />
+				<combo_box
+				 follows="left|top|right"
+				 layout="topleft"
+				 left_delta="140"
+				 top_pad="-16"
+				 right="-32"
+				 height="18"
+				 name="mirrors_rate_combo"
+				 tool_tip="How often mirror surfaces refresh"
+				 enabled_control="RenderMirrors"
+				 control_name="RenderHeroProbeUpdateRate">
+					<combo_box.item
+					 label="Low"
+					 name="6"
+					 value="6" />
+					<combo_box.item
+					 label="Medium"
+					 name="3"
+					 value="3" />
+					<combo_box.item
+					 label="High"
+					 name="2"
+					 value="2" />
+					<combo_box.item
+					 label="Ultra"
+					 name="1"
+					 value="1" />
+				</combo_box>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="18"
+				 right="-8"
+				 top_pad="-18"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="mirrors_rate_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderHeroProbeUpdateRate" />
+				</button>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_pad="10"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_mirrors_reset"
+				 tool_tip="Reset this section to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_mirrors" />
+				</button>
+			</panel>
+		</accordion_tab>
+		<accordion_tab
+		 expanded="false"
+		 layout="topleft"
+		 height="440"
+		 name="atab_sec_shadow"
+		 title="Shadows &amp; AO"
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="411"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_shadow">
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top="8"
+				 width="140"
+				 height="15"
+				 name="shadow_detail_label"
+				 value="Shadows" />
+				<combo_box
+				 follows="left|top|right"
+				 layout="topleft"
+				 left_delta="140"
+				 top_pad="-16"
+				 right="-32"
+				 height="18"
+				 name="shadow_detail_combo"
+				 tool_tip="Which lights cast shadows. Changing rebuilds shaders (brief hitch)."
+				 control_name="RenderShadowDetail">
+					<combo_box.item
+					 label="None"
+					 name="0"
+					 value="0" />
+					<combo_box.item
+					 label="Sun/Moon"
+					 name="1"
+					 value="1" />
+					<combo_box.item
+					 label="Sun/Moon + Projectors"
+					 name="2"
+					 value="2" />
+				</combo_box>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="18"
+				 right="-8"
+				 top_pad="-18"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="shadow_detail_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderShadowDetail" />
+				</button>
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="9"
+				 width="140"
+				 height="15"
+				 name="shadow_filter_label"
+				 value="Filtering" />
+				<combo_box
+				 follows="left|top|right"
+				 layout="topleft"
+				 left_delta="140"
+				 top_pad="-16"
+				 right="-32"
+				 height="18"
+				 name="shadow_filter_combo"
+				 tool_tip="How wide a kernel softens the shadow edge. Ultra switches to contact hardening: the shadow is sharp where the caster meets the ground and softens with distance from it. Higher tiers cost more texture fetches. Applies to shadow maps; ray-traced shadows use Shadow softness."
+				 control_name="SlipstreamRenderShadowFilterQuality">
+					<combo_box.item
+					 label="Low"
+					 name="0"
+					 value="0" />
+					<combo_box.item
+					 label="Medium"
+					 name="1"
+					 value="1" />
+					<combo_box.item
+					 label="High"
+					 name="2"
+					 value="2" />
+					<combo_box.item
+					 label="Ultra (contact hardening)"
+					 name="3"
+					 value="3" />
+				</combo_box>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="18"
+				 right="-8"
+				 top_pad="-18"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="shadow_filter_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="SlipstreamRenderShadowFilterQuality" />
+				</button>
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="9"
+				 width="140"
+				 height="15"
+				 name="shadow_res_scale_label"
+				 value="Shadow quality" />
+				<combo_box
+				 follows="left|top|right"
+				 layout="topleft"
+				 left_delta="140"
+				 top_pad="-16"
+				 right="-32"
+				 height="18"
+				 name="shadow_res_scale_combo"
+				 tool_tip="Sun/moon shadow map resolution per cascade (same as Advanced Graphics &gt; Shadow quality). With ray-traced shadows it sets the rays per pixel instead (Low 1 ... Ultra 4)."
+				 control_name="RenderVKShadowResolution">
+					<combo_box.item
+					 label="Ultra"
+					 name="2048"
+					 value="2048" />
+					<combo_box.item
+					 label="High"
+					 name="1024"
+					 value="1024" />
+					<combo_box.item
+					 label="Medium"
+					 name="512"
+					 value="512" />
+					<combo_box.item
+					 label="Low"
+					 name="256"
+					 value="256" />
+				</combo_box>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="18"
+				 right="-8"
+				 top_pad="-18"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="shadow_res_scale_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVKShadowResolution" />
+				</button>
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="9"
+				 width="140"
+				 height="15"
+				 name="shadow_avatar_label"
+				 value="Avatar shadows" />
+				<combo_box
+				 follows="left|top|right"
+				 layout="topleft"
+				 left_delta="140"
+				 top_pad="-16"
+				 right="-32"
+				 height="18"
+				 name="shadow_avatar_combo"
+				 tool_tip="How much avatar geometry casts shadows"
+				 control_name="RenderAvatarShadowDetail">
+					<combo_box.item
+					 label="Opaque only"
+					 name="0"
+					 value="0" />
+					<combo_box.item
+					 label="Alpha masked"
+					 name="1"
+					 value="1" />
+					<combo_box.item
+					 label="Full"
+					 name="2"
+					 value="2" />
+				</combo_box>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="18"
+				 right="-8"
+				 top_pad="-18"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="shadow_avatar_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderAvatarShadowDetail" />
+				</button>
+				<check_box
+				 follows="left|top"
+				 layout="topleft"
+				 height="16"
+				 left="8"
+				 top_pad="8"
+				 width="300"
+				 label="Translucent shadows (tinted by glass)"
+				 tool_tip="Translucent objects cast partial shadows tinted by their colour, so stained glass throws coloured light. Off: they cast hard, alpha-tested shadows."
+				 name="shadow_translucent"
+				 control_name="RenderVKTranslucentShadows" />
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="9"
+				 width="140"
+				 height="15"
+				 name="shadow_sun_mode_label"
+				 value="Sun/moon shadows" />
+				<combo_box
+				 follows="left|top|right"
+				 layout="topleft"
+				 left_delta="140"
+				 top_pad="-16"
+				 right="-32"
+				 height="18"
+				 name="shadow_sun_mode_combo"
+				 tool_tip="How the sun and moon cast shadows (needs Shadows: Sun/Moon or higher). Shadow maps are the classic cascades. Ray traced traces a ray toward the sun per pixel: pixel-exact contact shadows with soft edges and no cascade seams or shimmer, at a higher GPU cost. Needs a GPU with hardware ray queries."
+				 control_name="RenderVKSunShadows">
+					<combo_box.item
+					 label="Shadow maps"
+					 name="1"
+					 value="1" />
+					<combo_box.item
+					 label="Ray traced"
+					 name="2"
+					 value="2" />
+				</combo_box>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="18"
+				 right="-8"
+				 top_pad="-18"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="shadow_sun_mode_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVKSunShadows" />
+				</button>
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="9"
+				 width="140"
+				 height="15"
+				 name="shadow_proj_mode_label"
+				 value="Projector shadows" />
+				<combo_box
+				 follows="left|top|right"
+				 layout="topleft"
+				 left_delta="140"
+				 top_pad="-16"
+				 right="-32"
+				 height="18"
+				 name="shadow_proj_mode_combo"
+				 tool_tip="How projector lights stop at the first surface they hit (needs Shadows: Sun/Moon + Projectors). Ray traced needs a GPU with hardware ray queries."
+				 control_name="RenderVKProjectorShadows">
+					<combo_box.item
+					 label="Off"
+					 name="0"
+					 value="0" />
+					<combo_box.item
+					 label="Shadow maps"
+					 name="1"
+					 value="1" />
+					<combo_box.item
+					 label="Ray traced"
+					 name="2"
+					 value="2" />
+				</combo_box>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="18"
+				 right="-8"
+				 top_pad="-18"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="shadow_proj_mode_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVKProjectorShadows" />
+				</button>
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="9"
+				 width="140"
+				 height="15"
+				 name="shadow_rt_res_label"
+				 value="RT shadow resolution" />
+				<combo_box
+				 follows="left|top|right"
+				 layout="topleft"
+				 left_delta="140"
+				 top_pad="-16"
+				 right="-32"
+				 height="18"
+				 name="shadow_rt_res_combo"
+				 tool_tip="Resolution ray-traced shadows (sun, moon, projectors) are traced at, relative to the screen. Lower is faster; the shadow edges are upscaled following the scene depth so they don't bleed across objects. Only used with ray-traced shadows."
+				 control_name="RenderVKRTShadowMaskScale">
+					<combo_box.item
+					 label="Full"
+					 name="1.0"
+					 value="1.0" />
+					<combo_box.item
+					 label="Three quarter"
+					 name="0.75"
+					 value="0.75" />
+					<combo_box.item
+					 label="Half"
+					 name="0.5"
+					 value="0.5" />
+					<combo_box.item
+					 label="Quarter"
+					 name="0.25"
+					 value="0.25" />
+				</combo_box>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="18"
+				 right="-8"
+				 top_pad="-18"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="shadow_rt_res_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVKRTShadowMaskScale" />
+				</button>
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="9"
+				 width="140"
+				 height="15"
+				 name="shadow_update_label"
+				 value="Shadow updates" />
+				<combo_box
+				 follows="left|top|right"
+				 layout="topleft"
+				 left_delta="140"
+				 top_pad="-16"
+				 right="-32"
+				 height="18"
+				 name="shadow_update_combo"
+				 tool_tip="How often distant sun/moon shadows are redrawn. Nearby shadows (you, nearby avatars, your vehicle) always update every frame. Balanced and Performance reuse distant shadow maps for a few frames; far-away moving objects' shadows may lag slightly."
+				 control_name="RenderVKShadowUpdate">
+					<combo_box.item
+					 label="Realtime"
+					 name="0"
+					 value="0" />
+					<combo_box.item
+					 label="Balanced"
+					 name="1"
+					 value="1" />
+					<combo_box.item
+					 label="Performance"
+					 name="2"
+					 value="2" />
+				</combo_box>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="18"
+				 right="-8"
+				 top_pad="-18"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="shadow_update_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVKShadowUpdate" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="RT shadow softness"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="shadow_rt_softness"
+				 tool_tip="How soft the edges of ray-traced shadows are (sun, moon and projectors). 0 = razor sharp. Higher values widen the penumbra, more so the further a shadow falls from its caster."
+				 control_name="RenderVKRTShadowSoftness" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="shadow_rt_softness_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVKRTShadowSoftness" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Projector shadow budget"
+				 label_width="140"
+				 decimal_digits="0"
+				 increment="1"
+				 min_val="0"
+				 max_val="32"
+				 can_edit_text="true"
+				 name="shadow_proj_budget"
+				 tool_tip="Shadow maps: how many projector lights cast shadows at once (brightest and closest first). 0 = no projector shadows. Values above 16 need a restart."
+				 control_name="RenderVKProjShadowMax" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="shadow_proj_budget_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVKProjShadowMax" />
+				</button>
+				<check_box
+				 follows="left|top"
+				 layout="topleft"
+				 height="16"
+				 left="8"
+				 top_pad="10"
+				 width="300"
+				 label="Ambient occlusion (SSAO)"
+				 tool_tip="Screen-space ambient occlusion. Toggling rebuilds shaders (brief hitch)."
+				 name="shadow_ssao"
+				 control_name="RenderDeferredSSAO" />
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="10"
+				 width="140"
+				 height="15"
+				 name="godrays_label"
+				 value="God rays" />
+				<combo_box
+				 follows="left|top|right"
+				 layout="topleft"
+				 left_delta="140"
+				 top_pad="-16"
+				 right="-32"
+				 height="18"
+				 name="godrays_combo"
+				 tool_tip="Volumetric light shafts from the sun and moon through gaps in trees, windows and other geometry. Marched through the sun/moon shadow maps, or traced against the scene with ray-traced sun shadows, so they need shadows on (not shown under water). Higher tiers cost more GPU time and look smoother."
+				 control_name="RenderVKGodRays">
+					<combo_box.item
+					 label="Off"
+					 name="0"
+					 value="0" />
+					<combo_box.item
+					 label="Low"
+					 name="1"
+					 value="1" />
+					<combo_box.item
+					 label="Medium"
+					 name="2"
+					 value="2" />
+					<combo_box.item
+					 label="High"
+					 name="3"
+					 value="3" />
+				</combo_box>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="18"
+				 right="-8"
+				 top_pad="-18"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="godrays_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVKGodRays" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="God ray intensity"
+				 label_width="140"
+				 decimal_digits="2"
+				 text_width="56"
+				 increment="0.05"
+				 min_val="0"
+				 max_val="4"
+				 can_edit_text="true"
+				 name="godrays_intensity"
+				 tool_tip="Strength of the light shafts. Scales the scattering of the sky's haze, so hazier skies give stronger shafts."
+				 control_name="RenderVKGodRaysIntensity" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="godrays_intensity_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVKGodRaysIntensity" />
+				</button>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_pad="10"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_shadow_reset"
+				 tool_tip="Reset this section (including Advanced) to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_shadow" />
+				</button>
+			</panel>
+		</accordion_tab>
+		<accordion_tab
+		 expanded="false"
+		 layout="topleft"
+		 height="406"
+		 name="atab_sec_shadow_adv"
+		 title="Shadows &amp; AO - Advanced"
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="377"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_shadow_adv">
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top="8"
+				 width="200"
+				 height="15"
+				 font="SansSerifBold"
+				 name="shadow_hdr_tuning"
+				 value="Shadow Tuning" />
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="7"
+				 right="-32"
+				 height="18"
+				 label="Bias"
+				 label_width="140"
+				 decimal_digits="4"
+				 text_width="56"
+				 increment="0.0001"
+				 min_val="0"
+				 max_val="0.005"
+				 can_edit_text="true"
+				 name="shadow_bias"
+				 tool_tip="Sun/moon shadow-map compare bias (normalized light depth), subtracted when sampling. Raise to remove shadow acne; too high detaches shadows from their casters (peter-panning). 0 = rely on the raster and normal-offset bias."
+				 control_name="RenderVKShadowSampleBias" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="shadow_bias_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVKShadowSampleBias" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Offset"
+				 label_width="140"
+				 decimal_digits="3"
+				 text_width="56"
+				 increment="0.005"
+				 min_val="0"
+				 max_val="0.1"
+				 can_edit_text="true"
+				 name="shadow_offset"
+				 tool_tip="Sun/moon shadow sample offset"
+				 control_name="RenderShadowOffset" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="shadow_offset_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderShadowOffset" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Projector normal offset"
+				 label_width="140"
+				 decimal_digits="2"
+				 text_width="56"
+				 increment="0.05"
+				 min_val="0"
+				 max_val="4"
+				 can_edit_text="true"
+				 name="shadow_spot_bias"
+				 tool_tip="Shadow-mapped projectors: receiver offset along the surface normal, in shadow texels. Raise if lit faces show acne; lower if light leaks right behind thin casters."
+				 control_name="RenderVKProjShadowNormalOffset" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="shadow_spot_bias_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVKProjShadowNormalOffset" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Projector light offset"
+				 label_width="140"
+				 decimal_digits="2"
+				 text_width="56"
+				 increment="0.05"
+				 min_val="0"
+				 max_val="2"
+				 can_edit_text="true"
+				 name="shadow_spot_offset"
+				 tool_tip="Shadow-mapped projectors: receiver offset toward the light, in shadow texels. Large values let light leak through thin walls right in front of the receiver."
+				 control_name="RenderVKProjShadowLightOffset" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="shadow_spot_offset_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVKProjShadowLightOffset" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="RT shadow bias"
+				 label_width="140"
+				 decimal_digits="3"
+				 text_width="56"
+				 increment="0.001"
+				 min_val="0"
+				 max_val="0.1"
+				 can_edit_text="true"
+				 name="shadow_rt_bias"
+				 tool_tip="Ray-traced shadows (sun, moon, projectors): EXTRA shadow-ray origin offset in metres along the surface's geometric normal. Origins are already moved off the surface by its float precision (a fraction of a millimetre), so 0 is right for matching geometry. Raise only if lit surfaces show self-shadowing speckle; a few millimetres skip layered avatar skins and detach thin contact shadows."
+				 control_name="RenderVKRTShadowBias" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="shadow_rt_bias_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVKRTShadowBias" />
+				</button>
+				<view_border
+				 bevel_style="none"
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="12"
+				 right="-8"
+				 height="0"
+				 name="shadow_div_ssao" />
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="6"
+				 width="200"
+				 height="15"
+				 font="SansSerifBold"
+				 name="shadow_hdr_ssao"
+				 value="Ambient Occlusion" />
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="7"
+				 right="-32"
+				 height="18"
+				 label="Blur size"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.05"
+				 min_val="0"
+				 max_val="3"
+				 can_edit_text="true"
+				 name="ssao_blur_size"
+				 tool_tip="Width of the blur that softens the occlusion buffer. Despite the setting's name this no longer affects shadow edges: shadow filtering is weighted at the source, so this pass blurs ambient occlusion only."
+				 enabled_control="RenderDeferredSSAO"
+				 control_name="RenderShadowBlurSize" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="ssao_blur_size_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderDeferredSSAO">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderShadowBlurSize" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Scale"
+				 label_width="140"
+				 decimal_digits="0"
+				 increment="10"
+				 min_val="0"
+				 max_val="2000"
+				 can_edit_text="true"
+				 name="ssao_scale"
+				 tool_tip="Sampling radius scale for ambient occlusion"
+				 enabled_control="RenderDeferredSSAO"
+				 control_name="RenderSSAOScale" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="ssao_scale_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderDeferredSSAO">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderSSAOScale" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Max scale"
+				 label_width="140"
+				 decimal_digits="0"
+				 increment="5"
+				 min_val="1"
+				 max_val="500"
+				 can_edit_text="true"
+				 name="ssao_max_scale"
+				 tool_tip="Cap on the screen-space sampling radius (pixels). Vulkan: legacy capped AO path only (RenderVKAODepthMips off)"
+				 enabled_control="RenderDeferredSSAO"
+				 control_name="RenderSSAOMaxScale" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="ssao_max_scale_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderDeferredSSAO">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderSSAOMaxScale" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Factor"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0.01"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="ssao_factor"
+				 tool_tip="Strength falloff factor for occlusion"
+				 enabled_control="RenderDeferredSSAO"
+				 control_name="RenderSSAOFactor" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="ssao_factor_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderDeferredSSAO">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderSSAOFactor" />
+				</button>
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="10"
+				 width="140"
+				 height="15"
+				 name="ssao_effect_value_label"
+				 value="Occluded value" />
+				<!-- No scrub="true" on these two, unlike the labelled vector
+				     spinners on the Look and Lens tabs. Scrubbing drags a
+				     spinner's label, and these have none (the caption is the text
+				     beside them), so it would move onto the arrow buttons instead
+				     and cost them their hold-to-repeat. -->
+				<spinner
+				 follows="left|top"
+				 layout="topleft"
+				 left_delta="140"
+				 top_pad="-16"
+				 width="80"
+				 height="18"
+				 label_width="0"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="2"
+				 name="vec3_RenderSSAOEffect_0"
+				 tool_tip="Brightness (HSV value) multiplier for fully occluded areas; partial occlusion blends toward the original color"
+				 enabled_control="RenderDeferredSSAO">
+					<spinner.commit_callback
+					 function="PhotoStudio.CommitVec3" />
+				</spinner>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="18"
+				 right="-8"
+				 top_pad="-18"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="ssao_effect_rst"
+				 tool_tip="Reset the occlusion effect (both components) to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderSSAOEffect" />
+				</button>
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="9"
+				 width="140"
+				 height="15"
+				 name="ssao_effect_sat_label"
+				 value="Occluded saturation" />
+				<spinner
+				 follows="left|top"
+				 layout="topleft"
+				 left_delta="140"
+				 top_pad="-16"
+				 width="80"
+				 height="18"
+				 label_width="0"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="2"
+				 name="vec3_RenderSSAOEffect_1"
+				 tool_tip="Saturation multiplier for fully occluded areas; partial occlusion blends toward the original color"
+				 enabled_control="RenderDeferredSSAO">
+					<spinner.commit_callback
+					 function="PhotoStudio.CommitVec3" />
+				</spinner>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_pad="10"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_shadow_adv_reset"
+				 tool_tip="Reset the advanced shadow and AO settings to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_shadow_adv" />
+				</button>
+			</panel>
+		</accordion_tab>
+		<accordion_tab
+		 expanded="false"
+		 layout="topleft"
+		 height="194"
+		 name="atab_sec_perf"
+		 title="Performance"
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="165"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_perf">
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top="7"
+				 right="-32"
+				 height="18"
+				 label="Draw distance (m)"
+				 label_width="140"
+				 decimal_digits="0"
+				 increment="8"
+				 min_val="8"
+				 max_val="4096"
+				 can_edit_text="true"
+				 name="perf_farclip"
+				 tool_tip="How far the world is drawn, in meters (up to 4096). Loaded regions are capped at a 5x5 square around yours (SlipstreamMaxRegionRing)."
+				 control_name="RenderFarClip" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="perf_farclip_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderFarClip" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Object detail"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.125"
+				 min_val="0"
+				 max_val="8"
+				 can_edit_text="true"
+				 name="perf_volume_lod"
+				 tool_tip="Level-of-detail factor for objects; higher keeps detail visible farther away"
+				 control_name="RenderVolumeLODFactor" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="perf_volume_lod_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVolumeLODFactor" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Max avatar complexity"
+				 label_width="140"
+				 decimal_digits="0"
+				 increment="5000"
+				 min_val="0"
+				 max_val="350000"
+				 can_edit_text="true"
+				 name="perf_max_complexity"
+				 tool_tip="Avatars above this rendering cost draw as solid-color JellyDolls. 0 = no limit."
+				 control_name="RenderAvatarMaxComplexity" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="perf_max_complexity_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderAvatarMaxComplexity" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Max animated avatars"
+				 label_width="140"
+				 decimal_digits="0"
+				 increment="1"
+				 min_val="0"
+				 max_val="66"
+				 can_edit_text="true"
+				 name="perf_max_nonimpostors"
+				 tool_tip="Avatars beyond this count render as cheap impostors. 0 = animate everyone."
+				 control_name="RenderAvatarMaxNonImpostors" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="perf_max_nonimpostors_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderAvatarMaxNonImpostors" />
+				</button>
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="9"
+				 width="140"
+				 height="15"
+				 name="perf_texcomp_label"
+				 value="Texture compression" />
+				<combo_box
+				 follows="left|top|right"
+				 layout="topleft"
+				 left_delta="140"
+				 top_pad="-16"
+				 right="-32"
+				 height="18"
+				 name="perf_texcomp_combo"
+				 tool_tip="Stores textures block-compressed in video memory, encoded on the GPU as they load: 4-8x less texture memory.&#10;High quality: BC7, best encoder (1 byte per texel), no visible loss.&#10;Balanced: BC7, faster encoder.&#10;Max savings: BC1 for opaque textures (half a byte), BC3 with alpha; slight gradient banding.&#10;Adaptive: per texture -- BC1 / BC3 where it measured as good as BC7, else BC7; far-away textures use the smaller formats.&#10;Applies live -- loaded textures re-encode over a few seconds, so you can flip it and compare the same spot."
+				 control_name="RenderVKTextureCompression">
+					<combo_box.item
+					 label="Off"
+					 name="0"
+					 value="0" />
+					<combo_box.item
+					 label="High quality"
+					 name="1"
+					 value="1" />
+					<combo_box.item
+					 label="Balanced"
+					 name="2"
+					 value="2" />
+					<combo_box.item
+					 label="Max savings"
+					 name="3"
+					 value="3" />
+					<combo_box.item
+					 label="Adaptive"
+					 name="4"
+					 value="4" />
+				</combo_box>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="18"
+				 right="-8"
+				 top_pad="-18"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="perf_texcomp_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVKTextureCompression" />
+				</button>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_pad="10"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_perf_reset"
+				 tool_tip="Reset this section (including Advanced) to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_perf" />
+				</button>
+			</panel>
+		</accordion_tab>
+		<accordion_tab
+		 expanded="false"
+		 layout="topleft"
+		 height="296"
+		 name="atab_sec_perf_adv"
+		 title="Performance - Advanced"
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="267"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_perf_adv">
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top="8"
+				 width="140"
+				 height="15"
+				 name="perf_complexity_mode_label"
+				 value="Avatar display" />
+				<combo_box
+				 follows="left|top|right"
+				 layout="topleft"
+				 left_delta="140"
+				 top_pad="-16"
+				 right="-32"
+				 height="18"
+				 name="perf_complexity_mode_combo"
+				 tool_tip="How the avatar complexity limit is applied"
+				 control_name="RenderAvatarComplexityMode">
+					<combo_box.item
+					 label="Limit by complexity"
+					 name="0"
+					 value="0" />
+					<combo_box.item
+					 label="Always show friends"
+					 name="1"
+					 value="1" />
+					<combo_box.item
+					 label="Only show friends"
+					 name="2"
+					 value="2" />
+				</combo_box>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="18"
+				 right="-8"
+				 top_pad="-18"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="perf_complexity_mode_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderAvatarComplexityMode" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Avatar detail"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.125"
+				 min_val="0"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="perf_avatar_lod"
+				 tool_tip="Level-of-detail factor for avatar meshes"
+				 control_name="RenderAvatarLODFactor" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="perf_avatar_lod_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderAvatarLODFactor" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Avatar physics"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.05"
+				 min_val="0"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="perf_physics_lod"
+				 tool_tip="Level-of-detail factor for avatar physics (jiggle)"
+				 control_name="RenderAvatarPhysicsLODFactor" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="perf_physics_lod_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderAvatarPhysicsLODFactor" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Terrain detail"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.125"
+				 min_val="1"
+				 max_val="4"
+				 can_edit_text="true"
+				 name="perf_terrain_lod"
+				 tool_tip="Level-of-detail factor for terrain"
+				 control_name="RenderTerrainLODFactor" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="perf_terrain_lod_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderTerrainLODFactor" />
+				</button>
+				<check_box
+				 follows="left|top"
+				 layout="topleft"
+				 height="16"
+				 left="8"
+				 top_pad="9"
+				 width="300"
+				 label="Smooth terrain"
+				 tool_tip="Draw the terrain as a smooth surface through its height samples. The simulator still collides with the flat one, so feet and objects can sit a few centimetres off on rough ground."
+				 name="perf_terrain_smoothing"
+				 control_name="RenderVKTerrainSmooth" />
+				<check_box
+				 follows="left|top"
+				 layout="topleft"
+				 height="16"
+				 left="8"
+				 top_pad="9"
+				 width="300"
+				 label="Hex-tile terrain textures"
+				 tool_tip="Show each terrain texture at a different offset and rotation in every cell of a hexagonal lattice, so its repeat does not show. Up to three fetches per texture instead of one. Rebuilds the terrain shaders."
+				 name="perf_terrain_hex_tiling"
+				 control_name="SlipstreamRenderTerrainHexTiling" />
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Tree detail"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.125"
+				 min_val="0"
+				 max_val="2"
+				 can_edit_text="true"
+				 name="perf_tree_lod"
+				 tool_tip="Level-of-detail factor for Linden trees"
+				 control_name="RenderTreeLODFactor" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="perf_tree_lod_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderTreeLODFactor" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Flexiprim time"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.05"
+				 min_val="0"
+				 max_val="2"
+				 can_edit_text="true"
+				 name="perf_flex_time"
+				 tool_tip="Update-time budget factor for flexible prims"
+				 control_name="RenderFlexTimeFactor" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="perf_flex_time_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderFlexTimeFactor" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Max particles"
+				 label_width="140"
+				 decimal_digits="0"
+				 increment="256"
+				 min_val="0"
+				 max_val="8192"
+				 can_edit_text="true"
+				 name="perf_max_particles"
+				 tool_tip="Maximum particle count on screen"
+				 control_name="RenderMaxPartCount" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="perf_max_particles_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderMaxPartCount" />
+				</button>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_pad="10"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_perf_adv_reset"
+				 tool_tip="Reset the advanced performance settings to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_perf_adv" />
+				</button>
+			</panel>
+		</accordion_tab>
+		<accordion_tab
+		 expanded="false"
+		 layout="topleft"
+		 height="497"
+		 name="atab_sec_pfog"
+		 title="Particle Fog"
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="468"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_pfog">
+				<check_box
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top="8"
+				 height="16"
+				 width="200"
+				 label="Fog from particles"
+				 name="pfog_on"
+				 tool_tip="Fog machines, smoke, steam and mist made of particles become lit volumetric fog. Needs volumetric fog (Preferences > Graphics)."
+				 control_name="RenderVKParticleFog" />
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="10"
+				 width="140"
+				 height="15"
+				 name="pfog_quality_label"
+				 value="Quality" />
+				<combo_box
+				 follows="left|top"
+				 layout="topleft"
+				 left="148"
+				 top_delta="-2"
+				 width="110"
+				 height="20"
+				 name="pfog_quality_combo"
+				 tool_tip="Low halves the march steps and resolution cost; High doubles the steps and raises the resolution"
+				 enabled_control="RenderVKParticleFog"
+				 control_name="RenderVKParticleFogQuality">
+					<combo_box.item label="Low" name="0" value="0" />
+					<combo_box.item label="Medium" name="1" value="1" />
+					<combo_box.item label="High" name="2" value="2" />
+				</combo_box>
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 width="140"
+				 height="15"
+				 name="pfog_debug_label"
+				 value="Debug view" />
+				<combo_box
+				 follows="left|top"
+				 layout="topleft"
+				 left="148"
+				 top_delta="-2"
+				 width="110"
+				 height="20"
+				 name="pfog_debug_combo"
+				 tool_tip="Off; Conversion: tints each system red (partly) to green (fully converted) and draws its boxes; Erosion, Ambient occlusion and Local light show one lighting/shape term alone"
+				 enabled_control="RenderVKParticleFog"
+				 control_name="RenderVKParticleFogDebug">
+					<combo_box.item label="Off" name="0" value="0" />
+					<combo_box.item label="Conversion" name="1" value="1" />
+					<combo_box.item label="Erosion" name="2" value="2" />
+					<combo_box.item label="Ambient occlusion" name="3" value="3" />
+					<combo_box.item label="Local light" name="4" value="4" />
+				</combo_box>
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="12"
+				 width="200"
+				 height="15"
+				 font="SansSerifBold"
+				 name="pfog_hdr_shape"
+				 value="Shape" />
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="4"
+				 right="-32"
+				 height="18"
+				 label="Density"
+				 label_width="140"
+				 decimal_digits="2"
+				 text_width="56"
+				 increment="0.25"
+				 min_val="0"
+				 max_val="40"
+				 can_edit_text="true"
+				 name="pfog_density"
+				 tool_tip="How thick the fog is: higher makes solid, opaque clouds; low is a thin mist"
+				 enabled_control="RenderVKParticleFog"
+				 control_name="RenderVKParticleFogDensity" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="pfog_density_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderVKParticleFog">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVKParticleFogDensity" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Billow"
+				 label_width="140"
+				 decimal_digits="2"
+				 text_width="56"
+				 increment="0.05"
+				 min_val="0"
+				 max_val="2"
+				 can_edit_text="true"
+				 name="pfog_billow"
+				 tool_tip="How much of the fog is carved into separate lumps: low is one solid mass, high is lumps with gaps"
+				 enabled_control="RenderVKParticleFog"
+				 control_name="RenderVKParticleFogBillow" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="pfog_billow_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderVKParticleFog">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVKParticleFogBillow" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Billow size"
+				 label_width="140"
+				 decimal_digits="2"
+				 text_width="56"
+				 increment="0.05"
+				 min_val="0.25"
+				 max_val="4"
+				 can_edit_text="true"
+				 name="pfog_bscale"
+				 tool_tip="Size of the lumps"
+				 enabled_control="RenderVKParticleFog"
+				 control_name="RenderVKParticleFogBillowScale" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="pfog_bscale_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderVKParticleFog">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVKParticleFogBillowScale" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Edge erosion"
+				 label_width="140"
+				 decimal_digits="2"
+				 text_width="56"
+				 increment="0.05"
+				 min_val="0"
+				 max_val="2"
+				 can_edit_text="true"
+				 name="pfog_erosion"
+				 tool_tip="How ragged and wispy the edges are"
+				 enabled_control="RenderVKParticleFog"
+				 control_name="RenderVKParticleFogErosion" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="pfog_erosion_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderVKParticleFog">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVKParticleFogErosion" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Heaviness"
+				 label_width="140"
+				 decimal_digits="2"
+				 text_width="56"
+				 increment="0.05"
+				 min_val="0"
+				 max_val="2"
+				 can_edit_text="true"
+				 name="pfog_heavy"
+				 tool_tip="How fast the fog sinks and pools along the floor (rising smoke and steam are not pulled down)"
+				 enabled_control="RenderVKParticleFog"
+				 control_name="RenderVKParticleFogHeavy" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="pfog_heavy_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderVKParticleFog">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVKParticleFogHeavy" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Distance"
+				 label_width="140"
+				 decimal_digits="0"
+				 text_width="56"
+				 increment="1"
+				 min_val="16"
+				 max_val="256"
+				 can_edit_text="true"
+				 name="pfog_distance"
+				 tool_tip="Beyond this many metres particle systems stay as ordinary particles"
+				 enabled_control="RenderVKParticleFog"
+				 control_name="RenderVKParticleFogDistance" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="pfog_distance_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderVKParticleFog">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVKParticleFogDistance" />
+				</button>
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="12"
+				 width="200"
+				 height="15"
+				 font="SansSerifBold"
+				 name="pfog_hdr_quality"
+				 value="Quality" />
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="4"
+				 right="-32"
+				 height="18"
+				 label="March steps"
+				 label_width="140"
+				 decimal_digits="0"
+				 text_width="56"
+				 increment="1"
+				 min_val="8"
+				 max_val="256"
+				 can_edit_text="true"
+				 name="pfog_steps"
+				 tool_tip="Medium-quality ray-march steps per pixel (the quality setting halves or doubles it)"
+				 enabled_control="RenderVKParticleFog"
+				 control_name="RenderVKParticleFogSteps" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="pfog_steps_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderVKParticleFog">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVKParticleFogSteps" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Resolution"
+				 label_width="140"
+				 decimal_digits="2"
+				 text_width="56"
+				 increment="0.05"
+				 min_val="0.25"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="pfog_res"
+				 tool_tip="Medium-quality render resolution of the fog, as a fraction of the screen"
+				 enabled_control="RenderVKParticleFog"
+				 control_name="RenderVKParticleFogResolution" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="pfog_res_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderVKParticleFog">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVKParticleFogResolution" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Near resolution"
+				 label_width="140"
+				 decimal_digits="2"
+				 text_width="56"
+				 increment="0.05"
+				 min_val="0.25"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="pfog_nearres"
+				 tool_tip="Render resolution while fog is within about 4 m of the camera"
+				 enabled_control="RenderVKParticleFog"
+				 control_name="RenderVKParticleFogNearResolution" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="pfog_nearres_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderVKParticleFog">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVKParticleFogNearResolution" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Smoothing frames"
+				 label_width="140"
+				 decimal_digits="0"
+				 text_width="56"
+				 increment="1"
+				 min_val="1"
+				 max_val="16"
+				 can_edit_text="true"
+				 name="pfog_history"
+				 tool_tip="Frames blended together: more is steadier but trails when the fog moves"
+				 enabled_control="RenderVKParticleFog"
+				 control_name="RenderVKParticleFogHistory" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="pfog_history_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderVKParticleFog">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVKParticleFogHistory" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Shadowed lights"
+				 label_width="140"
+				 decimal_digits="0"
+				 text_width="56"
+				 increment="1"
+				 min_val="0"
+				 max_val="4"
+				 can_edit_text="true"
+				 name="pfog_shadowl"
+				 tool_tip="How many of the strongest local lights the fog shadows itself from"
+				 enabled_control="RenderVKParticleFog"
+				 control_name="RenderVKParticleFogShadowLights" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="pfog_shadowl_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderVKParticleFog">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVKParticleFogShadowLights" />
+				</button>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_pad="10"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_pfog_reset"
+				 tool_tip="Reset this section to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_pfog" />
+				</button>
+			</panel>
+		</accordion_tab>
+		<accordion_tab
+		 expanded="false"
+		 layout="topleft"
+		 height="142"
+		 name="atab_sec_preview"
+		 title="Preview &amp; Accessibility"
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="113"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_preview">
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top="8"
+				 width="140"
+				 height="15"
+				 name="preview_mode_label"
+				 value="Preview mode" />
+				<combo_box
+				 follows="left|top|right"
+				 layout="topleft"
+				 left_delta="140"
+				 top_pad="-16"
+				 right="-32"
+				 height="18"
+				 name="preview_mode_combo"
+				 tool_tip="Simulate color-vision deficiencies or show a false-color exposure map for checking your scene"
+				 control_name="RenderEffectPreviewMode">
+					<combo_box.item
+					 label="Off"
+					 name="0"
+					 value="0" />
+					<combo_box.item
+					 label="Protanopia"
+					 name="1"
+					 value="1" />
+					<combo_box.item
+					 label="Deuteranopia"
+					 name="2"
+					 value="2" />
+					<combo_box.item
+					 label="Tritanopia"
+					 name="3"
+					 value="3" />
+					<combo_box.item
+					 label="Achromatopsia"
+					 name="4"
+					 value="4" />
+					<combo_box.item
+					 label="Blue-cone monochromacy"
+					 name="5"
+					 value="5" />
+					<combo_box.item
+					 label="Achromatomaly"
+					 name="6"
+					 value="6" />
+					<combo_box.item
+					 label="False-color exposure"
+					 name="7"
+					 value="7" />
+				</combo_box>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="18"
+				 right="-8"
+				 top_pad="-18"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="preview_mode_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderEffectPreviewMode" />
+				</button>
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="9"
+				 width="140"
+				 height="15"
+				 name="preview_cvd_label"
+				 value="CVD compensation" />
+				<combo_box
+				 follows="left|top|right"
+				 layout="topleft"
+				 left_delta="140"
+				 top_pad="-16"
+				 right="-32"
+				 height="18"
+				 name="preview_cvd_combo"
+				 tool_tip="Daltonize the image to compensate for a color-vision deficiency"
+				 control_name="RenderCVDMode">
+					<combo_box.item
+					 label="Off"
+					 name="0"
+					 value="0" />
+					<combo_box.item
+					 label="Protanopia"
+					 name="1"
+					 value="1" />
+					<combo_box.item
+					 label="Deuteranopia"
+					 name="2"
+					 value="2" />
+					<combo_box.item
+					 label="Tritanopia"
+					 name="3"
+					 value="3" />
+				</combo_box>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="18"
+				 right="-8"
+				 top_pad="-18"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="preview_cvd_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderCVDMode" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Compensation amount"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="preview_cvd_amount"
+				 tool_tip="Strength of the CVD compensation"
+				 control_name="RenderCVDAmount" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="preview_cvd_amount_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderCVDAmount" />
+				</button>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_pad="10"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_preview_reset"
+				 tool_tip="Reset this section to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_preview" />
+				</button>
+			</panel>
+		</accordion_tab>
+	</accordion>
+</panel>

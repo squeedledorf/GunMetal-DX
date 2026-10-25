@@ -1,0 +1,146 @@
+#version 460
+// vkclean -- AO view-depth MIP chain, 64 x 64 tile per workgroup (#828, RenderVKAODepthSPD,
+// default on; the 16 x 16-tile clean_ao_depth.comp stays for A/B). Same image, same set,
+// same push, same per-level values as clean_ao_depth.comp -- only the work distribution
+// differs (after AMD FidelityFX SPD, the single-pass downsampler FSR 3.1 uses here):
+//
+//   clean_ao_depth.comp: 8 x 8 threads per 16 x 16 level-0 tile (32,400 groups at 4K), five
+//   barrier()s per group, 75-98 % of the lanes idle from level 2 on, and every store an
+//   imageSize() query + a five-way branch on the level.
+//   this:                16 x 16 threads per 64 x 64 level-0 tile (2,040 groups at 4K). Each
+//   thread reads its 4 x 4 level-0 block with four textureGathers (one per 2 x 2, instead of
+//   16 texelFetches), reduces it to its 2 x 2 of level 1 and its ONE level-2 texel in
+//   registers, then level 3 (8 x 8 lanes) and level 4 (4 x 4 lanes) go through shared memory
+//   -- two barriers. Level sizes come from pc.screen (Vulkan's max(1, size >> l), exactly
+//   what imageSize returns for this image: the host only builds the chain at the AO size).
+//
+// No global atomic counter / tail pass (SPD's last-workgroup levels): the chain has
+// kAoZMips = 5 levels (0..4) and one 64 x 64 tile already reduces down to level 4.
+//
+// PARITY with clean_ao_depth.comp (the AO kernel samples two levels per tap, so an ulp of
+// drift would show): linZ and reduce4 are verbatim copies; every reduce4 gets its operands
+// in the same (0,0) (1,0) (0,1) (1,1) order at every level (float sums are order-sensitive);
+// level-0 reads clamp to the last texel exactly as linZ's min() does (the gather goes
+// through the NEAREST / CLAMP_TO_EDGE depth sampler, and the clamped pixel is the one the
+// unprojection uses), so the partial tiles at the right / bottom edge reduce the same
+// virtual texels as before. A level-l texel's value depends only on its own aligned
+// 2^l x 2^l block, so the tile size does not enter the result.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(set = 0, binding = 0) uniform sampler2D uDepth;                 // pre-pass depth (reversed-Z)
+layout(r32f, set = 0, binding = 1) writeonly uniform image2D uOut[5];  // levels 0..4
+
+layout(push_constant) uniform Push {
+    mat4 inv_proj;   // VK clip -> view (the AO kernel's matrix)
+    vec4 screen;     // width, height, 1/width, 1/height (AO resolution = level 0)
+    vec4 params;     // x: effect radius (m), y: falloff fraction of it, z: level count (1..5),
+                     // w: > 0 = plain mean filter (else XeGTAO depth-aware weights)
+} pc;
+
+shared float sZ2[16][16];   // level 2 of the tile
+shared float sZ3[8][8];     // level 3 of the tile
+
+// clean_ao_depth.comp linZ with the depth already read (p: the CLAMPED pixel it came from).
+float linZd(ivec2 p, float d)
+{
+    if (d <= 0.0) return 0.0;   // sky (reversed-Z: far = 0)
+    const vec2 tc = (vec2(p) + 0.5) * pc.screen.zw;
+    const vec4 v = pc.inv_proj * vec4(tc * 2.0 - 1.0, d, 1.0);
+    return max(-v.z / v.w, 1e-6);
+}
+
+// Verbatim clean_ao_depth.comp reduce4.
+float reduce4(float a, float b, float c, float d)
+{
+    const float mx = max(max(a, b), max(c, d));
+    if (mx <= 0.0) return 0.0;   // all sky
+    if (pc.params.w > 0.0)
+    {
+        const float n = (a > 0.0 ? 1.0 : 0.0) + (b > 0.0 ? 1.0 : 0.0) + (c > 0.0 ? 1.0 : 0.0) + (d > 0.0 ? 1.0 : 0.0);
+        return (a + b + c + d) / n;   // sky texels are 0: they add nothing
+    }
+    // XeGTAO_DepthMIPFilter (0.75: its empirical depth-range scale).
+    const float r = 0.75 * max(pc.params.x, 1e-3);
+    const float fr = max(pc.params.y, 0.01) * r;
+    const float fMul = -1.0 / fr;
+    const float fAdd = (r - fr) / fr + 1.0;
+    const float wa = a > 0.0 ? clamp((mx - a) * fMul + fAdd, 0.0, 1.0) : 0.0;
+    const float wb = b > 0.0 ? clamp((mx - b) * fMul + fAdd, 0.0, 1.0) : 0.0;
+    const float wc = c > 0.0 ? clamp((mx - c) * fMul + fAdd, 0.0, 1.0) : 0.0;
+    const float wd = d > 0.0 ? clamp((mx - d) * fMul + fAdd, 0.0, 1.0) : 0.0;
+    const float ws = wa + wb + wc + wd;   // >= 1 (the farthest has weight 1)
+    return (wa * a + wb * b + wc * c + wd * d) / ws;
+}
+
+ivec2 levelSize(int l) { return max(ivec2(pc.screen.xy) >> l, ivec2(1)); }
+
+// Constant level index per call site (uOut[] indexed by a constant: no dynamic indexing).
+#define STORE(L, q, z) { if (all(lessThan((q), levelSize(L)))) imageStore(uOut[L], (q), vec4(z)); }
+
+// Level-1 texel q1: its 2 x 2 of level 0 (stored) and the reduction.
+float level1(ivec2 q1)
+{
+    const ivec2 full = ivec2(pc.screen.xy);
+    const ivec2 p = 2 * q1;
+    // textureGather order: (0, 1), (1, 1), (1, 0), (0, 0) of the 2 x 2 at p (the sample
+    // point is the block's shared corner; CLAMP_TO_EDGE repeats the last row / column).
+    const vec4 g = textureGather(uDepth, vec2(p + 1) * pc.screen.zw, 0);
+    const ivec2 m = full - 1;
+    const ivec2 c00 = min(p, m), c11 = min(p + 1, m);
+    const float z00 = linZd(c00, g.w);
+    const float z10 = linZd(ivec2(c11.x, c00.y), g.z);
+    const float z01 = linZd(ivec2(c00.x, c11.y), g.x);
+    const float z11 = linZd(c11, g.y);
+    STORE(0, p, z00);
+    STORE(0, p + ivec2(1, 0), z10);
+    STORE(0, p + ivec2(0, 1), z01);
+    STORE(0, p + ivec2(1, 1), z11);
+    return reduce4(z00, z10, z01, z11);
+}
+
+void main()
+{
+    const int levels = clamp(int(pc.params.z + 0.5), 1, 5);
+    const ivec2 l = ivec2(gl_LocalInvocationID.xy);
+    const ivec2 g = ivec2(gl_WorkGroupID.xy);
+
+    // Levels 0-1: this thread's 4 x 4 of level 0 = its 2 x 2 of level 1.
+    const ivec2 q1 = g * 32 + l * 2;
+    const float a = level1(q1);
+    const float b = level1(q1 + ivec2(1, 0));
+    const float c = level1(q1 + ivec2(0, 1));
+    const float d = level1(q1 + ivec2(1, 1));
+    if (levels > 1)
+    {
+        STORE(1, q1, a);
+        STORE(1, q1 + ivec2(1, 0), b);
+        STORE(1, q1 + ivec2(0, 1), c);
+        STORE(1, q1 + ivec2(1, 1), d);
+    }
+
+    // Level 2: one texel per thread, in registers.
+    const float z2 = reduce4(a, b, c, d);
+    if (levels > 2) STORE(2, g * 16 + l, z2);
+    if (levels <= 3) return;   // (uniform per dispatch: no barrier is skipped by some lanes only)
+    sZ2[l.x][l.y] = z2;
+    barrier();
+
+    // Level 3: 8 x 8 lanes.
+    if (all(lessThan(l, ivec2(8))))
+    {
+        const ivec2 s = l * 2;
+        const float z3 = reduce4(sZ2[s.x][s.y], sZ2[s.x + 1][s.y], sZ2[s.x][s.y + 1], sZ2[s.x + 1][s.y + 1]);
+        STORE(3, g * 8 + l, z3);
+        sZ3[l.x][l.y] = z3;
+    }
+    if (levels <= 4) return;
+    barrier();
+
+    // Level 4: 4 x 4 lanes.
+    if (all(lessThan(l, ivec2(4))))
+    {
+        const ivec2 s = l * 2;
+        STORE(4, g * 4 + l, reduce4(sZ3[s.x][s.y], sZ3[s.x + 1][s.y], sZ3[s.x][s.y + 1], sZ3[s.x + 1][s.y + 1]));
+    }
+}

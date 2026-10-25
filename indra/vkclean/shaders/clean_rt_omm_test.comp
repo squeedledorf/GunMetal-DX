@@ -1,0 +1,34 @@
+#version 460
+#extension GL_EXT_ray_query : require
+// vkclean — OPACITY MICROMAP SELF-TEST (#194, llcleanrtomm.cpp). The test BLAS holds
+// N triangles side by side; triangle k's micromap has exactly ONE known-opaque
+// micro-triangle (index k), every other one transparent. One lane per (triangle k,
+// probe point c): a ray straight down through the centroid of canonical micro-triangle
+// c (barycentric grid order, uploaded by the CPU) records whether the hardware
+// committed a hit there. Triangle k must be hit exactly at the canonical micro-triangle
+// the CPU's index function maps to k -- that proves the micro-triangle ordering, the
+// barycentric convention and that ray queries honour micromaps at all.
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0) uniform accelerationStructureEXT uTLAS;
+layout(std430, set = 0, binding = 1) readonly buffer Pts { vec2 pts[]; };   // canonical centroids (b1, b2)
+layout(std430, set = 0, binding = 2) writeonly buffer Hits { uint hits[]; };
+
+layout(push_constant) uniform Push { uint tris; uint micro; } pc;
+
+void main()
+{
+    const uint lane = gl_GlobalInvocationID.x;
+    if (lane >= pc.tris * pc.micro) return;
+    const uint k = lane / pc.micro, c = lane % pc.micro;
+    // Triangle k: v0 = (2k, 0, 0), v1 = v0 + x, v2 = v0 + y (CPU builds the same).
+    const vec2 b = pts[lane];   // per (triangle, micro) lane; x < 0 = no such micro-triangle
+    if (b.x < 0.0) { hits[lane] = 0u; return; }
+    const vec3 p = vec3(2.0 * float(k), 0.0, 0.0) + vec3(1, 0, 0) * b.x + vec3(0, 1, 0) * b.y;
+    rayQueryEXT rq;
+    rayQueryInitializeEXT(rq, uTLAS, gl_RayFlagsNoneEXT, 0xFFu, p + vec3(0, 0, 1), 0.0, vec3(0, 0, -1), 2.0);
+    uint cand = 0u;
+    while (rayQueryProceedEXT(rq)) cand = 1u;   // a 2-state micromap must never produce candidates
+    const bool hit = rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionTriangleEXT;
+    hits[lane] = (hit ? 1u : 0u) | (cand << 1);
+}

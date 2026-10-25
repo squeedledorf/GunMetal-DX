@@ -1,0 +1,193 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_control_flow_attributes : require
+// vkclean — FROXEL LIGHT MASKS (RenderVKLightCulling 2): the deferred lighting's per-pixel
+// light sets, built from the LIGHTS ALONE -- no pixel depth is read -- in the light pass
+// (LLCleanRendererVK "c_light_froxel", right after the cluster pass, same uploads).
+//
+// The main view's render extent is cut into square tiles of 2^fx_dims.w px x fx_dims.z
+// exponential depth slices (clean_lights_common.glsl froxelSlice); every cell holds a 256-bit
+// light mask (FROXEL_WORDS uints, MAX_VK_LIGHTS = 256: lossless, never capped). The buffer
+// was zero-filled this frame before this dispatch (vkCmdFillBuffer behind the upload barrier).
+//
+// ONE LIGHT PER WORKGROUP COLUMN: workgroup (li, k) of a (lights, FROXEL_SPLIT) dispatch takes
+// light li, bounds its cells -- the slice run of its view-depth interval x the tile rectangle
+// its bounding box projects to -- and strides over that box with the FROXEL_SPLIT x 64 lanes
+// of its column (a near light covering much of the screen is spread over FROXEL_SPLIT
+// workgroups; a small one leaves the extra workgroups idle at once). Each candidate cell is
+// tested exactly (froxelCellTest) and atomicOr-ed. Cost ~ lights x covered cells, independent
+// of the pixel count.
+//
+// CONSERVATIVE (the lit kernels' localLight accepts a light at P only when |L - P| < r, and a
+// projector only inside its projected frustum: x, y in (0, w), z > 0 of proj_mat * P; every
+// other light adds an exact 0 there). The cell a pixel reads is (its pixel's tile, the slice
+// of its vz). Its P lies on the JITTERED view ray through its pixel centre (deferPosition:
+// inv(fx_vp) at that NDC), so P is inside the tile's four edge planes -- built from fx_vp at the
+// tile's pixel edges, 0.5 px outside every centre -- and its vz inside the slice's interval,
+// both up to float rounding (P's world coordinates, the matrix inverse, log / exp), which the
+// slack `sl` below covers (1 cm + 0.1 % of the light's depth reach: >> the ~0.5 mm ulp of a
+// 4 km coordinate and the ~1e-6 relative error of the inverse / log). Then for a light that
+// lights P: the light's centre is within r + sl of a point of the cell, so the sphere test
+// (radius R = r + sl) against each edge plane and the cell's view-space AABB passes; P's vz is
+// within r |f| of cz, so P's slice lies in the light's slice run [slice(cz - R|f|),
+// slice(cz + R|f|)] (froxelSlice is monotone) and its tile in the projected rectangle (P is in
+// the R-box, whose projection -- all 8 corners in front -- is the hull of the corners'
+// projections; padded 2 px); and P passes each projector half-space, while the cell part
+// within the light's depth reach is a convex section whose 8 corners bound every plane value
+// on it, so "all 8 corners more than sl outside one half-space" cannot hold. A light record
+// that is not finite takes every cell (the old tile test kept it everywhere too: the per-pixel
+// walk adds 0 for it but counts its lit-guard trip, LG_LOCAL, at the same pixels).
+
+#include "clean_lights_common.glsl"
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer Lights  { Light lights[]; };
+layout(std430, set = 0, binding = 1) readonly buffer Info    { LightInfo info; };
+layout(std430, set = 0, binding = 2) buffer Froxels          { uint froxel[]; };
+
+vec4 vpRow(int i) { return vec4(info.fx_vp[0][i], info.fx_vp[1][i], info.fx_vp[2][i], info.fx_vp[3][i]); }
+// A clip-space half-space (dot(p.xyz, eye-relative X) + p.w >= 0), unit normal.
+vec4 unitPlane(vec4 p) { return p * inversesqrt(max(dot(p.xyz, p.xyz), 1e-30)); }
+// The corner ray where two (eye-through) edge planes meet, pointing forward (dot(ray, f) > 0).
+vec3 cornerRay(vec3 a, vec3 b, vec3 f)
+{
+    const vec3 r = cross(a, b);
+    return dot(r, f) < 0.0 ? -r : r;
+}
+
+// Can light li (eye-relative centre c, test radius R, view depth cz, depth reach Rz = R |f|)
+// reach a pixel of cell (tx, ty, s)? pl[5]: its projector half-spaces (eye-relative), proj:
+// it is a projector; sl: the slack inside R.
+bool froxelCellTest(uint tx, uint ty, uint s, vec3 c, float R, float cz, float Rz, vec3 cv,
+                    bool proj, vec4 pl[5], float sl)
+{
+    const uvec4 dims = info.fx_dims;
+    const vec3  f = info.cam_fwd.xyz;
+    // The tile's pixel edges in the lit kernels' NDC (ndc = px / extent * 2 - 1; Vulkan y down).
+    const float T = float(1u << dims.w);
+    const vec2  ex = info.fx_extent.xy;
+    const vec2  n0 = vec2(float(tx), float(ty)) * T * info.fx_extent.zw * 2.0 - 1.0;
+    const vec2  n1 = min(vec2(float(tx + 1u), float(ty + 1u)) * T, ex) * info.fx_extent.zw * 2.0 - 1.0;
+    // Inward edge planes: clip.x - n0.x clip.w >= 0 (left), n1.x clip.w - clip.x >= 0 (right), same in y.
+    const vec4 r0 = vpRow(0), r1 = vpRow(1), r3 = vpRow(3);
+    const vec4 pL = unitPlane(r0 - n0.x * r3), pR = unitPlane(n1.x * r3 - r0);
+    const vec4 pT = unitPlane(r1 - n0.y * r3), pB = unitPlane(n1.y * r3 - r1);
+    if (dot(pL.xyz, c) + pL.w < -R || dot(pR.xyz, c) + pR.w < -R ||
+        dot(pT.xyz, c) + pT.w < -R || dot(pB.xyz, c) + pB.w < -R) return false;
+    // The cell's depth interval (widened for log / exp rounding) within the light's reach.
+    vec2 zr = froxelSliceRange(s, info.fx_slices, dims.z);
+    zr = vec2(zr.x - 1e-4 * abs(zr.x) - 1e-4, zr.y + 1e-4 * abs(zr.y) + 1e-4);
+    const float z0 = max(zr.x, cz - Rz), z1 = min(zr.y, cz + Rz);
+    if (z0 > z1) return false;   // (the slice run is the light's: only the widening's rounding gets here)
+    // The section's 8 corners (eye-relative): the 4 corner rays at z0 / z1 (the planes pass
+    // through the eye: fx_vp has no translation column, P * rotation-only V).
+    vec3 ray[4];
+    ray[0] = cornerRay(pL.xyz, pT.xyz, f);
+    ray[1] = cornerRay(pR.xyz, pT.xyz, f);
+    ray[2] = cornerRay(pR.xyz, pB.xyz, f);
+    ray[3] = cornerRay(pL.xyz, pB.xyz, f);
+    // Sphere vs the section's view-space AABB (the view is rigid: distances are kept).
+    const mat3 Rv = mat3(info.view);
+    vec3 bmin = vec3(1e30), bmax = vec3(-1e30);
+    vec3 C[8];
+    [[unroll]] for (int k = 0; k < 8; ++k)
+    {
+        const vec3 ry = ray[k & 3];
+        C[k] = ry * ((k < 4 ? z0 : z1) / max(dot(ry, f), 1e-12));
+        const vec3 v = Rv * C[k];
+        bmin = min(bmin, v); bmax = max(bmax, v);
+    }
+    const vec3 d = cv - clamp(cv, bmin, bmax);
+    if (dot(d, d) > R * R) return false;
+    if (!proj) return true;
+    // Projector: rejected when all 8 corners lie more than sl outside one of its half-spaces.
+    [[unroll]] for (int h = 0; h < 5; ++h)
+    {
+        float m = -1e30;
+        [[unroll]] for (int k = 0; k < 8; ++k) m = max(m, dot(pl[h].xyz, C[k]) + pl[h].w);
+        if (m < -sl * length(pl[h].xyz)) return false;   // (NaN planes: never rejected)
+    }
+    return true;
+}
+
+#define FROXEL_SPLIT_LANES (gl_NumWorkGroups.y * 64u)
+
+void main()
+{
+    const uint li = gl_WorkGroupID.x;
+    const uint count = min(uint(info.cam_pos.w), 256u);   // (the light SSBO holds MAX_VK_LIGHTS = 256)
+    if (li >= count) return;
+    const uvec4 dims = info.fx_dims;
+    const vec4  pr = lights[li].pos_radius;
+    const vec3  c  = pr.xyz - info.fx_eye.xyz;
+    const float r  = pr.w;
+    const vec3  f  = info.cam_fwd.xyz;
+    const bool  finiteRec = !(any(isnan(pr)) || any(isinf(pr)));
+    if (finiteRec && !(r > 0.0)) return;   // r <= 0: localLight's range test rejects every P
+    // (an absurd radius -- no LL light comes near -- is taken everywhere like a non-finite
+    // record: its bounds would overflow the projection below)
+    const bool  bounded = finiteRec && r < 1.0e6;
+
+    // Default: every cell, untested (a non-finite / unbounded record; see the header).
+    uvec3 lo = uvec3(0u), hi = dims.xyz - 1u;
+    float cz = 0.0, sl = 0.0, R = 0.0, Rz = 0.0;
+    vec3  cv = vec3(0.0);
+    bool  proj = false;
+    vec4  pl[5] = vec4[5](vec4(0.0), vec4(0.0), vec4(0.0), vec4(0.0), vec4(0.0));
+    if (bounded)
+    {
+        cz = dot(c, f);
+        sl = 0.01 + 0.001 * (abs(cz) + r);
+        R  = r + sl;
+        Rz = R * length(f);
+        cv = mat3(info.view) * c;
+        lo.z = froxelSlice(cz - Rz, info.fx_slices, dims.z);
+        hi.z = froxelSlice(cz + Rz, info.fx_slices, dims.z);
+        // Tile rectangle: the R-box's 8 corners through fx_vp, all in front; else the whole screen.
+        bool front = true;
+        vec2 mn = vec2(1e30), mx = vec2(-1e30);
+        [[unroll]] for (int k = 0; k < 8; ++k)
+        {
+            const vec3 o = vec3((k & 1) != 0 ? R : -R, (k & 2) != 0 ? R : -R, (k & 4) != 0 ? R : -R);
+            const vec4 h = info.fx_vp * vec4(c + o, 1.0);
+            if (!(h.w > 1e-6)) { front = false; continue; }
+            const vec2 n = h.xy / h.w;
+            mn = min(mn, n); mx = max(mx, n);
+        }
+        if (front)
+        {
+            const vec2 ex = info.fx_extent.xy;
+            const vec2 p0 = (mn * 0.5 + 0.5) * ex - 2.0;   // (render px, padded 2 px)
+            const vec2 p1 = (mx * 0.5 + 0.5) * ex + 2.0;
+            if (!(p1.x >= 0.0 && p1.y >= 0.0 && p0.x < ex.x && p0.y < ex.y)) return;   // off screen: no pixel
+            lo.xy = uvec2(max(p0, vec2(0.0))) >> dims.w;
+            hi.xy = min(uvec2(min(p1, ex - 1.0)) >> dims.w, dims.xy - 1u);
+        }
+        if (lights[li].proj_origin.w > 0.5)
+        {
+            // The per-pixel frustum gate's five half-spaces x, w - x, y, w - y, z of proj_mat
+            // (world -> projector texcoord), re-based to eye-relative points.
+            proj = true;
+            const mat4 M = lights[li].proj_mat;
+            const vec4 rx = vec4(M[0][0], M[1][0], M[2][0], M[3][0]);
+            const vec4 ry = vec4(M[0][1], M[1][1], M[2][1], M[3][1]);
+            const vec4 rz = vec4(M[0][2], M[1][2], M[2][2], M[3][2]);
+            const vec4 rw = vec4(M[0][3], M[1][3], M[2][3], M[3][3]);
+            pl = vec4[5](rx, rw - rx, ry, rw - ry, rz);
+            [[unroll]] for (int h = 0; h < 5; ++h) pl[h].w += dot(pl[h].xyz, info.fx_eye.xyz);
+        }
+    }
+
+    const uint nx = hi.x - lo.x + 1u, ny = hi.y - lo.y + 1u, nz = hi.z - lo.z + 1u;
+    const uint total = nx * ny * nz;
+    const uint word = li >> 5u, bit = 1u << (li & 31u);
+    for (uint i = gl_WorkGroupID.y * 64u + gl_LocalInvocationID.x; i < total; i += FROXEL_SPLIT_LANES)
+    {
+        const uint tx = lo.x + i % nx;
+        const uint ty = lo.y + (i / nx) % ny;
+        const uint s  = lo.z + i / (nx * ny);
+        if (bounded && !froxelCellTest(tx, ty, s, c, R, cz, Rz, cv, proj, pl, sl)) continue;
+        atomicOr(froxel[((s * dims.y + ty) * dims.x + tx) * FROXEL_WORDS + word], bit);
+    }
+}

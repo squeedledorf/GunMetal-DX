@@ -1,0 +1,140 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<!--
+The shape editor (SLPanelShapeEditor): a top bar - Find, how many panels, and
+out to a window - over one, two or four panels. The panels are laid out by
+SLPanelShapeEditor::arrangeSlots inside "slots_area", so nothing in that area is
+placed here. In the Appearance sidebar (313 wide) one panel fits, and choosing
+two or four takes the editor out into a window (floater_shape_editor.xml).
+
+The layout combo's values are the panel counts; the section ids and the
+dropdown's values are in panel_shape_editor_slot.xml.
+-->
+<panel
+ name="panel_shape_editor"
+ layout="topleft"
+ width="313"
+ height="388"
+ follows="all"
+ background_visible="false">
+	<panel.string
+	 name="float_tooltip">
+		Show the editor in a window of its own, with room for two or four panels
+	</panel.string>
+	<panel.string
+	 name="dock_tooltip">
+		Put the editor back in the sidebar
+	</panel.string>
+	<panel.string
+	 name="find_none">
+		Nothing matches "[TEXT]"
+	</panel.string>
+	<panel.string
+	 name="find_result">
+		[INDEX] of [COUNT]: [WHAT]
+	</panel.string>
+	<panel.string
+	 name="section_body">
+		Body
+	</panel.string>
+	<panel.string
+	 name="section_head">
+		Head
+	</panel.string>
+	<panel.string
+	 name="section_eyes">
+		Eyes
+	</panel.string>
+	<panel.string
+	 name="section_ears">
+		Ears
+	</panel.string>
+	<panel.string
+	 name="section_nose">
+		Nose
+	</panel.string>
+	<panel.string
+	 name="section_mouth">
+		Mouth
+	</panel.string>
+	<panel.string
+	 name="section_chin">
+		Chin
+	</panel.string>
+	<panel.string
+	 name="section_torso">
+		Torso
+	</panel.string>
+	<panel.string
+	 name="section_legs">
+		Legs
+	</panel.string>
+	<line_editor
+	 follows="left|top|right"
+	 layout="topleft"
+	 left="2"
+	 top="2"
+	 right="-98"
+	 height="22"
+	 max_length_bytes="64"
+	 commit_on_focus_lost="false"
+	 label="Find a slider (Ctrl+F)"
+	 name="find_editor"
+	 tool_tip="Type part of a slider's or group's name and press Enter. The focused panel (or the first) switches to the group that has it, and the slider is lit up. Press Enter again for the next match." />
+	<combo_box
+	 follows="top|right"
+	 layout="topleft"
+	 right="-30"
+	 top="2"
+	 width="64"
+	 height="22"
+	 name="layout_combo"
+	 tool_tip="How many panels the editor shows. Each panel has its own group dropdown; the same group may be shown twice. Two and four take the editor out into a window, where there is room. Remembered between sessions.">
+		<combo_box.item
+		 label="One"
+		 name="one"
+		 value="1" />
+		<combo_box.item
+		 label="Two"
+		 name="two"
+		 value="2" />
+		<combo_box.item
+		 label="Four"
+		 name="four"
+		 value="4" />
+	</combo_box>
+	<button
+	 follows="top|right"
+	 layout="topleft"
+	 right="-2"
+	 top="2"
+	 width="24"
+	 height="22"
+	 label=""
+	 image_overlay="Conv_toolbar_arrow_ne"
+	 name="float_button"
+	 tool_tip="Show the editor in a window of its own, with room for two or four panels" />
+	<text
+	 follows="left|top|right"
+	 layout="topleft"
+	 left="4"
+	 top_pad="2"
+	 right="-4"
+	 height="14"
+	 font="SansSerifSmall"
+	 text_color="LabelDisabledColor"
+	 use_ellipses="true"
+	 name="find_status"
+	 value="" />
+	<!-- The panels. Their rects are worked out in C++ from the layout and
+	     this area's size, which is why nothing is placed in it here. -->
+	<panel
+	 follows="all"
+	 layout="topleft"
+	 left="0"
+	 top_pad="0"
+	 right="-1"
+	 height="346"
+	 background_visible="false"
+	 mouse_opaque="false"
+	 name="slots_area" />
+</panel>

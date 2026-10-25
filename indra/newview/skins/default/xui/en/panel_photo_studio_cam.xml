@@ -1,0 +1,927 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<!--
+Photo Studio "Cam" section: how the camera moves, rather than what it sees.
+
+Derived from the "Cam" tab of Firestorm's Photo Tools floater
+(floater_phototools.xml, panel P_Cam; The Phoenix Firestorm Project, Inc.,
+GNU LGPL 2.1; ported from phoenix-firestorm 4ae31a7ad6). Every control on that
+tab is here, laid out the Photo Studio way: slider rows with a reset button
+built in where Firestorm had a slider, a spinner and a "D" button, and a Reset
+All per section. Firestorm's sub-tabs (Camera Movement, Mouse, Misc) are
+sections here, and its 3D mouse block is two of them, the switches first.
+
+Nothing on this tab is part of a Look, and none of it is on the undo stack:
+these are the viewer's own camera settings, shared with Preferences, the
+Joystick floater and camera presets, and Photo Studio only shows them.
+
+Depth of field is NOT here. Firestorm keeps it on a tab of its own (DoF/Glow),
+not on Cam, and ours is on the Lens tab, where it travels with a Look.
+
+Two rows show raw values where a person might expect friendlier ones, kept
+that way because the setting is what Debug Settings, presets and RLVa all
+read: View Angle is in radians, and the 3D mouse Zoom row is
+FlycamAxisDeadZone6, which is what the zoom axis reads (see its tooltip).
+The ranges are Firestorm's slider ranges, widened where a setting's own
+default would otherwise sit off the end of the slider.
+
+Row conventions and the height arithmetic: panel_photo_studio_look.xml.
+-->
+<panel
+ name="panel_photo_studio_cam"
+ layout="topleft"
+ width="450"
+ height="490"
+ follows="all">
+	<accordion
+	 follows="all"
+	 layout="topleft"
+	 left="2"
+	 top="2"
+	 right="-2"
+	 height="484"
+	 single_expansion="false"
+	 name="cam_accordion">
+		<accordion_tab
+		 expanded="true"
+		 layout="topleft"
+		 height="244"
+		 name="atab_sec_cammove"
+		 title="Camera Movement"
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="215"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_cammove">
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top="7"
+				 right="-32"
+				 height="18"
+				 label="View angle (rad)"
+				 label_width="140"
+				 decimal_digits="3"
+				 increment="0.002"
+				 min_val="0.08"
+				 max_val="3.06"
+				 can_edit_text="true"
+				 name="cam_view_angle"
+				 tool_tip="The camera's vertical field of view, in radians: the viewer's zoom, the same one Ctrl+0 and Ctrl+8 change. 1.047 (60 degrees) is the default; lower is a longer lens. RLVa can hold it inside limits of its own. The 3D mouse sets the view itself while it is flying the camera."
+				 control_name="CameraAngle" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="cam_view_angle_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="CameraAngle" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Zoom time (s)"
+				 label_width="140"
+				 decimal_digits="1"
+				 increment="0.1"
+				 min_val="0"
+				 max_val="30"
+				 can_edit_text="true"
+				 name="cam_zoom_time"
+				 tool_tip="Seconds the camera takes to move between views: into and out of mouselook, back behind the avatar, onto something you focus on. Longer is slower and smoother."
+				 control_name="ZoomTime" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="cam_zoom_time_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="ZoomTime" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Camera lag"
+				 label_width="140"
+				 decimal_digits="1"
+				 increment="0.1"
+				 min_val="0"
+				 max_val="30"
+				 can_edit_text="true"
+				 name="cam_lag"
+				 tool_tip="How far the camera trails behind the avatar when it moves: 0 is locked to it, 30 lags by the avatar's whole speed."
+				 control_name="DynamicCameraStrength" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="cam_lag_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="DynamicCameraStrength" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Camera offset"
+				 label_width="140"
+				 decimal_digits="3"
+				 increment="0.001"
+				 min_val="0.001"
+				 max_val="25"
+				 can_edit_text="true"
+				 name="cam_offset_scale"
+				 tool_tip="Scales how far behind the avatar the camera sits by default. 1 is the normal distance; 2 is twice as far back."
+				 control_name="CameraOffsetScale" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="cam_offset_scale_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="CameraOffsetScale" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Smoothing"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="300"
+				 can_edit_text="true"
+				 name="cam_smoothing"
+				 tool_tip="How gently the camera starts and stops. Higher values ease in and out more, and are slower to arrive."
+				 control_name="CameraPositionSmoothing" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="cam_smoothing_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="CameraPositionSmoothing" />
+				</button>
+				<!-- Not settings: two switches on the viewer's on-screen info
+				     overlay (Develop, Show Info), which keeps them as session
+				     state. The floater flips and polls them; see
+				     SLFloaterPhotoStudio::refreshCamReadouts. -->
+				<check_box
+				 follows="left|top"
+				 layout="topleft"
+				 height="16"
+				 left="8"
+				 top_pad="10"
+				 width="300"
+				 label="Show the field of view on screen"
+				 name="cam_show_fov"
+				 tool_tip="Write the current vertical field of view, in degrees, in the info overlay at the top left of the screen. The same switch as Develop, Show Info, FOV.">
+					<check_box.commit_callback
+					 function="PhotoStudio.ToggleHUDInfo"
+					 parameter="fov" />
+				</check_box>
+				<check_box
+				 follows="left|top"
+				 layout="topleft"
+				 height="16"
+				 left="8"
+				 top_pad="8"
+				 width="300"
+				 label="Show camera position data"
+				 name="cam_show_position"
+				 tool_tip="Write the camera's and the avatar's positions and axes in the info overlay at the top left of the screen, for lining up shots, machinima and precise building. The same switch as Develop, Show Info, Camera.">
+					<check_box.commit_callback
+					 function="PhotoStudio.ToggleHUDInfo"
+					 parameter="camera" />
+				</check_box>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_pad="10"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_cammove_reset"
+				 tool_tip="Reset this section to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_cammove" />
+				</button>
+			</panel>
+		</accordion_tab>
+		<accordion_tab
+		 expanded="false"
+		 layout="topleft"
+		 height="140"
+		 name="atab_sec_cammouse"
+		 title="Mouselook"
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="111"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_cammouse">
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top="7"
+				 right="-32"
+				 height="18"
+				 label="Mouse sensitivity"
+				 label_width="140"
+				 decimal_digits="1"
+				 increment="0.1"
+				 min_val="0"
+				 max_val="15"
+				 can_edit_text="true"
+				 name="cam_mouse_sensitivity"
+				 tool_tip="How far the view turns for a given mouse movement in mouselook."
+				 control_name="MouseSensitivity" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="cam_mouse_sensitivity_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="MouseSensitivity" />
+				</button>
+				<check_box
+				 follows="left|top"
+				 layout="topleft"
+				 height="16"
+				 left="8"
+				 top_pad="10"
+				 width="300"
+				 label="Show avatar and attachments in mouselook"
+				 name="cam_first_person_avatar"
+				 tool_tip="Draw your body and attachments below the neck while in mouselook. Off by default."
+				 control_name="FirstPersonAvatarVisible" />
+				<check_box
+				 follows="left|top"
+				 layout="topleft"
+				 height="16"
+				 left="8"
+				 top_pad="8"
+				 width="300"
+				 label="Smooth mouselook movement"
+				 name="cam_mouse_smooth"
+				 tool_tip="Smooth out the mouse's motion in mouselook, at the cost of a little lag."
+				 control_name="MouseSmooth" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_pad="10"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_cammouse_reset"
+				 tool_tip="Reset this section to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_cammouse" />
+				</button>
+			</panel>
+		</accordion_tab>
+		<accordion_tab
+		 expanded="false"
+		 layout="topleft"
+		 height="161"
+		 name="atab_sec_cambehave"
+		 title="Camera Behavior"
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="132"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_cambehave">
+				<check_box
+				 follows="left|top"
+				 layout="topleft"
+				 height="16"
+				 left="8"
+				 top="8"
+				 width="340"
+				 label="Clicking your avatar keeps the camera where it is"
+				 name="cam_click_avatar_keeps"
+				 tool_tip="Normally clicking your own avatar brings the camera back behind you. With this on the camera stays put, so a framed shot survives a stray click."
+				 control_name="ClickOnAvatarKeepsCamera" />
+				<check_box
+				 follows="left|top"
+				 layout="topleft"
+				 height="16"
+				 left="8"
+				 top_pad="8"
+				 width="340"
+				 label="Reset the camera after a teleport"
+				 name="cam_reset_on_tp"
+				 tool_tip="Bring the camera back behind the avatar when a teleport lands. Untick to keep it where it was, relative to you."
+				 control_name="FSResetCameraOnTP" />
+				<check_box
+				 follows="left|top"
+				 layout="topleft"
+				 height="16"
+				 left="8"
+				 top_pad="8"
+				 width="340"
+				 label="Reset the camera when the avatar moves"
+				 name="cam_reset_on_move"
+				 tool_tip="Bring the camera back behind the avatar as soon as it walks, flies, jumps or is clicked somewhere to walk to. Untick to keep a camera you have placed while you move."
+				 control_name="SlipstreamMotionResetsCamera" />
+				<check_box
+				 follows="left|top"
+				 layout="topleft"
+				 height="16"
+				 left="8"
+				 top_pad="8"
+				 width="340"
+				 label="Allow camera to pass through prims"
+				 name="cam_ignore_sim_constraints"
+				 tool_tip="Ignore the push the region gives the camera to keep it out of objects, so it can go through walls and into buildings. Takes effect at once; no relog needed. Develop, Disable Camera Constraints goes further and also lifts the distance limits."
+				 control_name="FSIgnoreSimulatorCameraConstraints" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_pad="10"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_cambehave_reset"
+				 tool_tip="Reset this section to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_cambehave" />
+				</button>
+			</panel>
+		</accordion_tab>
+		<!-- The 3D mouse's switches, then (in Advanced) its per-axis feel.
+		     Choosing the device and mapping its axes stays in the Joystick
+		     floater, which the button here opens: a device cannot be picked
+		     from a checkbox. -->
+		<accordion_tab
+		 expanded="false"
+		 layout="topleft"
+		 height="211"
+		 name="atab_sec_camjoy"
+		 title="3D Mouse"
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="182"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_camjoy">
+				<check_box
+				 follows="left|top"
+				 layout="topleft"
+				 height="16"
+				 left="8"
+				 top="8"
+				 width="340"
+				 label="Enable 3D mouse"
+				 name="cam_joystick_enabled"
+				 tool_tip="Use a joystick or 3D mouse (such as a SpaceMouse) to drive the camera. Pick the device in the Joystick settings if it is not found on its own."
+				 control_name="JoystickEnabled" />
+				<check_box
+				 follows="left|top"
+				 layout="topleft"
+				 height="16"
+				 left="8"
+				 top_pad="8"
+				 width="340"
+				 label="Use the 3D mouse to move the avatar"
+				 name="cam_joystick_avatar"
+				 tool_tip="Let the 3D mouse walk and turn the avatar too, not only fly the camera."
+				 enabled_control="JoystickEnabled"
+				 control_name="JoystickAvatarEnabled" />
+				<check_box
+				 follows="left|top"
+				 layout="topleft"
+				 height="16"
+				 left="8"
+				 top_pad="8"
+				 width="340"
+				 label="Use the 3D mouse to move objects while building"
+				 name="cam_joystick_build"
+				 tool_tip="Let the 3D mouse move and rotate the selection while the build tools are open."
+				 enabled_control="JoystickEnabled"
+				 control_name="JoystickBuildEnabled" />
+				<check_box
+				 follows="left|top"
+				 layout="topleft"
+				 height="16"
+				 left="8"
+				 top_pad="8"
+				 width="340"
+				 label="Auto-level (no camera roll)"
+				 name="cam_auto_leveling"
+				 tool_tip="Keep the horizon level while flying, so the camera never rolls. While this is on the Roll row in 3D Mouse - Advanced does nothing."
+				 enabled_control="JoystickEnabled"
+				 control_name="AutoLeveling" />
+				<check_box
+				 follows="left|top"
+				 layout="topleft"
+				 height="16"
+				 left="8"
+				 top_pad="8"
+				 width="340"
+				 label="Zoom control (needs a zoom axis, below)"
+				 name="cam_zoom_direct"
+				 tool_tip="Let a 3D mouse axis set the field of view directly, so the zoom follows the axis and springs back with it. Needs Zoom axis set to the axis to use (4 on a SpaceMouse)."
+				 enabled_control="JoystickEnabled"
+				 control_name="ZoomDirect" />
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Zoom axis"
+				 label_width="140"
+				 decimal_digits="0"
+				 increment="1"
+				 min_val="-1"
+				 max_val="5"
+				 can_edit_text="true"
+				 name="cam_zoom_axis"
+				 tool_tip="Which device axis zooms: -1 for none, 0 to 5 for an axis. 4 is the usual choice on a SpaceMouse. The Joystick settings map the other axes."
+				 enabled_control="JoystickEnabled"
+				 control_name="JoystickAxis6" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="cam_zoom_axis_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="JoystickEnabled">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="JoystickAxis6" />
+				</button>
+				<!-- Floater.Toggle and not ToggleOrBringToFront: the latter only
+				     closes its target when that is not the frontmost floater, and
+				     pressing a button in Photo Studio makes Photo Studio frontmost,
+				     so it could never close the Joystick window again. -->
+				<button
+				 follows="left|top"
+				 layout="topleft"
+				 height="18"
+				 width="140"
+				 left="8"
+				 top_pad="10"
+				 label="Joystick settings..."
+				 name="cam_open_joystick"
+				 tool_tip="Open the Joystick settings: choose the device, map its axes and set the dead zones. Click again to close.">
+					<button.commit_callback
+					 function="Floater.Toggle"
+					 parameter="pref_joystick" />
+				</button>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_delta="0"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_camjoy_reset"
+				 tool_tip="Reset this section (including Advanced) to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_camjoy" />
+				</button>
+			</panel>
+		</accordion_tab>
+		<accordion_tab
+		 expanded="false"
+		 layout="topleft"
+		 height="272"
+		 name="atab_sec_camjoy_adv"
+		 title="3D Mouse - Advanced"
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="243"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_camjoy_adv">
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top="7"
+				 right="-32"
+				 height="18"
+				 label="Left / right"
+				 label_width="140"
+				 decimal_digits="3"
+				 increment="0.001"
+				 min_val="0"
+				 max_val="10"
+				 can_edit_text="true"
+				 name="cam_axis_lr"
+				 tool_tip="How fast the camera slides sideways for a push of the 3D mouse. Lower gives finer control."
+				 enabled_control="JoystickEnabled"
+				 control_name="FlycamAxisScale1" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="cam_axis_lr_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="JoystickEnabled">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="FlycamAxisScale1" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Up / down"
+				 label_width="140"
+				 decimal_digits="3"
+				 increment="0.001"
+				 min_val="0"
+				 max_val="10"
+				 can_edit_text="true"
+				 name="cam_axis_ud"
+				 tool_tip="How fast the camera rises and sinks. Lower gives finer control for small adjustments."
+				 enabled_control="JoystickEnabled"
+				 control_name="FlycamAxisScale2" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="cam_axis_ud_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="JoystickEnabled">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="FlycamAxisScale2" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="In / out (dolly)"
+				 label_width="140"
+				 decimal_digits="3"
+				 increment="0.001"
+				 min_val="0"
+				 max_val="10"
+				 can_edit_text="true"
+				 name="cam_axis_io"
+				 tool_tip="How fast the camera moves forward and back. This is a dolly: the camera itself travels, which changes perspective, where a zoom only narrows the field of view. Lower is gentler, for slow push-ins."
+				 enabled_control="JoystickEnabled"
+				 control_name="FlycamAxisScale0" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="cam_axis_io_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="JoystickEnabled">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="FlycamAxisScale0" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Pitch"
+				 label_width="140"
+				 decimal_digits="3"
+				 increment="0.001"
+				 min_val="0"
+				 max_val="2"
+				 can_edit_text="true"
+				 name="cam_axis_pitch"
+				 tool_tip="How fast the camera tilts up and down. Lower makes tilts more gradual."
+				 enabled_control="JoystickEnabled"
+				 control_name="FlycamAxisScale4" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="cam_axis_pitch_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="JoystickEnabled">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="FlycamAxisScale4" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Yaw"
+				 label_width="140"
+				 decimal_digits="3"
+				 increment="0.001"
+				 min_val="0"
+				 max_val="2"
+				 can_edit_text="true"
+				 name="cam_axis_yaw"
+				 tool_tip="How fast the camera turns left and right. Lower slows the turn, for precise framing."
+				 enabled_control="JoystickEnabled"
+				 control_name="FlycamAxisScale5" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="cam_axis_yaw_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="JoystickEnabled">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="FlycamAxisScale5" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Roll"
+				 label_width="140"
+				 decimal_digits="3"
+				 increment="0.001"
+				 min_val="0"
+				 max_val="2"
+				 can_edit_text="true"
+				 name="cam_axis_roll"
+				 tool_tip="How fast the camera rolls, tipping the horizon sideways. Does nothing while Auto-level is on, which holds the horizon flat."
+				 enabled_control="JoystickEnabled"
+				 control_name="FlycamAxisScale3" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="cam_axis_roll_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="JoystickEnabled">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="FlycamAxisScale3" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Zoom"
+				 label_width="140"
+				 decimal_digits="3"
+				 increment="0.001"
+				 min_val="0"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="cam_axis_zoom"
+				 tool_tip="With Zoom control on, the field of view (in radians, added to the axis's own reading) the zoom axis rests at, so it sets where the zoom range sits rather than how fast it moves. With Zoom control off it is the zoom axis's dead zone. Only matters once Zoom axis is set."
+				 enabled_control="JoystickEnabled"
+				 control_name="FlycamAxisDeadZone6" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="cam_axis_zoom_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="JoystickEnabled">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="FlycamAxisDeadZone6" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Feathering"
+				 label_width="140"
+				 decimal_digits="1"
+				 increment="0.5"
+				 min_val="0"
+				 max_val="100"
+				 can_edit_text="true"
+				 name="cam_feathering"
+				 tool_tip="How directly the camera follows the 3D mouse. Higher is rigid and immediate; lower lets the camera drift on with inertia, for smooth fly-bys."
+				 enabled_control="JoystickEnabled"
+				 control_name="FlycamFeathering" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="cam_feathering_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="JoystickEnabled">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="FlycamFeathering" />
+				</button>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_pad="10"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_camjoy_adv_reset"
+				 tool_tip="Reset the 3D mouse sensitivity settings to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_camjoy_adv" />
+				</button>
+			</panel>
+		</accordion_tab>
+	</accordion>
+</panel>

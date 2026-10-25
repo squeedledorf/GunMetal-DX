@@ -1,0 +1,2407 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+#include "clean_av_slots.glsl"
+// vkclean -- CLUSTER LOD ray tracing (#748, OWNER: 2b; vkgfx/llcleanclusterrtvk.cpp).
+//
+// The RT cut of every cluster-drawn instance and the GPU side of the cluster acceleration
+// structures. Set 0 = the cluster set (clean_cluster_common.glsl, read only here except the
+// page-usage stamps); set 1 = this module's set (bindings below). One pipeline, modes
+// (push .mode), dispatched in this order by LLCleanClusterRTVK::record with barriers between:
+//
+//   0 SELECT       one 64-lane workgroup per ClusterInstance (1b's list of this frame). The
+//                  instance takes part only when the cluster raster draws it for real
+//                  (1b's CLI1B_DRAW). STATIC: its RT cut is THE cut rule (clCutRenders) at
+//                  RenderVKClusterRTTolerancePx, evaluated from a per-instance REFERENCE
+//                  CAMERA (hysteresis, below), never frustum- or occlusion-culled (off-screen
+//                  casters), cone test off. RIGGED (an avatar 2a switched; RIGGED below): the
+//                  cut rule with the MAIN VIEW's projection (its ClusterView: LOD camera,
+//                  px_scale, tolerance) and the posed-bound margin, un-culled. The cut is
+//                  written to the cut arena (contiguous per instance) with an
+//                  order-independent hash; CLAS tiers also ask for the CLAS of every page
+//                  whose clusters have none yet (static) / add the cut to its AVATAR's demand
+//                  for the RT skinned arena (rigged: modes 13 / 14 hand out the slots).
+//                  STATIC ADMISSION (RP_STATIC / RP_STATIC_MIN): only static instances whose
+//                  importance (world sphere radius / distance) passes the CPU's threshold take
+//                  part (an admitted one keeps its place down to 0.7 x it); the threshold rises
+//                  while the CLAS pages the admitted cuts use do not fit the arena, so an
+//                  instance that could not become ready pays no selection (legacy BLAS).
+//                  STATIC CUT REUSE (pc.rt_flags): an admitted instance whose reference camera
+//                  did not move and whose previous-frame cut (the other cut arena, binding 32)
+//                  is still resident page for page copies that cut instead of walking its pages
+//                  (the same cut by construction: the same projection, the same residency);
+//                  every 32nd frame per instance it walks anyway (pages of finer children that
+//                  became resident since).
+//   1 CLAS_SCAN    (CLAS tiers) one lane per pool slot: a CLAS page whose pool slot now holds
+//                  another page (header mesh_key / page_index) or that no RT cut used for
+//                  pc.idle_frames is freed (its CLAS slot back on the free stack).
+//   2 CLAS_ALLOC   (CLAS tiers) one lane per wanted pool slot (<= pc.clas_pages_max): pop a CLAS
+//                  slot, write one VkClusterAccelerationStructureBuildTriangleClusterInfoNV per
+//                  cluster of the page (+ its explicit destination and size).
+//   3 CLAS_DECODE  (CLAS tiers) one workgroup per build arg: the cluster's quantized vertices
+//                  (pool QVertex, clean_qvertex.glsl) -> fp32 mesh-space positions, the CLAS
+//                  build's vertex input (CLAS have no build transform, so the BLAS space is the
+//                  mesh space and the TLAS record keeps the instance's own transform).
+//   4 BLAS_ARGS    (CLAS tiers) one workgroup per ClusterInstance: the CLAS addresses of its cut
+//                  (all must exist) -> one VkClusterAccelerationStructureBuildClustersBottomLevelInfoNV
+//                  (rigged: this frame's implicit build). STATIC (SC_SB_ON): its PERSISTENT BLAS
+//                  is kept while the cut and its CLAS are unchanged, else rebuilt into a heap block
+//                  (explicit destinations; blasArgs below).
+//   5 OVERRIDE     one workgroup per ClusterInstance (CLAS tiers: its BLAS built / kept) or
+//                  per CPU row (tier 0: newest / previous per-cut BLAS, each valid only while
+//                  every page of its cut is resident): the per-instance-id override row that
+//                  TLAS pass A (clean_rt_instances.comp binding 22) swaps in for the legacy BLAS.
+//   6 T0_EXPAND    (tier 0) one workgroup per CPU job (= one cluster of a per-cut BLAS build):
+//                  fp32 positions + uint16 indices (KHR builds take no uint8 indices) into the
+//                  transient build input, validated against the page table (a page evicted
+//                  since the cut was read back -> degenerate triangles, the build flagged invalid).
+//   7 PTLAS_DIFF   (tier 2) one lane per PTLAS instance (= TLAS record id): records that changed
+//                  since the last write -> VkPartitionedAccelerationStructureWriteInstanceDataNV ops
+//                  (also built alone, -DCL_RT_PTLAS_ONLY, for sessions whose TLAS is partitioned).
+//   8 INIT_STACK   (CLAS tiers) the CLAS slot free stack after (re)allocation.
+//  20 CLAS_GROW    (CLAS tiers) the CLAS pages of the arena chunks added this frame -> the free
+//                  stack (the arena grows chunk by chunk; nothing already built moves).
+//  21 SB_FREE      (CLAS tiers) the persistent static BLAS blocks freed this frame -> their class
+//                  stacks (after mode 4's allocations: a pop never races a push).
+//  22 SB_SWEEP     (CLAS tiers, every 16 frames, before mode 4) blocks of instances that neither
+//                  built nor traced them for 120 frames -> freed (free on liveness).
+//   9 RIG_SKIN     one workgroup per slot of the RT SKINNED ARENA (CLAS tiers: the slots mode 0
+//                  handed out this frame; tier 0: the CPU's job list over every live per-cut
+//                  BLAS): the cluster's vertices skinned EXACTLY as 2a's cluster pre-skin
+//                  (clean_cluster_preskin.comp; the legacy pre-skin's math) from this frame's
+//                  palettes, eye-relative, into the arena (position + skinned normal); CLAS
+//                  tiers write the slot's CLAS build argument (vertex stride 16, the pool's
+//                  uint8 indices, geometry index = the entry k within the instance's cut);
+//                  tier 0 validates the slot's page (evicted: the slot collapses to one point,
+//                  the row is not used this frame) and, on a build frame, writes its uint16
+//                  indices.
+//  10 RIG_OVR_T0   (tier 0) one lane per CPU rig row: the override row of a rigged instance
+//                  whose per-cut BLAS is valid this frame.
+//  13 RIG_ADMIT    (CLAS tiers) one lane: the RT skinned arena handed out PER AVATAR, whole or
+//                  not at all (last frame's admitted avatars first, then joint-table slot order;
+//                  mode 0's per-avatar demand): an avatar
+//                  that does not fit gets no slot -- its switched groups keep the legacy BLAS
+//                  and no CLAS is built for them -- while every avatar that fits is covered
+//                  completely (LLCleanRTVK::clusterRigCovered: the legacy-skin skip is per avatar).
+//  14 RIG_PLACE    (CLAS tiers) one workgroup per ClusterInstance: a rigged instance of an
+//                  admitted avatar takes its contiguous slot range within the avatar's, decides
+//                  the shared skinned cut (mode 11's count + hash) and writes its own-skinning
+//                  slot headers from the cut arena.
+//
+// #748 perf pass 2 (rigged):
+//  * DERIVED RT CUT: a rigged instance whose avatar is in a rig list (1b's main selection took its
+//    whole un-culled cut at the main view's projection -- THE rule mode 0 would evaluate) with no
+//    overflow anywhere (main slice, 2a's skinned arena / map) takes that cut as its RT cut: mode
+//    11's count, hashes and triangles; mode 12 writes its cut entries. No page walk (the walk was
+//    ~0.6 ms for 39 avatars repeating the main selection). Anything else walks as before.
+//  * PERSISTENT RIGGED CLAS (explicit destinations, one per arena slot): an avatar is KEPT --
+//    no skinning copy, no CLAS build, its slots / headers / vertices / CLAS untouched -- when the
+//    CPU proved its skinned WORLD positions unchanged since the last RT frame (RP_STILL: the GPU
+//    pose held and the root still, LLCleanAnimStore::slotWorldClean, skin meta clean), its
+//    per-avatar signature (each instance's ri, cut size + hashes, shared flag) equals the one its
+//    slots were built with, it was admitted last frame at the same range, and the host's keep
+//    flag holds (RP_KEEP: arenas not re-created, RT origin unchanged, no frame gap). Positions are
+//    relative to the RT ORIGIN (RP_ORIGIN, moved only when the eye gets kRigOriginMove away), not
+//    the per-frame eye, so a camera move alone never forces a rebuild; the TLAS record translates
+//    by that origin (clean_rt_instances.comp, group map words 4..7). Shared slots now COPY 2a's
+//    SKIN_OUT vertices into the RT arena (+ eye - origin): hits always read the RT arena.
+//
+// #1008 RIGGED RT CADENCE (RP_SCHED bit 0; RenderVKClusterRTRigCadence, 0 = everything above as
+// it was). The RT cut of an avatar and its CLAS are decoupled from the raster's per-frame cut --
+// ONLY for an avatar that never self-shadows in RT (RP_NOSELF: LLCleanRTVK::classifyNoSelf's
+// tag, with its hysteresis and dwell; its TLAS records carry the owner tag, so its receivers skip
+// its own geometry -- clean_rt_common.glsl rtSelfCandidate -- on every frame). Every other avatar
+// (and every rigged instance without a joint-table slot: animesh, row 256) stays in the near band
+// on the exact path, every frame. (The first cut let untagged avatars go coarse / stale: their
+// receivers met their own stale or coarser copy on kept frames and the exact one on rebuild
+// frames -- self-shadow patches flickering with the period. The tag makes the self-shadow state
+// constant while the geometry ages.) The coarse cut's error is also capped at RIG_COARSE_MAX_M
+// past the raster's, inside the receiver-identity probe's window (RT_SELF_PROBE_W), so a tagged
+// receiver still finds its own (coarse) surface and skips it:
+//  * BANDS: mode 0 folds each rigged instance's distance into its avatar's row (RIGAV_DIST, the
+//    nearest), mode 13 turns it into the avatar's distance BAND (near / mid / far, RP_BAND_M, a
+//    10 % dead band) for the next frame. Per band: a selection PERIOD (RP_PERIOD) and an RT
+//    tolerance MULTIPLIER (RP_TOLMUL) over the main view's tolerance -- near = 1 by default: the
+//    near band is the path above exactly (derived cut, shared welded skinning, caster =
+//    receiver); mid / far trace a coarser cut (fewer clusters, own skinning, unwelded) whose
+//    self-shadow mismatch is the multiplier x the raster's error -- small on screen at those
+//    distances, and not covered by the #747 receiver lift.
+//  * DUE (rigDue, the same answer in modes 0 and 13: last frame's band, admission and selection
+//    frame): an avatar re-selects its cut on its band's period, staggered by joint-table slot,
+//    and always on arrival (not covered last frame), with no joint-table slot, on a forced frame
+//    (RP_SCHED bit 1: the RT origin moved -- teleport / region crossing --, an arena re-created,
+//    a frame gap) and when its period elapsed. A NOT-DUE instance copies its previous cut
+//    forward from the other cut arena (st[ri][5], validated page for page as the static reuse;
+//    a page gone, a new instance or mesh -> it walks). Its avatar's signature is then unchanged,
+//    so mode 13 KEEPS it (RP_KEEP bit 1): no headers, no skinning, no CLAS build -- the RT pose
+//    lags by at most the period (<= RP_MAX_STALE frames).
+//  * REFRESH (mode 13, RIGAV_KEEP 2): a DUE mid / far avatar whose new cut is the same set
+//    (signature) at the same arena range keeps its slots and headers (mode 14 only rewrites the
+//    slot's ClusterInstance and stamps it with bit 31); mode 9 skins the slot, compares with the
+//    positions its CLAS was built from (the arena's) and rebuilds it only when a vertex moved
+//    more than RP_POSE_EPS x the cut's own error at that distance, or the slot's CLAS is
+//    RP_MAX_STALE frames old (per-slot build frame: rig_addr[cap * 4 + s]). Skipped slots keep
+//    their CLAS, vertices and header -- a CLAS and the arena words hits read are only ever
+//    written together (mode 9, the same record), so a hit always shades the geometry it hit.
+//
+// #1011 RT BOOKKEEPING + CLAS REUSE (RP_RANK / RP_REUSE; RenderVKClusterRTRigRank / RigReuse, live
+// A/Bs, 0 = everything above as it was). Measured at an 87-avatar party: every rigged RT cut was
+// already DERIVED (no page walk), yet c_cl_rt_select was 2.4 ms -- plumbing, not selection -- and
+// ~90k rigged CLAS (7.6M triangles) were rebuilt per frame (c_cl_rig_clas 2.2 ms):
+//  * RANKED SHARED CUT (RP_RANK bit 0): the main view's selection writes each shared instance's
+//    count / hashes / triangles (CL_B_INST_CUT) and ranks its entries (aux word,
+//    clean_cluster_select_common.glsl RT CUT SUMMARY). While that summary is valid (rigRankOk: the
+//    main slice and 2a's map complete -- no entry without a skinned slot) mode 11 only marks an
+//    instance with an unskinned entry anyway (a plain store, no atomics: per-instance insurance);
+//    mode 12 scatters by RANK instead of an atomic per entry, so an unchanged cut lands in the same
+//    slots every frame. 2a's overflow frames fall back to mode 11's gather and the atomic order.
+//    Mode 13 runs on the whole workgroup (rigAdmitPar: per-avatar reads / writes in parallel, the
+//    first fit on shared memory), not one lane over 257 rows of global memory.
+//  * CLAS REUSE (RP_REUSE bit 0, RP_KEEP bit 2): a due avatar whose cut set and range are its last
+//    frame's is REFRESHED (RIGAV_KEEP 2; before, only #1008's tagged mid / far avatars): its slots
+//    stay, and with the ranked cut its instances keep the SHARED skinned cut (skin once -- the
+//    refresh no longer forces own skinning). Mode 12 stamps a slot that holds the same cluster at
+//    the same entry as the CLAS it already has (RIG_STAMP_REFRESH); mode 9 copies 2a's vertices,
+//    compares them with the ones that CLAS was built from (the arena's) and rebuilds it only past
+//    the avatar's tolerance (rigRefreshBuild): a SELF-SHADOWING avatar RP_REUSE_EPS (default 20 um:
+//    float noise -- below the raster-vs-RT mismatch the eye-relative paths already have, so its
+//    receivers never see a stale hull of their own); a NO-SELF-SHADOW avatar (RP_NOSELF) RP_REUSE_LAG
+//    x the cut's error at its distance, capped at RIG_COARSE_MAX_M, at most RP_MAX_STALE frames old.
+//    A skipped slot writes nothing (its CLAS, vertices and header ref stay one snapshot).
+//
+// RIGGED (#747 + #748 integration: avatars 2a switched to the cluster raster). The RT cut of a
+// rigged instance uses the MAIN VIEW's projection (cl_views[main view]: its lagged LOD camera,
+// held px_scale and post-controller tolerance -- RP_MAIN_VIEW) and the same posed-bound margin
+// (clRigMargin) as 1b's main selection, but no frustum / cone / Hi-Z test: over the clusters the
+// raster draws it is the SAME cut (the cut rule is per group and culling never changes it), and
+// off-screen limbs get the cut the same rule gives them. Skinned with the same math and palettes,
+// the traced surface is the rasterized one (no self-shadowing between two LODs of one avatar;
+// the #747 interim receiver lift then finds no flagged face and stays off). Positions are
+// eye-relative (the palettes' eye): the TLAS record of such an instance is a pure translation by
+// that eye (clean_rt_instances.comp pass B).
+//
+// HYSTERESIS (RenderVKClusterRTHysteresis): the RT cut of an instance is a function of one
+// reference camera position, kept per renderer instance id relative to the instance's
+// translation (moving prims re-evaluate as their distance changes). It moves to the live
+// camera only when the live camera is farther than hyst * (distance to the mesh sphere) from
+// it, or the mesh changed. One reference per instance for every group keeps the cut watertight
+// (one consistent projection per instance), and the projected error it evaluates is within a
+// factor 1 / (1 - hyst) of the live one -- the RT cut changes far less often than the raster
+// cut (which follows the live camera every frame).
+//
+// Method: published material only -- the cut rule of the SIGGRAPH 2021 Nanite talk (through
+// the shared clean_cluster_common.glsl), the VK_NV_cluster_acceleration_structure /
+// VK_NV_partitioned_acceleration_structure specifications (indirect build argument layouts).
+layout(local_size_x = 64) in;
+
+#define CLUSTER_SET 0
+#define CL_DECLARE_POOL
+#define CL_DECLARE_PAGE_TABLE
+#define CL_DECLARE_MESHES
+#define CL_DECLARE_GROUPS
+#define CL_DECLARE_PAGE_USAGE
+#define CL_DECLARE_INSTANCES
+#define CL_DECLARE_STATS
+#define CL_DECLARE_JOINT_STRETCH
+#include "clean_cluster_common.glsl"
+// 1b's views (+ the selection tail: the shared rig cut), the main view's selected slice and its
+// counters (read only: the shared skinned cut, RIGGED below).
+#define CL_DECLARE_INST_CUT   // (#1011: the main view's per-instance cut summary)
+#include "clean_cluster_select_common.glsl"
+#include "clean_qvertex.glsl"
+// 2a (#747): the rigged instances' posed-bound margins (clRigMargin), as 1b's main selection.
+#define CL_DECLARE_SKIN_SCRATCH
+#include "clean_cluster_skin_common.glsl"
+#include "clean_skinvert.glsl"   // svPackNormal
+
+// = LLCleanClusterSelectVK::kInstDraw (1b-private ClusterInstance flag: drawn for real).
+#define CLI1B_DRAW_RT 1024u
+
+// ---- set 1: this module (LLCleanClusterRTVK, the same binding numbers) ----------------------
+// Per renderer instance id (ST_STRIDE uvec4): hysteresis state. [0] reference camera relative to
+// the instance translation, mesh; [1] mesh generation (0 = none), frame last selected, last hash
+// (2 words); [2] STATIC CUT REUSE: its last cut's base in that frame's cut arena, its count
+// (CL_NONE = none), the cut epoch it was written in, the frame it was last admitted.
+// [3] / [4] PERSISTENT STATIC BLAS (mode 4): [3] the cut hash it was built from, mesh, mesh
+// generation, 0; [4] the frame it was built, heap epoch (0 = none), block | class << 24, the
+// frame its override row was last written (flip stats). [5] #1008 RIGGED CUT REUSE: its last
+// cut's base in that frame's cut arena, its count (CL_NONE = none), the cut epoch it was written
+// in, 0 (rigged instances only; [3] / [4] stay the static heap's).
+layout(std430, set = 1, binding = 0) buffer RtClState { uvec4 st[]; };
+#define ST_STRIDE 6u
+// Per ClusterInstance (this frame): ri, cut base, cut count (kNone = none), tris, hash a, hash b,
+// mesh, mesh generation.
+layout(std430, set = 1, binding = 1) buffer RtClInst { uvec4 clinst[]; };       // 2 per row
+// Cut arena: {cluster ref, virtual page, tris, 0}.
+layout(std430, set = 1, binding = 2) buffer RtClCut { uvec4 cut[]; };
+// Override rows per renderer instance id (pass A binding 22): BLAS address lo, hi, cut base,
+// first vertex of the cut's first cluster | 0x80000000 when the geometry index IS the ref.
+layout(std430, set = 1, binding = 3) buffer RtClOvr { uvec4 ovr[]; };
+// Counters (zeroed every frame; offsets = LLCleanClusterRTVK::kCnt*).
+layout(std430, set = 1, binding = 4) coherent buffer RtClCnt { uint cnt[]; };
+// CLAS page per pool slot: {CLAS slot (kNone), header mesh_key, header page_index, last use}.
+layout(std430, set = 1, binding = 5) buffer RtClasOfSlot { uvec4 clas_of_slot[]; };
+// Free stack of CLAS slots: [0] top, [1 + i] entries.
+layout(std430, set = 1, binding = 6) coherent buffer RtClasFree { uint clas_free[]; };
+// Pool slots wanting a CLAS page this frame: [0..] slots (count = cnt[CNT_WANT]); + a stamp per
+// pool slot at clas_want_stamp.
+layout(std430, set = 1, binding = 7) buffer RtClasWant { uint clas_want[]; };
+layout(std430, set = 1, binding = 8) buffer RtClasStamp { uint clas_want_stamp[]; };
+// CLAS build: args (16 words each), explicit destination addresses (uvec2), sizes (uint).
+layout(std430, set = 1, binding = 9) buffer RtClasArgs { uint clas_args[]; };
+layout(std430, set = 1, binding = 10) buffer RtClasDst { uvec2 clas_dst[]; };
+layout(std430, set = 1, binding = 11) buffer RtClasSize { uint clas_size[]; };
+// Decoded positions: 64 x vec3 per build arg (CLAS) / per tier-0 job vertex range.
+layout(std430, set = 1, binding = 12) buffer RtClDecode { float dec[]; };
+// Cluster BLAS: per cut-arena entry its CLAS address (uvec2); infos (4 words); per info the
+// built address (implicit destinations, written by the build); per ClusterInstance its info.
+// Three regions of blas_max each in blas_info / blas_addr: this frame's implicit build, the
+// persistent static build's (explicit destinations: blas_addr = the heap block), and (blas_addr
+// only) the static build's sizes {bytes, 0}.
+layout(std430, set = 1, binding = 13) buffer RtClClasRefs { uvec2 clas_refs[]; };
+layout(std430, set = 1, binding = 14) buffer RtClBlasInfo { uint blas_info[]; };
+layout(std430, set = 1, binding = 15) buffer RtClBlasAddr { uvec2 blas_addr[]; };
+layout(std430, set = 1, binding = 16) buffer RtClBlasOf { uint blas_of[]; };
+// Tier 0: jobs (8 words), rows (16 words), uint16 index output, persistent hit cut table
+// ({ref, vpage, 0, 0} per entry of every live per-cut BLAS), validity words per build.
+layout(std430, set = 1, binding = 17) readonly buffer RtClT0Jobs { uvec4 t0_jobs[]; };   // 2 per job
+layout(std430, set = 1, binding = 18) readonly buffer RtClT0Rows { uvec4 t0_rows[]; };   // 4 per row
+layout(std430, set = 1, binding = 19) buffer RtClT0Idx { uint t0_idx[]; };
+layout(std430, set = 1, binding = 20) readonly buffer RtClHitCut { uvec4 hit_cut[]; };
+layout(std430, set = 1, binding = 21) coherent buffer RtClT0Valid { uint t0_valid[]; };
+// Tier 2: the TLAS records (pass A / B output, 16 words each), their last written copy, the
+// write-instance ops (26 words each) and the indirect command {opType, argCount, addr lo, hi,
+// stride lo, hi}.
+layout(std430, set = 1, binding = 22) readonly buffer RtClTlas { uvec4 tlas_rec[]; };     // 4 per record
+layout(std430, set = 1, binding = 23) buffer RtClTlasPrev { uvec4 tlas_prev[]; };         // 4 per record
+layout(std430, set = 1, binding = 24) buffer RtClPtlasOps { uint ptlas_ops[]; };
+layout(std430, set = 1, binding = 25) coherent buffer RtClPtlasCmd { uint ptlas_cmd[]; };
+// ---- RIGGED (bindings 26..31; LLCleanClusterRTVK "RIGGED") ----
+// The RT SKINNED ARENA (also the RT consumer set's binding 13, clean_rt_common.glsl):
+//   [0] first word of the vertex region, [1] first word of the index region (tier 0), [2..15] 0;
+//   [RIG_HDR_BASE + s*4, +4) slot s: {cluster ref, virtual page, k | tris << 16, ClusterInstance}
+//                            (k = the entry within its instance's cut = the geometry index);
+//   [vertex region + (s*64 + l)*4, +4) vertex l of slot s: eye-relative skinned position (fp32
+//                            bits, the AS build input, stride 16) + the skinned normal (octahedral);
+//   [index region + s*192, +192) tier 0: the slot's uint16 local indices (KHR builds take no
+//                            uint8; written on its BLAS's build frame, kept for the refits).
+layout(std430, set = 1, binding = 26) coherent buffer RtClRig { uint rig[]; };
+// Per ClusterInstance (CLAS tiers), 8 words (zeroed every frame): its first arena slot this
+// frame (CL_NONE = none), the main slice's skinned entries of it (mode 11), the scatter counter
+// (mode 12), 1 = its slots take the SHARED skinned cut, the entries' order-independent ref hash
+// (mode 11; = mode 0's cut hash s_ha when the sets are equal), the second hash (= s_hb), their
+// triangles, 1 = its RT cut was DERIVED from the shared cut (mode 12 writes its cut entries).
+layout(std430, set = 1, binding = 27) coherent buffer RtClRigOf { uint rig_of[]; };
+#define RIGOF_S0      0u
+#define RIGOF_GATHER  1u
+#define RIGOF_FILL    2u
+#define RIGOF_SHARED  3u
+#define RIGOF_HASH    4u
+#define RIGOF_HASHB   5u
+#define RIGOF_TRIS    6u
+#define RIGOF_DERIVED 7u
+#define RIG_HDR_SHARED 0x80000000u   // header word 3: the slot's vertices are 2a's SKIN_OUT slot (word 1)
+// The renderer's skin palettes (= clean_preskin.comp / clean_cluster_preskin.comp SkinBlock).
+#define MAX_JOINTS 110
+struct SkinBlock {
+    mat3x4 matrices[MAX_JOINTS];   // 48 B each
+    mat4   bind_shape;             // 64 B
+};
+layout(std430, set = 1, binding = 28) readonly buffer RtClPal { SkinBlock skins[]; };
+// CLAS tiers: the rigged CLAS build arguments (16 words per BUILT slot, compacted: CNT_RIG_ARGS)
+// and (binding 30, RP_RIG_CAP = cap) per argument its explicit destination (2 words at a * 2), its
+// built size (cap * 2 + a, written by the build), then per SLOT its build stamp (cap * 3 + s: the
+// RP_STAMP of the frame that last wrote its header; = this frame's -> build it; bit 31 = #1008
+// REFRESH: build it only if its pose moved), then per SLOT the frame its CLAS was last built
+// (cap * 4 + s; 0 = none). A slot's CLAS lives at RP_CLAS_BASE + s * RP_CLAS_STRIDE for as long
+// as its avatar keeps the range.
+layout(std430, set = 1, binding = 29) buffer RtClRigArgs { uint rig_args[]; };
+layout(std430, set = 1, binding = 30) buffer RtClRigAddr { uint rig_addr[]; };
+// 2a's SKIN_OUT (RP_SKIN_ADDR, the shared slots' vertex source: SkinVertex, 5 words).
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer SkinOutRef { uint w[]; };
+// Host-written per frame slot (GPU writes the rows' validity words): parameters (RP_*), then the
+// tier-0 rig rows (8 words: ri, ClusterInstance, first slot, slots, flags (1 = build frame), BLAS
+// lo, hi, valid (host 1, GPU clears)), then the tier-0 skin jobs (2 words: row, k).
+layout(std430, set = 1, binding = 31) coherent buffer RtClRigCpu { uint rcpu[]; };
+// The PREVIOUS frame's cut arena (static cut reuse; the two arenas alternate per cut epoch).
+layout(std430, set = 1, binding = 32) readonly buffer RtClCutPrev { uvec4 cut_prev[]; };
+// ---- STATIC (#748 static pass; LLCleanClusterRTVK "STATIC") ----
+// Host-written per frame slot: the CLAS arena's CHUNK TABLE (the arena grows chunk by chunk:
+// no re-creation, no CLAS lost when it grows) and the persistent static cluster BLAS heap's
+// parameters (SC_*; = LLCleanClusterRTVK::kSc*).
+layout(std430, set = 1, binding = 33) readonly buffer RtClStaticCpu { uint scpu[]; };
+#define SC_CHUNK_PAGES  0u    // CLAS pages per chunk
+#define SC_CHUNKS       1u    // chunks (their bases at SC_CHUNK_BASE)
+#define SC_SB_ON        2u    // 1 = static instances keep PERSISTENT cluster BLAS (explicit destinations)
+#define SC_SB_EPOCH     3u    // heap epoch (a BLAS of another epoch is gone: rebuilt)
+#define SC_SB_ADDR      4u    // 2 words: device address of the heap's first unit
+#define SC_SB_UNITS     6u    // heap capacity (units)
+#define SC_SB_UNIT      7u    // bytes per unit
+#define SC_SB_CLASSES   8u    // size classes
+#define SC_STACK_CAP    9u    // free blocks per class stack
+#define SC_PEND_CAP    10u    // pending frees per frame
+#define SC_OFF_BUILT   11u    // sb[] word of the CLAS build stamps (one per CLAS page)
+#define SC_OFF_STACKS  12u    // sb[] word of the class stacks
+#define SC_CLASS_UNITS 16u    // [classes] units of a BLAS of the class
+#define SC_CLASS_COUNT 48u    // [classes] clusters a BLAS of the class holds at most
+#define SC_CHUNK_BASE  80u    // [2 x chunks] chunk base addresses (lo, hi)
+// Persistent bookkeeping (device, kept across frames; header zeroed with each new heap epoch):
+//   [0] bump (units), [1] the last frame any CLAS page was freed, [2..3] 0, [4 + c] class c's
+//   free-stack top, [SB_PEND + 2i] this frame's pending frees {block, class} (mode 21 pushes them),
+//   [scpu[SC_OFF_BUILT] + cs] the frame CLAS page cs was (re)built, [scpu[SC_OFF_STACKS] + c *
+//   stack_cap + i] class c's free blocks.
+layout(std430, set = 1, binding = 34) coherent buffer RtClStaticHeap { uint sb[]; };
+// ---- SPATIAL PTLAS PARTITIONS (tier 2, RenderVKClusterPTLASPartition 1; host mPtlasPart) ----
+// [0, P) instances in regular partition p, [P] instances in the GLOBAL partition, then per instance
+// id (the dense TLAS record id) its partition [P + 1 + id] (P = global, CL_NONE = never written since
+// the PTLAS was created). Host-filled (0 / CL_NONE) whenever the PTLAS is (re)created (full write).
+layout(std430, set = 1, binding = 35) coherent buffer RtClPtlasPart { uint ppart[]; };
+#define SB_BUMP      0u
+#define SB_LAST_FREE 1u
+#define SB_TOPS      4u
+#define SB_PEND      64u
+#define BLAS_SB      0x80000000u   // blas_of[]: a static instance's persistent BLAS (st[ri * ST_STRIDE + 4u])
+#define RP_RIG_ON      0u    // 1 = rigged instances take part this frame
+#define RP_MAIN_VIEW   1u    // the main view's cluster view index (its projection = the rigged cut's)
+#define RP_RIG_BOUNDS  2u    // 1 = this frame's posed-bound margins exist (= SelectPush.rig_bounds)
+#define RP_RIG_CAP     3u    // arena slots
+#define RP_VTX_BASE    4u    // = rig[0]
+#define RP_IDX_BASE    5u    // = rig[1]
+#define RP_VTX_ADDR    6u    // 2 words: device address of the vertex region
+#define RP_SKIN_COUNT  8u    // live palettes
+#define RP_T0_ROWS     9u
+#define RP_T0_JOBS    10u
+#define RP_SHARED     11u    // CLAS tiers: 1 = the main view's shared skinned cut is usable this frame
+#define RP_EYE        12u    // 3 words: the palettes' eye (float bits)
+#define RP_ROWS_BASE  16u
+#define RP_JOBS_BASE  17u
+#define RP_SKIN_ADDR  18u    // 2 words: device address of 2a's SKIN_OUT (the shared cut's vertices)
+#define RP_AV_BASE    20u    // CLAS tiers: first rig_of word of the per-avatar table (RIGAV_*)
+#define RP_STATIC     21u    // bit 0: static instances take part (RenderVKClusterRTStatic)
+#define RP_STATIC_MIN 22u    // float bits: static admission threshold (importance; 0 = all)
+#define RP_KEEP       23u    // CLAS tiers: bit 0 = avatars may be KEPT this frame (header, #748 perf pass 2)
+#define RP_ORIGIN     24u    // 3 words: the RT origin the arena's positions are relative to (float bits)
+#define RP_STAMP      27u    // this record's build stamp (never 0, never repeated)
+#define RP_CLAS_BASE  28u    // 2 words: device address of slot 0's CLAS (explicit destinations)
+#define RP_CLAS_STRIDE 30u   // bytes per slot CLAS
+// #1008 RIGGED RT CADENCE (header)
+#define RP_SCHED      32u    // bit 0: cadence on; bit 1: every avatar due this frame (forced)
+#define RP_PERIOD     33u    // [3] selection period per band (frames, >= 1)
+#define RP_TOLMUL     36u    // [3] float bits: RT tolerance multiplier per band (x the main view's)
+#define RP_BAND_M     39u    // [2] float bits: near / far band edges (m)
+#define RP_MAX_STALE  41u    // frames a REFRESH slot's CLAS may age before it is rebuilt anyway
+#define RP_POSE_EPS   42u    // float bits: REFRESH rebuild threshold, x the cut's error (m) at the slot's distance
+// #1011 (header): bit 0 = the RANKED SHARED CUT (the selection's summary + ranks are written this frame)
+#define RP_RANK       43u
+#define RP_REUSE      44u    // bit 0 = CLAS REUSE (refreshed shared slots compared before their CLAS is rebuilt)
+#define RP_REUSE_EPS  45u    // float bits: a self-shadowing avatar's reuse tolerance (m)
+#define RP_REUSE_LAG  46u    // float bits: a no-self-shadow avatar's, x the cut's error (m) at its distance
+#define RP_STAMP_MASK 0x7FFFFFFFu   // RP_STAMP fits 31 bits; slot stamp bit 31 = REFRESH
+#define RIG_STAMP_REFRESH 0x80000000u
+#define RP_NOSELF    128u    // AV_SLOT_WORDS words: per joint-table slot, its RT records carry the no-self-shadow tag
+// A coarse RT cut's error stays within this (m) past the raster cut's: half of
+// clean_rt_common.glsl RT_SELF_PROBE_W, the window in which a receiver on a tagged character
+// identifies its own surface (else its rays could meet its own coarser hull).
+#define RIG_COARSE_MAX_M 0.1
+#define RP_STILL      64u    // AV_SLOT_WORDS words: per joint-table slot, its skinned world positions are unchanged
+#define RP_RT_AV      96u    // AV_SLOT_WORDS words: per joint-table slot, LLCleanRTVK's rigged plan traces the avatar
+                             //  (legacy RT rules: seen by a pass / RT capture candidate, casts shadows)
+// Per-avatar table in rig_of (257 rows: joint-table slots 0..255, 256 = rigged without one),
+// RIGAV_STRIDE words, host-zeroed every frame:
+#define RIGAV_ROWS    (AV_SLOT_CAP + 1u)
+#define RIGAV_STRIDE  8u
+#define RIGAV_WANT    0u     // slots the avatar's cuts ask for (mode 0)
+#define RIGAV_BASE    1u     // its first slot (mode 13; CL_NONE = not admitted)
+#define RIGAV_FILL    2u     // slots handed to its instances so far (mode 14)
+#define RIGAV_KEEP    3u     // 1 = kept this frame (mode 13)
+#define RIGAV_SIGA    4u     // signature (mode 0: sum / xor of its instances' cut words)
+#define RIGAV_SIGB    5u
+#define RIGAV_NINST   6u     // its instances with a cut
+#define RIGAV_DIST    7u     // #1008: its nearest instance, as ~float bits of the distance (atomicMax; 0 = none)
+#define RIGAV_KEEP_DUE 0x100u   // #1008: RIGAV_KEEP bit: the avatar is due this frame (mode 13; the low bits = 0 / 1 / 2)
+// Then (kept across frames: the host fill stops before them) RIGAV_ROWS "admitted last frame"
+// words, then RIGAV_ROWS x 4 persistent words: the range + signature its slots were last built
+// or kept with {base, want, siga, sigb}, then (#1008) RIGAV_ROWS x 4 schedule words {band, the
+// frame it last re-selected its cut (0 = never), (#1011, rigAdmitPar) 1 = LAGGED CLAS, 0}.
+#define RIGAV_PERSIST_WORDS 4u
+#define RIGAV_SCHED_WORDS   4u
+#define RIG_ST_TAG 0xFFFFFFFFu   // st[ri * 3 + 2].z of a rigged instance (never a static cut epoch)
+#define RIG_HDR_BASE  16u
+
+layout(push_constant) uniform ClRtPush
+{
+    vec4  cam;             // xyz main camera (world), w znear (m)
+    float px_scale;        // 0.5 * viewport height * P[1][1] (px per metre at 1 m)
+    float tol_px;          // RenderVKClusterRTTolerancePx
+    float hyst;            // RenderVKClusterRTHysteresis
+    uint  rt_flags;        // bit 0: the previous cut arena (binding 32) is last epoch's at this tolerance / px_scale
+                           // (static reuse); bit 1: ... is last epoch's (#1008 rigged reuse); bits 2..: cut epoch
+    uint  mode;
+    uint  instance_count;  // ClusterInstance rows (mode 0 / 4 / 5 CLAS)
+    uint  ri_cap;          // renderer instance ids covered by st[] / ovr[] (TLAS capacity)
+    uint  frame;
+    uint  cut_cap;         // cut arena entries
+    uint  max_cut;         // clusters per instance (<= CL_RT_SHARED_CUT)
+    uint  pool_pages;
+    uint  clas_pages_max;  // CLAS pages allocated / built per frame
+    uint  clas_cap;        // CLAS slots (pages)
+    uint  blas_max;        // cluster BLAS per frame
+    uint  tier;            // 0 per-cut BLAS, 1 CLAS, 2 CLAS + PTLAS
+    uint  job_count;       // tier 0: jobs (mode 6) / rows (mode 5); tier 2: records (mode 7)
+    uvec2 pool_addr;       // device address of the page pool (CLAS index input)
+    uvec2 decode_addr;     // device address of dec[] (CLAS vertex input)
+    uvec2 clas_base;       // (unused: CLAS addresses come from the chunk table, clasAddr)
+    uvec2 clas_refs_addr;  // device address of clas_refs[]
+    uint  clas_stride;     // bytes per CLAS (64 per CLAS slot)
+    uint  idle_frames;     // CLAS pages unused this long are freed
+    uint  part_size;       // tier 2: instances per partition
+    uint  ptlas_full;      // tier 2: 1 = write every record (fresh PTLAS)
+} pc;
+
+// = LLCleanClusterRTVK::kCnt*
+#define CNT_CUT        0u
+#define CNT_CUT_CHANGE 1u
+#define CNT_WANT       2u
+#define CNT_CLAS_ARGS  3u
+#define CNT_BLAS_INFOS 4u
+#define CNT_ELIGIBLE   5u
+#define CNT_READY      6u
+#define CNT_OVERFLOW   7u
+#define CNT_CLAS_FREED 8u
+#define CNT_CLAS_ALLOC 9u
+#define CNT_CLAS_FAIL  10u
+#define CNT_TRIS       11u
+#define CNT_NOT_READY  12u
+#define CNT_PTLAS_OPS  13u
+#define CNT_REF_RESETS 14u
+#define CNT_T0_INVALID 15u
+#define CNT_RIG          16u   // arena slots handed out (CLAS tiers; <= RP_RIG_CAP: the rigged CLAS build's count)
+#define CNT_RIG_WANT     17u   // arena slots asked for (CLAS tiers: sizes the arena)
+#define CNT_RIG_ELIGIBLE 18u
+#define CNT_RIG_READY    19u
+#define CNT_RIG_OVERFLOW 20u   // rigged instances without slots (arena full / cut too large)
+#define CNT_RIG_INVALID  21u   // tier-0 rig rows not usable this frame (a page of the cut evicted)
+#define CNT_RIG_TRIS     22u
+#define CNT_RIG_SHARED   23u   // rigged instances whose RT cut takes the shared skinned cut (no own skinning)
+#define CNT_CLAS_USED    24u   // pool pages with a CLAS some cut used this frame (static; + CNT_WANT = demand)
+#define CNT_RIG_AV_IN    25u   // avatars given their RT skinned arena slots (mode 13)
+#define CNT_RIG_AV_OUT   26u   // avatars that did not fit (their switched groups stay legacy)
+#define CNT_STATIC_SKIP  27u   // eligible static instances below the admission threshold (legacy BLAS)
+#define CNT_REUSED       28u   // static instances whose previous cut was reused (no page walk)
+#define CNT_RIG_KEPT_AV  29u   // avatars KEPT (no rigged CLAS build this frame)
+#define CNT_RIG_ARGS     30u   // rigged CLAS built this frame (the build's count)
+#define CNT_RIG_DERIVED  31u   // rigged instances whose RT cut was derived from the shared cut (no walk)
+// (#748 static pass) persistent static cluster BLAS, flips, the admission histogram
+#define CNT_SB_INFOS     32u   // static BLAS built this frame (explicit destinations)
+#define CNT_SB_KEPT      33u   // static BLAS kept (cut and its CLAS unchanged: no build)
+#define CNT_SB_FAIL      34u   // no heap block (heap full / fragmented: the CPU grows / repacks it)
+#define CNT_SB_OLD       35u   // new cut not ready (a CLAS missing): the previous BLAS kept tracing
+#define CNT_SB_UNITS     36u   // heap units the live static BLAS hold (sizes the heap)
+#define CNT_SB_PEND      37u   // blocks freed this frame (mode 21 pushes them)
+#define CNT_STATIC_FLIP  38u   // static instances whose override row came back (legacy last frame)
+#define CNT_IMP_HIST     39u   // [20] CLAS pages used + wanted per importance bucket (admission)
+#define CNT_IMP_BUCKETS  20u
+#define CNT_SB_LEAK      59u
+#define CNT_PTLAS_GLOBAL 61u   // spatial PTLAS writes that went into the global partition (large / disabled / cell full)
+// #1008 rigged RT cadence (past the 64 words of the original block: = LLCleanClusterRTVK::kCnt*)
+#define CNT_RIG_SEL       64u   // rigged instances whose RT cut was selected (walked / derived) this frame
+#define CNT_RIG_REUSED    65u   // rigged instances whose previous cut was copied forward (not due)
+#define CNT_RIG_DUE_AV    66u   // avatars due for re-selection this frame
+#define CNT_RIG_REFRESH_AV 67u  // avatars REFRESHED (same slots; CLAS rebuilt only where the pose moved)
+#define CNT_RIG_POSE_SKIP 68u   // REFRESH slots whose CLAS was kept (pose moved less than the threshold)
+#define CNT_RIG_STALE_MAX 69u   // the oldest RT pose traced this frame (frames: kept-by-schedule avatars, skipped slots)
+#define CNT_RIG_RASTER    70u   // the main slice's skinned entries of rigged instances (= their raster cut, mode 11)
+#define CNT_RIG_REFRESH_SLOTS 71u   // REFRESH slots compared (skinned) this frame
+// #1011 (header): CLAS reuse and skinning source
+#define CNT_RIG_REUSE_CMP  72u   // shared slots compared (the same cluster / entry as their CLAS)
+#define CNT_RIG_REUSE_SKIP 73u   // ... whose CLAS was kept (moved less than the avatar's tolerance)
+#define CNT_RIG_OWN_SKIN   74u   // slots mode 9 skinned itself (no shared skinned cut)
+#define CNT_RIG_COPIED     75u   // shared slots whose vertices mode 9 copied from 2a's SKIN_OUT (written)
+#define CNT_RIG_REBUILD_SLOTS 60u   // arena slots of the admitted avatars NOT kept this frame (= the rigged CLAS the build may make)   // pending-free / stack overflows (blocks lost until the next epoch)
+
+#define CL_RT_SHARED_CUT 2048u
+#define OVR_DIRECT 0x80000000u
+#define OVR_RIG    0x40000000u   // a rigged instance's row: z = its first arena slot
+#define CLINST_RIGGED 0x80000000u   // clinst[ii*2].w: the instance is rigged (tris in the low bits)
+
+uvec2 addrAdd(uvec2 a, uint off)
+{
+    uint c;
+    const uint lo = uaddCarry(a.x, off, c);
+    return uvec2(lo, a.y + c);
+}
+uint mix32(uint h)
+{
+    h ^= h >> 16u; h *= 0x7feb352du; h ^= h >> 15u; h *= 0x846ca68bu; h ^= h >> 16u;
+    return h;
+}
+
+// ============================================================================================
+// 0 SELECT
+// ============================================================================================
+shared uint s_n, s_tris, s_ha, s_hb, s_base, s_ok, s_rig, s_reuse, s_pbase, s_bad, s_derive;
+shared uvec2 s_cut[CL_RT_SHARED_CUT];   // {ref, vpage | tris << 20} (16 KiB)
+shared vec3 s_cam;
+
+// The joint-table slot of a rigged instance (the per-avatar table row; RIGAV_ROWS - 1 = none).
+uint rigAvatar(uint f)
+{
+    return (f & CLI1B_AVATAR) != 0u ? ((f >> CLI1B_AV_SHIFT) & AV_SLOT_MASK) : RIGAV_ROWS - 1u;
+}
+// RT AVATAR SET (2026-10-14): only avatars the RT plan traces get an RT cut (and so arena slots,
+// CLAS / per-cut BLAS, CNT_RIG_AV_IN): a no-shadow reduced-tier wearer or one no pass sees is
+// never asked for by pass B. Row 256 (rigged without a joint-table slot): always.
+bool rigTraced(uint f)
+{
+    const uint a = rigAvatar(f);
+    return a >= AV_SLOT_CAP || ((rcpu[RP_RT_AV + (a >> 5u)] >> (a & 31u)) & 1u) != 0u;
+}
+// #1008 RIGGED RT CADENCE (header). rig_of words of the per-avatar persistent regions (after the
+// per-frame table): "admitted last frame", {base, want, siga, sigb}, the schedule words.
+uint rigAdmBase()   { return rcpu[RP_AV_BASE] + RIGAV_ROWS * RIGAV_STRIDE; }
+uint rigPersBase()  { return rigAdmBase() + RIGAV_ROWS; }
+uint rigSchedBase() { return rigPersBase() + RIGAV_ROWS * RIGAV_PERSIST_WORDS; }
+bool rigSchedOk()   { return rigSchedBase() + RIGAV_ROWS * RIGAV_SCHED_WORDS <= uint(rig_of.length()); }
+// Avatar a never self-shadows in RT this frame (its records carry the owner tag): the only
+// avatars the cadence may leave coarse or stale (header).
+bool rigNoSelf(uint a)
+{
+    return a < AV_SLOT_CAP && ((rcpu[RP_NOSELF + (a >> 5u)] >> (a & 31u)) & 1u) != 0u;
+}
+// Avatar a's EFFECTIVE band: last frame's mode-13 band (0 near, 1 mid, 2 far) for a tagged
+// avatar, near for every other one (and for row 256).
+uint rigBand(uint a)
+{
+    if ((rcpu[RP_SCHED] & 1u) == 0u || !rigNoSelf(a) || !rigSchedOk()) return 0u;
+    return min(rig_of[rigSchedBase() + a * RIGAV_SCHED_WORDS], 2u);
+}
+// The RT tolerance multiplier of avatar a's cut this frame for an instance whose raster cut error
+// is err_m (m) -- capped so the coarse cut stays within RIG_COARSE_MAX_M of it (1 = the
+// raster's cut: derivable).
+float rigTolMul(uint a, float err_m)
+{
+    if ((rcpu[RP_SCHED] & 1u) == 0u) return 1.0;
+    const float m = uintBitsToFloat(rcpu[RP_TOLMUL + rigBand(a)]);
+    if (!(m > 1.0 && m <= 64.0)) return 1.0;
+    const float cap = err_m > 0.0 ? 1.0 + RIG_COARSE_MAX_M / err_m : m;
+    return max(min(m, cap), 1.0);
+}
+// The raster cut error (m) of the main view at distance d (0 = unknown).
+float rigRasterErr(float d)
+{
+    const uint mv = rcpu[RP_MAIN_VIEW];
+    if (mv >= CL_MAX_VIEWS) return 0.0;
+    const float pxs = cl_views[mv].px_scale;
+    return pxs > 0.0 ? cl_views[mv].tol_px * d / pxs : 0.0;
+}
+// Avatar a re-selects its RT cut this frame. Modes 0 and 13 must agree: inputs are last frame's
+// (band, selection frame, admission) -- mode 13 rewrites them only after its own decisions.
+// An untagged avatar is due every frame (the exact path).
+bool rigDue(uint a)
+{
+    if ((rcpu[RP_SCHED] & 1u) == 0u || (rcpu[RP_SCHED] & 2u) != 0u) return true;   // off / forced
+    if (!rigNoSelf(a) || !rigSchedOk()) return true;     // (untagged / row 256: exact, every frame)
+    if (rig_of[rigAdmBase() + a] == 0u) return true;      // arrival: not covered last frame
+    const uint q = rigSchedBase() + a * RIGAV_SCHED_WORDS;
+    const uint period = max(rcpu[RP_PERIOD + min(rig_of[q], 2u)], 1u);
+    const uint last = rig_of[q + 1u];
+    if (last == 0u || pc.frame - last >= period) return true;
+    return ((pc.frame + a * 3u) % period) == 0u;          // staggered by joint-table slot
+}
+// The band of distance d (m) for an avatar now in band b: a 10 % dead band around each edge.
+uint rigBandOf(float d, uint b)
+{
+    const float n = uintBitsToFloat(rcpu[RP_BAND_M]), f = max(uintBitsToFloat(rcpu[RP_BAND_M + 1u]), n);
+    if (b == 0u) return d > f * 1.1 ? 2u : (d > n * 1.1 ? 1u : 0u);
+    if (b == 1u) return d < n * 0.9 ? 0u : (d > f * 1.1 ? 2u : 1u);
+    return d < n * 0.9 ? 0u : (d < f * 0.9 ? 1u : 2u);
+}
+uint rigBandRaw(float d)
+{
+    const float n = uintBitsToFloat(rcpu[RP_BAND_M]), f = max(uintBitsToFloat(rcpu[RP_BAND_M + 1u]), n);
+    return d < n ? 0u : (d < f ? 1u : 2u);
+}
+
+// #1011 RANKED SHARED CUT (header): this frame's main slice and 2a's map are complete (every
+// selected entry of a drawn rigged instance has its skinned slot), so the selection's per-instance
+// summary and ranks stand for the skinned cut -- mode 11's gather is not needed. Uniform for the
+// whole RT build (its inputs are written before it).
+bool rigRankOk()
+{
+    if ((rcpu[RP_RANK] & 1u) == 0u || pc.tier < 1u || rcpu[RP_SHARED] == 0u) return false;
+    const uint mv = rcpu[RP_MAIN_VIEW];
+    if (mv >= CL_MAX_VIEWS) return false;
+    const uint sel = cl_cnt[mv * CLC_VIEW_WORDS + CLC_SELECTED];
+    return sel <= cl_views[mv].sel_cap && sel <= cl_rig[CLK_MAP_CAP] && cl_rig[CLK_OVERFLOW] == 0u;
+}
+// Instance ii's skinned main-view cut {count, hash a, hash b, triangles} (count 0 = none): the
+// selection's summary row (ranked path; only a row written this frame) or mode 11's gather.
+uvec4 rigGather(uint ii)
+{
+    if (rigRankOk())
+    {
+        const uint b = ii * CL_INST_CUT_WORDS;
+        if (b + CL_INST_CUT_WORDS > uint(cl_inst_cut.length())
+            || cl_inst_cut[b + 4u] != cl_views[rcpu[RP_MAIN_VIEW]].frame + 1u) return uvec4(0u);
+        // (mode 11 marked an entry of it without a skinned slot: no complete shared cut)
+        if (ii * 8u + 8u <= uint(rig_of.length()) && rig_of[ii * 8u + RIGOF_GATHER] != 0u) return uvec4(0u);
+        return uvec4(cl_inst_cut[b], cl_inst_cut[b + 1u], cl_inst_cut[b + 2u], cl_inst_cut[b + 3u]);
+    }
+    if (ii * 8u + 8u > uint(rig_of.length())) return uvec4(0u);
+    return uvec4(rig_of[ii * 8u + RIGOF_GATHER], rig_of[ii * 8u + RIGOF_HASH], rig_of[ii * 8u + RIGOF_HASHB],
+                 rig_of[ii * 8u + RIGOF_TRIS]);
+}
+
+// DERIVED RT CUT (header): instance ii's RT cut IS the main selection's shared cut of it -- its
+// avatar is in a rig list (1b selected the whole cut, un-culled, at the main view's projection
+// and margins), nothing overflowed (the main slice, 2a's map / skinned arena) and mode 11 (#1011:
+// or the selection's summary) gathered a non-empty cut that fits. CLAS tiers with the shared cut
+// usable only.
+bool rigDerivable(uint ii, uint flags, uint cap)
+{
+    if (pc.tier < 1u || rcpu[RP_SHARED] == 0u || clRigLists(flags) == 0u || ii * 8u + 8u > uint(rig_of.length()))
+        return false;
+    const uint mv = rcpu[RP_MAIN_VIEW];
+    if (mv >= CL_MAX_VIEWS) return false;
+    const uint sel = cl_cnt[mv * CLC_VIEW_WORDS + CLC_SELECTED];
+    if (sel > cl_views[mv].sel_cap || sel > cl_rig[CLK_MAP_CAP] || cl_rig[CLK_OVERFLOW] != 0u) return false;
+    const uint n = rigGather(ii).x;
+    return n != 0u && n <= cap;
+}
+
+// The admission histogram's bucket of an importance (world radius / distance): 1.5 buckets per
+// octave from 2^-14 (= LLCleanClusterRTVK::impBucketMin, the CPU picks the threshold from it).
+uint impBucket(float imp)
+{
+    const float b = floor(log2(max(imp, 1.0e-9)) * 1.5) + 21.0;
+    return uint(clamp(b, 0.0, float(CNT_IMP_BUCKETS - 1u)));
+}
+
+// A STATIC cut entry's page is in use this frame: 1c's page LRU and, CLAS tiers, its CLAS page
+// (kept: stamped + counted once as demand; missing: wanted once). The page counts into the
+// admission histogram at the bucket of the first instance that stamped it this frame.
+// (static cut perf pass) Called once per CUT ENTRY: up to 64 lanes of a workgroup (and every
+// instance of the same mesh) hit the same page's words, so the atomics serialized on one address.
+// A plain read first skips the write / atomic when this frame's value is already visible; a stale
+// read only falls through to the atomic exactly as before (the exchange stays the guard).
+void stampStatic(uint slot, uint bucket)
+{
+    if (slot < uint(cl_page_usage.length()) && cl_page_usage[slot] != pc.frame) cl_page_usage[slot] = pc.frame;
+    if (pc.tier < 1u || slot >= pc.pool_pages) return;
+    if (clas_of_slot[slot].x == CL_NONE)
+    {
+        if (clas_want_stamp[slot] != pc.frame + 1u && atomicExchange(clas_want_stamp[slot], pc.frame + 1u) != pc.frame + 1u)
+        {
+            const uint w = atomicAdd(cnt[CNT_WANT], 1u);
+            if (w < pc.pool_pages) clas_want[w] = slot;
+            atomicAdd(cnt[CNT_IMP_HIST + bucket], 1u);
+        }
+    }
+    else if (clas_of_slot[slot].w != pc.frame && atomicExchange(clas_of_slot[slot].w, pc.frame) != pc.frame)
+    {
+        atomicAdd(cnt[CNT_CLAS_USED], 1u);
+        atomicAdd(cnt[CNT_IMP_HIST + bucket], 1u);
+    }
+}
+
+// The device address of CLAS c of CLAS page cs: the page's chunk base + its place in the chunk.
+uvec2 clasAddr(uint cs, uint c)
+{
+    const uint ppc = max(scpu[SC_CHUNK_PAGES], 1u);
+    const uint ch = cs / ppc;
+    const uvec2 b = uvec2(scpu[SC_CHUNK_BASE + ch * 2u], scpu[SC_CHUNK_BASE + ch * 2u + 1u]);
+    return addrAdd(b, ((cs - ch * ppc) * CL_MAX_CLUSTERS_PER_PAGE + c) * pc.clas_stride);
+}
+
+void selectInstance(uint ii)
+{
+    const uint lid = gl_LocalInvocationID.x;
+    ClInstance inst = cl_instances[ii];
+    const uint ri = inst.render_instance;
+    const bool rigged = (inst.flags & CLI_RIGGED) != 0u;
+    if (lid == 0u && ii * 8u + 8u <= uint(rig_of.length())) rig_of[ii * 8u + RIGOF_S0] = CL_NONE;
+    // Static instances the cluster raster draws for real (RenderVKClusterRTStatic on); rigged
+    // ones of the avatars 2a switched (CLI1B_DRAW) when the rigged RT cut runs this frame (the
+    // main view was selected: its projection is the cut's; the skin has a palette).
+    bool ok = (inst.flags & CLI1B_DRAW_RT) != 0u && ri < pc.ri_cap && inst.mesh < uint(cl_meshes.length())
+           && (rigged ? (rcpu[RP_RIG_ON] != 0u && rcpu[RP_MAIN_VIEW] < CL_MAX_VIEWS
+                         && inst.skin_id < rcpu[RP_SKIN_COUNT] && rigTraced(inst.flags))
+                      : (rcpu[RP_STATIC] & 1u) != 0u);
+    ClMesh mesh;
+    if (ok)
+    {
+        mesh = cl_meshes[inst.mesh];
+        ok = mesh.generation == inst.mesh_generation && mesh.page_count != 0u;
+    }
+    // STATIC ADMISSION (header): importance = world sphere radius / distance (workgroup-uniform).
+    vec4 ws = vec4(0.0);
+    uint bucket = 0u;   // (the admission histogram's bucket of this instance)
+    if (ok && !rigged)
+    {
+        ws = clXformSphere(inst, mesh.sphere);
+        const float imp = ws.w / max(length(pc.cam.xyz - ws.xyz), pc.cam.w);
+        bucket = impBucket(imp);
+        const float tmin = uintBitsToFloat(rcpu[RP_STATIC_MIN]);
+        const uvec4 a0 = st[ri * ST_STRIDE], a2 = st[ri * ST_STRIDE + 2u];
+        const bool was = a0.w == inst.mesh && a2.w != 0u && a2.w + 8u >= pc.frame;   // admitted lately
+        if (!(imp >= (was ? 0.7 * tmin : tmin)))
+        {
+            if (lid == 0u) atomicAdd(cnt[CNT_STATIC_SKIP], 1u);
+            ok = false;
+        }
+    }
+    if (!ok)
+    {   // (workgroup-uniform)
+        if (lid == 0u) { clinst[ii * 2u] = uvec4(CL_NONE, 0u, CL_NONE, 0u); clinst[ii * 2u + 1u] = uvec4(0u); }
+        return;
+    }
+    const uint cap = min(pc.max_cut, CL_RT_SHARED_CUT);
+    const uint epoch = pc.rt_flags >> 2u;
+    // ---- hysteresis: the reference camera ----
+    const vec3 t_now = vec3(inst.xform_r0.w, inst.xform_r1.w, inst.xform_r2.w);
+    if (lid == 0u)
+    {
+        const uvec4 s0 = st[ri * ST_STRIDE];
+        const uvec4 s1 = st[ri * ST_STRIDE + 1u];
+        s_n = 0u; s_tris = 0u; s_ha = 0u; s_hb = 0u; s_ok = 1u; s_rig = CL_NONE; s_reuse = 0u; s_bad = 0u;
+        s_derive = 0u;
+        if (rigged)
+        {
+            // (no reference camera of ours: the cut must be the raster's -- the main view's)
+            st[ri * ST_STRIDE] = uvec4(0u, 0u, 0u, inst.mesh);
+            s_cam = vec3(0.0);
+            atomicAdd(cnt[CNT_RIG_ELIGIBLE], 1u);
+            // (#1008 stats: its raster cut -- mode 11's gather of the main slice, when it ran)
+            if ((rcpu[RP_SCHED] & 1u) != 0u && rcpu[RP_SHARED] != 0u && ii * 8u + 8u <= uint(rig_of.length()))
+                atomicAdd(cnt[CNT_RIG_RASTER], rigGather(ii).x);
+            // #1008 (header): the avatar's nearest instance -> its band next frame (mode 13)
+            const uint av = rigAvatar(inst.flags);
+            const uint ab = rcpu[RP_AV_BASE] + av * RIGAV_STRIDE;
+            const float dist = max(length(pc.cam.xyz - t_now), pc.cam.w);
+            // (only a tagged avatar has a band: every other one is near, exact)
+            if ((rcpu[RP_SCHED] & 1u) != 0u && rigNoSelf(av) && ab + RIGAV_STRIDE <= uint(rig_of.length())
+                && !isnan(dist) && !isinf(dist))
+                atomicMax(rig_of[ab + RIGAV_DIST], 0xFFFFFFFFu - floatBitsToUint(dist));
+            // NOT DUE: last frame's cut of this instance, copied forward (same mesh / generation,
+            // written last epoch, still resident page for page -- checked below)
+            const uvec4 s5 = st[ri * ST_STRIDE + 5u];
+            if (!rigDue(av) && (pc.rt_flags & 2u) != 0u && s0.w == inst.mesh && s1.x == inst.mesh_generation
+                && s5.z == epoch - 1u && s5.y != CL_NONE && s5.y != 0u && s5.y <= cap && s5.x + s5.y <= uint(cut_prev.length()))
+            {
+                s_reuse = 1u;
+                s_pbase = s5.x;
+                s_n = s5.y;
+                s_ha = s1.z; s_hb = s1.w;
+            }
+            // DERIVED RT CUT (header): the main selection's whole un-culled cut of this instance,
+            // skinned complete (mode 11 gathered it) -- no walk. (#1008: only at the raster's
+            // tolerance -- a coarser RT cut is another set.)
+            else if (rigTolMul(av, rigRasterErr(dist)) == 1.0 && rigDerivable(ii, inst.flags, cap))
+            {
+                const uvec4 g = rigGather(ii);
+                s_derive = 1u;
+                s_n = g.x;
+                s_ha = g.y;
+                s_hb = g.z;
+                s_tris = g.w;
+                atomicAdd(cnt[CNT_RIG_DERIVED], 1u);
+            }
+        }
+        else
+        {
+            const float d = max(length(pc.cam.xyz - ws.xyz) - ws.w, pc.cam.w);
+            vec3 cam_ref = uintBitsToFloat(s0.xyz) + t_now;
+            const bool reset = s0.w != inst.mesh || s1.x != inst.mesh_generation || s1.x == 0u;
+            const bool moved = length(pc.cam.xyz - cam_ref) > pc.hyst * d;
+            const bool fresh = reset || moved || any(isnan(cam_ref)) || any(isinf(cam_ref));
+            if (fresh)
+            {
+                cam_ref = pc.cam.xyz;
+                st[ri * ST_STRIDE] = uvec4(floatBitsToUint(cam_ref - t_now), inst.mesh);
+                atomicAdd(cnt[CNT_REF_RESETS], 1u);
+            }
+            s_cam = cam_ref;
+            atomicAdd(cnt[CNT_ELIGIBLE], 1u);
+            // STATIC CUT REUSE (header): the same reference camera, last epoch's cut in the other
+            // arena (CPU: same tolerance / px_scale, that epoch recorded), not this instance's
+            // periodic walk frame.
+            const uvec4 s2 = st[ri * ST_STRIDE + 2u];
+            if (!fresh && (pc.rt_flags & 1u) != 0u && s2.z == epoch - 1u && s2.y != CL_NONE && s2.y != 0u
+                && s2.y <= cap && s2.x + s2.y <= uint(cut_prev.length()) && ((epoch + ri) & 31u) != 0u)
+            {
+                s_reuse = 1u;
+                s_pbase = s2.x;
+                s_n = s2.y;
+                s_ha = s1.z; s_hb = s1.w;
+            }
+        }
+        st[ri * ST_STRIDE + 1u] = uvec4(inst.mesh_generation, pc.frame, s1.z, s1.w);
+    }
+    barrier();
+    bool walk = s_derive == 0u;   // (uniform)
+    if (s_reuse != 0u)   // (uniform: lane 0 wrote it before the barrier)
+    {
+        const uint n = s_n;
+        for (uint k = lid; k < n; k += 64u)
+        {
+            const uvec4 e = cut_prev[s_pbase + k];
+            if (e.y >= uint(cl_page_table.length()) || cl_page_table[e.y] != clRefSlot(e.x)) s_bad = 1u;
+            s_cut[k] = uvec2(e.x, e.y | (e.z << 20u));
+        }
+        barrier();
+        if (s_bad == 0u)
+        {
+            walk = false;
+            for (uint k = lid; k < n; k += 64u)
+            {
+                const uint sl = clRefSlot(s_cut[k].x);
+                if (!rigged) stampStatic(sl, bucket);
+                else if (sl < uint(cl_page_usage.length()) && cl_page_usage[sl] != pc.frame) cl_page_usage[sl] = pc.frame;
+                atomicAdd(s_tris, s_cut[k].y >> 20u);
+            }
+            if (lid == 0u) atomicAdd(cnt[rigged ? CNT_RIG_REUSED : CNT_REUSED], 1u);
+        }
+        barrier();
+        if (walk && lid == 0u) { s_n = 0u; s_ha = 0u; s_hb = 0u; }   // (a page went: walk)
+        barrier();
+    }
+    if (walk)
+    {
+        ClView v;
+        if (rigged)
+        {
+            // THE MAIN VIEW's projection (1b's main selection: LOD camera + margin, held px_scale,
+            // the post-controller tolerance) and the same posed-bound margin (2a; 1b's rule when the
+            // margins are missing: LOD0). Only the projection is used -- nothing is culled.
+            v = cl_views[rcpu[RP_MAIN_VIEW]];
+            v.flags = (v.flags & CLV_ORTHO) | CLV_RT | CLV_NO_CONE;
+            // #1008: a tagged mid / far avatar traces a coarser cut (x the band's multiplier,
+            // capped; near / untagged: 1)
+            {
+                const float d = max(length(pc.cam.xyz - t_now), pc.cam.w);
+                v.tol_px *= rigTolMul(rigAvatar(inst.flags), rigRasterErr(d));
+            }
+            inst.anim_margin_m = max(inst.anim_margin_m, rcpu[RP_RIG_BOUNDS] != 0u ? clRigMargin(ii) : 1.0e5);
+        }
+        else
+        {
+            v.cam_pos = vec4(s_cam, pc.cam.w);
+            // (integration with #749, kFormatVersion 2: the projection reads ClView::lod_cam. The RT
+            // cut has its own lagged reference camera, so the LOD camera IS it, with no extra margin.)
+            v.lod_cam = vec4(s_cam, 0.0);
+            v.px_scale = pc.px_scale;
+            v.tol_px = pc.tol_px;
+            v.flags = CLV_RT | CLV_NO_CONE;
+        }
+        const float tol = clTolerance(inst, v);
+
+        for (uint p = 0u; p < mesh.page_count; ++p)
+        {
+            const uint vpage = mesh.page_base + p;
+            if (vpage >= uint(cl_page_table.length())) break;
+            const uint slot = cl_page_table[vpage];
+            if (slot == CL_NONE) continue;                          // (uniform)
+            const uint n = min(clPageClusterCount(slot), CL_MAX_CLUSTERS_PER_PAGE);
+            if (lid < n)
+            {
+                const ClRecord rec = clLoadRecord(slot, lid);
+                if (rec.group < mesh.group_count && rec.child_group < mesh.group_count)
+                {
+                    const ClGroup gp = cl_groups[mesh.group_base + rec.group];
+                    const ClGroup gc = cl_groups[mesh.group_base + rec.child_group];
+                    const float parent_px = clProjectGroupError(gp.sphere, gp.error, inst, v,
+                                                                clJointStretch(inst.skin_id, gp.joint_mask));
+                    const float self_px = clProjectGroupError(gc.sphere, gc.error, inst, v,
+                                                              clJointStretch(inst.skin_id, gc.joint_mask));
+                    const bool child_res = clGroupResident(inst.mesh, rec.child_group);
+                    if (clCutRenders(parent_px, self_px, child_res, tol) && clRecTriCount(rec) != 0u)
+                    {
+                        const uint ref = clMakeRef(slot, lid);
+                        const uint k = atomicAdd(s_n, 1u);
+                        if (k < cap) s_cut[k] = uvec2(ref, vpage | (clRecTriCount(rec) << 20u));
+                        atomicAdd(s_tris, clRecTriCount(rec));
+                        atomicAdd(s_ha, mix32(ref ^ 0x9E3779B9u));
+                        atomicXor(s_hb, mix32(ref * 0x85EBCA77u + 1u));
+                        // (static: CLAS tiers need the page's CLAS -- once per slot per frame -- and the
+                        // scan's LRU sees it used. Rigged: per-frame CLAS of the skinned arena, mode 9.)
+                        if (!rigged) stampStatic(slot, bucket);
+                        else if (slot < uint(cl_page_usage.length())) cl_page_usage[slot] = pc.frame;
+                    }
+                }
+            }
+        }
+    }
+    barrier();
+    if (lid == 0u)
+    {
+        const uint n = s_n;
+        uint base = 0u;
+        bool good = n != 0u && n <= cap;
+        if (good)
+        {
+            base = atomicAdd(cnt[CNT_CUT], n);
+            good = base + n <= pc.cut_cap;
+        }
+        if (!good) atomicAdd(cnt[CNT_OVERFLOW], 1u);
+        s_base = base;
+        s_ok = good ? 1u : 0u;
+        const uvec4 s1 = st[ri * ST_STRIDE + 1u];
+        if (good && (s1.z != s_ha || s1.w != s_hb))
+        {
+            atomicAdd(cnt[CNT_CUT_CHANGE], 1u);
+            st[ri * ST_STRIDE + 1u] = uvec4(s1.x, s1.y, s_ha, s_hb);
+        }
+        if (good) atomicAdd(cnt[rigged ? CNT_RIG_TRIS : CNT_TRIS], s_tris);
+        clinst[ii * 2u] = uvec4(ri, base, good ? n : CL_NONE, s_tris | (rigged ? CLINST_RIGGED : 0u));
+        clinst[ii * 2u + 1u] = uvec4(s_ha, s_hb, inst.mesh, inst.mesh_generation);
+        // (static: this cut is the next epoch's reuse candidate; + the admission stamp)
+        if (!rigged) st[ri * ST_STRIDE + 2u] = uvec4(base, good ? n : CL_NONE, epoch, max(pc.frame, 1u));
+        else
+        {
+            // #1008: next frame's copy-forward source (a derived cut's entries: mode 12, this frame)
+            st[ri * ST_STRIDE + 5u] = uvec4(base, good ? n : CL_NONE, epoch, 0u);
+            if (s_reuse == 0u || walk) atomicAdd(cnt[CNT_RIG_SEL], 1u);
+        }
+        // CLAS tiers, rigged: the cut joins its AVATAR's demand for the RT skinned arena; mode 13
+        // admits whole avatars, mode 14 places the instances (slots, shared cut, headers).
+        if (good && rigged && pc.tier >= 1u)
+        {
+            atomicAdd(cnt[CNT_RIG_WANT], n);
+            const uint ab = rcpu[RP_AV_BASE] + rigAvatar(inst.flags) * RIGAV_STRIDE;
+            if (ab + RIGAV_STRIDE <= uint(rig_of.length()))
+            {
+                atomicAdd(rig_of[ab + RIGAV_WANT], n);
+                // PERSISTENT RIGGED CLAS: the avatar's signature -- this instance's id, cut size,
+                // cut hashes and whether its slots take the shared skinned cut (mode 14's rule).
+                // (#1008 cadence on: not the shared flag -- a copied-forward cut stops matching the
+                // raster's set whenever the raster LOD moves, which must not rebuild a not-due
+                // avatar; the vertex source only differs by the weld, and a rebuild re-decides it.)
+                const uvec4 g = rigGather(ii);
+                const bool shr = rcpu[RP_SHARED] != 0u && g.x == n && g.y == s_ha && (rcpu[RP_SCHED] & 1u) == 0u;
+                const uint h = mix32(s_ha ^ mix32(ri * 0x9E3779B9u + n) ^ (shr ? 0x5BD1E995u : 0u));
+                atomicAdd(rig_of[ab + RIGAV_SIGA], h);
+                atomicXor(rig_of[ab + RIGAV_SIGB], mix32(h + s_hb));
+                atomicAdd(rig_of[ab + RIGAV_NINST], 1u);
+            }
+            if (s_derive != 0u) rig_of[ii * 8u + RIGOF_DERIVED] = 1u;   // (mode 12 writes its entries)
+        }
+        else if (rigged && !good) atomicAdd(cnt[CNT_RIG_OVERFLOW], 1u);
+    }
+    barrier();
+    if (s_ok != 0u && s_derive == 0u)
+        for (uint k = lid; k < s_n; k += 64u)
+            cut[s_base + k] = uvec4(s_cut[k].x, s_cut[k].y & 0xFFFFFu, s_cut[k].y >> 20u, 0u);
+}
+
+// ============================================================================================
+// 13 RIG_ADMIT / 14 RIG_PLACE (CLAS tiers; header)
+// ============================================================================================
+// The occupied ranges of mode 13 (sorted by start), lane 0 only.
+shared uint s_ivb[RIGAV_ROWS], s_ive[RIGAV_ROWS];
+shared uint s_niv;
+void ivInsert(uint b, uint e)
+{
+    uint k = s_niv;
+    while (k > 0u && s_ivb[k - 1u] > b) { s_ivb[k] = s_ivb[k - 1u]; s_ive[k] = s_ive[k - 1u]; --k; }
+    s_ivb[k] = b; s_ive[k] = e;
+    ++s_niv;
+}
+// First fit of w slots around the occupied ranges (CL_NONE = no room).
+uint ivFit(uint w, uint cap)
+{
+    uint start = 0u;
+    for (uint i = 0u; i < s_niv; ++i)
+    {
+        if (start + w <= s_ivb[i]) break;
+        start = max(start, s_ive[i]);
+    }
+    return start + w <= cap ? start : CL_NONE;
+}
+bool rigStill(uint a)
+{
+    return a < AV_SLOT_CAP && ((rcpu[RP_STILL + (a >> 5u)] >> (a & 31u)) & 1u) != 0u;
+}
+void rigAdmit()
+{
+    if (gl_LocalInvocationID.x != 0u || rcpu[RP_RIG_ON] == 0u) return;
+    const uint cap = rcpu[RP_RIG_CAP], b0 = rcpu[RP_AV_BASE];
+    const uint pb = rigAdmBase();                        // admitted last frame
+    const uint pk = rigPersBase();                       // persistent {base, want, siga, sigb}
+    const uint ps = rigSchedBase();                      // #1008 schedule {band, last selection frame}
+    if (ps + RIGAV_ROWS * RIGAV_SCHED_WORDS > uint(rig_of.length())) return;
+    // KEEP (header): an avatar whose cut set and range are what its slots were last built with
+    // keeps them -- placed first, at their range -- when its skinned world positions are provably
+    // unchanged (RP_KEEP bit 0 + RP_STILL) or (#1008, RP_KEEP bit 1) it is not due this frame: its
+    // instances copied their cuts forward and its RT pose may lag up to its period.
+    // #1008 REFRESH (header), in the same pass: a due mid / far (tagged) avatar whose cut set and
+    // range are its last build's takes that range again -- slots, headers and CLAS stay; mode 9
+    // rebuilds only the slots whose pose moved. (Last frame's ranges of the avatars admitted last
+    // frame are disjoint, so kept and refreshed ones never collide: no overlap test.)
+    // The cadence off this frame (RP_SCHED bit 0, the CPU's gate: no tagged avatar): the loop is
+    // the original one -- no schedule reads.
+    s_niv = 0u;
+    uint kept = 0u, refreshed = 0u, stale_max = 0u;
+    const bool keep_ok = (rcpu[RP_KEEP] & 1u) != 0u && pc.tier >= 1u;
+    const bool cad = (rcpu[RP_SCHED] & 1u) != 0u;
+    const bool sched_ok = cad && (rcpu[RP_KEEP] & 2u) != 0u && pc.tier >= 1u;
+    // #1011 CLAS REUSE (header): every due avatar with last frame's cut set and range is refreshed
+    // (only with the ranked shared cut: its slots keep the shared skinning and their order)
+    const bool reuse_ok = (rcpu[RP_KEEP] & 4u) != 0u && pc.tier >= 1u && rigRankOk();
+    for (uint a = 0u; a < RIGAV_ROWS; ++a)
+    {
+        const uint ab = b0 + a * RIGAV_STRIDE;
+        const uint w = rig_of[ab + RIGAV_WANT];
+        if (w == 0u) { rig_of[ab + RIGAV_KEEP] = 0u; continue; }
+        const bool due = !cad || rigDue(a);
+        rig_of[ab + RIGAV_KEEP] = due ? RIGAV_KEEP_DUE : 0u;
+        if (rig_of[pb + a] == 0u) continue;
+        const bool by_still = keep_ok && rigStill(a);
+        const bool by_sched = sched_ok && !due;
+        const bool refresh = (sched_ok && due && rigBand(a) != 0u) || (reuse_ok && due);
+        if (!by_still && !by_sched && !refresh) continue;
+        const uint q = pk + a * RIGAV_PERSIST_WORDS;
+        if (rig_of[q + 1u] != w || rig_of[q + 2u] != rig_of[ab + RIGAV_SIGA] || rig_of[q + 3u] != rig_of[ab + RIGAV_SIGB]
+            || rig_of[q] + w > cap)
+            continue;
+        const uint k = (by_still || by_sched) ? 1u : 2u;
+        rig_of[ab + RIGAV_KEEP] = k | (due ? RIGAV_KEEP_DUE : 0u);
+        rig_of[ab + RIGAV_BASE] = rig_of[q];
+        ivInsert(rig_of[q], rig_of[q] + w);
+        if (k == 1u) ++kept; else ++refreshed;
+        // (#1008 stats: the RT pose of an avatar kept by the schedule is this many frames old)
+        if (k == 1u && !by_still)
+        {
+            const uint last = rig_of[ps + a * RIGAV_SCHED_WORDS + 1u];
+            if (last != 0u) stale_max = max(stale_max, pc.frame - last);
+        }
+    }
+    // The others: the avatars admitted LAST frame first (the words after the table), then the
+    // rest, each pass in joint-table slot order -- so a newcomer while the arena is short (its
+    // growth lags the readback) never evicts an avatar that is covered (and may have dropped its
+    // legacy BLAS: cluster-only groups) -- first fit around the kept / refreshed ranges.
+    bool fail = false;
+    for (uint pass = 0u; pass < 2u; ++pass)
+        for (uint a = 0u; a < RIGAV_ROWS; ++a)
+        {
+            const uint ab = b0 + a * RIGAV_STRIDE;
+            const uint w = rig_of[ab + RIGAV_WANT];
+            if (w == 0u || (rig_of[ab + RIGAV_KEEP] & 3u) != 0u || (rig_of[pb + a] != 0u) != (pass == 0u)) continue;
+            const uint b = ivFit(w, cap);
+            rig_of[ab + RIGAV_BASE] = b;
+            if (b != CL_NONE) ivInsert(b, b + w);
+            else fail = true;
+        }
+    // Kept / refreshed ranges fragmented the arena and an avatar did not fit: this frame repacks
+    // (the plain prefix order above, nothing kept) -- never fewer avatars covered than without
+    // keeping.
+    if (fail && kept + refreshed != 0u)
+    {
+        kept = 0u; refreshed = 0u; stale_max = 0u;
+        uint total = 0u;
+        for (uint pass = 0u; pass < 2u; ++pass)
+            for (uint a = 0u; a < RIGAV_ROWS; ++a)
+            {
+                const uint ab = b0 + a * RIGAV_STRIDE;
+                const uint w = rig_of[ab + RIGAV_WANT];
+                if (w == 0u || (rig_of[pb + a] != 0u) != (pass == 0u)) continue;
+                rig_of[ab + RIGAV_KEEP] &= RIGAV_KEEP_DUE;
+                if (total + w <= cap) { rig_of[ab + RIGAV_BASE] = total; total += w; }
+                else rig_of[ab + RIGAV_BASE] = CL_NONE;
+            }
+    }
+    uint hi = 0u, due_n = 0u;
+    for (uint a = 0u; a < RIGAV_ROWS; ++a)
+    {
+        const uint ab = b0 + a * RIGAV_STRIDE;
+        const uint w = rig_of[ab + RIGAV_WANT];
+        const bool in_ = w != 0u && rig_of[ab + RIGAV_BASE] != CL_NONE;
+        if (w != 0u) atomicAdd(cnt[in_ ? CNT_RIG_AV_IN : CNT_RIG_AV_OUT], 1u);
+        if (in_ && (rig_of[ab + RIGAV_KEEP] & 3u) != 1u) cnt[CNT_RIG_REBUILD_SLOTS] += w;   // (one lane: no atomic needed)
+        // #1008 schedule for the next frame (rigDue reads it; written here, before this loop
+        // rewrites the admission word): the selection frame of a due avatar (mode 13's first pass
+        // cached the answer in RIGAV_KEEP), its band from this frame's nearest instance (with the
+        // dead band; the plain edges on arrival). Cadence off: nothing read or written.
+        if (w != 0u && cad)
+        {
+            const uint q = ps + a * RIGAV_SCHED_WORDS;
+            if ((rig_of[ab + RIGAV_KEEP] & RIGAV_KEEP_DUE) != 0u) { rig_of[q + 1u] = max(pc.frame, 1u); ++due_n; }
+            const uint key = rig_of[ab + RIGAV_DIST];
+            if (key != 0u)
+            {
+                const float d = uintBitsToFloat(0xFFFFFFFFu - key);
+                rig_of[q] = rig_of[pb + a] == 0u ? rigBandRaw(d) : rigBandOf(d, min(rig_of[q], 2u));
+            }
+        }
+        rig_of[pb + a] = in_ ? 1u : 0u;
+        if (in_)
+        {
+            const uint q = pk + a * RIGAV_PERSIST_WORDS;
+            rig_of[q] = rig_of[ab + RIGAV_BASE];
+            rig_of[q + 1u] = w;
+            rig_of[q + 2u] = rig_of[ab + RIGAV_SIGA];
+            rig_of[q + 3u] = rig_of[ab + RIGAV_SIGB];
+            hi = max(hi, rig_of[ab + RIGAV_BASE] + w);
+        }
+    }
+    cnt[CNT_RIG_KEPT_AV] = kept;
+    cnt[CNT_RIG_REFRESH_AV] = refreshed;
+    cnt[CNT_RIG_DUE_AV] = due_n;
+    atomicMax(cnt[CNT_RIG_STALE_MAX], stale_max);   // (mode 9 adds its skipped slots' ages)
+    cnt[CNT_RIG] = hi;   // the slots in use end here (mode 9's range; kept ranges may leave holes)
+}
+
+// #1011 (header): mode 13 on the whole workgroup -- the same decisions as rigAdmit, row for row.
+// Phase A (all lanes, one avatar row each): keep / refresh and the kept range from the row's own
+// words. Phase B (lane 0): the first fit in joint-table slot order, over SHARED memory only. Phase
+// C (all lanes): the row's outputs (base, keep word, schedule, admission, persistent range). Mode
+// 13 runs alone in its dispatch, so its tables live in mode 0's s_cut storage: s_cut[a] = {want,
+// keep word}, s_cut[RIGAV_ROWS + a] = {base, admitted last frame}.
+// LAGGED CLAS (schedule word 2, kept across frames): the avatar was tagged no-self-shadow when its
+// slots were last built or kept, so its CLAS may lag its pose (#1008 refresh / #1011 reuse
+// tolerance). Untagged now, it must not be KEPT by the still-proof (that proves the pose did not
+// move since last frame, not that the CLAS holds it): it is refreshed -- every moved slot rebuilt
+// to the self-shadowing tolerance -- or placed afresh, so its receivers never meet a stale hull.
+shared uint s_ad[8];   // kept, refreshed, stale max, in, out, rebuild slots, due, slots end
+void rigAdmitPar()
+{
+    const uint lid = gl_LocalInvocationID.x;
+    if (rcpu[RP_RIG_ON] == 0u) return;   // (uniform)
+    const uint cap = rcpu[RP_RIG_CAP], b0 = rcpu[RP_AV_BASE];
+    const uint pb = rigAdmBase(), pk = rigPersBase(), ps = rigSchedBase();
+    if (ps + RIGAV_ROWS * RIGAV_SCHED_WORDS > uint(rig_of.length())) return;   // (uniform)
+    const bool keep_ok = (rcpu[RP_KEEP] & 1u) != 0u && pc.tier >= 1u;
+    const bool cad = (rcpu[RP_SCHED] & 1u) != 0u;
+    const bool sched_ok = cad && (rcpu[RP_KEEP] & 2u) != 0u && pc.tier >= 1u;
+    const bool reuse_ok = (rcpu[RP_KEEP] & 4u) != 0u && pc.tier >= 1u && rigRankOk();
+    if (lid < 8u) s_ad[lid] = 0u;
+    barrier();
+    // ---- A ----
+    for (uint a = lid; a < RIGAV_ROWS; a += 64u)
+    {
+        const uint ab = b0 + a * RIGAV_STRIDE;
+        const uint w = rig_of[ab + RIGAV_WANT];
+        const uint prev = rig_of[pb + a];
+        uint kw = 0u, base = CL_NONE;
+        if (w != 0u)
+        {
+            const bool due = !cad || rigDue(a);
+            kw = due ? RIGAV_KEEP_DUE : 0u;
+            const bool lagged = rig_of[ps + a * RIGAV_SCHED_WORDS + 2u] != 0u && !rigNoSelf(a);
+            const bool by_still = prev != 0u && keep_ok && rigStill(a) && !lagged;
+            const bool by_sched = prev != 0u && sched_ok && !due;
+            const bool refresh = prev != 0u && ((sched_ok && due && rigBand(a) != 0u) || (reuse_ok && due));
+            if (by_still || by_sched || refresh)
+            {
+                const uint q = pk + a * RIGAV_PERSIST_WORDS;
+                if (rig_of[q + 1u] == w && rig_of[q + 2u] == rig_of[ab + RIGAV_SIGA] && rig_of[q + 3u] == rig_of[ab + RIGAV_SIGB]
+                    && rig_of[q] + w <= cap)
+                {
+                    const uint k = (by_still || by_sched) ? 1u : 2u;
+                    kw |= k;
+                    base = rig_of[q];
+                    atomicAdd(s_ad[k == 1u ? 0u : 1u], 1u);
+                    if (k == 1u && !by_still)
+                    {
+                        const uint last = rig_of[ps + a * RIGAV_SCHED_WORDS + 1u];
+                        if (last != 0u) atomicMax(s_ad[2], pc.frame - last);
+                    }
+                }
+            }
+        }
+        s_cut[a] = uvec2(w, kw);
+        s_cut[RIGAV_ROWS + a] = uvec2(base, prev);
+    }
+    barrier();
+    // ---- B (lane 0, shared memory) ----
+    if (lid == 0u)
+    {
+        s_niv = 0u;
+        for (uint a = 0u; a < RIGAV_ROWS; ++a)
+            if ((s_cut[a].y & 3u) != 0u) ivInsert(s_cut[RIGAV_ROWS + a].x, s_cut[RIGAV_ROWS + a].x + s_cut[a].x);
+        bool fail = false;
+        for (uint pass = 0u; pass < 2u; ++pass)
+            for (uint a = 0u; a < RIGAV_ROWS; ++a)
+            {
+                const uint w = s_cut[a].x;
+                if (w == 0u || (s_cut[a].y & 3u) != 0u || (s_cut[RIGAV_ROWS + a].y != 0u) != (pass == 0u)) continue;
+                const uint b = ivFit(w, cap);
+                s_cut[RIGAV_ROWS + a].x = b;
+                if (b != CL_NONE) ivInsert(b, b + w);
+                else fail = true;
+            }
+        if (fail && s_ad[0] + s_ad[1] != 0u)
+        {
+            s_ad[0] = 0u; s_ad[1] = 0u; s_ad[2] = 0u;
+            uint total = 0u;
+            for (uint pass = 0u; pass < 2u; ++pass)
+                for (uint a = 0u; a < RIGAV_ROWS; ++a)
+                {
+                    const uint w = s_cut[a].x;
+                    if (w == 0u || (s_cut[RIGAV_ROWS + a].y != 0u) != (pass == 0u)) continue;
+                    s_cut[a].y &= RIGAV_KEEP_DUE;
+                    if (total + w <= cap) { s_cut[RIGAV_ROWS + a].x = total; total += w; }
+                    else s_cut[RIGAV_ROWS + a].x = CL_NONE;
+                }
+        }
+    }
+    barrier();
+    // ---- C ----
+    for (uint a = lid; a < RIGAV_ROWS; a += 64u)
+    {
+        const uint ab = b0 + a * RIGAV_STRIDE;
+        const uint w = s_cut[a].x, kw = s_cut[a].y, base = s_cut[RIGAV_ROWS + a].x, prev = s_cut[RIGAV_ROWS + a].y;
+        rig_of[ab + RIGAV_KEEP] = kw;
+        if (w == 0u) { rig_of[pb + a] = 0u; continue; }
+        rig_of[ab + RIGAV_BASE] = base;
+        const bool in_ = base != CL_NONE;
+        atomicAdd(s_ad[in_ ? 3u : 4u], 1u);
+        if (in_ && (kw & 3u) != 1u) atomicAdd(s_ad[5], w);
+        if (cad)
+        {
+            const uint q = ps + a * RIGAV_SCHED_WORDS;
+            if ((kw & RIGAV_KEEP_DUE) != 0u) { rig_of[q + 1u] = max(pc.frame, 1u); atomicAdd(s_ad[6], 1u); }
+            const uint key = rig_of[ab + RIGAV_DIST];
+            if (key != 0u)
+            {
+                const float d = uintBitsToFloat(0xFFFFFFFFu - key);
+                rig_of[q] = prev == 0u ? rigBandRaw(d) : rigBandOf(d, min(rig_of[q], 2u));
+            }
+        }
+        rig_of[pb + a] = in_ ? 1u : 0u;
+        if (in_)
+        {
+            const uint q = pk + a * RIGAV_PERSIST_WORDS;
+            rig_of[q] = base;
+            rig_of[q + 1u] = w;
+            rig_of[q + 2u] = rig_of[ab + RIGAV_SIGA];
+            rig_of[q + 3u] = rig_of[ab + RIGAV_SIGB];
+            atomicMax(s_ad[7], base + w);
+            rig_of[ps + a * RIGAV_SCHED_WORDS + 2u] = rigNoSelf(a) ? 1u : 0u;   // (LAGGED CLAS, above)
+        }
+    }
+    barrier();
+    if (lid == 0u)
+    {
+        if (s_ad[3] != 0u) atomicAdd(cnt[CNT_RIG_AV_IN], s_ad[3]);
+        if (s_ad[4] != 0u) atomicAdd(cnt[CNT_RIG_AV_OUT], s_ad[4]);
+        cnt[CNT_RIG_REBUILD_SLOTS] += s_ad[5];
+        cnt[CNT_RIG_KEPT_AV] = s_ad[0];
+        cnt[CNT_RIG_REFRESH_AV] = s_ad[1];
+        cnt[CNT_RIG_DUE_AV] = s_ad[6];
+        atomicMax(cnt[CNT_RIG_STALE_MAX], s_ad[2]);
+        cnt[CNT_RIG] = s_ad[7];
+    }
+}
+
+shared uint s_rfr;   // (#1008: this instance's avatar is REFRESHED)
+void rigPlace(uint ii)
+{
+    const uint lid = gl_LocalInvocationID.x;
+    const uvec4 r = clinst[ii * 2u];
+    if (r.x == CL_NONE || r.z == CL_NONE || (r.w & CLINST_RIGGED) == 0u || ii * 8u + 8u > uint(rig_of.length()))
+        return;   // uniform
+    if (lid == 0u)
+    {
+        const uint ab = rcpu[RP_AV_BASE] + rigAvatar(cl_instances[ii].flags) * RIGAV_STRIDE;
+        const uint ri = r.x;
+        uint s0 = CL_NONE;
+        bool kept = false, refresh = false;
+        if (ab + RIGAV_STRIDE <= uint(rig_of.length()) && rig_of[ab + RIGAV_BASE] != CL_NONE)
+        {
+            if ((rig_of[ab + RIGAV_KEEP] & 3u) != 0u)
+            {
+                // KEPT avatar: the instance's slots of the build frame (st[ri][2], the avatar's
+                // signature covers its id and cut size) -- inside the kept range by construction.
+                // #1008 REFRESHED avatar (KEEP 2): the same slots, whose headers already hold this
+                // cut set (the signature covers its hashes); mode 9 re-skins and compares them.
+                const uvec4 s2 = st[ri * ST_STRIDE + 2u];
+                const uint b = rig_of[ab + RIGAV_BASE], w = rig_of[ab + RIGAV_WANT];
+                if (s2.z == RIG_ST_TAG && s2.y == r.z && s2.x >= b && s2.x + r.z <= b + w)
+                {
+                    s0 = s2.x;
+                    kept = (rig_of[ab + RIGAV_KEEP] & 3u) == 1u;
+                    refresh = !kept;
+                }
+            }
+            else
+            {
+                s0 = rig_of[ab + RIGAV_BASE] + atomicAdd(rig_of[ab + RIGAV_FILL], r.z);
+                if (s0 + r.z > rcpu[RP_RIG_CAP]) s0 = CL_NONE;   // (never: the avatar's range holds its cuts)
+                else st[ri * ST_STRIDE + 2u] = uvec4(s0, r.z, RIG_ST_TAG, 0u);
+            }
+        }
+        if (s0 == CL_NONE) atomicAdd(cnt[CNT_RIG_OVERFLOW], 1u);
+        // SHARED SKINNED CUT: the main view selected (and 2a skinned + welded) every cluster of this
+        // cut -- its skinned entries (mode 11) are as many as the cut, which they are a subset of
+        // (same projection, same rule) -- then the slots take those vertices (mode 12 scatters
+        // them, mode 9 copies them) and nothing is skinned twice. (Kept: nothing to write;
+        // refreshed: own skinning -- its headers keep their order, mode 12 would reorder them.)
+        // #1011 CLAS REUSE (header): with the RANKED shared cut mode 12 keeps the order, so a
+        // refreshed instance of the same set stays shared (RIGOF_SHARED 2: mode 12 marks the slots
+        // that still hold their CLAS's cluster, mode 9 compares them) -- skin once.
+        const uvec4 g = rigGather(ii);
+        const bool same_set = rcpu[RP_SHARED] != 0u && g.x == r.z && g.y == clinst[ii * 2u + 1u].x;   // (the same SET)
+        const bool reuse_sh = refresh && s0 != CL_NONE && same_set && (rcpu[RP_REUSE] & 1u) != 0u && rigRankOk();
+        const bool use_shared = (!kept && !refresh && s0 != CL_NONE && same_set) || reuse_sh;
+        rig_of[ii * 8u + RIGOF_S0] = s0;
+        rig_of[ii * 8u + RIGOF_SHARED] = use_shared ? (reuse_sh ? 2u : 1u) : 0u;
+        if (use_shared) atomicAdd(cnt[CNT_RIG_SHARED], 1u);
+        s_rig = (use_shared || kept) ? CL_NONE : s0;   // (shared: headers from mode 12; kept: none)
+        s_rfr = (refresh && !reuse_sh) ? 1u : 0u;
+    }
+    barrier();
+    const uint s0 = s_rig;
+    if (s0 == CL_NONE) return;   // uniform
+    const uint cap = rcpu[RP_RIG_CAP];
+    const uint stamp = rcpu[RP_STAMP] & RP_STAMP_MASK;
+    if (s_rfr != 0u)   // (uniform)
+    {
+        // REFRESH: only the slot's ClusterInstance (this frame's list index; own skinning) and the
+        // stamp (bit 31: mode 9 compares before it builds). Ref, page and entry k stay -- they are
+        // what the slot's CLAS was built from and what hits read.
+        for (uint k = lid; k < r.z; k += 64u)
+        {
+            const uint h = RIG_HDR_BASE + (s0 + k) * 4u;
+            if (h + 4u > uint(rig.length())) continue;
+            rig[h + 3u] = ii;
+            if (cap * 3u + s0 + k < uint(rig_addr.length())) rig_addr[cap * 3u + s0 + k] = stamp | RIG_STAMP_REFRESH;
+        }
+        return;
+    }
+    for (uint k = lid; k < r.z; k += 64u)
+    {
+        const uvec4 e = cut[r.y + k];
+        const uint h = RIG_HDR_BASE + (s0 + k) * 4u;
+        if (h + 4u > uint(rig.length())) continue;
+        rig[h] = e.x;
+        rig[h + 1u] = e.y;
+        rig[h + 2u] = k | (e.z << 16u);
+        rig[h + 3u] = ii;   // (own skinning, mode 9)
+        if (cap * 3u + s0 + k < uint(rig_addr.length())) rig_addr[cap * 3u + s0 + k] = stamp;
+    }
+}
+
+// ============================================================================================
+// 1 CLAS_SCAN / 2 CLAS_ALLOC / 3 CLAS_DECODE / 4 BLAS_ARGS
+// ============================================================================================
+void clasScan(uint slot)
+{
+    if (slot >= pc.pool_pages) return;
+    const uvec4 e = clas_of_slot[slot];
+    if (e.x == CL_NONE) return;
+    const uint base = slot * CL_PAGE_WORDS;
+    const bool same = cl_pool[base] == 0x47504C43u && cl_pool[base + 2u] == e.y && cl_pool[base + 3u] == e.z;
+    if (same && pc.frame - e.w <= pc.idle_frames) return;
+    clas_of_slot[slot] = uvec4(CL_NONE);
+    // (a page past the arena -- its chunk went back -- is not pushed: the stack holds live pages)
+    if (e.x < pc.clas_cap)
+    {
+        const uint t = atomicAdd(clas_free[0], 1u);
+        if (t < pc.clas_cap) clas_free[1u + t] = e.x;
+    }
+    atomicAdd(cnt[CNT_CLAS_FREED], 1u);
+    // (a persistent static BLAS built before this frame may reference it: the previous-BLAS
+    // fallback of mode 4 is only taken while no CLAS was freed since that BLAS was built)
+    atomicMax(sb[SB_LAST_FREE], pc.frame);
+}
+
+void clasAlloc(uint i)
+{
+    if (i >= min(min(cnt[CNT_WANT], pc.pool_pages), pc.clas_pages_max)) return;
+    const uint slot = clas_want[i];
+    if (slot >= pc.pool_pages || clas_of_slot[slot].x != CL_NONE) return;
+    const uint base = slot * CL_PAGE_WORDS;
+    if (cl_pool[base] != 0x47504C43u) return;   // not a page (should not be selected)
+    const uint n = min(clPageClusterCount(slot), CL_MAX_CLUSTERS_PER_PAGE);
+    if (n == 0u) return;
+    // pop a CLAS slot (restore on underflow)
+    const uint t = atomicAdd(clas_free[0], 0xFFFFFFFFu);
+    if (t == 0u || t > pc.clas_cap)
+    {
+        atomicAdd(clas_free[0], 1u);
+        atomicAdd(cnt[CNT_CLAS_FAIL], 1u);
+        return;
+    }
+    const uint cs = clas_free[t];   // entry t - 1 (stack at [1..])
+    if (cs >= pc.clas_cap) return;
+    clas_of_slot[slot] = uvec4(cs, cl_pool[base + 2u], cl_pool[base + 3u], pc.frame);
+    atomicAdd(cnt[CNT_CLAS_ALLOC], 1u);
+    // (its build stamp: a persistent static BLAS built before it never references it -- mode 4)
+    if (scpu[SC_OFF_BUILT] + cs < uint(sb.length())) sb[scpu[SC_OFF_BUILT] + cs] = pc.frame;
+    // n args, contiguous (the build count can never pass clas_pages_max * 64)
+    const uint a0 = atomicAdd(cnt[CNT_CLAS_ARGS], n);
+    for (uint c = 0u; c < n; ++c)
+    {
+        const uint a = a0 + c;
+        const ClRecord rec = clLoadRecord(slot, c);
+        const uint tris = min(clRecTriCount(rec), CL_MAX_CLUSTER_TRIS);
+        const uint verts = min(clRecVertCount(rec), CL_MAX_CLUSTER_VERTS);
+        const uint ref = clMakeRef(slot, c);
+        const uvec2 ib = addrAdd(pc.pool_addr, clFirstIndexByte(slot, rec));
+        const uvec2 vb = addrAdd(pc.decode_addr, a * CL_MAX_CLUSTER_VERTS * 12u);
+        const uint w = a * 16u;
+        clas_args[w + 0u] = ref;                                   // clusterID (!= 0xFFFFFFFF)
+        clas_args[w + 1u] = 0u;                                    // clusterFlags
+        // 8-bit indices; the micromap index type also names a single format (no micromaps)
+        clas_args[w + 2u] = tris | (verts << 9u) | (0u << 18u) | (1u << 24u) | (1u << 28u);
+        clas_args[w + 3u] = ref & 0xFFFFFFu;                       // geometryIndex = the ref, no flags
+        clas_args[w + 4u] = 0u;                                    // index / vertex strides: packed
+        clas_args[w + 5u] = 0u;
+        clas_args[w + 6u] = ib.x;  clas_args[w + 7u] = ib.y;
+        clas_args[w + 8u] = vb.x;  clas_args[w + 9u] = vb.y;
+        clas_args[w + 10u] = 0u; clas_args[w + 11u] = 0u;          // per-triangle geometry indices: none
+        clas_args[w + 12u] = 0u; clas_args[w + 13u] = 0u;          // no micromaps
+        clas_args[w + 14u] = 0u; clas_args[w + 15u] = 0u;
+        clas_dst[a] = clasAddr(cs, c);
+        clas_size[a] = pc.clas_stride;
+    }
+}
+
+void clasDecode(uint a)
+{
+    if (a >= min(cnt[CNT_CLAS_ARGS], pc.clas_pages_max * CL_MAX_CLUSTERS_PER_PAGE)) return;   // uniform
+    const uint ref = clas_args[a * 16u];
+    const uint slot = clRefSlot(ref), c = clRefIndex(ref);
+    const ClRecord rec = clLoadRecord(slot, c);
+    const uint verts = min(clRecVertCount(rec), CL_MAX_CLUSTER_VERTS);
+    const uint v = gl_LocalInvocationID.x;
+    if (v >= verts) return;
+    const uint first = clFirstVertex(slot, rec);
+    const QvHeader h = QV_LOAD_HEADER(cl_pool, first);
+    const uint w = (first + v) * QV_WORDS;
+    const vec3 p = qvPos(h, cl_pool[w], cl_pool[w + 1u]);
+    const uint o = (a * CL_MAX_CLUSTER_VERTS + v) * 3u;
+    dec[o] = p.x; dec[o + 1u] = p.y; dec[o + 2u] = p.z;
+}
+
+shared uint s_ready, s_stale;
+
+// ---- PERSISTENT STATIC BLAS (header STATIC; LLCleanClusterRTVK "STATIC") ----
+// The size class of a BLAS of n clusters (CL_NONE = none holds it).
+uint sbClassOf(uint n)
+{
+    const uint nc = min(scpu[SC_SB_CLASSES], 32u);
+    for (uint c = 0u; c < nc; ++c)
+        if (scpu[SC_CLASS_COUNT + c] >= n) return c;
+    return CL_NONE;
+}
+// A heap block of class c: a freed one of the class (the stacks are pushed by mode 21 of EARLIER
+// frames only, so a pop never races a push), else fresh units from the bump pointer.
+bool sbAlloc(uint c, out uint blk)
+{
+    blk = CL_NONE;
+    const uint cap = scpu[SC_STACK_CAP];
+    const uint t = atomicAdd(sb[SB_TOPS + c], 0xFFFFFFFFu);
+    if (t != 0u && t <= cap)
+    {
+        blk = sb[scpu[SC_OFF_STACKS] + c * cap + t - 1u];
+        return true;
+    }
+    atomicAdd(sb[SB_TOPS + c], 1u);   // (empty: restore)
+    const uint units = scpu[SC_CLASS_UNITS + c];
+    const uint b = atomicAdd(sb[SB_BUMP], units);
+    if (b + units > scpu[SC_SB_UNITS] || b + units > 0x00FFFFFFu) return false;
+    blk = b;
+    return true;
+}
+// A block back: pushed onto its class stack by mode 21, after this frame's allocations.
+void sbFree(uint blk, uint c)
+{
+    const uint p = atomicAdd(cnt[CNT_SB_PEND], 1u);
+    if (p < scpu[SC_PEND_CAP]) { sb[SB_PEND + p * 2u] = blk; sb[SB_PEND + p * 2u + 1u] = c; }
+    else atomicAdd(cnt[CNT_SB_LEAK], 1u);
+}
+// 21 SB_FREE: one lane per pending free -> its class stack (only pushes in this dispatch: an
+// overflowing push takes itself back and the block is lost until the next heap epoch).
+void sbPush(uint i)
+{
+    if (i >= min(cnt[CNT_SB_PEND], scpu[SC_PEND_CAP])) return;
+    const uint blk = sb[SB_PEND + i * 2u], c = sb[SB_PEND + i * 2u + 1u];
+    if (c >= min(scpu[SC_SB_CLASSES], 32u)) return;
+    const uint cap = scpu[SC_STACK_CAP];
+    const uint t = atomicAdd(sb[SB_TOPS + c], 1u);
+    if (t < cap) sb[scpu[SC_OFF_STACKS] + c * cap + t] = blk;
+    else { atomicAdd(sb[SB_TOPS + c], 0xFFFFFFFFu); atomicAdd(cnt[CNT_SB_LEAK], 1u); }
+}
+
+// 22 SB_SWEEP (every 16 frames, before mode 4): one lane per renderer instance id -- a block of
+// this heap epoch whose instance neither built nor traced it for 120 frames (no longer admitted,
+// gone) is freed (free on liveness; else it would sit there until the id is reused or a repack).
+void sbSweep(uint ri)
+{
+    if (ri >= pc.ri_cap || scpu[SC_SB_ON] == 0u) return;
+    uvec4 p4 = st[ri * ST_STRIDE + 4u];
+    if (p4.y != scpu[SC_SB_EPOCH] || p4.y == 0u || p4.z == CL_NONE) return;
+    if (pc.frame - max(p4.x, p4.w) <= 120u) return;
+    sbFree(p4.z & 0x00FFFFFFu, p4.z >> 24u);
+    p4.z = CL_NONE;
+    st[ri * ST_STRIDE + 4u] = p4;
+}
+
+// 4 BLAS_ARGS. Rigged instances (and statics without the persistent heap) get a BLAS of this
+// frame's implicit-destination build (blas_info [0, blas_max)), as before. A STATIC instance
+// keeps a PERSISTENT BLAS in the heap:
+//   KEPT     while its cut (hash), mesh and every CLAS it references (build stamps no newer than
+//            the BLAS) are unchanged -- no build at all for a still camera;
+//   REBUILT  (explicit destination: blas_info / blas_addr [blas_max, 2 blas_max)) into a block of
+//            its size class when one of them changed (the old block is freed after this frame's
+//            allocations);
+//   PREVIOUS while its new cut is not ready (a CLAS missing / no block): the BLAS it has keeps
+//            tracing as long as no CLAS was freed since it was built -- no flip to the legacy BLAS.
+void blasArgs(uint ii)
+{
+    const uint lid = gl_LocalInvocationID.x;
+    const uvec4 r = clinst[ii * 2u];
+    if (lid == 0u) { s_ready = 1u; s_stale = 0u; blas_of[ii] = CL_NONE; }
+    barrier();
+    if (r.x == CL_NONE || r.z == CL_NONE) return;   // uniform
+    // Rigged: the CLAS of its arena slots, built this frame (mode 9 + the rigged CLAS build).
+    const bool rigged = (r.w & CLINST_RIGGED) != 0u;
+    const uint s0 = rigged && ii * 8u + 8u <= uint(rig_of.length()) ? rig_of[ii * 8u + RIGOF_S0] : CL_NONE;
+    if (rigged && s0 == CL_NONE) { if (lid == 0u) atomicAdd(cnt[CNT_NOT_READY], 1u); return; }   // uniform
+    const bool persist = !rigged && scpu[SC_SB_ON] != 0u && r.x < pc.ri_cap;
+    const uvec4 p4 = persist ? st[r.x * ST_STRIDE + 4u] : uvec4(0u);
+    const uint built_off = scpu[SC_OFF_BUILT];
+    for (uint k = lid; k < r.z; k += 64u)
+    {
+        if (rigged)
+        {
+            // (explicit destinations: slot s's CLAS -- built this frame or kept)
+            const uint rcap = rcpu[RP_RIG_CAP];
+            if (s0 + k >= rcap || rcap * 3u + s0 + k >= uint(rig_addr.length()) || rig_addr[rcap * 3u + s0 + k] == 0u)
+            { s_ready = 0u; continue; }
+            clas_refs[r.y + k] = addrAdd(uvec2(rcpu[RP_CLAS_BASE], rcpu[RP_CLAS_BASE + 1u]),
+                                         (s0 + k) * rcpu[RP_CLAS_STRIDE]);
+            continue;
+        }
+        const uint ref = cut[r.y + k].x;
+        const uint slot = clRefSlot(ref);
+        const uint cs = slot < pc.pool_pages ? clas_of_slot[slot].x : CL_NONE;
+        if (cs == CL_NONE || cs >= pc.clas_cap) { s_ready = 0u; continue; }
+        clas_refs[r.y + k] = clasAddr(cs, clRefIndex(ref));
+        if (persist && (built_off + cs >= uint(sb.length()) || sb[built_off + cs] > p4.x)) s_stale = 1u;
+    }
+    barrier();
+    if (lid != 0u) return;
+    if (!persist)
+    {
+        if (s_ready == 0u) { atomicAdd(cnt[CNT_NOT_READY], 1u); return; }
+        const uint idx = atomicAdd(cnt[CNT_BLAS_INFOS], 1u);
+        if (idx >= pc.blas_max) return;
+        const uvec2 a = addrAdd(pc.clas_refs_addr, r.y * 8u);
+        blas_info[idx * 4u + 0u] = r.z;   // clusterReferencesCount
+        blas_info[idx * 4u + 1u] = 8u;    // clusterReferencesStride
+        blas_info[idx * 4u + 2u] = a.x;
+        blas_info[idx * 4u + 3u] = a.y;
+        blas_of[ii] = idx;
+        return;
+    }
+    // ---- persistent static BLAS ----
+    const uint ri = r.x;
+    const uvec4 p3 = st[ri * ST_STRIDE + 3u];
+    const uvec4 h = clinst[ii * 2u + 1u];             // cut hash a, b, mesh, mesh generation
+    const uint hash = h.x ^ mix32(h.y + 0x632BE5ABu);
+    const uint epoch = scpu[SC_SB_EPOCH];
+    // own: this instance id holds a block of this heap; have: ... built from this mesh (an id
+    // reused by another object frees the old one's block when it builds)
+    const bool own = p4.y == epoch && epoch != 0u && p4.z != CL_NONE;
+    const bool have = own && p3.y == h.z && p3.z == h.w;
+    bool ok = false;
+    if (s_ready != 0u && have && s_stale == 0u && p3.x == hash)
+    {
+        ok = true;                                    // KEPT: nothing changed
+        atomicAdd(cnt[CNT_SB_KEPT], 1u);
+    }
+    else if (s_ready != 0u)
+    {
+        const uint c = sbClassOf(r.z);
+        uint blk = CL_NONE;
+        if (c != CL_NONE && sbAlloc(c, blk))
+        {
+            const uint j = atomicAdd(cnt[CNT_SB_INFOS], 1u);
+            if (j < pc.blas_max)
+            {
+                const uvec2 a = addrAdd(pc.clas_refs_addr, r.y * 8u);
+                const uint o = pc.blas_max + j;
+                blas_info[o * 4u + 0u] = r.z;
+                blas_info[o * 4u + 1u] = 8u;
+                blas_info[o * 4u + 2u] = a.x;
+                blas_info[o * 4u + 3u] = a.y;
+                const uvec2 base = uvec2(scpu[SC_SB_ADDR], scpu[SC_SB_ADDR + 1u]);
+                blas_addr[o] = addrAdd(base, blk * scpu[SC_SB_UNIT]);   // (the explicit destination)
+                // its size (the block's: the build writes the real one over it)
+                blas_addr[pc.blas_max + o] = uvec2(scpu[SC_CLASS_UNITS + c] * scpu[SC_SB_UNIT], 0u);
+                if (own) sbFree(p4.z & 0x00FFFFFFu, p4.z >> 24u);
+                st[ri * ST_STRIDE + 3u] = uvec4(hash, h.z, h.w, 0u);
+                st[ri * ST_STRIDE + 4u] = uvec4(pc.frame, epoch, blk | (c << 24u), p4.w);
+                ok = true;
+            }
+            else sbFree(blk, c);                      // (never: blas_max >= the instance rows)
+        }
+        else atomicAdd(cnt[CNT_SB_FAIL], 1u);
+    }
+    if (!ok && have && sb[SB_LAST_FREE] <= p4.x)
+    {
+        ok = true;                                    // the PREVIOUS BLAS: every CLAS it references is intact
+        atomicAdd(cnt[CNT_SB_OLD], 1u);
+    }
+    if (!ok) { atomicAdd(cnt[CNT_NOT_READY], 1u); return; }
+    const uvec4 n4 = st[ri * ST_STRIDE + 4u];
+    atomicAdd(cnt[CNT_SB_UNITS], scpu[SC_CLASS_UNITS + min(n4.z >> 24u, 31u)]);
+    blas_of[ii] = BLAS_SB;
+}
+
+// ============================================================================================
+// 5 OVERRIDE
+// ============================================================================================
+// First vertex (absolute QVertex index in the pool) of a resident cluster.
+uint firstVertexOf(uint ref)
+{
+    const ClRecord rec = clLoadRecord(clRefSlot(ref), clRefIndex(ref));
+    return clFirstVertex(clRefSlot(ref), rec);
+}
+
+void overrideClas(uint ii)
+{
+    if (gl_LocalInvocationID.x != 0u) return;
+    const uvec4 r = clinst[ii * 2u];
+    if (r.x == CL_NONE || r.z == CL_NONE || r.x >= pc.ri_cap) return;
+    const uint b = blas_of[ii];
+    if (b == BLAS_SB)
+    {
+        // a persistent static BLAS: its heap block (st, written by mode 4)
+        uvec4 p4 = st[r.x * ST_STRIDE + 4u];
+        const uvec2 base = uvec2(scpu[SC_SB_ADDR], scpu[SC_SB_ADDR + 1u]);
+        const uvec2 a = addrAdd(base, (p4.z & 0x00FFFFFFu) * scpu[SC_SB_UNIT]);
+        ovr[r.x] = uvec4(a.x, a.y, 0u, OVR_DIRECT | (firstVertexOf(cut[r.y].x) & 0x7FFFFFFFu));
+        atomicAdd(cnt[CNT_READY], 1u);
+        if (p4.w + 1u != pc.frame) atomicAdd(cnt[CNT_STATIC_FLIP], 1u);   // (back from the legacy BLAS)
+        p4.w = pc.frame;
+        st[r.x * ST_STRIDE + 4u] = p4;
+        return;
+    }
+    if (b == CL_NONE || b >= min(cnt[CNT_BLAS_INFOS], pc.blas_max)) return;
+    const uvec2 a = blas_addr[b];
+    if ((a.x | a.y) == 0u) return;
+    if ((r.w & CLINST_RIGGED) != 0u)
+    {
+        // geometry index = the entry k of its cut; z = its first arena slot (hit: slot z + k)
+        ovr[r.x] = uvec4(a.x, a.y, rig_of[ii * 8u + RIGOF_S0], OVR_RIG | (firstVertexOf(cut[r.y].x) & 0x0FFFFFFFu));
+        atomicAdd(cnt[CNT_RIG_READY], 1u);
+        return;
+    }
+    ovr[r.x] = uvec4(a.x, a.y, 0u, OVR_DIRECT | (firstVertexOf(cut[r.y].x) & 0x7FFFFFFFu));
+    atomicAdd(cnt[CNT_READY], 1u);
+}
+
+// Tier 0 row (4 uvec4): [0] ri, mesh, mesh generation, 0; [1] newest BLAS lo, hi, cut base, cut
+// count (0 = none); [2] its validity word (kNone = confirmed), previous BLAS lo, hi, cut base;
+// [3] previous cut count, 0, 0, 0.
+shared uint s_new_ok, s_old_ok;
+void overrideT0(uint row)
+{
+    const uint lid = gl_LocalInvocationID.x;
+    if (row >= pc.job_count) return;   // uniform
+    const uvec4 r0 = t0_rows[row * 4u], r1 = t0_rows[row * 4u + 1u], r2 = t0_rows[row * 4u + 2u], r3 = t0_rows[row * 4u + 3u];
+    const uint ri = r0.x;
+    if (ri >= pc.ri_cap) return;
+    // Only an instance the cluster path selected THIS frame with the same mesh (renderer ids
+    // are reused by other objects).
+    const uvec4 s0 = st[ri * ST_STRIDE], s1 = st[ri * ST_STRIDE + 1u];
+    if (s1.y != pc.frame || s0.w != r0.y || s1.x != r0.z) return;
+    if (lid == 0u)
+    {
+        s_new_ok = ((r1.x | r1.y) != 0u && r1.w != 0u && (r2.x == CL_NONE || t0_valid[r2.x] != 0u)) ? 1u : 0u;
+        s_old_ok = ((r2.y | r2.z) != 0u && r3.x != 0u) ? 1u : 0u;
+    }
+    barrier();
+    // every page of the cut still resident (its pool data is what hits shade from)
+    for (uint k = lid; k < r1.w && s_new_ok != 0u; k += 64u)
+    {
+        const uvec4 e = hit_cut[r1.z + k];
+        if (e.y >= uint(cl_page_table.length()) || cl_page_table[e.y] != clRefSlot(e.x)) s_new_ok = 0u;
+    }
+    for (uint k = lid; k < r3.x && s_old_ok != 0u; k += 64u)
+    {
+        const uvec4 e = hit_cut[r2.w + k];
+        if (e.y >= uint(cl_page_table.length()) || cl_page_table[e.y] != clRefSlot(e.x)) s_old_ok = 0u;
+    }
+    barrier();
+    if (lid != 0u) return;
+    if (s_new_ok != 0u)
+        ovr[ri] = uvec4(r1.x, r1.y, r1.z, firstVertexOf(hit_cut[r1.z].x) & 0x7FFFFFFFu);
+    else if (s_old_ok != 0u)
+        ovr[ri] = uvec4(r2.y, r2.z, r2.w, firstVertexOf(hit_cut[r2.w].x) & 0x7FFFFFFFu);
+    else { atomicAdd(cnt[CNT_T0_INVALID], 1u); return; }
+    atomicAdd(cnt[CNT_READY], 1u);
+}
+
+// ============================================================================================
+// 6 T0_EXPAND: job = {ref, vpage, vertex base (fp32 xyz units), index base (uint16 units, even)},
+//              {build validity word, tris, 0, 0}
+// ============================================================================================
+void t0Expand(uint j)
+{
+    if (j >= pc.job_count) return;   // uniform
+    const uint lid = gl_LocalInvocationID.x;
+    const uvec4 a = t0_jobs[j * 2u], b = t0_jobs[j * 2u + 1u];
+    const uint ref = a.x, slot = clRefSlot(ref), c = clRefIndex(ref);
+    const uint tris = b.y;
+    bool ok = a.y < uint(cl_page_table.length()) && cl_page_table[a.y] == slot && slot < pc.pool_pages;
+    ClRecord rec;
+    uint verts = 0u;
+    if (ok)
+    {
+        rec = clLoadRecord(slot, c);
+        verts = min(clRecVertCount(rec), CL_MAX_CLUSTER_VERTS);
+        ok = clRecTriCount(rec) == tris && verts != 0u;
+    }
+    if (!ok && lid == 0u) atomicAnd(t0_valid[b.x], 0u);
+    // indices: two per word (the base is even); invalid -> all 0 (degenerate, never hit)
+    const uint nidx = tris * 3u, words = (nidx + 1u) / 2u;
+    for (uint w = lid; w < words; w += 64u)
+    {
+        uint lo = 0u, hi = 0u;
+        if (ok)
+        {
+            lo = min(clLocalIndex(slot, rec, 2u * w), verts - 1u);
+            hi = 2u * w + 1u < nidx ? min(clLocalIndex(slot, rec, 2u * w + 1u), verts - 1u) : 0u;
+        }
+        t0_idx[a.w / 2u + w] = lo | (hi << 16u);
+    }
+    // positions: the CPU reserved CL_MAX_CLUSTER_VERTS per job (maxVertex = 63); unused = 0
+    vec3 p = vec3(0.0);
+    if (ok && lid < verts)
+    {
+        const uint first = clFirstVertex(slot, rec);
+        const QvHeader h = QV_LOAD_HEADER(cl_pool, first);
+        const uint w = (first + lid) * QV_WORDS;
+        p = qvPos(h, cl_pool[w], cl_pool[w + 1u]);
+    }
+    const uint o = (a.z + lid) * 3u;
+    dec[o] = p.x; dec[o + 1u] = p.y; dec[o + 2u] = p.z;
+}
+
+// ============================================================================================
+// 9 RIG_SKIN / 10 RIG_OVR_T0 (RIGGED, see the top)
+// ============================================================================================
+// = clean_cluster_preskin.comp loadWeights (= clean_preskin.comp), over the pool words.
+void rigLoadWeights(uint rec, out vec4 index, out vec4 weights)
+{
+    const uint b  = rec * 10u;
+    const uint wd = b >> 2u;
+    const uint a = cl_pool[wd], m = cl_pool[wd + 1u], c = cl_pool[wd + 2u];
+    uint jw, w01, w2;
+    if ((b & 2u) == 0u) { jw = a;                       w01 = m;                       w2 = c & 0xFFFFu; }
+    else                { jw = (a >> 16u) | (m << 16u); w01 = (m >> 16u) | (c << 16u); w2 = c >> 16u; }
+    index = vec4(float(jw & 0xFFu), float((jw >> 8u) & 0xFFu), float((jw >> 16u) & 0xFFu), float((jw >> 24u) & 0x7Fu));
+    const uint q0 = w01 & 0xFFFFu, q1 = w01 >> 16u;
+    const uint qs = q0 + q1 + w2;
+    const uint q3 = qs >= 65535u ? 0u : 65535u - qs;
+    weights = vec4(float(q0), float(q1), float(w2), float(q3)) * (1.0 / 65535.0);
+}
+// = clean_cluster_preskin.comp fetchJoint.
+void rigFetchJoint(uint sid, int j, out mat3 rot, out vec3 trans)
+{
+    j = clamp(j, 0, MAX_JOINTS - 1);
+    mat3x4 m = skins[sid].matrices[j];
+    rot   = mat3(m);
+    trans = vec3(m[0].w, m[1].w, m[2].w);
+}
+
+vec3 rigOrigin() { return uintBitsToFloat(uvec3(rcpu[RP_ORIGIN], rcpu[RP_ORIGIN + 1u], rcpu[RP_ORIGIN + 2u])); }
+vec3 rigEye() { return uintBitsToFloat(uvec3(rcpu[RP_EYE], rcpu[RP_EYE + 1u], rcpu[RP_EYE + 2u])); }
+// CLAS tiers, lane 0: slot s's CLAS build argument (compacted) + its explicit destination, and
+// (#1008) the frame its CLAS is built.
+void rigEmitArg(uint s, uint slot, ClRecord ar, uint kt)
+{
+    const uint atris = min(clRecTriCount(ar), CL_MAX_CLUSTER_TRIS);
+    const uint averts = min(clRecVertCount(ar), CL_MAX_CLUSTER_VERTS);
+    const uint cap = rcpu[RP_RIG_CAP];
+    const uint a = atomicAdd(cnt[CNT_RIG_ARGS], 1u);
+    if (a < cap && a * 16u + 16u <= uint(rig_args.length()) && a * 2u + 2u <= uint(rig_addr.length()))
+    {
+        const uint w = a * 16u;
+        const uvec2 ib = addrAdd(pc.pool_addr, clFirstIndexByte(slot, ar));
+        const uvec2 vb = addrAdd(uvec2(rcpu[RP_VTX_ADDR], rcpu[RP_VTX_ADDR + 1u]), s * CL_MAX_CLUSTER_VERTS * 16u);
+        rig_args[w + 0u] = s;                                    // clusterID (!= 0xFFFFFFFF)
+        rig_args[w + 1u] = 0u;
+        rig_args[w + 2u] = atris | (averts << 9u) | (0u << 18u) | (1u << 24u) | (1u << 28u);
+        rig_args[w + 3u] = kt & 0xFFFFu;                         // geometryIndex = k, no flags
+        rig_args[w + 4u] = 16u << 16u;                           // index stride packed, vertex stride
+        rig_args[w + 5u] = 0u;
+        rig_args[w + 6u] = ib.x; rig_args[w + 7u] = ib.y;
+        rig_args[w + 8u] = vb.x; rig_args[w + 9u] = vb.y;
+        rig_args[w + 10u] = 0u; rig_args[w + 11u] = 0u;
+        rig_args[w + 12u] = 0u; rig_args[w + 13u] = 0u;
+        rig_args[w + 14u] = 0u; rig_args[w + 15u] = 0u;
+        const uvec2 dst = addrAdd(uvec2(rcpu[RP_CLAS_BASE], rcpu[RP_CLAS_BASE + 1u]), s * rcpu[RP_CLAS_STRIDE]);
+        rig_addr[a * 2u] = dst.x;
+        rig_addr[a * 2u + 1u] = dst.y;
+        if (cap * 4u + s < uint(rig_addr.length())) rig_addr[cap * 4u + s] = max(pc.frame, 1u);
+    }
+}
+// #1008 REFRESH (header), the whole workgroup (uniform control flow): slot s's new positions (p,
+// this lane's vertex when `lane`) against the ones its CLAS was built from (the arena's, word vw).
+// True = rebuild it: a vertex moved more than RP_POSE_EPS x the cut's error at the instance's
+// distance (main view tolerance x the band's multiplier), its CLAS is RP_MAX_STALE frames old, or
+// it has none. False = keep the slot's CLAS, vertices and header as they are (write nothing).
+// #1011 CLAS REUSE (header): the same comparison for a refreshed SHARED slot (shared_ = true):
+// the avatar's tolerance is RP_REUSE_EPS when it self-shadows, RP_REUSE_LAG x the cut's error when
+// it never does (RP_NOSELF); bit-identical positions keep the CLAS whatever its age.
+shared uint s_dmax;
+bool rigRefreshBuild(uint s, bool lane, vec3 p, uint vw, ClInstance inst, bool shared_)
+{
+    const uint lid = gl_LocalInvocationID.x;
+    if (lid == 0u) s_dmax = 0u;
+    barrier();
+    if (lane && vw + 4u <= uint(rig.length()))
+    {
+        const vec3 o = uintBitsToFloat(uvec3(rig[vw], rig[vw + 1u], rig[vw + 2u]));
+        const float d = length(p - o);
+        atomicMax(s_dmax, (isnan(d) || isinf(d)) ? 0x7F800000u : floatBitsToUint(d));
+    }
+    barrier();
+    const uint cap = rcpu[RP_RIG_CAP];
+    const uint built = cap * 4u + s < uint(rig_addr.length()) ? rig_addr[cap * 4u + s] : 0u;
+    const uint age = built != 0u ? pc.frame - built : 0xFFFFFFFFu;
+    float err = 0.0;
+    const uint mv = rcpu[RP_MAIN_VIEW];
+    if (mv < CL_MAX_VIEWS)
+    {
+        const vec3 t = vec3(inst.xform_r0.w, inst.xform_r1.w, inst.xform_r2.w);
+        const float dist = max(length(pc.cam.xyz - t), pc.cam.w);
+        const float e0 = rigRasterErr(dist);
+        err = e0 * rigTolMul(rigAvatar(inst.flags), e0);
+    }
+    // (capped: a tagged receiver must still identify its own surface, RIG_COARSE_MAX_M)
+    float eps = min(uintBitsToFloat(rcpu[RP_POSE_EPS]) * err, RIG_COARSE_MAX_M);
+    const bool reuse = (rcpu[RP_REUSE] & 1u) != 0u;
+    if (reuse)
+    {
+        // #1011: a self-shadowing avatar only within float noise of the CLAS's positions (its own
+        // receivers never meet a stale hull); a no-self-shadow one may lag (its cast shadows only)
+        if (!rigNoSelf(rigAvatar(inst.flags))) eps = uintBitsToFloat(rcpu[RP_REUSE_EPS]);
+        else eps = max(eps, min(uintBitsToFloat(rcpu[RP_REUSE_LAG]) * err, RIG_COARSE_MAX_M));
+        if (!(eps >= 0.0)) eps = 0.0;
+    }
+    const float dmax = uintBitsToFloat(s_dmax);
+    const bool skip = built != 0u && dmax <= eps && (age < rcpu[RP_MAX_STALE] || (reuse && dmax == 0.0));   // (uniform)
+    if (lid == 0u)
+    {
+        atomicAdd(cnt[shared_ ? CNT_RIG_REUSE_CMP : CNT_RIG_REFRESH_SLOTS], 1u);
+        if (skip)
+        {
+            atomicAdd(cnt[shared_ ? CNT_RIG_REUSE_SKIP : CNT_RIG_POSE_SKIP], 1u);
+            if (dmax > 0.0) atomicMax(cnt[CNT_RIG_STALE_MAX], age);
+        }
+    }
+    return !skip;
+}
+void rigSkin(uint wg)
+{
+    const uint lid = gl_LocalInvocationID.x;
+    uint s = 0u, ii = CL_NONE, rb = CL_NONE;
+    bool build = false, refresh = false;
+    // positions: eye-relative skinning + (eye - RT origin) = RT-origin-relative (header)
+    const vec3 to_origin = rigEye() - rigOrigin();
+    if (pc.tier >= 1u)
+    {
+        // the slots modes 13 / 14 handed out this frame whose headers were written this frame
+        // (kept avatars' slots and holes: stamp of an earlier record)
+        // (#1008: stamp bit 31 = a REFRESHED slot -- compared before it is built)
+        const uint cap = rcpu[RP_RIG_CAP];
+        if (wg >= min(cnt[CNT_RIG], cap) || cap * 3u + wg >= uint(rig_addr.length())
+            || (rig_addr[cap * 3u + wg] & RP_STAMP_MASK) != (rcpu[RP_STAMP] & RP_STAMP_MASK))
+            return;   // uniform
+        s = wg;
+        refresh = (rig_addr[cap * 3u + wg] & RIG_STAMP_REFRESH) != 0u
+               && ((rcpu[RP_SCHED] & 1u) != 0u || (rcpu[RP_REUSE] & 1u) != 0u);   // (#1011: or CLAS reuse)
+    }
+    else
+    {
+        if (wg >= rcpu[RP_T0_JOBS]) return;   // uniform
+        const uint jb = rcpu[RP_JOBS_BASE] + wg * 2u;
+        rb = rcpu[RP_ROWS_BASE] + rcpu[jb] * 8u;
+        s = rcpu[rb + 2u] + rcpu[jb + 1u];
+        ii = rcpu[rb + 1u];
+        build = (rcpu[rb + 4u] & 1u) != 0u;
+    }
+    const uint hb = RIG_HDR_BASE + s * 4u;
+    if (hb + 4u > uint(rig.length())) return;   // uniform (never: the arena holds every slot)
+    const uint ref = rig[hb], vpage = rig[hb + 1u], kt = rig[hb + 2u];
+    const bool from_shared = pc.tier >= 1u && (rig[hb + 3u] & RIG_HDR_SHARED) != 0u;
+    if (pc.tier >= 1u) ii = rig[hb + 3u] & ~RIG_HDR_SHARED;
+    const uint slot = clRefSlot(ref);
+    // CLAS tiers: the slot's CLAS build argument comes first, whatever follows (an invariant slip
+    // below then collapses the positions instead of leaving a stale argument in the build) --
+    // except a REFRESHED slot's (#1008; #1011: shared ones too): it is decided after the skinning /
+    // copy (rigRefreshBuild). A SHARED slot's vertices are 2a's skinned cluster (header word 1;
+    // SkinVertex, stride 20): nothing to skin here.
+    if (pc.tier >= 1u && slot < pc.pool_pages)
+    {
+        const ClRecord ar = clLoadRecord(slot, clRefIndex(ref));
+        const uint averts = min(clRecVertCount(ar), CL_MAX_CLUSTER_VERTS);
+        if (lid == 0u && !refresh) rigEmitArg(s, slot, ar, kt);
+        // A SHARED slot: 2a's skinned (welded) vertices of SKIN_OUT slot `vpage` (header word 1),
+        // copied into the arena relative to the RT origin.
+        if (from_shared)
+        {
+            const uint vw = rcpu[RP_VTX_BASE] + s * CL_MAX_CLUSTER_VERTS * 4u + lid * 4u;
+            const uint sw = (vpage * CL_MAX_CLUSTER_VERTS + lid) * 5u;
+            const bool lane = lid < averts && vw + 4u <= uint(rig.length());
+            const bool inst_ok = ii < pc.instance_count;
+            ClInstance si;
+            if (inst_ok) si = cl_instances[ii];
+            vec3 p = vec3(0.0);
+            uint pn = 0u;
+            if (lane)
+            {
+                SkinOutRef so = SkinOutRef(uvec2(rcpu[RP_SKIN_ADDR], rcpu[RP_SKIN_ADDR + 1u]));
+                // (2026-10-14 step 2: SKIN_OUT is in its CHARACTER's space -- eye-relative = M p + t,
+                // the normal rotated by M; clean_cluster_skin_common.glsl CHARACTER SPACE)
+                mat3 cm = mat3(1.0);
+                vec3 ct = vec3(0.0);
+                if (inst_ok)
+                {
+                    const uint cb = clSkinCharBaseC(cl_rig[CLK_CAP]) + clSkinRow(si.flags) * CL_SKIN_CHAR_WORDS;
+                    cm = mat3(uintBitsToFloat(so.w[cb]),      uintBitsToFloat(so.w[cb + 1u]), uintBitsToFloat(so.w[cb + 2u]),
+                              uintBitsToFloat(so.w[cb + 3u]), uintBitsToFloat(so.w[cb + 4u]), uintBitsToFloat(so.w[cb + 5u]),
+                              uintBitsToFloat(so.w[cb + 6u]), uintBitsToFloat(so.w[cb + 7u]), uintBitsToFloat(so.w[cb + 8u]));
+                    ct = uintBitsToFloat(uvec3(so.w[cb + 9u], so.w[cb + 10u], so.w[cb + 11u]));
+                }
+                p = cm * uintBitsToFloat(uvec3(so.w[sw], so.w[sw + 1u], so.w[sw + 2u])) + ct + to_origin;
+                pn = svPackNormal(cm * svUnpackNormal(so.w[sw + 3u]));
+            }
+            // #1011 CLAS REUSE (header): a slot that still holds its CLAS's cluster -- kept as it is
+            // (nothing written) unless it moved past the avatar's tolerance. (No instance row: built.)
+            if (refresh)   // (uniform: the slot's stamp)
+            {
+                if (inst_ok && !rigRefreshBuild(s, lane, p, vw, si, true)) return;   // uniform
+                if (lid == 0u) rigEmitArg(s, slot, ar, kt);
+            }
+            if (lid == 0u) atomicAdd(cnt[CNT_RIG_COPIED], 1u);
+            if (lane)
+            {
+                rig[vw] = floatBitsToUint(p.x); rig[vw + 1u] = floatBitsToUint(p.y);
+                rig[vw + 2u] = floatBitsToUint(p.z); rig[vw + 3u] = pn;
+            }
+            return;
+        }
+    }
+    else if (pc.tier >= 1u)
+    {
+        // (never: mode 0 admits resident cuts only) no CLAS for this slot: mode 4 sees stamp 0
+        const uint cap = rcpu[RP_RIG_CAP];
+        if (lid == 0u && cap * 3u + s < uint(rig_addr.length())) rig_addr[cap * 3u + s] = 0u;
+    }
+    // ---- validity (workgroup-uniform). CLAS tiers: this frame's cut (resident by construction).
+    // Tier 0: the cut its BLAS was built from -- every page must still hold it.
+    bool ok = ii < pc.instance_count && slot < pc.pool_pages;
+    ClInstance inst;
+    if (ok)
+    {
+        inst = cl_instances[ii];
+        ok = (inst.flags & CLI_RIGGED) != 0u && inst.skin_id < rcpu[RP_SKIN_COUNT];
+        // (tier 0: header word 3 = 1 when the slot was invalid on its BLAS's build frame -- its
+        // indices are degenerate until the next build, so the BLAS never traces right again)
+        if (ok && rb != CL_NONE)
+            ok = inst.render_instance == rcpu[rb] && vpage < uint(cl_page_table.length())
+              && cl_page_table[vpage] == slot && (build || rig[hb + 3u] == 0u);
+    }
+    ClRecord rec;
+    uint vc = 0u, tris = 0u;
+    if (ok)
+    {
+        rec = clLoadRecord(slot, clRefIndex(ref));
+        vc = min(clRecVertCount(rec), CL_MAX_CLUSTER_VERTS);
+        tris = min(clRecTriCount(rec), CL_MAX_CLUSTER_TRIS);
+        // (tier 0: the build's primitive count is the harvested cut's)
+        ok = vc != 0u && (rb == CL_NONE || tris == (kt >> 16u));
+    }
+    const uint vbase = rcpu[RP_VTX_BASE] + s * CL_MAX_CLUSTER_VERTS * 4u;
+    if (!ok)
+    {
+        // The BLAS keeps this slot's geometry (a refit cannot drop it): one finite point inside
+        // the avatar (zero-area, never hit; its rest-pose position, eye-relative) and the row is
+        // not used this frame. (CLAS tiers: never expected -- mode 0 admits only skinnable
+        // instances; its argument was written above, so the build stays well-formed.)
+        if (lid == 0u && rb != CL_NONE) atomicAnd(rcpu[rb + 7u], 0u);
+        // (#1008: a refreshed slot's argument was deferred -- its positions change here: built)
+        if (lid == 0u && refresh && slot < pc.pool_pages) rigEmitArg(s, slot, clLoadRecord(slot, clRefIndex(ref)), kt);
+        vec3 p = vec3(0.0);
+        if (ii < pc.instance_count)
+        {
+            const ClInstance ci = cl_instances[ii];
+            p = vec3(ci.xform_r0.w, ci.xform_r1.w, ci.xform_r2.w) - rigOrigin();
+            if (any(isnan(p)) || any(isinf(p))) p = vec3(0.0);
+        }
+        const uint vw = vbase + lid * 4u;
+        if (vw + 4u <= uint(rig.length()))
+        {
+            rig[vw] = floatBitsToUint(p.x); rig[vw + 1u] = floatBitsToUint(p.y);
+            rig[vw + 2u] = floatBitsToUint(p.z); rig[vw + 3u] = 0u;
+        }
+        if (build)
+        {
+            for (uint w = lid; w < 192u; w += 64u)
+            {
+                const uint iw = rcpu[RP_IDX_BASE] + s * 192u + w;
+                if (iw < uint(rig.length())) rig[iw] = 0u;   // (all degenerate)
+            }
+            if (lid == 0u) rig[hb + 3u] = 1u;   // broken until rebuilt (see above)
+        }
+        return;
+    }
+    // ---- tier 0, build frame: the slot's uint16 indices (kept for the refits) ----
+    if (build)
+    {
+        const uint nidx = tris * 3u, words = (nidx + 1u) / 2u;
+        for (uint w = lid; w < 192u; w += 64u)
+        {
+            uint lo = 0u, hi = 0u;
+            if (w < words)
+            {
+                lo = min(clLocalIndex(slot, rec, 2u * w), vc - 1u);
+                hi = 2u * w + 1u < nidx ? min(clLocalIndex(slot, rec, 2u * w + 1u), vc - 1u) : 0u;
+            }
+            const uint iw = rcpu[RP_IDX_BASE] + s * 192u + w;
+            if (iw < uint(rig.length())) rig[iw] = lo | (hi << 16u);
+        }
+    }
+    // (#1008: lanes past the cluster's vertices stay for rigRefreshBuild's barriers)
+    const bool lane = lid < vc;
+    vec3 world_pos = vec3(0.0), world_nrm = vec3(0.0, 0.0, 1.0);
+    if (lane)
+    {
+        // ---- THE SKINNING: clean_cluster_preskin.comp's, statement for statement (no previous
+        // positions, no weld insert; tangents are not traced) ----
+        const uint skin_id = inst.skin_id;
+        const uint first = clFirstVertex(slot, rec);
+        const uint wbase = clFirstWeight(slot, rec);
+        mat4 bind_shape = skins[skin_id].bind_shape;
+        mat3 _bsm = mat3(bind_shape);
+        mat3 bs_n = mat3(cross(_bsm[1], _bsm[2]),
+                         cross(_bsm[2], _bsm[0]),
+                         cross(_bsm[0], _bsm[1]));
+
+        const QvHeader qh = QV_LOAD_HEADER(cl_pool, max(first, QV_HEADER_VERTS));
+        const uint sb = (first + lid) * QV_WORDS;
+        const uint q0 = cl_pool[sb], q1 = cl_pool[sb + 1u], q3 = cl_pool[sb + 3u];
+        vec3 pos = qvPos(qh, q0, q1);
+        vec3 nrm = qvNormal(q3);
+
+        vec3 bind_pos = (bind_shape * vec4(pos, 1.0)).xyz;
+        vec3 bind_nrm = bs_n * nrm;
+
+        vec4 weights = vec4(0.0);
+        vec4 index   = vec4(0.0);
+        if (wbase != CL_NONE) rigLoadWeights(wbase + lid, index, weights);
+        index   = clamp(index, vec4(0.0), vec4(float(MAX_JOINTS - 1)));
+        float ws = weights.x + weights.y + weights.z + weights.w;
+        if (ws > 0.0) weights *= (1.0 / ws);
+        else          weights = vec4(1.0, 0.0, 0.0, 0.0);
+
+        mat3 r1, r2, r3, r4;
+        vec3 t1, t2, t3, t4;
+        rigFetchJoint(skin_id, int(index.x), r1, t1);
+        rigFetchJoint(skin_id, int(index.y), r2, t2);
+        rigFetchJoint(skin_id, int(index.z), r3, t3);
+        rigFetchJoint(skin_id, int(index.w), r4, t4);
+
+        mat3 rot   = r1*weights.x + r2*weights.y + r3*weights.z + r4*weights.w;
+        vec3 trans = t1*weights.x + t2*weights.y + t3*weights.z + t4*weights.w;
+
+        world_pos = rot * bind_pos + trans;
+        world_nrm = rot * bind_nrm;
+
+        if (any(isnan(world_pos)) || any(isinf(world_pos)))
+            world_pos = (any(isnan(trans)) || any(isinf(trans))) ? vec3(0.0) : trans;
+
+        world_pos += to_origin;   // (RT origin, header)
+    }
+    const uint vw = vbase + lid * 4u;
+    // #1008 REFRESH: rebuilt only when the pose moved (else nothing is written: the slot's CLAS,
+    // vertices and header stay one consistent snapshot)
+    if (refresh)   // (uniform)
+    {
+        if (!rigRefreshBuild(s, lane, world_pos, vw, inst, false)) return;   // uniform
+        if (lid == 0u) rigEmitArg(s, slot, rec, kt);
+    }
+    if (lid == 0u && pc.tier >= 1u) atomicAdd(cnt[CNT_RIG_OWN_SKIN], 1u);   // (#1011 stats: skinned here, not shared)
+    if (!lane || vw + 4u > uint(rig.length())) return;
+    rig[vw]      = floatBitsToUint(world_pos.x);
+    rig[vw + 1u] = floatBitsToUint(world_pos.y);
+    rig[vw + 2u] = floatBitsToUint(world_pos.z);
+    rig[vw + 3u] = svPackNormal(world_nrm);
+}
+
+// CLAS tiers, the SHARED SKINNED CUT (#702 integration: 1b's main view selects the whole un-culled
+// cut of every switched avatar a secondary pass draws, 2a skins + welds it once into SKIN_OUT).
+// One lane per entry of the main view's selected slice (RP_MAIN_VIEW): mode 11 counts each rigged
+// instance's skinned entries, mode 12 (after mode 14 gave a complete instance its slots) scatters
+// them into its slot headers {ref, SKIN_OUT slot, k | tris << 16, instance | RIG_HDR_SHARED}.
+uint rigMainEntry(uint e, out uint ii, out uint sk, out uint sel)
+{
+    ii = CL_NONE; sk = CL_NONE; sel = CL_NONE;
+    const uint mv = rcpu[RP_MAIN_VIEW];
+    if (mv >= CL_MAX_VIEWS || e >= cl_cnt[mv * CLC_VIEW_WORDS + CLC_SEL_CLAMPED]) return CL_NONE;
+    sel = cl_views[mv].sel_base + e;
+    if (sel >= uint(cl_sel.length())) return CL_NONE;
+    const ClSelected cs = cl_sel[sel];
+    if (cs.instance >= pc.instance_count) return CL_NONE;
+    const uint f = cl_instances[cs.instance].flags;
+    if ((f & CLI_RIGGED) == 0u || (f & CLI1B_DRAW_RT) == 0u) return CL_NONE;
+    sk = clSkinnedCluster(sel);
+    if (sk == CL_NONE) return CL_NONE;
+    // (as mode 0's walk: a cluster without triangles is never part of an RT cut -- the derived
+    // cut, its hashes and its CLAS arguments must agree with that rule)
+    if (clRecTriCount(clLoadRecord(clRefSlot(cs.cluster_ref), clRefIndex(cs.cluster_ref))) == 0u) return CL_NONE;
+    ii = cs.instance;
+    return cs.cluster_ref;
+}
+void rigGatherCount(uint e)
+{
+    // #1011 (header): the selection's summary stands for this gather while the cut is complete.
+    // Per-instance insurance (the old gather's completeness was per instance, rigRankOk's is 2a's
+    // global overflow count): an entry of a drawn rigged instance without a skinned slot marks its
+    // instance MISSING (a plain store into its gather word, no atomics) -- rigGather then reports
+    // no cut for it (no derived cut, no shared slots: it walks and skins its own, as before).
+    if (rigRankOk())
+    {
+        const uint mv = rcpu[RP_MAIN_VIEW];
+        if (e >= cl_cnt[mv * CLC_VIEW_WORDS + CLC_SEL_CLAMPED]) return;
+        const uint sel = cl_views[mv].sel_base + e;
+        if (sel >= uint(cl_sel.length())) return;
+        const uint i = cl_sel[sel].instance;
+        if (i >= pc.instance_count || i * 8u + 8u > uint(rig_of.length())) return;
+        const uint f = cl_instances[i].flags;
+        if ((f & CLI_RIGGED) != 0u && (f & CLI1B_DRAW_RT) != 0u && clSkinnedCluster(sel) == CL_NONE)
+            rig_of[i * 8u + RIGOF_GATHER] = 1u;
+        return;
+    }
+    uint ii, sk, sel;
+    const uint ref = rigMainEntry(e, ii, sk, sel);
+    if (ref == CL_NONE || ii * 8u + 8u > uint(rig_of.length())) return;
+    atomicAdd(rig_of[ii * 8u + RIGOF_GATHER], 1u);
+    atomicAdd(rig_of[ii * 8u + RIGOF_HASH], mix32(ref ^ 0x9E3779B9u));   // (= mode 0's s_ha)
+    atomicXor(rig_of[ii * 8u + RIGOF_HASHB], mix32(ref * 0x85EBCA77u + 1u));   // (= s_hb)
+    atomicAdd(rig_of[ii * 8u + RIGOF_TRIS], clRecTriCount(clLoadRecord(clRefSlot(ref), clRefIndex(ref))));
+}
+void rigGatherScatter(uint e)
+{
+    uint ii, sk, sel;
+    const uint ref = rigMainEntry(e, ii, sk, sel);
+    if (ref == CL_NONE || ii * 8u + 8u > uint(rig_of.length())) return;
+    const uint shared_w = rig_of[ii * 8u + RIGOF_SHARED];
+    const bool shared_ = shared_w != 0u;
+    const bool derived = rig_of[ii * 8u + RIGOF_DERIVED] != 0u;
+    if (!shared_ && !derived) return;
+    // #1011 RANKED SHARED CUT (header): the entry's place is its rank (the same cut -> the same
+    // slots every frame), else the arrival order of this dispatch
+    uint k;
+    if (rigRankOk())
+    {
+        const uint aux = cl_draws[cl_aux.aux_base + sel];
+        if ((aux & CLA_RANKED) == 0u) return;
+        k = (aux >> CLA_RANK_SHIFT) & CLA_RANK_MASK;
+    }
+    else k = atomicAdd(rig_of[ii * 8u + RIGOF_FILL], 1u);
+    if (k >= rigGather(ii).x) return;
+    const uint tris = min(clRecTriCount(clLoadRecord(clRefSlot(ref), clRefIndex(ref))), CL_MAX_CLUSTER_TRIS);
+    // DERIVED RT CUT: its cut arena entries (mode 0 placed the range, count = the gather), with
+    // the virtual page (mesh page base + the page's mesh-local index: #1008's copy-forward checks
+    // every entry's page against the page table -- a wrong one only makes that instance walk)
+    if (derived)
+    {
+        const uvec4 r = clinst[ii * 2u];
+        if (r.z != CL_NONE && k < r.z)
+        {
+            const uint ps = clRefSlot(ref);
+            const uint mi = cl_instances[ii].mesh;
+            const uint vp = (ps < pc.pool_pages && mi < uint(cl_meshes.length()))
+                          ? cl_meshes[mi].page_base + cl_pool[ps * CL_PAGE_WORDS + 3u] : 0u;
+            cut[r.y + k] = uvec4(ref, vp, tris, 0u);
+        }
+    }
+    const uint s0 = rig_of[ii * 8u + RIGOF_S0];
+    if (!shared_ || s0 == CL_NONE) return;
+    const uint h = RIG_HDR_BASE + (s0 + k) * 4u;
+    if (h + 4u > uint(rig.length())) return;
+    const uint cap = rcpu[RP_RIG_CAP];
+    uint stamp = rcpu[RP_STAMP] & RP_STAMP_MASK;
+    // #1011 CLAS REUSE (header): a refreshed instance's slot that holds the same cluster at the same
+    // entry (= geometry index) as the CLAS it already has -- mode 9 compares before rebuilding it.
+    // (Its header is rewritten all the same: the 2a slot and the instance row move; hits read the
+    // ref, which stays.)
+    if (shared_w == 2u && rig[h] == ref && rig[h + 2u] == (k | (tris << 16u))
+        && cap * 4u + s0 + k < uint(rig_addr.length()) && rig_addr[cap * 4u + s0 + k] != 0u)
+        stamp |= RIG_STAMP_REFRESH;
+    rig[h] = ref;
+    rig[h + 1u] = sk;
+    rig[h + 2u] = k | (tris << 16u);
+    rig[h + 3u] = ii | RIG_HDR_SHARED;
+    if (cap * 3u + s0 + k < uint(rig_addr.length())) rig_addr[cap * 3u + s0 + k] = stamp;
+}
+
+// Tier 0: one lane per CPU rig row -> the override row of an instance whose per-cut BLAS is
+// valid this frame (every slot's page resident, the instance the row's: rigSkin cleared the
+// validity word otherwise) and that the RT cut selected this frame.
+void rigOverrideT0(uint row)
+{
+    if (row >= rcpu[RP_T0_ROWS]) return;
+    const uint rb = rcpu[RP_ROWS_BASE] + row * 8u;
+    const uint ri = rcpu[rb], s0 = rcpu[rb + 2u];
+    if (ri >= pc.ri_cap || (rcpu[rb + 5u] | rcpu[rb + 6u]) == 0u) return;
+    if (rcpu[rb + 7u] == 0u || st[ri * ST_STRIDE + 1u].y != pc.frame)
+    {
+        atomicAdd(cnt[CNT_RIG_INVALID], 1u);
+        return;
+    }
+    ovr[ri] = uvec4(rcpu[rb + 5u], rcpu[rb + 6u], s0,
+                    OVR_RIG | (firstVertexOf(rig[RIG_HDR_BASE + s0 * 4u]) & 0x0FFFFFFFu));
+    atomicAdd(cnt[CNT_RIG_READY], 1u);
+}
+
+// ============================================================================================
+// 7 PTLAS_DIFF: record (VkAccelerationStructureInstanceKHR) -> write-instance op when changed
+// ============================================================================================
+// SPATIAL partition of a record being written (push part_size 0; mode 7's spatial parameters ride
+// in cut_cap = P regular partitions, max_cut = instances per regular partition, hyst = grid cell (m),
+// tol_px = the largest axis scale kept in a cell). Instances are hashed by the grid cell of their
+// translation (TLAS space: agent / world, the RT origin for rigged records -- stable while nothing
+// moves), so each partition's bounds are a cell (+ its instances' extents) instead of the whole scene
+// (id order: ids are arrival order). Disabled records, instances larger than a cell and a full cell's
+// overflow go to the GLOBAL partition, which can hold every instance. The per-partition counts follow
+// every write (the old partition loses the instance, the new one gains it); a lane that finds a
+// partition full (possibly transiently, another lane's move out not yet counted) takes the global one.
+// Returns the partition index for the write op (VK_PARTITIONED_ACCELERATION_STRUCTURE_PARTITION_INDEX_GLOBAL_NV = ~0).
+uint ptlasSpatialPartition(uint id, bool live, uvec4 r0, uvec4 r1, uvec4 r2)
+{
+    const uint P = max(pc.cut_cap, 1u);
+    const uint pw = P + 1u + id;
+    if (pw >= uint(ppart.length())) return 0xFFFFFFFFu;
+    uint np = P;   // global
+    if (live)
+    {
+        const vec3 t = uintBitsToFloat(uvec3(r0.w, r1.w, r2.w));
+        const vec3 c0 = uintBitsToFloat(uvec3(r0.x, r1.x, r2.x));
+        const vec3 c1 = uintBitsToFloat(uvec3(r0.y, r1.y, r2.y));
+        const vec3 c2 = uintBitsToFloat(uvec3(r0.z, r1.z, r2.z));
+        const float scale = max(length(c0), max(length(c1), length(c2)));
+        const float cell = max(pc.hyst, 1.0);
+        if (all(lessThan(abs(t), vec3(1.0e7))) && scale <= max(pc.tol_px, cell))
+        {
+            const ivec3 c = ivec3(floor(t / cell));
+            uint h = uint(c.x) * 0x8DA6B343u ^ uint(c.y) * 0xD8163841u ^ uint(c.z) * 0xCB1AB31Fu;
+            h ^= h >> 16u;
+            h *= 0x7FEB352Du;
+            h ^= h >> 15u;
+            np = h % P;
+        }
+    }
+    const uint op = ppart[pw];
+    if (op == np && np < P) return np;          // (same cell: its count already holds it)
+    if (op < P) atomicAdd(ppart[op], 0xFFFFFFFFu);
+    else if (op == P) atomicAdd(ppart[P], 0xFFFFFFFFu);
+    if (np < P)
+    {
+        if (atomicAdd(ppart[np], 1u) >= max(pc.max_cut, 1u))
+        {
+            atomicAdd(ppart[np], 0xFFFFFFFFu);
+            np = P;
+        }
+    }
+    if (np == P)
+    {
+        atomicAdd(ppart[P], 1u);
+        atomicAdd(cnt[CNT_PTLAS_GLOBAL], 1u);
+    }
+    ppart[pw] = np;
+    return np < P ? np : 0xFFFFFFFFu;
+}
+
+void ptlasDiff(uint id)
+{
+    // job_count = the PTLAS instance capacity; records past instance_count (this frame's pass A
+    // range) are written disabled (stale records of a shrunk frame must leave the PTLAS).
+    if (id >= pc.job_count) return;
+    uvec4 r0 = uvec4(0u), r1 = uvec4(0u), r2 = uvec4(0u), r3 = uvec4(0u);
+    if (id < pc.instance_count)
+    {
+        r0 = tlas_rec[id * 4u]; r1 = tlas_rec[id * 4u + 1u]; r2 = tlas_rec[id * 4u + 2u]; r3 = tlas_rec[id * 4u + 3u];
+    }
+    if (pc.ptlas_full == 0u)
+    {
+        const uvec4 p0 = tlas_prev[id * 4u], p1 = tlas_prev[id * 4u + 1u], p2 = tlas_prev[id * 4u + 2u], p3 = tlas_prev[id * 4u + 3u];
+        if (r0 == p0 && r1 == p1 && r2 == p2 && r3 == p3) return;
+    }
+    tlas_prev[id * 4u] = r0; tlas_prev[id * 4u + 1u] = r1; tlas_prev[id * 4u + 2u] = r2; tlas_prev[id * 4u + 3u] = r3;
+    const uint o = atomicAdd(ptlas_cmd[1], 1u);   // the indirect command's argCount
+    if (o >= pc.job_count) return;
+    const uint w = o * 26u;
+    // transform (3x4 row-major) = the record's first 12 words
+    ptlas_ops[w + 0u] = r0.x; ptlas_ops[w + 1u] = r0.y; ptlas_ops[w + 2u] = r0.z; ptlas_ops[w + 3u] = r0.w;
+    ptlas_ops[w + 4u] = r1.x; ptlas_ops[w + 5u] = r1.y; ptlas_ops[w + 6u] = r1.z; ptlas_ops[w + 7u] = r1.w;
+    ptlas_ops[w + 8u] = r2.x; ptlas_ops[w + 9u] = r2.y; ptlas_ops[w + 10u] = r2.z; ptlas_ops[w + 11u] = r2.w;
+    for (uint k = 12u; k < 18u; ++k) ptlas_ops[w + k] = 0u;      // explicitAABB (unused: no flag)
+    const bool live = (r3.z | r3.w) != 0u;
+    ptlas_ops[w + 18u] = r3.x & 0xFFFFFFu;                       // instanceID = custom index
+    ptlas_ops[w + 19u] = r3.x >> 24u;                            // instanceMask
+    ptlas_ops[w + 20u] = r3.y & 0xFFFFFFu;                       // SBT offset
+    // KHR instance flags -> PTLAS flags (cull disable, flip facing, force opaque / no-opaque share
+    // bits 0..3; the micromap debug overrides 0x10 / 0x20 have no PTLAS equivalent)
+    ptlas_ops[w + 21u] = (r3.y >> 24u) & 0xFu;
+    ptlas_ops[w + 22u] = id;                                     // instanceIndex = the dense id
+    ptlas_ops[w + 23u] = pc.part_size != 0u ? id / pc.part_size   // partitionIndex: id order, or
+                       : ptlasSpatialPartition(id, live, r0, r1, r2);   // SPATIAL (+ global)
+    ptlas_ops[w + 24u] = live ? r3.z : 0u;                     // 0 = instance disabled
+    ptlas_ops[w + 25u] = live ? r3.w : 0u;
+    atomicAdd(cnt[CNT_PTLAS_OPS], 1u);
+}
+
+void main()
+{
+    const uint wg = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
+    const uint gid = wg * 64u + gl_LocalInvocationID.x;
+#ifdef CL_RT_PTLAS_ONLY
+    // The partitioned-TLAS diff alone (kWorldClusterRtPtlasSpv): it runs every RT frame of a
+    // PTLAS session, also with the cluster module gone, so its layout has no cluster set
+    // (set 0 = an empty layout).
+    ptlasDiff(gid);
+#else
+    switch (pc.mode)
+    {
+    case 0u: if (wg < pc.instance_count) selectInstance(wg); break;
+    case 1u: clasScan(gid); break;
+    case 2u: clasAlloc(gid); break;
+    case 3u: clasDecode(wg); break;
+    case 4u: if (wg < pc.instance_count) blasArgs(wg); break;
+    case 5u: if (pc.tier >= 1u) { if (wg < pc.instance_count) overrideClas(wg); } else overrideT0(wg); break;
+    case 6u: t0Expand(wg); break;
+    case 7u: ptlasDiff(gid); break;
+    case 8u:
+        if (gid < pc.clas_cap) clas_free[1u + gid] = pc.clas_cap - 1u - gid;
+        if (gid == 0u) clas_free[0] = pc.clas_cap;
+        break;
+    case 20u:   // CLAS_GROW: the CLAS pages of the chunks added this frame [job_count, clas_cap) -> the free stack
+        if (gid + pc.job_count < pc.clas_cap)
+        {
+            const uint t = atomicAdd(clas_free[0], 1u);
+            if (t < pc.clas_cap) clas_free[1u + t] = pc.job_count + gid;
+        }
+        break;
+    case 21u: sbPush(gid); break;
+    case 22u: sbSweep(gid); break;
+    case 9u: rigSkin(wg); break;
+    case 10u: rigOverrideT0(gid); break;
+    case 11u: rigGatherCount(gid); break;
+    case 12u: rigGatherScatter(gid); break;
+    case 13u: if (wg == 0u) { if ((rcpu[RP_RANK] & 1u) != 0u) rigAdmitPar(); else rigAdmit(); } break;
+    case 14u: if (wg < pc.instance_count) rigPlace(wg); break;
+    default: break;
+    }
+#endif
+}

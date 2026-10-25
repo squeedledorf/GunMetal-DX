@@ -1,0 +1,152 @@
+#version 460
+// vkclean -- MOTION BLUR (#118), pass 1: VELOCITY + TILEMAX. One 16x16 workgroup per
+// tile at the render resolution, after pass 2 (the whole HDR scene, transparents
+// included), before the TAA / FSR resolve.
+//
+// Per pixel, the blur radius vector (clean_mblur_common.glsl) from three components:
+//   total   : the pre-pass motion target (camera + moved prims + skinned avatars). Pixels
+//             it does not cover take the camera reprojection of their own depth -- sky
+//             (depth 0), water (the view ray's hit on the water plane: the water draws no
+//             depth / motion) and frames without the motion target -- the rule
+//             clean_taa.comp / clean_fsr_inputs.comp apply.
+//   camera  : what a STATIC world point at this pixel's depth would do: this frame's
+//             unjittered clip -> last frame's (reproj_cam). Split into ROTATION (the same
+//             with last frame's eye moved onto this one: reproj_rot -- turning, mouselook,
+//             zoom) and TRANSLATION (the rest: the camera's position change). The sky is
+//             at infinity: rotation only.
+//   (Speed-based FoV, #663: MbParams.p3.w removes the FoV boost change from all of these.)
+//   object  : total - camera (another avatar flying past; also the own avatar, which the
+//             camera follows: its object part cancels the camera part).
+//
+// SCALING WITHOUT ADDING BLUR. The wanted vector w = s_rot rot + s_trans trans + s_obj obj
+// is not used as is: with s_cam != s_obj it gives a pixel the camera follows (own avatar,
+// orbit focus -- total ~ 0) a fake blur of (s_trans - s_obj) x the camera motion. Instead
+// the TOTAL vector is kept as the direction and only scaled, by w's projection onto it:
+//     k = clamp(dot(w, total) / dot(total, total), 0, max scale);  blur = k x total.
+// A pixel that does not move on screen never blurs (k x 0); the streak always follows the
+// real screen motion; the sky with rotation at 0 does not blur when turning (total = rot,
+// w = 0); orbiting (rotation + an opposing translation of the eye around the focus) keeps
+// only the part of the translation that moves WITH the screen motion (none on the focus,
+// little behind it); flying straight keeps s_trans of the world's streak; all scales 1 is
+// exactly the physical blur. A magnitude-weighted blend (sum of s_i |c_i| over sum |c_i|)
+// was rejected: it blurs the background while orbiting (opposing components still add).
+//
+// Then x the shutter scale (frames of motion), halved (a radius: the blur is centred),
+// capped at the max radius. Written for every pixel (xy radius px, z linear depth) and
+// reduced per tile: xy the longest vector, z the shortest length, w the longest length.
+// Debug 2 (camera / object split): R rotation, G translation, B object, raw (unscaled)
+// per-frame px, written straight to the reconstruction target.
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+#include "clean_mblur_common.glsl"
+
+layout(rgba16f, set = 0, binding = 5)  writeonly uniform image2D outVel;      // xy radius px, z linear depth
+layout(rgba16f, set = 0, binding = 7)  writeonly uniform image2D outTileMax;
+layout(rgba16f, set = 0, binding = 11) writeonly uniform image2D outRecon;    // debug 2 only
+
+shared vec2  s_vec[256];
+shared float s_max[256];
+shared float s_min[256];
+
+// NDC depth (reversed-Z) of the water plane under screen uv; -1 = no hit in front.
+float waterPlaneDepth(vec2 uv)
+{
+    if (abs(mb.wplane.z) < 1e-20) return -1.0;
+    const vec2 n = uv * 2.0 - 1.0;
+    const float d = -(mb.wplane.x * n.x + mb.wplane.y * n.y + mb.wplane.w) / mb.wplane.z;
+    return (d > 0.0 && d <= 1.0) ? d : -1.0;
+}
+
+// uv - last frame's uv of the clip-space point (uv, d) under m (UV units, cur - prev).
+vec2 reprojectMotion(mat4 m, vec2 uv, float d)
+{
+    const vec4 c = m * vec4(uv * 2.0 - 1.0, d, 1.0);
+    if (c.w <= 1e-6) return vec2(0.0);
+    return uv - (c.xy / c.w * 0.5 + 0.5);
+}
+
+float linearDepth(float d)
+{
+    if (d <= 0.0) return kSkyZ;
+    const float den = mb.lin.z * d + mb.lin.w;
+    if (abs(den) < 1e-20) return kSkyZ;
+    return min(abs((mb.lin.x * d + mb.lin.y) / den), kSkyZ);
+}
+
+vec2 sanitize2(vec2 v) { return (any(isnan(v)) || any(isinf(v))) ? vec2(0.0) : v; }
+
+void main()
+{
+    const ivec2 rsize = renderSize();
+    const ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+    const uint li = gl_LocalInvocationIndex;
+    const bool inside = q.x < rsize.x && q.y < rsize.y;
+
+    vec2 v = vec2(0.0);
+    if (inside)
+    {
+        const vec2 px = vec2(rsize);
+        const vec2 uv = (vec2(q) + 0.5) / px;   // (the projection jitter is ignored: < 0.5 px of position)
+        float d = texelFetch(uDepth, q, 0).r;
+        bool water = false;
+        if (texelFetch(uReact, q, 0).g > 0.5)
+        {
+            const float dw = waterPlaneDepth(uv);
+            if (dw > d) { water = true; d = dw; }   // reversed-Z: in front = larger
+        }
+        const bool sky = d <= 0.0;
+        // Camera components (px per frame).
+        const vec2 rot = sanitize2(reprojectMotion(mb.reproj_rot, uv, max(d, 0.0))) * px;
+        const vec2 cam = sky ? rot : sanitize2(reprojectMotion(mb.reproj_cam, uv, d)) * px;
+        const vec2 trans = cam - rot;
+        vec2 total = cam;
+        if (mb.p0.w > 0.5 && !sky && !water)
+        {
+            vec2 tm = sanitize2(texelFetch(uMotion, q, 0).xy);
+            // Speed-based FoV (#663): the pre-pass motion holds the FoV change too. p3.w = k, the
+            // clip-xy scale of last frame's projection that removes it (reproj_cam / reproj_rot
+            // carry the same): previous ndc' = k previous ndc, so motion' = (1 - k) ndc / 2 + k motion.
+            // 0 / 1 = no change.
+            if (mb.p3.w > 0.0 && abs(mb.p3.w - 1.0) > 1e-6)
+                tm = 0.5 * (1.0 - mb.p3.w) * (uv * 2.0 - 1.0) + mb.p3.w * tm;
+            total = tm * px;
+        }
+        const vec2 obj = total - cam;
+
+        if (int(mb.p1.y + 0.5) == 2)
+        {
+            const vec3 c = sqrt(clamp(vec3(length(rot), length(trans), length(obj)) / 16.0, 0.0, 1.0));
+            imageStore(outRecon, q, vec4(c / debugExposure(), 1.0));
+        }
+
+        const float tt = dot(total, total);
+        if (tt > 1e-8)
+        {
+            const vec2 w = mb.scales.x * rot + mb.scales.y * trans + mb.scales.z * obj;
+            const float k = clamp(dot(w, total) / tt, 0.0, mb.scales.w);
+            v = total * (k * mb.p0.x * 0.5);
+            const float len = length(v);
+            if (len > mb.p0.y) v *= mb.p0.y / len;
+        }
+        imageStore(outVel, q, vec4(v, linearDepth(d), 0.0));
+    }
+
+    // TileMax: longest vector and shortest length of the tile (shared-memory tree).
+    const float len = length(v);
+    s_vec[li] = v;
+    s_max[li] = inside ? len : -1.0;
+    s_min[li] = inside ? len : 1e30;
+    barrier();
+    for (uint s = 128u; s > 0u; s >>= 1u)
+    {
+        if (li < s)
+        {
+            if (s_max[li + s] > s_max[li]) { s_max[li] = s_max[li + s]; s_vec[li] = s_vec[li + s]; }
+            s_min[li] = min(s_min[li], s_min[li + s]);
+        }
+        barrier();
+    }
+    if (li == 0u)
+        imageStore(outTileMax, ivec2(gl_WorkGroupID.xy), vec4(s_vec[0], s_min[0], max(s_max[0], 0.0)));
+}

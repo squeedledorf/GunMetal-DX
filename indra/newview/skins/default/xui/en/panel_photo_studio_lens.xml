@@ -1,0 +1,5133 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<!--
+Photo Studio "Lens" section: optical / film effects.
+Row and height conventions are documented in panel_photo_studio_look.xml. The
+bloom/glow pair is the HDR fork, and the floater shows only the side the
+renderer is running: the two Bloom (HDR) sections, and the two Cross Filter
+sections that are seeded from the same bloom, while RenderHDREnabled is on, the
+two Glow (Legacy) sections while it is off
+(SLFloaterPhotoStudio::refreshBloomSections, live as the setting changes). The
+rows also grey out on the same setting (enabled_control on Bloom and Cross
+Filter, disabled_control on Glow), which is all a build of this panel without the
+floater gets. (RenderBloomHDR is currently unwired renderer-side, so the fork
+gates on RenderHDREnabled — which is deliberately NOT offered as a toggle
+here; it cascades probe resets, buffer reallocation, and a shader rebuild. It
+follows "HDR and Emissive" in Preferences. Revisit if RenderBloomHDR gets
+wired.)
+-->
+<panel
+ name="panel_photo_studio_lens"
+ layout="topleft"
+ width="450"
+ height="490"
+ follows="all">
+	<accordion
+	 follows="all"
+	 layout="topleft"
+	 left="2"
+	 top="2"
+	 right="-2"
+	 height="484"
+	 single_expansion="false"
+	 name="lens_accordion">
+		<accordion_tab
+		 expanded="true"
+		 layout="topleft"
+		 height="192"
+		 name="atab_sec_dof"
+		 title="Depth of Field"
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="163"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_dof">
+				<check_box
+				 follows="left|top"
+				 layout="topleft"
+				 height="16"
+				 left="8"
+				 top="8"
+				 width="300"
+				 label="Depth of field"
+				 tool_tip="Blur the scene away from the focus distance, like a camera lens. Toggling causes a brief hitch."
+				 name="dof_enable"
+				 control_name="RenderDepthOfField" />
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="9"
+				 right="-32"
+				 height="18"
+				 label="F-number"
+				 label_width="140"
+				 decimal_digits="1"
+				 increment="0.1"
+				 min_val="0.7"
+				 max_val="32"
+				 can_edit_text="true"
+				 name="dof_fnumber"
+				 tool_tip="Aperture f-number. Lower values give a shallower focus plane and stronger blur."
+				 enabled_control="RenderDepthOfField"
+				 control_name="CameraFNumber" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="dof_fnumber_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderDepthOfField">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="CameraFNumber" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Focal length (mm)"
+				 label_width="140"
+				 decimal_digits="0"
+				 increment="1"
+				 min_val="5"
+				 max_val="200"
+				 can_edit_text="true"
+				 name="dof_focal_length"
+				 tool_tip="Lens focal length in millimeters. Longer lenses compress and blur backgrounds more."
+				 enabled_control="RenderDepthOfField"
+				 control_name="CameraFocalLength" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="dof_focal_length_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderDepthOfField">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="CameraFocalLength" />
+				</button>
+				<check_box
+				 follows="left|top"
+				 layout="topleft"
+				 height="16"
+				 left="8"
+				 top_pad="10"
+				 width="300"
+				 label="Lock focus point"
+				 tool_tip="Freeze the current focus distance in place (not saved between sessions)"
+				 name="dof_focus_locked"
+				 enabled_control="RenderDepthOfField"
+				 control_name="RenderFocusPointLocked" />
+				<check_box
+				 follows="left|top"
+				 layout="topleft"
+				 height="16"
+				 left="8"
+				 top_pad="8"
+				 width="300"
+				 label="Focus follows pointer"
+				 tool_tip="Continuously refocus on whatever is under the mouse pointer (not saved between sessions)"
+				 name="dof_focus_pointer"
+				 enabled_control="RenderDepthOfField"
+				 control_name="RenderFocusPointFollowsPointer" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_pad="10"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_dof_reset"
+				 tool_tip="Reset this section (including Advanced) to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_dof" />
+				</button>
+			</panel>
+		</accordion_tab>
+		<accordion_tab
+		 expanded="false"
+		 layout="topleft"
+		 height="218"
+		 name="atab_sec_dof_adv"
+		 title="Depth of Field - Advanced"
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="189"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_dof_adv">
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top="7"
+				 right="-32"
+				 height="18"
+				 label="Field of view"
+				 label_width="140"
+				 decimal_digits="0"
+				 increment="1"
+				 min_val="10"
+				 max_val="120"
+				 can_edit_text="true"
+				 name="dof_fov"
+				 tool_tip="Vertical field of view (degrees) the DoF model assumes for the virtual camera"
+				 enabled_control="RenderDepthOfField"
+				 control_name="CameraFieldOfView" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="dof_fov_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderDepthOfField">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="CameraFieldOfView" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Max blur (CoC)"
+				 label_width="140"
+				 decimal_digits="1"
+				 increment="0.5"
+				 min_val="1"
+				 max_val="32"
+				 can_edit_text="true"
+				 name="dof_max_cof"
+				 tool_tip="Maximum circle-of-confusion size, capping how strong the blur can get"
+				 enabled_control="RenderDepthOfField"
+				 control_name="CameraMaxCoF" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="dof_max_cof_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderDepthOfField">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="CameraMaxCoF" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Resolution scale"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.05"
+				 min_val="0.25"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="dof_res_scale"
+				 tool_tip="Resolution the blur is computed at. 1 = full resolution (sharpest, slowest); 0.25 = quarter."
+				 enabled_control="RenderDepthOfField"
+				 control_name="CameraDoFResScale" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="dof_res_scale_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderDepthOfField">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="CameraDoFResScale" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Focus transition (s)"
+				 label_width="140"
+				 decimal_digits="1"
+				 increment="0.1"
+				 min_val="0"
+				 max_val="5"
+				 can_edit_text="true"
+				 name="dof_transition"
+				 tool_tip="Seconds the camera takes to rack focus between distances"
+				 enabled_control="RenderDepthOfField"
+				 control_name="CameraFocusTransitionTime" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="dof_transition_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderDepthOfField">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="CameraFocusTransitionTime" />
+				</button>
+				<check_box
+				 follows="left|top"
+				 layout="topleft"
+				 height="16"
+				 left="8"
+				 top_pad="10"
+				 width="300"
+				 label="Blur foreground (near blur)"
+				 tool_tip="Also blur objects closer than the focus distance"
+				 name="dof_near_blur"
+				 enabled_control="RenderDepthOfField"
+				 control_name="RenderDepthOfFieldNearBlur" />
+				<check_box
+				 follows="left|top"
+				 layout="topleft"
+				 height="16"
+				 left="8"
+				 top_pad="8"
+				 width="300"
+				 label="Keep DoF while editing"
+				 tool_tip="Leave depth of field active while build/edit tools are open"
+				 name="dof_edit_mode"
+				 enabled_control="RenderDepthOfField"
+				 control_name="RenderDepthOfFieldInEditMode" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_pad="10"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_dof_adv_reset"
+				 tool_tip="Reset the advanced depth of field settings to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_dof_adv" />
+				</button>
+			</panel>
+		</accordion_tab>
+		<accordion_tab
+		 expanded="false"
+		 layout="topleft"
+		 height="168"
+		 name="atab_sec_bokeh"
+		 title="Bokeh"
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="139"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_bokeh">
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top="8"
+				 width="140"
+				 height="15"
+				 name="bokeh_blades_label"
+				 value="Aperture" />
+				<combo_box
+				 follows="left|top|right"
+				 layout="topleft"
+				 left_delta="140"
+				 top_pad="-16"
+				 right="-32"
+				 height="18"
+				 name="bokeh_blades_combo"
+				 tool_tip="Shape of out-of-focus highlights. Circular is the idealised lens; real diaphragms have blades and produce visible polygons"
+				 enabled_control="RenderDepthOfField"
+				 control_name="RenderBokehApertureBlades">
+					<combo_box.item
+					 label="Circular"
+					 name="0"
+					 value="0" />
+					<combo_box.item
+					 label="3 blades"
+					 name="3"
+					 value="3" />
+					<combo_box.item
+					 label="5 blades"
+					 name="5"
+					 value="5" />
+					<combo_box.item
+					 label="6 blades"
+					 name="6"
+					 value="6" />
+					<combo_box.item
+					 label="7 blades"
+					 name="7"
+					 value="7" />
+					<combo_box.item
+					 label="8 blades"
+					 name="8"
+					 value="8" />
+					<combo_box.item
+					 label="9 blades"
+					 name="9"
+					 value="9" />
+					<combo_box.item
+					 label="11 blades"
+					 name="11"
+					 value="11" />
+				</combo_box>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="18"
+				 right="-8"
+				 top_pad="-18"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="bokeh_blades_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderBokehApertureBlades" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Anamorphic"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.05"
+				 min_val="0.25"
+				 max_val="4"
+				 can_edit_text="true"
+				 name="bokeh_anamorphic"
+				 tool_tip="Stretches defocused highlights into ovals the way an anamorphic lens does. 1.0 is round; above 1 is taller than wide. Area preserving, so it changes the shape of the blur without changing its strength"
+				 enabled_control="RenderDepthOfField"
+				 control_name="RenderBokehAnamorphicSqueeze" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="bokeh_anamorphic_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderDepthOfField">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderBokehAnamorphicSqueeze" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Highlight Gain"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.05"
+				 min_val="0"
+				 max_val="4"
+				 can_edit_text="true"
+				 name="bokeh_highlight_gain"
+				 tool_tip="Extra weight on bright samples, making defocused highlights read as distinct discs. 0 is a plain average"
+				 enabled_control="RenderDepthOfField"
+				 control_name="RenderBokehHighlightGain" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="bokeh_highlight_gain_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderDepthOfField">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderBokehHighlightGain" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Cat's Eye"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="1.5"
+				 can_edit_text="true"
+				 name="bokeh_cat_eye"
+				 tool_tip="Optical vignetting; clips bokeh into lens-shaped slivers by distance from the image circle centre, so a wide display clips at the sides well before the top and bottom"
+				 enabled_control="RenderDepthOfField"
+				 control_name="RenderBokehCatEyeAmount" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="bokeh_cat_eye_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderDepthOfField">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderBokehCatEyeAmount" />
+				</button>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_pad="10"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_bokeh_reset"
+				 tool_tip="Reset this section (including Advanced) to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_bokeh" />
+				</button>
+			</panel>
+		</accordion_tab>
+		<accordion_tab
+		 expanded="false"
+		 layout="topleft"
+		 height="254"
+		 name="atab_sec_bokeh_adv"
+		 title="Bokeh - Advanced"
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="225"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_bokeh_adv">
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top="7"
+				 right="-32"
+				 height="18"
+				 label="Highlight Threshold"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.1"
+				 min_val="0"
+				 max_val="8"
+				 can_edit_text="true"
+				 name="bokeh_highlight_threshold"
+				 tool_tip="Brightness where the highlight boost starts. 0 boosts everything; raising it restricts the effect to genuine highlights"
+				 enabled_control="RenderDepthOfField"
+				 control_name="RenderBokehHighlightThreshold" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="bokeh_highlight_threshold_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderDepthOfField">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderBokehHighlightThreshold" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Firefly Clamp"
+				 label_width="140"
+				 decimal_digits="0"
+				 increment="8"
+				 min_val="0"
+				 max_val="1024"
+				 can_edit_text="true"
+				 name="bokeh_highlight_clamp"
+				 tool_tip="Caps how much a single bright sample may contribute to a neighbouring disc. Lower stops glints shimmering as the camera moves; 0 disables the cap"
+				 enabled_control="RenderDepthOfField"
+				 control_name="RenderBokehHighlightClamp" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="bokeh_highlight_clamp_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderDepthOfField">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderBokehHighlightClamp" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Blade Rotation"
+				 label_width="140"
+				 decimal_digits="0"
+				 increment="1"
+				 min_val="0"
+				 max_val="360"
+				 can_edit_text="true"
+				 name="bokeh_blade_rotation"
+				 tool_tip="Rotates the aperture polygon. No effect on a circular aperture"
+				 enabled_control="RenderDepthOfField"
+				 control_name="RenderBokehApertureRotation" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="bokeh_blade_rotation_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderDepthOfField">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderBokehApertureRotation" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Blade Curvature"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="bokeh_blade_curvature"
+				 tool_tip="Rounds the blades back toward a circle, as a rounded diaphragm does when held open. No effect on a circular aperture"
+				 enabled_control="RenderDepthOfField"
+				 control_name="RenderBokehApertureCurvature" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="bokeh_blade_curvature_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderDepthOfField">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderBokehApertureCurvature" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Defocus Fringe"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="bokeh_fringe_amount"
+				 tool_tip="Colour cast on the rim of defocused highlights, flipping hue either side of focus. Separate from the frame-wide Chromatic Aberration section"
+				 enabled_control="RenderDepthOfField"
+				 control_name="RenderBokehFringeAmount" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="bokeh_fringe_amount_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderDepthOfField">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderBokehFringeAmount" />
+				</button>
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="12"
+				 width="140"
+				 height="15"
+				 name="bokeh_fringe_near_label"
+				 value="Near tint" />
+				<color_swatch
+				 can_apply_immediately="true"
+				 follows="left|top"
+				 layout="topleft"
+				 left_delta="140"
+				 top_pad="-18"
+				 width="60"
+				 height="24"
+				 label_height="0"
+				 name="bokeh_fringe_near_tint"
+				 tool_tip="Cast on highlights in front of the focal plane"
+				 enabled_control="RenderDepthOfField"
+				 control_name="RenderBokehFringeNearTint" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="18"
+				 right="-8"
+				 top_pad="-21"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="bokeh_fringe_near_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderBokehFringeNearTint" />
+				</button>
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="12"
+				 width="140"
+				 height="15"
+				 name="bokeh_fringe_far_label"
+				 value="Far tint" />
+				<color_swatch
+				 can_apply_immediately="true"
+				 follows="left|top"
+				 layout="topleft"
+				 left_delta="140"
+				 top_pad="-18"
+				 width="60"
+				 height="24"
+				 label_height="0"
+				 name="bokeh_fringe_far_tint"
+				 tool_tip="Cast on highlights behind the focal plane"
+				 enabled_control="RenderDepthOfField"
+				 control_name="RenderBokehFringeFarTint" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="18"
+				 right="-8"
+				 top_pad="-21"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="bokeh_fringe_far_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderBokehFringeFarTint" />
+				</button>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_pad="10"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_bokeh_adv_reset"
+				 tool_tip="Reset the advanced bokeh settings to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_bokeh_adv" />
+				</button>
+			</panel>
+		</accordion_tab>
+		<accordion_tab
+		 expanded="false"
+		 layout="topleft"
+		 height="168"
+		 name="atab_sec_aberration"
+		 title="Lens Aberrations"
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="139"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_aberration">
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top="7"
+				 right="-32"
+				 height="18"
+				 label="Spherical"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="-1"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="aberration_spherical"
+				 tool_tip="Hollows defocused highlights into bright-rimmed bubbles, or fills them in for a creamy blur. Flips either side of focus, as real glass does"
+				 enabled_control="RenderDepthOfField"
+				 control_name="RenderBokehSphericalAberration" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="aberration_spherical_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderDepthOfField">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderBokehSphericalAberration" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Field Stretch"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="-1"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="aberration_field"
+				 tool_tip="Stretches defocused highlights toward the frame edges; positive swirls them around the centre, negative draws them into comet shapes"
+				 enabled_control="RenderDepthOfField"
+				 control_name="RenderBokehFieldStretch" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="aberration_field_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderDepthOfField">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderBokehFieldStretch" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Field Falloff"
+				 label_width="140"
+				 decimal_digits="1"
+				 increment="0.1"
+				 min_val="1"
+				 max_val="4"
+				 can_edit_text="true"
+				 name="aberration_field_falloff"
+				 tool_tip="How far in from the corners field stretch reaches; higher keeps the middle of the frame clean"
+				 enabled_control="RenderDepthOfField"
+				 control_name="RenderBokehFieldFalloff" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="aberration_field_falloff_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderDepthOfField">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderBokehFieldFalloff" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Coma Asymmetry"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="aberration_coma"
+				 tool_tip="Draws each highlight into a comet with its tail pointing away from frame centre; zero on the optical axis, strongest in the corners"
+				 enabled_control="RenderDepthOfField"
+				 control_name="RenderBokehComaAsymmetry" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="aberration_coma_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderDepthOfField">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderBokehComaAsymmetry" />
+				</button>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_pad="10"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_aberration_reset"
+				 tool_tip="Reset this section to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_aberration" />
+				</button>
+			</panel>
+		</accordion_tab>
+		<accordion_tab
+		 expanded="false"
+		 layout="topleft"
+		 height="142"
+		 name="atab_sec_bloom"
+		 title="Bloom (HDR)"
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="113"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_bloom">
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top="7"
+				 right="-32"
+				 height="18"
+				 label="Strength"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="2"
+				 can_edit_text="true"
+				 name="bloom_strength"
+				 tool_tip="How strongly the bloom is blended into the scene"
+				 enabled_control="RenderHDREnabled"
+				 control_name="RenderBloomStrength" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="bloom_strength_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderHDREnabled">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderBloomStrength" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Threshold"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.05"
+				 min_val="0"
+				 max_val="8"
+				 can_edit_text="true"
+				 name="bloom_threshold"
+				 tool_tip="Luminance (linear light) above which pixels bloom; 1.0 is roughly brighter-than-white. 8 (the default) is off: only glowing faces bloom, as in other viewers"
+				 enabled_control="RenderHDREnabled"
+				 control_name="RenderBloomThreshold" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="bloom_threshold_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderHDREnabled">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderBloomThreshold" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Scatter"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0.5"
+				 max_val="2.5"
+				 can_edit_text="true"
+				 name="bloom_scatter"
+				 tool_tip="Bloom spread per octave. Above about 2.5 the filter starts to alias."
+				 enabled_control="RenderHDREnabled"
+				 control_name="RenderBloomScatter" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="bloom_scatter_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderHDREnabled">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderBloomScatter" />
+				</button>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_pad="10"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_bloom_reset"
+				 tool_tip="Reset this section (including Advanced) to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_bloom" />
+				</button>
+			</panel>
+		</accordion_tab>
+		<accordion_tab
+		 expanded="false"
+		 layout="topleft"
+		 height="306"
+		 name="atab_sec_bloom_adv"
+		 title="Bloom (HDR) - Advanced"
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="277"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_bloom_adv">
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top="7"
+				 right="-32"
+				 height="18"
+				 label="Knee"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="bloom_knee"
+				 tool_tip="Soft-knee width below the threshold; wider gives a more gradual bloom onset"
+				 enabled_control="RenderHDREnabled"
+				 control_name="RenderBloomKnee" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="bloom_knee_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderHDREnabled">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderBloomKnee" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Prim glow boost"
+				 label_width="140"
+				 decimal_digits="1"
+				 increment="0.1"
+				 min_val="0"
+				 max_val="8"
+				 can_edit_text="true"
+				 name="bloom_alpha_boost"
+				 tool_tip="Multiplier for legacy prim-glow when fed into HDR bloom, so glowing objects match legacy brightness"
+				 enabled_control="RenderHDREnabled"
+				 control_name="RenderBloomAlphaGlowBoost" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="bloom_alpha_boost_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderHDREnabled">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderBloomAlphaGlowBoost" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Mip count"
+				 label_width="140"
+				 decimal_digits="0"
+				 increment="1"
+				 min_val="3"
+				 max_val="7"
+				 can_edit_text="true"
+				 name="bloom_mips"
+				 tool_tip="Bloom pyramid levels; more mips = wider, softer bloom. Changing causes a brief hitch."
+				 enabled_control="RenderHDREnabled"
+				 control_name="RenderBloomMipCount" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="bloom_mips_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderHDREnabled">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderBloomMipCount" />
+				</button>
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="9"
+				 width="140"
+				 height="15"
+				 name="bloom_res_scale_label"
+				 value="Base resolution" />
+				<combo_box
+				 follows="left|top|right"
+				 layout="topleft"
+				 left_delta="140"
+				 top_pad="-16"
+				 right="-32"
+				 height="18"
+				 name="bloom_res_scale_combo"
+				 tool_tip="Resolution the bloom pyramid starts at. Lower resolutions are faster and reach wider per mip. Changing causes a brief hitch."
+				 enabled_control="RenderHDREnabled"
+				 control_name="RenderBloomResolutionScale">
+					<combo_box.item
+					 label="Full"
+					 name="0"
+					 value="0" />
+					<combo_box.item
+					 label="3/4"
+					 name="1"
+					 value="1" />
+					<combo_box.item
+					 label="Half"
+					 name="2"
+					 value="2" />
+					<combo_box.item
+					 label="Quarter"
+					 name="3"
+					 value="3" />
+					<combo_box.item
+					 label="Eighth"
+					 name="4"
+					 value="4" />
+				</combo_box>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="18"
+				 right="-8"
+				 top_pad="-18"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="bloom_res_scale_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderBloomResolutionScale" />
+				</button>
+				<check_box
+				 follows="left|top"
+				 layout="topleft"
+				 height="16"
+				 left="8"
+				 top_pad="10"
+				 width="300"
+				 label="Halation"
+				 tool_tip="Enable the warm halo signal around bright highlights (uses a wider pyramid format). Toggling causes a brief hitch."
+				 name="bloom_halation"
+				 enabled_control="RenderHDREnabled"
+				 control_name="RenderBloomHalation" />
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="9"
+				 right="-32"
+				 height="18"
+				 label="Halation strength"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="bloom_halation_strength"
+				 tool_tip="Photographic halation amount; 0.25 is a gentle cinematic feel"
+				 enabled_control="RenderBloomHalation"
+				 control_name="RenderBloomHalationStrength" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="bloom_halation_strength_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderBloomHalation">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderBloomHalationStrength" />
+				</button>
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="12"
+				 width="140"
+				 height="15"
+				 name="bloom_halation_tint_label"
+				 value="Halation tint" />
+				<color_swatch
+				 can_apply_immediately="true"
+				 follows="left|top"
+				 layout="topleft"
+				 left_delta="140"
+				 top_pad="-18"
+				 width="60"
+				 height="24"
+				 label_height="0"
+				 name="bloom_halation_tint"
+				 tool_tip="Color of the halation halo; default is warm amber"
+				 enabled_control="RenderBloomHalation"
+				 control_name="RenderBloomHalationTint" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="18"
+				 right="-8"
+				 top_pad="-21"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="bloom_halation_tint_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderBloomHalationTint" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="12"
+				 right="-32"
+				 height="18"
+				 label="Keep saturation"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="bloom_sat_preserve"
+				 tool_tip="Keeps bloomed coloured highlights (a hot-pink glowing eye) close to their own hue instead of washing out toward white or the surrounding colours. 0 = plain additive bloom."
+				 enabled_control="RenderHDREnabled"
+				 control_name="SlipstreamBloomSaturationPreserve" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="bloom_sat_preserve_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderHDREnabled">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="SlipstreamBloomSaturationPreserve" />
+				</button>
+				<check_box
+				 follows="left|top"
+				 layout="topleft"
+				 height="16"
+				 left="8"
+				 top_pad="8"
+				 width="300"
+				 label="Hue-preserving highlights"
+				 tool_tip="Stronger mode, scaled by Keep saturation: tonemap only the brightness of bloomed pixels and keep their colour, so the tonemapper's shoulder does not bleach them. Works with every tonemapper."
+				 name="bloom_hue_highlights"
+				 enabled_control="RenderHDREnabled"
+				 control_name="SlipstreamBloomHuePreserveHighlights" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_pad="10"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_bloom_adv_reset"
+				 tool_tip="Reset the advanced bloom settings to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_bloom_adv" />
+				</button>
+			</panel>
+		</accordion_tab>
+		<accordion_tab
+		 expanded="false"
+		 layout="topleft"
+		 height="142"
+		 name="atab_sec_crossfilter"
+		 title="Cross Filter"
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="113"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_crossfilter">
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top="7"
+				 right="-32"
+				 height="18"
+				 label="Strength"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="32"
+				 can_edit_text="true"
+				 name="crossfilter_strength"
+				 tool_tip="Streaks every bright point in frame into a star, the way an etched glass filter does. Rides on the bloom pyramid, so bloom strength 0 silences it"
+				 enabled_control="RenderHDREnabled"
+				 control_name="RenderCrossFilterStrength" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="crossfilter_strength_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderHDREnabled">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderCrossFilterStrength" />
+				</button>
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="9"
+				 width="140"
+				 height="15"
+				 name="crossfilter_points_label"
+				 value="Points" />
+				<combo_box
+				 follows="left|top|right"
+				 layout="topleft"
+				 left_delta="140"
+				 top_pad="-16"
+				 right="-32"
+				 height="18"
+				 name="crossfilter_points_combo"
+				 tool_tip="Number of arms on each star. Arms are spread evenly, so odd counts give an asymmetric star"
+				 enabled_control="RenderHDREnabled"
+				 control_name="RenderCrossFilterPoints">
+					<combo_box.item
+					 label="2 (line)"
+					 name="2"
+					 value="2" />
+					<combo_box.item
+					 label="3"
+					 name="3"
+					 value="3" />
+					<combo_box.item
+					 label="4 (cross)"
+					 name="4"
+					 value="4" />
+					<combo_box.item
+					 label="6"
+					 name="6"
+					 value="6" />
+					<combo_box.item
+					 label="8"
+					 name="8"
+					 value="8" />
+					<combo_box.item
+					 label="12"
+					 name="12"
+					 value="12" />
+				</combo_box>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="18"
+				 right="-8"
+				 top_pad="-18"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="crossfilter_points_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderCrossFilterPoints" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Length"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0.25"
+				 max_val="2"
+				 can_edit_text="true"
+				 name="crossfilter_length"
+				 tool_tip="How far the arms reach. 1.0 is the tuned value; the range stops where the arms would start breaking into a lattice"
+				 enabled_control="RenderHDREnabled"
+				 control_name="RenderCrossFilterLength" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="crossfilter_length_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderHDREnabled">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderCrossFilterLength" />
+				</button>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_pad="10"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_crossfilter_reset"
+				 tool_tip="Reset this section (including Advanced) to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_crossfilter" />
+				</button>
+			</panel>
+		</accordion_tab>
+		<accordion_tab
+		 expanded="false"
+		 layout="topleft"
+		 height="142"
+		 name="atab_sec_crossfilter_adv"
+		 title="Cross Filter - Advanced"
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="113"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_crossfilter_adv">
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top="7"
+				 right="-32"
+				 height="18"
+				 label="Angle"
+				 label_width="140"
+				 decimal_digits="0"
+				 increment="1"
+				 min_val="0"
+				 max_val="360"
+				 can_edit_text="true"
+				 name="crossfilter_angle"
+				 tool_tip="Rotates the whole star, as if turning the filter in its thread"
+				 enabled_control="RenderHDREnabled"
+				 control_name="RenderCrossFilterAngle" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="crossfilter_angle_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderHDREnabled">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderCrossFilterAngle" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Falloff"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0.1"
+				 max_val="3"
+				 can_edit_text="true"
+				 name="crossfilter_falloff"
+				 tool_tip="How quickly each arm fades along its length. Low gives long even spokes, high keeps the star tight. Shape only - brightness is Strength"
+				 enabled_control="RenderHDREnabled"
+				 control_name="RenderCrossFilterFalloff" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="crossfilter_falloff_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderHDREnabled">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderCrossFilterFalloff" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Dispersion"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="crossfilter_chromatic"
+				 tool_tip="Rainbow spread along the arms. A real star filter is a diffraction grating, so the tips go coloured while the core stays white"
+				 enabled_control="RenderHDREnabled"
+				 control_name="RenderCrossFilterChromatic" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="crossfilter_chromatic_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderHDREnabled">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderCrossFilterChromatic" />
+				</button>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_pad="10"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_crossfilter_adv_reset"
+				 tool_tip="Reset the advanced cross filter settings to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_crossfilter_adv" />
+				</button>
+			</panel>
+		</accordion_tab>
+		<accordion_tab
+		 expanded="false"
+		 layout="topleft"
+		 height="165"
+		 name="atab_sec_glow"
+		 title="Glow (Legacy)"
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="136"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_glow">
+				<text
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top="8"
+				 right="-8"
+				 height="15"
+				 name="glow_caption">
+					Applies when HDR rendering is off.
+				</text>
+				<check_box
+				 follows="left|top"
+				 layout="topleft"
+				 height="16"
+				 left="8"
+				 top_pad="8"
+				 width="300"
+				 label="Glow"
+				 tool_tip="Legacy screen-space glow"
+				 name="glow_enable"
+				 disabled_control="RenderHDREnabled"
+				 control_name="RenderGlow" />
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="9"
+				 right="-32"
+				 height="18"
+				 label="Strength"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="glow_strength"
+				 tool_tip="Additive strength of the glow"
+				 disabled_control="RenderHDREnabled"
+				 control_name="RenderGlowStrength" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="glow_strength_rst"
+				 tool_tip="Reset to default"
+				 disabled_control="RenderHDREnabled">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderGlowStrength" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Width"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.05"
+				 min_val="0"
+				 max_val="4"
+				 can_edit_text="true"
+				 name="glow_width"
+				 tool_tip="Glow sample size; wider is softer but eventually pixelated"
+				 disabled_control="RenderHDREnabled"
+				 control_name="RenderGlowWidth" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="glow_width_rst"
+				 tool_tip="Reset to default"
+				 disabled_control="RenderHDREnabled">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderGlowWidth" />
+				</button>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_pad="10"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_glow_reset"
+				 tool_tip="Reset this section (including Advanced) to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_glow" />
+				</button>
+			</panel>
+		</accordion_tab>
+		<accordion_tab
+		 expanded="false"
+		 layout="topleft"
+		 height="275"
+		 name="atab_sec_glow_adv"
+		 title="Glow (Legacy) - Advanced"
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="246"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_glow_adv">
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top="7"
+				 right="-32"
+				 height="18"
+				 label="Iterations"
+				 label_width="140"
+				 decimal_digits="0"
+				 increment="1"
+				 min_val="1"
+				 max_val="8"
+				 can_edit_text="true"
+				 name="glow_iterations"
+				 tool_tip="Blur passes; higher is wider and smoother but slower"
+				 disabled_control="RenderHDREnabled"
+				 control_name="RenderGlowIterations" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="glow_iterations_rst"
+				 tool_tip="Reset to default"
+				 disabled_control="RenderHDREnabled">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderGlowIterations" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Max extract alpha"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="glow_max_alpha"
+				 tool_tip="Cap on brightness-extracted auto-glow"
+				 disabled_control="RenderHDREnabled"
+				 control_name="RenderGlowMaxExtractAlpha" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="glow_max_alpha_rst"
+				 tool_tip="Reset to default"
+				 disabled_control="RenderHDREnabled">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderGlowMaxExtractAlpha" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Min luminance"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="glow_min_lum"
+				 tool_tip="Auto-glow: scene brightness (0-1) above which things start to glow on their own. Lower = more of the scene glows. 1.00 = off (the default)."
+				 disabled_control="RenderHDREnabled"
+				 control_name="RenderGlowMinLuminance" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="glow_min_lum_rst"
+				 tool_tip="Reset to default"
+				 disabled_control="RenderHDREnabled">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderGlowMinLuminance" />
+				</button>
+				<check_box
+				 follows="left|top"
+				 layout="topleft"
+				 height="16"
+				 left="8"
+				 top_pad="10"
+				 width="300"
+				 label="HDR glow map"
+				 tool_tip="Use an HDR format for the glow map"
+				 name="glow_hdr"
+				 disabled_control="RenderHDREnabled"
+				 control_name="RenderGlowHDR" />
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="9"
+				 right="-32"
+				 height="18"
+				 label="Warmth amount"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="glow_warmth"
+				 tool_tip="Blend between luminance extraction (0) and warmth extraction (1)"
+				 disabled_control="RenderHDREnabled"
+				 control_name="RenderGlowWarmthAmount" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="glow_warmth_rst"
+				 tool_tip="Reset to default"
+				 disabled_control="RenderHDREnabled">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderGlowWarmthAmount" />
+				</button>
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="10"
+				 width="110"
+				 height="15"
+				 name="glow_lum_weights_label"
+				 tool_tip="Per-channel weights for luminance extraction (should sum to 1)"
+				 value="Lum weights" />
+				<spinner
+				 follows="left|top"
+				 layout="topleft"
+				 left_delta="110"
+				 top_pad="-16"
+				 width="68"
+				 height="18"
+				 label="R"
+				 label_width="10"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="1"
+				 name="vec3_RenderGlowLumWeights_0">
+					<spinner.commit_callback
+					 function="PhotoStudio.CommitVec3" />
+				</spinner>
+				<spinner
+				 follows="left|top"
+				 layout="topleft"
+				 left_delta="72"
+				 top_delta="0"
+				 width="68"
+				 height="18"
+				 label="G"
+				 label_width="10"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="1"
+				 name="vec3_RenderGlowLumWeights_1">
+					<spinner.commit_callback
+					 function="PhotoStudio.CommitVec3" />
+				</spinner>
+				<spinner
+				 follows="left|top"
+				 layout="topleft"
+				 left_delta="72"
+				 top_delta="0"
+				 width="68"
+				 height="18"
+				 label="B"
+				 label_width="10"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="1"
+				 name="vec3_RenderGlowLumWeights_2">
+					<spinner.commit_callback
+					 function="PhotoStudio.CommitVec3" />
+				</spinner>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="18"
+				 right="-8"
+				 top_delta="0"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="glow_lum_weights_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderGlowLumWeights" />
+				</button>
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="10"
+				 width="110"
+				 height="15"
+				 name="glow_warmth_weights_label"
+				 tool_tip="Per-channel weights used before taking the max warmth"
+				 value="Warmth weights" />
+				<spinner
+				 follows="left|top"
+				 layout="topleft"
+				 left_delta="110"
+				 top_pad="-16"
+				 width="68"
+				 height="18"
+				 label="R"
+				 label_width="10"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="2"
+				 name="vec3_RenderGlowWarmthWeights_0">
+					<spinner.commit_callback
+					 function="PhotoStudio.CommitVec3" />
+				</spinner>
+				<spinner
+				 follows="left|top"
+				 layout="topleft"
+				 left_delta="72"
+				 top_delta="0"
+				 width="68"
+				 height="18"
+				 label="G"
+				 label_width="10"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="2"
+				 name="vec3_RenderGlowWarmthWeights_1">
+					<spinner.commit_callback
+					 function="PhotoStudio.CommitVec3" />
+				</spinner>
+				<spinner
+				 follows="left|top"
+				 layout="topleft"
+				 left_delta="72"
+				 top_delta="0"
+				 width="68"
+				 height="18"
+				 label="B"
+				 label_width="10"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="2"
+				 name="vec3_RenderGlowWarmthWeights_2">
+					<spinner.commit_callback
+					 function="PhotoStudio.CommitVec3" />
+				</spinner>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="18"
+				 right="-8"
+				 top_delta="0"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="glow_warmth_weights_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderGlowWarmthWeights" />
+				</button>
+				<check_box
+				 follows="left|top"
+				 layout="topleft"
+				 height="16"
+				 left="8"
+				 top_pad="10"
+				 width="300"
+				 label="Glow noise (dither)"
+				 tool_tip="Dither the glow to reduce banding"
+				 name="glow_noise"
+				 disabled_control="RenderHDREnabled"
+				 control_name="RenderGlowNoise" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_pad="10"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_glow_adv_reset"
+				 tool_tip="Reset the advanced glow settings to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_glow_adv" />
+				</button>
+			</panel>
+		</accordion_tab>
+		<accordion_tab
+		 expanded="false"
+		 layout="topleft"
+		 height="172"
+		 name="atab_sec_flare"
+		 title="Lens Flare"
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="143"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_flare">
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top="7"
+				 right="-32"
+				 height="18"
+				 label="Strength"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="flare_strength"
+				 tool_tip="Master lens flare intensity; 0 turns the effect off entirely"
+				 control_name="RenderLensFlareStrength" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="flare_strength_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderLensFlareStrength" />
+				</button>
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="12"
+				 width="140"
+				 height="15"
+				 name="flare_streak_tint_label"
+				 value="Streak tint" />
+				<color_swatch
+				 can_apply_immediately="true"
+				 follows="left|top"
+				 layout="topleft"
+				 left_delta="140"
+				 top_pad="-18"
+				 width="60"
+				 height="24"
+				 label_height="0"
+				 name="flare_streak_tint"
+				 tool_tip="Color of the anamorphic streak; the default cool blue mimics coated cinema lenses"
+				 control_name="RenderLensFlareStreakTint" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="18"
+				 right="-8"
+				 top_pad="-21"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="flare_streak_tint_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderLensFlareStreakTint" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Glow"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.05"
+				 min_val="0"
+				 max_val="5"
+				 can_edit_text="true"
+				 name="flare_glow"
+				 tool_tip="Intensity of the soft central glow around the sun"
+				 control_name="RenderLensFlareGlow" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="flare_glow_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderLensFlareGlow" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Starburst"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.05"
+				 min_val="0"
+				 max_val="5"
+				 can_edit_text="true"
+				 name="flare_starburst"
+				 tool_tip="Intensity of the diffraction-spike starburst radiating from the sun"
+				 control_name="RenderLensFlareStarburst" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="flare_starburst_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderLensFlareStarburst" />
+				</button>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_pad="10"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_flare_reset"
+				 tool_tip="Reset this section (including Advanced) to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_flare" />
+				</button>
+			</panel>
+		</accordion_tab>
+		<accordion_tab
+		 expanded="false"
+		 layout="topleft"
+		 height="715"
+		 name="atab_sec_flare_adv"
+		 title="Lens Flare - Advanced"
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="686"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_flare_adv">
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top="8"
+				 width="200"
+				 height="15"
+				 font="SansSerifBold"
+				 name="flare_hdr_streak"
+				 value="Streak" />
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="7"
+				 right="-32"
+				 height="18"
+				 label="Length"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0.01"
+				 max_val="2"
+				 can_edit_text="true"
+				 name="flare_streak_length"
+				 tool_tip="How far the anamorphic streak stretches; 1.0 crosses the full screen width"
+				 control_name="RenderLensFlareStreakLength" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="flare_streak_length_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderLensFlareStreakLength" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Falloff"
+				 label_width="140"
+				 decimal_digits="1"
+				 increment="0.1"
+				 min_val="0.1"
+				 max_val="10"
+				 can_edit_text="true"
+				 name="flare_streak_falloff"
+				 tool_tip="How quickly the streak fades toward its tips; lower leaves a longer tail"
+				 control_name="RenderLensFlareStreakFalloff" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="flare_streak_falloff_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderLensFlareStreakFalloff" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Thickness"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="flare_streak_thickness"
+				 tool_tip="Vertical thickness of the streak; low is a hairline, high a soft band"
+				 control_name="RenderLensFlareStreakThickness" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="flare_streak_thickness_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderLensFlareStreakThickness" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Intensity"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.05"
+				 min_val="0"
+				 max_val="5"
+				 can_edit_text="true"
+				 name="flare_streak_intensity"
+				 tool_tip="Brightness of just the streak, separate from the master strength"
+				 control_name="RenderLensFlareStreakIntensity" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="flare_streak_intensity_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderLensFlareStreakIntensity" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Chromatic spread"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="flare_chromatic_spread"
+				 tool_tip="Red/blue separation along the streak; 1 gives a strong rainbow split"
+				 control_name="RenderLensFlareChromaticSpread" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="flare_chromatic_spread_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderLensFlareChromaticSpread" />
+				</button>
+				<view_border
+				 bevel_style="none"
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="12"
+				 right="-8"
+				 height="0"
+				 name="flare_div_glow" />
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="6"
+				 width="200"
+				 height="15"
+				 font="SansSerifBold"
+				 name="flare_hdr_glow"
+				 value="Glow" />
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="7"
+				 right="-32"
+				 height="18"
+				 label="Radius"
+				 label_width="140"
+				 decimal_digits="3"
+				 text_width="56"
+				 increment="0.005"
+				 min_val="0.01"
+				 max_val="0.5"
+				 can_edit_text="true"
+				 name="flare_glow_radius"
+				 tool_tip="Size of the soft glow around the sun"
+				 control_name="RenderLensFlareGlowRadius" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="flare_glow_radius_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderLensFlareGlowRadius" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Falloff"
+				 label_width="140"
+				 decimal_digits="1"
+				 increment="0.5"
+				 min_val="1"
+				 max_val="30"
+				 can_edit_text="true"
+				 name="flare_glow_falloff"
+				 tool_tip="Softness of the central glow; lower spreads it out, higher keeps it tight"
+				 control_name="RenderLensFlareGlowFalloff" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="flare_glow_falloff_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderLensFlareGlowFalloff" />
+				</button>
+				<view_border
+				 bevel_style="none"
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="12"
+				 right="-8"
+				 height="0"
+				 name="flare_div_ghosts" />
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="6"
+				 width="200"
+				 height="15"
+				 font="SansSerifBold"
+				 name="flare_hdr_ghosts"
+				 value="Ghosts" />
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="7"
+				 right="-32"
+				 height="18"
+				 label="Intensity"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.05"
+				 min_val="0"
+				 max_val="5"
+				 can_edit_text="true"
+				 name="flare_ghost"
+				 tool_tip="Intensity of the lens ghost circles; 0 disables ghosts"
+				 control_name="RenderLensFlareGhost" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="flare_ghost_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderLensFlareGhost" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Count"
+				 label_width="140"
+				 decimal_digits="0"
+				 increment="1"
+				 min_val="0"
+				 max_val="8"
+				 can_edit_text="true"
+				 name="flare_ghost_count"
+				 tool_tip="Number of ghost circles along the sun-to-center line"
+				 control_name="RenderLensFlareGhostCount" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="flare_ghost_count_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderLensFlareGhostCount" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Spacing"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0.1"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="flare_ghost_spacing"
+				 tool_tip="Distance between consecutive ghosts"
+				 control_name="RenderLensFlareGhostSpacing" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="flare_ghost_spacing_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderLensFlareGhostSpacing" />
+				</button>
+				<view_border
+				 bevel_style="none"
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="12"
+				 right="-8"
+				 height="0"
+				 name="flare_div_halo" />
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="6"
+				 width="200"
+				 height="15"
+				 font="SansSerifBold"
+				 name="flare_hdr_halo"
+				 value="Halo" />
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="7"
+				 right="-32"
+				 height="18"
+				 label="Intensity"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.05"
+				 min_val="0"
+				 max_val="5"
+				 can_edit_text="true"
+				 name="flare_halo"
+				 tool_tip="Intensity of the halo ring opposite the sun; 0 disables the halo"
+				 control_name="RenderLensFlareHalo" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="flare_halo_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderLensFlareHalo" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Radius"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0.01"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="flare_halo_radius"
+				 tool_tip="Radius of the halo ring"
+				 control_name="RenderLensFlareHaloRadius" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="flare_halo_radius_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderLensFlareHaloRadius" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Width"
+				 label_width="140"
+				 decimal_digits="3"
+				 text_width="56"
+				 increment="0.005"
+				 min_val="0.01"
+				 max_val="0.5"
+				 can_edit_text="true"
+				 name="flare_halo_width"
+				 tool_tip="Thickness of the halo ring; small is a crisp hoop, large a diffuse ring"
+				 control_name="RenderLensFlareHaloWidth" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="flare_halo_width_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderLensFlareHaloWidth" />
+				</button>
+				<view_border
+				 bevel_style="none"
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="12"
+				 right="-8"
+				 height="0"
+				 name="flare_div_starburst" />
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="6"
+				 width="200"
+				 height="15"
+				 font="SansSerifBold"
+				 name="flare_hdr_starburst"
+				 value="Starburst" />
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="7"
+				 right="-32"
+				 height="18"
+				 label="Spike Pairs"
+				 label_width="140"
+				 decimal_digits="0"
+				 increment="1"
+				 min_val="1"
+				 max_val="32"
+				 can_edit_text="true"
+				 name="flare_starburst_spikes"
+				 tool_tip="Draws twice this many spikes - half the blade count, or all of it if odd"
+				 control_name="RenderLensFlareStarburstSpikes" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="flare_starburst_spikes_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderLensFlareStarburstSpikes" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Sharpness"
+				 label_width="140"
+				 decimal_digits="0"
+				 increment="1"
+				 min_val="1"
+				 max_val="256"
+				 can_edit_text="true"
+				 name="flare_starburst_sharpness"
+				 tool_tip="Low values give soft wide rays; high values give thin needle-like beams"
+				 control_name="RenderLensFlareStarburstSharpness" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="flare_starburst_sharpness_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderLensFlareStarburstSharpness" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Length"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="flare_starburst_length"
+				 tool_tip="Length of the starburst spikes"
+				 control_name="RenderLensFlareStarburstLength" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="flare_starburst_length_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderLensFlareStarburstLength" />
+				</button>
+				<view_border
+				 bevel_style="none"
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="12"
+				 right="-8"
+				 height="0"
+				 name="flare_div_occlusion" />
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="6"
+				 width="200"
+				 height="15"
+				 font="SansSerifBold"
+				 name="flare_hdr_occlusion"
+				 value="Occlusion" />
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="7"
+				 right="-32"
+				 height="18"
+				 label="Size"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.05"
+				 min_val="0.25"
+				 max_val="2"
+				 can_edit_text="true"
+				 name="flare_occlusion_scale"
+				 tool_tip="Occlusion probe as a multiple of the sun disc; larger lets objects near the sun dim the flare sooner"
+				 control_name="RenderLensFlareOcclusionScale" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="flare_occlusion_scale_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderLensFlareOcclusionScale" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Fade"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.05"
+				 min_val="0.1"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="flare_fade_time"
+				 tool_tip="Seconds for the flare to fade in when the sun is revealed; it fades out faster. Longer is calmer through foliage"
+				 control_name="RenderLensFlareFadeTime" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="flare_fade_time_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderLensFlareFadeTime" />
+				</button>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_pad="10"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_flare_adv_reset"
+				 tool_tip="Reset the advanced lens flare settings to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_flare_adv" />
+				</button>
+			</panel>
+		</accordion_tab>
+		<accordion_tab
+		 expanded="false"
+		 layout="topleft"
+		 height="194"
+		 name="atab_sec_lensdirt"
+		 title="Lens Dirt"
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="165"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_lensdirt">
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top="7"
+				 right="-32"
+				 height="18"
+				 label="Strength"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="2"
+				 can_edit_text="true"
+				 name="lensdirt_strength"
+				 tool_tip="How strongly grime on the front element catches light. Only shows where there is already bloom or flare to catch, so a flat scene stays clean"
+				 control_name="RenderLensDirtStrength" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="lensdirt_strength_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderLensDirtStrength" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Grime"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="2"
+				 can_edit_text="true"
+				 name="lensdirt_grime"
+				 tool_tip="How much muck is on the glass. Scales every layer of dust and grit at once"
+				 control_name="RenderLensDirtGrime">
+					<slider.mouse_down_callback
+					 function="PhotoStudio.LensDirtSliderDown" />
+					<slider.mouse_up_callback
+					 function="PhotoStudio.LensDirtSliderUp" />
+				</slider>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="lensdirt_grime_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderLensDirtGrime" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Mote Size"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0.5"
+				 max_val="2"
+				 can_edit_text="true"
+				 name="lensdirt_mote_scale"
+				 tool_tip="Size of the dust specks. Above 1 they grow and thin out; below 1 they shrink into finer grime"
+				 control_name="RenderLensDirtMoteScale">
+					<slider.mouse_down_callback
+					 function="PhotoStudio.LensDirtSliderDown" />
+					<slider.mouse_up_callback
+					 function="PhotoStudio.LensDirtSliderUp" />
+				</slider>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="lensdirt_mote_scale_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderLensDirtMoteScale" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Smudge"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="2"
+				 can_edit_text="true"
+				 name="lensdirt_smudge"
+				 tool_tip="Strength of the broad wipe marks a cloth leaves behind, as opposed to the discrete specks"
+				 control_name="RenderLensDirtSmudge">
+					<slider.mouse_down_callback
+					 function="PhotoStudio.LensDirtSliderDown" />
+					<slider.mouse_up_callback
+					 function="PhotoStudio.LensDirtSliderUp" />
+				</slider>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="lensdirt_smudge_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderLensDirtSmudge" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Scratches"
+				 label_width="140"
+				 decimal_digits="0"
+				 increment="1"
+				 min_val="0"
+				 max_val="32"
+				 can_edit_text="true"
+				 name="lensdirt_scratches"
+				 tool_tip="How many scratches cross the glass. 0 is undamaged. They are straight and bright where dust is soft, so a few go a long way"
+				 control_name="RenderLensDirtScratches">
+					<slider.mouse_down_callback
+					 function="PhotoStudio.LensDirtSliderDown" />
+					<slider.mouse_up_callback
+					 function="PhotoStudio.LensDirtSliderUp" />
+				</slider>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="lensdirt_scratches_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderLensDirtScratches" />
+				</button>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_pad="10"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_lensdirt_reset"
+				 tool_tip="Reset this section to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_lensdirt" />
+				</button>
+			</panel>
+		</accordion_tab>
+		<accordion_tab
+		 expanded="false"
+		 layout="topleft"
+		 height="194"
+		 name="atab_sec_lensdirt_adv"
+		 title="Lens Dirt - Advanced"
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="165"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_lensdirt_adv">
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top="7"
+				 right="-32"
+				 height="18"
+				 label="Seed"
+				 label_width="140"
+				 decimal_digits="0"
+				 increment="1"
+				 min_val="0"
+				 max_val="999"
+				 can_edit_text="true"
+				 name="lensdirt_seed"
+				 tool_tip="Reshuffles the grime. Also moves the overall density a little, since dirt pools rather than spreading evenly and where it pools changes with the seed"
+				 control_name="RenderLensDirtSeed">
+					<slider.mouse_down_callback
+					 function="PhotoStudio.LensDirtSliderDown" />
+					<slider.mouse_up_callback
+					 function="PhotoStudio.LensDirtSliderUp" />
+				</slider>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="lensdirt_seed_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderLensDirtSeed" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Toe"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0.6"
+				 max_val="4"
+				 can_edit_text="true"
+				 name="lensdirt_toe"
+				 tool_tip="How much of the faint grime survives. Higher values crush the midtones and leave only the brightest specks, which reads clean whatever Strength is set to"
+				 control_name="RenderLensDirtToe">
+					<slider.mouse_down_callback
+					 function="PhotoStudio.LensDirtSliderDown" />
+					<slider.mouse_up_callback
+					 function="PhotoStudio.LensDirtSliderUp" />
+				</slider>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="lensdirt_toe_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderLensDirtToe" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Gain"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0.5"
+				 max_val="2.5"
+				 can_edit_text="true"
+				 name="lensdirt_gain"
+				 tool_tip="Overall brightness of the generated plate, applied after the toe. Mostly a trim for Toe"
+				 control_name="RenderLensDirtGain">
+					<slider.mouse_down_callback
+					 function="PhotoStudio.LensDirtSliderDown" />
+					<slider.mouse_up_callback
+					 function="PhotoStudio.LensDirtSliderUp" />
+				</slider>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="lensdirt_gain_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderLensDirtGain" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Bloom Response"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="2"
+				 can_edit_text="true"
+				 name="lensdirt_bloom_response"
+				 tool_tip="How much bloom lights up the dirt. 0 lets bloom pass through a clean lens"
+				 control_name="RenderLensDirtBloomResponse" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="lensdirt_bloom_response_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderLensDirtBloomResponse" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Flare Response"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="2"
+				 can_edit_text="true"
+				 name="lensdirt_flare_response"
+				 tool_tip="How much the lens flare lights up the dirt. Flare and grime share the same front element, so this is the response that reads most like a real lens"
+				 control_name="RenderLensDirtFlareResponse" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="lensdirt_flare_response_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderLensDirtFlareResponse" />
+				</button>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_pad="10"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_lensdirt_adv_reset"
+				 tool_tip="Reset this section to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_lensdirt_adv" />
+				</button>
+			</panel>
+		</accordion_tab>
+		<accordion_tab
+		 expanded="false"
+		 layout="topleft"
+		 height="272"
+		 name="atab_sec_ca"
+		 title="Chromatic Aberration"
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="243"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_ca">
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top="7"
+				 right="-32"
+				 height="18"
+				 label="Strength"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="ca_strength"
+				 tool_tip="Color fringe intensity. 0 disables; 0.15 is a subtle cinema lens feel."
+				 control_name="RenderChromaticAberrationStrength" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="ca_strength_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderChromaticAberrationStrength" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Falloff"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.05"
+				 min_val="0.5"
+				 max_val="4"
+				 can_edit_text="true"
+				 name="ca_falloff"
+				 tool_tip="How quickly fringing grows from center to edge; higher keeps the center clean"
+				 control_name="RenderChromaticAberrationFalloff" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="ca_falloff_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderChromaticAberrationFalloff" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Angle"
+				 label_width="140"
+				 decimal_digits="0"
+				 increment="1"
+				 min_val="0"
+				 max_val="360"
+				 can_edit_text="true"
+				 name="ca_angle"
+				 tool_tip="Rotates the red/blue split direction (degrees); only matters when anisotropy is nonzero"
+				 control_name="RenderChromaticAberrationAngle" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="ca_angle_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderChromaticAberrationAngle" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Anisotropy"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="-1"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="ca_anisotropy"
+				 tool_tip="Stretches the fringe along the angle axis for an anamorphic-style directional smear"
+				 control_name="RenderChromaticAberrationAnisotropy" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="ca_anisotropy_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderChromaticAberrationAnisotropy" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Red offset X"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="-1"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="ca_offset_rx"
+				 tool_tip="Red channel horizontal shift direction"
+				 control_name="RenderChromaticAberrationOffsetRX" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="ca_offset_rx_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderChromaticAberrationOffsetRX" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Red offset Y"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="-1"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="ca_offset_ry"
+				 tool_tip="Red channel vertical shift direction"
+				 control_name="RenderChromaticAberrationOffsetRY" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="ca_offset_ry_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderChromaticAberrationOffsetRY" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Blue offset X"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="-1"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="ca_offset_bx"
+				 tool_tip="Blue channel horizontal shift direction; typically opposite the red offset"
+				 control_name="RenderChromaticAberrationOffsetBX" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="ca_offset_bx_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderChromaticAberrationOffsetBX" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Blue offset Y"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="-1"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="ca_offset_by"
+				 tool_tip="Blue channel vertical shift direction"
+				 control_name="RenderChromaticAberrationOffsetBY" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="ca_offset_by_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderChromaticAberrationOffsetBY" />
+				</button>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_pad="10"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_ca_reset"
+				 tool_tip="Reset this section to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_ca" />
+				</button>
+			</panel>
+		</accordion_tab>
+		<accordion_tab
+		 expanded="false"
+		 layout="topleft"
+		 height="142"
+		 name="atab_sec_distortion"
+		 title="Distortion"
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="113"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_distortion">
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top="7"
+				 right="-32"
+				 height="18"
+				 label="Amount"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="distortion_amount"
+				 tool_tip="Overall lens distortion strength; 0 disables. Only the world view bends - nametags, outlines and UI stay straight."
+				 control_name="RenderLensDistortionAmount" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="distortion_amount_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderLensDistortionAmount" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Barrel / Pincushion"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="-0.5"
+				 max_val="0.5"
+				 text_width="56"
+				 can_edit_text="true"
+				 name="distortion_k1"
+				 tool_tip="Negative bows straight lines outward (barrel, the wide-angle look); positive bows them inward (pincushion)"
+				 control_name="RenderLensDistortionK1" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="distortion_k1_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderLensDistortionK1" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Anamorphic Squeeze"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0.5"
+				 max_val="2.5"
+				 can_edit_text="true"
+				 name="distortion_squeeze"
+				 tool_tip="Horizontal desqueeze; 1.0 is a spherical lens, 2.0 matches anamorphic cinema"
+				 control_name="RenderLensDistortionSqueeze" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="distortion_squeeze_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderLensDistortionSqueeze" />
+				</button>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_pad="10"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_distortion_reset"
+				 tool_tip="Reset this section (including Advanced) to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_distortion" />
+				</button>
+			</panel>
+		</accordion_tab>
+		<accordion_tab
+		 expanded="false"
+		 layout="topleft"
+		 height="170"
+		 name="atab_sec_distortion_adv"
+		 title="Distortion - Advanced"
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="141"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_distortion_adv">
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top="7"
+				 right="-32"
+				 height="18"
+				 label="Secondary Bend"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="-0.25"
+				 max_val="0.25"
+				 text_width="56"
+				 can_edit_text="true"
+				 name="distortion_k2"
+				 tool_tip="Shapes the bend toward the corners. Small non-zero values give the moustache distortion of real wide-angle lenses, where the bend reverses near the frame edge."
+				 control_name="RenderLensDistortionK2" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="distortion_k2_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderLensDistortionK2" />
+				</button>
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="9"
+				 width="140"
+				 height="15"
+				 name="distortion_fit_label"
+				 value="Rescale" />
+				<combo_box
+				 follows="left|top|right"
+				 layout="topleft"
+				 left_delta="140"
+				 top_pad="-16"
+				 right="-32"
+				 height="18"
+				 name="distortion_fit_combo"
+				 tool_tip="How the bent image is rescaled: none leaves pincushion showing black corners, Fit scales until nothing goes black, Fill keeps the whole frame visible and may letterbox the corners"
+				 control_name="RenderLensDistortionFit">
+					<combo_box.item
+					 label="None"
+					 name="0"
+					 value="0" />
+					<combo_box.item
+					 label="Fit (no black)"
+					 name="1"
+					 value="1" />
+					<combo_box.item
+					 label="Fill (keep all)"
+					 name="2"
+					 value="2" />
+				</combo_box>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="18"
+				 right="-8"
+				 top_pad="-18"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="distortion_fit_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderLensDistortionFit" />
+				</button>
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="10"
+				 width="110"
+				 height="15"
+				 name="distortion_center_label"
+				 tool_tip="Offset of the optical axis from the frame center"
+				 value="Center" />
+				<spinner
+				 follows="left|top"
+				 layout="topleft"
+				 left_delta="110"
+				 top_pad="-16"
+				 width="68"
+				 height="18"
+				 label="X"
+				 label_width="10"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="-0.5"
+				 max_val="0.5"
+				 name="vec3_RenderLensDistortionCenter_0">
+					<spinner.commit_callback
+					 function="PhotoStudio.CommitVec3" />
+				</spinner>
+				<spinner
+				 follows="left|top"
+				 layout="topleft"
+				 left_delta="72"
+				 top_delta="0"
+				 width="68"
+				 height="18"
+				 label="Y"
+				 label_width="10"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="-0.5"
+				 max_val="0.5"
+				 name="vec3_RenderLensDistortionCenter_1">
+					<spinner.commit_callback
+					 function="PhotoStudio.CommitVec3" />
+				</spinner>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="18"
+				 right="-8"
+				 top_delta="0"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="distortion_center_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderLensDistortionCenter" />
+				</button>
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="10"
+				 width="110"
+				 height="15"
+				 name="distortion_tangential_label"
+				 tool_tip="Decentering terms p1 and p2, modelling a lens element mounted slightly off-axis. Realistic values are tiny."
+				 value="Tangential" />
+				<spinner
+				 follows="left|top"
+				 layout="topleft"
+				 left_delta="110"
+				 top_pad="-16"
+				 width="68"
+				 height="18"
+				 label="P1"
+				 label_width="18"
+				 decimal_digits="3"
+				 increment="0.001"
+				 min_val="-0.05"
+				 max_val="0.05"
+				 name="vec3_RenderLensDistortionTangential_0">
+					<spinner.commit_callback
+					 function="PhotoStudio.CommitVec3" />
+				</spinner>
+				<spinner
+				 follows="left|top"
+				 layout="topleft"
+				 left_delta="72"
+				 top_delta="0"
+				 width="68"
+				 height="18"
+				 label="P2"
+				 label_width="18"
+				 decimal_digits="3"
+				 increment="0.001"
+				 min_val="-0.05"
+				 max_val="0.05"
+				 name="vec3_RenderLensDistortionTangential_1">
+					<spinner.commit_callback
+					 function="PhotoStudio.CommitVec3" />
+				</spinner>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="18"
+				 right="-8"
+				 top_delta="0"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="distortion_tangential_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderLensDistortionTangential" />
+				</button>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_pad="10"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_distortion_adv_reset"
+				 tool_tip="Reset the advanced distortion settings to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_distortion_adv" />
+				</button>
+			</panel>
+		</accordion_tab>
+		<accordion_tab
+		 expanded="false"
+		 layout="topleft"
+		 height="142"
+		 name="atab_sec_vignette"
+		 title="Vignette"
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="113"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_vignette">
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top="7"
+				 right="-32"
+				 height="18"
+				 label="Amount"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="vignette_amount"
+				 tool_tip="Opacity of the vignette; 0 disables"
+				 control_name="RenderVignetteAmount" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="vignette_amount_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVignetteAmount" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Radius"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0.25"
+				 max_val="1.5"
+				 can_edit_text="true"
+				 name="vignette_radius"
+				 tool_tip="Vignette size in image-height units; 1.0 reaches the top and bottom edges"
+				 control_name="RenderVignetteRadius" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="vignette_radius_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVignetteRadius" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Feather"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.05"
+				 min_val="0.2"
+				 max_val="4"
+				 can_edit_text="true"
+				 name="vignette_feather"
+				 tool_tip="Shape of the darkening curve: below 1 spreads a gentle haze inward, above 1 concentrates darkening at the corners"
+				 control_name="RenderVignetteFeather" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="vignette_feather_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVignetteFeather" />
+				</button>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_pad="10"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_vignette_reset"
+				 tool_tip="Reset this section (including Advanced) to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_vignette" />
+				</button>
+			</panel>
+		</accordion_tab>
+		<accordion_tab
+		 expanded="false"
+		 layout="topleft"
+		 height="255"
+		 name="atab_sec_vignette_adv"
+		 title="Vignette - Advanced"
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="226"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_vignette_adv">
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top="7"
+				 right="-32"
+				 height="18"
+				 label="Softness"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="vignette_soft"
+				 tool_tip="Softness of the vignette edge"
+				 control_name="RenderVignetteSoft" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="vignette_soft_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVignetteSoft" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Shape"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="vignette_shape"
+				 tool_tip="0 is circular, 1 is a rounded square"
+				 control_name="RenderVignetteShape" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="vignette_shape_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVignetteShape" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Mid point"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="vignette_midpoint"
+				 tool_tip="Position of the middle color in the three-color ramp; 0 disables (two-color vignette)"
+				 control_name="RenderVignetteMidPoint" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="vignette_midpoint_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVignetteMidPoint" />
+				</button>
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="12"
+				 width="140"
+				 height="15"
+				 name="vignette_color_label"
+				 value="Edge color" />
+				<color_swatch
+				 can_apply_immediately="true"
+				 follows="left|top"
+				 layout="topleft"
+				 left_delta="140"
+				 top_pad="-18"
+				 width="60"
+				 height="24"
+				 label_height="0"
+				 name="vignette_color"
+				 tool_tip="Vignette edge color"
+				 control_name="RenderVignetteColor" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="18"
+				 right="-8"
+				 top_pad="-21"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="vignette_color_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVignetteColor" />
+				</button>
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="12"
+				 width="140"
+				 height="15"
+				 name="vignette_midcolor_label"
+				 value="Mid color" />
+				<color_swatch
+				 can_apply_immediately="true"
+				 follows="left|top"
+				 layout="topleft"
+				 left_delta="140"
+				 top_pad="-18"
+				 width="60"
+				 height="24"
+				 label_height="0"
+				 name="vignette_midcolor"
+				 tool_tip="Intermediate ramp color, used when mid point is above 0"
+				 control_name="RenderVignetteMidColor" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="18"
+				 right="-8"
+				 top_pad="-21"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="vignette_midcolor_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVignetteMidColor" />
+				</button>
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="10"
+				 width="110"
+				 height="15"
+				 name="vignette_center_label"
+				 tool_tip="Offset of the vignette center (X and Y; the third value is unused)"
+				 value="Center" />
+				<spinner
+				 follows="left|top"
+				 layout="topleft"
+				 left_delta="110"
+				 top_pad="-16"
+				 width="68"
+				 height="18"
+				 label="X"
+				 label_width="10"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="-0.5"
+				 max_val="0.5"
+				 name="vec3_RenderVignetteCenter_0">
+					<spinner.commit_callback
+					 function="PhotoStudio.CommitVec3" />
+				</spinner>
+				<spinner
+				 follows="left|top"
+				 layout="topleft"
+				 left_delta="72"
+				 top_delta="0"
+				 width="68"
+				 height="18"
+				 label="Y"
+				 label_width="10"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="-0.5"
+				 max_val="0.5"
+				 name="vec3_RenderVignetteCenter_1">
+					<spinner.commit_callback
+					 function="PhotoStudio.CommitVec3" />
+				</spinner>
+				<spinner
+				 follows="left|top"
+				 layout="topleft"
+				 left_delta="72"
+				 top_delta="0"
+				 width="68"
+				 height="18"
+				 label="Z"
+				 label_width="10"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="-0.5"
+				 max_val="0.5"
+				 name="vec3_RenderVignetteCenter_2">
+					<spinner.commit_callback
+					 function="PhotoStudio.CommitVec3" />
+				</spinner>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="18"
+				 right="-8"
+				 top_delta="0"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="vignette_center_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVignetteCenter" />
+				</button>
+				<check_box
+				 follows="left|top"
+				 layout="topleft"
+				 height="16"
+				 left="8"
+				 top_pad="10"
+				 width="300"
+				 label="Correct for aspect ratio"
+				 tool_tip="Keep the vignette circular on wide screens instead of stretching with the frame"
+				 name="vignette_aspect"
+				 control_name="RenderVignetteCorrectAspect" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_pad="10"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_vignette_adv_reset"
+				 tool_tip="Reset the advanced vignette settings to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_vignette_adv" />
+				</button>
+			</panel>
+		</accordion_tab>
+		<accordion_tab
+		 expanded="false"
+		 layout="topleft"
+		 height="224"
+		 name="atab_sec_grain"
+		 title="Film Grain"
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="195"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_grain">
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top="7"
+				 right="-32"
+				 height="18"
+				 label="Amount"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="grain_amount"
+				 tool_tip="Film grain strength; 0 disables"
+				 control_name="RenderFilmGrainAmount" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="grain_amount_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderFilmGrainAmount" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Size"
+				 label_width="140"
+				 decimal_digits="1"
+				 increment="0.1"
+				 min_val="1"
+				 max_val="8"
+				 can_edit_text="true"
+				 name="grain_size"
+				 tool_tip="Size of the grain particles"
+				 control_name="RenderFilmGrainSize" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="grain_size_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderFilmGrainSize" />
+				</button>
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="9"
+				 width="140"
+				 height="15"
+				 name="grain_style_label"
+				 value="Style" />
+				<combo_box
+				 follows="left|top|right"
+				 layout="topleft"
+				 left_delta="140"
+				 top_pad="-16"
+				 right="-32"
+				 height="18"
+				 name="grain_style_combo"
+				 tool_tip="Grain character: mono luma, color (digital push), coarse (16mm feel), or photon shot (CCD sensor)"
+				 control_name="RenderFilmGrainStyle">
+					<combo_box.item
+					 label="Mono (luma)"
+					 name="0"
+					 value="0" />
+					<combo_box.item
+					 label="Color (digital)"
+					 name="1"
+					 value="1" />
+					<combo_box.item
+					 label="Coarse (16mm)"
+					 name="2"
+					 value="2" />
+					<combo_box.item
+					 label="Photon shot (CCD)"
+					 name="3"
+					 value="3" />
+				</combo_box>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="18"
+				 right="-8"
+				 top_pad="-18"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="grain_style_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderFilmGrainStyle" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Luma range"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="grain_range"
+				 tool_tip="Luma position where grain peaks: 0 shadows only, 0.5 midtones (classic film), 1 highlights only"
+				 control_name="RenderFilmGrainRange" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="grain_range_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderFilmGrainRange" />
+				</button>
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="12"
+				 width="140"
+				 height="15"
+				 name="grain_tint_label"
+				 value="Tint" />
+				<color_swatch
+				 can_apply_immediately="true"
+				 follows="left|top"
+				 layout="topleft"
+				 left_delta="140"
+				 top_pad="-18"
+				 width="60"
+				 height="24"
+				 label_height="0"
+				 name="grain_tint"
+				 tool_tip="Grain color; white is neutral, warm tints suggest film, cool tints suggest video noise"
+				 control_name="RenderFilmGrainTint" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="18"
+				 right="-8"
+				 top_pad="-21"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="grain_tint_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderFilmGrainTint" />
+				</button>
+				<check_box
+				 follows="left|top"
+				 layout="topleft"
+				 height="16"
+				 left="8"
+				 top_pad="10"
+				 width="300"
+				 label="Animated"
+				 tool_tip="Re-randomize the grain every frame, like real film"
+				 name="grain_animated"
+				 control_name="RenderFilmGrainAnimated" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_pad="10"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_grain_reset"
+				 tool_tip="Reset this section to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_grain" />
+				</button>
+			</panel>
+		</accordion_tab>
+		<accordion_tab
+		 expanded="false"
+		 layout="topleft"
+		 height="90"
+		 name="atab_sec_sharp"
+		 title="Sharpen"
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="61"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_sharp">
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top="7"
+				 right="-32"
+				 height="18"
+				 label="Sharpness (CAS)"
+				 label_width="140"
+				 decimal_digits="2"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="sharp_cas"
+				 tool_tip="Contrast Adaptive Sharpening strength"
+				 control_name="RenderCASSharpness" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="sharp_cas_rst"
+				 tool_tip="Reset to default">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderCASSharpness" />
+				</button>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_pad="10"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_sharp_reset"
+				 tool_tip="Reset this section to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_sharp" />
+				</button>
+			</panel>
+		</accordion_tab>
+	</accordion>
+</panel>

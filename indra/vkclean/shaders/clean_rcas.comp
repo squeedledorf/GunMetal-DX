@@ -1,0 +1,67 @@
+#version 450
+// vkclean -- SHARPENING (#183; RenderCASSharpness, LL's CAS setting, 0 = off). AMD
+// FidelityFX RCAS (robust contrast-adaptive sharpening, FSR 1, MIT): a 5-tap cross whose
+// negative lobe is limited per pixel so no channel can clip -- sharpens without halos or
+// ringing. Runs on the linear HDR scene before the post chain: from the TAA / upscale
+// resolve straight into mHdr (the history stays unsharpened, so sharpening never
+// accumulates), or without TAA from the frame's SSR copy (identical to mHdr then).
+// RCAS wants [0, 1]: it works in the resolve's Reinhard-compressed, pre-exposed space.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform sampler2D uSrc;                       // texelFetch
+layout(rgba16f, set = 0, binding = 1) writeonly uniform image2D uDst;      // mHdr
+layout(r32f, set = 0, binding = 2) readonly uniform image2D uExposure;     // 1x1 dynamic exposure
+
+layout(push_constant) uniform Push {
+    vec4  params;   // x sharpness (0..1, multiplies the lobe), y static exposure, z dynamic exposure on
+    ivec2 size;
+    ivec2 pad;
+} pc;
+
+float luma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+vec3 compress(vec3 c)   { return c / (1.0 + luma(c)); }
+vec3 decompress(vec3 t) { return t / max(1.0 - luma(t), 1e-4); }
+vec3 sanitize(vec3 c)   { return (any(isnan(c)) || any(isinf(c))) ? vec3(0.0) : clamp(c, vec3(0.0), vec3(65000.0)); }
+
+#define RCAS_LIMIT (0.25 - (1.0 / 16.0))
+
+void main()
+{
+    const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (p.x >= pc.size.x || p.y >= pc.size.y) return;
+    float expo = pc.params.y;
+    if (pc.params.z > 0.5) expo *= imageLoad(uExposure, ivec2(0)).r;
+    expo = (isnan(expo) || isinf(expo)) ? 1.0 : max(expo, 1e-6);
+
+    const ivec2 hi = pc.size - 1;
+    const vec4  e4 = texelFetch(uSrc, p, 0);
+    const vec3 e = compress(sanitize(e4.rgb) * expo);
+    const vec3 b = compress(sanitize(texelFetch(uSrc, clamp(p + ivec2( 0, -1), ivec2(0), hi), 0).rgb) * expo);
+    const vec3 d = compress(sanitize(texelFetch(uSrc, clamp(p + ivec2(-1,  0), ivec2(0), hi), 0).rgb) * expo);
+    const vec3 f = compress(sanitize(texelFetch(uSrc, clamp(p + ivec2( 1,  0), ivec2(0), hi), 0).rgb) * expo);
+    const vec3 h = compress(sanitize(texelFetch(uSrc, clamp(p + ivec2( 0,  1), ivec2(0), hi), 0).rgb) * expo);
+
+    // Per-channel lobe limits (ffx_fsr1.h FsrRcasF): the most negative lobe that keeps
+    // the result inside [min, max] of the cross.
+    const vec3 mn4 = min(min(b, d), min(f, h));
+    const vec3 mx4 = max(max(b, d), max(f, h));
+    const vec3 hitMin = min(mn4, e) / (4.0 * mx4 + 1e-6);
+    const vec3 hitMax = (1.0 - max(mx4, e)) / (4.0 * mn4 - 4.0 - 1e-6);
+    const vec3 lobe3  = max(-hitMin, hitMax);
+    const float lobe  = max(-RCAS_LIMIT, min(max(lobe3.r, max(lobe3.g, lobe3.b)), 0.0)) * pc.params.x;
+    const vec3 outc   = (lobe * (b + d + f + h) + e) / (4.0 * lobe + 1.0);
+
+    // Clamp to the cross's own [min, max] before decompress: RCAS's limiter bounds the ring,
+    // not the centre, so a bright centre over a dimmer ring overshoots 1.0 and the 0.999
+    // clamp + decompress turned it into ~1000x fireflies that fed bloom (FSR patch 3 fix).
+    // The decompress guard bounds LUMA, not each channel: compress() divides by 1 + luma,
+    // so a saturated bright colour legitimately exceeds 1.0 in one channel (sunlit path:
+    // red 1.53). A per-channel 0.999 clamp cut that channel and TAA + sharpening darkened
+    // such surfaces ~2x vs snapshots / FSR (red 5.55 -> 2.57).
+    const vec3 lo = min(mn4, e), hi3 = max(mx4, e);
+    vec3 t = max(clamp(outc, lo, hi3), vec3(0.0));
+    const float tl = luma(t);
+    if (tl > 0.999) t *= 0.999 / tl;
+    imageStore(uDst, p, vec4(sanitize(decompress(t) / expo), e4.a));
+}

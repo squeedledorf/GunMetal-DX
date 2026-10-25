@@ -1,0 +1,166 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+// vkclean -- PARTICLE FOG (#1003): BIN. One invocation per particle-pool slot.
+//
+// A live particle whose emitter slot + source id is in this frame's system table
+// (LLCleanPartFogVK: the converting / converted systems and the candidates whose bounds the
+// CPU wants) gets:
+//   * BOUNDS: its kernel sphere into the system's box (order-preserving atomics; copied to
+//     the host -- the next bricks are sized from the particles' real extent, wind included);
+//   * SPRITE CROSS-FADE (flag 2): its per-particle lighting record's near-camera fade
+//     (clean_particle.vert PART_VERTEX_LIGHT reads plight[3 i + 1].w for the main view) is
+//     scaled by 1 - the system's blend: the billboards fade by exactly the share the volume
+//     takes (no pop). The lighting compute wrote the record this frame, just before.
+//   * a SPLAT RECORD when its system has a brick this frame: mass = the sprite's optical
+//     depth over its quad, -ln(1 - a) sx sy (a = particle alpha x texture mean alpha, the
+//     coverage the billboard had; x the density setting), so the volume carries what the
+//     billboards did -- and REAL density where many overlap. The particle alpha's own fade
+//     (SL start / end alpha) is the dissipation on the creator's timeline. A short fade-in
+//     (pf.misc.y) keeps freshly spawned particles from popping into the field.
+//     Kernel radius R = half the sprite's current size x (1 + spread x age fraction): the
+//     kernel widens beyond the end scale as the particle ages while its MASS stays the same
+//     (the splat normalises it) -- the peak density falls as it spreads: puffs billow out and
+//     thin the way a fog machine's cloud does. The record carries the particle's NOISE SEED
+//     (its pool slot + spawn offset: stable for its life) -- the splat gives every puff its own
+//     lumpy profile, which stays with it while it grows.
+//   * HEAVY SETTLING (RenderVKParticleFogHeavy; sy.heavy.w the settling speed, 0 for rising
+//     smoke / steam): fog-machine fog is denser than air. The CARRIER sinks at that speed after
+//     a short delay -- an offset on the simulated position, so the creator's motion, wind
+//     included, is kept and the pool (the billboards) is untouched. Where its kernel reaches
+//     the FLOOR (the brick's floor map: the lowest upward-facing surface the march saw below
+//     the source, else the system's fallback floor; the bounce plane of a bouncing system) the
+//     blocked descent becomes OUTWARD drift from the source (x pf.settle.x, a stable per-
+//     particle angle jitter) and the kernel flattens into a layer: the fog pools and rolls
+//     along the floor. The velocity record gets the same motion (the noise advects with it).
+//     Bounds and splat both use the settled position.
+layout(local_size_x = 64) in;
+
+#include "clean_frame_info.glsl"
+#include "clean_atmos_common.glsl"
+#include "clean_particle_common.glsl"
+#define PF_FLOOR
+#include "clean_pfog_common.glsl"
+
+layout(std430, set = PF_SET, binding = 2) readonly buffer Particles { Particle parts[]; };
+layout(std430, set = PF_SET, binding = 3) buffer PartLight { vec4 plight[]; };
+
+// The floor height (world z) under xy from brick b's floor map (last frame's), or `fb`.
+float pfFloorAt(uint b, vec2 xy, float fb)
+{
+    if (b >= uint(pf.counts.x + 0.5)) return fb;
+    const uint base = uint(pf.bricks[b].dims_slot.w + 0.5) * PF_FLOOR_WORDS;
+    if (fl[base + 3u] == 0u) return fb;
+    const vec2 org = uintBitsToFloat(uvec2(fl[base], fl[base + 1u]));
+    const float cell = uintBitsToFloat(fl[base + 2u]);
+    if (!(cell > 0.0)) return fb;
+    const ivec2 c = ivec2(floor((xy - org) / cell));
+    // its own column, else the nearest seen of four around it (a column hidden this frame)
+    float best = -1e30;
+    for (int k = 0; k < 5; ++k)
+    {
+        const ivec2 q = c + (k == 0 ? ivec2(0) : ivec2(k == 1 ? 2 : (k == 2 ? -2 : 0), k == 3 ? 2 : (k == 4 ? -2 : 0)));
+        if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, ivec2(int(PF_NC))))) continue;
+        const uint v = fl[base + PF_FLOOR_HDR + uint(q.y) * PF_NC + uint(q.x)];
+        if (v == 0xFFFFFFFFu) continue;
+        best = pfUnordered(v);
+        break;
+    }
+    return best > -1e29 ? best : fb;
+}
+
+void main()
+{
+    const uint i = gl_GlobalInvocationID.x;
+    if (i >= uint(pf.counts.w + 0.5)) return;
+    const Particle p = parts[i];
+    if (p.misc.w == 0u) return;
+    const uint e = p.misc.z, src = p.pad.y;
+    const uint n = min(tb_hdr.x, PF_MAX_SYS);
+    uint s = 0xFFFFFFFFu;
+    for (uint k = 0u; k < n; ++k)
+        if (tb_sys[k].id.x == e && tb_sys[k].id.y == src) { s = k; break; }
+    if (s == 0xFFFFFFFFu) return;
+    const PfSys sy = tb_sys[s];
+
+    const float t = partAgeT(p);
+    const vec2 scl = abs(partScaleAt(p, t));
+    const vec4 col = partColorAt(p, t);
+    const float R = max(0.5 * max(scl.x, scl.y) * (1.0 + max(pf.misc.x, 0.0) * t), 0.01);
+    vec3 P = p.pos_age.xyz;
+    if (any(isnan(P)) || any(isinf(P))) return;
+    // the particle's own noise seed (stable for its life: pool slot + spawn offset)
+    const uint seed = pfHash(i * 0x9E3779B1u ^ floatBitsToUint(p.pos_offset.x)
+                             ^ pfHash(floatBitsToUint(p.pos_offset.y) ^ (floatBitsToUint(p.pos_offset.z) << 7)));
+    const vec3 rnd = pfHashVec(seed);
+
+    // ---- heavy settling (the carrier only) ----
+    float squash = 1.0;
+    vec3 vset = vec3(0.0);
+    const float vs = sy.heavy.w;
+    const uint bk = sy.id.z;
+    if (vs > 0.0)
+    {
+        const float age = max(p.pos_age.w - pf.settle.y, 0.0);
+        const float drop = vs * age;
+        float floorZ = pfFloorAt(bk, P.xy, sy.heavy.z);
+        if ((p.misc.x & F_BOUNCE) != 0u) floorZ = max(floorZ, p.accel.w);
+        floorZ = min(floorZ, P.z);   // (never lifts a particle the creator put below it)
+        const float minSq = clamp(pf.settle.z, 0.2, 1.0);
+        // the kernel rests ON the floor: its centre at least its (squashed) height above it
+        const float rest = floorZ + R * minSq * 0.8;
+        float z = P.z - drop;
+        vset = vec3(0.0, 0.0, -vs);
+        if (z < rest)
+        {
+            const float blocked = min(rest - z, drop);
+            z = min(rest, P.z);   // (a particle spawned inside the layer stays where it is)
+            // outward from the source, a stable angle jitter per particle
+            vec2 dir = P.xy - sy.heavy.xy;
+            const float dl = length(dir);
+            const float ang = (rnd.x - 0.5) * 1.2;
+            dir = dl > 0.05 ? dir / dl : vec2(cos(rnd.y * 6.2831853), sin(rnd.y * 6.2831853));
+            dir = vec2(dir.x * cos(ang) - dir.y * sin(ang), dir.x * sin(ang) + dir.y * cos(ang));
+            const float roll = blocked * max(pf.settle.x, 0.0) * (0.75 + 0.5 * rnd.z);
+            P.xy += dir * roll;
+            const float flat01 = clamp(blocked / max(R, 0.05), 0.0, 1.0);
+            squash = mix(1.0, minSq, flat01);
+            vset = vec3(dir * vs * max(pf.settle.x, 0.0), 0.0) * flat01 + vec3(0.0, 0.0, -vs) * (1.0 - flat01);
+        }
+        P.z = z;
+    }
+    const float Rz = R * squash;
+
+    if ((sy.id.w & 1u) != 0u)
+    {
+        const uint o = s * 8u;
+        atomicMin(rs_bounds[o + 0u], pfOrdered(P.x - R));
+        atomicMin(rs_bounds[o + 1u], pfOrdered(P.y - R));
+        atomicMin(rs_bounds[o + 2u], pfOrdered(P.z - Rz));
+        atomicMax(rs_bounds[o + 3u], pfOrdered(P.x + R));
+        atomicMax(rs_bounds[o + 4u], pfOrdered(P.y + R));
+        atomicMax(rs_bounds[o + 5u], pfOrdered(P.z + Rz));
+        atomicAdd(rs_bounds[o + 6u], 1u);
+    }
+
+    const float blend = clamp(sy.tex.z, 0.0, 1.0);
+    if ((sy.id.w & 2u) != 0u && blend > 0.0)
+    {
+        const uint li = i * PART_LIGHT_VEC4 + 1u;
+        plight[li].w *= 1.0 - blend;
+    }
+
+    const uint b = bk;
+    if (b >= uint(pf.counts.x + 0.5)) return;
+    const float a = clamp(col.a * sy.tex.x, 0.0, 0.98);
+    const float fadeIn = pf.misc.y > 0.0 ? clamp(p.pos_age.w / pf.misc.y, 0.0, 1.0) : 1.0;
+    const float M = -log(1.0 - a) * scl.x * scl.y * max(sy.tex.y, 0.0) * fadeIn;
+    if (!(M > 1e-6) || isinf(M)) return;
+    const uint slot = atomicAdd(ls_hdr.x, 1u);
+    if (slot >= uint(pf.counts.w + 0.5)) { atomicAdd(ls_hdr.w, 1u); return; }   // (never: one per particle)
+    const vec3 tint = atmosSrgbToLinear(clamp(col.rgb * sy.col.rgb, vec3(0.0), vec3(1.0)));
+    vec3 v = p.vel_maxage.xyz;
+    if (any(isnan(v)) || any(isinf(v))) v = vec3(0.0);
+    v += vset;
+    ls_rec[slot] = PfRec(vec4(P, R), vec4(tint, M), vec4(clamp(v, vec3(-32.0), vec3(32.0)), float(b)),
+                         vec4(squash, float(seed & 0xFFFFFFu), 0.0, 0.0));
+}

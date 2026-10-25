@@ -1,0 +1,285 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_nonuniform_qualifier : require
+#define CLEAN_PROBE_JOB_REF
+#include "clean_probe_job.glsl"
+// vkclean -- BC6H probe encoder (#565, RenderVKProbeFormat 3). Runs after the SCHEDULED
+// capture job's filter, once per radiance mip: one invocation per 4x4 block of one face.
+// Source: the one-probe RGBA16F scratch cube the filter wrote (layer = face). The slot is
+// the job's (the CPU never learns it, #478):
+//   slot <  live_slots (the default sky probe, slot 0): the texels are copied into the
+//            uncompressed LIVE array (RGBA16F) instead -- probe 0 updates at
+//            RenderDefaultProbeUpdatePeriod and backs every far reflection;
+//   else   : one BC6H block, written as raw bits through the R32G32B32A32_UINT
+//            block-texel view of the BC6H array's layer slot * 6 + face at this mip:
+//            uBc[slot * 6 + face], ONE SINGLE-LAYER view per layer (#565 fix). A single
+//            multi-layer uint4 view (VK_KHR_maintenance6 blockTexelViewCompatibleMultiple-
+//            Layers) mis-addresses on NVIDIA 615.71 (RTX 5090): writes to layer L / mip m
+//            land in other layers / mips of the BC6H image -- probes showed another probe's
+//            environment, or never-written VRAM decoded as BC6H (black / white blocks).
+//            Proven with a standalone write-then-sample test; single-layer views are exact.
+//            The index is dynamically uniform: the slot is the job's, the face is the
+//            workgroup's z (shaderStorageImageArrayDynamicIndexing).
+// An empty / abandoned job (info.x 0) writes nothing.
+// pc.clear: zero every block of this mip (z = every layer) -- run once per allocation
+// before the first encode, so a slot is black (an all-zero BC6H block), never garbage;
+// and for ONE slot (clear_base = slot * 6, z = 6) when the lit guard heals it
+// (LLCleanRendererVK::recordProbeHealClear).
+//
+// Encoder (unsigned BC6H, FAST): the four ONE-REGION modes only -- 11 (10-bit endpoints
+// stored as is), 12 / 13 / 14 (11 / 12 / 16-bit base endpoint + 9 / 8 / 4-bit signed
+// delta: finer steps for blocks of small range, mode 14 near-exact on flat blocks); 4-bit
+// indices. No two-region modes (partition search) -- what makes it fast. Written for this
+// renderer from the format definition (Khronos Data Format spec, BPTC float):
+//   * endpoints: the colour bounding box (its diagonal follows the dominant channel's
+//     correlation), and a least-squares refit for the indices that box gives;
+//   * each endpoint pair x each mode: quantize, exhaustive best index per texel against
+//     the EXACTLY decoded 16-entry palette; the lowest error wins.
+// Error is measured on the half-float BIT PATTERNS (what BC6H interpolates: roughly
+// logarithmic, so relative error is what counts), with a floor at the block maximum / 512
+// so a near-black texel next to a bright one doesn't steer the fit (it decodes to ~0.2 %
+// of the block maximum at worst). Mips below 4x4 (2x2): one block, missing texels repeat
+// the edge. Bit layouts and the reversed high base bits of modes 13 / 14 were checked
+// against an independent decoder (see the #565 report).
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, rgba16f) uniform readonly image2DArray uSrc;     // scratch mip (6 layers)
+layout(set = 0, binding = 1, rgba32ui) uniform writeonly uimage2DArray uBc[];  // per BC6H layer at this mip, uint4 view (1 layer)
+layout(set = 0, binding = 2, rgba16f) uniform writeonly image2DArray uLive;   // live array mip (RGBA16F)
+
+layout(push_constant) uniform Push {
+    uint  res;          // this mip's resolution (texels)
+    uint  live_slots;   // slots below this go to the live array (1: the default probe)
+    uint  clear;        // 1: zero this mip of BC6H layers clear_base + z (dispatch z = layers)
+    uint  clear_base;   // the first layer cleared (0: the whole array)
+    uvec2 job;          // the capture job buffer's address (the scheduled job's record = [0])
+} pc;
+
+const uint kW[16] = uint[16](0u, 4u, 9u, 13u, 17u, 21u, 26u, 30u, 34u, 38u, 43u, 47u, 51u, 55u, 60u, 64u);
+// One-region modes 11, 12, 13, 14: header (5 bits), endpoint precision, delta bits.
+const uint kHdr[4]   = uint[4](3u, 7u, 11u, 15u);
+const uint kPrec[4]  = uint[4](10u, 11u, 12u, 16u);
+const uint kDelta[4] = uint[4](10u, 9u, 8u, 4u);   // (mode 11: no delta, B stored as is)
+
+// Half-float bit pattern of a non-negative value (<= 65504, the largest finite half).
+float halfBits(float x)
+{
+    x = x > 0.0 ? min(x, 65504.0) : 0.0;
+    return float(packHalf2x16(vec2(x, 0.0)) & 0xFFFFu);
+}
+
+// The decoder's unsigned unquantize at precision p.
+uint unq(uint c, uint p)
+{
+    if (p >= 15u) return c;
+    if (c == 0u) return 0u;
+    if (c == (1u << p) - 1u) return 0xFFFFu;
+    return ((c << 16) + 0x8000u) >> p;
+}
+// Nearest endpoint code for half bits h: finish_unquantize ((x * 31) >> 6) maps an
+// unquantized x to half bits, so x ~ h * 64 / 31; unquantize puts code c at
+// c * 2^(16-p) + 2^(15-p) (p < 15) or c (p >= 15).
+uint quant(float h, uint p)
+{
+    const float t = h * (64.0 / 31.0);
+    const float c = p >= 15u ? floor(t + 0.5) : floor((t - exp2(float(15u - p))) / exp2(float(16u - p)) + 0.5);
+    return uint(clamp(c, 0.0, float((1u << p) - 1u)));
+}
+
+// Quantized endpoints of mode mi; a delta mode clamps B into A's signed delta range
+// (symmetric, so the anchor swap below keeps it representable).
+void qpair(vec3 e0, vec3 e1, uint mi, out uvec3 c0, out uvec3 c1)
+{
+    const uint p = kPrec[mi];
+    c0 = uvec3(quant(e0.x, p), quant(e0.y, p), quant(e0.z, p));
+    c1 = uvec3(quant(e1.x, p), quant(e1.y, p), quant(e1.z, p));
+    if (mi != 0u)
+    {
+        const int lim = (1 << (kDelta[mi] - 1u)) - 1;
+        const ivec3 a = ivec3(c0);
+        const ivec3 b = clamp(clamp(ivec3(c1), a - lim, a + lim), ivec3(0), ivec3((1 << p) - 1));
+        c1 = uvec3(b);
+    }
+}
+
+// Best index per texel for endpoints (c0, c1) at precision p (exact decoder arithmetic);
+// returns the total squared error.
+float assign(vec3 hv[16], uvec3 c0, uvec3 c1, uint p, out uint idx[16])
+{
+    const uvec3 a = uvec3(unq(c0.x, p), unq(c0.y, p), unq(c0.z, p));
+    const uvec3 b = uvec3(unq(c1.x, p), unq(c1.y, p), unq(c1.z, p));
+    vec3 pal[16];
+    for (uint i = 0u; i < 16u; ++i)
+    {
+        const uint w = kW[i];
+        pal[i] = vec3((((a * (64u - w) + b * w + 32u) >> 6) * 31u) >> 6);
+    }
+    float err = 0.0;
+    for (uint t = 0u; t < 16u; ++t)
+    {
+        float best = 3.4e38; uint bi = 0u;
+        for (uint i = 0u; i < 16u; ++i)
+        {
+            const vec3 d = hv[t] - pal[i];
+            const float e = dot(d, d);
+            if (e < best) { best = e; bi = i; }
+        }
+        idx[t] = bi;
+        err += best;
+    }
+    return err;
+}
+
+void putBits(inout uvec4 blk, inout uint pos, uint v, uint n)
+{
+    const uint w = pos >> 5u, o = pos & 31u;
+    blk[w] |= v << o;
+    if (o + n > 32u) blk[w + 1u] |= v >> (32u - o);
+    pos += n;
+}
+
+void main()
+{
+    const uvec3 g = gl_GlobalInvocationID;
+    const uint res = max(pc.res, 1u);
+    const uint blocks = max(res / 4u, 1u);
+    if (g.x >= blocks || g.y >= blocks) return;
+    if (pc.clear != 0u)
+    {
+        imageStore(uBc[pc.clear_base + gl_WorkGroupID.z], ivec3(ivec2(g.xy), 0), uvec4(0u));
+        return;
+    }
+    PrbJobRef jr = PrbJobRef(pc.job);
+    const uvec4 info = jr.jobs[PJ_SCHED].info;
+    if (info.x == 0u) return;
+    const uint slot = info.y;
+    const uint face = gl_WorkGroupID.z;   // (local size z 1: = g.z, workgroup-uniform)
+    const ivec2 base = ivec2(g.xy * 4u);
+
+    vec3 px[16];
+    for (uint t = 0u; t < 16u; ++t)
+    {
+        const ivec2 c = min(base + ivec2(int(t & 3u), int(t >> 2u)), ivec2(int(res) - 1));
+        px[t] = imageLoad(uSrc, ivec3(c, int(face))).rgb;
+    }
+
+    if (slot < pc.live_slots)
+    {
+        for (uint t = 0u; t < 16u; ++t)
+        {
+            const ivec2 c = base + ivec2(int(t & 3u), int(t >> 2u));
+            if (c.x < int(res) && c.y < int(res))
+                imageStore(uLive, ivec3(c, int(slot * 6u + face)), vec4(max(px[t], vec3(0.0)), 1.0));
+        }
+        return;
+    }
+
+    // ---- fit values: half bits, floored at the block maximum / 512 ----
+    float bmax = 0.0;
+    for (uint t = 0u; t < 16u; ++t) bmax = max(bmax, max(px[t].r, max(px[t].g, px[t].b)));
+    const float hfloor = halfBits(bmax * (1.0 / 512.0));
+    vec3 hv[16];
+    vec3 mn = vec3(3.4e38), mx = vec3(0.0), mean = vec3(0.0);
+    for (uint t = 0u; t < 16u; ++t)
+    {
+        hv[t] = max(vec3(halfBits(px[t].r), halfBits(px[t].g), halfBits(px[t].b)), vec3(hfloor));
+        mn = min(mn, hv[t]); mx = max(mx, hv[t]); mean += hv[t];
+    }
+    mean *= 1.0 / 16.0;
+
+    // ---- endpoint pair 0: the bounding box diagonal ----
+    const vec3 rng = mx - mn;
+    const int k = rng.x >= rng.y && rng.x >= rng.z ? 0 : (rng.y >= rng.z ? 1 : 2);
+    vec3 cov = vec3(0.0);
+    for (uint t = 0u; t < 16u; ++t)
+    {
+        const vec3 d = hv[t] - mean;
+        cov += d * d[k];
+    }
+    vec3 E0[2], E1[2];
+    E0[0] = mn; E1[0] = mx;
+    for (int c = 0; c < 3; ++c)
+        if (c != k && cov[c] < 0.0) { const float s = E0[0][c]; E0[0][c] = E1[0][c]; E1[0][c] = s; }
+
+    // ---- endpoint pair 1: least-squares refit for the mode-11 indices of pair 0 ----
+    uint idx[16];
+    uvec3 c0, c1;
+    qpair(E0[0], E1[0], 0u, c0, c1);
+    float err = assign(hv, c0, c1, kPrec[0], idx);
+    uint npairs = 1u;
+    if (err > 0.0)
+    {
+        float aa = 0.0, ab = 0.0, bb = 0.0;
+        vec3 ax = vec3(0.0), bx = vec3(0.0);
+        for (uint t = 0u; t < 16u; ++t)
+        {
+            const float w = float(kW[idx[t]]) / 64.0;
+            const float a = 1.0 - w;
+            aa += a * a; ab += a * w; bb += w * w;
+            ax += a * hv[t]; bx += w * hv[t];
+        }
+        const float det = aa * bb - ab * ab;
+        if (abs(det) > 1e-6)
+        {
+            E0[1] = clamp((ax * bb - bx * ab) / det, vec3(0.0), vec3(31743.0));
+            E1[1] = clamp((bx * aa - ax * ab) / det, vec3(0.0), vec3(31743.0));
+            npairs = 2u;
+        }
+    }
+
+    // ---- each pair x each one-region mode: keep the lowest error ----
+    uint bestMode = 0u;
+    for (uint pi = 0u; pi < npairs; ++pi)
+    {
+        for (uint mi = 0u; mi < 4u; ++mi)
+        {
+            if (pi == 0u && mi == 0u) continue;   // (evaluated above)
+            uvec3 n0, n1;
+            qpair(E0[pi], E1[pi], mi, n0, n1);
+            uint idx2[16];
+            const float e2 = assign(hv, n0, n1, kPrec[mi], idx2);
+            if (e2 < err)
+            {
+                err = e2; c0 = n0; c1 = n1; bestMode = mi;
+                for (uint t = 0u; t < 16u; ++t) idx[t] = idx2[t];
+            }
+        }
+    }
+
+    // ---- anchor: texel 0's index has an implicit 0 MSB -> swap the endpoints ----
+    // (the weight table is symmetric: kW[15 - i] = 64 - kW[i], so the palette is unchanged;
+    // the delta range is symmetric, so B - A stays representable)
+    if (idx[0] >= 8u)
+    {
+        const uvec3 s = c0; c0 = c1; c1 = s;
+        for (uint t = 0u; t < 16u; ++t) idx[t] = 15u - idx[t];
+    }
+
+    // ---- pack ----
+    // mode 11: hdr, rw gw bw (10), rx gx bx (10)
+    // 12 / 13 / 14: hdr, rw gw bw (low 10 bits of A), then per channel: the delta (B - A,
+    //   two's complement, kDelta bits) and A's high bits (1 / 2 / 6; 13 and 14 store them
+    //   bit-REVERSED); then the indices: texel 0 in 3 bits, texels 1..15 in 4 bits.
+    uvec4 blk = uvec4(0u);
+    uint pos = 0u;
+    putBits(blk, pos, kHdr[bestMode], 5u);
+    putBits(blk, pos, c0.x & 1023u, 10u); putBits(blk, pos, c0.y & 1023u, 10u); putBits(blk, pos, c0.z & 1023u, 10u);
+    if (bestMode == 0u)
+    {
+        putBits(blk, pos, c1.x, 10u); putBits(blk, pos, c1.y, 10u); putBits(blk, pos, c1.z, 10u);
+    }
+    else
+    {
+        const uint d = kDelta[bestMode], nh = kPrec[bestMode] - 10u;
+        for (int c = 0; c < 3; ++c)
+        {
+            putBits(blk, pos, (c1[c] - c0[c]) & ((1u << d) - 1u), d);
+            const uint hi = c0[c] >> 10u;
+            putBits(blk, pos, nh > 1u ? bitfieldReverse(hi) >> (32u - nh) : hi, nh);
+        }
+    }
+    putBits(blk, pos, idx[0], 3u);
+    for (uint t = 1u; t < 16u; ++t) putBits(blk, pos, idx[t], 4u);
+    imageStore(uBc[slot * 6u + face], ivec3(ivec2(g.xy), 0), blk);
+}

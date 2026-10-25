@@ -1,0 +1,150 @@
+# libVLC plugin allowlist for the Windows package (media plugin hardening:
+# ship only the stream access modules we use).
+#
+# viewer_manifest.py copies EXACTLY these files from <packages>/bin/release/plugins
+# into <app>/plugins and fails the packaging step if any listed file is missing.
+# Anything not listed here is not shipped. One path per line, relative to plugins/,
+# forward slashes. Lines starting with '#' are comments.
+#
+# Adding a module: add the line AND a justification in its group. Prefer
+# leaving things out; libVLC skips optional modules that are absent.
+
+# --- Stream access: network only -------------------------------------------
+# http + https are the only schemes the viewer hands to the media plugin
+# (parcel audio/video streams, MOAP media). No local-file, share, discovery or
+# capture access modules are shipped.
+access/libhttp_plugin.dll
+access/libhttps_plugin.dll
+# TLS client for https.
+misc/libgnutls_plugin.dll
+# In-memory credential store used by the http access module (no disk I/O).
+keystore/libmemory_keystore_plugin.dll
+
+# --- Stream filters ---------------------------------------------------------
+# Read-ahead / block caching for network streams, and ID3v2 tag skipping so
+# mp3 streams with leading tags probe correctly.
+stream_filter/libprefetch_plugin.dll
+stream_filter/libcache_read_plugin.dll
+stream_filter/libcache_block_plugin.dll
+stream_filter/libskiptags_plugin.dll
+
+# --- Demuxers ---------------------------------------------------------------
+# Common stream and video containers. adaptive = HLS/DASH (segments are
+# fetched through the same http/https access modules). es = raw elementary
+# streams (mp3/aac/ac3 radio). No playlist demuxer (m3u/pls/xspf): the media
+# plugin plays the single URL it is given and never follows sub-items, and a
+# playlist demuxer would only add a way to chain to further URLs.
+demux/libadaptive_plugin.dll
+demux/libes_plugin.dll
+demux/libmp4_plugin.dll
+demux/libmkv_plugin.dll
+demux/libavi_plugin.dll
+demux/libasf_plugin.dll
+demux/libogg_plugin.dll
+demux/libts_plugin.dll
+demux/libps_plugin.dll
+demux/libflacsys_plugin.dll
+demux/libwav_plugin.dll
+demux/libaiff_plugin.dll
+demux/libau_plugin.dll
+demux/libmpgv_plugin.dll
+demux/libh26x_plugin.dll
+# XML parser required by the adaptive demuxer (DASH manifests).
+misc/libxml_plugin.dll
+
+# --- Decoders ---------------------------------------------------------------
+# Software decoders for the common audio/video formats; avcodec covers most
+# of them. dxva2/d3d11va (+ the d3d9/d3d11 converters) are decode helpers kept
+# for hardware decode with copy-back to system memory.
+codec/libavcodec_plugin.dll
+codec/libmpg123_plugin.dll
+audio_filter/libmad_plugin.dll
+codec/libvorbis_plugin.dll
+codec/libopus_plugin.dll
+codec/libflac_plugin.dll
+codec/libtheora_plugin.dll
+codec/libspeex_plugin.dll
+codec/libfaad_plugin.dll
+codec/liblpcm_plugin.dll
+codec/libaraw_plugin.dll
+codec/libadpcm_plugin.dll
+codec/libg711_plugin.dll
+codec/libvpx_plugin.dll
+codec/libdav1d_plugin.dll
+codec/libaom_plugin.dll
+codec/libdxva2_plugin.dll
+codec/libd3d11va_plugin.dll
+d3d9/libdirect3d9_filters_plugin.dll
+d3d11/libdirect3d11_filters_plugin.dll
+
+# --- Packetizers ------------------------------------------------------------
+# Frame/packet reassembly for the decoders above (pure data transforms).
+packetizer/libpacketizer_a52_plugin.dll
+packetizer/libpacketizer_av1_plugin.dll
+packetizer/libpacketizer_copy_plugin.dll
+packetizer/libpacketizer_dts_plugin.dll
+packetizer/libpacketizer_flac_plugin.dll
+packetizer/libpacketizer_h264_plugin.dll
+packetizer/libpacketizer_hevc_plugin.dll
+packetizer/libpacketizer_mpeg4audio_plugin.dll
+packetizer/libpacketizer_mpeg4video_plugin.dll
+packetizer/libpacketizer_mpegaudio_plugin.dll
+packetizer/libpacketizer_mpegvideo_plugin.dll
+packetizer/libpacketizer_vc1_plugin.dll
+
+# --- Video output path ------------------------------------------------------
+# The media plugin renders into memory through libvlc_video_set_callbacks
+# (vmem) with RV32 output, flipped by the transform filter. Chroma modules are
+# pixel-format conversion only. No windowed video outputs are shipped, so there
+# is no fallback that could open a window. vdummy = no-display fallback.
+video_output/libvmem_plugin.dll
+video_output/libvdummy_plugin.dll
+video_filter/libtransform_plugin.dll
+video_filter/libscale_plugin.dll
+video_filter/libdeinterlace_plugin.dll
+video_filter/libblend_plugin.dll
+video_chroma/libswscale_plugin.dll
+video_chroma/libchain_plugin.dll
+video_chroma/libgrey_yuv_plugin.dll
+video_chroma/libi420_10_p010_plugin.dll
+video_chroma/libi420_nv12_plugin.dll
+video_chroma/libi420_rgb_mmx_plugin.dll
+video_chroma/libi420_rgb_plugin.dll
+video_chroma/libi420_rgb_sse2_plugin.dll
+video_chroma/libi420_yuy2_mmx_plugin.dll
+video_chroma/libi420_yuy2_plugin.dll
+video_chroma/libi420_yuy2_sse2_plugin.dll
+video_chroma/libi422_i420_plugin.dll
+video_chroma/libi422_yuy2_mmx_plugin.dll
+video_chroma/libi422_yuy2_plugin.dll
+video_chroma/libi422_yuy2_sse2_plugin.dll
+video_chroma/librv32_plugin.dll
+video_chroma/libyuvp_plugin.dll
+video_chroma/libyuy2_i420_plugin.dll
+video_chroma/libyuy2_i422_plugin.dll
+
+# --- Audio output path ------------------------------------------------------
+# Parcel audio capture (ParcelAudioCapture, #892) hands the decoded PCM to the
+# viewer through libvlc_audio_set_callbacks, which forces the player's audio
+# output to "amem,none": without amem there is NO audio output at all (the
+# stream demuxes and shows its title, but nothing reaches the viewer and
+# nothing plays; #960). amem writes to memory only, it opens no device.
+audio_output/libamem_plugin.dll
+# Without capture (capture off, parcel media, or the viewer's fallback when
+# capture delivers nothing) audio plays to the system device: mmdevice is the
+# default Windows output and loads wasapi as its stream backend;
+# directsound/waveout are its fallbacks; adummy = no-device fallback.
+# Mixers apply volume; the filters below are format/rate/channel conversion.
+audio_output/libmmdevice_plugin.dll
+audio_output/libwasapi_plugin.dll
+audio_output/libdirectsound_plugin.dll
+audio_output/libwaveout_plugin.dll
+audio_output/libadummy_plugin.dll
+audio_mixer/libfloat_mixer_plugin.dll
+audio_mixer/libinteger_mixer_plugin.dll
+audio_filter/libaudio_format_plugin.dll
+audio_filter/libugly_resampler_plugin.dll
+audio_filter/libspeex_resampler_plugin.dll
+audio_filter/libsamplerate_plugin.dll
+audio_filter/libsimple_channel_mixer_plugin.dll
+audio_filter/libtrivial_channel_mixer_plugin.dll

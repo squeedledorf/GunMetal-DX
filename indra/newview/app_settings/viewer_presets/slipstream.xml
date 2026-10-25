@@ -1,0 +1,33 @@
+<?xml version="1.0" ?>
+<llsd>
+<!--
+  "Slipstream defaults" (#132): the choice for people new to Second Life or coming from another
+  viewer, and the way back after picking one of the others. File format: see firestorm.xml.
+
+  Every setting named in any preset is reset to its default from app_settings/settings.xml
+  (no settings need to be listed here). key_bindings lists Slipstream's own binding for every
+  input another preset changes; presets that do not mention an input use these.
+-->
+  <map>
+    <key>settings</key>
+    <map />
+    <key>key_bindings</key>
+    <array>
+      <!-- Middle mouse button: hold to talk (app_settings/key_bindings.xml). -->
+      <map>
+        <key>command</key>
+        <string>voice_follow_key</string>
+        <key>mouse</key>
+        <string>MMB</string>
+        <key>key</key>
+        <string />
+        <key>mask</key>
+        <string>NONE</string>
+        <key>instead_of</key>
+        <array>
+          <string>toggle_voice</string>
+        </array>
+      </map>
+    </array>
+  </map>
+</llsd>

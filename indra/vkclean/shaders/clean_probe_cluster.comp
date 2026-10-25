@@ -1,0 +1,163 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// vkclean — clustered reflection-probe selection. Same view clusters as the local
+// lights (clean_lights.comp); each cluster lists the probes whose influence sphere
+// touches it (probe 0, the default sky probe, is always sampled and never listed).
+//
+// OVER THE CAP (#249): a zoomed-out cluster is metres wide and deep, and terrain-grid
+// (r ~28 m) + octree automatic (r 8..30 m) + a house's manual probes easily exceed
+// PROBE_CLUSTER_CAP there. The list used to be the FIRST cap probes in upload order
+// (nearest-first by |centre - camera| - radius), which ranks the big automatic spheres
+// ahead of the small manual boxes at the same place: the manual probes were the ones
+// dropped, and whole screen tiles x depth slices fell back to automatic-only lighting
+// (the manual class overrides the automatic one where it covers a pixel). Now an
+// overflowing cluster keeps, per class, the probes that cover it best (scale-invariant
+// key below), with the manual class first but PROBE_AUTO_RESERVE slots always left to
+// the automatic class, so pixels outside the manual volumes keep their local probes.
+//
+// probe_count[c] = kept | (candidates << 16): the low half is the list length (readers
+// mask it), the high half the number of probes that touched the cluster (overflow when
+// it exceeds the cap; RenderVKDebugView 17 shows both).
+
+#include "clean_lights_common.glsl"
+#include "clean_probes_common.glsl"
+
+layout(local_size_x = 64) in;
+
+layout(std430, set = 0, binding = 0) readonly  buffer Probes { ProbeHeader hdr; Probe probes[]; };
+layout(std430, set = 0, binding = 1) writeonly buffer PCount { uint probe_count[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer PIndex { uint probe_index[]; };
+layout(std430, set = 0, binding = 3) readonly  buffer Info   { LightInfo info; };
+
+// Automatic-class slots an overflowing cluster always keeps (when it has that many):
+// RenderVKProbeTopN blends at most 4 per pixel, and pixels across the cluster need
+// different nearest ones.
+#define PROBE_AUTO_RESERVE 6u
+
+vec3 g_bmin, g_bmax;           // cluster AABB (view space) the touch test uses
+vec3 g_kmin, g_kmax, g_kc;     // the AABB the ranking uses (last slice: not extended)
+
+// Does probe pi (complete) touch this cluster? lp / r: its view-space centre, radius.
+bool touches(uint pi, out vec3 lp, out float r)
+{
+    lp = vec3(0.0); r = 0.0;
+    if (probes[pi].idx.y == 0) return false;            // not captured yet
+    lp = (info.view * vec4(probes[pi].sphere.xyz, 1.0)).xyz;
+    r  = probes[pi].sphere.w;
+    const vec3 d = lp - clamp(lp, g_bmin, g_bmax);
+    return dot(d, d) <= r * r;
+}
+
+// Selection key, lower = more influence over the cluster: distance from the probe centre
+// to the cluster AABB plus half the distance to its centre (ranks probes that contain
+// part of it). MANUAL: in units of the radius -- a box's weight is its normalized depth
+// (1 - max|PL|), a sphere's falls off over its radius. AUTOMATIC: in metres -- their
+// per-pixel weight is 1 / distance (x falloff), so the nearest centres dominate whatever
+// their radius (dividing by r would favour the big terrain-grid spheres).
+float probeKey(vec3 lp, float r, bool manual)
+{
+    const float d = length(lp - clamp(lp, g_kmin, g_kmax)) + 0.5 * length(lp - g_kc);
+    return manual ? d / max(r, 1e-3) : d;
+}
+
+// Append the q best-covering probes of one class (manual / automatic) at probe_index
+// [base + at ...]; returns how many were written (q, or fewer when the class has fewer).
+uint selectClass(bool manual, uint q, uint base, uint at)
+{
+    if (q == 0u) return 0u;
+    float key[PROBE_CLUSTER_CAP];
+    uint  id[PROBE_CLUSTER_CAP];
+    uint  k = 0u;
+    const uint count = uint(hdr.info.x);
+    for (uint pi = 1u; pi < count; ++pi)
+    {
+        if ((probes[pi].params.w > 0.5) != manual) continue;
+        vec3 lp; float r;
+        if (!touches(pi, lp, r)) continue;
+        const float kk = probeKey(lp, r, manual);
+        if (k == q && kk >= key[q - 1u]) continue;     // full and not better than the worst
+        uint j = (k < q) ? k++ : q - 1u;               // insertion slot (drop the worst)
+        while (j > 0u && key[j - 1u] > kk) { key[j] = key[j - 1u]; id[j] = id[j - 1u]; --j; }
+        key[j] = kk; id[j] = pi;
+    }
+    for (uint j = 0u; j < k; ++j) probe_index[base + at + j] = id[j];
+    return k;
+}
+
+void main()
+{
+    uint c = gl_GlobalInvocationID.x;
+    if (c >= CLUSTER_COUNT) return;
+    uint cx = c % GX;
+    uint cy = (c / GX) % GY;
+    uint cz = c / (GX * GY);
+
+    float zn = info.zinfo.x, zf = info.zinfo.y;
+    float z0 = zn * pow(zf / zn, float(cz)      / float(GZ));
+    float z1 = zn * pow(zf / zn, float(cz + 1u) / float(GZ));
+    if (cz == 0u) z0 = 0.0;
+    const float z1k = z1;   // ranking AABB: the slice's own depth range
+    // The lookup clamps every depth past the cluster far (the draw distance) into the
+    // last slice, and the projection reaches further (zinfo.w; sim surrounds, domes):
+    // that slice must cover it too, or those pixels see probes chosen for a nearer box.
+    if (cz == GZ - 1u) z1 = max(z1, info.zinfo.w);
+    float x0 = -1.0 + 2.0 * float(cx)      / float(GX);
+    float x1 = -1.0 + 2.0 * float(cx + 1u) / float(GX);
+    float y0 = -1.0 + 2.0 * float(cy)      / float(GY);
+    float y1 = -1.0 + 2.0 * float(cy + 1u) / float(GY);
+    float tx = info.grid.z, ty = info.grid.w;
+
+    vec3 bmin = vec3( 1e30), bmax = vec3(-1e30);
+    vec3 kmin = vec3( 1e30), kmax = vec3(-1e30);
+    for (int k = 0; k < 3; ++k)
+    {
+        float z = (k == 0) ? z0 : (k == 1 ? z1k : z1);
+        for (int i = 0; i < 4; ++i)
+        {
+            float nx = (i & 1) != 0 ? x1 : x0;
+            float ny = (i & 2) != 0 ? y1 : y0;
+            vec3 p = vec3(nx * tx * z, -ny * ty * z, -z);
+            bmin = min(bmin, p); bmax = max(bmax, p);
+            if (k < 2) { kmin = min(kmin, p); kmax = max(kmax, p); }
+        }
+    }
+    g_bmin = bmin; g_bmax = bmax;
+    // Ranking against the slice's own box: past the draw distance (the extension) only
+    // sky-dome / surround pixels remain, and neighbour-sim grid probes out there must
+    // not outrank the ones covering the visible band.
+    g_kmin = kmin; g_kmax = kmax; g_kc = 0.5 * (kmin + kmax);
+
+    // Candidates per class.
+    const uint count = uint(hdr.info.x);
+    uint nm = 0u, na = 0u;
+    for (uint pi = 1u; pi < count; ++pi)
+    {
+        vec3 lp; float r;
+        if (!touches(pi, lp, r)) continue;
+        if (probes[pi].params.w > 0.5) ++nm; else ++na;
+    }
+    const uint total = nm + na;
+    const uint base = c * PROBE_CLUSTER_CAP;
+    uint n = 0u;
+    if (total <= PROBE_CLUSTER_CAP)
+    {
+        for (uint pi = 1u; pi < count; ++pi)
+        {
+            vec3 lp; float r;
+            if (!touches(pi, lp, r)) continue;
+            probe_index[base + n] = pi;
+            ++n;
+        }
+    }
+    else
+    {
+        // Manual first (it overrides the automatic class where it covers a pixel), but
+        // never more than cap - reserve while the automatic class has that many.
+        const uint qa0 = min(na, PROBE_AUTO_RESERVE);
+        const uint qm  = min(nm, PROBE_CLUSTER_CAP - qa0);
+        const uint qa  = min(na, PROBE_CLUSTER_CAP - qm);
+        n  = selectClass(true,  qm, base, 0u);
+        n += selectClass(false, qa, base, n);
+    }
+    probe_count[c] = n | (min(total, 0xFFFFu) << 16);
+}

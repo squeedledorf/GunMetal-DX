@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Slipstream pacman repository</title>
+<style>body{font:16px/1.5 system-ui,sans-serif;max-width:46rem;margin:2rem auto;padding:0 1rem}pre{background:#8882;padding:.8rem;overflow:auto}</style>
+</head><body>
+<h1>Slipstream pacman repository</h1>
+<p>Signed pacman repositories for the Slipstream viewer (<code>slipstream-bin</code>, x86_64), so
+<code>pacman -Syu</code> keeps it current. Pick <b>one</b> of the two repositories.</p>
+<h2>1. Trust the signing key</h2>
+<pre>curl -fsSLO @PACMAN_URL@/slipstream.asc
+gpg --show-keys --with-fingerprint slipstream.asc     # must show @FPR@
+sudo pacman-key --add slipstream.asc
+sudo pacman-key --lsign-key @FPR@</pre>
+<h2>2. Add the repository</h2>
+<p>Stable releases:</p>
+<pre>curl -fsS @PACMAN_URL@/slipstream.conf | sudo tee -a /etc/pacman.conf</pre>
+<p>Betas and releases (a beta user always has the newest build):</p>
+<pre>curl -fsS @PACMAN_URL@/slipstream-beta.conf | sudo tee -a /etc/pacman.conf</pre>
+<h2>3. Install</h2>
+<pre>sudo pacman -Syu slipstream-bin</pre>
+<p>Older package files stay in the repository for a while:
+<code>sudo pacman -U @PACMAN_URL@/slipstream/os/x86_64/&lt;file&gt;</code>.
+More: <a href="https://slipstreamviewer.org/wiki/install/">slipstreamviewer.org/wiki/install</a>.</p>
+</body></html>

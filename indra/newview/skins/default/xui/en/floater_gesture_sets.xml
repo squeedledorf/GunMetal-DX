@@ -1,0 +1,279 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<floater
+ positioning="cascading"
+ save_rect="true"
+ can_resize="true"
+ height="470"
+ width="720"
+ min_height="380"
+ min_width="600"
+ layout="topleft"
+ name="gesture_sets"
+ help_topic="gestures"
+ single_instance="true"
+ title="GESTURE SETS">
+    <floater.string name="yes">Yes</floater.string>
+    <floater.string name="no">No</floater.string>
+    <floater.string name="applying">Applying &apos;[NAME]&apos;...</floater.string>
+    <floater.string name="waiting_inventory">Waiting for inventory before applying &apos;[NAME]&apos;...</floater.string>
+    <floater.string name="loading_inventory">Loading inventory...</floater.string>
+    <floater.string name="count">[SHOWN] of [TOTAL] gestures shown. Select a set to edit it.</floater.string>
+    <floater.string name="count_with_set">[SHOWN] of [TOTAL] gestures shown, [MEMBERS] in set</floater.string>
+    <floater.string name="conflict_header">Warning: these gestures would share a trigger or key:</floater.string>
+    <floater.string name="conflict_trigger">Chat &quot;[WHAT]&quot;: [NAMES]</floater.string>
+    <floater.string name="conflict_key">Key [WHAT]: [NAMES]</floater.string>
+    <floater.string name="conflict_more">...and [COUNT] more</floater.string>
+
+    <text
+     follows="left|top"
+     font.style="BOLD"
+     height="16"
+     layout="topleft"
+     left="8"
+     name="sets_label"
+     top="24"
+     width="200">
+        Sets
+    </text>
+    <scroll_list
+     follows="left|top|bottom"
+     draw_heading="true"
+     height="226"
+     layout="topleft"
+     left="6"
+     multi_select="false"
+     name="set_list"
+     tool_tip="Double-click a set to apply it"
+     top_pad="2"
+     width="210">
+        <scroll_list.columns
+         label=""
+         name="applied"
+         width="18" />
+        <scroll_list.columns
+         label="Name"
+         name="name"
+         relative_width="1" />
+        <scroll_list.columns
+         label="#"
+         name="count"
+         width="38" />
+    </scroll_list>
+    <radio_group
+     follows="left|bottom"
+     height="18"
+     layout="topleft"
+     left="8"
+     name="mode_radio"
+     top_pad="6"
+     width="208">
+        <radio_item
+         height="16"
+         label="Exact"
+         layout="topleft"
+         left="0"
+         name="mode_exact"
+         tool_tip="Applying activates only this set's gestures and deactivates all others"
+         top="0"
+         width="90" />
+        <radio_item
+         height="16"
+         label="Add"
+         layout="topleft"
+         left="96"
+         name="mode_add"
+         tool_tip="Applying activates this set's gestures and leaves other gestures alone"
+         top="0"
+         width="90" />
+    </radio_group>
+    <button
+     follows="left|bottom"
+     height="22"
+     label="New"
+     layout="topleft"
+     left="6"
+     name="new_btn"
+     tool_tip="Create an empty set"
+     top_pad="4"
+     width="102" />
+    <button
+     follows="left|bottom"
+     height="22"
+     label="Duplicate"
+     layout="topleft"
+     left_pad="6"
+     name="duplicate_btn"
+     top_delta="0"
+     width="102" />
+    <button
+     follows="left|bottom"
+     height="22"
+     label="Rename"
+     layout="topleft"
+     left="6"
+     name="rename_btn"
+     top_pad="4"
+     width="102" />
+    <button
+     follows="left|bottom"
+     height="22"
+     label="Delete"
+     layout="topleft"
+     left_pad="6"
+     name="delete_btn"
+     top_delta="0"
+     width="102" />
+    <button
+     follows="left|bottom"
+     height="22"
+     label="Save Current as Set"
+     layout="topleft"
+     left="6"
+     name="save_current_btn"
+     tool_tip="Create a set from the gestures that are active right now"
+     top_pad="4"
+     width="210" />
+    <button
+     follows="left|bottom"
+     height="22"
+     label="Create Sets from Folders"
+     layout="topleft"
+     left="6"
+     name="from_folders_btn"
+     tool_tip="Create one set per inventory folder that contains gestures, named after the folder"
+     top_pad="4"
+     width="210" />
+    <button
+     follows="left|bottom"
+     font="SansSerifBold"
+     height="24"
+     label="Apply"
+     layout="topleft"
+     left="6"
+     name="apply_btn"
+     tool_tip="Apply the selected set"
+     top_pad="6"
+     width="210" />
+    <check_box
+     control_name="GestureSetsShowStatusBarIcon"
+     follows="left|bottom"
+     height="16"
+     label="Show in status bar"
+     layout="topleft"
+     left="6"
+     name="show_status_bar_icon"
+     top_pad="6"
+     width="210" />
+
+    <search_editor
+     clear_button_visible="true"
+     follows="left|top|right"
+     height="20"
+     label="Filter by name, trigger, key or folder"
+     layout="topleft"
+     left="228"
+     max_length_bytes="255"
+     name="filter_edit"
+     top="22"
+     width="330" />
+    <combo_box
+     follows="top|right"
+     height="20"
+     layout="topleft"
+     left_pad="6"
+     name="filter_combo"
+     top_delta="0"
+     width="148">
+        <combo_box.item label="All gestures" name="all" value="all" />
+        <combo_box.item label="Active" name="active" value="active" />
+        <combo_box.item label="Inactive" name="inactive" value="inactive" />
+        <combo_box.item label="In this set" name="in_set" value="in_set" />
+        <combo_box.item label="Not in this set" name="not_in_set" value="not_in_set" />
+        <combo_box.item label="Unassigned (in no set)" name="unassigned" value="unassigned" />
+    </combo_box>
+    <scroll_list
+     column_padding="0"
+     draw_heading="true"
+     follows="all"
+     height="306"
+     layout="topleft"
+     left="228"
+     multi_select="true"
+     name="gesture_list"
+     top="46"
+     width="484">
+        <scroll_list.columns
+         label=""
+         name="member"
+         tool_tip="Member of the selected set"
+         width="22" />
+        <scroll_list.columns
+         label="Name"
+         name="name"
+         relative_width="0.32" />
+        <scroll_list.columns
+         label="Chat"
+         name="trigger"
+         relative_width="0.18" />
+        <scroll_list.columns
+         label="Key"
+         name="shortcut"
+         relative_width="0.14" />
+        <scroll_list.columns
+         label="Folder"
+         name="folder"
+         relative_width="0.24" />
+        <scroll_list.columns
+         label="Active"
+         name="active"
+         relative_width="0.12" />
+    </scroll_list>
+    <button
+     follows="left|bottom"
+     height="22"
+     label="Check All Shown"
+     layout="topleft"
+     left="228"
+     name="check_shown_btn"
+     tool_tip="Add every gesture in the list to the selected set"
+     top_pad="4"
+     width="130" />
+    <button
+     follows="left|bottom"
+     height="22"
+     label="Uncheck All Shown"
+     layout="topleft"
+     left_pad="6"
+     name="uncheck_shown_btn"
+     tool_tip="Remove every gesture in the list from the selected set"
+     top_delta="0"
+     width="130" />
+    <text
+     follows="left|right|bottom"
+     halign="right"
+     height="16"
+     layout="topleft"
+     left_pad="6"
+     name="count_text"
+     top_delta="4"
+     width="206" />
+    <text
+     follows="left|right|bottom"
+     height="16"
+     layout="topleft"
+     left="228"
+     name="status_text"
+     text_color="EmphasisColor"
+     top_pad="8"
+     width="484" />
+    <text
+     follows="left|right|bottom"
+     height="56"
+     layout="topleft"
+     left="228"
+     name="conflict_text"
+     text_color="AlertCautionTextColor"
+     top_pad="2"
+     word_wrap="true"
+     width="484" />
+</floater>

@@ -1,0 +1,164 @@
+#version 460
+#extension GL_EXT_nonuniform_qualifier : require
+// vkclean — OPACITY MICROMAP BAKE (#194, llcleanrtomm.cpp). One workgroup per micromap
+// triangle (one triangle of an alpha-mask slot, seen through one instance's material,
+// tint and UV transform -- the OMM key). Each lane classifies micro-triangles, in
+// micromap index order (the bird curve, ommIndexToBary), into the 4-state format:
+//   0 transparent, 1 opaque, 2 unknown-transparent, 3 unknown-opaque.
+// Known states are resolved by the RT hardware; unknown ones come back to the shader's
+// exact alpha test (clean_rt_common.glsl rtCandidateAlpha) as candidates.
+//
+// The alpha is the raster's / the any-hit's: base_color_factor.a * tint.a * texel.a
+// against the material cutoff, UVs from cleanFaceUV (same uv_matrix / texgen rules).
+// CONSERVATIVE: a micro-triangle is KNOWN only when 7 samples (corners, edge midpoints,
+// centroid) at a mip matching its footprint are ALL near-solid (alpha >= 0.99) or ALL
+// near-empty (<= 0.01). A coarse mip averages a cut-out edge into mid alpha (0.6 is
+// "above the cutoff" while half its texels are holes): judged against the cutoff, whole
+// regions of holes became known-opaque and big cut-out surfaces turned into solid walls.
+// Anything in between is unknown and goes to the exact shader alpha test.
+layout(local_size_x = 64) in;
+
+#include "clean_uv_common.glsl"
+#include "clean_qvertex.glsl"   // quantized static vertex + 16-bit indices (#573)
+
+struct Instance {
+    mat4 model_matrix;
+    vec4 aabb_min;
+    vec4 aabb_max;
+    vec4 tint;
+    mat4 uv_matrix;
+    uint lod_group_id;
+    uint material_id;
+    uint flags;
+    uint skin_id;
+    vec4 spin_axis;
+    vec4 spin_pivot;
+};
+struct Material {
+    uvec2 base_color_handle;
+    uvec2 normal_handle;
+    uvec2 mr_handle;
+    uvec2 emissive_handle;
+    vec4  base_color_factor;
+    vec4  emissive_factor;
+    vec4  spec_color_gloss;
+    float metallic_factor;
+    float roughness_factor;
+    float alpha_cutoff;
+    uint  flags;
+};
+// One per micromap triangle (LLCleanRtOmm::BakeRec).
+struct BakeRec {
+    uint inst;          // instance whose material / tint / UV transform define the key
+    uint first_index;   // absolute index of the triangle's first index (slot first + prim*3)
+    int  base_vertex;   // the slot's base vertex
+    uint bit_offset;    // first bit of this triangle's data in `omm` (byte offset * 8)
+    uint level;         // subdivision level
+    uint _p0, _p1, _p2;
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer Instances { Instance instances[]; };
+layout(std430, set = 0, binding = 1) readonly buffer Materials { Material materials[]; };
+layout(std430, set = 0, binding = 2) readonly buffer Vbo { uint vbo[]; };    // QVertex: 5 words (+ slot headers)
+layout(std430, set = 0, binding = 3) readonly buffer Ibo { uint ibo[]; };    // 16-bit indices, 2 per word
+layout(std430, set = 0, binding = 4) readonly buffer Recs { BakeRec recs[]; };
+layout(std430, set = 0, binding = 5) coherent buffer Omm { uint omm[]; };   // zeroed before the bake
+layout(set = 1, binding = 0) uniform sampler2D uTextures[];
+
+layout(push_constant) uniform Push { uint rec_count; uint rec_base; } pc;
+
+// ---- bird-curve micro-triangle index -> barycentric corners (see llcleanrtomm.cpp) ----
+uint extractEvenBits(uint x)
+{
+    x &= 0x55555555u;
+    x = (x | (x >> 1)) & 0x33333333u;
+    x = (x | (x >> 2)) & 0x0f0f0f0fu;
+    x = (x | (x >> 4)) & 0x00ff00ffu;
+    x = (x | (x >> 8)) & 0x0000ffffu;
+    return x;
+}
+uint prefixEor(uint x) { x ^= x >> 1; x ^= x >> 2; x ^= x >> 4; x ^= x >> 8; return x; }
+void indexToBary(uint index, uint level, out vec2 c0, out vec2 c1, out vec2 c2)
+{
+    if (level == 0u) { c0 = vec2(0, 0); c1 = vec2(1, 0); c2 = vec2(0, 1); return; }
+    const uint b0 = extractEvenBits(index), b1 = extractEvenBits(index >> 1);
+    const uint fx = prefixEor(b0), fy = prefixEor(b0 & ~b1);
+    const uint t = fy ^ b1;
+    uint iu = (fx & ~t) | (b0 & ~t) | (~b0 & ~fx & t);
+    uint iv = fy ^ b0;
+    uint iw = (~fx & ~t) | (b0 & ~t) | (~b0 & fx & t);
+    const uint m = (1u << level) - 1u;
+    iu &= m; iv &= m; iw &= m;
+    const bool upright = ((iu & 1u) ^ (iv & 1u) ^ (iw & 1u)) != 0u;
+    if (!upright) { iu += 1u; iv += 1u; }
+    const float s = 1.0 / float(1u << level);
+    const vec2 p = vec2(float(iu), float(iv)) * s;
+    c0 = p;
+    c1 = upright ? p + vec2(s, 0) : p - vec2(s, 0);
+    c2 = upright ? p + vec2(0, s) : p - vec2(0, s);
+}
+
+vec2 vtxUV(Instance I, QvHeader h, uint v)
+{
+    const uint o = v * QV_WORDS;
+    return cleanFaceUV(I.flags, I.uv_matrix, qvUV(h, vbo[o + 2u]), qvNormal(vbo[o + 3u]),
+                       qvPos(h, vbo[o], vbo[o + 1u]), I.model_matrix, 0.0);
+}
+
+void main()
+{
+    const uint r = gl_WorkGroupID.x + gl_WorkGroupID.y * 65535u + pc.rec_base;
+    if (r >= pc.rec_count) return;
+    const BakeRec rec = recs[r];
+    const Instance I = instances[rec.inst];
+    const Material M = materials[I.material_id];
+    const uint vb = uint(rec.base_vertex);
+    const QvHeader qh = QV_LOAD_HEADER(vbo, max(vb, QV_HEADER_VERTS));
+    const vec2 t0 = vtxUV(I, qh, vb + QV_INDEX16(ibo, rec.first_index));
+    const vec2 t1 = vtxUV(I, qh, vb + QV_INDEX16(ibo, rec.first_index + 1u));
+    const vec2 t2 = vtxUV(I, qh, vb + QV_INDEX16(ibo, rec.first_index + 2u));
+    const float cutoff = M.alpha_cutoff;
+    const float a0 = M.base_color_factor.a * I.tint.a;
+    const bool textured = (M.flags & 1u) != 0u;
+    const uint tex = M.base_color_handle.x;
+    const vec2 tsz = textured ? vec2(textureSize(uTextures[nonuniformEXT(tex)], 0)) : vec2(1.0);
+    const float levels = textured ? float(textureQueryLevels(uTextures[nonuniformEXT(tex)])) : 1.0;
+    const uint micro = 1u << (2u * rec.level);
+    const float ms = 1.0 / float(1u << rec.level);
+    // Micro-triangle UV footprint (all micro-triangles of a triangle are congruent):
+    // edge ~ sqrt(2 * texel area); the 7 samples sit ~half an edge apart, so sample the
+    // mip where that spacing is one texel (bilinear covers between them).
+    const vec2 e1 = (t1 - t0) * tsz, e2 = (t2 - t0) * tsz;
+    const float area = abs(e1.x * e2.y - e1.y * e2.x) * 0.5 * ms * ms;
+    const float lod = clamp(log2(max(sqrt(2.0 * area) * 0.5, 1.0)), 0.0, max(levels - 1.0, 0.0));
+
+    for (uint m = gl_LocalInvocationID.x; m < micro; m += 64u)
+    {
+        uint state;
+        if (!textured)
+            state = (a0 >= cutoff) ? 1u : 0u;
+        else
+        {
+            vec2 c0, c1, c2;
+            indexToBary(m, rec.level, c0, c1, c2);
+            const vec2 b[7] = vec2[7](c0, c1, c2, (c0 + c1) * 0.5, (c1 + c2) * 0.5, (c2 + c0) * 0.5,
+                                       (c0 + c1 + c2) / 3.0);
+            uint solid = 0u, empty = 0u;
+            bool centre = false;
+            for (int i = 0; i < 7; ++i)
+            {
+                const vec2 uv = t0 * (1.0 - b[i].x - b[i].y) + t1 * b[i].x + t2 * b[i].y;
+                const float a = a0 * textureLod(uTextures[nonuniformEXT(tex)], uv, lod).a;
+                solid += (a >= max(cutoff, 0.99)) ? 1u : 0u;
+                empty += (a <= min(cutoff, 0.01) && a < cutoff) ? 1u : 0u;
+                if (i == 6) centre = a >= cutoff;
+            }
+            state = solid == 7u ? 1u : empty == 7u ? 0u : (centre ? 3u : 2u);
+        }
+        if (state != 0u)
+        {
+            const uint bit = rec.bit_offset + m * 2u;
+            atomicOr(omm[bit >> 5u], state << (bit & 31u));
+        }
+    }
+}

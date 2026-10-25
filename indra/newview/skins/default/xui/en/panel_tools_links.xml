@@ -1,0 +1,126 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<!-- #252: build floater "Links" tab (LLPanelObjectLinks). Hover a row to preview it in
+     the selection outline; click to select (Ctrl / Shift toggles). -->
+<panel
+ border="false"
+ follows="all"
+ height="440"
+ label="Links"
+ layout="topleft"
+ left="0"
+ mouse_opaque="false"
+ help_topic="toolbox_links_tab"
+ name="Links"
+ top="0"
+ width="295">
+    <panel.string name="links_count">[SHOWN] of [TOTAL] links</panel.string>
+    <panel.string name="no_linkset">Nothing selected</panel.string>
+    <panel.string name="not_editable">(no modify permission)</panel.string>
+    <panel.string name="name_pending">(loading name...)</panel.string>
+    <panel.string name="faces_of_link">Faces of link [NUM]: [NAME]</panel.string>
+    <panel.string name="faces_none">No link selected</panel.string>
+    <panel.string name="thumb_pbr">PBR base color texture</panel.string>
+    <panel.string name="thumb_diffuse">Diffuse texture</panel.string>
+    <panel.string name="thumb_none">No texture</panel.string>
+    <panel.string name="thumb_pending">PBR material loading...</panel.string>
+    <panel.string name="thumb_transparent">(transparent)</panel.string>
+    <panel.string name="thumb_media">Media face (shows media when playing)</panel.string>
+    <panel.string name="color_te">Color: R [R] G [G] B [B], alpha [A]%</panel.string>
+    <panel.string name="color_pbr">PBR base color: R [R] G [G] B [B], alpha [A]%</panel.string>
+    <filter_editor
+     follows="left|top|right"
+     height="23"
+     label="Filter by name, description or link number"
+     layout="topleft"
+     left="10"
+     max_length_chars="300"
+     name="links_filter"
+     text_pad_left="10"
+     top="6"
+     width="275" />
+    <text
+     type="string"
+     length="1"
+     follows="left|top|right"
+     height="16"
+     layout="topleft"
+     left="10"
+     name="links_count"
+     top_pad="4"
+     width="275">
+        Nothing selected
+    </text>
+    <scroll_list
+     column_padding="0"
+     draw_heading="true"
+     follows="left|top|right"
+     height="165"
+     layout="topleft"
+     left="10"
+     multi_select="true"
+     name="links_list"
+     tool_tip="Hover a link to preview it, click to select it (Ctrl / Shift: add or remove)"
+     top_pad="2"
+     width="275">
+        <scroll_list.columns
+         label="#"
+         name="num"
+         width="36" />
+        <scroll_list.columns
+         dynamic_width="true"
+         label="Name"
+         name="name" />
+    </scroll_list>
+    <text
+     type="string"
+     length="1"
+     follows="left|top|right"
+     height="16"
+     layout="topleft"
+     left="10"
+     name="faces_label"
+     top_pad="6"
+     use_ellipses="true"
+     width="275">
+        No link selected
+    </text>
+    <scroll_list
+     column_padding="0"
+     draw_heading="true"
+     follows="left|top|right"
+     height="195"
+     layout="topleft"
+     left="10"
+     multi_select="true"
+     name="faces_list"
+     tool_tip="Hover a face to preview it, click to select it (Shift / Ctrl: add or remove)"
+     top_pad="2"
+     width="275">
+        <scroll_list.columns
+         label="#"
+         name="face"
+         width="22" />
+        <scroll_list.columns
+         label="Tex"
+         name="thumb"
+         tool_tip="Base texture (PBR base color or diffuse); hover for a larger preview"
+         width="38" />
+        <scroll_list.columns
+         label="Color"
+         name="color"
+         tool_tip="Face color (PBR: base color factor); right half shows its alpha"
+         width="30" />
+        <scroll_list.columns
+         label="Type"
+         name="type"
+         width="52" />
+        <scroll_list.columns
+         label="Alpha"
+         name="alpha"
+         width="50" />
+        <scroll_list.columns
+         dynamic_width="true"
+         label="Texture"
+         name="texture" />
+    </scroll_list>
+</panel>

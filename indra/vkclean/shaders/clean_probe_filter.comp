@@ -1,0 +1,166 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#define CLEAN_PROBE_JOB_REF
+#include "clean_probe_job.glsl"
+// vkclean — reflection-probe filtering (ports of LL's radianceGenF / irradianceGenF).
+//
+// Source: the freshly captured probe cube (mipped). Destination: one mip of the probe
+// radiance cube-map array (mode 0) or the irradiance cube-map array (mode 1), written
+// at array layer slot*6 + face.
+//   mode 0 radiance: GGX importance-sampled prefilter, roughness = mip / (mips - 1)
+//          (mip 0 = a straight resample). Source LOD by solid angle (Sascha Willems /
+//          LL radianceGenF: 0.5*log2(omegaS/omegaP) + 1).
+//   mode 1 irradiance: cosine-weighted hemisphere, mean (E/pi), LL's +2 LOD bias.
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform samplerCube uSrc;
+// RenderVKProbeFormat (#565): PROBE_PACK 1 = RGB9E5, 2 = R11G11B10 -- the destination is
+// an r32ui alias of the packed array (clean_probe_pack.glsl); else RGBA16F (format 0, and
+// format 3's scratch / live cubes: clean_probe_bc6h.comp encodes from there).
+#if defined(PROBE_PACK)
+#include "clean_probe_pack.glsl"
+layout(set = 0, binding = 1, r32ui) uniform writeonly uimage2DArray uDst;
+#else
+layout(set = 0, binding = 1, rgba16f) uniform writeonly image2DArray uDst;
+#endif
+
+layout(push_constant) uniform Push {
+    uint  mode;       // 0 radiance, 1 irradiance
+    uint  slot;       // probe slot (layer = slot*6 + face)
+    uint  dst_res;    // destination mip resolution
+    uint  samples;
+    float roughness;  // mode 0
+    float src_res;    // source cube resolution (mip 0)
+    float ldr;        // 1 = vintage mode (HDR off): LL's probes are 8-bit, radiance clamps at 1
+    uint  job_mode;   // #478: bit 0 = the target slot is the GPU capture job's (bit 1: the realtime job);
+                      // #565 bit 2: the layer is pc.slot whatever the job (format 3: the one-probe
+                      // scratch cube / the live array's realtime cube; the job still sizes the dispatch)
+    uvec2 job;        // the capture job buffer's address (job_mode bit 0)
+} pc;
+
+const float PI = 3.14159265;
+
+vec3 srcSample(vec3 dir, float lod)
+{
+    vec3 c = textureLod(uSrc, dir, lod).rgb;
+    return pc.ldr > 0.5 ? min(c, vec3(1.0)) : c;
+}
+
+// Vulkan cube face texel -> direction (inverse of the spec's face/sc/tc table).
+vec3 faceDir(uint f, vec2 uv)
+{
+    float sc = uv.x * 2.0 - 1.0;
+    float tc = uv.y * 2.0 - 1.0;
+    vec3 d;
+    if      (f == 0u) d = vec3( 1.0, -tc, -sc);
+    else if (f == 1u) d = vec3(-1.0, -tc,  sc);
+    else if (f == 2u) d = vec3( sc,  1.0,  tc);
+    else if (f == 3u) d = vec3( sc, -1.0, -tc);
+    else if (f == 4u) d = vec3( sc, -tc,  1.0);
+    else              d = vec3(-sc, -tc, -1.0);
+    return normalize(d);
+}
+
+float radicalInverse(uint bits)
+{
+    bits = (bits << 16u) | (bits >> 16u);
+    bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);
+    bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xCCCCCCCCu) >> 2u);
+    bits = ((bits & 0x0F0F0F0Fu) << 4u) | ((bits & 0xF0F0F0F0u) >> 4u);
+    bits = ((bits & 0x00FF00FFu) << 8u) | ((bits & 0xFF00FF00u) >> 8u);
+    return float(bits) * 2.3283064365386963e-10;
+}
+vec2 hammersley(uint i, uint n) { return vec2(float(i) / float(n), radicalInverse(i)); }
+
+void basis(vec3 N, out vec3 T, out vec3 B)
+{
+    vec3 up = abs(N.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
+    T = normalize(cross(up, N));
+    B = cross(N, T);
+}
+
+float D_GGX(float NoH, float r)
+{
+    float a = r * r, a2 = a * a;
+    float d = NoH * NoH * (a2 - 1.0) + 1.0;
+    return a2 / (PI * d * d);
+}
+
+void main()
+{
+    uvec3 g = gl_GlobalInvocationID;
+    if (g.x >= pc.dst_res || g.y >= pc.dst_res) return;
+    uint face = g.z;
+    vec2 uv = (vec2(g.xy) + 0.5) / float(pc.dst_res);
+    vec3 N = faceDir(face, uv);
+    vec3 T, B; basis(N, T, B);
+    const float omegaP = 4.0 * PI / (6.0 * pc.src_res * pc.src_res);
+    vec3 col = vec3(0.0);
+
+    if (pc.mode == 0u)
+    {
+        if (pc.roughness <= 0.0)
+        {
+            col = srcSample(N, max(log2(pc.src_res / float(pc.dst_res)), 0.0));
+        }
+        else
+        {
+            float a = pc.roughness * pc.roughness;
+            float wsum = 0.0;
+            for (uint i = 0u; i < pc.samples; ++i)
+            {
+                vec2 Xi = hammersley(i, pc.samples);
+                float phi = 2.0 * PI * Xi.x;
+                float cosT = sqrt((1.0 - Xi.y) / (1.0 + (a * a - 1.0) * Xi.y));
+                float sinT = sqrt(1.0 - cosT * cosT);
+                vec3 H = normalize(T * (cos(phi) * sinT) + B * (sin(phi) * sinT) + N * cosT);
+                vec3 L = normalize(2.0 * dot(N, H) * H - N);   // V = N
+                float NoL = dot(N, L);
+                if (NoL <= 0.0) continue;
+                float NoH = max(dot(N, H), 0.0);
+                float pdf = D_GGX(NoH, pc.roughness) * NoH / (4.0 * NoH) + 0.0001;
+                float omegaS = 1.0 / (float(pc.samples) * pdf);
+                float lod = max(0.5 * log2(omegaS / omegaP) + 1.0, 0.0);
+                col  += srcSample(L, lod) * NoL;
+                wsum += NoL;
+            }
+            col /= max(wsum, 1e-4);
+        }
+    }
+    else
+    {
+        // Cosine-weighted hemisphere: pdf = cos/pi -> the mean is E/pi.
+        for (uint i = 0u; i < pc.samples; ++i)
+        {
+            vec2 Xi = hammersley(i, pc.samples);
+            float phi = 2.0 * PI * Xi.x;
+            float cosT = sqrt(1.0 - Xi.y);
+            float sinT = sqrt(Xi.y);
+            vec3 L = normalize(T * (cos(phi) * sinT) + B * (sin(phi) * sinT) + N * cosT);
+            float pdf = max(cosT / PI, 1e-4);
+            float lod = max(0.5 * log2(1.0 / (float(pc.samples) * pdf * omegaP)) + 2.0, 0.0);
+            col += srcSample(L, lod);
+        }
+        col /= float(pc.samples);
+    }
+    // FINITE + IN RANGE (lit guards): a bad source texel (a capture face drawn by the raster
+    // FS before its guard, an old allocation) must not land in the probe as inf / NaN.
+    // The ceiling is 64512, not the guard's 65000: it is exact in every store format (half,
+    // RGB9E5 504 x 128, R11/G11 126 x 512, B10 63 x 1024), so a legit bright texel at the
+    // clamp can't round ABOVE the guard on store (RGB9E5 rounded 65000 up to 65024 -- a
+    // false "probe texel > 65000" in the deferred lighting's texel guard). (BC6H endpoint
+    // quantization can still decode a clamp-level block maximum up to 65504; the guard's
+    // logged value range tells that apart from garbage.)
+    if (any(isnan(col)) || any(isinf(col))) col = vec3(0.0);
+    col = clamp(col, vec3(0.0), vec3(64512.0));
+    // (GPU-driven: an empty job dispatches no workgroups -- its indirect size is 0.)
+    const uint slot = (pc.job_mode & 5u) == 1u ? prbJob(pc.job, (pc.job_mode >> 1u) & 1u).info.y : pc.slot;
+#if defined(PROBE_PACK) && PROBE_PACK == 1
+    imageStore(uDst, ivec3(g.xy, int(slot * 6u + face)), uvec4(packRGB9E5(col), 0u, 0u, 0u));
+#elif defined(PROBE_PACK) && PROBE_PACK == 2
+    imageStore(uDst, ivec3(g.xy, int(slot * 6u + face)), uvec4(packR11G11B10(col), 0u, 0u, 0u));
+#else
+    imageStore(uDst, ivec3(g.xy, int(slot * 6u + face)), vec4(col, 1.0));
+#endif
+}

@@ -1,0 +1,40 @@
+#version 460
+// vkclean -- #962 LLCleanDlssRRVK in DLSS SUPER RESOLUTION mode: the network's render-size
+// colour input and its bias-current-colour mask, one dispatch, no G-buffer reads (SR needs no
+// guides; the Ray Reconstruction guide pass, clean_rr_guides.comp, does not run).
+//
+//   COLOUR  the jittered linear HDR scene, NaN / Inf scrubbed. A copy, not the scene itself:
+//           at render = display (DLAA) the network's output IS the scene image. size.z bit 0
+//           (RenderVKDlssSRExposure 1): pre-exposed (x the exposure the FSR inputs pass
+//           resolved; clean_rr_unexpose.comp divides it back out), as the RR path does; else
+//           unexposed, with that exposure handed to the network as its exposure image.
+//   BIAS    the bias-current-colour mask in [0, 1] (1 = trust this frame over history): live
+//           media / animated-texture faces, the no-history masks (pre-pass R8 + pass 2b's
+//           mReact.B) x p.x (RenderVKDlssResponsivity, clamped to >= 0). R16F.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform sampler2D uScene;                   // jittered linear HDR scene
+layout(set = 0, binding = 1) uniform sampler2D uNoTemporal;              // R8 no-history (pre-pass)
+layout(set = 0, binding = 2) uniform sampler2D uReact;                   // pass 2b: B no-history (blended)
+layout(set = 0, binding = 3, r32f) uniform readonly image2D uExposure;   // 1x1 (inputs pass)
+layout(set = 0, binding = 4, rgba16f) uniform writeonly image2D oColor;
+layout(set = 0, binding = 5, r16f) uniform writeonly image2D oBias;
+
+layout(push_constant) uniform Push
+{
+    uvec4 size;   // x, y render extent; z bit 0 pre-expose
+    vec4  p;      // x bias gain
+} pc;
+
+void main()
+{
+    const ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+    if (q.x >= int(pc.size.x) || q.y >= int(pc.size.y)) return;
+    vec3 c = texelFetch(uScene, q, 0).rgb;
+    if (any(isnan(c)) || any(isinf(c))) c = vec3(0.0);
+    if ((pc.size.z & 1u) != 0u) c *= imageLoad(uExposure, ivec2(0)).x;
+    imageStore(oColor, q, vec4(clamp(c, vec3(0.0), vec3(65000.0)), 1.0));
+    const float nh = max(texelFetch(uNoTemporal, q, 0).r, texelFetch(uReact, q, 0).b);
+    imageStore(oBias, q, vec4(clamp(nh * max(pc.p.x, 0.0), 0.0, 1.0)));
+}

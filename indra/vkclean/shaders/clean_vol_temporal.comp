@@ -1,0 +1,79 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// vkclean -- VOLUMETRIC FOG (#718), pass 3/4: TEMPORAL REPROJECTION (our own; it never
+// relies on TAA / FSR to converge the fog).
+//
+// The light pass sampled every cell at ONE jittered point (Halton xyz per frame + a
+// per-column depth decorrelation), with ONE cascade tap: a noisy, aliased estimate on its
+// own. Here each cell blends it into its history: exponential moving average, history
+// weight p0.x (~0.9: ~10 frames to converge, the jitter integrated into a supersampled,
+// soft-shadowed result).
+//   * REPROJECTION: the cell's centre (unjittered) in this frame's camera-relative world ->
+//     last frame's grid clip (push reproj, built in double on the CPU around the eye delta)
+//     -> last frame's (uv, slice) -> a TRILINEAR tap of last frame's history. Off the grid
+//     (newly revealed at the screen edge / in front of the near slices): no history.
+//   * HISTORY REJECTION / ANTI-LAG: the history is clamped to the min / max box of this
+//     frame's estimate over the cell and its 6 neighbours, widened by p0.z x its extent (the
+//     box spans the jitter noise, so a converged history survives it; a real change -- a
+//     light switched on / off, a moving shadow, a local volume moving or changing density --
+//     falls outside it and the history follows within a frame or two instead of ghosting).
+//     A moving volume still trails by about the box tolerance: say so, don't hide it.
+//   * RESET (p0.y = 1): first frame, grid resize / tier change, camera cut / teleport
+//     (the renderer's temporal reset), camera jump: this frame's estimate only.
+// rgb = in-scatter per metre, a = sigma_t: both filtered (the injection's jitter makes the
+// extinction of a noise-shaped volume noisy too).
+//
+// push p0: x history weight [0, 0.98], y 1 = reset, z clamp widening (fraction of the box), w 0.
+layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+#include "clean_frame_info.glsl"
+#include "clean_atmos_common.glsl"
+#include "clean_vol_common.glsl"
+#include "clean_vol_pass.glsl"
+
+layout(set = VOL_SET, binding = 0, rgba16f) readonly uniform image3D uCur;
+layout(set = VOL_SET, binding = 2) uniform sampler3D uHistPrev;
+layout(set = VOL_SET, binding = 3, rgba16f) writeonly uniform image3D uHistCur;
+
+void main()
+{
+    const uvec3 c = gl_GlobalInvocationID;
+    const uvec3 dims = volDims();
+    if (any(greaterThanEqual(c, dims))) return;
+    const ivec3 ic = ivec3(c);
+    const vec4 cur = imageLoad(uCur, ic);
+    vec4 outv = cur;
+    if (vp.p0.y < 0.5 && vp.p0.x > 0.0)
+    {
+        const vec3 rel = volRelPos(vec3(c) + 0.5);
+        const vec4 pc = vp.reproj * vec4(rel, 1.0);
+        bool ok = pc.w > 1e-4;
+        vec3 tc = vec3(0.0);
+        if (ok)
+        {
+            tc.xy = pc.xy / pc.w * 0.5 + 0.5;
+            tc.z = volSliceOfDepth(pc.w);
+            ok = all(greaterThanEqual(tc, vec3(0.0))) && all(lessThanEqual(tc, vec3(1.0)));
+        }
+        if (ok)
+        {
+            vec4 hist = textureLod(uHistPrev, tc, 0.0);
+            // 6-neighbour box of this frame's estimate.
+            vec4 mn = cur, mx = cur;
+            const ivec3 hi = ivec3(dims) - 1;
+            const ivec3 offs[6] = ivec3[6](ivec3(1, 0, 0), ivec3(-1, 0, 0), ivec3(0, 1, 0),
+                                           ivec3(0, -1, 0), ivec3(0, 0, 1), ivec3(0, 0, -1));
+            for (int k = 0; k < 6; ++k)
+            {
+                const vec4 s = imageLoad(uCur, clamp(ic + offs[k], ivec3(0), hi));
+                mn = min(mn, s);
+                mx = max(mx, s);
+            }
+            const vec4 widen = (mx - mn) * vp.p0.z;
+            hist = clamp(hist, mn - widen, mx + widen);
+            if (!any(isnan(hist)) && !any(isinf(hist)))
+                outv = mix(cur, hist, clamp(vp.p0.x, 0.0, 0.98));
+        }
+    }
+    imageStore(uHistCur, ic, max(outv, vec4(0.0)));
+}

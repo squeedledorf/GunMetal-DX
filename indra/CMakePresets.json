@@ -1,0 +1,59 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "cacheVariables": {
+        "ADDRESS_SIZE": "64",
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "linux-releaseos",
+      "displayName": "Linux x86_64, open-source Release (what `make` and CI build)",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/../build-linux-x86_64",
+      "cacheVariables": {
+        "INSTALL_PROPRIETARY": "FALSE"
+      },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" }
+    },
+    {
+      "name": "linux-release",
+      "displayName": "Linux x86_64, Release with proprietary packages (LL's Release config)",
+      "inherits": "linux-releaseos",
+      "cacheVariables": {
+        "INSTALL_PROPRIETARY": "TRUE"
+      }
+    },
+    {
+      "name": "windows-cross",
+      "displayName": "Windows x64 cross build on Linux (clang-cl + lld-link + xwin; see scripts/wincross)",
+      "inherits": "base",
+      "binaryDir": "${sourceDir}/../build-windows-x86_64",
+      "toolchainFile": "${sourceDir}/../scripts/wincross/toolchain-clang-cl-xwin.cmake",
+      "cacheVariables": {
+        "INSTALL_PROPRIETARY": "FALSE",
+        "USE_DISCORD": "OFF",
+        "USE_FMODSTUDIO": "OFF",
+        "USE_KDU": "OFF",
+        "USE_OPENAL": "ON",
+        "USE_SDL_WINDOW": "ON",
+        "LL_TESTS": "OFF",
+        "VS_DISABLE_FATAL_WARNINGS": "ON",
+        "USE_PRECOMPILED_HEADERS": "OFF",
+        "Vulkan_INCLUDE_DIR": "${sourceDir}/../build-windows-x86_64/vk/include",
+        "Vulkan_LIBRARY": "${sourceDir}/../build-windows-x86_64/vk/vulkan-1.lib"
+      },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "linux-releaseos", "configurePreset": "linux-releaseos" },
+    { "name": "linux-release", "configurePreset": "linux-release" },
+    { "name": "windows-cross", "configurePreset": "windows-cross" }
+  ]
+}

@@ -1,0 +1,232 @@
+#version 460
+#extension GL_EXT_ray_query : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_GOOGLE_include_directive : require
+#define CLEAN_PROBE_JOB_REF
+#include "clean_probe_job.glsl"
+// vkclean -- RAY-TRACED REFLECTION-PROBE CAPTURE (RenderReflectionProbeDetail 3,
+// "Raytraced"; research P2). Produces cube-capture faces by TRACING the scene TLAS
+// instead of rasterizing them: one invocation per face texel, mip 0 of the capture cube
+// (the same image the raster faces render into), then the existing mip chain + GGX /
+// irradiance filter run unchanged (LLCleanRendererVK::recordProbeFilter).
+//
+// Per texel:
+//   1. the face ray, exactly the raster face's (probeFaceMatrix: clip = (R.d, D.d, F.d),
+//      pixel row 0 = NDC y -1), clipped by the face's NEAR / FAR planes along F -- the
+//      raster's depth range, so a probe placed inside a prim starts past it the same way;
+//   2. a closest-hit ray over everything that writes raster depth in the capture (every
+//      class but alpha-blend; WATER counts: captures draw it opaque), alpha-mask cut-outs
+//      tested in the any-hit candidates, single-sided back faces skipped (the raster's
+//      cull: candidates test facing in the loop, opaque hits re-trace past a back face).
+//      Non-dynamic captures leave avatars out (instance mask: rigged, worn attachments,
+//      the agent's own avatar), as LL's cube snapshot drops them;
+//   3. the hit's surface (clean_rt_surface.glsl) shaded as the probe-capture lit FS
+//      shades it (clean_rt_shade.glsl: sky ambient + sky reflection, sun / moon with one
+//      shadow ray, the capture's light list, haze from the probe origin); a miss takes
+//      the probe sky (clean_probe_sky.frag: haze, rainbow / halo, clouds; no discs or
+//      stars, as LL's cube snapshots);
+//   4. ALPHA BLEND (flag bit 0 of the push): the NEAREST alpha-blend surface in front of
+//      that hit (a second ray over the blend class only, up to the opaque hit) is shaded
+//      and composited over it by its alpha -- one transmission layer. Layers behind it
+//      are lost (the raster face blends every sorted layer).
+// Rays never recurse; local lights are unshadowed except shadow-map projectors (as the
+// capture FS).
+layout(local_size_x = 8, local_size_y = 8) in;
+
+#include "clean_lights_common.glsl"
+layout(std430, set = 0, binding = 3) readonly buffer Lights { Light lights[]; };
+layout(std430, set = 0, binding = 4) readonly buffer CCount { uint cluster_count[]; };
+layout(std430, set = 0, binding = 5) readonly buffer CIndex { uint cluster_index[]; };
+layout(std140, set = 0, binding = 6) uniform LInfo { LightInfo linfo; };   // (draw set 0: UBO, #814)
+#include "clean_frame_info.glsl"
+#define PHYSKY_NOT_IN_PROBES   // (clean_atmos_common.glsl: the probes see the WindLight sky)
+#include "clean_atmos_common.glsl"
+layout(set = 1, binding = 0) uniform sampler2D uTextures[];
+#include "clean_clouds.glsl"
+#include "clean_vol_cloud_sky.glsl"
+#define CLEAN_SKY_SCENERY_ONLY
+#include "clean_sky_bodies.glsl"
+#include "clean_rt_common.glsl"
+#include "clean_brdf.glsl"
+#include "clean_light_eval.glsl"
+#include "clean_projshadow.glsl"
+layout(set = 0, binding = 18) uniform sampler2DShadow uProjShadowAtlas;
+layout(set = 0, binding = 29) uniform sampler2DShadow uProjTransDepth;
+layout(set = 0, binding = 30) uniform sampler2D uProjTransColor;
+#include "clean_shadow_rt.glsl"
+#include "clean_rt_surface.glsl"
+#include "clean_cloud_shadow_map.glsl"   // #719: rtHitSunShadow x the cloud shadow (draw set 0 binding 46)
+#include "clean_rt_shade.glsl"
+#include "clean_rt_weather.glsl"   // #970: the weather coat at the hits (as the raster capture's lit FS)
+
+// The capture cube's mip 0, all six faces (2D array view).
+layout(set = 3, binding = 0, rgba16f) writeonly uniform image2DArray uFaces;
+
+#define PRT_DYNAMIC   1u   // avatars in (LL getIsDynamic)
+#define PRT_SKY_ONLY  2u   // the default probe: sky only
+#define PRT_BLEND     4u   // composite the nearest alpha-blend layer (RenderVKProbeRTBlend)
+#define PRT_JOB       8u   // #478: origin, clips and flags from the GPU capture job (PRT_JOB_RT: the realtime one)
+#define PRT_JOB_RT    16u
+
+layout(push_constant) uniform ProbeTracePush {
+    vec4  origin;        // xyz probe origin (world), w near clip (m)
+    float farc;          // far clip (m)
+    uint  face0;         // first face of this dispatch (z workgroup = face - face0)
+    uint  flags;         // PRT_*
+    uint  light_list;    // the capture's light list (0 scheduled, 1 realtime)
+    uint  res;           // face size (texels)
+    float time;          // draw time (s): texture animation, water waves
+    float cone_spread;   // texel angle (rad): ray-cone texture LOD
+    uint  pad;
+    uvec2 job;           // PRT_JOB (#478): the capture job buffer's address
+} pt;
+
+// probeFaceMatrix's rows: clip x = R.d, clip y = D.d, clip w = F.d (+X -X +Y -Y +Z -Z).
+const vec3 kFaceR[6] = vec3[6](vec3(0, 0, -1), vec3(0, 0, 1), vec3(1, 0, 0), vec3(1, 0, 0), vec3(1, 0, 0), vec3(-1, 0, 0));
+const vec3 kFaceD[6] = vec3[6](vec3(0, -1, 0), vec3(0, -1, 0), vec3(0, 0, 1), vec3(0, 0, -1), vec3(0, -1, 0), vec3(0, -1, 0));
+const vec3 kFaceF[6] = vec3[6](vec3(1, 0, 0), vec3(-1, 0, 0), vec3(0, 1, 0), vec3(0, -1, 0), vec3(0, 0, 1), vec3(0, 0, -1));
+
+bool rtIsAvatar(uint id)
+{
+    if (!rtIdIn(id)) return false;   // (#874 guard)
+    const uint f = rt_instances[id].flags;
+    return (rt_geom[id].z & 0x80000000u) != 0u || (f & (512u | 8192u)) != 0u;
+}
+
+// Closest hit honouring the capture raster's rules (see the header). blend = the
+// alpha-blend layer pass (mask = blend class): any visible texel (alpha > 1/255) of a
+// blend material hits; avatars are dropped per candidate when not dynamic (an alpha-
+// blend avatar face is class BLEND, which the mask can't separate).
+RtHit probeClosest(vec3 o, vec3 d, float tmin, float tmax, uint mask, bool blendPass, bool dynamic)
+{
+    RtHit h;
+    h.hit = false;
+    for (int k = 0; k < 3; ++k)
+    {
+        rt_cone_width0 = 0.0;
+        rt_cone_spread = pt.cone_spread;
+        rt_cone_aniso  = 1.0;
+        // (Xid 109, as rtrClosest) the back-face re-trace can step tmin past tmax: an invalid ray
+        // query -- nothing is left on the interval: a miss; non-finite inputs too (rtRaySane)
+        if (!(tmin < tmax)) return h;
+        if (!rtRaySane(o, tmin, d, tmax)) return h;
+        rayQueryEXT rq;
+        rayQueryInitializeEXT(rq, uTLAS, gl_RayFlagsNoneEXT, mask & 0xFFu, o, tmin, d, tmax);
+        uint n_cand = 0u;
+        while (rayQueryProceedEXT(rq))
+        {
+            if (rayQueryGetIntersectionTypeEXT(rq, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
+            if (++n_cand > RT_CANDIDATE_BUDGET)
+            {   // over budget (G-7): stop -- the nearest hit committed so far stands
+                rayQueryTerminateEXT(rq);
+                break;
+            }
+            const uint id   = rtHitInstance(uint(rayQueryGetIntersectionInstanceCustomIndexEXT(rq, false)),
+                                            uint(rayQueryGetIntersectionGeometryIndexEXT(rq, false)));
+            const uint prim = RT_HIT_PRIM(rq, false, id);
+            const vec2 bc   = rayQueryGetIntersectionBarycentricsEXT(rq, false);
+            const float t   = rayQueryGetIntersectionTEXT(rq, false);
+            const mat4x3 o2w = rayQueryGetIntersectionObjectToWorldEXT(rq, false);
+            if (!dynamic && rtIsAvatar(id)) continue;
+            const uint fl = rtIdIn(id) ? rt_instances[id].flags : 256u;   // (#874 guard: alpha test -> opaque)
+            if ((fl & (256u | 2048u)) == 0u && !rtCandidateFront(id, prim, d, o2w)) continue;
+            float cutoff; bool blend; vec3 col;
+            const float a = rtCandidateAlphaCol(id, prim, bc, t, d, o2w, cutoff, blend, col);
+            if (blendPass && blend ? a > (1.0 / 255.0) : a >= cutoff)
+                rayQueryConfirmIntersectionEXT(rq);
+        }
+        if (rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionTriangleEXT)
+            return h;   // miss
+        h.hit = true;
+        h.dist = rayQueryGetIntersectionTEXT(rq, true);
+        h.instance = rtHitInstance(uint(rayQueryGetIntersectionInstanceCustomIndexEXT(rq, true)),
+                                   uint(rayQueryGetIntersectionGeometryIndexEXT(rq, true)));
+        if (!rtIdIn(h.instance)) { h.hit = false; return h; }   // (#874 guard: a bad id is a miss)
+        h.prim = RT_HIT_PRIM(rq, true, h.instance);
+        h.bary = rayQueryGetIntersectionBarycentricsEXT(rq, true);
+        h.front = rayQueryGetIntersectionFrontFaceEXT(rq, true);
+        h.o2w = rayQueryGetIntersectionObjectToWorldEXT(rq, true);
+        // Opaque instances never ran the candidate test: the raster back-face cull for
+        // single-sided ones -> continue past this triangle.
+        const uint fl = rt_instances[h.instance].flags;
+        if ((fl & (256u | 2048u)) != 0u || rtCandidateFront(h.instance, h.prim, d, h.o2w)) return h;
+        tmin = h.dist + max(h.dist * 1e-5, 1e-4);
+        h.hit = false;
+    }
+    return h;
+}
+
+vec3 probeSky(vec3 dir)
+{
+    return volCloudSkyApply(skyResolve(cloudComposite(skySceneryPre(dir), dir)), dir);   // (#719 panorama)
+}
+
+void main()
+{
+    const uint res = pt.res;
+    const uvec2 px = gl_GlobalInvocationID.xy;
+    if (px.x >= res || px.y >= res) return;
+    const uint face = pt.face0 + gl_WorkGroupID.z;
+    if (face > 5u) return;
+
+    const vec2 ndc = (vec2(px) + 0.5) / float(res) * 2.0 - 1.0;
+    const vec3 F = kFaceF[face];
+    const vec3 dir = normalize(F + ndc.x * kFaceR[face] + ndc.y * kFaceD[face]);
+    // The capture camera: the push's, or (#478) the GPU-chosen job's.
+    vec4 origin = pt.origin;
+    float farc = pt.farc;
+    uint flags = pt.flags;
+    if ((pt.flags & PRT_JOB) != 0u)
+    {
+        const PrbJob j = prbJob(pt.job, (pt.flags & PRT_JOB_RT) != 0u ? PJ_REALTIME : PJ_SCHED);
+        origin = j.origin;
+        farc = j.clip.x;
+        // (#834 PJ_NO_ALPHA: a far scheduled probe drops the blend layer, as its raster faces do)
+        flags = ((j.info.z & PJ_NO_ALPHA) != 0u ? 0u : (pt.flags & PRT_BLEND))
+              | ((j.info.z & PJ_DYNAMIC) != 0u ? PRT_DYNAMIC : 0u)
+              | ((j.info.z & PJ_SKY) != 0u ? PRT_SKY_ONLY : 0u);
+    }
+    vec3 col;
+    if ((flags & PRT_SKY_ONLY) != 0u)
+    {
+        col = probeSky(dir);
+    }
+    else
+    {
+        const vec3 o = origin.xyz;
+        const float fd = max(dot(dir, F), 1e-4);
+        const float tmin = origin.w / fd, tmax = farc / fd;
+        const bool dynamic = (flags & PRT_DYNAMIC) != 0u;
+        rt_anim_time = pt.time;
+        uint mask = (RT_MASK_ALL & ~RT_MASK_BLEND);   // = RT_MASK_PRIMARY | RT_MASK_WATER
+        if (!dynamic) mask &= ~(RT_MASK_RIGGED | RT_MASK_ATTACH | RT_MASK_SELF);
+        // Layer 0: the nearest non-blend hit (else the sky). Layer 1 (PRT_BLEND): the
+        // nearest alpha-blend hit in front of it, composited over by its alpha. One loop,
+        // so the closest-hit walk, the surface fetch and the hit shading (the RT sun +
+        // local lights) are each inlined ONCE -- compile time (the two layers used to be
+        // two copies of all three).
+        float topq = tmax;
+        col = vec3(0.0);
+        for (uint layer = 0u; layer < 2u; ++layer)
+        {
+            if (layer == 1u && !((flags & PRT_BLEND) != 0u && topq > tmin)) break;
+            const bool blend = layer == 1u;
+            const RtHit h = probeClosest(o, dir, tmin, blend ? topq : tmax, blend ? RT_MASK_BLEND : mask, blend, dynamic);
+            if (!h.hit)
+            {
+                if (!blend) col = probeSky(dir);
+                continue;
+            }
+            RtSurface s = rtSurfaceEval(h, dir);
+            rtWeatherHit(s);   // #970 (the coat; the lying-snow march is the main view's reflections' only)
+            const vec4 c = rtShadeHit(s, o, pt.light_list, pt.time);
+            if (blend) col = mix(col, c.rgb, clamp(c.a, 0.0, 1.0));
+            else { col = c.rgb; topq = h.dist; }
+        }
+    }
+    // FINITE + IN RANGE (lit guards): a capture texel is filtered into every mip and the
+    // irradiance cube -- one inf (> 65504 in this RGBA16F face) becomes NaN there (inf x 0)
+    // and reaches every pixel the probe lights, until the next capture of this probe.
+    if (any(isnan(col)) || any(isinf(col))) col = vec3(0.0);
+    imageStore(uFaces, ivec3(px, face), vec4(clamp(col, vec3(0.0), vec3(65000.0)), 1.0));
+}

@@ -1,0 +1,396 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+// vkclean -- PARTICLE FOG (#1003): the RAY MARCH over this frame's visible bricks, at the
+// march resolution (RenderVKParticleFogResolution x the render extent), after pass 1 (the
+// finished opaque depth), before pass 2.
+//
+// Each texel marches its view ray from the eye to its REPRESENTATIVE scene depth -- the
+// NEAREST of its render pixels on even (x + y) texels, the FARTHEST on odd ones (a
+// checkerboard: the composite's depth-aware upsample finds, for every render pixel, a
+// neighbour whose segment ends where its own surface is) -- through the union of the bricks
+// the ray hits. JITTERED START (IGN rotated per frame; the temporal pass accumulates it),
+// step ~0.85 voxel (at most pf.march.x steps over the hit segment). Per step:
+//
+//   sigma   sum over the bricks containing the point of the fine atlas' sigma x the brick's
+//           blend (the volume's share of its system), then ERODED (below)
+//   EROSION the cloud-rendering noise model (Schneider, "The Real-Time Volumetric Cloudscapes
+//           of Horizon Zero Dawn", 2015 -- our own implementation): the smooth splatted field
+//           becomes a COVERAGE c = max(1 - exp(-1.6 sigma / rho), 1 - exp(-0.8 sigma)) (rho =
+//           the brick's density-weighted mean density, from the resolve: a thin system and a
+//           thick one both get cores ~0.8 and edges), then
+//             shaped = remap(c, B x 0.6 (1 - base), 1 -> 0, 1)          the low-frequency base
+//                      (Perlin-Worley, period 4 x the brick's base scale) thresholds the field:
+//                      where the base is low the thin parts vanish -- lumps with DEFINED edges
+//             final  = remap(shaped, E x 0.5 (1 - detail)(1 - shaped), 1 -> 0, 1)   the high-
+//                      frequency detail (inverted Worley, a quarter of the base scale) erodes
+//                      the edges more than the core: cauliflower boundaries, solid cores
+//           and sigma' = sigma x (-ln(1 - final)) / (-ln(1 - c)) (final = c leaves it as it
+//           was), x 1 + 0.25 B (1 - c) (the thin parts the erosion thinned get a little back;
+//           the eroded edges DO lose mass -- defined boundaries are the point). B =
+//           RenderVKParticleFogBillow, E = RenderVKParticleFogErosion; base scale =
+//           RenderVKParticleFogBillowScale x the system's sprite size (0.3 - 1 m), its own noise
+//           phase per system.
+//           ADVECTION: the coarse velocity field (the particles' own mass-weighted velocity,
+//           settling included, so the lumps drift the way the emitter blows and the wind
+//           carries it) moves two noise phases offset by half a flow period (flow-map
+//           advection: each phase restarts while its weight is 0, so the detail never
+//           stretches without bound); the curl channel warps both lookups; the detail also
+//           churns slowly upward in time.
+//   light   albedo x [ pi x beam x vis x MS(sunOD) x powder + ambient x AO + local ]
+//           vis    one sun / moon cascade tap at the jittered point (dithered cascade pick,
+//                  as the froxel light pass) x the cloud shadow map
+//           MS     multiple scattering (Wrenninge-style octaves): sum_k 0.5^k a phase(g 0.5^k)
+//                  exp(-0.5^k s sunOD) over the in-brick optical depth toward the light --
+//                  bright tops, dark bellies, and dense fog that still glows inside. phase =
+//                  dual-lobe Henyey-Greenstein (forward g, a pf.erode.w share of a g -0.3 back
+//                  lobe): lights seen THROUGH the fog get a glowing halo
+//           powder BEER-POWDER: 1 - p x (1 - cos) / 2 x exp(-2 d), d = the local density x
+//                  half the base scale + half the optical depth toward the light: thin lit
+//                  edges seen with the light behind the viewer go darker than the dense
+//                  bulges -- the bumps read as bumps (none looking into the light)
+//           AO     0.12 + 0.88 x the light grid's ambient occlusion (folds, cores, bellies)
+//           local  the light grid's (self-shadowed) local-light in-scatter x the dual-lobe
+//                  phase toward its mean light direction (blended to isotropic by how
+//                  concentrated the lights are) x powder over its optical depth
+//   integration  energy conserving (Hillaire 2015): L += T x S x (1 - exp(-sigma ds)), T *= ...
+//   early out at T < 0.003 (an opaque core hides what is behind it, as it should).
+//
+// Out A: rgb in-scatter (linear HDR), a transmittance.
+// Out B: x entry distance (first sample with medium; PF_FAR = none), y transmittance-weighted
+//        mean distance (reprojection + the froxel fog lookup), z the segment end: > 0 the
+//        representative surface's distance (the fog reached it), < 0 -(where the fog ended)
+//        (the ray left every brick / went opaque before its surface: valid for every deeper
+//        surface), w 0 (the temporal pass's history length).
+// FLOOR MAP (for the next frame's HEAVY settling, clean_pfog_bin.comp): every texel's
+// representative surface, when it faces up (the depth's normal, |n.z| > 0.7, not across an
+// edge) and lies under a brick's footprint below its floor reference (the source + a margin:
+// a ceiling or a raised stage above the machine is not its floor), lowers that column of the
+// brick's floor buffer to it (atomic min: the LOWEST floor-like surface in the column -- the
+// floor under a table, beside an avatar's shoulders, below a balcony's edge, so the fog flows
+// down and around them) and stamps its header.
+// DEBUG VIEW (pf.noise.w): 1 the medium tinted by its brick's blend (red partial -> green
+// full) and the brick boxes' edges drawn in the brick's hue; 2 EROSION: unlit, white where the
+// field is untouched, red where the erosion took mass; 3 the AMBIENT OCCLUSION; 4 the LOCAL
+// LIGHT term alone (shadowed, phased).
+layout(local_size_x = 8, local_size_y = 8) in;
+
+#include "clean_frame_info.glsl"
+#include "clean_atmos_common.glsl"
+#include "clean_vol_common.glsl"
+#include "clean_lights_common.glsl"
+#include "clean_vol_cloud_shadow.glsl"   // cloudShadow(): #719 cloud shadow map (draw set 0 binding 46)
+#define PF_NO_BUFFERS
+#define PF_SAMPLERS
+#define PF_FLOOR
+#include "clean_pfog_common.glsl"
+
+layout(std140, set = 0, binding = 6) uniform LInfo { LightInfo linfo; };
+layout(set = 0, binding = 15) uniform sampler2DArrayShadow uShadowMap;
+layout(set = PF_SET, binding = 17) uniform sampler2D uDepth;   // reversed-Z world depth (texelFetch)
+layout(set = PF_SET, binding = 18, rgba16f) writeonly uniform image2D uOutA;
+layout(set = PF_SET, binding = 19, rgba16f) writeonly uniform image2D uOutB;
+
+float cascadeTap(int c, vec3 P)
+{
+    const vec4 s = shadowSpace(c, P);
+    const vec2 uv = s.xy * 0.5 + 0.5;
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0))) || s.z > 1.0) return 1.0;
+    return texture(uShadowMap, vec4(uv, float(c), s.z - ssr.shadow_params.x));
+}
+float sunVisibility(vec3 P, float vz, float n1)
+{
+    if (pf.light.z < 0.5 || vz >= ssr.shadow_clip.w) return 1.0;
+    const int c = vz < ssr.shadow_clip.x ? 0 : (vz < ssr.shadow_clip.y ? 1 : (vz < ssr.shadow_clip.z ? 2 : 3));
+    const float cend = ssr.shadow_clip[c];
+    const float blend = clamp((vz - cend * 0.8) / max(cend * 0.2, 1e-3), 0.0, 1.0);
+    if (n1 < blend) return c < 3 ? cascadeTap(c + 1, P) : 1.0;
+    return cascadeTap(c, P);
+}
+
+vec3 relAt(vec2 rpx, float d, bool unjitter)
+{
+    vec2 ndc = rpx / pf.dims.xy * 2.0 - 1.0;
+    if (unjitter && ssr.taa_params.w > 0.5) ndc -= ssr.taa_jitter.zw;   // the depth was rasterized jittered
+    const vec4 w = pf.inv_vp * vec4(ndc, d, 1.0);
+    return w.xyz / w.w;
+}
+
+// Base (x) and detail (y) noise of one flow phase at world point q: base period 4 bs (f = 1 /
+// (4 bs)), detail four times finer; off = the system's phase (tile units).
+vec2 pfNoise(vec3 q, float f, float bs, vec3 off)
+{
+    const vec3 warp = (textureLod(uNoise, q * (f * 0.37) + off.zxy, 0.0).rgb * 2.0 - 1.0) * (pf.noise.y * bs);
+    const vec3 w = (q + warp) * f + off;
+    const float base = textureLod(uNoise, w, 0.0).a;
+    const vec3 d = textureLod(uNoiseD, w * 4.0 + off.yzx + vec3(0.0, 0.0, -0.015 * pf.cam.w), 0.0).rgb;
+    return vec2(base, dot(d, vec3(0.625, 0.25, 0.125)));
+}
+
+// Dual-lobe Henyey-Greenstein: forward g, a pf.erode.w share of a back lobe.
+float pfPhase(float c, float g)
+{
+    return mix(volPhaseHG(c, g), volPhaseHG(c, -0.3), clamp(pf.erode.w, 0.0, 1.0));
+}
+
+// The floor map: the representative surface (camera-relative rs, reversed-Z depth d at render
+// pixel rp) lowers its column of every brick it lies under (see the header).
+void pfFloorWrite(vec3 rs, ivec2 rp, ivec2 rmax, float d)
+{
+    if (d <= 0.0) return;
+    const ivec2 rx = clamp(rp + ivec2(1, 0), ivec2(0), rmax), ry = clamp(rp + ivec2(0, 1), ivec2(0), rmax);
+    const float dx = texelFetch(uDepth, rx, 0).r, dy = texelFetch(uDepth, ry, 0).r;
+    if (dx <= 0.0 || dy <= 0.0) return;
+    const vec3 px = relAt(vec2(rx) + 0.5, dx, true) - rs, py = relAt(vec2(ry) + 0.5, dy, true) - rs;
+    const float lim = 0.08 * length(rs) + 0.02;
+    if (dot(px, px) > lim * lim || dot(py, py) > lim * lim) return;   // across an edge
+    const vec3 n = cross(px, py);
+    const float nl = length(n);
+    if (nl <= 1e-12 || abs(n.z) < 0.7 * nl) return;   // not a floor-like surface
+    const vec3 P = pf.cam.xyz + rs;
+    const uint nb = min(uint(pf.counts.x + 0.5), PF_MAX_BRICKS);
+    for (uint b = 0u; b < nb; ++b)
+    {
+        const PfBrick br = pf.bricks[b];
+        const float cell = 2.0 * br.org_vox.w;
+        const vec2 lc = (P.xy - br.org_vox.xy) / cell;
+        if (any(lessThan(lc, vec2(0.0))) || any(greaterThanEqual(lc, vec2(pfDimsC(br).xy)))) continue;
+        if (P.z > br.shape.y || P.z < br.org_vox.z - 4.0) continue;
+        const uint base = uint(br.dims_slot.w + 0.5) * PF_FLOOR_WORDS;
+        const uvec2 c = uvec2(lc);
+        atomicMin(fl[base + PF_FLOOR_HDR + c.y * PF_NC + c.x], pfOrdered(P.z));
+        fl[base] = floatBitsToUint(br.org_vox.x);
+        fl[base + 1u] = floatBitsToUint(br.org_vox.y);
+        fl[base + 2u] = floatBitsToUint(cell);
+        fl[base + 3u] = 1u;
+    }
+}
+
+vec3 hueColor(float h)   // 0 red .. 0.5 yellow .. 1 green
+{
+    return clamp(vec3(2.0 - 2.0 * h, 2.0 * h, 0.15), vec3(0.0), vec3(1.0));
+}
+
+void main()
+{
+    const ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 msz = ivec2(pf.dims.zw + 0.5);
+    if (px.x >= msz.x || px.y >= msz.y) return;
+    const vec2 scale = pf.dims.xy / pf.dims.zw;
+    const ivec2 rmax = ivec2(pf.dims.xy + 0.5) - 1;
+
+    // Representative depth: nearest (even texels) / farthest (odd) of the covered render pixels.
+    const ivec2 r0 = ivec2(vec2(px) * scale);
+    const ivec2 cover = clamp(ivec2(ceil(scale)), ivec2(1), ivec2(3));
+    const bool wantNear = ((px.x + px.y) & 1) == 0;
+    float dsel = wantNear ? -1.0 : 2.0;
+    ivec2 rsel = clamp(r0, ivec2(0), rmax);
+    for (int j = 0; j < cover.y; ++j)
+        for (int i = 0; i < cover.x; ++i)
+        {
+            const ivec2 rp = clamp(r0 + ivec2(i, j), ivec2(0), rmax);
+            const float d = texelFetch(uDepth, rp, 0).r;   // reversed Z: larger = nearer, sky 0
+            if (wantNear ? d > dsel : d < dsel) { dsel = d; rsel = rp; }
+        }
+    const vec3 rsurf = relAt(vec2(rsel) + 0.5, dsel, true);
+    const float tmax = dsel <= 0.0 ? PF_FAR : length(rsurf);
+    pfFloorWrite(rsurf, rsel, rmax, dsel);
+
+    const vec3 rv = relAt((vec2(px) + 0.5) * scale, 0.5, false);
+    const vec3 V = rv / max(length(rv), 1e-6);
+    const vec3 E = pf.cam.xyz;
+
+    // The bricks this ray hits, and the union segment.
+    const uint nb = min(uint(pf.counts.x + 0.5), PF_MAX_BRICKS);
+    uint mask = 0u;
+    float t0 = 1e30, t1 = 0.0, minVox = 1e9;
+    for (uint b = 0u; b < nb; ++b)
+    {
+        const vec2 h = pfBoxHit(pf.bricks[b], E, V);
+        const float tn = max(h.x, 0.0), tf = min(h.y, tmax);
+        if (tf <= tn) continue;
+        mask |= 1u << b;
+        t0 = min(t0, tn); t1 = max(t1, tf);
+        minVox = min(minVox, pf.bricks[b].org_vox.w);
+    }
+    if (mask == 0u)
+    {
+        imageStore(uOutA, px, vec4(0.0, 0.0, 0.0, 1.0));
+        imageStore(uOutB, px, vec4(PF_FAR, PF_FAR, -min(tmax, PF_FAR), 0.0));
+        return;
+    }
+
+    const float len = t1 - t0;
+    const int maxSteps = max(int(pf.march.x + 0.5), 8);
+    const int n = clamp(int(ceil(len / max(minVox * 0.85, 1e-3))), 1, maxSteps);
+    const float ds = len / float(n);
+    const float jit = pfIgn(vec2(px) + 5.588238 * float(uint(pf.march.y) % 64u));
+    const float n1 = pfIgn(vec2(px) + vec2(17.0, 59.0) + 7.13 * float(uint(pf.march.y) % 64u));
+
+    const vec3 Ld = atmosLightDir();
+    const bool sunUp = Ld.z > 0.0;
+    const vec3 beam = sunUp ? volBeam() : vec3(0.0);
+    const float cosT = dot(V, Ld);
+    const float g = pf.light.w;
+    const vec3 amb = volAmbient() * pf.look.w;
+    const float msA = 0.5 * pf.look.x;
+    const float selfK = max(pf.look.z, 0.0);
+    // flow-map phases
+    const float period = max(pf.noise.z, 0.5);
+    const float ph0 = fract(pf.cam.w / period), ph1 = fract(pf.cam.w / period + 0.5);
+    const float w0 = 1.0 - abs(2.0 * ph0 - 1.0);
+    const float billow = clamp(pf.look.y, 0.0, 1.5);
+    const float erosion = clamp(pf.erode.x, 0.0, 2.0);
+    const float powderK = clamp(pf.erode.z, 0.0, 0.9);
+    const float powS = powderK * 0.5 * (1.0 - cosT);   // (the sun's view weight)
+    const int dmode = int(pf.noise.w + 0.5);
+    const bool dbg = dmode == 1;
+    const vec3 fwd = linfo.cam_fwd.xyz;
+
+    float T = 1.0;
+    vec3 Ls = vec3(0.0);
+    float entry = PF_FAR, dsum = 0.0, wsum = 0.0, lastFog = t0;
+    float dbgHue = 0.0, dbgW = 0.0;
+    bool opaque = false;
+    float t = t0 + ds * jit;
+    for (int k = 0; k < n; ++k, t += ds)
+    {
+        const vec3 P = E + V * t;
+        float sig = 0.0, aow = 0.0, sunw = 0.0, hw = 0.0, bsw = 0.0, phw = 0.0, rhow = 0.0, odw = 0.0;
+        vec3 alb = vec3(0.0), vel = vec3(0.0), loc = vec3(0.0), ldw = vec3(0.0);
+        uint m = mask;
+        while (m != 0u)
+        {
+            const uint b = findLSB(m);
+            m &= m - 1u;
+            const PfBrick br = pf.bricks[b];
+            if (!pfInside(br, P)) continue;
+            const vec4 d = textureLod(uDens, pfUvw(br, P), 0.0);
+            const float s = d.a * br.atlas.w;
+            if (s <= 1e-5) continue;
+            const vec3 uc = pfUvwC(br, P);
+            const vec4 vv = textureLod(uVel, uc, 0.0);
+            const vec4 ll = textureLod(uLight, uc, 0.0);
+            const vec4 ld = textureLod(uLDir, uc, 0.0);
+            sig += s; alb += d.rgb * s; vel += vv.xyz * s; aow += vv.w * s; sunw += ll.a * s; loc += ll.rgb * s;
+            ldw += ld.xyz * s; odw += ld.w * s;
+            hw += br.look.y * s; bsw += br.shape.x * s; phw += br.shape.z * s;
+            rhow += pfRefSigma(uint(br.dims_slot.w + 0.5)) * br.atlas.w * s;
+        }
+        if (sig <= 1e-5) continue;
+        const float inv = 1.0 / sig;
+        vel *= inv;
+        const float bs = max(bsw * inv, 0.05);
+        const float rho = rhow * inv;
+        // EROSION (two advected flow phases of base + detail)
+        const float cov = max(rho > 1e-4 ? 1.0 - exp(-1.6 * sig / rho) : 0.0, 1.0 - exp(-0.8 * sig));
+        const float f = 0.25 / bs;
+        const vec3 off = fract(vec3(17.31, 31.7, 7.13) * (phw * inv));
+        const vec2 nA = pfNoise(P - vel * (ph0 * period), f, bs, off);
+        const vec2 nB = pfNoise(P - vel * (ph1 * period), f, bs, off);
+        const vec2 nv = mix(nB, nA, w0);
+        // SHAPE separate from OPACITY (2026-10-24): the shape comes from the density RELATIVE to the
+        // brick's mean (rel; unchanged by RenderVKParticleFogDensity), times the base lumps, cut by a
+        // soft threshold into a cloud MASK (0 outside, 1 inside, crisp edges), its edge then bitten
+        // by the detail noise. Inside, the medium is a CORE density (3x the brick mean, which scales
+        // with RenderVKParticleFogDensity): more density = the same shapes more opaque, never a blob.
+        // Billow = the coverage threshold (higher: smaller, separate lumps), Erosion = edge detail.
+        const float rel = rho > 1e-4 ? sig / rho : 0.0;
+        const float field = rel * (0.45 + 1.1 * nv.x);
+        const float thr = mix(0.25, 1.1, clamp(billow / 1.5, 0.0, 1.0));
+        float mask = smoothstep(thr - 0.12, thr + 0.12, field);
+        const float th2 = clamp(erosion * 0.5 * (1.0 - nv.y) * (1.0 - mask * mask), 0.0, 0.95);
+        mask = clamp((mask - th2) / (1.0 - th2), 0.0, 1.0);
+        const float fin = mask;
+        float sigma = mask * 3.0 * max(rho, 1e-4);
+        if (sigma <= 1e-5) continue;
+
+        const vec3 albedo = clamp(alb * inv, vec3(0.0), vec3(1.0));
+        const float sunOD = sunw * inv * selfK;
+        const float ao = clamp(aow * inv, 0.0, 1.0);
+        const float dLoc = 0.5 * sigma * bs;   // (the powder's local density term)
+        vec3 S = amb * (0.12 + 0.88 * ao);
+        // local lights: phase toward their mean direction, powder over their optical depth
+        vec3 lterm = vec3(0.0);
+        {
+            const vec3 ldm = ldw * inv;
+            const float conc = clamp(length(ldm), 0.0, 1.0);
+            const float cosL = conc > 1e-3 ? dot(V, ldm) / length(ldm) : 0.0;
+            const float phL = mix(1.0, 4.0 * ATMOS_PI * pfPhase(cosL, g), conc);
+            const float powL = 1.0 - powderK * 0.5 * (1.0 - cosL) * conc * exp(-2.0 * (dLoc + 0.5 * odw * inv));
+            lterm = loc * inv * (phL * powL);
+        }
+        S += lterm;
+        if (sunUp)
+        {
+            const float vz = dot(P - E, fwd);
+            const float vis = sunVisibility(P, vz, fract(n1 + float(k) * 0.618034)) * cloudShadow(P);
+            if (vis > 0.0)
+            {
+                float ms = 0.0, a = 1.0, bb = 1.0, cc = 1.0;
+                for (int o = 0; o < 3; ++o)
+                {
+                    ms += a * pfPhase(cosT, g * cc) * exp(-sunOD * bb);
+                    a *= msA; bb *= 0.5; cc *= 0.5;
+                }
+                const float powder = 1.0 - powS * exp(-2.0 * (dLoc + 0.5 * sunOD));
+                S += ATMOS_PI * beam * (vis * ms * powder);
+            }
+        }
+        S *= albedo;
+        if (dmode >= 2)
+        {
+            const float hs = 0.6 * atmosHdrScale();
+            if (dmode == 2) S = mix(vec3(1.0, 0.25, 0.2), vec3(1.0), cov > 1e-4 ? clamp(fin / cov, 0.0, 1.0) : 1.0) * hs;
+            else if (dmode == 3) S = vec3(ao) * hs;
+            else S = lterm;
+        }
+        const float ext = exp(-sigma * ds);
+        const float absorbed = T * (1.0 - ext);
+        Ls += S * absorbed;
+        dsum += t * absorbed; wsum += absorbed;
+        if (dbg) { dbgHue += hw * inv * absorbed; dbgW += absorbed; }
+        if (entry >= PF_FAR) entry = max(t - ds * 0.5, 0.0);
+        lastFog = t;
+        T *= ext;
+        if (T < 0.003) { T = 0.0; opaque = true; break; }
+    }
+    const float mean = wsum > 1e-5 ? dsum / wsum : PF_FAR;
+    // Segment end: the fog reached the representative surface (closed), or it ended first.
+    const bool open = opaque || t1 < tmax - 1e-3 || entry >= PF_FAR;
+    const float tend = open ? -min(opaque ? lastFog : t1, PF_FAR) : min(tmax, PF_FAR);
+    Ls = atmosClampHDR(max(Ls, vec3(0.0)));
+    if (any(isnan(Ls)) || isnan(T)) { Ls = vec3(0.0); T = 1.0; }
+
+    if (dbg)
+    {
+        const float hue = dbgW > 1e-5 ? dbgHue / dbgW : 0.0;
+        Ls = Ls * 0.35 + (1.0 - T) * hueColor(hue) * (0.6 * atmosHdrScale());
+        // box edges: the entry / exit points of every hit brick, near two faces at once
+        const float pxAng = 2.0 * max(linfo.grid.w, 1e-4) / max(pf.dims.w, 1.0);
+        uint m = mask;
+        while (m != 0u)
+        {
+            const uint b = findLSB(m);
+            m &= m - 1u;
+            const PfBrick br = pf.bricks[b];
+            const vec2 h = pfBoxHit(br, E, V);
+            const vec3 ext3 = pfMax(br) - br.org_vox.xyz;
+            for (int s = 0; s < 2; ++s)
+            {
+                const float th = s == 0 ? h.x : h.y;
+                if (th <= 0.0 || th > tmax) continue;
+                const vec3 u = (E + V * th - br.org_vox.xyz) / ext3;
+                const vec3 band = vec3(1.5 * pxAng * th) / ext3;
+                const vec3 nearF = vec3(lessThan(min(u, 1.0 - u), band));
+                if (nearF.x + nearF.y + nearF.z >= 2.0)
+                {
+                    Ls = hueColor(br.look.y) * (2.0 * atmosHdrScale());
+                    T = 0.0;
+                    entry = min(entry, th);
+                }
+            }
+        }
+    }
+    imageStore(uOutA, px, vec4(Ls, clamp(T, 0.0, 1.0)));
+    imageStore(uOutB, px, vec4(entry, min(mean, PF_FAR), tend, 0.0));
+}

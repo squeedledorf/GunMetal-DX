@@ -1,0 +1,131 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<panel
+    border="false"
+    height="408"
+    layout="topleft"
+    name="chat_group_settings"
+    top="0"
+    left="13"
+    width="517">
+    <text
+        follows="left|top"
+        height="14"
+        layout="topleft"
+        left="10"
+        name="group_chat_receive_label"
+        text_color="White"
+        top="10"
+        width="480">
+        Receiving group chat
+    </text>
+    <check_box
+        control_name="FSMuteAllGroups"
+        follows="left|top"
+        height="16"
+        label="Disable all group chats"
+        tool_tip="Incoming group chat sessions are declined. You can still start a group chat yourself. Per group: Receive group chat in the group's profile."
+        layout="topleft"
+        left="15"
+        name="FSMuteAllGroups"
+        top_pad="4"
+        width="470" />
+    <check_box
+        control_name="FSMuteGroupWhenNoticesDisabled"
+        follows="left|top"
+        height="16"
+        label="Disable a group's chat when I don't receive its notices"
+        layout="topleft"
+        left="15"
+        name="FSMuteGroupWhenNoticesDisabled"
+        top_pad="4"
+        width="470" />
+    <check_box
+        control_name="FSReportMutedGroupChat"
+        follows="left|top"
+        height="16"
+        label="Report disabled group chats in nearby chat"
+        layout="topleft"
+        left="30"
+        name="FSReportMutedGroupChat"
+        top_pad="4"
+        width="455" />
+    <text
+        follows="left|top"
+        height="14"
+        layout="topleft"
+        left="10"
+        name="group_chat_snooze_label"
+        text_color="White"
+        top_pad="14"
+        width="480">
+        Snooze
+    </text>
+    <text
+        follows="left|top"
+        height="16"
+        layout="topleft"
+        left="15"
+        name="GroupSnoozeTime_label"
+        top_pad="6"
+        width="240">
+        Snoozed group chat stays quiet for (seconds):
+    </text>
+    <spinner
+        control_name="GroupSnoozeTime"
+        decimal_digits="0"
+        follows="left|top"
+        height="20"
+        increment="60"
+        label=""
+        label_width="0"
+        layout="topleft"
+        left_pad="2"
+        max_val="86400"
+        min_val="0"
+        name="GroupSnoozeTime"
+        top_delta="-3"
+        width="70" />
+    <check_box
+        control_name="FSEnablePerGroupSnoozeDuration"
+        follows="left|top"
+        height="16"
+        label="Ask for the duration each time I snooze a group chat"
+        tool_tip="Snooze is in a group conversation's context menu. A group can also snooze instead of leaving when its chat is closed (group profile &gt; General)."
+        layout="topleft"
+        left="15"
+        name="FSEnablePerGroupSnoozeDuration"
+        top_pad="6"
+        width="470" />
+    <text
+        follows="left|top"
+        height="14"
+        layout="topleft"
+        left="10"
+        name="group_chat_notices_label"
+        text_color="White"
+        top_pad="14"
+        width="480">
+        Group notices
+    </text>
+    <check_box
+        control_name="FSGroupNoticesToIMLog"
+        follows="left|top"
+        height="16"
+        label="Copy group notices into the group's chat"
+        layout="topleft"
+        left="15"
+        name="FSGroupNoticesToIMLog"
+        top_pad="4"
+        width="470" />
+    <check_box
+        control_name="FSBetterGroupNoticesToIMLog"
+        enabled_control="FSGroupNoticesToIMLog"
+        follows="left|top"
+        height="16"
+        label="Include the sender and subject"
+        layout="topleft"
+        left="30"
+        name="FSBetterGroupNoticesToIMLog"
+        top_pad="4"
+        width="455" />
+</panel>

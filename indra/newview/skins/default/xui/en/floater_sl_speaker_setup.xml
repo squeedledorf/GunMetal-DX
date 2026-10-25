@@ -1,0 +1,250 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<floater
+ positioning="cascading"
+ save_rect="true"
+ can_resize="false"
+ height="432"
+ width="340"
+ layout="topleft"
+ name="sl_speaker_setup"
+ single_instance="true"
+ title="Set Up As Speaker">
+    <floater.string name="no_object">No object (select one prim you can modify)</floater.string>
+    <floater.string name="status_untagged">This prim is not a speaker yet. The defaults are shown.</floater.string>
+    <floater.string name="status_has_text">This prim has other hover text: setting the tag replaces it.</floater.string>
+    <floater.string name="status_tagged">This prim is a speaker: its current tag is shown.</floater.string>
+    <floater.string name="status_tagged_errors">This prim is a speaker; parts of its tag were not understood:</floater.string>
+    <floater.string name="status_same">This prim already carries exactly this tag.</floater.string>
+    <floater.string name="status_working">Putting the setup script into the prim...</floater.string>
+    <floater.string name="preview_mismatch">does not read back as set</floater.string>
+    <floater.string name="trust_unknown">Can't tell yet whether this object qualifies.</floater.string>
+    <floater.string name="trust_other_parcel">This object stands on another parcel than you: can't tell from here whether it qualifies.</floater.string>
+    <floater.string name="trust_yes">This object qualifies: its owner or group matches this parcel.</floater.string>
+    <floater.string name="trust_no">This object does not qualify yet: set its group to the parcel's group, deed it, or have the parcel owner own it.</floater.string>
+    <floater.string name="trust_no_scripts">Scripts may not run here for this object (no-script parcel), so the setup script could stay stopped in it.</floater.string>
+    <text
+     follows="left|top"
+     height="16"
+     layout="topleft"
+     left="10"
+     name="object_label"
+     top="26"
+     width="70">
+        Object:
+    </text>
+    <text
+     follows="left|top"
+     height="16"
+     layout="topleft"
+     left_pad="4"
+     name="object_name"
+     top_delta="0"
+     use_ellipses="true"
+     width="246">
+    </text>
+    <text
+     follows="left|top"
+     height="16"
+     layout="topleft"
+     left="10"
+     name="group_label"
+     top_pad="10"
+     width="110">
+        Group:
+    </text>
+    <line_editor
+     follows="left|top"
+     height="20"
+     layout="topleft"
+     left_pad="4"
+     max_length_bytes="24"
+     name="group"
+     tool_tip="Speaker group: 1 to 24 of a-z 0-9 _ . - (default main). Groups can have different levels and ranges, for example a stage and a quieter bar; all play the same parcel stream."
+     top_delta="-2"
+     width="200" />
+    <text
+     follows="left|top"
+     height="16"
+     layout="topleft"
+     left="10"
+     name="channel_label"
+     top_pad="10"
+     width="110">
+        Channel:
+    </text>
+    <combo_box
+     follows="left|top"
+     height="22"
+     layout="topleft"
+     left_pad="4"
+     name="channel"
+     tool_tip="What this speaker plays: mono (left and right mixed), the left or the right channel (place one of each for a stereo stage), or sub (low-passed mono)."
+     top_delta="-4"
+     width="120">
+        <combo_box.item
+         label="Mono"
+         name="mono"
+         value="M" />
+        <combo_box.item
+         label="Left"
+         name="left"
+         value="L" />
+        <combo_box.item
+         label="Right"
+         name="right"
+         value="R" />
+        <combo_box.item
+         label="Sub"
+         name="sub"
+         value="S" />
+    </combo_box>
+    <slider
+     decimal_digits="2"
+     follows="left|top"
+     height="16"
+     increment="0.05"
+     initial_value="1"
+     label="Volume:"
+     label_width="110"
+     layout="topleft"
+     left="10"
+     max_val="2"
+     min_val="0"
+     name="volume"
+     tool_tip="Speaker level, 0 to 2 (1 = the stream as is, 2 = +6 dB), times each listener's music volume."
+     top_pad="10"
+     width="316" />
+    <slider
+     decimal_digits="0"
+     follows="left|top"
+     height="16"
+     increment="1"
+     initial_value="30"
+     label="Range (m):"
+     label_width="110"
+     layout="topleft"
+     left="10"
+     max_val="100"
+     min_val="5"
+     name="range"
+     tool_tip="How far the speaker is heard, 5 to 100 metres."
+     top_pad="8"
+     width="316" />
+    <check_box
+     follows="left|top"
+     height="16"
+     label="Directional, cone of"
+     layout="topleft"
+     left="10"
+     name="use_dir"
+     tool_tip="Play in a cone around the prim's +X axis (for PA boxes) instead of all round."
+     top_pad="10"
+     width="150" />
+    <spinner
+     decimal_digits="0"
+     follows="left|top"
+     height="20"
+     increment="5"
+     initial_value="90"
+     layout="topleft"
+     left_pad="4"
+     max_val="360"
+     min_val="1"
+     name="dir"
+     tool_tip="Full cone angle in degrees, 1 to 360, around the prim's +X axis. 360 is all round."
+     top_delta="-2"
+     width="70" />
+    <text
+     follows="left|top"
+     height="16"
+     layout="topleft"
+     left_pad="4"
+     name="dir_units"
+     top_delta="2"
+     width="60">
+        degrees
+    </text>
+    <check_box
+     follows="left|top"
+     height="16"
+     label="Off (keep the tag, silence this speaker)"
+     layout="topleft"
+     left="10"
+     name="off"
+     top_pad="10"
+     width="316" />
+    <text
+     follows="left|top"
+     height="16"
+     layout="topleft"
+     left="10"
+     name="preview_label"
+     top_pad="12"
+     width="316">
+        Tag:
+    </text>
+    <text
+     follows="left|top"
+     height="32"
+     layout="topleft"
+     left="10"
+     name="preview"
+     text_color="White"
+     top_pad="2"
+     width="316"
+     wrap="true">
+    </text>
+    <text
+     follows="left|top"
+     height="30"
+     layout="topleft"
+     left="10"
+     name="status"
+     text_color="LtGray_50"
+     top_pad="4"
+     width="316"
+     wrap="true">
+    </text>
+    <text
+     follows="left|top"
+     height="30"
+     layout="topleft"
+     left="10"
+     name="trust_rule"
+     text_color="LtGray_50"
+     top_pad="4"
+     width="316"
+     wrap="true">
+        Speakers play for others only if owned by the parcel owner, or set to or deeded to the parcel's group.
+    </text>
+    <text
+     follows="left|top"
+     height="44"
+     layout="topleft"
+     left="10"
+     name="trust"
+     top_pad="2"
+     width="316"
+     wrap="true">
+    </text>
+    <button
+     follows="left|top"
+     height="22"
+     label="Set speaker tag"
+     layout="topleft"
+     left="10"
+     name="apply"
+     tool_tip="Put a small script into this prim that sets the tag as faint hover text (Slipstream does not draw it) and then deletes itself. No script keeps running."
+     top_pad="8"
+     width="150" />
+    <button
+     follows="left|top"
+     height="22"
+     label="Remove speaker tag"
+     layout="topleft"
+     left_pad="6"
+     name="remove"
+     tool_tip="Put a small script into this prim that clears its hover text and then deletes itself."
+     top_delta="0"
+     width="150" />
+</floater>

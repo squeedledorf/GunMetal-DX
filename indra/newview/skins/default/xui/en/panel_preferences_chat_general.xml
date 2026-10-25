@@ -1,0 +1,310 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<panel
+    border="false"
+    height="408"
+    label="Text Chat"
+    layout="topleft"
+    left="102"
+    name="preferences_chat_general"
+    top="1"
+    width="517">
+    <scroll_container
+        follows="all"
+        height="370"
+        layout="topleft"
+        left="0"
+        name="chat_general_scroll"
+        reserve_scroll_corner="false"
+        top="0"
+        width="517">
+        <panel
+            follows="left|top"
+            height="300"
+            layout="topleft"
+            left="0"
+            name="chat_general_scroll_panel"
+            top="0"
+            width="500">
+            <panel
+                border="false"
+                height="112"
+                layout="topleft"
+                name="general_chat_settings"
+                top="10"
+                left="13"
+                width="487">
+                <check_box
+                    control_name="ChatAutocompleteGestures"
+                    height="16"
+                    initial_value="true"
+                    label="Auto-complete gestures in nearby chat"
+                    layout="topleft"
+                    name="auto_complete_gestures"
+                    width="300"
+                    top="3"
+                    left="0" />
+                <check_box
+                    enabled="false"
+                    height="16"
+                    label="Only friends and groups can call or IM me"
+                    layout="topleft"
+                    name="voice_call_friends_only_check"
+                    width="330"
+                    top="25"
+                    left="0" />
+                <text
+                    font="SansSerifSmall"
+                    follows="left|top"
+                    height="18"
+                    layout="topleft"
+                    length="1"
+                    name="email_settings"
+                    skip_link_underline="true"
+                    type="string"
+                    width="330"
+                    top="49"
+                    left="5">
+                    [https://accounts.secondlife.com/change_email Email me IMs when I'm offline]
+                </text>
+                <text
+                    layout="topleft"
+                    left="325"
+                    height="12"
+                    name="font_size"
+                    width="58"
+                    top="5">
+                    Font size:
+                </text>
+                <combo_box
+                    control_name="ChatFontSize"
+                    height="23"
+                    layout="topleft"
+                    left="385"
+                    name="chat_font_size"
+                    top="0"
+                    width="100">
+                    <item label="Small" name="Small" value="0" />
+                    <item label="Medium" name="Medium" value="1" />
+                    <item label="Large" name="Large" value="2" />
+                </combo_box>
+                <check_box
+                    control_name="UseChatBubbles"
+                    height="16"
+                    label="Bubble Chat"
+                    layout="topleft"
+                    left="345"
+                    name="bubble_text_chat"
+                    width="140"
+                    top="28" />
+                <check_box
+                    control_name="ChatShiftEnterNewline"
+                    height="16"
+                    label="Shift+Enter: new line"
+                    tool_tip="Shift+Enter in nearby chat inserts a new line instead of whispering (use /whisper to whisper). In IMs Shift+Enter always inserts a new line."
+                    layout="topleft"
+                    name="chat_shift_enter_newline"
+                    width="140"
+                    top="49"
+                    left="345" />
+                <check_box
+                    control_name="ChatKeyFocusesOpenChatWindow"
+                    height="16"
+                    label="Enter or / focuses the open Nearby Chat window instead of the chat bar"
+                    tool_tip="When the Nearby Chat window (Conversations with Nearby Chat selected, or torn off) is open, the key that starts chat puts the cursor in its input instead of opening the bottom-left chat bar."
+                    layout="topleft"
+                    name="chat_key_focuses_open_window"
+                    width="470"
+                    top="70"
+                    left="0" />
+                <check_box
+                    control_name="SlipstreamNearbyChatInput"
+                    height="16"
+                    label="Use the bottom-left chat bar (off: chat keys always use the Conversations window)"
+                    tool_tip="Off: Enter (or /) always opens the Conversations window on its Nearby Chat tab and focuses the chat input; the bottom-left chat bar is never shown."
+                    layout="topleft"
+                    name="chat_use_bottom_bar"
+                    width="470"
+                    top="90"
+                    left="0" />
+            </panel>
+            <panel
+                border="false"
+                follows="left|top"
+                height="78"
+                layout="topleft"
+                name="general_typing_settings"
+                top_pad="10"
+                left="13"
+                width="487">
+                <text
+                    follows="left|top"
+                    height="14"
+                    layout="topleft"
+                    left="0"
+                    name="typing_label"
+                    text_color="White"
+                    width="480"
+                    top="0">
+                    Typing
+                </text>
+                <check_box
+                    control_name="PlayTypingAnim"
+                    height="16"
+                    initial_value="true"
+                    label="Play typing animation when chatting"
+                    layout="topleft"
+                    name="play_typing_animation"
+                    width="470"
+                    left="0"
+                    top="18" />
+                <check_box
+                    control_name="FSSendTypingState"
+                    follows="left|top"
+                    height="16"
+                    label="Let people see when I'm typing an IM to them"
+                    layout="topleft"
+                    left="0"
+                    name="FSSendTypingState"
+                    width="470"
+                    top="38" />
+                <check_box
+                    control_name="FSShowTypingStateInNameTag"
+                    follows="left|top"
+                    height="16"
+                    label="Show Typing in name tags"
+                    tool_tip="Adds Typing to the name tag of people who are typing in nearby chat."
+                    layout="topleft"
+                    left="0"
+                    name="FSShowTypingStateInNameTag"
+                    width="470"
+                    top="58" />
+            </panel>
+            <panel
+                height="78"
+                layout="topleft"
+                name="log_settings"
+                left="13"
+                top_pad="4"
+                width="487">
+                <text
+                    name="logging_label"
+                    layout="topleft"
+                    left="0"
+                    text_color="White"
+                    height="12"
+                    top="5"
+                    width="55">
+                    Save:
+                </text>
+                <combo_box
+                    enabled="false"
+                    control_name="KeepConversationLogTranscripts"
+                    height="23"
+                    layout="topleft"
+                    left_pad="5"
+                    name="conversation_log_combo"
+                    top="0"
+                    width="165">
+                    <item name="log_and_transcripts" label="Log and transcripts" value="2" />
+                    <item name="log_only" label="Log only" value="1" />
+                    <item name="no_log_or_transcript" label="No log or transcripts" value="0" />
+                </combo_box>
+                <button
+                    enabled="false"
+                    height="23"
+                    label="Clear log..."
+                    layout="topleft"
+                    left_pad="5"
+                    top="0"
+                    name="clear_log"
+                    width="110">
+                    <commit_callback function="Pref.ClearLog" />
+                </button>
+                <button
+                    enabled="false"
+                    height="23"
+                    label="Delete transcripts..."
+                    layout="topleft"
+                    left_pad="5"
+                    top="0"
+                    name="delete_transcripts"
+                    width="147">
+                    <button.commit_callback function="Pref.DeleteTranscripts" />
+                </button>
+                <text
+                    name="log_location_label"
+                    layout="topleft"
+                    left="0"
+                    text_color="White"
+                    height="12"
+                    top_pad="15"
+                    width="55">
+                    Location:
+                </text>
+                <line_editor
+                    control_name="InstantMessageLogPath"
+                    border_style="line"
+                    border_thickness="1"
+                    font="SansSerif"
+                    height="23"
+                    layout="topleft"
+                    left_pad="55"
+                    max_length_bytes="4096"
+                    name="log_path_string"
+                    top_delta="-5"
+                    width="185" />
+                <button
+                    enabled="false"
+                    follows="left|top"
+                    height="23"
+                    label="Browse..."
+                    label_selected="Browse"
+                    layout="topleft"
+                    left_pad="5"
+                    name="log_path_button"
+                    top_delta="0"
+                    width="112">
+                    <commit_callback function="Pref.LogPath" />
+                </button>
+                <check_box
+                    control_name="FSShowTimestampsTranscripts"
+                    follows="left|top"
+                    height="16"
+                    label="Show timestamps in transcripts"
+                    layout="topleft"
+                    name="FSShowTimestampsTranscripts"
+                    width="470"
+                    left="0"
+                    top="58" />
+            </panel>
+        </panel>
+    </scroll_container>
+    <button
+        height="23"
+        label="Translation..."
+        layout="topleft"
+        left="9"
+        name="ok_btn"
+        top="-29"
+        width="170">
+        <commit_callback function="Pref.TranslationSettings" />
+    </button>
+    <button
+        height="23"
+        layout="topleft"
+        top_pad="-23"
+        left_pad="5"
+        name="autoreplace_showgui"
+        commit_callback.function="Pref.AutoReplace"
+        label="Auto-Replace..."
+        width="150" />
+    <button
+        height="23"
+        layout="topleft"
+        top_pad="-23"
+        left_pad="5"
+        name="spellcheck_showgui"
+        commit_callback.function="Pref.SpellChecker"
+        label="Spell Checking..."
+        width="150" />
+</panel>

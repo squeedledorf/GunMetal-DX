@@ -1,0 +1,436 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<floater
+ can_close="true"
+ can_minimize="true"
+ can_resize="false"
+ height="724"
+ help_topic="floater_report_bug"
+ name="floater_report_bug"
+ positioning="centered"
+ save_rect="true"
+ single_instance="true"
+ title="REPORT BUG"
+ width="560">
+  <floater.string name="screenshot_info">World view, [WIDTH]x[HEIGHT], [KB] KB. Taken when this window opened.</floater.string>
+  <floater.string name="screenshot_info_ui">With interface, [WIDTH]x[HEIGHT], [KB] KB. Check it shows nothing private.</floater.string>
+  <floater.string name="screenshot_failed">Couldn't take a screenshot. You can still send the report.</floater.string>
+  <floater.string name="screenshot_login">Screenshots are available once you're logged in.</floater.string>
+  <floater.string name="screenshot_off">No screenshot will be sent.</floater.string>
+  <floater.string name="cancel_label">Cancel</floater.string>
+  <floater.string name="close_label">Close</floater.string>
+  <floater.string name="error_summary">Please write a summary of at least 8 characters.</floater.string>
+  <floater.string name="error_description">Please describe what happened (at least 10 characters).</floater.string>
+  <floater.string name="sending">Sending...</floater.string>
+  <floater.string name="filed">Thanks! Filed as #[NUMBER]: [URL]</floater.string>
+  <floater.string name="followup_select">Pick one of your earlier reports in the list first.</floater.string>
+  <floater.string name="followup_short">Please write at least 5 characters.</floater.string>
+  <floater.string name="followup_sent">Thanks! Your follow-up was added to the report.</floater.string>
+  <floater.string name="error_send">Couldn't send the report (HTTP [STATUS]): [ERROR]. Your text is still here; try again later.</floater.string>
+  <floater.string name="error_rate">Too many reports were sent recently: [ERROR]. Your text is still here; try again later.</floater.string>
+  <!-- #966 performance capture (LLVKPerfCapture) -->
+  <floater.string name="perf_none">For low frame rates or stutter: take a capture where it happens.</floater.string>
+  <floater.string name="perf_none_ticked">No capture yet: press Take capture where the problem happens (this window can stay open).</floater.string>
+  <floater.string name="perf_login">Performance captures are available once you're logged in.</floater.string>
+  <floater.string name="perf_capturing">Capturing... [SECONDS] s left. Keep the view where the problem happens.</floater.string>
+  <floater.string name="perf_attached">Attached: [SUMMARY], taken [MINUTES] min ago (see WHAT WILL BE SENT).</floater.string>
+  <floater.string name="perf_available">Latest capture: [SUMMARY], taken [MINUTES] min ago (not attached).</floater.string>
+
+  <tab_container
+   follows="all"
+   layout="topleft"
+   left="4"
+   right="-4"
+   top="2"
+   height="634"
+   tab_min_width="140"
+   name="tabs"
+   tab_position="top">
+    <panel
+     border="true"
+     label="REPORT"
+     name="report_panel">
+      <text
+       follows="left|top"
+       font.style="BOLD"
+       height="16"
+       layout="topleft"
+       left="8"
+       name="summary_label"
+       top="6"
+       width="530">
+        Summary
+      </text>
+      <line_editor
+       follows="left|top|right"
+       height="22"
+       layout="topleft"
+       left="8"
+       max_length_chars="120"
+       name="summary"
+       label="One line, e.g. &quot;Water turns black after a teleport&quot;"
+       top_pad="2"
+       width="534" />
+      <text
+       follows="left|top"
+       font.style="BOLD"
+       height="16"
+       layout="topleft"
+       left="8"
+       name="description_label"
+       top_pad="6"
+       width="530">
+        What happened, and what did you expect?
+      </text>
+      <text_editor
+       follows="left|top|right"
+       height="84"
+       layout="topleft"
+       left="8"
+       max_length="8000"
+       name="description"
+       top_pad="2"
+       width="534"
+       word_wrap="true" />
+      <text
+       follows="left|top"
+       font.style="BOLD"
+       height="16"
+       layout="topleft"
+       left="8"
+       name="steps_label"
+       top_pad="6"
+       width="530">
+        Steps to reproduce (optional)
+      </text>
+      <text_editor
+       follows="left|top|right"
+       height="56"
+       layout="topleft"
+       left="8"
+       max_length="4000"
+       name="steps"
+       top_pad="2"
+       width="534"
+       word_wrap="true" />
+      <text
+       follows="left|top"
+       font.style="BOLD"
+       height="16"
+       layout="topleft"
+       left="8"
+       name="avatar_label"
+       top_pad="6"
+       width="200">
+        Avatar name (optional)
+      </text>
+      <line_editor
+       follows="left|top"
+       height="22"
+       layout="topleft"
+       left="8"
+       max_length_chars="64"
+       name="avatar"
+       tool_tip="Sent as typed so we can follow up in world. Leave it empty to stay anonymous."
+       top_pad="2"
+       width="240" />
+      <text
+       follows="left|top"
+       height="32"
+       layout="topleft"
+       left_pad="10"
+       name="avatar_note"
+       top_delta="-6"
+       width="284"
+       wrap="true">
+        Reports are public on the issue tracker. Don't include anything private.
+      </text>
+      <text
+       follows="left|top"
+       font.style="BOLD"
+       height="16"
+       layout="topleft"
+       left="8"
+       name="system_label"
+       top_pad="4"
+       width="530">
+        Sent with the report (from Help > About and your graphics settings)
+      </text>
+      <text_editor
+       follows="left|top|right"
+       font="SansSerifSmall"
+       height="66"
+       max_length="4096"
+       layout="topleft"
+       left="8"
+       name="system_info"
+       read_only="true"
+       top_pad="2"
+       width="534"
+       word_wrap="true" />
+      <check_box
+       follows="left|top"
+       height="16"
+       initial_value="true"
+       label="Attach a log excerpt ([LINES] lines from the viewer log, personal information removed)"
+       layout="topleft"
+       left="8"
+       name="attach_log"
+       tool_tip="The end of this viewer's log (Slipstream.log, or Slipstream-2.log and so on for further viewers). Personal information is removed: names, chat and IM text, IP addresses, e-mail addresses, tokens, account and session handles, and the secret parts of web addresses. Hardware, graphics and audio details are kept. See the WHAT WILL BE SENT tab."
+       top_pad="8"
+       width="530" />
+      <check_box
+       follows="left|top"
+       height="16"
+       initial_value="false"
+       label="Performance problem (low FPS, stutter): attach a performance capture"
+       layout="topleft"
+       left="8"
+       name="attach_perf"
+       tool_tip="Frame timings measured over a few seconds: frame rate, main thread and graphics card time, the costliest GPU passes and main-thread sections, memory state and graphics settings. No names, places or positions. The same text as World > Improve graphics speed > Frame timings > Capture."
+       top_pad="4"
+       width="530" />
+      <button
+       follows="left|top"
+       height="22"
+       label="Take capture"
+       layout="topleft"
+       left="24"
+       name="perf_capture_btn"
+       tool_tip="Measure for the number of seconds set in the Frame timings page (10 by default). Keep the view where the problem happens."
+       top_pad="4"
+       width="110" />
+      <text
+       follows="left|top"
+       font="SansSerifSmall"
+       height="28"
+       layout="topleft"
+       left_pad="8"
+       name="perf_note"
+       top_delta="-3"
+       width="404"
+       wrap="true">
+        For low frame rates or stutter: take a capture where it happens.
+      </text>
+      <check_box
+       follows="left|top"
+       height="16"
+       initial_value="true"
+       label="Attach a screenshot"
+       layout="topleft"
+       left="8"
+       name="attach_screenshot"
+       tool_tip="Taken by the viewer itself; you can't attach other images."
+       top_pad="4"
+       width="250" />
+      <panel
+       background_visible="true"
+       bg_alpha_color="Black"
+       border="true"
+       follows="left|top"
+       height="128"
+       layout="topleft"
+       left="8"
+       name="screenshot_preview"
+       top_pad="6"
+       width="246" />
+      <check_box
+       follows="left|top"
+       height="16"
+       initial_value="false"
+       label="Include the interface"
+       layout="topleft"
+       left_pad="12"
+       name="screenshot_ui"
+       tool_tip="Off: the world only. On: everything on screen except this window, which may include chat or names."
+       top_delta="0"
+       width="250" />
+      <button
+       follows="left|top"
+       height="22"
+       label="Retake"
+       layout="topleft"
+       left_delta="0"
+       name="retake_btn"
+       tool_tip="Take a new screenshot now."
+       top_pad="8"
+       width="100" />
+      <text
+       follows="left|top"
+       height="80"
+       layout="topleft"
+       left_delta="0"
+       name="screenshot_note"
+       top_pad="8"
+       width="270"
+       wrap="true">
+        No screenshot will be sent.
+      </text>
+    </panel>
+    <panel
+     border="true"
+     label="MY REPORTS"
+     name="followup_panel">
+      <text
+       follows="left|top|right"
+       height="48"
+       layout="topleft"
+       left="8"
+       name="followup_intro"
+       top="6"
+       width="534"
+       wrap="true">
+        Reports you filed from this viewer. Pick one to add more information to it instead of filing a new report, or to see whether we replied. Status is checked every few hours through the report service; you get a notification when something changes. Turn that off with the ReportTrackEnabled setting.
+      </text>
+      <scroll_list
+       column_padding="0"
+       draw_heading="true"
+       follows="left|top|right"
+       height="150"
+       layout="topleft"
+       left="8"
+       name="my_reports"
+       top_pad="4"
+       width="534">
+        <scroll_list.columns
+         label="#"
+         name="number"
+         width="60" />
+        <scroll_list.columns
+         label="Summary"
+         name="summary"
+         relative_width="0.6" />
+        <scroll_list.columns
+         label="Status"
+         name="status"
+         relative_width="0.4" />
+      </scroll_list>
+      <button
+       follows="left|top"
+       height="22"
+       label="Open in browser"
+       layout="topleft"
+       left="8"
+       name="followup_open_btn"
+       top_pad="4"
+       width="130" />
+      <button
+       follows="left|top"
+       height="22"
+       label="Forget"
+       layout="topleft"
+       left_pad="6"
+       name="followup_forget_btn"
+       tool_tip="Remove this report from the list. You can no longer follow up on it from this viewer."
+       width="90" />
+      <text
+       follows="left|top"
+       font.style="BOLD"
+       height="16"
+       layout="topleft"
+       left="8"
+       name="followup_label"
+       top_pad="10"
+       width="530">
+        Add to the selected report
+      </text>
+      <text_editor
+       follows="left|top|right"
+       height="130"
+       layout="topleft"
+       left="8"
+       max_length="4000"
+       name="followup_comment"
+       top_pad="2"
+       width="534"
+       word_wrap="true" />
+      <text
+       follows="left|top"
+       height="48"
+       layout="topleft"
+       left="8"
+       name="followup_note"
+       top_pad="4"
+       width="534"
+       wrap="true">
+        The log excerpt and screenshot options on the REPORT tab apply here too. The comment is public on the issue tracker.
+      </text>
+      <button
+       follows="left|top"
+       height="23"
+       label="Send follow-up"
+       layout="topleft"
+       left="8"
+       name="followup_send_btn"
+       top_pad="4"
+       width="140" />
+    </panel>
+    <panel
+     border="true"
+     label="WHAT WILL BE SENT"
+     name="payload_panel">
+      <text
+       follows="left|top|right"
+       height="32"
+       layout="topleft"
+       left="8"
+       name="payload_label"
+       top="6"
+       width="534"
+       wrap="true">
+        This is everything the report sends, as it will be sent. It becomes a public issue on the Slipstream issue tracker.
+      </text>
+      <text_editor
+       follows="all"
+       font="Monospace"
+       layout="topleft"
+       left="8"
+       max_length="1048576"
+       name="payload"
+       read_only="true"
+       top_pad="4"
+       right="-8"
+       bottom="-8"
+       word_wrap="true" />
+    </panel>
+  </tab_container>
+  <text
+   follows="left|bottom|right"
+   height="34"
+   layout="topleft"
+   left="10"
+   name="status_text"
+   parse_urls="true"
+   top_pad="4"
+   width="540"
+   wrap="true" />
+  <text
+   follows="left|bottom"
+   font="SansSerifSmall"
+   height="16"
+   layout="topleft"
+   left="10"
+   name="tracker_link"
+   parse_urls="true"
+   top_pad="4"
+   width="330">
+    Or, with an account: [URL]
+  </text>
+  <button
+   follows="right|bottom"
+   height="23"
+   label="Send report"
+   layout="topleft"
+   left="344"
+   name="send_btn"
+   top_delta="-4"
+   width="100" />
+  <button
+   follows="right|bottom"
+   height="23"
+   label="Cancel"
+   layout="topleft"
+   left_pad="6"
+   name="close_btn"
+   top_delta="0"
+   width="100" />
+</floater>

@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Template: gen_metainfo.sh fills <releases> with the list
+     generated from the git tags and writes
+     org.slipstreamviewer.Slipstream.metainfo.xml for the Flatpak build. -->
+<component type="desktop-application">
+  <id>org.slipstreamviewer.Slipstream</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>LGPL-2.1-only</project_license>
+  <name>Slipstream Viewer</name>
+  <summary>Vulkan viewer for Second Life</summary>
+  <developer id="org.slipstreamviewer">
+    <name>Slipstream Viewer</name>
+  </developer>
+  <description>
+    <p>
+      Slipstream is a third-party viewer for Second Life with a GPU-driven Vulkan
+      renderer: a smooth frame rate in busy places, ray-traced shadows and reflections
+      on supported cards, AMD FSR upscaling, and a long draw distance.
+    </p>
+    <p>
+      It brings popular tools and chat features from other viewers, RLVa, flexible key
+      bindings and an importer that copies your settings, contacts' chat history and
+      key bindings from Firestorm, Alchemy, Black Dragon or the Second Life viewer.
+    </p>
+    <p>
+      Slipstream is not provided or supported by Linden Lab, the makers of Second Life.
+      Second Life is a trademark of Linden Research, Inc.
+    </p>
+  </description>
+  <launchable type="desktop-id">org.slipstreamviewer.Slipstream.desktop</launchable>
+  <icon type="stock">org.slipstreamviewer.Slipstream</icon>
+  <url type="homepage">https://slipstreamviewer.org/</url>
+  <url type="bugtracker">https://git.slipstreamviewer.org/sky_line/Slipstream/issues</url>
+  <url type="help">https://slipstreamviewer.org/wiki/</url>
+  <url type="vcs-browser">https://git.slipstreamviewer.org/sky_line/Slipstream</url>
+  <categories>
+    <category>Game</category>
+    <category>Simulation</category>
+  </categories>
+  <keywords>
+    <keyword>Second Life</keyword>
+    <keyword>virtual world</keyword>
+    <keyword>metaverse</keyword>
+  </keywords>
+  <provides>
+    <binary>slipstream</binary>
+  </provides>
+  <requires>
+    <display_length compare="ge">768</display_length>
+    <internet>always</internet>
+  </requires>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+  </supports>
+  <!-- Second Life has user-generated content rated General, Moderate and Adult,
+       text and voice chat with strangers, and an in-world currency. -->
+  <content_rating type="oars-1.1">
+    <content_attribute id="violence-cartoon">mild</content_attribute>
+    <content_attribute id="violence-realistic">mild</content_attribute>
+    <content_attribute id="sex-nudity">intense</content_attribute>
+    <content_attribute id="sex-themes">intense</content_attribute>
+    <content_attribute id="language-profanity">intense</content_attribute>
+    <content_attribute id="language-humor">moderate</content_attribute>
+    <content_attribute id="drugs-alcohol">mild</content_attribute>
+    <content_attribute id="social-chat">intense</content_attribute>
+    <content_attribute id="social-info">mild</content_attribute>
+    <content_attribute id="social-audio">intense</content_attribute>
+    <content_attribute id="social-contacts">intense</content_attribute>
+    <content_attribute id="money-purchasing">intense</content_attribute>
+  </content_rating>
+  <releases>
+@RELEASES@
+  </releases>
+</component>

@@ -1,0 +1,59 @@
+# Seed the signed pacman repositories (#419) with existing releases.
+#
+# The release workflow's pacman-repo job adds each NEW tag as it is released; this one is
+# for releases that predate the repository (or to re-add one by hand). Same steps as that
+# job, same runner state (PACMAN_REPO_ROOT), same signing secrets: the key never leaves
+# Forgejo. Tags route as in pacman_repo.sh: vX.Y.Z-beta.N -> slipstream-beta,
+# vX.Y.Z -> slipstream + slipstream-beta. Trigger from Actions -> pacman-seed -> Run
+# workflow (or the API), with a space-separated tag list, oldest first.
+
+name: pacman-seed
+
+on:
+  workflow_dispatch:
+    inputs:
+      tags:
+        description: 'Space-separated release tags to add, e.g. "v1.1.0 v1.2.0-beta.8 v1.2.0"'
+        required: true
+        type: string
+
+env:
+  RELEASE_API: http://192.168.96.20:3000/api/v1/repos/${{ github.repository }}
+  REPO_GIT: http://192.168.96.20:3000/${{ github.repository }}.git
+
+jobs:
+  seed:
+    runs-on: builder
+    timeout-minutes: 60
+    env:
+      TAGS: ${{ inputs.tags }}
+      PACMAN_WORK: /srv/ci/slipstream-pacman-seed
+      PACMAN_REPO_ROOT: /srv/ci/pacman-repo
+      PACMAN_DEPLOY_KEY: /home/ci/.ssh/slipstream_arch_deploy
+      PACMAN_DEPLOY_TARGET: 'archdeploy@192.168.96.20:'
+    steps:
+      - name: Seed, sign, publish, deploy
+        env:
+          LINUX_SIGNING_KEY: ${{ secrets.LINUX_SIGNING_KEY }}
+          LINUX_SIGNING_KEY_ID: ${{ secrets.LINUX_SIGNING_KEY_ID }}
+          LINUX_SIGNING_KEY_PASSPHRASE: ${{ secrets.LINUX_SIGNING_KEY_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          [ -f "$PACMAN_DEPLOY_KEY" ] || { echo "::error::$PACMAN_DEPLOY_KEY missing (scripts/packaging/pacman/INFRA.md)"; exit 1; }
+          for t in $TAGS; do
+            [[ "$t" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-beta\.[0-9]+)?$ ]] || { echo "::error::bad tag '$t'"; exit 1; }
+          done
+          rm -rf "$PACMAN_WORK"
+          mkdir -p "$PACMAN_WORK/src" "$PACMAN_WORK/tree"
+          trap 'rm -rf "$PACMAN_WORK"' EXIT
+          git -C "$PACMAN_WORK/src" init -q
+          git -C "$PACMAN_WORK/src" fetch -q --depth 1 "$REPO_GIT" "$GITHUB_SHA"
+          git -C "$PACMAN_WORK/src" archive FETCH_HEAD scripts/packaging/pacman scripts/packaging/aur scripts/packaging/keys scripts/ci | tar -x -C "$PACMAN_WORK/tree"
+          H="$PACMAN_WORK/tree/scripts/ci/signing_key.sh"
+          R="$PACMAN_WORK/tree/scripts/packaging/pacman/pacman_repo.sh"
+          bash "$H" check || { echo "::error::no LINUX_SIGNING_KEY"; exit 1; }
+          RELEASE_API="$RELEASE_API" DOWNLOAD_BASE="${REPO_GIT%.git}/releases/download" \
+            bash "$R" seed $TAGS
+          bash "$H" run bash "$R" publish
+          bash "$R" deploy
+          bash "$R" list

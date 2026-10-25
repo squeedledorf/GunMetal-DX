@@ -1,0 +1,139 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<!-- #966 Frame timings (LLVKPerfCapture): live frame split, GPU passes, main-thread sections,
+     memory / quality state; Capture writes a plain-text block for performance reports. -->
+<panel
+ bevel_style="none"
+ follows="left|top"
+ height="580"
+ width="580"
+ name="panel_performance_timings"
+ layout="topleft"
+ left="0"
+ top="0">
+  <string name="no_capture">Capture measures for the seconds set on the left (after a 1 s warm-up) and copies a plain-text summary to the clipboard. It has hardware, settings and timings only: no names, places or positions. Paste it into a report, or use Report a problem.</string>
+  <string name="capturing">Capturing... [SECONDS] s left. Keep the view where the problem happens.</string>
+  <string name="captured">Last capture ([MINUTES] min ago): [SUMMARY]. Saved as [FILE] (a capture started here is also on the clipboard; Copy puts it there again).</string>
+  <button
+    height="16"
+    width="16"
+    layout="topleft"
+    mouse_opaque="true"
+    follows="left|top"
+    name="back_btn"
+    top="7"
+    image_selected="Arrow_Left_Off"
+    image_pressed="Arrow_Left_Off"
+    image_unselected="Arrow_Left_Off"
+    left="15"
+    is_toggle="true">
+  </button>
+  <text
+   follows="left|top"
+   height="18"
+   layout="topleft"
+   left_pad="0"
+   valign="center"
+   halign="center"
+   top="6"
+   name="back_lbl"
+   width="32">
+    Back
+  </text>
+  <text
+   follows="left|top"
+   font="SansSerifLarge"
+   text_color="White"
+   height="20"
+   layout="topleft"
+   left="20"
+   top_pad="15"
+   name="timings_title"
+   width="300">
+    Frame timings
+  </text>
+  <text
+   follows="left|top"
+   font="SansSerifSmall"
+   text_color="White"
+   height="18"
+   layout="topleft"
+   top_pad="5"
+   left="20"
+   name="timings_desc"
+   width="540">
+    Where each frame's time goes on this computer. Measured only while this page is open or a capture runs.
+  </text>
+  <text_editor
+   follows="left|top"
+   font="Monospace"
+   height="378"
+   layout="topleft"
+   left="20"
+   max_length="65536"
+   name="timings_text"
+   read_only="true"
+   top_pad="6"
+   width="540"
+   word_wrap="true">
+    Measuring...
+  </text_editor>
+  <spinner
+   control_name="PerfCaptureSeconds"
+   decimal_digits="0"
+   follows="left|top"
+   height="22"
+   increment="1"
+   initial_value="10"
+   label="Seconds"
+   label_width="52"
+   layout="topleft"
+   left="20"
+   max_val="60"
+   min_val="3"
+   name="capture_seconds"
+   tool_tip="How long a capture measures (3-60 s)."
+   top_pad="8"
+   width="110" />
+  <button
+   follows="left|top"
+   height="22"
+   label="Capture"
+   layout="topleft"
+   left_pad="10"
+   name="capture_btn"
+   tool_tip="Measure for that many seconds, then copy a plain-text summary to the clipboard and save it in the logs folder."
+   top_delta="0"
+   width="100" />
+  <button
+   follows="left|top"
+   height="22"
+   label="Copy"
+   layout="topleft"
+   left_pad="6"
+   name="copy_capture_btn"
+   tool_tip="Copy the last capture to the clipboard again."
+   top_delta="0"
+   width="80" />
+  <button
+   follows="left|top"
+   height="22"
+   label="Report a problem..."
+   layout="topleft"
+   left_pad="6"
+   name="report_btn"
+   tool_tip="Help > Report Bug. Tick &quot;Performance problem&quot; there to attach the last capture."
+   top_delta="0"
+   width="150" />
+  <text
+   follows="left|top"
+   font="SansSerifSmall"
+   text_color="White"
+   height="46"
+   layout="topleft"
+   left="20"
+   name="capture_status"
+   top_pad="6"
+   width="540"
+   wrap="true">
+  </text>
+</panel>

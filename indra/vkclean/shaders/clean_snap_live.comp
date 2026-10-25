@@ -1,0 +1,282 @@
+#version 450
+// vkclean -- LIVE SNAPSHOTS (#873; llcleansnapshotvk.h). Snapshots are taken from the
+// main render path: the finished live frame (the swap image at a capture point -- 1 world
+// only, 2 world + HUD, 3 the whole frame with UI -- copied into a buffer, packed RGBA8 /
+// BGRA8, sRGB-encoded) or the live depth buffer is resampled to the shot size here, and
+// only the final RGB image (LLImageRaw layout: tightly packed, rows bottom-up) goes back to
+// the CPU. Five entry points (SNAP_MODE), one set / layout:
+//   0 H        separable Lanczos-3, horizontal: source rows -> work (half RGB, dstW wide)
+//   1 V        vertical Lanczos-3 + sRGB encode + RGB pack: work -> out
+//   2 DEPTH    point-sampled live depth, linearised, [near, far] -> 8-bit grey: src -> out
+//   3 ACC      jittered accumulation (upscaled shots): one live frame splatted into the
+//              shot-size running mean (work) with a Gaussian in OUTPUT pixels
+//   4 RESOLVE  the running mean (or, where the content moved, this frame upsampled) ->
+//              sRGB encode + RGB pack -> out
+// Filtering happens in LINEAR light (the source bytes are decoded, the result re-encoded):
+// a downscale averages light, not gamma-encoded values. The crop (a different aspect from
+// the window) is the `crop` rectangle in source pixels: never a re-render with another FOV.
+
+#ifndef SNAP_MODE
+#define SNAP_MODE 0
+#endif
+#define MODE_H       0
+#define MODE_V       1
+#define MODE_DEPTH   2
+#define MODE_ACC     3
+#define MODE_RESOLVE 4
+
+#if SNAP_MODE == MODE_H || SNAP_MODE == MODE_ACC
+layout(local_size_x = 8, local_size_y = 8) in;
+#else
+layout(local_size_x = 64) in;   // 4 output pixels per invocation (3 packed RGB words)
+#endif
+
+// b0: the source -- the swap copy (one RGBA8 / BGRA8 word per pixel, rows top-down) or the
+//     D32 depth copy (float bits). b1: work -- the horizontal pass's half-float rows, or the
+//     accumulation (running mean RGB + weight, half floats). b2: out -- packed RGB bytes,
+//     host-visible. b3: motion vectors (RG16F words, UV units, current - previous).
+layout(std430, set = 0, binding = 0) readonly buffer Src { uint src[]; };
+layout(std430, set = 0, binding = 1) buffer Work { uvec2 work[]; };
+layout(std430, set = 0, binding = 2) writeonly buffer Out { uint outp[]; };
+layout(std430, set = 0, binding = 3) readonly buffer Motion { uint motion[]; };
+
+layout(push_constant) uniform Push {
+    uvec4 size;    // x, y: source size; z, w: output size
+    uvec4 aux;     // x flags (1 BGRA source, 2 motion valid, 4 first accumulated frame, 8 dither the
+                   // output, #932); y, z motion size
+    uvec4 rows;    // x: first source row in work (H / V); y: work rows
+    vec4  crop;    // source pixels: x0, y0, w, h
+    vec4  p0;      // ACC / RESOLVE: jitter (source px, x right / y down), sigma (output px), motion threshold (px)
+                   // DEPTH: x near, y far (the 0..255 range)
+    vec4  p1;      // DEPTH: inverse projection terms {[10], [14], [11], [15]} (view z = (a d + b) / (c d + e))
+} pc;
+
+const uint kBgra = 1u, kMotion = 2u, kFirst = 4u, kDither = 8u;
+
+float srgbToLinear(float c)
+{
+    return c <= 0.04045 ? c / 12.92 : pow((c + 0.055) / 1.055, 2.4);
+}
+float linearToSrgb(float c)
+{
+    c = clamp(c, 0.0, 1.0);
+    return c <= 0.0031308 ? c * 12.92 : 1.055 * pow(c, 1.0 / 2.4) - 0.055;
+}
+
+vec3 loadLinear(ivec2 p)
+{
+    const vec4 u = unpackUnorm4x8(src[uint(p.y) * pc.size.x + uint(p.x)]);   // bytes in memory order
+    const vec3 c = (pc.aux.x & kBgra) != 0u ? u.zyx : u.xyz;
+    return vec3(srgbToLinear(c.r), srgbToLinear(c.g), srgbToLinear(c.b));
+}
+
+float sinc(float x)
+{
+    x *= 3.14159265358979;
+    return abs(x) < 1e-5 ? 1.0 : sin(x) / x;
+}
+float lanczos3(float x)
+{
+    return abs(x) >= 3.0 ? 0.0 : sinc(x) * sinc(x / 3.0);
+}
+
+uint toByte(float lin) { return uint(linearToSrgb(lin) * 255.0 + 0.5); }
+
+// OUTPUT DITHER (#932; RenderDitherEnabled -> kDither; RESOLVE only). An accumulated shot's
+// single 8-bit quantization, at the OUTPUT resolution, ONCE: the running mean carries sub-LSB
+// levels (the samples' own per-sample dithers averaged), which a bare round turns into bands
+// on gradients. (The resample modes' source frame is dithered already.) Triangular-PDF (+-1 LSB, the live view's amplitude) from an
+// integer hash of the output pixel -- white, no lattice: never the window-scale interleaved
+// gradient pattern the post chain's dither has, which magnified into a regular grain when it
+// survived the average. One value for the three channels (no chroma noise).
+uint pcgHash(uint v)
+{
+    const uint s = v * 747796405u + 2891336453u;
+    const uint w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
+    return (w >> 22u) ^ w;
+}
+float ditherTpdf(uint x, uint y)
+{
+    const uint h0 = pcgHash(x ^ pcgHash(y));
+    const uint h1 = pcgHash(h0 ^ 0x9E3779B9u);
+    return (float(h0 >> 8) + float(h1 >> 8)) * (1.0 / 16777216.0) - 1.0;   // [-1, 1)
+}
+uint toByteD(float lin, float n) { return uint(clamp(linearToSrgb(lin) * 255.0 + 0.5 + n, 0.0, 255.0)); }
+uvec3 toBytes(vec3 c, uint x, uint y)
+{
+    const float n = (pc.aux.x & kDither) != 0u ? ditherTpdf(x, y) : 0.0;
+    return uvec3(toByteD(c.r, n), toByteD(c.g, n), toByteD(c.b, n));
+}
+
+// Four consecutive output pixels in LLImageRaw order (flat index, rows bottom-up) -> three
+// little-endian words of R G B bytes.
+void packOut(uint t, uvec3 px[4])
+{
+    const uint u0 = px[0].x | (px[0].y << 8) | (px[0].z << 16) | (px[1].x << 24);
+    const uint u1 = px[1].y | (px[1].z << 8) | (px[2].x << 16) | (px[2].y << 24);
+    const uint u2 = px[2].z | (px[3].x << 8) | (px[3].y << 16) | (px[3].z << 24);
+    outp[3u * t + 0u] = u0;
+    outp[3u * t + 1u] = u1;
+    outp[3u * t + 2u] = u2;
+}
+
+// Accumulator word -> running mean + weight + "content moved here" flag. The flag rides on
+// the weight's sign: moved -> -(weight + 1).
+void unpackAcc(uvec2 a, out vec3 mean, out float wsum, out bool moved)
+{
+    const vec2 rg = unpackHalf2x16(a.x), bw = unpackHalf2x16(a.y);
+    mean = vec3(rg, bw.x);
+    moved = bw.y < 0.0;
+    wsum = moved ? -bw.y - 1.0 : bw.y;
+}
+uvec2 packAcc(vec3 mean, float wsum, bool moved)
+{
+    return uvec2(packHalf2x16(mean.rg), packHalf2x16(vec2(mean.b, moved ? -(wsum + 1.0) : wsum)));
+}
+
+// This frame's source, bilinear at a continuous source position (unjittered screen px).
+vec3 bilinearLinear(vec2 pos)
+{
+    const vec2 t = pos + pc.p0.xy - 0.5;   // the jitter moved the content by +j
+    const ivec2 i = ivec2(floor(t));
+    const vec2 f = t - vec2(i);
+    const ivec2 lim = ivec2(pc.size.xy) - 1;
+    const vec3 a = loadLinear(clamp(i, ivec2(0), lim));
+    const vec3 b = loadLinear(clamp(i + ivec2(1, 0), ivec2(0), lim));
+    const vec3 c = loadLinear(clamp(i + ivec2(0, 1), ivec2(0), lim));
+    const vec3 d = loadLinear(clamp(i + ivec2(1, 1), ivec2(0), lim));
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+void main()
+{
+    const uint dstW = pc.size.z, dstH = pc.size.w;
+#if SNAP_MODE == MODE_H
+    const ivec2 g = ivec2(gl_GlobalInvocationID.xy);
+    if (uint(g.x) >= dstW || uint(g.y) >= pc.rows.y) return;
+    const int sy = int(pc.rows.x) + g.y;
+    const float step = pc.crop.z / float(dstW);   // source px per output px
+    const float fs = max(step, 1.0);              // a downscale widens the kernel (no aliasing)
+    const float cx = pc.crop.x + (float(g.x) + 0.5) * step;
+    const int i0 = int(floor(cx - 3.0 * fs)), i1 = int(ceil(cx + 3.0 * fs));
+    vec3 acc = vec3(0.0);
+    float wsum = 0.0;
+    for (int i = i0; i <= i1; ++i)
+    {
+        const float w = lanczos3((float(i) + 0.5 - cx) / fs);
+        if (w == 0.0) continue;
+        acc += w * loadLinear(ivec2(clamp(i, 0, int(pc.size.x) - 1), sy));
+        wsum += w;
+    }
+    const vec3 c = wsum != 0.0 ? acc / wsum : vec3(0.0);
+    work[uint(g.y) * dstW + uint(g.x)] = uvec2(packHalf2x16(c.rg), packHalf2x16(vec2(c.b, 1.0)));
+#elif SNAP_MODE == MODE_ACC
+    // One jittered live frame into the shot-size running mean. The frame was rendered with
+    // the projection offset by j (source px): source pixel i shows the scene at unjittered
+    // position i + 0.5 - j. Every output pixel gathers the 3 x 3 source samples around it,
+    // weighted by a Gaussian of their distance in OUTPUT pixels (sigma p0.z): over N frames
+    // with distinct sub-pixel offsets the samples fill the output grid (super-resolution of
+    // a still scene, the TAA principle with many more samples and no history clamp).
+    const ivec2 o = ivec2(gl_GlobalInvocationID.xy);
+    if (uint(o.x) >= dstW || uint(o.y) >= dstH) return;
+    const vec2 s = vec2(dstW, dstH) / pc.crop.zw;               // output px per source px
+    const vec2 p = pc.crop.xy + (vec2(o) + 0.5) / s;            // output pixel centre, source px
+    const vec2 j = pc.p0.xy;
+    const ivec2 i0 = ivec2(floor(p + j));
+    const float inv2s2 = 1.0 / (2.0 * pc.p0.z * pc.p0.z);
+    const bool mv = (pc.aux.x & kMotion) != 0u;
+    vec3 sum = vec3(0.0);
+    float wsum = 0.0;
+    bool movedNow = false;
+    for (int dy = -1; dy <= 1; ++dy)
+    for (int dx = -1; dx <= 1; ++dx)
+    {
+        const ivec2 i = i0 + ivec2(dx, dy);
+        if (any(lessThan(i, ivec2(0))) || any(greaterThanEqual(i, ivec2(pc.size.xy)))) continue;
+        const vec2 q = vec2(i) + 0.5 - j;
+        const vec2 dd = (p - q) * s;
+        float w = exp(-dot(dd, dd) * inv2s2);
+        if (dx == 0 && dy == 0) w += 1e-4;   // never an empty pixel
+        if (mv)
+        {
+            // Motion vectors are render-sized (UV units): moving content is not accumulated
+            // (it would ghost); the resolve takes the last frame there instead.
+            const ivec2 m = clamp(ivec2((vec2(i) + 0.5) * vec2(pc.aux.yz) / vec2(pc.size.xy)),
+                                  ivec2(0), ivec2(pc.aux.yz) - 1);
+            const vec2 uv = unpackHalf2x16(motion[uint(m.y) * pc.aux.y + uint(m.x)]);
+            if (length(uv * vec2(pc.size.xy)) > pc.p0.w) { movedNow = true; continue; }
+        }
+        sum += w * loadLinear(i);
+        wsum += w;
+    }
+    const uint idx = uint(o.y) * dstW + uint(o.x);
+    vec3 mean = vec3(0.0);
+    float W = 0.0;
+    bool moved = false;
+    if ((pc.aux.x & kFirst) == 0u) unpackAcc(work[idx], mean, W, moved);
+    moved = moved || movedNow;
+    if (wsum > 0.0)
+    {
+        const float nw = W + wsum;
+        mean += (sum / wsum - mean) * (wsum / nw);
+        W = nw;
+    }
+    work[idx] = packAcc(mean, W, moved);
+#else
+    const uint t = gl_GlobalInvocationID.x;
+    const uint total = dstW * dstH;
+    if (t * 4u >= total) return;
+    uvec3 px[4];
+    for (uint k = 0u; k < 4u; ++k)
+    {
+        px[k] = uvec3(0u);
+        const uint f = t * 4u + k;
+        if (f >= total) continue;
+        const uint x = f % dstW;
+        const uint y = dstH - 1u - f / dstW;   // LLImageRaw rows are bottom-up; the source is top-down
+#if SNAP_MODE == MODE_V
+        const float step = pc.crop.w / float(dstH);
+        const float fs = max(step, 1.0);
+        const float cy = pc.crop.y + (float(y) + 0.5) * step;
+        const int j0 = int(floor(cy - 3.0 * fs)), j1 = int(ceil(cy + 3.0 * fs));
+        const int r0 = int(pc.rows.x), r1 = int(pc.rows.x + pc.rows.y) - 1;
+        vec3 acc = vec3(0.0);
+        float wsum = 0.0;
+        for (int j = j0; j <= j1; ++j)
+        {
+            const float w = lanczos3((float(j) + 0.5 - cy) / fs);
+            if (w == 0.0) continue;
+            const uint row = uint(clamp(j, r0, r1) - r0);
+            const uvec2 a = work[row * dstW + x];
+            acc += w * vec3(unpackHalf2x16(a.x), unpackHalf2x16(a.y).x);
+            wsum += w;
+        }
+        const vec3 c = wsum != 0.0 ? acc / wsum : vec3(0.0);
+        px[k] = uvec3(toByte(c.r), toByte(c.g), toByte(c.b));   // (the source frame is dithered already)
+#elif SNAP_MODE == MODE_DEPTH
+        // Point-sampled (a filtered depth would invent surfaces between an edge's two sides).
+        const vec2 sp = pc.crop.xy + (vec2(x, y) + 0.5) * pc.crop.zw / vec2(dstW, dstH);
+        const ivec2 si = clamp(ivec2(sp), ivec2(0), ivec2(pc.size.xy) - 1);
+        const float d = uintBitsToFloat(src[uint(si.y) * pc.size.x + uint(si.x)]);
+        const float num = pc.p1.x * d + pc.p1.y, den = pc.p1.z * d + pc.p1.w;
+        float dist = abs(den) > 1e-20 ? abs(num / den) : pc.p0.y;
+        if (isnan(dist) || isinf(dist)) dist = pc.p0.y;
+        const float g = clamp((dist - pc.p0.x) / max(pc.p0.y - pc.p0.x, 1e-6), 0.0, 1.0);
+        const uint b = uint(g * 255.0 + 0.5);
+        px[k] = uvec3(b);
+#elif SNAP_MODE == MODE_RESOLVE
+        vec3 mean; float wsum; bool moved;
+        unpackAcc(work[y * dstW + x], mean, wsum, moved);
+        vec3 c = mean;
+        if (moved || wsum < 1e-3)
+        {
+            // Moving content (motion vectors) or no sample landed: this frame alone, upsampled.
+            const vec2 pos = pc.crop.xy + (vec2(x, y) + 0.5) * pc.crop.zw / vec2(dstW, dstH);
+            c = bilinearLinear(pos);
+        }
+        px[k] = toBytes(c, x, y);
+#endif
+    }
+    packOut(t, px);
+#endif
+}

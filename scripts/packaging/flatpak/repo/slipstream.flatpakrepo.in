@@ -1,0 +1,8 @@
+[Flatpak Repo]
+Title=Slipstream Viewer
+Url=@REPO_URL@
+Homepage=https://slipstreamviewer.org/
+Comment=Vulkan viewer for Second Life
+Description=Official Flatpak repository of the Slipstream Viewer: branch stable (releases) and beta (betas and releases).
+Icon=@SITE_URL@slipstream.png
+GPGKey=@GPGKEY@

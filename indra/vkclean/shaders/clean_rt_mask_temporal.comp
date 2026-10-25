@@ -1,0 +1,654 @@
+#version 460
+// vkclean — RT SHADOW DENOISER, temporal pass (B). Accumulates the trace pass's raw
+// one-frame visibility (clean_rt_shadow_mask.comp) over time, per mask texel, for the
+// sun / moon and every ray-traced projector slot (matched by light id, never slot):
+//
+//   * REPROJECTION: the receiver (rebuilt from the pre-pass depth exactly as the trace
+//     did) back along its motion vector (object motion: skinned avatars; camera-only
+//     without one, rtMaskPrevPx) to last frame's unjittered render px, then into last frame's
+//     JITTERED mask grid (its sample sat at (m + 0.5 + J') / scale, J' = last frame's
+//     jitter): 2x2 bilinear taps, each kept only when its stored depth PLANE predicts
+//     the reprojected view depth (sloped ground at grazing views passes; another
+//     surface fails -> disocclusion).
+//   * NEIGHBOURHOOD CLAMP: the history is clamped to mean +- gamma * sigma of this
+//     frame's raw 3x3 neighbourhood (same surface only). Lit / umbra areas have zero
+//     variance: a caster moving in or out snaps the history at once (no ghost trail);
+//     penumbrae and leaf-dappled light keep a wide box and accumulate.
+//   * FAST HISTORY (ReLAX-style; sun): the box is widened only to cover a ~3-frame
+//     moving average of this texel's raw luminance (+- half its deviation; moments in
+//     meta.zw, reset with the history on anti-lag). A sub-texel caster seen on some
+//     frames only keeps that fast mean between 0 and 1, so the slow history stays
+//     inside the box (no flicker); a caster that LEFT drives the fast mean to the new
+//     state within ~3 frames and the slow history is dragged along (anti-lag) instead
+//     of decaying at 1/16 inside a box the old deviation held open (the wake ghost).
+//   * ADAPTIVE LENGTH: alpha = 1 / frames, frames capped by RenderVKRTShadowHistory and
+//     cut back when the clamp had to move the history (anti-lag), reset on disocclusion.
+//     Hard / near-hard shadows (penumbra radius under ~1 mask texel) cap at 4 frames:
+//     their raw estimate is ~binary and jittered for TAA / FSR to integrate, and a long
+//     mask history on top only stacked a second slow filter (moving-shadow lag). The
+//     full length is for wide penumbrae, where the disc noise needs it.
+//   * Projector slots keep their own length: meta.y = the shortest projector history
+//     at the texel (the surface age when it has none).
+//   * MOVING CASTERS (RenderVKRTShadowAntiLag): the receiver is static and its motion
+//     vector zero, so a walking avatar's shadow is pure shading change -- and the fast-
+//     history widening above (needed for static sub-pixel casters) contains the stale
+//     history BY CONSTRUCTION: in steady state the fast mean equals the slow history, so
+//     the box always reaches it and the clamp never fires (the "trail"). The trace flags
+//     texels whose rays met a MOVING caster (avatars, attachments, moved / spinning
+//     prims; depth plane w, this frame's OR last frame's via the history copy). Only
+//     there, a change detector runs: the centre sample AND the 3x3 mean both left the
+//     fast history's noise band (|x - fast mean| > 2 sigma_fast + 0.08) -> the widening
+//     is dropped, the history length snaps to 1 (current frame), the fast moments are
+//     re-seeded from the 3x3 (mean, spatial variance: no reset loop in noisy penumbrae),
+//     and the change is written as the TAA / FSR reactive (final sun mask alpha). With no
+//     change detected (an idle avatar) it accumulates as before, with a short per-pixel
+//     history for hard shadows (RenderVKRTShadowDynamicHistory; 1 with a hard sun).
+//     Static casters (grass, fences) keep the long, widened history: their shadow cannot
+//     move, so any frame-to-frame change is aliasing to integrate, never to reset.
+//   * 16-bit float accumulation: an 8-bit EMA stalls ~0.5 / 255 / alpha short of its
+//     target (the legacy 0.75 blend was rgba8).
+//   * SVGF-STYLE SUN HISTORY (#85, RenderVKRTShadowSvgf; static casters only -- movers
+//     keep the detector above):
+//     - the box the history is clamped to is the FAST history's neighbourhood (ReBLUR):
+//       min / max of last frame's fast mean (meta.z) over the 3x3 same-plane texels
+//       around the reprojected position, plus this texel's new fast mean, +- 0.02. The
+//       raw 3x3 of one-sample visibility is all-lit / all-umbra by chance in penumbra
+//       TAILS (p = 0.1: 39 % of frames) and its box then cut the history there: a tail
+//       sat at ~26 of 32 frames with a ~25 % dark bias (Monte-Carlo of this pass). The
+//       fast means are already ~3-frame averages, so the box only closes on a REAL change
+//       (a derezzed / edited caster, a moving sun), which it then follows within ~2 frames;
+//     - the clamp moves the LUMINANCE (all channels shifted together): translucent tints
+//       keep their colour;
+//     - reprojection taps must also match the receiver's plane SLOPE (depth gradient /
+//       depth, the a-trous pass's normal proxy; a crease or a turned surface fails);
+//     - hard / near-hard static shadows keep 8 frames instead of 4: with TAA / FSR
+//       rejecting a pixel (disocclusion, #608) the mask's own edge is then converged;
+//     - SUN MOTION (time of day, sun / moon switch): the host sends the sun's angular
+//       step in disc radii; a penumbra of radius r moves ~r x that per frame, and the
+//       history is capped so it lags at most half a texel (sunMoveCap).
+//     The spatial pass reads the same meta (clean_rt_mask_spatial.comp).
+//     DEBUG 6 (rtDiagView): this pass writes its events into the final mask's rgb, the
+//     spatial pass passes them through: red = disocclusion (no history), green = the
+//     history was clamped / cut (shade = amount), blue = the moving-caster detector fired.
+//   * PROJECTORS ON THE SUN PATH (#666, RenderVKRTShadowProjDenoise; rtProjFull): every
+//     ray-traced projector slot keeps its OWN history length and fast luminance mean
+//     (bindings 19 / 20, rtPackPM; matched by light id like the visibility), and gets
+//     what the sun has in SVGF mode: the history clamped (luminance) to the box of last
+//     frame's fast means of THIS light around the reprojected position plus its new fast
+//     mean, the moving-caster detector against the fast mean, the 8-frame static hard
+//     end, and a LIGHT-MOTION cap (projMoveCap: the host's apex step per frame in light
+//     radii, ProjShadow texel.w -- a moving spotlight moves every shadow it casts with no
+//     moving caster to flag). Off: the raw-3x3 box and the texel's shared shortest
+//     projector length, as before.
+// Legacy mode (RenderVKRTShadowDenoise off): the fixed 0.75 blend with the nearest
+// reprojected texel and a flat 3 % depth test, as before the denoiser.
+layout(local_size_x = 8, local_size_y = 8) in;
+
+#include "clean_frame_info.glsl"
+
+layout(set = 3, binding = 0) uniform sampler2D uDepth;
+layout(set = 3, binding = 3, rgba16ui) readonly uniform uimage2D uIds;
+// (Read-write, #674: w gets the moving-caster persistence countdown -- rtMoverPersist.)
+layout(set = 3, binding = 4, r32f) uniform image2D uMDepthZ;       // view depth (32-bit: reprojection / plane tests)
+layout(set = 3, binding = 21, rgba16f) uniform image2D uMDepthG;   // d(vz)/dx, d(vz)/dy, flags (exact integer < 2048)
+layout(set = 3, binding = 5) uniform sampler2D uHistSun;
+layout(set = 3, binding = 6) uniform sampler2DArray uHistProj;
+layout(set = 3, binding = 7) uniform usampler2D uHistIds;
+layout(set = 3, binding = 8) uniform sampler2D uHistDepth;         // r32f view depth
+layout(set = 3, binding = 22) uniform sampler2D uHistDepthG;       // rgba16f gradient + flags
+// The old rgba32f layout: (view depth, d/dx, d/dy, flags).
+vec4 loadMD(ivec2 t) { return vec4(imageLoad(uMDepthZ, t).x, imageLoad(uMDepthG, t).xyz); }
+vec4 fetchHistMD(ivec2 t) { return vec4(texelFetch(uHistDepth, t, 0).x, texelFetch(uHistDepthG, t, 0).xyz); }
+layout(set = 3, binding = 9) uniform sampler2D uHistMeta;
+layout(set = 3, binding = 10, rgba8) readonly uniform image2D uRawSun;
+layout(set = 3, binding = 11, rgba8) readonly uniform image2DArray uRawProj;
+layout(set = 3, binding = 12, rgba16f) writeonly uniform image2D uAccSun;
+layout(set = 3, binding = 13, rgba16f) writeonly uniform image2DArray uAccProj;
+layout(set = 3, binding = 14, rgba16f) writeonly uniform image2D uMeta;
+// Final sun mask (C's output): only its alpha matters here -- the shading change for the
+// TAA / FSR reactive mask, which C passes through (clean_rt_mask_spatial.comp).
+layout(set = 3, binding = 1, rgba8) writeonly uniform image2D uSunFinal;
+// #666 projector slot history (clean_rt_mask_common.glsl rtPackPM): this slot's / the read slot's.
+layout(set = 3, binding = 19, rgba16ui) writeonly uniform uimage2D uProjPMOut;
+layout(set = 3, binding = 20, rgba16ui) readonly uniform uimage2D uHistProjPM;
+// The light list and projector records (draw set 0): the light-motion cap reads the
+// apex step the host stored per ray-traced projector (texel.w).
+#include "clean_lights_common.glsl"
+layout(std430, set = 0, binding = 3) readonly buffer Lights { Light lights[]; };
+#include "clean_projshadow.glsl"
+
+#include "clean_rt_mask_common.glsl"
+
+// #771 STATIC CARRY (clean_rt_mask_cache.glsl rcCarried): a carried block's history slot
+// was copied by the reuse dispatch and its final texels keep last frame's -- skip it whole
+// (one 8x8 workgroup = one mask block; no barriers in this pass).
+#define RT_CACHE_WORK_QUAL readonly
+#define RC_NO_HIST
+#include "clean_rt_mask_cache.glsl"
+
+int idSlot(uvec4 ids, uint id)
+{
+    for (int s = 0; s < 4; ++s)
+        if (ids[s] == id) return s;
+    return -1;
+}
+
+// lum3 / accumulate / accumulateLum / changeDetect: the shared denoiser helpers.
+#define DENOISE_NO_ATROUS
+#include "clean_denoise_common.glsl"
+
+// SVGF mode: the longest history that lets a penumbra of radius r (mask texels) lag the
+// moving sun by at most half a texel (header). Unlimited while the sun holds still.
+float sunMoveCap(float r, float cap)
+{
+    const float mv = rtSunMove() * max(r, 1.0);   // texels per frame
+    return mv > 0.0 ? clamp(0.5 / mv, 1.0, cap) : cap;
+}
+
+// Longest history for a penumbra radius r (mask texels, < 0 = no caster met): 4 frames
+// for hard / near-hard shadows, RenderVKRTShadowHistory from ~4 texels of penumbra up.
+// MOVING casters (dyn): the hard end is RenderVKRTShadowDynamicHistory (default 2) and
+// a contact shadow (r -> 0) goes to 1 frame -- their raw estimate is already ~exact (one
+// deterministic ray), the jitter is TAA / FSR's to integrate; only wide penumbrae need
+// the long history. A hard sun (Shadow softness 0: one ray, no disc) on a moving caster
+// skips the mask's temporal accumulation entirely (1).
+// SVGF mode: the static hard end is 8 frames (header) and the sun's motion caps it.
+float historyCap(float r, bool dyn, bool hard_sun)
+{
+    const float full = max(mp.p0.w, 1.0);
+    // #841: without a TAA / FSR resolve the mask IS the only integrator of a hard edge (the
+    // trace's footprint jitter, clean_rt_shadow_mask.comp): static casters keep the full
+    // length there -- an 8-frame average of a jittered binary edge is still a crawling stipple.
+    if (!dyn && ssr.taa_params.w < 0.5 && rtDenoise()) return full;
+    if (!dyn) return min(full, mix(rtSvgf() ? 8.0 : 4.0, full, smoothstep(1.0, 4.0, max(r, 0.0))));
+    if (hard_sun) return 1.0;
+    const float hl = min(rtDynHardLen(), full);
+    const float rr = max(r, 0.0);
+    // #674: wide penumbrae climbed back to the FULL length here (smoothstep(1, 4, r)): a
+    // moving caster's soft shadow -- a low sun's penumbra stretched by 1 / N.L, an avatar
+    // on a wall -- kept up to RenderVKRTShadowHistory frames on the moving-caster path,
+    // whatever RenderVKRTShadowDynamicHistory said, and its leading band faded in over
+    // that history (the detector fires only where centre AND 3x3 mean leave the band: the
+    // outline). Capped at rtDynMaxLen; the spatial filter (whose radius is that
+    // penumbra's) smooths the extra noise.
+    const float dmax = rtDynMaxLen();
+    const float cap = min(full, rr < 1.0 ? mix(1.0, hl, rr) : mix(hl, full, smoothstep(1.0, 4.0, rr)));
+    return dmax > 0.0 ? min(cap, max(dmax, hl)) : cap;
+}
+
+// SVGF mode: does a history texel's depth plane have this receiver's SLOPE (depth
+// gradient / depth: the a-trous pass's normal proxy)? 1 = yes, fading to 0 between half
+// and 0.8 relative difference -- lenient: camera motion changes the per-pixel gradient a
+// little; a crease or a surface that turned changes it a lot.
+float slopeMatch(vec4 a, vec4 b)
+{
+    const vec2 sa = a.yz / max(a.x, 1e-3), sb = b.yz / max(b.x, 1e-3);
+    const float rel = length(sa - sb) / (length(sa) + length(sb) + 0.002);
+    return 1.0 - smoothstep(0.5, 0.8, rel);
+}
+
+// #666: as sunMoveCap, for a projector whose apex moved `move` light radii since last
+// frame (ProjShadow texel.w): its penumbra of radius r moves ~r x that per frame.
+float projMoveCap(float r, float cap, float move)
+{
+    const float mv = move * max(r, 1.0);
+    return mv > 0.0 ? clamp(0.5 / mv, 1.0, cap) : cap;
+}
+float projLightMove(uint id)
+{
+    if (id == 0u || id > uint(lights.length())) return 0.0;
+    const uint pi = lights[id - 1u].tex.z;
+    if (pi == 0u || pi > uint(pshadow.length())) return 0.0;
+    const float mv = pshadow[pi - 1u].texel.w;
+    return (isnan(mv) || isinf(mv)) ? 64.0 : clamp(mv, 0.0, 64.0);
+}
+
+float accRadius(float raw_r, float hist_r, float len_new)
+{
+    if (raw_r < 0.0) return hist_r;
+    if (hist_r < 0.0) return raw_r;
+    return mix(hist_r, raw_r, max(1.0 / len_new, 0.25));
+}
+
+void main()
+{
+    if (rcCarried(gl_WorkGroupID.xy)) return;   // #771
+    const ivec2 m = ivec2(gl_GlobalInvocationID.xy);
+    if (m.x >= int(mp.dims.z) || m.y >= int(mp.dims.w)) return;
+    const vec4 dc = loadMD(m);
+    const vec4 rs = imageLoad(uRawSun, m);
+    if (dc.x < 0.0)   // sky
+    {
+        imageStore(uAccSun, m, vec4(1.0, 1.0, 1.0, -1.0));
+        imageStore(uMeta, m, vec4(0.0));
+        imageStore(uSunFinal, m, vec4(1.0, 1.0, 1.0, 0.0));   // (C overwrites rgb)
+        return;
+    }
+    const uvec4 ids = imageLoad(uIds, m);
+    const ivec2 mx = ivec2(mp.dims.zw) - 1;
+
+    // ---- reprojection into last frame's mask ----
+    ivec2 tp[4];
+    float tw[4];
+    uint  tf[4];   // the taps' moving-caster bits (last frame's depth plane w)
+    float wsum = 0.0;
+    float zkeep = 1.0;   // #674 rtZoomKeep (1 = no zoom-in since last frame)
+    const bool sv = rtSvgf();
+    vec2 fbox = vec2(1e9, -1e9);   // SVGF mode: min / max of the fast history around the taps
+    uint  ring = 0u;               // #666: the ring texels below that passed (bit i), for the projectors
+    ivec2 ringc = ivec2(0);        // ... and its centre
+    for (int i = 0; i < 4; ++i) { tp[i] = ivec2(0); tw[i] = 0.0; tf[i] = 0u; }
+    if (rtMaskTemporal())
+    {
+        const ivec2 rp = rtMaskRenderPx(m);
+        const float d = texelFetch(uDepth, rp, 0).r;
+        const vec3 P = worldAt(vec2(rp) + 0.5, d);
+        vec2 prpx;   // last frame's unjittered render px (object motion included)
+        float pw;    // ... and view depth
+        if (rtMaskPrevPx(P, rp, prpx, pw))
+        {
+            if (rtZoomAware()) zkeep = rtZoomKeep(dc.x, pw);   // #674
+            const vec2 s = rtMaskScale();
+            if (rtDenoise())
+            {
+                // Last frame's texel t sampled jittered render px (t + 0.5 + J') / s,
+                // i.e. unjittered (t + 0.5 + J') / s - j'. Invert for the continuous t.
+                const vec2 jp = mp.p1.xy;
+                const vec2 Jp = (mp.dims.z < mp.dims.x) ? jp : vec2(0.0);
+                vec2 hc = (prpx + jp) * s - Jp - 0.5;
+                const bool ex = rtExactReproj();   // #674 (clean_rt_mask_common.glsl)
+                if (ex) hc = rtExactHc(prpx, jp, Jp, s, hc);
+                const ivec2 hb = ivec2(floor(hc));
+                const vec2 f = hc - vec2(hb);
+                const float tol = max(pw * 0.02, 0.03);
+                for (int i = 0; i < 4; ++i)
+                {
+                    const ivec2 o = ivec2(i & 1, i >> 1);
+                    const ivec2 t = hb + o;
+                    if (any(lessThan(t, ivec2(0))) || any(greaterThan(t, mx))) continue;
+                    const vec4 hd = fetchHistMD(t);
+                    if (hd.x <= 0.0) continue;
+                    const vec2 off = ex ? prpx - rtPrevCentre(vec2(t), jp, Jp, s)   // render px from the tap's sample
+                                        : (hc - vec2(t)) / s;
+                    const float zp = hd.x + clamp(dot(hd.yz, off), -0.25 * hd.x, 0.25 * hd.x);
+                    const float wz = clamp(1.0 - abs(zp - pw) / tol, 0.0, 1.0);
+                    const float bw = (o.x == 1 ? f.x : 1.0 - f.x) * (o.y == 1 ? f.y : 1.0 - f.y);
+                    tp[i] = t;
+                    tw[i] = bw * wz * (sv ? slopeMatch(dc, hd) : 1.0);
+                    tf[i] = uint(clamp(hd.w, 0.0, 2047.0) + 0.5);
+                    wsum += tw[i];
+                }
+                // SVGF mode: last frame's FAST history around the reprojected position, same
+                // surface only (the taps' plane test) -- the static history's clamp box.
+                if (sv)
+                {
+                    const ivec2 hn = ivec2(floor(hc + 0.5));
+                    ringc = hn;
+                    for (int i = 0; i < 9; ++i)
+                    {
+                        const ivec2 t = hn + ivec2(i % 3 - 1, i / 3 - 1);
+                        if (any(lessThan(t, ivec2(0))) || any(greaterThan(t, mx))) continue;
+                        const vec4 hd = fetchHistMD(t);
+                        if (hd.x <= 0.0) continue;
+                        const vec2 off = ex ? prpx - rtPrevCentre(vec2(t), jp, Jp, s) : (hc - vec2(t)) / s;
+                        const float zp = hd.x + clamp(dot(hd.yz, off), -0.25 * hd.x, 0.25 * hd.x);
+                        if (abs(zp - pw) >= tol || slopeMatch(dc, hd) < 0.5) continue;
+                        ring |= 1u << uint(i);
+                        const float fm = texelFetch(uHistMeta, t, 0).z;
+                        if (isnan(fm) || isinf(fm)) continue;
+                        fbox = vec2(min(fbox.x, fm), max(fbox.y, fm));
+                    }
+                }
+            }
+            else
+            {
+                const ivec2 t = ivec2(floor(prpx * s));
+                if (all(greaterThanEqual(t, ivec2(0))) && all(lessThanEqual(t, mx)))
+                {
+                    const float hd = texelFetch(uHistDepth, t, 0).r;
+                    if (hd > 0.0 && abs(hd - pw) < max(pw * 0.03, 0.05)) { tp[0] = t; tw[0] = 1.0; wsum = 1.0; }
+                }
+            }
+        }
+    }
+    // Too little of the footprint matched: disocclusion, start over.
+    if (wsum < 0.1) wsum = 0.0;
+
+    // ---------------------------------------------------------------- legacy
+    if (!rtDenoise())
+    {
+        const bool h = wsum > 0.0;
+        vec3 sun = rs.rgb;
+        if (h) sun = mix(sun, rtFiniteVis(texelFetch(uHistSun, tp[0], 0).rgb), 0.75);
+        imageStore(uAccSun, m, vec4(rtFiniteVis(sun), -1.0));
+        imageStore(uMeta, m, vec4(0.0));
+        imageStore(uSunFinal, m, vec4(1.0, 1.0, 1.0, 0.0));   // no reactive in legacy mode
+        const uvec4 hids = h ? texelFetch(uHistIds, tp[0], 0) : uvec4(0u);
+        for (int k = 0; k < 4; ++k)
+        {
+            if (ids[k] == 0u) continue;
+            vec3 v = imageLoad(uRawProj, ivec3(m, k)).rgb;
+            const int hs = h ? idSlot(hids, ids[k]) : -1;
+            if (hs >= 0) v = mix(v, rtFiniteVis(texelFetch(uHistProj, ivec3(tp[0], hs), 0).rgb), 0.75);
+            imageStore(uAccProj, ivec3(m, k), vec4(rtFiniteVis(v), -1.0));
+        }
+        return;
+    }
+
+    // ---------------------------------------------------------------- denoiser
+    // History, normalized over the matching taps. Radii average over taps that have one.
+    vec3 hsun = vec3(0.0);
+    vec2 hmeta = vec2(0.0);
+    float hr = 0.0, hrw = 0.0;
+    uvec4 hids[4];
+    for (int i = 0; i < 4; ++i)
+    {
+        hids[i] = uvec4(0u);
+        if (tw[i] <= 0.0) continue;
+        const vec4 h = texelFetch(uHistSun, tp[i], 0);
+        hsun += tw[i] * h.rgb;
+        hmeta += tw[i] * texelFetch(uHistMeta, tp[i], 0).xy;
+        if (h.a >= 0.0) { hr += tw[i] * h.a; hrw += tw[i]; }
+        hids[i] = texelFetch(uHistIds, tp[i], 0);
+    }
+    const bool hist = wsum > 0.0;
+    if (hist) { hsun /= wsum; hmeta /= wsum; }
+    // NaN / Inf safety: a bad history texel restarts here instead of living on.
+    hsun = rtFiniteVis(hsun);
+    if (any(isnan(hmeta)) || any(isinf(hmeta))) hmeta = vec2(0.0);
+    // #674 ZOOM / DOLLY IN (rtZoomKeep): the history lengths shrink with the footprint, so
+    // the magnified history is replaced at the rate the new detail needs instead of
+    // settling in over the full length afterwards.
+    hmeta *= zkeep;
+    const float hsr = hrw > 0.0 ? hr / hrw : -1.0;
+    const float age = hist ? hmeta.y : 0.0;   // projector history length / surface age (frames)
+
+    // Raw neighbourhood (3x3, same surface: the centre's depth plane).
+    const vec2 sm = rtMaskScale();
+    const float tolN = max(dc.x * 0.02, 0.03);
+    vec4 nd[9];
+    uvec4 nids[9];
+    vec3 m1 = vec3(0.0), m2 = vec3(0.0);
+    float nn = 0.0;
+    for (int i = 0; i < 9; ++i)
+    {
+        const ivec2 o = ivec2(i % 3 - 1, i / 3 - 1);
+        const ivec2 t = clamp(m + o, ivec2(0), mx);
+        nd[i] = loadMD(t);
+        const float zp = dc.x + clamp(dot(dc.yz, vec2(o) / sm), -0.25 * dc.x, 0.25 * dc.x);
+        const bool same = nd[i].x > 0.0 && abs(nd[i].x - zp) < tolN;
+        nids[i] = same ? imageLoad(uIds, t) : uvec4(0u);
+        if (!same) { nd[i].x = -1.0; continue; }
+        const vec3 v = imageLoad(uRawSun, t).rgb;
+        m1 += v; m2 += v * v; nn += 1.0;
+    }
+    // (The centre always qualifies.)
+    const vec3 mean = m1 / nn;
+    const vec3 sigma = sqrt(max(m2 / nn - mean * mean, vec3(0.0)));
+    const float g = abs(mp.p1.w);   // (negative: #85 rtProjStochastic)
+    const vec3 clo = mean - g * sigma - 0.01, chi = mean + g * sigma + 0.01;   // this frame's box
+    vec3 lo = clo, hi = chi;
+    // MOVING CASTERS (header): this texel's rays met one this frame, or last frame's
+    // (any matched history tap). Off with RenderVKRTShadowAntiLag (or no history).
+    const bool al = rtAntiLag() && hist;
+    const uint dfl = uint(clamp(dc.w, 0.0, 255.0) + 0.5) & 31u;   // the trace's bits
+    uint hfl = 0u;
+    for (int i = 0; i < 4; ++i) if (tw[i] > 0.0) hfl |= tf[i];
+    // #674 MOVING-CASTER PERSISTENCE: the flag only marks texels whose rays met the mover
+    // this frame or last. A texel the shadow LEFT is flagged for one frame; if the anti-
+    // lag snap there was partial (sa < 1: a soft edge, a noisy fast history), the next
+    // frame it was back on the static path -- long cap, and a clamp box built from the
+    // fast means of its 3x3 ring, all still in the trail and still dark -- and the stale
+    // history crawled out at 1 / length: the avatar-shadow ghost. Now a texel flagged
+    // this frame / last arms a countdown of rtMoverPersist() frames (carried in the depth
+    // plane's w through the history taps, max over them), and it stays on the moving-
+    // caster path until it runs out. 0 = the old one-frame flag.
+    const uint persist = rtMoverPersist();
+    uint hsc = 0u, hpc = 0u;
+    for (int i = 0; i < 4; ++i)
+        if (tw[i] > 0.0) { hsc = max(hsc, (tf[i] >> 5u) & 7u); hpc = max(hpc, (tf[i] >> 8u) & 7u); }
+    const bool sdyn_now = ((dfl | hfl) & 1u) != 0u;
+    const bool sdyn = al && (sdyn_now || (persist > 0u && hsc > 0u));
+    const uint scnt = persist == 0u ? 0u : (sdyn_now ? persist : (hsc > 0u ? hsc - 1u : 0u));
+    const bool pdyn_now = ((dfl | hfl) & 30u) != 0u;
+    const uint pcnt = persist == 0u ? 0u : (pdyn_now ? persist : (hpc > 0u ? hpc - 1u : 0u));
+    const bool hard_sun = ssr.sun_rt.x <= 0.0;
+    // FAST HISTORY (see the header): moments of the raw luminance at this texel, a
+    // ~3-frame average, from the history BEFORE this frame. A sub-texel caster -- wire,
+    // railing, far fence -- is hit by this texel's jittered sample only on some frames;
+    // on a frame its whole 3x3 misses it the spatial box collapses to "lit", but the
+    // fast mean (between 0 and 1) keeps the box reaching the slow history.
+    const float rl = (rs.r + rs.g + rs.b) * (1.0 / 3.0);
+    const float ml = (mean.r + mean.g + mean.b) * (1.0 / 3.0);
+    const float sl = (sigma.r + sigma.g + sigma.b) * (1.0 / 3.0);
+    vec2 hm = vec2(rl, rl * rl);
+    float sa = 0.0;   // the sun's change (moving casters only)
+    if (hist)
+    {
+        hm = vec2(0.0);
+        for (int i = 0; i < 4; ++i)
+        {
+            if (tw[i] <= 0.0) continue;
+            const vec2 hz = texelFetch(uHistMeta, tp[i], 0).zw;
+            hm += tw[i] * hz;
+            // SVGF mode: every accepted tap's fast mean is in the box (the ring above uses
+            // hard tests; a softly accepted tap must never leave the box empty / at fn).
+            if (sv && !isnan(hz.x) && !isinf(hz.x)) fbox = vec2(min(fbox.x, hz.x), max(fbox.y, hz.x));
+        }
+        hm /= wsum;
+        if (any(isnan(hm)) || any(isinf(hm))) hm = vec2(rl, rl * rl);
+        const float fs = sqrt(max(hm.y - hm.x * hm.x, 0.0));
+        if (sdyn) sa = changeDetect(rl, ml, hm.x, 2.0 * fs + 0.08);
+        // #674 LEADING EDGE (clean_rt_mask_common.glsl rtDarkSnap): this frame's rays met
+        // the mover and the texel went dark beyond the noise -> a detected change.
+        if (sdyn && rtDarkSnapOn() && (dfl & 1u) != 0u && rtDarkSnap(dot(hsun, vec3(1.0 / 3.0)), rl, ml)) sa = 1.0;
+        // The widening only where nothing moved: with a moving caster it would contain
+        // the stale history (the fast mean equals it in steady state). HOT texels too
+        // (a mover's history snapped last frame, length 1): a penumbra band sweeping
+        // over leaves them partial for a frame (snapped to the band's value) with the
+        // seeded spread making the detector deaf -- without the widening the plain box
+        // clamps the stale value and the length cut takes the current frame again. A
+        // stable texel reaches length 2 and gets the widening (sub-texel guard) back.
+        const float wide = (sdyn && hmeta.x < 1.5) ? 0.0 : 1.0 - sa;
+        lo = mix(clo, min(lo, vec3(hm.x - 0.5 * fs)), wide);
+        hi = mix(chi, max(hi, vec3(hm.x + 0.5 * fs)), wide);
+    }
+
+    const float rr = rtDecR(rs.a);
+    float scap_n = historyCap(rr >= 0.0 ? rr : hsr, sdyn, hard_sun);
+    if (sv) scap_n = sunMoveCap(rr >= 0.0 ? rr : hsr, scap_n);   // time of day (header)
+    const float scap = mix(scap_n, 1.0, sa);
+    float slen, scut = 0.0;
+    vec3 sun;
+    if (sv && !sdyn)
+    {
+        // SVGF mode, static casters (header): the luminance box of the fast history's
+        // neighbourhood and this texel's new fast mean.
+        const float fn = hist ? mix(hm.x, rl, max(1.0 / min(max(hmeta.x, 1.0) + 1.0, scap), 0.33)) : rl;
+        const vec2 fb = fbox.x <= fbox.y ? vec2(min(fbox.x, fn), max(fbox.y, fn)) : vec2(fn);
+        sun = accumulateLum(rs.rgb, fb.x - 0.02, fb.y + 0.02, hsun, hist ? max(hmeta.x, 1.0) : 0.0,
+                            scap, slen, scut);
+    }
+    else
+        sun = accumulate(rs.rgb, lo, hi, hsun, hist ? max(hmeta.x, 1.0) : 0.0, scap, slen);
+    // #674 certainty bypass (clean_rt_mask_common.glsl rtCertain).
+    bool scert = false;
+    if (sdyn && rtCertainBypass() && rtCertain(rl, ml)) { sun = rs.rgb; slen = 1.0; scert = true; }
+    const float srad = accRadius(rr, hsr, slen);
+    // Moments after the blend. Static casters: at the NEW length (an anti-lag snap,
+    // slen = 1, resets them). Moving casters: a fixed ~3-frame rate (a jittered hard
+    // edge with a 1-frame history must keep its 0 / 1 spread, or the detector fires on it
+    // every frame), re-seeded on a detected change from the 3x3: its mean and SPATIAL
+    // variance (a single-sample seed has no spread, and the next noisy penumbra sample
+    // would fire again -- a reset loop).
+    // A mover's clamp cut (slen 1 below a longer cap) re-seeds them too: the step it
+    // just took would read as a wide temporal spread and leave the detector deaf for
+    // frames. (Not where the cap itself is 1 -- a hard sun / contact shadow: there the
+    // 0.33-rate moments ARE the jitter spread that keeps the detector quiet.)
+    vec2 mom = hist ? mix(hm, vec2(rl, rl * rl), sdyn ? 0.33 : max(1.0 / slen, 0.33)) : vec2(rl, rl * rl);
+    const float reseed = (sdyn && slen < 1.5 && scap_n > 1.5) ? 1.0 : sa;
+    mom = mix(mom, vec2(ml, ml * ml + sl * sl), reseed);
+    imageStore(uAccSun, m, vec4(rtFiniteVis(sun), srad));
+    // Shading change for the TAA / FSR reactive mask: where the detector fired, how far
+    // the mask moved (luminance) this frame. Never from noise / jitter (sa = 0 there).
+    float react = sa * abs(dot(rtFiniteVis(sun) - hsun, vec3(1.0 / 3.0)));
+    // meta.y: the shortest projector history at this texel (below), else the surface age.
+    float pmin = min(age + 1.0, 255.0);
+
+    // ---- projector slots (by light id) ----
+    const bool pf = rtProjFull();   // #666: the sun path (header)
+    uvec4 pmo = uvec4(0u);          // this frame's projector slot history (pf)
+    uvec4 rids[9];                  // the ring's history ids (pf; fetched once for every slot)
+    for (int i = 0; i < 9; ++i)
+        rids[i] = (pf && (ring & (1u << uint(i))) != 0u)
+                ? texelFetch(uHistIds, clamp(ringc + ivec2(i % 3 - 1, i / 3 - 1), ivec2(0), mx), 0) : uvec4(0u);
+    for (int k = 0; k < 4; ++k)
+    {
+        const uint id = ids[k];
+        if (id == 0u) continue;
+        const vec4 raw = imageLoad(uRawProj, ivec3(m, k));
+        vec3 hv = vec3(0.0);
+        float hw = 0.0, pr = 0.0, prw = 0.0;
+        bool phd = false;   // last frame's rays of THIS light met a moving caster
+        for (int i = 0; i < 4; ++i)
+        {
+            if (tw[i] <= 0.0) continue;
+            const int hs = idSlot(hids[i], id);
+            if (hs < 0) continue;
+            const vec4 h = texelFetch(uHistProj, ivec3(tp[i], hs), 0);
+            hv += tw[i] * h.rgb;
+            hw += tw[i];
+            if (h.a >= 0.0) { pr += tw[i] * h.a; prw += tw[i]; }
+            if ((tf[i] & (2u << uint(hs))) != 0u) phd = true;
+        }
+        // This light's history must cover most of the matched footprint.
+        const bool ph = hist && hw > 0.5 * wsum;
+        if (ph) hv /= hw;
+        hv = rtFiniteVis(hv);
+        vec3 p1 = vec3(0.0), p2 = vec3(0.0);
+        float pn = 0.0;
+        for (int i = 0; i < 9; ++i)
+        {
+            if (nd[i].x < 0.0) continue;
+            const int s = idSlot(nids[i], id);
+            if (s < 0) continue;
+            const ivec2 t = clamp(m + ivec2(i % 3 - 1, i / 3 - 1), ivec2(0), mx);
+            const vec3 v = imageLoad(uRawProj, ivec3(t, s)).rgb;
+            p1 += v; p2 += v * v; pn += 1.0;
+        }
+        const vec3 pm = p1 / max(pn, 1.0);
+        const vec3 psg = sqrt(max(p2 / max(pn, 1.0) - pm * pm, vec3(0.0)));
+        const float prr = rtDecR(raw.a), phr = prw > 0.0 ? pr / prw : -1.0;
+        // Moving casters (as the sun; on the old path projectors keep no fast moments): the reference is
+        // the history itself and the noise band the 3x3's spatial spread -- a jittered
+        // hard edge has a wide spread, a still penumbra's history sits inside its noise.
+        const bool pdyn = al && ph && ((dfl & (2u << uint(k))) != 0u || phd || (persist > 0u && hpc > 0u));
+        float pa = 0.0;
+        if (pdyn)
+        {
+            const vec3 third = vec3(1.0 / 3.0);
+            pa = changeDetect(dot(raw.rgb, third), dot(pm, third), dot(hv, third),
+                              2.0 * dot(psg, third) + 0.08);
+            // #674 leading edge (as the sun): this light's rays met the mover this frame.
+            if (rtDarkSnapOn() && (dfl & (2u << uint(k))) != 0u
+                && rtDarkSnap(dot(hv, third), dot(raw.rgb, third), dot(pm, third))) pa = 1.0;
+        }
+        float plen;
+        vec3 v;
+        if (!pf)
+        {
+        // The history length is meta.y (the shortest projector history here last frame):
+        // an anti-lag cut now persists instead of springing back to the surface age.
+        v = accumulate(raw.rgb, pm - g * psg - 0.01, pm + g * psg + 0.01, hv,
+                       ph ? max(age, 1.0) : 0.0,
+                       mix(historyCap(prr >= 0.0 ? prr : phr, pdyn, false), 1.0, pa), plen);
+        }
+        else
+        {
+            // #666 THE SUN PATH (header). This light's own history length and fast mean,
+            // over the matched taps; the fast-history box from the same-surface ring.
+            float hl = 0.0, hf = 0.0, hpw = 0.0;
+            vec2 fb = vec2(1e9, -1e9);
+            for (int i = 0; i < 4; ++i)
+            {
+                if (tw[i] <= 0.0) continue;
+                const int hs = idSlot(hids[i], id);
+                if (hs < 0) continue;
+                const uint pmv = imageLoad(uHistProjPM, tp[i])[hs];
+                const float f = rtPMFast(pmv);
+                hl += tw[i] * rtPMLen(pmv);
+                hf += tw[i] * f;
+                hpw += tw[i];
+                fb = vec2(min(fb.x, f), max(fb.y, f));   // (every accepted tap is in the box)
+            }
+            if (hpw > 0.0) { hl /= hpw; hf /= hpw; }
+            hl *= zkeep;   // #674 zoom / dolly in (rtZoomKeep)
+            for (int i = 0; i < 9; ++i)
+            {
+                if ((ring & (1u << uint(i))) == 0u) continue;
+                const int s = idSlot(rids[i], id);
+                if (s < 0) continue;
+                const ivec2 t = clamp(ringc + ivec2(i % 3 - 1, i / 3 - 1), ivec2(0), mx);
+                const float f = rtPMFast(imageLoad(uHistProjPM, t)[s]);
+                fb = vec2(min(fb.x, f), max(fb.y, f));
+            }
+            const vec3 third = vec3(1.0 / 3.0);
+            const float prl = dot(raw.rgb, third), pml = dot(pm, third), psl = dot(psg, third);
+            // Moving casters: the detector against the FAST mean (as the sun), the band the
+            // 3x3's spatial spread (no per-slot temporal moments are kept).
+            if (pdyn && ph) pa = changeDetect(prl, pml, hf, 2.0 * psl + 0.08);
+            if (pdyn && ph && rtDarkSnapOn() && (dfl & (2u << uint(k))) != 0u
+                && rtDarkSnap(dot(hv, third), prl, pml)) pa = 1.0;   // #674 leading edge
+            const float pr_eff = prr >= 0.0 ? prr : phr;
+            float pcap_n = historyCap(pr_eff, pdyn, false);
+            pcap_n = projMoveCap(pr_eff, pcap_n, projLightMove(id));   // the light moved
+            const float pcap = mix(pcap_n, 1.0, pa);
+            const float plen_prev = ph ? max(hl, 1.0) : 0.0;
+            if (!pdyn)
+            {
+                // Static casters: the luminance box of this light's fast-history ring and
+                // this texel's new fast mean (the sun's SVGF branch).
+                const float fn = ph ? mix(hf, prl, max(1.0 / min(max(hl, 1.0) + 1.0, pcap), 0.33)) : prl;
+                const vec2 fbb = fb.x <= fb.y ? vec2(min(fb.x, fn), max(fb.y, fn)) : vec2(fn);
+                float pcut;
+                v = accumulateLum(raw.rgb, fbb.x - 0.02, fbb.y + 0.02, hv, plen_prev, pcap, plen, pcut);
+            }
+            else
+                v = accumulate(raw.rgb, pm - g * psg - 0.01, pm + g * psg + 0.01, hv, plen_prev, pcap, plen);
+            // The fast mean after the blend (the sun's moments rule: the new length's rate,
+            // ~3 frames for movers, re-seeded from the 3x3 on a detected change / cut).
+            float fnew = ph ? mix(hf, prl, pdyn ? 0.33 : max(1.0 / plen, 0.33)) : prl;
+            const float preseed = (pdyn && plen < 1.5 && pcap_n > 1.5) ? 1.0 : pa;
+            fnew = mix(fnew, pml, preseed);
+            pmo[k] = rtPackPM(plen, fnew);
+        }
+        // #674 certainty bypass (as the sun): this light's rays all blocked / all clear.
+        if (pdyn && rtCertainBypass() && rtCertain(dot(raw.rgb, vec3(1.0 / 3.0)), dot(pm, vec3(1.0 / 3.0))))
+        {
+            v = raw.rgb; plen = 1.0;
+            if (pf) pmo[k] = rtPackPM(1.0, dot(raw.rgb, vec3(1.0 / 3.0)));
+        }
+        pmin = min(pmin, plen);
+        imageStore(uAccProj, ivec3(m, k), vec4(rtFiniteVis(v), accRadius(prr, phr, plen)));
+        react = max(react, pa * abs(dot(rtFiniteVis(v) - hv, vec3(1.0 / 3.0))));
+    }
+    // #674: the persistence countdown into this slot's depth plane w (xyz unchanged, so a
+    // neighbour's concurrent .xyz read sees the same bits either way).
+    if (persist > 0u) imageStore(uMDepthG, m, vec4(dc.yz, float(dfl | (scnt << 5u) | (pcnt << 8u)), 0.0));
+    imageStore(uMeta, m, (any(isnan(mom)) || any(isinf(mom))) ? vec4(1.0, 1.0, 0.0, 0.0)
+                                                              : vec4(slen, pmin, mom));
+    if (pf) imageStore(uProjPMOut, m, pmo);
+    react = rtReactOn() ? clamp(react * rtReactGain(), 0.0, 1.0) : 0.0;
+    // (C overwrites rgb -- except in the temporal-events debug view, header)
+    vec3 diag = vec3(1.0);
+    if (rtDiagView())
+        diag = !hist ? vec3(1.0, 0.0, 0.0)
+             : (sa > 0.0 ? vec3(0.0, 0.0, 1.0) : mix(vec3(1.0), vec3(0.0, 1.0, 0.0), clamp(scut * 5.0, 0.0, 1.0)));
+    // #674 debug view 9 (rtDiagUsed): the history length used, the moving path, the detector.
+    if (rtDiagPull())
+        diag = vec3(clamp(abs(dot(rtFiniteVis(sun) - rtFiniteVis(rs.rgb), vec3(1.0 / 3.0))) * 4.0, 0.0, 1.0),
+                    sdyn ? 1.0 : 0.0, scert ? 1.0 : 0.0);
+    if (rtDiagUsed())
+        diag = vec3(clamp(slen / max(mp.p0.w, 1.0), 0.0, 1.0), sdyn ? 1.0 : 0.0, clamp(sa, 0.0, 1.0));
+    imageStore(uSunFinal, m, vec4(diag, react));
+}

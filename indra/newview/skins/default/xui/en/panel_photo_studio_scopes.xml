@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<!--
+Scopes: histogram, waveform, parade and vectorscope of the frame being graded.
+A Photo Studio section ("Scopes" in a panel's dropdown), and also the content of
+the standalone Scopes window (floater_scopes.xml). Every Scopes panel shows the
+same layout and pane choices (SLPhotoStudioScopeLayout, SLPhotoStudioScopePane0-3);
+right-click a pane to choose its scope. Ported from Alchemy Viewer's Scopes
+floater (credited).
+-->
+<panel
+ width="360"
+ height="320"
+ layout="topleft"
+ follows="all"
+ background_visible="false"
+ name="panel_photo_studio_scopes">
+	<panel.string
+	 name="waiting">
+		Measuring...
+	</panel.string>
+	<panel.string
+	 name="clipping">
+		Crushed [LOW]%   Blown [HIGH]%   ([SAMPLES] samples)
+	</panel.string>
+	<panel.string
+	 name="clipping_pixel">
+		Crushed [LOW]%   Blown [HIGH]%      R [R]  G [G]  B [B]
+	</panel.string>
+	<!-- Corner labels, drawn into each pane once more than one is shown so you
+	     can tell which scope you are looking at. Kept short: the label shares
+	     the pane with the trace it names. -->
+	<panel.string name="mode_rgb">RGB</panel.string>
+	<panel.string name="mode_luma">Luminance</panel.string>
+	<panel.string name="mode_red">Red</panel.string>
+	<panel.string name="mode_green">Green</panel.string>
+	<panel.string name="mode_blue">Blue</panel.string>
+	<panel.string name="mode_vector">Vectorscope</panel.string>
+	<panel.string name="mode_wave_luma">Waveform</panel.string>
+	<panel.string name="mode_wave_rgb">Waveform RGB</panel.string>
+	<panel.string name="mode_parade">Parade</panel.string>
+	<text
+	 follows="left|top"
+	 layout="topleft"
+	 left="8"
+	 top="6"
+	 width="42"
+	 height="15"
+	 name="scope_layout_label"
+	 value="Layout" />
+	<combo_box
+	 follows="left|top"
+	 layout="topleft"
+	 left_delta="44"
+	 top_pad="-16"
+	 width="130"
+	 height="18"
+	 name="scope_layout"
+	 control_name="SLPhotoStudioScopeLayout"
+	 tool_tip="How many scopes to show at once. Right-click any pane to choose which scope it shows: a histogram says how much of the frame sits at each brightness, a waveform or parade says where in the frame it is, and a vectorscope says what colour, on the same plane the colour wheels edit. Showing several costs nothing to measure -- every scope is computed from the same sample whether or not it is on screen.">
+		<combo_box.item
+		 label="Single"
+		 name="single"
+		 value="0" />
+		<combo_box.item
+		 label="Side by side"
+		 name="columns"
+		 value="1" />
+		<combo_box.item
+		 label="Stacked"
+		 name="rows"
+		 value="2" />
+		<combo_box.item
+		 label="Four"
+		 name="quad"
+		 value="3" />
+	</combo_box>
+	<check_box
+	 follows="top|right"
+	 layout="topleft"
+	 height="16"
+	 right="-8"
+	 top_delta="1"
+	 width="90"
+	 label="Log scale"
+	 tool_tip="Compress tall bins so the rest of the distribution stays readable. A histogram is spiky; on a linear scale one dominant tone flattens everything else onto the axis."
+	 name="scope_log"
+	 control_name="SLPhotoStudioScopeLogScale" />
+	<panel
+	 follows="all"
+	 layout="topleft"
+	 left="8"
+	 top_pad="9"
+	 right="-8"
+	 height="256"
+	 background_visible="false"
+	 mouse_opaque="false"
+	 name="scope_plot" />
+	<text
+	 follows="left|bottom|right"
+	 layout="topleft"
+	 left="8"
+	 top_pad="8"
+	 right="-8"
+	 height="15"
+	 font="SansSerifSmall"
+	 name="scope_clipping"
+	 tool_tip="Share of sampled pixels sitting exactly on black or exactly on white in their worst channel. Measured from a point sample of the frame, so it estimates the true share rather than counting every pixel. Point at the world and this reads the value under the cursor instead."
+	 value="" />
+</panel>
