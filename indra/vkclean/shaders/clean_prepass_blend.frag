@@ -50,5 +50,7 @@ void main()
         base *= texture(uTextures[nonuniformEXT(m.base_color_handle.x)], v_uv, taaLodBias(v_flags));   // + the lit FS's TAA mip bias
     const float kOpaqueAlpha = 0.99;
     if (base.a < kOpaqueAlpha) discard;
-    if (m.alpha_cutoff >= 0.0 && base.a < m.alpha_cutoff) discard;   // the lit FS's cutoff (blend faces may carry one)
+    // the lit FS's cutoff (blend faces may carry one): THE rule unscaled (clean_alpha_rule.glsl -- a strict
+    // subset of what the lit FS keeps: the coverage scale only raises the tested alpha)
+    if (m.alpha_cutoff >= 0.0 && !alphaKeeps(base.a, m.alpha_cutoff, 0.0, 0.0)) discard;
 }

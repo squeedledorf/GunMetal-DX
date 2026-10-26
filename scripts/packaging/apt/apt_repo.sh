@@ -143,9 +143,7 @@ add_deb() {
 # sha256 that publish_release.sh appended to the release notes for ASSET.
 notes_sha() {
   local tag=$1 asset=$2
-  curl -fsS "$RELEASE_API/releases/tags/$tag" \
-    | python3 -c 'import json,sys; print(json.load(sys.stdin).get("body",""))' \
-    | sed -nE "s/^([0-9a-f]{64})  ${asset//./\\.}\$/\1/p" | tail -1
+  python3 -I "$HERE/../../ci/release_lookup.py" --api "$RELEASE_API" sha "$tag" "$asset"
 }
 
 seed() {
@@ -154,7 +152,9 @@ seed() {
   for tag in "$@"; do
     asset="Slipstream_${tag#v}_amd64.deb"
     f="$ROOT/incoming/$asset"
-    curl -fsSL -o "$f" "$DOWNLOAD_BASE/$tag/$asset" || die "could not download $asset for $tag"
+    # Draft-aware (TOKEN in the environment); falls back to the public URL for old releases.
+    python3 -I "$HERE/../../ci/release_lookup.py" --api "$RELEASE_API" fetch "$tag" "$asset" "$f" 2>/dev/null \
+      || curl -fsSL -o "$f" "$DOWNLOAD_BASE/$tag/$asset" || die "could not download $asset for $tag"
     want=$(notes_sha "$tag" "$asset"); got=$(sha256sum "$f" | cut -d' ' -f1)
     [ -n "$want" ] || die "$tag release notes list no sha256 for $asset"
     [ "$want" = "$got" ] || die "$asset sha256 $got does not match the release notes ($want)"

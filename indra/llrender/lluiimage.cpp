@@ -32,6 +32,12 @@
 // Project includes
 #include "lluiimage.h"
 
+#include <algorithm>
+#include <vector>
+
+#include "llrender.h"
+#include "lltimer.h"
+
 LLUIImage::LLUIImage(const std::string& name, LLPointer<LLTexture> image)
 :   mName(name),
     mImage(image),
@@ -49,6 +55,170 @@ LLUIImage::LLUIImage(const std::string& name, LLPointer<LLTexture> image)
 LLUIImage::~LLUIImage()
 {
     delete mImageLoaded;
+    delete mVector;
+}
+
+// ---- #1056 vector icons ------------------------------------------------------------------
+
+namespace
+{
+    // Rasters kept per icon. Shared images (a folder, an info "i", a close X) are drawn by many
+    // widgets at their own sizes at once, and a cap below that count would re-rasterize the
+    // overflow every frame; these are a few KB each, so the cap is generous.
+    constexpr size_t MAX_VECTOR_SIZES_PER_IMAGE = 16;
+    // Largest raster side (physical pixels). Icons are tiny; this only stops a stretched
+    // draw rectangle from asking for a huge texture.
+    constexpr S32 MAX_VECTOR_RASTER_SIDE = 1024;
+    // A raster dropped from a cache may still be referenced by a draw already queued this
+    // frame (the UI backend uploads / samples at flush time), so it lives on briefly.
+    constexpr F64 VECTOR_RETIRE_SECONDS = 2.0;
+
+    LLUIImage::vector_rasterizer_t sVectorRasterizer;
+    U32 sVectorGeneration = 1;
+    std::vector<std::pair<LLPointer<LLTexture>, F64> > sRetiredRasters;
+
+    void purgeRetiredRasters()
+    {
+        if (sRetiredRasters.empty())
+        {
+            return;
+        }
+        const F64 now = LLTimer::getTotalSeconds();
+        sRetiredRasters.erase(std::remove_if(sRetiredRasters.begin(), sRetiredRasters.end(),
+                                             [now](const std::pair<LLPointer<LLTexture>, F64>& r)
+                                             { return now - r.second > VECTOR_RETIRE_SECONDS; }),
+                              sRetiredRasters.end());
+    }
+
+    void retireRaster(LLPointer<LLTexture>& tex)
+    {
+        if (tex.notNull())
+        {
+            sRetiredRasters.emplace_back(tex, (F64)LLTimer::getTotalSeconds());
+            tex = nullptr;
+        }
+    }
+}
+
+struct LLUIImage::VectorData
+{
+    struct Entry
+    {
+        S32 mWidth;     // physical pixels
+        S32 mHeight;
+        LLPointer<LLTexture> mTexture;   // null: the rasterizer failed at this size, draw the bitmap
+    };
+
+    VectorSpec  mSpec;
+    U32         mGeneration = 0;
+    std::vector<Entry> mEntries;   // most recently used first
+};
+
+bool LLUIImage::sClassicIcons = false;
+
+// static
+void LLUIImage::setVectorRasterizer(const vector_rasterizer_t& rasterizer)
+{
+    sVectorRasterizer = rasterizer;
+    invalidateVectorRasters();
+}
+
+// static
+void LLUIImage::setClassicIcons(bool classic)
+{
+    if (sClassicIcons != classic)
+    {
+        sClassicIcons = classic;
+        invalidateVectorRasters();
+    }
+}
+
+// static
+void LLUIImage::cleanUpVectorRasters()
+{
+    sRetiredRasters.clear();
+    sVectorRasterizer = nullptr;
+}
+
+// static
+void LLUIImage::invalidateVectorRasters()
+{
+    // Each image notices the new generation on its next vector draw and retires its rasters.
+    ++sVectorGeneration;
+}
+
+void LLUIImage::setVectorSource(const VectorSpec& spec)
+{
+    if (spec.mFile.empty())
+    {
+        delete mVector;
+        mVector = nullptr;
+        return;
+    }
+    if (!mVector)
+    {
+        mVector = new VectorData;
+    }
+    mVector->mSpec = spec;
+    for (VectorData::Entry& entry : mVector->mEntries)
+    {
+        retireRaster(entry.mTexture);
+    }
+    mVector->mEntries.clear();
+}
+
+LLTexture* LLUIImage::getVectorTexture(S32 width, S32 height) const
+{
+    if (sClassicIcons || !sVectorRasterizer || !mVector || width <= 0 || height <= 0)
+    {
+        return nullptr;
+    }
+
+    // physical pixels this draw will cover
+    const LLVector3 ui_scale = gGL.getUIScale();
+    const S32 pixel_w = llclamp(ll_round((F32)width * ui_scale.mV[VX]), 1, MAX_VECTOR_RASTER_SIDE);
+    const S32 pixel_h = llclamp(ll_round((F32)height * ui_scale.mV[VY]), 1, MAX_VECTOR_RASTER_SIDE);
+
+    VectorData& data = *mVector;
+    if (data.mGeneration != sVectorGeneration)
+    {
+        for (VectorData::Entry& entry : data.mEntries)
+        {
+            retireRaster(entry.mTexture);
+        }
+        data.mEntries.clear();
+        data.mGeneration = sVectorGeneration;
+    }
+
+    for (size_t i = 0; i < data.mEntries.size(); ++i)
+    {
+        VectorData::Entry& entry = data.mEntries[i];
+        if (entry.mWidth == pixel_w && entry.mHeight == pixel_h)
+        {
+            if (i != 0)
+            {
+                std::swap(data.mEntries[0], entry);
+            }
+            return data.mEntries[0].mTexture.get();
+        }
+    }
+
+    // First use of this icon at this pixel size (or first after a scale change): rasterize
+    // once, keep it. Never reached on a steady-state frame.
+    // (Log channel UIVectorIcons: this should go quiet a moment after the UI settles.)
+    LL_DEBUGS("UIVectorIcons") << "rasterize " << mName << " (" << data.mSpec.mFile << ") " << pixel_w << "x" << pixel_h << LL_ENDL;
+    purgeRetiredRasters();
+    VectorData::Entry fresh;
+    fresh.mWidth = pixel_w;
+    fresh.mHeight = pixel_h;
+    fresh.mTexture = sVectorRasterizer(data.mSpec, pixel_w, pixel_h);
+    if (data.mEntries.size() >= MAX_VECTOR_SIZES_PER_IMAGE)
+    {
+        retireRaster(data.mEntries.back().mTexture);
+        data.mEntries.pop_back();
+    }
+    data.mEntries.insert(data.mEntries.begin(), fresh);
+    return data.mEntries[0].mTexture.get();
 }
 
 S32 LLUIImage::getWidth() const

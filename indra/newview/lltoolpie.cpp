@@ -410,10 +410,14 @@ void LLToolPie::endRightOrbit()
 {
     if (mRightOrbiting)
     {
-        // Put the cursor back where the drag started, as LLToolCamera does.
-        LLCoordGL down(mRightDownX, mRightDownY);
-        LLUI::getInstance()->setMousePositionScreen(down.mX, down.mY);
-        gViewerWindow->showCursor();
+        // The cursor comes back at the window centre (#871); with MouseReleaseToCenter
+        // off, back where the drag started, as LLToolCamera does.
+        if (!gViewerWindow->releaseCursorToCenter())
+        {
+            LLCoordGL down(mRightDownX, mRightDownY);
+            LLUI::getInstance()->setMousePositionScreen(down.mX, down.mY);
+            gViewerWindow->showCursor();
+        }
     }
     mRightOrbitArmed = false;
     mRightOrbiting = false;

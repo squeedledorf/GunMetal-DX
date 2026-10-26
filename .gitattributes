@@ -18,6 +18,7 @@
 *.llm binary
 *.nib binary
 *.rtf binary
+*.bin binary
 # Chrome CRLSet (binary revocation data, scripts/revocation/fetch_crlset.py)
 crl-set binary
 *.ttf binary

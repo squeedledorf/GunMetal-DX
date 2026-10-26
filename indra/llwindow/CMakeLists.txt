@@ -82,6 +82,8 @@ if (WINDOWS)
        ole32
        dxgi
        d3d9
+       dinput8      # #847: joystick / 3D mouse (libndofdev) via DirectInput8
+       dxguid
        )
 endif ()
 

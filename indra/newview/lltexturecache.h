@@ -177,6 +177,16 @@ public:
     U32 getMaxEntries() { return sCacheMaxEntries; };
     // STORE backend counters (0 on the legacy backend)
     U64 getReadThroughHits() const { return mReadThroughHits.load(); }
+    // #951 texture pipeline diagnostics: store reads by outcome, writes queued / refused /
+    // skipped, and whether the store's index is loaded (-1 = legacy backend, 0 = still
+    // loading, 1 = ready, 2 = detached or its lock busy).
+    U64 getStoreReadHits() const { return mStoreReadHits.load(std::memory_order_relaxed); }
+    U64 getStoreReadMisses() const { return mStoreReadMisses.load(std::memory_order_relaxed); }
+    U64 getStoreReadErrors() const { return mStoreReadErrors.load(std::memory_order_relaxed); }
+    U64 getStoreWritesQueued() const { return mStoreWritesQueued.load(std::memory_order_relaxed); }
+    U64 getStoreWritesRefused() const { return mStoreWritesRefused.load(std::memory_order_relaxed); }
+    U64 getStoreWritesSkipped() const { return mStoreWritesSkipped.load(std::memory_order_relaxed); }
+    S32 getStoreState();
     void logStoreStats(const char* when);
     // #300 counters: RAM held by the entry mirror; entry lookups served from it vs from disk
     size_t getEntriesRAMBytes() const { return mEntriesBytes; }
@@ -305,6 +315,10 @@ private:
     std::atomic<U64> mReadThroughHits{ 0 };
     std::atomic<U64> mStoreWritesSkipped{ 0 };
     std::atomic<U64> mStoreWritesRefused{ 0 };
+    std::atomic<U64> mStoreReadHits{ 0 };       // #951
+    std::atomic<U64> mStoreReadMisses{ 0 };     // #951
+    std::atomic<U64> mStoreReadErrors{ 0 };     // #951
+    std::atomic<U64> mStoreWritesQueued{ 0 };   // #951
     std::atomic<bool> mStoreNotReadyLogged{ false };
 
     // HEADERS (Include first mip)

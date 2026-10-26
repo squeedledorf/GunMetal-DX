@@ -2,14 +2,19 @@
 #extension GL_EXT_nonuniform_qualifier : require
 #extension GL_GOOGLE_include_directive : require
 #define CLEAN_SKY_LUT   // (#819) skyColor() reads the sky-view LUT (draw set 0 binding 52) when valid
+#ifdef CLEAN_SHADOW_ISO_LOD
+// (#1031, RenderVKShadowIsoLod) the split shadow walk kernels' isotropic alpha-test LOD
+// (clean_rt_common.glsl RT_NO_FOOT_LOD): only VIS / SUNVIS are built with it
+#define RT_NO_FOOT_LOD
+#endif
 #extension GL_EXT_samplerless_texture_functions : require
 #extension GL_EXT_control_flow_attributes : require
 // Subgroup OR of the froxel masks (tileLightWord; basic + arithmetic subgroup ops in compute are
 // already a baseline: clean_cull.comp requires them) + the shader clock's stage reductions.
 #extension GL_KHR_shader_subgroup_basic : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
-#ifdef CLEAN_GI_TRACE
-#extension GL_KHR_shader_subgroup_ballot : require   // (the GI trace's cache fill: giCacheAddWave)
+#if defined(CLEAN_GI_TRACE) || defined(CLEAN_SHADOW_STAGE) || defined(CLEAN_VIS_QUEUE) || defined(CLEAN_VIS_WALK)
+#extension GL_KHR_shader_subgroup_ballot : require   // (the GI trace's cache fill: giCacheAddWave; #1031 the split shadow core's job list; #1039 the visibility queue's appends)
 #endif
 #ifdef CLEAN_SHADER_CLOCK
 // RenderVKShaderClockLighting variants only (clean_shader_clock.glsl): VK_KHR_shader_clock
@@ -303,6 +308,76 @@
 #else
 #define DEFER_GI_TRACE 0
 #endif
+// (#1031) THE GI KERNEL SPLIT (RenderVKGISplitKernels; LLCleanRendererVK::recordGI): the GI trace
+// above as one kernel (CLEAN_GI_STAGE 0, the fused build: 255 registers, ~1 MB of machine code,
+// 8 warps / SM) or as STAGES that hand each other compact per-texel records (set 3 binding 25,
+// GI RECORDS below), each holding only its own working set:
+//   1 TRACE    the receiver + the fresh ray's closest-hit walk -> the HIT RECORD (no shading)
+//   2 SHADE    the hit record -> the hit's material + lighting (or the sky / probes) -> the SAMPLE
+//   3 REUSE    the reservoir reuse, the reused pick's visibility ray, every store; a pick that needs
+//              its RE-SHADE (GI_F_LIGHT_CHG) appends the texel to the re-shade list and stops. Run
+//              again (push rtr.z = 1, TAIL) over that list after 4: the same binary re-derives the
+//              same pick and finishes it with the re-shade's result.
+//   4 RESHADE  one lane per listed texel: the re-shade ray traced and shaded (the fused giTrace)
+// (#1036) THE SHADE SPLIT (RenderVKGIShadeSplit; push rtr.z = 1 in TRACE): stage 2 as three kernels
+// over compacted lists instead of one 8x8 pass over every texel -- TRACE appends each traced texel to
+// the HIT list or the MISS list (GI RECORDS) and finishes a back-face stop's sample itself, then
+//   5 MISS      one lane per missed ray: the sky + the probes' far field -> the sample
+//   6 HIT-MAT   one lane per hit: the hit's material (rtSurfaceEval, the weather coat, the emitter
+//               split) -> the RT LIT RECORD (64 B) over the hit record
+//   7 HIT-LIGHT one lane per hit: the RT LIT RECORD lit (rtShadeHit: the sun ray, the local lights and
+//               their shadow-ray budget, the cache / probes) + the source clamp -> the sample
+// The samples land where SHADE writes them: REUSE reads the same words either way.
+#ifndef CLEAN_GI_STAGE
+#define CLEAN_GI_STAGE 0
+#endif
+#define GI_STAGE_FUSED    0
+#define GI_STAGE_TRACE    1
+#define GI_STAGE_SHADE    2
+#define GI_STAGE_REUSE    3
+#define GI_STAGE_RESHADE  4
+#define GI_STAGE_MISS     5
+#define GI_STAGE_HITMAT   6
+#define GI_STAGE_HITLIGHT 7
+// (#1036) THE RT REFLECTION SPLIT (RenderVKRTReflectionsShadeSplit; pass 11 -DCLEAN_RT_LIST only): the
+// list trace's per-ray code as TRACE (the walk) -> MAT (the hit's material) -> LIGHT (its lighting, the
+// blend layers, the store) over per-ray records -- see the list trace's DEFER_MAIN.
+#ifndef CLEAN_RT_STAGE
+#define CLEAN_RT_STAGE 0
+#endif
+#define RT_STAGE_FUSED 0
+#define RT_STAGE_TRACE 1
+#define RT_STAGE_MAT   2
+#define RT_STAGE_LIGHT 3
+#define RT_STAGE_LAYERS 4   // (#1039 M2, -DCLEAN_VIS_QUEUE_M2 only: the blend layers of every entry, before LIGHT)
+// (#1039 M1) THE VISIBILITY QUEUE (RenderVKVisQueue bit 1; clean_vis_queue.glsl): -DCLEAN_VIS_QUEUE builds the
+// hit-shading split's MATERIAL stage as the PRODUCER (the record, then the hit's sun ray as a request) and
+// its LIGHTING stage as the RESOLVE (the sun from the result: no sun walk in the kernel) -- the GI's
+// HIT-MAT / HIT-LIGHT (CLEAN_GI_STAGE 6 / 7) and the RT reflections' MAT / LIGHT (CLEAN_RT_STAGE 2 / 3);
+// -DCLEAN_VIS_WALK (pass 11 -DCLEAN_RT_LIST) is the WALK kernel between them. The fused stages stay the
+// fallback, and the TAIL for the entries past the queue's capacity (push rtr3.y = the first such entry).
+// (#1039 M2, RenderVKVisQueue bit 2) + -DCLEAN_VIS_QUEUE_M2: the producer also queues the RT hits' occlusion
+// ray and the hit shadow-ray budget's light rays (it runs the local-light walk unshadowed: RT_SHADE_BUDGET_OUT),
+// the RT split gains a LAYERS stage (CLEAN_RT_STAGE 4: the blend-layer gather + its sun rays per entry, into
+// the entry's layer slot), and the lighting stages resolve all of it from the results -- no ray query left
+// in DeferRtSplitLightVq2 / DeferGiSplitHitLightVq2.
+#if defined(CLEAN_VIS_QUEUE) && !(CLEAN_GI_STAGE == GI_STAGE_HITMAT || CLEAN_GI_STAGE == GI_STAGE_HITLIGHT \
+                                  || CLEAN_RT_STAGE == RT_STAGE_MAT || CLEAN_RT_STAGE == RT_STAGE_LIGHT \
+                                  || CLEAN_RT_STAGE == RT_STAGE_LAYERS)
+#error "CLEAN_VIS_QUEUE builds the hit-shading split's material / lighting stages only"
+#endif
+#if defined(CLEAN_VIS_QUEUE_M2) && !defined(CLEAN_VIS_QUEUE)
+#error "CLEAN_VIS_QUEUE_M2 extends CLEAN_VIS_QUEUE"
+#endif
+#if CLEAN_RT_STAGE == RT_STAGE_LAYERS && !defined(CLEAN_VIS_QUEUE_M2)
+#error "the RT split's LAYERS stage is the visibility queue's (-DCLEAN_VIS_QUEUE -DCLEAN_VIS_QUEUE_M2)"
+#endif
+#if defined(CLEAN_VIS_WALK) && !(CLEAN_DEFER_PASS == 11 && defined(CLEAN_RT_LIST) && CLEAN_RT_STAGE == RT_STAGE_FUSED && !DEFER_GI_TRACE)
+#error "CLEAN_VIS_WALK is built from pass 11 -DCLEAN_RT_LIST (the RT layout, no stage)"
+#endif
+#if CLEAN_RT_STAGE != RT_STAGE_FUSED && !(CLEAN_DEFER_PASS == 11 && defined(CLEAN_RT_LIST) && !DEFER_GI_TRACE)
+#error "CLEAN_RT_STAGE splits the RT reflections' list trace only (-DCLEAN_DEFER_PASS=11 -DCLEAN_RT_LIST)"
+#endif
 #if DEFER_RT_TRACE && (!defined(CLEAN_PROJ_SHADOW_RAYQUERY) || !defined(RT_SET))
 #error "the RT reflection kernels (11 / 12 / 14) need -DCLEAN_PROJ_SHADOW_RAYQUERY -DRT_SET=4 (12: 3)"
 #endif
@@ -325,6 +400,44 @@
 #define DEFER_SHADOW_MERGE 1
 #else
 #define DEFER_SHADOW_MERGE 0
+#endif
+// (#1031) THE SHADOW CORE SPLIT (RenderVKShadowSplitKernels; pass 15 -DCLEAN_SHADOW_CORE only;
+// LLCleanRendererVK::recordProjStoch): the generic core's kernel (CLEAN_SHADOW_STAGE 0, 255 registers)
+// as kernels over a per-texel SELECTION DESCRIPTOR (set 3 binding 26, 64 B per denoiser texel) and
+// the light samples' JOBS + VISIBILITIES (binding 27, 8 B per sample slot):
+//   1 SELECT  the receiver, the candidates (light grid / cluster walk, the emitters), the ReSTIR DI
+//             reservoir reuse + its store, the split lights, the occlusion probe, the dense window
+//             -> the descriptor (what the sample list is, and which samples have light: their terms
+//             gate, the GATE mask) + the GEOM guide; no ray.
+//   4 SUNVIS  (merged only) the sun / moon sample: certificates, receiver rules, ONE shadow walk ->
+//             the denoiser's sun channel (layer 2), whole.
+//   3 VIS     ONE THREAD PER light sample the gate lets through (SELECT's job list, indirect),
+//             regenerated from the descriptor: receiver rules + its walk(s) -> its visibility. No terms.
+//   2 SHADE   the samples' terms x the stored visibilities: the ratio, the occlusion notes, the
+//             split channel, every other store. No ray.
+// SUNVIS and VIS are independent (one barrier after SELECT, one before SHADE). Each walk runs in a
+// kernel that holds only one sample kind's state. (Literal per-sample RAY records do not fit: up to
+// 1 + 16 + 4 + 1 samples per texel, each a ShadowSample + the terminator state, ~80 B -- the kernels
+// regenerate the samples from the descriptor instead.)
+#ifndef CLEAN_SHADOW_STAGE
+#define CLEAN_SHADOW_STAGE 0
+#endif
+#define SH_STAGE_FUSED  0
+#define SH_STAGE_SELECT 1
+#define SH_STAGE_SHADE  2
+#define SH_STAGE_VIS    3
+#define SH_STAGE_SUNVIS 4
+#if CLEAN_SHADOW_STAGE != SH_STAGE_FUSED && !(DEFER_PSTOCH && defined(CLEAN_SHADOW_CORE))
+#error "CLEAN_SHADOW_STAGE splits pass 15's generic core only (-DCLEAN_DEFER_PASS=15 -DCLEAN_SHADOW_CORE)"
+#endif
+#if (CLEAN_SHADOW_STAGE == SH_STAGE_SUNVIS) != (DEFER_SHADOW_MERGE && CLEAN_SHADOW_STAGE == SH_STAGE_SUNVIS)
+#error "SUNVIS is the merged pass's (-DCLEAN_SHADOW_MERGE); VIS / SHADE are built without it (no sun in them)"
+#endif
+#if DEFER_SHADOW_MERGE && (CLEAN_SHADOW_STAGE == SH_STAGE_VIS || CLEAN_SHADOW_STAGE == SH_STAGE_SHADE)
+#error "VIS / SHADE carry no sun: build them without -DCLEAN_SHADOW_MERGE (shared by both passes)"
+#endif
+#if defined(CLEAN_SHADOW_ISO_LOD) && CLEAN_SHADOW_STAGE != SH_STAGE_VIS && CLEAN_SHADOW_STAGE != SH_STAGE_SUNVIS
+#error "CLEAN_SHADOW_ISO_LOD is the split walk kernels' (VIS / SUNVIS): every other kernel keeps the footprint LOD"
 #endif
 // (#859) the reflect kernels export the RT reflection mark (clean_surface_light.glsl)
 #if CLEAN_DEFER_PASS == 2 || CLEAN_DEFER_PASS == 5
@@ -438,6 +551,9 @@ layout(push_constant) uniform DeferPush {
                         // distance), z the fixed distance (m; RenderVKRTReflectionsSmallDist), w 0
     uvec4 rtr3;         // (#771 pass 15) xy the SUN EXPOSURE CERTIFICATE table's device address
                         // (clean_sun_cert.glsl; 0 = SXC off), zw 0
+                        // (#1036 pass 11 -DCLEAN_RT_LIST) x the RT REFLECTION RECORDS' capacity in
+                        // list entries (the fused list kernel: its first entry -- 0, or the split's
+                        // tail), y 0, zw the records' device address (the split stages; else 0)
 #endif
 } g_draw_push;          // 80 B (RT kernels: 128 B)
 // The frame has shadowed projector records: the shadow pass resolves their slots (and the
@@ -858,6 +974,28 @@ layout(set = 3, binding = 15, rgba32ui) uniform writeonly uimage2D uPdnMot;
 // parities; a placeholder until allocated -- touched only under push rtr2.w RS_RES_ON): per texel
 // uvec2 x = this frame's light index (0xFFFF: none) | half(M) << 16, y = float bits of W.
 layout(std430, set = 3, binding = 17) buffer RsReservoirs { uvec2 rs_res[]; };
+#if CLEAN_SHADOW_STAGE != SH_STAGE_FUSED
+// (#1031) THE SELECTION DESCRIPTORS (LLCleanRendererVK mPdnSel; the split core only): 4 uvec4 per
+// denoiser texel (pdnSelIndex), SELECT writes, SUNVIS / VIS / SHADE read:
+//   q0.x  PDN_SEL_* flags | nProj (bits 0-4) | spN << 5 | the probe << 16 | dOff << 24
+//   q0.y  pick0 / ex0 / dCw    q0.z  pick1 / ex1 / dStart | dSlots << 8 | dWin << 16 | dC << 24
+//   q0.w  exi0 | exi1 << 16 / pickE
+//   q1    pp0 / dScale, pp1 / ppE, Wsum / WsumE, nCand            (float bits)
+//   q2    fMove, the split lights (4 bytes), their ids (2 x 16 bits) x 2
+//   q3    the ReSTIR view's light, rsM, the GATE (bit j: light sample j has light at P -- traced),
+//         rsDom (#1052: the strongest candidate's target share, float bits; the converged marker's gate)
+// (one evaluation list per texel: the picks, the exact list or the dense window -- their words overlap)
+layout(std430, set = 3, binding = 26) buffer PdnSelect { uvec4 pdn_sel[]; };
+#if CLEAN_SHADOW_STAGE == SH_STAGE_SELECT || CLEAN_SHADOW_STAGE == SH_STAGE_VIS || CLEAN_SHADOW_STAGE == SH_STAGE_SHADE
+// (#1031) THE LIGHT-SAMPLE JOBS + VISIBILITIES (LLCleanRendererVK mPdnVis; S = push rtr3.w slots per
+// denoiser texel, N texels -- the host sizes S for the settings' longest list):
+//   [0..3]           the job list's header: the count, then VIS's indirect dispatch (ceil(count / 64), 1, 1)
+//                    (the host resets it before SELECT)
+//   [4 .. 4 + N S)   the JOBS: SELECT appends one per gated light sample, texel << 5 | slot j
+//   [4 + N S ..)     the VISIBILITIES: texel x S + j, VIS writes the gated ones (pdnVisPack), SHADE reads
+layout(std430, set = 3, binding = 27) buffer PdnVis { uint pdn_vis[]; };
+#endif
+#endif
 #elif CLEAN_DEFER_PASS == 3 || CLEAN_DEFER_PASS == 7 || CLEAN_DEFER_PASS == 8 || DEFER_SHADOW
 // (DEFER_SHADOW: the merged RT shadow pass's denoised sun / moon, layer 2 -- deferMergedSunT;
 //  7 BASE: the #91 emitters' diffuse ratio -- deferEmitterLight)
@@ -878,6 +1016,26 @@ layout(set = 3, binding = 18, rgba16f) uniform writeonly image2DArray uGiIn;
 layout(set = 3, binding = 19, rgba32ui) uniform uimage2DArray uGiGeom;
 layout(set = 3, binding = 20, rgba32ui) uniform writeonly uimage2D uGiMot;
 layout(std430, set = 3, binding = 22) buffer GiReservoirs { uvec4 gi_res[]; };
+#if CLEAN_GI_STAGE != GI_STAGE_FUSED && !defined(CLEAN_GI_RESOLVE)
+// (#1031) GI RECORDS (LLCleanRendererVK mGiHit; the split stages only): [0] the re-shade list's header
+// (x the count, yzw the RESHADE / TAIL indirect dispatch: ceil(count / 64), 1, 1), (#1036) [1] / [2]
+// the HIT / MISS lists' headers (x the count, yzw their indirect dispatch: 64 entries per workgroup in
+// GI_ROW-wide rows, 1; the host writes (0, 0, 0, 1) before TRACE), then the list (one texel index per
+// entry, 4 per uvec4: the re-shade list from entry 0 -- or, before REUSE, the HIT list from entry 0 and
+// the MISS list from the last entry down: a texel is on one of them at most), then 6 uvec4 (96 B) per
+// GI texel (giRecIndex):
+//   TRACE writes  q0 = d.xyz, flags (GI_REC_*)            -- every texel (flags 0: nothing traced)
+//                 q1 = t, instance, prim, bary.x          -- a hit: the committed intersection,
+//                 q2 = bary.y, o2w[0]; q3 = o2w[1], o2w[2].x; q4 = o2w[2].yz, o2w[3].xy
+//                 q5 = o2w[3].z, P (the receiver; a back-face stop: its point o + d t)
+//                 (#1036 lists: a back-face stop's sample in q1..q3 instead, as SHADE writes it)
+//   SHADE writes  q1 = L.rgb, the hit distance (0: sky); q2 = xs.xyz, ns.x; q3.xy = ns.yz (in place)
+//                 (#1036: MISS and HIT-LIGHT write the same words; HIT-MAT the RT LIT RECORD in
+//                 q1..q4 and the hit distance in q5.x between them)
+//   REUSE writes  q4 = o.xyz, tmax; q5.xyz = the re-shade direction (a listed texel's request)
+//   RESHADE       q4 = L.rgb, t (< 0: nothing within the tolerance window -- rejected)
+layout(std430, set = 3, binding = 25) buffer GiRecords { uvec4 gi_hit[]; };
+#endif
 #include "clean_gi_common.glsl"
 #elif CLEAN_DEFER_PASS == 3 || CLEAN_DEFER_PASS == 7
 layout(set = 3, binding = 18, rgba16f) uniform readonly image2DArray uGiIn;
@@ -1033,6 +1191,28 @@ vec3 deferEmitterLight(vec3 P, vec3 N, vec3 diffuseColor);
 // shadow trace reports its blocker (the projector rays too -- the flag is reset around the sun's).
 #define RT_TRACK_BLOCKER
 #endif
+#if DEFER_GI_TRACE || defined(CLEAN_VIS_WALK)
+// (#1041) the GI trace's budgeted point-light rays take the own-fixture rule (rtrProjRay): the shared walk
+// compiles it (clean_vis_walk.glsl RT_WALK_FIXTURE) -- and the visibility queue's walk, which traces them
+// for the GI producer (#1039 M2, VQ_F_FIXTURE)
+#define RT_WALK_FIXTURE
+#endif
+#if DEFER_PSTOCH && defined(CLEAN_SHADOW_CORE)
+// (#1031) the split's walk kernels trace one light kind each: the shared walk (clean_vis_walk.glsl, via
+// clean_rt_common.glsl) and the core compile only its paths (KERNEL SPECIALISATION) -- the same results,
+// far fewer live values. Defined here, before the walk library is included.
+#if CLEAN_SHADOW_STAGE == SH_STAGE_SUNVIS
+#define SH_KIND_DIRECTIONAL
+#elif CLEAN_SHADOW_STAGE == SH_STAGE_VIS
+#define SH_KIND_POSITIONAL
+#endif
+#define RT_WALK_FIXTURE   // (point-light samples: SH_FIXTURE; folded away again under SH_KIND_DIRECTIONAL)
+// (#1031) the opaque-first switch read from the push where the walk tests it (no private copy;
+// pdnOpts / PDN_OPT_OFIRST: the pass-15 options below)
+uint pdnOpts();
+#define PDN_OPT_OFIRST  64u
+#define RT_WALK_OFIRST ((pdnOpts() & PDN_OPT_OFIRST) != 0u)
+#endif
 
 #include "clean_draw_common.glsl"
 #include "clean_surface_light.glsl"
@@ -1118,6 +1298,34 @@ bool deferLightTaken(uint li) { return rsFrameOn() && deferPstochOn() && emTaken
 // histogram (1-3, 4-15, 16-63, 64+), 7 re-admissions (a culled light's visible ray), 8 new culls, 9 probes
 // fired, 10 patch claims refused (the chain full: no cache there), 11 patches freed (aged out / empty),
 // 12 counts dropped with their light (gone from the list).
+// (#1052) THE SOFT CULL (RenderVKReSTIROcclusionCull 1, the default; 2 = the rules above, RS_F_OCC_HARD).
+// The first cull showed blocky dark rectangles with a thin outline fixed to surfaces (snow, an avatar
+// face, a plain cylinder). Three causes in the rules above, each fixed here:
+//   1 FALSE EVIDENCE. A sample the facing gate never traced (vis 0, no ray) was noted BLOCKED, and so was
+//     a ray stopped by the receiver's own surface right at P (the terminator / self-shadow on a smooth
+//     curved low-poly surface -- exactly the face / cylinder / snow cases). Neither says anything about a
+//     light behind a wall. Now only a TRACED sample is evidence, and a blocked one only when its opaque
+//     caster lies at least the patch edge (OCC_BLOCK_MIN .. OCC_BLOCK_MAX) away (occEvidence): local geometry a patch-
+//     wide verdict cannot represent never culls. (VIS hands the verdict to SHADE in pdnVisPack's bit 30.)
+//   2 TOO LITTLE EVIDENCE. The count is in FRAMES with at least one blocked ray, and a rest light gets
+//     0-2 rays per patch per frame: a 70 %-blocked light went "8 frames all blocked" often enough over
+//     thousands of patches. The soft cull starts at OCC_N_SOFT (12) frames.
+//   3 A BINARY, AXIS-ALIGNED VERDICT. A culled light's 0 replaced a smooth visibility over a whole box --
+//     the rectangle -- and the denoiser, blending texels whose light sets differ across the box edge,
+//     drew the outline. Now the verdict is a WEIGHT c in [0, 1] -- 0 below OCC_N_SOFT, then 1/4 .. 1 over
+//     the counts 12 .. 15 (a fade-in, not a pop) -- applied the same way in expectation on both sides:
+//       * pass 15 keys each texel with P JITTERED by +-half a patch in the face's plane (per texel and
+//         frame; occKeyTexel) and leaves the light out where c > u (u: the texel's uniform for the
+//         frame) -- the patch edges dissolve into a dither the denoiser averages;
+//       * the lit kernels (deterministic: their output is not denoised) take the BILINEAR c of the four
+//         in-plane patches around P (occLitPatches: the uniform jitter's tent weights) and scale the
+//         light's visibility by 1 - c.
+//     Lights culled for good (c = 1 everywhere) behave exactly as before; transitions are smooth in space
+//     and time. Left hard: the distance-octave rings (camera-relative) and the normal-axis cell steps on
+//     tilted surfaces (one dither-free edge per 0.25 m of rise; rare after 1 and 2).
+#define OCC_N_SOFT 12u
+#define OCC_BLOCK_MIN 0.1
+#define OCC_BLOCK_MAX 0.5
 #define OCC_CELLS 32768u
 #define OCC_CELL_U2 25u
 #define OCC_STAT_U2 8u
@@ -1131,26 +1339,68 @@ bool deferLightTaken(uint li) { return rsFrameOn() && deferPstochOn() && emTaken
 #define OCC_VIS_MIN 0.02
 #define OCC_NONE 0xFFFFFFFFu
 bool occFrameOn() { return rsFrameOn() && (rg.rs_cfg.z & RS_F_OCC) != 0u; }
+bool occSoft() { return (rg.rs_cfg.z & RS_F_OCC_HARD) == 0u; }   // (#1052; a header word: uniform)
+uint occN() { return occSoft() ? OCC_N_SOFT : OCC_N; }            // (the count from which a light is culled)
 uint occMix(uint v)
 {
     const uint st = v * 747796405u + 2891336453u;
     const uint w = ((st >> ((st >> 28u) + 4u)) ^ st) * 277803737u;
     return (w >> 22u) ^ w;
 }
-// P's patch: its tag (never 0) and first table slot.
-uint occKey(vec3 P, vec3 N, out uint slot0)
+// P's distance octave (patch edge 0.25 x 2^L)
+int occLevel(vec3 P)
 {
     const float dist = length(P - linfo.cam_pos.xyz);
-    const int L = clamp(int(floor(log2(max(dist, 1.0) * (1.0 / 8.0)))) + 1, 0, 6);
-    const float sz = 0.25 * exp2(float(L));
-    const ivec3 c = ivec3(floor(P / sz));
+    return clamp(int(floor(log2(max(dist, 1.0) * (1.0 / 8.0)))) + 1, 0, 6);
+}
+float occEdge(int L) { return 0.25 * exp2(float(L)); }
+// the patch face of shading normal N (dominant axis x sign); ax: that axis
+uint occFace(vec3 N, out uint ax)
+{
     const vec3 a = abs(N);
-    const uint ax = (a.x >= a.y && a.x >= a.z) ? 0u : (a.y >= a.z ? 1u : 2u);
+    ax = (a.x >= a.y && a.x >= a.z) ? 0u : (a.y >= a.z ? 1u : 2u);
     const float nv = ax == 0u ? N.x : (ax == 1u ? N.y : N.z);
-    const uint face = ax * 2u + (nv < 0.0 ? 1u : 0u);
+    return ax * 2u + (nv < 0.0 ? 1u : 0u);
+}
+// patch (cell c of octave L, face): its tag (never 0) and first table slot
+uint occTag(ivec3 c, int L, uint face, out uint slot0)
+{
     const uint h = occMix(uint(c.x) ^ occMix(uint(c.y) ^ occMix(uint(c.z) ^ occMix((uint(L) << 3u) | face))));
     slot0 = (h * 0x9E3779B1u) >> 17u;   // (OCC_CELLS = 2^15)
     return h | 1u;
+}
+// P's patch: its tag (never 0) and first table slot.
+uint occKey(vec3 P, vec3 N, out uint slot0)
+{
+    const int L = occLevel(P);
+    uint ax;
+    const uint face = occFace(N, ax);
+    return occTag(ivec3(floor(P / occEdge(L))), L, face, slot0);
+}
+// (#1052 SOFT CULL) this texel's uniform for the frame: a light is left out where its weight c > u
+// (0 under the hard rules: c is 0 or 1 there)
+float g_occ_u = 0.0;
+// (#1052 SOFT CULL) pass 15's key for texel m: P jittered by +-half a patch along the face's two in-plane
+// axes (the normal axis stays: no jump to an empty cell), one draw per texel and frame -- SELECT, VIS
+// and SHADE derive the same (m, frame) values, so the gate, the walks and the notes agree. Sets g_occ_u.
+// Hard rules: occKey, u = 0.
+uint occKeyTexel(vec3 P, vec3 N, ivec2 m, uint frame, out uint slot0)
+{
+    if (!occSoft()) { g_occ_u = 0.0; return occKey(P, N, slot0); }
+    const uint h0 = occMix(uint(m.x) * 0x8DA6B343u ^ occMix(uint(m.y) * 0xD8163841u ^ occMix(frame * 0xCB1AB31Fu + 1052u)));
+    const uint h1 = occMix(h0 ^ 0x9E3779B9u), h2 = occMix(h1 ^ 0x7F4A7C15u);
+    g_occ_u = float(h0 >> 8u) * (1.0 / 16777216.0);
+    const int L = occLevel(P);
+    const float sz = occEdge(L);
+    uint ax;
+    const uint face = occFace(N, ax);
+    const uint a1 = (ax + 1u) % 3u, a2 = (ax + 2u) % 3u;
+    vec3 j = vec3(0.0);
+    j[a1] = (float(h1 >> 8u) * (1.0 / 16777216.0) - 0.5) * sz;
+    j[a2] = (float(h2 >> 8u) * (1.0 / 16777216.0) - 0.5) * sz;
+    ivec3 c = ivec3(floor((P + j) / sz));
+    c[ax] = int(floor(P[ax] / sz));
+    return occTag(c, L, face, slot0);
 }
 uint occBase(uint cell) { return REGIR_OCC_BASE + OCC_STAT_U2 + cell * OCC_CELL_U2; }
 // word w of patch cell (a word index into rg_cells' uint view)
@@ -1180,12 +1430,17 @@ void occStatAdd(uint k, uint v)
     if ((k & 1u) == 0u) atomicAdd(rg_cells[REGIR_OCC_BASE + (k >> 1u)].x, v);
     else                atomicAdd(rg_cells[REGIR_OCC_BASE + (k >> 1u)].y, v);
 }
-// light li is culled at this point
-bool occCulled(uint cell, uint li)
+// (#1052) light li's cull weight in patch cell: hard rules 0 / 1 (count >= OCC_N); soft 0 below OCC_N_SOFT,
+// then 1/4, 1/2, 3/4, 1 over the counts 12 .. 15 (the nibble saturates at 15)
+float occWeight(uint cell, uint li)
 {
-    if (cell == OCC_NONE || li >= 256u) return false;
-    return occCount(cell, li) >= OCC_N;
+    if (cell == OCC_NONE || li >= 256u) return 0.0;
+    const uint n = occCount(cell, li);
+    if (!occSoft()) return n >= OCC_N ? 1.0 : 0.0;
+    return n >= OCC_N_SOFT ? float(n - OCC_N_SOFT + 1u) / float(16u - OCC_N_SOFT) : 0.0;
 }
+// light li is culled at this point (soft: for this texel's draw g_occ_u)
+bool occCulled(uint cell, uint li) { return occWeight(cell, li) > g_occ_u; }
 #endif
 #if DEFER_SPLIT_IO
 #include "clean_probe_pack.glsl"   // packRGB9E5
@@ -1305,34 +1560,79 @@ void deferPdnVis(vec3 P, out vec3 visD, out vec3 visS)
 // (#869 OCCLUSION CULL) this pixel's patch (P, its shading normal N: pass 15's key), found on the first
 // stochastic light the walk meets; then one word load per light test
 int   g_occ_ok = 0;   // 0 not yet, 1 fetched
-uint  g_occ_cell = OCC_NONE;   // (its patch; OCC_NONE: none or culling nothing)
+uint  g_occ_cell = OCC_NONE;   // (its patch; OCC_NONE: none or culling nothing -- the hard rules)
+uvec4 g_occ_c = uvec4(OCC_NONE);   // (#1052 SOFT CULL) the four in-plane patches around P (OCC_NONE: none / culling nothing)
+vec4  g_occ_w = vec4(0.0);         // ... their bilinear weights
+// (#1052 SOFT CULL) P's four in-plane patches (the face's two in-plane axes; pass 15's jitter lands in
+// each with exactly these tent weights), kept only where they cull something. Hard rules: P's patch.
+void occLitPatches(vec3 P, vec3 N)
+{
+    g_occ_cell = OCC_NONE;
+    g_occ_c = uvec4(OCC_NONE);
+    g_occ_w = vec4(0.0);
+    if (!occSoft())
+    {
+        uint s0;
+        const uint c = occFind(occKey(P, N, s0), s0);
+        g_occ_cell = occAny(c) ? c : OCC_NONE;
+        return;
+    }
+    const int L = occLevel(P);
+    const vec3 x = P / occEdge(L);
+    uint ax;
+    const uint face = occFace(N, ax);
+    const uint a1 = (ax + 1u) % 3u, a2 = (ax + 2u) % 3u;
+    const vec2 f = vec2(x[a1], x[a2]) - 0.5;
+    const vec2 i = floor(f);
+    const vec2 t = f - i;
+    ivec3 base;
+    base[ax] = int(floor(x[ax]));
+    base[a1] = int(i.x);
+    base[a2] = int(i.y);
+    [[unroll]] for (uint k = 0u; k < 4u; ++k)
+    {
+        ivec3 c = base;
+        c[a1] += int(k & 1u);
+        c[a2] += int(k >> 1u);
+        uint s0;
+        const uint cell = occFind(occTag(c, L, face, s0), s0);
+        if (!occAny(cell)) continue;
+        g_occ_c[k] = cell;
+        g_occ_w[k] = ((k & 1u) != 0u ? t.x : 1.0 - t.x) * ((k >> 1u) != 0u ? t.y : 1.0 - t.y);
+    }
+}
 // (#869 SPLIT) Light li's visibility (localLight's hook, CLEAN_PROJ_STOCH_VIS): its OWN denoised
 // visibility where this pixel's taps split it (by its split id, Light.tex.w; mono: one ray, both
 // shares), else the rest's ratios (diffuse, specular) -- the shared ratio over the other lights.
 // (#869 OCCLUSION CULL) a light P's cell holds blocked (OCCLUSION CULL above): 0 -- pass 15 left it out
-// of every estimate the same way.
+// of every estimate the same way. (#1052 SOFT CULL) x (1 - c), c its bilinear cull weight at P: pass 15
+// leaves it out with that probability (the jittered key).
 void deferPdnVisLight(uint li, vec3 P, vec3 N, out vec3 visD, out vec3 visS)
 {
+    float keep = 1.0;
     if (occFrameOn())   // (a header word: uniform)
     {
         if (g_occ_ok == 0)
         {
-            uint s0;
-            const uint tag = occKey(P, N, s0);
-            const uint c = occFind(tag, s0);
-            g_occ_cell = occAny(c) ? c : OCC_NONE;
+            occLitPatches(P, N);
             g_occ_ok = 1;
         }
-        if (occCulled(g_occ_cell, li)) { visD = visS = vec3(0.0); return; }
+        float c = 0.0;
+        if (g_occ_cell != OCC_NONE) c = occWeight(g_occ_cell, li);
+        [[unroll]] for (uint k = 0u; k < 4u; ++k)
+            if (g_occ_c[k] != OCC_NONE) c += g_occ_w[k] * occWeight(g_occ_c[k], li);
+        if (c >= 1.0) { visD = visS = vec3(0.0); return; }
+        keep = 1.0 - c;
     }
     deferPdnVis(P, visD, visS);   // (the first call fetches the rest and the split union)
+    visD *= keep; visS *= keep;
     if (!g_sp_any) return;
     const uint id = lights[li].tex.w & 0xFFFFu;
     if (id == 0u) return;
     [[unroll]] for (uint k = 0u; k < PDN_SPLIT_MAX; ++k)
         if (g_sp_id[k] == id)
         {
-            visD = visS = vec3(clamp(g_sp_rest + g_sp_dv[k], 0.0, 1.0));
+            visD = visS = vec3(clamp(g_sp_rest + g_sp_dv[k], 0.0, 1.0) * keep);
             return;
         }
 }
@@ -1603,7 +1903,11 @@ uint rtrLightCluster(vec3 P)
 // club sit right along every stage light's own path -- never becomes a candidate here (the main
 // view keeps their translucent tint; a reflection hit's projector shadow does not pay a texture
 // fetch per beam prim).
-vec3 rtrProjRay(Light L, vec3 P, vec3 N)
+// (#1039 M2) its set-up apart (the visibility queue's producer queues the very same ray): the origin o, the
+// direction l, the length tmax, and whether the light's own fixture rule applies (fix; rt_fix_P = its centre,
+// rt_fix_max = gi.prm5.z).
+#define RTR_PROJ_MASK (RT_MASK_SHADOW & ~RT_MASK_BLEND)
+void rtrProjRaySetup(Light L, vec3 P, vec3 N, out vec3 o, out vec3 l, out float tmax, out bool fix)
 {
     // (#87 GI, RT_SHADE_POINT_BUDGET) a POINT light in the budget: toward its centre, stopping at its
     // fixture sphere (proj_axis.x = its prim's bounding radius, pass 15's SH_SPHERE rule: the bulb
@@ -1611,11 +1915,35 @@ vec3 rtrProjRay(Light L, vec3 P, vec3 N)
     const bool point = L.proj_origin.w < 0.5;
     const vec3 lv = (point ? L.pos_radius.xyz : L.proj_origin.xyz) - P;
     const float d = length(lv);
-    const vec3 l = lv / max(d, 1e-4);
+    l = lv / max(d, 1e-4);
     const vec3 n = dot(N, l) < 0.0 ? -N : N;
-    const vec3 o = offsetRayOrigin(P + n * 0.01, n);
+    o = offsetRayOrigin(P + n * 0.01, n);
     const float stop = point ? max(clamp(L.proj_axis.x, 0.0, 64.0), 0.05) : 0.05;
-    return traceShadowRayRGB(o, l, 0.0, max(d - stop, 0.0), RT_MASK_SHADOW & ~RT_MASK_BLEND);
+    tmax = max(d - stop, 0.0);
+#if DEFER_GI_TRACE
+    // (#1041) ... and its OWN FIXTURE (pass 15's SH_FIXTURE, clean_vis_walk.glsl): a lamp's shade /
+    // lantern / sconce around the point -- a small box holding its centre -- neither shadows nor tints
+    // its light; the ray is traced again up to where it enters that box. (Projectors: their near
+    // plane is that clip already.)
+    fix = point && gi.prm5.z > 0.0;
+#else
+    fix = false;
+#endif
+}
+vec3 rtrProjRay(Light L, vec3 P, vec3 N)
+{
+    vec3 o, l;
+    float tmax;
+    bool fix;
+    rtrProjRaySetup(L, P, N, o, l, tmax, fix);
+#if DEFER_GI_TRACE
+    rt_fix_on = fix;
+    rt_fix_P = L.pos_radius.xyz;
+    rt_fix_max = gi.prm5.z;
+#endif
+    const vec3 v = rtVisTraceK(o, l, tmax, RTR_PROJ_MASK, RT_WALK_RGB, 1u << RT_WALK_RGB);
+    rt_fix_on = false;
+    return v;
 }
 #define RT_SHADE_PROJ_RAY(L, P, N) rtrProjRay(L, P, N)
 #if DEFER_GI_TRACE
@@ -1701,6 +2029,27 @@ bool g_rtr_occ_bent = false;     // (the debug view: R was bent back onto the ar
 // The occlusion ray's length (m): far past any region and its neighbours -- a miss is the open sky.
 #define RTR_OCC_FAR 4096.0
 bool g_rtr_occ_layers = false;   // (the debug view: blend layers composited in front)
+#if !DEFER_GI_TRACE && (CLEAN_DEFER_PASS == 11 || CLEAN_DEFER_PASS == 14)
+// (#87 x #859) whether a reflection hit takes the occlusion ray this frame (rtrHitEnv): GI on, the setting
+// on (RenderVKRTReflectionsHitOcclusion) -- uniform
+bool rtrOccOn() { return giFrameOn() && (gi.cfg.x & GI_F_ON) != 0u && (rtrOpts() & 1024u) != 0u; }
+// The occlusion ray at hit P along R (rtrHitEnv, below; #1039 M2: the visibility queue's producer queues the
+// same ray): R bent back onto the arrival side of the hit's plane where it grazes / crosses it (sets
+// g_rtr_occ_bent), the origin lifted off that plane on that side (g_rtr_hit_ng).
+void rtrOccRay(vec3 P, vec3 R, out vec3 o, out vec3 Ro)
+{
+    const vec3 ng = g_rtr_hit_ng;
+    Ro = R;
+    const float rn = dot(Ro, ng);
+    g_rtr_occ_bent = rn < 0.02;
+    if (g_rtr_occ_bent) Ro = normalize(Ro + ng * (0.02 - rn));
+    o = offsetRayOrigin(P + ng * 0.01, ng);
+}
+#if defined(CLEAN_VIS_QUEUE_M2) && CLEAN_RT_STAGE == RT_STAGE_LIGHT
+// (#1039 M2) the RESOLVE: the queued occlusion ray's visibility and blocker distance (below)
+void vqHitOcc(out float vis, out float bt);
+#endif
+#endif
 // The environment at a hit: one probe walk (irradiance along N, radiance along R at the
 // roughness's lod and at lod 0); the sky along R where no probe covers it. Legacy irradiance
 // keeps the sky ambient in classic mode (as lightSurface's legacy branch).
@@ -1748,7 +2097,7 @@ void rtrHitEnv(vec3 P, vec3 N, vec3 R, float rough, bool legacy, vec3 amblit, ou
     //   * the hit's IRRADIANCE follows RenderVKGIHitAmbient as the GI hits do: 0 none, 1 the probes,
     //     2 the cache else the probes, 3 the cache else none.
     // RenderVKRTReflectionsHitOcclusion 0 (rtrOpts bit 10 clear) = the old rule (A/B). GI off: unchanged.
-    if (giFrameOn() && (gi.cfg.x & GI_F_ON) != 0u && (rtrOpts() & 1024u) != 0u)
+    if (rtrOccOn())
     {
         const uint amb = uint(gi.prm.w + 0.5);
         const float gk = max(gi.prm.x, 0.0);   // (RenderVKGIIntensity, as the receivers' GI)
@@ -1775,20 +2124,24 @@ void rtrHitEnv(vec3 P, vec3 N, vec3 R, float rough, bool legacy, vec3 amblit, ou
         // had already left the room through a wall (a seam receiver a hair inside the neighbouring prim,
         // its back faces skipped) and hit the world outside, where this ray rightly escaped. That is
         // closed at the source -- rtrTraceRefl's REFLECTION BACK-FACE STOP (RenderVKRTReflectionsBackFaceStop).
-        const vec3 ng = g_rtr_hit_ng;
         float vis = 1.0;
-        vec3 Ro = R;
-        const float rn = dot(Ro, ng);
-        g_rtr_occ_bent = rn < 0.02;
-        if (g_rtr_occ_bent) Ro = normalize(Ro + ng * (0.02 - rn));
+        vec3 o, Ro;
+        rtrOccRay(P, R, o, Ro);
         {
             // FAR (RTR_OCC_FAR), not the reflection length: an occlusion ray is a first-hit query, cheap
             // to run long, and only a TRUE miss is an escape to the sky. Capped at the reflection
             // length (64 m default), every hit in a room larger than that "escaped" -- the arc-shaped
             // green regions of the debug view and the bright wall rectangle in the owner's gold cube.
-            const vec3 o = offsetRayOrigin(P + ng * 0.01, ng);
+#if defined(CLEAN_VIS_QUEUE_M2) && CLEAN_RT_STAGE == RT_STAGE_LIGHT
+            // (#1039 M2) the producer queued this ray (rtrOccRay on the same record): its result
+            float bt;
+            vqHitOcc(vis, bt);
+            rt_block_t = bt;
+#else
             rt_block_t = 1e30;
-            vis = clamp(traceShadowRay(o, Ro, 0.0, RTR_OCC_FAR, RT_MASK_WORLD_BLOCK), 0.0, 1.0);
+            vis = traceShadowRay(o, Ro, 0.0, RTR_OCC_FAR, RT_MASK_WORLD_BLOCK);
+#endif
+            vis = clamp(vis, 0.0, 1.0);
             g_rtr_occ = vis;
             g_rtr_occ_far = rt_block_t < 1e29 && rt_block_t > max(g_draw_push.rtr.x, 1.0);
         }
@@ -1838,8 +2191,268 @@ void rtrHitEnv(vec3 P, vec3 N, vec3 R, float rough, bool legacy, vec3 amblit, ou
 #if DEFER_GI_TRACE
 #define RT_SHADE_NO_HAZE   // (#87: a GI ray brings no sky in-scatter into an enclosed room)
 #endif
+#if defined(CLEAN_VIS_QUEUE) && (CLEAN_GI_STAGE == GI_STAGE_HITLIGHT || CLEAN_RT_STAGE == RT_STAGE_LIGHT)
+// (#1039 M1) the RESOLVE stages: the hit's sun from the queue's result for this lane's entry (vqHitSunVis,
+// below) -- rtShadeHit compiles no sun walk
+uint g_vq_dest = 0u;   // (this lane's ENTRY: its result slots are vqDest(region, g_vq_dest, k))
+float vqHitSunVis(vec3 P, out vec3 tint);
+#define RT_SHADE_SUN_VIS(P, tint) vqHitSunVis(P, tint)
+#ifdef CLEAN_VIS_QUEUE_M2
+// (#1039 M2) ... and its local lights: the producer's unshadowed walk minus the queued rays' blocked parts
+// (vqHitLocal, below) -- rtShadeHit compiles no light walk and no shadow walk
+vec3 vqHitLocal();
+#define RT_SHADE_LOCAL(P) vqHitLocal()
+#endif
+#endif
+#if defined(CLEAN_VIS_QUEUE_M2) && (CLEAN_GI_STAGE == GI_STAGE_HITMAT || CLEAN_RT_STAGE == RT_STAGE_MAT)
+// (#1039 M2) the PRODUCERS run rtShadeHit's local-light walk with every share unshadowed: the budget's valid
+// picks land here (their count, light indices, shares) and the producer queues their rays (vqHitRequests)
+uint g_vq_bn = 0u;
+uint g_vq_bl[RT_SHADE_PROJ_MAXK];
+vec3 g_vq_bs[RT_SHADE_PROJ_MAXK];
+void vqBudgetOut(uint projK, float sc[RT_SHADE_PROJ_MAXK], uint li[RT_SHADE_PROJ_MAXK], vec3 sh[RT_SHADE_PROJ_MAXK])
+{
+    g_vq_bn = 0u;
+    [[unroll]] for (uint j = 0u; j < RT_SHADE_PROJ_MAXK; ++j)
+    {
+        // (the inline loop's: j < projK, up to the first empty slot)
+        if (g_vq_bn == j && j < projK && sc[j] > 0.0) g_vq_bn = j + 1u;
+        g_vq_bl[j] = li[j];
+        g_vq_bs[j] = sh[j];
+    }
+}
+#define RT_SHADE_BUDGET_OUT(projK, kScore, kLight, kShare) vqBudgetOut(projK, kScore, kLight, kShare)
+#endif
 #include "clean_rt_shade.glsl"
 #include "clean_rt_weather.glsl"   // #970 weather at hits: rtWeatherHit (the coat) / rtSnowField (the lying snow)
+// (#1036) RT LIT RECORD: a hit's RtLitSurface (clean_rt_shade.glsl) + its footprint (rt_surf_foot) in
+// 4 uvec4 (64 B) -- what the split hit shading's MATERIAL stage hands its LIGHTING stage (the GI's
+// HIT-MAT -> HIT-LIGHT, the RT reflections' MAT -> LIGHT):
+//   r0 = P.xyz, rt_surf_foot                                        (f32)
+//   r1 = oct N, oct Ng, oct Nv (snorm 16 + 16 each), the model (bits 0-1)
+//   r2 = the terminator lift's height along Ng, tw (f32), base.rg (half), base.b | ao (half; PBR)
+//        <GMDX> | emask (half; legacy: the emissive-mask weight)
+//   r3 = PBR       rough, metal (f32), emissive.rg, emissive.b | 0 (half)
+//        legacy    gloss, env (f32), spec_lin.rgb
+//        fullbright fb_env, 0 (f32), fb.rgb                         (water: nothing past r1)
+// The lift: rtTerminatorTri lifts along the facet normal only (ng x min(height, cap), ng = Ng: both the
+// hit triangle's normal on the side the ray arrived from), so its height says it all. Bit-exact: P,
+// the footprint, the lift height, tw and the f32 scalars. Rounded: the normals (oct 2 x 16 bits,
+// ~4e-5 rad), the colours and ao (fp16: 2^-11 relative, clamped to 65504). base.a = 1 (no caller of
+// the split paths reads rtShadeHit's alpha).
+uint rtLitOct(vec3 n) { return packSnorm2x16(gbOctEncode(n)); }
+vec3 rtLitUnoct(uint w) { return gbOctDecode(unpackSnorm2x16(w)); }
+uvec2 rtLitHalf3(vec3 c, float x)
+{
+    const vec3 h = min(c, vec3(65504.0));
+    return uvec2(packHalf2x16(h.rg), packHalf2x16(vec2(h.b, min(x, 65504.0))));
+}
+void rtLitPack(RtLitSurface s, out uvec4 r0, out uvec4 r1, out uvec4 r2, out uvec4 r3)
+{
+    const bool pbr = s.model == RT_SURF_PBR, fb = s.model == RT_SURF_FULLBRIGHT;
+    r0 = uvec4(floatBitsToUint(s.P), floatBitsToUint(rt_surf_foot));
+    r1 = uvec4(rtLitOct(s.N), rtLitOct(s.Ng), rtLitOct(s.Nv), s.model);
+    r2 = uvec4(floatBitsToUint(dot(s.tlift, s.Ng)), floatBitsToUint(s.tw),
+               rtLitHalf3(s.base.rgb, pbr ? s.ao : (s.model == RT_SURF_LEGACY ? s.emask : 0.0)));   // <GMDX> emask
+    r3 = uvec4(floatBitsToUint(pbr ? s.rough : (fb ? s.fb_env : s.gloss)), floatBitsToUint(pbr ? s.metal : (fb ? 0.0 : s.env)),
+               rtLitHalf3(pbr ? s.emissive : (fb ? s.fb : s.spec_lin), 0.0));
+}
+// The record back (rtSurfaceEval's defaults in the fields its model leaves alone); sets rt_surf_foot.
+RtLitSurface rtLitUnpack(uvec4 r0, uvec4 r1, uvec4 r2, uvec4 r3)
+{
+    RtLitSurface s;
+    s.P = uintBitsToFloat(r0.xyz);
+    rt_surf_foot = uintBitsToFloat(r0.w);
+    s.N = rtLitUnoct(r1.x);
+    s.Ng = rtLitUnoct(r1.y);
+    s.Nv = rtLitUnoct(r1.z);
+    s.model = r1.w & 3u;
+    const float lh = uintBitsToFloat(r2.x);
+    s.tlift = lh != 0.0 ? s.Ng * lh : vec3(0.0);
+    s.tw = uintBitsToFloat(r2.y);
+    const vec2 b2 = unpackHalf2x16(r2.w);
+    s.base = vec4(unpackHalf2x16(r2.z), b2.x, 1.0);
+    const vec3 c = vec3(unpackHalf2x16(r3.z), unpackHalf2x16(r3.w).x);
+    const float s0 = uintBitsToFloat(r3.x), s1 = uintBitsToFloat(r3.y);
+    const bool pbr = s.model == RT_SURF_PBR, fb = s.model == RT_SURF_FULLBRIGHT, lg = s.model == RT_SURF_LEGACY;
+    s.rough = pbr ? s0 : 1.0;
+    s.metal = pbr ? s1 : 0.0;
+    s.ao = pbr ? b2.y : 1.0;
+    s.emissive = pbr ? c : vec3(0.0);
+    s.spec_lin = lg ? c : vec3(0.0);
+    s.gloss = lg ? s0 : 0.0;
+    s.env = lg ? s1 : 0.0;
+    s.emask = lg ? b2.y : 0.0;   // <GMDX>
+    s.fb = fb ? c : vec3(0.0);
+    s.fb_env = fb ? s0 : 0.0;
+    return s;
+}
+#if defined(CLEAN_VIS_QUEUE) || defined(CLEAN_VIS_WALK)
+#include "clean_vis_queue.glsl"
+#endif
+#ifdef CLEAN_VIS_QUEUE
+// (#1039 M1) THE PRODUCER: entry dest's sun / moon ray as rtShadeHit would trace it at the hit of the RT LIT
+// RECORD r0..r3 -- read back exactly as the lighting stage reads it (rtLitUnpack: the same rounding, the
+// same footprint), seen from eye (the receiver), its want test (water: the glint above 1e-4; fullbright:
+// none; else N.L > 0) and its set-up (rtHitSunRay: the escape check, the back-face self-shadow, the
+// origin) -- queued as one VQ_K_SUN request (the walk kernel runs rtSunRayVis with the same switches), or a
+// constant result where no ray is cast. inCap false (an entry past the queue's capacity): nothing -- the
+// fused lighting stage's tail shades that entry. Every active lane calls it once (the append's ballot).
+// (#1039 M2, -DCLEAN_VIS_QUEUE_M2) + the hit's other rays, in rtShadeHit's order (each with the alpha-test
+// cone the inline walk would see: a traced sun ray leaves it at the hit's footprint, spread 0 --
+// rtHitSunShadowCore -- for every later ray of the hit):
+//   * the RT reflections' OCCLUSION ray (rtrHitEnv: rtrOccRay along the reflection direction rtShadeHit asks
+//     the environment for -- the water's wave reflection, else reflect(-V, N) --, from the arrival side
+//     g_rtr_hit_ng of the record's Ng; Rin = the reflection ray's direction): one VQ_K_OCC request;
+//   * the LOCAL LIGHTS: rtHitLocalLights on the record with RT_SHADE_BUDGET_OUT (the same walk the lighting
+//     stage ran: the light grid's picks, the cluster, every BRDF -- every share unshadowed) -> that sum into
+//     the SUM slot, and the hit shadow-ray budget's picks as VQ_K_LIGHT requests (rtrProjRaySetup; the share
+//     in the pick's slot, the walk leaves the blocked part there);
+//   * the BLEND LAYERS' cone flag into the layer slot (the RT split's LAYERS stage reads it).
+// hit false (M2's RT MAT runs every entry: a miss / a back-face stop has no material): only the layer flag.
+#if CLEAN_GI_STAGE == GI_STAGE_HITMAT || CLEAN_RT_STAGE == RT_STAGE_MAT
+void vqHitRequests(uvec4 r0, uvec4 r1, uvec4 r2, uvec4 r3, vec3 eye, vec3 Rin, uint e, bool inCap, bool hit)
+{
+    VqRegion r = vqRegion();
+    const uint db = vqDest(r, e, 0u);   // (entry e's slot 0)
+    bool want = false;
+    vec3 Po = vec3(0.0);
+    const vec3 L = atmosLightDir();
+    float tmax = 0.0;
+    uint wanted = 0u, consts = 0u;
+    const bool shade = inCap && hit;
+    const RtLitSurface s = rtLitUnpack(r0, r1, r2, r3);   // (sets rt_surf_foot: the casters' LOD; zeros for no hit)
+    const bool water = s.model == RT_SURF_WATER;
+    RtWaterShade ws;
+    if (shade && water) ws = rtShadeWaterBegin(s.P, eye, pc.u_cam_time.w, false);
+    if (shade)
+    {
+        bool sun = false;
+        if (water) sun = rtShadeWaterSunWanted(ws);
+        else if (s.model != RT_SURF_FULLBRIGHT) sun = dot(s.N, L) > 0.0;
+        float cvis = 1.0;
+        if (sun) want = rtHitSunRay(s.P, water ? vec3(0.0, 0.0, 1.0) : s.Ng, L, water ? vec3(0.0) : s.tlift, Po, tmax, cvis);
+        if (!want) vqStoreConst(r, db + VQ_SLOT_SUN, vec3(cvis));   // (no sun wanted: never read; else 1 / 0)
+        wanted = sun ? 1u : 0u;
+        consts = (sun && !want) ? 1u : 0u;
+    }
+    vqCount(r, wanted, consts, (hit && !inCap) ? 1u : 0u);
+    const uint flags = VQ_K_SUN | VQ_F_FOLIAGE | (rtSplitOn() ? VQ_F_SPLIT : 0u) | ((rtBlendOpts() & 1u) != 0u ? VQ_F_PARITY : 0u)
+                     | (specTransOn() ? VQ_F_RGB : 0u) | (rtHitSunCoarse() ? VQ_F_COARSE : 0u);
+    vqPush(r, want, db + VQ_SLOT_SUN, Po, tmax, L, rt_surf_foot, flags, rt_cone_aniso, 0.0);
+#ifdef CLEAN_VIS_QUEUE_M2
+    // the cone the hit's later rays see (rtHitSunShadowCore narrows it only when it traces)
+    const float cw = want ? rt_surf_foot : rt_cone_width0;
+    const float cs = want ? 0.0 : rt_cone_spread;
+    uint nOcc = 0u;
+#if CLEAN_RT_STAGE == RT_STAGE_MAT
+    // THE OCCLUSION RAY: every model but fullbright asks the environment (the water: unless the eye is under
+    // it); the water asks before its glint's sun ray, so with the cone as it came in
+    bool wantO = false;
+    vec3 oo = vec3(0.0), oR = vec3(0.0, 0.0, 1.0);
+    if (shade && rtrOccOn() && s.model != RT_SURF_FULLBRIGHT && !(water && ws.done))
+    {
+        g_rtr_hit_ng = dot(s.Ng, Rin) > 0.0 ? -s.Ng : s.Ng;   // (rtrReflShade's)
+        rtrOccRay(s.P, water ? ws.R : reflect(-normalize(eye - s.P), s.N), oo, oR);
+        wantO = true;
+        nOcc = 1u;
+    }
+    vqPush(r, wantO, db + vqSlotOcc(r), oo, RTR_OCC_FAR, oR, water ? rt_cone_width0 : cw, VQ_K_OCC, rt_cone_aniso,
+           water ? rt_cone_spread : cs);
+    // THE BLEND LAYERS (the LAYERS stage, every entry): composited after the hit's shading, so with the cone
+    // its sun ray left (the water's glint ray too)
+    if (inCap && (rtrOpts() & 1u) != 0u) r.q[vqResWord(r, db + vqSlotLayers(r))] = uvec4(0u, 0u, 0u, want ? 1u : 0u);
+#endif
+    // THE LOCAL LIGHTS (rtShadeHit's call: PBR / legacy hits), unshadowed, and the budget's picks
+    // (RT_SHADE_BUDGET_OUT -> g_vq_b*)
+    const bool lit = shade && !water && s.model != RT_SURF_FULLBRIGHT;
+    uint n = 0u;
+    if (lit)
+    {
+        const bool pbr = s.model == RT_SURF_PBR;
+        LegacySpec ls = legacySpecNone();
+        if (!pbr) { ls.spec = s.spec_lin; ls.gloss = s.gloss; ls.env = s.env; }
+        g_vq_bn = 0u;   // (a frame without lights: no picks)
+        const vec3 sum = rtHitLocalLights(s.P, s.N, normalize(eye - s.P), pbr, s.base.rgb, pbr ? s.metal : 0.0,
+                                          pbr ? s.rough : 1.0, ls, 0u);
+        // the budget's rays (the region's slots were sized for this K: min, a guard)
+        n = min(g_vq_bn, vqBudgetK(r));
+        RT_SHADE_STAT(2, n);
+        r.q[vqResWord(r, db + VQ_SLOT_SUM)] = uvec4(floatBitsToUint(sum), n);
+    }
+    [[unroll]] for (uint j = 0u; j < VQ_K_MAX; ++j)
+    {
+        if (j >= vqBudgetK(r)) break;   // (a header word: uniform)
+        const bool wj = j < n;
+        vec3 ko = vec3(0.0), kl = vec3(0.0, 0.0, 1.0);
+        float kt = 0.0;
+        bool fix = false;
+        uint li = 0u;
+        if (wj)
+        {
+            li = g_vq_bl[j];
+            rtrProjRaySetup(lights[li], s.P, s.N, ko, kl, kt, fix);
+            r.q[vqResWord(r, db + VQ_SLOT_K0 + j)] = uvec4(floatBitsToUint(g_vq_bs[j]), 0u);
+        }
+        vqPush(r, wj, db + VQ_SLOT_K0 + j, ko, kt, kl, cw, VQ_K_LIGHT | (fix ? (VQ_F_FIXTURE | ((li & 0xFFFFu) << 16)) : 0u),
+               rt_cone_aniso, cs);
+    }
+    vqCount2(r, nOcc, n, lit ? 1u : 0u);
+#endif
+}
+#endif
+#if CLEAN_GI_STAGE == GI_STAGE_HITLIGHT || CLEAN_RT_STAGE == RT_STAGE_LIGHT
+// THE RESOLVE: rtHitSunShadow's value from the stored visibility x tint (its max is the visibility, the
+// rest the tint), x the cloud layer's sun transmittance (#719) as the inline path multiplies it.
+float vqHitSunVis(vec3 P, out vec3 tint)
+{
+    VqRegion r = vqRegion();
+    const uvec4 v = r.q[vqResWord(r, vqDest(r, g_vq_dest, VQ_SLOT_SUN))];
+    // A traced ray left the alpha-test cone at the hit's footprint (rtHitSunShadowCore): the hit's later rays
+    // see it so -- M1's inline budget / occlusion / blend-layer rays (M2 queued them with it)
+    if ((v.w & VQ_RES_WALKED) != 0u) { rt_cone_width0 = rt_surf_foot; rt_cone_spread = 0.0; }
+    const vec3 vis = uintBitsToFloat(v.xyz);
+    tint = vec3(1.0);
+    const float sv = max(max(vis.r, vis.g), vis.b);
+    if (sv > 1e-4) tint = vis / sv;
+    return sv * cloudShadowMap(P);
+}
+#ifdef CLEAN_VIS_QUEUE_M2
+// (M2) rtHitLocalLights' value: the producer's unshadowed sum minus the blocked parts of the budget's shares,
+// in pick order, as the inline loop subtracts them (sum -= share x (1 - vis); the walk formed each product)
+vec3 vqHitLocal()
+{
+    VqRegion r = vqRegion();
+    const uint db = vqDest(r, g_vq_dest, 0u);
+    const uvec4 sv = r.q[vqResWord(r, db + VQ_SLOT_SUM)];
+    vec3 sum = uintBitsToFloat(sv.xyz);
+    const uint n = min(sv.w, vqBudgetK(r));
+    for (uint j = 0u; j < n; ++j) sum -= vqResult(r, db + VQ_SLOT_K0 + j);
+    return max(sum, vec3(0.0));
+}
+#if CLEAN_RT_STAGE == RT_STAGE_LIGHT
+// (M2) the occlusion ray's visibility (unclamped, as the walk returned it) and blocker distance
+void vqHitOcc(out float vis, out float bt)
+{
+    VqRegion r = vqRegion();
+    const uvec4 v = r.q[vqResWord(r, vqDest(r, g_vq_dest, vqSlotOcc(r)))];
+    vis = uintBitsToFloat(v.x);
+    bt = uintBitsToFloat(v.y);
+}
+// (M2) the blend layers in front (rtrBlendLayers' composite: the LAYERS stage's light + T x behind); layers:
+// some (1) / none (0) -- every kept layer has alpha above ALPHA_VISIBLE_EPS, so T < 1 exactly when one was met
+vec3 vqLayers(vec3 behind, out uint layers)
+{
+    VqRegion r = vqRegion();
+    const uvec4 v = r.q[vqResWord(r, vqDest(r, g_vq_dest, vqSlotLayers(r)))];
+    const float T = uintBitsToFloat(v.w);
+    layers = T < 1.0 ? 1u : 0u;
+    return uintBitsToFloat(v.xyz) + T * behind;
+}
+#endif
+#endif
+#endif
+#endif
 #endif
 layout(set = 2, binding = 0) uniform texture2D uG0;     // albedo (sRGB) + model alpha
 layout(set = 2, binding = 1) uniform texture2D uG1;     // oct N, oct Ng
@@ -2952,97 +3565,69 @@ uint  g_rc_back_rfl = gl_RayFlagsNoneEXT;
 // candidates at the material cutoff (blend candidates -- pass 14's camera ray -- at blendMin),
 // single-sided back faces skipped (the raster's cull: opaque instances commit without a
 // candidate test, so a back face there re-traces past it; clean_probe_rt.comp's rules).
+// (#1048: the shared closest-hit walk, clean_rt_closest.glsl, with this kernel's extras as its hooks --
+//  the trace-cost counters, the mask-test A/B, the back-face STOP)
+void rtrClosestKeep(uint id, uint fl, float a, float cutoff, bool blend, inout bool keep)
+{
+    // RenderVKRTReflectionsMaskTest 3 (A/B): every alpha-mask candidate solid -- whatever
+    // still does not show never reaches the alpha test (class / culling / geometry).
+    if (!blend && rtrMaskMode() == 3u) keep = true;
+    if ((rtrOpts() & 128u) != 0u && !blend && cutoff > 0.0
+        && ((fl & (512u | 8192u)) != 0u || (rtIdIn(id) && (rt_geom[id].z & 0x80000000u) != 0u)))
+    {   // (trace-cost counters: an avatar's alpha-mask candidate)
+        ++g_rc_amtest;
+        if (a < cutoff) ++g_rc_amrej;
+        else if (a / rt_mask_boost < cutoff) ++g_rc_amresc;
+    }
+}
+// (GI_F_BACK_STOP / REFLECTION BACK-FACE STOP) a committed single-sided back face h
+void rtrBackStop(RtHit h, vec3 d, inout uint rflags, inout bool stop)
+{
+    const uint fl = rt_instances[h.instance].flags;
+    // (GI_F_BACK_STOP) a back face stops the walk -- except TERRAIN (instance flag 32): the
+    // raster's terrain LOD and the ray-traced heightfield differ by centimetres to decimetres on
+    // hills, so receivers just below the traced terrain see its underside first; stopping there
+    // painted dark patches over the ground (moving with the TAA jitter). Terrain re-traces past
+    // it as before: a heightfield is no wall a leak can slip through.
+    // (#1032) Nor an ALPHA-MASK instance (bucket bit 4 without blend): a mask face only commits
+    // here when pass A traced it FORCE_OPAQUE (maskKnownOpaque); its back faces were skipped as
+    // candidates before, so it re-traces past them as before instead of stopping.
+    if (g_rc_back_stop && (fl & 32u) == 0u && (fl & 6u) != 4u)
+    {
+        // the window is on the DEPTH behind the face's plane (dist x |d . n|), not the distance along
+        // the ray: angle-invariant -- a grazing exit through a face microns away stays microns deep,
+        // a grazing walk through a 1 m wall stays 1 m deep
+        float depth = h.dist;
+        if (g_rc_back_win.x > 0.0 || g_rc_back_win.y < 1e29)
+        {
+            vec3 p0, p1, p2;
+            rtTriPositions(h.instance, h.prim, p0, p1, p2);
+            const mat3 M = mat3(h.o2w);
+            const vec3 c = cross(M * (p1 - p0), M * (p2 - p0));
+            const float cl = length(c);
+            if (cl > 0.0) depth = h.dist * abs(dot(d, c)) / cl;
+        }
+        if (depth >= g_rc_back_win.x && depth <= g_rc_back_win.y) { g_rc_back = true; stop = true; return; }
+        if (depth > g_rc_back_win.y) rflags = g_rc_back_rfl;
+    }
+}
+#define RTC_BEGIN() g_rc_back = false
+#define RTC_TRAVERSE() ++g_rc_trav
+#define RTC_OVER_BUDGET() g_rc_flags |= RC_BUDGET
+#define RTC_CANDS(n) g_rc_cand += min(n, RT_CANDIDATE_BUDGET)
+#define RTC_KEEP(id, fl, a, cutoff, blend, keep) rtrClosestKeep(id, fl, a, cutoff, blend, keep)
+#define RTC_BACKFACE(h, d, rflags, stop) rtrBackStop(h, d, rflags, stop)
+#define RTC_RETRACE(k) if (k < 2) { ++g_rc_retr; g_rc_flags |= RC_RETRACED; }
+#include "clean_rt_closest.glsl"
 RtHit rtrClosest(vec3 o, vec3 d, float tmin, float tmax, uint mask, float blendMin, uint rflags)
 {
-    RtHit h;
-    h.hit = false;
-    g_rc_back = false;
-    for (int k = 0; k < 3; ++k)
-    {
-        // (Xid 109) a back face committed within max(dist x 1e-5, 1e-4) of tmax steps the re-trace's
-        // tmin PAST tmax -- an invalid ray query (tmin <= tmax is required; undefined otherwise, a
-        // non-terminating traversal on NVIDIA). Nothing is left on the interval: a miss. And a ray
-        // the caller built from non-finite inputs (rtRaySane): a miss.
-        if (!(tmin < tmax)) return h;
-        if (!rtRaySane(o, tmin, d, tmax)) return h;
-        rayQueryEXT rq;
-        rayQueryInitializeEXT(rq, uTLAS, rflags, mask, o, tmin, d, tmax);
-        ++g_rc_trav;
-        uint n_cand = 0u;
-        while (rayQueryProceedEXT(rq))
-        {
-            if (rayQueryGetIntersectionTypeEXT(rq, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
-            if (++n_cand > RT_CANDIDATE_BUDGET)
-            {   // over budget (G-7): the nearest hit committed so far stands
-                g_rc_flags |= RC_BUDGET;
-                rayQueryTerminateEXT(rq);
-                break;
-            }
-            const uint id   = rtHitInstance(uint(rayQueryGetIntersectionInstanceCustomIndexEXT(rq, false)),
-                                            uint(rayQueryGetIntersectionGeometryIndexEXT(rq, false)));
-            const uint prim = RT_HIT_PRIM(rq, false, id);
-            const vec2 bc   = rayQueryGetIntersectionBarycentricsEXT(rq, false);
-            const float t   = rayQueryGetIntersectionTEXT(rq, false);
-            const mat4x3 o2w = rayQueryGetIntersectionObjectToWorldEXT(rq, false);
-            const uint fl = rtIdIn(id) ? rt_instances[id].flags : 256u;   // (#874 guard)
-            if ((fl & (256u | 2048u)) == 0u && !rtCandidateFront(id, prim, d, o2w)) continue;
-            float cutoff; bool blend; vec3 col;
-            const float a = rtCandidateAlphaCol(id, prim, bc, t, d, o2w, cutoff, blend, col);
-            bool keep = a >= (blend ? blendMin : cutoff);
-            // RenderVKRTReflectionsMaskTest 3 (A/B): every alpha-mask candidate solid -- whatever
-            // still does not show never reaches the alpha test (class / culling / geometry).
-            if (!blend && rtrMaskMode() == 3u) keep = true;
-            if ((rtrOpts() & 128u) != 0u && !blend && cutoff > 0.0
-                && ((fl & (512u | 8192u)) != 0u || (rtIdIn(id) && (rt_geom[id].z & 0x80000000u) != 0u)))
-            {   // (trace-cost counters: an avatar's alpha-mask candidate)
-                ++g_rc_amtest;
-                if (a < cutoff) ++g_rc_amrej;
-                else if (a / rt_mask_boost < cutoff) ++g_rc_amresc;
-            }
-            if (keep) rayQueryConfirmIntersectionEXT(rq);
-        }
-        g_rc_cand += min(n_cand, RT_CANDIDATE_BUDGET);
-        if (rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionTriangleEXT)
-            return h;   // miss
-        h.hit = true;
-        h.dist = rayQueryGetIntersectionTEXT(rq, true);
-        h.instance = rtHitInstance(uint(rayQueryGetIntersectionInstanceCustomIndexEXT(rq, true)),
-                                   uint(rayQueryGetIntersectionGeometryIndexEXT(rq, true)));
-        if (!rtIdIn(h.instance)) { h.hit = false; return h; }   // (#874 guard: a bad id is a miss)
-        h.prim = RT_HIT_PRIM(rq, true, h.instance);
-        h.bary = rayQueryGetIntersectionBarycentricsEXT(rq, true);
-        h.front = rayQueryGetIntersectionFrontFaceEXT(rq, true);
-        h.o2w = rayQueryGetIntersectionObjectToWorldEXT(rq, true);
-        const uint fl = rt_instances[h.instance].flags;
-        if ((fl & (256u | 2048u)) != 0u || rtCandidateFront(h.instance, h.prim, d, h.o2w)) return h;
-        // (GI_F_BACK_STOP) a back face stops the walk -- except TERRAIN (instance flag 32): the
-        // raster's terrain LOD and the ray-traced heightfield differ by centimetres to decimetres on
-        // hills, so receivers just below the traced terrain see its underside first; stopping there
-        // painted dark patches over the ground (moving with the TAA jitter). Terrain re-traces past
-        // it as before: a heightfield is no wall a leak can slip through.
-        if (g_rc_back_stop && (fl & 32u) == 0u)
-        {
-            // the window is on the DEPTH behind the face's plane (dist x |d . n|), not the distance along
-            // the ray: angle-invariant -- a grazing exit through a face microns away stays microns deep,
-            // a grazing walk through a 1 m wall stays 1 m deep
-            float depth = h.dist;
-            if (g_rc_back_win.x > 0.0 || g_rc_back_win.y < 1e29)
-            {
-                vec3 p0, p1, p2;
-                rtTriPositions(h.instance, h.prim, p0, p1, p2);
-                const mat3 M = mat3(h.o2w);
-                const vec3 c = cross(M * (p1 - p0), M * (p2 - p0));
-                const float cl = length(c);
-                if (cl > 0.0) depth = h.dist * abs(dot(d, c)) / cl;
-            }
-            if (depth >= g_rc_back_win.x && depth <= g_rc_back_win.y) { g_rc_back = true; return h; }
-            if (depth > g_rc_back_win.y) rflags = g_rc_back_rfl;
-        }
-        tmin = h.dist + max(h.dist * 1e-5, 1e-4);
-        h.hit = false;
-        if (k < 2) { ++g_rc_retr; g_rc_flags |= RC_RETRACED; }
-    }
-    return h;
+    RtClosestRules r;
+    r.mask = mask;
+    r.rflags = rflags;
+    r.blendMin = blendMin;
+    r.blendGt = false;
+    r.noAvatars = false;
+    return rtClosestWalk(o, d, tmin, tmax, r);
 }
 
 // SIZE-CLASS SEGMENTS (#859 perf; RenderVKRTReflectionsSizeClasses, rtrOpts bit 6; push rtr2):
@@ -3086,7 +3671,12 @@ bool rtrInstSmall(uint id, mat4x3 o2w)
 // receiver's ambient + the sun / moon at |N.L| of the layer's triangle (unshadowed), fullbright
 // unlit; alpha = texel alpha x factor x tint. Returns the composite; `layers` = how many.
 // smallD: past it, candidates of small instances are skipped (rtrSmallDist / rtrInstSmall).
-vec3 rtrBlendLayers(vec3 o, vec3 d, float tmax, vec3 behind, vec3 sunlit, vec3 amblit, float smallD, out uint layers)
+// (#1039 M2) The composite is linear in `behind`: rtrBlendLayersT returns its two parts -- sum (the layers'
+// own light, front to back) and T (their transmittance) -- and rtrBlendLayers = sum + T x behind. The
+// visibility queue's LAYERS stage runs rtrBlendLayersT alone (it needs no hit colour), the lighting stage
+// finishes the composite.
+void rtrBlendLayersT(vec3 o, vec3 d, float tmax, vec3 sunlit, vec3 amblit, float smallD, out uint layers,
+                     out vec3 lsum, out float lT)
 {
     float lt[RTR_BLEND_LAYERS];
     vec4  lc[RTR_BLEND_LAYERS];   // (rgb = the layer's unlit colour, a = its alpha)
@@ -3094,7 +3684,9 @@ vec3 rtrBlendLayers(vec3 o, vec3 d, float tmax, vec3 behind, vec3 sunlit, vec3 a
     [[unroll]] for (int j = 0; j < RTR_BLEND_LAYERS; ++j) { lt[j] = 3.0e38; lc[j] = vec4(0.0); ln[j] = vec4(0.0); }
     const vec3 L = atmosLightDir();
     float tmin = 0.0;
-    if (!rtRaySane(o, tmin, d, tmax)) { layers = 0u; return behind; }   // (Xid 109: an invalid ray -- no layers)
+    lsum = vec3(0.0);
+    lT = 1.0;
+    if (!rtRaySane(o, tmin, d, tmax)) { layers = 0u; return; }   // (Xid 109: an invalid ray -- no layers)
     rayQueryEXT rq;
     rayQueryInitializeEXT(rq, uTLAS, gl_RayFlagsNoneEXT, RT_MASK_BLEND, o, tmin, d, tmax);
     uint n_cand = 0u;
@@ -3114,9 +3706,9 @@ vec3 rtrBlendLayers(vec3 o, vec3 d, float tmax, vec3 behind, vec3 sunlit, vec3 a
         if ((fl & 256u) == 0u && !rtCandidateFront(id, prim, d, o2w)) continue;
         if (t > smallD && rtrInstSmall(id, o2w)) continue;   // (size-class segments: sub-footprint here)
         float cutoff; bool blend; vec3 col;
-        const float a = clamp(rtCandidateAlphaCol(id, prim, bc, t, d, o2w, cutoff, blend, col), 0.0, 1.0);
+        const float a = clamp(rtCandidateAlphaCol(id, prim, bc, t, d, rq, cutoff, blend, col), 0.0, 1.0);
         RT_SHADE_STAT(3, 1u);
-        if (a <= 1.0 / 255.0) continue;
+        if (a <= ALPHA_VISIBLE_EPS) continue;
         // (lit after the walk -- only the kept layers: the GI frames' shadow ray is per layer)
         vec4 nw = vec4(0.0, 0.0, 1.0, -1.0);   // fullbright
         if ((fl & 4096u) == 0u)
@@ -3201,6 +3793,14 @@ vec3 rtrBlendLayers(vec3 o, vec3 d, float tmax, vec3 behind, vec3 sunlit, vec3 a
             ++layers;
         }
     }
+    lsum = sum;
+    lT = T;
+}
+vec3 rtrBlendLayers(vec3 o, vec3 d, float tmax, vec3 behind, vec3 sunlit, vec3 amblit, float smallD, out uint layers)
+{
+    vec3 sum;
+    float T;
+    rtrBlendLayersT(o, d, tmax, sunlit, amblit, smallD, layers, sum, T);
     return sum + T * behind;
 }
 
@@ -3239,16 +3839,22 @@ uint g_rtr_mask_drop = 0u;
 #define RTR_BACK_STOP_NEAR 1.0e-3
 #define RTR_BACK_STOP_FAR  2.0
 bool g_rtr_back = false;   // (the debug view: the reflection ray stopped at a back face)
-vec3 rtrTraceRefl(vec3 o, vec3 R, float tmax, vec3 P, vec3 env, bool blend, out float tHit)
+// (#1036) In four parts -- the walk (rtrReflWalk), the hit's material (rtrReflMaterial), its lighting
+// (rtrReflShade) and the blend layers + debug views over the result (rtrReflTail) -- so the RT
+// reflection split (RenderVKRTReflectionsShadeSplit; RT TRACE over the RAY LIST) runs them as TRACE /
+// MAT / LIGHT kernels (the material handed over as the RT LIT RECORD); rtrTraceRefl is the four in a
+// row (the in-tile and the fused list trace, the forward layer, the mirrors).
+// The walk: the closest hit (every class but blend; size-class segments, the back-face stop), the
+// per-ray state reset (g_rtr_*), the alpha test's cone back to its defaults. smallD: the size-class
+// boundary (rtrSmallDist; the blend layers skip small instances past it).
+RtHit rtrReflWalk(vec3 o, vec3 R, float tmax, out float smallD)
 {
     rt_anim_time = pc.u_cam_time.w;   // (draw time: texture animation, water waves)
-    tHit = 0.0;
     g_rtr_occ = -1.0;
     g_rtr_occ_far = false;
     g_rtr_occ_bent = false;
     g_rtr_occ_layers = false;
     g_rtr_back = false;
-    vec3 col = env;
     // SIZE-CLASS SEGMENTS (rtrSmallDist): [0, D] over every class, then -- only after a miss there --
     // [D, tmax] without the small static opaque class. One segment when D reaches tmax.
     const uint rmask = RT_MASK_ALL & ~RT_MASK_BLEND & ~g_rtr_mask_drop;
@@ -3261,7 +3867,7 @@ vec3 rtrTraceRefl(vec3 o, vec3 R, float tmax, vec3 P, vec3 env, bool blend, out 
     g_rc_back_stop = backStop;
     g_rc_back_win  = vec2(RTR_BACK_STOP_NEAR, RTR_BACK_STOP_FAR);
     g_rc_back_rfl  = rtrReflCullFlags();
-    const float smallD = rtrSmallDist(tmax);
+    smallD = rtrSmallDist(tmax);
     RtHit h;
     h.hit = false;
     if (smallD < tmax)
@@ -3289,39 +3895,45 @@ vec3 rtrTraceRefl(vec3 o, vec3 R, float tmax, vec3 P, vec3 env, bool blend, out 
     // shadow rays (rtShadeHit) keep their footprint rule (rt_cone_* = the hit's, no coverage scale).
     rt_mask_width0 = -1.0; rt_mask_lod_bias = 0.0; rt_mask_lod_max = 64.0; rt_mask_cov_k = 0.0;
     g_rc_hitd = h.hit ? h.dist : -1.0;
-    if (g_rtr_back)
-    {
-        // the ray started inside a solid (REFLECTION BACK-FACE STOP above): its inside -- no light,
-        // never shaded (its lit side faces away); a hit, so the receiver splices it, not the env
-        g_rtr_occ = 0.0;
-        g_rts_terms = vec4(0.0);
-        col = vec3(0.0);
-        tHit = h.dist;
-    }
-    else if (h.hit)
-    {
-        RT_SHADE_STAT(4, 1u);
-        RtSurface hs = rtSurfaceEval(h, R);
-        float hd = h.dist;
-        rtWeatherAtHit(hs, R, hd);   // #970: the lying snow in front of the hit, else the weather coat on it
-        // (after the weather: the snow surface's normal when the march found snow; turned toward the
-        //  side the ray arrived from)
-        g_rtr_hit_ng = dot(hs.Ng, R) > 0.0 ? -hs.Ng : hs.Ng;
-        g_rtr_occ = -1.0;
-        // Seen from the receiver: haze over receiver -> hit (the camera -> receiver part is the
-        // receiver's own, applied to the whole pixel downstream).
-        vec3 c = rtShadeHit(hs, P, 0u, pc.u_cam_time.w).rgb;
-        if (any(isnan(c)) || any(isinf(c))) { lgNote(LG_SSR); c = vec3(0.0); }
-        col = clamp(c, vec3(0.0), vec3(LG_MAX_VALUE));
-        tHit = hd;
-    }
-    CLK_MARK(SSR);   // (the trace + hit shading)
+    return h;
+}
+// The hit's material (never a back-face stop): rtSurfaceEval at the ray cone (rt_cone_*), then
+// (#970) the lying snow in front of the hit, else the weather coat on it -- hd: the hit distance in,
+// the snow surface's when the march found one in front.
+RtSurface rtrReflMaterial(RtHit h, vec3 R, inout float hd)
+{
+    RtSurface hs = rtSurfaceEval(h, R);
+    rtWeatherAtHit(hs, R, hd);   // #970: the lying snow in front of the hit, else the weather coat on it
+    return hs;
+}
+// The hit's light seen from the receiver P: haze over receiver -> hit (the camera -> receiver part is
+// the receiver's own, applied to the whole pixel downstream).
+vec3 rtrReflShade(RtLitSurface hs, vec3 R, vec3 P)
+{
+    // (after the weather: the snow surface's normal when the march found snow; turned toward the
+    //  side the ray arrived from)
+    g_rtr_hit_ng = dot(hs.Ng, R) > 0.0 ? -hs.Ng : hs.Ng;
+    g_rtr_occ = -1.0;
+    vec3 c = rtShadeHit(hs, P, 0u, pc.u_cam_time.w).rgb;
+    if (any(isnan(c)) || any(isinf(c))) { lgNote(LG_SSR); c = vec3(0.0); }
+    return clamp(c, vec3(0.0), vec3(LG_MAX_VALUE));
+}
+// After the hit: col = its light (tHit its distance), or what stands where nothing was hit (tHit 0) ->
+// the blend layers in front of it, the debug views. hit: the walk committed a surface (a back-face
+// stop too); smallD: the walk's size-class boundary.
+vec3 rtrReflTail(vec3 col, bool hit, inout float tHit, vec3 o, vec3 R, float tmax, vec3 P, bool blend, float smallD)
+{
     if (blend)
     {
+        uint layers;
+#if defined(CLEAN_VIS_QUEUE_M2) && CLEAN_RT_STAGE == RT_STAGE_LIGHT
+        // (#1039 M2) the LAYERS stage gathered and lit them (the same ray, length and cone): the composite
+        col = vqLayers(col, layers);
+#else
         vec3 sunlit, amblit, additive, atten;
         atmosLightTerms(P - pc.u_cam_time.xyz, vec3(0.0, 0.0, 1.0), sunlit, amblit, additive, atten);
-        uint layers;
-        col = rtrBlendLayers(o, R, h.hit ? tHit : tmax, col, sunlit, amblit, smallD, layers);   // (#970: tHit -- the lying snow may stand in front of the hit)
+        col = rtrBlendLayers(o, R, hit ? tHit : tmax, col, sunlit, amblit, smallD, layers);   // (#970: tHit -- the lying snow may stand in front of the hit)
+#endif
         if (layers > 0u && tHit <= 0.0) tHit = tmax;
         CLK_MARK(SHADE);
 #if CLEAN_DEFER_PASS == 11 || CLEAN_DEFER_PASS == 14
@@ -3344,7 +3956,7 @@ vec3 rtrTraceRefl(vec3 o, vec3 R, float tmax, vec3 P, vec3 env, bool blend, out 
     if ((rtrOpts() & 2048u) != 0u)
     {
         vec3 dc;
-        if (!h.hit) dc = vec3(0.1, 0.2, 2.0);
+        if (!hit) dc = vec3(0.1, 0.2, 2.0);
         else if (g_rtr_back) dc = vec3(0.6);
         else if (g_rtr_occ < 0.0) dc = vec3(2.0);
         else
@@ -3362,7 +3974,7 @@ vec3 rtrTraceRefl(vec3 o, vec3 R, float tmax, vec3 P, vec3 env, bool blend, out 
     // term, BLUE the haze in-scatter between the receiver and the hit, WHITE the local lights +
     // emission; full strength whatever the total. BLACK: a hit with no light.
     // Pixels in their normal colours were not ray traced.
-    if ((rtrOpts() & 4096u) != 0u && h.hit)
+    if ((rtrOpts() & 4096u) != 0u && hit)
     {
         const vec4 t = g_rts_terms;
         const float tot = t.x + t.y + t.z + t.w;
@@ -3372,6 +3984,32 @@ vec3 rtrTraceRefl(vec3 o, vec3 R, float tmax, vec3 P, vec3 env, bool blend, out 
     }
 #endif
     return col;
+}
+vec3 rtrTraceRefl(vec3 o, vec3 R, float tmax, vec3 P, vec3 env, bool blend, out float tHit)
+{
+    float smallD;
+    const RtHit h = rtrReflWalk(o, R, tmax, smallD);
+    tHit = 0.0;
+    vec3 col = env;
+    if (g_rtr_back)
+    {
+        // the ray started inside a solid (REFLECTION BACK-FACE STOP above): its inside -- no light,
+        // never shaded (its lit side faces away); a hit, so the receiver splices it, not the env
+        g_rtr_occ = 0.0;
+        g_rts_terms = vec4(0.0);
+        col = vec3(0.0);
+        tHit = h.dist;
+    }
+    else if (h.hit)
+    {
+        RT_SHADE_STAT(4, 1u);
+        float hd = h.dist;
+        const RtSurface hs = rtrReflMaterial(h, R, hd);
+        col = rtrReflShade(rtLitSurface(hs), R, P);
+        tHit = hd;
+    }
+    CLK_MARK(SSR);   // (the trace + hit shading)
+    return rtrReflTail(col, h.hit, tHit, o, R, tmax, P, blend, smallD);
 }
 
 // ALPHA-MASK TEST of the reflection rays (RenderVKRTReflectionsMaskTest, rtrOpts bits 8-9;
@@ -3412,6 +4050,34 @@ void rtrReceiverRay(SurfaceLit s, vec3 P, vec3 V, vec3 Ng, float rough, float sc
     rt_cone_spread = pa + 0.25 * rough;
     rt_cone_aniso  = max(g_draw_push.rtr.w, 1.0);
     rtrMaskCone(camd * pa1, pa1);   // (the alpha-mask test: one render pixel's footprint)
+}
+// (#1049) RAY-QUERY BUDGET of one reflection ray (clean_rt_common.glsl rt_query_left; the hang guard
+// on top of the per-walk candidate budgets): every ray query the ray starts -- the walk's re-traces and
+// size-class segments (<= 6), the hit's sun walks (<= 6), projector rays (<= RT_SHADE_PROJ_MAXK), the
+// occlusion ray, the blend-layer walk + its GI shadow rays (1 + RTR_BLEND_LAYERS), the forward layer's
+// own walk (<= 3) -- adds up to ~30 at most, so the budget never binds in a sane frame (images
+// unchanged); past it the ray's remaining queries are refused (a miss / blocked), so no reflection ray
+// can chain unbounded traversal work. Set by each kernel per ray (in-tile / list trace, the split
+// stages, the forward layer); the GI and other kernels keep the default (unlimited).
+#define RTR_QUERY_BUDGET 48u
+void rtrQueryBudgetBegin() { rt_query_left = RTR_QUERY_BUDGET; }
+// The hang guard's counters -> the lit guard words (LLCleanRendererVK::kLgRt, logged by
+// readLitGuardStats with every frame -- not only while the GPU timers run -- and dumped in the
+// DEVICE_LOST report): + 0 reflection rays the query budget cut, + 1 rays rtRaySane refused
+// (non-finite / out of the world), + 2 reflection walks that hit RT_CANDIDATE_BUDGET. One subgroup
+// sum + atomic each, at the kernel's tail.
+#define LG_RT_WORD (LG_WORD0 + 31u)   // = LLCleanRendererVK::kLgRt
+void rtrStatsGuard()
+{
+    const uint a = subgroupAdd(rt_query_refused != 0u ? 1u : 0u);
+    const uint b = subgroupAdd(rt_ray_rejected);
+    const uint c = subgroupAdd((g_rc_flags & RC_BUDGET) != 0u ? 1u : 0u);
+    if (subgroupElect())
+    {
+        if (a != 0u) atomicAdd(lg_words[LG_RT_WORD], a);
+        if (b != 0u) atomicAdd(lg_words[LG_RT_WORD + 1u], b);
+        if (c != 0u) atomicAdd(lg_words[LG_RT_WORD + 2u], c);
+    }
 }
 #endif
 
@@ -3461,23 +4127,18 @@ uvec4 deferResolveProjectors(SurfaceLit s, vec3 P)
     {
         const uint li = cluster_index[c * CLUSTER_CAP + i];
         if (li >= count) continue;
-        const vec4 pr = lights[li].pos_radius;
-        const vec3 lv = pr.xyz - P;
-        const float d2 = dot(lv, lv);
-        if (d2 >= pr.w * pr.w) continue;
+        vec3 lv;
+        float d2;
+        if (!lightInRange(lights[li].pos_radius, P, lv, d2)) continue;
         const Light L = lights[li];
         if (L.proj_origin.w < 0.5 || L.tex.z == 0u) continue;
         if (pshadow[L.tex.z - 1u].params.w < 0.5) continue;
         // (#85 phase 2) the stochastic sampler carries its shadowed light: no slot, no lookup
         if ((g_draw_push.flags & DEFER_FLAG_PSTOCH) != 0u && projStochEligible(L)) continue;
-        const float dist = sqrt(d2);
-        if (dist >= L.pos_radius.w) continue;
-        const float atten = legacyAtten(dist / L.pos_radius.w, L.color_falloff.w);
-        if (atten <= 0.0 || lightCutoffFade(atten, L.color_falloff.rgb) <= 0.0) continue;
-        vec4 ptc = L.proj_mat * vec4(P, 1.0);
-        if (ptc.z < 0.0) continue;
-        ptc.xyz /= ptc.w;
-        if (ptc.z <= 0.0 || ptc.x <= 0.0 || ptc.x >= 1.0 || ptc.y <= 0.0 || ptc.y >= 1.0) continue;
+        float dist;
+        if (lightReachAt(L.pos_radius, L.color_falloff, d2, dist) <= 0.0) continue;   // (#1043)
+        vec2 ptc;
+        if (!lightProjFrustum(L.proj_mat, P, ptc)) continue;
         if (dot(s.N, normalize(L.proj_origin.xyz - P)) <= 0.0) continue;
         const vec3 v = clamp(dsFiniteNote(vec4(projectorVisibility(L, li, P, s.N, taps, tapsOk), 0.0)).rgb,
                              vec3(0.0), vec3(1.0));
@@ -3740,8 +4401,10 @@ void DEFER_MAIN()
             if (kind != DS_SOFT)
             {
                 const vec3 V = normalize(pc.u_cam_time.xyz - P);
-                // (no irradiance: amblit only seeds it)
-                const SurfaceRefl r = surfaceReflectionsW(s, P, V, vec3(0.0), false, kind == DS_SHARP_ENV ? SR_ENV : SR_SPEC);
+                // (no irradiance kept -- but #872's PBR environment normalization compares the
+                // probes' irradiance with the ambient the diffuse uses: the real amblit, as pass 4)
+                const vec3 amblit = s.model == SURF_PBR ? atmosAmbientTerm(s.N) : vec3(0.0);
+                const SurfaceRefl r = surfaceReflectionsW(s, P, V, amblit, false, kind == DS_SHARP_ENV ? SR_ENV : SR_SPEC);
                 imageStore(uReflSpec, px, uvec4(dsPackRGB9E5(kind == DS_SHARP_ENV ? r.env : r.spec)));
                 if (rtMark) mark = dsRtMark(s, V, kind == DS_SHARP_ENV, length(pc.u_cam_time.xyz - P), px, P);
                 CLK_MARK(STORE);
@@ -3793,9 +4456,15 @@ vec3 giCosDir(vec3 N, vec2 u)
 // One GI path vertex: the closest hit along d from o (every class but alpha-blend), shaded as the RT
 // reflections shade theirs, seen from the receiver P; a miss takes the sky. xs / ns: the vertex and
 // its geometric normal toward the ray (a sky sample: P + d x GI_FAR, -d).
+// (#1031) In two halves -- giTraceRay (the walk) and giShadeHit (the hit's or the sky's radiance) --
+// so the split stages run them in separate kernels; giTrace is the two in a row (the fused kernel,
+// the re-shade).
 #define GI_FAR 1.0e4
 bool g_gi_back = false;   // (GI_F_BACK_STOP) the last giTrace stopped at a single-sided back face
-vec3 giTrace(vec3 o, vec3 d, float tmax, vec3 P, out vec3 xs, out vec3 ns, out bool hit, out float hdist)
+// The walk: the closest hit along d from o (every class but alpha-blend). The caller set the ray
+// cone (rt_cone_*) and the alpha test's (rtrMaskCone); after it the alpha test's are back to the
+// defaults (the hit shading's shadow walks take those). g_gi_back: the hit is a back-face stop.
+RtHit giTraceRay(vec3 o, vec3 d, float tmax)
 {
     rt_anim_time = pc.u_cam_time.w;
     // (GI_F_CULL_BACK: single-sided back faces culled in traversal -- the shader's own rule
@@ -3811,31 +4480,30 @@ vec3 giTrace(vec3 o, vec3 d, float tmax, vec3 P, out vec3 xs, out vec3 ns, out b
     g_rc_back_stop = false;
     g_gi_back = g_rc_back;
     rt_mask_width0 = -1.0; rt_mask_lod_bias = 0.0; rt_mask_lod_max = 64.0; rt_mask_cov_k = 0.0;
-    hit = h.hit;
-    hdist = h.hit ? h.dist : 0.0;
-    if (h.hit && g_gi_back)
+    return h;
+}
+// The radiance the walk's result brings to the receiver P: a miss the sky (+ the probes' far field),
+// a hit its material shaded as the RT reflections shade theirs (never a back-face stop: the caller's).
+// Needs the walk's ray cone (rt_cone_*: the hit's texture LOD).
+// (#1036) In three parts -- the miss (giShadeMiss), the hit's material (giHitMaterial) and its lighting
+// (giHitLight) -- so the shade split runs them in separate kernels (the material handed over as the
+// RT LIT RECORD); giShadeHit is the three in a row (the fused kernel, SHADE, the re-shade).
+vec3 giShadeMiss(vec3 d, vec3 P, out vec3 xs, out vec3 ns)
+{
+    xs = P + d * GI_FAR;
+    ns = -d;
+    vec3 sky = skyColor(d);
+    if ((gi.cfg.x & GI_F_MISS_PROBES) != 0u)
     {
-        // a single-sided BACK face first: the ray started inside geometry / slipped into a seam --
-        // the surface's dark inside (no light), an occluder for the sky visibility; never shaded
-        // (its "lit" side faces away from the receiver)
-        xs = o + d * h.dist;
-        ns = -d;
-        return vec3(0.0);
+        // the far field: the probes along d (what lies past the ray length -- a far building, the
+        // terrain beyond -- as the probes captured it; the sky where none covers P)
+        vec3 pr, pr2, pirr;
+        if (sampleProbesEx(P, d, d, 0.5 * phdr.info.y, 0.0, sky, true, false, false, pr, pr2, pirr)) sky = pr;
     }
-    if (!h.hit)
-    {
-        xs = P + d * GI_FAR;
-        ns = -d;
-        vec3 sky = skyColor(d);
-        if ((gi.cfg.x & GI_F_MISS_PROBES) != 0u)
-        {
-            // the far field: the probes along d (what lies past the ray length -- a far building, the
-            // terrain beyond -- as the probes captured it; the sky where none covers P)
-            vec3 pr, pr2, pirr;
-            if (sampleProbesEx(P, d, d, 0.5 * phdr.info.y, 0.0, sky, true, false, false, pr, pr2, pirr)) sky = pr;
-        }
-        return (any(isnan(sky)) || any(isinf(sky))) ? vec3(0.0) : max(sky, vec3(0.0));
-    }
+    return (any(isnan(sky)) || any(isinf(sky))) ? vec3(0.0) : max(sky, vec3(0.0));
+}
+RtSurface giHitMaterial(RtHit h, vec3 d)
+{
     RtSurface hs = rtSurfaceEval(h, d);
     rtWeatherHit(hs);   // #970: the weather coat at the GI hit (the lying-snow march is the reflections' only)
     // (#91) THE GI SPLIT (clean_regir.glsl EMISSIVE LIGHTS): an emitter ReSTIR DI samples this frame
@@ -3847,6 +4515,10 @@ vec3 giTrace(vec3 o, vec3 d, float tmax, vec3 P, out vec3 xs, out vec3 ns, out b
         hs.emissive = vec3(0.0);
         if (hs.model == RT_SURF_FULLBRIGHT) hs.fb = vec3(0.0);
     }
+    return hs;
+}
+vec3 giHitLight(RtLitSurface hs, vec3 d, vec3 P, out vec3 xs, out vec3 ns)
+{
     vec3 c = rtShadeHit(hs, P, 0u, pc.u_cam_time.w).rgb;
     if (any(isnan(c)) || any(isinf(c))) c = vec3(0.0);
     xs = hs.P;
@@ -3865,6 +4537,28 @@ vec3 giTrace(vec3 o, vec3 d, float tmax, vec3 P, out vec3 xs, out vec3 ns, out b
         if (l > clampL) c *= clampL / l;
     }
     return c;
+}
+vec3 giShadeHit(RtHit h, vec3 d, vec3 P, out vec3 xs, out vec3 ns)
+{
+    rt_anim_time = pc.u_cam_time.w;
+    if (!h.hit) return giShadeMiss(d, P, xs, ns);
+    return giHitLight(rtLitSurface(giHitMaterial(h, d)), d, P, xs, ns);
+}
+vec3 giTrace(vec3 o, vec3 d, float tmax, vec3 P, out vec3 xs, out vec3 ns, out bool hit, out float hdist)
+{
+    const RtHit h = giTraceRay(o, d, tmax);
+    hit = h.hit;
+    hdist = h.hit ? h.dist : 0.0;
+    if (h.hit && g_gi_back)
+    {
+        // a single-sided BACK face first: the ray started inside geometry / slipped into a seam --
+        // the surface's dark inside (no light), an occluder for the sky visibility; never shaded
+        // (its "lit" side faces away from the receiver)
+        xs = o + d * h.dist;
+        ns = -d;
+        return vec3(0.0);
+    }
+    return giShadeHit(h, d, P, xs, ns);
 }
 #if defined(CLEAN_GI_RESOLVE)
 // ---- (GI-4) THE RADIANCE CACHE'S RESOLVE (kWorldDeferGiResolveSpv; after the GI trace): one slot
@@ -3946,16 +4640,14 @@ void giResStore(ivec2 q, ivec2 D, uint layer, GiSample y, float W, float M)
 // (GI_F_LIGHT_CHG, #980) One changed-light record's unshadowed diffuse light at X (Nx: the hit's
 // geometric normal, facing the receiver) -- the hit shading's range / attenuation (clean_rt_shade.glsl
 // rtHitLocalLights; albedo 1, a projector untextured: an upper bound of what it adds to the stored
-// radiance, legacy and PBR alike). reach: the walk's own reach test (range, attenuation; the caller
-// tests a projector's frustum).
+// radiance, legacy and PBR alike). reach: the walk's own reach test (THE LIGHT REACH, #1043: range,
+// attenuation, cutoff fade -- what the hit shading counts; the caller tests a projector's frustum).
 vec3 giChgLight(vec4 pr, vec4 cf, vec3 X, vec3 Nx, bool proj, vec3 apex, float amb, out bool reach)
 {
     reach = false;
-    const vec3 lv = pr.xyz - X;
-    const float d2 = dot(lv, lv);
-    if (!(d2 < pr.w * pr.w)) return vec3(0.0);
-    const float d = sqrt(d2);
-    const float at = legacyAtten(d / pr.w, cf.w);
+    vec3 lv;
+    float d;
+    const float at = lightReach(pr, cf, X, lv, d);
     if (at <= 0.0) return vec3(0.0);
     reach = true;
     const vec3 la = proj ? apex - X : lv;
@@ -4002,10 +4694,8 @@ uint giChangedSig(vec3 X, vec3 Nx, vec3 Ls)
             {
                 // a projector without ambiance lights only inside its frustum (the walk's test; with
                 // ambiance its back / side receivers are lit too: range only)
-                vec4 ptc = lights[li].proj_mat * vec4(X, 1.0);
-                inF = ptc.z >= 0.0;
-                ptc.xyz /= ptc.w;
-                inF = inF && !(ptc.z <= 0.0 || ptc.x <= 0.0 || ptc.x >= 1.0 || ptc.y <= 0.0 || ptc.y >= 1.0);
+                vec2 ptc;
+                inF = lightProjFrustum(lights[li].proj_mat, X, ptc);
             }
             bool rN = false;
             const vec3 E = inF ? giChgLight(pr, cf, X, Nx, proj, lights[li].proj_origin.xyz, amb, rN) : vec3(0.0);
@@ -4125,17 +4815,410 @@ float giTap(ivec2 q, ivec2 D, uint pl, float zExp, float ztol, vec3 P, vec3 N, f
     return wt;
 }
 
+// The render pixel of GI texel m (its jittered centre, D the GI extent): every stage's receiver.
+ivec2 giRenderPixel(ivec2 m, ivec2 D, out vec2 r)
+{
+    const vec2 R2 = vec2(float(g_draw_push.width), float(g_draw_push.height));
+    r = R2 / vec2(D);
+    const vec2 J = (ssr.taa_params.w > 0.5 && D.x < int(g_draw_push.width)) ? ssr.taa_jitter.xy : vec2(0.0);
+    return clamp(ivec2((vec2(m) + 0.5 + J) * r), ivec2(0), ivec2(R2) - 1);
+}
+// The fresh sample's ray (GI-1: one cosine-weighted direction) from receiver P (N / Ng toward the eye
+// V, camd from the camera; r render px per GI texel): its direction d, origin o and the walk's ray
+// cone (rt_cone_* and the alpha test's, rtrMaskCone); traced: this texel traces this frame.
+void giFreshRay(ivec2 m, uint frame, vec2 r, vec3 P, vec3 N, vec3 Ng, vec3 V, float camd,
+                out vec3 d, out vec3 o, out bool traced)
+{
+    uint seed = giPcg(uint(m.x) * 1973u + uint(m.y) * 9277u + frame * 26699u);
+    const vec2 u = fract(vec2(giRand(seed), giRand(seed)) + float(frame & 0xFFFFu) * vec2(0.7548776662, 0.5698402910));
+    d = giCosDir(N, u);
+    const float dn = dot(d, Ng);
+    if (dn < 0.02) d = normalize(d + Ng * (0.02 - dn));   // (above the facet: a normal map leans N under it)
+    // the hit's texture LOD: the receiver's pixel footprint, spreading as a diffuse lobe
+    const float pa = rtrPixelAngle(g_frag_xy) * r.x;
+    // THE ORIGIN'S LIFT: P is rebuilt from a reduced-resolution, jittered depth sample, so it lies
+    // up to about half a GI texel's footprint off the true surface along the view ray -- growing with
+    // the distance and, on a slanted surface, with 1 / cos (the depth slope). The depth-precision lift
+    // alone (rtReceiverOrigin: camd x 2^-21) left far / grazing receivers just INSIDE their own
+    // ray-traced surface: the back-face stop (GI_F_BACK_STOP) darkened them in jitter-moving patches.
+    // Lifted by half the footprint over the facet's cosine (capped at 4x).
+    const float lift = 0.5 * camd * pa / max(abs(dot(Ng, V)), 0.25);
+    o = rtReceiverOrigin(P, Ng, camd, lift);
+    rt_cone_width0 = camd * pa;
+    rt_cone_spread = pa + 0.5;
+    rt_cone_aniso = max(g_draw_push.rtr.w, 1.0);
+    rtrMaskCone(camd * pa, pa);
+    // (RenderVKGITraceEvery: 1 texel in 2 / 4 traces this frame -- a checkerboard / a 2 x 2 rotation;
+    //  the others take their reservoirs' reuse only, or hold the denoiser's history)
+    const uint everyLog = (gi.cfg.x >> GI_EVERY_SHIFT) & 3u;
+    traced = true;
+    if (everyLog == 1u) traced = ((uint(m.x) + uint(m.y) + frame) & 1u) == 0u;
+    else if (everyLog >= 2u) traced = ((uint(m.x) & 1u) + 2u * (uint(m.y) & 1u)) == (frame & 3u);
+}
+// The walk's ray cone again for a stage that shades (or re-traces) what another one walked: the
+// receiver P's footprint, as giFreshRay set it (the alpha test's stays at its defaults).
+void giRayCone(ivec2 rp, vec2 r, vec3 P)
+{
+    g_frag_xy = vec2(rp) + 0.5;
+    const float pa = rtrPixelAngle(g_frag_xy) * r.x;
+    const float camd = length(P - pc.u_cam_time.xyz);
+    rt_cone_width0 = camd * pa;
+    rt_cone_spread = pa + 0.5;
+    rt_cone_aniso = max(g_draw_push.rtr.w, 1.0);
+}
+#if CLEAN_GI_STAGE != GI_STAGE_FUSED
+// ---- (#1031) GI RECORDS (binding 25: the layout at its declaration) ----
+#define GI_REC_TRACED 1u   // a surface that traced its fresh ray this frame (else REUSE takes its defaults)
+#define GI_REC_HIT    2u   // ... and hit something (else the sky)
+#define GI_REC_BACK   4u   // ... a single-sided back face first (GI_F_BACK_STOP: dark, never shaded)
+#define GI_REC_FRONT  8u   // the hit's hardware front face (RtHit.front)
+// (#1036) the headers: [0] the re-shade list, [1] / [2] the HIT / MISS lists; the list from GI_REC_LIST
+#define GI_HDR_HIT  1u
+#define GI_HDR_MISS 2u
+#define GI_REC_LIST 3u
+#define GI_ROW 65535u   // (the HIT / MISS dispatch's row width: maxComputeWorkGroupCount's floor)
+uint giRecIndex(ivec2 m, ivec2 D) { return GI_REC_LIST + (uint(D.x * D.y) + 3u) / 4u + 6u * uint(m.y * D.x + m.x); }
+// The re-shade list (RESHADE / TAIL: one lane per entry, 64 per workgroup over x): this lane's entry,
+// or ~0u past the count (clamped to the texels: Xid 109 hardening, as rttEntry).
+uint giListLane(ivec2 D)
+{
+    const uint e = gl_WorkGroupID.x * 64u + gl_LocalInvocationIndex;
+    return e < min(gi_hit[0].x, uint(D.x * D.y)) ? e : 0xFFFFFFFFu;
+}
+ivec2 giListTexel(uint e, ivec2 D)
+{
+    const uint t = gi_hit[GI_REC_LIST + (e >> 2u)][e & 3u];
+    return ivec2(int(t % uint(D.x)), int(t / uint(D.x)));
+}
+// (#1036) TRACE: texel ti onto the HIT list (entries 0, 1, ...) or the MISS list (entries n - 1,
+// n - 2, ...; n = the texels) -- one atomic per subgroup and list; the electing lane raises the list's
+// indirect dispatch to cover its new end (64 entries per workgroup, GI_ROW-wide rows: monotone in the
+// end, so the largest append's maxima stand). Every texel appends at most once: the two never meet.
+void giShadeListGrow(uint hdr, uint end)
+{
+    const uint groups = (end + 63u) / 64u;
+    atomicMax(gi_hit[hdr].y, min(groups, GI_ROW));
+    atomicMax(gi_hit[hdr].z, (groups + GI_ROW - 1u) / GI_ROW);
+}
+void giShadeListAppend(bool hit, uint ti, uint n)
+{
+    const uvec4 bh = subgroupBallot(hit), bm = subgroupBallot(!hit);
+    const uint nh = subgroupBallotBitCount(bh), nm = subgroupBallotBitCount(bm);
+    uint baseH = 0u, baseM = 0u;
+    if (subgroupElect())
+    {
+        if (nh != 0u) { baseH = atomicAdd(gi_hit[GI_HDR_HIT].x, nh); giShadeListGrow(GI_HDR_HIT, baseH + nh); }
+        if (nm != 0u) { baseM = atomicAdd(gi_hit[GI_HDR_MISS].x, nm); giShadeListGrow(GI_HDR_MISS, baseM + nm); }
+    }
+    const uint eH = subgroupBroadcastFirst(baseH) + subgroupBallotExclusiveBitCount(bh);
+    const uint eM = subgroupBroadcastFirst(baseM) + subgroupBallotExclusiveBitCount(bm);
+    const uint slot = hit ? eH : n - 1u - eM;
+    if (slot < n) gi_hit[GI_REC_LIST + (slot >> 2u)][slot & 3u] = ti;
+}
+// MISS / HIT-MAT / HIT-LIGHT: this lane's texel on list hdr (64 lanes per workgroup, GI_ROW-wide rows),
+// false past the count (clamped to the texels: Xid 109 hardening). e0: the first entry this dispatch
+// covers (#1039: the fused HIT-LIGHT's tail past the visibility queue's capacity; else 0); e: the entry.
+bool giShadeListTexel(uint hdr, ivec2 D, uint e0, out ivec2 m, out uint e)
+{
+    const uint n = uint(D.x * D.y);
+    e = e0 + (gl_WorkGroupID.y * GI_ROW + gl_WorkGroupID.x) * 64u + gl_LocalInvocationIndex;
+    m = ivec2(0);
+    if (e >= min(gi_hit[hdr].x, n)) return false;
+    const uint slot = hdr == GI_HDR_HIT ? e : n - 1u - e;
+    const uint t = gi_hit[GI_REC_LIST + (slot >> 2u)][slot & 3u];
+    if (t >= n) return false;
+    m = ivec2(int(t % uint(D.x)), int(t / uint(D.x)));
+    return true;
+}
+// REUSE: texel ti onto the list -- one atomic per subgroup (its lanes take consecutive entries); the
+// lane whose entry starts a 64-entry block adds the workgroup that will run it (the indirect x: the
+// header's count rounded up to 64). Every texel appends at most once: the list never overflows.
+void giListAppend(uint ti)
+{
+    const uvec4 b = subgroupBallot(true);
+    uint base = 0u;
+    if (subgroupElect()) base = atomicAdd(gi_hit[0].x, subgroupBallotBitCount(b));
+    const uint e = subgroupBroadcastFirst(base) + subgroupBallotExclusiveBitCount(b);
+    gi_hit[GI_REC_LIST + (e >> 2u)][e & 3u] = ti;
+    if ((e & 63u) == 0u) atomicAdd(gi_hit[0].y, 1u);
+}
+// The shading stages' radiance-cache counters (giShadeHit's lookups at hits; GI_F_STATS)
+void giShadeStats()
+{
+    if ((gi.cfg.x & GI_F_STATS) == 0u) return;   // (a header word: uniform)
+    const uint sL = subgroupAdd(g_gi_lookups), sF = subgroupAdd(g_gi_found);
+    if (subgroupElect() && sL != 0u)
+    {
+        atomicAdd(gi.stat3.x, sL);
+        atomicAdd(gi.stat3.y, sF);
+    }
+}
+#endif
+
+#if CLEAN_GI_STAGE == GI_STAGE_TRACE
+// ---- (#1031) STAGE 1, TRACE: the receiver and its fresh ray's closest-hit walk -> the hit record.
+//      No hit shading in this kernel: the walk (rtrClosest's candidate alpha test, the back-face
+//      re-traces) is all it holds. ----
 void DEFER_MAIN()
 {
     const ivec2 m = ivec2(gl_GlobalInvocationID.xy);
     const ivec2 D = ivec2(g_draw_push.rtr2.xy + 0.5);
     if (any(greaterThanEqual(m, D))) return;
+    // the re-shade list starts empty (REUSE appends two barriers later; last frame's RESHADE / TAIL
+    // read it before recordGI's opening barrier)
+    if (m == ivec2(0)) gi_hit[0] = uvec4(0u, 0u, 1u, 1u);
+    const uint frame = uint(g_draw_push.rtr2.z + 0.5);
+    vec2 r;
+    const ivec2 rp = giRenderPixel(m, D, r);
+    g_frag_xy = vec2(rp) + 0.5;
+    const uint ri = giRecIndex(m, D);
+    const vec4 g2 = texelFetch(uG2, rp, 0);
+    bool surf = deferHasSurface(g2);
+    float glow;
+    bool noFade;
+    SurfaceLit s;
+    if (surf)
+    {
+        s = deferSurface(rp, g2, glow, noFade);
+        surf = s.model != SURF_FULLBRIGHT;
+    }
+    if (!surf)
+    {
+        gi_hit[ri] = uvec4(0u);
+        return;
+    }
+    const vec3 P = deferPosition(rp);
+    const vec3 cam = pc.u_cam_time.xyz;
+    const vec3 V = normalize(cam - P);
+    const vec3 Ng = dot(s.Ng, V) < 0.0 ? -s.Ng : s.Ng;
+    const vec3 N = dot(s.N, V) < 0.0 ? -s.N : s.N;
+    vec3 d, o;
+    bool traced;
+    giFreshRay(m, frame, r, P, N, Ng, V, length(P - cam), d, o, traced);
+    if (!traced)
+    {
+        gi_hit[ri] = uvec4(floatBitsToUint(d), 0u);
+        return;
+    }
+    const RtHit h = giTraceRay(o, d, max(g_draw_push.rtr.x, 1.0));
+    const bool back = h.hit && g_gi_back;
+    gi_hit[ri] = uvec4(floatBitsToUint(d), GI_REC_TRACED | (h.hit ? GI_REC_HIT : 0u) | (back ? GI_REC_BACK : 0u)
+                                           | (h.hit && h.front ? GI_REC_FRONT : 0u));
+    // (#1036) THE SHADE SPLIT (push rtr.z = 1: uniform): a back-face stop's sample is final here (SHADE's:
+    // dark, its point, facing the ray -- no shading stage sees it); every other traced texel goes onto
+    // the HIT or the MISS list
+    if (g_draw_push.rtr.z > 0.5)
+    {
+        if (back)
+        {
+            gi_hit[ri + 1u] = uvec4(floatBitsToUint(vec3(0.0)), floatBitsToUint(h.dist));
+            gi_hit[ri + 2u] = uvec4(floatBitsToUint(o + d * h.dist), floatBitsToUint(-d.x));
+            gi_hit[ri + 3u] = uvec4(floatBitsToUint(-d.yz), 0u, 0u);
+            return;
+        }
+        giShadeListAppend(h.hit, uint(m.y * D.x + m.x), uint(D.x * D.y));
+    }
+    if (h.hit)
+    {
+        gi_hit[ri + 1u] = uvec4(floatBitsToUint(h.dist), h.instance, h.prim, floatBitsToUint(h.bary.x));
+        gi_hit[ri + 2u] = uvec4(floatBitsToUint(h.bary.y), floatBitsToUint(h.o2w[0]));
+        gi_hit[ri + 3u] = uvec4(floatBitsToUint(h.o2w[1]), floatBitsToUint(h.o2w[2].x));
+        gi_hit[ri + 4u] = uvec4(floatBitsToUint(h.o2w[2].yz), floatBitsToUint(h.o2w[3].xy));
+    }
+    // (a back-face stop: its point, giTrace's -- SHADE has no o)
+    gi_hit[ri + 5u] = uvec4(floatBitsToUint(h.hit ? h.o2w[3].z : 0.0), floatBitsToUint(back ? o + d * h.dist : P));
+}
+#elif CLEAN_GI_STAGE == GI_STAGE_SHADE
+// ---- (#1031) STAGE 2, SHADE: the hit record -> the sample (the hit's material + lighting with its
+//      sun / light shadow rays, or the sky + the probes' far field), written over the record ----
+void DEFER_MAIN()
+{
+    const ivec2 m = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 D = ivec2(g_draw_push.rtr2.xy + 0.5);
+    if (any(greaterThanEqual(m, D))) return;
+    const uint ri = giRecIndex(m, D);
+    const uvec4 q0 = gi_hit[ri];
+    if ((q0.w & GI_REC_TRACED) == 0u) return;   // (no surface / not traced this frame: REUSE's defaults)
+    const vec3 d = uintBitsToFloat(q0.xyz);
+    const uvec4 q1 = gi_hit[ri + 1u], q5 = gi_hit[ri + 5u];
+    RtHit h;
+    h.hit = (q0.w & GI_REC_HIT) != 0u;
+    h.dist = 0.0; h.instance = 0u; h.prim = 0u; h.bary = vec2(0.0); h.front = false; h.o2w = mat4x3(1.0);
+    vec3 L = vec3(0.0), xs, ns;
+    float hdist = 0.0;
+    if (h.hit)
+    {
+        const uvec4 q2 = gi_hit[ri + 2u], q3 = gi_hit[ri + 3u], q4 = gi_hit[ri + 4u];
+        h.dist = uintBitsToFloat(q1.x);
+        h.instance = q1.y;
+        h.prim = q1.z;
+        h.bary = vec2(uintBitsToFloat(q1.w), uintBitsToFloat(q2.x));
+        h.front = (q0.w & GI_REC_FRONT) != 0u;
+        h.o2w = mat4x3(uintBitsToFloat(q2.yzw), uintBitsToFloat(q3.xyz),
+                       vec3(uintBitsToFloat(q3.w), uintBitsToFloat(q4.xy)), vec3(uintBitsToFloat(q4.zw), uintBitsToFloat(q5.x)));
+        hdist = h.dist;
+    }
+    if ((q0.w & GI_REC_BACK) != 0u)
+    {
+        // a back-face stop (giTrace): dark, never shaded -- TRACE stored its point
+        xs = uintBitsToFloat(q5.yzw);
+        ns = -d;
+    }
+    else
+    {
+        const vec3 P = uintBitsToFloat(q5.yzw);
+        vec2 r;
+        giRayCone(giRenderPixel(m, D, r), r, P);
+        L = giShadeHit(h, d, P, xs, ns);
+    }
+    gi_hit[ri + 1u] = uvec4(floatBitsToUint(L), floatBitsToUint(hdist));
+    gi_hit[ri + 2u] = uvec4(floatBitsToUint(xs), floatBitsToUint(ns.x));
+    gi_hit[ri + 3u] = uvec4(floatBitsToUint(ns.yz), 0u, 0u);
+    giShadeStats();
+}
+#elif CLEAN_GI_STAGE == GI_STAGE_MISS
+// ---- (#1036) STAGE 5, MISS: one lane per MISS-listed texel -- the sky + the probes' far field along
+//      the ray (SHADE's miss) -> the sample ----
+void DEFER_MAIN()
+{
+    const ivec2 D = ivec2(g_draw_push.rtr2.xy + 0.5);
+    ivec2 m;
+    uint e;
+    if (!giShadeListTexel(GI_HDR_MISS, D, 0u, m, e)) return;
+    const uint ri = giRecIndex(m, D);
+    const vec3 d = uintBitsToFloat(gi_hit[ri].xyz);
+    const vec3 P = uintBitsToFloat(gi_hit[ri + 5u].yzw);
+    vec2 r;
+    giRayCone(giRenderPixel(m, D, r), r, P);   // (SHADE's state: the pixel the probe lookups see)
+    rt_anim_time = pc.u_cam_time.w;
+    vec3 xs, ns;
+    const vec3 L = giShadeMiss(d, P, xs, ns);
+    gi_hit[ri + 1u] = uvec4(floatBitsToUint(L), floatBitsToUint(0.0));
+    gi_hit[ri + 2u] = uvec4(floatBitsToUint(xs), floatBitsToUint(ns.x));
+    gi_hit[ri + 3u] = uvec4(floatBitsToUint(ns.yz), 0u, 0u);
+}
+#elif CLEAN_GI_STAGE == GI_STAGE_HITMAT
+// ---- (#1036) STAGE 6, HIT-MAT: one lane per HIT-listed texel -- the hit record -> the hit's material
+//      (rtSurfaceEval at the receiver's ray cone, the weather coat, the emitter split) -> the RT LIT
+//      RECORD over q1..q4, the hit distance in q5.x (the receiver P stays in q5.yzw) ----
+// (#1039 M1, -DCLEAN_VIS_QUEUE) + THE PRODUCER: the hit's sun ray queued (vqHitRequests) for the entries
+// below the queue's capacity (M2: + its local lights' walk and the budget's light rays).
+void DEFER_MAIN()
+{
+    const ivec2 D = ivec2(g_draw_push.rtr2.xy + 0.5);
+    ivec2 m;
+    uint e;
+    if (!giShadeListTexel(GI_HDR_HIT, D, 0u, m, e)) return;
+    const uint ri = giRecIndex(m, D);
+    const uvec4 q0 = gi_hit[ri], q1 = gi_hit[ri + 1u], q2 = gi_hit[ri + 2u], q3 = gi_hit[ri + 3u], q4 = gi_hit[ri + 4u];
+    const uvec4 q5 = gi_hit[ri + 5u];
+    const vec3 d = uintBitsToFloat(q0.xyz);
+    RtHit h;
+    h.hit = true;
+    h.dist = uintBitsToFloat(q1.x);
+    h.instance = q1.y;
+    h.prim = q1.z;
+    h.bary = vec2(uintBitsToFloat(q1.w), uintBitsToFloat(q2.x));
+    h.front = (q0.w & GI_REC_FRONT) != 0u;
+    h.o2w = mat4x3(uintBitsToFloat(q2.yzw), uintBitsToFloat(q3.xyz),
+                   vec3(uintBitsToFloat(q3.w), uintBitsToFloat(q4.xy)), vec3(uintBitsToFloat(q4.zw), uintBitsToFloat(q5.x)));
+    const vec3 P = uintBitsToFloat(q5.yzw);
+    vec2 r;
+    giRayCone(giRenderPixel(m, D, r), r, P);
+    rt_anim_time = pc.u_cam_time.w;
+    const RtSurface hs = giHitMaterial(h, d);
+    uvec4 r0, r1, r2, r3;
+    rtLitPack(rtLitSurface(hs), r0, r1, r2, r3);
+    gi_hit[ri + 1u] = r0;
+    gi_hit[ri + 2u] = r1;
+    gi_hit[ri + 3u] = r2;
+    gi_hit[ri + 4u] = r3;
+    gi_hit[ri + 5u].x = floatBitsToUint(h.dist);
+#ifdef CLEAN_VIS_QUEUE
+    vqHitRequests(r0, r1, r2, r3, P, d, e, e < vqEntryCap(vqRegion()), true);
+#endif
+}
+#elif CLEAN_GI_STAGE == GI_STAGE_HITLIGHT
+// ---- (#1036) STAGE 7, HIT-LIGHT: one lane per HIT-listed texel -- the RT LIT RECORD lit from the
+//      receiver P (rtShadeHit: the sun / moon ray, the local lights and their shadow-ray budget, the
+//      cache / probes at the hit) + the source clamp -> the sample (SHADE's words) ----
+// (#1039 M1) -DCLEAN_VIS_QUEUE: THE RESOLVE -- the entries below the queue's capacity, the sun from their
+// result; without it (the fused stage) push rtr3.y = the first entry: the TAIL past that capacity.
+void DEFER_MAIN()
+{
+    const ivec2 D = ivec2(g_draw_push.rtr2.xy + 0.5);
+    ivec2 m;
+    uint e;
+#ifdef CLEAN_VIS_QUEUE
+    if (!giShadeListTexel(GI_HDR_HIT, D, 0u, m, e)) return;
+    if (e >= vqEntryCap(vqRegion())) return;   // (the tail's)
+    g_vq_dest = e;
+#else
+    if (!giShadeListTexel(GI_HDR_HIT, D, g_draw_push.rtr3.y, m, e)) return;
+#endif
+    const uint ri = giRecIndex(m, D);
+    const vec3 d = uintBitsToFloat(gi_hit[ri].xyz);
+    const uvec4 q5 = gi_hit[ri + 5u];
+    const vec3 P = uintBitsToFloat(q5.yzw);
+    vec2 r;
+    giRayCone(giRenderPixel(m, D, r), r, P);   // (the pixel: the light grid's seed; the cone: the shadow rays')
+    rt_anim_time = pc.u_cam_time.w;
+    const RtLitSurface hs = rtLitUnpack(gi_hit[ri + 1u], gi_hit[ri + 2u], gi_hit[ri + 3u], gi_hit[ri + 4u]);
+    vec3 xs, ns;
+    const vec3 L = giHitLight(hs, d, P, xs, ns);
+    gi_hit[ri + 1u] = uvec4(floatBitsToUint(L), q5.x);   // (the hit distance HIT-MAT kept)
+    gi_hit[ri + 2u] = uvec4(floatBitsToUint(xs), floatBitsToUint(ns.x));
+    gi_hit[ri + 3u] = uvec4(floatBitsToUint(ns.yz), 0u, 0u);
+    giShadeStats();
+}
+#elif CLEAN_GI_STAGE == GI_STAGE_RESHADE
+// ---- (#1031) STAGE 4, RESHADE: one lane per listed texel -- its request's ray walked and shaded
+//      (giTrace, as the fused kernel's second loop pass) -> the result over the request ----
+void DEFER_MAIN()
+{
+    const ivec2 D = ivec2(g_draw_push.rtr2.xy + 0.5);
+    const uint e = giListLane(D);
+    if (e == 0xFFFFFFFFu) return;
+    const ivec2 m = giListTexel(e, D);
+    const uint ri = giRecIndex(m, D);
+    vec2 r;
+    const ivec2 rp = giRenderPixel(m, D, r);
+    g_frag_xy = vec2(rp) + 0.5;
+    const vec3 P = deferPosition(rp);
+    const uvec4 q4 = gi_hit[ri + 4u], q5 = gi_hit[ri + 5u];
+    // the receiver's ray cone; the alpha test at its defaults (the fused kernel's re-shade walk ran
+    // after the fresh walk had reset them)
+    giRayCone(rp, r, P);
+    vec3 xt, nt;
+    bool ht;
+    float tt;
+    const vec3 Lt = giTrace(uintBitsToFloat(q4.xyz), uintBitsToFloat(q5.xyz), uintBitsToFloat(q4.w), P, xt, nt, ht, tt);
+    gi_hit[ri + 4u] = uvec4(floatBitsToUint(Lt), floatBitsToUint(ht ? tt : -1.0));
+    giShadeStats();
+}
+#else
+
+void DEFER_MAIN()
+{
+    const ivec2 D = ivec2(g_draw_push.rtr2.xy + 0.5);
+#if CLEAN_GI_STAGE == GI_STAGE_REUSE
+    // (#1031) TAIL (push rtr.z = 1: a header-free uniform): the listed texels only, after their re-shade
+    const bool tail = g_draw_push.rtr.z > 0.5;
+    ivec2 m = ivec2(gl_GlobalInvocationID.xy);
+    if (tail)
+    {
+        const uint e = giListLane(D);
+        if (e == 0xFFFFFFFFu) return;
+        m = giListTexel(e, D);
+    }
+#else
+    const ivec2 m = ivec2(gl_GlobalInvocationID.xy);
+#endif
+    if (any(greaterThanEqual(m, D))) return;
     const uint frame = uint(g_draw_push.rtr2.z + 0.5);
     const int par = int(uint(g_draw_push.rtr2.w + 0.5) & 1u);
-    const vec2 R2 = vec2(float(g_draw_push.width), float(g_draw_push.height));
-    const vec2 r = R2 / vec2(D);
-    const vec2 J = (ssr.taa_params.w > 0.5 && D.x < int(g_draw_push.width)) ? ssr.taa_jitter.xy : vec2(0.0);
-    const ivec2 rp = clamp(ivec2((vec2(m) + 0.5 + J) * r), ivec2(0), ivec2(R2) - 1);
+    vec2 r;
+    const ivec2 rp = giRenderPixel(m, D, r);
     g_frag_xy = vec2(rp) + 0.5;
     const vec4 g2 = texelFetch(uG2, rp, 0);
     bool surf = deferHasSurface(g2);
@@ -4164,34 +5247,20 @@ void DEFER_MAIN()
     const float camd = length(P - cam);
 
     // ---- GI-1: the fresh sample (one cosine-weighted ray) ----
-    uint seed = giPcg(uint(m.x) * 1973u + uint(m.y) * 9277u + frame * 26699u);
-    const vec2 u = fract(vec2(giRand(seed), giRand(seed)) + float(frame & 0xFFFFu) * vec2(0.7548776662, 0.5698402910));
-    vec3 d = giCosDir(N, u);
-    const float dn = dot(d, Ng);
-    if (dn < 0.02) d = normalize(d + Ng * (0.02 - dn));   // (above the facet: a normal map leans N under it)
-    // the hit's texture LOD: the receiver's pixel footprint, spreading as a diffuse lobe
-    const float pa = rtrPixelAngle(g_frag_xy) * r.x;
-    // THE ORIGIN'S LIFT: P is rebuilt from a reduced-resolution, jittered depth sample, so it lies
-    // up to about half a GI texel's footprint off the true surface along the view ray -- growing with
-    // the distance and, on a slanted surface, with 1 / cos (the depth slope). The depth-precision lift
-    // alone (rtReceiverOrigin: camd x 2^-21) left far / grazing receivers just INSIDE their own
-    // ray-traced surface: the back-face stop (GI_F_BACK_STOP) darkened them in jitter-moving patches.
-    // Lifted by half the footprint over the facet's cosine (capped at 4x).
-    const float lift = 0.5 * camd * pa / max(abs(dot(Ng, V)), 0.25);
-    const vec3 o = rtReceiverOrigin(P, Ng, camd, lift);
-    rt_cone_width0 = camd * pa;
-    rt_cone_spread = pa + 0.5;
-    rt_cone_aniso = max(g_draw_push.rtr.w, 1.0);
-    rtrMaskCone(camd * pa, pa);
+    vec3 d, o;
+    bool traced;
+    giFreshRay(m, frame, r, P, N, Ng, V, camd, d, o, traced);
+#if CLEAN_GI_STAGE == GI_STAGE_REUSE
+    // (#1031) the direction TRACE walked, bit for bit (the record); the alpha test's defaults for the
+    // visibility ray below (the fused kernel's walk reset them before it: giTraceRay)
+    const uint ri = giRecIndex(m, D);
+    const uvec4 rq0 = gi_hit[ri];
+    d = uintBitsToFloat(rq0.xyz);
+    rt_mask_width0 = -1.0; rt_mask_lod_bias = 0.0; rt_mask_lod_max = 64.0; rt_mask_cov_k = 0.0;
+#endif
     vec3 xs = P, ns = N;
     bool hit = false;
     float hdist = 0.0;
-    // (RenderVKGITraceEvery: 1 texel in 2 / 4 traces this frame -- a checkerboard / a 2 x 2 rotation;
-    //  the others take their reservoirs' reuse only, or hold the denoiser's history)
-    const uint everyLog = (gi.cfg.x >> GI_EVERY_SHIFT) & 3u;
-    bool traced = true;
-    if (everyLog == 1u) traced = ((uint(m.x) + uint(m.y) + frame) & 1u) == 0u;
-    else if (everyLog >= 2u) traced = ((uint(m.x) & 1u) + 2u * (uint(m.y) & 1u)) == (frame & 3u);
     vec3 L = vec3(0.0);
     bool freshBack = false;   // (debug view 9: the FRESH ray stopped at a back face)
     vec3 S = vec3(0.0);
@@ -4228,9 +5297,45 @@ void DEFER_MAIN()
         vec3 Lt = vec3(0.0), xt = P, nt = N;
         bool ht = false;
         float tt = 0.0;
+#if CLEAN_GI_STAGE == GI_STAGE_REUSE
+        // (#1031) both rays were walked and shaded by other stages: pass 0 by TRACE + SHADE (the
+        // record), pass 1 by RESHADE -- this lane asks for it (the request + the list) and stops here;
+        // its TAIL run comes back with the result
+        bool bt = false;
+        if (pass == 0u)
+        {
+            if (traced)
+            {
+                const uvec4 q1 = gi_hit[ri + 1u], q2 = gi_hit[ri + 2u], q3 = gi_hit[ri + 3u];
+                Lt = uintBitsToFloat(q1.xyz);
+                tt = uintBitsToFloat(q1.w);
+                xt = uintBitsToFloat(q2.xyz);
+                nt = vec3(uintBitsToFloat(q2.w), uintBitsToFloat(q3.xy));
+                ht = (rq0.w & GI_REC_HIT) != 0u;
+                bt = (rq0.w & GI_REC_BACK) != 0u;
+            }
+        }
+        else if (!tail)
+        {
+            gi_hit[ri + 4u] = uvec4(floatBitsToUint(o), floatBitsToUint(rsDl + rsTol));
+            gi_hit[ri + 5u] = uvec4(floatBitsToUint(rsDir), 0u);
+            giListAppend(uint(m.y * D.x + m.x));
+            return;
+        }
+        else
+        {
+            // the result -- for THIS pick only (the request's direction, bit for bit; a different
+            // one would be another sample's re-shade: rejected, as a surface not found)
+            const uvec4 q4 = gi_hit[ri + 4u], q5 = gi_hit[ri + 5u];
+            tt = uintBitsToFloat(q4.w);
+            ht = tt >= 0.0 && all(equal(q5.xyz, floatBitsToUint(rsDir)));
+            Lt = uintBitsToFloat(q4.xyz);
+        }
+#else
         if (pass != 0u || traced)
             Lt = giTrace(o, pass == 0u ? d : rsDir, pass == 0u ? max(g_draw_push.rtr.x, 1.0) : rsDl + rsTol, P,
                          xt, nt, ht, tt);
+#endif
         if (pass != 0u)
         {
             // (GI_F_LIGHT_CHG) RE-SHADE: a changed light reaches the picked point, so its stored
@@ -4256,7 +5361,11 @@ void DEFER_MAIN()
             break;
         }
         L = Lt; xs = xt; ns = nt; hit = ht; hdist = tt;
+#if CLEAN_GI_STAGE == GI_STAGE_REUSE
+        freshBack = traced && bt;
+#else
         freshBack = traced && g_gi_back;
+#endif
         // the estimate: L x cos / pi x (1 / (cos / pi)) = L (the cosine-weighted mean incoming radiance)
         S = L;
         if ((gf & GI_F_RES) == 0u) break;
@@ -4538,6 +5647,7 @@ void DEFER_MAIN()
         if (subgroupElect() && sK != 0u) atomicAdd(gi.sph_n.z, sK);
     }
 }
+#endif   // CLEAN_GI_STAGE
 #endif   // CLEAN_GI_RESOLVE
 #elif CLEAN_DEFER_PASS == 11 || CLEAN_DEFER_PASS == 16
 // ---- RT TRACE (#859; see HYBRID RT REFLECTIONS in the header) ----
@@ -4631,10 +5741,16 @@ uint rtrSelectTile(uint lid, uint entry, uvec2 org, out uvec4 m, out float gs)
 }
 #endif
 #if CLEAN_DEFER_PASS == 11
-// One reflection ray at render pixel px (m: its mark; blockRay: a 2 x 2 block's one ray, the level
-// path; grad / gs: the density gradient on, the frame's budget scale) -> uRtTrace + the stats. The
-// in-tile trace and the list trace run exactly this per ray.
-void rtrTraceRay(ivec2 px, uvec4 m, bool blockRay, bool grad, float gs)
+// The env the blend layers composite over on a miss: the mark's spec word's, else its env word's.
+vec3 rtrMarkEnv(uvec4 m)
+{
+    const vec2 k = unpackHalf2x16(m.z);
+    return k.x > 0.0 ? dsUnpackRGB9E5(m.x) / k.x : (k.y > 0.0 ? dsUnpackRGB9E5(m.y) / k.y : vec3(0.0));
+}
+// The reflection ray at render pixel px (m: its mark; blockRay: a 2 x 2 block's one ray, the level
+// path; grad / gs: the density gradient on, the frame's budget scale): the receiver P, the ray (o, R),
+// the env; sets g_frag_xy and the ray cone (rt_cone_*, rtrMaskCone).
+void rtrRayBegin(ivec2 px, uvec4 m, bool blockRay, bool grad, float gs, out vec3 P, out vec3 o, out vec3 R, out vec3 env)
 {
     g_frag_xy = vec2(px) + 0.5;
     CLK_INV();
@@ -4643,15 +5759,12 @@ void rtrTraceRay(ivec2 px, uvec4 m, bool blockRay, bool grad, float gs)
     float glow;
     bool noFade;
     const SurfaceLit s = deferSurface(px, g2, glow, noFade);
-    const vec3 P = deferPosition(px);
+    P = deferPosition(px);
     const vec3 V = normalize(pc.u_cam_time.xyz - P);
     const vec3 Ng = dot(s.Ng, V) < 0.0 ? -s.Ng : s.Ng;
     CLK_MARK(GBUF);
-    // The env the blend layers composite over on a miss: the spec word's, else the env word's.
-    const vec2 k = unpackHalf2x16(m.z);
-    const vec3 env = k.x > 0.0 ? dsUnpackRGB9E5(m.x) / k.x : (k.y > 0.0 ? dsUnpackRGB9E5(m.y) / k.y : vec3(0.0));
+    env = rtrMarkEnv(m);
     const float rough = s.model == SURF_PBR ? s.rough : (s.env > 0.0 ? 0.0 : 1.0 - s.gloss);
-    vec3 o, R;
     // (a block's one ray: the cone of its 2 x 2 footprint; the gradient: of the 1 / rho pixels its
     // ray stands for, 1 / sqrt(rho) wide)
     float coneScale = blockRay ? 2.0 : 1.0;
@@ -4674,17 +5787,22 @@ void rtrTraceRay(ivec2 px, uvec4 m, bool blockRay, bool grad, float gs)
         const float geo = rtrNormalSpread(px, P, s.N, s.Ng, length(P - pc.u_cam_time.xyz)).x;
         rt_cone_spread += min(2.0 * geo * coneScale, 0.5);
     }
-    float t;
-    const vec3 c = rtrTraceRefl(o, R, max(g_draw_push.rtr.x, 1.0), P, env, (rtrOpts() & 1u) != 0u, t);
-    imageStore(uRtTrace, px, vec4(t > 0.0 ? c : vec3(0.0), t));
-    // the hit-shading counters -> the header (rtt_hit; the VKGpu "RT reflections" line)
+}
+// The per-ray counters -> the headers (subgroup sums; each stage of the #1036 split flushes the ones
+// it counts -- the host only sums them):
+// the hit-shading counters -> the header (rtt_hit; the VKGpu "RT reflections" line)
+void rtrStatsHit()
+{
     [[unroll]] for (int k = 0; k < RTR_HIT_WORDS; ++k)
     {
         const uint v = subgroupAdd(g_rtr_stat[k]);
         if (subgroupElect() && v != 0u) atomicAdd(rtt_hit[k], v);
     }
-    // TRACE COST (rtt_cost; the VKGpu "RT reflections" line's trace-cost part), while the host asks
-    // (GPU timers on: rtrOpts bit 7)
+}
+// TRACE COST (rtt_cost; the VKGpu "RT reflections" line's trace-cost part), while the host asks
+// (GPU timers on: rtrOpts bit 7)
+void rtrStatsCost()
+{
     if ((rtrOpts() & 128u) != 0u)   // (push constant: uniform)
     {
         uint v[RTR_COST_WORDS];
@@ -4724,8 +5842,11 @@ void rtrTraceRay(ivec2 px, uvec4 m, bool blockRay, bool grad, float gs)
             if (subgroupElect() && t != 0u) atomicAdd(rtt_amresc, t);
         }
     }
-    // (#869) the light grid's hit counters -> its header's stat[3 .. 9] (bytes / halves unpacked
-    // first: a subgroup sum would carry across the packed fields)
+}
+// (#869) the light grid's hit counters -> its header's stat[3 .. 9] (bytes / halves unpacked
+// first: a subgroup sum would carry across the packed fields)
+void rtrStatsRegir()
+{
     if (rtrRegirOn())   // (push constant: uniform)
     {
         const uint a5 = g_rtr_stat[5], a6 = g_rtr_stat[6];
@@ -4737,6 +5858,21 @@ void rtrTraceRay(ivec2 px, uvec4 m, bool blockRay, bool grad, float gs)
             if (subgroupElect() && t != 0u) atomicAdd(rg.stat[3 + k], t);
         }
     }
+}
+// One reflection ray at render pixel px (rtrRayBegin's arguments) -> uRtTrace + the stats. The
+// in-tile trace and the (fused) list trace run exactly this per ray.
+void rtrTraceRay(ivec2 px, uvec4 m, bool blockRay, bool grad, float gs)
+{
+    rtrQueryBudgetBegin();   // (#1049)
+    vec3 P, o, R, env;
+    rtrRayBegin(px, m, blockRay, grad, gs, P, o, R, env);
+    float t;
+    const vec3 c = rtrTraceRefl(o, R, max(g_draw_push.rtr.x, 1.0), P, env, (rtrOpts() & 1u) != 0u, t);
+    imageStore(uRtTrace, px, vec4(t > 0.0 ? c : vec3(0.0), t));
+    rtrStatsHit();
+    rtrStatsCost();
+    rtrStatsRegir();
+    rtrStatsGuard();   // (#1049)
     CLK_MARK(STORE);
 }
 #endif
@@ -4790,12 +5926,65 @@ void DEFER_MAIN()
     else
         imageStore(uRtTrace, ivec2(px), vec4(0.0, 0.0, 0.0, -1.0));   // (dropped: not traced)
 }
-#elif defined(CLEAN_RT_LIST)
+#elif defined(CLEAN_VIS_WALK)
+// ---- (#1039 M1) THE VISIBILITY QUEUE'S WALK (clean_vis_queue.glsl; RenderVKVisQueue): one lane per request
+//      of the region push rtr3.zw names, 64 per workgroup (indirect: the producer raised the region's
+//      dispatch). Nothing but the walk lives here: the request's ray, its switches, the walk, the result
+//      for its entry. A VQ_K_SUN request is rtSunRayVis exactly as the inline hit shading calls it (the
+//      walk library's one body, the same ray, cone and state), so its result is bit-identical. ----
+// (#1039 M2) + VQ_K_OCC (traceShadowRay: the grey mixed walk over RT_MASK_WORLD_BLOCK -> its visibility and
+// blocker distance) and VQ_K_LIGHT (rtrProjRay's walk: coloured, the opaque set, the own fixture's re-trace
+// when flagged -> share x (1 - visibility), the share read from the slot first) -- every kind through ONE
+// walk site (clean_vis_walk.glsl rtVisQueued), with the cone each request carries.
+void DEFER_MAIN()
+{
+    VqRegion r = vqRegion();
+    const uint i = (gl_WorkGroupID.y * VQ_ROW + gl_WorkGroupID.x) * 64u + gl_LocalInvocationIndex;
+    if (i >= min(r.q[0].x, vqReqCap(r))) return;
+    const uint w = VQ_HDR_WORDS + i * VQ_REQ_WORDS;
+    const uvec4 q0 = r.q[w], q1 = r.q[w + 1u], q2 = r.q[w + 2u];
+    if (q2.x >= vqEntryCap(r) * vqSlots(r)) return;   // (Xid 109 hardening: a result slot past the region)
+    rtrQueryBudgetBegin();   // (#1049: this request's rays, the hang guard -- a few at most, never binds)
+    const uint kf = q2.y;
+    const uint kind = kf & 15u;
+    rt_anim_time = pc.u_cam_time.w;
+    rt_cone_width0 = uintBitsToFloat(q1.w);
+    rt_cone_spread = uintBitsToFloat(q2.w);
+    rt_cone_aniso = uintBitsToFloat(q2.z);
+    rt_blend_coarse = (kf & VQ_F_COARSE) != 0u;
+    if ((kf & VQ_F_FOLIAGE) != 0u) rtFoliageSet(ssr.foliage_rt);
+    // (VQ_K_LIGHT) the light's own fixture (rtrProjRay under the GI: gi.prm5.z, RenderVKReSTIRFixtureSize)
+    rt_fix_on = (kf & VQ_F_FIXTURE) != 0u;
+    rt_fix_P = rt_fix_on ? lights[kf >> 16].pos_radius.xyz : vec3(0.0);
+    rt_fix_max = gi.prm5.z;
+    rt_block_t = 1e30;   // (VQ_K_OCC: its blocker distance)
+    const uint wkind = kind == VQ_K_OCC ? RT_WALK_GREY : RT_WALK_RGB;
+    const uint wmask = kind == VQ_K_OCC ? RT_MASK_WORLD_BLOCK : RTR_PROJ_MASK;
+    const vec3 vis = rtVisQueued(uintBitsToFloat(q0.xyz), uintBitsToFloat(q1.xyz), uintBitsToFloat(q0.w), kind == VQ_K_SUN,
+                                 wkind, wmask, (kf & VQ_F_OPAQUE) != 0u, (kf & VQ_F_SPLIT) != 0u, (kf & VQ_F_PARITY) != 0u,
+                                 (kf & VQ_F_RGB) != 0u);
+    rt_fix_on = false;
+    const uint rw = vqResWord(r, q2.x);
+    if (kind == VQ_K_LIGHT)
+    {
+        // the share the producer left in the slot -> the part of it this ray finds blocked
+        const vec3 share = uintBitsToFloat(r.q[rw].xyz);
+        r.q[rw] = uvec4(floatBitsToUint(share * (vec3(1.0) - vis)), VQ_RES_WALKED);
+    }
+    else if (kind == VQ_K_OCC)
+        r.q[rw] = uvec4(floatBitsToUint(vis.x), floatBitsToUint(rt_block_t), 0u, VQ_RES_WALKED);
+    else
+        r.q[rw] = uvec4(floatBitsToUint(vis), VQ_RES_WALKED);
+    rtrStatsGuard();   // (#1049: rays the guard refused)
+}
+#elif defined(CLEAN_RT_LIST) && CLEAN_RT_STAGE == RT_STAGE_FUSED
 // ---- RT TRACE over the RAY LIST (#859 perf): lane = ray, 64 per workgroup, list order ----
+// (#1036) push rtr3.x: the first list entry this dispatch traces -- 0, or under the split the
+// records' capacity: the FUSED TAIL over the rays past it (rtrRecLane)
 void DEFER_MAIN()
 {
     const uint rb = 2u * rtt_args[3] + 1u;
-    const uint i = (gl_WorkGroupID.y * RTT_ROW + gl_WorkGroupID.x) * 64u + gl_LocalInvocationIndex;
+    const uint i = g_draw_push.rtr3.x + (gl_WorkGroupID.y * RTT_ROW + gl_WorkGroupID.x) * 64u + gl_LocalInvocationIndex;
     if (i >= min(rtt_words[rb], rtt_words[rb + 4u])) return;
     const uint e = rtt_words[rb + 7u + i];
     const ivec2 px = ivec2(e & 0x7FFFu, (e >> 15) & 0x7FFFu);
@@ -4803,6 +5992,238 @@ void DEFER_MAIN()
     // (pass 16's entry-0 workgroup stored this frame's scale: bit-identical to its rtrGradScale)
     rtrTraceRay(px, imageLoad(uReflRtMark, px), (e >> 31) != 0u, grad, grad ? rtrGradScaleNow() : 1.0);
 }
+#elif defined(CLEAN_RT_LIST)
+// ---- (#1036) THE RT REFLECTION SPLIT (RenderVKRTReflectionsShadeSplit; LLCleanRendererVK::
+//      recordRtReflect): the list trace's per-ray code (rtrTraceRay) as three kernels over the same
+//      indirect dispatch (lane = list entry), handing each other per-ray RECORDS (below):
+//   1 TRACE  the receiver + its ray (rtrRayBegin) + the walk (rtrReflWalk) -> the hit record; the
+//            trace-cost counters
+//   2 MAT    a hit (no back-face stop) -> its material (rtrReflMaterial: rtSurfaceEval, the lying snow
+//            / the weather coat) -> the RT LIT RECORD over the hit record, the (snow) hit distance
+//   3 LIGHT  every ray: the RT LIT RECORD lit (rtrReflShade), the blend layers + debug views
+//            (rtrReflTail: after the material -- the lying snow may shorten the ray they composite
+//            over), the store, the hit-shading / light grid counters
+// The records hold the first push rtr3.x list entries; the rays past them (a frame over the budget the
+// records were sized for) take the fused list kernel as a TAIL dispatch (same rays, same results).
+// RT REFLECTION RECORDS (LLCleanRendererVK mRtRec; device address in push rtr3.zw): 7 uvec4 (112 B)
+// per list entry:
+//   TRACE writes q0 = R.xyz, flags (RTR_REC_*); q1 = t, instance, prim, bary.x (a hit);
+//                q2 = bary.y, o2w[0]; q3 = o2w[1], o2w[2].x; q4 = o2w[2].yz, o2w[3].xy;
+//                q5 = o2w[3].z, o.xyz; q6 = the ray cone (rt_cone_width0, _spread, _aniso), smallD
+//   MAT writes   q1..q4 = the RT LIT RECORD, q5.x = the hit distance (the lying snow's when in front)
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+layout(buffer_reference, std430, buffer_reference_align = 16) buffer RtrRecords { uvec4 q[]; };
+#define RTR_REC_WORDS 7u
+#define RTR_REC_HIT   1u   // the walk committed a surface
+#define RTR_REC_BACK  2u   // ... a single-sided back face it stopped at (REFLECTION BACK-FACE STOP)
+#define RTR_REC_FRONT 4u   // the hit's hardware front face (RtHit.front)
+// (#1039 M1) the records' address / capacity: the push (rtr3.zw / x) -- or, in the visibility queue's stages
+// (their push rtr3.zw names the queue's region), the region header the host wrote; RTR_REC_E0: the first
+// entry of the dispatch (the fused LIGHT's tail past the queue's capacity: push rtr3.y; else 0).
+#ifdef CLEAN_VIS_QUEUE
+#define RTR_REC_ADDR vqRegion().q[2].xy
+#define RTR_REC_CAP  vqRegion().q[2].z
+#define RTR_REC_E0   0u
+#else
+#define RTR_REC_ADDR g_draw_push.rtr3.zw
+#define RTR_REC_CAP  g_draw_push.rtr3.x
+#define RTR_REC_E0   g_draw_push.rtr3.y
+#endif
+RtrRecords rtrRec() { return RtrRecords(RTR_REC_ADDR); }
+// This lane's list entry i (the list trace's numbering) and its pixel; false past the list or past the
+// records (their capacity: those are the fused tail's).
+bool rtrRecLane(out uint i, out uint e, out ivec2 px)
+{
+    const uint rb = 2u * rtt_args[3] + 1u;
+    i = RTR_REC_E0 + (gl_WorkGroupID.y * RTT_ROW + gl_WorkGroupID.x) * 64u + gl_LocalInvocationIndex;
+    e = 0u;
+    px = ivec2(0);
+    if (i >= min(min(rtt_words[rb], rtt_words[rb + 4u]), RTR_REC_CAP)) return false;
+    e = rtt_words[rb + 7u + i];
+    px = ivec2(e & 0x7FFFu, (e >> 15) & 0x7FFFu);
+    return true;
+}
+#if CLEAN_RT_STAGE == RT_STAGE_TRACE
+void DEFER_MAIN()
+{
+    uint i, e;
+    ivec2 px;
+    if (!rtrRecLane(i, e, px)) return;
+    rtrQueryBudgetBegin();   // (#1049: the walk's share; LIGHT starts its own)
+    const bool grad = rtrGradOn();   // (a header word: uniform)
+    vec3 P, o, R, env;
+    rtrRayBegin(px, imageLoad(uReflRtMark, px), (e >> 31) != 0u, grad, grad ? rtrGradScaleNow() : 1.0, P, o, R, env);
+    float smallD;
+    const RtHit h = rtrReflWalk(o, R, max(g_draw_push.rtr.x, 1.0), smallD);
+    RtrRecords rec = rtrRec();
+    const uint b = i * RTR_REC_WORDS;
+    rec.q[b] = uvec4(floatBitsToUint(R), (h.hit ? RTR_REC_HIT : 0u) | (g_rtr_back ? RTR_REC_BACK : 0u)
+                                         | (h.hit && h.front ? RTR_REC_FRONT : 0u));
+    if (h.hit)
+    {
+        rec.q[b + 1u] = uvec4(floatBitsToUint(h.dist), h.instance, h.prim, floatBitsToUint(h.bary.x));
+        rec.q[b + 2u] = uvec4(floatBitsToUint(h.bary.y), floatBitsToUint(h.o2w[0]));
+        rec.q[b + 3u] = uvec4(floatBitsToUint(h.o2w[1]), floatBitsToUint(h.o2w[2].x));
+        rec.q[b + 4u] = uvec4(floatBitsToUint(h.o2w[2].yz), floatBitsToUint(h.o2w[3].xy));
+    }
+    rec.q[b + 5u] = uvec4(floatBitsToUint(h.hit ? h.o2w[3].z : 0.0), floatBitsToUint(o));
+    rec.q[b + 6u] = uvec4(floatBitsToUint(rt_cone_width0), floatBitsToUint(rt_cone_spread), floatBitsToUint(rt_cone_aniso),
+                          floatBitsToUint(smallD));
+    rtrStatsCost();
+    rtrStatsGuard();   // (#1049)
+}
+#elif CLEAN_RT_STAGE == RT_STAGE_MAT
+void DEFER_MAIN()
+{
+    uint i, e;
+    ivec2 px;
+    if (!rtrRecLane(i, e, px)) return;
+    RtrRecords rec = rtrRec();
+    const uint b = i * RTR_REC_WORDS;
+    const uvec4 q0 = rec.q[b];
+    const bool mat = (q0.w & (RTR_REC_HIT | RTR_REC_BACK)) == RTR_REC_HIT;   // (a miss / a back-face stop: no material)
+#ifndef CLEAN_VIS_QUEUE_M2
+    if (!mat) return;
+#endif
+    // (#1039 M2: every entry stays -- the producer writes the blend layers' slot of each)
+    const uvec4 q6 = rec.q[b + 6u];
+    const vec3 R = uintBitsToFloat(q0.xyz);
+    // TRACE's state at the material: the pixel, the ray cone (the hit's texture LOD), the draw time
+    g_frag_xy = vec2(px) + 0.5;
+    rt_cone_width0 = uintBitsToFloat(q6.x);
+    rt_cone_spread = uintBitsToFloat(q6.y);
+    rt_cone_aniso  = uintBitsToFloat(q6.z);
+    rt_anim_time = pc.u_cam_time.w;
+    uvec4 r0 = uvec4(0u), r1 = uvec4(0u), r2 = uvec4(0u), r3 = uvec4(0u);
+    if (mat)
+    {
+        const uvec4 q1 = rec.q[b + 1u], q2 = rec.q[b + 2u], q3 = rec.q[b + 3u], q4 = rec.q[b + 4u], q5 = rec.q[b + 5u];
+        RtHit h;
+        h.hit = true;
+        h.dist = uintBitsToFloat(q1.x);
+        h.instance = q1.y;
+        h.prim = q1.z;
+        h.bary = vec2(uintBitsToFloat(q1.w), uintBitsToFloat(q2.x));
+        h.front = (q0.w & RTR_REC_FRONT) != 0u;
+        h.o2w = mat4x3(uintBitsToFloat(q2.yzw), uintBitsToFloat(q3.xyz),
+                       vec3(uintBitsToFloat(q3.w), uintBitsToFloat(q4.xy)), vec3(uintBitsToFloat(q4.zw), uintBitsToFloat(q5.x)));
+        float hd = h.dist;
+        const RtSurface hs = rtrReflMaterial(h, R, hd);
+        rtLitPack(rtLitSurface(hs), r0, r1, r2, r3);
+        rec.q[b + 1u] = r0;
+        rec.q[b + 2u] = r1;
+        rec.q[b + 3u] = r2;
+        rec.q[b + 4u] = r3;
+        rec.q[b + 5u].x = floatBitsToUint(hd);
+    }
+#ifdef CLEAN_VIS_QUEUE
+    // (#1039 M1) THE PRODUCER: the hit's sun ray queued (the receiver is the eye of its shading); M2: + its
+    // occlusion ray, its local lights + the budget's rays, the blend layers' cone flag
+    vqHitRequests(r0, r1, r2, r3, deferPosition(px), R, i, i < vqEntryCap(vqRegion()), mat);
+#endif
+#ifdef CLEAN_VIS_QUEUE_M2
+    rtrStatsHit();     // (the local-light walk's counters: lights in range, ray records, rays queued)
+    rtrStatsRegir();
+#endif
+}
+#elif CLEAN_RT_STAGE == RT_STAGE_LAYERS
+// (#1039 M2) THE BLEND LAYERS of every entry below the queue's capacity (RenderVKVisQueue bit 2, with the blend
+// layers on): rtrReflTail's gather + its per-layer sun rays (GI frames) and cache lookups, over the same ray
+// (the reflection ray's origin / direction, up to the hit -- the lying snow's distance where MAT found it --,
+// the back-face stop's, or the full length), with the cone the fused LIGHT would have by then (the producer's
+// flag: narrowed by a traced sun ray) and the receiver's sky terms -> the entry's layer slot (their light, T).
+// The lighting stage composites (vqLayers). After MAT, beside the WALK (disjoint slots: no barrier between).
+void DEFER_MAIN()
+{
+    uint i, e;
+    ivec2 px;
+    if (!rtrRecLane(i, e, px)) return;
+    VqRegion r = vqRegion();
+    if (i >= vqEntryCap(r)) return;   // (the fused tail's)
+    RtrRecords rec = rtrRec();
+    const uint b = i * RTR_REC_WORDS;
+    const uvec4 q0 = rec.q[b], q5 = rec.q[b + 5u], q6 = rec.q[b + 6u];
+    rtrQueryBudgetBegin();   // (#1049)
+    const uint lw = vqResWord(r, vqDest(r, i, vqSlotLayers(r)));
+    const bool narrow = (r.q[lw].w & 1u) != 0u;
+    const bool hit = (q0.w & RTR_REC_HIT) != 0u;
+    const bool back = (q0.w & RTR_REC_BACK) != 0u;
+    const vec3 R = uintBitsToFloat(q0.xyz), o = uintBitsToFloat(q5.yzw);
+    g_frag_xy = vec2(px) + 0.5;
+    const vec3 P = deferPosition(px);
+    // (a narrowing sun ray needs a shaded hit: its footprint is the RT LIT RECORD's)
+    rt_cone_width0 = narrow ? uintBitsToFloat(rec.q[b + 1u].w) : uintBitsToFloat(q6.x);
+    rt_cone_spread = narrow ? 0.0 : uintBitsToFloat(q6.y);
+    rt_cone_aniso  = uintBitsToFloat(q6.z);
+    rt_anim_time = pc.u_cam_time.w;
+    // LIGHT's hit distance: the back-face stop's walk distance, the shaded hit's (MAT's), none
+    const float t = back ? uintBitsToFloat(rec.q[b + 1u].x) : (hit ? uintBitsToFloat(q5.x) : 0.0);
+    const float tmax = max(g_draw_push.rtr.x, 1.0);
+    vec3 sunlit, amblit, additive, atten;
+    atmosLightTerms(P - pc.u_cam_time.xyz, vec3(0.0, 0.0, 1.0), sunlit, amblit, additive, atten);
+    uint layers;
+    vec3 lsum;
+    float lT;
+    rtrBlendLayersT(o, R, hit ? t : tmax, sunlit, amblit, uintBitsToFloat(q6.w), layers, lsum, lT);
+    r.q[lw] = uvec4(floatBitsToUint(lsum), floatBitsToUint(lT));
+    rtrStatsHit();     // (blend candidates shaded)
+    rtrStatsGuard();   // (#1049)
+}
+#else   // RT_STAGE_LIGHT
+// (#1039 M1) -DCLEAN_VIS_QUEUE: THE RESOLVE -- the entries below the queue's capacity, the sun from their
+// result; without it (the fused stage) push rtr3.y = the first entry: the TAIL past that capacity.
+void DEFER_MAIN()
+{
+    uint i, e;
+    ivec2 px;
+    if (!rtrRecLane(i, e, px)) return;
+#ifdef CLEAN_VIS_QUEUE
+    if (i >= vqEntryCap(vqRegion())) return;   // (the tail's)
+    g_vq_dest = i;
+#endif
+    RtrRecords rec = rtrRec();
+    const uint b = i * RTR_REC_WORDS;
+    const uvec4 q0 = rec.q[b], q5 = rec.q[b + 5u], q6 = rec.q[b + 6u];
+    rtrQueryBudgetBegin();   // (#1049: the hit shading's + the blend layers' share)
+    const vec3 R = uintBitsToFloat(q0.xyz), o = uintBitsToFloat(q5.yzw);
+    const bool hit = (q0.w & RTR_REC_HIT) != 0u;
+    // TRACE's state after the walk: the pixel (the light grid's seed), the receiver (rtrRayBegin's, from
+    // the same inputs), the ray cone (the blend layers' LOD -- until a sun ray narrows it, as in
+    // rtrTraceRefl), the draw time
+    g_frag_xy = vec2(px) + 0.5;
+    const vec3 P = deferPosition(px);
+    const vec3 env = rtrMarkEnv(imageLoad(uReflRtMark, px));
+    rt_cone_width0 = uintBitsToFloat(q6.x);
+    rt_cone_spread = uintBitsToFloat(q6.y);
+    rt_cone_aniso  = uintBitsToFloat(q6.z);
+    rt_anim_time = pc.u_cam_time.w;
+    g_rtr_back = (q0.w & RTR_REC_BACK) != 0u;
+    float t = 0.0;
+    vec3 col = env;
+    if (g_rtr_back)
+    {
+        // (rtrTraceRefl's back-face stop: the solid's inside, a hit at the walk's distance)
+        g_rtr_occ = 0.0;
+        g_rts_terms = vec4(0.0);
+        col = vec3(0.0);
+        t = uintBitsToFloat(rec.q[b + 1u].x);
+    }
+    else if (hit)
+    {
+        RT_SHADE_STAT(4, 1u);
+        const RtLitSurface hs = rtLitUnpack(rec.q[b + 1u], rec.q[b + 2u], rec.q[b + 3u], rec.q[b + 4u]);
+        col = rtrReflShade(hs, R, P);
+        t = uintBitsToFloat(q5.x);
+    }
+    const vec3 c = rtrReflTail(col, hit, t, o, R, max(g_draw_push.rtr.x, 1.0), P, (rtrOpts() & 1u) != 0u,
+                               uintBitsToFloat(q6.w));
+    imageStore(uRtTrace, px, vec4(t > 0.0 ? c : vec3(0.0), t));
+    rtrStatsHit();
+    rtrStatsRegir();
+    rtrStatsGuard();   // (#1049)
+}
+#endif
 #else
 void DEFER_MAIN()
 {
@@ -5399,6 +6820,7 @@ void DEFER_MAIN()
     rt_cone_spread = pa;
     rt_cone_aniso  = max(g_draw_push.rtr.w, 1.0);
     rt_anim_time = pc.u_cam_time.w;
+    rtrQueryBudgetBegin();   // (#1049: the layer walk + its reflection ray)
     vec4 outv = vec4(0.0);
     const RtHit h = rtrClosest(cam, dir, 0.0, tmaxCam, RT_MASK_BLEND | RT_MASK_WATER, RTR_FWD_MIN_ALPHA, gl_RayFlagsNoneEXT);
     if (h.hit)
@@ -5415,7 +6837,12 @@ void DEFER_MAIN()
         {
             ok = cam.z >= waterHeight();   // (from below, the water FS shows no reflection)
             rough = 0.0;
-            R = rtWaterReflectDir(ls.P, cam, pc.u_cam_time.w);
+            // <GMDX> the flat water plane's mirror image: the water FS adds its own waves when it reads it
+            // (rtFwdInWater). A wave normal per 2 x 2 block made the reflection a mosaic. The flat ray
+            // leaves a wave trough low and clipped the next crest: a water reflection never sees
+            // water (it reflected itself dark over most of a channel, and missed the bank by the shore).
+            R = reflect(dir, vec3(0.0, 0.0, 1.0));
+            g_rtr_mask_drop |= RT_MASK_WATER;
         }
         else if (ls.model == RT_SURF_PBR)
         {
@@ -5441,6 +6868,7 @@ void DEFER_MAIN()
         }
     }
     imageStore(uRtFwd, hp, outv);
+    rtrStatsGuard();   // (#1049)
 }
 
 #elif CLEAN_DEFER_PASS == 15
@@ -5529,6 +6957,8 @@ float pdnRand(inout uint seed) { seed = pdnPcg(seed); return float(seed >> 8u) *
 // mesh avatar in sun shadow, brightest in a dark room. Traced, the away side carries its real
 // visibility (mostly self-shadowed: 0, often without a ray -- the back-face rule).
 #define PDN_OPT_SUN_AWAY 32u
+// (#1031) PDN_OPT_OFIRST (RenderVKShadowOpaqueFirst; 64u, defined above the includes with RT_WALK_OFIRST):
+// the generic core's shadow walks try the opaque geometry first -- clean_vis_walk.glsl OPAQUE FIRST.
 uint pdnOpts() { return uint(max(g_draw_push.rtr2.z, 0.0) + 0.5); }   // (push: uniform)
 // The sun sample's gate on the shading normal: surfaceSunWant, or (PDN_OPT_SUN_AWAY) any lit surface.
 bool pdnSunWant(SurfaceLit s, vec3 L)
@@ -5591,18 +7021,13 @@ float pdnTargetL(uint li, vec3 P, vec3 N, bool anyLight)
         const vec4 sp = pshadow[tx.z - 1u].params;
         if (sp.w < 0.5 || !(sp.z > 1.5)) return 0.0;   // (projStochEligible)
     }
-    const vec4 pr = lights[li].pos_radius;
-    const vec3 lv = pr.xyz - P;
-    const float d2 = dot(lv, lv);
-    if (d2 >= pr.w * pr.w) return 0.0;
     const vec4 cf = lights[li].color_falloff;
-    const float dist = sqrt(d2);
-    float atten = legacyAtten(dist / pr.w, cf.w);
-    if (atten <= 0.0) return 0.0;
-    // the lights' CUTOFF FADE (projDirectTerms' lightCutoffFade, ALU only): a light faded out
+    // THE LIGHT REACH with its CUTOFF FADE (#1043; projDirectTerms', ALU only): a light faded out
     // here is never picked -- such picks carried no light (num = den = 0, a wasted sample:
     // DN_F_INFO no-information) and are a large share of a club's picks at the light pools' rims
-    atten *= lightCutoffFade(atten, cf.rgb);
+    vec3 lv;
+    float dist;
+    const float atten = lightReach(lights[li].pos_radius, cf, P, lv, dist);
     if (atten <= 0.0) return 0.0;
     if (lights[li].proj_origin.w < 0.5)
     {
@@ -5610,10 +7035,8 @@ float pdnTargetL(uint li, vec3 P, vec3 N, bool anyLight)
         if (nlp <= 0.0) return 0.0;
         return atten * max(pdnLum(cf.rgb), 1e-4) * (0.25 + nlp);
     }
-    vec4 ptc = lights[li].proj_mat * vec4(P, 1.0);
-    if (ptc.z < 0.0) return 0.0;
-    ptc.xyz /= ptc.w;
-    if (ptc.z <= 0.0 || ptc.x <= 0.0 || ptc.x >= 1.0 || ptc.y <= 0.0 || ptc.y >= 1.0) return 0.0;
+    vec2 ptc;
+    if (!lightProjFrustum(lights[li].proj_mat, P, ptc)) return 0.0;
     const float nl = dot(N, normalize(lights[li].proj_origin.xyz - P));
     if (nl <= 0.0) return 0.0;
     return atten * max(pdnLum(cf.rgb), 1e-4) * (0.25 + nl);   // (a floor on N.L: glints at grazing light)
@@ -5860,35 +7283,10 @@ float pdnTerrainExit(vec3 P, vec3 cam, vec3 Ng)
     if (dot(n, Vt) <= 0.0) return -1.0;
     return rayQueryGetIntersectionTEXT(rq, true);
 }
-// #747 CLUSTER LOD RECEIVER LIFT (the mask's maskClusterRigLift): a receiver within the cut's
-// error of a legacy rigged surface still casting this frame lifts its ray origins by that error.
-float pdnClusterRigLift(vec3 P, vec3 cam)
-{
-    if (ssr.cluster_rt.z < 0.5 || !(ssr.cluster_rt.x > 0.0)) return 0.0;
-    if (uint(rt_cl_rig.length()) > 2u && rt_cl_rig[2] == 0x80000000u) return 0.0;
-    vec3 V = P - cam;
-    const float camd = length(V);
-    if (camd < 1e-4) return 0.0;
-    V /= camd;
-    const float eps = ssr.cluster_rt.x * max(camd, ssr.cluster_rt.y);
-    const float w = 2.0 * eps + 1e-3;
-    vec3 qo = P - V * w;
-    float qt0 = 0.0, qt1 = 2.0 * w;
-    if (!rtRaySane(qo, qt0, V, qt1)) return 0.0;   // (Xid 109: an invalid probe ray)
-    rayQueryEXT rq;
-    rayQueryInitializeEXT(rq, uTLAS, gl_RayFlagsNoOpaqueEXT, RT_MASK_RIGGED | RT_MASK_SELF, qo, qt0, V, qt1);
-    uint n_cand = 0u;
-    bool hit = false;
-    while (rayQueryProceedEXT(rq))
-    {
-        if (rayQueryGetIntersectionTypeEXT(rq, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
-        if (++n_cand > RT_CANDIDATE_BUDGET) { rayQueryTerminateEXT(rq); break; }
-        const uint id = rtHitInstance(uint(rayQueryGetIntersectionInstanceCustomIndexEXT(rq, false)),
-                                      uint(rayQueryGetIntersectionGeometryIndexEXT(rq, false)));
-        if (rtIsClusterRig(id)) { hit = true; rayQueryTerminateEXT(rq); break; }
-    }
-    return hit ? eps : 0.0;
-}
+// #747 CLUSTER LOD RECEIVER LIFT: a receiver within the cut's error of a legacy rigged surface still
+// casting this frame lifts its ray origins by that error (clean_rt_receiver.glsl, #1048: the one copy).
+#include "clean_rt_receiver.glsl"
+float pdnClusterRigLift(vec3 P, vec3 cam) { return rtClusterRigLift(P, cam); }
 #endif
 #if DEFER_SHADOW_MERGE && !defined(CLEAN_SHADOW_CORE)
 // The sun / moon visibility x tint of the receiver at render px rp (P, its visible-side geometric
@@ -7450,6 +8848,7 @@ void occResolve()
     }
     for (uint k = 0u; k < 32u; ++k) nw[k] = 0u;
     uint nCull = 0u, readmit = 0u, newCull = 0u, gone = 0u;
+    const uint nCut = occN();   // (#1052: OCC_N_SOFT under the soft cull -- nCull = the lights with a weight)
     for (uint k = 0u; k < 32u; ++k)
     {
         const uint cw = occLoad(occWord(c, OCC_W_CNT + k));
@@ -7464,11 +8863,11 @@ void occResolve()
             const uint j = rsRemap(k * 8u + q);   // (this frame's index of that light)
             if (j >= 256u) { if (old != 0u) ++gone; continue; }
             uint n = old;
-            if (isV) { if (old >= OCC_N) ++readmit; n = 0u; }   // a visible ray: re-admitted
-            else if (isB) { n = min(n + 1u, 15u); if (n == OCC_N) ++newCull; }
+            if (isV) { if (old >= nCut) ++readmit; n = 0u; }   // a visible ray: re-admitted
+            else if (isB) { n = min(n + 1u, 15u); if (n == nCut) ++newCull; }
             if (n == 0u) continue;
             nw[j >> 3u] |= n << ((j & 7u) * 4u);
-            if (n >= OCC_N) ++nCull;
+            if (n >= nCut) ++nCull;
         }
     }
     bool live = false;
@@ -7879,6 +9278,10 @@ void DEFER_MAIN()
 // ---- THE GENERIC SHADOW CORE (#85 / #869 Phase 1, RenderVKShadowGenericCore): one receiver
 //      setup, a list of light samples (the sun / moon first, then the projector picks -- Phase 5:
 //      ReSTIR's final sample), ONE visibility routine (clean_shadow_core.glsl) ----
+// (#1031) the split's walk kernels trace one light kind each, and the opaque-first switch: SH_KIND_* /
+// RT_WALK_OFIRST, defined before clean_draw_common.glsl (the shared walk library compiles by them)
+// (#1031) pass 15 runs 8 x 8 workgroups: shadowSampleVis parks its rays' inputs in shared memory
+#define SH_PARK
 #include "clean_shadow_core.glsl"
 
 // The ray-traced projector li as a light sample: its apex, soft radius, axis + near plane, the
@@ -8073,6 +9476,8 @@ void rsEmSample(uint es, vec3 P, vec3 N, vec3 xi, out ShadowSample S)
 #define RS_RES_ON   1u   // push rtr2.w: the reservoir buffer is bound at this extent (write this parity)
 #define RS_RES_PREV 2u   //   ... and last frame's parity holds this extent's reservoirs
 uint rsResFlags() { return uint(max(g_draw_push.rtr2.w, 0.0) + 0.5); }
+#define RS_CONV_DOM 0.9   // (#1052) the strongest candidate's target share from which a reused pick may mark the
+                          // texel converged (the denoiser's RenderVKReSTIRDenoiseIters shortcut; RS_F_CONV_ANY: any)
 uint rsResIndex(ivec2 q, ivec2 D, uint layer) { return layer * uint(D.x * D.y) + uint(q.y * D.x + q.x); }
 uvec2 rsResPack(uint li, float M, float W)
 {
@@ -8249,12 +9654,372 @@ void occNote(uint tag, uint slot0, inout uint cell, uint li, bool visible, inout
     const uint bit = 1u << (li & 31u);
     if ((occLoad(w) & bit) == 0u) occOr(w, bit);
 }
+// (#1052 SOFT CULL, cause 1) A light sample is occlusion EVIDENCE for P's patch: it was traced, and its
+// ray(s) either reached the light (visible) or met an opaque caster at least occBlockMin away -- not
+// the receiver's own surface / terminator at P, which a patch-wide verdict cannot represent (rt_block_t:
+// the walk's nearest opaque caster; a translucent-only block leaves it unset: no evidence). The hard
+// rules: every sample (untraced ones counted as blocked, as before).
+bool occEvidence(bool traced, vec3 vis, vec3 P)
+{
+    if (!occSoft()) return true;
+    if (!traced) return false;
+    if (max(max(vis.r, vis.g), vis.b) > OCC_VIS_MIN) return true;
+    // (the patch edge, capped at OCC_BLOCK_MAX: self-shadow hits are centimetres; a far patch's metres-wide
+    //  edge would stop a floor near the shared wall from ever noting the wall)
+    return rt_block_t < 1e29 && rt_block_t >= clamp(occEdge(occLevel(P)), OCC_BLOCK_MIN, OCC_BLOCK_MAX);
+}
+
+// ---- (#1031) THE TEXEL'S LIGHT-SAMPLE LIST: the evaluation list (the fused kernel's locals, or
+//      SELECT's descriptor) and its j-th LIGHT sample (the sun is not one of them) -- ONE definition
+//      for the fused loop, SELECT's gate, VIS and SHADE, so they all see the same samples ----
+struct PdnSelD {
+    uint  nProj, spN, ocProbe, Ke, dOff;
+    bool  dense, exact;
+    uint  u0, u1, u2;   // pick0 / ex0 / dCw; pick1 / ex1 / dStart | dSlots << 8 | dWin << 16 | dC << 24;
+                        // exi0 | exi1 << 16 / pickE
+    float f0, f1, f2;   // pp0 / dScale, pp1 / ppE, Wsum / WsumE
+    uvec4 spLi;         // the split lights (0xFFFFFFFF past spN)
+};
+// Sample j < nProj + spN (+ 1 with the probe): its light (0xFFFFFFFF: none -- skipped), noise index ni,
+// weight, split slot (-1: the rest's), probe. count: the frame's lights; ocCull: P's culling patch.
+uint pdnSampleLight(PdnSelD d, uint j, uint count, uint ocCull, out uint ni, out float wgt, out int spT, out bool ocP)
+{
+    ni = 0u; wgt = 1.0; spT = -1; ocP = false;
+    if (j >= d.nProj + d.spN)
+    {   // (#869 OCCLUSION CULL) the PROBE: a culled light that reaches P, one ray
+        ocP = true;
+        ni = 72u;
+        return d.ocProbe;
+    }
+    if (j >= d.nProj)
+    {   // (#869) a SPLIT light: weight 1, its own noise phase
+        spT = int(j - d.nProj);
+        ni = 64u + uint(spT);
+        return d.spLi[spT];
+    }
+    if (d.dense)
+    {
+        const uint dC = d.u1 >> 24u;
+        if (j >= dC)
+        {   // (#91) the emitter stratum: its own RIS pick over the cell's emitters, W_E / p
+            wgt = d.f1 > 0.0 ? d.f2 / d.f1 : 0.0;
+            if (!(wgt > 0.0) || !(wgt < 3.0e38)) return 0xFFFFFFFFu;
+            ni = j;
+            return d.u2;
+        }
+        // (RS_F_STRIDE) the sub-window's c positions evenly spaced over the window's, and
+        // the window's over the cell's slots: c DIFFERENT stretches of the stratified CDF.
+        // (Contiguous, a cell whose fire holds 10 of 16 slots evaluated the fire 4 times --
+        // four rays of ONE light, the binary one-light ratio the dense evaluation exists to
+        // replace: blotches under a flickering fire beside other lights.)
+        const uint dWin = (d.u1 >> 16u) & 255u;
+        const uint k = rsWinSlot(d.dOff, j, dC, dWin);
+        const uint jj = rsWinSlot(d.u1 & 255u, k, dWin, (d.u1 >> 8u) & 255u);
+        const uvec2 sl = rg_cells[d.u0 + 1u + jj];
+        const uint li = sl.x;
+        if (li >= count || emTaken(li)) return 0xFFFFFFFFu;   // (#91: a taken-over light has no light here)
+        if (pdnSplitHas(d.spLi, li) || occCulled(ocCull, li)) return 0xFFFFFFFFu;   // (#869: split: its own sample; culled: none)
+        wgt = uintBitsToFloat(sl.y) * d.f0 * float(dWin) / float(dC);
+        if (!(wgt > 0.0) || !(wgt < 3.0e38)) return 0xFFFFFFFFu;
+        ni = jj;
+        return li;
+    }
+    if (d.exact)
+    {
+        ni = j == 0u ? (d.u2 & 0xFFFFu) : (d.u2 >> 16u);
+        return j == 0u ? d.u0 : d.u1;
+    }
+    const uint li = j == 0u ? d.u0 : d.u1;
+    const float pp = j == 0u ? d.f0 : d.f1;
+    if (li == 0xFFFFFFFFu || !(pp > 0.0)) return 0xFFFFFFFFu;
+    wgt = d.f2 / (float(d.Ke) * pp);
+    ni = j;
+    return li;
+}
+
+#if CLEAN_SHADOW_STAGE != SH_STAGE_FUSED
+// ---- (#1031) THE SELECTION DESCRIPTOR (binding 26: the layout at its declaration) ----
+#define PDN_SEL_SURF   0x0200u   // a surface (else SELECT stored the empty texel; the others skip it)
+#define PDN_SEL_NOCP   0x0100u   // the occlusion probe fires (its light: bits 16-23)
+#define PDN_SEL_DENSE  0x0400u   // the dense evaluation (the window in q0.y / q0.z, dOff in bits 24-31)
+#define PDN_SEL_EXACT  0x0800u   // every candidate evaluated (ex0 / ex1)
+#define PDN_SEL_REUSED 0x1000u   // a reused reservoir is the one final sample
+#define PDN_SEL_KE2    0x2000u   // two picks (else one)
+#define PDN_SEL_CELL   0x4000u   // P lies in the light grid (rsCell != REGIR_NO_CELL)
+uint pdnSelIndex(ivec2 m, ivec2 D) { return 4u * uint(m.y * D.x + m.x); }
+// The evaluation list of the descriptor at sdi (q0 = sd0 already loaded)
+PdnSelD pdnSelLoad(uint sdi, uvec4 sd0)
+{
+    const uvec4 sd1 = pdn_sel[sdi + 1u];
+    const uint li4 = pdn_sel[sdi + 2u].y;
+    PdnSelD d;
+    d.nProj = sd0.x & 31u;
+    d.spN = (sd0.x >> 5u) & 7u;
+    d.ocProbe = (sd0.x & PDN_SEL_NOCP) != 0u ? (sd0.x >> 16u) & 255u : 0xFFFFFFFFu;
+    d.Ke = (sd0.x & PDN_SEL_KE2) != 0u ? 2u : 1u;
+    d.dOff = sd0.x >> 24u;
+    d.dense = (sd0.x & PDN_SEL_DENSE) != 0u;
+    d.exact = (sd0.x & PDN_SEL_EXACT) != 0u;
+    d.u0 = sd0.y; d.u1 = sd0.z; d.u2 = sd0.w;
+    d.f0 = uintBitsToFloat(sd1.x); d.f1 = uintBitsToFloat(sd1.y); d.f2 = uintBitsToFloat(sd1.z);
+    d.spLi = uvec4(0xFFFFFFFFu);
+    [[unroll]] for (uint k = 0u; k < PDN_SPLIT_MAX; ++k)
+        if (k < d.spN) d.spLi[k] = (li4 >> (8u * k)) & 255u;
+    return d;
+}
+// The light samples (SELECT's gate, VIS, SHADE): nProj + spN + the probe
+uint pdnSelSamples(PdnSelD d) { return d.nProj + d.spN + (d.ocProbe != 0xFFFFFFFFu ? 1u : 0u); }
+#endif
+#if CLEAN_SHADOW_STAGE == SH_STAGE_SELECT || CLEAN_SHADOW_STAGE == SH_STAGE_VIS || CLEAN_SHADOW_STAGE == SH_STAGE_SHADE
+// ---- (#1031) A LIGHT SAMPLE'S VISIBILITY (binding 27): bit 31 coloured; mono (r = g = b, every opaque
+//      / grey-translucent / budget result): bits 0-23 the value as unorm24 (exact in a float; unorm30 was
+//      not: 1.0 * (2^30 - 1) rounds to 2^30 in fp32, which overflowed into bit 30 and read back 0 -- fully
+//      lit samples went dark and only penumbrae lit, the 'only the edges of a light' bug); coloured (#735
+//      foliage / RGB translucency): unorm10 r, g, b. Bit 30 (#1052): the sample is occlusion EVIDENCE
+//      (occEvidence: VIS's verdict for SHADE's note; always set under the hard rules) ----
+uint pdnVisSlots() { return g_draw_push.rtr3.w; }   // (push: the slots per texel, uniform)
+// The visibilities' first word (past the header and the job list)
+uint pdnVisBase(ivec2 D) { return 4u + uint(D.x * D.y) * pdnVisSlots(); }
+#define PDN_JOB_SLOT_BITS 5u   // a job: texel << 5 | slot (slots <= 22)
+#define PDN_VIS_EVIDENCE 0x40000000u
+uint pdnVisPack(vec3 v, bool evidence)
+{
+    v = clamp(v, vec3(0.0), vec3(1.0));
+    const uint ev = evidence ? PDN_VIS_EVIDENCE : 0u;
+    if (v.r == v.g && v.g == v.b) return ev | uint(round(v.r * 16777215.0));
+    const uvec3 q = uvec3(round(v * 1023.0));
+    return 0x80000000u | ev | q.r | (q.g << 10u) | (q.b << 20u);
+}
+vec3 pdnVisUnpack(uint w)
+{
+    if ((w & 0x80000000u) == 0u) return vec3(float(w & 0x00FFFFFFu) * (1.0 / 16777215.0));
+    return vec3(float(w & 1023u), float((w >> 10u) & 1023u), float((w >> 20u) & 1023u)) * (1.0 / 1023.0);
+}
+#endif
+#if CLEAN_SHADOW_STAGE == SH_STAGE_VIS || CLEAN_SHADOW_STAGE == SH_STAGE_SUNVIS
+// (#1031) The samples' receiver for VIS / SUNVIS -- the fused kernel's receiver section line for line:
+// texel m's render pixel, surface, position, view depth, depth sample and the ShadowRecv (+ the self-
+// shadow owner, the noise phase). False: no surface (SELECT stored the texel).
+bool pdnVisRecv(ivec2 m, ivec2 D, uint frame, out SurfaceLit s, out vec3 P, out float vz, out float dR,
+                out ShadowRecv Rv, out bool ngOnPlane)
+{
+    const vec2 R2 = vec2(float(g_draw_push.width), float(g_draw_push.height));
+    const vec2 r = R2 / vec2(D);   // render px per denoiser texel
+    const vec2 J = (ssr.taa_params.w > 0.5 && D.x < int(g_draw_push.width)) ? ssr.taa_jitter.xy : vec2(0.0);
+    const ivec2 rp = clamp(ivec2((vec2(m) + 0.5 + J) * r), ivec2(0), ivec2(R2) - 1);
+    g_frag_xy = vec2(rp) + 0.5;
+    const vec4 g2 = texelFetch(uG2, rp, 0);
+    P = vec3(0.0); vz = 0.0; dR = 0.0; ngOnPlane = false;
+    if (!deferHasSurface(g2)) return false;
+    float glow;
+    bool noFade;
+    s = deferSurface(rp, g2, glow, noFade);
+    if (s.model == SURF_FULLBRIGHT) return false;
+    P = deferPosition(rp);
+    const vec3 V = normalize(pc.u_cam_time.xyz - P);
+    const vec3 Ng = dot(s.Ng, V) < 0.0 ? -s.Ng : s.Ng;
+    vz = dot(P - linfo.cam_pos.xyz, linfo.cam_fwd.xyz);
+    s.cel = s.cel && specCelOn();
+    g_cel = s.cel;
+    const vec3 cam = pc.u_cam_time.xyz;
+    dR = texelFetch(uDepthG, rp, 0).r;
+    const vec3 Nf = pdnFacetNormal(rp, P, cam, Ng, ngOnPlane);
+    Rv.P = P; Rv.Ng = Nf; Rv.cam = cam; Rv.rp = rp;
+    Rv.pxw = max(length(pdnWorldAt(vec2(rp) + 0.5 + vec2(1.0, 0.0), dR) - P), 1e-6);
+    {
+        const vec3 Vc = P - cam;
+        const float vcl = length(Vc);
+        Rv.slope = vcl > 1e-4 ? g_draw_push.rtr2.y * Rv.pxw * length(cross(Nf, Vc / vcl)) : 0.0;
+    }
+    rtSelfBegin(P);
+    rt_noise_shift = fract(float(frame) * vec2(0.7548776662, 0.5698402910));
+    rt_vis_hint = -1.0;
+    return true;
+}
+#endif
+
+#if CLEAN_SHADOW_STAGE == SH_STAGE_VIS
+// ---- (#1031) VIS: ONE THREAD PER GATED LIGHT SAMPLE (SELECT's job list, an indirect dispatch: every
+//      lane has a sample to trace). The job's texel's receiver, its light sample j (pdnProjSample /
+//      rsEmSample), the receiver rules (shadowRecvLight: the terminator / rig probes) and the sample's
+//      walk(s) (shadowSampleVis: its disc rays + the translucent split, the inputs parked between
+//      rays) -> its visibility slot. No per-texel sample loop: nothing of a texel's other samples is
+//      live across a walk. ----
+void DEFER_MAIN()
+{
+    const ivec2 D = ivec2(g_draw_push.rtr.xy + 0.5);
+    const uint slots = pdnVisSlots();
+    const uint e = gl_WorkGroupID.x * 64u + gl_LocalInvocationIndex;
+    if (e >= min(pdn_vis[0], uint(D.x * D.y) * slots)) return;   // (the count clamped to the list: Xid 109 hardening)
+    const uint job = pdn_vis[4u + e];
+    const uint tex = job >> PDN_JOB_SLOT_BITS, j = job & ((1u << PDN_JOB_SLOT_BITS) - 1u);
+    const ivec2 m = ivec2(int(tex % uint(D.x)), int(tex / uint(D.x)));
+    if (m.y >= D.y || j >= slots) return;
+    const uint sdi = pdnSelIndex(m, D);
+    const uvec4 sd0 = pdn_sel[sdi];
+    const uint frame = uint(g_draw_push.rtr.z + 0.5);
+    SurfaceLit s;
+    vec3 P;
+    float vz, dR;
+    ShadowRecv Rv;
+    bool ngOnPlane;
+    if (!pdnVisRecv(m, D, frame, s, P, vz, dR, Rv, ngOnPlane)) return;   // (never: SELECT listed a surface)
+    if ((sd0.x & PDN_SEL_CELL) != 0u) rt_fix_max = rg.rs_params.y;
+    const uint count = uint(linfo.cam_pos.w);
+    // P's culling patch (the dense window's skips; SELECT read the same: the resolve ran before pass 15;
+    // #1052: the same jittered key and draw -- occKeyTexel of (m, frame))
+    uint ocCull = OCC_NONE;
+    if (count > 0u && !litDbg(LDBG_NO_LOCAL) && occFrameOn())
+    {
+        uint slot0;
+        const uint c = occFind(occKeyTexel(P, s.N, m, frame, slot0), slot0);
+        if (occAny(c)) ocCull = c;
+    }
+    ShadowSample S;
+    {
+        const PdnSelD sel = pdnSelLoad(sdi, sd0);
+        uint ni;
+        float wgt;
+        int spT;
+        bool ocP;
+        const uint li = pdnSampleLight(sel, j, count, ocCull, ni, wgt, spT, ocP);
+        if (li == 0xFFFFFFFFu) return;   // (never: the gate bit)
+        if (li >= REGIR_EM_KEY)
+        {   // (#91) an EMITTING TRIANGLE: one ray to a point of its part above the horizon -- the
+            // triangle point: a per-texel random offset + the R3 sequence over the frames
+            uint es = pdnPcg(uint(m.x) * 2731u + uint(m.y) * 6151u + ni * 977u);
+            const vec3 off = vec3(pdnRand(es), pdnRand(es), pdnRand(es));
+            const vec3 xi = fract(off + float(frame & 0xFFFFu) * vec3(0.8191725134, 0.6710436067, 0.5497004779));
+            rsEmSample(li - REGIR_EM_KEY, P, s.N, xi, S);
+        }
+        else
+        {
+            pdnProjSample(li, vec2(m) + 0.5 + vec2(17.0, 59.0) * float(ni), S);
+            // (#869) a MOVED light's sample: RS_MOVE_RAYS disc rays (the fused loop's rule)
+            if (rsFrameOn() && rsMoveOn() && (!sel.dense || spT >= 0) && S.radius > 0.0 && rsMoved(li))
+                S.nRays = max(rsMoveRays(), 1u);
+        }
+    }
+    // the receiver rules for this light (ONE call site), the facing gate, THE walk(s)
+    vec3 Nin;
+    const float nsl = shadowRecvLight(Rv, (S.flags & SH_POSITIONAL) != 0u ? normalize(S.pos - P) : S.pos, Nin);
+    const bool trace = !((S.flags & SH_POSITIONAL) != 0u && (pdnOpts() & PDN_OPT_FACING) != 0u && nsl < -0.25);
+    rt_block_t = 1e30;
+    const vec3 vis = trace ? shadowSampleVis(S, P, Nin, pc.u_cam_time.xyz, pc.u_cam_time.w) : vec3(0.0);
+    // (#1052) bit 30: occlusion evidence for SHADE's note (before shadowRecvLightEnd: rt_block_t is the walk's)
+    const bool ev = occEvidence(trace, vis, P);
+    shadowRecvLightEnd();
+    pdn_vis[pdnVisBase(D) + tex * slots + j] = pdnVisPack(vis, ev);
+}
+#elif CLEAN_SHADOW_STAGE == SH_STAGE_SUNVIS
+// ---- (#1031) SUNVIS (merged): the sun / moon sample -- the fused loop's sample 0 line for line: the
+//      exposure certificate, the gates, pdnSunSample (footprint jitter, terrain re-anchor), the receiver
+//      rules, ONE walk, the certificates' post rays -> the denoiser's sun channel (layer 2) ----
+shared uvec4 s_sunPost[64][4];   // (per lane: the certificate texel + the post rays' inputs, across the walk)
+void DEFER_MAIN()
+{
+    const ivec2 m = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 D = ivec2(g_draw_push.rtr.xy + 0.5);
+    if (any(greaterThanEqual(m, D))) return;
+    const uint opts = pdnOpts();
+    if ((opts & PDN_OPT_SUN_SKIP) != 0u) return;   // (the host skips the dispatch too)
+    if ((pdn_sel[pdnSelIndex(m, D)].x & PDN_SEL_SURF) == 0u) return;   // (SELECT stored the lit texel)
+    const uint frame = uint(g_draw_push.rtr.z + 0.5);
+    SurfaceLit s;
+    vec3 P;
+    float vz, dR;
+    ShadowRecv Rv;
+    bool ngOnPlane;
+    if (!pdnVisRecv(m, D, frame, s, P, vz, dR, Rv, ngOnPlane)) return;
+    const vec3 cam = pc.u_cam_time.xyz;
+    const float time = pc.u_cam_time.w;
+    const vec3 Nf = Rv.Ng;
+    const float sw = g_draw_push.rtr2.x;
+    const float texPerPx = float(D.x) / float(g_draw_push.width);
+    vec3 sunOut = vec3(1.0);
+    float srad = -1.0;
+    bool sdyn = false;
+    [[dont_unroll]] for (uint once = 0u; once < 1u; ++once)   // (the fused loop's sample 0: continue = done)
+    {
+        ShadowSample S;
+        vec3 Pin = P;
+        float sfade = 0.0;
+        SxcTexel sxc = sxcNone();
+        // (#771) SUN EXPOSURE CERTIFICATE: a certified cell writes a fully blocked sample's value and
+        // traces nothing
+        {
+            const vec3 Lsx = atmosLightDir();
+            float fx;
+            if (surfaceSunWant(s, Lsx) && pdnSunGate(s, vz, sw, Lsx, fx))
+            {
+                sxc = sxcSunPre(P, Nf, Lsx, dot(Nf, Lsx), Rv.pxw, fx, sw, m, frame, texPerPx);
+                if (sxc.cls == SXC_C_SKIP)
+                {
+                    sunOut = sxcDebug(sxc, sxc.out_, vec3(0.0));
+                    srad = sxc.srad;
+                    sdyn = false;
+                    continue;
+                }
+            }
+        }
+        const bool sunAway = !surfaceSunWant(s, atmosLightDir());   // (PDN_OPT_SUN_AWAY: one ray)
+        if (!pdnSunSample(s, Rv, dR, vz, frame, sw, texPerPx, (opts & PDN_OPT_SUN_ONE) != 0u || sunAway, ngOnPlane,
+                          S, Pin, sfade))
+        {
+            sunOut = vec3(1.0); srad = -1.0;
+            continue;
+        }
+        vec3 Nin;
+        const float nsl = shadowRecvLight(Rv, S.pos, Nin);
+        if (!(nsl > -0.25))
+        {
+            shadowRecvLightEnd();
+            sunOut = mix(vec3(1.0), vec3(0.0), clamp(sw, 0.0, 1.0));
+            srad = 0.0;
+            continue;
+        }
+        // (#1031) what the certificates' post rays and the channel's encoding need after the walk waits
+        // in shared memory (this lane's slot), not in registers across it
+        {
+            const uint li = gl_LocalInvocationIndex;
+            s_sunPost[li][0] = uvec4(sxc.e, sxc.cls, sxc.sub, (sxc.certNow ? 1u : 0u) | (sxc.ticket ? 2u : 0u));
+            s_sunPost[li][1] = uvec4(sxc.key0, sxc.key1, floatBitsToUint(S.bias), floatBitsToUint(sfade));
+            s_sunPost[li][2] = uvec4(floatBitsToUint(Pin), floatBitsToUint(nsl));
+            s_sunPost[li][3] = uvec4(floatBitsToUint(Nin), floatBitsToUint(Rv.pxw));
+        }
+        rt_block_t = 1e30;
+        rt_block_dyn = false;
+        const vec3 vis = shadowSampleVis(S, Pin, Nin, cam, time);
+        const uint lj = gl_LocalInvocationIndex;
+        const uvec4 q0 = s_sunPost[lj][0], q1 = s_sunPost[lj][1], q2 = s_sunPost[lj][2], q3 = s_sunPost[lj][3];
+        SxcTexel sxp = sxcNone();
+        sxp.e = q0.x; sxp.cls = q0.y; sxp.sub = q0.z; sxp.certNow = (q0.w & 1u) != 0u; sxp.ticket = (q0.w & 2u) != 0u;
+        sxp.key0 = q1.x; sxp.key1 = q1.y;
+        const vec3 PinW = uintBitsToFloat(q2.xyz), NinW = uintBitsToFloat(q3.xyz);
+        sxcSunPost(sxp, vis, PinW, NinW, cam, uintBitsToFloat(q1.z), frame);   // (#771: revocation + certification rays)
+        shadowRecvLightEnd();
+        const float sfadeW = uintBitsToFloat(q1.w), nslW = uintBitsToFloat(q2.w), pxwW = uintBitsToFloat(q3.w);
+        const vec3 sun = mix(vis, vec3(1.0), sfadeW);
+        sdyn = rt_block_dyn;
+        if (rt_block_t < 1e29) srad = rt_block_t * tan(ssr.sun_rt.x) / max(nslW, 0.15) / pxwW * texPerPx;
+        // weak sun / moon (the host's weight, a ramp over the threshold band): fade toward lit
+        sunOut = mix(vec3(1.0), clamp(sun, vec3(0.0), vec3(1.0)), clamp(sw, 0.0, 1.0));
+        sunOut = sxcDebug(sxp, sunOut, vis);   // (RenderVKSunCertDebug)
+    }
+    imageStore(uPdnIn, ivec3(m, 2), vec4(sunOut, pdnSunEncA(srad, sdyn)));
+}
+#else
 
 void DEFER_MAIN()
 {
     const ivec2 m = ivec2(gl_GlobalInvocationID.xy);
     const ivec2 D = ivec2(g_draw_push.rtr.xy + 0.5);
     if (any(greaterThanEqual(m, D))) return;
+#if CLEAN_SHADOW_STAGE == SH_STAGE_SHADE
+    const uint sdi = pdnSelIndex(m, D);
+    const uvec4 sd0 = pdn_sel[sdi];
+    if ((sd0.x & PDN_SEL_SURF) == 0u) return;   // (no surface: SELECT stored the empty texel)
+#endif
     const uint ctl = uint(g_draw_push.rtr.w + 0.5);
     const uint K = clamp(ctl & 3u, 1u, 2u);
     const int par = int((ctl >> 4u) & 1u);
@@ -8278,6 +10043,7 @@ void DEFER_MAIN()
     }
     if (!surf)
     {
+#if CLEAN_SHADOW_STAGE != SH_STAGE_SHADE   // (SHADE: never -- SELECT stored the empty texel)
         imageStore(uPdnIn, ivec3(m, 0), vec4(0.0));
         imageStore(uPdnIn, ivec3(m, 1), vec4(0.0));
 #if DEFER_SHADOW_MERGE
@@ -8288,6 +10054,10 @@ void DEFER_MAIN()
         imageStore(uPdnMot, m, uvec4(0u));
         if (imageSize(uPdnGeom).z >= PDN_SPLIT_GEOM_LAYERS)   // (#869: no split light here)
             imageStore(uPdnGeom, ivec3(m, PDN_SPLIT_GEOM_PAR + par), uvec4(0u));
+#if CLEAN_SHADOW_STAGE == SH_STAGE_SELECT
+        pdn_sel[pdnSelIndex(m, D)] = uvec4(0u);   // (TRACE skips it)
+#endif
+#endif
         return;
     }
     CLK_SURF();
@@ -8314,6 +10084,7 @@ void DEFER_MAIN()
     const vec3 cam = pc.u_cam_time.xyz;
     const float time = pc.u_cam_time.w;
     const float dR = texelFetch(uDepthG, rp, 0).r;
+#if CLEAN_SHADOW_STAGE == SH_STAGE_FUSED   // (#1031: the walks' receiver -- VIS / SUNVIS build their own)
     ShadowRecv Rv;
     // the FACET normal (pdnFacetNormal: the mask's receiver normal, not the G-buffer's smooth
     // vertex normal) -- every light's receiver rules (shadowRecvLight: the terminator band /
@@ -8330,6 +10101,7 @@ void DEFER_MAIN()
     rtSelfBegin(P);
     rt_noise_shift = fract(float(frame) * vec2(0.7548776662, 0.5698402910));
     rt_vis_hint = -1.0;
+#endif
     const bool gate = (opts & PDN_OPT_FACING) != 0u;
     const bool infoFix = (opts & PDN_OPT_BLEED) != 0u;
 
@@ -8358,11 +10130,13 @@ void DEFER_MAIN()
     uint ocRefused = 0u;
     if (ocOn)
     {
-        ocTag = occKey(P, s.N, ocSlot0);
+        ocTag = occKeyTexel(P, s.N, m, frame, ocSlot0);   // (#1052: jittered under the soft cull; sets g_occ_u)
         ocCell = occFind(ocTag, ocSlot0);
         if (occAny(ocCell)) ocCull = ocCell;
     }
     uint ocProbe = 0xFFFFFFFFu;
+#if CLEAN_SHADOW_STAGE != SH_STAGE_SHADE
+    // ==== THE SELECTION (#1031: SELECT's whole job; the fused kernel's too) ====
     // (the probe pick: a uniform reservoir over every culled light that reaches P -- the split walk's
     //  cluster list, then the grid window's slots: the cluster list is capped at CLUSTER_CAP, and with a
     //  hundred projectors a culled light may only be met in the grid, the list that culled it)
@@ -8574,6 +10348,9 @@ void DEFER_MAIN()
                      ? clamp(2.0 * min(Wflk / Wsum, 1.0 - wMax / Wsum), 0.0, 1.0) : 0.0;
     // the share the denoiser's moving-light rule and the dense evaluation read (MOT w)
     const float fMove = max(fMoveL, fFlk);
+    // (#1052) THE STRONGEST CANDIDATE'S SHARE of this texel's target (before the reuse replaces Wsum): the
+    // denoiser's converged shortcut (RS_CONV_DOM below) is only honest where one light dominates
+    const float rsDom = Wsum > 0.0 ? clamp(wMax / Wsum, 0.0, 1.0) : 0.0;
     // ---- pass 2: the SAMPLE LIST through the one core -- sample 0 the sun / moon (merged), then
     //      the projector evaluations: every candidate when they all fit (exact: no noise), else
     //      the K picks weighted W / (K p) ----
@@ -8704,6 +10481,129 @@ void DEFER_MAIN()
     // (#91) dense: + the emitter stratum's one pick (the dense window covers the lights only)
     const uint nProj = !(projOn || nEm > 0u) ? 0u
                      : (dense ? dC + (pickE != 0xFFFFFFFFu ? 1u : 0u) : (exact ? uint(nCand) : Ke));
+    // (#869 SPLIT) + the split lights' samples, last: one each, their own visibility (spV)
+    // (#869 OCCLUSION CULL) + the probe, last: detection only (occNote), never in an estimate
+    // the probe, with probability clamp(n / 8, 1/8, 1) for n culled lights reaching P: a patch culling a
+    // hundred projectors probes from every texel every frame (each light re-tested every few frames)
+    if (ocProbe != 0xFFFFFFFFu && pdnRand(pseed) >= clamp(nProbe * 0.125, 0.125, 1.0)) ocProbe = 0xFFFFFFFFu;
+    const uint nOcP = ocProbe != 0xFFFFFFFFu ? 1u : 0u;
+    // (the ReSTIR view's light: the reservoir's, else the first pick)
+    const uint rsYl = rsResOn ? rsY : (pp0 > 0.0 ? pick0 : 0xFFFFFFFFu);
+    // (#1031) the evaluation list as one record (pdnSampleLight: the fused loop, SELECT's gate, VIS, SHADE)
+    PdnSelD sel;
+    sel.nProj = nProj; sel.spN = spN; sel.ocProbe = nOcP != 0u ? ocProbe : 0xFFFFFFFFu; sel.Ke = Ke; sel.dOff = dOff;
+    sel.dense = dense; sel.exact = exact; sel.spLi = spLi;
+    sel.u0 = 0u; sel.u1 = 0u; sel.u2 = 0u; sel.f0 = 0.0; sel.f1 = 0.0; sel.f2 = 0.0;
+    if (dense)
+    {
+        sel.u0 = dCw; sel.u1 = dStart | (dSlots << 8u) | (dWin << 16u) | (dC << 24u); sel.u2 = pickE;
+        sel.f0 = dScale; sel.f1 = ppE; sel.f2 = WsumE;
+    }
+    else if (exact) { sel.u0 = ex0; sel.u1 = ex1; sel.u2 = (exi0 & 0xFFFFu) | (exi1 << 16u); }
+    else { sel.u0 = pick0; sel.u1 = pick1; sel.f0 = pp0; sel.f1 = pp1; sel.f2 = Wsum; }
+#if CLEAN_SHADOW_STAGE == SH_STAGE_SELECT
+    // ---- (#1031) SELECT's outputs: the descriptor (the others regenerate the sample list from it) with
+    //      the GATE -- which light samples have light at P (the fused loop's terms test before its ray:
+    //      VIS traces exactly those) --, the GEOM guide (W0: the gobo-free light-set reference), the
+    //      emitter count stat ----
+    {
+        uint gateM = 0u;
+        const uint nS = min(pdnSelSamples(sel), pdnVisSlots());   // (the slots the host sized: never fewer)
+        [[dont_unroll]] for (uint j = 0u; j < nS; ++j)
+        {
+            uint ni;
+            float wgt;
+            int spT;
+            bool ocP;
+            const uint li = pdnSampleLight(sel, j, count, ocCull, ni, wgt, spT, ocP);
+            if (li == 0xFFFFFFFFu) continue;
+            vec3 dt = vec3(0.0), st = vec3(0.0);
+            float pd = 0.0;
+            if (li >= REGIR_EM_KEY)
+            {
+                if (!rsEmTerms(li - REGIR_EM_KEY, P, s.N, diffuseColor, dt)) continue;
+            }
+            else
+            {
+                if (!projDirectTerms(li, P, s.N, V, pbr, base, diffuseColor, specularColor, rough, ls, false, dt, st, pd))
+                    continue;
+                if (max(max(dt.r, dt.g), dt.b) + max(max(st.r, st.g), st.b) <= 0.0) continue;   // (a black gobo texel)
+            }
+            gateM |= 1u << j;
+        }
+        // (#1031) VIS's JOB LIST: one entry per gated light sample (texel << 5 | j), one atomic per
+        // subgroup (the lanes take consecutive runs); the count's 64-entry blocks are VIS's workgroups
+        {
+            const uint nJ = bitCount(gateM);
+            const uint ex = subgroupExclusiveAdd(nJ);
+            const uint tot = subgroupAdd(nJ);
+            uint jb = 0u;
+            if (subgroupElect() && tot != 0u)
+            {
+                jb = atomicAdd(pdn_vis[0], tot);
+                const uint g = (jb + tot + 63u) / 64u - (jb + 63u) / 64u;
+                if (g != 0u) atomicAdd(pdn_vis[1], g);
+            }
+            jb = subgroupBroadcastFirst(jb) + ex;
+            const uint tex = uint(m.y * D.x + m.x);
+            uint bits = gateM;
+            [[dont_unroll]] while (bits != 0u)
+            {
+                const uint j = uint(findLSB(bits));
+                bits &= bits - 1u;
+                pdn_vis[4u + jb] = (tex << PDN_JOB_SLOT_BITS) | j;
+                ++jb;
+            }
+        }
+        uvec4 q0 = uvec4(nProj | (spN << 5u) | PDN_SEL_SURF | (dOff << 24u), sel.u0, sel.u1, sel.u2);
+        if (nOcP != 0u) q0.x |= PDN_SEL_NOCP | (ocProbe << 16u);
+        if (dense) q0.x |= PDN_SEL_DENSE;
+        if (exact) q0.x |= PDN_SEL_EXACT;
+        if (reused) q0.x |= PDN_SEL_REUSED;
+        if (Ke == 2u) q0.x |= PDN_SEL_KE2;
+        if (rsCell != REGIR_NO_CELL) q0.x |= PDN_SEL_CELL;
+        uint li4 = 0u;
+        [[unroll]] for (uint k = 0u; k < PDN_SPLIT_MAX; ++k)
+            if (k < spN) li4 |= (spLi[k] & 255u) << (8u * k);
+        const uint si = pdnSelIndex(m, D);
+        pdn_sel[si] = q0;
+        pdn_sel[si + 1u] = uvec4(floatBitsToUint(vec3(sel.f0, sel.f1, sel.f2)), floatBitsToUint(nCand));
+        pdn_sel[si + 2u] = uvec4(floatBitsToUint(fMove), li4, (spId.x & 0xFFFFu) | (spId.y << 16u),
+                                 (spId.z & 0xFFFFu) | (spId.w << 16u));
+        pdn_sel[si + 3u] = uvec4(rsYl, floatBitsToUint(rsM), gateM, floatBitsToUint(rsDom));   // (#1052: w the dominance)
+    }
+    imageStore(uPdnGeom, ivec3(m, par), uvec4(floatBitsToUint(vz), pdnPackNR(s.N, specRough), packHalf2x16(grad),
+                                             pdnPackMeta(0.0, 0.0, 0u, W0)));   // (W: the gobo-free light-set reference)
+    if (emOn)   // (#91 stats: one atomic per subgroup; emOn is uniform)
+    {
+        const uint sE = subgroupAdd(nEm > 0u ? 1u : 0u);
+        if (subgroupElect() && sE != 0u) atomicAdd(rg.rs_em_stat[2], sE);
+    }
+    return;
+#endif
+#else   // SH_STAGE_SHADE
+    // ==== (#1031) THE SELECTION, AS SELECT LEFT IT (the descriptor; the layout at its declaration), the
+    //      gate, the visibilities VIS stored. The end-of-texel words -- nCand, fMove, the split ids, the
+    //      ReSTIR view's -- are read after the samples ====
+    const PdnSelD sel = pdnSelLoad(sdi, sd0);
+    const uint gateM = pdn_sel[sdi + 3u].z;
+    const uint vslots = pdnVisSlots();
+    const uint vbase = pdnVisBase(D) + uint(m.y * D.x + m.x) * vslots;
+    const bool mvOn = rsFrameOn() && rsMoveOn();   // (uniform)
+    const bool emOn = rsFrameOn() && emLitOn() && !litDbg(LDBG_NO_LOCAL);   // (uniform)
+    uint emRays = 0u;
+    const uint rsCell = (sd0.x & PDN_SEL_CELL) != 0u ? 0u : REGIR_NO_CELL;   // (only tested against NONE)
+    const bool rsResOn = rsFrameOn() && (rsResFlags() & RS_RES_ON) != 0u;   // (uniform)
+    const bool reused = (sd0.x & PDN_SEL_REUSED) != 0u;
+    const uint pick0 = sd0.y;   // (a reused reservoir: the pick list's first)
+    spN = sel.spN;
+    spLi = sel.spLi;
+    ocProbe = sel.ocProbe;
+    const uint nOcP = ocProbe != 0xFFFFFFFFu ? 1u : 0u;
+    const uint nProj = sel.nProj;
+#endif
+#if CLEAN_SHADOW_STAGE != SH_STAGE_SELECT
+    // ==== THE SAMPLES (#1031: SHADE combines them with VIS's visibilities; the fused kernel traces them) ====
 #if DEFER_SHADOW_MERGE
     const uint s0 = 1u;
     const float sw = g_draw_push.rtr2.x;
@@ -8714,12 +10614,6 @@ void DEFER_MAIN()
 #else
     const uint s0 = 0u;
 #endif
-    // (#869 SPLIT) + the split lights' samples, last: one each, their own visibility (spV)
-    // (#869 OCCLUSION CULL) + the probe, last: detection only (occNote), never in an estimate
-    // the probe, with probability clamp(n / 8, 1/8, 1) for n culled lights reaching P: a patch culling a
-    // hundred projectors probes from every texel every frame (each light re-tested every few frames)
-    if (ocProbe != 0xFFFFFFFFu && pdnRand(pseed) >= clamp(nProbe * 0.125, 0.125, 1.0)) ocProbe = 0xFFFFFFFFu;
-    const uint nOcP = ocProbe != 0xFFFFFFFFu ? 1u : 0u;
     [[dont_unroll]] for (uint si = 0u; si < s0 + nProj + spN + nOcP; ++si)
     {
         ShadowSample S;
@@ -8767,65 +10661,29 @@ void DEFER_MAIN()
 #endif
         {
             const uint j = si - s0;
-            uint li, ni;
-            if (j >= nProj + spN)
-            {   // (#869 OCCLUSION CULL) the PROBE: a culled light that reaches P, one ray
-                ocP = true;
-                li = ocProbe;
-                ni = 72u;
-            }
-            else if (j >= nProj)
-            {   // (#869) a SPLIT light: weight 1, its own noise phase
-                spT = int(j - nProj);
-                li = spLi[spT];
-                ni = 64u + uint(spT);
-                if (mvOn) spMv[spT] = rsMoved(li);
-            }
-            else if (dense && j >= dC)
-            {   // (#91) the emitter stratum: its own RIS pick over the cell's emitters, W_E / p
-                li = pickE;
-                wgt = ppE > 0.0 ? WsumE / ppE : 0.0;
-                if (!(wgt > 0.0) || !(wgt < 3.0e38)) continue;
-                ni = j;
-            }
-            else if (dense)
-            {
-                // (RS_F_STRIDE) the sub-window's c positions evenly spaced over the window's, and
-                // the window's over the cell's slots: c DIFFERENT stretches of the stratified CDF.
-                // (Contiguous, a cell whose fire holds 10 of 16 slots evaluated the fire 4 times --
-                // four rays of ONE light, the binary one-light ratio the dense evaluation exists to
-                // replace: blotches under a flickering fire beside other lights.)
-                const uint k = rsWinSlot(dOff, j, dC, dWin);
-                const uint jj = rsWinSlot(dStart, k, dWin, dSlots);
-                const uvec2 sl = rg_cells[dCw + 1u + jj];
-                li = sl.x;
-                if (li >= count || emTaken(li)) continue;   // (#91: a taken-over light has no light here)
-                if (pdnSplitHas(spLi, li) || occCulled(ocCull, li)) continue;   // (#869: split: its own sample; culled: none)
-                wgt = uintBitsToFloat(sl.y) * dScale * float(dWin) / float(dC);
-                if (!(wgt > 0.0) || !(wgt < 3.0e38)) continue;
-                ni = jj;
-            }
-            else if (exact) { li = j == 0u ? ex0 : ex1; ni = j == 0u ? exi0 : exi1; }
-            else
-            {
-                li = j == 0u ? pick0 : pick1;
-                const float pp = j == 0u ? pp0 : pp1;
-                if (li == 0xFFFFFFFFu || !(pp > 0.0)) continue;
-                wgt = Wsum / (float(Ke) * pp);
-                ni = j;
-            }
+            // the probe (a culled light that reaches P), a split light (weight 1, its own noise phase),
+            // the emitter stratum, the dense window, the exact list or the K picks (pdnSampleLight)
+            uint ni;
+            const uint li = pdnSampleLight(sel, j, count, ocCull, ni, wgt, spT, ocP);
+            if (spT >= 0 && mvOn) spMv[spT] = rsMoved(li);
             if (li == 0xFFFFFFFFu) continue;
+#if CLEAN_SHADOW_STAGE == SH_STAGE_SHADE
+            // (#1031) only what SELECT's gate let VIS trace (the slots the host sized: never fewer)
+            if (j >= vslots || ((gateM >> j) & 1u) == 0u) continue;
+#endif
             if (li >= REGIR_EM_KEY)
             {   // (#91) an EMITTING TRIANGLE: its diffuse term, one ray to a point of its part above the
                 // horizon (uniform in solid angle)
                 if (!rsEmTerms(li - REGIR_EM_KEY, P, s.N, diffuseColor, dt)) continue;
                 st = vec3(0.0); pd = 0.0;
+#if CLEAN_SHADOW_STAGE == SH_STAGE_FUSED
                 // the triangle point: a per-texel random offset + the R3 sequence over the frames (stratified
                 // in time: the denoiser's history integrates the penumbra instead of white noise)
                 uint es = pdnPcg(uint(m.x) * 2731u + uint(m.y) * 6151u + ni * 977u);
                 const vec3 off = vec3(pdnRand(es), pdnRand(es), pdnRand(es));
                 const vec3 xi = fract(off + float(frame & 0xFFFFu) * vec3(0.8191725134, 0.6710436067, 0.5497004779));
                 rsEmSample(li - REGIR_EM_KEY, P, s.N, xi, S);
+#endif
                 ++emRays;
             }
             else
@@ -8834,6 +10692,7 @@ void DEFER_MAIN()
                 continue;
             if (max(max(dt.r, dt.g), dt.b) + max(max(st.r, st.g), st.b) <= 0.0) continue;   // (a black gobo texel: no ray)
             sLi = li;
+#if CLEAN_SHADOW_STAGE == SH_STAGE_FUSED
             pdnProjSample(li, vec2(m) + 0.5 + vec2(17.0, 59.0) * float(ni), S);
             // (#869) a MOVED light's sample: its shadow history is cut short by the denoiser, so the
             // disc takes RS_MOVE_RAYS rays (outermost first, the adaptive early-outs inside) instead
@@ -8843,8 +10702,15 @@ void DEFER_MAIN()
             // (Dense evaluation: one ray per light -- its information is the other lights, and a
             // RenderVKReSTIRPointRadius disc of a few cm has almost no penumbra to resolve.)
             if (mvOn && (!dense || spT >= 0) && S.radius > 0.0 && rsMoved(li)) S.nRays = max(rsMoveRays(), 1u);
+#endif
             }
         }
+#if CLEAN_SHADOW_STAGE == SH_STAGE_SHADE
+        // (#1031) the visibility VIS traced for this sample (the receiver rules, the facing gate, the walk)
+        const uint visW = pdn_vis[vbase + (si - s0)];
+        const vec3 vis = pdnVisUnpack(visW);
+        const bool ocEv = (visW & PDN_VIS_EVIDENCE) != 0u;   // (#1052: VIS's occEvidence)
+#else
         // ---- the receiver rules for this light (ONE call site: the terminator probe, its escape
         //      check and the rig probe inline once): the #664 lift, the #747 rig lift + slope offset,
         //      the facet the origin leaves, the facing measure ----
@@ -8869,6 +10735,7 @@ void DEFER_MAIN()
         rt_block_dyn = false;
 #endif
         const vec3 vis = trace ? shadowSampleVis(S, Pin, Nin, cam, time) : vec3(0.0);   // THE core call
+        const bool ocEv = occEvidence(trace, vis, P);   // (#1052: before the sun's post rays move rt_block_t)
 #if DEFER_SHADOW_MERGE
         if (isSun) sxcSunPost(sxc, vis, Pin, Nin, cam, S.bias, frame);   // (#771: revocation + certification rays)
 #endif
@@ -8885,8 +10752,10 @@ void DEFER_MAIN()
             continue;
         }
 #endif
+#endif   // SH_STAGE_SHADE
         // (#869 OCCLUSION CULL) every light ray is evidence for P's cell: blocked -> B, visible -> V
-        if (ocOn && sLi != 0xFFFFFFFFu) occNote(ocTag, ocSlot0, ocCell, sLi,
+        // (#1052 SOFT CULL: only a traced sample, and a blocked one only behind a non-local caster -- ocEv)
+        if (ocOn && sLi != 0xFFFFFFFFu && ocEv) occNote(ocTag, ocSlot0, ocCell, sLi,
                                               max(max(vis.r, vis.g), vis.b) > OCC_VIS_MIN,   // (any channel: tinted glass passes light)
                                               ocRefused);
         if (ocP) continue;   // (the probe: detection only)
@@ -8905,6 +10774,16 @@ void DEFER_MAIN()
         hitW += hl;
     }
     CLK_MARK(PROJ);
+#if CLEAN_SHADOW_STAGE == SH_STAGE_SHADE
+    // (#1031) the descriptor's end-of-texel words
+    const uvec4 sd2 = pdn_sel[sdi + 2u], sd3 = pdn_sel[sdi + 3u];
+    nCand = uintBitsToFloat(pdn_sel[sdi + 1u].w);
+    const float fMove = uintBitsToFloat(sd2.x);
+    spId = uvec4(sd2.z & 0xFFFFu, sd2.z >> 16u, sd2.w & 0xFFFFu, sd2.w >> 16u);
+    const uint rsYl = sd3.x;
+    const float rsM = uintBitsToFloat(sd3.y);
+    const float rsDom = uintBitsToFloat(sd3.w);   // (#1052: SELECT's strongest-candidate share)
+#endif
     if (ocOn)   // (#869 OCCLUSION CULL stats: probes fired, patch claims refused; ocOn is uniform)
     {
         const uint sP = subgroupAdd(nOcP), sR = subgroupAdd(ocRefused);
@@ -8912,7 +10791,12 @@ void DEFER_MAIN()
     }
     if (emOn)   // (#91 stats: one atomic per subgroup; emOn is uniform)
     {
-        const uint sE = subgroupAdd(nEm > 0u ? 1u : 0u), sR = subgroupAdd(emRays);
+#if CLEAN_SHADOW_STAGE == SH_STAGE_SHADE
+        const uint sE = 0u;   // (SELECT counted the texels with emitters)
+#else
+        const uint sE = subgroupAdd(nEm > 0u ? 1u : 0u);
+#endif
+        const uint sR = subgroupAdd(emRays);
         if (subgroupElect())
         {
             if (sE != 0u) atomicAdd(rg.rs_em_stat[2], sE);
@@ -8925,11 +10809,19 @@ void DEFER_MAIN()
     float a0 = pdnInfoA(nCand, denD, infoFix);
     // (#91) not for a reused EMITTER: its sample is a new point on a (possibly metres-wide) triangle every
     // frame -- a binary visibility across the whole penumbra, not a converged value (full a-trous there)
-    if (reused && a0 > 0.0 && pick0 < REGIR_EM_KEY) a0 = 1000.0 + rsM;
+    // (#1052) nor where several lights share the texel (RenderVKReSTIRConvMultiLight 0, the default): a reused
+    // pick's M is the light SELECTION's confidence, not the visibility's -- the ratio is still ONE light's
+    // binary visibility per frame, and with the M cap and the spatial reuse a whole neighbourhood keeps the
+    // same pick, so its history converges to that light's shadow, not the mix. The shortcut's few a-trous
+    // iterations then left those regions as organic blotches with a hard rim where the shortcut flag
+    // toggled (the cull-off blotches). Where one light holds >= RS_CONV_DOM of the target the pick IS the
+    // mix: the shortcut stays.
+    const bool convOk = (rg.rs_cfg.z & RS_F_CONV_ANY) != 0u || rsDom >= RS_CONV_DOM;
+    if (reused && a0 > 0.0 && pick0 < REGIR_EM_KEY && convOk) a0 = 1000.0 + rsM;
     vec3 l0 = pdnRatio(numD, denD);
     if ((opts & PDN_OPT_DBG_RS) != 0u)   // (RenderVKDenoiseDebug 7: the ReSTIR view)
     {
-        const uint yl = rsResOn ? rsY : (pp0 > 0.0 ? pick0 : 0xFFFFFFFFu);
+        const uint yl = rsYl;
         const float mf = rsResOn ? clamp(rsM / float(max(rg.rs_cfg2.x, 1u)), 0.0, 1.0) : 1.0;
         // (#91) an EMITTING TRIANGLE pick: amber (its slot changes every build: no stable hue)
         l0 = rsCell == REGIR_NO_CELL ? vec3(0.25) : (yl == 0xFFFFFFFFu ? vec3(0.3, 0.0, 0.0)
@@ -8946,9 +10838,11 @@ void DEFER_MAIN()
     if ((opts & PDN_OPT_SUN_SKIP) == 0u) imageStore(uPdnIn, ivec3(m, 2), vec4(sunOut, pdnSunEncA(srad, sdyn)));
     CLK_MARK(SUNVIS);
 #endif
-    // ---- guides ---- (grad: above)
+    // ---- guides ---- (grad: above; #1031 TRACE: SELECT stored the GEOM guide)
+#if CLEAN_SHADOW_STAGE == SH_STAGE_FUSED
     imageStore(uPdnGeom, ivec3(m, par), uvec4(floatBitsToUint(vz), pdnPackNR(s.N, specRough), packHalf2x16(grad),
                                              pdnPackMeta(0.0, 0.0, 0u, W0)));   // (W: the gobo-free light-set reference)
+#endif
     // (#869 SPLIT) the split lights' ids + this frame's samples (clean_pdn_common.glsl SPLIT CHANNEL;
     // the temporal pass replaces z / w with their histories)
     if (spLayers)
@@ -8966,7 +10860,9 @@ void DEFER_MAIN()
     imageStore(uPdnMot, m, uvec4(packHalf2x16(dS), packHalf2x16(dV), floatBitsToUint(pw),
                                  uint(clamp(fMove, 0.0, 1.0) * 255.0 + 0.5)));
     CLK_MARK(STORE);
+#endif   // CLEAN_SHADOW_STAGE != SH_STAGE_SELECT
 }
+#endif   // CLEAN_SHADOW_STAGE == SH_STAGE_VIS / SUNVIS / else
 #endif   // CLEAN_SHADOW_CORE
 
 #elif DEFER_GRID_BUILD

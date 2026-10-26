@@ -32,7 +32,8 @@ auth=(-H "Authorization: token $TOKEN")
 W=$(mktemp -d "${TMPDIR:-/tmp}/sign-release.XXXXXX")
 trap 'rm -rf "$W"' EXIT
 
-curl -fsS "${auth[@]}" "$RELEASE_API/releases/tags/$TAG" > "$W/release.json" || die "no release $TAG"
+# Draft or published (the release gate keeps it a draft until everything is attached).
+python3 -I "$HERE/release_lookup.py" json "$TAG" > "$W/release.json" || die "no release $TAG"
 ID=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$W/release.json")
 
 # Remove the previous signature files first, so a failure below never leaves a
@@ -69,7 +70,7 @@ mkdir "$W/files"
 : > "$W/SHA256SUMS.unsorted"
 while IFS=$'\t' read -r name uuid want; do
   case "$name" in */*|.*|'') die "refusing odd asset name '$name'" ;; esac
-  curl -fsS -o "$W/files/$name" "$SERVER/attachments/$uuid" || die "could not download $name"
+  curl -fsS "${auth[@]}" -o "$W/files/$name" "$SERVER/attachments/$uuid" || die "could not download $name"
   got=$(sha256sum "$W/files/$name" | cut -d' ' -f1)
   if [ -z "$want" ]; then
     echo "::warning::$name has no checksum line in the release notes (uploaded outside publish_release.sh?); using the downloaded bytes"

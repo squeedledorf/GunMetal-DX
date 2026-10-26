@@ -75,6 +75,14 @@ public:
     bool getCursorPosition(LLCoordWindow *position) override;
 
     void showCursor() override;
+
+#if LL_WINDOWS
+    void* getDirectInput8() override;
+    bool getInputDevices(U32 device_type_filter,
+                         std::function<bool(std::string&, LLSD&, void*)> osx_callback,
+                         void* win_callback,
+                         void* userdata) override;
+#endif
     void hideCursor() override;
     bool isCursorHidden() override;
 
@@ -248,6 +256,13 @@ private:
     LLPreeditor* mPreeditor = nullptr;
 
     void tryFindFullscreenSize(int &aWidth, int &aHeight);
+
+#if LL_WINDOWS
+    // #847: joystick / 3D mouse. libndofdev on Windows talks DirectInput8, which the SDL
+    // window does not otherwise provide. Holds an IDirectInput8* (void* keeps dinput.h
+    // out of this header); getDirectInput8() hands out its address as LL's win32 window did.
+    void* mDirectInput8 = nullptr;
+#endif
     // #919: SDL_SetWindowFullscreenMode for the requested kind on the window's current display
     // (NULL = borderless desktop; the display's desktop mode = exclusive). False if SDL refused.
     bool applyFullscreenMode(bool exclusive);

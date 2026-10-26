@@ -41,12 +41,15 @@ void main()
     const bool rev = wp.misc.w > 0.5;
     const bool sky = rev ? !(dz > 0.0) : !(dz < 1.0);
     vec3 rel;
+    bool covered = false;   // <GMDX>
     if (!sky)
     {
         const vec4 w = wp.inv_view_proj * vec4(ndc, dz, 1.0);
         rel = w.xyz / w.w;
-        // A surface under cover is never veiled.
-        if (weatherPrecipOpen(wp.eye.xyz + rel) < 0.5) return;
+        // <GMDX> A surface under cover keeps the last kVeilIndoor metres clear (a room seen from its
+        // doorway stays clear) but the air out to it is veiled: skipped outright, sheltered spots
+        // drew unfogged and dark amid the whiteout.
+        covered = weatherPrecipOpen(wp.eye.xyz + rel) < 0.5;
     }
     else
     {
@@ -56,6 +59,8 @@ void main()
     const float len = max(length(rel), 1e-3);
     float d = len;
     if (rel.z > 0.0) d = min(d, kWxVeilCeiling * len / rel.z);
+    if (covered) d = max(d - kVeilIndoor, 0.0);   // <GMDX>
+    if (!(d > 0.0)) return;
     const float a = clamp(1.0 - exp(-sigma * d), 0.0, 1.0);
     o_color = vec4(ssr.weather[15].rgb * a, a);
 }

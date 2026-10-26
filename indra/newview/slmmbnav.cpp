@@ -238,9 +238,13 @@ void SLMMBNav::endPress()
     if (mTalkDown) firePushToTalk(false);
     if (was == NAVIGATING && mHideCursor)
     {
-        // Put the cursor back where the press started, as the camera tool does.
-        LLUI::getInstance()->setMousePositionScreen(mDownX, mDownY);
-        gViewerWindow->showCursor();
+        // Centre of the window (#871); with MouseReleaseToCenter off, back where the
+        // press started, as the camera tool does.
+        if (!gViewerWindow->releaseCursorToCenter())
+        {
+            LLUI::getInstance()->setMousePositionScreen(mDownX, mDownY);
+            gViewerWindow->showCursor();
+        }
     }
     mHideCursor = false;
     if (hasMouseCapture())

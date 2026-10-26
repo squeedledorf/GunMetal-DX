@@ -154,28 +154,13 @@ float cascadeTap(int c, vec3 P)
 // away-facing leaf faces in every ray here (opaque_only included: a ray flag, free);
 // mode 2 adds the transmission ray for lit samples (not past RenderVKGodRaysRTAlphaDist /
 // RenderVKRTSunAlphaDist: those stay at mode 1, the cheap end of the march).
+// (#1048: clean_vis_walk.glsl rtSunRayVis -- the RT hits' single sun ray, the same rules; the copy here
+//  gave the mixed walk -- RenderVKRTTranslucentSplit 0 -- no LL blend parity, unlike the ground's rays)
 vec3 sunRayVisImpl(vec3 P, vec3 d, bool opaque_only)
 {
-    const float tmax = max(ssr.sun_rt.w, 1.0);
-    if (opaque_only)
-        return vec3(traceShadowRayOpaque(P, d, 0.0, tmax, RT_MASK_SHADOW & ~RT_MASK_BLEND));
-    vec3 v;
-    // Translucent split (RenderVKRTTranslucentSplit, as the ground's RT sun): opaque set
-    // first, the transmittance ray only where the sample is lit. One ray either way per
-    // blocked sample; lit samples pay a second (blend-class only) traversal.
-    if ((uint(ssr.lit_dbg.w + 0.5) & 2u) != 0u)
-    {
-        if (traceShadowRayVisSplit(P, d, 0.0, tmax, (uint(ssr.lit_dbg.w + 0.5) & 1u) != 0u) <= 0.0) return vec3(0.0);   // <SS:Skoomastream>
-        rt_blend_parity = (uint(ssr.lit_dbg.w + 0.5) & 1u) != 0u;
-        v = traceTransmittance(P, d, 0.0, tmax, ssr.render_opts.z > 0.5);
-        rt_blend_parity = false;
-    }
-    else
-        v = ssr.render_opts.z > 0.5 ? traceShadowRayRGB(P, d, 0.0, tmax, RT_MASK_SHADOW)
-                                    : vec3(traceShadowRay(P, d, 0.0, tmax, RT_MASK_SHADOW));
-    if (rt_fol_mode == 2u && max(max(v.r, v.g), v.b) > 0.0)
-        v *= traceFoliageTransmit(P, d, 0.0, tmax, ssr.render_opts.z > 0.5);
-    return v;
+    const uint opts = uint(ssr.lit_dbg.w + 0.5);   // (clean_shadow_rt.glsl rtBlendOpts)
+    return rtSunRayVis(P, d, max(ssr.sun_rt.w, 1.0), opaque_only, (opts & 2u) != 0u, (opts & 1u) != 0u,
+                       ssr.render_opts.z > 0.5);
 }
 vec3 sunRayVis(vec3 P, vec3 d, bool opaque_only)
 {

@@ -223,6 +223,79 @@ const uint SR_SPEC = 2u;
 const uint SR_ENV  = 4u;
 const uint SR_ALL  = 7u;
 
+// ---- (#872) PBR ENVIRONMENT SPECULAR, MATCHED TO ITS DIFFUSE AMBIENT ----
+// A PBR surface's ambient is two terms that must come from the SAME light: the diffuse lights
+// with the irradiance (refl.irr), the specular with the probes' prefiltered radiance. They did
+// not wherever the irradiance is NOT the probes': the sky probe ambiance < 1 (every legacy
+// sky: 0) pulls the irradiance to amblit (probeAccum), and with no probe (probes off, probe
+// captures) it IS amblit -- while the specular still read the full captured environment, sky
+// included, at the sky's own HDR level (skyResolve: srgb_to_linear of up to 5 -> ~43 x the
+// sky HDR scale, against an amblit near 0.1-0.4). A dark dielectric's ambient is then ~all
+// specular (EnvBRDF ~1.6-4 % of that sky): black PBR clothing showed navy, bright skies washed
+// PBR out to grey (probes on) or streaked it (probes off) -- legacy matte faces have no
+// environment specular at all, so they kept their colour.
+// The standard remedy where reflections and diffuse ambient come from different sources
+// (reflection-capture normalization against the pixel's diffuse ambient): scale the
+// environment radiance by (the diffuse ambient used) / (the irradiance of the environment the
+// radiance came from), faded in by roughness -- near-mirror surfaces keep the reflected image
+// as is (SSR covers them; a mirror shows the sky's real brightness), rough ones get the
+// ambient's level. The ratio is a scalar, so the environment's hue stays (a wood room still
+// reflects brown) and it only DIMS (capped at 1): nothing gets brighter than before. Where the
+// probes light the diffuse fully (ambiance >= 1) the ratio is 1: unchanged.
+// Off (A/B): RenderVKLitDebugMask 8192 (LDBG_NO_IBL_NORM). Debug view 29 shows the weight.
+float g_ibl_norm_w = 1.0;            // the weight applied to this surface (debug view 29)
+const float IBL_NORM_ROUGH0 = 0.1;   // roughness where the normalization starts
+const float IBL_NORM_ROUGH1 = 0.3;   // ... and is complete
+float iblLum(vec3 c) { return dot(max(c, vec3(0.0)), vec3(0.2126, 0.7152, 0.0722)); }
+// The diffuse ambient lightSurface's PBR branch lights diffuseColor with, linear (before AO):
+// classic skies take the irradiance as sRGB (x 0.9), linear ones as is.
+vec3 pbrAmbientLinear(vec3 irr) { return atmosClassic() ? atmosSrgbToLinear(irr * 0.9) : irr; }
+// The weight for a surface of roughness `rough`: irrUsed = the irradiance its diffuse takes,
+// irrEnv = the irradiance of the environment its specular reads (same space as irrUsed).
+float iblNormWeight(float rough, vec3 irrUsed, vec3 irrEnv)
+{
+    const float m = smoothstep(IBL_NORM_ROUGH0, IBL_NORM_ROUGH1, rough);
+    if (m <= 0.0) return 1.0;
+    const float le = iblLum(pbrAmbientLinear(irrEnv));
+    if (!(le > 1e-5)) return 1.0;
+    const float k = clamp(iblLum(pbrAmbientLinear(irrUsed)) / le, 0.0, 1.0);
+    return mix(1.0, k, m);
+}
+// The sky averaged over a cone around d (half-angle th, radians): the centre + 4 taps on the
+// ring, weighted 1 : cos(th) -- a 5-tap stand-in for a lobe prefilter (the sky-view LUT has no
+// mips). th = 60 degrees ~ the cosine-weighted mean (the sky's irradiance / pi around d).
+vec3 skyCone(vec3 d, float th)
+{
+    const vec3 c = skyColor(d);
+    if (th < 0.02) return c;
+    const vec3 t = abs(d.z) < 0.999 ? normalize(cross(vec3(0.0, 0.0, 1.0), d)) : vec3(1.0, 0.0, 0.0);
+    const vec3 b = cross(d, t);
+    const float ct = cos(th), st = sin(th);
+    const vec3 ring = skyColor(d * ct + t * st) + skyColor(d * ct - t * st)
+                    + skyColor(d * ct + b * st) + skyColor(d * ct - b * st);
+    return (c + ring * ct) / (1.0 + 4.0 * ct);
+}
+// The PBR specular radiance where no probe covers P (probes off / not ready, probe captures).
+// It was skyColor(R): the sky along the mirror direction whatever the roughness, so a rough
+// surface reflected the sharp sun glow (#1051's view-dependent streaks with probes off).
+// Now: the sky prefiltered over the GGX lobe (dominant direction, Lagarde & de Rousiers 2014;
+// cone ~ alpha), normalized to the diffuse ambient (amblit) as the probe path.
+vec3 iblSkyRadiance(vec3 N, vec3 R, float rough, vec3 amblit)
+{
+    if (litDbg(LDBG_NO_IBL_NORM)) { g_ibl_norm_w = 1.0; return skyColor(R); }
+    const float a = rough * rough;
+    const vec3 md = mix(N, R, (1.0 - a) * (sqrt(1.0 - a) + a));
+    const vec3 Rd = dot(md, md) > 1e-8 ? normalize(md) : N;
+    vec3 rad = skyCone(Rd, min(a, 1.0));
+    g_ibl_norm_w = 1.0;
+    if (rough > IBL_NORM_ROUGH0)
+    {
+        g_ibl_norm_w = iblNormWeight(rough, amblit, skyCone(N, 1.0472));
+        rad *= g_ibl_norm_w;
+    }
+    return rad;
+}
+
 #ifdef CLEAN_REFL_RT_MARK
 // RT REFLECTION MARK (#859; the split lighting's reflect kernels only -- clean_deferred_light.comp
 // passes 2 / 5): what the RT reflection pass needs to put a traced hit in place of the
@@ -275,13 +348,18 @@ SurfaceRefl surfaceReflectionsW(SurfaceLit s, vec3 P, vec3 V, vec3 amblit, bool 
     const bool wSpec = (want & SR_SPEC) != 0u, wEnv = (want & SR_ENV) != 0u;
     const bool needRad  = wSpec && (fullbright ? envIntensity > 0.0 : (pbr || s.gloss > 0.0));
     const bool needRad2 = !fullbright && (pbr ? dbg9 : ((envIntensity > 0.0 && wEnv) || dbg9));
-    const bool needIrr  = (want & SR_IRR) != 0u && !fullbright && (pbr || !classic);
+    // (#872) PBR specular normalization: it needs the walk's irradiance even when the caller
+    // keeps only the specular (the split lighting's sharp pass) -- rough surfaces only.
+    const bool iblNorm  = pbr && wSpec && s.rough > IBL_NORM_ROUGH0 && !litDbg(LDBG_NO_IBL_NORM);
+    const bool needIrr  = ((want & SR_IRR) != 0u || iblNorm) && !fullbright && (pbr || !classic);
     vec3 prad = vec3(0.0), prad2 = vec3(0.0), pirr = amblit;
     bool have = false;
     if (needRad || needRad2 || needIrr)
         have = sampleProbesEx(P, pN, R, pLod, 0.0, amblit, needRad, needRad2, needIrr, prad, prad2, pirr);
-    // The sky along R where no probe covers P (every radiance fallback below uses it).
-    const vec3 skyR = (!have && (needRad || needRad2)) ? skyColor(R) : vec3(0.0);
+    // The sky along R where no probe covers P (the legacy / fullbright radiance fallbacks; PBR
+    // takes the prefiltered, normalized iblSkyRadiance).
+    const vec3 skyR = (!have && !pbr && (needRad || needRad2)) ? skyColor(R) : vec3(0.0);
+    g_ibl_norm_w = 1.0;
     CLK_MARK(PROBE);   // (shader clock, clean_shader_clock.glsl: empty in every other build)
 
     SurfaceRefl r;
@@ -299,7 +377,19 @@ SurfaceRefl surfaceReflectionsW(SurfaceLit s, vec3 P, vec3 V, vec3 amblit, bool 
     {
         const float rough = s.rough;
         r.irr = have ? pirr : amblit;
-        vec3 radiance = have ? prad : skyR;
+        // (#872) the environment radiance at the diffuse ambient's level (see iblNormWeight)
+        vec3 radiance = vec3(0.0);
+        if (have)
+        {
+            radiance = prad;
+            if (iblNorm)
+            {
+                g_ibl_norm_w = iblNormWeight(rough, pirr, g_probe_irr_ref);
+                radiance *= g_ibl_norm_w;
+            }
+        }
+        else if (needRad)
+            radiance = iblSkyRadiance(N, R, rough, amblit);
 #ifdef CLEAN_REFL_RT_IN
         if (wSpec) { const vec4 ri = CLEAN_REFL_RT_IN(); radiance = mix(radiance, ri.rgb, ri.a); }
 #endif
@@ -530,17 +620,12 @@ vec4 lightSurface(SurfaceLit s, vec3 P, float alpha)
                 }
                 if (traced && (!maskOn || untraced)) continue;
                 if (!traced && unranked) continue;
-                const vec3 lv = L.pos_radius.xyz - P;
-                const float dist = length(lv);
-                if (dist >= L.pos_radius.w) continue;
-                float atten = legacyAtten(dist / L.pos_radius.w, L.color_falloff.w);
+                vec3 lv;
+                float dist;
+                const float atten = lightReach(L.pos_radius, L.color_falloff, P, lv, dist);   // (#1043)
                 if (atten <= 0.0) continue;
-                atten *= lightCutoffFade(atten, L.color_falloff.rgb);
-                if (atten <= 0.0) continue;
-                vec4 ptc = L.proj_mat * vec4(P, 1.0);
-                if (ptc.z < 0.0) continue;
-                ptc.xyz /= ptc.w;
-                if (ptc.z <= 0.0 || ptc.x <= 0.0 || ptc.x >= 1.0 || ptc.y <= 0.0 || ptc.y >= 1.0) continue;
+                vec2 ptc;
+                if (!lightProjFrustum(L.proj_mat, P, ptc)) continue;
                 if (!(dot(s.N, normalize(L.proj_origin.xyz - P)) > 0.0)) continue;
                 const vec3 dlit = projDiffuse(L, -dot(lv, L.proj_axis.xyz), ptc.xy);
                 if (!(max(max(dlit.r, dlit.g), dlit.b) * atten > 0.002)) continue;
@@ -805,6 +890,10 @@ vec4 lightSurface(SurfaceLit s, vec3 P, float alpha)
                 else if (dbg == 16) d = vec3(ambocc);
                 else if (dbg == 9)   // mirror-sharp probe content along R (lod 0): the walk's radiance 2
                     d = refl.have ? refl.prad2 : vec3(1.0, 0.0, 1.0);
+                else if (dbg == 29)  // (#872) the environment specular's normalization weight:
+                    // white = unchanged (smooth, or the probes light the diffuse), darker = dimmed to
+                    // the diffuse ambient; amber = the sky fallback (no probe covers P)
+                    d = vec3(g_ibl_norm_w) * (refl.have ? vec3(1.0) : vec3(1.0, 0.75, 0.3));
                 return vec4(d, 1.0);
             }
         }

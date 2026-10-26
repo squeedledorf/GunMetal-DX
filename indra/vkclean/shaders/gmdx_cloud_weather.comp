@@ -1,0 +1,71 @@
+#version 450
+// <GMDX> upstream's clean_vol_cloud_weather.comp for the GunMetal-DX cloud model (gmdx_cloud_common.glsl).
+// Wicked's model raises the coverage straight up into the shell, so the 2D dome's fine detail
+// layer (the EEP noise at 16 x the tile) stood up as streaky vertical curtains under the clouds.
+// Here the detail layer is sampled at 4 x and blurred over a texel ring: lumpy coverage edges,
+// no streaks. Everything else is upstream's mapping.
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_nonuniform_qualifier : require
+// vkclean -- VOLUMETRIC CLOUDS (#719): the 2D WEATHER MAP, from the region's EEP sky.
+//
+// One texel per 1/512 of the weather tile (periodic: the clouds module samples it with a
+// REPEAT sampler at world xy / tile, tile = 24 km x EEP cloud scale x RenderVKVolCloudScale).
+// Rebuilt every frame (512^2 texels, a few bilinear fetches each: ~0.02 ms) so the EEP scroll
+// (wind) and the day-cycle blend of two noise textures arrive continuously.
+//
+// The coverage is the 2D dome's own (clean_clouds.glsl cloudsF, LL's alpha1) on the same
+// inputs, so a region's sky keeps its character -- where the dome showed cloud, the shell
+// grows cloud:
+//   raw = (noise(u + pos_density1.xy) - 0.5) + (noise(16 u + pos_density2.xy) - 0.5) * density2
+//       + 2 (cloud_coverage - 0.25)
+//   coverage = saturate(raw x 3 x density1)
+// (EEP "Cloud Coverage" = LL cloud_shadow = ssr.atmos[2].w; density1 / 2 = pos_density.z;
+// LL sharpens x 10 for a flat layer, the volume's own shaping does part of that here.)
+// Cloud type (stratus 0 .. towering cumulus 1): heavier where the coverage is dense, varied by
+// a second noise channel and the EEP cloud variance. Local density: the detail layer, plus
+// overcast skies thickening.
+// Writes r = coverage, g = type, b = local density, a = 1.
+layout(local_size_x = 8, local_size_y = 8) in;
+
+#include "clean_frame_info.glsl"
+#include "clean_atmos_common.glsl"
+layout(set = 1, binding = 0) uniform sampler2D uTextures[];   // bindless (the EEP cloud noise)
+layout(set = 2, binding = 0, rgba8) uniform writeonly image2D uWeather;
+
+vec4 wxNoise(vec2 uv)
+{
+    const int ia = int(ssr.clouds[3].x), ib = int(ssr.clouds[3].y);
+    if (ia < 0) return vec4(0.5);
+    const vec4 a = textureLod(uTextures[nonuniformEXT(uint(ia))], uv, 0.0);
+    if (ib == ia || ib < 0 || ssr.clouds[2].w <= 0.0) return a;
+    const vec4 b = textureLod(uTextures[nonuniformEXT(uint(ib))], uv, 0.0);
+    return mix(a, b, ssr.clouds[2].w);
+}
+
+void main()
+{
+    const ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 sz = imageSize(uWeather);
+    if (px.x >= sz.x || px.y >= sz.y) return;
+    const vec2 u = (vec2(px) + 0.5) / vec2(sz);
+
+    const vec3 pd1 = ssr.clouds[1].xyz;     // scrolled (wind) large layer + density1
+    const float variance = ssr.clouds[1].w;
+    const vec3 pd2 = ssr.clouds[2].xyz;     // detail layer + density2
+    // #783 M2: the weather's cloud cover (ssr.weather[11].z, zero without weather) only ever
+    // adds to the region's -- the weather never thins a region's own sky.
+    const float coverage_eep = max(ssr.atmos[2].w, ssr.weather[11].z);
+
+    const vec4 n1 = wxNoise(u + fract(pd1.xy));
+    const vec2 uv2 = u * 4.0 + fract(pd2.xy);
+    const vec2 o = vec2(1.5 / 512.0);
+    const vec4 n2 = (wxNoise(uv2 + vec2(o.x, o.y)) + wxNoise(uv2 + vec2(-o.x, o.y))
+                   + wxNoise(uv2 + vec2(o.x, -o.y)) + wxNoise(uv2 - o)) * 0.25;
+    const float cloud_density = 2.0 * (coverage_eep - 0.25);
+    const float raw = (n1.x - 0.5) + (n2.x - 0.5) * pd2.z + cloud_density;
+    const float cov = clamp(raw * 3.0 * max(pd1.z, 0.05), 0.0, 1.0);
+    const float type = clamp(0.15 + 0.75 * smoothstep(0.2, 1.0, cov) * (0.6 + 0.4 * n1.y)
+                             + 0.3 * variance * (n2.y - 0.3), 0.0, 1.0);
+    const float dens = clamp(0.55 + 0.45 * n2.x + 0.3 * max(coverage_eep - 0.5, 0.0), 0.0, 1.0);
+    imageStore(uWeather, px, vec4(cov, type, dens, 1.0));   // (upstream: sqrt(cov), for its own shape model)
+}

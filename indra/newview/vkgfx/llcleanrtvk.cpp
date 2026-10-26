@@ -29,7 +29,9 @@
  * Static BLAS: PREFER_FAST_TRACE | ALLOW_COMPACTION; compacted size queried at build
  * and COMPACT-copied two frames later when it saves >= 10%.
  * All BLAS geometry is flagged neither OPAQUE nor NO_DUPLICATE_ANY_HIT; opacity comes
- * from the TLAS instance flags (FORCE_OPAQUE / FORCE_NO_OPAQUE).
+ * from the TLAS instance flags (FORCE_OPAQUE / FORCE_NO_OPAQUE). (#1032: an alpha-mask
+ * instance whose alpha test provably always passes is FORCE_OPAQUE too --
+ * clean_rt_instances.comp maskKnownOpaque, texOpaqueUpdate below.)
  *
  * Rigged. For every rigged instance of an avatar the cull considers visible (av_vis)
  * and whose skin is live this frame: a private range of the RT rig-position buffer
@@ -491,7 +493,9 @@ bool LLCleanRTVK::init()
         mOmmOk = false;
     }
     LL_INFOS("Vulkan") << "RT: foundation ready (per-slot BLAS, GPU TLAS, ray-query debug views 13/14; scratch align "
-                       << mCtx->asScratchAlignment() << ")" << LL_ENDL;
+                       << mCtx->asScratchAlignment() << "; opacity micromaps "
+                       << (mOmmOk ? "on" : mCtx->opacityMicromapEnabled() ? "off (self-test / bake pipeline)" : "off (no device support)")
+                       << ")" << LL_ENDL;
     const bool ready = mCompPipe && mDebugPipe && mDummy.buffer;
     if (ready) auditRegister(true);   // #874: the DEVICE_LOST RT scene audit
     return ready;
@@ -547,8 +551,10 @@ void LLCleanRTVK::shutdown()
                          &mTerrEntry, &mTerrPos, &mAuditRb[0], &mAuditRb[1], &mAuditRb[2],
                          &mRtGeomVc, &mGuard[0], &mGuard[1], &mGuard[2],
                          &mArenaGuardRb[0], &mArenaGuardRb[1], &mArenaGuardRb[2],
-                         &mPoseSnap, &mPoseRb[0], &mPoseRb[1], &mPoseRb[2]};   // #1007
+                         &mPoseSnap, &mPoseRb[0], &mPoseRb[1], &mPoseRb[2],    // #1007
+                         &mTexOpaque[0], &mTexOpaque[1], &mTexOpaque[2]};      // #1032
     for (GpuBuffer* b : bufs) if (b->buffer) mCtx->destroyBuffer(*b);
+    mTexOpaqueCpu.clear(); mTexOpaqueGen = ~0u; mTexOpaqueOn = false;
     for (bool& v : mPoseRbValid) v = false;
     mArenaGuards.clear(); mArenaGuardFills.clear();   // #973
     for (uint32_t i = 0; i < 3; ++i) { mArenaGuardProbes[i].clear(); mArenaGuardToken[i] = 0; }
@@ -1309,6 +1315,61 @@ void LLCleanRTVK::evictForBudget(VkDeviceSize need, uint64_t budget, bool force)
     if (evicted) LLVKHitch::count("rt_blasEvicted", evicted);
 }
 
+// #1032 KNOWN-OPAQUE ALPHA-MASK: the per-slot "image has no alpha" bits pass A reads
+// (clean_rt_instances.comp maskKnownOpaque, binding 28). A slot's bit is set only while it is
+// one of a shared texture's views (mVkTexShared names that texture) and that texture's resident
+// image was decoded without alpha or scanned with every alpha byte 255 (SharedTex::comps != 4:
+// the texture path stores those as 3-channel, never with coverage mips -- every texel samples
+// alpha exactly 1.0). Owned slots (media, white, proto) stay clear: the old rule. Rebuilt when
+// the renderer's texture generation moved (mapping / image / verdict changes) and every
+// kTexOpaqueRefresh frames regardless; this frame slot's host buffer gets the current copy.
+// No buffer (allocation failed): the zeroed dummy is bound -- nothing is known opaque by its
+// texture this frame, the old rule; retried next frame.
+void LLCleanRTVK::texOpaqueUpdate()
+{
+    constexpr uint32_t kTexOpaqueRefresh = 120;
+    const LLCleanRendererVK& R = mR;
+    const uint32_t nslot = (uint32_t)R.mTextures.size();
+    const uint32_t words = std::max<uint32_t>((nslot + 31u) / 32u, 1u);
+    if (mTexOpaqueGen != R.mTexAlphaGen || mTexOpaqueCpu.size() != words || mFrame - mTexOpaqueBuilt >= kTexOpaqueRefresh)
+    {
+        mTexOpaqueGen = R.mTexAlphaGen;
+        mTexOpaqueBuilt = mFrame;
+        mTexOpaqueCpu.assign(words, 0u);
+        uint32_t n = 0;
+        for (const auto& kv : R.mSharedTex)
+        {
+            const LLCleanRendererVK::SharedTex& st = kv.second;
+            if (st.comps == 4 || !st.image) continue;
+            for (uint32_t f = 0; f < 2; ++f)
+            {
+                const uint32_t sl = st.slot[f];
+                if (!sl || sl >= nslot || sl >= R.mVkTexShared.size() || R.mVkTexShared[sl] != kv.first
+                    || !R.mTextures[sl].image)
+                    continue;
+                mTexOpaqueCpu[sl >> 5] |= 1u << (sl & 31u);
+                ++n;
+            }
+        }
+        mTexOpaqueCount = n;
+    }
+    GpuBuffer& b = mTexOpaque[mSlotIdx];
+    mTexOpaqueOn = ensureBuf(b, (VkDeviceSize)words * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, false) && b.mapped;
+    if (mTexOpaqueOn)
+    {
+        std::memcpy(b.mapped, mTexOpaqueCpu.data(), (size_t)words * 4);
+        // (ensureBuf rounds up: words past the table read as "not opaque")
+        if (b.size > (VkDeviceSize)words * 4)
+            std::memset(static_cast<uint8_t*>(b.mapped) + (size_t)words * 4, 0, (size_t)(b.size - (VkDeviceSize)words * 4));
+    }
+    else
+    {
+        static uint32_t s_log = 0;
+        if (s_log++ < 4) LL_WARNS("VKRT") << "#1032: alpha-less texture bits buffer unavailable (" << words * 4
+                                          << " B); mask instances keep FORCE_NO_OPAQUE this frame" << LL_ENDL;
+    }
+}
+
 void LLCleanRTVK::updateSets(uint32_t s)
 {
     VkDevice dev = mCtx->device();
@@ -1329,7 +1390,10 @@ void LLCleanRTVK::updateSets(uint32_t s)
                        // 24: per-geometry vertex counts (#874 read guard)
                        B(mRtGeomVc),
                        // 25 / 26: #1007 rigged pose motion (mode 5): joint snapshot, this slot's readback
-                       B(mPoseSnap), B(mPoseRb[s])};
+                       B(mPoseSnap), B(mPoseRb[s]),
+                       // 27 / 28: #1032 known-opaque alpha-mask: materials, alpha-less texture slots
+                       // (the zeroed dummy = no slot known opaque)
+                       B(mR.mMaterialSSBO), mTexOpaqueOn ? B(mTexOpaque[s]) : mDummy.buffer};
     // REWRITTEN EVERY FRAME (this slot's fence was waited; ~21 writes). Never skip on a
     // "same handles" key: a destroyed + recreated buffer can come back with the SAME
     // VkBuffer value, and a skipped rewrite then leaves the descriptor on freed memory --
@@ -3507,6 +3571,7 @@ void LLCleanRTVK::recordBuild(VkCommandBuffer cmd, const VKCullPush& cull, const
         abortFrame();
         return;
     }
+    texOpaqueUpdate();   // (#1032: binding 28)
     updateSets(mSlotIdx);
     if (mClusterRT) mClusterRT->writeSets(mTlasInst);   // TODO(2b) #748 (once per frame, before any bind)
     const VkDeviceAddress sbase = alignUp(mScratch.address, salign);
@@ -3665,6 +3730,14 @@ void LLCleanRTVK::recordBuild(VkCommandBuffer cmd, const VKCullPush& cull, const
 #endif
         if (rig_facing) pp.dbg_on |= 4u;
         if (leaf_facing) pp.dbg_on |= 8u;
+        // Bit 4 (#1032, clean_rt_instances.comp maskKnownOpaque): alpha-mask instances whose
+        // alpha test provably always passes get FORCE_OPAQUE (no candidate). Off = A/B.
+        bool mask_opaque = true;
+#if defined(LL_HAS_CLEAN_PIPELINE)
+        static LLCachedControl<bool> s_mask_opaque(gSavedSettings, "RenderVKRTMaskOpaque", true);
+        mask_opaque = s_mask_opaque;
+#endif
+        if (mask_opaque) pp.dbg_on |= 16u;
         // SIZE CLASS (clean_rt_common.glsl / clean_rt_instances.comp maskClassSized): static opaque
         // instances below this bound take the RT_MASK_SMALL bit, which only the reflection rays'
         // far segment leaves out (RenderVKRTReflectionsSizeClasses); every other ray takes it.

@@ -190,6 +190,13 @@ private:
     U64             mFitRegionHandle = 0;
     F32             mFitBasePixelsPerMeter = 0.f;
     LLRectf         mFitMapRect;
+    // Whole Region + Camera at top = the round radar: centred on the agent, turned with the camera,
+    // cut to a disc of this radius (view pixels) around the map centre; 0 = not the radar.
+    F32             mRadarRadius = 0.f;
+    bool            mRadarSquare = false;   // the square radar (Camera at top, square): turned inside mFitMapRect
+    bool            radarOn() const { return mRadarRadius > 0.f || mRadarSquare; }
+    LLVector2       radarCenter() const;   // the disc's centre in view coordinates
+    LLVector2       toRadarRim(const LLVector2& p) const;   // p, pulled in to the rim when outside the disc / square
     // </GMDX>
 
     bool            mPanning; // map is being dragged
@@ -219,6 +226,14 @@ private:
 
     LLUUID          mClosestAgentToCursor;
     uuid_vec_t      mAvatarsAtLastRightClick; // avatars under the cursor, closest first
+    // <GMDX> right-click a dot > Dot Colour: "0".."5" (the mark colours), "custom" (the colour picker),
+    // "clear"; for the closest avatar of the last right-click
+    void            setAvatarDotColor(const std::string& which);
+    class LLColorSwatchCtrl* mDotColorSwatch = nullptr;   // hidden: the colour picker's owner
+    LLUUID          mDotColorAvatar;                       // whose colour the picker sets
+    bool            mDotColorHad = false;                  // its own colour before the picker opened, to restore on cancel
+    LLColor4        mDotColorBefore;
+    // </GMDX>
 
     std::string     mToolTipMsg;
     std::string     mParcelNameMsg;

@@ -324,6 +324,15 @@ std::atomic<bool> s_crashMarkerReady{false};
 char s_crashMarkerPath[1024];
 std::atomic<bool> s_crashMarkerReady{false};
 #endif
+char s_crashDriverToken[64] = "-";   // #1064 (vkPipelineCrashMarkerSetDriver)
+}
+
+void vkPipelineCrashMarkerSetDriver(const char* token)
+{
+    if (!token || !token[0]) return;
+    std::snprintf(s_crashDriverToken, sizeof(s_crashDriverToken), "%s", token);
+    for (char* c = s_crashDriverToken; *c; ++c)
+        if (*c == ' ' || *c == '\n' || *c == '\r' || *c == '\t') *c = '_';   // (one token, one line)
 }
 
 void vkPipelineCrashMarkerSetPath(const char* utf8_path)
@@ -340,11 +349,12 @@ void vkPipelineCrashMarkerSetPath(const char* utf8_path)
     s_crashMarkerReady = true;
 }
 
-bool vkPipelineCrashMarkerWrite()
+bool vkPipelineCrashMarkerWrite(uint64_t os_thread_id)
 {
     if (!s_crashMarkerReady.load()) return false;
-    // "<unix time> <sessions left>\n" by hand: no snprintf, no allocation.
-    char buf[48];
+    // "<unix time> <sessions left>\n<driver token>\n<pipeline name>\n" by hand (vk_pipeline.h):
+    // no snprintf, no allocation -- static buffers and byte copies only.
+    static char buf[48 + sizeof(s_crashDriverToken) + kCrumbName + 4];
     size_t len = 0;
     char digits[24];
     int nd = 0;
@@ -353,6 +363,22 @@ bool vkPipelineCrashMarkerWrite()
     while (nd) buf[len++] = digits[--nd];
     buf[len++] = ' ';
     buf[len++] = (char)('0' + (kVkPipelineCrashSafeSessions % 10));
+    buf[len++] = '\n';
+    // #1064: the driver it crashed on, and the pipeline the crashing thread was compiling (its
+    // crumb; none on a driver-owned thread -- the line is then empty: no quarantine candidate).
+    for (size_t k = 0; k + 1 < sizeof(s_crashDriverToken) && s_crashDriverToken[k]; ++k) buf[len++] = s_crashDriverToken[k];
+    buf[len++] = '\n';
+    for (int i = 0; i < kCrumbSlots; ++i)
+    {
+        if (!s_crumbUsed[i].load(std::memory_order_acquire)) continue;
+        if (s_crumbThread[i].load(std::memory_order_relaxed) != os_thread_id) continue;
+        for (size_t k = 0; k + 1 < kCrumbName && s_crumbName[i][k]; ++k)
+        {
+            const char c = s_crumbName[i][k];
+            buf[len++] = (c == '\n' || c == '\r') ? ' ' : c;
+        }
+        break;
+    }
     buf[len++] = '\n';
 #if LL_WINDOWS
     HANDLE h = CreateFileW(s_crashMarkerPath, GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS,
@@ -378,6 +404,66 @@ bool vkPipelineCrashOnCompileThread(uint64_t os_thread_id)
 }
 
 bool vkPipelineCrashOnCurrentThread() { return vkPipelineCrashOnCompileThread(crumbThreadId()); }
+
+bool vkPipelineCrashMarkerWriteForCurrentThread() { return vkPipelineCrashMarkerWrite(crumbThreadId()); }
+
+// ---- #1064 per-pipeline quarantine (vk_pipeline.h) ----
+namespace {
+std::mutex s_quarMutex;
+std::vector<std::string> s_quarNames;      // (guarded by s_quarMutex)
+std::vector<std::string> s_quarLogged;     // names whose skip was already logged (subset of s_quarNames)
+std::string s_quarDriver;
+std::atomic<bool> s_quarAny{false};        // fast path: nothing quarantined
+std::mutex s_debugCrashMutex;
+std::string s_debugCrashName;              // RenderVKDebugCrashCompilingPipeline (guarded)
+std::atomic<bool> s_debugCrashAny{false};
+
+// RenderVKDebugCrashCompilingPipeline: fault on purpose inside the crumb (the real crash path).
+void debugCrashIfNamed(const char* crumb_name)
+{
+    if (!s_debugCrashAny.load(std::memory_order_relaxed) || !crumb_name) return;
+    {
+        std::lock_guard<std::mutex> lk(s_debugCrashMutex);
+        if (s_debugCrashName != crumb_name) return;
+    }
+    std::fprintf(stderr, "[vkgfx] RenderVKDebugCrashCompilingPipeline: crashing on purpose while compiling %s\n", crumb_name);
+    int* volatile target = nullptr;
+    *target = 1064;
+}
+}
+
+void vkSetPipelineQuarantine(const std::vector<std::string>& names, const std::string& driver_label)
+{
+    std::lock_guard<std::mutex> lk(s_quarMutex);
+    s_quarNames = names;
+    s_quarLogged.clear();
+    s_quarDriver = driver_label;
+    s_quarAny.store(!s_quarNames.empty(), std::memory_order_release);
+}
+
+bool vkPipelineQuarantined(const std::string& crumb_name)
+{
+    if (!s_quarAny.load(std::memory_order_acquire)) return false;
+    std::string driver;
+    {
+        std::lock_guard<std::mutex> lk(s_quarMutex);
+        if (std::find(s_quarNames.begin(), s_quarNames.end(), crumb_name) == s_quarNames.end()) return false;
+        if (std::find(s_quarLogged.begin(), s_quarLogged.end(), crumb_name) != s_quarLogged.end()) return true;
+        s_quarLogged.push_back(crumb_name);   // (bounded: a subset of s_quarNames)
+        driver = s_quarDriver;
+    }
+    pipeEvent(true, "VKPipe: pipeline %s is QUARANTINED on this driver (%s): it crashed the driver's shader compiler"
+              " twice, so it is not compiled (VK_NULL_HANDLE) and the feature using it is off (#1064)",
+              crumb_name.c_str(), driver.empty() ? "?" : driver.c_str());
+    return true;
+}
+
+void vkSetPipelineDebugCrashName(const std::string& crumb_name)
+{
+    std::lock_guard<std::mutex> lk(s_debugCrashMutex);
+    s_debugCrashName = crumb_name;
+    s_debugCrashAny.store(!crumb_name.empty(), std::memory_order_relaxed);
+}
 
 size_t vkPipelineRecentCompilesText(char* out, size_t size)
 {
@@ -640,6 +726,7 @@ static VkResult createGraphicsPipelineOnce(VkDevice device, const GraphicsPipeli
         }
         rz.depthBiasConstant = -rz.depthBiasConstant;
         rz.depthBiasSlope = -rz.depthBiasSlope;
+        rz.depthBiasClamp = -rz.depthBiasClamp;   // <GMDX>
         rz.reverseZ = false;
         return createGraphicsPipelineOnce(device, rz, cache, out);
     }
@@ -700,6 +787,7 @@ static VkResult createGraphicsPipelineOnce(VkDevice device, const GraphicsPipeli
         rs.depthBiasEnable = VK_TRUE;
         rs.depthBiasConstantFactor = desc.depthBiasConstant;
         rs.depthBiasSlopeFactor = desc.depthBiasSlope;
+        rs.depthBiasClamp = desc.depthBiasClamp;   // <GMDX>
     }
 
     VkPipelineMultisampleStateCreateInfo ms{
@@ -1031,11 +1119,22 @@ void createGraphicsPipelineInto(VkDevice device, const GraphicsPipelineDesc& des
                                 const char* name)
 {
     PipelineBatch& b = batch();
-    if (b.depth == 0) { *out = createGraphicsPipeline(device, desc); return; }
+    if (b.depth == 0)
+    {
+        if (s_quarAny.load(std::memory_order_acquire))   // #1064 (by the batch name too, not only the sync one)
+        {
+            QueuedPipeline q;
+            fillGraphicsQueued(q, desc, out, name);
+            if (vkPipelineQuarantined(q.name)) { *out = VK_NULL_HANDLE; return; }
+        }
+        *out = createGraphicsPipeline(device, desc);
+        return;
+    }
     *out = VK_NULL_HANDLE;
     std::vector<QueuedPipeline>& dst = b.deferDepth > 0 ? b.deferred : b.queue;
     dst.emplace_back();
     fillGraphicsQueued(dst.back(), desc, out, name);
+    if (vkPipelineQuarantined(dst.back().name)) dst.pop_back();   // #1064: stays VK_NULL_HANDLE
 }
 
 void createComputePipelineInto(VkDevice device, VkShaderModule comp, VkPipelineLayout layout,
@@ -1043,12 +1142,23 @@ void createComputePipelineInto(VkDevice device, VkShaderModule comp, VkPipelineL
                                VkPipeline* out, const char* name)
 {
     PipelineBatch& b = batch();
-    if (b.depth == 0) { *out = createComputePipeline(device, comp, layout, stageFlags, spec); return; }
+    if (b.depth == 0)
+    {
+        if (s_quarAny.load(std::memory_order_acquire))   // #1064 (by the batch name too, not only the sync one)
+        {
+            QueuedPipeline q;
+            fillComputeQueued(q, comp, layout, stageFlags, spec, out, name);
+            if (vkPipelineQuarantined(q.name)) { *out = VK_NULL_HANDLE; return; }
+        }
+        *out = createComputePipeline(device, comp, layout, stageFlags, spec);
+        return;
+    }
     *out = VK_NULL_HANDLE;
     if (!comp || !layout) return;   // (what the synchronous create would return for it)
     std::vector<QueuedPipeline>& dst = b.deferDepth > 0 ? b.deferred : b.queue;
     dst.emplace_back();
     fillComputeQueued(dst.back(), comp, layout, stageFlags, spec, out, name);
+    if (vkPipelineQuarantined(dst.back().name)) dst.pop_back();   // #1064: stays VK_NULL_HANDLE
 }
 
 void destroyShaderModuleDeferred(VkDevice device, VkShaderModule module, const VkAllocationCallbacks* alloc)
@@ -1069,7 +1179,7 @@ void appendPipelineState(std::string& k, const QueuedPipeline& q)
     pv(q.compute); pv(q.compFlags);
     pv(d.colorFormat); pv(d.depthFormat);
     pv(d.blend); pv(d.additive); pv(d.glowFormat); pv(d.glowWrite); pv(d.polygonMode);
-    pv(d.depthBiasConstant); pv(d.depthBiasSlope); pv(d.lineWidth); pv(d.noColor);
+    pv(d.depthBiasConstant); pv(d.depthBiasSlope); pv(d.depthBiasClamp); pv(d.lineWidth); pv(d.noColor);   // <GMDX> clamp
     pv(d.depthClamp); pv(d.customBlend); pv(d.srcColor); pv(d.dstColor); pv(d.partAccum); pv(d.glowAdditive);
     pv(d.colorWrite); pv(d.dynamicDepthCull); pv(d.dynamicShadingRate); pv(d.reverseZ);
     pv(d.fsrAttachment); pv(d.reactFormat); pv(d.reactWriteMask);
@@ -1243,6 +1353,8 @@ static VkPipeline createWithRecovery(const char* what, const std::function<VkRes
         return (int64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
     };
+    // #1064: crashed the driver's compiler twice on this driver: never handed to it again.
+    if (vkPipelineQuarantined(what ? what : "")) return VK_NULL_HANDLE;
     for (unsigned attempt = 1;; ++attempt)
     {
         VkPipeline p = VK_NULL_HANDLE;
@@ -1250,6 +1362,7 @@ static VkPipeline createWithRecovery(const char* what, const std::function<VkRes
         VkResult r;
         {
             const VkPipelineCompileCrumb crumb(what);   // (#782 crash breadcrumb)
+            debugCrashIfNamed(what);                     // (#1064 RenderVKDebugCrashCompilingPipeline)
             r = once(&p);
         }
         if (on_main)
@@ -1863,6 +1976,7 @@ void compileQueue(VkDevice device, std::vector<QueuedPipeline>& queue, const cha
                 VkResult res;
                 {
                     const VkPipelineCompileCrumb crumb(queue[i].name.c_str());   // (#782 crash breadcrumb)
+                    debugCrashIfNamed(queue[i].name.c_str());                     // (#1064 debug setting)
                     res = queue[i].compute ? createComputeQueuedOnce(device, queue[i], cache, &made)
                                            : createGraphicsPipelineOnce(device, queue[i].desc, cache, &made);
                 }
@@ -2037,6 +2151,7 @@ VkPipeline createComputePipelineAdmitted(VkDevice device, VkShaderModule comp, V
     VkPipeline out = VK_NULL_HANDLE;
     std::vector<QueuedPipeline> q(1);
     fillComputeQueued(q[0], comp, layout, stageFlags, spec, &out, name);
+    if (vkPipelineQuarantined(q[0].name)) return VK_NULL_HANDLE;   // #1064
     PipelineJobOpts o;
     o.prio = prio;
     o.maxThreads = 1;
@@ -2052,6 +2167,7 @@ VkPipeline createGraphicsPipelineAdmitted(VkDevice device, const GraphicsPipelin
     VkPipeline out = VK_NULL_HANDLE;
     std::vector<QueuedPipeline> q(1);
     fillGraphicsQueued(q[0], desc, &out, name);
+    if (vkPipelineQuarantined(q[0].name)) return VK_NULL_HANDLE;   // #1064
     PipelineJobOpts o;
     o.prio = prio;
     o.maxThreads = 1;

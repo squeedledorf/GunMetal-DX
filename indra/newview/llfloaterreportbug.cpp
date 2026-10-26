@@ -267,6 +267,8 @@ namespace
                                     "|\\bgpu\\b|\\bcpu\\b|driver|vulkan|\\bvk\\b|hardware|memory|\\bram\\b|vram)",
                                     boost::regex::icase);
     const boost::regex VOICE_LINES("(voice|webrtc|playout|recording|microphone)", boost::regex::icase);
+    // The periodic memory / VRAM status reports (#739): the newest of each kind is always kept.
+    const boost::regex MEM_STATUS_TAGS("(^|#)(VKMem|MemGov)#");
     // High-volume periodic INFO that would crowd out the rest.
     const boost::regex NOISY_LINES("(AssetFetch|asset fetch|timeline|\\btick\\b|\\bstats?\\b)", boost::regex::icase);
     const boost::regex SCRUB_USERINFO("\\b([a-zA-Z][a-zA-Z0-9+.-]*://)[^\\s/@]+@");
@@ -444,7 +446,7 @@ namespace
 
     // prio: 0 = DEBUG and high-volume periodic INFO, 1 = other INFO, 2 = warnings, errors
     // and voice / audio / hardware lines. The byte budget is spent on the highest first.
-    struct LogEntry { std::string location; std::string text; S32 lines = 0; S32 prio = 1; bool voice = false; };
+    struct LogEntry { std::string location; std::string text; S32 lines = 0; S32 prio = 1; bool voice = false; bool mem_status = false; };
 
     // Scrubbed entries from [start, start + length) of the log (every level and source).
     std::vector<LogEntry> read_log_entries(std::ifstream& in, std::streamoff start, std::streamoff length,
@@ -489,6 +491,7 @@ namespace
                 e.location = source + std::string(m[4]);
                 e.lines = 1;
                 e.voice = boost::regex_search(line, VOICE_LINES);
+                e.mem_status = !chat_entry && boost::regex_search(tags, MEM_STATUS_TAGS);
                 if (level == "WARNING" || level == "ERROR" || e.voice || boost::regex_search(line, DEVICE_LINES)) e.prio = 2;
                 else if (level == "DEBUG" || boost::regex_search(line, NOISY_LINES)) e.prio = 0;
                 e.text = scrub_line(text, names) + "\n";
@@ -512,15 +515,35 @@ namespace
     {
         std::map<std::string, S32> per_location;
         std::vector<size_t> picked;
+        std::vector<char> pinned(entries.size(), 0);
         size_t bytes = 0;
         S32 lines = 0;
+        if (newest_first)
+        {
+            // The latest memory / VRAM status of each reporting call site goes in before the
+            // budget is spent (#739): a long log full of warnings must not push them out.
+            size_t pins = 0;
+            for (size_t n = 0; n < entries.size() && pins < 24; ++n)
+            {
+                const size_t i = entries.size() - 1 - n;
+                const LogEntry& e = entries[i];
+                if (!e.mem_status || e.text.size() > 4096 || e.lines > 12) continue;
+                if (per_location.count(e.location)) continue;
+                per_location[e.location] = 1;
+                pinned[i] = 1;
+                bytes += e.text.size();
+                lines += e.lines;
+                picked.push_back(i);
+                ++pins;
+            }
+        }
         for (S32 prio = 2; prio >= 0; --prio)
         {
             for (size_t n = 0; n < entries.size(); ++n)
             {
                 const size_t i = newest_first ? entries.size() - 1 - n : n;
                 const LogEntry& e = entries[i];
-                if (e.prio != prio) continue;
+                if (e.prio != prio || pinned[i]) continue;
                 if (++per_location[e.location] > (e.voice ? 60 : 5)) continue;
                 if (bytes + e.text.size() > max_bytes || lines + e.lines > max_lines) break;
                 bytes += e.text.size();

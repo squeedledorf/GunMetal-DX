@@ -4509,23 +4509,33 @@ Safer graphics settings applied and saved:[CHANGES]
    name="VKRiskySettingReverted"
    type="notify">
 The previous session closed unexpectedly soon after a graphics setting was raised, so Slipstream set it back to what it was before:[CHANGES]
-You can turn it on again in Preferences &gt; Graphics &gt; Advanced Settings. If it crashes again, please send a bug report (Help &gt; Report Bug) so we can fix it.
+You can turn it on again in Preferences &gt; Graphics. If it crashes again, please send a bug report (Help &gt; Report Bug) so we can fix it.
   </notification>
 
   <notification
    icon="notify.tga"
    name="VKSnapshotReduced"
    type="notify">
-The snapshot was rendered at [RENDERED] instead of [REQUESTED] and scaled up, because a render that large does not fit the [LIMIT].
-Lowering the graphics settings (ray tracing, shadows, reflections) or closing other programs leaves room for a larger render.
+The snapshot could not be rendered at the full [REQUESTED]. It was rendered at [RENDERED] and enlarged to [REQUESTED], so it will look softer than usual.
+Reason: [LIMIT].
+For a sharper picture, lower the graphics settings (ray tracing, shadows, reflections), pick a smaller snapshot size, or close other programs.
   </notification>
 
   <notification
    icon="notify.tga"
    name="VKSnapshotRefused"
    type="notify">
-A [REQUESTED] snapshot cannot be taken now: there is not enough [LIMIT].
-Choose a smaller size, lower the graphics settings or close other programs, then try again.
+No [REQUESTED] snapshot was taken: a render that large does not fit: [LIMIT].
+Pick a smaller snapshot size, lower the graphics settings or close other programs, then try again.
+  </notification>
+
+  <notification
+   icon="notify.tga"
+   name="VKPipelineQuarantined"
+   type="notify">
+A graphics feature was turned off because the graphics driver ([DRIVER]) crashed twice while preparing it. Slipstream will keep it off on this driver so the viewer can start.
+Updating your graphics driver may fix the problem; the feature is tried again automatically after a driver update.
+Technical name: [NAMES]
   </notification>
 
   <notification
@@ -4533,7 +4543,7 @@ Choose a smaller size, lower the graphics settings or close other programs, then
    name="VKTextureCompressionDefault"
    type="notify">
 Texture compression set to [LEVEL] ([REASON]). [EFFECT]
-Change it in Preferences &gt; Graphics &gt; Advanced Settings (or Photo Studio &gt; Scene &gt; Performance); it will not be changed automatically again.
+Change it in Preferences &gt; Graphics &gt; Textures (or Photo Studio &gt; Scene &gt; Performance); it will not be changed automatically again.
   </notification>
 
   <notification
@@ -9013,12 +9023,26 @@ No Media Plugin was found to handle the "[MIME_TYPE]" mime type.  Media of this 
    type="alertmodal">
 The following Media Plugin has failed:
     [PLUGIN]
-[REASON]
+[REASON][SECURITY_HINT]
 Please re-install the plugin or contact the vendor if you continue to experience problems. On Linux, a missing system library is the usual cause; see README-linux.txt for the packages to install.
   <tag>fail</tag>
     <form name="form">
       <ignore name="ignore"
        text="A Media Plugin fails to run"/>
+    </form>
+  </notification>
+  <notification
+   icon="alertmodal.tga"
+   name="MediaPluginDied"
+   type="alertmodal">
+The media plugin has stopped unexpectedly:
+    [PLUGIN]
+[SECURITY_HINT]
+Web media in this session will not work until it is restarted. Details are in the viewer log.
+  <tag>fail</tag>
+    <form name="form">
+      <ignore name="ignore"
+       text="A Media Plugin stops unexpectedly"/>
     </form>
   </notification>
   <notification
@@ -14907,6 +14931,13 @@ Temperature and tint cannot neutralise that. It looks like a coloured surface ra
    type="notifytip"
    log_to_im="true">
    Calculation failed.
+  </notification>
+  <!-- <GMDX> tp2 found nobody -->
+  <notification
+   icon="notifytip.tga"
+   name="ChatCommandTeleportToAvatarNone"
+   type="notifytip">
+   No one nearby has "[NAME]" in their name.
   </notification>
   <notification
    icon="notifytip.tga"

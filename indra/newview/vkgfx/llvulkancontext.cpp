@@ -389,6 +389,22 @@ std::string LLVulkanContext::pipelineCompileText()
 
 bool LLVulkanContext::driverIsIntelWindows() { return s_driverIntelWindows.load(); }
 
+// #1064 (guarded by s_pipeReportMutex): the driver identity the compile-crash quarantine is keyed by.
+static std::string s_driverIdToken;
+static std::string s_driverIdLabel;
+
+std::string LLVulkanContext::driverIdentityToken()
+{
+    std::lock_guard<std::mutex> lk(s_pipeReportMutex);
+    return s_driverIdToken;
+}
+
+std::string LLVulkanContext::driverIdentityLabel()
+{
+    std::lock_guard<std::mutex> lk(s_pipeReportMutex);
+    return s_driverIdLabel;
+}
+
 void LLVulkanContext::setPipelineCompileCapNote(const std::string& note)
 {
     std::lock_guard<std::mutex> lk(s_pipeReportMutex);
@@ -591,6 +607,18 @@ bool LLVulkanContext::init(SDL_Window* window, uint32_t width, uint32_t height,
         vkGetPhysicalDeviceProperties2(mImpl->mDevice.physicalDevice(), &p2);
         const bool amdProprietary = (drv.driverID == VK_DRIVER_ID_AMD_PROPRIETARY);
         s_driverIntelWindows = (drv.driverID == VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS);   // #876 (the cap is decided in llappviewer)
+        {
+            // #1064: "<vendorID>-<driverID>-<driverVersion>" (hex, decimal, hex): no spaces, so the
+            // crash handler writes it verbatim and the marker / quarantine files compare it as text.
+            char tok[64];
+            std::snprintf(tok, sizeof(tok), "%04x-%u-%08x", (unsigned)p2.properties.vendorID, (unsigned)drv.driverID,
+                          (unsigned)p2.properties.driverVersion);
+            std::string label = drv.driverName;
+            if (drv.driverInfo[0]) label += std::string(" ") + drv.driverInfo;
+            std::lock_guard<std::mutex> lk(s_pipeReportMutex);
+            s_driverIdToken = tok;
+            s_driverIdLabel = label;
+        }
         const U64 defaultCost = amdProprietary ? (3072ull << 20) : (512ull << 20);
         vkSetPipelineDefaultCost(defaultCost);
         vkSetPipelineCompileThreads(0);   // auto; RenderVKPipelineCompileThreads (llappviewer) may cap it
@@ -1824,6 +1852,14 @@ std::string LLVulkanContext::texResidencyBrief(const LLUUID& id) const
     if (!mImpl || !mImpl->mWorld) return std::string();
     return mImpl->mWorld->texResidencyBrief(id);
 }
+
+// <GMDX>
+bool LLVulkanContext::texOnGpu(const LLUUID& id) const
+{
+    if (!mImpl || !mImpl->mWorld) return true;
+    return mImpl->mWorld->texOnGpu(id);
+}
+// </GMDX>
 
 std::string LLVulkanContext::vramReadoutText() const
 {

@@ -22,6 +22,7 @@
     <command name="places"/>
     <command name="destinations"/>
     <command name="minimap"/>
+    <command name="gmdx_loadouts"/>
     <command name="myenvironments"/>
     <command name="stats"/>
     <command name="performance"/>

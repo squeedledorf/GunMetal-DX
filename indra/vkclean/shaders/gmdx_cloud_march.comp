@@ -1,0 +1,88 @@
+#version 450
+// <GMDX> upstream's clean_vol_cloud_march.comp on the GunMetal-DX cloud model (gmdx_cloud_common.glsl).
+#extension GL_GOOGLE_include_directive : require
+// vkclean -- VOLUMETRIC CLOUDS (#719): the main-view MARCH.
+//
+// At QUARTER resolution (half the render extent per axis), after pass 1 (the finished opaque
+// depth). Partial update: per frame only a pattern of texels is marched (quality 1: one of
+// each 2x2 block, Bayer order; 2: a checkerboard; 3 / snapshots: all) -- the temporal pass
+// (clean_vol_cloud_temporal.comp) reprojects the rest from history.
+//
+// Each texel marches its view ray (the texel centre's, unjittered) through the slab, ending
+// at the FARTHEST scene depth of its 2x2 render pixels (so a building edge does not cut the
+// clouds behind the sky pixels of the block; the composite's per-pixel entry-distance test
+// keeps clouds off the nearer pixels), the max distance, or the slab exit. Early exit on
+// opaque (T < 0.01). Then the aerial perspective / far fade (vcAtmosphere).
+//
+// Out A: rgb = in-scatter (LINEAR HDR, premultiplied), a = transmittance.
+// Out B: x = entry distance (first cloud sample, m; 65000 = none), y = transmittance-weighted
+//        mean distance (reprojection / haze key), zw = 0.
+layout(local_size_x = 8, local_size_y = 8) in;
+
+#include "clean_frame_info.glsl"
+#include "clean_atmos_common.glsl"
+#define VC_SET 1
+#include "gmdx_cloud_common.glsl"
+
+layout(set = 1, binding = 4) uniform sampler2D uDepth;                 // world depth (texelFetch)
+layout(set = 1, binding = 5, rgba16f) writeonly uniform image2D uOutA;
+layout(set = 1, binding = 6, rgba16f) writeonly uniform image2D uOutB;
+
+// (View, extents, pattern: the module UBO, vc.inv_vp / dims / pat.)
+
+vec3 relAt(vec2 rpx, float d, bool unjitter)
+{
+    vec2 ndc = rpx / vc.dims.xy * 2.0 - 1.0;
+    if (unjitter && ssr.taa_params.w > 0.5) ndc -= ssr.taa_jitter.zw;   // the depth was rasterized jittered
+    const vec4 w = vc.inv_vp * vec4(ndc, d, 1.0);
+    return w.xyz / w.w;
+}
+
+void main()
+{
+    const uvec2 t = gl_GlobalInvocationID.xy;
+    const int mode = int(vc.pat.x + 0.5);
+    const uint phase = uint(vc.pat.y + 0.5);
+    ivec2 opx;
+    if (mode == 2)
+    {
+        const ivec2 bayer[4] = ivec2[4](ivec2(0, 0), ivec2(1, 1), ivec2(1, 0), ivec2(0, 1));
+        opx = ivec2(t) * 2 + bayer[phase & 3u];
+    }
+    else if (mode == 1)
+        opx = ivec2(int(t.x) * 2 + int((t.y + phase) & 1u), int(t.y));
+    else
+        opx = ivec2(t);
+    if (opx.x >= int(vc.dims.z) || opx.y >= int(vc.dims.w)) return;
+
+    // Farthest of the texel's render pixels (reversed-Z: smallest depth; sky = 0).
+    const vec2 scale = vc.dims.xy / vc.dims.zw;
+    const ivec2 r0 = ivec2(vec2(opx) * scale);
+    const ivec2 rmax = ivec2(vc.dims.xy) - 1;
+    float dmin = 1.0;
+    ivec2 rfar = clamp(r0, ivec2(0), rmax);
+    for (int j = 0; j < 2; ++j)
+        for (int i = 0; i < 2; ++i)
+        {
+            const ivec2 rp = clamp(r0 + ivec2(i, j), ivec2(0), rmax);
+            const float d = texelFetch(uDepth, rp, 0).r;
+            if (d < dmin) { dmin = d; rfar = rp; }
+        }
+    const bool sky = dmin <= 0.0;
+    const float tmax = sky ? VC_FAR : length(relAt(vec2(rfar) + 0.5, dmin, true));
+
+    const vec3 rel = relAt((vec2(opx) + 0.5) * scale, 0.5, false);
+    const vec3 V = rel / max(length(rel), 1e-6);
+
+    const VcLight l = vcLightSetup();
+    // Rotating dither only while something integrates it (the temporal pass); snapshots and
+    // the no-history mode keep a static per-texel pattern.
+    const float jitter = vcIgn(vec2(opx) + 5.588238 * float(uint(vc.march.z) % 64u));
+    VcResult r = vcMarch(l, V, tmax, int(vc.pat.z), int(vc.pat.w), jitter);
+    r = vcAtmosphere(r, V);
+    imageStore(uOutA, opx, vec4(r.scat, r.T));
+    // <GMDX> w = where this texel's march ended (its farthest scene depth): gmdx_cloud_composite.frag
+    // thins the cloud for nearer pixels of the block (read only without history: the temporal pass
+    // writes w = 0).
+    imageStore(uOutB, opx, vec4(min(r.entry, VC_FAR), min(r.dmean, VC_FAR), 0.0, min(tmax, VC_FAR)));
+}

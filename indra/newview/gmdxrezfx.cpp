@@ -23,6 +23,7 @@
 
 #include "llviewerprecompiledheaders.h"
 #include "gmdxrezfx.h"
+#include "vkgfx/llvulkancontext.h"   // <GMDX> texOnGpu
 
 #include "llagent.h"
 #include "llapp.h"
@@ -301,17 +302,27 @@ void derefSlot(U32 s)
 // Whether any texture an object's faces sample is still on its way: nothing decoded yet and
 // not a known missing asset (LLViewerTexture discard level -1). Base colour of the legacy face
 // and of a glTF material.
+// <GMDX> The Vulkan renderer has the texture's image: LL's discard level runs ahead of it (a decode
+// waiting on the image budget, an image the renderer evicted while LL kept its level), and until
+// then the face draws white.
+bool onGpu(const LLViewerTexture* t)
+{
+    LLVulkanContext& vk = LLVulkanContext::instance();
+    return !vk.isInitialized() || vk.texOnGpu(t->getID());
+}
+// </GMDX>
+
 bool texturesLoading(LLViewerObject* obj)
 {
     const U8 n = obj->getNumTEs();
     for (U8 i = 0; i < n; ++i)
     {
         const LLViewerTexture* t = obj->getTEImage(i);
-        if (t && t->getDiscardLevel() < 0 && !t->isMissingAsset()) return true;
+        if (t && !t->isMissingAsset() && (t->getDiscardLevel() < 0 || !onGpu(t))) return true;
         const LLTextureEntry* te = obj->getTE(i);
         const LLFetchedGLTFMaterial* m = te ? static_cast<const LLFetchedGLTFMaterial*>(te->getGLTFRenderMaterial()) : nullptr;
-        if (m && m->mBaseColorTexture.notNull() && m->mBaseColorTexture->getDiscardLevel() < 0
-            && !m->mBaseColorTexture->isMissingAsset())
+        if (m && m->mBaseColorTexture.notNull() && !m->mBaseColorTexture->isMissingAsset()
+            && (m->mBaseColorTexture->getDiscardLevel() < 0 || !onGpu(m->mBaseColorTexture.get())))
             return true;
     }
     return false;
@@ -354,7 +365,7 @@ bool texLoaded(LLViewerTexture* t)
     LLViewerFetchedTexture* ft = dynamic_cast<LLViewerFetchedTexture*>(t);
     if (!ft || ft->isMissingAsset()) return true;
     const S32 d = ft->getDiscardLevel();
-    return d >= 0 && (d <= ft->getDesiredDiscardLevel() || ft->isFullyLoaded());
+    return d >= 0 && (d <= ft->getDesiredDiscardLevel() || ft->isFullyLoaded()) && onGpu(ft);   // <GMDX> (and drawn)
 }
 
 bool stillLoading(LLViewerObject* obj)

@@ -91,6 +91,7 @@
 // [RLVa:KB] - Checked: 2011-05-22 (RLVa-1.3.1)
 #include "rlvactions.h"
 #include "rlvhandler.h"
+#include "rlvinventory.h"
 #include "rlvlocks.h"
 // [/RLVa:KB]
 
@@ -5402,6 +5403,13 @@ EInventorySortGroup LLFolderBridge::computeSortGroup() const
     if (GMDXLoadouts::folderKind(mUUID)) // <GMDX> sorted with the system folders
     {
         return SG_SYSTEM_FOLDER;
+    }
+
+    // The RLV shared root is pinned (display/sort only); SLInventoryPinRLVFolder 0 sorts it normally
+    static LLCachedControl<bool> s_pin_rlv(gSavedSettings, "SLInventoryPinRLVFolder", true);
+    if (s_pin_rlv && RlvActions::isRlvEnabled() && mUUID.notNull() && mUUID == RlvInventory::instance().getSharedRootID())
+    {
+        return SG_RLV_FOLDER;
     }
 
     return SG_NORMAL_FOLDER;

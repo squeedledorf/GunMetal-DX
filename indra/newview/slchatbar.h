@@ -62,6 +62,7 @@ public:
 // [/SL:KB]
 
     void        refresh() override;
+    void        draw() override;
     void        refreshGestures();
 
     // Move cursor into chat input field.
@@ -110,5 +111,6 @@ protected:
 
     boost::signals2::connection mChatChannelConnection;
     boost::signals2::connection mShowChatChannelConnection;
+    boost::signals2::connection mLogStyleConnection;   // <GMDX> the chat log takes the gear (updateChannelSelector)
     boost::signals2::connection mChatFontSizeConnection;
 };

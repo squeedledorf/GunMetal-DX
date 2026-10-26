@@ -64,6 +64,7 @@ struct GraphicsPipelineDesc {
     VkCompareOp depthCompare = VK_COMPARE_OP_LESS_OR_EQUAL;
     float depthBiasConstant = 0.f;   // != 0 enables depth bias
     float depthBiasSlope = 0.f;
+    float depthBiasClamp = 0.f;      // <GMDX> the bias's largest magnitude (0 = none; needs the device feature)
     float lineWidth = 1.f;
     VkCullModeFlags cullMode = VK_CULL_MODE_NONE;
     VkFrontFace frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
@@ -443,12 +444,38 @@ size_t vkPipelineCompilesInFlightText(char* out, size_t size);
 bool vkPipelineCompileOnThread(uint64_t os_thread_id, char* out, size_t size);
 // #876 / #890: a crash during pipeline compilation (on a compile worker, or inside a driver
 // shader compiler module on any thread) is recorded for the next start so it compiles one
-// pipeline at a time. The marker is one line "<unix time> <sessions left>\n" written by the
-// crash handler. Set the path once at startup (UTF-8; converted here, so the crash path
-// allocates nothing); vkPipelineCrashMarkerWrite is then safe in a signal / exception filter:
-// static buffers and open/write/close (CreateFileW/WriteFile) only. Returns true if written.
+// pipeline at a time. The marker written by the crash handler is three lines:
+//   "<unix time> <sessions left>\n"   (the only line older builds wrote / read)
+//   "<driver token>\n"                (#1064: vkPipelineCrashMarkerSetDriver; "-" if unset)
+//   "<pipeline name>\n"               (#1064: the crumb of the crashing thread, exactly as the
+//                                      crash log's "crashed while compiling pipeline: ..." prints
+//                                      it; empty when the crash held no crumb -- a driver-owned thread)
+// Set the path once at startup (UTF-8; converted here, so the crash path allocates nothing);
+// vkPipelineCrashMarkerWrite is then safe in a signal / exception filter: static buffers and
+// open/write/close (CreateFileW/WriteFile) only. `os_thread_id`: the crashing thread (OS id,
+// as vkPipelineCompileOnThread). Returns true if written.
 void vkPipelineCrashMarkerSetPath(const char* utf8_path);
-bool vkPipelineCrashMarkerWrite();
+// #1064: the current driver's identity token (LLVulkanContext::driverIdentityToken; no spaces),
+// copied into a static buffer once at startup so the crash path only copies bytes.
+void vkPipelineCrashMarkerSetDriver(const char* token);
+bool vkPipelineCrashMarkerWrite(uint64_t os_thread_id);
+// The same for the calling thread (the Unix fatal-signal hook runs on the faulting thread).
+bool vkPipelineCrashMarkerWriteForCurrentThread();
+// #1064 PER-PIPELINE QUARANTINE: pipelines whose compile crashed the driver twice on this
+// driver (llappviewer keeps the persisted list). A quarantined pipeline is never handed to the
+// driver: every create path here -- createGraphicsPipelineInto / createComputePipelineInto (in
+// or outside a batch), the *Admitted creates and the synchronous creates -- leaves its handle
+// VK_NULL_HANDLE (a disabled feature, as above) and logs one WARNING per name. Names are the
+// crumb names, compared exactly: "<name passed to the create> (<module labels>)" for the batch /
+// Into / Admitted paths, "graphics pipeline (<vert>/<frag>)" / "compute pipeline (<comp>)" for
+// the synchronous creates. Set once at startup, before the first pipeline; `driver_label`
+// names the driver in the warning.
+void vkSetPipelineQuarantine(const std::vector<std::string>& names, const std::string& driver_label);
+bool vkPipelineQuarantined(const std::string& crumb_name);
+// RenderVKDebugCrashCompilingPipeline (testing #1064 without the broken driver): a create whose
+// crumb name equals this faults on purpose (a null write) right after taking its crumb, so
+// the real crash handler / marker path runs. "" = off (the default). Set once at startup.
+void vkSetPipelineDebugCrashName(const std::string& crumb_name);
 // The crashing OS thread's compile crumb, or a fault inside a driver compiler: true when this
 // crash should arm the marker (the thread holds a compile crumb). The module-name test lives
 // with the platform crash handler (it alone can name the module).

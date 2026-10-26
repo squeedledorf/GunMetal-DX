@@ -54,6 +54,14 @@
 //                                 full (its current record) and its share scaled by the weight;
 //                                 the shadow-ray budget ranks the weighted shares.
 //   RT_SHADE_LIGHT_NOTE(li)    -> stats hook: light li is evaluated at this hit (in range).
+//   RT_SHADE_SUN_VIS(P, tint)  -> (#1039 M1, the visibility queue's RESOLVE stages) the hit's sun / moon
+//                                 visibility x cloud shadow (returned) and tint from a stored result instead
+//                                 of the inline ray (rtHitSunShadow); the producer queued the ray with
+//                                 rtHitSunRay's set-up from the same record.
+//   RT_SHADE_LOCAL(P)          -> (#1039 M2) the hit's local lights (rtHitLocalLights' value) from stored
+//                                 results: the producer ran rtHitLocalLights on the same record with
+//                                 RT_SHADE_BUDGET_OUT (below) and queued the budget's rays -- no light walk,
+//                                 no shadow walk here.
 //
 // Requires before inclusion: clean_lights_common.glsl + the light buffers (set 0
 // bindings 3-6: lights, cluster_count, cluster_index, linfo), clean_frame_info.glsl,
@@ -112,6 +120,11 @@ vec3 rtProjShadowMapQ0(Light L, uint idx, vec3 P, vec3 N)
 
 // clean_draw_common.glsl localLights, probe-capture specialization (list = the capture's
 // light list: 0 scheduled job, 1 realtime probe).
+// (#1039 M2) RT_SHADE_BUDGET_OUT(projK, kScore, kLight, kShare): defined, the walk ends with every share
+// UNSHADOWED -- returns that sum, hands the hook the budget's picks (the K brightest shadowable shares,
+// descending, score 0 = an empty slot: the valid picks are a prefix; not called when the frame has no light)
+// and traces no ray; the visibility queue's producer queues the picks' rays (clean_deferred_light.comp
+// vqHitRequests).
 vec3 rtHitLocalLights(vec3 P, vec3 N, vec3 V, bool pbr, vec3 base, float metal, float rough, LegacySpec ls, uint list)
 {
     const uint count = uint(linfo.cam_pos.w);
@@ -171,14 +184,14 @@ vec3 rtHitLocalLights(vec3 P, vec3 N, vec3 V, bool pbr, vec3 base, float metal, 
 #endif
         }
         if (li >= count) continue;   // (never: a list entry past this frame's lights)
-        const vec4 pr = lights[li].pos_radius;
-        vec3 lv = pr.xyz - P;
-        const float d2 = dot(lv, lv);
-        if (d2 >= pr.w * pr.w) continue;
+        // THE LIGHT REACH (#1043, clean_light_eval.glsl): range, attenuation and the cutoff fade -- the
+        // main view's lights end where the reflected / bounced ones do
+        vec3 lv;
+        float d2;
+        if (!lightInRange(lights[li].pos_radius, P, lv, d2)) continue;
         Light L = lights[li];
-        const float dist = sqrt(d2);
-        if (dist >= L.pos_radius.w) continue;
-        const float atten = legacyAtten(dist / L.pos_radius.w, L.color_falloff.w);
+        float dist;
+        const float atten = lightReachAt(L.pos_radius, L.color_falloff, d2, dist);
         if (atten <= 0.0) continue;
         RT_SHADE_STAT(0, 1u);
         RT_SHADE_LIGHT_NOTE(li);
@@ -231,10 +244,8 @@ vec3 rtHitLocalLights(vec3 P, vec3 N, vec3 V, bool pbr, vec3 base, float metal, 
         }
         else
         {   // PROJECTOR (spotLightF)
-            vec4 ptc = L.proj_mat * vec4(P, 1.0);
-            if (ptc.z < 0.0) continue;
-            ptc.xyz /= ptc.w;
-            if (ptc.z <= 0.0 || ptc.x <= 0.0 || ptc.x >= 1.0 || ptc.y <= 0.0 || ptc.y >= 1.0) continue;
+            vec2 ptc;
+            if (!lightProjFrustum(L.proj_mat, P, ptc)) continue;
             const float l_dist = -dot(lv, L.proj_axis.xyz);
             const vec3  l  = normalize(L.proj_origin.xyz - P);
             const float nl_raw = dot(N, l);
@@ -326,6 +337,9 @@ vec3 rtHitLocalLights(vec3 P, vec3 N, vec3 V, bool pbr, vec3 base, float metal, 
         }
     }
 #if RT_SHADE_PROJ_BUDGETED
+#ifdef RT_SHADE_BUDGET_OUT
+    RT_SHADE_BUDGET_OUT(projK, kScore, kLight, kShare);   // (#1039 M2: the producer queues the rays)
+#else
     // The budget's rays, after the walk (one call site: one inlined shadow walk).
     for (uint j = 0u; j < projK; ++j)
     {
@@ -335,6 +349,7 @@ vec3 rtHitLocalLights(vec3 P, vec3 N, vec3 V, bool pbr, vec3 base, float metal, 
         sum -= kShare[j] * (vec3(1.0) - vis);
     }
     sum = max(sum, vec3(0.0));
+#endif
 #endif
     return sum;
 }
@@ -357,10 +372,16 @@ float rtHitSunShadow(vec3 P, vec3 Ng, vec3 L, float dist, float foot, vec3 lift,
 {
     return rtHitSunShadowCore(P, Ng, L, dist, foot, lift, tint) * cloudShadowMap(P);
 }
-float rtHitSunShadowCore(vec3 P, vec3 Ng, vec3 L, float dist, float foot, vec3 lift, out vec3 tint)
+// (#1039 M1) THE SUN RAY'S SET-UP, apart: what rtHitSunShadowCore traces, so the visibility queue's
+// producer can queue the very same ray. False: no ray -- cvis is the visibility (1 shadows off, 0 the
+// back-face self-shadow); true: trace rtSunRayVis(Po, L, tmax, ...) (the caller's foliage / blend state).
+// The escape check (one short force-opaque ray, only for a lifted hit in the sun's band) runs here.
+bool rtHitSunRay(vec3 P, vec3 Ng, vec3 L, vec3 lift, out vec3 Po, out float tmax, out float cvis)
 {
-    tint = vec3(1.0);
-    if (ssr.shadow_params.w < 0.5) return 1.0;   // sun / moon shadows off
+    Po = P;
+    tmax = 0.0;
+    cvis = 1.0;
+    if (ssr.shadow_params.w < 0.5) return false;   // sun / moon shadows off
     vec3 n = Ng;
     if (dot(lift, lift) > 0.0)
         lift = rtTerminatorEscape(P, offsetRayOrigin(P, Ng), Ng, lift);
@@ -368,25 +389,32 @@ float rtHitSunShadowCore(vec3 P, vec3 Ng, vec3 L, float dist, float foot, vec3 l
     // BACK-FACE SELF-SHADOW (clean_shadow_rt.glsl rtBackfaceSelfShadow; Ng is the hit's side, the
     // one the arriving ray sees): turned away from the sun, its own surface shadows it -- no ray
     // whose origin would leave through a single-plane wall
-    if (!lifted && rtBackfaceSelfShadow()) { if (!(dot(n, L) > 0.0)) return 0.0; }
+    if (!lifted && rtBackfaceSelfShadow()) { if (!(dot(n, L) > 0.0)) { cvis = 0.0; return false; } }
     else if (!lifted && dot(n, L) < 0.0) n = -n;
-    const vec3 Po = offsetRayOrigin((lifted ? P + lift : P) + n * ssr.sun_rt.z, n);
+    Po = offsetRayOrigin((lifted ? P + lift : P) + n * ssr.sun_rt.z, n);
+    tmax = ssr.sun_rt.w > 1.0 ? ssr.sun_rt.w : 512.0;
+    return true;
+}
+// The hit's sun ray state (rtSunRayVis' switches) as the visibility queue's request flags.
+bool rtHitSunCoarse() { return (rtBlendOpts() & 4u) != 0u; }
+float rtHitSunShadowCore(vec3 P, vec3 Ng, vec3 L, float dist, float foot, vec3 lift, out vec3 tint)
+{
+    tint = vec3(1.0);
+    vec3 Po;
+    float tmax, cvis;
+    if (!rtHitSunRay(P, Ng, L, lift, Po, tmax, cvis)) return cvis;
     rt_cone_width0 = foot;
     rt_cone_spread = 0.0;
-    const float tmax = ssr.sun_rt.w > 1.0 ? ssr.sun_rt.w : 512.0;
     // Translucent casters at their texture's mean (RenderVKProbeRTBlendCoarse): no UV /
     // LOD work per candidate; the capture's GGX filter erases texel detail anyway.
-    rt_blend_coarse = (rtBlendOpts() & 4u) != 0u;
+    rt_blend_coarse = rtHitSunCoarse();
     // Translucent split (RenderVKRTTranslucentSplit, clean_shadow_rt.glsl): the opaque
     // set first (binary, cut-outs alpha-tested); the translucent transmittance ray only
     // where it is lit -- shadowed hits never walk the blend casters at all.
     // Foliage transmission (#735): the main view's rules, so captured canopies match.
-    // (shadowDiscRay: the split's opaque walk or the mixed one -- one inlined walk.)
+    // (clean_vis_walk.glsl rtSunRayVis, #1048: the one single-ray sun core -- one inlined walk.)
     rtFolBegin();
-    const bool split = rtSplitOn();
-    vec3 vis = shadowDiscRay(Po, L, 0.0, tmax, split);
-    if (split && vis.x > 0.0) vis *= shadowRayTrans(Po, L, 0.0, tmax);
-    vis = rtFolTransmit(vis, Po, L, tmax);
+    const vec3 vis = rtSunRayVis(Po, L, tmax, false, rtSplitOn(), (rtBlendOpts() & 1u) != 0u, specTransOn());
     rtFolEnd();
     rt_blend_coarse = false;
     const float sv = max(max(vis.r, vis.g), vis.b);
@@ -450,12 +478,15 @@ struct RtWaterShade
     float mixK;      // min(1, df2.x)
     vec3 additive, atten;
     bool done;       // no glint ray, color is final
+    vec3 R;          // (#1039 M2) the reflection direction RT_SHADE_ENV is asked along (unset when done)
 };
-RtWaterShade rtShadeWaterBegin(vec3 P, vec3 eye, float time_s)
+// env false (#1039 M1: the visibility queue's producer asks only whether the glint wants its sun ray): no
+// reflection (radiance stays 0) -- the probes / occlusion ray of RT_SHADE_ENV are skipped, the glint is the same.
+RtWaterShade rtShadeWaterBegin(vec3 P, vec3 eye, float time_s, bool env)
 {
     RtWaterShade w;
     w.color = vec3(0.0); w.punctual = vec3(0.0); w.radiance = vec3(0.0); w.fb = vec3(0.0); w.mixK = 0.0;
-    w.additive = vec3(0.0); w.atten = vec3(1.0); w.done = false;
+    w.additive = vec3(0.0); w.atten = vec3(1.0); w.done = false; w.R = vec3(0.0, 0.0, 1.0);
     const bool under = eye.z < waterHeight();
     const float time = time_s * 0.5;
     const vec3  up   = vec3(0.0, 0.0, 1.0);
@@ -506,16 +537,18 @@ RtWaterShade rtShadeWaterBegin(vec3 P, vec3 eye, float time_s)
     const float rough = clamp(ssr.water[2].z, 0.0, 1.0);
     vec3 R = reflect(viewVec, wave_ibl);
     R.z = abs(R.z);
-#ifdef RT_SHADE_ENV
-    // (#859 main view: the probes around the water hit along R, as the main view's water FS)
-    vec3 radiance;
+    w.R = R;
+    vec3 radiance = vec3(0.0);
+    if (env)
     {
+#ifdef RT_SHADE_ENV
+        // (#859 main view: the probes around the water hit along R, as the main view's water FS)
         vec3 wirr, wrad2;
         RT_SHADE_ENV(P, up, R, rough, false, amblit, wirr, radiance, wrad2);
-    }
 #else
-    vec3 radiance = skyColor(R);   // captures never sample the probes
+        radiance = skyColor(R);   // captures never sample the probes
 #endif
+    }
 
     const vec3 specularColor = atmosSrgbToLinear(ssr.water[3].rgb);
     const vec3 V = -viewVec;
@@ -557,13 +590,47 @@ vec4 g_rts_terms = vec4(0.0);
 #define RT_SHADE_HAZE_K 1.0
 #endif
 float rtsLum(vec3 c) { return max(dot(c, vec3(0.2126, 0.7152, 0.0722)), 0.0); }
-vec4 rtShadeHit(RtSurface s, vec3 eye, uint list, float time_s)
+// (#1036) THE LIT SURFACE: the part of an RtSurface rtShadeHit reads (with the global rt_surf_foot --
+// the hit's footprint: the sun ray's caster LOD, the water's normal-map LOD, the light grid's
+// footprint threshold). rtSurfaceEval's other fields (ids, flags, material, texel, facing) are the
+// material stage's alone. The split hit-shading kernels hand it from their material stage to their
+// lighting stage as a packed record (clean_deferred_light.comp RT LIT RECORD); the fused paths copy
+// it out of the RtSurface (rtLitSurface: field copies, the same values).
+struct RtLitSurface {
+    vec3  P, Ng, N, Nv;
+    vec3  tlift;
+    float tw;
+    uint  model;
+    vec4  base;
+    float rough, metal, ao;
+    vec3  emissive;
+    vec3  spec_lin;
+    float gloss, env;
+    float emask;   // <GMDX> legacy emissive-mask weight (RtSurface.emask)
+    vec3  fb;
+    float fb_env;
+};
+RtLitSurface rtLitSurface(RtSurface s)
+{
+    RtLitSurface l;
+    l.P = s.P; l.Ng = s.Ng; l.N = s.N; l.Nv = s.Nv;
+    l.tlift = s.tlift; l.tw = s.tw;
+    l.model = s.model;
+    l.base = s.base;
+    l.rough = s.rough; l.metal = s.metal; l.ao = s.ao;
+    l.emissive = s.emissive;
+    l.spec_lin = s.spec_lin; l.gloss = s.gloss; l.env = s.env;
+    l.emask = s.emask;   // <GMDX>
+    l.fb = s.fb; l.fb_env = s.fb_env;
+    return l;
+}
+vec4 rtShadeHit(RtLitSurface s, vec3 eye, uint list, float time_s)
 {
     g_rts_terms = vec4(0.0);
     const vec3 P = s.P;
     const bool water = s.model == RT_SURF_WATER;
     RtWaterShade ws;
-    if (water) ws = rtShadeWaterBegin(P, eye, time_s);
+    if (water) ws = rtShadeWaterBegin(P, eye, time_s, true);
 
     const vec3 V = normalize(eye - P);
     if (!water && s.model == RT_SURF_FULLBRIGHT)
@@ -598,7 +665,11 @@ vec4 rtShadeHit(RtSurface s, vec3 eye, uint list, float time_s)
     float sunVis = 1.0;
     if (water ? rtShadeWaterSunWanted(ws) : dot(N, L) > 0.0)
     {
+#ifdef RT_SHADE_SUN_VIS
+        sunVis = RT_SHADE_SUN_VIS(P, sunTint);   // (#1039 M1: the queued ray's result)
+#else
         sunVis = rtHitSunShadow(P, water ? vec3(0.0, 0.0, 1.0) : s.Ng, L, dist, foot, water ? vec3(0.0) : s.tlift, sunTint);
+#endif
 #ifndef RT_SHADE_NO_HAZE
         // (the reflections' grazing fade: a terminator-band hit counts as lit -- a GI hit never: in a
         //  sealed room that fade let the sun in through every smooth wall it grazed)
@@ -721,7 +792,11 @@ vec4 rtShadeHit(RtSurface s, vec3 eye, uint list, float time_s)
         g_rts_terms.xy = vec2(rtsLum((classic ? atmosSrgbToLinear(irradiance * 0.9) : irradiance) * s.base.rgb),
                               rtsLum(glossenv * 0.25 * s.spec_lin + (s.env > 0.0 ? legacyenv * 0.5 * s.env : vec3(0.0))));
     }
+#ifdef RT_SHADE_LOCAL
+    const vec3 local = RT_SHADE_LOCAL(P);   // (#1039 M2: the producer's walk + the queued rays' blocked parts)
+#else
     const vec3 local = rtHitLocalLights(P, N, V, pbr, s.base.rgb, pbr ? s.metal : 0.0, pbr ? s.rough : 1.0, ls, list);
+#endif
     g_rts_terms.z = rtsLum(pbr ? local + s.emissive : local);
     color = atmosClampHDR(color * (classic ? 1.1 : 1.0)) + local * (classic ? 0.9 : 1.0);
 #ifndef RT_SHADE_NO_HAZE
@@ -732,6 +807,10 @@ vec4 rtShadeHit(RtSurface s, vec3 eye, uint list, float time_s)
     }
 #endif
     return vec4(color, s.base.a);
+}
+vec4 rtShadeHit(RtSurface s, vec3 eye, uint list, float time_s)
+{
+    return rtShadeHit(rtLitSurface(s), eye, list, time_s);
 }
 
 #endif

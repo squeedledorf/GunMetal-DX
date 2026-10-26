@@ -10,6 +10,7 @@
 #include "vk_pipeline.h"
 #include "vk_world_shaders_spv.h"
 
+#include "llagent.h"   // <GMDX> the agent frame origin (Params::gmdx)
 #include "llerror.h"
 #include "llviewercontrol.h"
 
@@ -135,16 +136,16 @@ bool LLCleanVolCloudsVK::create(VkDeviceContext* ctx, VkDescriptorSetLayout dslD
 
     // ---- set layouts ----
     {
-        VkDescriptorSetLayoutBinding b[13]{};
-        for (uint32_t i = 0; i < 13; ++i)
+        VkDescriptorSetLayoutBinding b[14]{};   // <GMDX> + 13, the cloud shapes
+        for (uint32_t i = 0; i < 14; ++i)
         {
             b[i].binding = i; b[i].descriptorCount = 1; b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-            const bool sampled = i == 1 || i == 2 || i == 3 || i == 4 || i == 7 || i == 8;
+            const bool sampled = i == 1 || i == 2 || i == 3 || i == 4 || i == 7 || i == 8 || i == 13;
             b[i].descriptorType = i == 0 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
                                 : (sampled ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
         }
         VkDescriptorSetLayoutCreateInfo lci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        lci.bindingCount = 13; lci.pBindings = b;
+        lci.bindingCount = 14; lci.pBindings = b;
         VK_CHECK(vkdCreateSetLayout(dev, &lci, &mDsl, "mDslVolClouds"));
     }
     {
@@ -191,7 +192,8 @@ bool LLCleanVolCloudsVK::create(VkDeviceContext* ctx, VkDescriptorSetLayout dslD
         mParamBuf = ctx->createBuffer(sizeof(Params), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     }
-    if (!mNoiseBase.image || !mNoiseDetail.image || !mWeather.image || !mShadow.image || !mPano.image || !mParamBuf.buffer)
+    if (!mNoiseBase.image || !mNoiseDetail.image || !mWeather.image || !mShadow.image || !mPano.image || !mParamBuf.buffer
+        || !mShapes.create(ctx))   // <GMDX>
     {
         LL_WARNS("VKVolClouds") << "volumetric clouds: allocation refused (out of video memory); retrying later" << LL_ENDL;
         destroy(dev);
@@ -237,6 +239,7 @@ bool LLCleanVolCloudsVK::create(VkDeviceContext* ctx, VkDescriptorSetLayout dslD
             w[i + 1].pImageInfo = &ii[i];
         }
         vkUpdateDescriptorSets(dev, 6, w, 0, nullptr);
+        mShapes.write(dev, mPreSet, mSampClamp);   // <GMDX>
         const VkDescriptorImageInfo ni[3] = {{VK_NULL_HANDLE, mNoiseBase.view, VK_IMAGE_LAYOUT_GENERAL},
                                              {VK_NULL_HANDLE, mNoiseDetail.view, VK_IMAGE_LAYOUT_GENERAL},
                                              {VK_NULL_HANDLE, mWeather.view, VK_IMAGE_LAYOUT_GENERAL}};
@@ -273,10 +276,11 @@ bool LLCleanVolCloudsVK::create(VkDeviceContext* ctx, VkDescriptorSetLayout dslD
         const C cs[7] = {
             {kWorldVolCloudNoiseBaseSpv,   kWorldVolCloudNoiseBaseSpv_bytes,   "kWorldVolCloudNoiseBaseSpv",   mNoiseLayout, P_NOISE_BASE},
             {kWorldVolCloudNoiseDetailSpv, kWorldVolCloudNoiseDetailSpv_bytes, "kWorldVolCloudNoiseDetailSpv", mNoiseLayout, P_NOISE_DETAIL},
-            {kWorldVolCloudWeatherSpv,     kWorldVolCloudWeatherSpv_bytes,     "kWorldVolCloudWeatherSpv",     mWxLayout,    P_WEATHER},
-            {kWorldVolCloudShadowSpv,      kWorldVolCloudShadowSpv_bytes,      "kWorldVolCloudShadowSpv",      mLayout,      P_SHADOW},
-            {kWorldVolCloudPanoSpv,        kWorldVolCloudPanoSpv_bytes,        "kWorldVolCloudPanoSpv",        mLayout,      P_PANO},
-            {kWorldVolCloudMarchSpv,       kWorldVolCloudMarchSpv_bytes,       "kWorldVolCloudMarchSpv",       mLayout,      P_MARCH},
+            // <GMDX> the weather map, shadow map, panorama and march run GunMetal-DX's cloud model (gmdx_cloud_*.comp)
+            {kWorldGmdxCloudWeatherSpv,    kWorldGmdxCloudWeatherSpv_bytes,    "kWorldGmdxCloudWeatherSpv",    mWxLayout,    P_WEATHER},
+            {kWorldGmdxCloudShadowSpv,     kWorldGmdxCloudShadowSpv_bytes,     "kWorldGmdxCloudShadowSpv",     mLayout,      P_SHADOW},
+            {kWorldGmdxCloudPanoSpv,       kWorldGmdxCloudPanoSpv_bytes,       "kWorldGmdxCloudPanoSpv",       mLayout,      P_PANO},
+            {kWorldGmdxCloudMarchSpv,      kWorldGmdxCloudMarchSpv_bytes,      "kWorldGmdxCloudMarchSpv",      mLayout,      P_MARCH},
             {kWorldVolCloudTemporalSpv,    kWorldVolCloudTemporalSpv_bytes,    "kWorldVolCloudTemporalSpv",    mLayout,      P_TEMPORAL}};
         for (const C& c : cs)
         {
@@ -285,7 +289,7 @@ bool LLCleanVolCloudsVK::create(VkDeviceContext* ctx, VkDescriptorSetLayout dslD
             destroyShaderModuleDeferred(dev, m, nullptr);
         }
         VkShaderModule vs = vcModule(dev, kWorldGlowCombineVertSpv, kWorldGlowCombineVertSpv_bytes, "kWorldGlowCombineVertSpv");
-        VkShaderModule fs = vcModule(dev, kWorldVolCloudCompFragSpv, kWorldVolCloudCompFragSpv_bytes, "kWorldVolCloudCompFragSpv");
+        VkShaderModule fs = vcModule(dev, kWorldGmdxCloudCompFragSpv, kWorldGmdxCloudCompFragSpv_bytes, "kWorldGmdxCloudCompFragSpv");   // <GMDX>
         GraphicsPipelineDesc d;
         d.vert = vs; d.frag = fs; d.layout = mCompLayout;
         d.colorFormat = hdrFormat;
@@ -360,6 +364,7 @@ void LLCleanVolCloudsVK::destroy(VkDevice dev)
     vkDeviceWaitIdle(dev);
     for (VkPipeline& p : mPipe) if (p) { vkDestroyPipeline(dev, p, nullptr); p = VK_NULL_HANDLE; }
     destroyTargets();
+    mShapes.destroy(mCtx);   // <GMDX>
     for (GpuImage* im : {&mNoiseBase, &mNoiseDetail, &mWeather, &mShadow, &mPano})
     {
         if (im->image && mCtx) mCtx->destroyImage(*im);
@@ -475,6 +480,7 @@ void LLCleanVolCloudsVK::writeMainSets()
             w[i].pImageInfo = &ii[i - 1];
         }
         vkUpdateDescriptorSets(dev, 11, w, 0, nullptr);
+        mShapes.write(dev, mMainSet[p], mSampClamp);   // <GMDX>
     }
     // Composite: [0] the raw march, [1 + p] history parity p.
     for (int s = 0; s < 3; ++s)
@@ -537,7 +543,10 @@ bool LLCleanVolCloudsVK::prepare(const Frame& f)
 
     const U32 q = llclamp((U32)s_quality, 1u, 3u);
     const Tier& tt = kTiers[q];
-    const bool temporal = s_temporal && !f.offscreen;
+    // <GMDX> No history while the camera is in (or at the edge of) the layer: the cloud is all
+    // around and close, history smeared it off the avatar and nearby objects as trails.
+    const bool inLayer = f.camTime[2] > base - 300.f && f.camTime[2] < top + 300.f;
+    const bool temporal = s_temporal && !f.offscreen && !inLayer;
     uint32_t pattern = temporal ? tt.pattern : 0u;
     uint32_t steps = tt.steps, light = tt.light;
     if (f.offscreen) { steps = steps * 3 / 2; light = 6; }
@@ -567,6 +576,39 @@ bool LLCleanVolCloudsVK::prepare(const Frame& f)
     P.march[2] = (float)(temporal ? (mFrame % 64u) : f.snapSample ? ((mFrame + f.snapSample) % 64u) : 0u);
     P.march[3] = f.offscreen ? 1.f : 0.f;
     P.cam[0] = f.camTime[0]; P.cam[1] = f.camTime[1]; P.cam[2] = f.camTime[2]; P.cam[3] = f.camTime[3];
+    // <GMDX> The agent frame's global origin, wrapped by 21 weather tiles (the noises and the
+    // anti-tiling term in gmdx_cloud_common.glsl stay periodic): the clouds hold still across a
+    // region crossing instead of jumping with the frame.
+    const LLVector3d o = gAgent.getPosGlobalFromAgent(LLVector3::zero);
+    {
+        const double wrap = tile * 21.0;
+        // Wind speed (GMDXCloudWindSpeed, x the region's EEP cloud scroll): the scroll's step since
+        // the last recording, times (speed - 1), adds to a drift every lookup shares (the weather
+        // map, the noises, the bodies, the shadow map), so the clouds travel faster or slower in
+        // the region's own direction; 1 = the region's speed.
+        static LLCachedControl<F32> s_wind(gSavedSettings, "GMDXCloudWindSpeed", 1.f);
+        const double k = llclamp((double)(F32)s_wind, 0.0, 20.0);
+        if (mWindPrimed && !f.offscreen)
+        {
+            for (int i = 0; i < 2; ++i)
+            {
+                double d = (i ? pdy : pdx) - mWindPrevPd[i];
+                if (std::fabs(d) > 0.5) d -= std::round(d);   // (a wrapped scroll)
+                mWindExtra[i] = std::fmod(mWindExtra[i] + d * tile * (k - 1.0), wrap);
+            }
+        }
+        mWindPrevPd[0] = pdx; mWindPrevPd[1] = pdy;
+        mWindPrimed = true;
+        const double ox = o.mdV[VX] + mWindExtra[0], oy = o.mdV[VY] + mWindExtra[1];
+        P.gmdx[0] = (float)(ox - std::floor(ox / wrap) * wrap);
+        P.gmdx[1] = (float)(oy - std::floor(oy / wrap) * wrap);
+        // The EEP scroll the weather map bakes in (its uv offset): the cloud bodies ride on it.
+        P.gmdx[2] = (float)(pdx - std::floor(pdx));
+        P.gmdx[3] = (float)(pdy - std::floor(pdy));
+        static LLCachedControl<F32> s_bodies(gSavedSettings, "GMDXCloudBodies", 1.f);
+        P.gmdx[4] = (float)mShapes.count();
+        P.gmdx[5] = llclamp((F32)s_bodies, 0.f, 1.f);
+    }
     {
         // #783 M2 LIGHTNING: the flash lights the cloud layer from inside (the composite adds it
         // over the clouds' own opacity; no history, so nothing smears). Not in snapshots.
@@ -588,11 +630,14 @@ bool LLCleanVolCloudsVK::prepare(const Frame& f)
         const float dotL = L[0] * mShLight[0] + L[1] * mShLight[1] + L[2] * mShLight[2];
         const double dx = cx - mShCentre[0], dy = cy - mShCentre[1];
         const bool due = !mShValid || mShAge == ~0u || mShAge + 1u >= kShadowEvery || dotL < 0.99996f   // ~0.5 deg
-                       || dx * dx + dy * dy > (double)(kShadowExtent * 0.2f) * (kShadowExtent * 0.2f) || f.offscreen;
+                       || dx * dx + dy * dy > (double)(kShadowExtent * 0.2f) * (kShadowExtent * 0.2f) || f.offscreen
+                       || o.mdV[VX] != mShOrigin[0] || o.mdV[VY] != mShOrigin[1];   // <GMDX> the frame moved (a crossing)
         if (due)
         {
             mShCentre[0] = cx; mShCentre[1] = cy;
+            mShOrigin[0] = o.mdV[VX]; mShOrigin[1] = o.mdV[VY];   // <GMDX>
             mShScroll[0] = pdx; mShScroll[1] = pdy;
+            mShWind[0] = mWindExtra[0]; mShWind[1] = mWindExtra[1];   // <GMDX>
             mShLight[0] = L[0]; mShLight[1] = L[1]; mShLight[2] = L[2];
             mShAge = 0;
             mShValid = true;
@@ -602,7 +647,9 @@ bool LLCleanVolCloudsVK::prepare(const Frame& f)
         P.shadow[0] = (float)mShCentre[0]; P.shadow[1] = (float)mShCentre[1];
         P.shadow[2] = kShadowExtent; P.shadow[3] = (float)kShadowSteps;
         // Between refreshes the clouds drift with the scroll: the lookup's centre follows.
-        const double driftx = -(pdx - mShScroll[0]) * tile, drifty = -(pdy - mShScroll[1]) * tile;
+        // <GMDX> (+ the wind speed's own drift since the refresh)
+        const double driftx = -(pdx - mShScroll[0]) * tile - (mWindExtra[0] - mShWind[0]);
+        const double drifty = -(pdy - mShScroll[1]) * tile - (mWindExtra[1] - mShWind[1]);
         mVc[0][3] = llclamp((F32)s_shadow_k, 0.f, 1.f);
         mVc[1][0] = (float)(mShCentre[0] + driftx);
         mVc[1][1] = (float)(mShCentre[1] + drifty);

@@ -230,6 +230,7 @@ public:
     void setObjectName(VkObjectType type, uint64_t handle, const char* name) const;
     VkPhysicalDevice physicalDevice() const { return mPhysical; }
     bool depthClampEnabled() const { return mDepthClamp; }
+    bool depthBiasClampEnabled() const { return mDepthBiasClamp; }   // <GMDX>
     // fragmentStoresAndAtomics enabled: storage writes from fragment shaders (the raster
     // cursor pick's fragment list, #702). A device requirement since #704: always true
     // on a created device.
@@ -852,6 +853,7 @@ private:
                       VkImageUsageFlags usage) const;
     bool mValidation = false;
     bool mDepthClamp = false;
+    bool mDepthBiasClamp = false;   // <GMDX>
     bool mFragStores = false;   // fragmentStoresAndAtomics enabled
     bool mPipeRobust = false;   // VK_EXT_pipeline_robustness enabled (#546)
     bool mDebugRobustReq = false;   // RenderVKDebugRobustness (setDebugRobustness)

@@ -152,6 +152,18 @@
          tool_tip="When entering aim mode, return to whichever view (over-the-shoulder or first person) you last switched to with the view toggle key, instead of always starting in OTS"
          top_pad="6"
          width="470" />
+        <!-- <GMDX> Esc toggles aim mode and the follow camera (GMDXOTSDynamicCamera) -->
+        <check_box
+         control_name="GMDXOTSDynamicCamera"
+         follows="left|top"
+         height="16"
+         label="Dynamic camera (Esc leaves aim mode, Esc again goes back in)"
+         layout="topleft"
+         left="30"
+         name="ots_dynamic_camera_prefs"
+         tool_tip="Esc in aim mode drops to the normal follow camera behind your avatar with the pointer free, as always; with this on, the next Esc goes straight back into aim mode (OTS or first person, as M would). Esc still resets the view as usual when you did not leave aim mode with it."
+         top_pad="6"
+         width="470" />
 
         <!-- Mouselook (moved from Move & View) -->
         <text

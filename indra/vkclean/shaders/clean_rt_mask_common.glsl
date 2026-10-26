@@ -49,7 +49,8 @@ layout(push_constant) uniform MaskPush {
                           // history (frames), bits 8-15 the reactive gain x 16, bits 16-22
                           // the sun's motion since the last mask frame in disc radii x 32,
                           // bit 23 the temporal-events debug view (RenderVKRTShadowDebug 6)),
-                          // w max history length (frames)
+                          // w max history length (frames; + 128: no resolve integrates the
+                          // jittered mask, #1050 -- rtHistMax / rtNoResolve)
     vec4 p1;              // xy LAST frame's TAA jitter (render px), z spatial radius cap (mask
                           // texels, 0 = no spatial pass), w history clamp width (sigmas; NEGATIVE:
                           // the ray-traced projectors are sampled by the stochastic sampler instead,
@@ -98,13 +99,27 @@ vec2 rtMaskJitter()
 // used to be "TAA jitter on" -- with FXAA / SMAA / no AA the mask had no accumulation and
 // a frozen noise phase; the host now keeps the plumbing for the mask and says so here.
 bool rtMaskTemporal() { return (rtModeBits() & 2u) != 0u; }
+// p0.w: the longest history (frames, 1..64), + 128 for rtNoResolve.
+float rtHistMax() { return max(mod(mp.p0.w, 128.0), 1.0); }
+// #1050 NO RESOLVE (RenderVKRTShadowRrHistory, p0.w >= 128): the view is jittered but what
+// consumes it is DLSS Ray Reconstruction -- a denoiser trained on per-pixel noise, not a
+// resolve that averages the mask's jitter-driven variation over its own long history the
+// way TAA / FSR do (and at Ultra Performance with 128 jitter phases per cycle). The mask's
+// "the resolve integrates it" shortcuts below (8-frame static hard edges, the linear
+// history reprojection, the per-frame disc rotation) then reached the network as edge
+// flicker and a jitter-locked quarter-texel slide: static shadows vibrating in place. Here
+// the mask stabilises itself as it does without a resolve (#674 / #841).
+bool rtNoResolve() { return mp.p0.w >= 127.5; }
+// The mask is its own final integrator: no jitter, or a jittered view nothing resolves.
+bool rtMaskSelfIntegrated() { return ssr.taa_params.w < 0.5 || rtNoResolve(); }
 // The view is jittered and a TAA / FSR resolve integrates per-frame variation (the disc
 // blur's per-frame rotation is only for that: without a resolve it would just crawl).
-bool rtMaskResolved() { return ssr.taa_params.w > 0.5 && rtMaskTemporal(); }
+bool rtMaskResolved() { return ssr.taa_params.w > 0.5 && rtMaskTemporal() && !rtNoResolve(); }
 
 // #674 EXACT HISTORY REPROJECTION (RenderVKRTMaskExactReproj -> p0.y bit 3; only while
-// the view is NOT jittered and the mask is below render resolution, so the TAA / FSR and
-// full-resolution paths are untouched). A mask texel t below
+// the view is NOT jittered -- or jittered with no resolve, #1050 rtNoResolve: the inversion
+// takes last frame's jitter, rtPrevCentre -- and the mask is below render resolution, so the
+// TAA / FSR and full-resolution paths are untouched). A mask texel t below
 // full resolution traces the render pixel CENTRE floor((t + 0.5 + J) / s) + 0.5
 // (rtMaskRenderPx truncates), not (t + 0.5 + J) / s. The temporal pass's inversion used
 // the latter: at scale 0.5 without jitter the reprojection of a STATIC receiver lands a
@@ -114,7 +129,7 @@ bool rtMaskResolved() { return ssr.taa_params.w > 0.5 && rtMaskTemporal(); }
 // catches it, cuts the length, it springs back, drifts again: a smooth back-and-forth.
 // This inverts the real sample centres (piecewise linear between them) instead: a static
 // receiver maps to exactly its own texel.
-bool rtExactReproj() { return (rtModeBits() & 8u) != 0u && ssr.taa_params.w < 0.5 && mp.dims.z < mp.dims.x; }
+bool rtExactReproj() { return (rtModeBits() & 8u) != 0u && rtMaskSelfIntegrated() && mp.dims.z < mp.dims.x; }
 
 // #674 MOVING-CASTER PERSISTENCE (RenderVKRTShadowMoverPersist -> p0.y bits 4-6, frames;
 // 0 = off, the old one-frame flag): see clean_rt_mask_temporal.comp. The temporal pass

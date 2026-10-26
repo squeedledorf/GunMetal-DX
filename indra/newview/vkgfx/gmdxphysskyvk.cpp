@@ -19,7 +19,7 @@
  * $/LicenseInfo$
  */
 
-// <GMDX> PHYSICAL SKY (RenderVKPhysicalSky, off by default: Classic is the WindLight sky).
+// <GMDX> PHYSICAL SKY (RenderVKPhysicalSky, on by default; off = Classic, the WindLight sky).
 // Defines the LLCleanRendererVK members declared in its "PHYSICAL SKY" block; the shaders are
 // vkclean/shaders/clean_physky.glsl (maths, after Epic Games' MIT-licensed reference) and
 // clean_physky_lut.comp, read in clean_atmos_common.glsl.
@@ -105,7 +105,7 @@ void memBarrier(VkCommandBuffer cmd, VkPipelineStageFlags2 ss, VkAccessFlags2 sa
 
 void LLCleanRendererVK::physSkyFill(VKSSRInfo& si)
 {
-    static LLCachedControl<bool> on_setting(gSavedSettings, "RenderVKPhysicalSky", false);
+    static LLCachedControl<bool> on_setting(gSavedSettings, "RenderVKPhysicalSky", true);
     static LLCachedControl<F32> exposure(gSavedSettings, "RenderVKPhysicalSkyExposure", 8.f);
     static LLCachedControl<F32> ambient_scale(gSavedSettings, "RenderVKPhysicalSkyAmbient", 0.3f);
     static LLCachedControl<F32> highlight(gSavedSettings, "RenderVKPhysicalSkyHighlight", 1.5f);
@@ -187,7 +187,7 @@ void LLCleanRendererVK::physSkyInit()
     for (int i = 0; i < 2; ++i)
     {
         w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        w[i].dstSet = mDsetDraw0; w[i].dstBinding = 55 + i; w[i].descriptorCount = 1;   // <GMDX> 55 / 56 (46 / 47 are upstream's clouds)
+        w[i].dstSet = mDsetDraw0; w[i].dstBinding = 57 + i; w[i].descriptorCount = 1;   // <GMDX> 57 / 58 (46 / 47 are upstream's clouds, 54 / 55 its VS instances)
         w[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; w[i].pImageInfo = &ii[i];
     }
     vkUpdateDescriptorSets(dev, 2, w, 0, nullptr);

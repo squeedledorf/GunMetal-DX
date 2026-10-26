@@ -27,7 +27,11 @@
 #ifndef LL_LLUIIMAGE_H
 #define LL_LLUIIMAGE_H
 
+#include <functional>
+#include <string>
+#include <vector>
 #include "v4color.h"
+#include "v4coloru.h"
 #include "llpointer.h"
 #include "llrefcount.h"
 #include "llrefcount.h"
@@ -99,6 +103,55 @@ public:
 
     void onImageLoaded();
 
+    // ---- #1056 vector icons --------------------------------------------------------------
+    // An image may carry a vector (SVG) source next to its classic bitmap. While classic
+    // icons are off, draw()/drawSolid() show a rasterization of the vector at the exact
+    // physical pixel size the icon is drawn at (logical size x the current UI scale),
+    // made lazily on first use and cached per size. Layout is untouched: getWidth()/
+    // getHeight() keep reporting the classic bitmap's size. The bitmap stays loaded, so
+    // flipping the classic switch is a plain draw-time decision with nothing to reload.
+    //
+    // One more source drawn over the first at the same size (a frame, a fill, a mark...): the
+    // same fields as the first layer. textures.xml: vector_file2/vector_color2/vector_box2, ...3.
+    struct VectorLayer
+    {
+        std::string mFile;
+        LLColor4U   mColor = LLColor4U(255, 255, 255, 255);
+        std::string mColorName;
+        F32         mBox[4] = { 0.f, 0.f, 1.f, 1.f };
+    };
+
+    // What to draw and how it sits in the icon's rectangle.
+    struct VectorSpec
+    {
+        std::vector<VectorLayer> mExtra;   // drawn over the first source, in order
+        std::string mFile;                                // SVG, relative to the textures dir
+        LLColor4U   mColor = LLColor4U(255, 255, 255, 255);   // RGB the mask is tinted with; A = its peak opacity
+        // Non-empty: the tint is this entry of the skin colour table (colors.xml), looked up by the
+        // rasterizer each time it rasterizes (mColor.A still scales the opacity; mColor's RGB is
+        // the fallback). A colour-table change invalidates the rasters, so a theme switch recolours.
+        std::string mColorName;
+        // Where the glyph's ink goes, as fractions of the icon rectangle (origin top-left):
+        // left, top, right, bottom. Defaults to the whole rectangle; textures.xml sets it to
+        // the bitmap's own ink bounds so the glyph occupies the area the old artwork did.
+        F32         mBox[4] = { 0.f, 0.f, 1.f, 1.f };
+    };
+
+    // The rasterizer (viewer side, it owns SVG parsing and texture creation) returns a
+    // mask texture of exactly pixel_w x pixel_h, or null on failure (the bitmap is then
+    // drawn instead).
+    typedef std::function<LLPointer<LLTexture>(const VectorSpec& spec, S32 pixel_w, S32 pixel_h)> vector_rasterizer_t;
+    static void setVectorRasterizer(const vector_rasterizer_t& rasterizer);
+    static void setClassicIcons(bool classic);
+    static bool getClassicIcons() { return sClassicIcons; }
+    // The UI scale / display scale changed: cached rasters are for the old pixel size.
+    static void invalidateVectorRasters();
+    // Shutdown: drop the retired rasters and the rasterizer (call after the images are gone).
+    static void cleanUpVectorRasters();
+
+    void setVectorSource(const VectorSpec& spec);
+    bool hasVectorSource() const { return mVector != nullptr; }
+
 protected:
     image_loaded_signal_t* mImageLoaded;
 
@@ -109,6 +162,15 @@ protected:
     EScaleStyle             mScaleStyle;
     mutable S32             mCachedW;
     mutable S32             mCachedH;
+
+private:
+    struct VectorData;
+    // The raster to draw instead of mImage for a width x height (logical) draw, or null to
+    // draw the bitmap (no vector source, classic icons on, rasterizer failed).
+    LLTexture* getVectorTexture(S32 width, S32 height) const;
+
+    VectorData*             mVector = nullptr;   // null for the (vast majority of) bitmap-only images
+    static bool             sClassicIcons;
 };
 
 #include "lluiimage.inl"

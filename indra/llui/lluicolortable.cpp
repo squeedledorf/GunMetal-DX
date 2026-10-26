@@ -34,6 +34,7 @@
 #include "llfile.h"
 #include "llui.h"
 #include "lluicolortable.h"
+#include "lluiimage.h"
 #include "lluictrlfactory.h"
 
 LLUIColorTable::ColorParams::ColorParams()
@@ -177,6 +178,7 @@ void LLUIColorTable::clear()
 {
     clearTable(mLoadedColors);
     clearTable(mUserSetColors);
+    LLUIImage::invalidateVectorRasters();   // #1056: vector icons named a colour from this table
 }
 
 LLUIColor LLUIColorTable::getColor(std::string_view name, const LLColor4& default_color) const
@@ -201,6 +203,7 @@ LLUIColor LLUIColorTable::getColor(std::string_view name, const LLColor4& defaul
 // update user color, loaded colors are parsed on initialization
 void LLUIColorTable::setColor(std::string_view name, const LLColor4& color)
 {
+    LLUIImage::invalidateVectorRasters();   // #1056: re-rasterize vector icons that use this colour
     auto it = mUserSetColors.lower_bound(name);
     if(it != mUserSetColors.end() && !(mUserSetColors.key_comp()(name, it->first)))
     {
@@ -245,6 +248,7 @@ bool LLUIColorTable::isDefault(std::string_view name) const
 
 void LLUIColorTable::resetToDefault(std::string_view name)
 {
+    LLUIImage::invalidateVectorRasters();
     string_color_map_t::iterator iter = mUserSetColors.find(name);
 
     if (iter != mUserSetColors.end())
@@ -261,6 +265,7 @@ void LLUIColorTable::resetToDefault(std::string_view name)
 bool LLUIColorTable::loadFromSettings()
 {
     bool result = false;
+    LLUIImage::invalidateVectorRasters();
 
     // pass constraint=LLDir::ALL_SKINS because we want colors.xml from every
     // skin dir
@@ -434,6 +439,7 @@ bool LLUIColorTable::loadFromFilename(const std::string& filename, string_color_
 void LLUIColorTable::insertFromParams(const Params& p)
 {
     insertFromParams(p, mUserSetColors);
+    LLUIImage::invalidateVectorRasters();
 }
 
 // EOF

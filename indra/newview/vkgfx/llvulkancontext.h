@@ -819,6 +819,8 @@ public:
     std::string texInspectText(const LLUUID& obj, int face, unsigned map, const float* uv_px) const;
     // #684 Texture Console: short Vulkan residency line for a texture id; "" if not resident.
     std::string texResidencyBrief(const LLUUID& id) const;
+    // <GMDX> LLCleanRendererVK::texOnGpu (true without the world renderer: nothing to wait for)
+    bool texOnGpu(const LLUUID& id) const;
     // #458 HOST MEMORY: host-visible live MB per category (the non-zero ones), device-only
     // live MB, and the allocation traffic (vkAllocateMemory / vkFreeMemory per second and
     // MB/s, host-visible vs device-only, busiest categories) over the last hostMemTick
@@ -832,6 +834,11 @@ public:
     // #876 / #890: the driver is Intel's proprietary Windows one (VK_DRIVER_ID_INTEL_PROPRIETARY_WINDOWS):
     // parallel pipeline creation crashes it. Known after init(); false before.
     static bool driverIsIntelWindows();
+    // #1064: the driver identity the per-pipeline compile-crash quarantine is keyed by, as one
+    // token "<vendorID hex>-<driverID>-<driverVersion hex>" (e.g. "1002-1-00800161"), and a
+    // readable label (driverName + driverInfo). Known after init(); "" before. Any thread.
+    static std::string driverIdentityToken();
+    static std::string driverIdentityLabel();
     // The compile-thread cap decision (llappviewer) as one clause for the "pipelines" report
     // line, e.g. "capped to 1 thread: Intel Windows driver (#876)". "" = automatic. Any thread.
     static void setPipelineCompileCapNote(const std::string& note);

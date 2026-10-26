@@ -102,7 +102,12 @@ bool SSFloaterGameControlOverlay::handleMouseUp(S32 x, S32 y, MASK mask)
     if (hasMouseCapture())
     {
         gFocusMgr.setMouseCapture(nullptr);
-        storeRectControl();
+        // <GMDX> a user move, as a title-bar drag ends one: keeps it on screen, remembers the rect
+        // AND the floater's relative position, which the view reapplies when the screen's snap
+        // area changes (entering mouselook hides the toolbars; translate() alone left the
+        // position it opened at, so the overlay jumped back to its corner)
+        handleReshape(getRect(), true);
+        // </GMDX>
         return true;
     }
     return LLFloater::handleMouseUp(x, y, mask);

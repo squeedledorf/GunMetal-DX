@@ -1279,8 +1279,7 @@ void LLFloaterPreference::cancel(const std::vector<std::string> settings_to_skip
     // hide spellchecker settings folder
     LLFloaterReg::hideInstance("prefs_spellchecker");
 
-    // hide advanced graphics floater
-    LLFloaterReg::hideInstance("prefs_graphics_advanced");
+    // <GMDX> (no advanced graphics floater: its settings are tabs of the Graphics panel)
 
     // reverts any changes to current skin
     gSavedSettings.setString("SkinCurrent", sSkin);
@@ -1650,12 +1649,12 @@ void LLFloaterPreference::resetAutotuneSettings()
 void LLFloaterPreference::getControlNames(std::vector<std::string>& names)
 {
     LLView* view = findChild<LLView>("display");
-    LLFloater* advanced = LLFloaterReg::findTypedInstance<LLFloater>("prefs_graphics_advanced");
-    if (view && advanced)
+    // <GMDX> The advanced graphics settings are tabs of "display" now: one tree covers them
+    if (view)
     {
         std::list<LLView*> stack;
         stack.push_back(view);
-        stack.push_back(advanced);
+        // </GMDX>
         while(!stack.empty())
         {
             // Process view on top of the stack
@@ -1716,14 +1715,7 @@ void LLFloaterPreference::onBtnOK(const LLSD& userdata)
         saveSettings();
         apply();
 
-        if (userdata.asString() == "closeadvanced")
-        {
-            LLFloaterReg::hideInstance("prefs_graphics_advanced");
-        }
-        else
-        {
-            closeFloater(false);
-        }
+        closeFloater(false); // <GMDX> (no "closeadvanced": the advanced floater is gone)
 
         //Conversation transcript and log path changed so reload conversations based on new location
         if (mPriorInstantMessageLogPath.length())
@@ -1780,16 +1772,9 @@ void LLFloaterPreference::onBtnCancel(const LLSD& userdata)
         refresh();
     }
 
-    if (userdata.asString() == "closeadvanced")
-    {
-        cancel({"RenderQualityPerformance"});
-        LLFloaterReg::hideInstance("prefs_graphics_advanced");
-    }
-    else
-    {
-        cancel();
-        closeFloater();
-    }
+    // <GMDX> (no "closeadvanced": the advanced floater is gone)
+    cancel();
+    closeFloater();
 }
 
 //static
@@ -1813,14 +1798,10 @@ void LLFloaterPreference::updateUserInfo(const std::string& visibility)
 // static
 void LLFloaterPreference::refreshEnabledGraphics()
 {
+    // <GMDX> refresh() refreshes the advanced graphics tabs too (the Graphics panel)
     if (LLFloaterPreference* instance = LLFloaterReg::findTypedInstance<LLFloaterPreference>("preferences"))
     {
         instance->refresh();
-    }
-
-    if (LLFloater* advanced = LLFloaterReg::findTypedInstance<LLFloater>("prefs_graphics_advanced"))
-    {
-        advanced->refresh();
     }
 }
 
@@ -2131,10 +2112,12 @@ void LLFloaterPreference::refresh()
         gSavedSettings.getU32("RenderAvatarMaxComplexity"),
         getChild<LLTextBox>("IndirectMaxComplexityText", true));
     refreshEnabledState();
-    if (LLFloater* advanced = LLFloaterReg::findTypedInstance<LLFloater>("prefs_graphics_advanced"))
+    // <GMDX> The Graphics panel (LLFloaterPreferenceGraphicsAdvanced) holds the advanced graphics tabs
+    if (LLPanel* graphics = tabcontainer->getPanelByName("display"))
     {
-        advanced->refresh();
+        graphics->refresh();
     }
+    // </GMDX>
     updateClickActionViews();
 }
 
@@ -2629,19 +2612,14 @@ void LLFloaterPreference::onClickAutoAdjustments()
 
 void LLFloaterPreference::onClickAdvanced()
 {
-    LLFloaterReg::showInstance("prefs_graphics_advanced");
-
-    LLTabContainer* tabcontainer = getChild<LLTabContainer>("pref core");
-    for (child_list_t::const_iterator iter = tabcontainer->getChildList()->begin();
-         iter != tabcontainer->getChildList()->end(); ++iter)
+    // <GMDX> The advanced graphics settings are tabs of the Graphics panel: show the first of
+    // them (was: open the Advanced Graphics floater).
+    selectPanel("display");
+    if (LLTabContainer* graphics_tabs = findChild<LLTabContainer>("adv_tab_container"))
     {
-        LLView* view = *iter;
-        LLPanelPreferenceGraphics* panel = dynamic_cast<LLPanelPreferenceGraphics*>(view);
-        if (panel)
-        {
-            panel->resetDirtyChilds();
-        }
+        graphics_tabs->selectTabByName("adv_tab_general");
     }
+    // </GMDX>
 }
 
 void LLFloaterPreference::onClickActionChange()
@@ -3018,11 +2996,7 @@ void LLPanelPreference::saveSettings()
     mSavedValues.clear();
     std::list<LLView*> view_stack;
     view_stack.push_back(this);
-    // Search for 'Advanced' panel and add it if found
-    if (LLFloater* advanced = LLFloaterReg::findTypedInstance<LLFloater>("prefs_graphics_advanced"))
-    {
-        view_stack.push_back(advanced);
-    }
+    // <GMDX> (no 'Advanced' graphics floater: its settings are in the Graphics panel's tree)
 
     while (!view_stack.empty())
     {
@@ -3234,9 +3208,7 @@ static LLPanelInjector<LLPanelPreferencePrivacy> t_pref_privacy("panel_preferenc
 
 bool LLPanelPreferenceGraphics::postBuild()
 {
-    LLFloaterReg::showInstance("prefs_graphics_advanced");
-    LLFloaterReg::hideInstance("prefs_graphics_advanced");
-
+    // <GMDX> (no Advanced Graphics floater to build: its settings are this panel's tabs)
     resetDirtyChilds();
     setPresetText();
 
@@ -3366,13 +3338,9 @@ void LLPanelPreferenceGraphics::setPresetText()
 
 bool LLPanelPreferenceGraphics::hasDirtyChilds()
 {
-    LLFloater* advanced = LLFloaterReg::findTypedInstance<LLFloater>("prefs_graphics_advanced");
+    // <GMDX> (the advanced graphics settings are in this panel's tree)
     std::list<LLView*> view_stack;
     view_stack.push_back(this);
-    if (advanced)
-    {
-        view_stack.push_back(advanced);
-    }
     while(!view_stack.empty())
     {
         // Process view on top of the stack
@@ -3408,13 +3376,9 @@ bool LLPanelPreferenceGraphics::hasDirtyChilds()
 
 void LLPanelPreferenceGraphics::resetDirtyChilds()
 {
-    LLFloater* advanced = LLFloaterReg::findTypedInstance<LLFloater>("prefs_graphics_advanced");
+    // <GMDX> (the advanced graphics settings are in this panel's tree)
     std::list<LLView*> view_stack;
     view_stack.push_back(this);
-    if (advanced)
-    {
-        view_stack.push_back(advanced);
-    }
     while(!view_stack.empty())
     {
         // Process view on top of the stack

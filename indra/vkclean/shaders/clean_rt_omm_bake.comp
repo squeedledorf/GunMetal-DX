@@ -16,6 +16,7 @@
 // "above the cutoff" while half its texels are holes): judged against the cutoff, whole
 // regions of holes became known-opaque and big cut-out surfaces turned into solid walls.
 // Anything in between is unknown and goes to the exact shader alpha test.
+// ALPHA-BLEND entries (#1032, a material without a cutoff): transparent / unknown only (below).
 layout(local_size_x = 64) in;
 
 #include "clean_uv_common.glsl"
@@ -132,10 +133,39 @@ void main()
     const float area = abs(e1.x * e2.y - e1.y * e2.x) * 0.5 * ms * ms;
     const float lod = clamp(log2(max(sqrt(2.0 * area) * 0.5, 1.0)), 0.0, max(levels - 1.0, 0.0));
 
+    // ALPHA-BLEND (#1032, RenderVKRTOmmBlend; material without a cutoff): TRANSPARENT-ONLY. A
+    // micro-triangle is known transparent only when all 7 samples read TEXEL alpha exactly 0 --
+    // where every consumer leaves the ray untouched whatever the face alpha (shadow walks:
+    // 1 - 0 = 1, "casts nothing" in LL parity; closest hits keep blend only above a positive
+    // minimum). The face alpha (base factor x tint) is left out on purpose: the entry is shared
+    // by every tint of its (slot, material, UV) -- llSetAlpha fades don't rebake -- so a face
+    // faded to 0 must not bake its whole surface transparent for a visible sharer. Everything
+    // else is UNKNOWN (state 2): never known opaque, so the hardware never commits a translucent
+    // face -- the translucent walk's per-caster product, the #735 away-facing rule and the
+    // point-light fixture rule all still run in the shader for every visible texel. Untextured:
+    // unknown everywhere (the planner only builds textured entries).
+    const bool blendMode = cutoff < 0.0;
     for (uint m = gl_LocalInvocationID.x; m < micro; m += 64u)
     {
         uint state;
-        if (!textured)
+        if (blendMode)
+        {
+            uint empty = 0u;
+            if (textured)
+            {
+                vec2 c0, c1, c2;
+                indexToBary(m, rec.level, c0, c1, c2);
+                const vec2 b[7] = vec2[7](c0, c1, c2, (c0 + c1) * 0.5, (c1 + c2) * 0.5, (c2 + c0) * 0.5,
+                                           (c0 + c1 + c2) / 3.0);
+                for (int i = 0; i < 7; ++i)
+                {
+                    const vec2 uv = t0 * (1.0 - b[i].x - b[i].y) + t1 * b[i].x + t2 * b[i].y;
+                    empty += (textureLod(uTextures[nonuniformEXT(tex)], uv, lod).a <= 0.0) ? 1u : 0u;
+                }
+            }
+            state = empty == 7u ? 0u : 2u;
+        }
+        else if (!textured)
             state = (a0 >= cutoff) ? 1u : 0u;
         else
         {

@@ -1,12 +1,68 @@
 // vkclean — local-light evaluation helpers (LL deferredUtil ports) shared by the lit
-// FS (clean_draw_common.glsl) and the ray-traced shadow mask (clean_rt_shadow_mask.comp).
-// Needs Light (clean_lights_common.glsl) and uTextures declared before inclusion. All
+// FS (clean_draw_common.glsl), the deferred kernels, the RT hit shading, the ray-traced shadow
+// mask (clean_rt_shadow_mask.comp) and the fog passes. Needs Light (clean_lights_common.glsl),
+// uTextures and the frame info (clean_frame_info.glsl: the cutoff) declared before inclusion. All
 // texture reads use explicit LOD (valid in compute).
 float legacyAtten(float d, float falloff)   // deferredUtil calcLegacyDistanceAttenuation
 {
     float a = 1.0 - clamp((d + falloff) / (1.0 + falloff), 0.0, 1.0);
     a *= a;
     return a * 2.0;
+}
+
+// ---- THE LIGHT REACH (#1043): does light record (pr = pos_radius, cf = color_falloff) reach P, and
+//      how strongly -- the range, LL's distance attenuation and the cutoff fade below, in that order.
+//      ONE predicate for every light walk: the lit FS / deferred lit kernels, the projector sampler,
+//      the RT hit shading (reflections, GI, mirror, RT forward, probe RT), the RT shadow mask's
+//      projector rays, both fog passes and the GI change test. Before, the cutoff fade was missing
+//      from the RT hits, the mask, the fogs and the GI change test: a surface and its reflection /
+//      bounce disagreed about a dim light's tail, the mask cast rays the lit pass then multiplied by a
+//      fade of 0. (clean_regir.glsl's cell weights keep their own conservative bound: a box, not a P.) ----
+// LIT-PASS TRIM (RenderVKLightCutoff -> ssr.lit_dbg.z, linear radiance; 0 = off): a light
+// whose attenuated colour at this point is below the cutoff is faded out over [c, 2c] and
+// skipped below c -- before its shadow / gobo fetches. Smooth, so no visible edge where
+// the tail of a dim / distant light's falloff used to end.
+float lightCutoffFade(float atten, vec3 color)
+{
+    const float c = ssr.lit_dbg.z;
+    if (c <= 0.0) return 1.0;
+    return smoothstep(c, 2.0 * c, atten * max(max(color.r, color.g), color.b));
+}
+// The range test alone, on the position (callers that load the rest of the record only for the lights
+// in range): lv = the vector to the light, d2 its squared length.
+bool lightInRange(vec4 pr, vec3 P, out vec3 lv, out float d2)
+{
+    lv = pr.xyz - P;
+    d2 = dot(lv, lv);
+    return d2 < pr.w * pr.w;
+}
+// ... then the attenuation x the cutoff fade at squared distance d2 (in range): > 0, or 0 = no reach.
+float lightReachAt(vec4 pr, vec4 cf, float d2, out float dist)
+{
+    dist = sqrt(d2);
+    if (dist >= pr.w) return 0.0;
+    const float atten = legacyAtten(dist / pr.w, cf.w);
+    if (atten <= 0.0) return 0.0;
+    return atten * lightCutoffFade(atten, cf.rgb);
+}
+// Both: the light's attenuation x cutoff fade at P (0 = it does not reach P), lv / dist to it.
+float lightReach(vec4 pr, vec4 cf, vec3 P, out vec3 lv, out float dist)
+{
+    float d2;
+    dist = 0.0;
+    if (!lightInRange(pr, P, lv, d2)) return 0.0;
+    return lightReachAt(pr, cf, d2, dist);
+}
+// A projector's frustum (proj_mat: world -> projector texture space): true inside, tc = the texture
+// coordinate there (the gobo's).
+bool lightProjFrustum(mat4 proj_mat, vec3 P, out vec2 tc)
+{
+    vec4 ptc = proj_mat * vec4(P, 1.0);
+    tc = vec2(0.0);
+    if (ptc.z < 0.0) return false;
+    ptc.xyz /= ptc.w;
+    tc = ptc.xy;
+    return !(ptc.z <= 0.0 || ptc.x <= 0.0 || ptc.x >= 1.0 || ptc.y <= 0.0 || ptc.y >= 1.0);
 }
 
 vec4 projSample(Light L, vec2 tc, float lod)

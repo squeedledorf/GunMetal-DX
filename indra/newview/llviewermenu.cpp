@@ -4948,20 +4948,58 @@ class LLLandCanSit : public view_listener_t
 //
 void reset_view_final(bool proceed);
 
+// <GMDX> Aim mode, as M enters it (LLViewMouselook): the shoulder camera when OTS is on and can be
+// used (with OTSRememberLastView, the view last toggled into), else first-person mouselook.
+static void enter_aim_mode()
+{
+    if (gSavedSettings.getBOOL("OTSEnabled")
+        && gAgentCamera.canUseOTS()
+        && !(gSavedSettings.getBOOL("OTSRememberLastView")
+             && gSavedSettings.getBOOL("OTSLastViewFirstPerson")))
+    {
+        gAgentCamera.changeCameraToOTS();
+        return;
+    }
+    gAgentCamera.changeCameraToMouselook();
+}
+
+// OTS "Dynamic camera" (GMDXOTSDynamicCamera): the last Esc left aim mode, so the next one (on the
+// follow camera, not building) goes back in. M clears it.
+static bool sEscLeftAim = false;
+// </GMDX>
+
 void handle_reset_view()
 {
-    // Esc first releases the third-person shooter camera, leaving the
-    // camera where it is (a second Esc then resets the view as usual).
+    // <GMDX> OTS Dynamic camera: Esc toggles aim mode and the follow camera
+    static LLCachedControl<bool> ots_dynamic_camera(gSavedSettings, "GMDXOTSDynamicCamera", false);
+    if (ots_dynamic_camera && sEscLeftAim && gAgentCamera.getCameraMode() == CAMERA_MODE_THIRD_PERSON
+        && !LLToolMgr::getInstance()->inBuildMode() && !gAgentCamera.cameraCustomizeAvatar())
+    {
+        sEscLeftAim = false;
+        enter_aim_mode();
+        return;
+    }
+    sEscLeftAim = ots_dynamic_camera && gAgentCamera.cameraMouselook();   // (OTS too: the reset below leaves aim mode)
+    // </GMDX>
+    // Esc first releases the third-person shooter camera. With "Dynamic camera" on
+    // (#944, #952) it hands the view back to the normal follow camera behind the
+    // avatar with the pointer free, so Esc toggles between the two; off, it parks
+    // the camera where it is.
+    static LLCachedControl<bool> tps_dynamic_camera(gSavedSettings, "SlipstreamTPSDynamicCamera", false);
     if (SLTPSCamera::isEngagedNow())
     {
-        SLTPSCamera::getInstance()->disengage(SLTPSCamera::DISENGAGE_USER);
-        return;
+        if (!tps_dynamic_camera)
+        {
+            SLTPSCamera::getInstance()->disengage(SLTPSCamera::DISENGAGE_USER);
+            return;
+        }
+        SLTPSCamera::getInstance()->disengage(SLTPSCamera::DISENGAGE_MODE_CHANGE);
     }
     // With the TPS camera enabled but released (mouse free), Esc re-engages it --
     // back behind the avatar with the mouse captured, same as clicking the avatar --
     // instead of dropping to the stock camera. Falls through to the normal reset
     // where TPS can't engage (sitting, build mode, appearance editing, mouselook...).
-    if (SLTPSCamera::isEnabled() && !gAgentCamera.cameraCustomizeAvatar()
+    else if (SLTPSCamera::isEnabled() && !gAgentCamera.cameraCustomizeAvatar()
         && SLTPSCamera::getInstance()->canEngage())
     {
         SLTPSCamera::getInstance()->requestEngage();
@@ -5024,6 +5062,7 @@ class LLViewMouselook : public view_listener_t
         // with OTSRememberLastView, whichever view was last toggled into).
         // When disabled M toggles normal first-person mouselook.
         // M from EITHER aim view (OTS or toggled-to-first-person) exits.
+        sEscLeftAim = false;   // <GMDX> (OTS Dynamic camera: M, not Esc)
         if (gAgentCamera.cameraOTS())
         {
             gAgentCamera.changeCameraFromOTS();

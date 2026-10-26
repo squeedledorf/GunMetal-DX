@@ -19,7 +19,7 @@
    layout="topleft"
    left="12"
    name="fog_on"
-   tool_tip="The volumetric fog the mist is a mode of (Graphics > Advanced)."
+   tool_tip="The volumetric fog the mist is a mode of (Preferences > Graphics > Lighting)."
    top="10"
    width="150" />
   <check_box

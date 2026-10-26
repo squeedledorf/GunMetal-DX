@@ -2588,6 +2588,8 @@ bool VkDeviceContext::createLogicalDevice(bool wantSwapchain) {
         }
         mDepthClamp = sup.depthClamp == VK_TRUE;
         f2.features.depthClamp = mDepthClamp ? VK_TRUE : VK_FALSE;
+        mDepthBiasClamp = sup.depthBiasClamp == VK_TRUE;   // <GMDX> (the sun cascades cap their slope bias)
+        f2.features.depthBiasClamp = mDepthBiasClamp ? VK_TRUE : VK_FALSE;
         // Multi-attachment pipelines (glow / WBOIT-style MRT) use differing
         // per-attachment blend states (VUID-VkPipelineColorBlendStateCreateInfo-
         // pAttachments-00605). Near-universal on desktop.

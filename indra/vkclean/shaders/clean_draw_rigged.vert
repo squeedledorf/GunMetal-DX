@@ -64,6 +64,10 @@ struct Instance {
     vec4 spin_pivot;    // xyz agent-space pivot
 };
 layout(std430, set = 0, binding = 0) readonly buffer Instances { Instance instances[]; };
+// #1033 SLIM RECORD (clean_vs_inst.glsl, derived every frame by clean_vs_inst.comp): the 112 B
+// record carries every field read below; the full row is opened only for GPU texture animation.
+#include "clean_vs_inst.glsl"
+layout(std430, set = 0, binding = 54) readonly buffer VsInstances { VsInst vs_inst[]; };
 // TEMPORAL (#84, stage 2): each skinned vertex's position LAST frame, eye-relative to
 // THIS frame's eye like `position`, at the same index (clean_preskin.comp re-skins it
 // with last frame's palettes). Only the motion pre-pass consumes what is derived from it.
@@ -162,7 +166,8 @@ invariant gl_Position;
 
 void main()
 {
-    Instance inst = instances[gl_InstanceIndex];
+    const VsInst inst = vs_inst[gl_InstanceIndex];
+    const mat4 inst_model = vsiModel(inst);
 
     // Position is EYE-RELATIVE (camera-relative palettes); the renderer pushes the
     // translation-free view-projection for rigged draws. World position for
@@ -275,8 +280,9 @@ void main()
     // Planar texgen needs object-local positions (the pre-skinned stream is
     // eye-relative), so rigged faces take the texcoord path; the anim still applies.
     // (depth variants: the alpha test's inputs, the same expressions)
-    v_uv           = cleanFaceUV(inst.flags & ~64u, inst.uv_matrix, texcoord0, nrm, pos,
-                                 inst.model_matrix, pc.u_cam_time.w);
+    v_uv           = cleanFaceUV(inst.flags & ~64u,
+                                 (inst.flags & 1024u) != 0u ? instances[gl_InstanceIndex].uv_matrix : vsiUv(inst),
+                                 texcoord0, nrm, pos, inst_model, pc.u_cam_time.w);
     v_material_id  = inst.material_id;
     v_tint         = inst.tint;
     v_flags        = inst.flags;
@@ -338,7 +344,7 @@ void main()
     }
 #endif
     const mat4 nuvm = matMapOwnUV(inst.material_id, MAP_NORMAL) ? matMapUVMatrix(inst.material_id, MAP_NORMAL)
-                                                                  : inst.uv_matrix;
+                                                                  : vsiUv(inst);
     v_world_tangent = cleanFaceTangent(inst.flags & ~64u, nuvm, nrm, tng);
 #endif
 #ifdef CLEAN_VS_PICK

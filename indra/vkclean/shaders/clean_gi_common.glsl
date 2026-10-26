@@ -164,7 +164,8 @@ struct GiHeader
     uvec4 chg[2];  // the lights that moved or whose radiance changed (bit = light index; the host's mGiChg:
                    // against each light's GI reference), GI_F_LIGHT_CHG only
     vec4  prm5;    // (#980) x the re-shade significance threshold (RenderVKGIReshadeThreshold; 0 = re-shade
-                   // wherever a changed light reaches), y the old records in chg_prev
+                   // wherever a changed light reaches), y the old records in chg_prev, z (#1041) the own-fixture
+                   // box limit of the hits' budgeted point-light rays (RenderVKReSTIRFixtureSize, m; 0 = off)
     vec4  sph[GI_SPHERES_MAX];   // xyz centre (world), w radius
     vec4  chg_prev[128];   // (#980; 2 x GI_CHG_PREV_MAX) the changed lights' OLD records (their GI reference), in
                    // ascending light index (the k-th set bit of chg): [2k] pos_radius (w < 0: it MOVED --

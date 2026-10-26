@@ -644,6 +644,7 @@ private:
     bool                    mDropUnsent = false;        // #485: dropped from the queue before sending
     F64                     mQueuedSince = 0.0;         // #485: entered WAIT_HTTP_RESOURCE2
     F64                     mStateSince = LLTimer::getTotalSeconds();   // #485 RAM: last setState() (worker sweep ages)
+    U8                      mNetWhy = 0;                // #951: LLTextureFetch::ENetWhy (why LOAD_FROM_NETWORK did not move on)
     bool                    mGovWaiting = false;        // RAM #262: parked in DECODE_IMAGE on the memory budget
     void setGovWaiting(bool w)
         {
@@ -1190,6 +1191,7 @@ bool LLTextureFetchWorker::doWork(S32 param)
         }
         else if (!mRegionRetryTimer.hasExpired())
         {
+            mNetWhy = LLTextureFetch::NET_WHY_CAP_RETRY;   // #951
             return false;
         }
         // else retry
@@ -1391,16 +1393,30 @@ bool LLTextureFetchWorker::doWork(S32 param)
             else
             {
                 //LL_INFOS(LOG_TXT) << mID << " waiting to retry for " << wait_seconds << " seconds" << LL_ENDL;
+                mNetWhy = LLTextureFetch::NET_WHY_RETRY_WAIT;   // #951
                 return false;
             }
         }
 
         static LLCachedControl<bool> use_http(gSavedSettings, "ImagePipelineUseHTTP", true);
+        U8 net_why = LLTextureFetch::NET_WHY_NO_HTTP;   // #951: unless a branch below says otherwise
 
 //      if (mHost.isInvalid()) get_url = false;
         if ( use_http && mCanUseHTTP && mUrl.empty())//get http url.
         {
             LLViewerRegion* region = getRegion();
+            // #951: the ViewerAsset URL is the grid's asset CDN, the same from every region. A texture
+            // requested for a host that isn't a known region (yet / any more), or whose region has no
+            // caps yet, fetches through the agent's region, as mesh does, instead of waiting out the
+            // capability retries (720 x 1 s) with no request ever sent.
+            if (!region || region->getViewerAssetUrl().empty())
+            {
+                LLViewerRegion* agent_region = gAgent.getRegion();
+                if (agent_region && !agent_region->getViewerAssetUrl().empty())
+                {
+                    region = agent_region;
+                }
+            }
             if (region)
             {
                 std::string http_url = region->getViewerAssetUrl();
@@ -1422,6 +1438,7 @@ bool LLTextureFetchWorker::doWork(S32 param)
                     mCanUseCapability = false;
                     mRegionRetryAttempt++;
                     mRegionRetryTimer.setTimerExpirySec(CAP_MISSING_EXPIRATION_DELAY);
+                    net_why = LLTextureFetch::NET_WHY_NO_URL;   // #951
                     // ex: waiting for caps
                     LL_INFOS_ONCE(LOG_TXT) << "Texture not available via HTTP: empty URL." << LL_ENDL;
                 }
@@ -1431,6 +1448,7 @@ bool LLTextureFetchWorker::doWork(S32 param)
                 mCanUseCapability = false;
                 mRegionRetryAttempt++;
                 mRegionRetryTimer.setTimerExpirySec(CAP_MISSING_EXPIRATION_DELAY);
+                net_why = LLTextureFetch::NET_WHY_NO_REGION;   // #951
                 // This will happen if not logged in or if a region deoes not have HTTP Texture enabled
                 //LL_WARNS(LOG_TXT) << "Region not found for host: " << mHost << LL_ENDL;
                 LL_INFOS_ONCE(LOG_TXT) << "Texture not available via HTTP: no region " << mUrl << LL_ENDL;
@@ -1452,6 +1470,7 @@ bool LLTextureFetchWorker::doWork(S32 param)
         }
         else
         {
+            mNetWhy = net_why;  // #951
             return false;
         }
     }
@@ -3650,6 +3669,7 @@ void LLTextureFetch::sweepWorkers()
     st.mPeak = llmax(st.mPeak, st.mTotal);
 
     auto img_bytes = [](const LLImageBase* img) -> U64 { return img ? (U64)llmax(img->getDataSize(), 0) : 0; };
+    F32 oldest_stuck = 0.f;     // #951
     for (LLTextureFetchWorker* w : all)
     {
         if (!w->mWorkMutex.trylock())
@@ -3677,25 +3697,56 @@ void LLTextureFetch::sweepWorkers()
         const bool finished = have_work && w->getFlags(LLWorkerClass::WCF_WORK_FINISHED);
         const bool idle = !have_work;
         const bool other_type = w->mFTType != FTT_DEFAULT;
+        const U8 net_why = w->mNetWhy;                                  // #951
+        const bool gov_waiting = w->mGovWaiting;
+        const bool oom_backoff = w->mDecodeOOMRetryAt > 0.0;
         w->mWorkMutex.unlock();
 
+        S32 stage = -1;     // #951: EStage of a worker with work in progress
         if (idle) ++st.mIdle;
-        else if (finished) ++st.mUncollected;
+        else if (finished) { ++st.mUncollected; stage = STAGE_UNCOLLECTED; }
         else switch (state)
         {
             case LLTextureFetchWorker::INIT:
             case LLTextureFetchWorker::LOAD_FROM_TEXTURE_CACHE:
-            case LLTextureFetchWorker::CACHE_POST:              ++st.mCache; break;
+            case LLTextureFetchWorker::CACHE_POST:              ++st.mCache; stage = STAGE_CACHE; break;
             case LLTextureFetchWorker::LOAD_FROM_NETWORK:
+                ++st.mNetWait; ++st.mLoadNet; stage = STAGE_NET;
+                ++st.mNetWhy[net_why < NET_WHY_COUNT ? net_why : NET_WHY_NONE];
+                break;
             case LLTextureFetchWorker::WAIT_HTTP_RESOURCE:
-            case LLTextureFetchWorker::WAIT_HTTP_RESOURCE2:     ++st.mNetWait; break;
+            case LLTextureFetchWorker::WAIT_HTTP_RESOURCE2:     ++st.mNetWait; ++st.mWaitRes; stage = STAGE_NET; break;
             case LLTextureFetchWorker::SEND_HTTP_REQ:
-            case LLTextureFetchWorker::WAIT_HTTP_REQ:           ++st.mInFlight; break;
+            case LLTextureFetchWorker::WAIT_HTTP_REQ:           ++st.mInFlight; stage = STAGE_HTTP; break;
             case LLTextureFetchWorker::DECODE_IMAGE:
-            case LLTextureFetchWorker::DECODE_IMAGE_UPDATE:     ++st.mDecode; break;
+                ++st.mDecode; stage = STAGE_DECODE;
+                if (oom_backoff) ++st.mDecodeOOM;
+                else if (gov_waiting) ++st.mDecodeGov;
+                break;
+            case LLTextureFetchWorker::DECODE_IMAGE_UPDATE:     ++st.mDecode; ++st.mDecodeRun; stage = STAGE_DECODE; break;
             case LLTextureFetchWorker::WRITE_TO_CACHE:
-            case LLTextureFetchWorker::WAIT_ON_WRITE:           ++st.mWrite; break;
+            case LLTextureFetchWorker::WAIT_ON_WRITE:           ++st.mWrite; stage = STAGE_WRITE; break;
             default:                                            ++st.mCache; break;     // DONE about to return
+        }
+        if (stage >= 0)
+        {
+            // #951: per-stage oldest age and the "in this state > 30 s" counts
+            const F32 age_s = (F32)llmax(age, 0.0);
+            if (age_s > 30.f)
+            {
+                ++st.mStuck[stage];
+                if (age_s > oldest_stuck)
+                {
+                    oldest_stuck = age_s;   // the oldest stuck worker over all stages
+                    st.mOldestId = w->mID;
+                    st.mOldestState = (S32)state;
+                }
+            }
+            st.mOldest[stage] = llmax(st.mOldest[stage], age_s);
+            if (state == LLTextureFetchWorker::LOAD_FROM_NETWORK && !finished)
+            {
+                st.mOldestLoadNet = llmax(st.mOldestLoadNet, age_s);
+            }
         }
 
         if ((idle || finished) && !http_active && !w->wasAborted())
@@ -3767,6 +3818,165 @@ void LLTextureFetch::sweepWorkers()
     // (mEvictedCap is the subset of both kinds deleted for the caps rather than age)
     st.mSweepMs = timer.getElapsedTimeF32() * 1000.f;
     mWorkerStats = st;
+    logPipelineState(now);  // #951
+}
+
+// static
+const char* LLTextureFetch::netWhyName(S32 why)
+{
+    switch (why)
+    {
+        case NET_WHY_RETRY_WAIT:    return "retry-wait";
+        case NET_WHY_NO_REGION:     return "no-region";
+        case NET_WHY_NO_URL:        return "no-url";
+        case NET_WHY_CAP_RETRY:     return "cap-wait";
+        case NET_WHY_NO_HTTP:       return "no-http";
+        default:                    return "unset";
+    }
+}
+
+// static
+const char* LLTextureFetch::stageName(S32 stage)
+{
+    switch (stage)
+    {
+        case STAGE_CACHE:       return "disk cache read";
+        case STAGE_NET:         return "network wait";
+        case STAGE_HTTP:        return "HTTP request";
+        case STAGE_DECODE:      return "decode";
+        case STAGE_WRITE:       return "disk cache write";
+        case STAGE_UNCOLLECTED: return "finished, not collected";
+        default:                return "?";
+    }
+}
+
+// #951 TEXTURE PIPELINE DIAGNOSTICS. Two textures-are-not-loading reports had nothing in
+// their logs that said WHERE the fetches stood: the worker breakdown sat past the bug
+// report's 600-character line clip, and "net-wait" lumped "no URL" together with "queued
+// for a send slot". From the ~1 Hz worker sweep, short lines (each well under the clip):
+//  - every 10 s while fetch workers have work (60 s otherwise): the workers by state, why
+//    LOAD_FROM_NETWORK ones are not sending, decode waits by cause; the oldest age per
+//    stage and how many have been in their state > 30 s; the I/O side (HTTP slots / send
+//    queue, decode admission, the J2C store: index ready, reads by outcome, writes);
+//  - a WARNING (at most every 30 s) when the pipeline is stalled: workers have work but
+//    none changed state for 30 s, or LOAD_FROM_NETWORK workers have found no URL for 30 s
+//    after login.
+// SLTexturePipelineLog (default on) turns the lines off. No PII: counts, ages, state names
+// and at most one texture id.
+// Threads: Tmain
+void LLTextureFetch::logPipelineState(F64 now)
+{
+    static LLCachedControl<bool> s_on(gSavedSettings, "SLTexturePipelineLog", true);
+    const WorkerStats& w = mWorkerStats;
+    const S32 active = w.mTotal - w.mIdle - w.mUncollected;     // (busy ones included: in doWork)
+    const U64 changes = mStateChanges.load(std::memory_order_relaxed);
+    if (mDiagLastChangeTime <= 0.0)
+    {
+        mDiagLastChangeTime = now;  // (first sweep: the epoch-based clock, not 0)
+    }
+    if (changes != mDiagLastChanges || active <= 0)
+    {
+        mDiagLastChanges = changes;
+        mDiagLastChangeTime = now;
+    }
+    if (w.mTotal > 0)
+    {
+        mDiagEverActive = true;
+    }
+    if (!s_on || !mDiagEverActive)
+    {
+        return;
+    }
+    const F32 since_change = (F32)(now - mDiagLastChangeTime);
+
+    if (now >= mDiagNextLog)
+    {
+        mDiagNextLog = now + (active > 0 ? 10.0 : 60.0);
+        LL_INFOS("TexPipe") << llformat("texture pipeline: workers %d (busy %d, idle %d, uncollected %d) | cache %d"
+                                        " | net lookup %d [retry-wait %d no-region %d no-url %d cap-wait %d no-http %d unset %d]"
+                                        " queued %d | http %d | decode %d (budget-wait %d oom-wait %d pool %d) | write %d",
+                                        w.mTotal, w.mBusy, w.mIdle, w.mUncollected, w.mCache,
+                                        w.mLoadNet, w.mNetWhy[NET_WHY_RETRY_WAIT], w.mNetWhy[NET_WHY_NO_REGION],
+                                        w.mNetWhy[NET_WHY_NO_URL], w.mNetWhy[NET_WHY_CAP_RETRY], w.mNetWhy[NET_WHY_NO_HTTP],
+                                        w.mNetWhy[NET_WHY_NONE], w.mWaitRes, w.mInFlight,
+                                        w.mDecode, w.mDecodeGov, w.mDecodeOOM, w.mDecodeRun, w.mWrite) << LL_ENDL;
+        LL_INFOS("TexPipe") << llformat("texture pipeline ages: oldest s cache %.0f net %.0f (lookup %.0f) http %.0f decode %.0f"
+                                        " write %.0f uncollected %.0f | >30 s: cache %d net %d http %d decode %d write %d"
+                                        " uncollected %d | last state change %.0f s ago",
+                                        w.mOldest[STAGE_CACHE], w.mOldest[STAGE_NET], w.mOldestLoadNet, w.mOldest[STAGE_HTTP],
+                                        w.mOldest[STAGE_DECODE], w.mOldest[STAGE_WRITE], w.mOldest[STAGE_UNCOLLECTED],
+                                        w.mStuck[STAGE_CACHE], w.mStuck[STAGE_NET], w.mStuck[STAGE_HTTP],
+                                        w.mStuck[STAGE_DECODE], w.mStuck[STAGE_WRITE], w.mStuck[STAGE_UNCOLLECTED],
+                                        since_change) << LL_ENDL;
+        FetchGateStats g;
+        getFetchGateStats(g);
+        const char* store = "none";
+        U64 rh = 0, rm = 0, re = 0, wq = 0, wr = 0, ws = 0;
+        S32 cache_reads = 0, cache_writes = 0;
+        if (mTextureCache)
+        {
+            const S32 ss = mTextureCache->getStoreState();
+            store = ss < 0 ? "legacy" : ss == 0 ? "INDEX LOADING" : ss == 1 ? "ready" : "locked or detached";
+            rh = mTextureCache->getStoreReadHits();
+            rm = mTextureCache->getStoreReadMisses();
+            re = mTextureCache->getStoreReadErrors();
+            wq = mTextureCache->getStoreWritesQueued();
+            wr = mTextureCache->getStoreWritesRefused();
+            ws = mTextureCache->getStoreWritesSkipped();
+            cache_reads = mTextureCache->getNumReads();
+            cache_writes = mTextureCache->getNumWrites();
+        }
+        LLImageDecodeThread* dec = LLAppViewer::getImageDecodeThread();
+        LL_INFOS("TexPipe") << llformat("texture pipeline io: http slots %d/%d aux %d, send queue %d (p95 %.1f s), sent %llu,"
+                                        " dropped unsent %llu | decode admission waiters %d, decode pool pending %d"
+                                        " | j2c store %s: reads hit %llu miss %llu error %llu, writes %llu refused %llu"
+                                        " skipped %llu, open reads %d writes %d",
+                                        g.mInFlight, g.mInFlightLimit, g.mInFlightAux, g.mQueued, g.mQueueAgeP95,
+                                        (unsigned long long)g.mSent, (unsigned long long)g.mDroppedUnsent, g.mGovWaiting,
+                                        dec ? (S32)dec->getPending() : -1, store,
+                                        (unsigned long long)rh, (unsigned long long)rm, (unsigned long long)re,
+                                        (unsigned long long)wq, (unsigned long long)wr, (unsigned long long)ws,
+                                        cache_reads, cache_writes) << LL_ENDL;
+    }
+
+    // Stalled: work but no state change at all for 30 s, or URL lookups failing for 30 s
+    // (after login: before it, no region is normal).
+    const bool no_progress = active > 0 && since_change >= 30.f;
+    const bool lookup_stuck = w.mLoadNet > 0 && w.mOldestLoadNet >= 30.f && gAgent.getRegion() != nullptr;
+    if ((no_progress || lookup_stuck) && now >= mDiagNextWarn)
+    {
+        mDiagNextWarn = now + 30.0;
+        // the stage holding the most workers stuck > 30 s
+        S32 stage = STAGE_NET;
+        S32 count = 0;
+        for (S32 k = 0; k < STAGE_COUNT; ++k)
+        {
+            if (w.mStuck[k] > count)
+            {
+                count = w.mStuck[k];
+                stage = k;
+            }
+        }
+        if (count == 0)
+        {
+            count = lookup_stuck ? w.mLoadNet : active;
+        }
+        S32 top_why = NET_WHY_NONE;
+        for (S32 k = 1; k < NET_WHY_COUNT; ++k)
+        {
+            if (w.mNetWhy[k] > w.mNetWhy[top_why]) top_why = k;
+        }
+        const char* oldest_state = (w.mOldestState >= 0 && w.mOldestState < (S32)LL_ARRAY_SIZE(e_state_name))
+                                 ? e_state_name[w.mOldestState] : "?";
+        LL_WARNS("TexPipe") << llformat("texture pipeline stalled: %d waiting in %s for >30 s (oldest %.0f s in %s, e.g. %s)"
+                                        "; net lookup %d (mostly %s, oldest %.0f s); last state change %.0f s ago;"
+                                        " http slots %d/%d, send queue %d, decode admission waiters %d",
+                                        count, stageName(stage), w.mOldest[stage], oldest_state,
+                                        w.mOldestId.asString().c_str(), w.mLoadNet, netWhyName(top_why), w.mOldestLoadNet,
+                                        since_change, (S32)mHttpSemaphore, (S32)mHttpHighWater,
+                                        getHttpWaitersCount(),
+                                        mGovWaitCount.load(std::memory_order_relaxed)) << LL_ENDL;
+    }
 }
 
 // called in the MAIN thread after the TextureCacheThread shuts down.
@@ -3865,6 +4075,8 @@ void LLTextureFetchWorker::setState(e_state new_state)
     mStateTimer.reset();
     mState = new_state;
     mStateSince = LLTimer::getTotalSeconds();   // #485 RAM (worker sweep)
+    mNetWhy = 0;                                // #951
+    mFetcher->noteStateChange();                // #951
 }
 
 LLViewerRegion* LLTextureFetchWorker::getRegion()

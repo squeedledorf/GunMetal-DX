@@ -25,6 +25,8 @@
 
 #include "gmdxregioncapture.h"
 
+#include <filesystem>
+
 #include "llagent.h"
 #include "llagentbenefits.h"
 #include "llagentcamera.h"
@@ -104,11 +106,11 @@ constexpr S64 kShareMaxBytes = 96 * 1024 * 1024;
 constexpr S32 kShareMinPx = 256, kShareMaxPx = 8192;
 
 // Windows that snapshot settings and write the snapshot back as saved values (Preferences'
-// Cancel / OK, the Advanced graphics window's close, saving a graphics preset): open during
+// Cancel / OK, with the advanced graphics tabs, saving a graphics preset): open during
 // a capture they would save its temporary values.
 const char* openGraphicsWindow()
 {
-    static const char* const kNames[] = { "preferences", "prefs_graphics_advanced", "performance", "save_pref_preset" };
+    static const char* const kNames[] = { "preferences", "performance", "save_pref_preset" };
     for (const char* n : kNames)
         if (LLFloaterReg::instanceVisible(n)) return n;
     return nullptr;
@@ -1382,6 +1384,112 @@ void GMDXRegionCapture::requestStop(const std::string& why)
 {
     GMDXRegionCaptureState& s = GMDXRegionCaptureState::get();
     if (isRunning() && s.stop_request.empty()) s.stop_request = why;
+}
+
+namespace
+{
+// The World Map's captured maps: 512 px textures (a region is rarely larger on the World Map),
+// by region handle, the least recently drawn dropped past kWorldMax.
+constexpr S32 kWorldPx = 512;
+constexpr size_t kWorldMax = 96;
+struct WorldTex { LLPointer<LLViewerTexture> tex; F32 width = 256.f; bool loading = false; F64 used = 0.0; };
+std::map<U64, WorldTex> sWorld;
+std::vector<U64> sWorldHandles;   // the regions with a map file, from the last scan
+std::string sWorldDir;
+F64 sWorldNextScan = 0.0;
+} // namespace
+
+void GMDXRegionCapture::forEachWorldMapTexture(const std::function<bool(U64)>& visible,
+                                               const std::function<void(U64, LLViewerTexture*, F32)>& draw)
+{
+    static LLCachedControl<bool> use(gSavedSettings, "GMDXWorldMapUseCapturedMaps", true);
+    if (!use)
+    {
+        sWorld.clear();
+        return;
+    }
+    const F64 now = LLFrameTimer::getElapsedSeconds();
+    const std::string dir = GMDXRegionCaptureState::mapDir();
+    if (now >= sWorldNextScan || dir != sWorldDir)   // (a capture, an import or a delete shows within seconds)
+    {
+        sWorldNextScan = now + 5.0;
+        if (dir != sWorldDir) sWorld.clear();   // (another grid)
+        sWorldDir = dir;
+        sWorldHandles.clear();
+        std::error_code ec;
+        for (const std::filesystem::directory_entry& e : std::filesystem::directory_iterator(std::filesystem::u8path(dir), ec))
+        {
+            const auto u8 = e.path().filename().u8string();
+            const std::string name(u8.begin(), u8.end());
+            U32 x = 0, y = 0;
+            char ext[8] = {};
+            if (sscanf(name.c_str(), "%u_%u.%7s", &x, &y, ext) == 3 && (!strcmp(ext, "j2c") || !strcmp(ext, "png")))
+            {
+                const U64 h = to_region_handle(x, y);
+                if (std::find(sWorldHandles.begin(), sWorldHandles.end(), h) == sWorldHandles.end()) sWorldHandles.push_back(h);
+            }
+        }
+        for (auto it = sWorld.begin(); it != sWorld.end(); )   // (deleted maps)
+            it = std::find(sWorldHandles.begin(), sWorldHandles.end(), it->first) == sWorldHandles.end() ? sWorld.erase(it) : std::next(it);
+    }
+    for (const U64 h : sWorldHandles)
+    {
+        if (!visible(h)) continue;   // (only what is on screen is loaded and kept)
+        WorldTex& w = sWorld[h];
+        w.used = now;
+        if (w.tex.notNull())
+        {
+            draw(h, w.tex.get(), w.width);
+            continue;
+        }
+        if (w.loading) continue;
+        w.loading = true;
+        const std::string path = GMDXRegionCaptureState::mapFile(h);
+        const std::string meta_path = GMDXRegionCaptureState::mapPath(h, "json");
+        struct Loaded { LLPointer<LLImageRaw> raw; F32 width = 256.f; };
+        auto load = [path, meta_path]() -> Loaded
+        {
+            Loaded out;
+            try { out.raw = GMDXRegionCaptureState::loadPng(path); }
+            catch (...) { return Loaded(); }
+            if (out.raw.notNull() && out.raw->getWidth() > kWorldPx) out.raw->scale(kWorldPx, kWorldPx);
+            std::string json;   // (a var-region's width: the World Map's own tiles are all 256 m)
+            if (GMDXRegionCaptureState::readFile(meta_path, json))
+            {
+                try
+                {
+                    const LLSD meta = LlsdFromJson(boost::json::parse(json));
+                    if (meta.has("region_width")) out.width = llclamp((F32)meta["region_width"].asReal(), 16.f, 8192.f);
+                }
+                catch (...) {}
+            }
+            return out;
+        };
+        auto done = [h, dir](Loaded loaded)
+        {
+            LLPointer<LLImageRaw> raw = loaded.raw;
+            if (LLApp::isExiting() || dir != sWorldDir) return;
+            auto it = sWorld.find(h);
+            if (it == sWorld.end()) return;   // (dropped meanwhile)
+            if (raw.isNull())
+            {
+                sWorld.erase(it);   // unreadable: tried again at the next scan
+                return;
+            }
+            it->second.tex = GMDXRegionCaptureState::minimapTexture(raw, 0.f);
+            it->second.width = loaded.width;
+        };
+        LL::WorkQueue::ptr_t main_queue = LL::WorkQueue::getInstance("mainloop");
+        LL::WorkQueue::ptr_t general = LL::WorkQueue::getInstance("General");
+        if (!(main_queue && general && main_queue->postTo(general, load, done))) done(load());
+    }
+    // the least recently drawn textures go past the cap
+    while (sWorld.size() > kWorldMax)
+    {
+        auto oldest = sWorld.begin();
+        for (auto it = sWorld.begin(); it != sWorld.end(); ++it) if (it->second.used < oldest->second.used) oldest = it;
+        sWorld.erase(oldest);
+    }
 }
 
 LLViewerTexture* GMDXRegionCapture::getMinimapTexture(const LLViewerRegion* region)

@@ -33,6 +33,7 @@
     bg_writeable_color="GMDXChatBarBackground"
     bg_focus_color="GMDXChatBarBackground"
     text_color="GMDXChatBarText"
+    text_tentative_color="GMDXChatBarLabel"
     cursor_color="GMDXChatBarCursor"
     spellcheck="true" />
    <menu_button

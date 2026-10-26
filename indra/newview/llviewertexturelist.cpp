@@ -57,6 +57,7 @@
 #include "pipeline.h"
 #include "llappviewer.h"
 #include "llxuiparser.h"
+#include "lluicolortable.h"
 #include "lltracerecording.h"
 #include "llviewerdisplay.h"
 #include "llviewerwindow.h"
@@ -1546,6 +1547,106 @@ void LLUIImageList::cleanUp()
 {
     mUIImages.clear();
     mUITextureList.clear() ;
+    mVectorDocs.clear();
+    LLUIImage::cleanUpVectorRasters();
+}
+
+LLPointer<LLImageRaw> LLUIImageList::rasterizeVectorLayer(const std::string& vector_file, const LLColor4U& base_color,
+                                                          const std::string& color_name, const F32 box[4],
+                                                          S32 pixel_w, S32 pixel_h)
+{
+    LL_PROFILE_ZONE_SCOPED_CATEGORY_TEXTURE;
+    auto doc_it = mVectorDocs.find(vector_file);
+    if (doc_it == mVectorDocs.end())
+    {
+        // First use of this icon: read + parse the SVG once; every pixel size reuses it.
+        LLPointer<LLImageSVG> doc;
+        const std::string path = gDirUtilp->findSkinnedFilename("textures", vector_file);
+        if (path.empty())
+        {
+            LL_WARNS() << "Vector icon not found: " << vector_file << LL_ENDL;
+        }
+        else
+        {
+            llifstream in(path.c_str(), std::ios::binary);
+            if (in.is_open())
+            {
+                const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+                doc = LLImageSVG::parse(text);
+            }
+            if (doc.isNull())
+            {
+                LL_WARNS() << "Could not read vector icon " << path << LL_ENDL;
+            }
+        }
+        doc_it = mVectorDocs.emplace(vector_file, doc).first;   // null kept: failure is not retried per frame
+    }
+    if (doc_it->second.isNull())
+    {
+        return nullptr;
+    }
+
+    LLColor4U color = base_color;
+    if (!color_name.empty())
+    {
+        // named skin colour (colors.xml); its own alpha multiplies the baked opacity
+        const LLColor4 named = LLUIColorTable::instance().getColor(color_name, LLColor4(base_color)).get();
+        color.mV[VRED] = (U8)ll_round(llclamp(named.mV[VRED], 0.f, 1.f) * 255.f);
+        color.mV[VGREEN] = (U8)ll_round(llclamp(named.mV[VGREEN], 0.f, 1.f) * 255.f);
+        color.mV[VBLUE] = (U8)ll_round(llclamp(named.mV[VBLUE], 0.f, 1.f) * 255.f);
+        color.mV[VALPHA] = (U8)ll_round(base_color.mV[VALPHA] * llclamp(named.mV[VALPHA], 0.f, 1.f));
+    }
+    return doc_it->second->rasterize(pixel_w, pixel_h, color, box);
+}
+
+LLPointer<LLTexture> LLUIImageList::rasterizeVector(const LLUIImage::VectorSpec& spec, S32 pixel_w, S32 pixel_h)
+{
+    LL_PROFILE_ZONE_SCOPED_CATEGORY_TEXTURE;
+    LLPointer<LLImageRaw> raw = rasterizeVectorLayer(spec.mFile, spec.mColor, spec.mColorName, spec.mBox, pixel_w, pixel_h);
+    if (raw.isNull())
+    {
+        return nullptr;
+    }
+    // extra layers (frame / fill / mark of a checkbox, tile + arrow of a scroll button): the same
+    // size, composited source-over onto the first
+    for (const LLUIImage::VectorLayer& layer : spec.mExtra)
+    {
+        LLPointer<LLImageRaw> top = rasterizeVectorLayer(layer.mFile, layer.mColor, layer.mColorName, layer.mBox, pixel_w, pixel_h);
+        if (top.isNull() || top->getDataSize() != raw->getDataSize())
+        {
+            continue;
+        }
+        U8* dst = raw->getData();
+        const U8* src = top->getData();
+        const U32 count = (U32)pixel_w * (U32)pixel_h;
+        for (U32 i = 0; i < count; ++i, dst += 4, src += 4)
+        {
+            const U32 sa = src[3];
+            if (sa == 0)
+            {
+                continue;
+            }
+            const U32 da = dst[3];
+            const U32 oa = sa * 255 + da * (255 - sa);   // alpha x 255
+            if (oa == 0)
+            {
+                continue;
+            }
+            for (S32 c = 0; c < 3; ++c)
+            {
+                dst[c] = (U8)((src[c] * sa * 255 + dst[c] * da * (255 - sa)) / oa);
+            }
+            dst[3] = (U8)((oa + 127) / 255);
+        }
+    }
+    LLPointer<LLViewerTexture> tex = LLViewerTextureManager::getLocalTexture(raw.get(), false);
+    if (tex.isNull())
+    {
+        return nullptr;
+    }
+    tex->setBoostLevel(LLGLTexture::BOOST_UI);   // counted with the other skin sprites
+    tex->setAddressMode(LLTexUnit::TAM_CLAMP);
+    return tex;
 }
 
 LLUIImagePtr LLUIImageList::getUIImageByID(const LLUUID& image_id, S32 priority)
@@ -1738,6 +1839,22 @@ struct UIImageDeclaration : public LLInitParam::Block<UIImageDeclaration>
 {
     Mandatory<std::string>      name;
     Optional<std::string>       file_name;
+    // #1056: SVG next to the bitmap (textures dir relative), drawn instead of it unless
+    // "classic icons" is on. vector_color is "#RRGGBB" / "#RRGGBBAA" (tint, peak opacity;
+    // default opaque white) or the name of a colors.xml entry ("IconColor", "IconColor@66" with a
+    // hex peak opacity); vector_box is "left,top,right,bottom" fractions of the icon
+    // rectangle (origin top-left) the glyph's ink is fitted into (default: all of it).
+    // On an entry with scale.* / clip.* the vector ignores them.
+    Optional<std::string>       vector_file;
+    Optional<std::string>       vector_color;
+    Optional<std::string>       vector_box;
+    // further layers drawn over the first at the same size (same meaning as vector_*)
+    Optional<std::string>       vector_file2;
+    Optional<std::string>       vector_color2;
+    Optional<std::string>       vector_box2;
+    Optional<std::string>       vector_file3;
+    Optional<std::string>       vector_color3;
+    Optional<std::string>       vector_box3;
     Optional<bool>              preload;
     Optional<LLRect>            scale;
     Optional<LLRect>            clip;
@@ -1747,6 +1864,15 @@ struct UIImageDeclaration : public LLInitParam::Block<UIImageDeclaration>
     UIImageDeclaration()
     :   name("name"),
         file_name("file_name"),
+        vector_file("vector_file"),
+        vector_color("vector_color"),
+        vector_box("vector_box"),
+        vector_file2("vector_file2"),
+        vector_color2("vector_color2"),
+        vector_box2("vector_box2"),
+        vector_file3("vector_file3"),
+        vector_color3("vector_color3"),
+        vector_box3("vector_box3"),
         preload("preload", false),
         scale("scale"),
         clip("clip"),
@@ -1766,9 +1892,74 @@ struct UIImageDeclarations : public LLInitParam::Block<UIImageDeclarations>
     {}
 };
 
+namespace
+{
+    // "#RRGGBB" / "#RRGGBBAA" (the # is optional); anything else (or unset) is opaque white.
+    // A colour-table name ("IconColor", optionally "IconColor@AA" with AA a hex peak opacity)
+    // is reported through `name`; the returned colour is then white with that opacity.
+    LLColor4U parse_vector_color(const std::string& text, std::string& name)
+    {
+        name.clear();
+        if (!text.empty() && text[0] != '#' && text.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos)
+        {
+            U32 alpha = 255;
+            const size_t at = text.find('@');
+            name = text.substr(0, at);
+            if (at != std::string::npos)
+            {
+                alpha = (U32)strtoul(text.c_str() + at + 1, nullptr, 16) & 0xFF;
+            }
+            return LLColor4U(255, 255, 255, (U8)alpha);
+        }
+        std::string hex = text;
+        if (!hex.empty() && hex[0] == '#')
+        {
+            hex.erase(0, 1);
+        }
+        if ((hex.size() == 6 || hex.size() == 8) && hex.find_first_not_of("0123456789abcdefABCDEF") == std::string::npos)
+        {
+            const U32 value = (U32)strtoul(hex.c_str(), nullptr, 16);
+            const U32 rgb = (hex.size() == 8) ? (value >> 8) : value;
+            const U32 alpha = (hex.size() == 8) ? (value & 0xFF) : 255;
+            return LLColor4U((U8)((rgb >> 16) & 0xFF), (U8)((rgb >> 8) & 0xFF), (U8)(rgb & 0xFF), (U8)alpha);
+        }
+        return LLColor4U(255, 255, 255, 255);
+    }
+
+    // "left,top,right,bottom" -> box[4]; leaves box untouched unless four sane numbers parse.
+    void parse_vector_box(const std::string& text, F32 box[4])
+    {
+        F32 v[4];
+        if (sscanf(text.c_str(), "%f,%f,%f,%f", &v[0], &v[1], &v[2], &v[3]) == 4
+            && v[2] > v[0] && v[3] > v[1] && v[0] >= 0.f && v[1] >= 0.f && v[2] <= 1.f && v[3] <= 1.f)
+        {
+            for (S32 i = 0; i < 4; ++i)
+            {
+                box[i] = v[i];
+            }
+        }
+    }
+}
+
 bool LLUIImageList::initFromFile()
 {
     LL_PROFILE_ZONE_SCOPED_CATEGORY_TEXTURE;
+
+    // #1056: vector icons draw through this unless "classic icons" is on. The switch is read at
+    // draw time, so flipping it is live: nothing to reload, the next frame just draws the other.
+    LLUIImage::setVectorRasterizer([](const LLUIImage::VectorSpec& spec, S32 w, S32 h)
+    {
+        return LLUIImageList::getInstance()->rasterizeVector(spec, w, h);
+    });
+    LLUIImage::setClassicIcons(gSavedSettings.getBOOL("SLClassicIcons"));
+    if (LLControlVariable* classic_icons = gSavedSettings.getControl("SLClassicIcons"))
+    {
+        classic_icons->getSignal()->connect([](LLControlVariable*, const LLSD& value, const LLSD&)
+        {
+            LLUIImage::setClassicIcons(value.asBoolean());
+        });
+    }
+
     // Look for textures.xml in all the right places. Pass
     // constraint=LLDir::ALL_SKINS because we want to overlay textures.xml
     // from all the skins directories.
@@ -1840,7 +2031,34 @@ bool LLUIImageList::initFromFile()
             {
                 continue;
             }
-            preloadUIImage(image.name, file_name, image.use_mips, image.scale, image.clip, image.scale_type);
+            LLUIImagePtr ui_image = preloadUIImage(image.name, file_name, image.use_mips, image.scale, image.clip, image.scale_type);
+
+            // #1056: vector source. Only entries that are icons carry one (widget backgrounds
+            // never get a vector_file); an icon that still has scale.* / clip.* from the old
+            // artwork draws its raster whole, at the logical size, ignoring them.
+            if (ui_image.notNull() && image.vector_file.isProvided() && !image.vector_file().empty())
+            {
+                LLUIImage::VectorSpec spec;
+                spec.mFile = image.vector_file();
+                spec.mColor = parse_vector_color(image.vector_color(), spec.mColorName);
+                parse_vector_box(image.vector_box(), spec.mBox);
+                const std::string* extra_files[2] = { &image.vector_file2(), &image.vector_file3() };
+                const std::string* extra_colors[2] = { &image.vector_color2(), &image.vector_color3() };
+                const std::string* extra_boxes[2] = { &image.vector_box2(), &image.vector_box3() };
+                for (S32 i = 0; i < 2; ++i)
+                {
+                    if (extra_files[i]->empty())
+                    {
+                        continue;
+                    }
+                    LLUIImage::VectorLayer layer;
+                    layer.mFile = *extra_files[i];
+                    layer.mColor = parse_vector_color(*extra_colors[i], layer.mColorName);
+                    parse_vector_box(*extra_boxes[i], layer.mBox);
+                    spec.mExtra.push_back(layer);
+                }
+                ui_image->setVectorSource(spec);
+            }
         }
 
         if (!gSavedSettings.getBOOL("NoPreload"))

@@ -97,6 +97,20 @@ LLHUDText::LLHUDText(const U8 type) :
     sTextObjects.insert(ptr);
 }
 
+// #1026: object hover text fades between PrimTextFadeDistance and that plus PrimTextFadeRange
+// (8 m + 4 m by default); text whose owner chose its own fade (setFadeDistance) keeps it.
+void LLHUDText::updateFadeFromSettings()
+{
+    if (!mFadeFromSettings)
+    {
+        return;
+    }
+    static LLCachedControl<F32> fade_dist(gSavedSettings, "PrimTextFadeDistance", 8.f);
+    static LLCachedControl<F32> fade_range(gSavedSettings, "PrimTextFadeRange", 4.f);
+    mFadeDistance = llmax(0.f, (F32)fade_dist);
+    mFadeRange = llmax(0.1f, (F32)fade_range);
+}
+
 LLHUDText::~LLHUDText()
 {
 }
@@ -432,6 +446,7 @@ void LLHUDText::updateVisibility()
 
     mLastDistance = (mPositionAgent - LLViewerCamera::getInstance()->getOrigin()).magVec();
 
+    updateFadeFromSettings();
     if (!mTextSegments.size() || (mDoFade && (mLastDistance > mFadeDistance + mFadeRange)))
     {
         mVisible = false;
@@ -452,6 +467,14 @@ void LLHUDText::updateVisibility()
     {
         max_draw_distance = MAX_DRAW_DISTANCE;
         gSavedSettings.setF32("PrimTextMaxDrawDistance", MAX_DRAW_DISTANCE);
+    }
+
+    // #1026: with the fade coming from the settings, never cut the text off before
+    // its fade has finished, so the hover text sliders do what they say (still
+    // capped at MAX_DRAW_DISTANCE).
+    if (mFadeFromSettings)
+    {
+        max_draw_distance = llmax(max_draw_distance, llmin(mFadeDistance + mFadeRange, MAX_DRAW_DISTANCE));
     }
 
     if(last_distance_center > max_draw_distance)

@@ -527,12 +527,13 @@ void LLFloaterPerformance::detachObject(const LLUUID& obj_id)
 
 void LLFloaterPerformance::onClickAdvanced()
 {
-    LLFloaterPreference* instance = LLFloaterReg::getTypedInstance<LLFloaterPreference>("preferences");
-    if (instance)
+    // <GMDX> The advanced graphics settings are tabs of Preferences > Graphics. Opening
+    // Preferences snapshots the settings for its Cancel (onOpen), as saveSettings() did here.
+    if (LLFloaterPreference* instance = LLFloaterReg::showTypedInstance<LLFloaterPreference>("preferences"))
     {
-        instance->saveSettings();
+        instance->onClickAdvanced();
     }
-    LLFloaterReg::showInstance("prefs_graphics_advanced");
+    // </GMDX>
 }
 
 void LLFloaterPerformance::onClickDefaults()

@@ -664,6 +664,16 @@ VkDeviceSize LLCleanRTVK::ommPlanFrame(const float lod_cam[3], float radius, VkD
     const uint32_t slot_n = std::min<uint32_t>((uint32_t)(R.mCpuSlots.size() / kSlotBytesO), (uint32_t)mSlot.size());
     const uint32_t maxL = ommMaxLevelSetting(mCtx->ommMaxLevel4State());
     const float r2 = radius;
+    bool maskOpaqueOn = true;   // (#1032, RenderVKRTMaskOpaque: pass A dbg_on bit 4)
+    bool blendOmmOn = false;    // (#1032, RenderVKRTOmmBlend: transparent-only micromaps on alpha-blend)
+#if defined(LL_HAS_CLEAN_PIPELINE)
+    {
+        static LLCachedControl<bool> s_mask_opaque(gSavedSettings, "RenderVKRTMaskOpaque", true);
+        static LLCachedControl<bool> s_blend(gSavedSettings, "RenderVKRTOmmBlend", false);
+        maskOpaqueOn = s_mask_opaque;
+        blendOmmOn = s_blend;
+    }
+#endif
 
     uint32_t dbgRowBits = 0;
 #if defined(LL_HAS_CLEAN_PIPELINE)
@@ -705,10 +715,12 @@ VkDeviceSize LLCleanRTVK::ommPlanFrame(const float lod_cam[3], float radius, VkD
         const uint32_t gid = rdU(I + 176);
         const uint32_t mid = rdU(I + 180);
         // Static / worn-rigid alpha-MASK instances whose UVs are a fixed affine map of the
-        // vertex UVs (no planar texgen, no texture animation). Rigged, blend, terrain,
-        // water, HUD and exclusion surfaces keep the plain path.
-        const bool cand = (f & 4u) && !(f & (1u | 2u | 8u | 32u | 64u | 1024u | 2048u | 65536u))
-                       && gid < grp_n && mid < mat_n;
+        // vertex UVs (no planar texgen, no texture animation). Rigged, terrain, water, HUD and
+        // exclusion surfaces keep the plain path; ALPHA-BLEND ones too unless
+        // RenderVKRTOmmBlend (#1032: a transparent-only micromap, see clean_rt_omm_bake.comp).
+        const bool mask_cand = (f & 4u) && !(f & (1u | 2u | 8u | 32u | 64u | 1024u | 2048u | 65536u));
+        const bool blend_cand = blendOmmOn && (f & 2u) && !(f & (1u | 4u | 8u | 32u | 64u | 1024u | 2048u | 65536u));
+        const bool cand = (mask_cand || blend_cand) && gid < grp_n && mid < mat_n;
         if (cand)
         {
             const uint8_t* M = mats + (size_t)mid * kMatBytes;
@@ -720,13 +732,28 @@ VkDeviceSize LLCleanRTVK::ommPlanFrame(const float lod_cam[3], float radius, VkD
             const float dx = tx - lod_cam[0], dy = ty - lod_cam[1], dz = tz - lod_cam[2];
             const float reach = r2 + std::max(rdF(I + 76), 0.f);
             const bool in_reach = r2 <= 0.f || dx * dx + dy * dy + dz * dz <= reach * reach;
-            if ((mflags & 1u) && cutoff >= 0.f && in_reach && tex < R.mTextures.size()
+            // (#1032) a known-opaque instance (clean_rt_instances.comp maskKnownOpaque: its alpha
+            // test always passes) is traced FORCE_OPAQUE on the plain BLAS -- a micromap would be
+            // all opaque, pure cost. Same rule on the CPU copies (the texture bits are the last
+            // frame's: a miss here only builds an entry pass A then ignores).
+            const bool tex_no_alpha = tex < (uint32_t)mTexOpaqueCpu.size() * 32u
+                                   && ((mTexOpaqueCpu[tex >> 5] >> (tex & 31u)) & 1u) != 0u;
+            const bool known_opaque = mask_cand && maskOpaqueOn
+                && (cutoff <= 0.f || (rdF(M + 44) * rdF(I + 108) >= cutoff && tex_no_alpha));
+            // (#1032) BLEND: only a true translucent material (no cutoff -- a blend-bucket face whose
+            // material has one is a binary caster in the consumers, with the #735 facing rule the
+            // hardware would bypass) whose base map may hold transparent texels (an alpha-less one
+            // has none to cull).
+            const bool mode_ok = mask_cand ? (cutoff >= 0.f && !known_opaque) : (cutoff < 0.f && !tex_no_alpha);
+            if ((mflags & 1u) && mode_ok && in_reach && tex < R.mTextures.size()
                 && R.mTextures[tex].extent.width >= 32 && R.mTextures[tex].extent.height >= 32)
             {
                 OmmKey key;
                 key.mat = mid; key.tex = tex;
                 key.texVer = tex < R.mTexContentVer.size() ? R.mTexContentVer[tex] : 0u;   // (#614: not bumped by a pool move)
-                key.tintA = rdU(I + 108);
+                // (#1032) a blend entry's bake ignores the face alpha (transparent = texel alpha 0):
+                // every tint of one (slot, material, UV) shares it -- alpha fades don't mint entries.
+                key.tintA = blend_cand ? 0u : rdU(I + 108);
                 key.uv[0] = rdF(I + 112); key.uv[1] = rdF(I + 116);   // uv_matrix col 0 .xy
                 key.uv[2] = rdF(I + 128); key.uv[3] = rdF(I + 132);   // col 1 .xy
                 key.uv[4] = rdF(I + 160); key.uv[5] = rdF(I + 164);   // col 3 .xy (translation)

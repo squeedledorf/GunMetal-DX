@@ -3452,6 +3452,27 @@ bool LLViewerMediaImpl::isPlayable() const
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////
+// #885: antivirus (Windows Defender) can silently block the plugin host
+// (SLPlugin.exe). Notify once per session per plugin type, not on every event.
+static bool shouldNotifyMediaPluginFailure(const std::string& plugin_type)
+{
+    static std::set<std::string> notified;
+    return notified.insert(plugin_type).second;
+}
+
+static std::string mediaPluginSecurityHint()
+{
+    const std::string launcher = gDirUtilp->getLLPluginLauncher();
+#if LL_WINDOWS
+    const std::string install_dir = gDirUtilp->getExecutableDir();
+    return "\nThis is often caused by antivirus software such as Windows Defender blocking the media plugin host. "
+           "Try adding an exclusion for the viewer install folder (" + install_dir + ") and the plugin program (" + launcher
+           + "), then restart the viewer.\n";
+#else
+    return "\nSecurity software on your system may be blocking the media plugin host (" + launcher + ").\n";
+#endif
+}
+
 void LLViewerMediaImpl::handleMediaEvent(LLPluginClassMedia* plugin, LLPluginClassMediaOwner::EMediaEvent event)
 {
     bool pass_through = true;
@@ -3488,7 +3509,11 @@ void LLViewerMediaImpl::handleMediaEvent(LLPluginClassMedia* plugin, LLPluginCla
             args["REASON"] = load_error.empty() ? std::string() : ("Reason: " + load_error + "\n");
             LL_WARNS("Media") << "media plugin " << args["PLUGIN"].asString() << " failed to launch"
                               << (load_error.empty() ? std::string() : ": " + load_error) << LL_ENDL;
-            LLNotificationsUtil::add("MediaPluginFailed", args);
+            if (shouldNotifyMediaPluginFailure(args["PLUGIN"].asString()))
+            {
+                args["SECURITY_HINT"] = mediaPluginSecurityHint();
+                LLNotificationsUtil::add("MediaPluginFailed", args);
+            }
         }
         break;
 
@@ -3502,8 +3527,16 @@ void LLViewerMediaImpl::handleMediaEvent(LLPluginClassMedia* plugin, LLPluginCla
 
             LLSD args;
             args["PLUGIN"] = LLMIMETypes::implType(mCurrentMimeType);
-            // SJB: This is getting called every frame if the plugin fails to load, continuously respawining the alert!
-            //LLNotificationsUtil::add("MediaPluginFailed", args);
+            // #885: the host process died unexpectedly (STATE_ERROR is never
+            // reached on an intentional shutdown). Tell the user once per
+            // session per plugin type (the old per-event alert respawned
+            // every frame, hence the once-only gate).
+            LL_WARNS("Media") << "media plugin " << args["PLUGIN"].asString() << " stopped unexpectedly" << LL_ENDL;
+            if (shouldNotifyMediaPluginFailure(args["PLUGIN"].asString()))
+            {
+                args["SECURITY_HINT"] = mediaPluginSecurityHint();
+                LLNotificationsUtil::add("MediaPluginDied", args);
+            }
         }
         break;
 

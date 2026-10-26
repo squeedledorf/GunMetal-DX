@@ -38,6 +38,7 @@
 #include "vk_device.h"
 #include "vk_descpool.h"
 #include "vk_pipeline.h"   // PipelineJobSlot
+#include "gmdxcloudshapesvk.h"   // <GMDX>
 
 #include <cstdint>
 
@@ -122,8 +123,9 @@ public:
         float inv_vp[16], reproj[16];
         float dims[4], pat[4], temporal[4];
         float flash[4];   // #783 M2: xyz unit direction to a lightning strike, w its sky radiance (0 = none)
+        float gmdx[8];    // <GMDX> gmdx_cloud_common.glsl vc.gmdx / vc.gmdx2
     };
-    static_assert(sizeof(Params) == 320, "Params = clean_vol_cloud_ubo.glsl VolCloudParams (std140)");
+    static_assert(sizeof(Params) == 352, "Params = gmdx_cloud_common.glsl VolCloudParams (std140)");   // <GMDX> (upstream's 320 + gmdx)
 
 private:
     bool ensurePipelines();
@@ -142,6 +144,7 @@ private:
     // (write), 11 shadow map, 12 panorama. mNoiseDsl: 0 the noise volume (storage). mWxDsl
     // (set 2 after draw sets 0 / 1): 0 the weather map (storage). mCompDsl (fragment): 0 params,
     // 1 depth, 2 A, 3 B.
+    GMDXCloudShapesVK mShapes;   // <GMDX> the sculpted cloud bodies (mDsl binding 13)
     VkDescriptorSetLayout mDsl = VK_NULL_HANDLE, mNoiseDsl = VK_NULL_HANDLE;
     VkDescriptorSetLayout mWxDsl = VK_NULL_HANDLE, mCompDsl = VK_NULL_HANDLE;
     VkDescPool       mPool;
@@ -184,6 +187,11 @@ private:
     // Shadow map latch: centre, light, scroll at the refresh; frames since.
     double    mShCentre[2] = {}, mShScroll[2] = {};
     float     mShLight[3] = {};
+    double    mShOrigin[2] = {};   // <GMDX> the agent frame's global origin at the refresh
+    // <GMDX> GMDXCloudWindSpeed: the extra drift (m) on top of the EEP scroll, its last scroll
+    // reading, and the drift at the shadow map's refresh.
+    double    mWindExtra[2] = {}, mWindPrevPd[2] = {}, mShWind[2] = {};
+    bool      mWindPrimed = false;
     uint32_t  mShAge = ~0u;
     bool      mShValid = false;
     // Panorama: next band, rows written since creation (valid once a full pass is in).

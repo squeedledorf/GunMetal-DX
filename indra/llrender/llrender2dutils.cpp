@@ -493,6 +493,47 @@ void gl_draw_scaled_image(S32 x, S32 y, S32 width, S32 height, LLTexture* image,
     gl_draw_scaled_rotated_image( x, y, width, height, 0.f, image, color, uv_rect );
 }
 
+void gl_draw_pixel_snapped_image(S32 x, S32 y, S32 width, S32 height, LLTexture* image, const LLColor4& color, bool solid_color)
+{
+    if (!image)
+    {
+        return;
+    }
+    if (solid_color)
+    {
+        gGL.flush();   // solid-colour batch boundary
+    }
+    gGL.getTexUnit(0)->bind(image, true);
+    gGL.color4fv(color.mV);
+
+    constexpr S32 NUM_VERTICES = 2 * 3;
+    static LLVector2 uv[NUM_VERTICES + 1];
+    static LLVector4a pos[NUM_VERTICES + 1];
+
+    const LLVector3 ui_scale = gGL.getUIScale();
+    LLVector3 origin = gGL.getUITranslation();
+    origin.mV[VX] += x;
+    origin.mV[VY] += y;
+    origin.scaleVec(ui_scale);
+    const F32 left = (F32)ll_round(origin.mV[VX]);
+    const F32 bottom = (F32)ll_round(origin.mV[VY]);
+    const F32 right = left + (F32)ll_round(width * ui_scale.mV[VX]);
+    const F32 top = bottom + (F32)ll_round(height * ui_scale.mV[VY]);
+
+    gGL.begin(LLRender::TRIANGLES);
+    {
+        S32 index = 0;
+        uv[index].set(1.f, 1.f);  pos[index].set(right, top, 0.f);   index++;
+        uv[index].set(0.f, 1.f);  pos[index].set(left, top, 0.f);    index++;
+        uv[index].set(0.f, 0.f);  pos[index].set(left, bottom, 0.f); index++;
+        uv[index].set(1.f, 1.f);  pos[index].set(right, top, 0.f);   index++;
+        uv[index].set(0.f, 0.f);  pos[index].set(left, bottom, 0.f); index++;
+        uv[index].set(1.f, 0.f);  pos[index].set(right, bottom, 0.f); index++;
+        gGL.vertexBatchPreTransformed(pos, uv, NUM_VERTICES);
+    }
+    gGL.end();
+}
+
 void gl_draw_scaled_image_with_border(S32 x, S32 y, S32 border_width, S32 border_height, S32 width, S32 height, LLTexture* image, const LLColor4& color, bool solid_color, const LLRectf& uv_rect, bool scale_inner)
 {
     if (NULL == image)

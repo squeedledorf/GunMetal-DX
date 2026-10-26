@@ -13,6 +13,7 @@
 //                 (clean_translucent.glsl), so smoke throws a partial, tinted shadow.
 // Inputs match clean_particle.vert.
 #include "clean_translucent.glsl"
+#include "clean_alpha_rule.glsl"   // (#1044: THE alpha-test rule's thresholds)
 layout(location = 0) flat in uint v_tex;   // bindless index (0xFFFFFFFF = not resident)
 layout(location = 1)      in vec2 v_uv;
 layout(location = 3) flat in vec4 v_tint;  // sRGB colour x alpha
@@ -36,11 +37,11 @@ void main()
     // the particle FS does.
     const vec4 c = texture(uTextures[nonuniformEXT(v_tex)], v_uv) * v_tint;
 #if defined(TRANS_COLOR)
-    if (c.a < 0.004) discard;
+    if (c.a < ALPHA_TRANS_MIN) discard;
     outT = vec4(translucentTransmit(srgbToLinear(c.rgb), c.a), 1.0);
 #elif defined(TRANS_DEPTH)
-    if (c.a < 0.02) discard;
+    if (c.a < ALPHA_TRANS_FRONT) discard;
 #else
-    if (c.a < 0.5) discard;
+    if (c.a < ALPHA_BLEND_CUTOFF) discard;
 #endif
 }

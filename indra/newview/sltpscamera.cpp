@@ -212,13 +212,9 @@ void SLTPSCamera::applyAimToAgentUpdate(LLQuaternion& body_rotation, LLQuaternio
 
 void SLTPSCamera::onSettingChanged(const LLSD& new_value)
 {
-    if (new_value.asBoolean())
-    {
-        // Engage on the next frame: the toggle may come from a menu click whose
-        // teardown still owns the mouse.
-        requestEngage();
-    }
-    else
+    // #795: enabling only arms the feature (mouse stays free until the user engages
+    // it with a self click, Esc or the keybind). Disabling releases at once.
+    if (!new_value.asBoolean())
     {
         mPendingEngage = false;
         disengage(DISENGAGE_USER);
@@ -230,16 +226,14 @@ void SLTPSCamera::toggleEngaged()
     if (mEngaged)
     {
         disengage(DISENGAGE_USER);
+        return;
     }
-    else if (!isEnabled())
+    if (!isEnabled())
     {
-        // turning the feature on engages it (see onSettingChanged)
+        // the keybind turns the feature on and engages it in one press
         gSavedSettings.setBOOL("SlipstreamTPSCamera", true);
     }
-    else
-    {
-        requestEngage();
-    }
+    requestEngage();
 }
 
 bool SLTPSCamera::canEngage() const

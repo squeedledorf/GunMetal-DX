@@ -26,6 +26,7 @@
 
 #include "llviewerprecompiledheaders.h"
 #include "llviewerwindow.h"
+#include "gmdxfloaterinputoverlay.h"   // <GMDX> scroll on the input overlay
 #include "slkeycommands.h"
 #include "llworldclock.h"
 #include "llmemorygovernor.h"         // #873 live snapshot system-memory check
@@ -4013,6 +4014,7 @@ bool LLViewerWindow::handleUnicodeChar(llwchar uni_char, MASK mask)
 void LLViewerWindow::handleScrollWheel(S32 clicks)
 {
     LLUI::getInstance()->resetMouseIdleTimer();
+    GMDXFloaterInputOverlay::noteScroll(clicks);   // <GMDX> the keyboard and mouse overlay
 
     LLMouseHandler* mouse_captor = gFocusMgr.getMouseCapture();
     if( mouse_captor )
@@ -4130,6 +4132,19 @@ void LLViewerWindow::clearPopups()
     {
         mPopupView->clearPopups();
     }
+}
+
+bool LLViewerWindow::releaseCursorToCenter()
+{
+    if (!gSavedSettings.getBOOL("MouseReleaseToCenter"))
+    {
+        return false;
+    }
+    // Same order as LLToolGun::handleDeselect: SDL restores the pointer to the last
+    // warped (centre) position when relative mode lapses.
+    moveCursorToCenter();
+    showCursor();
+    return true;
 }
 
 void LLViewerWindow::moveCursorToCenter()
@@ -5859,6 +5874,46 @@ void LLViewerWindow::onSelectionFailure(const snapshot_saved_signal_t::slot_type
 }
 
 
+// Snapshot file name from SnapshotFileNamePattern (#788). Tokens: {name} the base name,
+// {date} YYYY-MM-DD, {time} HHMMSS, {region} the current region, {w} / {h} the image size,
+// {n} / {n:K} the counter, zero-padded to K digits. Unknown text is kept; characters a file
+// name cannot hold are replaced. Sets has_counter when the pattern carries {n}.
+static std::string snapshotFileName(const std::string& pattern, const std::string& base, const LLDate& now,
+                                    S32 width, S32 height, S32 counter, bool& has_counter)
+{
+    has_counter = false;
+    std::string region;
+    if (gAgent.getRegion()) region = gAgent.getRegion()->getName();
+    std::string out;
+    for (size_t i = 0; i < pattern.size();)
+    {
+        const size_t close = (pattern[i] == '{') ? pattern.find('}', i) : std::string::npos;
+        if (close == std::string::npos)
+        {
+            out += pattern[i++];
+            continue;
+        }
+        const std::string tok = pattern.substr(i + 1, close - i - 1);
+        i = close + 1;
+        if (tok == "name") out += base;
+        else if (tok == "date") out += now.toLocalDateString("%Y-%m-%d");
+        else if (tok == "time") out += now.toLocalDateString("%H%M%S");
+        else if (tok == "region") out += region;
+        else if (tok == "w") out += llformat("%d", width);
+        else if (tok == "h") out += llformat("%d", height);
+        else if (tok == "n" || tok.compare(0, 2, "n:") == 0)
+        {
+            has_counter = true;
+            const S32 digits = (tok.size() > 2) ? llclamp(atoi(tok.c_str() + 2), 0, 9) : 0;
+            out += llformat("%0*d", digits, counter);
+        }
+        else out += "{" + tok + "}";
+    }
+    out = gDirUtilp->getScrubbedFileName(out);
+    if (out.empty()) out = gDirUtilp->getScrubbedFileName(base);
+    return out;
+}
+
 void LLViewerWindow::saveImageLocal(LLImageFormatted *image, const snapshot_saved_signal_t::slot_type& success_cb, const snapshot_saved_signal_t::slot_type& failure_cb)
 {
     std::string lastSnapshotDir = LLViewerWindow::getLastSnapshotDir();
@@ -5917,8 +5972,11 @@ void LLViewerWindow::saveImageLocal(LLImageFormatted *image, const snapshot_save
     static LLCachedControl<std::string> sSnapshotBaseName(LLCachedControl<std::string>(gSavedPerAccountSettings, "SnapshotBaseName", "Snapshot"));
     static LLCachedControl<std::string> sSnapshotDir(LLCachedControl<std::string>(gSavedPerAccountSettings, "SnapshotBaseDir", ""));
 
-    // Look for an unused file name
-    auto is_snapshot_name_loc_set = isSnapshotLocSet();
+    // Look for an unused file name (never overwriting: the counter, or a "_N" suffix when the
+    // pattern has none, moves on until the name is free).
+    static LLCachedControl<std::string> sSnapshotPattern(gSavedSettings, "SnapshotFileNamePattern", "{name}_{date}_{time}{n:2}");
+    std::string pattern(sSnapshotPattern);
+    if (pattern.empty()) pattern = "{name}_{date}_{time}{n:2}";
     std::string filepath;
     auto i = 1;
     auto err = 0;
@@ -5926,11 +5984,12 @@ void LLViewerWindow::saveImageLocal(LLImageFormatted *image, const snapshot_save
     auto now = LLDate::now();
     do
     {
+        bool has_counter = false;
+        std::string name = snapshotFileName(pattern, sSnapshotBaseName, now, image->getWidth(), image->getHeight(), i, has_counter);
+        if (!has_counter && i > 1) name += llformat("_%d", i);
         filepath = sSnapshotDir;
         filepath += gDirUtilp->getDirDelimiter();
-        filepath += sSnapshotBaseName;
-        filepath += now.toLocalDateString("_%Y-%m-%d_%H%M%S");
-        filepath += llformat("%.2d", i);
+        filepath += name;
         filepath += extension;
 
         llstat stat_info;
@@ -5938,7 +5997,7 @@ void LLViewerWindow::saveImageLocal(LLImageFormatted *image, const snapshot_save
         i++;
     }
     while( -1 != err  // Search until the file is not found (i.e., stat() gives an error).
-            && is_snapshot_name_loc_set); // Or stop if we are rewriting.
+            && i < 100000);
 
     LL_INFOS() << "Saving snapshot to " << filepath << LL_ENDL;
     if (image->save(filepath))
@@ -6237,6 +6296,18 @@ bool LLViewerWindow::rawSnapshot(LLImageRaw *raw, S32 image_width, S32 image_hei
         return false;
     }
 
+    // #947: the UI captures take the presented frame, which already holds the HUD attachments;
+    // with "HUDs" off, hide them for the frames this snapshot renders.
+    struct HudAttachmentHold
+    {
+        bool saved;
+        explicit HudAttachmentHold(bool hide) : saved(LLPipeline::sShowHUDAttachments)
+        {
+            if (hide) LLPipeline::sShowHUDAttachments = false;
+        }
+        ~HudAttachmentHold() { LLPipeline::sShowHUDAttachments = saved; }
+    } hud_hold(show_ui && !show_hud);
+
     //  * #873: every snapshot is taken from the MAIN RENDER PATH (vk_live_snapshot, above) --
     //    unless RenderSnapshotOffscreen (A/B, fallback) or "No post-processing" (the live
     //    frame has its post) asks for the offscreen renderer, or the live path cannot take it.
@@ -6280,12 +6351,20 @@ bool LLViewerWindow::rawSnapshot(LLImageRaw *raw, S32 image_width, S32 image_hei
         const U32 aa = vkSnapshotFit(rw, rh, want_depth ? 0u : vkSnapshotAAFrames());
         if (rw <= 0 || rh <= 0 || rw != image_width || rh != image_height)
         {
-            // Tell the user once per requested size (the floater re-renders previews).
+            // Tell the user once per attempt (#855): the floater re-renders previews, often
+            // at alternating sizes, so a new size alone is not a new attempt -- a notice also
+            // waits at least kMinGap seconds after the last, and a repeat of the same size
+            // waits kRepeatGap.
             static S32 s_told_w = 0, s_told_h = 0;
-            if (s_told_w != image_width || s_told_h != image_height)
+            static F64 s_told_at = -1.0e9;
+            constexpr F64 kMinGap = 20.0, kRepeatGap = 120.0;
+            const F64 since = LLFrameTimer::getTotalSeconds() - s_told_at;
+            const bool same_size = (s_told_w == image_width && s_told_h == image_height);
+            if (since >= kMinGap && (!same_size || since >= kRepeatGap))
             {
                 s_told_w = image_width;
                 s_told_h = image_height;
+                s_told_at = LLFrameTimer::getTotalSeconds();
                 LLSD args;
                 args["REQUESTED"] = llformat("%d x %d", image_width, image_height);
                 args["RENDERED"] = rw > 0 ? llformat("%d x %d", rw, rh) : std::string();
@@ -6972,6 +7051,27 @@ LLRect LLViewerWindow::getChatConsoleRect()
         // Make console rect somewhat narrow so having inventory open is
         // less of a problem.
         console_rect.mRight  = console_rect.mLeft + 2 * getWindowWidthScaled() / 3;
+    }
+
+    // Keep the console above the nearby chat bar while it is shown (#990). The bar is a
+    // freely movable floater, so use its actual rect, and only when it overlaps the console
+    // horizontally and sits in the bottom part of the screen (not dragged elsewhere).
+    // Max with the toolbar pad above so both clutter sources are respected; when the bar
+    // hides or minimizes the console returns to its normal position on the next update.
+    LLFloater* chat_bar = LLFloaterReg::findInstance("chatbar");
+    if (chat_bar && chat_bar->getVisible() && !chat_bar->isMinimized())
+    {
+        LLRect bar_rect;
+        if (chat_bar->localRectToOtherView(chat_bar->getLocalRect(), &bar_rect, getRootView()))
+        {
+            const S32 CONSOLE_PADDING_CHATBAR = 4;
+            const bool overlaps_x = bar_rect.mLeft < console_rect.mRight && bar_rect.mRight > console_rect.mLeft;
+            const bool in_bottom_area = bar_rect.mTop < full_window.getHeight() / 3;
+            if (overlaps_x && in_bottom_area)
+            {
+                console_rect.mBottom = llmax(console_rect.mBottom, bar_rect.mTop + CONSOLE_PADDING_CHATBAR);
+            }
+        }
     }
 
     return console_rect;

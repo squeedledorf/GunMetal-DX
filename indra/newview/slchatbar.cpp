@@ -121,6 +121,7 @@ SLChatBar::~SLChatBar()
 
     mChatChannelConnection.disconnect();
     mShowChatChannelConnection.disconnect();
+    mLogStyleConnection.disconnect();   // <GMDX>
     mChatFontSizeConnection.disconnect();
 }
 
@@ -149,6 +150,8 @@ bool SLChatBar::postBuild()
     mChatChannelConnection = gSavedSettings.getControl("SlipstreamNearbyChatChannel")->getSignal()->connect(
         [this](LLControlVariable*, const LLSD& new_val, const LLSD&) { changeChannelLabel(new_val.asInteger()); });
     mShowChatChannelConnection = gSavedSettings.getControl("FSShowChatChannel")->getSignal()->connect(
+        [this](LLControlVariable*, const LLSD&, const LLSD&) { updateChannelSelector(); });
+    mLogStyleConnection = gSavedSettings.getControl("NearbyChatOverlayStyle")->getSignal()->connect(   // <GMDX>
         [this](LLControlVariable*, const LLSD&, const LLSD&) { updateChannelSelector(); });
     updateChannelSelector();
     // </FS>
@@ -444,7 +447,11 @@ void SLChatBar::updateChannelSelector()
         return;
     }
     const bool show = gSavedSettings.getBOOL("FSShowChatChannel");
-    const S32 right_limit = gear->getRect().mLeft - 2;
+    // <GMDX> with the chat log on, its gear is in the log's top-right corner: the line takes this one's room
+    const bool log = GMDXChatLog::active();
+    gear->setVisible(!log);
+    const S32 right_limit = log ? gear->getRect().mRight : gear->getRect().mLeft - 2;
+    // </GMDX>
     LLRect editor_rect = mInputEditor->getRect();
     if (show)
     {
@@ -623,6 +630,25 @@ void SLChatBar::onCommitGesture(LLUICtrl* ctrl)
         // free focus back to chat bar
         mGestureCombo->setFocus(FALSE);
     }
+}
+
+// #1017: hiding the UI lets the floater area grow over the toolbars, and floaters that follow the
+// bottom edge move down with it; when the toolbars come back the area shrinks a frame or more
+// later, after any one-shot fix-up, and the bar is left half below the bottom edge. The bottom
+// chat bar must always be fully reachable, so keep it inside the floater area every frame (a
+// no-op once it is inside). Not for a bar hosted inside another window.
+void SLChatBar::draw()
+{
+    if (gFloaterView && getParent() == gFloaterView && !isMinimized())
+    {
+        const LLRect area = gFloaterView->getSnapRect();
+        const LLRect& r = getRect();
+        if (r.mBottom < area.mBottom || r.mTop > area.mTop || r.mLeft < area.mLeft || r.mRight > area.mRight)
+        {
+            gFloaterView->adjustToFitScreen(this, false);
+        }
+    }
+    LLFloater::draw();
 }
 
 // [SL:KB] - Patch: Chat-NearbyToastWidth | Checked: 2010-11-10 (Catznip-2.4)

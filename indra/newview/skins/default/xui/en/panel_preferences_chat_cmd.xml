@@ -228,6 +228,25 @@
         control_name="SlipstreamChatCommandTeleportToCam"
         enabled_control="SlipstreamChatCommandEnable"
         width="240"/>
+    <!-- <GMDX> tp2 <name> -->
+    <text
+        top_pad="5"
+        follows="left|top"
+        height="18"
+        name="GMDXChatCommandTeleportToAvatar_txt"
+        width="240">
+        Teleport to Avatar (name)
+    </text>
+    <line_editor
+        top_pad="0"
+        follows="left|top"
+        height="20"
+        max_length_chars="256"
+        text_pad_left="5"
+        name="GMDXChatCommandTeleportToAvatar"
+        control_name="GMDXChatCommandTeleportToAvatar"
+        enabled_control="SlipstreamChatCommandEnable"
+        width="240"/>
         <!--Calculatooor-->
     <text
         top_pad="5"

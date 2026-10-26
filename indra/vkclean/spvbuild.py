@@ -7,10 +7,24 @@
 # cache keyed by the PREPROCESSED source (glslc -E: every #include resolved) + stage + flags +
 # the glslc version, so a rebuild after editing one shader file recompiles only the variants
 # whose preprocessed text changed. glslc -E is cheap next to an optimised compile.
-import argparse, hashlib, os, shutil, struct, subprocess, sys, tempfile
+import argparse, hashlib, os, re, shutil, struct, subprocess, sys, tempfile
 from concurrent.futures import ThreadPoolExecutor
 
 TARGET = "--target-env=vulkan1.3"
+# SL_SPV_DEBUG=<regex> at build time: emit source-level debug info (glslc -g) so GPU profilers can
+# map samples to shader source lines, for the variants whose "<file> <flags>" matches the regex
+# (e.g. "CLEAN_GI_TRACE|CLEAN_SHADOW_CORE"). Each variant embeds its whole preprocessed source, so
+# matching everything ("1" or ".") makes the world header too big to link. Profiling builds only.
+# Ninja does not track the environment: delete the generated vk_*_spv.h headers after changing it.
+_DEBUG_RE = os.environ.get("SL_SPV_DEBUG") or None
+if _DEBUG_RE == "1":
+    _DEBUG_RE = "."
+
+
+def debug_flags(path, flags):
+    if _DEBUG_RE and re.search(_DEBUG_RE, os.path.basename(path) + " " + " ".join(flags)):
+        return ["-g"]
+    return []
 _tool_versions = {}
 _used = set()          # cache entries this run read or wrote (prune_cache drops the rest)
 
@@ -45,7 +59,7 @@ def preprocess(path, stage, flags):
 
 def variant_key(kind, path, stage, flags, text):
     h = hashlib.blake2b(digest_size=16)
-    for part in (kind, tool_version("glslc"), stage, "\0".join(flags), os.path.basename(path), text):
+    for part in (kind, tool_version("glslc"), " ".join(debug_flags(path, flags)), stage, "\0".join(flags), os.path.basename(path), text):
         h.update(part.encode("utf-8", "surrogateescape"))
         h.update(b"\x01")
     return h.hexdigest()
@@ -63,7 +77,7 @@ def _compile_one(path, stage, flags, cache_dir):
             return list(struct.unpack(f"<{len(data)//4}I", data))
     with tempfile.TemporaryDirectory() as td:
         out = os.path.join(td, "o.spv")
-        r = subprocess.run([tool("glslc"), TARGET, "-O", f"-fshader-stage={stage}", *flags, path, "-o", out],
+        r = subprocess.run([tool("glslc"), TARGET, "-O", *debug_flags(path, flags), f"-fshader-stage={stage}", *flags, path, "-o", out],
                            capture_output=True, text=True)
         if r.returncode:
             raise SystemExit(f"spvbuild: compiling {path} ({stage} {' '.join(flags)}) failed:\n{r.stderr}")

@@ -120,23 +120,19 @@ vec3 pfLocalLights(PfBrick br, vec3 P, out vec4 ldir)
     {
         const uint li = cluster_index[c * CLUSTER_CAP + i];
         if (li >= count) continue;
-        const vec4 pr = lights[li].pos_radius;
-        const vec3 lv = pr.xyz - P;
-        const float d2 = dot(lv, lv);
-        if (d2 >= pr.w * pr.w) continue;
-        const float dist = sqrt(d2);
+        // THE LIGHT REACH (#1043, clean_light_eval.glsl): the lit pass's range / attenuation / cutoff fade
         const vec4 cf = lights[li].color_falloff;
-        const float atten = legacyAtten(dist / pr.w, cf.w);
+        vec3 lv;
+        float dist;
+        const float atten = lightReach(lights[li].pos_radius, cf, P, lv, dist);
         if (atten <= 0.0) continue;
         vec3 E = vec3(0.0);
         if (lights[li].proj_origin.w < 0.5) E = cf.rgb * atten;
         else
         {
             const Light L = lights[li];
-            vec4 ptc = L.proj_mat * vec4(P, 1.0);
-            if (ptc.z < 0.0) continue;
-            ptc.xyz /= ptc.w;
-            if (ptc.z <= 0.0 || ptc.x <= 0.0 || ptc.x >= 1.0 || ptc.y <= 0.0 || ptc.y >= 1.0) continue;
+            vec2 ptc;
+            if (!lightProjFrustum(L.proj_mat, P, ptc)) continue;
             const float l_dist = -dot(lv, L.proj_axis.xyz);
             E = projDiffuse(L, l_dist, ptc.xy) * atten;
             if (L.tex.z != 0u && L.tex.z - 1u < nrec)
@@ -149,7 +145,7 @@ vec3 pfLocalLights(PfBrick br, vec3 P, out vec4 ldir)
         const float lum = pfLum(E);
         if (lum <= 1e-6) continue;
         // into the top list (insertion; whatever falls off the end is summed unshadowed)
-        vec3 e = E, q = pr.xyz;
+        vec3 e = E, q = lights[li].pos_radius.xyz;
         float l = lum;
         for (int k = 0; k < nsh; ++k)
         {

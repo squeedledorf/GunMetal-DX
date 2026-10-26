@@ -192,9 +192,11 @@ float weatherOpenCascade(vec4 fr, vec4 fz, vec2 s, uint base, vec3 P, vec3 Ng, v
         const vec2 xy = c + radius * vec2(o.x * rot.x - o.y * rot.y, o.x * rot.y + o.y * rot.x);
         const vec2 uv = (xy - fr.xy) * fr.z;
         const vec2 f = fract(uv * res - 0.5);
-        const vec4 top = fz.x - weatherGather(m, uv) * fz.y;   // gather order: (0,1) (1,1) (1,0) (0,0)
+        const vec4 dg = weatherGather(m, uv);   // gather order: (0,1) (1,1) (1,0) (0,0)
+        const vec4 top = fz.x - dg * fz.y;
         const float zr = P.z + dot(g, xy - c);
-        const vec4 op = clamp((vec4(zr) - (top - 1.5 * bias)) / bias, 0.0, 1.0);   // open from top - 0.5 bias up
+        vec4 op = clamp((vec4(zr) - (top - 1.5 * bias)) / bias, 0.0, 1.0);   // open from top - 0.5 bias up
+        op = mix(op, vec4(1.0), vec4(greaterThanEqual(dg, vec4(0.9999))));   // <GMDX> the clear value: open sky
         open += dot(op, vec4((1.0 - f.x) * f.y, f.x * f.y, f.x * (1.0 - f.y), (1.0 - f.x) * (1.0 - f.y)));
     }
     return open * 0.25;

@@ -37,6 +37,7 @@ layout(set = 0, binding = 49) uniform sampler2D uWeatherOccl[10];
 
 // The precipitation's ceiling above the camera (m; llcleanweathervk.cpp kVeilCeiling).
 const float kWxVeilCeiling = 1500.0;
+const float kVeilIndoor = 10.0;   // <GMDX> metres a covered surface keeps clear of the veil (its own room)
 
 // One cascade's openness at P (1 open .. 0 under its top surface; outside the map: -1).
 float weatherPrecipOpenMap(uint m, vec4 fr, vec4 fz, vec2 s, vec3 P)
@@ -48,6 +49,9 @@ float weatherPrecipOpenMap(uint m, vec4 fr, vec4 fz, vec2 s, vec3 P)
     else if (m == 1u) d = textureLod(uWeatherOccl[1], uv, 0.0).r;
     else if (m == 2u) d = textureLod(uWeatherOccl[2], uv, 0.0).r;
     else d = textureLod(uWeatherOccl[3], uv, 0.0).r;
+    // <GMDX> the clear value: nothing drawn there, open sky. Read as a roof at the box bottom, it
+    // covered every receiver below the box -- the whole cascade once the camera is high up.
+    if (d >= 0.9999) return 1.0;
     const float top = fz.x - d * fz.y;
     return clamp((P.z - (top - 1.5 * fz.z)) / max(fz.z, 1e-3), 0.0, 1.0);
 }
@@ -147,11 +151,12 @@ float weatherVeilT(vec3 P)
 {
     const float sigma = ssr.weather[15].w;
     if (!(sigma > 0.0)) return 1.0;
-    if (weatherPrecipOpen(P) < 0.5) return 1.0;
+    const bool covered = weatherPrecipOpen(P) < 0.5;   // <GMDX> (the opaque veil's rule, clean_weather_veil.frag)
     const vec3 rel = P - ssr.cam_origin.xyz;
     const float len = length(rel);
     float d = len;
     if (rel.z > 0.0) d = min(d, kWxVeilCeiling * len / rel.z);
+    if (covered) d = max(d - kVeilIndoor, 0.0);   // <GMDX>
     return exp(-sigma * d);
 }
 

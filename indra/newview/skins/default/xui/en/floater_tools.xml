@@ -2995,11 +2995,25 @@ even though the user gets a free copy.
              left_pad="8"
              name="button permissions"
              width="134" />
+            <button
+             follows="left|top"
+             height="23"
+             label="Reset all scripts"
+             layout="topleft"
+             left="8"
+             name="button reset scripts"
+             tool_tip="Reset every script in the selected object's contents that you can modify"
+             top="36"
+             width="276">
+              <button.commit_callback
+               function="Tools.SelectedScriptAction"
+               parameter="reset" />
+            </button>
             <filter_editor
              follows="left|top|right"
              label="Enter filter text"
              layout="topleft"
-             top="40"
+             top="66"
              left="10"
              text_pad_left="10"
              max_length_chars="300"
@@ -3012,11 +3026,11 @@ even though the user gets a free copy.
              border_visible="true"
              bevel_style="in"
              follows="left|top|right"
-             height="367"
+             height="341"
              layout="topleft"
              left="10"
              name="contents_inventory"
-             top="70"
+             top="96"
              width="275" />
 		</panel>
        <panel

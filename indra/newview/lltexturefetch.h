@@ -278,6 +278,21 @@ public:
     };
     void getFetchGateStats(FetchGateStats& out);
 
+    // #951: why a LOAD_FROM_NETWORK worker did not move on (set where doWork returns
+    // without leaving the state; cleared by any state change).
+    enum ENetWhy
+    {
+        NET_WHY_NONE = 0,           // not evaluated yet / moving on
+        NET_WHY_RETRY_WAIT,         // the retry policy's back-off after a server failure
+        NET_WHY_NO_REGION,          // no region for the worker's host (or no agent region)
+        NET_WHY_NO_URL,             // the region has no ViewerAsset capability (yet)
+        NET_WHY_CAP_RETRY,          // waiting out CAP_MISSING_EXPIRATION_DELAY before asking again
+        NET_WHY_NO_HTTP,            // ImagePipelineUseHTTP off / HTTP not allowed for this request
+        NET_WHY_COUNT
+    };
+    // #951: worker kinds for the per-stage ages (WorkerStats::mOldest / mStuck)
+    enum EStage { STAGE_CACHE = 0, STAGE_NET, STAGE_HTTP, STAGE_DECODE, STAGE_WRITE, STAGE_UNCOLLECTED, STAGE_COUNT };
+
     // #485 RAM: every fetch worker by state and the bytes each kind holds, sampled by
     // the worker sweep (sweepWorkers, main thread, ~1 Hz), plus what the sweep evicted.
     // A worker outlives its fetch until its texture deletes it; a finished one keeps
@@ -303,7 +318,26 @@ public:
         U64 mEvictedUncollected = 0;// lifetime: finished but not collected for SLFetchWorkerUncollectedSec
         U64 mEvictedCap = 0;        // lifetime: over SLFetchMaxWorkers / SLFetchWorkerHeldMB
         F32 mSweepMs = 0.f;
+        // #951 texture pipeline diagnostics (logPipelineState): mNetWait split by state, why
+        // LOAD_FROM_NETWORK workers are not sending, decode waits by cause, and how long the
+        // oldest worker of each kind has been in its state.
+        S32 mLoadNet = 0;           // LOAD_FROM_NETWORK (looking for a URL / capability)
+        S32 mWaitRes = 0;           // WAIT_HTTP_RESOURCE + WAIT_HTTP_RESOURCE2 (send queue)
+        S32 mNetWhy[NET_WHY_COUNT] = {};   // LOAD_FROM_NETWORK workers by ENetWhy
+        S32 mDecodeGov = 0;         // DECODE_IMAGE parked on the memory budget
+        S32 mDecodeOOM = 0;         // DECODE_IMAGE in the #698 out-of-memory backoff
+        S32 mDecodeRun = 0;         // DECODE_IMAGE_UPDATE (queued on / running in the decode pool)
+        F32 mOldest[STAGE_COUNT] = {};     // seconds the oldest worker of each EStage has been in its state
+        S32 mStuck[STAGE_COUNT] = {};      // workers of each EStage in their state > 30 s
+        F32 mOldestLoadNet = 0.f;   // seconds the oldest LOAD_FROM_NETWORK worker has been looking for a URL
+        LLUUID mOldestId;           // the oldest stuck worker (a texture id, no PII)
+        S32 mOldestState = -1;      //   ...its state
     };
+    static const char* netWhyName(S32 why);
+    static const char* stageName(S32 stage);
+    // #951: total worker state changes (any worker), so a stall (no change at all) can be
+    // told from a slow queue. Threads: T*
+    void noteStateChange() { mStateChanges.fetch_add(1, std::memory_order_relaxed); }
     // Threads: Tmain
     const WorkerStats& getWorkerStats() const { return mWorkerStats; }
     // ----------------------------------
@@ -485,6 +519,14 @@ private:
     void sweepWorkers();
     WorkerStats                         mWorkerStats;                   // Tmain
     F64                                 mNextSweepTime = 0.0;           // Tmain
+    // #951 texture pipeline diagnostics (Tmain, from sweepWorkers)
+    void logPipelineState(F64 now);
+    std::atomic<U64>                    mStateChanges{ 0 };
+    U64                                 mDiagLastChanges = 0;           // Tmain
+    F64                                 mDiagLastChangeTime = 0.0;      // Tmain: when mStateChanges last moved
+    F64                                 mDiagNextLog = 0.0;             // Tmain
+    F64                                 mDiagNextWarn = 0.0;            // Tmain
+    bool                                mDiagEverActive = false;        // Tmain
 
     // #485 fetch gate
     std::atomic<bool>                   mPumpPosted{ false };

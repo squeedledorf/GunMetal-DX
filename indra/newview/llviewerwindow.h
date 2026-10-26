@@ -380,6 +380,10 @@ public:
     bool            getCursorHidden() { return mCursorHidden; }
     void            moveCursorToCenter();                               // move to center of window
     void            moveCursorTo(S32 x, S32 y);                         // move to an arbitrary screen-space (GL) position, clamped to the world view
+    // End of a hidden-cursor capture (#871): warp to the window centre, then show the cursor.
+    // Returns false (and does nothing) when MouseReleaseToCenter is off, so the caller can
+    // restore the cursor its old way.
+    bool            releaseCursorToCenter();
 
     void            initTextures(S32 location_id);
     void            setShowProgress(const bool show);

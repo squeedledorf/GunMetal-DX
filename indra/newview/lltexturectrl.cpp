@@ -568,6 +568,7 @@ bool LLFloaterTexturePicker::postBuild()
 
     mResolutionLabel = getChild<LLTextBox>("size_lbl");
     mResolutionWarning = getChild<LLTextBox>("over_limit_lbl");
+    mRestrictionNote = getChild<LLTextBox>("restricted_lbl");
 
     mPreviewWidget = getChild<LLView>("preview_widget");
 
@@ -605,6 +606,7 @@ bool LLFloaterTexturePicker::postBuild()
         refreshInventoryFilter();
 
         mInventoryPanel->setFilterPermMask(mImmediateFilterPermMask);
+        updateRestrictionNote();
         mInventoryPanel->setShowFolderState(LLInventoryFilter::SHOW_NON_EMPTY_FOLDERS);
 
         // Disable auto selecting first filtered item because it takes away
@@ -783,6 +785,11 @@ void LLFloaterTexturePicker::draw()
     // This is going to spam mOnUpdateImageStatsCallback,
     // either move elsewhere or fix to cause update once per image
     bool valid_dims = updateImageStats();
+
+    // #658: the permission-filter note shares the left column with the resolution warning
+    mRestrictionNote->setVisible(mImmediateFilterPermMask != PERM_NONE
+        && mModeSelector->getValue().asInteger() == PICKER_INVENTORY
+        && !mResolutionWarning->getVisible());
 
     // if we're inactive, gray out "apply immediate" checkbox
     mSelectBtn->setEnabled(mActive && mCanApply && valid_dims && !getTentative());
@@ -1809,6 +1816,16 @@ void LLFloaterTexturePicker::setImmediateFilterPermMask(PermissionMask mask)
 {
     mImmediateFilterPermMask = mask;
     mInventoryPanel->setFilterPermMask(mask);
+    updateRestrictionNote();
+}
+
+void LLFloaterTexturePicker::updateRestrictionNote()
+{
+    if (!mRestrictionNote) return;
+    if (mImmediateFilterPermMask == PERM_NONE) return;
+    mRestrictionNote->setText(getString((mImmediateFilterPermMask & PERM_MODIFY) ? "restricted_note_modify" : "restricted_note"));
+    mRestrictionNote->setToolTip(getString("restricted_tip"));
+    mFilterEdit->setToolTip(getString("restricted_tip"));
 }
 
 void LLFloaterTexturePicker::onPickerCallback(const std::vector<std::string>& filenames, LLHandle<LLFloater> handle)

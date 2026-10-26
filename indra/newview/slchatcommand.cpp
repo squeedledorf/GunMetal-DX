@@ -47,6 +47,8 @@
 #include "llviewerparcelmgr.h"
 #include "llviewerregion.h"
 #include "llvoavatarself.h"
+#include "llworld.h"
+#include "llavatarnamecache.h"
 #include "llvolume.h"
 #include "llvolumemessage.h"
 #include "slaoengine.h"
@@ -64,7 +66,7 @@ bool SLChatCommand::parseCommand(std::string data)
         if (!(input >> cmd))    return false;
 
         static LLCachedControl<std::string> sDrawDistanceCommand(gSavedSettings, "SlipstreamChatCommandDrawDistance", "/dd");
-        static LLCachedControl<std::string> sHeightCommand(gSavedSettings, "SlipstreamChatCommandHeight", "/gth");
+        static LLCachedControl<std::string> sHeightCommand(gSavedSettings, "SlipstreamChatCommandHeight", "gth");
         static LLCachedControl<std::string> sGroundCommand(gSavedSettings, "SlipstreamChatCommandGround", "/flr");
         static LLCachedControl<std::string> sPosCommand(gSavedSettings, "SlipstreamChatCommandPos", "/pos");
         static LLCachedControl<std::string> sRezPlatCommand(gSavedSettings, "SlipstreamChatCommandRezPlat", "/plat");
@@ -76,7 +78,8 @@ bool SLChatCommand::parseCommand(std::string data)
         static LLCachedControl<std::string> sRegionMsgCommand(gSavedSettings, "SlipstreamChatCommandRegionMessage", "/regionmsg");
         static LLCachedControl<std::string> sSetNearbyChatChannelCmd(gSavedSettings, "SlipstreamChatCommandSetChatChannel", "/setchannel");
         static LLCachedControl<std::string> sResyncAnimCommand(gSavedSettings, "SlipstreamChatCommandResyncAnim", "/resync");
-        static LLCachedControl<std::string> sTeleportToCam(gSavedSettings, "SlipstreamChatCommandTeleportToCam", "/tp2cam");
+        static LLCachedControl<std::string> sTeleportToCam(gSavedSettings, "SlipstreamChatCommandTeleportToCam", "tp2cam");
+        static LLCachedControl<std::string> sTeleportToAvatar(gSavedSettings, "GMDXChatCommandTeleportToAvatar", "tp2");   // <GMDX>
         static LLCachedControl<std::string> sHoverHeight(gSavedSettings, "SlipstreamChatCommandHoverHeight", "/hover");
         static LLCachedControl<std::string> sAOCommand(gSavedSettings, "SlipstreamChatCommandAnimationOverride", "/ao");
 
@@ -264,6 +267,50 @@ bool SLChatCommand::parseCommand(std::string data)
             gAgent.teleportViaLocation(gAgentCamera.getCameraPositionGlobal());
             return true;
         }
+        // <GMDX> tp2 <name>: to the closest avatar in view of the map whose display name, username
+        // or legacy name has <name> in it (as Firestorm's tp2; names RLVa hides never match)
+        else if (cmd == utf8str_tolower(sTeleportToAvatar()))
+        {
+            std::string name;
+            std::getline(input >> std::ws, name);
+            LLStringUtil::trim(name);
+            if (name.empty()) return false;
+            uuid_vec_t ids;
+            std::vector<LLVector3d> positions;
+            LLWorld::getInstance()->getAvatars(&ids, &positions, gAgent.getPositionGlobal());
+            const LLVector3d here = gAgent.getPositionGlobal();
+            F64 best_d2 = F64_MAX;
+            LLVector3d best;
+            for (size_t i = 0; i < ids.size(); ++i)
+            {
+                if (ids[i] == gAgentID || !RlvActions::canShowName(RlvActions::SNC_DEFAULT, ids[i])) continue;
+                LLAvatarName av;
+                if (!LLAvatarNameCache::get(ids[i], &av)) continue;
+                bool match = false;
+                for (const std::string& n : { av.getDisplayName(), av.getUserName(), av.getLegacyName() })
+                {
+                    match = match || utf8str_tolower(n).find(name) != std::string::npos;
+                }
+                if (!match) continue;
+                LLVector3d pos = positions[i];
+                if (LLViewerObject* obj = gObjectList.findObject(ids[i]))
+                {
+                    pos = obj->getPositionGlobal();   // (the map's coarse height can be unknown: high up)
+                }
+                const F64 d2 = (pos - here).magVecSquared();
+                if (d2 < best_d2) { best_d2 = d2; best = pos; }
+            }
+            if (best_d2 == F64_MAX)
+            {
+                LLSD args;
+                args["NAME"] = name;
+                LLNotificationsUtil::add("ChatCommandTeleportToAvatarNone", args);
+                return true;
+            }
+            gAgent.teleportViaLocation(best);
+            return true;
+        }
+        // </GMDX>
         else if (cmd == utf8str_tolower(sHoverHeight()))  // Hover height
         {
             F32 height;

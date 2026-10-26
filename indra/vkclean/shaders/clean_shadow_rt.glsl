@@ -35,8 +35,7 @@ vec3 shadowRayVis(vec3 origin, vec3 dir, float tmin, float tmax, uint mask)
 {
     rt_blend_parity = (rtBlendOpts() & 1u) != 0u;
     // (One walk with a run-time kind, not a choice of two: clean_rt_common.glsl RT_WALK_*.)
-    const vec3 v = traceShadowWalk(origin, dir, tmin, tmax, mask,
-                                   specTransOn() ? RT_WALK_RGB : RT_WALK_GREY);
+    const vec3 v = rtVisWalkF(origin, dir, tmin, tmax, mask, specTransOn() ? RT_WALK_RGB : RT_WALK_GREY, RT_WALK_KS_MIXED);
     rt_blend_parity = false;
     return v;
 }
@@ -64,7 +63,7 @@ void rtFolEnd()   { rtFoliageEnd(); }
 // casters' (#212).
 vec3 rtFolTransmit(vec3 v, vec3 origin, vec3 dir, float tmax)
 {
-    if (rt_fol_mode != 2u || !(max(max(v.r, v.g), v.b) > 0.0)) return v;
+    if (rtFolMode() != 2u || !(max(max(v.r, v.g), v.b) > 0.0)) return v;
     return v * traceFoliageTransmit(origin, dir, 0.0, tmax, specTransOn());
 }
 
@@ -83,11 +82,10 @@ vec3 shadowRayTrans(vec3 origin, vec3 dir, float tmin, float tmax)
 // blocks on its LL-solid texels (traceShadowRayVisSplit); the mixed walk is shadowRayVis.
 vec3 shadowDiscRay(vec3 origin, vec3 dir, float tmin, float tmax, bool split)
 {
-    const bool parity = (rtBlendOpts() & 1u) != 0u;
-    rt_blend_parity = parity;
-    const vec3 v = traceShadowWalk(origin, dir, tmin, tmax,
-                                   (split && !parity) ? (RT_MASK_SHADOW & ~RT_MASK_BLEND) : RT_MASK_SHADOW,
-                                   split ? RT_WALK_VIS : (specTransOn() ? RT_WALK_RGB : RT_WALK_GREY));
+    rt_blend_parity = !split && (rtBlendOpts() & 1u) != 0u;
+    const vec3 v = rtVisWalkF(origin, dir, tmin, tmax,
+                              split ? (RT_MASK_SHADOW & ~RT_MASK_BLEND) : RT_MASK_SHADOW,
+                              split ? RT_WALK_VIS : (specTransOn() ? RT_WALK_RGB : RT_WALK_GREY), RT_WALK_KS_DISC);
     rt_blend_parity = false;
     return v;
 }
@@ -442,7 +440,8 @@ vec3 rtTerminatorEscape(vec3 P, vec3 Ps, vec3 ng, vec3 lift)
 // it (the raster facet / the mask's depth-plane normal; 0 = unknown), min_cos: how far
 // the probe's facet may turn from it. Out: lift (world), ns (visible-side interpolated
 // vertex normal), ng (visible-side facet normal). 0 = no triangle, 1 = probed,
-// 2 = REJECTED (#664 round 4): the probe's closest hit is not the rasterized surface.
+// 2 = REJECTED (#664 round 4): the probe's closest hit is not the rasterized surface. The lift is RAW:
+// rtTerminatorCached runs the escape check (#1042: one site for both sources).
 // The probe ray runs from w in front of P: where another surface lies within w of P
 // along the view -- the far side of a CREASE close to its fold line, at the 1 mm floor
 // of w several pixels wide up close -- the first hit was THAT surface, and the lift
@@ -483,8 +482,7 @@ int rtTerminatorProbe(vec3 P, vec3 cam, vec3 ng_ref, float min_cos, out vec3 lif
         ok = dot(r, ng) >= min_cos;
     }
     if (!ok) { lift = vec3(0.0); ns = vec3(0.0); ng = vec3(0.0); rt_lift_capped = false; return 2; }
-    lift = rtTerminatorEscape(P, rtReceiverOrigin(P, ng, camd, 0.0), ng, lift);
-    return 1;
+    return 1;   // (the raw lift: rtTerminatorCached escape-checks either source's once)
 }
 
 // PER-RECEIVER CACHE (#664): the probe is light-independent (the triangle, its vertex
@@ -515,9 +513,9 @@ vec3 rtOctDecode(vec2 e)
     if (n.z < 0.0) n.xy = (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
     return normalize(n);
 }
-// px: the receiver's render pixel (< 0 = none). True = data: lift (escape-checked, world),
-// ns / ng (visible side). The escape check is the only ray (only if there is a lift).
-bool rtTerminatorTriAt(ivec2 px, vec3 P, vec3 cam, out vec3 lift, out vec3 ns, out vec3 ng)
+// px: the receiver's render pixel (< 0 = none). True = data: the RAW lift (world; rtTerminatorCached
+// escape-checks it), ns / ng (visible side). No ray.
+bool rtTerminatorTriAt(ivec2 px, vec3 P, out vec3 lift, out vec3 ns, out vec3 ng)
 {
     lift = vec3(0.0); ns = vec3(0.0); ng = vec3(0.0);
     rt_tri_dev = 0.0; rt_esc_flag = 0.0; rt_lift_capped = false;
@@ -529,20 +527,24 @@ bool rtTerminatorTriAt(ivec2 px, vec3 P, vec3 cam, out vec3 lift, out vec3 ns, o
     ng = rtOctDecode(unpackSnorm2x16(t.x));
     ns = rtOctDecode(vec2(float((t.y >> 16u) & 255u), float(t.y >> 24u)) * (2.0 / 255.0) - 1.0);
     const float h = unpackHalf2x16(t.y & 0x7FFFu).x;
-    if (h > 0.0)
-        lift = rtTerminatorEscape(P, rtReceiverOrigin(P, ng, length(P - cam), 0.0), ng, ng * h);
+    if (h > 0.0) lift = ng * h;
     return true;
 }
 bool rt_tc_tri = false;
 // ng_ref / min_cos: rtTerminatorProbe's validation (per receiver, so the cache key P
 // covers them). px: the receiver's render pixel for the pre-pass triangle (< 0: none --
 // alpha-blend receivers, particles, mirror / probe views), else the probe.
+// ONE ESCAPE CHECK (#1042): whichever source served, its lift is escape-checked here, once -- the
+// generic shadow core's form (it carried its own copy of these functions with this single site, while
+// this copy ran a check inside each source). Every consumer now shares this one implementation.
 bool rtTerminatorCached(vec3 P, vec3 cam, vec3 ng_ref, float min_cos, ivec2 px, out vec3 lift, out vec3 ns, out vec3 ng)
 {
     if (rt_tc_state < 0 || any(notEqual(rt_tc_P, P)))
     {
-        rt_tc_tri = rtTerminatorTriAt(px, P, cam, rt_tc_lift, rt_tc_ns, rt_tc_ng);
+        rt_tc_tri = rtTerminatorTriAt(px, P, rt_tc_lift, rt_tc_ns, rt_tc_ng);
         rt_tc_state = rt_tc_tri ? 1 : rtTerminatorProbe(P, cam, ng_ref, min_cos, rt_tc_lift, rt_tc_ns, rt_tc_ng);
+        if (rt_tc_state == 1)   // (the one escape check: either source's lift)
+            rt_tc_lift = rtTerminatorEscape(P, rtReceiverOrigin(P, rt_tc_ng, length(P - cam), 0.0), rt_tc_ng, rt_tc_lift);
         rt_tc_dev = rt_tri_dev; rt_tc_esc = rt_esc_flag; rt_tc_cap = rt_lift_capped;
         rt_tc_P = P;
     }

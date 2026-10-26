@@ -128,6 +128,7 @@ private:
         U8 bpp = 4;              // bytes per texel of the VK image
         U8 fmt = 0;              // llrvk::eTexelFormat of the VK image (#458: rect updates)
         bool cpu_gone = false;   // #707: the image's CPU copy was dropped -- this IS its UI copy
+        U8 levels = 1;           // <GMDX> mip levels (use_mips art: a new generation recreates it)
     };
     std::unordered_map<const LLTextureData*, CachedTex> mTexCache;
     U64 mCacheBytes = 0;

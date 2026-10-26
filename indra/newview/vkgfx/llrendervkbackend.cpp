@@ -719,7 +719,10 @@ uint32_t LLRenderVKBackend::resolveTexture(LLTextureData* image)
     const U64 serial = image->getVKSerial();
     auto it = mTexCache.find(image);
     // Address reused by a different (newer) LLTextureData: the entry is stale.
-    if (it != mTexCache.end() && it->second.serial != serial)
+    // <GMDX> A mip-chained image is made again for new pixels (a rectangle update would leave
+    // its smaller levels behind).
+    if (it != mTexCache.end() && (it->second.serial != serial
+                                  || (it->second.levels > 1 && it->second.generation != gen)))
     {
         dropEntry(it);
         it = mTexCache.end();
@@ -752,6 +755,7 @@ uint32_t LLRenderVKBackend::resolveTexture(LLTextureData* image)
         // Font atlas is point-sampled (TFO_POINT). Create nearest. Pixels go straight
         // into the upload staging (no packed copy).
         uint32_t vkId = 0;
+        U32 levels = 1u;   // <GMDX>
         if (fmt == TXF_COVERAGE8 || (fmt == TXF_RGBA8 && comps != 4))
         {
             // the image without pixels, then the converted texels in full
@@ -769,10 +773,18 @@ uint32_t LLRenderVKBackend::resolveTexture(LLTextureData* image)
         }
         else
         {
-            vkId = gVK.createTexture(w, h, src, /*nearest=*/true, fmt);
+            // <GMDX> textures.xml use_mips (art drawn well below its size, e.g. the controller
+            // pictures): a mip chain and linear filtering, or minifying it drops texels and aliases
+            if (image->getUseMipMaps() && fmt == TXF_RGBA8 && std::max(w, h) > 1u)
+            {
+                levels = 1u;
+                for (U32 s = std::max(w, h); s > 1u; s >>= 1) ++levels;
+            }
+            vkId = gVK.createTexture(w, h, src, /*nearest=*/levels == 1u, fmt, levels);
         }
         image->resetVKDirty();
         CachedTex ct;
+        ct.levels = (U8)levels;
         ct.bpp = bpp;
         ct.fmt = (U8)fmt;
         ct.vkId = vkId; ct.generation = gen; ct.width = w; ct.height = h;

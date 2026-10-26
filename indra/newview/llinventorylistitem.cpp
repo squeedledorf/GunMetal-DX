@@ -106,9 +106,10 @@ void LLPanelInventoryListItemBase::draw()
         // Leaked on purpose: never released in static-destructor order (#275).
         static LLPointer<LLUIImage>* fav_img_p = new LLPointer<LLUIImage>(LLRender2D::getInstance()->getUIImage("Inv_Favorite_Star_Full"));
         const LLPointer<LLUIImage>& fav_img = *fav_img_p;
-        gl_draw_scaled_image(
+        // via the UI image so the vector icon is picked up (#1056)
+        fav_img->draw(
             local_rect.getWidth() - FAVORITE_IMAGE_SIZE - FAVORITE_IMAGE_PAD, FAVORITE_IMAGE_PAD,
-            FAVORITE_IMAGE_SIZE, FAVORITE_IMAGE_SIZE, fav_img->getImage());
+            FAVORITE_IMAGE_SIZE, FAVORITE_IMAGE_SIZE);
     }
 
     if (mSelected && mSelectedImage)

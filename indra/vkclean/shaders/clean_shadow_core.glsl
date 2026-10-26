@@ -21,7 +21,7 @@
 //     the trace: only data and a few flags.
 //   * shadowSampleVis: the soft-disc loop (outermost Vogel samples first, the adaptive / hint
 //     early-outs, the terminator-safe floor), then the translucent split ray, then the #735
-//     foliage transmission ray -- every ray through ONE walk call (traceShadowWalkG), so the
+//     foliage transmission ray -- every ray through ONE walk call (clean_vis_walk.glsl rtVisTrace), so the
 //     candidate alpha test, the self-shadow probe and the facing rules are inlined once.
 // Per-sample globals (clean_rt_common / clean_shadow_rt): the caller resets rt_block_t (and
 // rt_block_dyn) before a sample and reads them after; shadowRecvLight sets rt_term_* and
@@ -29,165 +29,10 @@
 #ifndef CLEAN_SHADOW_CORE_GLSL
 #define CLEAN_SHADOW_CORE_GLSL
 
-// ---- THE WALK: traceShadowWalk (clean_rt_common.glsl) + two more kinds ----
-// RT_WALK_OPAQUE: traceShadowRayOpaque -- every instance force-opaque (no candidate, no alpha
-// test), except a receiver that may sit on a no-self-shadow character, whose rays drop the
-// opaque flag and confirm every candidate but the receiver's own (rtSelfCandidate).
-// RT_WALK_FOL(_RGB): traceFoliageTransmit -- the #735 mode-2 transmission ray over the
-// alpha-mask class, light-facing faces culled, coloured by the first rt_fol_layers leaves.
-// Same rules and results as those functions; one inlined body for all of them.
-#define RT_WALK_OPAQUE  5u
-#define RT_WALK_FOL     6u
-#define RT_WALK_FOL_RGB 7u
-// ---- OWN-FIXTURE RULE (#439 / #869: a POINT light's own lamp; the sample's SH_FIXTURE) ----
-// SL point lights sit inside their fixtures (a bulb in a shade, a lantern, a sconce): traced
-// plainly, the fixture shadows its own light and the lamp goes dark. A caster instance whose own
-// box (object space) holds the light's centre and whose world size is at most rt_fix_max is the
-// light's FIXTURE: its translucent faces do not tint the ray, and when an opaque / alpha-tested
-// face of it ends the ray, the ray is traced again up to where it ENTERS that box (rt_fix_t) --
-// everything between the receiver and the lamp still shadows, nothing inside the lamp does. Not
-// an infinite near plane: the clip is the fixture's own bounds, and only a small enclosing box
-// qualifies (a room-sized mesh around the light never does). Set per sample by the caller.
-bool  rt_fix_on  = false;
-vec3  rt_fix_P   = vec3(0.0);   // the light's centre (absolute world)
-float rt_fix_max = 0.0;         // the largest fixture box edge (m; RenderVKReSTIRFixtureSize)
-float rt_fix_t   = -1.0;        // out: the committed caster was the fixture -- its box entry t
-bool rtFixtureBox(uint id, mat4x3 w2o, mat4x3 o2w, out vec3 a, out vec3 b)
-{
-    a = vec3(0.0); b = vec3(0.0);
-    if (!rtIdIn(id)) return false;
-    a = rt_instances[id].aabb_min.xyz;
-    b = rt_instances[id].aabb_max.xyz;
-    const vec3 lo = w2o * vec4(rt_fix_P, 1.0);
-    if (!(all(greaterThanEqual(lo, a)) && all(lessThanEqual(lo, b)))) return false;
-    const vec3 e = abs(b - a) * vec3(length(o2w[0]), length(o2w[1]), length(o2w[2]));
-    return max(max(e.x, e.y), e.z) <= rt_fix_max;
-}
-vec3 traceShadowWalkG(vec3 origin, vec3 dir, float tmin, float tmax, uint mask, uint kind)
-{
-    const bool fol_walk = kind >= RT_WALK_FOL;
-    const bool trans_walk = kind == RT_WALK_TRANS || kind == RT_WALK_TRANS_RGB;
-    const bool opaque_walk = kind == RT_WALK_OPAQUE;
-    const bool rgb = kind == RT_WALK_RGB || kind == RT_WALK_TRANS_RGB || kind == RT_WALK_FOL_RGB;
-    uint flags;
-    if (fol_walk)
-        flags = gl_RayFlagsNoOpaqueEXT | (rt_fol_flip ? gl_RayFlagsCullFrontFacingTrianglesEXT
-                                                      : gl_RayFlagsCullBackFacingTrianglesEXT);
-    else if (opaque_walk)
-        flags = gl_RayFlagsTerminateOnFirstHitEXT | (rt_self_owner != 0u ? gl_RayFlagsNoneEXT : gl_RayFlagsOpaqueEXT)
-              | rtFolShadowFlags();
-    else
-        flags = gl_RayFlagsTerminateOnFirstHitEXT | (trans_walk ? gl_RayFlagsNoneEXT : rtFolShadowFlags());
-    // (Xid 109, rtRaySane: an invalid ray is blocked as G-7; the foliage walk keeps no colour)
-    if (!rtRaySane(origin, tmin, dir, tmax)) return fol_walk ? vec3(1.0) : vec3(0.0);
-    rayQueryEXT rq;
-    rayQueryInitializeEXT(rq, uTLAS, flags, mask & 0xFFu, origin, tmin, dir, tmax);
-    vec3 trans = vec3(1.0);
-    vec3 fa, fb;   // (rtFixtureBox's box)
-    uint n_cand = 0u;
-    uint n_fol = 0u;
-    const uint budget = fol_walk ? RT_CANDIDATE_BUDGET_NOOPAQUE : RT_CANDIDATE_BUDGET;
-    while (rayQueryProceedEXT(rq))
-    {
-        if (rayQueryGetIntersectionTypeEXT(rq, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
-        if (++n_cand > budget)
-        {
-            // over budget (G-7): the shadow walks treat it as opaque; the foliage ray keeps the
-            // colour gathered so far (visibility is the shadow rays')
-            if (!fol_walk) rayQueryConfirmIntersectionEXT(rq);
-            rayQueryTerminateEXT(rq);
-            break;
-        }
-        const uint id = rtHitInstance(uint(rayQueryGetIntersectionInstanceCustomIndexEXT(rq, false)),
-                                      uint(rayQueryGetIntersectionGeometryIndexEXT(rq, false)));
-        uint fol = RT_FOL_OCCLUDE;
-        if (fol_walk)
-        {
-            if (!rtIdIn(id) || (rt_instances[id].flags & 256u) != 0u) continue;   // double-sided: an occluder (/ #874 guard)
-        }
-        else
-        {
-            const uint self_c = rtSelfCandidate(RT_CAND_OWNER(rq), id);
-            if (self_c == 1u) continue;
-            if (self_c == 2u || opaque_walk) { rayQueryConfirmIntersectionEXT(rq); continue; }
-            fol = rtFolAway(id, rayQueryGetIntersectionFrontFaceEXT(rq, false));
-            if (fol == RT_FOL_PASS) continue;
-        }
-        const uint prim = RT_HIT_PRIM(rq, false, id);
-        const vec2 bc   = rayQueryGetIntersectionBarycentricsEXT(rq, false);
-        const float t   = rayQueryGetIntersectionTEXT(rq, false);
-        const mat4x3 o2w = rayQueryGetIntersectionObjectToWorldEXT(rq, false);
-        float cutoff; bool blend; vec3 col;
-        const float a = rtCandidateAlphaCol(id, prim, bc, t, dir, o2w, cutoff, blend, col);   // (the ONE alpha test)
-        if (fol_walk)
-        {
-            if (a < cutoff) continue;   // a hole in the leaf
-            trans *= rgb ? rtFolLayer(col) : vec3(rt_fol_strength);
-            rt_block_t = min(rt_block_t, t);
-            RT_NOTE_BLOCKER(id);
-            if (++n_fol >= rt_fol_layers || max(max(trans.r, trans.g), trans.b) < 0.01)
-            {
-                rayQueryTerminateEXT(rq);
-                break;
-            }
-            continue;
-        }
-        if (kind == RT_WALK_VIS)
-        {
-            if (a >= cutoff && fol == RT_FOL_OCCLUDE)   // #735
-                rayQueryConfirmIntersectionEXT(rq);
-        }
-        else if ((blend ? a >= RT_BLEND_SOLID : a >= cutoff) && fol == RT_FOL_LEAF)
-        {
-            if (trans_walk && rt_fol_mode == 2u && n_fol < rt_fol_layers)
-            {
-                trans *= rgb ? rtFolLayer(col) : vec3(rt_fol_strength);
-                ++n_fol;
-                rt_block_t = min(rt_block_t, t);
-                if (max(max(trans.r, trans.g), trans.b) < 0.01) rayQueryConfirmIntersectionEXT(rq);
-            }
-        }
-        else if (blend && rt_fix_on && rtFixtureBox(id, rayQueryGetIntersectionWorldToObjectEXT(rq, false), o2w, fa, fb)) {}
-                                                   // (the light's own translucent shade: no tint)
-        else if (blend && rt_blend_parity && a >= 0.88)
-            rayQueryConfirmIntersectionEXT(rq);   // LL: solid caster
-        else if (blend && !(rt_blend_parity && a < 0.05))
-        {
-            trans *= rgb ? translucentTransmit(col, a) : vec3(1.0 - clamp(a, 0.0, 1.0));
-            if (!trans_walk && a > 0.004) { rt_block_t = min(rt_block_t, t); RT_NOTE_BLOCKER(id); }
-            if (max(max(trans.r, trans.g), trans.b) < 0.01) rayQueryConfirmIntersectionEXT(rq);
-        }
-        else if (blend) {}                         // LL: casts nothing
-        else if (a >= cutoff)
-            rayQueryConfirmIntersectionEXT(rq);
-    }
-    if (fol_walk) return trans;
-    if (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT) return trans;
-    if (rt_fix_on && !trans_walk)
-    {
-        // OWN FIXTURE: the committed caster's box entry (the slab test in its object space: the
-        // ray parameter is the same through the affine map); the caller re-traces up to it
-        const uint fid = rtHitInstance(uint(rayQueryGetIntersectionInstanceCustomIndexEXT(rq, true)),
-                                       uint(rayQueryGetIntersectionGeometryIndexEXT(rq, true)));
-        const mat4x3 w2o = rayQueryGetIntersectionWorldToObjectEXT(rq, true);
-        if (rtFixtureBox(fid, w2o, rayQueryGetIntersectionObjectToWorldEXT(rq, true), fa, fb))
-        {
-            const vec3 oo = w2o * vec4(origin, 1.0);
-            const vec3 od = w2o * vec4(dir, 0.0);
-            const vec3 inv = vec3(1.0) / mix(od, vec3(1e-20), lessThan(abs(od), vec3(1e-20)));
-            const vec3 t0 = (fa - oo) * inv, t1 = (fb - oo) * inv;
-            const vec3 tn = min(t0, t1);
-            rt_fix_t = max(max(max(tn.x, tn.y), tn.z), 0.0);
-            return vec3(0.0);
-        }
-    }
-    if (!trans_walk)
-    {
-        rt_block_t = min(rt_block_t, rayQueryGetIntersectionTEXT(rq, true));
-        RT_NOTE_COMMITTED(rq);
-    }
-    return vec3(0.0);
-}
+// ---- THE WALK: clean_vis_walk.glsl (#1039 M0; included by clean_rt_common.glsl) -- rtVisWalk over every
+//      kind, the own-fixture rule (rt_fix_*, re-traced by rtVisTrace), the opaque-first pre-ray
+//      (RT_WALK_OFIRST) and the kernel specialisation (SH_KIND_DIRECTIONAL / SH_KIND_POSITIONAL: the
+//      includer defines them before clean_rt_common.glsl; this file compiles its sample code by them). ----
 
 // ---- THE RECEIVER (light-independent; once per texel) ----
 struct ShadowRecv {
@@ -206,78 +51,10 @@ float shadowRecvClLift(ShadowRecv R)
     if (g_shc_cl < 0.0) g_shc_cl = pdnClusterRigLift(R.P, R.cam);
     return g_shc_cl;
 }
-// #664 TERMINATOR TRIANGLE of the receiver (rtTerminatorCached, clean_shadow_rt.glsl, with ONE
-// escape-check site): the pre-pass triangle (rtTerminatorTriAt) or the camera probe
-// (rtTerminatorProbe), their lift escape-checked once after either. Same results, same cache
-// (rt_tc_*: keyed by P) and the same globals for rtTerminatorPost.
-bool shadowTermTri(ivec2 px, vec3 P, out vec3 lift, out vec3 ns, out vec3 ng)
-{
-    // rtTerminatorTriAt without its escape check (the raw lift ng x h)
-    lift = vec3(0.0); ns = vec3(0.0); ng = vec3(0.0);
-    rt_tri_dev = 0.0; rt_esc_flag = 0.0; rt_lift_capped = false;
-    if (px.x < 0 || !rtTermTriBound()) return false;
-    const ivec2 sz = textureSize(uTermTri, 0);
-    if (any(greaterThanEqual(px, sz))) return false;
-    const uvec2 t = texelFetch(uTermTri, px, 0).xy;
-    if ((t.y & 0x8000u) == 0u) return false;
-    ng = rtOctDecode(unpackSnorm2x16(t.x));
-    ns = rtOctDecode(vec2(float((t.y >> 16u) & 255u), float(t.y >> 24u)) * (2.0 / 255.0) - 1.0);
-    const float h = unpackHalf2x16(t.y & 0x7FFFu).x;
-    if (h > 0.0) lift = ng * h;
-    return true;
-}
-int shadowTermProbe(vec3 P, vec3 cam, vec3 ng_ref, float min_cos, out vec3 lift, out vec3 ns, out vec3 ng)
-{
-    // rtTerminatorProbe without its escape check
-    lift = vec3(0.0); ns = vec3(0.0); ng = vec3(0.0);
-    rt_tri_dev = 0.0; rt_esc_flag = 0.0; rt_lift_capped = false;
-    vec3 V = P - cam;
-    const float camd = length(V);
-    if (camd < 1e-4) return 0;
-    V /= camd;
-    const float pm = max(max(abs(P.x), abs(P.y)), abs(P.z));
-    const float w = max(4.0 * (camd * RT_DEPTH_REL_ERR + max(RT_OFS_FRAME_ULPS * rtUlp(pm), RT_OFS_FLOAT_SCALE)), 1e-3);
-    vec3 qo = P - V * w;
-    float qt0 = 0.0, qt1 = 2.0 * w;
-    if (!rtRaySane(qo, qt0, V, qt1)) return 0;   // (Xid 109: an invalid probe ray -- no triangle)
-    rayQueryEXT rq;
-    rayQueryInitializeEXT(rq, uTLAS, gl_RayFlagsOpaqueEXT, RT_MASK_SHADOW & 0xFFu, qo, qt0, V, qt1);
-    while (rayQueryProceedEXT(rq)) {}
-    if (rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionTriangleEXT) return 0;
-    const uint id   = rtHitInstance(uint(rayQueryGetIntersectionInstanceCustomIndexEXT(rq, true)),
-                                    uint(rayQueryGetIntersectionGeometryIndexEXT(rq, true)));
-    const uint prim = RT_HIT_PRIM(rq, true, id);
-    const vec2 bb   = rayQueryGetIntersectionBarycentricsEXT(rq, true);
-    const mat4x3 o2w = rayQueryGetIntersectionObjectToWorldEXT(rq, true);
-    const float th  = rayQueryGetIntersectionTEXT(rq, true);
-    vec3 Ph;
-    if (!rtTerminatorTri(id, prim, vec3(1.0 - bb.x - bb.y, bb.x, bb.y), o2w, cam - P, lift, ns, ng, Ph))
-        return 0;
-    bool ok = abs(th - w) <= 0.5 * w;
-    if (ok && dot(ng_ref, ng_ref) > 0.5)
-    {
-        const vec3 r = normalize(ng_ref) * (dot(ng_ref, cam - P) < 0.0 ? -1.0 : 1.0);   // visible side
-        ok = dot(r, ng) >= min_cos;
-    }
-    if (!ok) { lift = vec3(0.0); ns = vec3(0.0); ng = vec3(0.0); rt_lift_capped = false; return 2; }
-    return 1;
-}
-bool shadowTermCached(vec3 P, vec3 cam, vec3 ng_ref, float min_cos, ivec2 px, out vec3 lift, out vec3 ns, out vec3 ng)
-{
-    if (rt_tc_state < 0 || any(notEqual(rt_tc_P, P)))
-    {
-        rt_tc_tri = shadowTermTri(px, P, rt_tc_lift, rt_tc_ns, rt_tc_ng);
-        rt_tc_state = rt_tc_tri ? 1 : shadowTermProbe(P, cam, ng_ref, min_cos, rt_tc_lift, rt_tc_ns, rt_tc_ng);
-        if (rt_tc_state == 1)   // (the one escape check: either source's lift)
-            rt_tc_lift = rtTerminatorEscape(P, rtReceiverOrigin(P, rt_tc_ng, length(P - cam), 0.0), rt_tc_ng, rt_tc_lift);
-        rt_tc_dev = rt_tri_dev; rt_tc_esc = rt_esc_flag; rt_tc_cap = rt_lift_capped;
-        rt_tc_P = P;
-    }
-    lift = rt_tc_lift; ns = rt_tc_ns; ng = rt_tc_ng;
-    rt_term_dev = rt_tc_dev; rt_term_esc = rt_tc_esc; rt_term_ng = rt_tc_ng;
-    rt_term_rej = rt_tc_state == 2; rt_term_cap = rt_tc_cap; rt_term_src_tri = rt_tc_tri;
-    return rt_tc_state == 1;
-}
+// #664 TERMINATOR TRIANGLE of the receiver: clean_shadow_rt.glsl rtTerminatorCached (the pre-pass
+// triangle or the camera probe, their lift escape-checked once after either; #1042: this file's copy of
+// it is gone -- every consumer shares that one). Same cache (rt_tc_*: keyed by P) and the same globals
+// for rtTerminatorPost.
 
 // Per (receiver, light): the RT shadow mask's receiver rules (clean_rt_shadow_mask.comp, sun and
 // projectors alike). l: unit direction to the light's centre from R.P. Sets the core's
@@ -289,7 +66,7 @@ float shadowRecvLight(ShadowRecv R, vec3 l, out vec3 N)
     const float ngl = dot(R.Ng, l);
     vec3 tlift = vec3(0.0), tns = vec3(0.0), tng = vec3(0.0);
     const bool term = rtTerminatorOn() && rtTerminatorBand(ngl)
-                   && shadowTermCached(R.P, R.cam, R.Ng, RT_TERM_MASK_COS, R.rp, tlift, tns, tng);
+                   && rtTerminatorCached(R.P, R.cam, R.Ng, RT_TERM_MASK_COS, R.rp, tlift, tns, tng);
     N = term ? tng : R.Ng;
     rt_term_on = term; rt_term_lift = tlift; rt_term_ns = tns;
     // (#747 + the slope offset: only along the receiver's VISIBLE side -- the core lifts along the
@@ -326,6 +103,92 @@ struct ShadowSample {
     vec2  noise;     // the Vogel pattern's radius offset [0, 1) and rotation (radians)
 };
 
+// ---- (#1031) THE SAMPLE'S RAY-GENERATION INPUTS (ShRayGen): everything shadowSampleVis derives once
+//      per sample and every ray of it re-reads (the disc frame, the origin rules, the near plane, the
+//      floor, the flags). With SH_PARK (the includer: 64-lane workgroups) they wait in shared memory,
+//      one row set per lane, and each ray reloads them -- so none of them is live across a walk: the
+//      walk's alpha test, the register peak, sees only the accumulators. Without it: a local copy. ----
+#define SHG_SPHERE   1u
+#define SHG_HARD     2u
+#define SHG_LIFTED   4u
+#define SHG_BFS      8u
+#define SHG_SPLIT   16u
+#define SHG_FOL     32u
+#define SHG_OO      64u
+#define SHG_DPAR   128u   // the disc rays' blend parity
+#define SHG_TPAR   256u   // the translucent ray's
+#define SHG_KIND_SHIFT 9u   // the disc rays' walk kind (3 bits)
+#define SHG_VISSET 4096u   // the disc rays walk the opaque set (binary): mask without the blend class
+struct ShRayGen {
+    vec3 pos;  float radius;     // S.pos (directional: the unit direction L), the disc radius
+    vec3 axis; float nearClip;
+    vec3 Pb;   float biasLift;   // (positional origins) the lifted receiver, S.bias + rt_cl_lift
+    vec3 Nin;  float camd;
+    vec3 Nv;   float efloor;
+    vec3 Nf;   float tmax;
+    vec3 u;    float noiseX;
+    vec3 v;    float noiseY;
+    vec3 oL;   uint  bits;       // (directional) every ray's origin; SHG_*
+    vec3 tlift; uint n;          // rt_term_lift; the disc rays
+    vec3 post;                   // rtTerminatorPost's light direction
+};
+#ifdef SH_PARK
+#define SH_PARK_ROWS 11
+shared uvec4 s_shPark[64][SH_PARK_ROWS];
+void shRayGenPark(ShRayGen g)
+{
+    const uint l = gl_LocalInvocationIndex;
+    s_shPark[l][0]  = uvec4(floatBitsToUint(g.pos), floatBitsToUint(g.radius));
+    s_shPark[l][1]  = uvec4(floatBitsToUint(g.axis), floatBitsToUint(g.nearClip));
+    s_shPark[l][2]  = uvec4(floatBitsToUint(g.Pb), floatBitsToUint(g.biasLift));
+    s_shPark[l][3]  = uvec4(floatBitsToUint(g.Nin), floatBitsToUint(g.camd));
+    s_shPark[l][4]  = uvec4(floatBitsToUint(g.Nv), floatBitsToUint(g.efloor));
+    s_shPark[l][5]  = uvec4(floatBitsToUint(g.Nf), floatBitsToUint(g.tmax));
+    s_shPark[l][6]  = uvec4(floatBitsToUint(g.u), floatBitsToUint(g.noiseX));
+    s_shPark[l][7]  = uvec4(floatBitsToUint(g.v), floatBitsToUint(g.noiseY));
+    s_shPark[l][8]  = uvec4(floatBitsToUint(g.oL), g.bits);
+    s_shPark[l][9]  = uvec4(floatBitsToUint(g.tlift), g.n);
+    s_shPark[l][10] = uvec4(floatBitsToUint(g.post), 0u);
+}
+ShRayGen shRayGenUnpark()
+{
+    const uint l = gl_LocalInvocationIndex;
+    ShRayGen g;
+    uvec4 q;
+    q = s_shPark[l][0];  g.pos  = uintBitsToFloat(q.xyz); g.radius   = uintBitsToFloat(q.w);
+    q = s_shPark[l][1];  g.axis = uintBitsToFloat(q.xyz); g.nearClip = uintBitsToFloat(q.w);
+    q = s_shPark[l][2];  g.Pb   = uintBitsToFloat(q.xyz); g.biasLift = uintBitsToFloat(q.w);
+    q = s_shPark[l][3];  g.Nin  = uintBitsToFloat(q.xyz); g.camd     = uintBitsToFloat(q.w);
+    q = s_shPark[l][4];  g.Nv   = uintBitsToFloat(q.xyz); g.efloor   = uintBitsToFloat(q.w);
+    q = s_shPark[l][5];  g.Nf   = uintBitsToFloat(q.xyz); g.tmax     = uintBitsToFloat(q.w);
+    q = s_shPark[l][6];  g.u    = uintBitsToFloat(q.xyz); g.noiseX   = uintBitsToFloat(q.w);
+    q = s_shPark[l][7];  g.v    = uintBitsToFloat(q.xyz); g.noiseY   = uintBitsToFloat(q.w);
+    q = s_shPark[l][8];  g.oL   = uintBitsToFloat(q.xyz); g.bits     = q.w;
+    q = s_shPark[l][9];  g.tlift = uintBitsToFloat(q.xyz); g.n       = q.w;
+    q = s_shPark[l][10]; g.post = uintBitsToFloat(q.xyz);
+    return g;
+}
+#endif
+// A ray's origin for a positional light toward point T (the receiver rules: lifted -> the lift's side,
+// back-face self-shadow -> the visible side, else the side facing T).
+vec3 shPosOrigin(ShRayGen g, vec3 toT)
+{
+    vec3 Nr = g.Nin;
+    if ((g.bits & SHG_LIFTED) != 0u) { if (dot(Nr, g.tlift) < 0.0) Nr = -Nr; }
+    else if ((g.bits & SHG_BFS) != 0u) Nr = g.Nv;
+    else if (dot(Nr, toT) < 0.0) Nr = -Nr;
+    return rtReceiverOrigin(g.Pb, Nr, g.camd, g.biasLift);
+}
+// A positional ray's length to the near plane (dot(X - O, A) = near: the fixture never shadows its own
+// light) or, for a point light, to its own prim's bounding sphere (SH_SPHERE)
+float shPosTmax(ShRayGen g, vec3 o, vec3 d, float len)
+{
+    if ((g.bits & SHG_SPHERE) != 0u) return len - g.nearClip - 0.002;
+    const float da = dot(d, g.axis);
+    const float dp = dot(o - g.pos, g.axis);
+    return min((da < -1e-6) ? (g.nearClip - dp) / da : len, len) - 0.002;
+}
+
 // The visibility (x translucent / foliage tint) of receiver P (geometric normal Nin: the facet
 // shadowRecvLight chose) toward light sample S. The caller set rt_term_* / rt_cl_lift
 // (shadowRecvLight), rt_block_t, rt_noise_shift; the sample's rays share ONE walk call site.
@@ -333,12 +196,24 @@ struct ShadowSample {
 // (positional) of clean_shadow_rt.glsl.
 vec3 shadowSampleVis(ShadowSample S, vec3 P, vec3 Nin, vec3 cam, float time)
 {
+    // (#1031 KERNEL SPECIALISATION: a one-kind kernel folds the other kind's paths away)
+#if defined(SH_KIND_DIRECTIONAL)
+    const bool pos = false, sphere = false;
+    const bool oo = (S.flags & SH_OPAQUE_ONLY) != 0u;
+    const bool fol = (S.flags & SH_FOLIAGE) != 0u;
+    rt_fix_on = false;
+#elif defined(SH_KIND_POSITIONAL)
+    const bool pos = true, oo = false, fol = false;
+    const bool sphere = (S.flags & SH_SPHERE) != 0u;
+    rt_fix_on = (S.flags & SH_FIXTURE) != 0u;
+#else
     const bool pos = (S.flags & SH_POSITIONAL) != 0u;
     const bool oo = (S.flags & SH_OPAQUE_ONLY) != 0u;
     const bool fol = (S.flags & SH_FOLIAGE) != 0u;
-    const bool split = (S.flags & SH_SPLIT) != 0u;
     const bool sphere = (S.flags & SH_SPHERE) != 0u;
     rt_fix_on = (S.flags & SH_FIXTURE) != 0u;
+#endif
+    const bool split = (S.flags & SH_SPLIT) != 0u;
     rt_fix_P = S.pos;
     rtSetShadowFootprint(P, Nin, cam);
     if (fol) rtFolBegin();
@@ -347,53 +222,93 @@ vec3 shadowSampleVis(ShadowSample S, vec3 P, vec3 Nin, vec3 cam, float time)
     rt_cone_spread = 0.0;
     rt_cone_width0 = camd * 0.001;   // (fallback only: rtSetShadowFootprint's rt_foot_* override it)
     rt_cone_aniso  = 1.0;
+#ifdef RT_NO_FOOT_LOD
+    // (#1031) ISOTROPIC SHADOW LOD (RenderVKShadowIsoLod): the receiver pixel's footprint (minor axis:
+    // the pixel across the view, already x the raster's material mip bias) as the ray cone's CONSTANT
+    // width -- the alpha test's cone path: LOD = log2(width / |n.d| x the caster triangle's texel
+    // density). The anisotropic projection (textureGrad along both footprint axes) is not compiled.
+    if (rt_foot_on)
+    {
+        rt_cone_width0 = length(rt_foot_a);
+        rt_foot_on = false;
+    }
+#endif
+    // ---- the sample's ray-generation inputs (ShRayGen above) ----
+    ShRayGen G;
+    G.pos = S.pos; G.radius = S.radius; G.axis = S.axis; G.nearClip = S.nearClip;
+    G.camd = camd; G.Nin = Nin; G.tmax = S.tmax; G.noiseX = S.noise.x; G.noiseY = S.noise.y;
+    G.n = max(S.nRays, 1u);
+    G.tlift = rt_term_lift;
+    G.biasLift = S.bias + rt_cl_lift;
     // TERMINATOR (#664): a lifted origin stays on the VISIBLE side (above the facet, on the
     // surface the vertex normals describe); unlifted, each ray leaves the light-facing side.
     const bool lifted = rt_term_on && dot(rt_term_lift, rt_term_lift) > 0.0;
-    const vec3 Pb = lifted ? P + rt_term_lift : P;
+    G.Pb = lifted ? P + rt_term_lift : P;
     const vec3 L = S.pos;               // (directional)
-    const vec3 toO = S.pos - Pb;        // (positional: to the emitter centre)
+    const vec3 toO = S.pos - G.Pb;      // (positional: to the emitter centre)
     const float dO = length(toO);
     // BACK-FACE SELF-SHADOW (clean_shadow_rt.glsl rtBackfaceSelfShadow): unlifted, every origin
     // leaves along the VISIBLE side of the facet (Nv), and a facet turned away from the light's
     // centre is shadowed by its own surface -- no ray (the old light-side flip pushed the origin
     // through single-plane walls: the next room's projector lit this side).
     const bool bfs = !lifted && rtBackfaceSelfShadow();
-    const vec3 Nv = rtVisibleSide(Nin, P, cam);
-    const bool selfShadowed = bfs && !(dot(Nv, pos ? toO : L) > 0.0);
+    G.Nv = rtVisibleSide(Nin, P, cam);
+    const bool selfShadowed = bfs && !(dot(G.Nv, pos ? toO : L) > 0.0);
     // the disc frame's normal (a point light: its disc faces the receiver)
     const vec3 A = pos ? (sphere ? (dO > 1e-4 ? toO / dO : vec3(0.0, 0.0, 1.0)) : S.axis) : L;
     const bool hard = !(S.radius > 0.0);
-    const uint n = max(S.nRays, 1u);
     // the disc floor's frame: the shading surface when known (RenderVKRTShadowTerminatorFloor)
-    vec3 Nf = rt_term_on ? rt_term_ns : Nin;
-    if (dot(Nf, pos ? toO : L) < 0.0) Nf = -Nf;
-    float efloor = -2.0;
+    G.Nf = rt_term_on ? rt_term_ns : Nin;
+    if (dot(G.Nf, pos ? toO : L) < 0.0) G.Nf = -G.Nf;
+    G.efloor = -2.0;
     if (!hard)
     {
-        if (pos) { if (dO > 1e-4) efloor = min(clamp(dot(Nf, toO) / dO, 0.0, 1.0), ssr.taa_scale.w * S.radius / dO); }
-        else efloor = min(clamp(dot(Nf, L), 0.0, 1.0), ssr.taa_scale.w * S.radius);
+        if (pos) { if (dO > 1e-4) G.efloor = min(clamp(dot(G.Nf, toO) / dO, 0.0, 1.0), ssr.taa_scale.w * S.radius / dO); }
+        else G.efloor = min(clamp(dot(G.Nf, L), 0.0, 1.0), ssr.taa_scale.w * S.radius);
     }
-    vec3 u = vec3(0.0), v = vec3(0.0);
+    G.u = vec3(0.0); G.v = vec3(0.0);
     if (!hard || !pos)   // (the sun's frame is always built: unused when hard)
     {
-        u = normalize(abs(A.z) < 0.9 ? cross(A, vec3(0.0, 0.0, 1.0)) : cross(A, vec3(1.0, 0.0, 0.0)));
-        v = cross(A, u);
+        G.u = normalize(abs(A.z) < 0.9 ? cross(A, vec3(0.0, 0.0, 1.0)) : cross(A, vec3(1.0, 0.0, 0.0)));
+        G.v = cross(A, G.u);
     }
     const uint optsB = rtBlendOpts();
     const bool discVisSet = split || oo;   // binary opaque-set disc rays
-    const uint discMask = discVisSet ? (RT_MASK_SHADOW & ~RT_MASK_BLEND) : RT_MASK_SHADOW;
     const uint discKind = (oo && !rt_opaque_cutouts) ? RT_WALK_OPAQUE
                         : (discVisSet ? RT_WALK_VIS : (specTransOn() ? RT_WALK_RGB : RT_WALK_GREY));
-    const bool discParity = !discVisSet && (optsB & 1u) != 0u;
+    G.bits = (sphere ? SHG_SPHERE : 0u) | (hard ? SHG_HARD : 0u) | (lifted ? SHG_LIFTED : 0u) | (bfs ? SHG_BFS : 0u)
+           | (split ? SHG_SPLIT : 0u) | (fol ? SHG_FOL : 0u) | (oo ? SHG_OO : 0u)
+           | ((!discVisSet && (optsB & 1u) != 0u) ? SHG_DPAR : 0u) | ((optsB & 1u) != 0u ? SHG_TPAR : 0u)
+           | (discKind << SHG_KIND_SHIFT) | (discVisSet ? SHG_VISSET : 0u);
+    // (#1031) a directional light's rays all leave ONE origin (every ray's Nr rule tests against L)
+    G.oL = vec3(0.0);
+    if (!pos)
+    {
+        vec3 Nr = Nin;
+        if (lifted) { if (dot(Nr, rt_term_lift) < 0.0) Nr = -Nr; }
+        else if (bfs) Nr = G.Nv;
+        else if (dot(Nr, L) < 0.0) Nr = -Nr;
+        G.oL = rtReceiverOrigin(G.Pb, Nr, camd, G.biasLift);
+    }
+    G.post = pos ? normalize(S.pos - P) : L;
+#ifdef SH_PARK
+    shRayGenPark(G);
+#endif
 
     vec3 vis = vec3(0.0), first = vec3(0.0);
-    float rays = float(n);   // the normaliser: rays actually traced (early-outs below)
+    float rays = float(G.n);   // the normaliser: rays actually traced (early-outs below)
     uint k = 0u;
     uint phase = selfShadowed ? 3u : 0u;   // 0 the disc, 1 the translucent ray, 2 the foliage ray, 3 done
                                            // (self-shadowed: vis 0, no ray)
-    [[dont_unroll]] for (uint it = 0u; it < n + 2u && phase < 3u; ++it)
+    const uint nRays = G.n;   // (the loop bound: one value across the walks)
+    [[dont_unroll]] for (uint it = 0u; it < nRays + 2u && phase < 3u; ++it)
     {
+#ifdef SH_PARK
+        const ShRayGen g = shRayGenUnpark();   // (this ray's inputs: reloaded, not carried across the last walk)
+#else
+        const ShRayGen g = G;
+#endif
+        const uint n = g.n;
         vec3 o = vec3(0.0), d = vec3(0.0);
         float tm = 0.0;
         uint kind = 0u, mask = 0u;
@@ -414,54 +329,40 @@ vec3 shadowSampleVis(ShadowSample S, vec3 P, vec3 Nin, vec3 cam, float time)
                 const uint i = n - 1u - k;   // outermost samples first (rtAdaptiveDone)
                 ++k;
                 vec3 off = vec3(0.0);
-                if (!hard)
+                if ((g.bits & SHG_HARD) == 0u)
                 {
-                    const float r   = S.radius * sqrt((float(i) + S.noise.x) / float(n));
-                    const float phi = S.noise.y + 2.3999632 * float(i);
-                    off = (u * cos(phi) + v * sin(phi)) * r;
+                    const float r   = g.radius * sqrt((float(i) + g.noiseX) / float(n));
+                    const float phi = g.noiseY + 2.3999632 * float(i);
+                    off = (g.u * cos(phi) + g.v * sin(phi)) * r;
                 }
                 if (pos)
                 {
-                    const vec3 T = S.pos + off;
-                    vec3 Nr = Nin;
-                    if (lifted) { if (dot(Nr, rt_term_lift) < 0.0) Nr = -Nr; }
-                    else if (bfs) Nr = Nv;
-                    else if (dot(Nr, T - Pb) < 0.0) Nr = -Nr;
-                    o = rtReceiverOrigin(Pb, Nr, camd, S.bias + rt_cl_lift);
+                    const vec3 T = g.pos + off;
+                    o = shPosOrigin(g, T - g.Pb);
                     const vec3 toL = T - o;
                     const float len = length(toL);
                     if (len <= 1e-4) { vis += vec3(1.0); continue; }
                     d = toL / len;
-                    const float e = dot(Nf, d);
-                    if (e < efloor) d = normalize(d + Nf * (efloor - e));
-                    // the near plane (dot(X - O, A) = near): the fixture never shadows its own light;
-                    // a point light: its own prim's bounding sphere (SH_SPHERE)
-                    if (sphere) tm = len - S.nearClip - 0.002;
-                    else
-                    {
-                        const float da = dot(d, S.axis);
-                        const float dp = dot(o - S.pos, S.axis);
-                        tm = min((da < -1e-6) ? (S.nearClip - dp) / da : len, len) - 0.002;
-                    }
+                    const float e = dot(g.Nf, d);
+                    if (e < g.efloor) d = normalize(d + g.Nf * (g.efloor - e));
+                    tm = shPosTmax(g, o, d, len);
                     if (tm <= 0.0) { vis += vec3(1.0); continue; }
                 }
                 else
                 {
-                    vec3 Nr = Nin;
-                    if (lifted) { if (dot(Nr, rt_term_lift) < 0.0) Nr = -Nr; }
-                    else if (bfs) Nr = Nv;
-                    else if (dot(Nr, L) < 0.0) Nr = -Nr;
-                    o = rtReceiverOrigin(Pb, Nr, camd, S.bias + rt_cl_lift);
-                    d = L;
-                    if (!hard)
+                    o = g.oL;
+                    d = g.pos;
+                    if ((g.bits & SHG_HARD) == 0u)
                     {
-                        d = normalize(L + off);
-                        const float e = dot(Nf, d);
-                        if (e < efloor) d = normalize(d + Nf * (efloor - e));
+                        d = normalize(g.pos + off);
+                        const float e = dot(g.Nf, d);
+                        if (e < g.efloor) d = normalize(d + g.Nf * (g.efloor - e));
                     }
-                    tm = S.tmax;
+                    tm = g.tmax;
                 }
-                kind = discKind; mask = discMask; par = discParity;
+                kind = (g.bits >> SHG_KIND_SHIFT) & 7u;
+                mask = (g.bits & SHG_VISSET) != 0u ? (RT_MASK_SHADOW & ~RT_MASK_BLEND) : RT_MASK_SHADOW;
+                par = (g.bits & SHG_DPAR) != 0u;
                 want = true;
             }
         }
@@ -470,34 +371,24 @@ vec3 shadowSampleVis(ShadowSample S, vec3 P, vec3 Nin, vec3 cam, float time)
             // TRANSLUCENT SPLIT: one ray toward the light's centre over the blend class (same
             // origin rules and near-plane clip as a disc ray; no disc floor), where any light is left
             phase = 2u;
-            if (split && any(greaterThan(vis, vec3(0.0))))
+            if ((g.bits & SHG_SPLIT) != 0u && any(greaterThan(vis, vec3(0.0))))
             {
-                vec3 Nr = Nin;
-                if (lifted) { if (dot(Nr, rt_term_lift) < 0.0) Nr = -Nr; }
-                else if (bfs) Nr = Nv;
-                else if (dot(Nr, pos ? toO : L) < 0.0) Nr = -Nr;
-                o = rtReceiverOrigin(Pb, Nr, camd, S.bias + rt_cl_lift);
                 if (pos)
                 {
-                    const vec3 toL = S.pos - o;
+                    o = shPosOrigin(g, g.pos - g.Pb);
+                    const vec3 toL = g.pos - o;
                     const float len = length(toL);
                     if (len > 1e-4)
                     {
                         d = toL / len;
-                        if (sphere) tm = len - S.nearClip - 0.002;
-                        else
-                        {
-                            const float da = dot(d, S.axis);
-                            const float dp = dot(o - S.pos, S.axis);
-                            tm = min((da < -1e-6) ? (S.nearClip - dp) / da : len, len) - 0.002;
-                        }
+                        tm = shPosTmax(g, o, d, len);
                         want = tm > 0.0;
                     }
                 }
-                else { d = L; tm = S.tmax; want = true; }
+                else { o = g.oL; d = g.pos; tm = g.tmax; want = true; }
                 kind = specTransOn() ? RT_WALK_TRANS_RGB : RT_WALK_TRANS;
                 mask = RT_MASK_BLEND;
-                par = (optsB & 1u) != 0u;
+                par = (g.bits & SHG_TPAR) != 0u;
             }
             if (!want) continue;
         }
@@ -506,32 +397,20 @@ vec3 shadowSampleVis(ShadowSample S, vec3 P, vec3 Nin, vec3 cam, float time)
             // FOLIAGE TRANSMISSION (#735 mode 2; the sun / moon's full trace only): one ray along
             // the centre over the alpha-mask class, where the shadow rays left some light
             phase = 3u;
-            if (!fol || oo || rt_fol_mode != 2u || !(max(max(vis.r, vis.g), vis.b) > 0.0)) continue;
-            vec3 Nr = Nin;
-            if (lifted) { if (dot(Nr, rt_term_lift) < 0.0) Nr = -Nr; }
-            else if (bfs) Nr = Nv;
-            else if (dot(Nr, L) < 0.0) Nr = -Nr;
-            o = rtReceiverOrigin(Pb, Nr, camd, S.bias + rt_cl_lift);
-            d = L; tm = S.tmax;
+            if ((g.bits & SHG_FOL) == 0u || pos || (g.bits & SHG_OO) != 0u || rtFolMode() != 2u
+                || !(max(max(vis.r, vis.g), vis.b) > 0.0))
+                continue;
+            o = g.oL;   // (SH_FOLIAGE: the sun / moon's only -- directional)
+            d = g.pos; tm = g.tmax;
             kind = specTransOn() ? RT_WALK_FOL_RGB : RT_WALK_FOL;
             mask = RT_MASK_ALPHAMASK;
             want = true;
         }
         if (!want) continue;
         rt_blend_parity = par;
-        vec3 w = vec3(1.0);
         // (SH_FIXTURE: a ray ended by the light's own fixture is traced again up to the fixture's box
-        //  -- at most twice, nested lamps; the same call site)
-        float tmc = tm;
-        [[dont_unroll]] for (uint fr = 0u; fr < 3u; ++fr)
-        {
-            rt_fix_t = -1.0;
-            w = traceShadowWalkG(o, d, 0.0, tmc, mask, kind);   // THE walk site
-            if (!(rt_fix_t >= 0.0)) break;
-            tmc = min(rt_fix_t, tmc) - 0.002;
-            w = vec3(1.0);   // (nothing before the fixture so far: lit unless the next pass meets one)
-            if (tmc <= 0.0) break;
-        }
+        //  -- at most twice, nested lamps; the same call site: rtVisTrace)
+        const vec3 w = rtVisTrace(o, d, tm, mask, kind);   // THE walk site
         rt_blend_parity = false;
         if (kind == RT_WALK_OPAQUE || kind == RT_WALK_VIS || kind == RT_WALK_GREY || kind == RT_WALK_RGB) vis += w;
         else vis *= w;
@@ -540,7 +419,11 @@ vec3 shadowSampleVis(ShadowSample S, vec3 P, vec3 Nin, vec3 cam, float time)
     rt_fix_on = false;
     if (fol) rtFolEnd();
     rt_foot_on = false;
-    const vec3 r = rtTerminatorPost(vis, pos ? normalize(S.pos - P) : L);
+#ifdef SH_PARK
+    const vec3 r = rtTerminatorPost(vis, shRayGenUnpark().post);
+#else
+    const vec3 r = rtTerminatorPost(vis, G.post);
+#endif
     rt_term_rej = false;
     return r;
 }

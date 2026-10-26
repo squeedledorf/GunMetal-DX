@@ -112,6 +112,7 @@
 #include "llfloatergesture.h"
 #include "ssfloatergamecontroldebug.h" // <SS:GameControl>
 #include "ssfloatergamecontroloverlay.h" // <SS:GameControl>
+#include "gmdxfloaterinputoverlay.h"   // <GMDX>
 #include "ssfloatergamecontrolgyro.h" // <SS:GameControl>
 #include "llfloatergltfasseteditor.h"
 #include "llfloatergltfexport.h"
@@ -162,7 +163,6 @@
 #include "llfloaterperformance.h"
 #include "llfloaterperms.h"
 #include "llfloaterpreference.h"
-#include "llfloaterpreferencesgraphicsadvanced.h"
 #include "llfloaterpreferenceviewadvanced.h"
 #include "llfloaterpreviewtrash.h"
 #include "llfloaterprofile.h"
@@ -441,6 +441,7 @@ void LLViewerFloaterReg::registerFloaters()
     LLFloaterReg::add("gestures", "floater_gesture.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLFloaterGesture>);
     LLFloaterReg::add("game_control_gyro", "floater_game_control_gyro.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<SSFloaterGameControlGyro>); // <SS:GameControl>
     LLFloaterReg::add("game_control_overlay", "floater_game_control_overlay.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<SSFloaterGameControlOverlay>); // <SS:GameControl>
+    LLFloaterReg::add("gmdx_input_overlay", "floater_gmdx_input_overlay.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<GMDXFloaterInputOverlay>); // <GMDX>
     LLFloaterReg::add("game_control_debug", "floater_game_control_debug.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<SSFloaterGameControlDebug>); // <SS:GameControl>
     LLFloaterReg::add("gesture_sets", "floater_gesture_sets.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<SLFloaterGestureSets>);
     LLFloaterReg::add("sl_ao", "floater_sl_ao.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<SLFloaterAO>);
@@ -522,7 +523,7 @@ void LLViewerFloaterReg::registerFloaters()
     LLFloaterReg::add("perms_default", "floater_perms_default.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLFloaterPermsDefault>);
     LLFloaterReg::add("places", "floater_places.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLFloaterSidePanelContainer>);
     LLFloaterReg::add("preferences", "floater_preferences.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLFloaterPreference>);
-    LLFloaterReg::add("prefs_graphics_advanced", "floater_preferences_graphics_advanced.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLFloaterPreferenceGraphicsAdvanced>);
+    // <GMDX> no "prefs_graphics_advanced": those settings are tabs of Preferences > Graphics
     LLFloaterReg::add("prefs_view_advanced", "floater_preferences_view_advanced.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLFloaterPreferenceViewAdvanced>);
     LLFloaterReg::add("prefs_proxy", "floater_preferences_proxy.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLFloaterPreferenceProxy>);
     LLFloaterReg::add("prefs_spellchecker_import", "floater_spellcheck_import.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLFloaterSpellCheckerImport>);

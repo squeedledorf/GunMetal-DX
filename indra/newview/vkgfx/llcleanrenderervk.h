@@ -415,6 +415,9 @@ public:
     std::string texInspectText(const LLUUID& obj, S32 face, U32 map, const F32* uv_px = nullptr);
     // #684: one short residency line for a texture id (Texture Console columns); "" if not resident.
     std::string texResidencyBrief(const LLUUID& id) const;
+    // <GMDX> A Vulkan image holds this texture now (either variant: plain or alpha-mask), so a face
+    // using it can draw it rather than the white default (GMDXRezFx waits on it).
+    bool texOnGpu(const LLUUID& id) const;
 
     // Number of instances currently uploaded (diagnostic).
     uint32_t instanceCount() const { return mInstanceCount; }
@@ -3008,6 +3011,23 @@ private:
     // SSBO (never read: only the motion pre-pass consumes it).
     GpuBuffer mPrevInstSSBO{};
     uint32_t  mPrevInstCap = 0;                                  // rows
+    // #1033 SLIM VERTEX-SHADER INSTANCE RECORDS (clean_vs_inst.glsl, 112 B per row): the world
+    // vertex shaders read these instead of the 224 B Instance (draw set 0 binding 54 = current,
+    // 55 = previous-frame, motion pre-pass only). Derived EVERY frame by one compute dispatch
+    // (clean_vs_inst.comp, recordVsInst) from the instance SSBO / previous-instance SSBO after
+    // the stream + previous-row copies, so every Instance writer (stream, grow copy, agent
+    // shift, previous-row copy) stays authoritative and nothing else writes these. Sized to the
+    // instance capacity (the high-water pattern of the SSBO itself); the previous one exists
+    // only while mPrevInstSSBO does (binding 55 aliases the current one otherwise).
+    GpuBuffer mVsInstSSBO{};
+    GpuBuffer mVsInstPrevSSBO{};
+    uint32_t  mVsInstCap = 0;                                    // rows of mVsInstSSBO
+    uint32_t  mVsInstPrevCap = 0;                                // rows of mVsInstPrevSSBO
+    VkPipelineLayout mVsInstLayout = VK_NULL_HANDLE;
+    VkPipeline       mVsInstPipe = VK_NULL_HANDLE;
+    void ensureVsInst();                          // (re)size to the instance capacity (device wait on change)
+    void writeVsInstDescriptor();                 // draw set 0 bindings 54 / 55
+    void recordVsInst(VkCommandBuffer cmd);       // after the stream + previous-row copies
     std::vector<std::pair<uint32_t, uint32_t>> mPrevInstRuns;   // last frame's upload runs
     std::vector<std::pair<uint32_t, uint32_t>> mInstCopyRuns;   // scratch (merged runs)
     std::vector<uint8_t> mInstLive;       // per id: live in the mirror at the last upload
@@ -4574,7 +4594,8 @@ private:
                              // y the re-shade gain limit (RenderVKGIReshadeGain; 0 = none)
         uint32_t chg[8];     // GI_F_LIGHT_CHG: the lights moved / radiance-changed (mGiChg: GI's reference rule)
         float    prm5[4];    // (#980) x the re-shade significance threshold (RenderVKGIReshadeThreshold; 0 = any
-                             // reach), y the old records in chg_prev (<= 64)
+                             // reach), y the old records in chg_prev (<= 64), z (#1041) the own-fixture box
+                             // limit of the hits' point-light rays (RenderVKReSTIRFixtureSize, m)
         float    sph[64][4];
         float    chg_prev[128][4];   // (#980) mGiChgPrev: the flagged lights' old records, ascending light index
     };
@@ -4582,6 +4603,29 @@ private:
     class LLCleanDenoiserVK* mGiDn = nullptr;       // the GI signal's own denoiser instance
     VkPipeline            mGiTracePipe = VK_NULL_HANDLE;   // pass 11 -DCLEAN_GI_TRACE
     VkPipeline            mGiResolvePipe = VK_NULL_HANDLE; // (GI-4) the radiance cache's resolve
+    // (#1031, RenderVKGISplitKernels) the GI trace as stages (clean_deferred_light.comp THE GI KERNEL
+    // SPLIT): TRACE, SHADE, REUSE (+ TAIL), RESHADE -- over mGiHit (set 3 binding 25: the list headers
+    // + list + 96 B of records per GI texel); without it (refused / off) the fused mGiTracePipe
+    enum GiStage : uint32_t { GIS_TRACE = 0, GIS_SHADE, GIS_REUSE, GIS_RESHADE, GIS_COUNT };
+    VkPipeline            mGiSplitPipe[GIS_COUNT] = {};
+    GpuBuffer             mGiHit{};
+    uint32_t              mGiHitW = 0, mGiHitH = 0;
+    double                mGiHitRetryAt = 0.0;       // the records were refused (#697): the next attempt
+    bool                  mGiSplitNow = false;       // this recording runs the stages (giDecide)
+    bool                  giSplitReady(uint32_t w, uint32_t h) const;
+    // (#1036, RenderVKGIShadeSplit) SHADE as MISS / HIT-MAT / HIT-LIGHT, indirect over TRACE's hit / miss
+    // lists (mGiHit's headers 1 / 2 + the list space; the material records in the hit records' space);
+    // while these compile, SHADE
+    enum GiShadeStage : uint32_t { GSS_MISS = 0, GSS_HITMAT, GSS_HITLIGHT, GSS_COUNT };
+    VkPipeline            mGiShadePipe[GSS_COUNT] = {};
+    bool                  mGiShadeSplitNow = false;  // this recording splits SHADE (giDecide)
+    bool                  giShadeSplitReady() const;
+    static VkDeviceSize   giHitBytes(uint32_t w, uint32_t h)
+    {
+        const VkDeviceSize n = (VkDeviceSize)w * h;
+        // headers (the re-shade list, #1036 the hit / miss lists), list (4 B / texel), records
+        return 16u * (3u + (n + 3u) / 4u) + n * 96u;
+    }
     GpuBuffer             mGiState{};                // header + radiance cache (fixed at its size)
     uint32_t              mGiStateSlots = ~0u;       // the cache slots mGiState was made for
     GpuBuffer             mGiRes{};                  // (GI-2) reservoirs: 32 B x 2 parities per GI texel
@@ -4614,11 +4658,13 @@ private:
     // before the next command buffer begins) applies it. RenderVKResizeAtFrameStart 0: in place.
     // (w != 0: giApply; lag / lagFree: the #978 phase-2 resources, giLagEnsure / giLagFree)
     struct GiReq { bool pending = false, free = false; uint32_t w = 0, h = 0, slots = 0; bool wantRes = false; float scale = 0.f;
+                   bool wantHit = false;
                    bool lag = false, lagFree = false; uint32_t lagW = 0, lagH = 0; };
     GiReq                 mGiReq;
     void                  giPrestep();
-    void                  giFreeAll();               // (device wait) the denoiser, state, reservoirs; set 3 18-23
-    bool                  giApply(uint32_t w, uint32_t h, uint32_t slots, bool wantRes, float scale);   // false: refused
+    void                  giFreeAll();               // (device wait) the denoiser, state, reservoirs, records; set 3 18-23 / 25
+    // false: refused (wantHit: #1031's records -- a refusal only drops the split)
+    bool                  giApply(uint32_t w, uint32_t h, uint32_t slots, bool wantRes, float scale, bool wantHit);
     void                  giWriteHeader(VkCommandBuffer cmd);   // light pass, with the uploads
     void                  recordGI(VkCommandBuffer cmd, const VKDeferPush& p, uint32_t viewOff, bool onAsync);
     bool                  giTraceReady() const;      // recordGI would record the trace (this frame's TLAS, the images)
@@ -4776,7 +4822,16 @@ private:
     // (#859 noise) 24 the RT reflection TEMPORAL history (storage image array, 2 layers: mDsRtHist)
     static constexpr uint32_t kDsBindingRtHist = kDsImgBindings + 17u;
     static_assert(kDsBindingRtHist == 24u, "clean_deferred_light.comp set 3 binding 24 (uRtHist)");
-    static constexpr uint32_t kDsBindings = kDsImgBindings + 18u;
+    // (#1031) 25 the split GI stages' records + re-shade list (storage buffer: mGiHit, else mRsResDummy)
+    static constexpr uint32_t kDsBindingGiHit = kDsImgBindings + 18u;
+    static_assert(kDsBindingGiHit == 25u, "clean_deferred_light.comp set 3 binding 25 (gi_hit)");
+    // (#1031) 26 the split shadow core's selection descriptors (storage buffer: mPdnSel, else mRsResDummy)
+    static constexpr uint32_t kDsBindingPdnSel = kDsImgBindings + 19u;
+    static_assert(kDsBindingPdnSel == 26u, "clean_deferred_light.comp set 3 binding 26 (pdn_sel)");
+    // (#1031) 27 the split shadow core's light-sample visibilities (storage buffer: mPdnVis, else mRsResDummy)
+    static constexpr uint32_t kDsBindingPdnVis = kDsImgBindings + 20u;
+    static_assert(kDsBindingPdnVis == 27u, "clean_deferred_light.comp set 3 binding 27 (pdn_vis)");
+    static constexpr uint32_t kDsBindings = kDsImgBindings + 21u;
     VkDescriptorSetLayout mDslDeferSplit = VK_NULL_HANDLE;   // set 3: the storage images
     VkDescPool       mDeferSplitPool;
     VkDescriptorSet  mDsetDeferSplit = VK_NULL_HANDLE;
@@ -4871,6 +4926,89 @@ private:
     VkPipeline       mRtSelectPipe = VK_NULL_HANDLE;    // pass 16 (mRtReflLayout)
     VkPipeline       mRtTraceListPipe = VK_NULL_HANDLE; // pass 11 -DCLEAN_RT_LIST (mRtReflLayout)
     bool             mRtReflRayList = true;              // this frame's RenderVKRTReflectionsRayList
+    // (#1036, RenderVKRTReflectionsShadeSplit) the list trace as TRACE / MAT / LIGHT (clean_deferred_light.comp
+    // THE RT REFLECTION SPLIT) over per-ray records: mRtRec, kRtRecBytes per list entry for the first
+    // mRtRecCap entries, found by device address (push rtr3.zw; rtr3.x = the capacity -- no descriptor);
+    // the entries past it take mRtTraceListPipe as a TAIL dispatch. Sized for RenderVKRTReflectionsRayBudget
+    // (rtSplitDecide); refused (#697): the fused list trace, retried after mRtRecRetryAt.
+    enum RtSplitStage : uint32_t { RTS_TRACE = 0, RTS_MAT, RTS_LIGHT, RTS_COUNT };
+    VkPipeline       mRtSplitPipe[RTS_COUNT] = {};
+    GpuBuffer        mRtRec{};
+    uint32_t         mRtRecCap = 0;              // list entries mRtRec holds
+    double           mRtRecRetryAt = 0.0;
+    bool             mRtSplitWant = true;        // this frame's RenderVKRTReflectionsShadeSplit
+    bool             mRtSplitNow = false;        // this recording traces through the split (rtSplitDecide)
+    static constexpr uint32_t kRtRecBytes = 112u;   // (7 uvec4: clean_deferred_light.comp RTR_REC_WORDS)
+    void             rtSplitDecide(uint32_t rw, uint32_t rh, double now);
+    // (#1039 M1, RenderVKVisQueue; llcleanvisqueuevk.cpp) THE VISIBILITY QUEUE (clean_vis_queue.glsl): the
+    // hit-shading splits' sun rays as requests -- the material stage queues (DeferRtSplitMatVq /
+    // DeferGiSplitHitMatVq), ONE walk kernel traces them (DeferVisWalk), the lighting stage resolves
+    // (DeferRtSplitLightVq / DeferGiSplitHitLightVq: no sun walk). One device-address buffer (no
+    // descriptor), a region per consumer: a 256 B header + 64 B per entry (a 48 B request + a 16 B result),
+    // entries = the consumer's (the RT records' capacity, the GI texels) within the cap
+    // (RenderVKVisQueueMB, 0 = the VRAM tier's: 192 / 64 / 32 MB); the entries past it take the fused
+    // lighting stage as a TAIL (push rtr3.y = the first). Sized from the extent / settings only (no growth);
+    // a new size allocates first and retires the old buffer. Refused (#697): the fused stages, retry in 30 s.
+    // (#1039 M2, RenderVKVisQueue bit 2) the SET 2 variants (DeferRtSplitMatVq2 / DeferRtSplitLayersVq2 /
+    // DeferRtSplitLightVq2, DeferGiSplitHitMatVq2 / DeferGiSplitHitLightVq2) also queue the hits' occlusion ray
+    // and the hit shadow-ray budget's K light rays (the producer walks the local lights unshadowed) and give the
+    // RT split a LAYERS stage (the blend layers): no ray query left in the lighting stages. An entry then holds
+    // R requests (RT 2 + K, GI 1 + K: the most it can ask) and S 16 B result slots (RT 4 + K, GI 2 + K).
+    enum VisQueueRegionId : uint32_t { VQR_RT = 0, VQR_GI, VQR_COUNT };
+    struct VisQueueRegion
+    {
+        VkDeviceSize offset = 0;    // in mVq
+        uint32_t     entries = 0;   // entry capacity; 0 = this consumer is not queued
+        uint32_t     wanted = 0;    // the consumer's entries this recording (the tail covers wanted - entries)
+        uint32_t     reqPerEntry = 1;   // R: the request capacity is entries x R (never refuses: the most an entry asks)
+        uint32_t     slots = 1;         // S: result slots per entry
+        uint32_t     budgetK = 0;       // the hit shadow-ray budget K the slots were sized for (set 2)
+    };
+    GpuBuffer        mVq{};
+    VisQueueRegion   mVqRegion[VQR_COUNT];
+    uint32_t         mVqCapBytes = 0;            // this recording's cap
+    double           mVqRetryAt = 0.0;
+    bool             mVqRtNow = false;           // this recording queues the RT reflections' hit rays
+    bool             mVqGiNow = false;           // ... and the GI's
+    uint32_t         mVqSet = 0;                 // ... through set 0 (M1: the sun) or set 1 (M2: every hit ray)
+    VkPipeline       mVisWalkPipe = VK_NULL_HANDLE;   // pass 11 -DCLEAN_RT_LIST -DCLEAN_VIS_WALK (mRtReflLayout)
+    enum VisQueueStage : uint32_t { VQS_MAT = 0, VQS_LIGHT, VQS_LAYERS, VQS_COUNT };   // (LAYERS: RT set 1 only)
+    VkPipeline       mRtVqPipe[2][VQS_COUNT] = {};  // the RT split's MAT / LIGHT (/ LAYERS) -DCLEAN_VIS_QUEUE [_M2]
+    VkPipeline       mGiVqPipe[2][VQS_COUNT] = {};  // the GI shade split's HIT-MAT / HIT-LIGHT -DCLEAN_VIS_QUEUE [_M2]
+    // the pipelines compile with the world batch at init only when their RenderVKVisQueue bit is on then;
+    // switched on later, in the background (mVqJob): the consumers stay fused until they land
+    PipelineJobSlot  mVqJob;
+    bool             mVqPipesQueued[2] = {};     // each set queued once (the world batch or mVqJob): never twice
+    bool             vqSetReady(uint32_t s) const
+    {
+        return mVisWalkPipe && mRtVqPipe[s][VQS_MAT] && mRtVqPipe[s][VQS_LIGHT] && (s == 0u || mRtVqPipe[s][VQS_LAYERS])
+            && mGiVqPipe[s][VQS_MAT] && mGiVqPipe[s][VQS_LIGHT];
+    }
+    static constexpr uint32_t kVqHdrBytes = 256u, kVqReqBytes = 48u, kVqSlotBytes = 16u;   // (clean_vis_queue.glsl)
+    // the producers' counters (GPU timers on): the regions' header words 0-4, a 3-slot readback ring
+    GpuBuffer        mVqStatRb{};
+    uint32_t         mVqStatSlot = 0;
+    bool             mVqStatUsed[3][VQR_COUNT] = {};
+    struct VqStatAcc
+    {
+        double frames[VQR_COUNT] = {}, req[VQR_COUNT] = {}, wanted[VQR_COUNT] = {}, consts[VQR_COUNT] = {},
+               past[VQR_COUNT] = {}, refused[VQR_COUNT] = {}, occ[VQR_COUNT] = {}, lightRays[VQR_COUNT] = {},
+               litHits[VQR_COUNT] = {};
+        uint32_t peak[VQR_COUNT] = {};
+        double lastLog = 0.0;
+    } mVqStatAcc;
+    // the pipelines (after mRtReflLayout) of the sets in setMask (bit s = set s; 0: the ones the setting asks
+    // for -- the world batch at init); the background build passes the sets it wants
+    void             visQueueInit(VkDevice dev, uint32_t setMask);
+    void             visQueueDestroy();
+    void             visQueueDecide();                 // per recording, after giDecide + rtSplitDecide
+    VkDeviceAddress  visQueueAddr(uint32_t r) const { return mVq.address + mVqRegion[r].offset; }
+    // A region's header for this recording (the WAR barrier on last frame's readers, the write, the barrier
+    // to the producer); recAddr / recCap: the RT records' (the RT region's resolve finds them there).
+    void             visQueueBegin(VkCommandBuffer cmd, uint32_t r, VkDeviceAddress recAddr, uint32_t recCap);
+    // The WALK over a region's requests (indirect; the RT layout's sets bound, base = the consumer's push).
+    void             visQueueWalk(VkCommandBuffer cmd, uint32_t r, const VKRtReflPush& base);
+    void             visQueueStats(VkCommandBuffer cmd, uint32_t r);   // the region's counters into the ring
     VkPipeline       mRtFwdPipe = VK_NULL_HANDLE;      // pass 14 (mRtReflLayout)
     VkPipeline       mRtResolvePipe = VK_NULL_HANDLE;  // pass 13 (mDeferSplitLayout: no RT set)
     VkPipelineLayout mRtUberLayout = VK_NULL_HANDLE;   // draw sets 0 / 1 + set 2 + RT set 3, 112 B push
@@ -5012,6 +5150,23 @@ private:
     // recordProjStoch while compiled; the per-light-type pipes above stay the fallback.
     VkPipeline mPdnSampleCorePipe = VK_NULL_HANDLE;
     VkPipeline mPdnMergeCorePipe = VK_NULL_HANDLE;
+    // (#1031, RenderVKShadowSplitKernels) the generic core as SELECT (plain / merged), SUNVIS (merged),
+    // VIS and SHADE (shared) -- clean_deferred_light.comp THE SHADOW CORE SPLIT -- over mPdnSel (set 3
+    // binding 26: 64 B per denoiser texel) and mPdnVis (binding 27: 16 B + mPdnVisSlots x 8 B per denoiser
+    // texel: VIS's job list + the visibilities), both at the denoiser's extent, allocated / freed like mRsRes
+    VkPipeline mPdnSelectPipe[2] = {};
+    VkPipeline mPdnSunVisPipe = VK_NULL_HANDLE, mPdnVisPipe = VK_NULL_HANDLE, mPdnShadePipe = VK_NULL_HANDLE;
+    // (RenderVKShadowIsoLod) SUNVIS / VIS with the isotropic alpha-test LOD (the defaults; the above: the
+    // receiver-footprint LOD, setting 0 -- and the fallback while these compile)
+    VkPipeline mPdnSunVisIsoPipe = VK_NULL_HANDLE, mPdnVisIsoPipe = VK_NULL_HANDLE;
+    GpuBuffer  mPdnSel{}, mPdnVis{};
+    uint32_t   mPdnSelW = 0, mPdnSelH = 0, mPdnVisSlots = 0;
+    double     mPdnSelRetryAt = 0.0;   // a refused allocation (#697): the fused core meanwhile
+    void       pdnSelFrame();          // a sampling frame: ensure / free (the rsResFrame rule)
+    void       writePdnSelBinding();   // set 3 bindings 26 + 27 (no frame in flight)
+    bool       pdnSplitWanted() const; // RenderVKShadowSplitKernels + the five pipelines
+    uint32_t   pdnVisSlotsWanted() const;   // the settings' longest light-sample list (mPdnVis's slots)
+    void       pdnSelFree();           // (the device waited) both buffers, bindings to the placeholder
     bool   mShadowMergeTry = false;      // predicted this frame (selectLitVariant)
     bool   mShadowMergeNow = false;      // confirmed this frame (recordWorld, after deferSplitFrame)
     bool   mRtMaskWant = false;          // selectLitVariant's RT mask verdict before the merge held it off
@@ -5623,6 +5778,12 @@ private:
     VkDescriptorSetLayout mDslProbeTrace = VK_NULL_HANDLE;   // binding 0: capture mip 0 (storage, 2D array)
     VkPipelineLayout      mProbeTraceLayout = VK_NULL_HANDLE;   // draw sets 0 / 1, RT set, mDslProbeTrace
     VkPipeline            mProbeTracePipe = VK_NULL_HANDLE;
+    // #1064: mProbeTracePipe compiles in the background the first time Raytraced is selected
+    // (probeTraceEnsure), not at init: until it lands (or if it fails / is quarantined) detail 3
+    // runs as Realtime, as with any missing piece. Queued: asked once per renderer lifetime.
+    PipelineJobSlot       mProbeTraceJob;
+    bool                  mProbeTracePipeQueued = false;
+    void probeTraceEnsure();
     VkDescPool            mProbeTracePool;                     // (initProbes: the sets name the cubes)
     VkDescriptorSet       mDsetProbeTrace[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};   // [0] mProbeCap, [1] mProbeCapRT
     VkImageView           mProbeCapStoreView = VK_NULL_HANDLE, mProbeCapRTStoreView = VK_NULL_HANDLE;
@@ -6193,13 +6354,17 @@ private:
     // overdraw counter's): zeroed before the dispatch, copied after it into a 3-deep host
     // ring, harvested 3 frames later (readLitGuardStats). Logged once per new kind of trip
     // (WARN) and as a ~10 s summary while anything is non-zero (tag VKLitGuard).
-    static constexpr uint32_t kOdCounterBytes = 256;   // 64 words: [0..3] overdraw, [4..34] lit guards
-    static constexpr uint32_t kLgFirstWord = 4, kLgWords = 31;
+    static constexpr uint32_t kOdCounterBytes = 256;   // 64 words: [0..3] overdraw, [4..37] lit guards
+    static constexpr uint32_t kLgFirstWord = 4, kLgWords = 34;
     // PROBE TEXEL GUARD (clean_draw_common.glsl lgProbeTexel): lit-guard word indices.
     static constexpr uint32_t kLgPt = 13;                 // + LGPT_*: bad texels per store (4)
     static constexpr uint32_t kLgPtNonFinite = 17, kLgPtMax = 18, kLgPtMinInv = 19, kLgPtBadIn = 20;
     static constexpr uint32_t kLgPtSample = 21, kLgPtLive1 = 22, kLgPtSlots = 23;   // slots: 8 words
-    static_assert(kLgPtSlots + kPrbSlotCap / 32 == kLgWords, "lit guard words = clean_draw_common.glsl LGPT_WORD");
+    // (#1049) RT REFLECTION HANG GUARD (clean_deferred_light.comp rtrStatsGuard, LG_RT_WORD): + 0 rays
+    // the per-ray query budget cut, + 1 rays rtRaySane refused, + 2 walks over the candidate budget.
+    static constexpr uint32_t kLgRt = 31;
+    static_assert(kLgPtSlots + kPrbSlotCap / 32 == kLgRt, "lit guard words = clean_draw_common.glsl LGPT_WORD");
+    static_assert(kLgRt + 3 == kLgWords, "the RT hang guard's words end the lit guard words");
     static_assert((kLgFirstWord + kLgWords) * 4 <= kOdCounterBytes, "mOdCounter holds every lit guard word");
     GpuBuffer        mLgRb[3]{};
     bool             mLgRbValid[3] = {false, false, false};
@@ -6217,7 +6382,7 @@ private:
     bool             mLgScanNow = true;
     bool             mLgRbScan[3] = {true, true, true};
     uint32_t         mLgScanFrames = 0;
-    uint32_t         mLgSeen = 0;                // kinds already WARNed once (bit per word)
+    uint64_t         mLgSeen = 0;                // kinds already WARNed once (bit per word)
     double           mLgNextLog = 0.0;
     // The GPU slot table (mPrbSlots, 64 B / slot) copied beside the counters while probe
     // texels trip (mLgSlotsUntil), so the log can say what each bad slot holds (#478: the
@@ -6995,6 +7160,10 @@ private:
                        uint8_t dbg_k = 0, dbg_kd = 0, dbg_state = 0;
                      };
     std::unordered_map<uint64_t, SharedTex> mSharedTex;
+    // #1032: bumped whenever a bindless slot's shared image mapping (mVkTexShared) or a shared
+    // texture's alpha verdict (SharedTex::comps) may have changed -- LLCleanRTVK rebuilds its
+    // per-slot "no alpha" bits (clean_rt_instances.comp maskKnownOpaque) when it moves.
+    uint32_t mTexAlphaGen = 0;
     // RenderVKAlphaCoverageMips as last seen (2 = not yet); images refreshed for it.
     uint8_t  mCovMipsSeen = 2;
     uint64_t mCovRefresh = 0;

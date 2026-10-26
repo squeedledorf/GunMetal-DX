@@ -28,6 +28,7 @@
 #include "llfontgl.h"
 #include "llmath.h"
 #include "llrender.h"
+#include "llrender2dutils.h"
 #include "llviewercontrol.h"
 #include "v4color.h"
 
@@ -94,7 +95,8 @@ namespace
 
     // ---- 0: gunmetal frame -------------------------------------------------------------
 
-    void drawFrame(const LLRectf& sq)
+    // The brushed-metal band around the map and its edge lines (gGL.begin / end of its own).
+    void frameBand(const LLRectf& sq)
     {
         const F32 b = FRAME_BAND;
         const LLRectf map(sq.mLeft + b, sq.mTop - b, sq.mRight - b, sq.mBottom + b);
@@ -138,6 +140,15 @@ namespace
         // A dark 1 px line along the map, a darker one around the outside.
         outline(LLRectf(map.mLeft - 1.f, map.mTop + 1.f, map.mRight + 1.f, map.mBottom - 1.f), LLColor4(0.05f, 0.05f, 0.06f, 0.95f));
         outline(sq, LLColor4(0.08f, 0.08f, 0.09f, 1.f));
+        gGL.end();
+    }
+
+    void drawFrame(const LLRectf& sq)
+    {
+        const F32 b = FRAME_BAND;
+        const LLRectf map(sq.mLeft + b, sq.mTop - b, sq.mRight - b, sq.mBottom + b);
+        frameBand(sq);
+        gGL.begin(LLRender::TRIANGLES);
 
         // Ticks every 1/16 of the side, out from the map edge; the quarter marks are left to
         // the letters.
@@ -262,6 +273,33 @@ namespace
 
     // ---- 2: heading tape ---------------------------------------------------------------
 
+    // The eight direction pills turned so heading_deg points up (the rotating map). place(ux, uy,
+    // half_w, r, x, y) puts one: (ux, uy) its direction on screen, half_w / r its half width / height.
+    template <class Place>
+    void turningPills(F32 heading_deg, Place place)
+    {
+        const LLFontGL* font = LLFontGL::getFontSansSerifSmallBold();
+        const F32 r = floorf((font->getLineHeight() + 4.f) * 0.5f);
+        F32 px[8];
+        F32 py[8];
+        gGL.getTexUnit(0)->unbind(LLTexUnit::TT_TEXTURE);
+        gGL.begin(LLRender::TRIANGLES);
+        for (S32 i = 0; i < 8; ++i)
+        {
+            const F32 half_len = llmax(0.f, floorf(font->getWidthF32(label(i).c_str()) * 0.5f) + 3.f - r);
+            const F32 a = (i * 45.f - heading_deg) * DEG_TO_RAD;
+            place(sinf(a), cosf(a), half_len + r, r, px[i], py[i]);
+            px[i] = floorf(px[i]);
+            py[i] = floorf(py[i]);
+            pill(px[i], py[i], half_len, r, PANEL, i == 0 ? ACCENT : LLColor4(1.f, 1.f, 1.f, 0.5f));
+        }
+        gGL.end();
+        for (S32 i = 0; i < 8; ++i)
+        {
+            text(font, label(i), px[i], py[i], labelColor(i), LLFontGL::VCENTER, LLFontGL::NO_SHADOW);
+        }
+    }
+
     void drawTape(const LLRectf& sq, F32 heading)
     {
         const F32 bottom = sq.mTop;   // the strip sits above the map (getTopReserve)
@@ -329,7 +367,15 @@ F32 GMDXMinimapCompass::getMapInset()
 
 F32 GMDXMinimapCompass::getTopReserve()
 {
-    return getStyle() == STYLE_TAPE ? TAPE_HEIGHT : 0.f;
+    // (the rotating Whole Region map has no tape)
+    static LLCachedControl<bool> rotate(gSavedSettings, "MiniMapRotate", true);
+    return getStyle() == STYLE_TAPE && !rotate ? TAPE_HEIGHT : 0.f;
+}
+
+S32 GMDXMinimapCompass::getRotatingStyle()
+{
+    static LLCachedControl<S32> style(gSavedSettings, "GMDXMiniMapRotateCompass", STYLE_PILLS);
+    return style == STYLE_FRAME ? STYLE_FRAME : STYLE_PILLS;
 }
 
 void GMDXMinimapCompass::draw(const LLRectf& square, F32 heading_deg)
@@ -345,6 +391,146 @@ void GMDXMinimapCompass::draw(const LLRectf& square, F32 heading_deg)
         default:
             drawFrame(square);
             break;
+    }
+    gGL.getTexUnit(0)->unbind(LLTexUnit::TT_TEXTURE);
+}
+
+F32 GMDXMinimapCompass::getRadarRing()
+{
+    return FRAME_BAND;
+}
+
+void GMDXMinimapCompass::drawRadar(F32 cx, F32 cy, F32 radius, F32 heading_deg, S32 style)
+{
+    if (style == STYLE_PILLS)   // pills just inside the disc's edge, and a faint line along it
+    {
+        gGL.getTexUnit(0)->unbind(LLTexUnit::TT_TEXTURE);
+        gGL.pushMatrix();
+        gGL.translatef(cx, cy, 0.f);
+        gl_washer_2d(radius, radius - 1.f, 96, LLColor4(1.f, 1.f, 1.f, 0.22f), LLColor4(1.f, 1.f, 1.f, 0.22f));
+        gGL.popMatrix();
+        turningPills(heading_deg, [&](F32 ux, F32 uy, F32 half_w, F32 r, F32& x, F32& y)
+            {
+                const F32 d = radius - PILL_PAD - (fabsf(ux) * half_w + fabsf(uy) * r);
+                x = cx + ux * d;
+                y = cy + uy * d;
+            });
+        gGL.getTexUnit(0)->unbind(LLTexUnit::TT_TEXTURE);
+        return;
+    }
+    constexpr S32 SEGMENTS = 96;
+    const F32 r0 = radius, r1 = radius + FRAME_BAND;
+    // Brushed metal as the frame's: light towards the top-left and bottom-right, dark between.
+    auto metal = [&](F32 x, F32 y)
+    {
+        const F32 t = ((x - (cx - r1)) + ((cy + r1) - y)) / (4.f * r1);
+        const F32 g = 0.21f + 0.21f * (0.5f + 0.5f * cosf(t * F_TWO_PI));
+        return LLColor4(g, g + 0.005f, g + 0.02f, 1.f);
+    };
+    auto at = [&](F32 bearing_deg, F32 r, F32& x, F32& y)   // a bearing (clockwise from north), turned so the heading is up
+    {
+        const F32 a = (bearing_deg - heading_deg) * DEG_TO_RAD;
+        x = cx + r * sinf(a);
+        y = cy + r * cosf(a);
+    };
+    const LLColor4 inner_line(0.05f, 0.05f, 0.06f, 0.95f), outer_line(0.08f, 0.08f, 0.09f, 1.f);
+
+    gGL.getTexUnit(0)->unbind(LLTexUnit::TT_TEXTURE);
+    gGL.begin(LLRender::TRIANGLES);
+    for (S32 s = 0; s < SEGMENTS; ++s)
+    {
+        const F32 a0 = F_TWO_PI * s / SEGMENTS, a1 = F_TWO_PI * (s + 1) / SEGMENTS;
+        const F32 c0 = cosf(a0), s0 = sinf(a0), c1 = cosf(a1), s1 = sinf(a1);
+        auto band = [&](F32 ra, F32 rb, bool shaded, const LLColor4& flat)
+        {
+            const F32 ax = cx + ra * c0, ay = cy + ra * s0, bx = cx + ra * c1, by = cy + ra * s1;
+            const F32 dx = cx + rb * c0, dy = cy + rb * s0, ex = cx + rb * c1, ey = cy + rb * s1;
+            vertex(ax, ay, shaded ? metal(ax, ay) : flat); vertex(bx, by, shaded ? metal(bx, by) : flat); vertex(ex, ey, shaded ? metal(ex, ey) : flat);
+            vertex(ax, ay, shaded ? metal(ax, ay) : flat); vertex(ex, ey, shaded ? metal(ex, ey) : flat); vertex(dx, dy, shaded ? metal(dx, dy) : flat);
+        };
+        band(r0, r1, true, LABEL);
+        band(r0 - 1.f, r0 + 1.f, false, inner_line);   // a dark line along the map, a darker one outside
+        band(r1 - 1.f, r1, false, outer_line);
+    }
+    // ticks every 15 degrees between the labelled directions, pointing in from the band's outer edge
+    for (S32 i = 0; i < 24; ++i)
+    {
+        if (i % 3 == 0) continue;
+        F32 ox, oy, ix, iy;
+        at(i * 15.f, r1 - 2.f, ox, oy);
+        at(i * 15.f, r1 - 6.f, ix, iy);
+        const F32 len = llmax(sqrtf((ox - ix) * (ox - ix) + (oy - iy) * (oy - iy)), 1e-3f);
+        const F32 nx = -(oy - iy) / len * 0.5f, ny = (ox - ix) / len * 0.5f;
+        vertex(ox - nx, oy - ny, TICK); vertex(ix - nx, iy - ny, TICK); vertex(ix + nx, iy + ny, TICK);
+        vertex(ox - nx, oy - ny, TICK); vertex(ix + nx, iy + ny, TICK); vertex(ox + nx, oy + ny, TICK);
+    }
+    gGL.end();
+
+    for (S32 i = 0; i < 8; ++i)
+    {
+        F32 x, y;
+        at(i * 45.f, r0 + FRAME_BAND * 0.5f, x, y);
+        text(labelFont(i), label(i), x, y, labelColor(i), LLFontGL::VCENTER, LLFontGL::DROP_SHADOW);
+    }
+    gGL.getTexUnit(0)->unbind(LLTexUnit::TT_TEXTURE);
+}
+
+void GMDXMinimapCompass::drawRadarSquare(const LLRectf& sq, F32 heading_deg, S32 style)
+{
+    if (style == STYLE_PILLS)   // pills sliding round just inside the map's edges
+    {
+        gGL.getTexUnit(0)->unbind(LLTexUnit::TT_TEXTURE);
+        gGL.begin(LLRender::TRIANGLES);
+        outline(sq, LLColor4(1.f, 1.f, 1.f, 0.22f));
+        gGL.end();
+        const F32 cx = (sq.mLeft + sq.mRight) * 0.5f, cy = (sq.mBottom + sq.mTop) * 0.5f;
+        turningPills(heading_deg, [&](F32 ux, F32 uy, F32 half_w, F32 r, F32& x, F32& y)
+            {
+                const F32 hx = sq.getWidth() * 0.5f - PILL_PAD - half_w, hy = sq.getHeight() * 0.5f - PILL_PAD - r;
+                const F32 t = llmin(fabsf(ux) > 1e-4f ? hx / fabsf(ux) : F32_MAX, fabsf(uy) > 1e-4f ? hy / fabsf(uy) : F32_MAX);
+                x = cx + ux * t;
+                y = cy + uy * t;
+            });
+        gGL.getTexUnit(0)->unbind(LLTexUnit::TT_TEXTURE);
+        return;
+    }
+    frameBand(sq);
+    const F32 cx = (sq.mLeft + sq.mRight) * 0.5f, cy = (sq.mBottom + sq.mTop) * 0.5f;
+    const F32 half = sq.getWidth() * 0.5f;
+    // Where a bearing (clockwise from north, turned so the heading is up) meets the square of
+    // half side h around the centre; side = true when it meets a left / right edge.
+    auto at = [&](F32 bearing_deg, F32 h, F32& x, F32& y, bool& side)
+    {
+        const F32 a = (bearing_deg - heading_deg) * DEG_TO_RAD;
+        const F32 ux = sinf(a), uy = cosf(a);
+        side = fabsf(ux) > fabsf(uy);
+        const F32 t = h / llmax(fabsf(ux), fabsf(uy));
+        x = cx + ux * t;
+        y = cy + uy * t;
+    };
+    constexpr F32 TICK_LEN = 4.f;
+    gGL.getTexUnit(0)->unbind(LLTexUnit::TT_TEXTURE);
+    gGL.begin(LLRender::TRIANGLES);
+    for (S32 i = 0; i < 24; ++i)   // every 15 degrees between the labelled directions, out from the map edge
+    {
+        if (i % 3 == 0) continue;
+        F32 x, y;
+        bool side;
+        at(i * 15.f, half - FRAME_BAND + 1.f, x, y, side);
+        const F32 out = side ? (x > cx ? 1.f : -1.f) : (y > cy ? 1.f : -1.f);
+        if (side) quad(x, y - 0.5f, x + out * TICK_LEN, y + 0.5f, TICK);
+        else quad(x - 0.5f, y, x + 0.5f, y + out * TICK_LEN, TICK);
+    }
+    gGL.end();
+    for (S32 i = 0; i < 8; ++i)
+    {
+        F32 x, y;
+        bool side;
+        at(i * 45.f, half - FRAME_BAND * 0.5f, x, y, side);
+        // (kept off the corners, where two edges' letters would meet)
+        x = llclamp(x, sq.mLeft + FRAME_BAND, sq.mRight - FRAME_BAND);
+        y = llclamp(y, sq.mBottom + FRAME_BAND * 0.5f, sq.mTop - FRAME_BAND * 0.5f);
+        text(labelFont(i), label(i), x, y, labelColor(i), LLFontGL::VCENTER, LLFontGL::DROP_SHADOW);
     }
     gGL.getTexUnit(0)->unbind(LLTexUnit::TT_TEXTURE);
 }

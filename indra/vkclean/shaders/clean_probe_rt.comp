@@ -86,74 +86,25 @@ const vec3 kFaceR[6] = vec3[6](vec3(0, 0, -1), vec3(0, 0, 1), vec3(1, 0, 0), vec
 const vec3 kFaceD[6] = vec3[6](vec3(0, -1, 0), vec3(0, -1, 0), vec3(0, 0, 1), vec3(0, 0, -1), vec3(0, -1, 0), vec3(0, -1, 0));
 const vec3 kFaceF[6] = vec3[6](vec3(1, 0, 0), vec3(-1, 0, 0), vec3(0, 1, 0), vec3(0, -1, 0), vec3(0, 0, 1), vec3(0, 0, -1));
 
-bool rtIsAvatar(uint id)
-{
-    if (!rtIdIn(id)) return false;   // (#874 guard)
-    const uint f = rt_instances[id].flags;
-    return (rt_geom[id].z & 0x80000000u) != 0u || (f & (512u | 8192u)) != 0u;
-}
 
 // Closest hit honouring the capture raster's rules (see the header). blend = the
 // alpha-blend layer pass (mask = blend class): any visible texel (alpha > 1/255) of a
 // blend material hits; avatars are dropped per candidate when not dynamic (an alpha-
 // blend avatar face is class BLEND, which the mask can't separate).
+// (#1048: the shared closest-hit walk, clean_rt_closest.glsl -- this capture's rules as its data)
+#include "clean_rt_closest.glsl"
 RtHit probeClosest(vec3 o, vec3 d, float tmin, float tmax, uint mask, bool blendPass, bool dynamic)
 {
-    RtHit h;
-    h.hit = false;
-    for (int k = 0; k < 3; ++k)
-    {
-        rt_cone_width0 = 0.0;
-        rt_cone_spread = pt.cone_spread;
-        rt_cone_aniso  = 1.0;
-        // (Xid 109, as rtrClosest) the back-face re-trace can step tmin past tmax: an invalid ray
-        // query -- nothing is left on the interval: a miss; non-finite inputs too (rtRaySane)
-        if (!(tmin < tmax)) return h;
-        if (!rtRaySane(o, tmin, d, tmax)) return h;
-        rayQueryEXT rq;
-        rayQueryInitializeEXT(rq, uTLAS, gl_RayFlagsNoneEXT, mask & 0xFFu, o, tmin, d, tmax);
-        uint n_cand = 0u;
-        while (rayQueryProceedEXT(rq))
-        {
-            if (rayQueryGetIntersectionTypeEXT(rq, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
-            if (++n_cand > RT_CANDIDATE_BUDGET)
-            {   // over budget (G-7): stop -- the nearest hit committed so far stands
-                rayQueryTerminateEXT(rq);
-                break;
-            }
-            const uint id   = rtHitInstance(uint(rayQueryGetIntersectionInstanceCustomIndexEXT(rq, false)),
-                                            uint(rayQueryGetIntersectionGeometryIndexEXT(rq, false)));
-            const uint prim = RT_HIT_PRIM(rq, false, id);
-            const vec2 bc   = rayQueryGetIntersectionBarycentricsEXT(rq, false);
-            const float t   = rayQueryGetIntersectionTEXT(rq, false);
-            const mat4x3 o2w = rayQueryGetIntersectionObjectToWorldEXT(rq, false);
-            if (!dynamic && rtIsAvatar(id)) continue;
-            const uint fl = rtIdIn(id) ? rt_instances[id].flags : 256u;   // (#874 guard: alpha test -> opaque)
-            if ((fl & (256u | 2048u)) == 0u && !rtCandidateFront(id, prim, d, o2w)) continue;
-            float cutoff; bool blend; vec3 col;
-            const float a = rtCandidateAlphaCol(id, prim, bc, t, d, o2w, cutoff, blend, col);
-            if (blendPass && blend ? a > (1.0 / 255.0) : a >= cutoff)
-                rayQueryConfirmIntersectionEXT(rq);
-        }
-        if (rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionTriangleEXT)
-            return h;   // miss
-        h.hit = true;
-        h.dist = rayQueryGetIntersectionTEXT(rq, true);
-        h.instance = rtHitInstance(uint(rayQueryGetIntersectionInstanceCustomIndexEXT(rq, true)),
-                                   uint(rayQueryGetIntersectionGeometryIndexEXT(rq, true)));
-        if (!rtIdIn(h.instance)) { h.hit = false; return h; }   // (#874 guard: a bad id is a miss)
-        h.prim = RT_HIT_PRIM(rq, true, h.instance);
-        h.bary = rayQueryGetIntersectionBarycentricsEXT(rq, true);
-        h.front = rayQueryGetIntersectionFrontFaceEXT(rq, true);
-        h.o2w = rayQueryGetIntersectionObjectToWorldEXT(rq, true);
-        // Opaque instances never ran the candidate test: the raster back-face cull for
-        // single-sided ones -> continue past this triangle.
-        const uint fl = rt_instances[h.instance].flags;
-        if ((fl & (256u | 2048u)) != 0u || rtCandidateFront(h.instance, h.prim, d, h.o2w)) return h;
-        tmin = h.dist + max(h.dist * 1e-5, 1e-4);
-        h.hit = false;
-    }
-    return h;
+    rt_cone_width0 = 0.0;
+    rt_cone_spread = pt.cone_spread;
+    rt_cone_aniso  = 1.0;
+    RtClosestRules r;
+    r.mask = mask;
+    r.rflags = gl_RayFlagsNoneEXT;
+    r.blendMin = blendPass ? ALPHA_VISIBLE_EPS : RT_BLEND_CUTOFF;   // (blend pass: any visible texel)
+    r.blendGt = blendPass;
+    r.noAvatars = !dynamic;
+    return rtClosestWalk(o, d, tmin, tmax, r);
 }
 
 vec3 probeSky(vec3 dir)

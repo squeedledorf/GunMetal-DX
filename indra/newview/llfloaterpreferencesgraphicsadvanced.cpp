@@ -50,15 +50,19 @@
 // [/RLVa:KB]
 
 
-LLFloaterPreferenceGraphicsAdvanced::LLFloaterPreferenceGraphicsAdvanced(const LLSD& key)
-    : LLFloater(key)
+// <GMDX> Preferences > Graphics (floater_preferences.xml, the "display" tab)
+static LLPanelInjector<LLFloaterPreferenceGraphicsAdvanced> t_pref_graph_adv("panel_preference_graphics_advanced");
+
+LLFloaterPreferenceGraphicsAdvanced::LLFloaterPreferenceGraphicsAdvanced()
+    : LLPanelPreferenceGraphics()
 {
+    // The panel's scope covers every tab, the Quality one too: its complexity / animated
+    // avatar sliders land here, which do what LLFloaterPreference's handlers do.
     mCommitCallbackRegistrar.add("Pref.RenderOptionUpdate",            boost::bind(&LLFloaterPreferenceGraphicsAdvanced::onRenderOptionEnable, this));
     mCommitCallbackRegistrar.add("Pref.UpdateIndirectMaxNonImpostors", boost::bind(&LLFloaterPreferenceGraphicsAdvanced::updateMaxNonImpostors,this));
     mCommitCallbackRegistrar.add("Pref.UpdateIndirectMaxComplexity",   boost::bind(&LLFloaterPreferenceGraphicsAdvanced::updateMaxComplexity,this));
-
-    mCommitCallbackRegistrar.add("Pref.Cancel", boost::bind(&LLFloaterPreferenceGraphicsAdvanced::onBtnCancel, this, _2));
-    mCommitCallbackRegistrar.add("Pref.OK",     boost::bind(&LLFloaterPreferenceGraphicsAdvanced::onBtnOK, this, _2));
+    // No Pref.OK / Pref.Cancel: Preferences' own buttons save and revert these settings.
+    // </GMDX>
 
     mImpostorsChangedSignal = gSavedSettings.getControl("RenderAvatarMaxNonImpostors")->getSignal()->connect(boost::bind(&LLFloaterPreferenceGraphicsAdvanced::updateIndirectMaxNonImpostors, this, _2));
     // Projector Shadows is only enabled at Shadows >= "Sun/Moon + Projectors": re-evaluate
@@ -87,6 +91,7 @@ LLFloaterPreferenceGraphicsAdvanced::~LLFloaterPreferenceGraphicsAdvanced()
     mComplexityModeChangedSignal.disconnect();
     mLODFactorChangedSignal.disconnect();
     mBackgroundFPSChangedSignal.disconnect();
+    mNumImpostorsChangedSignal.disconnect(); // <GMDX>
 }
 
 // #277: fill the graphics card combo from the Vulkan pre-flight (every enumerated device;
@@ -159,7 +164,7 @@ bool LLFloaterPreferenceGraphicsAdvanced::postBuild()
     // (debug settings, preset load, Cancel restoring the saved value).
     mBackgroundFPSChangedSignal = gSavedSettings.getControl("BackgroundFPSLimit")->getSignal()->connect(
         [this](LLControlVariable*, const LLSD&, const LLSD&) { updateBackgroundFPSText(); });
-    return true;
+    return LLPanelPreferenceGraphics::postBuild(); // <GMDX>
 }
 
 void LLFloaterPreferenceGraphicsAdvanced::onOpen(const LLSD& key)
@@ -198,7 +203,7 @@ void LLFloaterPreferenceGraphicsAdvanced::draw()
                                                     "at most -- then the new settings apply either way)."));
         }
     }
-    LLFloater::draw();
+    LLPanelPreferenceGraphics::draw(); // <GMDX>
 }
 
 // #405: one VRAM budget -- what it is, what uses it, what the soft ladder holds back right
@@ -235,16 +240,7 @@ void LLFloaterPreferenceGraphicsAdvanced::updateNetDrawDistanceText()
     box->setText(text);
 }
 
-void LLFloaterPreferenceGraphicsAdvanced::onClickCloseBtn(bool app_quitting)
-{
-    LLFloaterPreference* instance = LLFloaterReg::findTypedInstance<LLFloaterPreference>("preferences");
-    if (instance)
-    {
-        instance->cancel({"RenderQualityPerformance"});
-    }
-    updateMaxComplexity();
-}
-
+// <GMDX> No onClickCloseBtn: Preferences' Cancel / close reverts these settings with the rest.
 void LLFloaterPreferenceGraphicsAdvanced::onRenderOptionEnable()
 {
     LLFloaterPreference* instance = LLFloaterReg::findTypedInstance<LLFloaterPreference>("preferences");
@@ -776,22 +772,4 @@ void LLFloaterPreferenceGraphicsAdvanced::refreshEnabledState()
 
     // now turn off any features that are unavailable
     disableUnavailableSettings();
-}
-
-void LLFloaterPreferenceGraphicsAdvanced::onBtnOK(const LLSD& userdata)
-{
-    LLFloaterPreference* instance = LLFloaterReg::getTypedInstance<LLFloaterPreference>("preferences");
-    if (instance)
-    {
-        instance->onBtnOK(userdata);
-    }
-}
-
-void LLFloaterPreferenceGraphicsAdvanced::onBtnCancel(const LLSD& userdata)
-{
-    LLFloaterPreference* instance = LLFloaterReg::getTypedInstance<LLFloaterPreference>("preferences");
-    if (instance)
-    {
-        instance->onBtnCancel(userdata);
-    }
 }

@@ -27,20 +27,24 @@
 #define LLFLOATERPREFERENCEGRAPHICSADVANCED_H
 
 #include "llcontrol.h"
-#include "llfloater.h"
+#include "llfloaterpreference.h"
 #include "llframetimer.h"
 
 class LLSliderCtrl;
 class LLTextBox;
 
-class LLFloaterPreferenceGraphicsAdvanced : public LLFloater
+// <GMDX> Not a floater any more: Preferences > Graphics itself (panel_preferences_graphics_advanced.xml,
+// panel class "panel_preference_graphics_advanced"), its tabs being the former Graphics panel ("Quality")
+// and the advanced graphics tabs. An LLPanelPreferenceGraphics, so presets, dirty tracking and
+// Preferences' OK / Cancel cover every tab. The upstream class name is kept to ease merges.
+class LLFloaterPreferenceGraphicsAdvanced : public LLPanelPreferenceGraphics
 {
 public:
-    LLFloaterPreferenceGraphicsAdvanced(const LLSD& key);
+    LLFloaterPreferenceGraphicsAdvanced();
     ~LLFloaterPreferenceGraphicsAdvanced();
     /*virtual*/ bool postBuild();
     void onOpen(const LLSD& key);
-    void onClickCloseBtn(bool app_quitting);
+    // </GMDX>
     void disableUnavailableSettings();
     void refreshEnabledGraphics();
     void refreshEnabledState();
@@ -65,9 +69,7 @@ public:
     LOG_CLASS(LLFloaterPreferenceGraphicsAdvanced);
 
 protected:
-    void        onBtnOK(const LLSD& userdata);
-    void        onBtnCancel(const LLSD& userdata);
-
+    // <GMDX> no own OK / Cancel (Preferences' buttons) </GMDX>
     boost::signals2::connection mImpostorsChangedSignal;
     boost::signals2::connection mComplexityChangedSignal;
     boost::signals2::connection mComplexityModeChangedSignal;

@@ -10,6 +10,79 @@
  top="724"
  visible="false"
  width="128">
+    <!-- <GMDX> on an avatar's dot (the closest under the cursor): its profile, its dot's colour -->
+    <menu_item_call
+     label="View Profile"
+     name="Avatar Profile">
+        <menu_item_call.on_click
+         function="Minimap.Avatar.Profile" />
+    </menu_item_call>
+    <menu
+     label="Dot Colour"
+     name="Avatar Dot Colour"
+     tear_off="false">
+        <menu_item_call
+         label="Red"
+         name="Avatar Dot Colour Red">
+            <menu_item_call.on_click
+             function="Minimap.Avatar.Color"
+             parameter="0" />
+        </menu_item_call>
+        <menu_item_call
+         label="Orange"
+         name="Avatar Dot Colour Orange">
+            <menu_item_call.on_click
+             function="Minimap.Avatar.Color"
+             parameter="1" />
+        </menu_item_call>
+        <menu_item_call
+         label="Yellow"
+         name="Avatar Dot Colour Yellow">
+            <menu_item_call.on_click
+             function="Minimap.Avatar.Color"
+             parameter="2" />
+        </menu_item_call>
+        <menu_item_call
+         label="Green"
+         name="Avatar Dot Colour Green">
+            <menu_item_call.on_click
+             function="Minimap.Avatar.Color"
+             parameter="3" />
+        </menu_item_call>
+        <menu_item_call
+         label="Cyan"
+         name="Avatar Dot Colour Cyan">
+            <menu_item_call.on_click
+             function="Minimap.Avatar.Color"
+             parameter="4" />
+        </menu_item_call>
+        <menu_item_call
+         label="Purple"
+         name="Avatar Dot Colour Purple">
+            <menu_item_call.on_click
+             function="Minimap.Avatar.Color"
+             parameter="5" />
+        </menu_item_call>
+        <menu_item_separator />
+        <menu_item_call
+         label="Custom..."
+         name="Avatar Dot Colour Custom">
+            <menu_item_call.on_click
+             function="Minimap.Avatar.Color"
+             parameter="custom" />
+        </menu_item_call>
+        <menu_item_call
+         label="Default"
+         name="Avatar Dot Colour Default">
+            <menu_item_call.on_click
+             function="Minimap.Avatar.Color"
+             parameter="clear" />
+            <menu_item_call.on_enable
+             function="Minimap.Avatar.HasColor" />
+        </menu_item_call>
+    </menu>
+    <menu_item_separator
+     name="Avatar Separator" />
     <menu_item_call
      label="Camera to Avatar"
      name="Cam To Avatar">
@@ -367,31 +440,6 @@
                  parameter="far" />
             </menu_item_check>
         </menu>
-        <menu
-         label="Rotation"
-         name="Rotation"
-         tear_off="false">
-            <menu_item_check
-             label="North at top"
-             name="North at top">
-                <menu_item_check.on_check
-                 function="Minimap.MapOrientation.Check"
-                 parameter="north_at_top" />
-                <menu_item_check.on_click
-                 function="Minimap.MapOrientation.Set"
-                 parameter="north_at_top" />
-            </menu_item_check>
-            <menu_item_check
-             label="Camera at top"
-             name="Camera at top">
-                <menu_item_check.on_check
-                 function="Minimap.MapOrientation.Check"
-                 parameter="camera_at_top" />
-                <menu_item_check.on_click
-                 function="Minimap.MapOrientation.Set"
-                 parameter="camera_at_top" />
-            </menu_item_check>
-        </menu>
         <menu_item_check
          label="Auto-center"
          name="Auto-center map">
@@ -424,6 +472,65 @@
              function="Minimap.ViewMode.Check"
              parameter="follow" />
         </menu_item_call>
+    </menu>
+
+    <!-- <GMDX> Rotation: Follow Me turns with the camera; Whole Region turns around the agent
+         (round / square radar) or turns the whole region (GMDXMiniMapRotateView). The items that
+         do not apply to the view are hidden in LLNetMap::handleRightMouseDown. -->
+    <menu
+     label="Rotation"
+     name="Rotation"
+     tear_off="false">
+        <menu_item_check
+         label="North at top"
+         name="North at top">
+            <menu_item_check.on_check
+             function="Minimap.MapOrientation.Check"
+             parameter="north_at_top" />
+            <menu_item_check.on_click
+             function="Minimap.MapOrientation.Set"
+             parameter="north_at_top" />
+        </menu_item_check>
+        <menu_item_check
+         label="Camera at top"
+         name="Camera at top">
+            <menu_item_check.on_check
+             function="Minimap.MapOrientation.Check"
+             parameter="camera_at_top" />
+            <menu_item_check.on_click
+             function="Minimap.MapOrientation.Set"
+             parameter="camera_at_top" />
+        </menu_item_check>
+        <menu_item_check
+         label="Turn around me (round)"
+         name="Turn round">
+            <menu_item_check.on_check
+             function="Minimap.MapOrientation.Check"
+             parameter="rotate_round" />
+            <menu_item_check.on_click
+             function="Minimap.MapOrientation.Set"
+             parameter="rotate_round" />
+        </menu_item_check>
+        <menu_item_check
+         label="Turn around me (square)"
+         name="Turn square">
+            <menu_item_check.on_check
+             function="Minimap.MapOrientation.Check"
+             parameter="rotate_square" />
+            <menu_item_check.on_click
+             function="Minimap.MapOrientation.Set"
+             parameter="rotate_square" />
+        </menu_item_check>
+        <menu_item_check
+         label="Turn the whole region"
+         name="Turn whole">
+            <menu_item_check.on_check
+             function="Minimap.MapOrientation.Check"
+             parameter="rotate_whole" />
+            <menu_item_check.on_click
+             function="Minimap.MapOrientation.Set"
+             parameter="rotate_whole" />
+        </menu_item_check>
     </menu>
 
     <menu
@@ -506,52 +613,52 @@
              function="ToggleControl"
              parameter="GMDXMinimapUseCapturedMaps" />
         </menu_item_check>
-        <menu_item_separator />
-        <menu
-         label="Opacity"
-         name="Opacity"
-         tear_off="false">
-            <menu_item_check
-             label="100%"
-             name="Opacity 100">
-                <menu_item_check.on_check
-                 function="Minimap.Opacity.Check"
-                 parameter="1.0" />
-                <menu_item_check.on_click
-                 function="Minimap.Opacity.Set"
-                 parameter="1.0" />
-            </menu_item_check>
-            <menu_item_check
-             label="75%"
-             name="Opacity 75">
-                <menu_item_check.on_check
-                 function="Minimap.Opacity.Check"
-                 parameter="0.75" />
-                <menu_item_check.on_click
-                 function="Minimap.Opacity.Set"
-                 parameter="0.75" />
-            </menu_item_check>
-            <menu_item_check
-             label="50%"
-             name="Opacity 50">
-                <menu_item_check.on_check
-                 function="Minimap.Opacity.Check"
-                 parameter="0.5" />
-                <menu_item_check.on_click
-                 function="Minimap.Opacity.Set"
-                 parameter="0.5" />
-            </menu_item_check>
-            <menu_item_check
-             label="25%"
-             name="Opacity 25">
-                <menu_item_check.on_check
-                 function="Minimap.Opacity.Check"
-                 parameter="0.25" />
-                <menu_item_check.on_click
-                 function="Minimap.Opacity.Set"
-                 parameter="0.25" />
-            </menu_item_check>
-        </menu>
+    </menu>
+
+    <menu
+     label="Opacity"
+     name="Opacity"
+     tear_off="false">
+        <menu_item_check
+         label="100%"
+         name="Opacity 100">
+            <menu_item_check.on_check
+             function="Minimap.Opacity.Check"
+             parameter="1.0" />
+            <menu_item_check.on_click
+             function="Minimap.Opacity.Set"
+             parameter="1.0" />
+        </menu_item_check>
+        <menu_item_check
+         label="75%"
+         name="Opacity 75">
+            <menu_item_check.on_check
+             function="Minimap.Opacity.Check"
+             parameter="0.75" />
+            <menu_item_check.on_click
+             function="Minimap.Opacity.Set"
+             parameter="0.75" />
+        </menu_item_check>
+        <menu_item_check
+         label="50%"
+         name="Opacity 50">
+            <menu_item_check.on_check
+             function="Minimap.Opacity.Check"
+             parameter="0.5" />
+            <menu_item_check.on_click
+             function="Minimap.Opacity.Set"
+             parameter="0.5" />
+        </menu_item_check>
+        <menu_item_check
+         label="25%"
+         name="Opacity 25">
+            <menu_item_check.on_check
+             function="Minimap.Opacity.Check"
+             parameter="0.25" />
+            <menu_item_check.on_click
+             function="Minimap.Opacity.Set"
+             parameter="0.25" />
+        </menu_item_check>
     </menu>
 
     <menu
@@ -660,6 +767,17 @@
      label="Region Map"
      name="Region Map"
      tear_off="false">
+        <!-- <GMDX> captured maps over the World Map's tiles -->
+        <menu_item_check
+         label="Show Captured Maps on the World Map"
+         name="World Map Captured">
+            <menu_item_check.on_check
+             control="GMDXWorldMapUseCapturedMaps" />
+            <menu_item_check.on_click
+             function="ToggleControl"
+             parameter="GMDXWorldMapUseCapturedMaps" />
+        </menu_item_check>
+        <menu_item_separator />
         <menu_item_call
          label="Capture Region Map..."
          name="Capture Region Map">

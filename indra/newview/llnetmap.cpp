@@ -85,6 +85,8 @@
 #include "gmdxminimapmarks.h"    // <GMDX> marks
 #include "llclipboard.h"         // <GMDX> copy coordinates
 #include "llnotificationsutil.h" // <GMDX> mark names
+#include "llavataractions.h"     // <GMDX> a dot's profile
+#include "llcolorswatch.h"       // <GMDX> a dot's colour
 
 static LLDefaultChildRegistry::Register<LLNetMap> r1("net_map");
 
@@ -99,6 +101,7 @@ constexpr F32 MAP_SCALE_ZOOM_FACTOR = 1.04f; // Zoom in factor per click of scro
 constexpr F32 MIN_DOT_RADIUS = 3.5f;
 constexpr F32 DOT_SCALE = 0.75f;
 constexpr F32 MIN_PICK_SCALE = 2.f;
+constexpr F32 MIN_PICK_PX = 8.f;   // <GMDX> the zone around a dot that picks it, at least this many pixels
 constexpr S32 MOUSE_DRAG_SLOP = 2;      // How far the mouse needs to move before we think it's a drag
 
 constexpr F64 COARSEUPDATE_MAX_Z = 1020.0f;
@@ -170,15 +173,28 @@ bool LLNetMap::postBuild()
     commitRegistrar.add("Minimap.MapOrientation.Set", boost::bind(&LLNetMap::setMapOrientation, this, _2));
     commitRegistrar.add("Minimap.AboutLand", boost::bind(&LLNetMap::popupShowAboutLand, this, _2));
     commitRegistrar.add("Minimap.CamToAvatar", boost::bind(&LLNetMap::handleCamToAvatar, this, _2));
+    // <GMDX> a dot's profile and colour
+    commitRegistrar.add("Minimap.Avatar.Profile", [this](LLUICtrl*, const LLSD&)
+        {
+            if (!mAvatarsAtLastRightClick.empty()) LLAvatarActions::showProfile(mAvatarsAtLastRightClick.front());
+        });
+    commitRegistrar.add("Minimap.Avatar.Color", [this](LLUICtrl*, const LLSD& param) { setAvatarDotColor(param.asString()); });
+    enableRegistrar.add("Minimap.Avatar.HasColor", [this](LLUICtrl*, const LLSD&)
+        {
+            LLColor4 c;
+            return !mAvatarsAtLastRightClick.empty() && GMDXMinimapMarks::avatarColor(mAvatarsAtLastRightClick.front(), c);
+        });
+    // </GMDX>
     commitRegistrar.add("Minimap.RegionMap.Capture", [](LLUICtrl*, const LLSD&) { GMDXRegionCapture::openWindow(); });  // <GMDX>
     enableRegistrar.add("Minimap.RegionMap.CanCapture", [](LLUICtrl*, const LLSD&) { return GMDXRegionCapture::canCapture(); });  // <GMDX>
     commitRegistrar.add("Minimap.RegionMap.Cancel", [](LLUICtrl*, const LLSD&) { GMDXRegionCapture::cancelCapture(); });  // <GMDX>
     enableRegistrar.add("Minimap.RegionMap.Running", [](LLUICtrl*, const LLSD&) { return GMDXRegionCapture::isRunning(); });  // <GMDX>
     // <GMDX> Show Whole Region compass style; Copy / Save Map Image (gmdxminimapimage.h)
-    enableRegistrar.add("Minimap.CompassStyle.Check", [](LLUICtrl*, const LLSD& param)
-        { return GMDXMinimapCompass::getStyle() == param.asInteger(); });
-    commitRegistrar.add("Minimap.CompassStyle.Set", [](LLUICtrl*, const LLSD& param)
-        { gSavedSettings.setS32("GMDXMiniMapCompassStyle", param.asInteger()); });
+    // (the rotating map keeps its own: GMDXMiniMapRotateCompass, pills or frame)
+    enableRegistrar.add("Minimap.CompassStyle.Check", [this](LLUICtrl*, const LLSD& param)
+        { return (rotateMap() ? GMDXMinimapCompass::getRotatingStyle() : GMDXMinimapCompass::getStyle()) == param.asInteger(); });
+    commitRegistrar.add("Minimap.CompassStyle.Set", [this](LLUICtrl*, const LLSD& param)
+        { gSavedSettings.setS32(rotateMap() ? "GMDXMiniMapRotateCompass" : "GMDXMiniMapCompassStyle", param.asInteger()); });
     commitRegistrar.add("Minimap.CopyImage", [](LLUICtrl*, const LLSD&) { gmdx_copy_region_map_image(); });
     commitRegistrar.add("Minimap.SaveImage", [](LLUICtrl*, const LLSD&) { gmdx_save_region_map_image(); });
     // View: Follow Me / Whole Region (GMDXMiniMapWholeRegion)
@@ -327,10 +343,54 @@ LLVector3d LLNetMap::mapCenterGlobal() const
 
 bool LLNetMap::rotateMap() const
 {
-    // Show Whole Region is always north-up.
+    // Camera at top: in Show Whole Region too, where the map turns as GMDXMiniMapRotateView says
+    // (round / square radar, or the whole region: mRadarRadius / mRadarSquare).
     static LLUICachedControl<bool> rotate_map("MiniMapRotate", true);
-    return rotate_map && !mFitRegion;
+    return rotate_map;
 }
+
+LLVector2 LLNetMap::radarCenter() const
+{
+    return LLVector2((F32)(getRect().getWidth() / 2) + mFitPan.mV[VX], (F32)(getRect().getHeight() / 2) + mFitPan.mV[VY]);
+}
+
+LLVector2 LLNetMap::toRadarRim(const LLVector2& p) const
+{
+    const LLVector2 c = radarCenter();
+    const LLVector2 d = p - c;
+    if (mRadarSquare)
+    {
+        const F32 hx = llmax(mFitMapRect.getWidth() * 0.5f - 3.f, 1.f), hy = llmax(mFitMapRect.getHeight() * 0.5f - 3.f, 1.f);
+        const F32 k = llmax(fabsf(d.mV[VX]) / hx, fabsf(d.mV[VY]) / hy);
+        return k > 1.f ? c + d / k : p;
+    }
+    const F32 len = d.length();
+    const F32 rim = llmax(mRadarRadius - 3.f, 0.f);
+    return len > rim && len > 0.f ? c + d * (rim / len) : p;
+}
+
+namespace
+{
+// The round radar's disc (view coordinates) for the zone drawing; radius 0 = no radar.
+LLVector2 sDiscCenter;
+F32 sDiscRadius = 0.f;
+void clip_disc(std::vector<LLVector2>& poly, const LLVector2& c, F32 r);
+// A textured axis-aligned quad cut to the disc of radius r around the origin, inside gGL.begin(TRIANGLES).
+void disc_quad(F32 x0, F32 y0, F32 x1, F32 y1, F32 u0, F32 v0, F32 u1, F32 v1, F32 r)
+{
+    std::vector<LLVector2> poly = { { x0, y0 }, { x1, y0 }, { x1, y1 }, { x0, y1 } };
+    clip_disc(poly, LLVector2(0.f, 0.f), r);
+    auto emit = [&](const LLVector2& p)
+    {
+        gGL.texCoord2f(u0 + (u1 - u0) * (p.mV[VX] - x0) / (x1 - x0), v0 + (v1 - v0) * (p.mV[VY] - y0) / (y1 - y0));
+        gGL.vertex2f(p.mV[VX], p.mV[VY]);
+    };
+    for (size_t k = 1; k + 1 < poly.size(); ++k)
+    {
+        emit(poly[0]); emit(poly[k]); emit(poly[k + 1]);
+    }
+}
+} // namespace
 // </GMDX>
 
 
@@ -384,6 +444,13 @@ void LLNetMap::draw()
     static LLCachedControl<bool> physical_only(gSavedSettings, "GMDXMiniMapPhysicalOnly", false);
     LLRectf fit_square;
     F32 fit_ppm = 0.f;
+    // the rotating map (GMDXMiniMapRotateView): 0 / 1 = the radar, round / square, turning around
+    // the agent; 2 = the whole region turning about its centre, shrunk so it fits at any angle
+    static LLCachedControl<S32> rotate_view(gSavedSettings, "GMDXMiniMapRotateView", 0);
+    const bool rotating = whole_region && rotateMap();
+    const S32 rot_view = rotating ? llclamp((S32)rotate_view, 0, 2) : -1;
+    const bool radar = rot_view == 0 || rot_view == 1;   // centred on the agent
+    const bool rotate_frame = rotating && GMDXMinimapCompass::getRotatingStyle() == GMDXMinimapCompass::STYLE_FRAME;
     if (whole_region)
     {
         const S32 width = getRect().getWidth();
@@ -394,24 +461,41 @@ void LLNetMap::draw()
         fit_square.setOriginAndSize((F32)(width / 2 - side / 2), (F32)(height / 2 - side / 2), (F32)side, (F32)side);
         mFitPan.set(0.f, (F32)(height / 2 - getRect().getHeight() / 2));   // (below the tape strip, if any)
         const F32 region_width = current_region->getWidth();
-        const F32 inset = GMDXMinimapCompass::getMapInset();
-        mFitBasePixelsPerMeter = llmax((F32)side - 2.f * inset, 1.f) / region_width;
+        const F32 inset = rotating ? (rotate_frame ? GMDXMinimapCompass::getRadarRing() : 0.f) : GMDXMinimapCompass::getMapInset();
+        // (the turning whole region: its diagonal fits)
+        mFitBasePixelsPerMeter = llmax((F32)side - 2.f * inset, 1.f) / (region_width * (rot_view == 2 ? F_SQRT2 : 1.f));
         mFitMapRect.setOriginAndSize(fit_square.mLeft + inset, fit_square.mBottom + inset,
                                      fit_square.getWidth() - 2.f * inset, fit_square.getHeight() - 2.f * inset);
         // Zoom (the wheel; wheel out to the whole region): a new region or turning the mode on starts whole
         if (!mFitRegion || current_region->getHandle() != mFitRegionHandle)
         {
+            if (!mFitRegion || !radar) mFitZoom = 1.f;   // (the radar keeps its zoom across region crossings)
             mFitRegionHandle = current_region->getHandle();
-            mFitZoom = 1.f;
             mFitViewCenter.set(region_width * 0.5f, region_width * 0.5f);
         }
-        clampFitView(region_width);
+        if (radar)
+        {
+            // centred on the agent; past the region's edges the disc stays dark
+            const LLVector3 agent = gAgent.getPositionAgent() - current_region->getOriginAgent();
+            mFitViewCenter.set(agent.mV[VX], agent.mV[VY]);
+        }
+        else if (rot_view == 2)
+        {
+            mFitZoom = 1.f;   // the whole region, always (no zoom or pan)
+            mFitViewCenter.set(region_width * 0.5f, region_width * 0.5f);
+        }
+        else
+        {
+            clampFitView(region_width);
+        }
         fit_ppm = mFitBasePixelsPerMeter * mFitZoom;
         const LLVector3d old_center = mFitCenterGlobal;
         mFitCenterGlobal = current_region->getOriginGlobal()
             + LLVector3d(mFitViewCenter.mV[VX], mFitViewCenter.mV[VY], 0.0);
         mFitCenterGlobal.mdV[VZ] = gAgentCamera.getCameraPositionGlobal().mdV[VZ];
-        if (mFitRegion && (old_center.mdV[VX] != mFitCenterGlobal.mdV[VX] || old_center.mdV[VY] != mFitCenterGlobal.mdV[VY]))
+        // (the radar's centre moves with the agent: the layers keep their timed refresh, a forced
+        // one every frame would never finish)
+        if (mFitRegion && !radar && (old_center.mdV[VX] != mFitCenterGlobal.mdV[VX] || old_center.mdV[VY] != mFitCenterGlobal.mdV[VY]))
         {
             mUpdateObjectImage = true;   // the layers are centred on the view
             mUpdateParcelImage = true;
@@ -425,6 +509,8 @@ void LLNetMap::draw()
         mUpdateObjectImage = true;
         mUpdateParcelImage = true;
     }
+    mRadarSquare = rot_view == 1 || rot_view == 2;
+    mRadarRadius = rot_view == 0 ? mFitMapRect.getWidth() * 0.5f : 0.f;
     // </GMDX>
 
     static LLUICachedControl<bool> auto_center("MiniMapAutoCenter", true);
@@ -462,7 +548,7 @@ void LLNetMap::draw()
     gGL.translatef(offset.mV[0], offset.mV[1], offset.mV[2]);
 
     {
-        // <GMDX> the map's opacity (mini-map menu, Background > Opacity)
+        // <GMDX> the map's opacity (mini-map menu, Opacity)
         static LLCachedControl<F32> s_map_opacity(gSavedSettings, "GMDXMiniMapOpacity", 1.f);
         const F32 map_opacity = llclamp((F32)s_map_opacity, 0.1f, 1.f);
         // </GMDX>
@@ -479,6 +565,22 @@ void LLNetMap::draw()
             LLColor4 background_color = mBackgroundColor.get();
             background_color.mV[VALPHA] *= map_opacity; // <GMDX> GMDXMiniMapOpacity
             gGL.color4fv( background_color.mV );
+            if (mRadarRadius > 0.f)   // <GMDX> the radar's disc
+            {
+                const LLVector2 c = radarCenter();
+                const F32 r = mRadarRadius;
+                std::vector<LLVector2> disc = { c + LLVector2(-r, -r), c + LLVector2(r, -r), c + LLVector2(r, r), c + LLVector2(-r, r) };
+                clip_disc(disc, c, r);
+                gGL.begin(LLRender::TRIANGLES);
+                for (size_t k = 1; k + 1 < disc.size(); ++k)
+                {
+                    gGL.vertex2f(disc[0].mV[VX], disc[0].mV[VY]);
+                    gGL.vertex2f(disc[k].mV[VX], disc[k].mV[VY]);
+                    gGL.vertex2f(disc[k + 1].mV[VX], disc[k + 1].mV[VY]);
+                }
+                gGL.end();
+            }
+            else
             gl_rect_2d(0, getRect().getHeight(), getRect().getWidth(), 0);
         }
 
@@ -568,6 +670,11 @@ void LLNetMap::draw()
             gGL.getTexUnit(0)->bind(tex);
             // </GMDX>
             gGL.begin(LLRender::TRIANGLES);
+            if (mRadarRadius > 0.f)   // <GMDX> cut to the radar's disc
+            {
+                disc_quad(left, bottom, right, top, 0.f, 0.f, 1.f, 1.f, mRadarRadius);
+            }
+            else
             {
                 gGL.texCoord2f(0.f, 1.f);
                 gGL.vertex2f(left, top);
@@ -632,6 +739,13 @@ void LLNetMap::draw()
                     v0 = (cy0 - y0) / (y1 - y0);
                     v1 = (cy1 - y0) / (y1 - y0);
                     x0 = cx0; x1 = cx1; y0 = cy0; y1 = cy1;
+                }
+                if (mRadarRadius > 0.f)   // and to the radar's disc
+                {
+                    gGL.begin(LLRender::TRIANGLES);
+                    disc_quad(x0, y0, x1, y1, u0, v0, u1, v1, mRadarRadius);
+                    gGL.end();
+                    return;
                 }
                 gGL.begin(LLRender::TRIANGLES);
                 {
@@ -765,9 +879,15 @@ void LLNetMap::draw()
         LLUI::getInstance()->getMousePositionLocal(this, &local_mouse_x, &local_mouse_y);
         mClosestAgentToCursor.setNull();
         F32 closest_dist_squared = F32_MAX; // value will be overridden in the loop
-        F32 min_pick_dist_squared = (mDotRadius * MIN_PICK_SCALE) * (mDotRadius * MIN_PICK_SCALE);
+        const F32 pick_radius = llmax(mDotRadius * MIN_PICK_SCALE, MIN_PICK_PX);   // <GMDX>
+        F32 min_pick_dist_squared = pick_radius * pick_radius;
+        LLVector2 closest_pos;   // <GMDX> the picked dot, highlighted
 
-        drawZones();   // <GMDX> fills and outlines under the avatars
+        // <GMDX> fills and outlines under the avatars (cut to the radar's disc)
+        sDiscCenter = radarCenter();
+        sDiscRadius = mRadarRadius;
+        drawZones();
+        // </GMDX>
 
         LLVector3 pos_map;
         uuid_vec_t avatar_ids;
@@ -787,6 +907,14 @@ void LLNetMap::draw()
             // </GMDX>
 
             pos_map = globalPosToView(positions[i]);
+            // <GMDX> the radar: avatars past the disc / square wait on its rim, in their direction
+            if (radarOn())
+            {
+                const LLVector2 rim = toRadarRim(LLVector2(pos_map.mV[VX], pos_map.mV[VY]));
+                pos_map.mV[VX] = rim.mV[VX];
+                pos_map.mV[VY] = rim.mV[VY];
+            }
+            // </GMDX>
 
 // [RLVa:KB] - Checked: RLVa-1.2.0
 //            bool show_as_friend = (LLAvatarTracker::instance().getBuddyInfo(uuid) != NULL) && (RlvActions::canShowName(RlvActions::SNC_DEFAULT, uuid));
@@ -795,7 +923,8 @@ void LLNetMap::draw()
 
             // <GMDX> group colour (LLGroupColorMap) wins over contact sets, as in SoapStorm
             //const LLColor4 color = LGGContactSets::getInstance()->getAvatarColor(uuid, map_avatar_color, ContactSetType::MINIMAP);
-            const LLColor4 color = LLGroupColorMap::instance().tint(uuid, LGGContactSets::getInstance()->getAvatarColor(uuid, map_avatar_color, ContactSetType::MINIMAP));
+            LLColor4 color = LLGroupColorMap::instance().tint(uuid, LGGContactSets::getInstance()->getAvatarColor(uuid, map_avatar_color, ContactSetType::MINIMAP));
+            GMDXMinimapMarks::avatarColor(uuid, color);   // and this account's own colour for the dot over both
             // </GMDX>
             unknown_relative_z = positions[i].mdV[VZ] >= COARSEUPDATE_MAX_Z &&
                     camera_position.mV[VZ] >= COARSEUPDATE_MAX_Z;
@@ -841,6 +970,7 @@ void LLNetMap::draw()
             {
                 closest_dist_squared = dist_to_cursor_squared;
                 mClosestAgentToCursor = uuid;
+                closest_pos.set(pos_map.mV[VX], pos_map.mV[VY]);   // <GMDX>
             }
         }
 
@@ -864,6 +994,7 @@ void LLNetMap::draw()
         }
 
         drawZonePreview();   // <GMDX>
+        sDiscRadius = 0.f;   // <GMDX>
         drawMarks();   // <GMDX>
 
         // Draw dot for self avatar position
@@ -886,6 +1017,20 @@ void LLNetMap::draw()
             }
         }
 
+        // <GMDX> the dot under the cursor (the one a right-click picks): a white ring over a dark halo
+        if (mCursorInside && mClosestAgentToCursor.notNull() && mClosestAgentToCursor != gAgent.getID())
+        {
+            gGL.getTexUnit(0)->unbind(LLTexUnit::TT_TEXTURE);
+            gGL.pushMatrix();
+            gGL.translatef(closest_pos.mV[VX], closest_pos.mV[VY], 0.f);
+            const F32 r = mDotRadius + 3.f;
+            const LLColor4 halo(0.05f, 0.06f, 0.07f, 0.6f), ring(1.f, 1.f, 1.f, 0.95f);
+            gl_washer_2d(r + 2.5f, r - 1.f, 32, halo, halo);
+            gl_washer_2d(r + 1.f, r, 32, ring, ring);
+            gGL.popMatrix();
+        }
+        // </GMDX>
+
         gGL.getTexUnit(0)->unbind(LLTexUnit::TT_TEXTURE);
 
         // Draw frustum
@@ -904,6 +1049,14 @@ void LLNetMap::draw()
         F32 far_clip_meters = gAgentCamera.mDrawDistance;
         // </GMDX>
         F32 far_clip_pixels = far_clip_meters * meters_to_pixels;
+        // <GMDX> the radar: the cone ends at the disc's rim
+        if (mRadarRadius > 0.f)
+        {
+            const LLVector3 camera_view = globalPosToView(gAgentCamera.getCameraPositionGlobal());
+            const F32 from_center = (LLVector2(camera_view.mV[VX], camera_view.mV[VY]) - radarCenter()).length();
+            far_clip_pixels = llclamp(mRadarRadius - from_center, 0.f, far_clip_pixels);
+        }
+        // </GMDX>
 
         F32 ctr_x = (F32)center_sw_left;
         F32 ctr_y = (F32)center_sw_bottom;
@@ -924,9 +1077,11 @@ void LLNetMap::draw()
 
             gGL.pushMatrix();
                 gGL.translatef(pos_map.mV[VX], pos_map.mV[VY], 0.f);
-                gl_ring(whisper_radius, 1.75f, map_whisper_ring_color, map_whisper_ring_color, 100, false);
-                gl_ring(chat_radius, 1.75f, map_chat_ring_color, map_chat_ring_color, 100, false);
-                gl_ring(shout_radius, 1.75f, map_shout_ring_color, map_shout_ring_color, 100, false);
+                // <GMDX> the radar: only the rings inside its disc (they are centred on it)
+                const F32 ring_max = mRadarRadius > 0.f ? mRadarRadius : F32_MAX;
+                if (whisper_radius <= ring_max) gl_ring(whisper_radius, 1.75f, map_whisper_ring_color, map_whisper_ring_color, 100, false);
+                if (chat_radius <= ring_max) gl_ring(chat_radius, 1.75f, map_chat_ring_color, map_chat_ring_color, 100, false);
+                if (shout_radius <= ring_max) gl_ring(shout_radius, 1.75f, map_shout_ring_color, map_shout_ring_color, 100, false);
             gGL.popMatrix();
         }
 
@@ -983,6 +1138,18 @@ void LLNetMap::draw()
         {
             heading += 360.f;
         }
+        const S32 rotating_style = GMDXMinimapCompass::getRotatingStyle();
+        if (mRadarSquare)
+        {
+            GMDXMinimapCompass::drawRadarSquare(rotating_style == GMDXMinimapCompass::STYLE_FRAME ? fit_square : mFitMapRect,
+                                                heading, rotating_style);
+        }
+        else if (mRadarRadius > 0.f)
+        {
+            const LLVector2 c = radarCenter();
+            GMDXMinimapCompass::drawRadar(c.mV[VX], c.mV[VY], mRadarRadius, heading, rotating_style);
+        }
+        else
         GMDXMinimapCompass::draw(fit_square, heading);
     }
     drawCursorCoordinates();
@@ -1027,9 +1194,23 @@ void zone_lines(const std::vector<LLVector2>& pts, bool closed, F32 width, const
             {
                 run = len - t;
             }
+            F32 t0 = t, t1 = t + run;
+            if (on && sDiscRadius > 0.f)   // the radar: only the part inside the disc
+            {
+                const LLVector2 f = a - sDiscCenter;
+                const F32 r = sDiscRadius - width * 0.5f;
+                const F32 bq = f * dir, cq = f * f - r * r, disc = bq * bq - cq;
+                if (disc <= 0.f) on = false;
+                else
+                {
+                    t0 = llmax(t0, -bq - sqrtf(disc));
+                    t1 = llmin(t1, -bq + sqrtf(disc));
+                    on = t1 > t0;
+                }
+            }
             if (on)
             {
-                const LLVector2 p0 = a + dir * t, p1 = a + dir * (t + run);
+                const LLVector2 p0 = a + dir * t0, p1 = a + dir * t1;
                 gGL.vertex2f(p0.mV[VX] - nrm.mV[VX], p0.mV[VY] - nrm.mV[VY]);
                 gGL.vertex2f(p1.mV[VX] - nrm.mV[VX], p1.mV[VY] - nrm.mV[VY]);
                 gGL.vertex2f(p1.mV[VX] + nrm.mV[VX], p1.mV[VY] + nrm.mV[VY]);
@@ -1115,6 +1296,20 @@ void clip_half(std::vector<LLVector2>& poly, const LLVector2& n, F32 c, bool kee
     poly.swap(out);
 }
 
+// A convex polygon cut to the disc (a RADAR_SIDES-gon) of radius r around c.
+void clip_disc(std::vector<LLVector2>& poly, const LLVector2& c, F32 r)
+{
+    constexpr S32 RADAR_SIDES = 96;
+    const F32 apothem = r * cosf(F_PI / RADAR_SIDES);
+    for (S32 k = 0; k < RADAR_SIDES && poly.size() >= 3; ++k)
+    {
+        const F32 a = F_TWO_PI * (k + 0.5f) / RADAR_SIDES;
+        const LLVector2 n(cosf(a), sinf(a));
+        clip_half(poly, n, n * c + apothem, false);
+    }
+    if (poly.size() < 3) poly.clear();
+}
+
 // The fill: the zone's colour, or 45-degree black / yellow bands 7 px wide that move with the zone
 // (anchor: a point of the zone in view coordinates).
 void zone_fill(const std::vector<LLVector2>& outline, S32 fill, const LLColor4& color, const LLVector2& anchor)
@@ -1127,7 +1322,18 @@ void zone_fill(const std::vector<LLVector2>& outline, S32 fill, const LLColor4& 
     {
         gGL.color4f(color.mV[VRED], color.mV[VGREEN], color.mV[VBLUE], 0.22f);
         gGL.begin(LLRender::TRIANGLES);
-        for (const LLVector2& p : tris) gGL.vertex2f(p.mV[VX], p.mV[VY]);
+        std::vector<LLVector2> tri;
+        for (size_t t = 0; t + 2 < tris.size(); t += 3)
+        {
+            tri.assign(tris.begin() + t, tris.begin() + t + 3);
+            if (sDiscRadius > 0.f) clip_disc(tri, sDiscCenter, sDiscRadius);
+            for (size_t k = 1; k + 1 < tri.size(); ++k)
+            {
+                gGL.vertex2f(tri[0].mV[VX], tri[0].mV[VY]);
+                gGL.vertex2f(tri[k].mV[VX], tri[k].mV[VY]);
+                gGL.vertex2f(tri[k + 1].mV[VX], tri[k + 1].mV[VY]);
+            }
+        }
         gGL.end();
         return;
     }
@@ -1146,6 +1352,7 @@ void zone_fill(const std::vector<LLVector2>& outline, S32 fill, const LLColor4& 
             poly.assign(tris.begin() + t, tris.begin() + t + 3);
             clip_half(poly, n, base + band * BAND, true);
             clip_half(poly, n, base + (band + 1) * BAND, false);
+            if (sDiscRadius > 0.f) clip_disc(poly, sDiscCenter, sDiscRadius);
             if (poly.size() < 3) continue;
             const LLColor4& c = (band & 1) ? black : yellow;
             gGL.color4fv(c.mV);
@@ -1212,6 +1419,7 @@ void LLNetMap::drawZones()
             {
                 const LLVector2* top = &pts[0];
                 for (const LLVector2& p : pts) if (p.mV[VY] > top->mV[VY]) top = &p;
+                if (mRadarRadius > 0.f && (*top - radarCenter()).length() > mRadarRadius) continue;   // <GMDX> off the radar
                 font->renderUTF8(z.name, 0, top->mV[VX], top->mV[VY] + 3.f, c, LLFontGL::HCENTER, LLFontGL::BOTTOM,
                                  LLFontGL::NORMAL, LLFontGL::DROP_SHADOW, 32);
             }
@@ -1251,6 +1459,7 @@ LLUUID LLNetMap::zoneAt(S32 x, S32 y)
     static LLCachedControl<bool> show_zones(gSavedSettings, "GMDXMiniMapShowZones", true);
     if (!show_zones) return LLUUID::null;
     const LLVector2 q((F32)x, (F32)y);
+    if (radarOn() && !onMap(LLVector3(q.mV[VX], q.mV[VY], 0.f))) return LLUUID::null;   // <GMDX> off the radar
     LLUUID best;
     F32 best_d = 6.f;   // px from the outline
     for (const GMDXMapZone& z : GMDXMinimapMarks::zones())
@@ -1301,6 +1510,10 @@ void LLNetMap::finishZone()
 // <GMDX> Mini-map marks: a diamond in the mark's colour with a dark outline, its name beside it.
 bool LLNetMap::onMap(const LLVector3& p) const
 {
+    if (mRadarRadius > 0.f)
+    {
+        return (LLVector2(p.mV[VX], p.mV[VY]) - radarCenter()).length() <= mRadarRadius;
+    }
     if (mFitRegion)
     {
         return p.mV[VX] >= mFitMapRect.mLeft && p.mV[VX] <= mFitMapRect.mRight
@@ -1426,7 +1639,7 @@ void LLNetMap::drawPhysicalObjects(const LLVector3& map_center_agent, F32 pixels
 
     const LLColor4 color = physical_color.get();
     const LLColor4 tail(color.mV[VRED], color.mV[VGREEN], color.mV[VBLUE], 0.f);
-    const F32 view_radius = 0.5f * mObjectMapPixels + 2.f;    // half the view's diagonal
+    const F32 view_radius = mRadarRadius > 0.f ? mRadarRadius : 0.5f * mObjectMapPixels + 2.f;    // the radar's disc, else half the view's diagonal
     const F32 view_radius_sq = view_radius * view_radius;
     auto vertex = [](F32 x, F32 y, const LLColor4& c)
     {
@@ -1518,6 +1731,14 @@ void LLNetMap::drawTracking(const LLVector3d& pos_global, const LLColor4& color,
                             bool draw_arrow )
 {
     LLVector3 pos_local = globalPosToView(pos_global);
+    // <GMDX> the radar: on its rim when past it
+    if (radarOn())
+    {
+        const LLVector2 rim = toRadarRim(LLVector2(pos_local.mV[VX], pos_local.mV[VY]));
+        LLWorldMapView::drawTrackingDot(rim.mV[VX], rim.mV[VY], color, pos_local.mV[VZ]);
+        return;
+    }
+    // </GMDX>
     if( (pos_local.mV[VX] < 0) ||
         (pos_local.mV[VY] < 0) ||
         (pos_local.mV[VX] >= getRect().getWidth()) ||
@@ -1644,7 +1865,8 @@ bool LLNetMap::handleScrollWheel(S32 x, S32 y, S32 clicks)
     if (mFitRegion)
     {
         LLViewerRegion* region = gAgent.getRegion();
-        if (!region || mFitBasePixelsPerMeter <= 0.f)
+        if (!region || mFitBasePixelsPerMeter <= 0.f
+            || (rotateMap() && gSavedSettings.getS32("GMDXMiniMapRotateView") == 2))   // (the turning whole region: always whole)
         {
             return true;
         }
@@ -2114,7 +2336,7 @@ void LLNetMap::createParcelImage()
 bool LLNetMap::fitPanAt(S32 x, S32 y) const
 {
     constexpr F32 EDGE = 16.f;
-    return mFitRegion && mFitZoom > 1.f && x > mFitMapRect.mLeft + EDGE && x < mFitMapRect.mRight - EDGE
+    return mFitRegion && !radarOn() && mFitZoom > 1.f && x > mFitMapRect.mLeft + EDGE && x < mFitMapRect.mRight - EDGE
         && y > mFitMapRect.mBottom + EDGE && y < mFitMapRect.mTop - EDGE;
 }
 
@@ -2222,26 +2444,39 @@ bool LLNetMap::handleRightMouseDown(S32 x, S32 y, MASK mask)
     if (menu)
     {
         mPopupWorldPos = viewPosToGlobal(x, y);
-        // <GMDX> on a mark: its items, and its own position for the copies
-        mPopupMark = markAt(x, y);
-        mPopupZone = mPopupMark.isNull() ? zoneAt(x, y) : LLUUID::null;
+        updateCamToAvatarMenu(menu, x, y);   // (mAvatarsAtLastRightClick)
+        // <GMDX> on an avatar's dot: its profile and dot colour; on a mark: its items, and its own
+        // position for the copies
+        const bool on_avatar = !mAvatarsAtLastRightClick.empty();
+        menu->setItemVisible("Avatar Profile", on_avatar);
+        menu->setItemVisible("Avatar Dot Colour", on_avatar);
+        menu->setItemVisible("Avatar Separator", on_avatar);
+        mPopupMark = on_avatar ? LLUUID::null : markAt(x, y);
+        mPopupZone = (on_avatar || mPopupMark.notNull()) ? LLUUID::null : zoneAt(x, y);
         const bool on_mark = mPopupMark.notNull(), on_zone = mPopupZone.notNull();
         for (const char* item : { "Track Mark", "Rename Mark", "Mark Colour", "Remove Mark" }) menu->setItemVisible(item, on_mark);
         for (const char* item : { "Zone Line", "Zone Fill", "Zone Colour", "Rename Zone", "Remove Zone" }) menu->setItemVisible(item, on_zone);
         menu->setItemVisible("Add Mark Here", !on_mark && !on_zone);
         menu->setItemVisible("Draw Zone", !on_mark && !on_zone);
         // </GMDX>
-        updateCamToAvatarMenu(menu, x, y);
         menu->buildDrawLabels();
         menu->updateParent(LLMenuGL::sMenuContainer);
-        // <GMDX> items that do not apply are hidden: zoom / rotation in Whole Region, the compass
-        // style in Follow Me (submenu branches have no on_visible in XUI)
+        // <GMDX> items that do not apply are hidden: zoom in Whole Region, the compass style in
+        // Follow Me, each view's own rotation items (submenu branches have no on_visible in XUI)
         if (LLMenuGL* view = menu->findChild<LLMenuGL>("View"))
         {
             view->setItemVisible("Zoom", !mFitRegion);
-            view->setItemVisible("Rotation", !mFitRegion);
         }
         menu->setItemVisible("Compass Style", mFitRegion);
+        if (LLMenuGL* compass = menu->findChildMenuByName("Compass Style", true))
+        {
+            compass->setItemVisible("Compass Heading Tape", !rotateMap());   // (north-up only)
+        }
+        if (LLMenuGL* rotation = menu->findChildMenuByName("Rotation", true))
+        {
+            rotation->setItemVisible("Camera at top", !mFitRegion);
+            for (const char* item : { "Turn round", "Turn square", "Turn whole" }) rotation->setItemVisible(item, mFitRegion);
+        }
         // </GMDX>
         LLMenuGL::showPopup(this, menu, x, y);
     }
@@ -2255,7 +2490,8 @@ void LLNetMap::updateCamToAvatarMenu(LLMenuGL* menu, S32 x, S32 y)
     std::vector<LLVector3d> positions;
     LLWorld::getInstance()->getAvatars(&avatar_ids, &positions, gAgentCamera.getCameraPositionGlobal());
 
-    const F32 min_pick_dist_squared = (mDotRadius * MIN_PICK_SCALE) * (mDotRadius * MIN_PICK_SCALE);
+    const F32 pick_radius = llmax(mDotRadius * MIN_PICK_SCALE, MIN_PICK_PX);   // <GMDX>
+    const F32 min_pick_dist_squared = pick_radius * pick_radius;
     std::vector<std::pair<F32, LLUUID>> picked;
     for (size_t i = 0; i < avatar_ids.size(); ++i)
     {
@@ -2267,7 +2503,11 @@ void LLNetMap::updateCamToAvatarMenu(LLMenuGL* menu, S32 x, S32 y)
         // </GMDX>
 
         LLVector3 pos_map = globalPosToView(positions[i]);
-        F32 dist_to_cursor_squared = dist_vec_squared(LLVector2(pos_map.mV[VX], pos_map.mV[VY]), LLVector2((F32)x, (F32)y));
+        // <GMDX> where draw() puts the dot (the radar's rim for one past it)
+        LLVector2 dot(pos_map.mV[VX], pos_map.mV[VY]);
+        if (radarOn()) dot = toRadarRim(dot);
+        F32 dist_to_cursor_squared = dist_vec_squared(dot, LLVector2((F32)x, (F32)y));
+        // </GMDX>
         if (dist_to_cursor_squared < min_pick_dist_squared)
         {
             picked.emplace_back(dist_to_cursor_squared, avatar_ids[i]);
@@ -2324,6 +2564,50 @@ void LLNetMap::updateCamToAvatarMenu(LLMenuGL* menu, S32 x, S32 y)
         avatars_menu->addChild(LLUICtrlFactory::create<LLMenuItemCallGL>(p));
     }
 }
+
+// <GMDX>
+void LLNetMap::setAvatarDotColor(const std::string& which)
+{
+    if (mAvatarsAtLastRightClick.empty()) return;
+    const LLUUID id = mAvatarsAtLastRightClick.front();
+    if (which == "clear")
+    {
+        GMDXMinimapMarks::clearAvatarColor(id);
+        return;
+    }
+    if (which != "custom")
+    {
+        GMDXMinimapMarks::setAvatarColor(id, GMDXMinimapMarks::color(llclamp((S32)std::stoi(which), 0, GMDXMinimapMarks::COLORS - 1)));
+        return;
+    }
+    if (!mDotColorSwatch)
+    {
+        LLColorSwatchCtrl::Params p(LLUICtrlFactory::getDefaultParams<LLColorSwatchCtrl>());
+        p.name = "dot_color_swatch";
+        p.rect = LLRect(0, 1, 1, 0);
+        p.visible = false;
+        p.can_apply_immediately = true;   // the dot follows the picker live
+        mDotColorSwatch = LLUICtrlFactory::create<LLColorSwatchCtrl>(p);
+        addChild(mDotColorSwatch);
+        mDotColorSwatch->setCommitCallback([this](LLUICtrl* ctrl, const LLSD&)
+            { GMDXMinimapMarks::setAvatarColor(mDotColorAvatar, LLColor4(ctrl->getValue())); });
+        // Cancel: the dot goes back to what it was (no colour of its own, if it had none)
+        mDotColorSwatch->setOnCancelCallback([this](LLUICtrl*, const LLSD&)
+            {
+                if (mDotColorHad) GMDXMinimapMarks::setAvatarColor(mDotColorAvatar, mDotColorBefore);
+                else GMDXMinimapMarks::clearAvatarColor(mDotColorAvatar);
+            });
+    }
+    mDotColorAvatar = id;
+    mDotColorHad = GMDXMinimapMarks::avatarColor(id, mDotColorBefore);
+    static LLUIColor map_avatar_color = LLUIColorTable::instance().getColor("MapAvatarColor", LLColor4::white);
+    LLColor4 current = LLGroupColorMap::instance().tint(id, LGGContactSets::getInstance()->getAvatarColor(id, map_avatar_color, ContactSetType::MINIMAP));
+    GMDXMinimapMarks::avatarColor(id, current);
+    mDotColorSwatch->set(current, true);
+    mDotColorSwatch->setOriginal(current);
+    mDotColorSwatch->showPicker(true);
+}
+// </GMDX>
 
 void LLNetMap::handleCamToAvatar(const LLSD& userdata)
 {
@@ -2515,10 +2799,12 @@ bool LLNetMap::isMapOrientationChecked(const LLSD &userdata)
         return !rotate_map;
     }
 
-    if (command_name == "camera_at_top")
-    {
-        return rotate_map;
-    }
+    // <GMDX> Whole Region: how it turns (GMDXMiniMapRotateView)
+    const S32 view = gSavedSettings.getS32("GMDXMiniMapRotateView");
+    if (command_name == "rotate_round") return rotate_map && view == 0;
+    if (command_name == "rotate_square") return rotate_map && view == 1;
+    if (command_name == "rotate_whole") return rotate_map && view == 2;
+    // </GMDX>
 
     return false;
 }
@@ -2534,6 +2820,13 @@ void LLNetMap::setMapOrientation(const LLSD &userdata)
     {
         gSavedSettings.setBOOL("MiniMapRotate", true);
     }
+    // <GMDX> Whole Region: how it turns
+    else if (command_name == "rotate_round" || command_name == "rotate_square" || command_name == "rotate_whole")
+    {
+        gSavedSettings.setBOOL("MiniMapRotate", true);
+        gSavedSettings.setS32("GMDXMiniMapRotateView", command_name == "rotate_round" ? 0 : command_name == "rotate_square" ? 1 : 2);
+    }
+    // </GMDX>
 }
 
 void LLNetMap::popupShowAboutLand(const LLSD &userdata)

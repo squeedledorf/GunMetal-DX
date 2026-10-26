@@ -345,11 +345,13 @@ bool LLTextureCacheRemoteWorker::doRead()
             mReadData = data;
             mDataSize = n;
             mImageSize = imagesize;
+            mCache->mStoreReadHits.fetch_add(1, std::memory_order_relaxed);     // #951
         }
         else
         {
             mReadData = NULL;
             mDataSize = n < 0 ? -1 : 0;   // -1: endWork() drops the record
+            (n < 0 ? mCache->mStoreReadErrors : mCache->mStoreReadMisses).fetch_add(1, std::memory_order_relaxed);
         }
         return true;
     }
@@ -2551,6 +2553,26 @@ namespace
     constexpr std::chrono::milliseconds STORE_READY_WAIT(10000);
 }
 
+// #951 diagnostics. Main thread (never blocks: try_lock; a store call in flight on the
+// cache thread holds the lock shared, which try_lock_shared still gets).
+S32 LLTextureCache::getStoreState()
+{
+    if (!mUsingStore)
+    {
+        return -1;
+    }
+    std::shared_lock<std::shared_mutex> lock(mStoreMutex, std::try_to_lock);
+    if (!lock.owns_lock())
+    {
+        return 2;   // detachStore() holds it exclusively (shutting down), or a writer is queued
+    }
+    if (!mStore)
+    {
+        return 2;
+    }
+    return mStore->ready() ? 1 : 0;
+}
+
 // static
 std::string LLTextureCache::legacyDir(ELLPath location)
 {
@@ -2778,6 +2800,10 @@ bool LLTextureCache::storeWrite(const LLUUID& id, const U8* data, S32 datasize, 
     if (!queued)
     {
         ++mStoreWritesRefused;
+    }
+    else
+    {
+        mStoreWritesQueued.fetch_add(1, std::memory_order_relaxed);    // #951
     }
     return queued;
 }

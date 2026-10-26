@@ -705,7 +705,10 @@ bool buildPipelines(LLFxRuntimeVK::Job& job, std::string& err)
                 if (job.robust) ci.pNext = &rob;
                 if (job.abandon && job.abandon->load()) { err = "error: compile abandoned"; return false; }
                 {
-                    const VkPipelineCompileCrumb crumb(("FX compute pass " + ps.name).c_str());
+                    const std::string crumb_name = "FX compute pass " + ps.name;
+                    if (vkPipelineQuarantined(crumb_name))   // #1064: crashed the driver's compiler twice
+                    { err = "error: pass '" + ps.name + "' is quarantined: it crashed this graphics driver's shader compiler"; return false; }
+                    const VkPipelineCompileCrumb crumb(crumb_name.c_str());
                     r = vkCreateComputePipelines(dev, job.cache, 1, &ci, nullptr, &pv.pipe);
                 }
                 if (r != VK_SUCCESS) { pv.pipe = VK_NULL_HANDLE; err = vkErr("vkCreateComputePipelines", r) + " for pass '" + ps.name + "'"; return false; }
@@ -812,7 +815,10 @@ bool buildPipelines(LLFxRuntimeVK::Job& job, std::string& err)
             { err = "error: pass '" + ps.name + "' needs a stencil buffer, which this device cannot provide"; return false; }
             if (job.abandon && job.abandon->load()) { err = "error: compile abandoned"; return false; }
             {
-                const VkPipelineCompileCrumb crumb(("FX pass " + ps.name).c_str());
+                const std::string crumb_name = "FX pass " + ps.name;
+                if (vkPipelineQuarantined(crumb_name))   // #1064: crashed the driver's compiler twice
+                { err = "error: pass '" + ps.name + "' is quarantined: it crashed this graphics driver's shader compiler"; return false; }
+                const VkPipelineCompileCrumb crumb(crumb_name.c_str());
                 r = vkCreateGraphicsPipelines(dev, job.cache, 1, &gi, nullptr, &pv.pipe);
             }
             if (r != VK_SUCCESS) { pv.pipe = VK_NULL_HANDLE; err = vkErr("vkCreateGraphicsPipelines", r) + " for pass '" + ps.name + "'"; return false; }

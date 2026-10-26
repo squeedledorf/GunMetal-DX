@@ -41,6 +41,12 @@
 #include "llimagebmp.h" // <GMDX> image clipboard
 #include "llimagepng.h" // <GMDX>
 
+#if LL_WINDOWS
+// #847: DirectInput8 for libndofdev (joystick / 3D mouse), see getInputDevices()
+#define DIRECTINPUT_VERSION 0x0800
+#include <dinput.h>
+#endif
+
 #include <sstream>
 
 #ifdef LL_GLIB
@@ -88,6 +94,24 @@ LLWindowSDL::LLWindowSDL(LLWindowCallbacks* callbacks,
         : LLWindow(callbacks, fullscreen, flags),
         mGamma(1.0f), mFlashing(false)
 {
+#if LL_WINDOWS
+    // #847: the ndof library needs a DirectInput8 interface; the SDL window never made one,
+    // so every device read as invalid and all axes stayed 0.
+    {
+        IDirectInput8* di8 = nullptr;
+        HRESULT hr = DirectInput8Create(GetModuleHandle(nullptr), DIRECTINPUT_VERSION,
+                                        IID_IDirectInput8, (void**)&di8, nullptr);
+        if (SUCCEEDED(hr))
+        {
+            mDirectInput8 = di8;
+        }
+        else
+        {
+            LL_WARNS("Joystick") << "DirectInput8Create failed, hr=" << std::hex << (U32)hr << std::dec << LL_ENDL;
+        }
+    }
+#endif
+
     // Initialize the keyboard
     gKeyboard = new LLKeyboardSDL();
     gKeyboard->setCallbacks(callbacks);
@@ -322,11 +346,42 @@ LLWindowSDL::~LLWindowSDL()
     destroyContext();
     clear_clipboard_image(); // <GMDX> the clipboard image, while the image classes are still up
 
+#if LL_WINDOWS
+    if (mDirectInput8)
+    {
+        static_cast<IDirectInput8*>(mDirectInput8)->Release();
+        mDirectInput8 = nullptr;
+    }
+#endif
+
     delete[] mSupportedResolutions;
 
     gWindowImplementation = nullptr;
 }
 
+
+#if LL_WINDOWS
+void* LLWindowSDL::getDirectInput8()
+{
+    // Address of the interface pointer (callers deref to LPDIRECTINPUT8), as LLWindowWin32 did.
+    return &mDirectInput8;
+}
+
+bool LLWindowSDL::getInputDevices(U32 device_type_filter,
+                                  std::function<bool(std::string&, LLSD&, void*)> osx_callback,
+                                  void* win_callback,
+                                  void* userdata)
+{
+    if (mDirectInput8 && win_callback)
+    {
+        // The callback runs synchronously, inside EnumDevices
+        HRESULT status = static_cast<IDirectInput8*>(mDirectInput8)->EnumDevices(
+            device_type_filter, (LPDIENUMDEVICESCALLBACK)win_callback, userdata, DIEDFL_ATTACHEDONLY);
+        return status == DI_OK;
+    }
+    return false;
+}
+#endif
 
 void LLWindowSDL::show()
 {

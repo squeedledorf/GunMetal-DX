@@ -91,7 +91,7 @@ vec3 atmosToYUp(vec3 w) { return vec3(w.y, w.z, w.x); }
 
 // ---------------------------------------------------------------------------
 // <GMDX> PHYSICAL SKY (RenderVKPhysicalSky; clean_physky.glsl, gmdxphysskyvk.cpp). Hillaire's
-// sky-view and transmittance LUTs (draw set 0 bindings 46 / 47, linear HDR radiance) stand in
+// sky-view and transmittance LUTs (draw set 0 bindings 57 / 58, linear HDR radiance) stand in
 // for skyHazePre's WindLight dome, and colour the haze; the haze AMOUNT (atten) and all
 // surface lighting stay WindLight's, so regions keep their look apart from the sky's colour.
 // Both outputs go back through LL's sky "pre" space (physkyPre: the inverse of skyResolve) so
@@ -99,8 +99,8 @@ vec3 atmosToYUp(vec3 w) { return vec3(w.y, w.z, w.x); }
 // ---------------------------------------------------------------------------
 #define PHYSKY_P(i) ssr.physky[i]
 #include "clean_physky.glsl"
-layout(set = 0, binding = 55) uniform sampler2D uPkSkyView;   // <GMDX> (46 / 47 are the volumetric clouds)
-layout(set = 0, binding = 56) uniform sampler2D uPkTrans;
+layout(set = 0, binding = 57) uniform sampler2D uPkSkyView;   // <GMDX> (46 / 47 are the volumetric clouds, 54 / 55 the VS instances)
+layout(set = 0, binding = 58) uniform sampler2D uPkTrans;
 
 bool physkyOn() { return ssr.physky[4].w > 0.5; }
 
@@ -249,6 +249,22 @@ float atmosAmbientLighting(vec3 norm, vec3 light_dir)
 // mode they stay in LL's sRGB-ish space (the classic recombination expects it).
 // (#816: sunlit is a per-frame constant, atmos_k[5]; amblit keeps its per-pixel ambient
 // factor INSIDE the sRGB -> linear conversion, so only its base is precomputed.)
+// atmosLightTerms' amblit alone (no haze): callers that need the sky ambient of a surface
+// without its haze terms (#872: the split lighting's sharp-reflection pass).
+vec3 atmosAmbientTerm(vec3 norm)
+{
+#ifdef CLEAN_LPROBE_NO_ATMOS
+    return vec3(0.2);   // (register probe)
+#endif
+    vec3 amblit = ssr.atmos_k[4].rgb * atmosAmbientLighting(norm, atmosLightDir());
+    if (!atmosClassic())
+    {
+        amblit = atmosSrgbToLinear(amblit);
+        amblit = vec3(dot(amblit, vec3(0.2126, 0.7152, 0.0722)));
+    }
+    return amblit * ssr.atmos[12].w;   // sky_ambient_scale
+}
+
 void atmosLightTerms(vec3 rel_pos, vec3 norm, out vec3 sunlit, out vec3 amblit,
                      out vec3 additive, out vec3 atten)
 {
@@ -258,13 +274,7 @@ void atmosLightTerms(vec3 rel_pos, vec3 norm, out vec3 sunlit, out vec3 amblit,
 #endif
     atmosScatterHaze(rel_pos, additive, atten);
     sunlit = ssr.atmos_k[5].rgb;   // (classic or linear) x sky_sunlight_scale
-    amblit = ssr.atmos_k[4].rgb * atmosAmbientLighting(norm, atmosLightDir());
-    if (!atmosClassic())
-    {
-        amblit = atmosSrgbToLinear(amblit);
-        amblit = vec3(dot(amblit, vec3(0.2126, 0.7152, 0.0722)));
-    }
-    amblit *= ssr.atmos[12].w;   // sky_ambient_scale
+    amblit = atmosAmbientTerm(norm);
 }
 
 // cleanHazeF composite on LINEAR colour: lin * atten.r + srgb_to_linear(additive*2) * hdr.
@@ -342,6 +352,9 @@ vec3 skyHazeCore(float ny, float nl)
     haze_glow *= glow.x;
     haze_glow = pow(haze_glow, glow.z);
     haze_glow = (sun_moon_glow_factor < 1.0) ? 0.0 : (sun_moon_glow_factor * (haze_glow + 0.25));
+    // #848: the moon's halo is this glow, so moon_brightness dims it too (not only the disc).
+    // Unchanged from the default 0.5 up; below it the glow falls off linearly to nothing.
+    if (!sun_up) haze_glow *= clamp(ssr.atmos[12].x * 2.0, 0.0, 1.0);
 
     vec3 color = (blue_horizon * blue_weight * (sunlight + ambient_color)
                + (haze_horizon * haze_weight) * (sunlight * haze_glow + ambient_color));

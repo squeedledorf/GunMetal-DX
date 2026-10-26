@@ -97,13 +97,15 @@
          layout="topleft"
          help_topic="preferences_general_tab"
          name="general" />
+        <!-- <GMDX> Graphics: the former Graphics panel plus the advanced graphics tabs -->
         <panel
-	 class="panel_preference_graphics"
-         filename="panel_preferences_graphics1.xml"
+	 class="panel_preference_graphics_advanced"
+         filename="panel_preferences_graphics_advanced.xml"
          label="Graphics"
          layout="topleft"
          help_topic="preferences_display_tab"
          name="display" />
+        <!-- </GMDX> -->
         <panel
 		 class="panel_preference"
          filename="panel_preferences_sound.xml"

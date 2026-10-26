@@ -136,7 +136,9 @@ layout(std430, binding = 14) writeonly buffer RigPos   { uint rig_pos[]; };
 // OPACITY MICROMAPS (#194, llcleanrtomm.cpp): per instance, OMM id + 1 per LOD level of
 // its group (0 = none); per OMM id, its BLAS address (0 = retired). An alpha-mask instance
 // with one for the level it uses references that BLAS -- the slot's triangles in the same
-// order plus a micromap baked from its material -- with no opacity override.
+// order plus a micromap baked from its material -- with no opacity override. (#1032,
+// RenderVKRTOmmBlend: alpha-BLEND instances too -- their micromaps hold only transparent /
+// unknown states, so dropping FORCE_NO_OPAQUE never makes one opaque.)
 layout(std430, binding = 15) readonly buffer OmmInst   { uvec4 omm_inst[]; };
 layout(std430, binding = 16) readonly buffer OmmAddr   { uvec4 omm_addr[]; };   // addr lo, hi, slot, 0
 // TERRAIN MORPH COPY (mode 3): the static VBO (quantized, #573: 5 words per vertex, the
@@ -194,6 +196,27 @@ void setGeomEmRow(uint id, uint first, int base, uint count)
 // -- host-read by LLCleanRTVK when this frame slot comes round (the pose skip).
 layout(std430, binding = 25) buffer PoseSnap             { AvatarJoints pose_snap[]; };
 layout(std430, binding = 26) writeonly buffer PoseRb     { uint pose_rb[]; };
+// #1032 KNOWN-OPAQUE ALPHA-MASK (maskKnownOpaque): the material table (LLCleanMaterialStore::
+// Material, 96 B -- the same buffer the consumers' alpha test reads, clean_rt_common.glsl
+// RtMaterial) and one bit per bindless texture slot: set when the image bound there has no
+// alpha (decoded with 1 / 3 channels, or every alpha byte 255 -- SharedTex::comps != 4), so
+// every texel samples alpha 1.0 at any mip / filter. CPU-written per frame slot (LLCleanRTVK
+// texOpaqueUpdate); the zeroed dummy = no slot known opaque.
+struct Material {
+    uvec2 base_color_handle;
+    uvec2 normal_handle;
+    uvec2 mr_handle;
+    uvec2 emissive_handle;
+    vec4  base_color_factor;
+    vec4  emissive_factor;
+    vec4  spec_color_gloss;
+    float metallic_factor;
+    float roughness_factor;
+    float alpha_cutoff;
+    uint  flags;
+};
+layout(std430, binding = 27) readonly buffer Materials   { Material materials[]; };
+layout(std430, binding = 28) readonly buffer TexOpaque   { uint tex_opaque[]; };
 #define CLRIG_HDR 40u   // (8 header words + the AV_SLOT_WORDS avatar mask; was 16 with 256 slots)
 #define CLOVR_RIG 0x40000000u   // = clean_cluster_rt.comp OVR_RIG
 // [8..15] (CLRIG_AV_TRACED, 2026-10-13): a 256-bit avatar mask (joint-table slot) written only
@@ -221,7 +244,8 @@ layout(push_constant) uniform Push {
     uint counter_word;  // used_bits[counter_word] counts active TLAS instances
     uint dbg_on;        // bit 0 RenderVKRTDebugFlicker: record the membership stats below;
                         // bit 1 RenderVKRTBlendCull (pass A); bit 2 RenderVKRTRiggedFacingParity
-                        // (FACING_RIG); bit 3 RenderVKRTFoliageTransmission != 0 (FACING_LEAF)
+                        // (FACING_RIG); bit 3 RenderVKRTFoliageTransmission != 0 (FACING_LEAF);
+                        // bit 4 RenderVKRTMaskOpaque (MASK_OPAQUE, #1032)
     vec4 dbg_sphere;    // xyz focus centre (the focus projector's apex), w radius (m)
     uint rig_first;     // mode 2: first rig entry of this dispatch's run
     uint tlas_update;   // 1 = this frame's TLAS is a refit (activity preserved, see top)
@@ -401,7 +425,44 @@ uint maskClassSized(uint id, uint f, mat4 M, uint slot)
 #define FACING_RIG  4u
 #define FACING_LEAF 8u
 
-// Opaque unless the raster would alpha test it (mask / blend buckets).
+#define MASK_OPAQUE 16u
+
+// #1032 KNOWN-OPAQUE ALPHA-MASK. An alpha-mask instance (bucket bit 4, not blend) whose alpha
+// test can never fail -- the auto-mask demotion's opaque-texture faces (a blend face with a
+// 3-channel texture), mask-mode materials on alpha-less textures, untextured mask faces -- was
+// FORCE_NO_OPAQUE like real cut-out foliage: every ray crossing it returned to the shader for
+// an alpha test (texture fetch included) that always passed. Here it is decided exactly as the
+// consumers' test (clean_rt_common.glsl rtCandidateAlphaCol) would decide every candidate on
+// it this frame, from the same buffers:
+//   * a cutoff-less (< 0) material on a non-blend instance: rtCandidateAlphaCol returns 1.0;
+//     cutoff 0: alpha >= 0 always passes;
+//   * else base_color_factor.a x tint.a (the same single multiply) >= the cutoff, and either no
+//     resident base map (material flag bit 0 clear: the test uses that constant alpha) or a
+//     base map whose bindless slot is known alpha-less (tex_opaque: texel alpha 1.0 at any mip
+//     -- such images never take coverage mips).
+// The instance keeps its mask CLASS (RT_MASK_ALPHAMASK: facing culling, the #735 transmission
+// ray's mask and every ray mask are unchanged) and only gains FORCE_OPAQUE. Rays traced with
+// gl_RayFlagsNoOpaqueEXT (the #735 foliage transmission ray, camera-like closest hits) still
+// see it as a candidate and run the same alpha / colour code as before. Material edits (new id
+// or resolved flags) and texture loads (slot bits) apply the frame they reach the buffers.
+// Off (RenderVKRTMaskOpaque false): the old rule.
+bool maskKnownOpaque(uint id, uint f)
+{
+    if ((pc.dbg_on & MASK_OPAQUE) == 0u || (f & 6u) != 4u || (f & (32u | 2048u)) != 0u) return false;
+    const uint mid = instances[id].material_id;
+    if (mid >= uint(materials.length())) return false;
+    const float cutoff = materials[mid].alpha_cutoff;
+    if (cutoff <= 0.0) return true;
+    const float a = materials[mid].base_color_factor.a * instances[id].tint.a;
+    if (!(a >= cutoff)) return false;
+    if ((materials[mid].flags & 1u) == 0u) return true;
+    const uint tex = materials[mid].base_color_handle.x;
+    if ((tex >> 5u) >= uint(tex_opaque.length())) return false;
+    return ((tex_opaque[tex >> 5u] >> (tex & 31u)) & 1u) != 0u;
+}
+
+// Opaque unless the raster would alpha test it (mask / blend buckets) -- or a mask instance
+// whose test provably always passes (maskKnownOpaque, #1032).
 // FACING (#735, clean_rt_common.glsl rt_fol_*): only the sun / moon shadow rays request
 // facing culling, and it must reach the casters the shadow pass back-face culls: SINGLE-
 // SIDED STATIC ALPHA-MASK leaves (FACING_LEAF) and SINGLE-SIDED WORN ATTACHMENTS, opaque or
@@ -414,9 +475,9 @@ uint maskClassSized(uint id, uint f, mat4 M, uint slot)
 // (negative-determinant) transform turns the raster's winding over on screen, so it gets
 // FLIP_FACING and the rays see the faces the raster -- and the shadow pass -- sees. (A
 // worn attachment's transform includes its joint's: a mirrored joint scale flips it too.)
-uint geomFlags(uint f, mat3 m)
+uint geomFlags(uint id, uint f, mat3 m)
 {
-    bool opaque = (f & 6u) == 0u || (f & (32u | 2048u)) != 0u;
+    bool opaque = (f & 6u) == 0u || (f & (32u | 2048u)) != 0u || maskKnownOpaque(id, f);
     const uint cls = maskClass(f, false);
     // (own worn attachments: the rigged class -- maskClass(f, false) returns it only for flag 8192)
     const bool worn = (f & 512u) != 0u && (cls == RT_MASK_ATTACH || cls == RT_MASK_RIGGED);   // (blend: CULL_DISABLE)
@@ -553,7 +614,7 @@ void passA(uint id)
             t.row1 = vec4(M[0][1], M[1][1], M[2][1], M[3][1]);
             t.row2 = vec4(M[0][2], M[1][2], M[2][2], M[3][2]);
             t.custom_mask = (id & 0xFFFFFFu) | (maskClassSized(id, f, M, LOD_SENTINEL) << 24);
-            t.sbt_flags = geomFlags(f, mat3(M)) << 24;
+            t.sbt_flags = geomFlags(id, f, mat3(M)) << 24;
             t.ref_lo = co.x; t.ref_hi = co.y;
             tlas[id] = t;
             atomicAdd(used_bits[pc.counter_word], 1u);
@@ -645,9 +706,11 @@ void passA(uint id)
     t.row1 = vec4(M[0][1], M[1][1], M[2][1], M[3][1]);
     t.row2 = vec4(M[0][2], M[1][2], M[2][2], M[3][2]);
     t.custom_mask = (id & 0xFFFFFFu) | (maskClassSized(id, f, M, slot_id) << 24);
-    t.sbt_flags = geomFlags(f, mat3(M)) << 24;
+    t.sbt_flags = geomFlags(id, f, mat3(M)) << 24;
     t.ref_lo = addr.x; t.ref_hi = addr.y;
-    if (id < uint(omm_inst.length()))
+    // (#1032) a known-opaque mask instance keeps the plain BLAS + FORCE_OPAQUE: a micromap
+    // adds nothing over it (a stale row could still name one while the planner catches up).
+    if (id < uint(omm_inst.length()) && !maskKnownOpaque(id, f))
     {
         // Row = OMM id + 1, top bits = DEBUG instance flags (RenderVKRTOmmDebugStage 4/5:
         // force 2-state / disable micromaps).
@@ -662,7 +725,7 @@ void passA(uint id)
                 // The micromap decides opacity: no FORCE_OPAQUE / FORCE_NO_OPAQUE (a forced
                 // no-opaque would turn known-opaque micro-triangles back into candidates).
                 t.ref_lo = oa.x; t.ref_hi = oa.y;
-                uint gf = geomFlags(f, mat3(M)) & (GI_CULL_DISABLE | GI_FLIP_FACING);
+                uint gf = geomFlags(id, f, mat3(M)) & (GI_CULL_DISABLE | GI_FLIP_FACING);
                 if ((row & 0x40000000u) != 0u) gf |= 0x10u;                        // FORCE_OPACITY_MICROMAP_2_STATE
                 if ((row & 0x20000000u) != 0u) gf |= 0x20u | GI_FORCE_NO_OPAQUE;   // DISABLE_OPACITY_MICROMAPS
                 t.sbt_flags = gf << 24;

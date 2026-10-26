@@ -690,6 +690,7 @@ set(viewer_SOURCE_FILES
     alcurveeditorctrl.cpp
     ssfloatergamecontroldebug.cpp
     ssfloatergamecontroloverlay.cpp
+    gmdxfloaterinputoverlay.cpp
     ssfloatergamecontrolgyro.cpp
     ssgamecontroldiagram.cpp
     ssgamecontrolui.cpp
@@ -1599,6 +1600,7 @@ set(viewer_HEADER_FILES
     alcurveeditorctrl.h
     ssfloatergamecontroldebug.h
     ssfloatergamecontroloverlay.h
+    gmdxfloaterinputoverlay.h
     ssfloatergamecontrolgyro.h
     ssgamecontroldiagram.h
     ssgamecontrolui.h
@@ -1938,6 +1940,7 @@ list(APPEND viewer_SOURCE_FILES
     vkgfx/llcleandenoisevk.cpp        # diffuse / specular lighting denoiser (#85 phase 2)
     vkgfx/llcleanprojstochvk.cpp      # RT projectors stochastic + denoised (#85 phase 2)
     vkgfx/llcleangivk.cpp             # ray-traced GI: ReSTIR GI + radiance cache (#87)
+    vkgfx/llcleanvisqueuevk.cpp       # the visibility queue: RT hit sun rays as requests (#1039)
     vkgfx/llcleanrtcachevk.cpp        # RT sun shadow cache: tile classifier + indirect trace (#771)
     vkgfx/llcleansuncertvk.cpp        # sun exposure certificates: world-space sun shadow cache (#771 Phase 2)
     vkgfx/llcleanterrainbakevk.cpp    # per-region terrain bake: far terrain from baked textures (#811)
@@ -1945,6 +1948,7 @@ list(APPEND viewer_SOURCE_FILES
     vkgfx/gmdxseloutlinevk.cpp        # <GMDX> selection styles: classic wireframe, screen-space outline
     vkgfx/gmdxphysskyvk.cpp           # <GMDX> physical sky (Hillaire): parameters, lookup tables
     vkgfx/gmdxreplayvk.cpp            # <GMDX> instant replay: GPU H.264 encode + MP4
+    vkgfx/gmdxcloudshapesvk.cpp       # <GMDX> volumetric clouds: the sculpted cloud bodies
     vkgfx/llcelshadevk.cpp            # avatar mask + cel shading (#549 / #550)
     vkgfx/llcleanpickvk.cpp           # GPU cursor pick of rigged surfaces (#255)
     vkgfx/llcleanaudiortvk.cpp        # acoustics probe: room + occlusion rays against the TLAS (#683)
@@ -2204,6 +2208,7 @@ set_source_files_properties(
     vkgfx/llcleandenoisevk.cpp
     vkgfx/llcleanprojstochvk.cpp
     vkgfx/llcleangivk.cpp
+    vkgfx/llcleanvisqueuevk.cpp
     vkgfx/llcleanrtcachevk.cpp
     vkgfx/llcleansuncertvk.cpp
     vkgfx/llcleanterrainbakevk.cpp

@@ -33,9 +33,8 @@
 #pragma warning (disable : 4702)
 #endif
 
-#define NANOSVG_IMPLEMENTATION
+// #1056: NanoSVG's implementation is compiled once, in llimage (llimagesvg.cpp), which llrender links.
 #include <nanosvg/nanosvg.h>
-#define NANOSVGRAST_IMPLEMENTATION
 #include <nanosvg/nanosvgrast.h>
 
 #if LL_WINDOWS

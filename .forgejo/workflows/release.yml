@@ -76,6 +76,26 @@
 # the PKGBUILD verify it; apt-repo adds the .deb to the signed apt repository
 # (scripts/packaging/apt, host prerequisites in INFRA.md there); sign-release
 # runs last and attaches SHA256SUMS + SHA256SUMS.asc covering every asset.
+#
+# RELEASE GATE: v* and jetstream-* releases are created as DRAFTS (publish_release.sh) and
+# the final release-gate job (scripts/ci/release_gate.py) publishes one only when every
+# asset-producing job succeeded and the release holds the full asset set for its kind
+# (tarball [+ .sig], win64.zip, Setup.exe, .deb, .flatpak, Arch package + PKGBUILD,
+# SHA256SUMS [+ .asc], update-manifest.json; Jetstream: tarball, zip, Setup.exe, sums,
+# manifest). Announcements (test-plan, jetstream-post: Discord, pruning) wait for the gate.
+# Drafts are invisible to GET /releases/tags/{tag}: every CI lookup by tag goes through
+# scripts/ci/release_lookup.py (also used for authenticated asset downloads). vk-* test
+# builds and workflow_dispatch publishes are NOT gated: they are published immediately.
+#
+# RECOVERY from a failed tag build (a job failed, or the gate listed missing assets): the
+# release is still an unpublished draft, nothing public happened, so DO NOT bump the version:
+#   1. fix the cause on the branch (or just re-run if it was a flaky job and the tag is right);
+#   2. delete the draft release on the release page (or DELETE /releases/{id});
+#   3. move the tag to the fixed commit and push it again, CI rebuilds from scratch:
+#        git tag -f vX.Y.Z <fixed-commit>; git push -f origin vX.Y.Z
+# Re-running a single failed job also works: publish_release.sh replaces a same-named asset
+# in the draft, and re-running release-gate afterwards publishes it. Only after the gate has
+# published a tag may a fix need a new version (a public tag is never moved).
 
 name: release
 
@@ -340,10 +360,10 @@ jobs:
           H="$AUR_WORK/tree/scripts/ci/signing_key.sh"
           bash "$H" check || { echo "::warning::no signing key: the PKGBUILD stays unsigned"; exit 0; }
           ASSET="Slipstream_${TAG#v}_x86_64.tar.xz"
-          curl -fsSL -o "$AUR_WORK/src/$ASSET" "${REPO_GIT%.git}/releases/download/$TAG/$ASSET"
-          WANT=$(curl -fsS "$RELEASE_API/releases/tags/$TAG" \
-                 | python3 -c 'import json,sys; print(json.load(sys.stdin).get("body",""))' \
-                 | sed -nE "s/^([0-9a-f]{64})  ${ASSET//./\\.}\$/\1/p" | tail -1)
+          # The release is a draft until release-gate: look it up / download through the API.
+          RL="$AUR_WORK/tree/scripts/ci/release_lookup.py"
+          python3 -I "$RL" fetch "$TAG" "$ASSET" "$AUR_WORK/src/$ASSET"
+          WANT=$(python3 -I "$RL" sha "$TAG" "$ASSET")
           GOT=$(sha256sum "$AUR_WORK/src/$ASSET" | cut -d' ' -f1)
           [ "$WANT" = "$GOT" ] || { echo "::error::$ASSET sha256 $GOT does not match the release notes ('$WANT')"; exit 1; }
           # Binary detached signature, the form makepkg expects for a .sig source.
@@ -360,6 +380,7 @@ jobs:
         if: steps.tree.outcome == 'success'
         continue-on-error: true
         env:
+          TOKEN: ${{ secrets.RELEASE_TOKEN }}
           # Set only when the .sig was attached: source=(... .sig) + validpgpkeys.
           PGP_FPR: ${{ steps.sig.outputs.fpr }}
         run: |
@@ -374,6 +395,8 @@ jobs:
         id: makepkg
         if: steps.gen.outcome == 'success'
         continue-on-error: true
+        env:
+          TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
           set -euo pipefail
           if ! command -v makepkg >/dev/null 2>&1 || ! command -v bsdtar >/dev/null 2>&1; then
@@ -382,7 +405,7 @@ jobs:
           fi
           ASSET="Slipstream_${TAG#v}_x86_64.tar.xz"
           # Pre-seed the source over the LAN; makepkg still checks it against sha256sums.
-          [ -f "$AUR_WORK/src/$ASSET" ] || curl -fsSL -o "$AUR_WORK/src/$ASSET" "${REPO_GIT%.git}/releases/download/$TAG/$ASSET"
+          [ -f "$AUR_WORK/src/$ASSET" ] || python3 -I "$AUR_WORK/tree/scripts/ci/release_lookup.py" fetch "$TAG" "$ASSET" "$AUR_WORK/src/$ASSET"
           # A signed PKGBUILD: makepkg verifies the .sig against validpgpkeys with
           # a keyring holding only the release key, as a user's would.
           if grep -q '^validpgpkeys=' "$AUR_WORK/out/PKGBUILD"; then
@@ -439,6 +462,8 @@ jobs:
       - name: Fetch the published tarball
         id: fetch
         continue-on-error: true
+        env:
+          TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
           set -euo pipefail
           rm -rf "$DEB_WORK"
@@ -446,12 +471,12 @@ jobs:
           # The scripts at this commit, without touching the build job's tree.
           git -C "$CI_ROOT" archive "$GITHUB_SHA" scripts/packaging/deb scripts/ci | tar -x -C "$DEB_WORK/tree"
           ASSET="Slipstream_${TAG#v}_x86_64.tar.xz"
-          curl -fsSL -o "$DEB_WORK/$ASSET" "${REPO_GIT%.git}/releases/download/$TAG/$ASSET"
+          # The release is a draft until release-gate: look it up / download through the API.
+          RL="$DEB_WORK/tree/scripts/ci/release_lookup.py"
+          python3 -I "$RL" fetch "$TAG" "$ASSET" "$DEB_WORK/$ASSET"
           # Check it against the sha256 publish_release.sh appended to the notes
           # after verifying the upload.
-          WANT=$(curl -fsS "$RELEASE_API/releases/tags/$TAG" \
-                 | python3 -c 'import json,sys; print(json.load(sys.stdin).get("body",""))' \
-                 | sed -nE "s/^([0-9a-f]{64})  ${ASSET//./\\.}\$/\1/p" | tail -1)
+          WANT=$(python3 -I "$RL" sha "$TAG" "$ASSET")
           GOT=$(sha256sum "$DEB_WORK/$ASSET" | cut -d' ' -f1)
           if [ "$WANT" != "$GOT" ]; then
             echo "::error::$ASSET sha256 $GOT does not match the release notes ('$WANT')"
@@ -518,6 +543,7 @@ jobs:
     steps:
       - name: Add the .deb, sign, publish, deploy
         env:
+          TOKEN: ${{ secrets.RELEASE_TOKEN }}
           LINUX_SIGNING_KEY: ${{ secrets.LINUX_SIGNING_KEY }}
           LINUX_SIGNING_KEY_ID: ${{ secrets.LINUX_SIGNING_KEY_ID }}
           LINUX_SIGNING_KEY_PASSPHRASE: ${{ secrets.LINUX_SIGNING_KEY_PASSPHRASE }}
@@ -562,6 +588,7 @@ jobs:
     steps:
       - name: Add the package, sign, publish, deploy
         env:
+          TOKEN: ${{ secrets.RELEASE_TOKEN }}
           LINUX_SIGNING_KEY: ${{ secrets.LINUX_SIGNING_KEY }}
           LINUX_SIGNING_KEY_ID: ${{ secrets.LINUX_SIGNING_KEY_ID }}
           LINUX_SIGNING_KEY_PASSPHRASE: ${{ secrets.LINUX_SIGNING_KEY_PASSPHRASE }}
@@ -652,7 +679,8 @@ jobs:
           rm -rf "$UM_WORK"; mkdir -p "$UM_WORK/tree"
           trap 'rm -rf "$UM_WORK"' EXIT
           git -C "$CI_ROOT" archive "$GITHUB_SHA" scripts/updater scripts/ci | tar -x -C "$UM_WORK/tree"
-          curl -fsS -H "Authorization: token $TOKEN" "$RELEASE_API/releases/tags/$TAG" > "$UM_WORK/release.json"
+          # Draft-aware lookup (the release is unpublished until release-gate).
+          python3 -I "$UM_WORK/tree/scripts/ci/release_lookup.py" json "$TAG" > "$UM_WORK/release.json"
           python3 "$UM_WORK/tree/scripts/updater/sign_update_manifest.py" from-release "$UM_WORK/release.json" \
             --tag "$TAG" --out "$UM_WORK/update-manifest.json"
           # The key is only in this step's environment; check the result with the public half
@@ -665,12 +693,56 @@ jobs:
           TAG="$TAG" FILE="$UM_WORK/update-manifest.json" SHA="$SHA" COMMIT="$GITHUB_SHA" \
             bash "$UM_WORK/tree/scripts/ci/publish_release.sh"
 
+  release-gate:
+    # Publishes the release (it is a draft until now, see publish_release.sh) only when every
+    # asset-producing job succeeded and the release has the full expected asset set for its
+    # kind (scripts/ci/release_gate.py). Otherwise it fails listing what is missing and the
+    # draft stays unpublished: nothing was public, so fix the cause, delete the draft release
+    # and move the tag (header of this file). Not for vk-* test builds (published at once).
+    # Add any new asset-producing job to `needs` and its assets to release_gate.py.
+    # apt-repo / pacman-repo deploy to their own hosts and publish no release asset, so they
+    # are not gated.
+    needs: [build, windows, deb-package, arch-package, flatpak, update-manifest, sign-release]
+    if: always() && ((startsWith(github.ref, 'refs/tags/v') && !startsWith(github.ref, 'refs/tags/vk-')) || startsWith(github.ref, 'refs/tags/jetstream-'))
+    runs-on: builder
+    timeout-minutes: 15
+    env:
+      TAG: ${{ github.ref_name }}
+      GATE_WORK: /srv/ci/slipstream-release-gate
+    steps:
+      - name: Check jobs + assets, publish the release
+        env:
+          TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          HAVE_SIGNING_KEY: ${{ secrets.LINUX_SIGNING_KEY != '' }}
+          HAVE_UPDATE_KEY: ${{ secrets.UPDATE_SIGNING_KEY != '' }}
+          R_BUILD: ${{ needs.build.result }}
+          R_WINDOWS: ${{ needs.windows.result }}
+          R_UPDATE_MANIFEST: ${{ needs.update-manifest.result }}
+          R_SIGN_RELEASE: ${{ needs.sign-release.result }}
+          R_DEB: ${{ needs.deb-package.result }}
+          R_ARCH: ${{ needs.arch-package.result }}
+          R_FLATPAK: ${{ needs.flatpak.result }}
+        run: |
+          set -euo pipefail
+          rm -rf "$GATE_WORK"; mkdir -p "$GATE_WORK"
+          trap 'rm -rf "$GATE_WORK"' EXIT
+          git -C "$CI_ROOT" archive "$GITHUB_SHA" scripts/ci | tar -x -C "$GATE_WORK"
+          args=(--job "build=$R_BUILD" --job "windows=$R_WINDOWS" --job "update-manifest=$R_UPDATE_MANIFEST" --job "sign-release=$R_SIGN_RELEASE")
+          # Jetstream builds have no .deb / Arch / Flatpak packages (those jobs are skipped).
+          if [[ "$TAG" == v* ]]; then
+            args+=(--job "deb-package=$R_DEB" --job "arch-package=$R_ARCH" --job "flatpak=$R_FLATPAK")
+          fi
+          [ "$HAVE_SIGNING_KEY" = true ] && args+=(--signing)
+          [ "$HAVE_UPDATE_KEY" = true ] && args+=(--update-manifest)
+          python3 -I "$GATE_WORK/scripts/ci/release_gate.py" "$TAG" "${args[@]}"
+
   test-plan:
     # Jetstream builds and betas: the test plan for testers in Discord #test-plans, built from
     # the Test-Plan / Test-Settings trailers of the commits since the previous build of the same
     # kind (scripts/ci/test_plan.py). Secret: DISCORD_TESTPLANS_WEBHOOK (unset = printed only).
-    needs: [build, windows]
-    if: always() && needs.build.result == 'success' && needs.windows.result == 'success' && (startsWith(github.ref, 'refs/tags/jetstream-') || contains(github.ref, '-beta.'))
+    # Public: waits for release-gate (the release is published) and needs its success.
+    needs: [build, windows, release-gate]
+    if: always() && needs.release-gate.result == 'success' && (startsWith(github.ref, 'refs/tags/jetstream-') || contains(github.ref, '-beta.'))
     runs-on: builder
     timeout-minutes: 10
     env:
@@ -698,8 +770,9 @@ jobs:
     # list in the release text) and delete all but the newest 10 Jetstream releases + tags.
     # Secret: DISCORD_JETSTREAM_WEBHOOK (optional; unset = no post). Variable:
     # DISCORD_JETSTREAM_ROLE (the "Jetstream Pings" role id, pinged with each post).
-    needs: [build, windows, update-manifest]
-    if: always() && needs.build.result == 'success' && needs.windows.result == 'success' && startsWith(github.ref, 'refs/tags/jetstream-')
+    # Public: waits for release-gate (announcing and pruning only after the release is published).
+    needs: [release-gate]
+    if: always() && needs.release-gate.result == 'success' && startsWith(github.ref, 'refs/tags/jetstream-')
     runs-on: builder
     timeout-minutes: 15
     env:
@@ -762,6 +835,8 @@ jobs:
         id: fetch
         if: steps.sync.outcome == 'success'
         continue-on-error: true
+        env:
+          TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
           set -euo pipefail
           rm -rf "$FP_WORK"
@@ -779,11 +854,11 @@ jobs:
             exit 0
           fi
           ASSET="Slipstream_${TAG#v}_x86_64.tar.xz"
-          curl -fsSL -o "$FP_WORK/$ASSET" "${REPO_GIT%.git}/releases/download/$TAG/$ASSET"
+          # The release is a draft until release-gate: look it up / download through the API.
+          RL="$FP_WORK/tree/scripts/ci/release_lookup.py"
+          python3 -I "$RL" fetch "$TAG" "$ASSET" "$FP_WORK/$ASSET"
           # Check it against the sha256 publish_release.sh appended to the notes.
-          WANT=$(curl -fsS "$RELEASE_API/releases/tags/$TAG" \
-                 | python3 -c 'import json,sys; print(json.load(sys.stdin).get("body",""))' \
-                 | sed -nE "s/^([0-9a-f]{64})  ${ASSET//./\\.}\$/\1/p" | tail -1)
+          WANT=$(python3 -I "$RL" sha "$TAG" "$ASSET")
           GOT=$(sha256sum "$FP_WORK/$ASSET" | cut -d' ' -f1)
           if [ "$WANT" != "$GOT" ]; then
             echo "::error::$ASSET sha256 $GOT does not match the release notes ('$WANT')"

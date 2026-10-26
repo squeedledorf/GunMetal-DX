@@ -1,11 +1,13 @@
 #version 450
 #extension GL_EXT_nonuniform_qualifier : require
+#extension GL_GOOGLE_include_directive : require
 // vkclean — shadow-map alpha test (LL shadowAlphaMaskF). Depth-only pass for the
-// mask / alpha-blend casters: masks discard below the material cutoff, alpha-blend
-// casters follow LL's shadow pass (clean_translucent.glsl llBlendShadowPass).
-// BLEND_SOLID (translucent shadows on, #212): alpha-blend casters keep only the texels
-// LL makes solid; the translucency layer (clean_shadow_trans.frag) tints with the rest.
-// Inputs match clean_draw.vert / clean_draw_rigged.vert.
+// mask / alpha-blend casters: masks discard below the material cutoff -- THE alpha-test rule
+// (#1044, clean_alpha_rule.glsl); alpha-blend casters follow LL's shadow pass
+// (clean_translucent.glsl llBlendShadowPass). BLEND_SOLID (translucent shadows on, #212):
+// alpha-blend casters keep only the texels LL makes solid; the translucency layer
+// (clean_shadow_trans.frag) tints with the rest. Inputs match clean_draw.vert / clean_draw_rigged.vert.
+#include "clean_alpha_rule.glsl"
 #include "clean_translucent.glsl"
 layout(location = 0) flat in uint v_material_id;
 layout(location = 1)      in vec2 v_uv;
@@ -50,7 +52,10 @@ void main()
     const float a = m.base_color_factor.a * v_tint.a * ta;
     if (m.alpha_cutoff >= 0.0)
     {
-        if (a < max(m.alpha_cutoff, 0.05)) discard;
+        // THE rule (clean_alpha_rule.glsl): the mask's own cutoff, no coverage scale (a shadow caster
+        // tests its texel's own coverage). (#1044: the old max(.., 0.05) floor cut faint mask texels --
+        // and every texel of a cutoff-0 mask -- that the raster draws and the RT shadow rays block.)
+        if (!alphaKeeps(a, m.alpha_cutoff, 0.0, 0.0)) discard;
         return;
     }
     // <SS:Skoomastream> Alpha-blend caster: LL's shadow pass (Firestorm parity), not

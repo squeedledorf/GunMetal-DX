@@ -245,14 +245,14 @@ bool noTemporalFace(uint flags)
 // sampled level (textureQueryLod + the same bias), so coverage stays near level 0's.
 // Every alpha-test site of one surface (the pre-passes and the lit FS's EQUAL pass) must
 // use it identically. Only the TEST is scaled; blending keeps the real alpha. 0 = off.
+// (#1044) The raster's form of THE alpha-test rule (clean_alpha_rule.glsl): its coverage scale.
+#include "clean_alpha_rule.glsl"
 float maskCoverageK() { return float((uint(ssr.lit_dbg.x + 0.5) >> 18) & 63u) * (1.0 / 16.0); }
-// <GMDX> cutoff: the material's. Above the cutoff ceiling (247.5/255, llvovolume.cpp kMaskCutoffCeiling)
-// it is a dissolve's "only fully opaque" (clean_mask_cutoff): no boost, or the faded parts come back.
-float maskTestAlpha(float a, float lod, float cutoff)
-{
-    const float k = maskCoverageK();
-    return (k > 0.0 && cutoff <= 0.9706) ? a * (1.0 + max(lod, 0.0) * k) : a;
-}
+float maskTestAlpha(float a, float lod) { return alphaCoverage(a, lod, maskCoverageK()); }
+// <GMDX> with the material's cutoff: above the cutoff ceiling (247.5/255, llvovolume.cpp
+// kMaskCutoffCeiling) it is a dissolve's "only fully opaque" (clean_mask_cutoff): no coverage
+// scale, or the faded parts come back.
+float maskTestAlpha(float a, float lod, float cutoff) { return cutoff <= 0.9706 ? maskTestAlpha(a, lod) : a; }
 
 float taaLodBias(uint flags) { return (ssr.taa_params.w > 0.5 && (flags & 8u) == 0u && !noTemporalFace(flags)) ? ssr.taa_scale.x : 0.0; }
 

@@ -15,6 +15,21 @@ with the same filename but different name
   preload="true" (optional, false by default)
     - If true, we will attempt to load the image before displaying any UI.
       If false, we will load in the background after initializing the UI.
+  vector_file="phosphor/bug.svg" (optional)
+    - an SVG (Phosphor icon set, fill weight), relative to the textures directory. Unless the "Classic icons"
+      preference (SLClassicIcons) is on, the UI draws this instead of the bitmap, rasterized at the exact
+      physical pixel size of each draw (logical size x UI scale), lazily and cached. The bitmap still defines the
+      image's layout size and is what "Classic icons" shows. A vector ignores scale.* / clip.* (only icons get a
+      vector_file, never stretchable widget backgrounds).
+  vector_color="#RRGGBB" or "#RRGGBBAA" (optional)
+    - tint of the vector mask (the average colour of the bitmap it replaces, so state variants keep their look)
+      and, with the 8-digit form, its peak opacity. Default opaque white.
+  vector_box="0.100,0.100,0.900,0.900" (optional)
+    - left,top,right,bottom fractions of the icon rectangle (origin top-left) that the glyph's ink is fitted into;
+      the bitmap's own ink bounds, so the glyph fills the area the old artwork did. Default: the whole rectangle.
+  vector_file2 / vector_color2 / vector_box2, and vector_file3 / vector_color3 / vector_box3 (optional)
+    - more layers drawn over the first at the same size, source-over, each with its own colour and box
+      (a checkbox is frame + fill + check mark; a scroll button is tile + frame + caret).
   use_mips="true" (currently unused)
   scale.left="1"
   scale.bottom="1"
@@ -30,52 +45,52 @@ with the same filename but different name
 
 <textures version="101">
   <!-- Please add new files alphabetically to prevent merge conflicts. JC -->
-  <texture name="Accordion_ArrowClosed_Off" file_name="containers/Accordion_ArrowClosed_Off.png" preload="false" />
-  <texture name="Accordion_ArrowClosed_Press" file_name="containers/Accordion_ArrowClosed_Press.png" preload="false" />
-  <texture name="Accordion_ArrowOpened_Off" file_name="containers/Accordion_ArrowOpened_Off.png" preload="false" />
-  <texture name="Accordion_ArrowOpened_Press" file_name="containers/Accordion_ArrowOpened_Press.png" preload="false" />
+  <texture name="Accordion_ArrowClosed_Off" file_name="containers/Accordion_ArrowClosed_Off.png" preload="false" vector_file="phosphor/caret-right.svg" vector_color="#BABABA" vector_box="0.300,0.100,0.700,0.900" />
+  <texture name="Accordion_ArrowClosed_Press" file_name="containers/Accordion_ArrowClosed_Press.png" preload="false" vector_file="phosphor/caret-right.svg" vector_color="#898989" vector_box="0.300,0.100,0.700,0.900" />
+  <texture name="Accordion_ArrowOpened_Off" file_name="containers/Accordion_ArrowOpened_Off.png" preload="false" vector_file="phosphor/caret-down.svg" vector_color="#B0B0B0" vector_box="0.100,0.300,0.800,0.800" />
+  <texture name="Accordion_ArrowOpened_Press" file_name="containers/Accordion_ArrowOpened_Press.png" preload="false" vector_file="phosphor/caret-down.svg" vector_color="#828282" vector_box="0.100,0.300,0.800,0.800" />
   <texture name="Accordion_Off" file_name="containers/Accordion_Off.png" preload="false" />
   <texture name="Accordion_Press" file_name="containers/Accordion_Press.png" preload="false" />
   <texture name="Accordion_Over" file_name="containers/Accordion_Over.png" preload="false" />
   <texture name="Accordion_Selected" file_name="containers/Accordion_Selected.png" preload="false" />
 
-  <texture name="Activate_Checkmark" file_name="taskpanel/Activate_Checkmark.png" preload="false" />
+  <texture name="Activate_Checkmark" file_name="taskpanel/Activate_Checkmark.png" preload="false" vector_file="phosphor/check.svg" vector_color="IconColor" />
 
-  <texture name="AddItem_Disabled" file_name="icons/AddItem_Disabled.png" preload="false" />
-  <texture name="AddItem_Off" file_name="icons/AddItem_Off.png" preload="false" />
-  <texture name="AddItem_Press" file_name="icons/AddItem_Press.png" preload="false" />
+  <texture name="AddItem_Disabled" file_name="icons/AddItem_Disabled.png" preload="false" vector_file="phosphor/plus.svg" vector_color="IconColor@30" vector_box="0.278,0.222,0.722,0.722" />
+  <texture name="AddItem_Off" file_name="icons/AddItem_Off.png" preload="false" vector_file="phosphor/plus.svg" vector_color="IconColor@BF" vector_box="0.278,0.222,0.722,0.722" />
+  <texture name="AddItem_Press" file_name="icons/AddItem_Press.png" preload="false" vector_file="phosphor/plus.svg" vector_color="#C6C6C680" vector_box="0.278,0.222,0.722,0.722" />
 
   <texture name="add_payment_image_center"  file_name="windows/add_payment_image_center.png" preload="true" />
   <texture name="add_payment_image_left"  file_name="windows/add_payment_image_left.png" preload="true" />
   <texture name="add_payment_image_right"  file_name="windows/add_payment_image_right.png" preload="true" />
 
-  <texture name="Arrow_Left_Off" file_name="navbar/Arrow_Left_Off.png" preload="true" />
-  <texture name="Arrow_Right_Off" file_name="navbar/Arrow_Right_Off.png" preload="true" />
+  <texture name="Arrow_Left_Off" file_name="navbar/Arrow_Left_Off.png" preload="true" vector_file="phosphor/arrow-left.svg" vector_color="IconColor@BF" vector_box="0.188,0.062,0.750,0.938" />
+  <texture name="Arrow_Right_Off" file_name="navbar/Arrow_Right_Off.png" preload="true" vector_file="phosphor/arrow-right.svg" vector_color="IconColor@BF" vector_box="0.250,0.062,0.812,0.938" />
 
-  <texture name="Arrow_Small_Down" file_name="widgets/Arrow_Small_Down.png" preload="true" />
-  <texture name="Arrow_Small_Up" file_name="widgets/Arrow_Small_Up.png" preload="true" />
-  <texture name="Arrow_Small_Left" file_name="widgets/Arrow_Small_Left.png" preload="true" />
-  <texture name="Arrow_Small_Right" file_name="widgets/Arrow_Small_Right.png" preload="true" />
+  <texture name="Arrow_Small_Down" file_name="widgets/Arrow_Small_Down.png" preload="true" vector_file="phosphor/caret-down.svg" vector_color="#B1B1B1E5" vector_box="0.318,0.391,0.636,0.609" />
+  <texture name="Arrow_Small_Up" file_name="widgets/Arrow_Small_Up.png" preload="true" vector_file="phosphor/caret-up.svg" vector_color="#B1B1B1E5" vector_box="0.318,0.391,0.636,0.609" />
+  <texture name="Arrow_Small_Left" file_name="widgets/Arrow_Small_Left.png" preload="true" vector_file="phosphor/caret-left.svg" vector_color="#B2B2B2" vector_box="0.333,0.200,0.600,0.800" />
+  <texture name="Arrow_Small_Right" file_name="widgets/Arrow_Small_Right.png" preload="true" vector_file="phosphor/caret-right.svg" vector_color="#B2B2B2" vector_box="0.400,0.200,0.667,0.800" />
 
-  <texture name="Arrow_Down" file_name="widgets/Arrow_Down.png"	preload="true" />
-  <texture name="Arrow_Up" file_name="widgets/Arrow_Up.png" preload="true" />
-  <texture name="Arrow_Left" file_name="widgets/Arrow_Left.png" preload="true" />
-  <texture name="Arrow_Right" file_name="widgets/Arrow_Right.png" preload="true" />
+  <texture name="Arrow_Down" file_name="widgets/Arrow_Down.png"	preload="true" vector_file="phosphor/arrow-down.svg" vector_color="IconColor" vector_box="0.062,0.250,0.938,0.812" />
+  <texture name="Arrow_Up" file_name="widgets/Arrow_Up.png" preload="true" vector_file="phosphor/arrow-up.svg" vector_color="IconColor" vector_box="0.062,0.250,0.938,0.812" />
+  <texture name="Arrow_Left" file_name="widgets/Arrow_Left.png" preload="true" vector_file="phosphor/arrow-left.svg" vector_color="IconColor" vector_box="0.188,0.062,0.750,0.938" />
+  <texture name="Arrow_Right" file_name="widgets/Arrow_Right.png" preload="true" vector_file="phosphor/arrow-right.svg" vector_color="IconColor" vector_box="0.188,0.062,0.750,0.938" />
 
-  <texture name="AudioMute_Off" file_name="icons/AudioMute_Off.png" preload="false" />
-  <texture name="AudioMute_Over" file_name="icons/AudioMute_Over.png" preload="false" />
-  <texture name="VoiceMute_Off" file_name="icons/VoiceMute_Off.png" preload="false" />
+  <texture name="AudioMute_Off" file_name="icons/AudioMute_Off.png" preload="false" vector_file="phosphor/speaker-x.svg" vector_color="#AD6363" vector_box="0.062,0.125,0.938,0.938" />
+  <texture name="AudioMute_Over" file_name="icons/AudioMute_Over.png" preload="false" vector_file="phosphor/speaker-x.svg" vector_color="#B26D6D" vector_box="0.062,0.125,0.938,0.938" />
+  <texture name="VoiceMute_Off" file_name="icons/VoiceMute_Off.png" preload="false" vector_file="phosphor/microphone-slash.svg" vector_color="#B67878" vector_box="0.188,0.000,0.938,1.000" />
 
-  <texture name="Audio_Off" file_name="icons/Audio_Off.png" preload="false" />
-  <texture name="Audio_Press" file_name="icons/Audio_Press.png" preload="false" />
+  <texture name="Audio_Off" file_name="icons/Audio_Off.png" preload="false" vector_file="phosphor/speaker-high.svg" vector_color="IconColor@BF" vector_box="0.062,0.062,0.938,0.875" />
+  <texture name="Audio_Press" file_name="icons/Audio_Press.png" preload="false" vector_file="phosphor/speaker-high.svg" vector_color="IconColor@80" vector_box="0.062,0.062,0.938,0.875" />
 
-  <texture name="Move" file_name="icons/move.png" preload="false" />
+  <texture name="Move" file_name="icons/move.png" preload="false" vector_file="phosphor/arrows-out-cardinal.svg" vector_color="IconColor" vector_box="0.167,0.000,0.778,0.944" />
 
-  <texture name="BackArrow_Off" file_name="icons/BackArrow_Off.png" preload="false" />
+  <texture name="BackArrow_Off" file_name="icons/BackArrow_Off.png" preload="false" vector_file="phosphor/arrow-left.svg" vector_color="IconColor@BF" vector_box="0.167,0.222,0.778,0.722" />
 
-  <texture name="BackButton_Off" file_name="icons/back_arrow_off.png" preload="false" scale.left="22" scale.top="12" scale.right="25" scale.bottom="12" />
-  <texture name="BackButton_Over" file_name="icons/back_arrow_over.png" preload="false" scale.left="22" scale.top="12" scale.right="25" scale.bottom="12" />
-  <texture name="BackButton_Press" file_name="icons/back_arrow_press.png" preload="false" scale.left="22" scale.top="12" scale.right="25" scale.bottom="12" />
+  <texture name="BackButton_Off" file_name="icons/back_arrow_off.png" preload="false" scale.left="22" scale.top="12" scale.right="25" scale.bottom="12" vector_file="phosphor/caret-left.svg" vector_color="IconColor" vector_box="0.300,0.180,0.700,0.820" />
+  <texture name="BackButton_Over" file_name="icons/back_arrow_over.png" preload="false" scale.left="22" scale.top="12" scale.right="25" scale.bottom="12" vector_file="phosphor/caret-left.svg" vector_color="IconColor" vector_box="0.300,0.180,0.700,0.820" />
+  <texture name="BackButton_Press" file_name="icons/back_arrow_press.png" preload="false" scale.left="22" scale.top="12" scale.right="25" scale.bottom="12" vector_file="phosphor/caret-left.svg" vector_color="IconColor" vector_box="0.300,0.180,0.700,0.820" />
 
   <texture name="Error_Tag_Background" file_name="widgets/Error_Tag_Background.png" preload="true" scale.left="12" scale.top="2" scale.right="36" scale.bottom="2" />
   <texture name="New_Tag_Background" file_name="widgets/New_Tag_Background.png" preload="true" scale.left="12" scale.top="2" scale.right="36" scale.bottom="2" />
@@ -101,90 +116,90 @@ with the same filename but different name
   <texture name="BreadCrumbBtn_Right_Over" file_name="widgets/BreadCrumbBtn_Right_Over.png" preload="false"/>
   <texture name="BreadCrumbBtn_Right_Press" file_name="widgets/BreadCrumbBtn_Right_Press.png" preload="false"/>
 
-  <texture name="BuyArrow_Over" file_name="navbar/BuyArrow_Over.png" preload="true" scale.left="0" scale.top="1" scale.right="0" scale.bottom="0"  />
-  <texture name="BuyArrow_Press" file_name="navbar/BuyArrow_Press.png" preload="true" scale.left="1" scale.top="1" scale.right="0" scale.bottom="0"  />
+  <texture name="BuyArrow_Over" file_name="navbar/BuyArrow_Over.png" preload="true" scale.left="0" scale.top="1" scale.right="0" scale.bottom="0" vector_file="phosphor/coin.svg" vector_color="IconAccentColor" vector_box="0.125,0.250,0.812,0.875" />
+  <texture name="BuyArrow_Press" file_name="navbar/BuyArrow_Press.png" preload="true" scale.left="1" scale.top="1" scale.right="0" scale.bottom="0" vector_file="phosphor/coin.svg" vector_color="IconAccentColor" vector_box="0.188,0.312,0.875,0.938" />
 
-  <texture name="Cam_Avatar_Off" file_name="bottomtray/Cam_Avatar_Off.png" preload="true" />
-  <texture name="Cam_FreeCam_Off" file_name="bottomtray/Cam_FreeCam_Off.png" preload="false" />
-  <texture name="Cam_Orbit_Off" file_name="bottomtray/Cam_Orbit_Off.png" preload="false" />
-  <texture name="Cam_Pan_Off" file_name="bottomtray/Cam_Pan_Off.png" preload="false" />
+  <texture name="Cam_Avatar_Off" file_name="bottomtray/Cam_Avatar_Off.png" preload="true" vector_file="phosphor/user.svg" vector_color="IconColor@BF" vector_box="0.111,0.167,0.944,0.778" />
+  <texture name="Cam_FreeCam_Off" file_name="bottomtray/Cam_FreeCam_Off.png" preload="false" vector_file="phosphor/crosshair.svg" vector_color="IconColor@BF" vector_box="0.056,0.056,0.944,0.833" />
+  <texture name="Cam_Orbit_Off" file_name="bottomtray/Cam_Orbit_Off.png" preload="false" vector_file="phosphor/cube-focus.svg" vector_color="IconColor@BF" vector_box="0.111,0.167,0.889,0.944" />
+  <texture name="Cam_Pan_Off" file_name="bottomtray/Cam_Pan_Off.png" preload="false" vector_file="phosphor/hand-grabbing.svg" vector_color="IconColor@BF" vector_box="0.111,0.056,0.889,0.889" />
 
-  <texture name="Cam_Preset_Back_Off" file_name="bottomtray/Cam_Preset_Back_Off.png" preload="false" />
-  <texture name="Cam_Preset_Back_On" file_name="bottomtray/Cam_Preset_Back_On.png" preload="false" />
-  <texture name="Cam_Preset_Eye_Off" file_name="bottomtray/Cam_Preset_Eye_Off.png" preload="false" />
-  <texture name="Cam_Preset_Front_Off" file_name="bottomtray/Cam_Preset_Front_Off.png" preload="false" />
-  <texture name="Cam_Preset_Front_On" file_name="bottomtray/Cam_Preset_Front_On.png" preload="false" />
-  <texture name="Cam_Preset_Side_Off" file_name="bottomtray/Cam_Preset_Side_Off.png" preload="false" />
-  <texture name="Cam_Preset_Side_On" file_name="bottomtray/Cam_Preset_Side_On.png" preload="false" />
+  <texture name="Cam_Preset_Back_Off" file_name="bottomtray/Cam_Preset_Back_Off.png" preload="false" vector_file="phosphor/video-camera.svg" vector_color="IconColor" />
+  <texture name="Cam_Preset_Back_On" file_name="bottomtray/Cam_Preset_Back_On.png" preload="false" vector_file="phosphor/video-camera.svg" vector_color="IconColor" />
+  <texture name="Cam_Preset_Eye_Off" file_name="bottomtray/Cam_Preset_Eye_Off.png" preload="false" vector_file="phosphor/eye.svg" vector_color="IconColor" />
+  <texture name="Cam_Preset_Front_Off" file_name="bottomtray/Cam_Preset_Front_Off.png" preload="false" vector_file="phosphor/video-camera.svg" vector_color="IconColor" />
+  <texture name="Cam_Preset_Front_On" file_name="bottomtray/Cam_Preset_Front_On.png" preload="false" vector_file="phosphor/video-camera.svg" vector_color="IconColor" />
+  <texture name="Cam_Preset_Side_Off" file_name="bottomtray/Cam_Preset_Side_Off.png" preload="false" vector_file="phosphor/video-camera.svg" vector_color="IconColor" />
+  <texture name="Cam_Preset_Side_On" file_name="bottomtray/Cam_Preset_Side_On.png" preload="false" vector_file="phosphor/video-camera.svg" vector_color="IconColor" />
 
-  <texture name="Cam_Rotate_In" file_name="bottomtray/Cam_Rotate_In.png" preload="false" />
-  <texture name="Cam_Rotate_Out" file_name="bottomtray/Cam_Rotate_Out.png" preload="false" />
-  <texture name="Cam_Rotate_Center" file_name="bottomtray/Cam_Rotate_Center.png" preload="false" />
-  <texture name="Cam_Tracking_In" file_name="bottomtray/Cam_Tracking_In.png" preload="false" />
-  <texture name="Cam_Tracking_Out" file_name="bottomtray/Cam_Tracking_Out.png" preload="false" />
-  <texture name="Cam_Tracking_Center" file_name="bottomtray/Cam_Tracking_Center.png" preload="false" />
+  <texture name="Cam_Rotate_In" file_name="bottomtray/Cam_Rotate_In.png" preload="false" vector_file="phosphor/arrow-up.svg" vector_color="IconAccentColor" vector_box="0.410,0.013,0.590,0.385" />
+  <texture name="Cam_Rotate_Out" file_name="bottomtray/Cam_Rotate_Out.png" preload="false" vector_file="phosphor/crosshair.svg" vector_color="IconColor@D1" />
+  <texture name="Cam_Rotate_Center" file_name="bottomtray/Cam_Rotate_Center.png" preload="false" vector_file="phosphor/circle.svg" vector_color="#7FB6A0" vector_box="0.410,0.410,0.590,0.590" />
+  <texture name="Cam_Tracking_In" file_name="bottomtray/Cam_Tracking_In.png" preload="false" vector_file="phosphor/arrow-up.svg" vector_color="IconAccentColor" vector_box="0.410,0.013,0.590,0.449" />
+  <texture name="Cam_Tracking_Out" file_name="bottomtray/Cam_Tracking_Out.png" preload="false" vector_file="phosphor/arrows-out-cardinal.svg" vector_color="IconColor" />
+  <texture name="Cam_Tracking_Center" file_name="bottomtray/Cam_Tracking_Center.png" preload="false" vector_file="phosphor/circle.svg" vector_color="IconAccentColor" vector_box="0.423,0.423,0.577,0.577" />
 
-  <texture name="Checkbox_Off_Disabled" file_name="widgets/Checkbox_Disabled.png" preload="true" />
-  <texture name="Checkbox_On_Disabled" file_name="widgets/Checkbox_On_Disabled.png" preload="true" />
-  <texture name="Checkbox_Off" file_name="widgets/Checkbox_Off.png" preload="true" />
-  <texture name="Checkbox_On" file_name="widgets/Checkbox_On.png" preload="true" />
-  <texture name="Checkbox_On_Press" file_name="widgets/Checkbox_On_Press.png" preload="true" />
-  <texture name="Checkbox_Press" file_name="widgets/Checkbox_Press.png" preload="true" />
-  <texture name="Check_Mark" file_name="icons/check_mark.png" preload="true" />
+  <texture name="Checkbox_Off_Disabled" file_name="widgets/Checkbox_Disabled.png" preload="true" vector_file="phosphor_authored/frame-square.svg" vector_color="IconWidgetFrameDisabled" vector_file2="phosphor/square.svg" vector_color2="IconWidgetFillDisabled" vector_box2="0.100,0.100,0.900,0.900" />
+  <texture name="Checkbox_On_Disabled" file_name="widgets/Checkbox_On_Disabled.png" preload="true" vector_file="phosphor_authored/frame-square.svg" vector_color="IconWidgetFrameDisabled" vector_file2="phosphor/square.svg" vector_color2="IconWidgetFillDisabled" vector_box2="0.100,0.100,0.900,0.900" vector_file3="phosphor/check.svg" vector_color3="IconWidgetMarkDisabled" vector_box3="0.200,0.220,0.800,0.780" />
+  <texture name="Checkbox_Off" file_name="widgets/Checkbox_Off.png" preload="true" vector_file="phosphor_authored/frame-square.svg" vector_color="IconWidgetFrame" vector_file2="phosphor/square.svg" vector_color2="IconWidgetFill" vector_box2="0.100,0.100,0.900,0.900" />
+  <texture name="Checkbox_On" file_name="widgets/Checkbox_On.png" preload="true" vector_file="phosphor_authored/frame-square.svg" vector_color="IconWidgetFrame" vector_file2="phosphor/square.svg" vector_color2="IconWidgetFill" vector_box2="0.100,0.100,0.900,0.900" vector_file3="phosphor/check.svg" vector_color3="IconWidgetMark" vector_box3="0.200,0.220,0.800,0.780" />
+  <texture name="Checkbox_On_Press" file_name="widgets/Checkbox_On_Press.png" preload="true" vector_file="phosphor_authored/frame-square.svg" vector_color="IconWidgetFrame" vector_file2="phosphor/square.svg" vector_color2="IconWidgetFillPress" vector_box2="0.100,0.100,0.900,0.900" vector_file3="phosphor/check.svg" vector_color3="IconWidgetMark" vector_box3="0.200,0.220,0.800,0.780" />
+  <texture name="Checkbox_Press" file_name="widgets/Checkbox_Press.png" preload="true" vector_file="phosphor_authored/frame-square.svg" vector_color="IconWidgetFrame" vector_file2="phosphor/square.svg" vector_color2="IconWidgetFillPress" vector_box2="0.100,0.100,0.900,0.900" />
+  <texture name="Check_Mark" file_name="icons/check_mark.png" preload="true" vector_file="phosphor/check.svg" vector_color="#619381" vector_box="0.077,0.000,0.923,0.938" />
 
   <texture name="Checker" file_name="checker.png" preload="false" />
 
-  <texture name="Command_360_Capture_Icon"  file_name="toolbar_icons/360_capture.png"  preload="true" />
-  <texture name="Command_AboutLand_Icon"    file_name="toolbar_icons/land.png"         preload="true" />
-  <texture name="Command_Appearance_Icon"   file_name="toolbar_icons/appearance.png"   preload="true" />
-  <texture name="Command_Avatar_Icon"       file_name="toolbar_icons/avatars.png"      preload="true" />
-  <texture name="Command_Build_Icon"        file_name="toolbar_icons/build.png"        preload="true" />
-  <texture name="Command_Chat_Icon"         file_name="toolbar_icons/chat.png"         preload="true" />
-  <texture name="Command_Compass_Icon"      file_name="toolbar_icons/land.png"         preload="true" />
-  <texture name="Command_Debug_Icon"        file_name="toolbar_icons/debug.png"        preload="true" />
-  <texture name="Command_Destinations_Icon" file_name="toolbar_icons/destinations.png" preload="true" />
-  <texture name="Command_Gestures_Icon"     file_name="toolbar_icons/gestures.png"     preload="true" />
-  <texture name="Command_Weather_Icon"      file_name="toolbar_icons/weather.png"      preload="true" />
-  <texture name="Command_Grid_Status_Icon"  file_name="toolbar_icons/grid_status.png"  preload="true" />
-  <texture name="Command_HowTo_Icon"        file_name="toolbar_icons/howto.png"        preload="true" />
-  <texture name="Command_Inventory_Icon"    file_name="toolbar_icons/inventory.png"    preload="true" />
-  <texture name="Command_Photo_Studio_Icon" file_name="toolbar_icons/photo_studio.png" preload="true" />
-  <texture name="Command_QuickPrefs_Icon"   file_name="toolbar_icons/quick_prefs.png"  preload="true" />
-  <texture name="Command_Recorder_Icon"     file_name="toolbar_icons/recorder.png"     preload="true" />
-  <texture name="Command_Scopes_Icon"       file_name="toolbar_icons/scopes.png"       preload="true" />
-  <texture name="Command_LocalAssets_Icon"  file_name="toolbar_icons/local_assets.png" preload="true" />
-  <texture name="Command_Map_Icon"          file_name="toolbar_icons/map.png"          preload="true" />
-  <texture name="Command_Marketplace_Icon"  file_name="toolbar_icons/marketplace.png"  preload="true" />
-  <texture name="Command_MktListings_Icon"  file_name="toolbar_icons/mktlistings.png"  preload="true" />
-  <texture name="Command_MiniCart_Icon"     file_name="toolbar_icons/mini_cart.png"    preload="true" />
-  <texture name="Command_MiniMap_Icon"      file_name="toolbar_icons/mini_map.png"     preload="true" />
-  <texture name="Command_Move_Icon"         file_name="toolbar_icons/move.png"         preload="true" />
-  <texture name="Command_Environments_Icon" file_name="toolbar_icons/environments.png" preload="true" />
-  <texture name="Command_People_Icon"       file_name="toolbar_icons/people.png"       preload="true" />
-  <texture name="Command_Performance_Icon"  file_name="toolbar_icons/performance.png"  preload="true" />
-  <texture name="Command_PersonalLighting_Icon"  file_name="toolbar_icons/personal_lighting.png"  preload="true" />
-  <texture name="Command_Picks_Icon"        file_name="toolbar_icons/picks.png"        preload="true" />
-  <texture name="Command_Places_Icon"       file_name="toolbar_icons/places.png"       preload="true" />
-  <texture name="Command_TeleportHistory_Icon" file_name="toolbar_icons/teleporthistory.png" preload="true" />
-  <texture name="Command_Poser_Icon"        file_name="toolbar_icons/poser.png"        preload="true" />
-  <texture name="Command_Preferences_Icon"  file_name="toolbar_icons/preferences.png"  preload="true" />
-  <texture name="Command_Profile_Icon"      file_name="toolbar_icons/profile.png"      preload="true" />
-  <texture name="Command_RegionTracker_Icon" file_name="toolbar_icons/regiontracker.png"       preload="true" />
-  <texture name="Command_Report_Abuse_Icon" file_name="toolbar_icons/report_abuse.png" preload="true" />
-  <texture name="Command_Scripts_Icon"      file_name="toolbar_icons/script.png"       preload="true" />
-  <texture name="Command_Stats_Icon"        file_name="toolbar_icons/stats.png"        preload="true" />
-  <texture name="Command_Search_Icon"       file_name="toolbar_icons/search.png"       preload="true" />
-  <texture name="Command_Snapshot_Icon"     file_name="toolbar_icons/snapshot.png"     preload="true" />
-  <texture name="Command_Snapshot_Disk_Icon" file_name="toolbar_icons/snapshot_disk.png"     preload="true" />
-  <texture name="Command_Speak_Icon"        file_name="toolbar_icons/speak.png"        preload="true" />
-  <texture name="Command_View_Icon"         file_name="toolbar_icons/view.png"         preload="true" />
-  <texture name="Command_Voice_Icon"        file_name="toolbar_icons/nearbyvoice.png"  preload="true" />
-  <texture name="Command_Webbrowser_Icon"   file_name="toolbar_icons/web.png"          preload="true" />
-  <texture name="Command_Poser_Icon"        file_name="toolbar_icons/poser.png"        preload="true" />
-  <texture name="Caret_Top_Icon"            file_name="toolbar_icons/caret_top.png"    preload="true" scale.left="1" scale.top="28" scale.right="15" scale.bottom="5" />
-  <texture name="Caret_Bottom_Icon"         file_name="toolbar_icons/caret_bottom.png" preload="true" scale.left="1" scale.top="23" scale.right="15" scale.bottom="1" />
-  <texture name="Caret_Right_Icon"          file_name="toolbar_icons/caret_right.png"  preload="true" scale.left="5" scale.top="15" scale.right="28" scale.bottom="1" />
-  <texture name="Caret_Left_Icon"           file_name="toolbar_icons/caret_left.png"   preload="true" scale.left="1" scale.top="15" scale.right="23" scale.bottom="1" />
+  <texture name="Command_360_Capture_Icon"  file_name="toolbar_icons/360_capture.png"  preload="true" vector_file="phosphor/globe-hemisphere-west.svg" vector_color="IconColor" />
+  <texture name="Command_AboutLand_Icon"    file_name="toolbar_icons/land.png"         preload="true" vector_file="phosphor/mountains.svg" vector_color="IconColor" vector_box="0.000,0.056,0.944,1.000" />
+  <texture name="Command_Appearance_Icon"   file_name="toolbar_icons/appearance.png"   preload="true" vector_file="phosphor/coat-hanger.svg" vector_color="IconColor" vector_box="0.056,0.111,1.000,0.889" />
+  <texture name="Command_Avatar_Icon"       file_name="toolbar_icons/avatars.png"      preload="true" vector_file="phosphor/users.svg" vector_color="IconColor" vector_box="0.056,0.056,0.944,1.000" />
+  <texture name="Command_Build_Icon"        file_name="toolbar_icons/build.png"        preload="true" vector_file="phosphor/hammer.svg" vector_color="IconColor" vector_box="0.000,0.056,0.944,1.000" />
+  <texture name="Command_Chat_Icon"         file_name="toolbar_icons/chat.png"         preload="true" vector_file="phosphor/chat.svg" vector_color="IconColor" vector_box="0.000,0.111,1.000,0.944" />
+  <texture name="Command_Compass_Icon"      file_name="toolbar_icons/land.png"         preload="true" vector_file="phosphor/compass.svg" vector_color="IconColor" vector_box="0.000,0.056,0.944,1.000" />
+  <texture name="Command_Debug_Icon"        file_name="toolbar_icons/debug.png"        preload="true" vector_file="phosphor/bug.svg" vector_color="IconColor" vector_box="0.000,0.056,1.000,0.889" />
+  <texture name="Command_Destinations_Icon" file_name="toolbar_icons/destinations.png" preload="true" vector_file="phosphor/signpost.svg" vector_color="IconColor" vector_box="0.222,0.056,0.778,1.000" />
+  <texture name="Command_Gestures_Icon"     file_name="toolbar_icons/gestures.png"     preload="true" vector_file="phosphor/hand-waving.svg" vector_color="IconColor" vector_box="0.000,0.056,1.000,1.000" />
+  <texture name="Command_Weather_Icon"      file_name="toolbar_icons/weather.png"      preload="true" vector_file="phosphor/cloud-sun.svg" vector_color="#ADADAD" vector_box="0.111,0.056,0.944,1.000" />
+  <texture name="Command_Grid_Status_Icon"  file_name="toolbar_icons/grid_status.png"  preload="true" vector_file="phosphor/pulse.svg" vector_color="IconColor" vector_box="0.100,0.100,0.900,0.900" />
+  <texture name="Command_HowTo_Icon"        file_name="toolbar_icons/howto.png"        preload="true" vector_file="phosphor/question.svg" vector_color="IconColor" vector_box="0.111,0.056,0.889,1.000" />
+  <texture name="Command_Inventory_Icon"    file_name="toolbar_icons/inventory.png"    preload="true" vector_file="phosphor/backpack.svg" vector_color="IconColor" vector_box="0.000,0.111,0.944,0.944" />
+  <texture name="Command_Photo_Studio_Icon" file_name="toolbar_icons/photo_studio.png" preload="true" vector_file="phosphor/aperture.svg" vector_color="#C5C5C5" />
+  <texture name="Command_QuickPrefs_Icon"   file_name="toolbar_icons/quick_prefs.png"  preload="true" vector_file="phosphor/sliders-horizontal.svg" vector_color="IconColor" vector_box="0.056,0.000,1.000,1.000" />
+  <texture name="Command_Recorder_Icon"     file_name="toolbar_icons/recorder.png"     preload="true" vector_file="phosphor/record.svg" vector_color="IconColor" vector_box="0.056,0.056,1.000,1.000" />
+  <texture name="Command_Scopes_Icon"       file_name="toolbar_icons/scopes.png"       preload="true" vector_file="phosphor/chart-line.svg" vector_color="IconColor" vector_box="0.000,0.111,1.000,0.944" />
+  <texture name="Command_LocalAssets_Icon"  file_name="toolbar_icons/local_assets.png" preload="true" vector_file="phosphor/hard-drives.svg" vector_color="IconColor" vector_box="0.167,0.278,0.889,0.889" />
+  <texture name="Command_Map_Icon"          file_name="toolbar_icons/map.png"          preload="true" vector_file="phosphor/map-trifold.svg" vector_color="IconColor" vector_box="0.000,0.056,1.000,0.944" />
+  <texture name="Command_Marketplace_Icon"  file_name="toolbar_icons/marketplace.png"  preload="true" vector_file="phosphor/storefront.svg" vector_color="IconColor" vector_box="0.000,0.111,0.944,0.944" />
+  <texture name="Command_MktListings_Icon"  file_name="toolbar_icons/mktlistings.png"  preload="true" vector_file="phosphor/storefront.svg" vector_color="IconColor" vector_box="0.056,0.000,1.000,1.000" />
+  <texture name="Command_MiniCart_Icon"     file_name="toolbar_icons/mini_cart.png"    preload="true" vector_file="phosphor/shopping-cart.svg" vector_color="IconColor" />
+  <texture name="Command_MiniMap_Icon"      file_name="toolbar_icons/mini_map.png"     preload="true" vector_file="phosphor/map-pin-area.svg" vector_color="IconColor" />
+  <texture name="Command_Move_Icon"         file_name="toolbar_icons/move.png"         preload="true" vector_file="phosphor/arrows-out-cardinal.svg" vector_color="IconColor" vector_box="0.167,0.000,0.778,0.944" />
+  <texture name="Command_Environments_Icon" file_name="toolbar_icons/environments.png" preload="true" vector_file="phosphor/sun-horizon.svg" vector_color="#B1B1B1" />
+  <texture name="Command_People_Icon"       file_name="toolbar_icons/people.png"       preload="true" vector_file="phosphor/users.svg" vector_color="IconColor" vector_box="0.000,0.056,0.944,1.000" />
+  <texture name="Command_Performance_Icon"  file_name="toolbar_icons/performance.png"  preload="true" vector_file="phosphor/gauge.svg" vector_color="IconColor@CC" vector_box="0.000,0.111,1.000,0.944" />
+  <texture name="Command_PersonalLighting_Icon"  file_name="toolbar_icons/personal_lighting.png"  preload="true" vector_file="phosphor/lightbulb.svg" vector_color="#B1B1B1" vector_box="0.000,0.167,1.000,0.833" />
+  <texture name="Command_Picks_Icon"        file_name="toolbar_icons/picks.png"        preload="true" vector_file="phosphor/star.svg" vector_color="IconColor" vector_box="0.056,0.000,0.944,0.944" />
+  <texture name="Command_Places_Icon"       file_name="toolbar_icons/places.png"       preload="true" vector_file="phosphor/map-pin.svg" vector_color="IconColor" vector_box="0.111,0.056,0.833,1.000" />
+  <texture name="Command_TeleportHistory_Icon" file_name="toolbar_icons/teleporthistory.png" preload="true" vector_file="phosphor/clock-counter-clockwise.svg" vector_color="IconColor" vector_box="0.000,0.056,1.000,1.000" />
+  <texture name="Command_Poser_Icon"        file_name="toolbar_icons/poser.png"        preload="true" vector_file="phosphor/person-arms-spread.svg" vector_color="IconColor" vector_box="0.188,0.078,0.828,0.922" />
+  <texture name="Command_Preferences_Icon"  file_name="toolbar_icons/preferences.png"  preload="true" vector_file="phosphor/gear.svg" vector_color="IconColor" vector_box="0.056,0.000,0.944,0.889" />
+  <texture name="Command_Profile_Icon"      file_name="toolbar_icons/profile.png"      preload="true" vector_file="phosphor/user-circle.svg" vector_color="IconColor" vector_box="0.000,0.167,1.000,0.889" />
+  <texture name="Command_RegionTracker_Icon" file_name="toolbar_icons/regiontracker.png"       preload="true" vector_file="phosphor/crosshair.svg" vector_color="IconColor" vector_box="0.000,0.056,1.000,0.944" />
+  <texture name="Command_Report_Abuse_Icon" file_name="toolbar_icons/report_abuse.png" preload="true" vector_file="phosphor/flag.svg" vector_color="IconColor" />
+  <texture name="Command_Scripts_Icon"      file_name="toolbar_icons/script.png"       preload="true" vector_file="phosphor/file-code.svg" vector_color="IconColor" vector_box="0.000,0.056,1.000,1.000" />
+  <texture name="Command_Stats_Icon"        file_name="toolbar_icons/stats.png"        preload="true" vector_file="phosphor/chart-bar.svg" vector_color="IconColor" vector_box="0.056,0.000,1.000,0.944" />
+  <texture name="Command_Search_Icon"       file_name="toolbar_icons/search.png"       preload="true" vector_file="phosphor/magnifying-glass.svg" vector_color="IconColor" vector_box="0.000,0.000,0.944,1.000" />
+  <texture name="Command_Snapshot_Icon"     file_name="toolbar_icons/snapshot.png"     preload="true" vector_file="phosphor/camera.svg" vector_color="IconColor" vector_box="0.000,0.167,1.000,0.833" />
+  <texture name="Command_Snapshot_Disk_Icon" file_name="toolbar_icons/snapshot_disk.png"     preload="true" vector_file="phosphor/floppy-disk.svg" vector_color="IconColor" vector_box="0.000,0.167,1.000,0.833" />
+  <texture name="Command_Speak_Icon"        file_name="toolbar_icons/speak.png"        preload="true" vector_file="phosphor/microphone.svg" vector_color="IconColor" vector_box="0.222,0.056,0.778,0.944" />
+  <texture name="Command_View_Icon"         file_name="toolbar_icons/view.png"         preload="true" vector_file="phosphor/eye.svg" vector_color="IconColor" vector_box="0.056,0.056,0.944,0.833" />
+  <texture name="Command_Voice_Icon"        file_name="toolbar_icons/nearbyvoice.png"  preload="true" vector_file="phosphor/microphone.svg" vector_color="IconColor" vector_box="0.000,0.000,1.000,0.889" />
+  <texture name="Command_Webbrowser_Icon"   file_name="toolbar_icons/web.png"          preload="true" vector_file="phosphor/globe.svg" vector_color="IconColor" vector_box="0.056,0.000,1.000,1.000" />
+  <texture name="Command_Poser_Icon"        file_name="toolbar_icons/poser.png"        preload="true" vector_file="phosphor/person-arms-spread.svg" vector_color="IconColor" vector_box="0.188,0.078,0.828,0.922" />
+  <texture name="Caret_Top_Icon"            file_name="toolbar_icons/caret_top.png"    preload="true" scale.left="1" scale.top="28" scale.right="15" scale.bottom="5" vector_file="phosphor/caret-up.svg" vector_color="IconColor" vector_box="0.267,0.143,0.733,0.964" />
+  <texture name="Caret_Bottom_Icon"         file_name="toolbar_icons/caret_bottom.png" preload="true" scale.left="1" scale.top="23" scale.right="15" scale.bottom="1" vector_file="phosphor/caret-down.svg" vector_color="IconColor" vector_box="0.267,0.036,0.733,0.857" />
+  <texture name="Caret_Right_Icon"          file_name="toolbar_icons/caret_right.png"  preload="true" scale.left="5" scale.top="15" scale.right="28" scale.bottom="1" vector_file="phosphor/caret-right.svg" vector_color="IconColor" vector_box="0.036,0.267,0.857,0.733" />
+  <texture name="Caret_Left_Icon"           file_name="toolbar_icons/caret_left.png"   preload="true" scale.left="1" scale.top="15" scale.right="23" scale.bottom="1" vector_file="phosphor/caret-left.svg" vector_color="IconColor" vector_box="0.143,0.267,0.964,0.733" />
 
   <texture name="ComboButton_Disabled" file_name="widgets/ComboButton_Disabled.png" preload="true" scale.left="2" scale.top="19" scale.right="18" scale.bottom="2" />
   <texture name="ComboButton_Selected" file_name="widgets/ComboButton_Selected.png" preload="true" scale.left="2" scale.top="19" scale.right="18" scale.bottom="2" />
@@ -195,29 +210,29 @@ with the same filename but different name
 
   <texture name="Container" file_name="containers/Container.png" preload="false" />
 
-  <texture name="Conv_toolbar_add_person" file_name="icons/Conv_toolbar_add_person.png" preload="false" />
-  <texture name="Conv_toolbar_arrow_ne" file_name="icons/Conv_toolbar_arrow_ne.png" preload="false" />
-  <texture name="Conv_toolbar_arrow_sw" file_name="icons/Conv_toolbar_arrow_sw.png" preload="false" />
-  <texture name="Conv_toolbar_call_log" file_name="icons/Conv_toolbar_call_log.png" preload="false" />
-  <texture name="Conv_toolbar_close" file_name="icons/Conv_toolbar_close.png" preload="false" />
-  <texture name="Conv_toolbar_collapse" file_name="icons/Conv_toolbar_collapse.png" preload="false" />
-  <texture name="Conv_collapse_to_one_line" file_name="icons/collapse_to_one_line.png" preload="false" />
-  <texture name="Conv_expand_one_line" file_name="icons/expand_one_liner.png" preload="false" />
-  <texture name="Conv_toolbar_expand" file_name="icons/Conv_toolbar_expand.png" preload="false" />
-  <texture name="Conv_toolbar_hang_up" file_name="icons/Conv_toolbar_hang_up.png" preload="false" />
-  <texture name="Conv_toolbar_open_call" file_name="icons/Conv_toolbar_open_call.png" preload="false" />
-  <texture name="Conv_toolbar_plus" file_name="icons/Conv_toolbar_plus.png" preload="false" />
-  <texture name="Conv_toolbar_sort" file_name="icons/Conv_toolbar_sort.png" preload="false" />
-  <texture name="Conv_log_inbox" file_name="icons/Conv_log_inbox.png" preload="false" />
+  <texture name="Conv_toolbar_add_person" file_name="icons/Conv_toolbar_add_person.png" preload="false" vector_file="phosphor/user-plus.svg" vector_color="#B2B2B2" vector_box="0.000,0.111,0.957,0.833" />
+  <texture name="Conv_toolbar_arrow_ne" file_name="icons/Conv_toolbar_arrow_ne.png" preload="false" vector_file="phosphor/arrow-up-right.svg" vector_color="IconColor@99" vector_box="0.222,0.222,0.778,0.778" />
+  <texture name="Conv_toolbar_arrow_sw" file_name="icons/Conv_toolbar_arrow_sw.png" preload="false" vector_file="phosphor/arrow-down-left.svg" vector_color="IconColor@99" vector_box="0.222,0.222,0.833,0.778" />
+  <texture name="Conv_toolbar_call_log" file_name="icons/Conv_toolbar_call_log.png" preload="false" vector_file="phosphor/phone-call.svg" vector_color="#6D6D6D" />
+  <texture name="Conv_toolbar_close" file_name="icons/Conv_toolbar_close.png" preload="false" vector_file="phosphor/x.svg" vector_color="IconColor@A6" vector_box="0.222,0.222,0.778,0.778" />
+  <texture name="Conv_toolbar_collapse" file_name="icons/Conv_toolbar_collapse.png" preload="false" vector_file="phosphor/arrows-in.svg" vector_color="IconColor@99" vector_box="0.111,0.222,0.889,0.778" />
+  <texture name="Conv_collapse_to_one_line" file_name="icons/collapse_to_one_line.png" preload="false" vector_file="phosphor/arrows-in-line-vertical.svg" vector_color="#C7C7C7" />
+  <texture name="Conv_expand_one_line" file_name="icons/expand_one_liner.png" preload="false" vector_file="phosphor/arrows-out-line-vertical.svg" vector_color="#C7C7C7" />
+  <texture name="Conv_toolbar_expand" file_name="icons/Conv_toolbar_expand.png" preload="false" vector_file="phosphor/arrows-out.svg" vector_color="IconColor@99" vector_box="0.111,0.222,0.889,0.778" />
+  <texture name="Conv_toolbar_hang_up" file_name="icons/Conv_toolbar_hang_up.png" preload="false" vector_file="phosphor/phone-disconnect.svg" vector_color="IconColor@B3" vector_box="0.091,0.000,0.955,0.944" />
+  <texture name="Conv_toolbar_open_call" file_name="icons/Conv_toolbar_open_call.png" preload="false" vector_file="phosphor/phone.svg" vector_color="IconColor@99" vector_box="0.167,0.000,0.833,0.944" />
+  <texture name="Conv_toolbar_plus" file_name="icons/Conv_toolbar_plus.png" preload="false" vector_file="phosphor/plus.svg" vector_color="#B3B3B3" vector_box="0.278,0.278,0.722,0.722" />
+  <texture name="Conv_toolbar_sort" file_name="icons/Conv_toolbar_sort.png" preload="false" vector_file="phosphor/funnel.svg" vector_color="#8B8B8B" vector_box="0.045,0.222,1.000,0.778" />
+  <texture name="Conv_log_inbox" file_name="icons/Conv_log_inbox.png" preload="false" vector_file="phosphor/tray.svg" vector_color="#6A6A6A" vector_box="0.000,0.111,1.000,0.944" />
 
-  <texture name="Copy" file_name="icons/Copy.png" preload="false" />
-  <texture name="CopyBright" file_name="icons/CopyBright.png" preload="false" />
+  <texture name="Copy" file_name="icons/Copy.png" preload="false" vector_file="phosphor/copy.svg" vector_color="#848484" vector_box="0.056,0.056,0.944,0.944" />
+  <texture name="CopyBright" file_name="icons/CopyBright.png" preload="false" vector_file="phosphor/copy.svg" vector_color="#A8A8A8" vector_box="0.056,0.056,0.944,0.944" />
   
-  <texture name="DisclosureArrow_Opened_Off" file_name="widgets/DisclosureArrow_Opened_Off.png" preload="true" />
+  <texture name="DisclosureArrow_Opened_Off" file_name="widgets/DisclosureArrow_Opened_Off.png" preload="true" vector_file="phosphor/caret-down.svg" vector_color="IconColor@BF" vector_box="0.188,0.375,0.750,0.688" />
 
   <texture name="ChatBarHandle" file_name="bottomtray/ChatBarHandle.png" preload="false" />
-  <texture name="DownArrow" file_name="bottomtray/DownArrow.png" preload="false" />
-  <texture name="DownArrow_Off" file_name="icons/DownArrow_Off.png" preload="false" />
+  <texture name="DownArrow" file_name="bottomtray/DownArrow.png" preload="false" vector_file="phosphor/caret-down.svg" vector_color="IconColor@BF" />
+  <texture name="DownArrow_Off" file_name="icons/DownArrow_Off.png" preload="false" vector_file="phosphor/arrow-down.svg" vector_color="IconColor@BF" vector_box="0.222,0.167,0.722,0.778" />
   <texture name="Dragbar" file_name="windows/Dragbar.png" preload="false" scale.left="35" scale.top="5" scale.right="29" scale.bottom="5" />
 
   <texture name="DropDown_Disabled" file_name="widgets/DropDown_Disabled.png" preload="true" scale.left="4" scale.top="19" scale.right="99" scale.bottom="4" />
@@ -227,31 +242,31 @@ with the same filename but different name
 
   <texture name="DropTarget" file_name="widgets/DropTarget.png" preload="false" />
 
-  <texture name="Emoji_Picker_Icon" file_name="icons/emoji_picker_icon.png" preload="true" />
-  <texture name="ExternalBrowser_Off" file_name="icons/ExternalBrowser_Off.png" preload="false" />
-  <texture name="Edit_Wrench" file_name="icons/Edit_Wrench.png" preload="false" />
+  <texture name="Emoji_Picker_Icon" file_name="icons/emoji_picker_icon.png" preload="true" vector_file="phosphor/smiley.svg" vector_color="IconColor@BD" />
+  <texture name="ExternalBrowser_Off" file_name="icons/ExternalBrowser_Off.png" preload="false" vector_file="phosphor/globe.svg" vector_color="IconColor@BF" vector_box="0.000,0.125,1.000,0.875" />
+  <texture name="Edit_Wrench" file_name="icons/Edit_Wrench.png" preload="false" vector_file="phosphor/wrench.svg" vector_color="#BFBFBF" />
 
-  <texture name="Presets_Icon" file_name="icons/Presets_Icon.png" preload="true" />
+  <texture name="Presets_Icon" file_name="icons/Presets_Icon.png" preload="true" vector_file="phosphor/sliders-horizontal.svg" vector_color="#B8B8B8" />
 
-  <texture name="Presets_Icon" file_name="icons/Presets_Icon.png" preload="true" />
-  <texture name="Presets_Icon_Graphic" file_name="icons/Presets_Icon_Graphic.png" preload="true" />
-  <texture name="Favorite_Star_Active" file_name="navbar/Favorite_Star_Active.png" preload="false" />
-  <texture name="Favorite_Star_Off" file_name="navbar/Favorite_Star_Off.png" preload="false" />
-  <texture name="Favorite_Star_Press" file_name="navbar/Favorite_Star_Press.png" preload="false" />
-  <texture name="Favorite_Star_Over" file_name="navbar/Favorite_Star_Over.png" preload="false" />
+  <texture name="Presets_Icon" file_name="icons/Presets_Icon.png" preload="true" vector_file="phosphor/sliders-horizontal.svg" vector_color="#B8B8B8" />
+  <texture name="Presets_Icon_Graphic" file_name="icons/Presets_Icon_Graphic.png" preload="true" vector_file="phosphor/sliders.svg" vector_color="#C7C7C7" />
+  <texture name="Favorite_Star_Active" file_name="navbar/Favorite_Star_Active.png" preload="false" vector_file="phosphor/star.svg" vector_color="#1F8962" vector_box="0.000,0.056,0.944,0.889" />
+  <texture name="Favorite_Star_Off" file_name="navbar/Favorite_Star_Off.png" preload="false" vector_file="phosphor/star.svg" vector_color="#666666" vector_box="0.000,0.056,0.944,0.889" />
+  <texture name="Favorite_Star_Press" file_name="navbar/Favorite_Star_Press.png" preload="false" vector_file="phosphor/star.svg" vector_color="#727272" vector_box="0.000,0.056,0.944,0.889" />
+  <texture name="Favorite_Star_Over" file_name="navbar/Favorite_Star_Over.png" preload="false" vector_file="phosphor/star.svg" vector_color="#008E5A" vector_box="0.000,0.056,0.944,0.889" />
   <texture name="Favorite_Link_Over" file_name="navbar/Favorite_Link_Over.png" preload="false" />
 
 
-  <texture name="Flag" file_name="navbar/Flag.png" preload="false" />
+  <texture name="Flag" file_name="navbar/Flag.png" preload="false" vector_file="phosphor/flag.svg" vector_color="#5A5A5A" vector_box="0.167,0.111,0.833,0.944" />
 
   <texture name="Flyout_Left" file_name="windows/Flyout_Left.png" preload="false" />
   <texture name="Flyout_Pointer" file_name="windows/Flyout_Pointer.png" preload="false" />
   <texture name="Flyout_Right" file_name="windows/Flyout_Right.png" preload="false" />
 
   <texture name="Folder_Arrow" file_name="folder_arrow.tga" preload="true" />
-  <texture name="ForSale_Badge" file_name="icons/ForSale_Badge.png" preload="false" />
-  <texture name="ForwardArrow_Off" file_name="icons/ForwardArrow_Off.png" preload="false" />
-  <texture name="ForwardArrow_Press" file_name="icons/ForwardArrow_Press.png" preload="false" />
+  <texture name="ForSale_Badge" file_name="icons/ForSale_Badge.png" preload="false" vector_file="phosphor/tag.svg" vector_color="#EA4D36E3" vector_box="0.031,0.031,0.984,0.984" />
+  <texture name="ForwardArrow_Off" file_name="icons/ForwardArrow_Off.png" preload="false" vector_file="phosphor/arrow-right.svg" vector_color="IconColor@BF" vector_box="0.222,0.222,0.833,0.722" />
+  <texture name="ForwardArrow_Press" file_name="icons/ForwardArrow_Press.png" preload="false" vector_file="phosphor/arrow-right.svg" vector_color="IconColor@80" vector_box="0.222,0.222,0.833,0.722" />
   <!-- <SS:Skoomastream> custom crosshair (FSCustomCrosshair) -->
   <texture name="FSCrosshairArrows"  file_name="fs_crosshair_arrows.png" preload="true" />
   <texture name="FSCrosshairDot"  file_name="fs_crosshair_dot.png" preload="true" />
@@ -260,143 +275,143 @@ with the same filename but different name
   <texture name="FSHitMarker"  file_name="fs_hitmarker.png" preload="true" />
 
   <texture name="Generic_Experience" file_name="Blank.png" preload="false" />
-  <texture name="Generic_Group" file_name="icons/Generic_Group.png" preload="false" />
-  <texture name="Generic_Group_Large" file_name="icons/Generic_Group_Large.png" preload="false" />
-  <texture name="icon_group.tga" file_name="icons/Generic_Group.png" preload="false" />
-  <texture name="Generic_Object_Small" file_name="icons/Generic_Object_Small.png" preload="false" />
-  <texture name="Generic_Person" file_name="icons/Generic_Person.png" preload="false" />
-  <texture name="Generic_Person_Large" file_name="icons/Generic_Person_Large.png" preload="false" />
+  <texture name="Generic_Group" file_name="icons/Generic_Group.png" preload="false" vector_file="phosphor/users-three.svg" vector_color="IconColor" vector_box="0.100,0.100,0.900,0.900" />
+  <texture name="Generic_Group_Large" file_name="icons/Generic_Group_Large.png" preload="false" vector_file="phosphor/users-three.svg" vector_color="IconColor" vector_box="0.100,0.100,0.900,0.900" />
+  <texture name="icon_group.tga" file_name="icons/Generic_Group.png" preload="false" vector_file="phosphor/users-three.svg" vector_color="IconColor" vector_box="0.100,0.100,0.900,0.900" />
+  <texture name="Generic_Object_Small" file_name="icons/Generic_Object_Small.png" preload="false" vector_file="phosphor/cube.svg" vector_color="IconColor" vector_box="0.100,0.100,0.900,0.900" />
+  <texture name="Generic_Person" file_name="icons/Generic_Person.png" preload="false" vector_file="phosphor/user.svg" vector_color="IconColor" vector_box="0.100,0.100,0.900,0.900" />
+  <texture name="Generic_Person_Large" file_name="icons/Generic_Person_Large.png" preload="false" vector_file="phosphor/user.svg" vector_color="IconColor" vector_box="0.100,0.100,0.900,0.900" />
 
-  <texture name="Group_Notices" file_name="icons/Group_Notices.png" preload="false" />
+  <texture name="Group_Notices" file_name="icons/Group_Notices.png" preload="false" vector_file="phosphor/megaphone.svg" vector_color="#8D8D8D" vector_box="0.150,0.100,0.850,0.900" />
 
-  <texture name="Hand" file_name="icons/hand.png" preload="false" />
+  <texture name="Hand" file_name="icons/hand.png" preload="false" vector_file="phosphor/hand-grabbing.svg" vector_color="IconColor" vector_box="0.100,0.100,0.900,0.900" />
   
-  <texture name="Help_Press" file_name="navbar/Help_Press.png" preload="false" />
+  <texture name="Help_Press" file_name="navbar/Help_Press.png" preload="false" vector_file="phosphor/question.svg" vector_color="#BABABA80" vector_box="0.188,0.062,0.750,0.875" />
 
-  <texture name="Hierarchy_View_Disabled" file_name="icons/Hierarchy_View_Disabled.png" preload="false" />
-  <texture name="Hierarchy_View_On" file_name="icons/Hierarchy_View_On.png" preload="false" />
+  <texture name="Hierarchy_View_Disabled" file_name="icons/Hierarchy_View_Disabled.png" preload="false" vector_file="phosphor/tree-structure.svg" vector_color="IconColorDisabled@80" vector_box="0.056,0.222,0.833,0.778" />
+  <texture name="Hierarchy_View_On" file_name="icons/Hierarchy_View_On.png" preload="false" vector_file="phosphor/tree-structure.svg" vector_color="#818181" />
 
 
-  <texture name="Home_Off" file_name="navbar/Home_Off.png" preload="false" />
+  <texture name="Home_Off" file_name="navbar/Home_Off.png" preload="false" vector_file="phosphor/house.svg" vector_color="IconColor@BF" vector_box="0.125,0.062,0.938,0.938" />
 	<texture name="Horizontal Drag Handle" file_name="widgets/horizontal_drag_handle.png" scale.left="8" scale.right="120" scale.bottom="1" scale.top="6" scale_type="scale_outer"/>
 
-  <texture name="Icon_Close_Foreground" file_name="windows/Icon_Close_Foreground.png" preload="true" />
-  <texture name="Icon_Close_Press" file_name="windows/Icon_Close_Press.png" preload="true" />
-  <texture name="Icon_Close_Toast" file_name="windows/Icon_Close_Toast.png" preload="true" />
+  <texture name="Icon_Close_Foreground" file_name="windows/Icon_Close_Foreground.png" preload="true" vector_file="phosphor/x.svg" vector_color="#979797" vector_box="0.250,0.188,0.688,0.688" />
+  <texture name="Icon_Close_Press" file_name="windows/Icon_Close_Press.png" preload="true" vector_file="phosphor/x.svg" vector_color="#323232" vector_box="0.250,0.250,0.688,0.750" />
+  <texture name="Icon_Close_Toast" file_name="windows/Icon_Close_Toast.png" preload="true" vector_file="phosphor/x-circle.svg" vector_color="#989898" />
   
-  <texture name="Icon_Copy" file_name="icons/copy_clipboard.png" preload="true" />
+  <texture name="Icon_Copy" file_name="icons/copy_clipboard.png" preload="true" vector_file="phosphor/copy.svg" vector_color="IconColor@C7" vector_box="0.133,0.167,0.767,0.833" />
   
-  <texture name="Icon_Delete" file_name="icons/delete_icon.png" preload="true" />
+  <texture name="Icon_Delete" file_name="icons/delete_icon.png" preload="true" vector_file="phosphor/trash.svg" vector_color="IconColor" vector_box="0.233,0.167,0.767,0.767" />
 
-  <texture name="Icon_Dock_Foreground" file_name="windows/Icon_Dock_Foreground.png" preload="true" />
-  <texture name="Icon_Dock_Press" file_name="windows/Icon_Dock_Press.png" preload="true" />
-  <texture name="Icon_Undock_Foreground" file_name="windows/Icon_Undock_Foreground.png" preload="true" />
+  <texture name="Icon_Dock_Foreground" file_name="windows/Icon_Dock_Foreground.png" preload="true" vector_file="phosphor/corners-in.svg" vector_color="#A1A1A1" vector_box="0.250,0.125,0.688,0.812" />
+  <texture name="Icon_Dock_Press" file_name="windows/Icon_Dock_Press.png" preload="true" vector_file="phosphor/corners-in.svg" vector_color="#363636" vector_box="0.250,0.125,0.688,0.812" />
+  <texture name="Icon_Undock_Foreground" file_name="windows/Icon_Undock_Foreground.png" preload="true" vector_file="phosphor/corners-out.svg" vector_color="#A1A1A1" vector_box="0.250,0.125,0.688,0.812" />
 
-  <texture name="Icon_File_Upload" file_name="icons/file_upload.png" preload="true" />
+  <texture name="Icon_File_Upload" file_name="icons/file_upload.png" preload="true" vector_file="phosphor/upload-simple.svg" vector_color="IconColor" vector_box="0.167,0.167,0.833,0.767" />
   
-  <texture name="Icon_For_Sale" file_name="icons/Icon_For_Sale.png" preload="false" />
+  <texture name="Icon_For_Sale" file_name="icons/Icon_For_Sale.png" preload="false" vector_file="phosphor/tag.svg" vector_color="#B2AA85" vector_box="0.125,0.000,0.812,1.000" />
 
-  <texture name="Icon_Gear_Background" file_name="windows/Icon_Gear_Background.png" preload="false" />
-  <texture name="Icon_Gear_Foreground" file_name="windows/Icon_Gear_Foreground.png" preload="false" />
-  <texture name="Icon_Gear_Press" file_name="windows/Icon_Gear_Press.png" preload="false" />
-  <texture name="Icon_Gear" file_name="windows/Icon_Gear.png" preload="false" />
+  <texture name="Icon_Gear_Background" file_name="windows/Icon_Gear_Background.png" preload="false" vector_file="phosphor/gear.svg" vector_color="#717171" vector_box="0.083,0.000,0.917,0.917" />
+  <texture name="Icon_Gear_Foreground" file_name="windows/Icon_Gear_Foreground.png" preload="false" vector_file="phosphor/gear.svg" vector_color="#A8A8A8" vector_box="0.083,0.000,0.917,0.917" />
+  <texture name="Icon_Gear_Press" file_name="windows/Icon_Gear_Press.png" preload="false" vector_file="phosphor/gear.svg" vector_color="#383838" vector_box="0.083,0.000,0.917,0.917" />
+  <texture name="Icon_Gear" file_name="windows/Icon_Gear.png" preload="false" vector_file="phosphor/gear.svg" vector_color="#919191" />
 
-  <texture name="Icon_Help_Foreground" file_name="windows/Icon_Help_Foreground.png" preload="true" />
-  <texture name="Icon_Help_Press" file_name="windows/Icon_Help_Press.png" preload="true" />
+  <texture name="Icon_Help_Foreground" file_name="windows/Icon_Help_Foreground.png" preload="true" vector_file="phosphor/question.svg" vector_color="#9F9F9F" vector_box="0.250,0.125,0.688,0.812" />
+  <texture name="Icon_Help_Press" file_name="windows/Icon_Help_Press.png" preload="true" vector_file="phosphor/question.svg" vector_color="#353535" vector_box="0.250,0.125,0.688,0.812" />
 
-  <texture name="Icon_Minimize_Foreground" file_name="windows/Icon_Minimize_Foreground.png" preload="true" />
-  <texture name="Icon_Minimize_Press" file_name="windows/Icon_Minimize_Press.png" preload="true" />
+  <texture name="Icon_Minimize_Foreground" file_name="windows/Icon_Minimize_Foreground.png" preload="true" vector_file="phosphor/minus.svg" vector_color="#989898" vector_box="0.250,0.562,0.688,0.750" />
+  <texture name="Icon_Minimize_Press" file_name="windows/Icon_Minimize_Press.png" preload="true" vector_file="phosphor/minus.svg" vector_color="#333333" vector_box="0.250,0.562,0.688,0.750" />
   
-  <texture name="Icon_Collapse_Foreground" file_name="windows/Icon_Collapse_Foreground.png" preload="true" />
-  <texture name="Icon_Collapse_Press" file_name="windows/Icon_Collapse_Press.png" preload="true" />
+  <texture name="Icon_Collapse_Foreground" file_name="windows/Icon_Collapse_Foreground.png" preload="true" vector_file="phosphor/caret-double-up.svg" vector_color="#AEAEAE" vector_box="0.312,0.125,0.750,0.875" />
+  <texture name="Icon_Collapse_Press" file_name="windows/Icon_Collapse_Press.png" preload="true" vector_file="phosphor/caret-double-up.svg" vector_color="#393939" vector_box="0.312,0.125,0.750,0.875" />
 
-  <texture name="Icon_Paste" file_name="icons/paste_clipboard.png" preload="true" />
+  <texture name="Icon_Paste" file_name="icons/paste_clipboard.png" preload="true" vector_file="phosphor/clipboard.svg" vector_color="IconColor@D6" vector_box="0.233,0.167,0.867,0.833" />
 
-  <texture name="Icon_Restore_Foreground" file_name="windows/Icon_Restore_Foreground.png" preload="false" />
-  <texture name="Icon_Restore_Press" file_name="windows/Icon_Restore_Press.png" preload="false" />
+  <texture name="Icon_Restore_Foreground" file_name="windows/Icon_Restore_Foreground.png" preload="false" vector_file="phosphor/corners-out.svg" vector_color="#919191" vector_box="0.312,0.125,0.875,0.750" />
+  <texture name="Icon_Restore_Press" file_name="windows/Icon_Restore_Press.png" preload="false" vector_file="phosphor/corners-out.svg" vector_color="#3B3B3B" vector_box="0.312,0.125,0.875,0.750" />
 
-  <texture name="Icon_Snapshot" file_name="icons/snapshot_icon.png" preload="true" />
+  <texture name="Icon_Snapshot" file_name="icons/snapshot_icon.png" preload="true" vector_file="phosphor/camera.svg" vector_color="IconColor@CA" vector_box="0.167,0.233,0.833,0.767" />
   
-  <texture name="Icon_Use_Texture" file_name="icons/texture_icon.png" preload="true" />
+  <texture name="Icon_Use_Texture" file_name="icons/texture_icon.png" preload="true" vector_file="phosphor/image.svg" vector_color="IconColor@CC" vector_box="0.267,0.267,0.733,0.733" />
 
-  <texture name="Info" file_name="icons/Info.png" preload="false" />
-  <texture name="Info_Small" file_name="icons/Info_Small.png" preload="false" />
-  <texture name="Info_Off" file_name="navbar/Info_Off.png" preload="false" />
-  <texture name="Info_Over" file_name="icons/Info_Over.png" preload="false" />
-  <texture name="Info_Press" file_name="navbar/Info_Press.png" preload="false" />
+  <texture name="Info" file_name="icons/Info.png" preload="false" vector_file="phosphor/info.svg" vector_color="IconColor@58" />
+  <texture name="Info_Small" file_name="icons/Info_Small.png" preload="false" vector_file="phosphor/info.svg" vector_color="IconColor@90" />
+  <texture name="Info_Off" file_name="navbar/Info_Off.png" preload="false" vector_file="phosphor/info.svg" vector_color="#6A6A6A" />
+  <texture name="Info_Over" file_name="icons/Info_Over.png" preload="false" vector_file="phosphor/info.svg" vector_color="IconAccentColor" />
+  <texture name="Info_Press" file_name="navbar/Info_Press.png" preload="false" vector_file="phosphor/info.svg" vector_color="#515151" />
 
   <texture name="Inspector_Background" file_name="windows/Inspector_Background.png" preload="false"
            scale.left="4" scale.top="28" scale.right="60" scale.bottom="4" />
   <texture name="Inspector_Hover" file_name="windows/Inspector_Hover.png" preload="false" />
-  <texture name="Inspector_I" file_name="windows/Inspector_I.png" preload="false" />
+  <texture name="Inspector_I" file_name="windows/Inspector_I.png" preload="false" vector_file="phosphor/info.svg" vector_color="IconAccentColor" />
 
-  <texture name="Inv_Alpha" file_name="icons/Inv_Alpha.png" preload="false" />
-  <texture name="Inv_Animation" file_name="icons/Inv_Animation.png" preload="false" />
-  <texture name="Inv_BodyShape" file_name="icons/Inv_BodyShape.png" preload="false" />
-  <texture name="Inv_CallingCard" file_name="icons/Inv_CallingCard.png" preload="false" />
-  <texture name="Inv_Clothing" file_name="icons/Inv_Clothing.png" preload="false" />
-  <texture name="Inv_Eye" file_name="icons/Inv_Eye.png" preload="false" />
-  <texture name="Inv_Favorite_Star_Content" file_name="icons/Inv_Favorite_Star_Content.png" preload="false" />
-  <texture name="Inv_Favorite_Star_Full" file_name="icons/Inv_Favorite_Star_Full.png" preload="false" />
-  <texture name="Inv_FolderClosed" file_name="icons/Inv_FolderClosed.png" preload="false" />
-  <texture name="Inv_FolderOpen" file_name="icons/Inv_FolderOpen.png" preload="false" />
-  <texture name="Inv_Gesture" file_name="icons/Inv_Gesture.png" preload="false" />
-  <texture name="Inv_Gloves" file_name="icons/Inv_Gloves.png" preload="false" />
-  <texture name="Inv_Hair" file_name="icons/Inv_Hair.png" preload="false" />
-  <texture name="Inv_LinkItem" file_name="icons/Inv_LinkItem.png" preload="false" />
-  <texture name="Inv_LinkFolder" file_name="icons/Inv_LinkFolder.png" preload="false" />
-  <texture name="Inv_Jacket" file_name="icons/Inv_Jacket.png" preload="false" />
-  <texture name="Inv_LookFolderOpen" file_name="icons/Inv_LookFolderOpen.png" preload="false" />
-  <texture name="Inv_LookFolderClosed" file_name="icons/Inv_LookFolderClosed.png" preload="false" />
-  <texture name="Inv_LostClosed" file_name="icons/Inv_LostClosed.png" preload="false" />
-  <texture name="Inv_LostOpen" file_name="icons/Inv_LostOpen.png" preload="false" />
-  <texture name="Inv_Landmark" file_name="icons/Inv_Landmark.png" preload="false" />
-  <texture name="Inv_Material" file_name="icons/Inv_Material.png" preload="false" />
-  <texture name="Inv_Mesh" file_name="icons/Inv_Mesh.png" preload="false" />  
-  <texture name="Inv_Notecard" file_name="icons/Inv_Notecard.png" preload="false" />
-  <texture name="Inv_Object" file_name="icons/Inv_Object.png" preload="false" />
-  <texture name="Inv_Object_Multi" file_name="icons/Inv_Object_Multi.png" preload="false" />
-  <texture name="Inv_Pants" file_name="icons/Inv_Pants.png" preload="false" />
-  <texture name="Inv_Script" file_name="icons/Inv_Script.png" preload="false" />
-  <texture name="Inv_Shirt" file_name="icons/Inv_Shirt.png" preload="false" />
-  <texture name="Inv_Shoe" file_name="icons/Inv_Shoe.png" preload="false" />
-  <texture name="Inv_Skin" file_name="icons/Inv_Skin.png" preload="false" />
-  <texture name="Inv_Skirt" file_name="icons/Inv_Skirt.png" preload="false" />
-  <texture name="Inv_Snapshot" file_name="icons/Inv_Snapshot.png" preload="false" />
-  <texture name="Inv_Socks" file_name="icons/Inv_Socks.png" preload="false" />
-  <texture name="Inv_Sound" file_name="icons/Inv_Sound.png" preload="false" />
-  <texture name="Inv_StockFolderClosed" file_name="icons/Inv_StockFolderClosed.png" preload="false" />
-  <texture name="Inv_StockFolderOpen" file_name="icons/Inv_StockFolderOpen.png" preload="false" />
+  <texture name="Inv_Alpha" file_name="icons/Inv_Alpha.png" preload="false" vector_file="phosphor/checkerboard.svg" vector_color="#B7B7B7" vector_box="0.000,0.000,1.000,0.938" />
+  <texture name="Inv_Animation" file_name="icons/Inv_Animation.png" preload="false" vector_file="phosphor/person-simple-run.svg" vector_color="#B6C6CF" vector_box="0.000,0.062,1.000,1.000" />
+  <texture name="Inv_BodyShape" file_name="icons/Inv_BodyShape.png" preload="false" vector_file="phosphor/person-simple.svg" vector_color="IconColor" />
+  <texture name="Inv_CallingCard" file_name="icons/Inv_CallingCard.png" preload="false" vector_file="phosphor/identification-card.svg" vector_color="#A8A8A8" vector_box="0.000,0.188,1.000,0.875" />
+  <texture name="Inv_Clothing" file_name="icons/Inv_Clothing.png" preload="false" vector_file="phosphor/t-shirt.svg" vector_color="#FFEFE1" vector_box="0.000,0.000,1.000,0.938" />
+  <texture name="Inv_Eye" file_name="icons/Inv_Eye.png" preload="false" vector_file="phosphor/eye.svg" vector_color="#C3A998" vector_box="0.000,0.188,1.000,0.875" />
+  <texture name="Inv_Favorite_Star_Content" file_name="icons/Inv_Favorite_Star_Content.png" preload="false" vector_file="phosphor/star.svg" vector_color="#959595" vector_box="0.000,0.000,0.929,0.929" />
+  <texture name="Inv_Favorite_Star_Full" file_name="icons/Inv_Favorite_Star_Full.png" preload="false" vector_file="phosphor/star.svg" vector_color="#B7B7B7" vector_box="0.071,0.071,0.929,0.929" />
+  <texture name="Inv_FolderClosed" file_name="icons/Inv_FolderClosed.png" preload="false" vector_file="phosphor/folder.svg" vector_color="#F7DCAE" vector_box="0.000,0.062,1.000,1.000" />
+  <texture name="Inv_FolderOpen" file_name="icons/Inv_FolderOpen.png" preload="false" vector_file="phosphor/folder-open.svg" vector_color="#EFD6A7" vector_box="0.000,0.000,1.000,0.938" />
+  <texture name="Inv_Gesture" file_name="icons/Inv_Gesture.png" preload="false" vector_file="phosphor/hand-waving.svg" vector_color="#D9BEA9" />
+  <texture name="Inv_Gloves" file_name="icons/Inv_Gloves.png" preload="false" vector_file="phosphor/hand.svg" vector_color="#C8BBB0" vector_box="0.000,0.000,0.938,1.000" />
+  <texture name="Inv_Hair" file_name="icons/Inv_Hair.png" preload="false" vector_file="phosphor/scissors.svg" vector_color="#C09881" vector_box="0.062,0.000,0.938,1.000" />
+  <texture name="Inv_LinkItem" file_name="icons/Inv_LinkItem.png" preload="false" vector_file="phosphor/link.svg" vector_color="#AEAFAF" vector_box="0.000,0.500,0.500,1.000" />
+  <texture name="Inv_LinkFolder" file_name="icons/Inv_LinkFolder.png" preload="false" vector_file="phosphor/link.svg" vector_color="#AEAFAF" vector_box="0.000,0.500,0.500,1.000" />
+  <texture name="Inv_Jacket" file_name="icons/Inv_Jacket.png" preload="false" vector_file="phosphor/hoodie.svg" vector_color="#B19782" vector_box="0.000,0.062,1.000,0.938" />
+  <texture name="Inv_LookFolderOpen" file_name="icons/Inv_LookFolderOpen.png" preload="false" vector_file="phosphor/coat-hanger.svg" vector_color="#D9BE8B" vector_box="0.000,0.000,1.000,0.938" />
+  <texture name="Inv_LookFolderClosed" file_name="icons/Inv_LookFolderClosed.png" preload="false" vector_file="phosphor/coat-hanger.svg" vector_color="#E1C592" vector_box="0.000,0.062,1.000,1.000" />
+  <texture name="Inv_LostClosed" file_name="icons/Inv_LostClosed.png" preload="false" vector_file="phosphor/archive.svg" vector_color="#EFCFA3" vector_box="0.000,0.062,1.000,1.000" />
+  <texture name="Inv_LostOpen" file_name="icons/Inv_LostOpen.png" preload="false" vector_file="phosphor/archive.svg" vector_color="#E7C89B" vector_box="0.000,0.000,1.000,0.938" />
+  <texture name="Inv_Landmark" file_name="icons/Inv_Landmark.png" preload="false" vector_file="phosphor/map-pin.svg" vector_color="#6D90B3C1" vector_box="0.062,0.000,0.875,1.000" />
+  <texture name="Inv_Material" file_name="icons/Inv_Material.png" preload="false" vector_file="phosphor/palette.svg" vector_color="#AA5A45" vector_box="0.062,0.062,0.938,0.938" />
+  <texture name="Inv_Mesh" file_name="icons/Inv_Mesh.png" preload="false" vector_file="phosphor/polygon.svg" vector_color="#524014" vector_box="0.000,0.000,1.000,0.938" />  
+  <texture name="Inv_Notecard" file_name="icons/Inv_Notecard.png" preload="false" vector_file="phosphor/note.svg" vector_color="#C5C9EB" vector_box="0.000,0.188,1.000,0.875" />
+  <texture name="Inv_Object" file_name="icons/Inv_Object.png" preload="false" vector_file="phosphor/cube.svg" vector_color="#D86B43" />
+  <texture name="Inv_Object_Multi" file_name="icons/Inv_Object_Multi.png" preload="false" vector_file="phosphor/stack.svg" vector_color="#BB5637" />
+  <texture name="Inv_Pants" file_name="icons/Inv_Pants.png" preload="false" vector_file="phosphor/pants.svg" vector_color="#83A5B8" vector_box="0.125,0.000,0.812,1.000" />
+  <texture name="Inv_Script" file_name="icons/Inv_Script.png" preload="false" vector_file="phosphor/file-code.svg" vector_color="#BFBFBF" vector_box="0.062,0.000,0.938,1.000" />
+  <texture name="Inv_Shirt" file_name="icons/Inv_Shirt.png" preload="false" vector_file="phosphor/t-shirt.svg" vector_color="#ACB8BE" vector_box="0.000,0.000,1.000,0.938" />
+  <texture name="Inv_Shoe" file_name="icons/Inv_Shoe.png" preload="false" vector_file="phosphor/sneaker.svg" vector_color="#F83A3A" vector_box="0.000,0.188,1.000,0.750" />
+  <texture name="Inv_Skin" file_name="icons/Inv_Skin.png" preload="false" vector_file="phosphor/fingerprint.svg" vector_color="#B89888" />
+  <texture name="Inv_Skirt" file_name="icons/Inv_Skirt.png" preload="false" vector_file="phosphor/dress.svg" vector_color="#BAA5B0" vector_box="0.000,0.062,1.000,1.000" />
+  <texture name="Inv_Snapshot" file_name="icons/Inv_Snapshot.png" preload="false" vector_file="phosphor/camera.svg" vector_color="#AFCBAE" vector_box="0.062,0.000,1.000,1.000" />
+  <texture name="Inv_Socks" file_name="icons/Inv_Socks.png" preload="false" vector_file="phosphor/sock.svg" vector_color="#D6C3C6" vector_box="0.062,0.000,0.938,1.000" />
+  <texture name="Inv_Sound" file_name="icons/Inv_Sound.png" preload="false" vector_file="phosphor/speaker-high.svg" vector_color="#C9A992" />
+  <texture name="Inv_StockFolderClosed" file_name="icons/Inv_StockFolderClosed.png" preload="false" vector_file="phosphor/stack.svg" vector_color="#D0BB95" vector_box="0.000,0.062,1.000,1.000" />
+  <texture name="Inv_StockFolderOpen" file_name="icons/Inv_StockFolderOpen.png" preload="false" vector_file="phosphor/stack.svg" vector_color="#C6B28B" vector_box="0.000,0.000,1.000,0.938" />
   <texture name="GMDX_Inv_EquipmentClosed" file_name="icons/GMDX_Inv_EquipmentClosed.png" preload="false" /> <!-- <GMDX> -->
   <texture name="GMDX_Inv_EquipmentOpen" file_name="icons/GMDX_Inv_EquipmentOpen.png" preload="false" /> <!-- <GMDX> -->
   <texture name="GMDX_Inv_LoadoutsClosed" file_name="icons/GMDX_Inv_LoadoutsClosed.png" preload="false" /> <!-- <GMDX> -->
   <texture name="GMDX_Inv_LoadoutsOpen" file_name="icons/GMDX_Inv_LoadoutsOpen.png" preload="false" /> <!-- <GMDX> -->
   <texture name="GMDX_Inv_OutdatedClosed" file_name="icons/GMDX_Inv_OutdatedClosed.png" preload="false" /> <!-- <GMDX> -->
   <texture name="GMDX_Inv_OutdatedOpen" file_name="icons/GMDX_Inv_OutdatedOpen.png" preload="false" /> <!-- <GMDX> -->
-  <texture name="Inv_SysClosed" file_name="icons/Inv_SysClosed.png" preload="false" />
-  <texture name="Inv_SysOpen" file_name="icons/Inv_SysOpen.png" preload="false" />
-  <texture name="Inv_Tattoo" file_name="icons/Inv_Tattoo.png" preload="false" />
-  <texture name="Inv_Universal" file_name="icons/Inv_Universal.png" preload="false" />
-  <texture name="Inv_Physics" file_name="icons/Inv_Physics.png" preload="false" />
-  <texture name="Inv_Texture" file_name="icons/Inv_Texture.png" preload="false" />
-  <texture name="Inv_TrashClosed" file_name="icons/Inv_TrashClosed.png" preload="false" />
-  <texture name="Inv_TrashOpen" file_name="icons/Inv_TrashOpen.png" preload="false" />
-  <texture name="Inv_Underpants" file_name="icons/Inv_Underpants.png" preload="false" />
-  <texture name="Inv_Undershirt" file_name="icons/Inv_Undershirt.png" preload="false" />
-  <texture name="Inv_Link" file_name="icons/Inv_Link.png" preload="false" />
-  <texture name="Inv_Settings" file_name="icons/Inv_Settings.png" preload="false" />
-  <texture name="Inv_SettingsSky" file_name="icons/Inv_SettingsSky.png" preload="false" />
-  <texture name="Inv_SettingsWater" file_name="icons/Inv_SettingsWater.png" preload="false" />
-  <texture name="Inv_SettingsDay" file_name="icons/Inv_SettingsDay.png" preload="false" />
+  <texture name="Inv_SysClosed" file_name="icons/Inv_SysClosed.png" preload="false" vector_file="phosphor/folder-lock.svg" vector_color="#DCD4A8" vector_box="0.000,0.062,1.000,1.000" />
+  <texture name="Inv_SysOpen" file_name="icons/Inv_SysOpen.png" preload="false" vector_file="phosphor/folder-lock.svg" vector_color="#D5CEA1" vector_box="0.000,0.000,1.000,0.938" />
+  <texture name="Inv_Tattoo" file_name="icons/Inv_Tattoo.png" preload="false" vector_file="phosphor/fingerprint-simple.svg" vector_color="#F77A7A" vector_box="0.125,0.000,0.875,1.000" />
+  <texture name="Inv_Universal" file_name="icons/Inv_Universal.png" preload="false" vector_file="phosphor/stack.svg" vector_color="#F66B3E" vector_box="0.062,0.000,1.000,1.000" />
+  <texture name="Inv_Physics" file_name="icons/Inv_Physics.png" preload="false" vector_file="phosphor/atom.svg" vector_color="#C2BE8E" />
+  <texture name="Inv_Texture" file_name="icons/Inv_Texture.png" preload="false" vector_file="phosphor/image.svg" vector_color="#EB6540" vector_box="0.062,0.062,0.938,0.938" />
+  <texture name="Inv_TrashClosed" file_name="icons/Inv_TrashClosed.png" preload="false" vector_file="phosphor/trash.svg" vector_color="#9FB3BE" vector_box="0.062,0.062,0.875,1.000" />
+  <texture name="Inv_TrashOpen" file_name="icons/Inv_TrashOpen.png" preload="false" vector_file="phosphor/trash.svg" vector_color="#A0B4BF" vector_box="0.062,0.000,0.875,1.000" />
+  <texture name="Inv_Underpants" file_name="icons/Inv_Underpants.png" preload="false" vector_file="phosphor/pants.svg" vector_color="IconColor" vector_box="0.000,0.188,1.000,0.812" />
+  <texture name="Inv_Undershirt" file_name="icons/Inv_Undershirt.png" preload="false" vector_file="phosphor/t-shirt.svg" vector_color="IconColor" vector_box="0.125,0.000,0.875,1.000" />
+  <texture name="Inv_Link" file_name="icons/Inv_Link.png" preload="false" vector_file="phosphor/arrow-bend-up-right.svg" vector_color="#676767" />
+  <texture name="Inv_Settings" file_name="icons/Inv_Settings.png" preload="false" vector_file="phosphor/sliders.svg" vector_color="#77998F" vector_box="0.000,0.062,1.000,1.000" />
+  <texture name="Inv_SettingsSky" file_name="icons/Inv_SettingsSky.png" preload="false" vector_file="phosphor/cloud-sun.svg" vector_color="#1EA4C5" vector_box="0.000,0.188,1.000,0.812" />
+  <texture name="Inv_SettingsWater" file_name="icons/Inv_SettingsWater.png" preload="false" vector_file="phosphor/drop.svg" vector_color="#11B5FF" vector_box="0.188,0.062,0.812,0.875" />
+  <texture name="Inv_SettingsDay" file_name="icons/Inv_SettingsDay.png" preload="false" vector_file="phosphor/sun-horizon.svg" vector_color="#1C5F82" vector_box="0.000,0.125,1.000,0.875" />
 
-  <texture name="Inv_Invalid" file_name="icons/Inv_Invalid.png" preload="false" />
-  <texture name="Inv_Unknown" file_name="icons/Inv_UnknownObject.png" preload="false" />
-  <texture name="Inv_VersionFolderClosed" file_name="icons/Inv_VersionFolderClosed.png" preload="false" />
-  <texture name="Inv_VersionFolderOpen" file_name="icons/Inv_VersionFolderOpen.png" preload="false" />
+  <texture name="Inv_Invalid" file_name="icons/Inv_Invalid.png" preload="false" vector_file="phosphor/question.svg" vector_color="#B7674F" vector_box="0.312,0.250,0.688,0.750" />
+  <texture name="Inv_Unknown" file_name="icons/Inv_UnknownObject.png" preload="false" vector_file="phosphor/question.svg" vector_color="#9A6C41" />
+  <texture name="Inv_VersionFolderClosed" file_name="icons/Inv_VersionFolderClosed.png" preload="false" vector_file="phosphor/folder-simple.svg" vector_color="#D5BF98" vector_box="0.000,0.062,1.000,1.000" />
+  <texture name="Inv_VersionFolderOpen" file_name="icons/Inv_VersionFolderOpen.png" preload="false" vector_file="phosphor/folder-simple-plus.svg" vector_color="#C0AD88" vector_box="0.000,0.000,1.000,0.938" />
 
-  <texture name="Inv_Toolbar_SearchVisibility" file_name="icons/Inv_Toolbar_SearchVisibility.png" preload="false" />
+  <texture name="Inv_Toolbar_SearchVisibility" file_name="icons/Inv_Toolbar_SearchVisibility.png" preload="false" vector_file="phosphor/eye.svg" vector_color="#B0B0B0" />
 
-  <texture name="Landmarks_overlay" file_name="navbar/Landmarks.png" preload="false" />
+  <texture name="Landmarks_overlay" file_name="navbar/Landmarks.png" preload="false" vector_file="phosphor/map-pin.svg" vector_color="IconColor" vector_box="0.071,0.000,0.857,1.000" />
 
   <texture name="Linden_Dollar_Alert" file_name="widgets/Linden_Dollar_Alert.png"/>
   <texture name="Linden_Dollar_Background" file_name="widgets/Linden_Dollar_Background.png"/>
@@ -404,196 +419,196 @@ with the same filename but different name
   <texture name="ListItem_Select" file_name="widgets/ListItem_Select.png" preload="true" scale.left="2" scale.bottom="2" scale.top="22" scale.right="278" />
   <texture name="ListItem_Over" file_name="widgets/ListItem_Over.png" preload="true" scale.left="2" scale.bottom="2" scale.top="22" scale.right="278" />
 
-  <texture name="List_View_Disabled" file_name="icons/List_View_Disabled.png" preload="false" />
-  <texture name="List_View_On" file_name="icons/List_View_On.png" preload="false" />
+  <texture name="List_View_Disabled" file_name="icons/List_View_Disabled.png" preload="false" vector_file="phosphor/list.svg" vector_color="IconColorDisabled@80" vector_box="0.222,0.222,0.833,0.778" />
+  <texture name="List_View_On" file_name="icons/List_View_On.png" preload="false" vector_file="phosphor/list.svg" vector_color="#7F7F7F" vector_box="0.222,0.222,0.833,0.778" />
 
-  <texture name="Lock" file_name="icons/Lock.png" preload="false" />
-  <texture name="Lock2" file_name="navbar/Lock.png" preload="false" />
+  <texture name="Lock" file_name="icons/Lock.png" preload="false" vector_file="phosphor/lock.svg" vector_color="#CF5050" vector_box="0.444,0.000,1.000,0.611" />
+  <texture name="Lock2" file_name="navbar/Lock.png" preload="false" vector_file="phosphor/lock.svg" vector_color="#5F5F5F" vector_box="0.167,0.056,0.833,0.889" />
 
-  <texture name="Locked_Icon" file_name="icons/Locked_Icon.png" preload="false" />
+  <texture name="Locked_Icon" file_name="icons/Locked_Icon.png" preload="false" vector_file="phosphor/lock.svg" vector_color="#A9A9A9" />
 
-  <texture name="Map_Placeholder_Icon" file_name="icons/map_placeholder.png" preload="true" />
+  <texture name="Map_Placeholder_Icon" file_name="icons/map_placeholder.png" preload="true" vector_file="phosphor/map-trifold.svg" vector_color="IconColor" vector_box="0.100,0.100,0.900,0.900" />
     
   <texture name="Marketplace_Dropzone_Background" file_name="widgets/Marketplace_Dropzone_Background.png" preload="true" />
   <texture name="MarketplaceBtn_Off" file_name="widgets/MarketplaceBtn_Off.png" preload="true" scale.left="30" scale.top="19" scale.right="35" scale.bottom="4" />
   <texture name="MarketplaceBtn_Selected" file_name="widgets/MarketplaceBtn_Selected.png" preload="true" scale.left="30" scale.top="19" scale.right="35" scale.bottom="4" />
 
-  <texture name="Microphone_On" file_name="icons/Microphone_On.png" preload="false" />
+  <texture name="Microphone_On" file_name="icons/Microphone_On.png" preload="false" vector_file="phosphor/microphone.svg" vector_color="IconColor@33" vector_box="0.250,0.167,0.750,0.833" />
 
-  <texture name="MinusItem_Disabled" file_name="icons/MinusItem_Disabled.png" preload="false" />
-  <texture name="MinusItem_Off" file_name="icons/MinusItem_Off.png" preload="false" />
-  <texture name="MinusItem_Press" file_name="icons/MinusItem_Press.png" preload="false" />
+  <texture name="MinusItem_Disabled" file_name="icons/MinusItem_Disabled.png" preload="false" vector_file="phosphor/minus.svg" vector_color="IconColorDisabled@30" vector_box="0.278,0.389,0.722,0.556" />
+  <texture name="MinusItem_Off" file_name="icons/MinusItem_Off.png" preload="false" vector_file="phosphor/minus.svg" vector_color="#C6C6C6DF" vector_box="0.278,0.389,0.722,0.556" />
+  <texture name="MinusItem_Press" file_name="icons/MinusItem_Press.png" preload="false" vector_file="phosphor/minus.svg" vector_color="#AAAAAA80" vector_box="0.278,0.389,0.722,0.556" />
 
   <texture name="menu_separator" file_name="navbar/FileMenu_Divider.png" scale.left="4" scale.top="166" scale.right="0" scale.bottom="0" />
 
-  <texture name="ModelImport_Status_Good" file_name="green_checkmark.png" preload="false"/>
-  <texture name="ModelImport_Status_Warning" file_name="lag_status_warning.tga" preload="false"/>
-  <texture name="ModelImport_Status_Error" file_name="red_x.png" preload="false"/>
+  <texture name="ModelImport_Status_Good" file_name="green_checkmark.png" preload="false" vector_file="phosphor/check-circle.svg" vector_color="IconSuccessColor" />
+  <texture name="ModelImport_Status_Warning" file_name="lag_status_warning.tga" preload="false" vector_file="phosphor/warning.svg" vector_color="IconWarningColor" />
+  <texture name="ModelImport_Status_Error" file_name="red_x.png" preload="false" vector_file="phosphor/x-circle.svg" vector_color="IconErrorColor" vector_box="0.062,0.062,0.938,0.938" />
   
-  <texture name="MouseLook_View_Off" file_name="bottomtray/Mouselook_View_Off.png" preload="false" />
-  <texture name="MouseLook_View_On" file_name="bottomtray/Mouselook_View_On.png" preload="false" />
+  <texture name="MouseLook_View_Off" file_name="bottomtray/Mouselook_View_Off.png" preload="false" vector_file="phosphor/crosshair.svg" vector_color="IconColor" />
+  <texture name="MouseLook_View_On" file_name="bottomtray/Mouselook_View_On.png" preload="false" vector_file="phosphor/crosshair.svg" vector_color="IconColor" />
 
-  <texture name="Move_Fly_Off" file_name="bottomtray/Move_Fly_Off.png" preload="false" />
-  <texture name="Move_Run_Off" file_name="bottomtray/Move_Run_Off.png" preload="false" />
-  <texture name="Move_Walk_Off" file_name="bottomtray/Move_Walk_Off.png" preload="false" />
-  <texture name="Movement_Backward_Off" file_name="bottomtray/Movement_Backward_Off.png" preload="false" />
-  <texture name="Movement_Backward_On" file_name="bottomtray/Movement_Backward_On.png" preload="false" />
-  <texture name="Movement_Down_Off" file_name="bottomtray/Movement_Down_Off.png" preload="false" />
-  <texture name="Movement_Down_On" file_name="bottomtray/Movement_Down_On.png" preload="false" />
-  <texture name="Movement_Forward_Off" file_name="bottomtray/Movement_Forward_Off.png" preload="false" />
-  <texture name="Movement_Forward_On" file_name="bottomtray/Movement_Forward_On.png" preload="false" />
-  <texture name="Movement_Left_Off" file_name="bottomtray/Movement_Left_Off.png" preload="false" />
-  <texture name="Movement_Left_On" file_name="bottomtray/Movement_Left_On.png" preload="false" />
-  <texture name="Movement_Right_Off" file_name="bottomtray/Movement_Right_Off.png" preload="false" />
-  <texture name="Movement_Right_On" file_name="bottomtray/Movement_Right_On.png" preload="false" />
-  <texture name="Movement_TurnLeft_Off" file_name="bottomtray/Movement_TurnLeft_Off.png" preload="false" />
-  <texture name="Movement_TurnLeft_On" file_name="bottomtray/Movement_TurnLeft_On.png" preload="false" />
-  <texture name="Movement_TurnRight_Off" file_name="bottomtray/Movement_TurnRight_Off.png" preload="false" />
-  <texture name="Movement_TurnRight_On" file_name="bottomtray/Movement_TurnRight_On.png" preload="false" />
-  <texture name="Movement_Up_Off" file_name="bottomtray/Movement_Up_Off.png" preload="false" />
-  <texture name="Movement_Up_On" file_name="bottomtray/Movement_Up_On.png" preload="false" />
-  <texture name="MusicNote" file_name="icons/MusicNote.png" preload="false" />
+  <texture name="Move_Fly_Off" file_name="bottomtray/Move_Fly_Off.png" preload="false" vector_file="phosphor/airplane.svg" vector_color="IconColor@C7" vector_box="0.000,0.000,0.944,0.833" />
+  <texture name="Move_Run_Off" file_name="bottomtray/Move_Run_Off.png" preload="false" vector_file="phosphor/person-simple-run.svg" vector_color="IconColor@BF" vector_box="0.056,0.056,0.889,0.889" />
+  <texture name="Move_Walk_Off" file_name="bottomtray/Move_Walk_Off.png" preload="false" vector_file="phosphor/person-simple-walk.svg" vector_color="IconColor@BF" vector_box="0.222,0.056,0.833,0.889" />
+  <texture name="Movement_Backward_Off" file_name="bottomtray/Movement_Backward_Off.png" preload="false" vector_file="phosphor/arrow-down.svg" vector_color="#ABABAB" vector_box="0.250,0.125,0.792,0.917" />
+  <texture name="Movement_Backward_On" file_name="bottomtray/Movement_Backward_On.png" preload="false" vector_file="phosphor/arrow-down.svg" vector_color="IconAccentColor" vector_box="0.250,0.125,0.792,0.917" />
+  <texture name="Movement_Down_Off" file_name="bottomtray/Movement_Down_Off.png" preload="false" vector_file="phosphor/arrow-down.svg" vector_color="#B1B1B1" />
+  <texture name="Movement_Down_On" file_name="bottomtray/Movement_Down_On.png" preload="false" vector_file="phosphor/arrow-down.svg" vector_color="IconAccentColor" />
+  <texture name="Movement_Forward_Off" file_name="bottomtray/Movement_Forward_Off.png" preload="false" vector_file="phosphor/arrow-up.svg" vector_color="#ABABAB" vector_box="0.250,0.125,0.792,0.958" />
+  <texture name="Movement_Forward_On" file_name="bottomtray/Movement_Forward_On.png" preload="false" vector_file="phosphor/arrow-up.svg" vector_color="IconAccentColor" vector_box="0.250,0.125,0.792,0.958" />
+  <texture name="Movement_Left_Off" file_name="bottomtray/Movement_Left_Off.png" preload="false" vector_file="phosphor/arrow-left.svg" vector_color="#BFBFBF" vector_box="0.000,0.000,0.944,1.000" />
+  <texture name="Movement_Left_On" file_name="bottomtray/Movement_Left_On.png" preload="false" vector_file="phosphor/arrow-left.svg" vector_color="IconAccentColor" vector_box="0.000,0.000,0.944,1.000" />
+  <texture name="Movement_Right_Off" file_name="bottomtray/Movement_Right_Off.png" preload="false" vector_file="phosphor/arrow-right.svg" vector_color="#BFBFBF" vector_box="0.056,0.000,1.000,1.000" />
+  <texture name="Movement_Right_On" file_name="bottomtray/Movement_Right_On.png" preload="false" vector_file="phosphor/arrow-right.svg" vector_color="IconAccentColor" vector_box="0.056,0.000,1.000,1.000" />
+  <texture name="Movement_TurnLeft_Off" file_name="bottomtray/Movement_TurnLeft_Off.png" preload="false" vector_file="phosphor/arrow-u-up-left.svg" vector_color="#A6A6A6" vector_box="0.167,0.125,0.958,0.917" />
+  <texture name="Movement_TurnLeft_On" file_name="bottomtray/Movement_TurnLeft_On.png" preload="false" vector_file="phosphor/arrow-u-up-left.svg" vector_color="#54997E" vector_box="0.167,0.125,0.958,0.917" />
+  <texture name="Movement_TurnRight_Off" file_name="bottomtray/Movement_TurnRight_Off.png" preload="false" vector_file="phosphor/arrow-u-up-right.svg" vector_color="#A6A6A6" vector_box="0.042,0.125,0.833,0.917" />
+  <texture name="Movement_TurnRight_On" file_name="bottomtray/Movement_TurnRight_On.png" preload="false" vector_file="phosphor/arrow-u-up-right.svg" vector_color="#54997E" vector_box="0.042,0.125,0.833,0.917" />
+  <texture name="Movement_Up_Off" file_name="bottomtray/Movement_Up_Off.png" preload="false" vector_file="phosphor/arrow-up.svg" vector_color="#B1B1B1" />
+  <texture name="Movement_Up_On" file_name="bottomtray/Movement_Up_On.png" preload="false" vector_file="phosphor/arrow-up.svg" vector_color="IconAccentColor" />
+  <texture name="MusicNote" file_name="icons/MusicNote.png" preload="false" vector_file="phosphor/music-note.svg" vector_color="#B7B7B7" vector_box="0.000,0.000,0.944,1.000" />
 
   <texture name="NavBar_BG" file_name="navbar/NavBar_BG.png" preload="true" scale.left="1" scale.top="1" scale.right="0" scale.bottom="0" />
   <texture name="NavBar_BG_NoFav_Bevel" file_name="navbar/NavBar_BG_NoFav_Bevel.png" preload="true" scale.left="1" scale.top="1" scale.right="0" scale.bottom="0" />
   <texture name="NavBar_BG_NoNav_Bevel" file_name="navbar/NavBar_BG_NoNav_Bevel.png" preload="true" scale.left="1" scale.top="1" scale.right="0" scale.bottom="0" />
 
-  <texture name="Nearby_chat_icon" file_name="icons/nearby_chat_icon.png" preload="false" />
+  <texture name="Nearby_chat_icon" file_name="icons/nearby_chat_icon.png" preload="false" vector_file="phosphor/chat.svg" vector_color="IconColor@B3" vector_box="0.050,0.100,0.900,0.850" />
 
-  <texture name="Notices_Unread" file_name="bottomtray/Notices_Unread.png" preload="true" />
+  <texture name="Notices_Unread" file_name="bottomtray/Notices_Unread.png" preload="true" vector_file="phosphor/envelope.svg" vector_color="IconColor" vector_box="0.100,0.100,0.900,0.900" />
 
   <texture name="NoEntryLines" file_name="world/NoEntryLines.png" use_mips="true" preload="false" />
   <texture name="NoEntryPassLines" file_name="world/NoEntryPassLines.png" use_mips="true" preload="false" />
 
-  <texture name="Object_Cone" file_name="build/Object_Cone.png" preload="false" />
-  <texture name="Object_Cone_Selected" file_name="build/Object_Cone_Selected.png" preload="false" />
-  <texture name="Object_Cube" file_name="build/Object_Cube.png" preload="false" />
-  <texture name="Object_Cube_Selected" file_name="build/Object_Cube_Selected.png" preload="false" />
-  <texture name="Object_Cylinder" file_name="build/Object_Cylinder.png" preload="false" />
-  <texture name="Object_Cylinder_Selected" file_name="build/Object_Cylinder_Selected.png" preload="false" />
-  <texture name="Object_Grass" file_name="build/Object_Grass.png" preload="false" />
-  <texture name="Object_Grass_Selected" file_name="build/Object_Grass_Selected.png" preload="false" />
-  <texture name="Object_Hemi_Cone" file_name="build/Object_Hemi_Cone.png" preload="false" />
-  <texture name="Object_Hemi_Cone_Selected" file_name="build/Object_Hemi_Cone_Selected.png" preload="false" />
-  <texture name="Object_Hemi_Cylinder" file_name="build/Object_Hemi_Cylinder.png" preload="false" />
-  <texture name="Object_Hemi_Cylinder_Selected" file_name="build/Object_Hemi_Cylinder_Selected.png" preload="false" />
-  <texture name="Object_Hemi_Sphere" file_name="build/Object_Hemi_Sphere.png" preload="false" />
-  <texture name="Object_Hemi_Sphere_Selected" file_name="build/Object_Hemi_Sphere_Selected.png" preload="false" />
-  <texture name="Object_Prism" file_name="build/Object_Prism.png" preload="false" />
-  <texture name="Object_Prism_Selected" file_name="build/Object_Prism_Selected.png" preload="false" />
-  <texture name="Object_Pyramid" file_name="build/Object_Pyramid.png" preload="false" />
-  <texture name="Object_Pyramid_Selected" file_name="build/Object_Pyramid_Selected.png" preload="false" />
-  <texture name="Object_Ring" file_name="build/Object_Ring.png" preload="false" />
-  <texture name="Object_Ring_Selected" file_name="build/Object_Ring_Selected.png" preload="false" />
-  <texture name="Object_Sphere" file_name="build/Object_Sphere.png" preload="false" />
-  <texture name="Object_Sphere_Selected" file_name="build/Object_Sphere_Selected.png" preload="false" />
-  <texture name="Object_Tetrahedron" file_name="build/Object_Tetrahedron.png" preload="false" />
-  <texture name="Object_Tetrahedron_Selected" file_name="build/Object_Tetrahedron_Selected.png" preload="false" />
-  <texture name="Object_Torus" file_name="build/Object_Torus.png" preload="false" />
-  <texture name="Object_Torus_Selected" file_name="build/Object_Torus_Selected.png" preload="false" />
-  <texture name="Object_Tree" file_name="build/Object_Tree.png" preload="false" />
-  <texture name="Object_Tree_Selected" file_name="build/Object_Tree_Selected.png" preload="false" />
-  <texture name="Object_Tube" file_name="build/Object_Tube.png" preload="false" />
-  <texture name="Object_Tube_Selected" file_name="build/Object_Tube_Selected.png" preload="false" />
+  <texture name="Object_Cone" file_name="build/Object_Cone.png" preload="false" vector_file="phosphor/traffic-cone.svg" vector_color="#A6A8AA" vector_box="0.050,0.000,0.950,1.000" />
+  <texture name="Object_Cone_Selected" file_name="build/Object_Cone_Selected.png" preload="false" vector_file="phosphor/traffic-cone.svg" vector_color="#92B9AC" vector_box="0.050,0.000,0.950,1.000" />
+  <texture name="Object_Cube" file_name="build/Object_Cube.png" preload="false" vector_file="phosphor/cube.svg" vector_color="#979797" />
+  <texture name="Object_Cube_Selected" file_name="build/Object_Cube_Selected.png" preload="false" vector_file="phosphor/cube.svg" vector_color="IconAccentColor" />
+  <texture name="Object_Cylinder" file_name="build/Object_Cylinder.png" preload="false" vector_file="phosphor/cylinder.svg" vector_color="#9E9E9F" vector_box="0.100,0.000,0.900,1.000" />
+  <texture name="Object_Cylinder_Selected" file_name="build/Object_Cylinder_Selected.png" preload="false" vector_file="phosphor/cylinder.svg" vector_color="#87B2A2" vector_box="0.100,0.000,0.900,1.000" />
+  <texture name="Object_Grass" file_name="build/Object_Grass.png" preload="false" vector_file="phosphor/plant.svg" vector_color="#B2B2B2" vector_box="0.000,0.050,1.000,0.950" />
+  <texture name="Object_Grass_Selected" file_name="build/Object_Grass_Selected.png" preload="false" vector_file="phosphor/plant.svg" vector_color="#A0C0B3" vector_box="0.000,0.050,1.000,0.950" />
+  <texture name="Object_Hemi_Cone" file_name="build/Object_Hemi_Cone.png" preload="false" vector_file="phosphor/traffic-cone.svg" vector_color="#A4A6A7" vector_box="0.100,0.000,0.900,1.000" />
+  <texture name="Object_Hemi_Cone_Selected" file_name="build/Object_Hemi_Cone_Selected.png" preload="false" vector_file="phosphor/traffic-cone.svg" vector_color="#90B8A9" vector_box="0.100,0.000,0.900,1.000" />
+  <texture name="Object_Hemi_Cylinder" file_name="build/Object_Hemi_Cylinder.png" preload="false" vector_file="phosphor/cylinder.svg" vector_color="#969696" vector_box="0.150,0.000,0.850,1.000" />
+  <texture name="Object_Hemi_Cylinder_Selected" file_name="build/Object_Hemi_Cylinder_Selected.png" preload="false" vector_file="phosphor/cylinder.svg" vector_color="IconAccentColor" vector_box="0.150,0.000,0.850,1.000" />
+  <texture name="Object_Hemi_Sphere" file_name="build/Object_Hemi_Sphere.png" preload="false" vector_file="phosphor_authored/hemisphere.svg" vector_color="#A5A5A5" vector_box="0.000,0.200,1.000,0.950" />
+  <texture name="Object_Hemi_Sphere_Selected" file_name="build/Object_Hemi_Sphere_Selected.png" preload="false" vector_file="phosphor_authored/hemisphere.svg" vector_color="#90B8A8" vector_box="0.000,0.200,1.000,0.950" />
+  <texture name="Object_Prism" file_name="build/Object_Prism.png" preload="false" vector_file="phosphor/triangle.svg" vector_color="#A3A3A3" />
+  <texture name="Object_Prism_Selected" file_name="build/Object_Prism_Selected.png" preload="false" vector_file="phosphor/triangle.svg" vector_color="#8DB6A6" />
+  <texture name="Object_Pyramid" file_name="build/Object_Pyramid.png" preload="false" vector_file="phosphor_authored/pyramid.svg" vector_color="#A7A7A7" />
+  <texture name="Object_Pyramid_Selected" file_name="build/Object_Pyramid_Selected.png" preload="false" vector_file="phosphor_authored/pyramid.svg" vector_color="#92B9A9" />
+  <texture name="Object_Ring" file_name="build/Object_Ring.png" preload="false" vector_file="phosphor_authored/ring.svg" vector_color="#9D9D9D" vector_box="0.000,0.100,1.000,0.850" />
+  <texture name="Object_Ring_Selected" file_name="build/Object_Ring_Selected.png" preload="false" vector_file="phosphor_authored/ring.svg" vector_color="#86B1A0" vector_box="0.000,0.100,1.000,0.850" />
+  <texture name="Object_Sphere" file_name="build/Object_Sphere.png" preload="false" vector_file="phosphor/sphere.svg" vector_color="#A2A2A2" />
+  <texture name="Object_Sphere_Selected" file_name="build/Object_Sphere_Selected.png" preload="false" vector_file="phosphor/sphere.svg" vector_color="#8CB5A5" />
+  <texture name="Object_Tetrahedron" file_name="build/Object_Tetrahedron.png" preload="false" vector_file="phosphor_authored/tetrahedron.svg" vector_color="#A0A0A0" vector_box="0.050,0.050,1.000,1.000" />
+  <texture name="Object_Tetrahedron_Selected" file_name="build/Object_Tetrahedron_Selected.png" preload="false" vector_file="phosphor_authored/tetrahedron.svg" vector_color="#8AB4A3" vector_box="0.050,0.050,1.000,1.000" />
+  <texture name="Object_Torus" file_name="build/Object_Torus.png" preload="false" vector_file="phosphor_authored/torus.svg" vector_color="#9A9B9B" vector_box="0.000,0.150,1.000,0.850" />
+  <texture name="Object_Torus_Selected" file_name="build/Object_Torus_Selected.png" preload="false" vector_file="phosphor_authored/torus.svg" vector_color="#84AE9E" vector_box="0.000,0.150,1.000,0.850" />
+  <texture name="Object_Tree" file_name="build/Object_Tree.png" preload="false" vector_file="phosphor/tree.svg" vector_color="#9A9A9B" vector_box="0.100,0.000,0.850,1.000" />
+  <texture name="Object_Tree_Selected" file_name="build/Object_Tree_Selected.png" preload="false" vector_file="phosphor/tree.svg" vector_color="#83AE9E" vector_box="0.100,0.000,0.850,1.000" />
+  <texture name="Object_Tube" file_name="build/Object_Tube.png" preload="false" vector_file="phosphor_authored/tube.svg" vector_color="#9A9A9A" vector_box="0.100,0.000,0.900,1.000" />
+  <texture name="Object_Tube_Selected" file_name="build/Object_Tube_Selected.png" preload="false" vector_file="phosphor_authored/tube.svg" vector_color="#82AF9E" vector_box="0.100,0.000,0.900,1.000" />
 
-  <texture name="Object_View_Off" file_name="bottomtray/Object_View_Off.png" preload="false" />
-  <texture name="Object_View_On" file_name="bottomtray/Object_View_On.png" preload="false" />
+  <texture name="Object_View_Off" file_name="bottomtray/Object_View_Off.png" preload="false" vector_file="phosphor/cube-focus.svg" vector_color="#BFBFBFE9" />
+  <texture name="Object_View_On" file_name="bottomtray/Object_View_On.png" preload="false" vector_file="phosphor/cube-focus.svg" vector_color="#C8DEE9" />
 
-  <texture name="OptionsMenu_Disabled" file_name="icons/OptionsMenu_Disabled.png" preload="false" />
-  <texture name="OptionsMenu_Off" file_name="icons/OptionsMenu_Off.png" preload="false" />
-  <texture name="OptionsMenu_Press" file_name="icons/OptionsMenu_Press.png" preload="false" />
+  <texture name="OptionsMenu_Disabled" file_name="icons/OptionsMenu_Disabled.png" preload="false" vector_file="phosphor/gear.svg" vector_color="IconColor@30" vector_box="0.056,0.222,1.000,0.778" />
+  <texture name="OptionsMenu_Off" file_name="icons/OptionsMenu_Off.png" preload="false" vector_file="phosphor/gear.svg" vector_color="IconColor@BF" vector_box="0.056,0.167,1.000,0.778" />
+  <texture name="OptionsMenu_Press" file_name="icons/OptionsMenu_Press.png" preload="false" vector_file="phosphor/gear.svg" vector_color="#C4C4C480" vector_box="0.056,0.167,1.000,0.778" />
 
-  <texture name="ClipboardSmallMenu_Disabled" file_name="icons/ClipboardSmallMenu_Disabled.png" preload="false" />
-  <texture name="ClipboardSmallMenu_Off" file_name="icons/ClipboardSmallMenu_Off.png" preload="false" />
-  <texture name="ClipboardSmallMenu_Press" file_name="icons/ClipboardSmallMenu_Press.png" preload="false" />
-  <texture name="ClipboardMenu_Disabled" file_name="icons/ClipboardMenu_Disabled.png" preload="false" />
-  <texture name="ClipboardMenu_Off" file_name="icons/ClipboardMenu_Off.png" preload="false" />
-  <texture name="ClipboardMenu_Press" file_name="icons/ClipboardMenu_Press.png" preload="false" />
+  <texture name="ClipboardSmallMenu_Disabled" file_name="icons/ClipboardSmallMenu_Disabled.png" preload="false" vector_file="phosphor/clipboard.svg" vector_color="IconColor@32" />
+  <texture name="ClipboardSmallMenu_Off" file_name="icons/ClipboardSmallMenu_Off.png" preload="false" vector_file="phosphor/clipboard.svg" vector_color="IconColor@E6" />
+  <texture name="ClipboardSmallMenu_Press" file_name="icons/ClipboardSmallMenu_Press.png" preload="false" vector_file="phosphor/clipboard.svg" vector_color="IconColor@AA" />
+  <texture name="ClipboardMenu_Disabled" file_name="icons/ClipboardMenu_Disabled.png" preload="false" vector_file="phosphor/clipboard.svg" vector_color="IconColor@32" />
+  <texture name="ClipboardMenu_Off" file_name="icons/ClipboardMenu_Off.png" preload="false" vector_file="phosphor/clipboard.svg" vector_color="IconColor@E6" />
+  <texture name="ClipboardMenu_Press" file_name="icons/ClipboardMenu_Press.png" preload="false" vector_file="phosphor/clipboard.svg" vector_color="IconColor@AA" />
 
-  <texture name="OutboxStatus_Success" file_name="green_checkmark.png" preload="false" />
-  <texture name="OutboxStatus_Warning" file_name="icons/pop_up_caution.png" preload="false" />
-  <texture name="OutboxStatus_Error" file_name="red_x.png" preload="false" />
+  <texture name="OutboxStatus_Success" file_name="green_checkmark.png" preload="false" vector_file="phosphor/check-circle.svg" vector_color="IconSuccessColor" />
+  <texture name="OutboxStatus_Warning" file_name="icons/pop_up_caution.png" preload="false" vector_file="phosphor/warning.svg" vector_color="IconWarningColor" />
+  <texture name="OutboxStatus_Error" file_name="red_x.png" preload="false" vector_file="phosphor/x-circle.svg" vector_color="IconErrorColor" vector_box="0.062,0.062,0.938,0.938" />
 
-  <texture name="PanOrbit_Off" file_name="bottomtray/PanOrbit_Off.png" preload="false" />
+  <texture name="PanOrbit_Off" file_name="bottomtray/PanOrbit_Off.png" preload="false" vector_file="phosphor/arrows-out-cardinal.svg" vector_color="IconColor@BF" vector_box="0.056,0.056,0.944,0.944" />
 
-  <texture name="Paste" file_name="icons/Paste.png" preload="false" />
-  <texture name="Parcel_Exp_Color" file_name="icons/Parcel_Exp_Color.png" preload="false" />
+  <texture name="Paste" file_name="icons/Paste.png" preload="false" vector_file="phosphor/clipboard.svg" vector_color="#9E9E9E" vector_box="0.056,0.056,0.944,0.944" />
+  <texture name="Parcel_Exp_Color" file_name="icons/Parcel_Exp_Color.png" preload="false" vector_file="phosphor/warning-circle.svg" vector_color="IconErrorColor" vector_box="0.056,0.000,0.944,1.000" />
 
- <texture name="Parcel_Build_Dark" file_name="icons/Parcel_Build_Dark.png" preload="false" />
- <texture name="Parcel_BuildNo_Dark" file_name="icons/Parcel_BuildNo_Dark.png" preload="false" />
- <texture name="Parcel_Damage_Dark" file_name="icons/Parcel_Damage_Dark.png" preload="false" />
- <texture name="Parcel_DamageNo_Dark" file_name="icons/Parcel_DamageNo_Dark.png" preload="false" />
- <texture name="Parcel_Fly_Dark" file_name="icons/Parcel_Fly_Dark.png" preload="false" />
- <texture name="Parcel_FlyNo_Dark" file_name="icons/Parcel_FlyNo_Dark.png" preload="false" />
- <texture name="Parcel_Health_Dark" file_name="icons/Parcel_Health_Dark.png" preload="false" />
- <texture name="Parcel_M_Dark" file_name="icons/Parcel_M_Dark.png" preload="false" />
- <texture name="Parcel_PG_Dark" file_name="icons/Parcel_PG_Dark.png" preload="false" />
- <texture name="Parcel_Push_Dark" file_name="icons/Parcel_Push_Dark.png" preload="false" />
- <texture name="Parcel_PushNo_Dark" file_name="icons/Parcel_PushNo_Dark.png" preload="false" />
- <texture name="Parcel_R_Dark" file_name="icons/Parcel_R_Dark.png" preload="false" />
- <texture name="Parcel_Scripts_Dark" file_name="icons/Parcel_Scripts_Dark.png" preload="false" />
- <texture name="Parcel_ScriptsNo_Dark" file_name="icons/Parcel_ScriptsNo_Dark.png" preload="false" />
- <texture name="Parcel_Voice_Dark" file_name="icons/Parcel_Voice_Dark.png" preload="false" />
- <texture name="Parcel_VoiceNo_Dark" file_name="icons/Parcel_VoiceNo_Dark.png" preload="false" />
- <texture name="Parcel_SeeAVsOff_Dark" file_name="icons/Parcel_SeeAVsOff_Dark.png" preload="false" />
- <texture name="Parcel_SeeAVsOn_Dark" file_name="icons/Parcel_SeeAVsOn_Dark.png" preload="false" />
- <texture name="Parcel_SeeAVsOff_Light" file_name="icons/Parcel_SeeAVsOff_Light.png" preload="false" />
- <texture name="Parcel_SeeAVsOn_Light" file_name="icons/Parcel_SeeAVsOn_Light.png" preload="false" />
+ <texture name="Parcel_Build_Dark" file_name="icons/Parcel_Build_Dark.png" preload="false" vector_file="phosphor/hammer.svg" vector_color="#979797" vector_box="0.000,0.056,0.727,0.944" />
+ <texture name="Parcel_BuildNo_Dark" file_name="icons/Parcel_BuildNo_Dark.png" preload="false" vector_file="phosphor/prohibit.svg" vector_color="#A97E80" vector_box="0.000,0.056,1.000,0.944" />
+ <texture name="Parcel_Damage_Dark" file_name="icons/Parcel_Damage_Dark.png" preload="false" vector_file="phosphor/heartbeat.svg" vector_color="#BFBFBF" vector_box="0.045,0.056,0.773,0.889" />
+ <texture name="Parcel_DamageNo_Dark" file_name="icons/Parcel_DamageNo_Dark.png" preload="false" vector_file="phosphor/heartbeat.svg" vector_color="#C79B9C" vector_box="0.045,0.056,1.000,0.944" />
+ <texture name="Parcel_Fly_Dark" file_name="icons/Parcel_Fly_Dark.png" preload="false" vector_file="phosphor/airplane.svg" vector_color="#BFBFBF" vector_box="0.000,0.000,0.773,0.833" />
+ <texture name="Parcel_FlyNo_Dark" file_name="icons/Parcel_FlyNo_Dark.png" preload="false" vector_file="phosphor/airplane.svg" vector_color="#D0797C" vector_box="0.000,0.000,0.955,0.944" />
+ <texture name="Parcel_Health_Dark" file_name="icons/Parcel_Health_Dark.png" preload="false" vector_file="phosphor/heartbeat.svg" vector_color="#BB1C24" vector_box="0.071,0.077,0.929,0.923" />
+ <texture name="Parcel_M_Dark" file_name="icons/Parcel_M_Dark.png" preload="false" vector_file="phosphor_authored/badge-m.svg" vector_color="#E8E8E8" vector_box="0.056,0.062,0.944,0.938" />
+ <texture name="Parcel_PG_Dark" file_name="icons/Parcel_PG_Dark.png" preload="false" vector_file="phosphor_authored/badge-g.svg" vector_color="#C8E8F8" vector_box="0.056,0.062,0.944,0.938" />
+ <texture name="Parcel_Push_Dark" file_name="icons/Parcel_Push_Dark.png" preload="false" vector_file="phosphor/arrows-left-right.svg" vector_color="#BCBCBC" vector_box="0.000,0.000,0.727,0.944" />
+ <texture name="Parcel_PushNo_Dark" file_name="icons/Parcel_PushNo_Dark.png" preload="false" vector_file="phosphor/arrows-left-right.svg" vector_color="#CB8487" vector_box="0.000,0.000,1.000,0.944" />
+ <texture name="Parcel_R_Dark" file_name="icons/Parcel_R_Dark.png" preload="false" vector_file="phosphor_authored/badge-a.svg" vector_color="#E8B8B8" vector_box="0.056,0.062,0.944,0.938" />
+ <texture name="Parcel_Scripts_Dark" file_name="icons/Parcel_Scripts_Dark.png" preload="false" vector_file="phosphor/file-code.svg" vector_color="#AFAFAF" vector_box="0.045,0.056,0.636,0.944" />
+ <texture name="Parcel_ScriptsNo_Dark" file_name="icons/Parcel_ScriptsNo_Dark.png" preload="false" vector_file="phosphor/file-code.svg" vector_color="#B99294" vector_box="0.045,0.056,1.000,0.944" />
+ <texture name="Parcel_Voice_Dark" file_name="icons/Parcel_Voice_Dark.png" preload="false" vector_file="phosphor/microphone.svg" vector_color="#B7B7B7" vector_box="0.000,0.056,0.727,0.944" />
+ <texture name="Parcel_VoiceNo_Dark" file_name="icons/Parcel_VoiceNo_Dark.png" preload="false" vector_file="phosphor/microphone-slash.svg" vector_color="#CB787B" vector_box="0.000,0.056,1.000,0.944" />
+ <texture name="Parcel_SeeAVsOff_Dark" file_name="icons/Parcel_SeeAVsOff_Dark.png" preload="false" vector_file="phosphor/eye-slash.svg" vector_color="#D78083" vector_box="0.136,0.111,0.955,0.944" />
+ <texture name="Parcel_SeeAVsOn_Dark" file_name="icons/Parcel_SeeAVsOn_Dark.png" preload="false" vector_file="phosphor/eye.svg" vector_color="IconColor" vector_box="0.136,0.111,0.818,0.611" />
+ <texture name="Parcel_SeeAVsOff_Light" file_name="icons/Parcel_SeeAVsOff_Light.png" preload="false" vector_file="phosphor/eye-slash.svg" vector_color="#80292C" vector_box="0.136,0.111,0.955,0.944" />
+ <texture name="Parcel_SeeAVsOn_Light" file_name="icons/Parcel_SeeAVsOn_Light.png" preload="false" vector_file="phosphor/eye.svg" vector_color="#333333" vector_box="0.136,0.111,0.818,0.611" />
 
- <texture name="Parcel_BuildNo_Light" file_name="icons/Parcel_BuildNo_Light.png" preload="false" />
- <texture name="Parcel_FlyNo_Light" file_name="icons/Parcel_FlyNo_Light.png" preload="false" />
- <texture name="Parcel_ForSale_Light" file_name="icons/Parcel_ForSale_Light.png" preload="false" />
- <texture name="Parcel_M_Light" file_name="icons/Parcel_M_Light.png" preload="false" />
- <texture name="Parcel_PG_Light" file_name="icons/Parcel_PG_Light.png" preload="false" />
- <texture name="Parcel_PushNo_Light" file_name="icons/Parcel_PushNo_Light.png" preload="false" />
- <texture name="Parcel_R_Light" file_name="icons/Parcel_R_Light.png" preload="false" />
- <texture name="Parcel_ScriptsNo_Light" file_name="icons/Parcel_ScriptsNo_Dark.png" preload="false" />
- <texture name="Parcel_Voice_Light" file_name="icons/Parcel_Voice_Light.png" preload="false" />
- <texture name="Parcel_VoiceNo_Light" file_name="icons/Parcel_VoiceNo_Light.png" preload="false" />
+ <texture name="Parcel_BuildNo_Light" file_name="icons/Parcel_BuildNo_Light.png" preload="false" vector_file="phosphor/prohibit.svg" vector_color="#623739" vector_box="0.000,0.056,1.000,0.944" />
+ <texture name="Parcel_FlyNo_Light" file_name="icons/Parcel_FlyNo_Light.png" preload="false" vector_file="phosphor/airplane.svg" vector_color="#81292C" vector_box="0.000,0.000,0.955,0.944" />
+ <texture name="Parcel_ForSale_Light" file_name="icons/Parcel_ForSale_Light.png" preload="false" vector_file="phosphor/tag.svg" vector_color="#565656" vector_box="0.045,0.056,0.864,0.944" />
+ <texture name="Parcel_M_Light" file_name="icons/Parcel_M_Light.png" preload="false" vector_file="phosphor_authored/badge-m.svg" vector_color="#484848" vector_box="0.056,0.062,0.944,0.938" />
+ <texture name="Parcel_PG_Light" file_name="icons/Parcel_PG_Light.png" preload="false" vector_file="phosphor_authored/badge-g.svg" vector_color="#3888C8" vector_box="0.056,0.062,0.944,0.938" />
+ <texture name="Parcel_PushNo_Light" file_name="icons/Parcel_PushNo_Light.png" preload="false" vector_file="phosphor/arrows-left-right.svg" vector_color="#722A2D" vector_box="0.000,0.000,1.000,0.944" />
+ <texture name="Parcel_R_Light" file_name="icons/Parcel_R_Light.png" preload="false" vector_file="phosphor_authored/badge-a.svg" vector_color="#D83838" vector_box="0.056,0.062,0.944,0.938" />
+ <texture name="Parcel_ScriptsNo_Light" file_name="icons/Parcel_ScriptsNo_Dark.png" preload="false" vector_file="phosphor/file-code.svg" vector_color="#B99294" vector_box="0.045,0.056,1.000,0.944" />
+ <texture name="Parcel_Voice_Light" file_name="icons/Parcel_Voice_Light.png" preload="false" vector_file="phosphor/microphone.svg" vector_color="#333333" vector_box="0.000,0.056,0.727,0.889" />
+ <texture name="Parcel_VoiceNo_Light" file_name="icons/Parcel_VoiceNo_Light.png" preload="false" vector_file="phosphor/microphone-slash.svg" vector_color="#7D292C" vector_box="0.000,0.056,1.000,0.944" />
 
-  <texture name="Pathfinding_Dirty" file_name="icons/Pathfinding_Dirty.png" preload="false" />
-  <texture name="Pathfinding_Disabled" file_name="icons/Pathfinding_Disabled.png" preload="false" />
+  <texture name="Pathfinding_Dirty" file_name="icons/Pathfinding_Dirty.png" preload="false" vector_file="phosphor/path.svg" vector_color="#625A36" vector_box="0.045,0.056,0.909,0.944" />
+  <texture name="Pathfinding_Disabled" file_name="icons/Pathfinding_Disabled.png" preload="false" vector_file="phosphor/path.svg" vector_color="#783A3C" vector_box="0.045,0.056,0.909,0.944" />
 
-  <texture name="Pause_Off" file_name="icons/Pause_Off.png" preload="false" />
-  <texture name="Pause_Over" file_name="icons/Pause_Over.png" preload="false" />
-  <texture name="Pause_Press" file_name="icons/Pause_Press.png" preload="false" />
-  <texture name="Person_Check" file_name="icons/Person_Check.png" preload="false" />
-  <texture name="Person_Star" file_name="icons/Person_Star.png" preload="false" />
+  <texture name="Pause_Off" file_name="icons/Pause_Off.png" preload="false" vector_file="phosphor/pause.svg" vector_color="IconColor@BF" vector_box="0.250,0.125,0.688,0.875" />
+  <texture name="Pause_Over" file_name="icons/Pause_Over.png" preload="false" vector_file="phosphor/pause.svg" vector_color="IconColor" vector_box="0.250,0.125,0.688,0.875" />
+  <texture name="Pause_Press" file_name="icons/Pause_Press.png" preload="false" vector_file="phosphor/pause.svg" vector_color="IconColor@80" vector_box="0.250,0.125,0.688,0.875" />
+  <texture name="Person_Check" file_name="icons/Person_Check.png" preload="false" vector_file="phosphor/user-check.svg" vector_color="#F2C811" vector_box="0.100,0.100,0.900,0.900" />
+  <texture name="Person_Star" file_name="icons/Person_Star.png" preload="false" vector_file="phosphor/star.svg" vector_color="#E02020" vector_box="0.100,0.100,0.900,0.900" />
 
-  <texture name="Permission_Visible_Online" file_name="icons/see_me_online.png" preload="false" />
-  <texture name="Permission_Visible_Them_Online" file_name="icons/see_them_online.png" preload="false" />
-  <texture name="Permission_Visible_Map" file_name="icons/see_on_map.png" preload="false" />
-  <texture name="Permission_Visible_Them_Map" file_name="icons/see_them_on_map.png" preload="false" />
-  <texture name="Permission_Edit_Objects_Mine" file_name="icons/edit_mine.png" preload="false" />
-  <texture name="Permission_Edit_Objects_Theirs" file_name="icons/edit_theirs.png" preload="false" />
-  <texture name="Permission_Ungranted" file_name="icons/Permission_Ungranted.png" preload="false" />
-  <texture name="Permission_Visible_Online_h" file_name="icons/see_me_online_h.png" preload="false" />
-  <texture name="Permission_Visible_Map_h" file_name="icons/see_on_map_h.png" preload="false" />
-  <texture name="Permission_Edit_Objects_Mine_h" file_name="icons/edit_mine_h.png" preload="false" />
-  <texture name="Permission_Edit_Objects_Theirs_h" file_name="icons/edit_theirs_h.png" preload="false" />
+  <texture name="Permission_Visible_Online" file_name="icons/see_me_online.png" preload="false" vector_file="phosphor/eye.svg" vector_color="IconAccentColor" vector_box="0.062,0.125,0.938,1.000" />
+  <texture name="Permission_Visible_Them_Online" file_name="icons/see_them_online.png" preload="false" vector_file="phosphor/eye.svg" vector_color="#96B4A9" vector_box="0.062,0.000,0.938,1.000" />
+  <texture name="Permission_Visible_Map" file_name="icons/see_on_map.png" preload="false" vector_file="phosphor/map-pin.svg" vector_color="#6F7472" vector_box="0.062,0.062,0.938,1.000" />
+  <texture name="Permission_Visible_Them_Map" file_name="icons/see_them_on_map.png" preload="false" vector_file="phosphor/map-pin.svg" vector_color="#959696" vector_box="0.062,0.000,0.938,1.000" />
+  <texture name="Permission_Edit_Objects_Mine" file_name="icons/edit_mine.png" preload="false" vector_file="phosphor/pencil.svg" vector_color="#AFAFAF" />
+  <texture name="Permission_Edit_Objects_Theirs" file_name="icons/edit_theirs.png" preload="false" vector_file="phosphor/pencil.svg" vector_color="#AFAFAF" />
+  <texture name="Permission_Ungranted" file_name="icons/Permission_Ungranted.png" preload="false" vector_file="phosphor/prohibit.svg" vector_color="#D90607" />
+  <texture name="Permission_Visible_Online_h" file_name="icons/see_me_online_h.png" preload="false" vector_file="phosphor/eye.svg" vector_color="IconColor" vector_box="0.000,0.208,1.000,0.625" />
+  <texture name="Permission_Visible_Map_h" file_name="icons/see_on_map_h.png" preload="false" vector_file="phosphor/map-pin.svg" vector_color="IconColor" vector_box="0.062,0.125,0.938,0.750" />
+  <texture name="Permission_Edit_Objects_Mine_h" file_name="icons/edit_mine_h.png" preload="false" vector_file="phosphor/pencil.svg" vector_color="IconColor" vector_box="0.000,0.083,1.000,0.750" />
+  <texture name="Permission_Edit_Objects_Theirs_h" file_name="icons/edit_theirs_h.png" preload="false" vector_file="phosphor/pencil.svg" vector_color="IconColor" vector_box="0.000,0.083,1.000,0.750" />
 
-  <texture name="Play_Off" file_name="icons/Play_Off.png" preload="false" />
-  <texture name="Play_Over" file_name="icons/Play_Over.png" preload="false" />
-  <texture name="Play_Press" file_name="icons/Play_Press.png" preload="false" />
+  <texture name="Play_Off" file_name="icons/Play_Off.png" preload="false" vector_file="phosphor/play.svg" vector_color="IconColor@BF" vector_box="0.375,0.125,0.750,0.875" />
+  <texture name="Play_Over" file_name="icons/Play_Over.png" preload="false" vector_file="phosphor/play.svg" vector_color="IconColor" vector_box="0.375,0.125,0.750,0.875" />
+  <texture name="Play_Press" file_name="icons/Play_Press.png" preload="false" vector_file="phosphor/play.svg" vector_color="IconColor@80" vector_box="0.375,0.125,0.750,0.875" />
 
-  <texture name="Profile_Badge_Beta" file_name="icons/profile_badge_beta.png" preload="true"/>
-  <texture name="Profile_Badge_Beta_Lifetime" file_name="icons/profile_badge_beta_lifetime.png" preload="true"/>
-  <texture name="Profile_Badge_Lifetime" file_name="icons/profile_badge_lifetime.png" preload="true"/>
-  <texture name="Profile_Badge_Linden" file_name="icons/profile_badge_linden.png" preload="true"/>
-  <texture name="Profile_Badge_Pplus_Lifetime" file_name="icons/profile_badge_pplus_lifetime.png" preload="true"/>
-  <texture name="Profile_Badge_Premium_Lifetime" file_name="icons/profile_badge_premium_lifetime.png" preload="true"/>
-  <texture name="Profile_Group_Visibility_Off" file_name="icons/profile_group_visibility_eye_off.png" preload="true"/>
-  <texture name="Profile_Group_Visibility_Off_Pressed" file_name="icons/profile_group_visibility_eye_off_pressed.png" preload="true"/>
-  <texture name="Profile_Group_Visibility_On" file_name="icons/profile_group_visibility_eye_on.png" preload="true"/>
-  <texture name="Profile_Group_Visibility_On_Pressed" file_name="icons/profile_group_visibility_eye_on_pressed.png" preload="true"/>
-  <texture name="Profile_Friend_Offline" file_name="icons/Profile_Friend_Offline.png" preload="true"/>
-  <texture name="Profile_Friend_Online" file_name="icons/Profile_Friend_Online.png" preload="true"/>
-  <texture name="Profile_Perm_Find_Disabled" file_name="icons/Profile_Perm_Find_Disabled.png" preload="true"/>
-  <texture name="Profile_Perm_Find_Enabled" file_name="icons/Profile_Perm_Find_Enabled.png" preload="true"/>
-  <texture name="Profile_Perm_Objects_Disabled" file_name="icons/Profile_Perm_Objects_Disabled.png" preload="true"/>
-  <texture name="Profile_Perm_Objects_Enabled" file_name="icons/Profile_Perm_Objects_Enabled.png" preload="true"/>
-  <texture name="Profile_Perm_Online_Disabled" file_name="icons/Profile_Perm_Online_Disabled.png" preload="true"/>
-  <texture name="Profile_Perm_Online_Enabled" file_name="icons/Profile_Perm_Online_Enabled.png" preload="true"/>
+  <texture name="Profile_Badge_Beta" file_name="icons/profile_badge_beta.png" preload="true" vector_file="phosphor/flask.svg" vector_color="#0898C8" vector_box="0.100,0.100,0.900,0.900" />
+  <texture name="Profile_Badge_Beta_Lifetime" file_name="icons/profile_badge_beta_lifetime.png" preload="true" vector_file="phosphor/flask.svg" vector_color="#A808E8" vector_box="0.100,0.100,0.900,0.900" />
+  <texture name="Profile_Badge_Lifetime" file_name="icons/profile_badge_lifetime.png" preload="true" vector_file="phosphor/infinity.svg" vector_color="#E87808" vector_box="0.100,0.100,0.900,0.900" />
+  <texture name="Profile_Badge_Linden" file_name="icons/profile_badge_linden.png" preload="true" vector_file="phosphor/cube.svg" vector_color="#4888A8" vector_box="0.100,0.100,0.900,0.900" />
+  <texture name="Profile_Badge_Pplus_Lifetime" file_name="icons/profile_badge_pplus_lifetime.png" preload="true" vector_file="phosphor/crown.svg" vector_color="#A808E8" vector_box="0.100,0.100,0.900,0.900" />
+  <texture name="Profile_Badge_Premium_Lifetime" file_name="icons/profile_badge_premium_lifetime.png" preload="true" vector_file="phosphor/crown.svg" vector_color="#0898C8" vector_box="0.100,0.100,0.900,0.900" />
+  <texture name="Profile_Group_Visibility_Off" file_name="icons/profile_group_visibility_eye_off.png" preload="true" vector_file="phosphor/eye-slash.svg" vector_color="IconColor" vector_box="0.050,0.100,0.950,0.900" />
+  <texture name="Profile_Group_Visibility_Off_Pressed" file_name="icons/profile_group_visibility_eye_off_pressed.png" preload="true" vector_file="phosphor/eye-slash.svg" vector_color="#464646" vector_box="0.050,0.100,0.950,0.900" />
+  <texture name="Profile_Group_Visibility_On" file_name="icons/profile_group_visibility_eye_on.png" preload="true" vector_file="phosphor/eye.svg" vector_color="IconColor" vector_box="0.050,0.200,0.950,0.800" />
+  <texture name="Profile_Group_Visibility_On_Pressed" file_name="icons/profile_group_visibility_eye_on_pressed.png" preload="true" vector_file="phosphor/eye.svg" vector_color="#464646" vector_box="0.050,0.200,0.950,0.800" />
+  <texture name="Profile_Friend_Offline" file_name="icons/Profile_Friend_Offline.png" preload="true" vector_file="phosphor/circle.svg" vector_color="#808080" vector_box="0.100,0.100,0.900,0.900" />
+  <texture name="Profile_Friend_Online" file_name="icons/Profile_Friend_Online.png" preload="true" vector_file="phosphor/circle.svg" vector_color="#20D020" vector_box="0.100,0.100,0.900,0.900" />
+  <texture name="Profile_Perm_Find_Disabled" file_name="icons/Profile_Perm_Find_Disabled.png" preload="true" vector_file="phosphor/map-pin.svg" vector_color="IconColorDisabled@CC" vector_box="0.133,0.100,0.867,0.833" />
+  <texture name="Profile_Perm_Find_Enabled" file_name="icons/Profile_Perm_Find_Enabled.png" preload="true" vector_file="phosphor/map-pin.svg" vector_color="#9B9B9BCC" vector_box="0.133,0.100,0.867,0.833" />
+  <texture name="Profile_Perm_Objects_Disabled" file_name="icons/Profile_Perm_Objects_Disabled.png" preload="true" vector_file="phosphor/pencil.svg" vector_color="IconColorDisabled" vector_box="0.133,0.100,0.867,0.867" />
+  <texture name="Profile_Perm_Objects_Enabled" file_name="icons/Profile_Perm_Objects_Enabled.png" preload="true" vector_file="phosphor/pencil.svg" vector_color="#6D6D6D" vector_box="0.133,0.100,0.867,0.867" />
+  <texture name="Profile_Perm_Online_Disabled" file_name="icons/Profile_Perm_Online_Disabled.png" preload="true" vector_file="phosphor/eye.svg" vector_color="IconColorDisabled@CC" vector_box="0.067,0.233,0.900,0.700" />
+  <texture name="Profile_Perm_Online_Enabled" file_name="icons/Profile_Perm_Online_Enabled.png" preload="true" vector_file="phosphor/eye.svg" vector_color="#8D8D8DCC" vector_box="0.067,0.233,0.900,0.700" />
   
   <texture name="ProgressBar" file_name="widgets/ProgressBar.png" preload="true" scale.left="4" scale.top="11" scale.right="48" scale.bottom="3" />
   <texture name="ProgressBarSolid" file_name="widgets/ProgressBarSolid.png" preload="true" scale.left="4" scale.top="11" scale.right="48" scale.bottom="3" />
@@ -614,17 +629,17 @@ with the same filename but different name
   <texture name="PushButton_Login_Pressed" file_name="widgets/PushButton_Login_Pressed.png" preload="true" scale.left="4" scale.top="19" scale.right="28" scale.bottom="4" />
 
 
-  <texture name="RadioButton_Press" file_name="widgets/RadioButton_Press.png" preload="true" />
-  <texture name="RadioButton_On_Press" file_name="widgets/RadioButton_On_Press.png" preload="true" />
-  <texture name="RadioButton_Off" file_name="widgets/RadioButton_Off.png" preload="true" />
-  <texture name="RadioButton_On" file_name="widgets/RadioButton_On.png" preload="true" />
-  <texture name="RadioButton_Disabled" file_name="widgets/RadioButton_Disabled.png" preload="true" />
-  <texture name="RadioButton_On_Disabled" file_name="widgets/RadioButton_On_Disabled.png" preload="true" />
+  <texture name="RadioButton_Press" file_name="widgets/RadioButton_Press.png" preload="true" vector_file="phosphor_authored/frame-circle.svg" vector_color="IconWidgetFrame" vector_file2="phosphor/circle.svg" vector_color2="IconWidgetFillPress" vector_box2="0.100,0.100,0.900,0.900" />
+  <texture name="RadioButton_On_Press" file_name="widgets/RadioButton_On_Press.png" preload="true" vector_file="phosphor_authored/frame-circle.svg" vector_color="IconWidgetFrame" vector_file2="phosphor/circle.svg" vector_color2="IconWidgetFillPress" vector_box2="0.100,0.100,0.900,0.900" vector_file3="phosphor/circle.svg" vector_color3="IconWidgetMark" vector_box3="0.330,0.330,0.670,0.670" />
+  <texture name="RadioButton_Off" file_name="widgets/RadioButton_Off.png" preload="true" vector_file="phosphor_authored/frame-circle.svg" vector_color="IconWidgetFrame" vector_file2="phosphor/circle.svg" vector_color2="IconWidgetFill" vector_box2="0.100,0.100,0.900,0.900" />
+  <texture name="RadioButton_On" file_name="widgets/RadioButton_On.png" preload="true" vector_file="phosphor_authored/frame-circle.svg" vector_color="IconWidgetFrame" vector_file2="phosphor/circle.svg" vector_color2="IconWidgetFill" vector_box2="0.100,0.100,0.900,0.900" vector_file3="phosphor/circle.svg" vector_color3="IconWidgetMark" vector_box3="0.330,0.330,0.670,0.670" />
+  <texture name="RadioButton_Disabled" file_name="widgets/RadioButton_Disabled.png" preload="true" vector_file="phosphor_authored/frame-circle.svg" vector_color="IconWidgetFrameDisabled" vector_file2="phosphor/circle.svg" vector_color2="IconWidgetFillDisabled" vector_box2="0.100,0.100,0.900,0.900" />
+  <texture name="RadioButton_On_Disabled" file_name="widgets/RadioButton_On_Disabled.png" preload="true" vector_file="phosphor_authored/frame-circle.svg" vector_color="IconWidgetFrameDisabled" vector_file2="phosphor/circle.svg" vector_color2="IconWidgetFillDisabled" vector_box2="0.100,0.100,0.900,0.900" vector_file3="phosphor/circle.svg" vector_color3="IconWidgetMarkDisabled" vector_box3="0.330,0.330,0.670,0.670" />
 
 
-  <texture name="Refresh_Off" file_name="icons/Refresh_Off.png" preload="true" />
+  <texture name="Refresh_Off" file_name="icons/Refresh_Off.png" preload="true" vector_file="phosphor/arrows-clockwise.svg" vector_color="IconColor@BF" vector_box="0.167,0.056,0.833,0.889" />
 
-  <texture name="Resize_Corner" file_name="windows/Resize_Corner.png" preload="true" />
+  <texture name="Resize_Corner" file_name="windows/Resize_Corner.png" preload="true" vector_file="phosphor_authored/grip.svg" vector_color="IconColorDisabled@54" />
 
   <texture name="Rounded_Rect"	file_name="Rounded_Rect.png" preload="true" scale.left="6" scale.top="26" scale.right="58" scale.bottom="6" />
   <texture name="Rounded_Rect_Top"	file_name="Rounded_Rect.png" preload="true" scale.left="6" scale.top="8" scale.right="58" scale.bottom="0" clip.left="0" clip.right="64" clip.bottom="16" clip.top="32" />
@@ -634,10 +649,10 @@ with the same filename but different name
   <texture name="Rounded_Square"	file_name="rounded_square.j2c" preload="true" scale.left="16" scale.top="16" scale.right="112" scale.bottom="16" />
   <texture name="Row_Selection" file_name="navbar/Row_Selection.png" preload="false" />
 
-  <texture name="ScrollArrow_Down" file_name="widgets/ScrollArrow_Down.png"	preload="true" scale.left="2" scale.top="13" scale.right="13" scale.bottom="2" />
-  <texture name="ScrollArrow_Left"	file_name="widgets/ScrollArrow_Left.png" preload="true" scale.left="2" scale.top="13" scale.right="13" scale.bottom="2" />
-  <texture name="ScrollArrow_Right" file_name="widgets/ScrollArrow_Right.png" preload="true" scale.left="2" scale.top="13" scale.right="13" scale.bottom="2" />
-  <texture name="ScrollArrow_Up" file_name="widgets/ScrollArrow_Up.png"	preload="true" scale.left="2" scale.top="13" scale.right="13" scale.bottom="2" />
+  <texture name="ScrollArrow_Down" file_name="widgets/ScrollArrow_Down.png"	preload="true" scale.left="2" scale.top="13" scale.right="13" scale.bottom="2" vector_file="phosphor/square.svg" vector_color="IconWidgetFill" vector_file2="phosphor_authored/frame-square.svg" vector_color2="IconWidgetFrame" vector_box2="0.000,0.000,1.000,1.000" vector_file3="phosphor/caret-down.svg" vector_color3="IconWidgetArrow" vector_box3="0.270,0.300,0.730,0.700" />
+  <texture name="ScrollArrow_Left"	file_name="widgets/ScrollArrow_Left.png" preload="true" scale.left="2" scale.top="13" scale.right="13" scale.bottom="2" vector_file="phosphor/square.svg" vector_color="IconWidgetFill" vector_file2="phosphor_authored/frame-square.svg" vector_color2="IconWidgetFrame" vector_box2="0.000,0.000,1.000,1.000" vector_file3="phosphor/caret-left.svg" vector_color3="IconWidgetArrow" vector_box3="0.270,0.300,0.730,0.700" />
+  <texture name="ScrollArrow_Right" file_name="widgets/ScrollArrow_Right.png" preload="true" scale.left="2" scale.top="13" scale.right="13" scale.bottom="2" vector_file="phosphor/square.svg" vector_color="IconWidgetFill" vector_file2="phosphor_authored/frame-square.svg" vector_color2="IconWidgetFrame" vector_box2="0.000,0.000,1.000,1.000" vector_file3="phosphor/caret-right.svg" vector_color3="IconWidgetArrow" vector_box3="0.270,0.300,0.730,0.700" />
+  <texture name="ScrollArrow_Up" file_name="widgets/ScrollArrow_Up.png"	preload="true" scale.left="2" scale.top="13" scale.right="13" scale.bottom="2" vector_file="phosphor/square.svg" vector_color="IconWidgetFill" vector_file2="phosphor_authored/frame-square.svg" vector_color2="IconWidgetFrame" vector_box2="0.000,0.000,1.000,1.000" vector_file3="phosphor/caret-up.svg" vector_color3="IconWidgetArrow" vector_box3="0.270,0.300,0.730,0.700" />
 
   <texture name="ScrollThumb_Horiz" file_name="widgets/ScrollThumb_Horiz.png" preload="true" scale.left="4" scale.top="0" scale.bottom="0" scale.right="2" />
   <texture name="ScrollThumb_Vert" file_name="widgets/ScrollThumb_Vert.png" preload="true" scale.left="4" scale.top="53" scale.bottom="10" scale.right="4" />
@@ -645,9 +660,9 @@ with the same filename but different name
   <texture name="ScrollTrack_Horiz" file_name="widgets/ScrollTrack_Horiz.png" preload="true" scale.left="4" scale.top="0" scale.bottom="0" scale.right="2" />
 
 
-  <texture name="Search" file_name="navbar/Search.png" preload="false" />
+  <texture name="Search" file_name="navbar/Search.png" preload="false" vector_file="phosphor/magnifying-glass.svg" vector_color="#666666" />
 
-  <texture name="Search_Icon" file_name="icons/Search_Icon.png" preload="false" />
+  <texture name="Search_Icon" file_name="icons/Search_Icon.png" preload="false" vector_file="phosphor/magnifying-glass.svg" vector_color="#8D8D8D" vector_box="0.167,0.118,0.889,0.941" />
 
   <texture name="SegmentedBtn_Left_Off" file_name="widgets/SegmentedBtn_Left_Off.png" preload="true" scale.left="4" scale.top="19" scale.right="22" scale.bottom="4" />
   <texture name="SegmentedBtn_Left_Over" file_name="widgets/SegmentedBtn_Left_Over.png" preload="true" scale.left="4" scale.top="19" scale.right="22" scale.bottom="4" />
@@ -671,17 +686,17 @@ with the same filename but different name
   <texture name="SegmentedBtn_Right_Selected_Press" file_name="widgets/SegmentedBtn_Right_Selected_Press.png" preload="true" scale.left="4" scale.top="19" scale.right="22" scale.bottom="4" />
   <texture name="SegmentedBtn_Right_Selected_Disabled" file_name="widgets/SegmentedBtn_Right_Selected_Disabled.png" preload="true" scale.left="4" scale.top="19" scale.right="22" scale.bottom="4" />
 
-  <texture name="Shirt_Large" file_name="icons/Shirt_Large.png" preload="false" />
+  <texture name="Shirt_Large" file_name="icons/Shirt_Large.png" preload="false" vector_file="phosphor/t-shirt.svg" vector_color="IconColor@42" vector_box="0.032,0.258,0.968,0.935" />
 
-  <texture name="Sidebar_Icon_Dock_Foreground" file_name="taskpanel/Sidebar_Icon_Dock_Foreground.png" preload="false" />
-  <texture name="Sidebar_Icon_Dock_Press" file_name="taskpanel/Sidebar_Icon_Dock_Press.png" preload="false" />
-  <texture name="Sidebar_Icon_Undock_Foreground" file_name="taskpanel/Sidebar_Icon_Undock_Foreground.png" preload="false" />
-  <texture name="Sidebar_Icon_Undock_Press" file_name="taskpanel/Sidebar_Icon_Undock_Press.png" preload="false" />
+  <texture name="Sidebar_Icon_Dock_Foreground" file_name="taskpanel/Sidebar_Icon_Dock_Foreground.png" preload="false" vector_file="phosphor/sidebar.svg" vector_color="#A1A1A1" vector_box="0.125,0.312,0.812,0.750" />
+  <texture name="Sidebar_Icon_Dock_Press" file_name="taskpanel/Sidebar_Icon_Dock_Press.png" preload="false" vector_file="phosphor/sidebar.svg" vector_color="#363636" vector_box="0.125,0.312,0.812,0.750" />
+  <texture name="Sidebar_Icon_Undock_Foreground" file_name="taskpanel/Sidebar_Icon_Undock_Foreground.png" preload="false" vector_file="phosphor/sidebar.svg" vector_color="#A1A1A1" vector_box="0.125,0.312,0.812,0.750" />
+  <texture name="Sidebar_Icon_Undock_Press" file_name="taskpanel/Sidebar_Icon_Undock_Press.png" preload="false" vector_file="phosphor/sidebar.svg" vector_color="#363636" vector_box="0.125,0.312,0.812,0.750" />
 
-  <texture name="Shop" file_name="icons/Shop.png" preload="false" />
+  <texture name="Shop" file_name="icons/Shop.png" preload="false" vector_file="phosphor/shopping-cart.svg" vector_color="#BDBDBD" vector_box="0.087,0.174,0.783,0.783" />
 
-  <texture name="SkipBackward_Off" file_name="icons/SkipBackward_Off.png" preload="false" />
-  <texture name="SkipForward_Off" file_name="icons/SkipForward_Off.png" preload="false" />
+  <texture name="SkipBackward_Off" file_name="icons/SkipBackward_Off.png" preload="false" vector_file="phosphor/skip-back.svg" vector_color="IconColor@BF" vector_box="0.188,0.125,0.812,0.875" />
+  <texture name="SkipForward_Off" file_name="icons/SkipForward_Off.png" preload="false" vector_file="phosphor/skip-forward.svg" vector_color="IconColor@BF" vector_box="0.250,0.125,0.875,0.875" />
 
   <texture name="SliderTrack_Horiz" file_name="widgets/SliderTrack_Horiz.png" scale.left="4" scale.top="4" scale.right="100" scale.bottom="2" />
   <texture name="SliderTrack_Vert" file_name="widgets/SliderTrack_Vert.png" scale.left="2" scale.top="100" scale.right="4" scale.bottom="4" />
@@ -691,14 +706,14 @@ with the same filename but different name
 
   <texture name="AL_Logo" file_name="icons/AL_Logo.png" preload="true" />
   <texture name="SL_Logo" file_name="icons/SL_Logo.png" preload="true" />
-  <texture name="OBJECT_Icon" file_name="icons/object_icon.png" preload="true" />
-  <texture name="Unknown_Icon" file_name="icons/unknown_icon.png" preload="true" />
+  <texture name="OBJECT_Icon" file_name="icons/object_icon.png" preload="true" vector_file="phosphor/cube.svg" vector_color="IconColor" vector_box="0.100,0.100,0.900,0.900" />
+  <texture name="Unknown_Icon" file_name="icons/unknown_icon.png" preload="true" vector_file="phosphor/question.svg" vector_color="IconColor" vector_box="0.100,0.100,0.900,0.900" />
 
-  <texture name="Snapshot_Off" file_name="bottomtray/Snapshot_Off.png" preload="true" scale.left="4" scale.top="19" scale.right="22" scale.bottom="4" />
-  <texture name="Snapshot_Download" file_name="snapshot_download.png" preload="false" />
-  <texture name="Snapshot_Email" file_name="snapshot_email.png" preload="false" />
-  <texture name="Snapshot_Inventory" file_name="toolbar_icons/inventory.png" preload="false" />
-  <texture name="Snapshot_Profile" file_name="toolbar_icons/profile.png" preload="false" />
+  <texture name="Snapshot_Off" file_name="bottomtray/Snapshot_Off.png" preload="true" scale.left="4" scale.top="19" scale.right="22" scale.bottom="4" vector_file="phosphor/camera.svg" vector_color="IconColor@C9" vector_box="0.278,0.167,0.722,0.778" />
+  <texture name="Snapshot_Download" file_name="snapshot_download.png" preload="false" vector_file="phosphor/download-simple.svg" vector_color="IconColor" vector_box="0.000,0.056,1.000,0.944" />
+  <texture name="Snapshot_Email" file_name="snapshot_email.png" preload="false" vector_file="phosphor/envelope.svg" vector_color="IconColor" vector_box="0.000,0.167,1.000,0.833" />
+  <texture name="Snapshot_Inventory" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/backpack.svg" vector_color="IconColor" vector_box="0.000,0.111,0.944,0.944" />
+  <texture name="Snapshot_Profile" file_name="toolbar_icons/profile.png" preload="false" vector_file="phosphor/user-circle.svg" vector_color="IconColor" vector_box="0.000,0.167,1.000,0.889" />
   <texture name="startup_logo"  file_name="windows/startup_logo.png" preload="true" />
 
   <texture name="login_sl_logo"  file_name="windows/login_sl_logo.png" preload="true" />
@@ -710,26 +725,26 @@ with the same filename but different name
   <texture name="Stepper_Up_Off" file_name="widgets/Stepper_Up_Off.png" preload="false" />
   <texture name="Stepper_Up_Press" file_name="widgets/Stepper_Up_Press.png" preload="false" />
 
-  <texture name="Stop_Off" file_name="icons/Stop_Off.png" preload="true" />
-  <texture name="StopReload_Off" file_name="icons/StopReload_Off.png" preload="false" />
-  <texture name="StopReload_Over" file_name="icons/StopReload_Over.png" preload="false" />
+  <texture name="Stop_Off" file_name="icons/Stop_Off.png" preload="true" vector_file="phosphor/stop.svg" vector_color="IconColor@BF" vector_box="0.188,0.125,0.812,0.812" />
+  <texture name="StopReload_Off" file_name="icons/StopReload_Off.png" preload="false" vector_file="phosphor/arrows-clockwise.svg" vector_color="IconColor@B3" vector_box="0.125,0.125,0.875,0.875" />
+  <texture name="StopReload_Over" file_name="icons/StopReload_Over.png" preload="false" vector_file="phosphor/arrows-clockwise.svg" vector_color="IconColor@EC" vector_box="0.125,0.125,0.875,0.875" />
 
-  <texture name="Sync_Disabled" file_name="icons/Sync_Disabled.png" preload="true" />
-  <texture name="Sync_Enabled" file_name="icons/Sync_Enabled.png" preload="true" />
-  <texture name="Sync_Progress_1" file_name="icons/Sync_Progress_1.png" preload="true" />
-  <texture name="Sync_Progress_2" file_name="icons/Sync_Progress_2.png" preload="true" />
-  <texture name="Sync_Progress_3" file_name="icons/Sync_Progress_3.png" preload="true" />
-  <texture name="Sync_Progress_4" file_name="icons/Sync_Progress_4.png" preload="true" />
-  <texture name="Sync_Progress_5" file_name="icons/Sync_Progress_5.png" preload="true" />
-  <texture name="Sync_Progress_6" file_name="icons/Sync_Progress_6.png" preload="true" />
+  <texture name="Sync_Disabled" file_name="icons/Sync_Disabled.png" preload="true" vector_file="phosphor/arrows-clockwise.svg" vector_color="IconColorDisabled" vector_box="0.062,0.125,0.938,0.875" />
+  <texture name="Sync_Enabled" file_name="icons/Sync_Enabled.png" preload="true" vector_file="phosphor/arrows-clockwise.svg" vector_color="IconColor" vector_box="0.062,0.125,0.938,0.875" />
+  <texture name="Sync_Progress_1" file_name="icons/Sync_Progress_1.png" preload="true" vector_file="phosphor_authored/sync-0.svg" vector_color="IconColor" />
+  <texture name="Sync_Progress_2" file_name="icons/Sync_Progress_2.png" preload="true" vector_file="phosphor_authored/sync-60.svg" vector_color="IconColor" />
+  <texture name="Sync_Progress_3" file_name="icons/Sync_Progress_3.png" preload="true" vector_file="phosphor_authored/sync-120.svg" vector_color="IconColor" />
+  <texture name="Sync_Progress_4" file_name="icons/Sync_Progress_4.png" preload="true" vector_file="phosphor_authored/sync-180.svg" vector_color="IconColor" />
+  <texture name="Sync_Progress_5" file_name="icons/Sync_Progress_5.png" preload="true" vector_file="phosphor_authored/sync-240.svg" vector_color="IconColor" />
+  <texture name="Sync_Progress_6" file_name="icons/Sync_Progress_6.png" preload="true" vector_file="phosphor_authored/sync-300.svg" vector_color="IconColor" />
 
-  <texture name="TabIcon_Close_Off" file_name="taskpanel/TabIcon_Close_Off.png" preload="false" />
-  <texture name="TabIcon_Home_Selected" file_name="taskpanel/TabIcon_Home_Selected.png" preload="false" />
-  <texture name="TabIcon_Me_Off" file_name="taskpanel/TabIcon_Me_Off.png" preload="false" />
-  <texture name="TabIcon_Open_Off" file_name="taskpanel/TabIcon_Open_Off.png" preload="false" />
-  <texture name="TabIcon_People_Off" file_name="taskpanel/TabIcon_People_Off.png" preload="false" />
-  <texture name="TabIcon_Places_Off" file_name="taskpanel/TabIcon_Places_Off.png" preload="false" />
-  <texture name="TabIcon_Things_Off" file_name="taskpanel/TabIcon_Things_Off.png" preload="false" />
+  <texture name="TabIcon_Close_Off" file_name="taskpanel/TabIcon_Close_Off.png" preload="false" vector_file="phosphor/x.svg" vector_color="IconColor@54" vector_box="0.125,0.125,0.875,0.875" />
+  <texture name="TabIcon_Home_Selected" file_name="taskpanel/TabIcon_Home_Selected.png" preload="false" vector_file="phosphor/house.svg" vector_color="IconColor" vector_box="0.167,0.042,0.833,0.917" />
+  <texture name="TabIcon_Me_Off" file_name="taskpanel/TabIcon_Me_Off.png" preload="false" vector_file="phosphor/user.svg" vector_color="IconColor@54" vector_box="0.083,0.208,0.917,0.792" />
+  <texture name="TabIcon_Open_Off" file_name="taskpanel/TabIcon_Open_Off.png" preload="false" vector_file="phosphor/arrow-square-out.svg" vector_color="IconColor@54" vector_box="0.125,0.125,0.875,0.875" />
+  <texture name="TabIcon_People_Off" file_name="taskpanel/TabIcon_People_Off.png" preload="false" vector_file="phosphor/users.svg" vector_color="IconColor@54" vector_box="0.125,0.125,0.917,0.875" />
+  <texture name="TabIcon_Places_Off" file_name="taskpanel/TabIcon_Places_Off.png" preload="false" vector_file="phosphor/map-pin.svg" vector_color="IconColor@54" vector_box="0.167,0.083,0.792,0.917" />
+  <texture name="TabIcon_Things_Off" file_name="taskpanel/TabIcon_Things_Off.png" preload="false" vector_file="phosphor/backpack.svg" vector_color="IconColor@54" vector_box="0.125,0.167,0.875,0.833" />
 
   <texture name="TabTop_Right_Off" file_name="containers/TabTop_Right_Off.png" preload="false"  scale.left="8" scale.top="8" scale.right="62" scale.bottom="9" />
   <texture name="TabTop_Right_Selected" file_name="containers/TabTop_Right_Selected.png" preload="false"  scale.left="8" scale.top="8" scale.right="62" scale.bottom="9" />
@@ -750,19 +765,19 @@ with the same filename but different name
   <texture name="TextField_Active" file_name="widgets/TextField_Active.png" preload="true" scale.left="9" scale.top="12" scale.right="248" scale.bottom="12" />
   <texture name="TextField_Search_Highlight" file_name="widgets/TextField_Search_Highlight.png" preload="true" scale.left="9" scale.top="12" scale.right="248" scale.bottom="12" />
 
-  <texture name="Thumbnail_Fallback" file_name="icons/thumbnail_fallback_icon.png" preload="true" />
+  <texture name="Thumbnail_Fallback" file_name="icons/thumbnail_fallback_icon.png" preload="true" vector_file="phosphor/image.svg" vector_color="IconColor@3F" vector_box="0.037,0.087,0.963,0.912" />
 
-  <texture name="Toast_CloseBtn" file_name="windows/Toast_CloseBtn.png" preload="true" />
+  <texture name="Toast_CloseBtn" file_name="windows/Toast_CloseBtn.png" preload="true" vector_file="phosphor/x-circle.svg" vector_color="#989898" />
   <texture name="Toast_Background" file_name="windows/Toast_Background.png" preload="true"
            scale.left="4" scale.top="28" scale.right="60" scale.bottom="4" />
   <texture name="Toast_Over" file_name="windows/Toast_Over.png" preload="true"
            scale.left="4" scale.top="28" scale.right="60" scale.bottom="4" />
 
-  <texture name="Tool_Create" file_name="build/Tool_Create.png" preload="false" />
-  <texture name="Tool_Dozer" file_name="build/Tool_Dozer.png" preload="false" />
-  <texture name="Tool_Face" file_name="build/Tool_Face.png" preload="false" />
-  <texture name="Tool_Grab" file_name="build/Tool_Grab.png" preload="false" />
-  <texture name="Tool_Zoom" file_name="build/Tool_Zoom.png" preload="false" />
+  <texture name="Tool_Create" file_name="build/Tool_Create.png" preload="false" vector_file="phosphor/hammer.svg" vector_color="#B3B3B3" />
+  <texture name="Tool_Dozer" file_name="build/Tool_Dozer.png" preload="false" vector_file="phosphor/mountains.svg" vector_color="#8F8F8F" vector_box="0.000,0.150,1.000,0.900" />
+  <texture name="Tool_Face" file_name="build/Tool_Face.png" preload="false" vector_file="phosphor/square-half.svg" vector_color="#939393" vector_box="0.150,0.100,0.850,1.000" />
+  <texture name="Tool_Grab" file_name="build/Tool_Grab.png" preload="false" vector_file="phosphor/hand-grabbing.svg" vector_color="#B2B2B2" vector_box="0.100,0.050,0.900,0.950" />
+  <texture name="Tool_Zoom" file_name="build/Tool_Zoom.png" preload="false" vector_file="phosphor/magnifying-glass-plus.svg" vector_color="#8D8D8D" />
 
   <texture name="Toolbar_Left_Flash" file_name="containers/Toolbar_Left_Flash.png" preload="false" scale.left="5" scale.bottom="4" scale.top="24" scale.right="30" />
   <texture name="Toolbar_Left_Off" file_name="containers/Toolbar_Left_Off.png" preload="false" scale.left="5" scale.bottom="4" scale.top="24" scale.right="30" />
@@ -779,47 +794,47 @@ with the same filename but different name
 
   <texture name="Tooltip" file_name="widgets/Tooltip.png" preload="true" scale.left="2" scale.top="16" scale.right="100" scale.bottom="3" />
 
-  <texture name="TrashItem_Disabled" file_name="icons/TrashItem_Disabled.png" preload="false" />
-  <texture name="TrashItem_Off" file_name="icons/TrashItem_Off.png" preload="false" />
-  <texture name="TrashItem_Press" file_name="icons/TrashItem_Press.png" preload="false" />
+  <texture name="TrashItem_Disabled" file_name="icons/TrashItem_Disabled.png" preload="false" vector_file="phosphor/trash.svg" vector_color="IconColor@30" vector_box="0.167,0.056,0.778,0.833" />
+  <texture name="TrashItem_Off" file_name="icons/TrashItem_Off.png" preload="false" vector_file="phosphor/trash.svg" vector_color="IconColor@BF" vector_box="0.167,0.056,0.778,0.833" />
+  <texture name="TrashItem_Press" file_name="icons/TrashItem_Press.png" preload="false" vector_file="phosphor/trash.svg" vector_color="IconColor@80" vector_box="0.167,0.056,0.778,0.833" />
 
-  <texture name="Unread_Chiclet" file_name="bottomtray/Unread_Chiclet.png" preload="false" />
+  <texture name="Unread_Chiclet" file_name="bottomtray/Unread_Chiclet.png" preload="false" vector_file="phosphor/chat-circle.svg" vector_color="#D28723" vector_box="0.000,0.071,1.000,0.929" />
 
-  <texture name="UpArrow_Off" file_name="icons/UpArrow_Off.png" preload="false" />
+  <texture name="UpArrow_Off" file_name="icons/UpArrow_Off.png" preload="false" vector_file="phosphor/arrow-up.svg" vector_color="IconColor@BF" vector_box="0.222,0.167,0.722,0.778" />
 
-  <texture name="Video_URL_Off" file_name="icons/Video_URL_Off.png" preload="true" />
+  <texture name="Video_URL_Off" file_name="icons/Video_URL_Off.png" preload="true" vector_file="phosphor/link.svg" vector_color="IconColor" vector_box="0.100,0.100,0.900,0.900" />
   
   <texture name="Vertical Drag Handle" file_name="widgets/vertical_drag_handle.png" scale.left="2" scale.right="7" scale.bottom="8" scale.top="120"  scale_type="scale_outer"/>
 
-    <texture name="VirtualTrackball_Moon_Back" file_name="widgets/track_control_moon_back.png" />
-  <texture name="VirtualTrackball_Moon_Front" file_name="widgets/track_control_moon_front.png" />
-  <texture name="VirtualTrackball_Rotate_Bottom" file_name="widgets/track_control_rotate_bottom.png" />
-  <texture name="VirtualTrackball_Rotate_Left" file_name="widgets/track_control_rotate_left_side.png" />
-  <texture name="VirtualTrackball_Rotate_Right" file_name="widgets/track_control_rotate_right_side.png" />
-  <texture name="VirtualTrackball_Rotate_Top" file_name="widgets/track_control_rotate_top.png" />
-  <texture name="VirtualTrackball_Rotate_Bottom_Active" file_name="widgets/track_control_rotate_bottom_active.png" />
-  <texture name="VirtualTrackball_Rotate_Left_Active" file_name="widgets/track_control_rotate_left_side_active.png" />
-  <texture name="VirtualTrackball_Rotate_Right_Active" file_name="widgets/track_control_rotate_right_side_active.png" />
-  <texture name="VirtualTrackball_Rotate_Top_Active" file_name="widgets/track_control_rotate_top_active.png" />
+    <texture name="VirtualTrackball_Moon_Back" file_name="widgets/track_control_moon_back.png" vector_file="phosphor/moon.svg" vector_color="#7EC9E84C" vector_box="0.222,0.222,0.722,0.722" />
+  <texture name="VirtualTrackball_Moon_Front" file_name="widgets/track_control_moon_front.png" vector_file="phosphor/moon.svg" vector_color="#85C9E7" vector_box="0.056,0.056,0.944,0.944" />
+  <texture name="VirtualTrackball_Rotate_Bottom" file_name="widgets/track_control_rotate_bottom.png" vector_file="phosphor/caret-down.svg" vector_color="IconColor" vector_box="0.000,0.042,1.000,0.917" />
+  <texture name="VirtualTrackball_Rotate_Left" file_name="widgets/track_control_rotate_left_side.png" vector_file="phosphor/caret-left.svg" vector_color="IconColor" vector_box="0.083,0.042,0.958,1.000" />
+  <texture name="VirtualTrackball_Rotate_Right" file_name="widgets/track_control_rotate_right_side.png" vector_file="phosphor/caret-right.svg" vector_color="IconColor" vector_box="0.042,0.042,0.917,1.000" />
+  <texture name="VirtualTrackball_Rotate_Top" file_name="widgets/track_control_rotate_top.png" vector_file="phosphor/caret-up.svg" vector_color="IconColor" vector_box="0.000,0.083,1.000,0.958" />
+  <texture name="VirtualTrackball_Rotate_Bottom_Active" file_name="widgets/track_control_rotate_bottom_active.png" vector_file="phosphor/caret-down.svg" vector_color="IconColor" vector_box="0.000,0.042,1.000,0.917" />
+  <texture name="VirtualTrackball_Rotate_Left_Active" file_name="widgets/track_control_rotate_left_side_active.png" vector_file="phosphor/caret-left.svg" vector_color="IconColor" vector_box="0.083,0.042,0.958,1.000" />
+  <texture name="VirtualTrackball_Rotate_Right_Active" file_name="widgets/track_control_rotate_right_side_active.png" vector_file="phosphor/caret-right.svg" vector_color="IconColor" vector_box="0.042,0.042,0.917,1.000" />
+  <texture name="VirtualTrackball_Rotate_Top_Active" file_name="widgets/track_control_rotate_top_active.png" vector_file="phosphor/caret-up.svg" vector_color="IconColor" vector_box="0.000,0.083,1.000,0.958" />
   <texture name="VirtualTrackball_Sphere" file_name="widgets/track_control_sphere.png" />
-  <texture name="VirtualTrackball_Sun_Back" file_name="widgets/track_control_sun_back.png" />
-  <texture name="VirtualTrackball_Sun_Front" file_name="widgets/track_control_sun_front.png" />
+  <texture name="VirtualTrackball_Sun_Back" file_name="widgets/track_control_sun_back.png" vector_file="phosphor/sun.svg" vector_color="#E1A20140" vector_box="0.222,0.222,0.778,0.778" />
+  <texture name="VirtualTrackball_Sun_Front" file_name="widgets/track_control_sun_front.png" vector_file="phosphor/sun.svg" vector_color="#D5AB01" vector_box="0.056,0.056,0.944,0.944" />
     
     <texture name="Volume_Background" file_name="windows/Volume_Background.png" preload="false"
            scale.left="6" scale.top="33" scale.right="63" scale.bottom="10" />
 
-  <texture name="VoicePTT_Lvl1" file_name="bottomtray/VoicePTT_Lvl1.png" preload="false" />
-  <texture name="VoicePTT_Lvl2" file_name="bottomtray/VoicePTT_Lvl2.png" preload="false" />
-  <texture name="VoicePTT_Lvl3" file_name="bottomtray/VoicePTT_Lvl3.png" preload="false" />
-  <texture name="VoicePTT_Off" file_name="bottomtray/VoicePTT_Off.png" preload="false" />
-  <texture name="VoicePTT_On" file_name="bottomtray/VoicePTT_On.png" preload="false" />
+  <texture name="VoicePTT_Lvl1" file_name="bottomtray/VoicePTT_Lvl1.png" preload="false" vector_file="phosphor_authored/ptt-1.svg" vector_color="#30B030" vector_box="0.111,0.222,0.833,0.778" />
+  <texture name="VoicePTT_Lvl2" file_name="bottomtray/VoicePTT_Lvl2.png" preload="false" vector_file="phosphor_authored/ptt-2.svg" vector_color="#30B030" vector_box="0.111,0.167,0.944,0.889" />
+  <texture name="VoicePTT_Lvl3" file_name="bottomtray/VoicePTT_Lvl3.png" preload="false" vector_file="phosphor_authored/ptt-3.svg" vector_color="IconErrorColor" vector_box="0.111,0.167,0.944,0.889" />
+  <texture name="VoicePTT_Off" file_name="bottomtray/VoicePTT_Off.png" preload="false" vector_file="phosphor_authored/ptt-0.svg" vector_color="IconColorDisabled" vector_box="0.056,0.222,0.889,0.833" />
+  <texture name="VoicePTT_On" file_name="bottomtray/VoicePTT_On.png" preload="false" vector_file="phosphor_authored/ptt-3.svg" vector_color="#30B030" vector_box="0.111,0.222,0.833,0.778" />
   
   <texture name="Wearables_Divider" file_name="windows/Wearables_Divider.png" preload="false" />
 
-  <texture name="Add_Icon" file_name="icons/add_icon.png" preload="false" />
-  <texture name="Remove_Icon" file_name="icons/remove_icon.png" preload="false" />
+  <texture name="Add_Icon" file_name="icons/add_icon.png" preload="false" vector_file="phosphor/plus.svg" vector_color="IconColor" vector_box="0.062,0.062,0.938,0.938" />
+  <texture name="Remove_Icon" file_name="icons/remove_icon.png" preload="false" vector_file="phosphor/minus.svg" vector_color="IconColor" vector_box="0.062,0.062,0.938,0.938" />
 
-  <texture name="Web_Profile_Off" file_name="icons/Web_Profile_Off.png" preload="false" />
+  <texture name="Web_Profile_Off" file_name="icons/Web_Profile_Off.png" preload="false" vector_file="phosphor/user-circle.svg" vector_color="IconColor" />
 
   <texture name="WellButton_Lit" file_name="bottomtray/WellButton_Lit.png"  preload="true" scale.left="4" scale.top="19" scale.right="28" scale.bottom="4" />
   <texture name="WellButton_Lit_Selected" file_name="bottomtray/WellButton_Lit_Selected.png" preload="true" scale.left="4" scale.top="19" scale.right="28" scale.bottom="4" />
@@ -833,13 +848,13 @@ with the same filename but different name
   <texture name="Window_NoTitle_Foreground" file_name="windows/Window_NoTitle_Foreground.png" preload="true"
            scale.left="4" scale.top="24" scale.right="26" scale.bottom="4" />
 
-  <texture name="YouAreHere_Badge" file_name="icons/YouAreHere_Badge.png" preload="false" />
+  <texture name="YouAreHere_Badge" file_name="icons/YouAreHere_Badge.png" preload="false" vector_file="phosphor/map-pin.svg" vector_color="#EB5841" vector_box="0.031,0.031,0.984,0.984" />
 
-  <texture name="Zoom_Off" file_name="icons/Zoom_Off.png" preload="false" />
-  <texture name="UnZoom_Off" file_name="icons/UnZoom_Off.png" preload="false" />
+  <texture name="Zoom_Off" file_name="icons/Zoom_Off.png" preload="false" vector_file="phosphor/magnifying-glass-plus.svg" vector_color="IconColor@BF" vector_box="0.062,0.062,0.938,0.938" />
+  <texture name="UnZoom_Off" file_name="icons/UnZoom_Off.png" preload="false" vector_file="phosphor/magnifying-glass-minus.svg" vector_color="IconColor@BF" vector_box="0.062,0.062,0.938,0.938" />
 
   <texture name="pixiesmall.j2c" use_mips="true" />
-  <texture name="script_error.j2c" use_mips="true" />
+  <texture name="script_error.j2c" use_mips="true" vector_file="phosphor/warning-octagon.svg" vector_color="IconErrorColor" vector_box="0.000,0.031,1.000,1.000" />
   <texture name="silhouette.j2c" use_mips="true" />
   <texture name="foot_shadow.j2c" use_mips="true" />
   <texture name="cloud-particle.j2c" use_mips="true" />
@@ -849,90 +864,90 @@ with the same filename but different name
   <texture name="Ticker_Grid" file_name="ticker_visualizer_grid.tga" preload="false" />
 
   <!--WARNING OLD ART BELOW *do not use*-->
-  <texture name="icn_media_web.tga" preload="true" />
-  <texture name="icn_media_movie.tga" preload="true" />
+  <texture name="icn_media_web.tga" preload="true" vector_file="phosphor/globe.svg" vector_color="#949DC0" vector_box="0.219,0.125,0.781,0.844" />
+  <texture name="icn_media_movie.tga" preload="true" vector_file="phosphor/film-strip.svg" vector_color="#8793B4" vector_box="0.000,0.094,0.969,0.875" />
 
-  <texture name="jump_left_out.tga" file_name="widgets/jump_left_out.png" />
-  <texture name="jump_left_in.tga" file_name="widgets/jump_left_in.png" />
-  <texture name="jump_right_out.tga" file_name="widgets/jump_right_out.png" />
-  <texture name="jump_right_in.tga" file_name="widgets/jump_right_in.png" />
+  <texture name="jump_left_out.tga" file_name="widgets/jump_left_out.png" vector_file="phosphor/skip-back.svg" vector_color="IconColor" vector_box="0.100,0.100,0.900,0.900" />
+  <texture name="jump_left_in.tga" file_name="widgets/jump_left_in.png" vector_file="phosphor/skip-back.svg" vector_color="IconColor" vector_box="0.100,0.100,0.900,0.900" />
+  <texture name="jump_right_out.tga" file_name="widgets/jump_right_out.png" vector_file="phosphor/skip-forward.svg" vector_color="IconColor" vector_box="0.100,0.100,0.900,0.900" />
+  <texture name="jump_right_in.tga" file_name="widgets/jump_right_in.png" vector_file="phosphor/skip-forward.svg" vector_color="IconColor" vector_box="0.100,0.100,0.900,0.900" />
 
-  <texture name="scrollbutton_left_out_blue.tga" file_name="widgets/ScrollArrow_Left_Opaque.png" />
-  <texture name="scrollbutton_left_in_blue.tga" file_name="widgets/ScrollArrow_Left_Over_Opaque.png" />
-  <texture name="scrollbutton_right_out_blue.tga" file_name="widgets/ScrollArrow_Right_Opaque.png" />
-  <texture name="scrollbutton_right_in_blue.tga" file_name="widgets/ScrollArrow_Right_Over_Opaque.png" />
-  <texture name="scrollbutton_up_out_blue.tga" file_name="widgets/ScrollArrow_Up_Opaque.png" />
-  <texture name="scrollbutton_up_in_blue.tga" file_name="widgets/ScrollArrow_Up_Over_Opaque.png" />
-  <texture name="scrollbutton_down_out_blue.tga" file_name="widgets/ScrollArrow_Down_Opaque.png" />
-  <texture name="scrollbutton_down_in_blue.tga" file_name="widgets/ScrollArrow_Down_Over_Opaque.png" />
+  <texture name="scrollbutton_left_out_blue.tga" file_name="widgets/ScrollArrow_Left_Opaque.png" vector_file="phosphor/square.svg" vector_color="IconWidgetTile" vector_file2="phosphor_authored/frame-square.svg" vector_color2="IconWidgetFrame" vector_box2="0.000,0.000,1.000,1.000" vector_file3="phosphor/caret-left.svg" vector_color3="IconWidgetArrow" vector_box3="0.270,0.300,0.730,0.700" />
+  <texture name="scrollbutton_left_in_blue.tga" file_name="widgets/ScrollArrow_Left_Over_Opaque.png" vector_file="phosphor/square.svg" vector_color="IconWidgetTileOver" vector_file2="phosphor_authored/frame-square.svg" vector_color2="IconWidgetFrame" vector_box2="0.000,0.000,1.000,1.000" vector_file3="phosphor/caret-left.svg" vector_color3="IconColorSelected" vector_box3="0.270,0.300,0.730,0.700" />
+  <texture name="scrollbutton_right_out_blue.tga" file_name="widgets/ScrollArrow_Right_Opaque.png" vector_file="phosphor/square.svg" vector_color="IconWidgetTile" vector_file2="phosphor_authored/frame-square.svg" vector_color2="IconWidgetFrame" vector_box2="0.000,0.000,1.000,1.000" vector_file3="phosphor/caret-right.svg" vector_color3="IconWidgetArrow" vector_box3="0.270,0.300,0.730,0.700" />
+  <texture name="scrollbutton_right_in_blue.tga" file_name="widgets/ScrollArrow_Right_Over_Opaque.png" vector_file="phosphor/square.svg" vector_color="IconWidgetTileOver" vector_file2="phosphor_authored/frame-square.svg" vector_color2="IconWidgetFrame" vector_box2="0.000,0.000,1.000,1.000" vector_file3="phosphor/caret-right.svg" vector_color3="IconColorSelected" vector_box3="0.270,0.300,0.730,0.700" />
+  <texture name="scrollbutton_up_out_blue.tga" file_name="widgets/ScrollArrow_Up_Opaque.png" vector_file="phosphor/square.svg" vector_color="IconWidgetTile" vector_file2="phosphor_authored/frame-square.svg" vector_color2="IconWidgetFrame" vector_box2="0.000,0.000,1.000,1.000" vector_file3="phosphor/caret-up.svg" vector_color3="IconWidgetArrow" vector_box3="0.270,0.300,0.730,0.700" />
+  <texture name="scrollbutton_up_in_blue.tga" file_name="widgets/ScrollArrow_Up_Over_Opaque.png" vector_file="phosphor/square.svg" vector_color="IconWidgetTileOver" vector_file2="phosphor_authored/frame-square.svg" vector_color2="IconWidgetFrame" vector_box2="0.000,0.000,1.000,1.000" vector_file3="phosphor/caret-up.svg" vector_color3="IconColorSelected" vector_box3="0.270,0.300,0.730,0.700" />
+  <texture name="scrollbutton_down_out_blue.tga" file_name="widgets/ScrollArrow_Down_Opaque.png" vector_file="phosphor/square.svg" vector_color="IconWidgetTile" vector_file2="phosphor_authored/frame-square.svg" vector_color2="IconWidgetFrame" vector_box2="0.000,0.000,1.000,1.000" vector_file3="phosphor/caret-down.svg" vector_color3="IconWidgetArrow" vector_box3="0.270,0.300,0.730,0.700" />
+  <texture name="scrollbutton_down_in_blue.tga" file_name="widgets/ScrollArrow_Down_Over_Opaque.png" vector_file="phosphor/square.svg" vector_color="IconWidgetTileOver" vector_file2="phosphor_authored/frame-square.svg" vector_color2="IconWidgetFrame" vector_box2="0.000,0.000,1.000,1.000" vector_file3="phosphor/caret-down.svg" vector_color3="IconColorSelected" vector_box3="0.270,0.300,0.730,0.700" />
 
-  <texture name="up_arrow.tga" file_name="up_arrow.png" />
-  <texture name="down_arrow.tga" file_name="down_arrow.png" />
-  <texture name="arrow_down.tga" />
+  <texture name="up_arrow.tga" file_name="up_arrow.png" vector_file="phosphor/caret-up.svg" vector_color="#C0C2CB" vector_box="0.250,0.312,0.812,0.688" />
+  <texture name="down_arrow.tga" file_name="down_arrow.png" vector_file="phosphor/caret-down.svg" vector_color="#C0C1C3" vector_box="0.250,0.312,0.812,0.688" />
+  <texture name="arrow_down.tga" vector_file="phosphor/caret-down.svg" vector_color="#A1A1A4" vector_box="0.125,0.250,0.875,0.812" />
 
-  <texture name="tearoffbox.tga" />
-  <texture name="tearoff_pressed.tga" />
+  <texture name="tearoffbox.tga" vector_file="phosphor/copy-simple.svg" vector_color="IconColor" vector_box="0.188,0.188,0.875,0.875" />
+  <texture name="tearoff_pressed.tga" vector_file="phosphor/copy-simple.svg" vector_color="IconColor" vector_box="0.125,0.125,0.938,0.938" />
 
   <texture name="color_swatch_alpha.tga" preload="true" />
 
-  <texture name="button_anim_pause.tga" />
-  <texture name="button_anim_pause_selected.tga" />
-  <texture name="button_anim_play.tga" />
-  <texture name="button_anim_play_selected.tga" />
-  <texture name="crosshairs.tga" />
+  <texture name="button_anim_pause.tga" vector_file="phosphor/pause.svg" vector_color="#666D93" vector_box="0.000,0.031,1.000,0.969" />
+  <texture name="button_anim_pause_selected.tga" vector_file="phosphor/pause.svg" vector_color="#8B7D7A" />
+  <texture name="button_anim_play.tga" vector_file="phosphor/play.svg" vector_color="#606792" vector_box="0.000,0.031,1.000,0.969" />
+  <texture name="button_anim_play_selected.tga" vector_file="phosphor/play.svg" vector_color="#82777B" />
+  <texture name="crosshairs.tga" vector_file="phosphor/crosshair.svg" vector_color="#6D6D6D" />
   <texture name="direction_arrow.tga" />
   <texture name="target_arrow.tga" />
 
-  <texture name="icon_avatar_offline.tga" />
-  <texture name="icon_avatar_online.tga" />
-  <texture name="icon_avatar_online" file_name="icon_avatar_online.tga" preload="false" />
+  <texture name="icon_avatar_offline.tga" vector_file="phosphor/circle.svg" vector_color="#808080" vector_box="0.125,0.062,1.000,1.000" />
+  <texture name="icon_avatar_online.tga" vector_file="phosphor/circle.svg" vector_color="#20D020" vector_box="0.062,0.062,1.000,1.000" />
+  <texture name="icon_avatar_online" file_name="icon_avatar_online.tga" preload="false" vector_file="phosphor/circle.svg" vector_color="#20D020" vector_box="0.062,0.062,1.000,1.000" />
   <texture name="slim_icon_16_viewer" file_name="slim_icon_16_viewer.tga" preload="false" />
-  <texture name="icon_diurnal.tga" />
-  <texture name="icon_for_sale.tga" file_name="icons/Icon_For_Sale.png" />
-  <texture name="icon_top_pick.tga" />
-  <texture name="Icon_Place" file_name="icon_place.tga" preload="false" />
-  <texture name="Icon_Auction" file_name="icon_auction.tga" preload="false" />
-  <texture name="Icon_Group" file_name="icon_group.tga" preload="false" />
+  <texture name="icon_diurnal.tga" vector_file="phosphor/sun-horizon.svg" vector_color="IconColor" vector_box="0.000,0.000,0.125,1.000" />
+  <texture name="icon_for_sale.tga" file_name="icons/Icon_For_Sale.png" vector_file="phosphor/tag.svg" vector_color="#B2AA85" vector_box="0.125,0.000,0.812,1.000" />
+  <texture name="icon_top_pick.tga" vector_file="phosphor/star.svg" vector_color="#A78869" />
+  <texture name="Icon_Place" file_name="icon_place.tga" preload="false" vector_file="phosphor/map-pin.svg" vector_color="#1E6885" />
+  <texture name="Icon_Auction" file_name="icon_auction.tga" preload="false" vector_file="phosphor/gavel.svg" vector_color="#515253" />
+  <texture name="Icon_Group" file_name="icon_group.tga" preload="false" vector_file="phosphor/users-three.svg" vector_color="IconColor" vector_box="0.100,0.100,0.900,0.900" />
 
 
-  <texture name="lag_status_critical.tga" />
-  <texture name="lag_status_good.tga" />
-  <texture name="lag_status_warning.tga" />
+  <texture name="lag_status_critical.tga" vector_file="phosphor/wifi-x.svg" vector_color="IconErrorColor" vector_box="0.000,0.000,1.000,0.969" />
+  <texture name="lag_status_good.tga" vector_file="phosphor/wifi-high.svg" vector_color="IconSuccessColor" />
+  <texture name="lag_status_warning.tga" vector_file="phosphor/wifi-medium.svg" vector_color="IconWarningColor" />
 
-  <texture name="legend.tga" />
+  <texture name="legend.tga" vector_file="phosphor/list-bullets.svg" vector_color="IconColor" vector_box="0.250,0.250,0.750,0.750" />
 
-  <texture name="map_avatar_16.tga" />
-  <texture name="map_avatar_8.tga" />
-  <texture name="map_event.tga" />
-  <texture name="map_home.tga" />
-  <texture name="map_infohub.tga" />
-  <texture name="map_telehub.tga" />
-  <texture name="map_track_16.tga" />
-  <texture name="map_ui_collapse_icon.png" />
-  <texture name="map_ui_expand_icon.png" />
+  <texture name="map_avatar_16.tga" vector_file="phosphor/circle.svg" vector_color="#888142" />
+  <texture name="map_avatar_8.tga" vector_file="phosphor/circle.svg" vector_color="#7A6C29" vector_box="0.000,0.000,0.875,0.875" />
+  <texture name="map_event.tga" vector_file="phosphor/calendar.svg" vector_color="#8B8551" />
+  <texture name="map_home.tga" vector_file="phosphor/house.svg" vector_color="#A3583D" />
+  <texture name="map_infohub.tga" vector_file="phosphor/info.svg" vector_color="#56B3E2" />
+  <texture name="map_telehub.tga" vector_file="phosphor/info.svg" vector_color="#2086B0" />
+  <texture name="map_track_16.tga" vector_file="phosphor/map-pin.svg" vector_color="IconColor" />
+  <texture name="map_ui_collapse_icon.png" vector_file="phosphor/arrows-in.svg" vector_color="IconColor" vector_box="0.000,0.125,0.938,0.875" />
+  <texture name="map_ui_expand_icon.png" vector_file="phosphor/arrows-out.svg" vector_color="IconColor" vector_box="0.000,0.125,1.000,0.875" />
 
-  <texture name="notify_caution_icon.tga" />
+  <texture name="notify_caution_icon.tga" vector_file="phosphor/warning.svg" vector_color="#D9C6A2" vector_box="0.000,0.062,1.000,1.000" />
 
   <texture name="default_land_picture.j2c" />
   <texture name="default_profile_picture.j2c" />
-  <texture name="locked_image.j2c" />
-  <texture name="badge_note.j2c" />
-  <texture name="badge_warn.j2c" />
-  <texture name="badge_ok.j2c" />
-  <texture name="materials_ui_x_24.png" />
+  <texture name="locked_image.j2c" vector_file="phosphor/lock.svg" vector_color="IconColor" vector_box="0.100,0.100,0.900,0.900" />
+  <texture name="badge_note.j2c" vector_file="phosphor/info.svg" vector_color="#4A90D9" vector_box="0.203,0.203,1.000,0.797" />
+  <texture name="badge_warn.j2c" vector_file="phosphor/warning.svg" vector_color="IconWarningColor" vector_box="0.172,0.125,0.828,0.766" />
+  <texture name="badge_ok.j2c" vector_file="phosphor/check-circle.svg" vector_color="IconSuccessColor" vector_box="0.203,0.203,0.812,0.797" />
+  <texture name="materials_ui_x_24.png" vector_file="phosphor/x.svg" vector_color="IconColor" vector_box="0.100,0.100,0.900,0.900" />
 
-  <texture name="Progress_1" file_name="icons/Progress_1.png" preload="true" />
-  <texture name="Progress_2" file_name="icons/Progress_2.png" preload="true" />
-  <texture name="Progress_3" file_name="icons/Progress_3.png" preload="true" />
-  <texture name="Progress_4" file_name="icons/Progress_4.png" preload="true" />
-  <texture name="Progress_5" file_name="icons/Progress_5.png" preload="true" />
-  <texture name="Progress_6" file_name="icons/Progress_6.png" preload="true" />
-  <texture name="Progress_7" file_name="icons/Progress_7.png" preload="true" />
-  <texture name="Progress_8" file_name="icons/Progress_8.png" preload="true" />
-  <texture name="Progress_9" file_name="icons/Progress_9.png" preload="true" />
-  <texture name="Progress_10" file_name="icons/Progress_10.png" preload="true" />
-  <texture name="Progress_11" file_name="icons/Progress_11.png" preload="true" />
-  <texture name="Progress_12" file_name="icons/Progress_12.png" preload="true" />
+  <texture name="Progress_1" file_name="icons/Progress_1.png" preload="true" vector_file="phosphor_authored/spinner-0.svg" vector_color="IconColor" vector_box="0.080,0.080,0.920,0.920" />
+  <texture name="Progress_2" file_name="icons/Progress_2.png" preload="true" vector_file="phosphor_authored/spinner-30.svg" vector_color="IconColor" vector_box="0.080,0.080,0.920,0.920" />
+  <texture name="Progress_3" file_name="icons/Progress_3.png" preload="true" vector_file="phosphor_authored/spinner-60.svg" vector_color="IconColor" vector_box="0.080,0.080,0.920,0.920" />
+  <texture name="Progress_4" file_name="icons/Progress_4.png" preload="true" vector_file="phosphor_authored/spinner-90.svg" vector_color="IconColor" vector_box="0.080,0.080,0.920,0.920" />
+  <texture name="Progress_5" file_name="icons/Progress_5.png" preload="true" vector_file="phosphor_authored/spinner-120.svg" vector_color="IconColor" vector_box="0.080,0.080,0.920,0.920" />
+  <texture name="Progress_6" file_name="icons/Progress_6.png" preload="true" vector_file="phosphor_authored/spinner-150.svg" vector_color="IconColor" vector_box="0.080,0.080,0.920,0.920" />
+  <texture name="Progress_7" file_name="icons/Progress_7.png" preload="true" vector_file="phosphor_authored/spinner-180.svg" vector_color="IconColor" vector_box="0.080,0.080,0.920,0.920" />
+  <texture name="Progress_8" file_name="icons/Progress_8.png" preload="true" vector_file="phosphor_authored/spinner-210.svg" vector_color="IconColor" vector_box="0.080,0.080,0.920,0.920" />
+  <texture name="Progress_9" file_name="icons/Progress_9.png" preload="true" vector_file="phosphor_authored/spinner-240.svg" vector_color="IconColor" vector_box="0.080,0.080,0.920,0.920" />
+  <texture name="Progress_10" file_name="icons/Progress_10.png" preload="true" vector_file="phosphor_authored/spinner-270.svg" vector_color="IconColor" vector_box="0.080,0.080,0.920,0.920" />
+  <texture name="Progress_11" file_name="icons/Progress_11.png" preload="true" vector_file="phosphor_authored/spinner-300.svg" vector_color="IconColor" vector_box="0.080,0.080,0.920,0.920" />
+  <texture name="Progress_12" file_name="icons/Progress_12.png" preload="true" vector_file="phosphor_authored/spinner-330.svg" vector_color="IconColor" vector_box="0.080,0.080,0.920,0.920" />
 
   <texture name="bevel_background" file_name="widgets/bevel_background.png" preload="true" scale.left="12" scale.top="15" scale.right="108" scale.bottom="2"/>
   <texture name="buy_off" file_name="widgets/buy_off.png" preload="true" scale.left="2" scale.top="15" scale.right="67" scale.bottom="4"/>
@@ -940,58 +955,58 @@ with the same filename but different name
   <texture name="buy_press" file_name="widgets/buy_press.png" preload="true" scale.left="2" scale.top="15" scale.right="67" scale.bottom="4"/>
   
   <texture name="hint_background" file_name="windows/hint_background.png" preload="false" scale.left="8" scale.top="70" scale.right="195" scale.bottom="11"/>
-  <texture name="hint_arrow_left" file_name="windows/hint_arrow_left.png" preload="false"/>
-  <texture name="hint_arrow_right" file_name="windows/hint_arrow_right.png" preload="false"/>
-  <texture name="hint_arrow_up" file_name="windows/hint_arrow_up.png" preload="false"/>
-  <texture name="hint_arrow_down" file_name="windows/hint_arrow_down.png" preload="false"/>
-  <texture name="hint_arrow_lower_left" file_name="windows/hint_arrow_lower_left.png" preload="false"/>
+  <texture name="hint_arrow_left" file_name="windows/hint_arrow_left.png" preload="false" vector_file="phosphor/caret-left.svg" vector_color="IconColor" vector_box="0.120,0.083,1.000,0.917" />
+  <texture name="hint_arrow_right" file_name="windows/hint_arrow_right.png" preload="false" vector_file="phosphor/caret-right.svg" vector_color="IconColor" vector_box="0.000,0.083,0.880,0.917" />
+  <texture name="hint_arrow_up" file_name="windows/hint_arrow_up.png" preload="false" vector_file="phosphor/caret-up.svg" vector_color="IconColor" vector_box="0.083,0.120,0.917,1.000" />
+  <texture name="hint_arrow_down" file_name="windows/hint_arrow_down.png" preload="false" vector_file="phosphor/caret-down.svg" vector_color="IconColor" vector_box="0.083,0.000,0.917,0.880" />
+  <texture name="hint_arrow_lower_left" file_name="windows/hint_arrow_lower_left.png" preload="false" vector_file="phosphor/arrow-down-left.svg" vector_color="IconColor" vector_box="0.042,0.000,0.917,0.880" />
 
   <texture name="Yellow_Gradient" file_name="windows/yellow_gradient.png"/>
-  <texture name="Popup_Caution" file_name="icons/pop_up_caution.png"/>
-  <texture name="Camera_Drag_Dot" file_name="world/CameraDragDot.png"/>
+  <texture name="Popup_Caution" file_name="icons/pop_up_caution.png" vector_file="phosphor/warning.svg" vector_color="#E1C801" />
+  <texture name="Camera_Drag_Dot" file_name="world/CameraDragDot.png" vector_file="phosphor/circle.svg" vector_color="IconColor" vector_box="0.071,0.143,0.929,0.929" />
   <texture name="NavBar Separator" file_name="navbar/separator.png"/>
 
-  <texture name="Cake" file_name="icons/cake_32.png" preload="false"/>
+  <texture name="Cake" file_name="icons/cake_32.png" preload="false" vector_file="phosphor/cake.svg" vector_color="IconColor" />
 
-  <texture name="AccountLevel_Plus" file_name="icons/AccountLevel_Plus.png" preload="false" />
-  <texture name="AccountLevel_Premium" file_name="icons/AccountLevel_Premium.png" preload="false" />
+  <texture name="AccountLevel_Plus" file_name="icons/AccountLevel_Plus.png" preload="false" vector_file="phosphor/crown.svg" vector_color="IconColor" vector_box="0.100,0.100,0.900,0.900" />
+  <texture name="AccountLevel_Premium" file_name="icons/AccountLevel_Premium.png" preload="false" vector_file="phosphor/crown.svg" vector_color="IconColor" vector_box="0.100,0.100,0.900,0.900" />
 
   <texture name="Default_Outfit_Photo" file_name="icons/Default_Outfit_Photo.png" preload="true"/>
-  <texture name="Notification_Condense" file_name="icons/Icon_Notification_Condense.png" preload="true"/>
-  <texture name="Notification_Expand" file_name="icons/Icon_Notification_Expand.png" preload="true"/>
+  <texture name="Notification_Condense" file_name="icons/Icon_Notification_Condense.png" preload="true" vector_file="phosphor/caret-up.svg" vector_color="#8C8C8C" />
+  <texture name="Notification_Expand" file_name="icons/Icon_Notification_Expand.png" preload="true" vector_file="phosphor/caret-down.svg" vector_color="#8C8C8C" />
   <texture name="System_Notification" file_name="icons/SL_Logo.png" preload="true"/>
-  <texture name="Icon_Attachment_Small" file_name="icons/Icon_Attachment_Small.png"	preload="true"/>
-  <texture name="Icon_Attachment_Large" file_name="icons/Icon_Attachment_Large.png"	preload="true"/>
+  <texture name="Icon_Attachment_Small" file_name="icons/Icon_Attachment_Small.png"	preload="true" vector_file="phosphor/paperclip.svg" vector_color="IconColor" vector_box="0.100,0.100,0.900,0.900" />
+  <texture name="Icon_Attachment_Large" file_name="icons/Icon_Attachment_Large.png"	preload="true" vector_file="phosphor/paperclip.svg" vector_color="IconColor" vector_box="0.100,0.100,0.900,0.900" />
 
-  <texture name="Single_Folder_Mode" file_name="icons/single_folder_mode.png" preload="true"/>
-  <texture name="Multi_Folder_Mode" file_name="icons/multi_folder_mode.png" preload="true"/>
-  <texture name="Single_Folder_Back" file_name="icons/single_folder_back.png" preload="true"/>
-  <texture name="Single_Folder_Forward" file_name="icons/single_folder_forward.png" preload="true"/>
-  <texture name="Single_Folder_Up" file_name="icons/single_folder_up.png" preload="true"/>
-  <texture name="Icon_Color_Palette" file_name="icons/Icon_Color_Palette.png" preload="false"/>
-  <texture name="Icon_Font_Size" file_name="icons/Icon_Font_Size.png" preload="false"/>
+  <texture name="Single_Folder_Mode" file_name="icons/single_folder_mode.png" preload="true" vector_file="phosphor/folder.svg" vector_color="IconColor@80" vector_box="0.167,0.167,0.833,0.833" />
+  <texture name="Multi_Folder_Mode" file_name="icons/multi_folder_mode.png" preload="true" vector_file="phosphor/folders.svg" vector_color="IconColor@80" vector_box="0.056,0.167,0.944,0.833" />
+  <texture name="Single_Folder_Back" file_name="icons/single_folder_back.png" preload="true" vector_file="phosphor/arrow-left.svg" vector_color="IconColor@B3" vector_box="0.111,0.222,0.889,0.833" />
+  <texture name="Single_Folder_Forward" file_name="icons/single_folder_forward.png" preload="true" vector_file="phosphor/arrow-right.svg" vector_color="IconColor@B3" vector_box="0.111,0.222,0.889,0.833" />
+  <texture name="Single_Folder_Up" file_name="icons/single_folder_up.png" preload="true" vector_file="phosphor/arrow-up.svg" vector_color="IconColor@B3" vector_box="0.222,0.111,0.833,0.889" />
+  <texture name="Icon_Color_Palette" file_name="icons/Icon_Color_Palette.png" preload="false" vector_file="phosphor/palette.svg" vector_color="IconColor@CC" vector_box="0.000,0.111,0.944,0.889" />
+  <texture name="Icon_Font_Size" file_name="icons/Icon_Font_Size.png" preload="false" vector_file="phosphor/text-aa.svg" vector_color="IconColor@CC" vector_box="0.056,0.167,0.944,0.833" />
  
   <texture name="SlipstreamRelease128" file_name="slipstream/slipstream_128.png" preload="false" />
   <texture name="SlipstreamBeta128" file_name="slipstream/slipstream_128.png" preload="false" />
   <texture name="SlipstreamProject128" file_name="slipstream/slipstream_128.png" preload="false" />
   <texture name="SlipstreamTest128" file_name="slipstream/slipstream_128.png" preload="false" />
 
-  <texture name="social_discord" file_name="slipstream/discord_32.png" preload="false" />
-  <texture name="social_mastodon" file_name="slipstream/mastodon_32.png" preload="false" />
+  <texture name="social_discord" file_name="slipstream/discord_32.png" preload="false" vector_file="phosphor/discord-logo.svg" vector_color="#5865F2" />
+  <texture name="social_mastodon" file_name="slipstream/mastodon_32.png" preload="false" vector_file="phosphor/mastodon-logo.svg" vector_color="#6364FF" />
     <texture name="social_bluesky" file_name="slipstream/bluesky.png" preload="false" />
-    <texture name="social_github" file_name="slipstream/github.png" preload="false" />
+    <texture name="social_github" file_name="slipstream/github.png" preload="false" vector_file="phosphor/github-logo.svg" vector_color="IconColor" />
 
-  <texture name="Cam_Recall" file_name="icons/Cam_Recall.png"/>
-  <texture name="Cam_Save" file_name="icons/Cam_Save.png"/>
-  <texture name="Icon_Pointer" file_name="icons/Icon_Pointer.png" preload="false"/>
+  <texture name="Cam_Recall" file_name="icons/Cam_Recall.png" vector_file="phosphor/camera-rotate.svg" vector_color="IconColor@BF" vector_box="0.056,0.056,0.944,0.833" />
+  <texture name="Cam_Save" file_name="icons/Cam_Save.png" vector_file="phosphor/camera-plus.svg" vector_color="IconColor@BF" vector_box="0.056,0.056,0.944,0.833" />
+  <texture name="Icon_Pointer" file_name="icons/Icon_Pointer.png" preload="false" vector_file="phosphor/cursor.svg" vector_color="#B2B2B2" vector_box="0.267,0.000,0.733,1.000" />
 
-  <texture name="Script_Undo" file_name="script_editor/script_undo.png" preload="false" />
-  <texture name="Script_Redo" file_name="script_editor/script_redo.png" preload="false" />
-	<texture name="Poser_Visual_On"			file_name="icons/visual_pose_enabled.png" />
+  <texture name="Script_Undo" file_name="script_editor/script_undo.png" preload="false" vector_file="phosphor/arrow-u-up-left.svg" vector_color="#A7A7A7" vector_box="0.000,0.111,1.000,0.833" />
+  <texture name="Script_Redo" file_name="script_editor/script_redo.png" preload="false" vector_file="phosphor/arrow-u-up-right.svg" vector_color="#A7A7A7" vector_box="0.000,0.111,1.000,0.833" />
+	<texture name="Poser_Visual_On"			file_name="icons/visual_pose_enabled.png" vector_file="phosphor/person-arms-spread.svg" vector_color="#5A7B53" vector_box="0.004,0.055,0.994,0.943" />
 	<texture name="Edit_Flip_X"			file_name="icons/visual_pose_enabled.png" />
-  <texture name="Script_Running" file_name="script_editor/green_square.png" preload="false" />
-  <texture name="Script_NotRunning" file_name="script_editor/yellow_square.png" preload="false" />
-  <texture name="Script_Error" file_name="script_editor/red_square.png" preload="false" />
+  <texture name="Script_Running" file_name="script_editor/green_square.png" preload="false" vector_file="phosphor/square.svg" vector_color="IconSuccessColor@80" vector_box="0.143,0.143,0.857,0.857" />
+  <texture name="Script_NotRunning" file_name="script_editor/yellow_square.png" preload="false" vector_file="phosphor/square.svg" vector_color="IconWarningColor@80" vector_box="0.143,0.143,0.857,0.857" />
+  <texture name="Script_Error" file_name="script_editor/red_square.png" preload="false" vector_file="phosphor/square.svg" vector_color="IconErrorColor@80" vector_box="0.143,0.143,0.857,0.857" />
 <texture name="Dpad" file_name="bottomtray/Dpad.png" preload="false" /> <!-- game control rows in Preferences > Controls -->
 <!-- <SS:GameControl> Controller pictures and prompt icons, CC0 (see gamecontrol/CREDITS.txt) -->
 <texture name="GameControl_Body_xbox" file_name="gamecontrol/body_xbox.png" use_mips="true" preload="false" />

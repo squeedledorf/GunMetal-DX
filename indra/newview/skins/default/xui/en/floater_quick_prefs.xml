@@ -124,7 +124,7 @@
      left_pad="0"
      top_delta="-2"
      name="qp_upscale"
-     tool_tip="Render the world with AMD FidelityFX Super Resolution 3.1 temporal upscaling (turns TAA on). Native AA keeps full resolution and uses FSR for anti-aliasing only; the other presets render the world at a lower resolution: faster, softer. The interface always stays at full resolution. DLSS: NVIDIA DLSS (GeForce RTX; needs the separately built shim, see the DLSS page in the wiki); Ray Reconstruction is set in Preferences > Graphics > Advanced."
+     tool_tip="Render the world with AMD FidelityFX Super Resolution 3.1 temporal upscaling (turns TAA on). Native AA keeps full resolution and uses FSR for anti-aliasing only; the other presets render the world at a lower resolution: faster, softer. The interface always stays at full resolution. DLSS: NVIDIA DLSS (GeForce RTX; needs the separately built shim, see the DLSS page in the wiki); Ray Reconstruction is set in Preferences > Graphics > Post FX."
      width="180">
     <combo_box.item label="Off (native)" name="0" value="0"/>
     <combo_box.item label="FSR Native AA (1x)" name="1" value="1"/>

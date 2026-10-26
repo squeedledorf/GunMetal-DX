@@ -19,6 +19,7 @@ set(llimage_SOURCE_FILES
     llimagej2c.cpp
     llimagejpeg.cpp
     llimagepng.cpp
+    llimagesvg.cpp
     llimagetga.cpp
     llimagetiff.cpp
     llimageworker.cpp
@@ -36,6 +37,7 @@ set(llimage_HEADER_FILES
     llimagej2c.h
     llimagejpeg.h
     llimagepng.h
+    llimagesvg.h
     llimagetga.h
     llimagetiff.h
     llimageworker.h

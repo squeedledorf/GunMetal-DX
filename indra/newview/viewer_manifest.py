@@ -85,6 +85,10 @@ class ViewerManifest(LLManifest):
                 supporters_names = self.extract_names(supporters_path)
                 self.put_in_file(supporters_names.encode(), "supporters.txt", src=supporters_path)
 
+                # <GMDX> the volumetric clouds' cloud bodies (CorvaeOboro's CC0 volumes,
+                # scripts/clouds/corvae_shapes.py)
+                self.path("gmdx_cloud_shapes.bin")
+
                 # ... and the default camera position settings
                 self.path("camera")
 
@@ -189,6 +193,10 @@ class ViewerManifest(LLManifest):
                 with self.prefix(src_dst="*/textures"):
                     self.path("*/*.jpg")
                     self.path("*/*.png")
+                    # #1056: Phosphor vector icons (vector_file in textures.xml) + their licence
+                    self.path("phosphor/*.svg")
+                    self.path("phosphor/LICENSE")
+                    self.path("phosphor_authored/*.svg")   # our own, in the same style
                     self.path("salt_and_pepper.jpg")
                     self.path("*.tga")
                     self.path("*.j2c")

@@ -13,14 +13,18 @@
  *      spheres (GI-4), the counters zeroed;
  *   3. recordGI (after the RT reflections and the projector sampler, before BASE / COMBINE, on the
  *      lighting's queue): the GI trace (pass 11 -DCLEAN_GI_TRACE: one ray per GI texel, its hit shaded
- *      as the RT reflections shade theirs, reservoir reuse), the cache's resolve (GI-4), the GI
+ *      as the RT reflections shade theirs, reservoir reuse; #1031 RenderVKGISplitKernels: as the
+ *      TRACE / SHADE / REUSE / RESHADE / TAIL stages over mGiHit; #1036 RenderVKGIShadeSplit: SHADE as
+ *      MISS / HIT-MAT / HIT-LIGHT over TRACE's hit / miss lists), the cache's resolve (GI-4), the GI
  *      denoiser (the #85 temporal + a-trous, a second LLCleanDenoiserVK: its own images, never the
  *      shadow channels'), the stats copy;
  *   4. the combine / BASE (clean_deferred_light.comp deferReflIn): the denoised GI REPLACES the
  *      probes' diffuse irradiance where it has an estimate (x RenderVKGIIntensity, floored by
  *      RenderVKGIMinAmbient x the probes' value); the probes stay the specular and the far field.
  * VRAM: the GI denoiser (112 B per GI texel: ~103 MB at 1440p half extent), the reservoirs
- * (64 B per GI texel), the state (1.2 KB + 48 B per cache slot: 12 MB at 2^18). All fixed by the
+ * (64 B per GI texel), the split stages' records (100 B per GI texel + 48 B: ~88 MB at 1440p half extent;
+ * the #1036 shade split's lists and material records live in the same space),
+ * the state (1.2 KB + 48 B per cache slot: 12 MB at 2^18). All fixed by the
  * extent / the settings, allocated soft (#697: a refusal turns GI off and retries in 30 s), freed
  * when GI is switched off or held unused for kRtReflHoldSecs.
  *
@@ -141,6 +145,8 @@ struct GiCfg
     bool reprojSearch = true;  // RenderVKGIReprojSearch
     U32 disoccTaps = 4;    // RenderVKGIDisoccTaps
     bool upsNormal = true; // RenderVKGIUpsampleNormal
+    bool split = true;     // RenderVKGISplitKernels (#1031)
+    bool shadeSplit = true;    // RenderVKGIShadeSplit (#1036)
 };
 GiCfg giCfg()
 {
@@ -186,6 +192,8 @@ GiCfg giCfg()
     static LLCachedControl<U32>  s_rsearch(gSavedSettings, "RenderVKGIReprojSearch", 1U);
     static LLCachedControl<U32>  s_dtaps(gSavedSettings, "RenderVKGIDisoccTaps", 4U);
     static LLCachedControl<U32>  s_upsn(gSavedSettings, "RenderVKGIUpsampleNormal", 1U);
+    static LLCachedControl<bool> s_split(gSavedSettings, "RenderVKGISplitKernels", true);
+    static LLCachedControl<bool> s_shsplit(gSavedSettings, "RenderVKGIShadeSplit", true);
     c.mode = std::min<U32>(s_mode, 3u);
     c.scale = s_scale >= 0.75f ? 1.f : (s_scale >= 0.375f ? 0.5f : 0.25f);
     c.intensity = std::clamp((F32)s_int, 0.f, 16.f);
@@ -226,6 +234,8 @@ GiCfg giCfg()
     c.reprojSearch = s_rsearch != 0u;
     c.disoccTaps = std::min<U32>(s_dtaps, 8u);
     c.upsNormal = s_upsn != 0u;
+    c.split = s_split;
+    c.shadeSplit = s_shsplit;
 #endif
     return c;
 }
@@ -260,7 +270,55 @@ void LLCleanRendererVK::giInit(VkDevice dev)
         createComputePipelineInto(dev, m, mRtReflLayout, 0u, giLitSpec(), &mGiResolvePipe, "mGiResolvePipe (DeferGiResolve)");
         destroyShaderModuleDeferred(dev, m, nullptr);
     }
+    if (mRtReflLayout)
+    {
+        // (#1031) the split stages (distinct module names: RenderVKPipelineStats logs each one's registers)
+        struct Stage { const uint32_t* code; size_t bytes; const char* mod; const char* name; };
+        const Stage st[GIS_COUNT] = {
+            {kWorldDeferGiSplitTraceSpv, kWorldDeferGiSplitTraceSpv_bytes, "DeferGiSplitTrace", "mGiSplitPipe (DeferGiSplitTrace)"},
+            {kWorldDeferGiSplitShadeSpv, kWorldDeferGiSplitShadeSpv_bytes, "DeferGiSplitShade", "mGiSplitPipe (DeferGiSplitShade)"},
+            {kWorldDeferGiSplitReuseSpv, kWorldDeferGiSplitReuseSpv_bytes, "DeferGiSplitReuse", "mGiSplitPipe (DeferGiSplitReuse)"},
+            {kWorldDeferGiSplitReshadeSpv, kWorldDeferGiSplitReshadeSpv_bytes, "DeferGiSplitReshade",
+             "mGiSplitPipe (DeferGiSplitReshade)"}};
+        for (uint32_t i = 0; i < GIS_COUNT; ++i)
+        {
+            if (mGiSplitPipe[i]) continue;
+            VkShaderModule m = giModule(dev, st[i].code, st[i].bytes, st[i].mod);
+            createComputePipelineInto(dev, m, mRtReflLayout, 0u, giLitSpec(), &mGiSplitPipe[i], st[i].name);
+            destroyShaderModuleDeferred(dev, m, nullptr);
+        }
+        // (#1036) the shade split's stages
+        const Stage sh[GSS_COUNT] = {
+            {kWorldDeferGiSplitMissSpv, kWorldDeferGiSplitMissSpv_bytes, "DeferGiSplitMiss", "mGiShadePipe (DeferGiSplitMiss)"},
+            {kWorldDeferGiSplitHitMatSpv, kWorldDeferGiSplitHitMatSpv_bytes, "DeferGiSplitHitMat",
+             "mGiShadePipe (DeferGiSplitHitMat)"},
+            {kWorldDeferGiSplitHitLightSpv, kWorldDeferGiSplitHitLightSpv_bytes, "DeferGiSplitHitLight",
+             "mGiShadePipe (DeferGiSplitHitLight)"}};
+        for (uint32_t i = 0; i < GSS_COUNT; ++i)
+        {
+            if (mGiShadePipe[i]) continue;
+            VkShaderModule m = giModule(dev, sh[i].code, sh[i].bytes, sh[i].mod);
+            createComputePipelineInto(dev, m, mRtReflLayout, 0u, giLitSpec(), &mGiShadePipe[i], sh[i].name);
+            destroyShaderModuleDeferred(dev, m, nullptr);
+        }
+    }
     writeGiBindings();
+}
+
+// (#1031) the split stages can run this recording: every pipeline (async builds landed) + the records
+bool LLCleanRendererVK::giSplitReady(uint32_t w, uint32_t h) const
+{
+    for (uint32_t i = 0; i < GIS_COUNT; ++i)
+        if (!mGiSplitPipe[i]) return false;
+    return mGiHit.buffer && mGiHitW == w && mGiHitH == h;
+}
+
+// (#1036) the shade split's three pipelines exist (async builds landed); else SHADE
+bool LLCleanRendererVK::giShadeSplitReady() const
+{
+    for (uint32_t i = 0; i < GSS_COUNT; ++i)
+        if (!mGiShadePipe[i]) return false;
+    return true;
 }
 
 void LLCleanRendererVK::giDestroy()
@@ -269,6 +327,14 @@ void LLCleanRendererVK::giDestroy()
     VkDevice dev = mCtx->device();
     if (mGiTracePipe) { vkDestroyPipeline(dev, mGiTracePipe, nullptr); mGiTracePipe = VK_NULL_HANDLE; }
     if (mGiResolvePipe) { vkDestroyPipeline(dev, mGiResolvePipe, nullptr); mGiResolvePipe = VK_NULL_HANDLE; }
+    for (VkPipeline& sp : mGiSplitPipe)
+        if (sp) { vkDestroyPipeline(dev, sp, nullptr); sp = VK_NULL_HANDLE; }
+    for (VkPipeline& sp : mGiShadePipe)
+        if (sp) { vkDestroyPipeline(dev, sp, nullptr); sp = VK_NULL_HANDLE; }
+    if (mGiHit.buffer) { mCtx->destroyBuffer(mGiHit); mGiHit = GpuBuffer{}; }
+    mGiHitW = mGiHitH = 0;
+    mGiSplitNow = false;
+    mGiShadeSplitNow = false;
     if (mGiState.buffer) { mCtx->destroyBuffer(mGiState); mGiState = GpuBuffer{}; }
     if (mGiRes.buffer) { mCtx->destroyBuffer(mGiRes); mGiRes = GpuBuffer{}; }
     if (mGiStatRb.buffer) { mCtx->destroyBuffer(mGiStatRb); mGiStatRb = GpuBuffer{}; }
@@ -296,13 +362,13 @@ void LLCleanRendererVK::writeGiMotion()
     else              mGiDn->setMotion(VK_NULL_HANDLE, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL);
 }
 
-// Set 3 bindings 18-23 (callers guarantee no frame in flight uses the set).
+// Set 3 bindings 18-23 + 25 (callers guarantee no frame in flight uses the set).
 void LLCleanRendererVK::writeGiBindings()
 {
     if (!mDsetDeferSplit || !mCtx) return;
     VkDescriptorImageInfo ii[4]{};
-    VkDescriptorBufferInfo bi[2]{};
-    VkWriteDescriptorSet w[6]{};
+    VkDescriptorBufferInfo bi[3]{};
+    VkWriteDescriptorSet w[7]{};
     uint32_t n = 0;
     // (the GI denoiser's images; without it -- its init failed -- the projector denoiser's views, which
     //  have the same formats: the combine / BASE declare 18-21 statically and read them only on a GI
@@ -334,6 +400,15 @@ void LLCleanRendererVK::writeGiBindings()
             ++n;
         }
     }
+    // (#1031) 25: the split stages' records (only the split pipelines declare it)
+    if (const VkBuffer hb = mGiHit.buffer ? mGiHit.buffer : mRsResDummy.buffer)
+    {
+        bi[2] = {hb, 0, VK_WHOLE_SIZE};
+        w[n].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w[n].dstSet = mDsetDeferSplit;
+        w[n].dstBinding = kDsBindingGiHit; w[n].descriptorCount = 1;
+        w[n].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[n].pBufferInfo = &bi[2];
+        ++n;
+    }
     if (n) vkUpdateDescriptorSets(mCtx->device(), n, w, 0, nullptr);
     // draw set 0 binding 53: the same state buffer for the forward lit FS (CLEAN_GI_FORWARD) -- or (#978
     // phase 2, one-frame-latency GI) its copy, mGiStateFwd, while one exists for this cache size: the trace
@@ -357,6 +432,8 @@ void LLCleanRendererVK::writeGiBindings()
 void LLCleanRendererVK::giDecide(uint32_t rw, uint32_t rh)
 {
     mGiNow = false;
+    mGiSplitNow = false;    // (#1031: decided below, on a GI frame)
+    mGiShadeSplitNow = false;   // (#1036: ditto)
     mGiLagNow = false;      // (#978 phase 2: decided below, on a GI frame)
     mGiFwdCopied = false;
     mGiLagValue = 0;        // (joined by the last recording, at the latest by its tail: asyncSubmitFrame)
@@ -453,7 +530,13 @@ void LLCleanRendererVK::giDecide(uint32_t rw, uint32_t rh)
     const bool needImg = !mGiDn->allocated() || mGiDn->width() != w || mGiDn->height() != h || !mGiState.buffer
                       || mGiStateSlots != slots;
     const bool needRes = wantRes ? (!mGiRes.buffer || mGiResW != w || mGiResH != h) : (mGiRes.buffer != VK_NULL_HANDLE);
-    if (needImg || needRes)
+    // (#1031) the split stages' records: wanted while RenderVKGISplitKernels is on and every stage's
+    // pipeline exists (a refusal: the fused kernel, retried after mGiHitRetryAt)
+    bool splitPipes = true;
+    for (uint32_t i = 0; i < GIS_COUNT; ++i) splitPipes = splitPipes && mGiSplitPipe[i] != VK_NULL_HANDLE;
+    const bool wantHit = cfg.split && splitPipes && (mGiHit.buffer || now >= mGiHitRetryAt);
+    const bool needHit = wantHit ? (!mGiHit.buffer || mGiHitW != w || mGiHitH != h) : (mGiHit.buffer != VK_NULL_HANDLE);
+    if (needImg || needRes || needHit)
     {
         // (2026-10-22, the Beta 5 DEVICE_LOST rule) never re-created under this recording: draw set 0
         // is bound already and set 3 / the GI denoiser's set would be rewritten behind a device wait
@@ -464,9 +547,10 @@ void LLCleanRendererVK::giDecide(uint32_t rw, uint32_t rh)
             mGiReq = GiReq{};
             mGiReq.pending = true;
             mGiReq.w = w; mGiReq.h = h; mGiReq.slots = slots; mGiReq.wantRes = wantRes; mGiReq.scale = cfg.scale;
+            mGiReq.wantHit = wantHit;
             if (needImg) { mGiResPrevOk = false; return; }
         }
-        else if (!giApply(w, h, slots, wantRes, cfg.scale))   // (RenderVKResizeAtFrameStart 0: in place)
+        else if (!giApply(w, h, slots, wantRes, cfg.scale, wantHit))   // (RenderVKResizeAtFrameStart 0: in place)
             return;
     }
     // (#978 phase 2) ONE-FRAME-LATENCY GI (RenderVKGILatencyFrame; llcleangivk.cpp GI LATENCY FRAME): its
@@ -497,6 +581,10 @@ void LLCleanRendererVK::giDecide(uint32_t rw, uint32_t rh)
         mGiLagNow = mGiLagWant && giLagReady(rw, rh);
     }
     mGiNow = true;
+    mGiSplitNow = wantHit && giSplitReady(w, h);   // (#1031: else the fused kernel this recording)
+    // (#1036) SHADE as MISS / HIT-MAT / HIT-LIGHT over TRACE's lists (same records: no allocation of
+    // its own); while its pipelines compile, SHADE
+    mGiShadeSplitNow = mGiSplitNow && cfg.shadeSplit && giShadeSplitReady();
     mGiLastActive = now;
     mGiDn->beginFrame();
     ++mGiFrame;
@@ -535,6 +623,10 @@ void LLCleanRendererVK::giFreeAll()
     if (mGiDn && mGiDn->allocated()) mGiDn->release();
     if (mGiState.buffer) { mCtx->destroyBuffer(mGiState); mGiState = GpuBuffer{}; }
     if (mGiRes.buffer) { mCtx->destroyBuffer(mGiRes); mGiRes = GpuBuffer{}; }
+    if (mGiHit.buffer) { mCtx->destroyBuffer(mGiHit); mGiHit = GpuBuffer{}; }   // (#1031)
+    mGiHitW = mGiHitH = 0;
+    mGiSplitNow = false;
+    mGiShadeSplitNow = false;
     giLagDestroyRes();   // (#978 phase 2: the forward copy, the depth copy)
     mGiStateSlots = ~0u;
     mGiResW = mGiResH = 0;
@@ -545,7 +637,7 @@ void LLCleanRendererVK::giFreeAll()
 // The GI resources at this extent / cache size (each change waits for the device; set 3's GI
 // bindings rewritten). False: the denoiser's images or the state buffer were refused (#697: GI
 // off, retry in 30 s); refused reservoirs only drop the reuse.
-bool LLCleanRendererVK::giApply(uint32_t w, uint32_t h, uint32_t slots, bool wantRes, float scale)
+bool LLCleanRendererVK::giApply(uint32_t w, uint32_t h, uint32_t slots, bool wantRes, float scale, bool wantHit)
 {
     if (!mCtx || !mGiDn) return false;
     const double now = giClock();
@@ -617,6 +709,39 @@ bool LLCleanRendererVK::giApply(uint32_t w, uint32_t h, uint32_t slots, bool wan
                                << " MB) were refused (VRAM); no reuse (RenderVKGI acts as 1)" << LL_ENDL;
         else mCtx->setObjectName(VK_OBJECT_TYPE_BUFFER, (uint64_t)mGiRes.buffer, "giReservoirs");
     }
+    // (#1031) the split stages' records at the GI extent (the re-shade list + 96 B per GI texel)
+    if (!wantHit && mGiHit.buffer)
+    {
+        vkDeviceWaitIdle(mCtx->device());
+        mCtx->destroyBuffer(mGiHit);
+        mGiHit = GpuBuffer{};
+        mGiHitW = mGiHitH = 0;
+        changed = true;
+    }
+    if (wantHit && (!mGiHit.buffer || mGiHitW != w || mGiHitH != h))
+    {
+        vkDeviceWaitIdle(mCtx->device());
+        if (mGiHit.buffer) { mCtx->destroyBuffer(mGiHit); mGiHit = GpuBuffer{}; }
+        const VkDeviceSize bytes = giHitBytes(w, h);
+        {
+            VkMemScope memcat(VKMEM_DENOISE);
+            VkDeviceContext::SoftAllocScope soft(mCtx);
+            // (#1036: + transfer dst -- recordGI clears the hit / miss lists' headers)
+            mGiHit = mCtx->createBuffer(bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT
+                                               | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        }
+        mGiHitW = mGiHit.buffer ? w : 0u;
+        mGiHitH = mGiHit.buffer ? h : 0u;
+        changed = true;
+        if (!mGiHit.buffer)
+        {
+            mGiHitRetryAt = now + 30.0;
+            LL_WARNS("Vulkan") << "ray-traced GI: the split stages' records (" << ((bytes + (1u << 19)) >> 20)
+                               << " MB) were refused (VRAM); the fused GI kernel instead, retry in 30 s" << LL_ENDL;
+        }
+        else mCtx->setObjectName(VK_OBJECT_TYPE_BUFFER, (uint64_t)mGiHit.buffer, "giRecords");
+    }
     if (changed)
     {
         vkDeviceWaitIdle(mCtx->device());
@@ -624,7 +749,8 @@ bool LLCleanRendererVK::giApply(uint32_t w, uint32_t h, uint32_t slots, bool wan
         writeGiBindings();
         LL_INFOS("Vulkan") << "ray-traced GI: " << w << "x" << h << " (RenderVKGIScale " << scale << "), denoiser "
                            << ((mGiDn->bytes() + (1u << 19)) >> 20) << " MB, reservoirs "
-                           << ((mGiRes.buffer ? (uint64_t)w * h * 64u : 0u) >> 20) << " MB, state + cache "
+                           << ((mGiRes.buffer ? (uint64_t)w * h * 64u : 0u) >> 20) << " MB, split-stage records "
+                           << ((mGiHit.buffer ? (uint64_t)giHitBytes(w, h) : 0u) >> 20) << " MB, state + cache "
                            << ((sizeof(GiHeader) + (uint64_t)slots * 48u) >> 20) << " MB (" << slots << " cache slots)"
                            << LL_ENDL;
     }
@@ -640,7 +766,7 @@ void LLCleanRendererVK::giPrestep()
     mGiReq = GiReq{};
     if (!mCtx || !mGiDn) return;
     if (r.free) { giFreeAll(); return; }
-    if (r.w) giApply(r.w, r.h, r.slots, r.wantRes, r.scale);
+    if (r.w) giApply(r.w, r.h, r.slots, r.wantRes, r.scale, r.wantHit);
     // (#978 phase 2: after the state buffer -- the forward copy takes its cache size)
     if (r.lag) giLagEnsure(r.lagW, r.lagH);
     else if (r.lagFree) giLagFree();
@@ -705,6 +831,16 @@ void LLCleanRendererVK::giWriteHeader(VkCommandBuffer cmd)
     // hits' ambient fell back to the probes -- more noise, a different colour); its exponential mean
     // follows the new colour.
     h.prm5[0] = cfg.reshadeThr;
+    // (#1041) the own-fixture rule's box limit for the hits' budgeted point-light rays (pass 15's
+    // RenderVKReSTIRFixtureSize: a bulb's own shade / lantern / sconce never shadows its light)
+    {
+        F32 fixture = 1.5f;
+#if defined(LL_HAS_CLEAN_PIPELINE)
+        static LLCachedControl<F32> s_fix(gSavedSettings, "RenderVKReSTIRFixtureSize", 1.5f);
+        fixture = s_fix;
+#endif
+        h.prm5[2] = std::clamp(fixture, 0.f, 16.f);
+    }
     if (cfg.lightChg)
     {
         h.cfg[0] |= GI_F_LIGHT_CHG;
@@ -1193,16 +1329,47 @@ void LLCleanRendererVK::recordGI(VkCommandBuffer cmd, const VKDeferPush& p, uint
     if (!giTraceReady()) return;
     const VkDescriptorSet rtSet = mRT->consumerSet();
     const GiCfg cfg = giCfg();
-    {   // WAR on the GI images / reservoirs / cache (last frame's readers) + the header upload
+    const uint32_t dw = mGiDn->width(), dh = mGiDn->height();
+    const bool split = mGiSplitNow && giSplitReady(dw, dh);
+    const bool shadeSplit = split && mGiShadeSplitNow && giShadeSplitReady();   // (#1036)
+    // (#1039 M1, RenderVKVisQueue) THE VISIBILITY QUEUE: HIT-MAT queues the hits' sun rays, the walk traces
+    // them, HIT-LIGHT resolves (no sun walk in it); the hits past the region take the fused HIT-LIGHT as a tail
+    // (#1039 M2, bit 2: pipeline set 1) + the budget's light rays queued: HIT-LIGHT holds no ray query
+    const uint32_t vs = mVqSet;
+    const bool vq = shadeSplit && mVqGiNow && mVq.buffer && mVisWalkPipe && mGiVqPipe[vs][VQS_MAT] && mGiVqPipe[vs][VQS_LIGHT];
+    if (vq) visQueueBegin(cmd, VQR_GI, 0u, 0u);
+    if (shadeSplit)
+    {
+        // (#1036) the HIT / MISS lists' headers (count 0, dispatch (0, 0, 1)) before TRACE appends: last
+        // frame's stages read them (storage + indirect) -- WAR -- then the clear
         VkMemoryBarrier2 m{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
-        m.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT; m.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+        m.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
+        m.dstStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT; m.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        VkDependencyInfo d{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        d.memoryBarrierCount = 1; d.pMemoryBarriers = &m;
+        vkCmdPipelineBarrier2(cmd, &d);
+        const uint32_t hdr[8] = {0u, 0u, 0u, 1u, 0u, 0u, 0u, 1u};
+        vkCmdUpdateBuffer(cmd, mGiHit.buffer, 16u, sizeof(hdr), hdr);
+    }
+    {   // WAR on the GI images / reservoirs / cache (last frame's readers) + the header upload
+        // (#1031: + the re-shade list's header, last frame's indirect dispatches read it)
+        // (#1036: + the HIT / MISS headers' clear -> TRACE's appends and the stages' indirect reads)
+        VkMemoryBarrier2 m{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+        m.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
+        m.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
         m.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
         m.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+        if (shadeSplit)
+        {
+            m.srcStageMask |= VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;
+            m.srcAccessMask |= VK_ACCESS_2_TRANSFER_WRITE_BIT;
+            m.dstStageMask |= VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
+            m.dstAccessMask |= VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT;
+        }
         VkDependencyInfo d{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
         d.memoryBarrierCount = 1; d.pMemoryBarriers = &m;
         vkCmdPipelineBarrier2(cmd, &d);
     }
-    const uint32_t dw = mGiDn->width(), dh = mGiDn->height();
     VKRtReflPush rp{};
     rp.d = p;
     rp.d.flags = p.flags & 0x00FFFFFFu;
@@ -1222,9 +1389,125 @@ void LLCleanRendererVK::recordGI(VkCommandBuffer cmd, const VKDeferPush& p, uint
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mRtReflLayout, 0, 5, sets, 1, &viewOff);
     VK_PUSH_BUDGET_CHECK(rp);
     vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(rp), &rp);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mGiTracePipe);
-    vkCmdDispatch(cmd, (dw + 7u) / 8u, (dh + 7u) / 8u, 1);
-    gpuSubMark(cmd, onAsync ? "c_gi_trace" : "g_gi_trace");
+    if (split)
+    {
+        // (#1031) THE STAGES (clean_deferred_light.comp THE GI KERNEL SPLIT), each reading what the one
+        // before it wrote into the records (compute -> compute RAW); RESHADE and TAIL take their
+        // workgroup count from the re-shade list's header (REUSE's appends: + the indirect read).
+        auto raw = [cmd](bool indirect)
+        {
+            VkMemoryBarrier2 m{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+            m.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT; m.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+            m.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+            m.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+            if (indirect)
+            {
+                m.dstStageMask |= VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
+                m.dstAccessMask |= VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT;
+            }
+            VkDependencyInfo d{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+            d.memoryBarrierCount = 1; d.pMemoryBarriers = &m;
+            vkCmdPipelineBarrier2(cmd, &d);
+        };
+        // 1 TRACE: the fresh rays' walks -> hit records (+ the list's header reset; #1036: + the HIT /
+        // MISS lists, push rtr.z = 1)
+        if (shadeSplit)
+        {
+            VKRtReflPush tp = rp;
+            tp.rtr[2] = 1.f;
+            vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(tp), &tp);
+        }
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mGiSplitPipe[GIS_TRACE]);
+        vkCmdDispatch(cmd, (dw + 7u) / 8u, (dh + 7u) / 8u, 1);
+        gpuSubMark(cmd, onAsync ? "c_gi_trace" : "g_gi_trace");
+        if (shadeSplit)
+        {
+            // (#1036) 2 as MISS + HIT-MAT (independent texels: no barrier between them) -> HIT-LIGHT, each
+            // indirect over its list (TRACE's appends: + the indirect read)
+            vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(rp), &rp);
+            raw(true);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mGiShadePipe[GSS_MISS]);
+            vkCmdDispatchIndirect(cmd, mGiHit.buffer, 2u * 16u + 4u);
+            gpuSubMark(cmd, onAsync ? "c_gi_miss" : "g_gi_miss");
+            VKRtReflPush vp = rp;   // (#1039: the queue's stages -- push rtr3.zw = the region)
+            if (vq)
+            {
+                const VkDeviceAddress qa = visQueueAddr(VQR_GI);
+                vp.rtr3[2] = (uint32_t)(qa & 0xFFFFFFFFull);
+                vp.rtr3[3] = (uint32_t)(qa >> 32);
+                vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(vp), &vp);
+            }
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, vq ? mGiVqPipe[vs][VQS_MAT] : mGiShadePipe[GSS_HITMAT]);
+            vkCmdDispatchIndirect(cmd, mGiHit.buffer, 1u * 16u + 4u);
+            gpuSubMark(cmd, onAsync ? "c_gi_hitmat" : "g_gi_hitmat");
+            if (vq)
+            {
+                // HIT-MAT's requests + its raised dispatch -> the walk; the results -> HIT-LIGHT
+                raw(true);
+                visQueueWalk(cmd, VQR_GI, rp);
+                gpuSubMark(cmd, onAsync ? "c_gi_walk" : "g_gi_walk");
+                raw(false);
+                vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(vp), &vp);
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mGiVqPipe[vs][VQS_LIGHT]);
+                vkCmdDispatchIndirect(cmd, mGiHit.buffer, 1u * 16u + 4u);
+                if (mVqRegion[VQR_GI].entries < dw * dh)
+                {
+                    // the hits past the region: the fused HIT-LIGHT from the first of them (independent texels)
+                    VKRtReflPush tp = rp;
+                    tp.rtr3[1] = mVqRegion[VQR_GI].entries;
+                    vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(tp), &tp);
+                    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mGiShadePipe[GSS_HITLIGHT]);
+                    vkCmdDispatchIndirect(cmd, mGiHit.buffer, 1u * 16u + 4u);
+                }
+                gpuSubMark(cmd, onAsync ? "c_gi_hitlight" : "g_gi_hitlight");
+                vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(rp), &rp);
+                visQueueStats(cmd, VQR_GI);
+            }
+            else
+            {
+                raw(false);
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mGiShadePipe[GSS_HITLIGHT]);
+                vkCmdDispatchIndirect(cmd, mGiHit.buffer, 1u * 16u + 4u);
+                gpuSubMark(cmd, onAsync ? "c_gi_hitlight" : "g_gi_hitlight");
+            }
+        }
+        else
+        {
+            // 2 SHADE: the hits' (or the sky's) radiance -> the samples
+            raw(false);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mGiSplitPipe[GIS_SHADE]);
+            vkCmdDispatch(cmd, (dw + 7u) / 8u, (dh + 7u) / 8u, 1);
+            gpuSubMark(cmd, onAsync ? "c_gi_shade" : "g_gi_shade");
+        }
+        // 3 REUSE: the reservoirs, the visibility rays, every store but the listed texels'
+        raw(false);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mGiSplitPipe[GIS_REUSE]);
+        vkCmdDispatch(cmd, (dw + 7u) / 8u, (dh + 7u) / 8u, 1);
+        gpuSubMark(cmd, onAsync ? "c_gi_reuse" : "g_gi_reuse");
+        // 4 RESHADE + 3 again as TAIL over the re-shade list: only a frame whose picks can want a
+        // re-shade (the temporal reuse + GI_F_LIGHT_CHG); empty lists dispatch no workgroup
+        if ((mGiFlags & GI_F_TEMPORAL) != 0u && cfg.lightChg)
+        {
+            raw(true);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mGiSplitPipe[GIS_RESHADE]);
+            vkCmdDispatchIndirect(cmd, mGiHit.buffer, 4u);
+            gpuSubMark(cmd, onAsync ? "c_gi_reshade" : "g_gi_reshade");
+            raw(true);
+            VKRtReflPush tp = rp;
+            tp.rtr[2] = 1.f;   // (TAIL: the list's texels, with their re-shade results)
+            vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(tp), &tp);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mGiSplitPipe[GIS_REUSE]);
+            vkCmdDispatchIndirect(cmd, mGiHit.buffer, 4u);
+            gpuSubMark(cmd, onAsync ? "c_gi_tail" : "g_gi_tail");
+            vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(rp), &rp);
+        }
+    }
+    else
+    {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mGiTracePipe);
+        vkCmdDispatch(cmd, (dw + 7u) / 8u, (dh + 7u) / 8u, 1);
+        gpuSubMark(cmd, onAsync ? "c_gi_trace" : "g_gi_trace");
+    }
     if ((mGiFlags & GI_F_CACHE) != 0u && mGiResolvePipe && mGiStateSlots != ~0u && mGiStateSlots != 0u)
     {
         // (GI-4) the radiance cache: this frame's accumulations into the means, eviction, invalidation

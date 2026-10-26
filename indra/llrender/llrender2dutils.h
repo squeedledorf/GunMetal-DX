@@ -102,6 +102,10 @@ void gl_washer_segment_2d(F32 outer_radius, F32 inner_radius, F32 start_radians,
 
 void gl_draw_image(S32 x, S32 y, LLTexture* image, const LLColor4& color = UI_VERTEX_COLOR, const LLRectf& uv_rect = LLRectf(0.f, 1.f, 1.f, 0.f));
 void gl_draw_scaled_image(S32 x, S32 y, S32 width, S32 height, LLTexture* image, const LLColor4& color = UI_VERTEX_COLOR, const LLRectf& uv_rect = LLRectf(0.f, 1.f, 1.f, 0.f));
+// #1056: vector icon rasters. Same rectangle as gl_draw_scaled_image, but the origin snaps to a
+// whole physical pixel and the quad is `width`/`height` logical x UI scale rounded -- exactly the
+// raster's size -- so the raster is sampled 1:1 at any UI scale.
+void gl_draw_pixel_snapped_image(S32 x, S32 y, S32 width, S32 height, LLTexture* image, const LLColor4& color, bool solid_color);
 void gl_draw_rotated_image(S32 x, S32 y, F32 degrees, LLTexture* image, const LLColor4& color = UI_VERTEX_COLOR, const LLRectf& uv_rect = LLRectf(0.f, 1.f, 1.f, 0.f));
 void gl_draw_scaled_rotated_image(S32 x, S32 y, S32 width, S32 height, F32 degrees, LLTexture* image, const LLColor4& color = UI_VERTEX_COLOR, const LLRectf& uv_rect = LLRectf(0.f, 1.f, 1.f, 0.f));
 void gl_draw_scaled_image_with_border(S32 x, S32 y, S32 border_width, S32 border_height, S32 width, S32 height, LLTexture* image, const LLColor4 &color, bool solid_color = false, const LLRectf& uv_rect = LLRectf(0.f, 1.f, 1.f, 0.f), bool scale_inner = true);

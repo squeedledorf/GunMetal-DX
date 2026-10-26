@@ -224,11 +224,17 @@ struct Instance {
     vec4 spin_pivot;    // xyz agent-space pivot
 };
 layout(std430, set = 0, binding = 0) readonly buffer Instances { Instance instances[]; };
+// #1033 SLIM RECORDS (clean_vs_inst.glsl; clean_vs_inst.comp derives them every frame): the
+// per-instance reads below go through the 112 B record; the full row is opened only for
+// the rare fields (terrain / enclose-test AABB, spin axis + pivot, GPU texture animation).
+#include "clean_vs_inst.glsl"
+layout(std430, set = 0, binding = 54) readonly buffer VsInstances { VsInst vs_inst[]; };
 // TEMPORAL (#84): every instance as of the PREVIOUS frame (same layout, kept by GPU
 // copies of the changed runs; see LLCleanRendererVK::recordPrevInstances). Only the
 // motion pre-pass consumes what is derived from it.
 #ifdef CLEAN_VS_PREV_POS
 layout(std430, set = 0, binding = 23) readonly buffer PrevInstances { Instance prev_instances[]; };
+layout(std430, set = 0, binding = 55) readonly buffer PrevVsInstances { VsInst prev_vs_inst[]; };   // (#1033)
 #endif
 
 // ATTACHMENT SKINNING (flag bit9 = 512). A statically-worn unrigged attachment
@@ -360,7 +366,8 @@ void main()
         tangent   = ((a_qpos.w & 1) != 0) ? vec4(qvOctDecode(a_otan), (a_qpos.w & 2) != 0 ? -1.0 : 1.0) : vec4(0.0);
 #endif
     }
-    Instance inst = instances[gl_InstanceIndex];
+    const VsInst inst = vs_inst[gl_InstanceIndex];
+    const mat4 inst_model = vsiModel(inst);
 
 #ifdef CLEAN_VS_SKIP_TERRAIN
     // G-BUFFER TERRAIN SPLIT (-DCLEAN_VS_SKIP_TERRAIN, RenderVKGbufTerrainSplit): the deferred
@@ -382,8 +389,8 @@ void main()
     // list exactly; collapsed as F8 below (nothing rasterizes).
     {
         const bool bakeFar = (inst.flags & 32u) != 0u
-            && terrBakeFar(inst.skin_id, terrainBoxDist(inst.model_matrix, inst.aabb_min.xyz, inst.aabb_max.xyz,
-                                                        ssr.terrain_lod.xyz));
+            && terrBakeFar(inst.skin_id, terrainBoxDist(inst_model, instances[gl_InstanceIndex].aabb_min.xyz,
+                                                        instances[gl_InstanceIndex].aabb_max.xyz, ssr.terrain_lod.xyz));
         if (bakeFar == (CLEAN_VS_TERRAIN_SIDE == 1))
         {
             gl_Position = vec4(0.0, 0.0, -2.0, 1.0);
@@ -411,7 +418,7 @@ void main()
         }
     }
 
-    mat4 M = inst.model_matrix;
+    mat4 M = inst_model;
 #ifdef CLEAN_VSPROBE_NO_POSE
     const bool attached = false;   // (#821 register probe)
 #else
@@ -420,13 +427,13 @@ void main()
 #endif
     if (attached)
     {
-        uint bone = min(uint(inst.aabb_max.w + 0.5), 215u);
-        M = jointWorld(avatar_joints[inst.skin_id].world[bone]) * inst.model_matrix;
+        uint bone = min(vsiBone(inst), 215u);
+        M = jointWorld(avatar_joints[inst.skin_id].world[bone]) * inst_model;
     }
 #ifndef CLEAN_VSPROBE_NO_POSE
-    else if (dot(inst.spin_axis.xyz, inst.spin_axis.xyz) > 0.0)
+    else if ((inst.aux & VSI_SPIN) != 0u)
     {
-        M = spinPose(M, inst.spin_axis, inst.spin_pivot, pc.u_cam_time.w);
+        M = spinPose(M, instances[gl_InstanceIndex].spin_axis, instances[gl_InstanceIndex].spin_pivot, pc.u_cam_time.w);
     }
 #endif
 
@@ -477,23 +484,25 @@ void main()
     // attached) keeps this frame's pose: camera-only motion.
     v_prev_world_pos = world_pos.xyz;
     {
-        const Instance pinst = prev_instances[gl_InstanceIndex];
+        const VsInst pinst = prev_vs_inst[gl_InstanceIndex];
+        const mat4 pinst_model = vsiModel(pinst);
         if (attached)
         {
             if ((pinst.flags & 512u) != 0u && pinst.skin_id != 0xFFFFFFFFu
                 && pinst.skin_id < uint(prev_avatar_joints.length()))
             {
-                const uint pbone = min(uint(pinst.aabb_max.w + 0.5), 215u);
+                const uint pbone = min(vsiBone(pinst), 215u);
                 // Same association as this frame's M (static pose -> exactly zero motion).
-                const mat4 PM = jointWorld(prev_avatar_joints[pinst.skin_id].world[pbone]) * pinst.model_matrix;
+                const mat4 PM = jointWorld(prev_avatar_joints[pinst.skin_id].world[pbone]) * pinst_model;
                 v_prev_world_pos = (PM * vec4(lpos, 1.0)).xyz;
             }
         }
         else
         {
-            mat4 PM = pinst.model_matrix;
-            if (dot(pinst.spin_axis.xyz, pinst.spin_axis.xyz) > 0.0)
-                PM = spinPose(PM, pinst.spin_axis, pinst.spin_pivot, ssr.taa_params.x);
+            mat4 PM = pinst_model;
+            if ((pinst.aux & VSI_SPIN) != 0u)
+                PM = spinPose(PM, prev_instances[gl_InstanceIndex].spin_axis,
+                              prev_instances[gl_InstanceIndex].spin_pivot, ssr.taa_params.x);
             v_prev_world_pos = (PM * vec4(lpos, 1.0)).xyz;   // terrain: this frame's morph
         }
     }
@@ -513,8 +522,9 @@ void main()
 #ifdef CLEAN_VSPROBE_NO_TEXANIM
     v_uv           = texcoord0;   // (#821 register probe)
 #else
-    v_uv           = cleanFaceUV(inst.flags, inst.uv_matrix, texcoord0, normal, position,
-                                 inst.model_matrix, pc.u_cam_time.w);
+    v_uv           = cleanFaceUV(inst.flags,
+                                 (inst.flags & 1024u) != 0u ? instances[gl_InstanceIndex].uv_matrix : vsiUv(inst),
+                                 texcoord0, normal, position, inst_model, pc.u_cam_time.w);
 #endif
     v_material_id  = inst.material_id;
     v_tint         = inst.tint;
@@ -545,12 +555,20 @@ void main()
     if (false)   // (#821 register probe)
 #endif
     {
-        const vec3 hc = 0.5 * (inst.aabb_min.xyz + inst.aabb_max.xyz);
-        const vec3 he = 0.5 * abs(inst.aabb_max.xyz - inst.aabb_min.xyz);
-        const vec3 d  = pc.u_cam_time.xyz - (M * vec4(hc, 1.0)).xyz;
-        const bool inside = boxAxisInside(d, M[0].xyz, he.x) && boxAxisInside(d, M[1].xyz, he.y)
-                         && boxAxisInside(d, M[2].xyz, he.z);
-        if (inside) v_flags |= 16384u;
+        // Camera outside the box's bounding sphere (bound_r x the Frobenius norm of mat3(M)
+        // bounds every box point's reach from M[3]): not inside, and the full row's AABB
+        // stays unread. NaN fails the compare and takes the exact test.
+        const float reach = inst.bound_r * sqrt(dot(M[0].xyz, M[0].xyz) + dot(M[1].xyz, M[1].xyz)
+                                                + dot(M[2].xyz, M[2].xyz)) * 1.001 + 0.01;
+        if (!(distance(pc.u_cam_time.xyz, M[3].xyz) > reach))
+        {
+            const vec3 hc = 0.5 * (instances[gl_InstanceIndex].aabb_min.xyz + instances[gl_InstanceIndex].aabb_max.xyz);
+            const vec3 he = 0.5 * abs(instances[gl_InstanceIndex].aabb_max.xyz - instances[gl_InstanceIndex].aabb_min.xyz);
+            const vec3 d  = pc.u_cam_time.xyz - (M * vec4(hc, 1.0)).xyz;
+            const bool inside = boxAxisInside(d, M[0].xyz, he.x) && boxAxisInside(d, M[1].xyz, he.y)
+                             && boxAxisInside(d, M[2].xyz, he.z);
+            if (inside) v_flags |= 16384u;
+        }
     }
 #endif
 #ifdef CLEAN_VS_WORLD_POS
@@ -560,7 +578,7 @@ void main()
 #ifdef CLEAN_VSPROBE_NO_TEXANIM
     v_uv_raw       = texcoord0;   // (#821 register probe)
 #else
-    v_uv_raw       = cleanFaceRawUV(inst.flags, texcoord0, normal, position, inst.model_matrix);
+    v_uv_raw       = cleanFaceRawUV(inst.flags, texcoord0, normal, position, inst_model);
 #endif
     // TERRAIN (bit5): the patch mesh is region-local (model_matrix = region render
     // matrix), so position.xy is LL's terrain UV basis -- legacy detail texgen and the
@@ -579,9 +597,9 @@ void main()
     if (attached && (uint(ssr.weather[14].w + 0.5) & 8u) != 0u && (ac_head.w & 1u) != 0u)
 #endif
     {
-        const mat4 RJ = wxAcRestJoint(min(uint(inst.aabb_max.w + 0.5), 215u));
-        const vec3 rp = (RJ * (inst.model_matrix * vec4(position, 1.0))).xyz;
-        const mat3 O3 = mat3(inst.model_matrix);
+        const mat4 RJ = wxAcRestJoint(min(vsiBone(inst), 215u));
+        const vec3 rp = (RJ * (inst_model * vec4(position, 1.0))).xyz;
+        const mat3 O3 = mat3(inst_model);
         const vec3 rn = mat3(RJ) * (wxAcCofactor(O3) * normal) * (determinant(O3) < 0.0 ? -1.0 : 1.0);
         if (!any(isnan(rp)) && !any(isinf(rp)) && dot(rn, rn) > 1e-20) v_wx_rest = vec4(rp, normalize(rn).z);
     }
@@ -592,7 +610,7 @@ void main()
     v_world_tangent = vec4(0.0);   // (#821 register probe)
 #else
     const mat4 nuvm = matMapOwnUV(inst.material_id, MAP_NORMAL) ? matMapUVMatrix(inst.material_id, MAP_NORMAL)
-                                                                  : inst.uv_matrix;
+                                                                  : vsiUv(inst);
     const vec4 tl  = cleanFaceTangent(inst.flags, nuvm, normal, tangent);
     // Unit-length world tangent (LL normalizes normal_matrix * tangent): mat3(M)
     // carries the object SCALE, and an unnormalized tangent (x20 on a stretched

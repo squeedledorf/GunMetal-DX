@@ -155,11 +155,13 @@ float sunMoveCap(float r, float cap)
 // SVGF mode: the static hard end is 8 frames (header) and the sun's motion caps it.
 float historyCap(float r, bool dyn, bool hard_sun)
 {
-    const float full = max(mp.p0.w, 1.0);
+    const float full = rtHistMax();
     // #841: without a TAA / FSR resolve the mask IS the only integrator of a hard edge (the
     // trace's footprint jitter, clean_rt_shadow_mask.comp): static casters keep the full
     // length there -- an 8-frame average of a jittered binary edge is still a crawling stipple.
-    if (!dyn && ssr.taa_params.w < 0.5 && rtDenoise()) return full;
+    // #1050: likewise under DLSS Ray Reconstruction (rtNoResolve; the view jitter moves the
+    // sample over the footprint instead).
+    if (!dyn && rtMaskSelfIntegrated() && rtDenoise()) return full;
     if (!dyn) return min(full, mix(rtSvgf() ? 8.0 : 4.0, full, smoothstep(1.0, 4.0, max(r, 0.0))));
     if (hard_sun) return 1.0;
     const float hl = min(rtDynHardLen(), full);
@@ -649,6 +651,6 @@ void main()
         diag = vec3(clamp(abs(dot(rtFiniteVis(sun) - rtFiniteVis(rs.rgb), vec3(1.0 / 3.0))) * 4.0, 0.0, 1.0),
                     sdyn ? 1.0 : 0.0, scert ? 1.0 : 0.0);
     if (rtDiagUsed())
-        diag = vec3(clamp(slen / max(mp.p0.w, 1.0), 0.0, 1.0), sdyn ? 1.0 : 0.0, clamp(sa, 0.0, 1.0));
+        diag = vec3(clamp(slen / rtHistMax(), 0.0, 1.0), sdyn ? 1.0 : 0.0, clamp(sa, 0.0, 1.0));
     imageStore(uSunFinal, m, vec4(diag, react));
 }

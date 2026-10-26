@@ -12,6 +12,7 @@
 // with the rest. Inputs match
 // clean_draw.vert / clean_draw_rigged.vert (as clean_shadow_mask.frag).
 #include "clean_translucent.glsl"
+#include "clean_alpha_rule.glsl"   // (#1044: ALPHA_TRANS_MIN / ALPHA_TRANS_FRONT)
 layout(location = 0) flat in uint v_material_id;
 layout(location = 1)      in vec2 v_uv;
 layout(location = 3) flat in vec4 v_tint;
@@ -49,10 +50,10 @@ void main()
     // <SS:Skoomastream> LL-solid texels and mask materials cast in the depth cascade.
     if (base.a >= LL_BLEND_SHADOW_SOLID || m.alpha_cutoff >= 0.0) discard;
 #ifdef TRANS_COLOR
-    if (base.a < 0.004) discard;
+    if (base.a < ALPHA_TRANS_MIN) discard;
     outT = vec4(translucentTransmit(base.rgb, base.a), 1.0);
 #else
     // Nearly invisible texels don't count as "the glass" for the in-front test.
-    if (base.a < 0.02) discard;
+    if (base.a < ALPHA_TRANS_FRONT) discard;
 #endif
 }

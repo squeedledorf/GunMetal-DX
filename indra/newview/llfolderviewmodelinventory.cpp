@@ -375,6 +375,11 @@ bool LLInventorySort::operator()(const LLFolderViewModelItemInventory* const& a,
             // Group order is System Folders, Trash, Normal Folders, Items
             return (a->getSortGroup() < b->getSortGroup());
         }
+        else if (a->getSortGroup() == SG_RLV_FOLDER || b->getSortGroup() == SG_RLV_FOLDER)
+        {
+            // The RLV shared root stays pinned to the top whatever the sort order
+            return (a->getSortGroup() == SG_RLV_FOLDER);
+        }
         else if (mByDate)
         {
             // Trash needs to go to the bottom if we are sorting by date

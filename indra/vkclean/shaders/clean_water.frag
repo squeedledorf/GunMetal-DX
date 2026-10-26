@@ -165,6 +165,10 @@ void main()
         distort2 = mix(distort, distort2, min(1.0, fade * 10.0));
         vec3 refPos2 = scenePos(distort2);
         if (P.z < refPos2.z - 0.05) { distort2 = distort; refPos2 = refPos; }   // sample above water
+        // <GMDX> ...or on a much shallower bottom than the one under this pixel: the waves dragged
+        // bright shallow sand out over deep water in jagged patches (real refraction shifts with
+        // the depth: over deep water it shows deep water).
+        else if (P.z - refPos2.z < 0.5 * (P.z - refPos.z) - 0.25) { distort2 = distort; refPos2 = refPos; }
         fb = textureLod(uSceneColor, distort2, 0.0).rgb;
         // VOLUMETRIC FOG (#718): the solid scene was fogged over the air in front of the
         // water by clean_vol_apply.frag; the surface applies it again below -- take it back
@@ -190,7 +194,10 @@ void main()
     // (#859) the ray-traced reflection of this water surface (compute, half resolution) where it
     // has one: in place of the probe / sky, under SSR as everywhere else
     {
-        const vec4 ri = rtFwdIn(P);
+        // <GMDX> a flat mirror image, displaced by the waves as the refraction is
+        const vec2 roff = wavef.xy * 3.0 * ssr.water[2].w / max(sqrt(dist), 1.0) * 2.0
+                        * vec2(textureSize(uSceneDepth, 0));
+        const vec4 ri = rtFwdInWater(P, roff);
         radiance = mix(radiance, ri.rgb, ri.a);
     }
 #endif

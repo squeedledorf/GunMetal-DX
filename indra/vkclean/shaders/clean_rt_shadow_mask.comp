@@ -221,54 +221,8 @@ float maskTerrainExit(vec3 P, vec3 cam, vec3 Ng)
     return rayQueryGetIntersectionTEXT(rq, true);
 }
 
-// CLUSTER LOD RECEIVER LIFT (#747 fallback; frame info cluster_rt, clean_shadow_rt.glsl
-// rt_cl_lift). An avatar the cluster path draws in the main view casts from its cluster cut
-// (#748 rigged cluster RT, llcleanclusterrtvk.h RIGGED: those faces carry no flag, nothing is
-// lifted). Where one still CASTS from its legacy rigged geometry this frame (the legacy
-// rigged BLAS: RenderVKClusterRTRigged 0, its cluster RT data not ready), while the
-// pre-pass depth this mask rebuilds the receiver from is its CLUSTER surface. The two differ
-// by at most the cut's error, eps = tol_px x max(distance, znear) / px_scale (the selection's
-// own projection bound: llcleanclustervk.h shadowLiftBound): where the cluster surface lies
-// inside the legacy hull, every ray leaving it hit that hull -- hard-edged self-shadow
-// patches along the crossing curves, moving with the pose. A receiver within eps of such a
-// legacy surface (a short camera-ray probe over the rigged classes, +-2 eps around P, any
-// face flagged RT_GEOM_W_CLUSTER_RIG) gets its ray origins lifted by eps along the light-
-// facing normal: out of its own legacy hull, so only occluders nearer than the LOD's own
-// error go unresolved. Returns the lift (m), 0 = none (LOD off, nothing switched, no flagged
-// surface near: the previous behaviour exactly).
-float maskClusterRigLift(vec3 P, vec3 cam)
-{
-    if (ssr.cluster_rt.z < 0.5 || !(ssr.cluster_rt.x > 0.0)) return 0.0;
-    // GATE (#748 perf pass): TLAS pass B counted no switched face traced on its legacy geometry
-    // this frame (word 2 of the RT skinned arena: bit 31 valid | the count, LLCleanClusterRTVK::
-    // recordLiftFlag; 0 = unknown -- no rigged cluster RT / no group map: the probe runs). Every
-    // switched avatar then casts from its cluster cut and there is no legacy hull to leave.
-    if (uint(rt_cl_rig.length()) > 2u && rt_cl_rig[2] == 0x80000000u) return 0.0;
-    vec3 V = P - cam;
-    const float camd = length(V);
-    if (camd < 1e-4) return 0.0;
-    V /= camd;
-    const float eps = ssr.cluster_rt.x * max(camd, ssr.cluster_rt.y);
-    const float w = 2.0 * eps + 1e-3;
-    rayQueryEXT rq;
-    rayQueryInitializeEXT(rq, uTLAS, gl_RayFlagsNoOpaqueEXT, RT_MASK_RIGGED | RT_MASK_SELF, P - V * w, 0.0, V, 2.0 * w);
-    uint n_cand = 0u;
-    bool hit = false;
-    while (rayQueryProceedEXT(rq))
-    {
-        if (rayQueryGetIntersectionTypeEXT(rq, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
-        if (++n_cand > RT_CANDIDATE_BUDGET) { rayQueryTerminateEXT(rq); break; }
-        const uint id = rtHitInstance(uint(rayQueryGetIntersectionInstanceCustomIndexEXT(rq, false)),
-                                      uint(rayQueryGetIntersectionGeometryIndexEXT(rq, false)));
-        if (rtIsClusterRig(id))
-        {
-            hit = true;
-            rayQueryTerminateEXT(rq);
-            break;
-        }
-    }
-    return hit ? eps : 0.0;
-}
+// #747 interim CLUSTER LOD RECEIVER LIFT: clean_rt_receiver.glsl rtClusterRigLift (#1048: the one copy).
+#include "clean_rt_receiver.glsl"
 
 void storeIds(ivec2 mpx, uvec4 ids) { imageStore(uIdsOut, mpx, ids); }
 // d = (view depth, d/dx, d/dy, flags): depth stays 32-bit; the gradients clamp inside
@@ -379,8 +333,8 @@ void main()
     vec3 Np;
     if (need_ng && !(okx && oky) && maskProbeNormal(P, cam, Np)) Ng = Np;
     if (dot(Ng, cam - P) < 0.0) Ng = -Ng;   // the visible side
-    // #747 interim: the cluster surface of a switched avatar (maskClusterRigLift above).
-    const float cl_lift = need_ng ? maskClusterRigLift(P, cam) : 0.0;
+    // #747 interim: the cluster surface of a switched avatar (clean_rt_receiver.glsl rtClusterRigLift).
+    const float cl_lift = need_ng ? rtClusterRigLift(P, cam) : 0.0;
     // Receiver DEPTH PLANE for the upsample / history / spatial weights: view depth and
     // its screen-space gradient (per render px, the same neighbours maskTangent chose), so
     // sloped receivers (ground at a grazing view) compare against the depth their plane
@@ -599,15 +553,14 @@ void main()
             if (L.tex.y != 0u && !RTG_OK(L.tex.x < rtGuardTexCount(), RTG_LIGHT, L.tex.x | 0x80000000u, rtGuardTexCount())) continue;
             const ProjShadow ps = pshadow[L.tex.z - 1u];
             if (ps.params.w < 0.5 || ps.params.z < 1.5) continue;   // not ray traced
-            vec3 lv = L.pos_radius.xyz - P;
-            float dist = length(lv);
-            if (dist >= L.pos_radius.w) continue;
-            float atten = legacyAtten(dist / L.pos_radius.w, L.color_falloff.w);
+            // THE LIGHT REACH (#1043): the lit pass's range / attenuation / cutoff fade -- no ray for a
+            // projector it fades out here, and the REST ratio weighs the light the lit pass adds
+            vec3 lv;
+            float dist;
+            const float atten = lightReach(L.pos_radius, L.color_falloff, P, lv, dist);
             if (atten <= 0.0) continue;
-            vec4 ptc = L.proj_mat * vec4(P, 1.0);
-            if (ptc.z < 0.0) continue;
-            ptc.xyz /= ptc.w;
-            if (ptc.z <= 0.0 || ptc.x <= 0.0 || ptc.x >= 1.0 || ptc.y <= 0.0 || ptc.y >= 1.0) continue;
+            vec2 ptc;
+            if (!lightProjFrustum(L.proj_mat, P, ptc)) continue;
             const vec3 l = normalize(L.proj_origin.xyz - P);
             // SHADOW TERMINATOR (#664; as the sun above): in this projector's band the
             // shared probe (rtTerminatorCached: at most one per pixel for the sun and

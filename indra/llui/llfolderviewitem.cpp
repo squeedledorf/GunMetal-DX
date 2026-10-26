@@ -873,12 +873,12 @@ void LLFolderViewItem::drawFavoriteIcon()
         {
             x_offset = getRect().getWidth();
         }
-        gl_draw_scaled_image(
+        // via the UI image so the vector icon is picked up (#1056)
+        favorite_image->draw(
             x_offset - FAVORITE_IMAGE_SIZE - FAVORITE_IMAGE_PAD,
             getRect().getHeight() - mItemHeight + FAVORITE_IMAGE_PAD,
             FAVORITE_IMAGE_SIZE,
             FAVORITE_IMAGE_SIZE,
-            favorite_image->getImage(),
             sFgColor);
     }
 }

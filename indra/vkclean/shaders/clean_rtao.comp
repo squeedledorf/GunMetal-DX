@@ -129,34 +129,11 @@ void rtaoSetFootprint(vec3 P, vec3 Ng, vec3 cam)
     rt_foot_on = true;
 }
 
-// #747 interim CLUSTER LOD RECEIVER LIFT (clean_rt_shadow_mask.comp maskClusterRigLift, the
-// same probe and gate): a receiver on an avatar the cluster path draws, while that avatar
-// still casts from its legacy rigged hull, sits up to the cut's error inside the hull; every
-// AO ray would hit the hull at once (dark patches moving with the pose). Returns the lift (m).
-float rtaoClusterRigLift(vec3 P, vec3 cam)
-{
-    if (ssr.cluster_rt.z < 0.5 || !(ssr.cluster_rt.x > 0.0)) return 0.0;
-    if (uint(rt_cl_rig.length()) > 2u && rt_cl_rig[2] == 0x80000000u) return 0.0;
-    vec3 V = P - cam;
-    const float camd = length(V);
-    if (camd < 1e-4) return 0.0;
-    V /= camd;
-    const float eps = ssr.cluster_rt.x * max(camd, ssr.cluster_rt.y);
-    const float w = 2.0 * eps + 1e-3;
-    rayQueryEXT rq;
-    rayQueryInitializeEXT(rq, uTLAS, gl_RayFlagsNoOpaqueEXT, RT_MASK_RIGGED | RT_MASK_SELF, P - V * w, 0.0, V, 2.0 * w);
-    uint n_cand = 0u;
-    bool hit = false;
-    while (rayQueryProceedEXT(rq))
-    {
-        if (rayQueryGetIntersectionTypeEXT(rq, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
-        if (++n_cand > RT_CANDIDATE_BUDGET) { rayQueryTerminateEXT(rq); break; }
-        const uint id = rtHitInstance(uint(rayQueryGetIntersectionInstanceCustomIndexEXT(rq, false)),
-                                      uint(rayQueryGetIntersectionGeometryIndexEXT(rq, false)));
-        if (rtIsClusterRig(id)) { hit = true; rayQueryTerminateEXT(rq); break; }
-    }
-    return hit ? eps : 0.0;
-}
+// #747 interim CLUSTER LOD RECEIVER LIFT (clean_rt_receiver.glsl rtClusterRigLift, #1048: the one copy):
+// a receiver on an avatar the cluster path draws, while that avatar still casts from its legacy rigged
+// hull, sits up to the cut's error inside the hull; every AO ray would hit the hull at once (dark
+// patches moving with the pose). The lift (m) moves the AO rays' origins out of it.
+#include "clean_rt_receiver.glsl"
 
 void main()
 {
@@ -203,7 +180,7 @@ void main()
     // and the cluster-LOD lift.
     const float pxw = max(length(viewPos(tc + vec2(pc.screen.z, 0.0), d) - vpos), 1e-6);
     const float slope_ofs = max(pc.trace.w, 0.0) * pxw * length(cross(Ng, V));
-    const float lift = rtaoClusterRigLift(P, cam);
+    const float lift = rtClusterRigLift(P, cam);
     const vec3 O = rtReceiverOrigin(P, Ng, camd, max(pc.trace.z, 0.0) + slope_ofs + lift);
 
     rt_anim_time = pc.trace.y;

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""After a Jetstream build is published: announce it on Discord and prune old Jetstream releases.
+"""After the release-gate has published a Jetstream build: announce it on Discord and prune old Jetstream releases.
 
 Jetstream = the build CI makes every 6 hours from main when it has new commits
 (.forgejo/workflows/jetstream.yml tags it, release.yml builds and publishes it). Its notes are
@@ -17,6 +17,9 @@ import sys
 import time
 import urllib.error
 import urllib.request
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import release_lookup  # noqa: E402  (drafts are invisible to /releases/tags; the lookup lists them)
 
 TOKEN = os.environ["TOKEN"]
 API = os.environ["RELEASE_API"]
@@ -110,6 +113,8 @@ def prune():
         page += 1
     jet = []
     for r in rels:
+        if r.get("draft"):
+            continue        # an in-flight build's draft (or one waiting for a fix) is never pruned
         m = JTAG.match(r.get("tag_name") or "")
         if m:
             jet.append((tuple(int(x) for x in m.groups()), r))
@@ -125,7 +130,12 @@ def prune():
 
 
 def main():
-    rel = forgejo("GET", f"/releases/tags/{TAG}")
+    rel = release_lookup.find_release(API, TOKEN, TAG)
+    if rel is None:
+        sys.exit(f"::error::no release for {TAG}")
+    if rel.get("draft"):
+        # Only reachable if the release-gate was bypassed: never announce an unpublished build.
+        sys.exit(f"::error::{TAG} is still a draft (release-gate did not publish it): not announcing, not pruning")
     if HOOK:
         post_discord(rel)
     else:

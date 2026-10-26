@@ -60,4 +60,17 @@ namespace GMDXMinimapCompass
 // drawn in the getTopReserve() strip above `square`).
     // Untextured and text draws only; leaves texture unit 0 unbound.
     void draw(const LLRectf& square, F32 heading_deg);
+
+    // The rotating Whole Region map's compass (GMDXMiniMapRotateCompass): STYLE_PILLS (default,
+    // the map fills the view, the eight pills turn just inside its edge) or STYLE_FRAME (the
+    // map shrinks inside a gunmetal frame of width getRadarRing() whose ticks and letters turn).
+    // The tape is north-up only: getTopReserve() is 0 while the map rotates.
+    S32 getRotatingStyle();
+    F32 getRadarRing();
+    // The round radar: the map's disc (centre, radius in view-local UI units); with the frame
+    // its ring lies outside the radius.
+    void drawRadar(F32 cx, F32 cy, F32 radius, F32 heading_deg, S32 style);
+    // The square rotating map: `square` is the map (pills) or the map with its frame around it
+    // (frame: the map is inset by getRadarRing()); letters slide round so heading_deg points up.
+    void drawRadarSquare(const LLRectf& square, F32 heading_deg, S32 style);
 }

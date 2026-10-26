@@ -31,6 +31,16 @@ void LLUIImage::draw(S32 x, S32 y, const LLColor4& color) const
 
 void LLUIImage::draw(S32 x, S32 y, S32 width, S32 height, const LLColor4& color) const
 {
+    if (mVector)
+    {
+        if (LLTexture* vectorp = getVectorTexture(width, height))
+        {
+            // the raster is exactly the drawn rectangle in physical pixels: whole texture, no
+            // 9-slice, origin snapped to a pixel so it is sampled 1:1
+            gl_draw_pixel_snapped_image(x, y, width, height, vectorp, color, false);
+            return;
+        }
+    }
     gl_draw_scaled_image_with_border(
         x, y,
         width, height,
@@ -44,6 +54,14 @@ void LLUIImage::draw(S32 x, S32 y, S32 width, S32 height, const LLColor4& color)
 
 void LLUIImage::drawSolid(S32 x, S32 y, S32 width, S32 height, const LLColor4& color) const
 {
+    if (mVector)
+    {
+        if (LLTexture* vectorp = getVectorTexture(width, height))
+        {
+            gl_draw_pixel_snapped_image(x, y, width, height, vectorp, color, true);
+            return;
+        }
+    }
     gl_draw_scaled_image_with_border(
         x, y,
         width, height,

@@ -148,7 +148,7 @@ vec3 debugSun(uint dbg, ivec2 m, vec3 final_vis, float var)
 {
     if (dbg == 1u) return imageLoad(uRawSun, m).rgb;
     if (dbg == 2u) return clamp(imageLoad(uAccSun, m).rgb, vec3(0.0), vec3(1.0));
-    if (dbg == 3u) return vec3(clamp(imageLoad(uMeta, m).x / max(mp.p0.w, 1.0), 0.0, 1.0));
+    if (dbg == 3u) return vec3(clamp(imageLoad(uMeta, m).x / rtHistMax(), 0.0, 1.0));
     if (dbg == 4u)
     {
         const float v = var >= 0.0 ? var : tempVar(imageLoad(uMeta, m));

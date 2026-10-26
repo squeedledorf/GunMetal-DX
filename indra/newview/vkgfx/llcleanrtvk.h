@@ -346,6 +346,9 @@ private:
     // distinct (slot, alpha key) gets its own micromap + BLAS (an "OMM entry"), and pass A
     // swaps that BLAS in for the instance (omm_inst table) and drops FORCE_NO_OPAQUE so the
     // hardware resolves known-opaque / known-transparent micro-triangles itself.
+    // (#1032, RenderVKRTOmmBlend) static alpha-BLEND instances get transparent-only entries
+    // (alpha exactly 0 -> known transparent, else unknown: the shader still runs on every
+    // visible texel); the entry's material (no cutoff) selects that bake mode.
     struct OmmKey
     {
         uint32_t slot = 0, slotGen = 0, mat = 0, tex = 0, texVer = 0, tintA = 0;
@@ -667,7 +670,16 @@ private:
     uint8_t   mNoSelf[kAvatarSlotCap] = {};
     uint32_t  mNoSelfChanged[kAvatarSlotCap] = {};
     uint32_t  mNoSelfCount = 0;
-    static constexpr uint32_t kCompBindings = 27;   // clean_rt_instances.comp storage buffers (22: cluster RT override, #748; 23: cluster-switched rigged groups; 24: per-geometry vertex counts, #874; 25 / 26: #1007 pose snapshot / pose motion readback)
+    static constexpr uint32_t kCompBindings = 29;   // clean_rt_instances.comp storage buffers (22: cluster RT override, #748; 23: cluster-switched rigged groups; 24: per-geometry vertex counts, #874; 25 / 26: #1007 pose snapshot / pose motion readback; 27 / 28: #1032 materials / alpha-less texture slots)
+    // #1032 KNOWN-OPAQUE ALPHA-MASK (clean_rt_instances.comp maskKnownOpaque): one bit per
+    // bindless texture slot whose image has no alpha (SharedTex::comps != 4), rebuilt from the
+    // renderer's shared-texture registry when its texture generation moved (and every
+    // kTexOpaqueRefresh frames as a safety net), copied into this frame slot's host buffer.
+    std::vector<uint32_t> mTexOpaqueCpu;
+    GpuBuffer mTexOpaque[3];
+    uint32_t  mTexOpaqueGen = ~0u, mTexOpaqueBuilt = 0, mTexOpaqueCount = 0;
+    bool      mTexOpaqueOn = false;   // this frame binds mTexOpaque[slot] (else the zeroed dummy)
+    void texOpaqueUpdate();
     // #1007 rigged refit cadence + pose skip (llcleanrtvk.cpp "POSE SKIP"), this frame's
     // counters: skipped by the distance / screen-size cadence, skipped by the pose test, and
     // the largest staleness (frames since its last copy + refit) a skipped group carries.

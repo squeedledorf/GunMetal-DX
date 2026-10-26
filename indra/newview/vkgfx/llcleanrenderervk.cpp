@@ -2961,7 +2961,7 @@ void LLCleanRendererVK::logMemory()
                           + B(mSkinPaletteSSBO) + B(mWorkSSBO) + B(mAvatarJointsSSBO) + B(mSkinMetaSSBO);
     uint64_t cull = B(mCounters) + B(mCand) + B(mCandB) + B(mCandMeta) + B(mWgCounts) + B(mDbgReasons) + B(mRigAlloc)
                   + B(mLightSSBO) + B(mLightInfoSSBO) + B(mClusterCount) + B(mClusterIndex) + B(mSSRInfoSSBO)
-                  + B(mPrevInstSSBO) + B(mPrevJoints) + B(mPrevPalette) + B(mPrevSkinPos)
+                  + B(mPrevInstSSBO) + B(mVsInstSSBO) + B(mVsInstPrevSSBO) + B(mPrevJoints) + B(mPrevPalette) + B(mPrevSkinPos)
                   + B(mSkinHistPos) + B(mSkinHistTab);
     for (const GpuBuffer& b : mCmd) cull += B(b);
     cull += B(mTexDemand);
@@ -3453,6 +3453,7 @@ uint64_t LLCleanRendererVK::releaseTexSlot(uint32_t slot)
     retireView(t.view);
     t = GpuImage{};
     mVkTexShared[slot] = 0;
+    ++mTexAlphaGen;   // (#1032)
     auto it = mSharedTex.find(sk);
     if (it == mSharedTex.end()) return 0;
     SharedTex& st = it->second;
@@ -4393,6 +4394,7 @@ uint32_t LLCleanRendererVK::uploadRealMaterialTextures(bool full)
     auto swapShared = [&](SharedTex& st, GpuImage base, int32_t gen, bool retire_old, uint8_t enc, bool lossy)
     {
         (void)retire_old;   // always retired: frames in flight (and a downgrade copy) use it
+        ++mTexAlphaGen;     // (#1032: a new image under the slots)
         for (uint32_t f = 0; f < 2; ++f)
             if (st.slot[f]) retireView(mTextures[st.slot[f]].view);
         {
@@ -4924,6 +4926,7 @@ uint32_t LLCleanRendererVK::uploadRealMaterialTextures(bool full)
                 mTextures[idx] = img;
                 touchTexSlot(idx);
                 mVkTexShared[idx] = shared_key;
+                ++mTexAlphaGen;   // (#1032)
                 setWhy(reg, TEXWHY_LEVEL);
                 mVkTexW[idx] = (uint16_t)std::min(iw, 0xffffu); mVkTexH[idx] = (uint16_t)std::min(ih, 0xffffu);
                 mVkTexIndex[key] = idx;
@@ -5004,6 +5007,7 @@ uint32_t LLCleanRendererVK::uploadRealMaterialTextures(bool full)
                 SharedTex& st = shared_it->second;
                 st.slot[fi] = idx;
                 mVkTexShared[idx] = shared_key;
+                ++mTexAlphaGen;   // (#1032)
                 mTextures[idx] = GpuImage{};   // rebuildShared/createView fill it
                 if (mVkTexWhy.size() <= idx) mVkTexWhy.resize((size_t)idx + 1u, 0u);
                 mVkTexWhy[idx] = st.enc_why;   // debug view 19 (#263)
@@ -5047,6 +5051,7 @@ uint32_t LLCleanRendererVK::uploadRealMaterialTextures(bool full)
                     mTextures[idx] = fresh;   // owned (streamed per frame)
                     touchTexSlot(idx);
                     mVkTexShared[idx] = 0;
+                    ++mTexAlphaGen;   // (#1032)
                 }
                 else
                 {
@@ -5060,6 +5065,7 @@ uint32_t LLCleanRendererVK::uploadRealMaterialTextures(bool full)
                     st.fmt = img.format; st.enc = batch.last_enc; st.enc_level = (uint8_t)mTexCompLevel;
                     st.comps = (uint8_t)std::clamp((int)raw->getComponents(), 1, 4);
                     if (fresh_opaque) { st.comps = 3; ++mFactOpaqueRestored; }
+                    ++mTexAlphaGen;   // (#1032)
                     st.normal_only = role == ROLE_NORMAL;
                     st.avatar = fresh_avatar;
                     st.hud = tex_hud;
@@ -5090,6 +5096,7 @@ uint32_t LLCleanRendererVK::uploadRealMaterialTextures(bool full)
                     mTextures[idx] = img;
                     touchTexSlot(idx);
                     mVkTexShared[idx] = shared_key;
+                    ++mTexAlphaGen;   // (#1032)
                 }
                 mVkTexW[idx] = (uint16_t)std::min(fresh.extent.width, 0xffffu);
                 mVkTexH[idx] = (uint16_t)std::min(fresh.extent.height, 0xffffu);
@@ -6057,6 +6064,7 @@ uint32_t LLCleanRendererVK::uploadRealMaterialTextures(bool full)
                                 if (!base.image) { note_oom(); break; }
                                 swapShared(st, base, -1, /*retire_old*/false, h.enc, false);
                                 st.comps = h.comps; st.cov = tmp.cov; st.mask_cut = tmp.mask_cut; st.cov_why = COVW_TIER2;
+                                ++mTexAlphaGen;   // (#1032)
                                 st.src_w = std::max(st.src_w, (uint32_t)h.w); st.src_h = std::max(st.src_h, (uint32_t)h.h);
                                 st.full_w = tmp.full_w; st.full_h = tmp.full_h;
                                 st.t2_top = (uint16_t)std::max(h.w, h.h); st.t2_src = true;
@@ -6128,6 +6136,7 @@ uint32_t LLCleanRendererVK::uploadRealMaterialTextures(bool full)
             st.cov = batch.last_cov; st.cov_why = COVW_UPGRADE_PLAIN;
             // (a decode without alpha can't take coverage mips: don't refresh it again)
             if (raw->getComponents() < 4) st.comps = (uint8_t)std::clamp((int)raw->getComponents(), 1, 3);
+            ++mTexAlphaGen;   // (#1032: a new image under the slot -- its verdict follows from the scan)
             notePick(st, u.key, pk, tag);
             if (refresh) ++mLossyRefresh;
             ++img_ops; ++n_up;
@@ -6754,6 +6763,19 @@ void LLCleanRendererVK::fillDbgMipCodes()
 // #684 TEXTURE CONSOLE columns: one short line of Vulkan residency for a texture id (resident
 // size / mip below full, requested mip, bias source, storage format). "" = not a shared
 // world image (not resident, or an own-slot image).
+// <GMDX>
+bool LLCleanRendererVK::texOnGpu(const LLUUID& id) const
+{
+    const uint64_t k = texUuidKey(id.mData) | 1ull;   // (resolve_tex's asset key)
+    for (const uint64_t key : { k, (uint64_t)(k ^ 0xC0A6E000C0A6E000ull) })   // (and its alpha-mask variant)
+    {
+        const auto it = mSharedTex.find(key);
+        if (it != mSharedTex.end() && it->second.image != VK_NULL_HANDLE) return true;
+    }
+    return false;
+}
+// </GMDX>
+
 std::string LLCleanRendererVK::texResidencyBrief(const LLUUID& id) const
 {
     for (const auto& kv : mSharedTex)
@@ -6998,6 +7020,7 @@ std::string LLCleanRendererVK::texInspectText(const LLUUID& obj, S32 face, U32 m
 void LLCleanRendererVK::fillDbgMipCodes() {}
 std::string LLCleanRendererVK::texInspectText(const LLUUID&, S32, U32, const F32*) { return std::string(); }
 std::string LLCleanRendererVK::texResidencyBrief(const LLUUID&) const { return std::string(); }
+bool LLCleanRendererVK::texOnGpu(const LLUUID&) const { return true; }   // <GMDX>
 #endif
 
 void LLCleanRendererVK::fillPrototypeScene()
@@ -8852,7 +8875,7 @@ void LLCleanRendererVK::writeDescriptors()
         {
             VkDescriptorBufferInfo rb{mRezFxTable.buffer, 0, VK_WHOLE_SIZE};
             VkWriteDescriptorSet wr{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-            wr.dstSet=mDsetDraw0; wr.dstBinding=54; wr.descriptorCount=1;
+            wr.dstSet=mDsetDraw0; wr.dstBinding=56; wr.descriptorCount=1;   // <GMDX> 56
             wr.descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; wr.pBufferInfo=&rb;
             vkUpdateDescriptorSets(dev, 1, &wr, 0, nullptr);
         }
@@ -8883,6 +8906,7 @@ void LLCleanRendererVK::writeDescriptors()
             vkUpdateDescriptorSets(dev, 1, &wq, 0, nullptr);
         }
         writePrevInstDescriptor();   // 23..25: previous-frame instances / skinned / joints (or aliases)
+        writeVsInstDescriptor();     // 54 / 55: slim vertex-shader instance records (#1033)
         writeCelDescriptors();       // 37 / 38: cel params + skin meta (#549 / #550, llcelshadevk.cpp)
         if (mRigCache.buffer)        // 35: reduced-tier skin cache state (rigged VS)
         {
@@ -12917,6 +12941,7 @@ void LLCleanRendererVK::destroyRetiredGuarded(TexRetire& r, uint32_t s)
                 if (sit->second.slot[1] == i) sit->second.slot[1] = 0;
             }
             mVkTexShared[i] = 0;
+            ++mTexAlphaGen;   // (#1032)
         }
         t = GpuImage{};
         touchTexSlot(i);   // every set drops it at its next write (white)
@@ -13049,6 +13074,7 @@ void LLCleanRendererVK::beginTextureFrame(VkCommandBuffer cmd)
                 // for normal maps); a decode with real alpha turns it back (re-encode)
                 SharedTex& st = sit->second;
                 st.comps = it.cscan->opaque ? 3 : it.cscan->comps;
+                ++mTexAlphaGen;   // (#1032)
                 if (it.cscan->opaque) ++mAlphaUnused;
                 // Persistent facts (#263): what holds for this UUID's full-size pixels.
                 const bool at_full = st.full_w && it.cscan->w >= st.full_w && it.cscan->h >= st.full_h;
@@ -15697,6 +15723,7 @@ void LLCleanRendererVK::setProbes(const LLVKWorldFrame& wf)
     // setting or of the outcome (the switch's timeline in a crash log).
     {
         const int req = wf.probe_detail;
+        if (req >= 3) probeTraceEnsure();   // #1064: compiled on first use
         const char* why = req >= 3 ? probeTraceMissing() : nullptr;
         const int eff = why ? 2 : req;
         if (req != mProbeDetailReq || eff != mProbeDetailNow || why != mProbeTraceWhy)
@@ -18430,11 +18457,42 @@ void LLCleanRendererVK::recordProbeCapture(VkCommandBuffer cmd, const VKDrawPush
 
 // ---- RAY-TRACED PROBE CAPTURE (RenderReflectionProbeDetail 3) ----
 
+// #1064: the trace pipeline compiles on first use, in the background (the frame never waits on
+// a cold compile; it crashed AMD's Windows driver compiler at startup for everyone). setProbes,
+// every frame while detail 3 is requested: polls a running compile, else queues it once.
+void LLCleanRendererVK::probeTraceEnsure()
+{
+    if (mProbeTraceJob.pending()) mProbeTraceJob.poll();
+    if (mProbeTraceJob.pending() || mProbeTracePipeQueued || mProbeTracePipe) return;
+    if (!mCtx || !mRT || !mRT->consumerLayout() || !mProbeTraceLayout || !mDslProbeTrace) return;
+    mProbeTracePipeQueued = true;
+    VkDevice dev = mCtx->device();
+    {
+        PipelineBatchScope scope(dev);
+        VkShaderModule pm = moduleFromSpv(dev, kWorldProbeRtSpv, kWorldProbeRtSpv_bytes, "kWorldProbeRtSpv");
+        createComputePipelineInto(dev, pm, mProbeTraceLayout, 0, nullptr, &mProbeTracePipe, "mProbeTracePipe");
+        destroyShaderModuleDeferred(dev, pm, nullptr);
+        PipelineJobOpts o;
+        o.what = "ray-traced probe capture";
+        o.prio = VKPIPE_PRIO_USER;   // (the user picked Raytraced and sees Realtime until it lands)
+        o.gate = false;              // (optional: never holds the login screen)
+        mProbeTraceJob.start(pipelineBatchFlushAsync(dev, o));   // (nullptr if quarantined: nothing queued)
+    }
+    LL_INFOS("Vulkan") << "Raytraced reflections: the capture pipeline is "
+                       << (mProbeTraceJob.pending() ? "compiling in the background (Realtime until it lands)"
+                                                    : "not available on this driver (quarantined, #1064)")
+                       << LL_ENDL;
+}
+
 const char* LLCleanRendererVK::probeTraceMissing() const
 {
     if (!mRT) return "ray tracing is off (RenderVKRayTracing 0, or not supported by this GPU / driver)";
     if (!mRT->consumerLayout()) return "no RT consumer set layout";
-    if (!mProbeTracePipe || !mProbeTraceLayout || !mDslProbeTrace) return "the ray-traced capture pipeline was not created";
+    // #1064: never read mProbeTracePipe while its background compile may still write it.
+    if (mProbeTraceJob.pending()) return "the ray-traced capture pipeline is compiling in the background";
+    if (!mProbeTracePipe || !mProbeTraceLayout || !mDslProbeTrace)
+        return mProbeTracePipeQueued ? "the ray-traced capture pipeline could not be created (see the VKPipe log lines)"
+                                     : "the ray-traced capture pipeline was not created";
     if (!mProbeCap.image || !mProbeCapRT.image) return "the probe capture cubes are not allocated";
     if (!mDsetProbeTrace[0] || !mDsetProbeTrace[1]) return "the capture trace descriptor sets are not allocated";
     if (mDsetProbeFilterRT.empty()) return "the realtime capture filter sets are not allocated";
@@ -26047,6 +26105,120 @@ void LLCleanRendererVK::recreatePrevInstances()
     mTemporalReset = true;
 }
 
+// #1033 SLIM VERTEX-SHADER INSTANCE RECORDS. Sized to the instance SSBO's capacity (the
+// previous-frame copy only while the previous-instance SSBO exists); a change waits for the
+// device (bindings 54 / 55 of frames in flight name the old buffers) and rewrites them. A
+// failed allocation retries a couple of seconds later; until then the bindings alias the
+// instance SSBO (same buffer, in bounds, but not the slim layout: a short-lived glitch
+// instead of a crash, and nothing is derived).
+void LLCleanRendererVK::ensureVsInst()
+{
+    if (!mCtx) return;
+    const uint32_t want = mInstanceSSBO.buffer ? mInstanceBufCap : 0u;
+    const bool want_prev = want && mPrevInstSSBO.buffer && mPrevInstCap == want;
+    if (mVsInstCap == want && (mVsInstPrevCap != 0u) == want_prev) return;
+    static uint32_t s_retry_at = 0;
+    if (want && (uint32_t)gFrameCount < s_retry_at) return;
+    vkDeviceWaitIdle(mCtx->device());
+    for (GpuBuffer* b : {&mVsInstSSBO, &mVsInstPrevSSBO})
+        if (b->buffer) { mCtx->destroyBuffer(*b); *b = GpuBuffer{}; }
+    mVsInstCap = mVsInstPrevCap = 0;
+    if (want)
+    {
+        VkMemScope memcat(VKMEM_SCENE);
+        const VkDeviceSize bytes = (VkDeviceSize)want * 112u;   // (clean_vs_inst.glsl VsInst)
+        VkDeviceContext::SoftAllocScope soft(mCtx);   // a refusal just retries later
+        mVsInstSSBO = mCtx->createBuffer(bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (mVsInstSSBO.buffer && want_prev)
+        {
+            mVsInstPrevSSBO = mCtx->createBuffer(bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+            if (!mVsInstPrevSSBO.buffer) { mCtx->destroyBuffer(mVsInstSSBO); mVsInstSSBO = GpuBuffer{}; }
+        }
+        if (mVsInstSSBO.buffer)
+        {
+            mVsInstCap = want;
+            if (mVsInstPrevSSBO.buffer) mVsInstPrevCap = want;
+            vkAddrName(mVsInstSSBO.buffer, "vsInstances");
+            vkAddrName(mVsInstPrevSSBO.buffer, "vsInstancesPrev");
+        }
+        else
+        {
+            s_retry_at = (uint32_t)gFrameCount + 120u;
+            LL_WARNS("VKMem") << "#1033: slim instance records (" << want << " rows) not allocated; retrying" << LL_ENDL;
+        }
+    }
+    writeVsInstDescriptor();
+}
+
+void LLCleanRendererVK::writeVsInstDescriptor()
+{
+    if (!mDsetDraw0 || !mInstanceSSBO.buffer) return;
+    const VkBuffer b54 = mVsInstSSBO.buffer ? mVsInstSSBO.buffer : mInstanceSSBO.buffer;
+    const VkBuffer b55 = mVsInstPrevSSBO.buffer ? mVsInstPrevSSBO.buffer : b54;
+    VkDescriptorBufferInfo bi[2] = {{b54, 0, VK_WHOLE_SIZE}, {b55, 0, VK_WHOLE_SIZE}};
+    VkWriteDescriptorSet w[2]{};
+    for (int i = 0; i < 2; ++i)
+    {
+        w[i].sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w[i].dstSet=mDsetDraw0; w[i].dstBinding=54+i;
+        w[i].descriptorCount=1; w[i].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[i].pBufferInfo=&bi[i];
+    }
+    vkUpdateDescriptorSets(mCtx->device(), 2, w, 0, nullptr);
+}
+
+// After the frame's instance stream and previous-row copies: one dispatch derives every row's
+// slim record (current, and previous while the history is on) -- dense and coalesced, the
+// work the vertex stage used to do per vertex with strided 224 B loads.
+void LLCleanRendererVK::recordVsInst(VkCommandBuffer cmd)
+{
+    ensureVsInst();   // (a no-op unless the instance / previous capacity moved since the frame start)
+    if (!mVsInstPipe || !mVsInstSSBO.buffer || !mInstanceSSBO.buffer) return;
+    const uint32_t n = std::min({mInstanceCount, mInstanceBufCap, mVsInstCap,
+                                 (uint32_t)(mCpuInstances.size() / sizeof(Instance))});
+    if (n == 0) return;
+    const bool prev = mVsInstPrevSSBO.buffer && mPrevInstSSBO.buffer && mTemporalOn
+                    && mVsInstPrevCap >= n && mPrevInstCap >= n;
+    VkDevice dev = mCtx->device();
+    auto addr = [dev](VkBuffer b) -> VkDeviceAddress
+    {
+        if (!b) return 0;
+        VkBufferDeviceAddressInfo ai{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
+        ai.buffer = b;
+        return vkGetBufferDeviceAddress(dev, &ai);
+    };
+    struct VsInstPush { uint32_t in_cur[2]; uint32_t out_cur[2]; uint32_t in_prev[2]; uint32_t out_prev[2];
+                        uint32_t n_cur, n_prev, pad0, pad1; } pp{};
+    static_assert(sizeof(VsInstPush) == 48, "clean_vs_inst.comp push");
+    const VkDeviceAddress ic = addr(mInstanceSSBO.buffer), oc = addr(mVsInstSSBO.buffer);
+    const VkDeviceAddress ip = prev ? addr(mPrevInstSSBO.buffer) : 0, op = prev ? addr(mVsInstPrevSSBO.buffer) : 0;
+    pp.in_cur[0] = (uint32_t)(ic & 0xFFFFFFFFull); pp.in_cur[1] = (uint32_t)(ic >> 32);
+    pp.out_cur[0] = (uint32_t)(oc & 0xFFFFFFFFull); pp.out_cur[1] = (uint32_t)(oc >> 32);
+    pp.in_prev[0] = (uint32_t)(ip & 0xFFFFFFFFull); pp.in_prev[1] = (uint32_t)(ip >> 32);
+    pp.out_prev[0] = (uint32_t)(op & 0xFFFFFFFFull); pp.out_prev[1] = (uint32_t)(op >> 32);
+    pp.n_cur = n;
+    pp.n_prev = prev ? n : 0u;
+    // In: the instance / previous-row writes (stream, grow and previous-row copies, agent
+    // shift) and the earlier frames' vertex reads of the slim rows (WAR) / derive writes (WAW).
+    // Out: this frame's vertex shaders.
+    VkMemoryBarrier2 mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    mb.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
+                    | VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT;
+    mb.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT
+                     | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+    mb.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    mb.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+    VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; dep.memoryBarrierCount = 1; dep.pMemoryBarriers = &mb;
+    vkCmdPipelineBarrier2(cmd, &dep);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mVsInstPipe);
+    VK_PUSH_BUDGET_CHECK(pp);
+    vkCmdPushConstants(cmd, mVsInstLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pp), &pp);
+    vkCmdDispatch(cmd, (n + 63u) / 64u, 1, 1);
+    mb.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    mb.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+    mb.dstStageMask = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    mb.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+    vkCmdPipelineBarrier2(cmd, &dep);
+}
+
 void LLCleanRendererVK::ensureTemporal(uint32_t w, uint32_t h)
 {
     VkMemScope memcat(VKMEM_SCENE);   // #407 (history tables; the motion target below)
@@ -32739,7 +32911,21 @@ void LLCleanRendererVK::rtMaskPushFill(const VKDrawPush& drawPush, uint32_t rw, 
                              | (react ? 8u : 0u) | (dyn_len << 4) | (gain16 << 8)
                              | ((svgf ? sun_move : 0u) << 16) | (diag ? 0x800000u : 0u);
         mp.p0[2] = (float)flags;
-        mp.p0[3] = llclamp(hist, 1.f, 64.f);
+        // p0.w + 128 (#1050, RenderVKRTShadowRrHistory, default on): DLSS Ray Reconstruction
+        // consumes this jittered frame. It is a denoiser, not a resolve: the mask's "TAA / FSR
+        // integrate the jitter" shortcuts (8-frame static hard edges, the linear history
+        // reprojection; clean_rt_mask_common.glsl rtNoResolve) reached it as edge flicker and a
+        // jitter-locked slide -- static tree shadows vibrating in place, strongest at Ultra
+        // Performance (up to 128 jitter phases, a render pixel 3 display pixels wide), some under
+        // DLAA, never under FSR / native. The mask then stabilises itself as it does with no
+        // resolve. (Harmless while RR takes the mask raw, RenderVKDlssRawSignals bit 1.)
+        bool rr_hist = true;
+#if defined(LL_HAS_CLEAN_PIPELINE)
+        static LLCachedControl<bool> s_rr_hist(gSavedSettings, "RenderVKRTShadowRrHistory", true);
+        rr_hist = s_rr_hist;
+#endif
+        const bool no_resolve = rr_hist && dlssRrFrame() && mTaaJitterOn && !mOffscreen;
+        mp.p0[3] = llclamp(hist, 1.f, 64.f) + (no_resolve ? 128.f : 0.f);
         mp.p1[0] = mRtMaskPrevJitter[0]; mp.p1[1] = mRtMaskPrevJitter[1];
         mp.p1[2] = llclamp(spatial, 0.f, 16.f);
         mp.p1[3] = llclamp(gamma, 0.5f, 8.f);
@@ -35077,7 +35263,7 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
     cl.bindingCount=31; cl.pBindings=cb;
     VK_CHECK(vkdCreateSetLayout(dev, &cl, &mDslCull, "mDslCull"));
 
-    VkDescriptorSetLayoutBinding db0[57]{};   // <GMDX> 57: + the rez effect table (54), the physical sky LUTs (55, 56)
+    VkDescriptorSetLayoutBinding db0[59]{};   // <GMDX> 59: + the rez effect table (56), the physical sky LUTs (57, 58)
     db0[0].binding=0; db0[0].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     // (#783 M2: + FRAGMENT -- a moving object's snow is drawn in its own frame, read from its
     // model matrix: clean_weather_surface.glsl weatherSnow)
@@ -35284,20 +35470,29 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
     // CLEAN_GI_FORWARD). Written with set 3's GI bindings (writeGiBindings); read only on a GI frame.
     db0[53].binding=53; db0[53].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     db0[53].descriptorCount=1; db0[53].stageFlags=VK_SHADER_STAGE_FRAGMENT_BIT|VK_SHADER_STAGE_COMPUTE_BIT;
-    // <GMDX> 54 the rez effect table (gmdx_rezfx.glsl; mRezFxTable): the world VS (de-rez vertex
-    // effects, the effect outputs) and FS (the de-rez cut, the paint). (Was 45, then 49 on the
-    // test branch: upstream took both for the volumetric fog and the weather.)
-    db0[54].binding=54; db0[54].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    db0[54].descriptorCount=1; db0[54].stageFlags=VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT;
-    // <GMDX> 55 / 56 the physical sky's sky-view and transmittance LUTs (gmdxphysskyvk.cpp;
-    // clean_atmos_common.glsl): every FS and compute that runs the atmosphere. (Were 46 / 47 on the
-    // physical-sky branch: upstream's volumetric clouds took them.)
-    for (int i = 55; i < 57; ++i)
+    // 54 / 55 the slim vertex-shader instance records, current / previous frame (#1033,
+    // clean_vs_inst.glsl; derived by clean_vs_inst.comp): the static and rigged world VS.
+    for (int i = 54; i < 56; ++i)
+    {
+        db0[i].binding=(uint32_t)i; db0[i].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        db0[i].descriptorCount=1; db0[i].stageFlags=VK_SHADER_STAGE_VERTEX_BIT;
+    }
+    // <GMDX> 56 the rez effect table (gmdx_rezfx.glsl; mRezFxTable): the world VS (de-rez vertex
+    // effects, the effect outputs) and FS (the de-rez cut, the paint). (Was 45, then 49, then 54:
+    // upstream took each, the last for its VS instance records.)
+    db0[56].binding=56; db0[56].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    db0[56].descriptorCount=1; db0[56].stageFlags=VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT;
+    // <GMDX> 57 / 58 the physical sky's sky-view and transmittance LUTs (gmdxphysskyvk.cpp;
+    // clean_atmos_common.glsl): every FS and compute that runs the atmosphere. (Were 46 / 47, then
+    // 55 / 56: upstream's volumetric clouds and VS instance records took them.)
+    for (int i = 57; i < 59; ++i)
     {
         db0[i].binding=i; db0[i].descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         db0[i].descriptorCount=1; db0[i].stageFlags=VK_SHADER_STAGE_FRAGMENT_BIT|VK_SHADER_STAGE_COMPUTE_BIT;
     }
-    VkDescriptorBindingFlags db0f[57] = {};
+    VkDescriptorBindingFlags db0f[59] = {};   // <GMDX> 59
+    db0f[54] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;   // (#1033: written once the buffers exist, before any draw)
+    db0f[55] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
     for (int i = 41; i < 44; ++i) db0f[i] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
     db0f[45] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;   // (written before the first draw; tidy for validation)
     db0f[49] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;   // (likewise)
@@ -35306,11 +35501,11 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
     db0f[51] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
     db0f[52] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;   // (#819: written at init; tidy for validation)
     db0f[53] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;   // (#87: written with the GI bindings)
-    db0f[55] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;   // <GMDX> physical sky LUTs: read only while the physical sky is on
-    db0f[56] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
-    db0fi.bindingCount=57; db0fi.pBindingFlags=db0f;
+    db0f[57] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;   // <GMDX> physical sky LUTs: read only while the physical sky is on
+    db0f[58] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
+    db0fi.bindingCount=59; db0fi.pBindingFlags=db0f;
     VkDescriptorSetLayoutCreateInfo dl0{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    dl0.pNext=&db0fi; dl0.bindingCount=57; dl0.pBindings=db0;
+    dl0.pNext=&db0fi; dl0.bindingCount=59; dl0.pBindings=db0;
 
     // Local-light cluster cull set: 0 lights, 1 counts, 2 indices, 3 info.
     {
@@ -35335,14 +35530,14 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
         // vkdCreatePipelineLayout check proves it at each of those layouts. (draw0 now
         // carries 21 -- array elements counted -- with the #731 depth at binding 40.)
         vkdInitDeviceLimits(mCtx->physicalDevice());
-        constexpr uint32_t kBindlessReserve = 65;   // <GMDX> + the rez effect table 54, the physical sky LUTs 55 / 56   // (#87: + the GI state buffer 53)   // (draw0 gained 2 array slots at binding 34; + 3 storage images 41-43; + the terrain bake table 44, #811;
+        constexpr uint32_t kBindlessReserve = 67;   // <GMDX> + the rez effect table 56, the physical sky LUTs 57 / 58, upstream's VS instance records 54 / 55   // (#87: + the GI state buffer 53)   // (draw0 gained 2 array slots at binding 34; + 3 storage images 41-43; + the terrain bake table 44, #811;
                                                     //  + #819 the sky-view LUT 52;
                                                     //  + the volumetric fog volume 45 and the fog passes' own history sampler, #718;
                                                     //  + the cloud shadow map 46 / panorama 47, #719; + the RT forward reflections 48, #859;
                                                     //  + the weather occlusion maps 49 (4 slots: 2 cascades x 2), #783;
                                                     //  + its M2 snow slots: 2 cover grids + the per-instance image;
                                                     //  + M4 the run-off flow map; + #901 the 2 avatar shelter atlas images;
-                                                    //  + #901 the rest-pose accumulation grids 51; <GMDX> + the rez effect table 54)
+                                                    //  + #901 the rest-pose accumulation grids 51; <GMDX> + the rez effect table 56)
         static_assert(kWeatherOcclSlots == 10, "kBindlessReserve counts binding 49's array elements");
         static_assert(kWeatherOcclSlots <= kVkCowMaxArrayElems,
                       "draw set 0 binding 49 must fit the copy-on-write record (vkCowCopySet, #926)");
@@ -35725,6 +35920,18 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
         VkShaderModule shm = moduleFromSpv(dev, kWorldInstShiftSpv, kWorldInstShiftSpv_bytes, "kWorldInstShiftSpv");
         createComputePipelineInto(dev, shm, mInstShiftLayout, 0, nullptr, &mInstShiftPipe, "mInstShiftPipe");
         destroyShaderModuleDeferred(dev, shm, nullptr);
+    }
+
+    // ---- #1033 slim vertex-shader instance records (clean_vs_inst.comp): buffers by device
+    // address, no set. Push: uvec2 in_cur, out_cur, in_prev, out_prev, uint n_cur, n_prev, 2 pad (48 B).
+    {
+        VkPushConstantRange vpr{VK_SHADER_STAGE_COMPUTE_BIT, 0, 48};
+        VkPipelineLayoutCreateInfo vli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        vli.pushConstantRangeCount = 1; vli.pPushConstantRanges = &vpr;
+        VK_CHECK(vkdCreatePipelineLayout(dev, &vli, &mVsInstLayout, "mVsInstLayout"));
+        VkShaderModule vsm = moduleFromSpv(dev, kWorldVsInstSpv, kWorldVsInstSpv_bytes, "kWorldVsInstSpv");
+        createComputePipelineInto(dev, vsm, mVsInstLayout, 0, nullptr, &mVsInstPipe, "mVsInstPipe");
+        destroyShaderModuleDeferred(dev, vsm, nullptr);
     }
 
     // ---- pre-skin compute pipeline ----
@@ -36695,6 +36902,15 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
         bias_s = gSavedSettings.getF32("RenderVKShadowBiasSlope");
 #endif
         sd.depthBiasConstant = bias_c; sd.depthBiasSlope = bias_s;
+        // <GMDX> RenderVKShadowBiasClamp: the slope term has no limit, and at sunset every face is near
+        // grazing -- a hill's crest was pushed metres away from the sun in the cascades, so the air
+        // behind it read lit (god rays through the land). Capped (normalized depth: ~0.5 m in cascade 0).
+        float bias_clamp = 1e-3f;
+#if defined(LL_HAS_CLEAN_PIPELINE)
+        bias_clamp = std::max(gSavedSettings.getF32("RenderVKShadowBiasClamp"), 0.f);
+#endif
+        sd.depthBiasClamp = mCtx->depthBiasClampEnabled() ? bias_clamp : 0.f;
+        // </GMDX>
         VkShaderModule sms = moduleFromSpv(dev, kWorldShadowMaskFragSpv, kWorldShadowMaskFragSpv_bytes, "kWorldShadowMaskFragSpv");
         VkShaderModule srv = moduleFromSpv(dev, kWorldRiggedVertSpv, kWorldRiggedVertSpv_bytes, "kWorldRiggedVertSpv");
         // LL culls back faces in the shadow pass too. The cascade basis (x = rt,
@@ -36753,6 +36969,7 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
         // (casters in front of the projector's near plane must clip, not pancake onto
         // it and shadow the whole cone).
         sd.depthClamp = false;
+        sd.depthBiasClamp = 0.f;   // <GMDX> (projectors: as before, uncapped)
         // BOTH faces cast for projectors: SL mesh walls are often single planes, and
         // with back-face culling a plane facing away from the light never reached the
         // map (light went straight through it). Acne on lit faces is handled by the
@@ -37133,9 +37350,8 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
             tli.setLayoutCount = 4; tli.pSetLayouts = tsets;
             tli.pushConstantRangeCount = 1; tli.pPushConstantRanges = &tpc;
             VK_CHECK(vkdCreatePipelineLayout(dev, &tli, &mProbeTraceLayout, "mProbeTraceLayout"));
-            VkShaderModule pm = moduleFromSpv(dev, kWorldProbeRtSpv, kWorldProbeRtSpv_bytes, "kWorldProbeRtSpv");
-            createComputePipelineInto(dev, pm, mProbeTraceLayout, 0, nullptr, &mProbeTracePipe, "mProbeTracePipe");
-            destroyShaderModuleDeferred(dev, pm, nullptr);
+            // #1064: the pipeline itself compiles on first use of Raytraced (probeTraceEnsure): it
+            // crashed AMD's Windows compiler at startup for users who never select detail 3.
         }
     }
 
@@ -38306,6 +38522,8 @@ void LLCleanRendererVK::shutdown()
     mRtMaskPipe = VK_NULL_HANDLE; mRtMaskLayout = VK_NULL_HANDLE; mDslRtMask = VK_NULL_HANDLE;
     mDsetRtMask[0] = mDsetRtMask[1] = VK_NULL_HANDLE;
     rtMaskCacheDestroy(dev);   // #771 (pipeline, set 4, buffers)
+    mProbeTraceJob.wait();   // #1064 (a background compile writes mProbeTracePipe)
+    mProbeTracePipeQueued = false;
     if (mProbeTracePipe) vkDestroyPipeline(dev, mProbeTracePipe, nullptr);
     if (mProbeTraceLayout) vkDestroyPipelineLayout(dev, mProbeTraceLayout, nullptr);
     if (mDslProbeTrace) vkdDestroySetLayout(dev, mDslProbeTrace);   // (its pool: destroyProbes)
@@ -38386,6 +38604,9 @@ void LLCleanRendererVK::shutdown()
     if (mDslDepthUp) { vkdDestroySetLayout(dev, mDslDepthUp); mDslDepthUp = VK_NULL_HANDLE; }
     if (mDepthUpBuf.buffer) mCtx->destroyBuffer(mDepthUpBuf);
     mDepthUpBuf = GpuBuffer{}; mDepthUpCap = 0; mDepthUpSetBuf = VK_NULL_HANDLE;
+    for (GpuBuffer* b : {&mVsInstSSBO, &mVsInstPrevSSBO})
+        if (b->buffer) { mCtx->destroyBuffer(*b); *b = GpuBuffer{}; }
+    mVsInstCap = mVsInstPrevCap = 0;
     if (mPrevInstSSBO.buffer) mCtx->destroyBuffer(mPrevInstSSBO);
     mPrevInstSSBO = GpuBuffer{}; mPrevInstCap = 0;
     for (GpuBuffer* b : {&mPrevJoints, &mPrevPalette, &mPrevSkinPos, &mSkinHistPos, &mSkinHistTab})
@@ -38544,6 +38765,9 @@ void LLCleanRendererVK::shutdown()
     if (mInstShiftPipe) vkDestroyPipeline(dev, mInstShiftPipe, nullptr);
     if (mInstShiftLayout) vkDestroyPipelineLayout(dev, mInstShiftLayout, nullptr);
     mInstShiftPipe = VK_NULL_HANDLE; mInstShiftLayout = VK_NULL_HANDLE;
+    if (mVsInstPipe) vkDestroyPipeline(dev, mVsInstPipe, nullptr);
+    if (mVsInstLayout) vkDestroyPipelineLayout(dev, mVsInstLayout, nullptr);
+    mVsInstPipe = VK_NULL_HANDLE; mVsInstLayout = VK_NULL_HANDLE;
     mPool.destroy();
     if (mDslCull) vkdDestroySetLayout(dev, mDslCull);
     if (mDslDraw0) vkdDestroySetLayout(dev, mDslDraw0);
@@ -38627,7 +38851,11 @@ void LLCleanRendererVK::syncFromStoresPrestep()
         // re-created / freed here, never under an open command buffer
         deferSplitPrestep();
         pdnPrestep();
-        if (mRsResSampled) rsResFrame();   // (#869: the ReSTIR reservoirs at the denoiser's extent)
+        if (mRsResSampled)
+        {
+            rsResFrame();    // (#869: the ReSTIR reservoirs at the denoiser's extent)
+            pdnSelFrame();   // (#1031: the split shadow core's descriptors, same extent)
+        }
         mRsResSampled = false;
         giPrestep();                       // (#87: the GI denoiser / state / reservoirs)
         rrPrestep();                       // (#870 / #962: DLSS targets / sets / network feature, an RR <-> SR switch; last: the RT
@@ -38919,6 +39147,7 @@ void LLCleanRendererVK::syncFromStores()
         vkDeviceWaitIdle(mCtx->device());   // bindings 24 / 25 of frames in flight name the old rows
         recreatePrevInstances();
     }
+    ensureVsInst();   // #1033: slim vertex-shader instance records follow the same capacities
 }
 
 // ===========================================================================
@@ -39663,6 +39892,8 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         mPrevInstRuns.swap(mInstRuns);
     }
     mInstRuns.clear();
+    // #1033: the slim vertex-shader records, derived from the rows as they now stand.
+    recordVsInst(cmd);
     // TEMPORAL (stage 2): last frame's joint table rows before the stream / animation
     // below overwrite them.
     recordPrevJoints(cmd, false);
@@ -40213,7 +40444,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
                 static LLCachedControl<U32> s_rtsdbg(gSavedSettings, "RenderVKRTShadowDebug", 0U);
                 // Bits [18,24): alpha-mask coverage per mip (#648 round 4; clean_frame_info.glsl
                 // maskTestAlpha) in 1/16, 0 = off. Packed word < 2^24: exact in the float.
-                static LLCachedControl<F32> s_amip(gSavedSettings, "RenderVKAlphaMipCoverage", 0.25f);
+                static LLCachedControl<F32> s_amip(gSavedSettings, "RenderVKAlphaMipCoverage", 0.0f);   // <GMDX> default 0 (settings.xml)
                 const U32 amip = (U32)llclamp((S32)std::lround((F32)s_amip * 16.f), 0, 63);
                 // Bit 17: the RT terminator triangle target is bound and written this frame
                 // (#664; clean_shadow_rt.glsl rtTermTriBound) -- RT consumer set binding 10.
@@ -41517,6 +41748,9 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         mPdnNow = false;                               // (#85 phase 2; likewise)
         mPdnFlags = 0u;
         if (!mOffscreen) deferSplitFrame(deferNow && !mDeferDbgNow, rw, rh);
+        // (#1039 M1) the visibility queue: which hit-shading splits queue their sun rays, the regions, the
+        // buffer -- after the GI's (giDecide) and the RT split's (rtSplitDecide) decisions
+        visQueueDecide();
         // MERGED RT SHADOWS (#195 + #85, RenderVKRTShadowMerge): settle selectLitVariant's
         // prediction now that the split and the denoiser are known. Confirmed: the merged pass
         // records before the SHADOW kernel (recordDeferredLighting), the mask stays off. Withdrawn
@@ -42760,6 +42994,18 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     // (flushProbeFilters): the main view keeps sampling last frame's filtered probes.
     bool probeDoneEarly = false;
     bool mirrorDone = false;
+    // #1034: the late particle compute (partLate) is not an input of the async lighting segment, so
+    // on the async-lighting path it is recorded AFTER the q_defer_light fork (on graphics, beside the
+    // segment) instead of ahead of it: the fork's graphics signal -- the async queue's start -- no
+    // longer waits for the particle sim / sort. partHold defers it; recordLateParticles runs it once.
+    bool partHold = false, partDone = false;
+    auto recordLateParticles = [&]()
+    {
+        if (!partLate || partDone) return;
+        partDone = true;
+        recordParticleCompute(cmd, push.frustum_planes, false, false);   // (phase 2: see partLate above; no mirror / cascade draws)
+        gpuSubMark(cmd, "c_particles");
+    };
     auto recordMirrorStep = [&]()
     {
         // ---- PLANAR MIRROR capture (reflected view; sampled by passes 1/2) ----
@@ -42767,16 +43013,13 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         LLVKHitch::count("mirrorActive", mMirrorOn ? 1u : 0u);
         LLVKHitch::count("mirrorSkippedOccluded", (mMirrorOn && mMirrorSkipOcc) ? 1u : 0u);
         gpuSubMark(cmd, "c_mirror");
-        if (partLate)
-        {
-            recordParticleCompute(cmd, push.frustum_planes, false, false);   // (phase 2: see partLate above; no mirror / cascade draws)
-            gpuSubMark(cmd, "c_particles");
-        }
+        if (!partHold) recordLateParticles();
         mirrorDone = true;
     };
     if (gbufDone)
     {
         // Async deferred lighting: mirror first (the lighting reads it), then the fork.
+        partHold = true;   // (#1034: the particle compute follows the fork -- below)
         recordMirrorStep();
         if (maskAoAsync || (!aoPre && !maskNow))
         {
@@ -42812,6 +43055,13 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
             else if (depthHere)
                 depthToAttachGfx(cmd);   // no fork: recordDeferLight on graphics expects the attachment layout
         }
+    }
+    // #1034: (partHold) the particle compute, after the lighting fork -- or in the old place when no
+    // fork was made (it is never skipped: partDone).
+    if (partHold)
+    {
+        partHold = false;
+        recordLateParticles();
     }
     if (mOv.probeEarly)
     {
@@ -43431,25 +43681,25 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         const bool fullRate = mOffscreen || mLiveCapNow;
         if (mCtx->shadingRateEnabled() && !fullRate)
         {
-            // 0 = auto: 2x2 from 1440p up (no visible difference at 4K), 2x1 below.
-            // <SS:Skoomastream> ...but only while temporal AA runs: it is what hides the
-            // coarse pattern. Without it (SMAA / FXAA / none) auto is full rate -- coarse
-            // shading showed as blocky, distance-worsening pixelation on every alpha decal.
+            // 0 = auto: 2x2 from 1440p up (no visible difference at 4K), 2x1 below, but
+            // only while a temporal resolve runs this frame (mTaaNow: TAA, FSR and DLSS
+            // all ride on it); without one the coarse blocks show as screen-door hair
+            // and eyes (#622), so auto shades every pixel.
             U32 rate = s_rate;
-            if (rate == 0) rate = !mTemporalOn ? 1u : (rw >= 2560u || rh >= 1440u) ? 4u : 2u;
-            // </SS:Skoomastream>
+            if (rate == 0) rate = !mTaaNow ? 1u : (rw >= 2560u || rh >= 1440u) ? 4u : 2u;
             if (rate >= 4) vrsW = vrsH = 2;
             else if (rate >= 2) vrsW = 2;
         }
         // PARTICLES (the per-particle-lit LIT pipelines; RenderVKParticleShadingRate, same
         // encoding, 0 = auto as above): the FS is a texel x tint now, soft sprites hide
-        // the coarse rate, and TAA resolves it; coverage / blending stay per pixel.
+        // the coarse rate, and TAA resolves it (auto: full rate without a temporal resolve, as above);
+        // coverage / blending stay per pixel.
         static LLCachedControl<U32> s_prate(gSavedSettings, "RenderVKParticleShadingRate", 0);
         mPartVrsW = mPartVrsH = 1;
         if (mCtx->shadingRateEnabled() && !fullRate)
         {
             U32 rate = s_prate;
-            if (rate == 0) rate = (rw >= 2560u || rh >= 1440u) ? 4u : 2u;
+            if (rate == 0) rate = !mTaaNow ? 1u : (rw >= 2560u || rh >= 1440u) ? 4u : 2u;
             if (rate >= 4) mPartVrsW = mPartVrsH = 2;
             else if (rate >= 2) mPartVrsW = 2;
         }
@@ -45759,8 +46009,13 @@ void LLCleanRendererVK::recordWeatherOcclusion(VkCommandBuffer cmd, const VKCull
         bucketDraw(cmd, buf.buffer, 0, mShadowCounters.buffer, counterSlot(b)*sizeof(uint32_t),
                    mdiMaxSlot(counterSlot(b)), sizeof(DrawCmd));
     };
-    draw(mProjPipe,       mShadowCmd[0], 0);   // opaque
-    draw(mProjMaskPipe,   mShadowCmd[1], 1);   // alpha-mask (foliage: the alpha test keeps its gaps)
+    // <GMDX> cull-none pipelines (the Ds ones) for the single-sided buckets too: the projector pipes
+    // cull back faces since 246a510a75 (LL's spot shadows), and this map's matrix has no y-flip, so
+    // its winding is reversed -- every upward single-sided face (terrain, prim tops) was culled, the
+    // near cascade's cover read the undersides as tops, and the ground under the camera stayed bare.
+    draw(mProjDsPipe,     mShadowCmd[0], 0);   // opaque
+    draw(mProjMaskDsPipe, mShadowCmd[1], 1);   // alpha-mask (foliage: the alpha test keeps its gaps)
+    // </GMDX>
     draw(mProjMaskDsPipe, mShadowCmd[2], 2);   // alpha-blend, alpha-tested as the projector tiles (invisible prims stay open)
     draw(mProjDsPipe,     mShadowCmd[3], 6);   // double-sided opaque
     draw(mProjMaskDsPipe, mShadowCmd[4], 7);   // double-sided mask
@@ -45942,6 +46197,17 @@ void LLCleanRendererVK::asyncLostHook()
                   (unsigned long long)r->mGuardCompWaits, (unsigned long long)r->mGuardForced,
                   (unsigned)r->mRetireLate.size());
     vkFaultLogLine(line);
+    // (#1049) the RT reflection hang guard (lit guard words kLgRt..) of the last frames whose readback
+    // copy ran (host-visible ring: a hung frame's own copy never does; idle words stay 0)
+    for (uint32_t k = 0; k < 3; ++k)
+    {
+        if (!r->mLgRb[k].mapped) continue;
+        const uint32_t* w = static_cast<const uint32_t*>(r->mLgRb[k].mapped);
+        std::snprintf(line, sizeof(line), "[vktest] RT reflection hang guard (#1049), lit guard ring %u (guard frame %llu): "
+                      "query budget cut %u rays, rtRaySane refused %u rays, candidate budget hit %u walks",
+                      k, (unsigned long long)r->mLgRbFrame[k], w[kLgRt], w[kLgRt + 1], w[kLgRt + 2]);
+        vkFaultLogLine(line);
+    }
     const uint32_t have = std::min(r->mAsyncFrameLogN, kAsyncFrameLog);
     for (uint32_t k = 0; k < have; ++k)
     {
@@ -46710,6 +46976,18 @@ void LLCleanRendererVK::regirHeaderFill(RegirHeader& h)
         if (mRsOccNow && !mRsOccPrev) mRsOccClear = true;   // (re-enabled: no verdict from before)
         mRsOccPrev = mRsOccNow;
         if (mRsOccNow) h.rs_cfg[2] |= 512u;
+        // (#1052) 1 = the soft cull (evidence filter, 12 frames, a weight dithered / blended across patches);
+        // 2 = the first cull's hard rules (RS_F_OCC_HARD, A/B). The counts mean the same: no clear on a switch.
+        if (mRsOccNow && occ >= 2u) h.rs_cfg[2] |= 1024u;
+    }
+    {   // (#1052 RS_F_CONV_ANY, RenderVKReSTIRConvMultiLight: A/B) the denoiser's converged shortcut for any
+        // reused reservoir (the old rule) instead of only where one light dominates the texel
+        bool convAny = false;
+#if defined(LL_HAS_CLEAN_PIPELINE)
+        static LLCachedControl<bool> s_convAny(gSavedSettings, "RenderVKReSTIRConvMultiLight", false);
+        convAny = s_convAny;
+#endif
+        if (convAny) h.rs_cfg[2] |= 2048u;
     }
     h.rs_cfg2[0] = std::clamp<U32>(mcap, 1u, 64u);
     h.rs_cfg2[1] = std::min<U32>(taps, 5u);
@@ -47359,7 +47637,9 @@ void LLCleanRendererVK::recordDeferredLighting(VkCommandBuffer& cmd, uint32_t rw
 //   10 probe clusters over PROBE_CLUSTER_CAP, 11 max probe candidates, 12 probe list
 //   entries past the probe count; 13.. the PROBE TEXEL GUARD (kLgPt*, clean_draw_common.glsl
 //   lgProbeTexel): bad texels per store, value range, bad lookup inputs, a sample, the
-//   bad slots -- litGuardProbeHeal logs them and heals the slots.
+//   bad slots -- litGuardProbeHeal logs them and heals the slots; kLgRt.. (#1049) the RT
+//   reflection hang guard (clean_deferred_light.comp rtrStatsGuard): rays the per-ray query
+//   budget cut, rays rtRaySane refused, walks over the candidate budget.
 // The deferred segment may run on the async queue (resources are CONCURRENT then); the
 // readback ring is read 3 frames later, after the frame fences that cover it.
 void LLCleanRendererVK::recordLitGuardBegin(VkCommandBuffer cmd)
@@ -47710,7 +47990,7 @@ void LLCleanRendererVK::readLitGuardStats()
     for (uint32_t i = 0; i < kLgWords; ++i)
     {
         const bool isMax = i == 7 || i == 11 || i == kLgPtMax || i == kLgPtMinInv || i == kLgPtLive1;
-        const bool isOr = i >= kLgPtSlots;
+        const bool isOr = i >= kLgPtSlots && i < kLgRt;
         if (i == kLgPtSample) { if (w[i]) mLgAcc[i] = w[i]; }   // (the latest sample)
         else if (isOr) mLgAcc[i] |= w[i];
         else mLgAcc[i] = isMax ? std::max<uint64_t>(mLgAcc[i], w[i]) : mLgAcc[i] + w[i];
@@ -47725,6 +48005,18 @@ void LLCleanRendererVK::readLitGuardStats()
         "clusters whose shadowed projectors overflowed CLUSTER_CAP (lit unshadowed there)",
         "light list entries past the light count", "probe clusters over PROBE_CLUSTER_CAP", "",
         "probe list entries past the probe count"};
+    // (#1049) the RT reflection hang guard: first sighting of each kind, WARN (rare by design: the
+    // first two budgets sit far above sane content: each count there is a pathological ray cut short)
+    static const char* const kRtNames[3] = {"rays cut by the per-ray query budget (RTR_QUERY_BUDGET)",
+        "rays refused by rtRaySane (non-finite / out-of-world origin, direction or interval)",
+        "walks over the candidate budget (RT_CANDIDATE_BUDGET: dense alpha-tested content, or a pathological ray)"};
+    for (uint32_t k = 0; k < 3; ++k)
+        if (w[kLgRt + k] != 0u && (mLgSeen & (1ull << (kLgRt + k))) == 0u)
+        {
+            mLgSeen |= 1ull << (kLgRt + k);
+            LL_WARNS("VKLitGuard") << "VK lit guard (first): RT reflections (#1049 hang guard): " << kRtNames[k] << ": "
+                                   << w[kLgRt + k] << " this frame" << LL_ENDL;
+        }
     for (uint32_t i : {0u, 1u, 2u, 3u, 8u, 9u, 12u})
         if (w[i] != 0u && (mLgSeen & (1u << i)) == 0u)
         {
@@ -47775,6 +48067,9 @@ void LLCleanRendererVK::readLitGuardStats()
         }
         else if (mLgAcc[1])
             os << " | probe blend tripped with NO bad probe texel / input (the blend math, or a texel x ambiance product)";
+        if (mLgAcc[kLgRt] || mLgAcc[kLgRt + 1] || mLgAcc[kLgRt + 2])   // (#1049)
+            os << " | RT reflection hang guard (totals): query budget cut " << mLgAcc[kLgRt] << " rays, rtRaySane refused "
+               << mLgAcc[kLgRt + 1] << " rays, candidate budget hit " << mLgAcc[kLgRt + 2] << " walks";
         LL_INFOS("VKLitGuard") << os.str() << LL_ENDL;
     }
     for (uint64_t& v : mLgAcc) v = 0;
@@ -48376,8 +48671,10 @@ void LLCleanRendererVK::initDeferSplit()
         // (#827: binding 8 = the feature split's tile list, a storage buffer; the rest images)
         // (#827: binding 8 = the feature split's tile list; #859: 10 = the RT tile list -- buffers)
         // (#87: 22 / 23 the GI reservoirs / state -- buffers; 18-21 the GI denoiser's images)
+        // (#1031: 25 the split GI stages' records, 26 the split shadow core's descriptors -- buffers)
         b[i].descriptorType = (i == kDsBindingTiles || i == kDsBindingRtTiles || i == kDsBindingRsRes
-                               || i == kDsBindingGiRes || i == kDsBindingGiState)
+                               || i == kDsBindingGiRes || i == kDsBindingGiState || i == kDsBindingGiHit
+                               || i == kDsBindingPdnSel || i == kDsBindingPdnVis)
                                   ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     }
     VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
@@ -48389,6 +48686,7 @@ void LLCleanRendererVK::initDeferSplit()
     if (!mRsResDummy.buffer)
         mRsResDummy = mCtx->createBuffer(16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     writeRsResBinding();
+    writePdnSelBinding();   // (#1031: binding 26's placeholder until the descriptors exist)
     const VkDescriptorSetLayout dsl[4] = {mDslDraw0, mDslDraw1, mDslDefer, mDslDeferSplit};
     VkPushConstantRange pc{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(VKDeferPush)};
     VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
@@ -48471,6 +48769,22 @@ void LLCleanRendererVK::initDeferSplit()
         createComputePipelineInto(dev, lm, mRtReflLayout, 0u, litDebugSpec(false), &mRtTraceListPipe,
                                   "mRtTraceListPipe (DeferRtTraceList)");
         destroyShaderModuleDeferred(dev, lm, nullptr);
+        // (#1036, RenderVKRTReflectionsShadeSplit) the list trace's split stages (distinct module names:
+        // RenderVKPipelineStats logs each one's registers)
+        {
+            struct Stage { const uint32_t* code; size_t bytes; const char* mod; const char* name; };
+            const Stage st[RTS_COUNT] = {
+                {kWorldDeferRtSplitTraceSpv, kWorldDeferRtSplitTraceSpv_bytes, "DeferRtSplitTrace", "mRtSplitPipe (DeferRtSplitTrace)"},
+                {kWorldDeferRtSplitMatSpv, kWorldDeferRtSplitMatSpv_bytes, "DeferRtSplitMat", "mRtSplitPipe (DeferRtSplitMat)"},
+                {kWorldDeferRtSplitLightSpv, kWorldDeferRtSplitLightSpv_bytes, "DeferRtSplitLight", "mRtSplitPipe (DeferRtSplitLight)"}};
+            for (uint32_t i = 0; i < RTS_COUNT; ++i)
+            {
+                VkShaderModule xm = moduleFromSpv(dev, st[i].code, st[i].bytes, st[i].mod);
+                createComputePipelineInto(dev, xm, mRtReflLayout, 0u, litDebugSpec(false), &mRtSplitPipe[i], st[i].name);
+                destroyShaderModuleDeferred(dev, xm, nullptr);
+            }
+        }
+        visQueueInit(dev, 0u);   // (#1039: the visibility queue's walk + the splits' producer / resolve variants)
         VkShaderModule fm = moduleFromSpv(dev, kWorldDeferRtFwdSpv, kWorldDeferRtFwdSpv_bytes, "kWorldDeferRtFwdSpv");
         createComputePipelineInto(dev, fm, mRtReflLayout, 0u, litDebugSpec(false), &mRtFwdPipe, "mRtFwdPipe (DeferRtFwd)");
         destroyShaderModuleDeferred(dev, fm, nullptr);
@@ -48869,6 +49183,12 @@ void LLCleanRendererVK::destroyDeferSplit()
     // (#859) the RT reflection kernels + their targets / placeholders
     for (VkPipeline* q : {&mRtTracePipe, &mRtSelectPipe, &mRtTraceListPipe, &mRtFwdPipe, &mRtResolvePipe, &mRtPreTracePipe})
         if (*q) { vkDestroyPipeline(dev, *q, nullptr); *q = VK_NULL_HANDLE; }
+    for (VkPipeline& q : mRtSplitPipe)   // (#1036)
+        if (q) { vkDestroyPipeline(dev, q, nullptr); q = VK_NULL_HANDLE; }
+    visQueueDestroy();   // (#1039 M1)
+    if (mRtRec.buffer) { mCtx->destroyBuffer(mRtRec); mRtRec = GpuBuffer{}; }
+    mRtRecCap = 0;
+    mRtSplitNow = false;
     if (mRtReflLayout) { vkDestroyPipelineLayout(dev, mRtReflLayout, nullptr); mRtReflLayout = VK_NULL_HANDLE; }
     if (mRtUberLayout) { vkDestroyPipelineLayout(dev, mRtUberLayout, nullptr); mRtUberLayout = VK_NULL_HANDLE; }
     // (#860) the RT mirror kernel + its set (the target is the mirror's: ensureMirror owns it). A mirror
@@ -49102,6 +49422,7 @@ void LLCleanRendererVK::deferSplitFrame(bool deferred, uint32_t rw, uint32_t rh)
         }
         else if (unused) mAlias.forget(AS_DSPLIT0, DS_ALIASED);   // (idempotent; also after a stale drop)
     }
+    rtSplitDecide(rw, rh, now);   // (#1036: after this frame's mRtReflNow)
     // (#859) UBER frames (deferred, not split -- RenderVKDeferredSplit 0, a retry backoff): the
     // pre-trace target at the render extent while wanted (held like the split's), else 1 x 1.
     // Not on a frame that queued the split's re-creation (it would allocate the uber target for
@@ -49226,6 +49547,7 @@ void LLCleanRendererVK::rtReflSettings()
     mRtReflTemporal = true;
     mRtReflDebugView = false;
     mRtReflRayList = true;
+    mRtSplitWant = true;
     U32 mode = 0;
 #if defined(LL_HAS_CLEAN_PIPELINE)
     static LLCachedControl<U32>  s_mode(gSavedSettings, "RenderVKRTReflections", 1);
@@ -49257,6 +49579,7 @@ void LLCleanRendererVK::rtReflSettings()
     static LLCachedControl<F32>  s_scut(gSavedSettings, "RenderVKRTReflectionsStrengthCut", 0.02f);
     static LLCachedControl<U32>  s_dbgview(gSavedSettings, "RenderVKDebugView", 0);
     static LLCachedControl<bool> s_raylist(gSavedSettings, "RenderVKRTReflectionsRayList", true);
+    static LLCachedControl<bool> s_shsplit(gSavedSettings, "RenderVKRTReflectionsShadeSplit", false);
     static LLCachedControl<F32>  s_curv(gSavedSettings, "RenderVKRTReflectionsCurvatureDensity", 12.f);
     static LLCachedControl<bool> s_lobe(gSavedSettings, "RenderVKRTReflectionsLobeFilter", true);
     static LLCachedControl<bool> s_temporal(gSavedSettings, "RenderVKRTReflectionsTemporal", true);
@@ -49311,6 +49634,8 @@ void LLCleanRendererVK::rtReflSettings()
     // RAY LIST (clean_deferred_light.comp pass 16 + pass 11 -DCLEAN_RT_LIST): select, then trace one
     // lane per ray; off: the in-tile trace (A/B: the same rays and outputs)
     mRtReflRayList = s_raylist;
+    // (#1036) the list trace as TRACE / MAT / LIGHT over per-ray records (rtSplitDecide)
+    mRtSplitWant = s_shsplit;
     // (#859 noise) CURVATURE DENSITY (clean_deferred_light.comp rtrCurvQ / rtrRho; rtt_curv): degrees ->
     // rad, 0 / non-finite off; at least 1 degree (the density saturates at one ray per pixel anyway)
     const F32 curv = s_curv;
@@ -49378,6 +49703,67 @@ VKRtReflPush LLCleanRendererVK::rtReflPush(const VKDeferPush& p) const
     rp.rtr2[2] = mRtReflSmallDist;
     rp.rtr2[3] = 0.f;
     return rp;
+}
+
+// (#1036) THE RT REFLECTION SPLIT (clean_deferred_light.comp; recordRtReflect): this recording traces the
+// ray list as TRACE / MAT / LIGHT when the setting, the ray list, the three pipelines and the records are
+// there. The records: kRtRecBytes per list entry for RenderVKRTReflectionsRayBudget x the render pixels
+// (a quarter of them without a budget; at least 64 K entries, at most the list's capacity) -- the rays
+// past them take the fused list kernel as a tail dispatch, so the capacity costs speed, never rays. No
+// descriptor names them (device address in the push): a new size allocates the new buffer first and
+// retires the old one (freed once no frame in flight reads it), no device wait. Refused (#697): the old
+// records stay in use if there are any, else the fused trace; retried after 30 s.
+void LLCleanRendererVK::rtSplitDecide(uint32_t rw, uint32_t rh, double now)
+{
+    mRtSplitNow = false;
+    if (!mCtx) return;
+    bool pipes = true;
+    for (VkPipeline sp : mRtSplitPipe) pipes = pipes && sp != VK_NULL_HANDLE;
+    const bool keep = mRtSplitWant && mRtReflRayList && mDsRtMarkFull && mDsRtTileCount != 0u && pipes;
+    if (!keep)
+    {
+        if (mRtRec.buffer)
+        {
+            retireBuffer(mRtRec);
+            mRtRec = GpuBuffer{};
+            mRtRecCap = 0;
+        }
+        return;
+    }
+    const uint64_t listCap = (uint64_t)mDsRtTileCount * 64u;
+    const double frac = mRtReflBudget > 0.f ? std::min((double)mRtReflBudget, 1.0) : 0.25;
+    uint64_t cap = (uint64_t)std::ceil((double)rw * (double)rh * frac);
+    cap = std::min<uint64_t>(std::max<uint64_t>(cap, 65536u), listCap);
+    cap = std::min<uint64_t>((cap + 63u) & ~(uint64_t)63u, listCap);
+    if ((!mRtRec.buffer || mRtRecCap != (uint32_t)cap) && now >= mRtRecRetryAt)
+    {
+        const VkDeviceSize bytes = (VkDeviceSize)cap * kRtRecBytes;
+        GpuBuffer nb{};
+        {
+            VkMemScope memcat(VKMEM_TARGET);
+            VkDeviceContext::SoftAllocScope soft(mCtx);
+            nb = mCtx->createBuffer(bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, true);
+        }
+        if (nb.buffer && nb.address)
+        {
+            if (mRtRec.buffer) retireBuffer(mRtRec);
+            mRtRec = nb;
+            mRtRecCap = (uint32_t)cap;
+            mCtx->setObjectName(VK_OBJECT_TYPE_BUFFER, (uint64_t)mRtRec.buffer, "rtReflSplitRecords");
+            LL_INFOS("Vulkan") << "RT reflections: split-trace records for " << cap << " rays ("
+                               << ((bytes + (1u << 19)) >> 20) << " MB; RenderVKRTReflectionsShadeSplit)" << LL_ENDL;
+        }
+        else
+        {
+            if (nb.buffer) mCtx->destroyBuffer(nb);
+            mRtRecRetryAt = now + 30.0;
+            LL_WARNS("Vulkan") << "RT reflections: the split trace's records (" << ((bytes + (1u << 19)) >> 20)
+                               << " MB) were refused (VRAM); "
+                               << (mRtRec.buffer ? "the previous records stay in use" : "the fused trace instead")
+                               << ", retry in 30 s" << LL_ENDL;
+        }
+    }
+    mRtSplitNow = mRtReflNow && mRtSelectPipe && mRtTraceListPipe && mRtRec.buffer && mRtRec.address && mRtRecCap != 0u;
 }
 
 // Init (after the draw sets exist): the 1 x 1 zero forward-reflection placeholder (draw set 0
@@ -49622,7 +50008,8 @@ void LLCleanRendererVK::recordRtMarkInit(VkCommandBuffer cmd)
 //   dispatches of 0 groups + the forward pass (its camera rays over the blend / water classes,
 //   when RenderVKRTReflectionsForward is on).
 // GPU timers (c_ on the async queue): g_defer_rtrefl_wait (the reflect passes' drain),
-// g_defer_rtrefl_sel (the ray list's selection), g_defer_rtrefl_trace (the trace),
+// g_defer_rtrefl_sel (the ray list's selection), g_defer_rtrefl_trace (the trace; #1036
+// RenderVKRTReflectionsShadeSplit: its walk, then g_defer_rtrefl_mat / _tail / _light),
 // g_defer_rtrefl_fwd (forward / water layer), g_defer_rtrefl (the resolve). (The trace and forward
 // dispatches have no barrier between them: on a GPU that overlaps them the two marks split one window.)
 void LLCleanRendererVK::recordRtReflect(VkCommandBuffer cmd, const VKDeferPush& p, uint32_t viewOff, bool onAsync)
@@ -49669,15 +50056,115 @@ void LLCleanRendererVK::recordRtReflect(VkCommandBuffer cmd, const VKDeferPush& 
         gpuSubMark(cmd, onAsync ? "c_defer_rtrefl_sel" : "g_defer_rtrefl_sel");
         // (clean_deferred_light.comp RAY LIST: the dispatch at rtt_words[2n + 2])
         const VkDeviceSize argOff = kRtTilesHdrBytes + ((VkDeviceSize)mDsRtTileCount * 2u + 2u) * sizeof(uint32_t);
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mRtTraceListPipe);
-        vkCmdDispatchIndirect(cmd, mDsRtTiles.buffer, argOff);
+        if (mRtSplitNow && mRtRec.buffer && mRtRec.address)
+        {
+            // (#1036) THE RT REFLECTION SPLIT (clean_deferred_light.comp): TRACE -> MAT -> LIGHT over the
+            // records (lane = list entry, below the capacity), the fused list kernel as the TAIL over the
+            // entries past it -- all four indirect over the list's dispatch; each stage reads what the one
+            // before it wrote (compute -> compute RAW). The push: rtr3.x the capacity, rtr3.zw the address.
+            VKRtReflPush sp = rp;
+            sp.rtr3[0] = mRtRecCap;
+            sp.rtr3[2] = (uint32_t)(mRtRec.address & 0xFFFFFFFFull);
+            sp.rtr3[3] = (uint32_t)(mRtRec.address >> 32);
+            vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(sp), &sp);
+            VkMemoryBarrier2 rm{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+            rm.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT; rm.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+            rm.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+            rm.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+            VkDependencyInfo rd{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+            rd.memoryBarrierCount = 1; rd.pMemoryBarriers = &rm;
+            // (#1039 M1, RenderVKVisQueue) THE VISIBILITY QUEUE: MAT queues the hits' sun rays (its producer
+            // variant), the walk traces them, LIGHT resolves (no sun walk in it); the entries past the region's
+            // capacity take the fused LIGHT as a tail (push rtr3.y = the first). The queue's stages find the
+            // records through the region header (their push rtr3.zw names the region).
+            // (#1039 M2, bit 2: pipeline set 1) MAT also queues the hits' occlusion ray and the budget's light
+            // rays, a LAYERS stage beside the walk gathers the blend layers, LIGHT holds no ray query.
+            const uint32_t vs = mVqSet;
+            const bool vq = mVqRtNow && mVq.buffer && mVisWalkPipe && mRtVqPipe[vs][VQS_MAT] && mRtVqPipe[vs][VQS_LIGHT]
+                         && (vs == 0u || mRtVqPipe[vs][VQS_LAYERS]);
+            VKRtReflPush vp = sp;
+            if (vq)
+            {
+                visQueueBegin(cmd, VQR_RT, mRtRec.address, mRtRecCap);
+                const VkDeviceAddress qa = visQueueAddr(VQR_RT);
+                vp.rtr3[0] = 0u;
+                vp.rtr3[1] = 0u;
+                vp.rtr3[2] = (uint32_t)(qa & 0xFFFFFFFFull);
+                vp.rtr3[3] = (uint32_t)(qa >> 32);
+            }
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mRtSplitPipe[RTS_TRACE]);
+            vkCmdDispatchIndirect(cmd, mDsRtTiles.buffer, argOff);
+            gpuSubMark(cmd, onAsync ? "c_defer_rtrefl_trace" : "g_defer_rtrefl_trace");
+            vkCmdPipelineBarrier2(cmd, &rd);
+            if (vq) vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(vp), &vp);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, vq ? mRtVqPipe[vs][VQS_MAT] : mRtSplitPipe[RTS_MAT]);
+            vkCmdDispatchIndirect(cmd, mDsRtTiles.buffer, argOff);
+            gpuSubMark(cmd, onAsync ? "c_defer_rtrefl_mat" : "g_defer_rtrefl_mat");
+            // (the tail's rays are its own: no barrier against MAT; mostly workgroups that find no entry)
+            if (vq) vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(sp), &sp);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mRtTraceListPipe);
+            vkCmdDispatchIndirect(cmd, mDsRtTiles.buffer, argOff);
+            gpuSubMark(cmd, onAsync ? "c_defer_rtrefl_tail" : "g_defer_rtrefl_tail");
+            if (vq)
+            {
+                // MAT's requests + its raised dispatch -> the walk (storage + indirect); the walk's results ->
+                // LIGHT (storage)
+                VkMemoryBarrier2 im = rm;
+                im.dstStageMask |= VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
+                im.dstAccessMask |= VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT;
+                VkDependencyInfo id{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+                id.memoryBarrierCount = 1; id.pMemoryBarriers = &im;
+                vkCmdPipelineBarrier2(cmd, &id);
+                visQueueWalk(cmd, VQR_RT, sp);
+                gpuSubMark(cmd, onAsync ? "c_defer_rtrefl_walk" : "g_defer_rtrefl_walk");
+                if (vs == 1u && mRtReflBlend)
+                {
+                    // (set 1) the blend layers of every queued entry -> its layer slot: MAT's records and flags
+                    // only (no barrier against the walk -- disjoint slots)
+                    vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(vp), &vp);
+                    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mRtVqPipe[vs][VQS_LAYERS]);
+                    vkCmdDispatchIndirect(cmd, mDsRtTiles.buffer, argOff);
+                    gpuSubMark(cmd, onAsync ? "c_defer_rtrefl_layers" : "g_defer_rtrefl_layers");
+                }
+                vkCmdPipelineBarrier2(cmd, &rd);
+                vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(vp), &vp);
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mRtVqPipe[vs][VQS_LIGHT]);
+                vkCmdDispatchIndirect(cmd, mDsRtTiles.buffer, argOff);
+                if (mVqRegion[VQR_RT].entries < mRtRecCap)
+                {
+                    // the entries past the region: the fused LIGHT from the first of them (independent entries:
+                    // no barrier against the resolve)
+                    VKRtReflPush tp = sp;
+                    tp.rtr3[1] = mVqRegion[VQR_RT].entries;
+                    vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(tp), &tp);
+                    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mRtSplitPipe[RTS_LIGHT]);
+                    vkCmdDispatchIndirect(cmd, mDsRtTiles.buffer, argOff);
+                }
+                gpuSubMark(cmd, onAsync ? "c_defer_rtrefl_light" : "g_defer_rtrefl_light");
+                visQueueStats(cmd, VQR_RT);
+            }
+            else
+            {
+                vkCmdPipelineBarrier2(cmd, &rd);
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mRtSplitPipe[RTS_LIGHT]);
+                vkCmdDispatchIndirect(cmd, mDsRtTiles.buffer, argOff);
+                gpuSubMark(cmd, onAsync ? "c_defer_rtrefl_light" : "g_defer_rtrefl_light");
+            }
+            vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(rp), &rp);
+        }
+        else
+        {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mRtTraceListPipe);
+            vkCmdDispatchIndirect(cmd, mDsRtTiles.buffer, argOff);
+            gpuSubMark(cmd, onAsync ? "c_defer_rtrefl_trace" : "g_defer_rtrefl_trace");
+        }
     }
     else
     {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mRtTracePipe);
         vkCmdDispatchIndirect(cmd, mDsRtTiles.buffer, 0);   // one 8x8 workgroup per listed tile
+        gpuSubMark(cmd, onAsync ? "c_defer_rtrefl_trace" : "g_defer_rtrefl_trace");
     }
-    gpuSubMark(cmd, onAsync ? "c_defer_rtrefl_trace" : "g_defer_rtrefl_trace");
     if (mRtFwdNow && mDsRtFwd.image)
     {
         const uint32_t hw = (p.width + 1u) / 2u, hh = (p.height + 1u) / 2u;
@@ -49814,6 +50301,7 @@ std::string LLCleanRendererVK::rtReflStatsText()
        << " cast=" << a.cast * k << " tiles=" << a.tiles * k << " (rays/tile "
        << std::setprecision(2) << (a.tiles > 0.0 ? a.cast / a.tiles : 0.0) << std::setprecision(0) << ", ray list "
        << (mRtReflRayList && mRtSelectPipe && mRtTraceListPipe ? "on" : "off");
+    if (mRtSplitNow) os << ", split trace: " << mRtRecCap << " ray records";   // (#1036: the cast past them took the tail)
     if (a.ovf > 0.0) os << ", overflow " << a.ovf * k;
     os << ") budget=";
     if (a.budget > 0.0) os << a.budget * k; else os << "none";

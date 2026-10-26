@@ -26,6 +26,7 @@
 // and removes the one under the cursor.
 // Zones: outlines with no fill (rectangle, circle, polygon) in a colour, solid or dotted, with an
 // optional name, drawn on the mini-map (Draw Zone), kept in the same file, global positions too.
+// Avatar dot colours: see avatarColor().
 
 #pragma once
 
@@ -82,6 +83,12 @@ public:
     static void setZoneDotted(const LLUUID& id, bool dotted);
     static void setZoneFill(const LLUUID& id, S32 fill);
     static void removeZone(const LLUUID& id);
+
+    // Avatar dot colours (right-click a dot > Dot Colour): this account's own colour for an avatar's
+    // mini-map dot, over its group / contact set colour. Kept in the same file.
+    static bool avatarColor(const LLUUID& avatar_id, LLColor4& color);
+    static void setAvatarColor(const LLUUID& avatar_id, const LLColor4& color);
+    static void clearAvatarColor(const LLUUID& avatar_id);
 
     // A map point (no height) on the ground: z = the terrain's height there (unchanged off the loaded regions).
     static LLVector3d onGround(LLVector3d pos_global);

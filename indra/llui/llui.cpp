@@ -36,6 +36,7 @@
 #include "m3math.h"
 #include "v4color.h"
 #include "llrender.h"
+#include "lluiimage.h"
 #include "llrect.h"
 #include "lldir.h"
 #include "llgl.h"
@@ -512,6 +513,11 @@ LLVector2& LLUI::getScaleFactor()
 //static
 void LLUI::setScaleFactor(const LLVector2& scale_factor)
 {
+    if (LLRender::sUIGLScaleFactor != scale_factor)
+    {
+        // #1056: vector icons were rasterized for the old physical pixel size
+        LLUIImage::invalidateVectorRasters();
+    }
     LLRender::sUIGLScaleFactor = scale_factor;
 }
 

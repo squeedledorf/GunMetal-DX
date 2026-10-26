@@ -143,6 +143,7 @@ configure: $(BUILD_DIR)/CMakeCache.txt
 # packaged tree costs minutes; local iteration runs from packaged/ directly).
 TARBALL ?= 0
 build: $(BUILD_DIR)/CMakeCache.txt
+	@python3 -I scripts/ci/check_win_macros.py
 	$(if $(filter 1,$(TARBALL)),,ALCH_SKIP_TARBALL=1) cmake --build $(BUILD_DIR)
 	@printf '\nLauncher: %s\n' '$(LAUNCHER)'
 	@$(MAKE) --no-print-directory glibc-check
@@ -162,6 +163,7 @@ GLIBC_CHECK_EXTRA = $(BUILD_DIR)/newview/packaged/lib/libdecor/*.so* $(BUILD_DIR
 .PHONY: glibc-check
 # Windows x64 cross build (clang-cl + xwin); see scripts/wincross/build.sh.
 windows: venv
+	@python3 -I scripts/ci/check_win_macros.py
 	VIEWER_CHANNEL="$(VIEWER_CHANNEL)" BUILD_ID="$(BUILD_ID)" SL_3P_CACHE="$(SL_3P_CACHE)" UPDATE_PUBKEY_HEX="$(UPDATE_PUBKEY_HEX)" bash scripts/wincross/build.sh
 
 # Print the resolved version/channel (TAG=v0.11.0-beta.1 to preview a tag).

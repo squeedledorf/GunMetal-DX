@@ -448,6 +448,9 @@ protected:
     LLFrameTimer        mOpenTimer;          // #650 diagnostics
     bool                mMaterialAuditDone = false;
     void                auditMaterialPicker();
+    // #658: tell the user why restricted items are hidden when a permission filter is active
+    void                updateRestrictionNote();
+    LLTextBox*          mRestrictionNote = nullptr;
     PermissionMask      mImmediateFilterPermMask;
     PermissionMask      mDnDFilterPermMask;
     bool                mCanApplyImmediately;

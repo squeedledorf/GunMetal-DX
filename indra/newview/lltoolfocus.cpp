@@ -222,6 +222,23 @@ void LLToolCamera::pickCallback(const LLPickInfo& pick_info)
         {
             // A click on yourself (LLToolPie) never refocuses: the camera stays as it is.
         }
+        else if (hit_obj && hit_obj->isAvatar())
+        {
+            // #958: an avatar (its bare body) is focused on the point that was hit, kept
+            // within reach of the avatar. The object-relative offset used for prims is taken
+            // from the avatar's drawable and added to its object position, and the two can
+            // disagree for a GPU-animated avatar, throwing the focus (and the camera) away.
+            LLVOAvatar* avatarp = hit_obj->asAvatar();
+            const LLVector3d char_pos = gAgent.getPosGlobalFromAgent(avatarp->getCharacterPosition());
+            LLVector3d focus = pick_info.mPosGlobal;
+            const F64 MAX_FOCUS_DIST = 4.0;   // (collision volumes and the name tag lie within ~3 m)
+            if (focus.isExactlyZero() || (focus - char_pos).length() > MAX_FOCUS_DIST)
+            {
+                focus = char_pos;
+            }
+            gAgentCamera.setFocusOnAvatar(false, ANIMATE);
+            gAgentCamera.setFocusGlobal(focus, pick_info.mObjectID);
+        }
         else if (hit_obj)
         {
             // ...clicked on a world object, so focus at its position

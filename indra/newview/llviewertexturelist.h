@@ -33,8 +33,10 @@
 #include "llviewertexture.h"
 #include "llui.h"
 #include <list>
+#include <map>
 #include <unordered_set>
 #include "lluiimage.h"
+#include "llimagesvg.h"
 
 const U32 LL_IMAGE_REZ_LOSSLESS_CUTOFF = 128;
 
@@ -259,7 +261,15 @@ public:
     LLPointer<LLUIImage> preloadUIImage(const std::string& name, const std::string& filename, bool use_mips, const LLRect& scale_rect, const LLRect& clip_rect, LLUIImage::EScaleStyle stype);
 
     static void onUIImageLoaded( bool success, LLViewerFetchedTexture *src_vi, LLImageRaw* src, LLImageRaw* src_aux, S32 discard_level, bool final, void* userdata );
+
+    // #1056: rasterize a vector icon (textures dir relative SVG) at an exact pixel size into a
+    // small local UI texture; the callback LLUIImage draws through while classic icons are off.
+    // Null when the file is missing / unparsable (the caller draws the bitmap). Main thread.
+    LLPointer<LLTexture> rasterizeVector(const LLUIImage::VectorSpec& spec, S32 pixel_w, S32 pixel_h);
 private:
+    LLPointer<LLImageRaw> rasterizeVectorLayer(const std::string& vector_file, const LLColor4U& base_color,
+                                               const std::string& color_name, const F32 box[4],
+                                               S32 pixel_w, S32 pixel_h);
     LLPointer<LLUIImage> loadUIImageByName(const std::string& name, const std::string& filename,
                                    bool use_mips = false, const LLRect& scale_rect = LLRect::null,
                                    const LLRect& clip_rect = LLRect::null,
@@ -288,6 +298,9 @@ private:
     //keep a copy of UI textures to prevent them to be deleted.
     //mTextureData of each UI texture equals to some LLUIImage.mImage.
     std::list< LLPointer<LLViewerFetchedTexture> > mUITextureList ;
+
+    // parsed vector icons by file name (a null entry = tried and failed, not retried)
+    std::map< std::string, LLPointer<LLImageSVG> > mVectorDocs;
 };
 
 const bool GLTEXTURE_TRUE = true;

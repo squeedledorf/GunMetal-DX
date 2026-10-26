@@ -1,4 +1,7 @@
 <?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<!-- <GMDX> The first tab ("Quality") of Preferences > Graphics: included by
+     panel_preferences_graphics_advanced.xml, whose tabs follow it. Widgets here
+     follow left|top: the tab is shorter than this file's rect. -->
 <panel
  border="true"
  follows="left|top|right|bottom"
@@ -109,6 +112,7 @@
     width="80">
       Faster
   </text>
+  <!-- <GMDX> was 100 wide, past the panel edge (85 still fits translations) -->
   <text
     type="string"
     length="1"
@@ -118,7 +122,7 @@
     left_delta="360"
     name="BetterText"
     top_delta="0"
-    width="100">
+    width="85">
       Better
   </text>
   <icon
@@ -220,6 +224,7 @@
     tool_tip="How far the world is drawn, in meters (up to 4096). Loaded regions are capped at a 5x5 square around yours (SlipstreamMaxRegionRing)."
     top_delta="40"
     width="427" />
+  <!-- <GMDX> was 128 wide, past the panel edge -->
   <text
     type="string"
     length="1"
@@ -229,11 +234,14 @@
     left_delta="427"
     name="DrawDistanceMeterText2"
     top_delta="0"
-    width="128">
+    width="20">
      m
   </text>
 
+  <!-- <GMDX> follows: without it the button stays put from the bottom edge and
+       slid onto Reset to recommended settings in a taller Preferences window -->
   <button
+  follows="left|top"
   height="23"
   label="Automatic adjustments settings"
   layout="topleft"
@@ -258,8 +266,10 @@
       text_readonly_color="LabelDisabledColor">
         Avatar display:
     </text>
+    <!-- <GMDX> follows: the default (right|top) moved it away from its label in a wider window -->
     <combo_box
      control_name="RenderAvatarComplexityMode"
+     follows="left|top"
      height="23"
      layout="topleft"
      left_delta="130"
@@ -350,7 +360,9 @@
       0
   </text> 
     
+  <!-- <GMDX> follows, as for AutoAdjustmentsButton -->
   <button
+    follows="left|top"
     height="23"
     label="Exceptions..."
     layout="topleft"
@@ -397,7 +409,7 @@
     left="10"
     name="FxEnabled"
     tool_tip="Run the effects stack: ReShade FX effects on the world, set up in Photo Studio > Effects. Also on a key you can set in Controls (Toggle Effects)."
-    top="345"
+    top="333"
     width="160" />
   <text
     type="string"
@@ -428,7 +440,7 @@
     layout="topleft"
     left="10"
     name="PrefSaveButton"
-    top="310"
+    top="300"
     width="200">
     <button.commit_callback
       function="Pref.PrefSave"
@@ -476,18 +488,7 @@
       function="Pref.HardwareDefaults" />
   </button>
 
-  <button
-    follows="top|left"
-    height="23"
-    label="Advanced Settings..."
-    layout="topleft"
-    left_pad="10"
-    name="AdvancedSettings"
-    top_delta="0"
-    width="200">
-    <button.commit_callback
-      function="Pref.Advanced"
-      parameter="advanced" />
-  </button>
+  <!-- <GMDX> No "Advanced Settings..." button: those settings are the tabs after this one.
+       The preset / effects / reset rows moved up 10-12 px to fit the tab. -->
 
 </panel>

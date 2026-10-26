@@ -164,6 +164,13 @@ bool LLRenderVK::initCommon(VkDeviceContext& ctx) {
         sci.magFilter = filt;
         sci.minFilter = filt;
         sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        // <GMDX> linear: trilinear over a mip chain where an image has one (use_mips art drawn
+        // small); a single-level image samples level 0 as before. Nearest keeps level 0 only.
+        if (filt == VK_FILTER_LINEAR)
+        {
+            sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+            sci.maxLod = VK_LOD_CLAMP_NONE;
+        }
         sci.addressModeU = addr;
         sci.addressModeV = addr;
         sci.addressModeW = addr;
@@ -246,7 +253,8 @@ void LLRenderVK::recordUploadCmds(VkCommandBuffer cmd, const PendingUpload& u)
     toDst.oldLayout = u.preserve ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
     toDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     toDst.image = u.image;
-    toDst.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    const uint32_t levels = u.preserve ? 1u : std::max(u.levels, 1u);   // <GMDX> every level, before the chain
+    toDst.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, levels, 0, 1};
     VkDependencyInfo d1{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
     d1.imageMemoryBarrierCount = 1;
     d1.pImageMemoryBarriers = &toDst;
@@ -259,6 +267,42 @@ void LLRenderVK::recordUploadCmds(VkCommandBuffer cmd, const PendingUpload& u)
     region.imageExtent = {u.w, u.h, 1};
     vkCmdCopyBufferToImage(cmd, u.buf, u.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
+    // <GMDX> MIP CHAIN (createTexture levels > 1): each level a linear blit of the one above, which
+    // goes to SHADER_READ once read; the last level follows below with the plain path's barrier.
+    if (levels > 1)
+    {
+        auto barrier = [&](uint32_t level, VkImageLayout from, VkImageLayout to, VkPipelineStageFlags2 ss,
+                           VkAccessFlags2 sa, VkPipelineStageFlags2 ds, VkAccessFlags2 da)
+        {
+            VkImageMemoryBarrier2 b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+            b.srcStageMask = ss; b.srcAccessMask = sa; b.dstStageMask = ds; b.dstAccessMask = da;
+            b.oldLayout = from; b.newLayout = to; b.image = u.image;
+            b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, level, 1, 0, 1};
+            VkDependencyInfo d{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+            d.imageMemoryBarrierCount = 1; d.pImageMemoryBarriers = &b;
+            vkCmdPipelineBarrier2(cmd, &d);
+        };
+        int32_t mw = (int32_t)u.w, mh = (int32_t)u.h;
+        for (uint32_t i = 1; i < levels; ++i)
+        {
+            barrier(i - 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                    VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+            const int32_t nw = std::max(mw / 2, 1), nh = std::max(mh / 2, 1);
+            VkImageBlit bl{};
+            bl.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, i - 1, 0, 1}; bl.srcOffsets[1] = {mw, mh, 1};
+            bl.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, i, 0, 1};     bl.dstOffsets[1] = {nw, nh, 1};
+            vkCmdBlitImage(cmd, u.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           u.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bl, VK_FILTER_LINEAR);
+            barrier(i - 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
+                    VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+            mw = nw; mh = nh;
+        }
+    }
+    // </GMDX>
+
     VkImageMemoryBarrier2 toRead{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
     toRead.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
     toRead.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
@@ -267,7 +311,8 @@ void LLRenderVK::recordUploadCmds(VkCommandBuffer cmd, const PendingUpload& u)
     toRead.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     toRead.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     toRead.image = u.image;
-    toRead.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    toRead.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, levels - 1, 1, 0, 1};   // <GMDX> (the last level: the chain did the rest)
+    toRead.srcStageMask |= VK_PIPELINE_STAGE_2_BLIT_BIT;
     VkDependencyInfo d2{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
     d2.imageMemoryBarrierCount = 1;
     d2.pImageMemoryBarriers = &toRead;
@@ -410,15 +455,16 @@ void LLRenderVK::submitUpload(PendingUpload& u)
     if (u.owned.buffer) mCtx->destroyBuffer(u.owned);
 }
 
-GpuImage LLRenderVK::createSampledImage(uint32_t w, uint32_t h, eTexelFormat fmt)
+GpuImage LLRenderVK::createSampledImage(uint32_t w, uint32_t h, eTexelFormat fmt, uint32_t levels)
 {
     const VkFormat vkfmt = fmt == TXF_RGBA8 ? VK_FORMAT_R8G8B8A8_UNORM
                          : fmt == TXF_LA8   ? VK_FORMAT_R8G8_UNORM
                                             : VK_FORMAT_R8_UNORM;
     GpuImage img = mCtx->createImage2D(
         w, h, vkfmt,
-        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-        VK_IMAGE_ASPECT_COLOR_BIT);
+        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT
+            | (levels > 1 ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0u),   // <GMDX> (the mip blits read it)
+        VK_IMAGE_ASPECT_COLOR_BIT, std::max(levels, 1u));
     if (fmt == TXF_RGBA8 || !img.image) return img;
     // Swizzled view: the shaders sample RGBA exactly as the RGBA8 expansion gave it.
     VkComponentMapping cm{};
@@ -443,16 +489,17 @@ GpuImage LLRenderVK::createSampledImage(uint32_t w, uint32_t h, eTexelFormat fmt
     vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
     vi.format = vkfmt;
     vi.components = cm;
-    vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, std::max(levels, 1u), 0, 1};   // <GMDX> levels
     VK_CHECK(vkCreateImageView(mCtx->device(), &vi, nullptr, &img.view));
     return img;
 }
 
 uint32_t LLRenderVK::createTexture(uint32_t w, uint32_t h, const uint8_t* pixels,
-                                   bool nearest, eTexelFormat fmt) {
+                                   bool nearest, eTexelFormat fmt, uint32_t levels) {
     VkMemScope memcat(VKMEM_UI);   // #407: UI textures + their staging
+    if (fmt != TXF_RGBA8 || !pixels) levels = 1;   // <GMDX> (the mip chain: RGBA8 blits of a full upload)
     VkTexture t;
-    t.image = createSampledImage(w, h, fmt);
+    t.image = createSampledImage(w, h, fmt, levels);
     t.view = t.image.view;
     t.texFmt = fmt;
 
@@ -460,6 +507,7 @@ uint32_t LLRenderVK::createTexture(uint32_t w, uint32_t h, const uint8_t* pixels
     PendingUpload u;
     u.image = t.image.image;
     u.w = w; u.h = h;
+    u.levels = levels;   // <GMDX>
     // pixels == nullptr: no upload (the caller follows with a full beginTextureUpdate).
     if (uint8_t* dst = (t.image.image && pixels) ? allocStaging(bytes, u) : nullptr)
     {

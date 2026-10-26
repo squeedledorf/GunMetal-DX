@@ -341,7 +341,7 @@ AcWalk acWalk(vec3 o, vec3 d, float tmin, float tmax, uint mask, uint rflags, bo
             cls = 1u;   // far alpha-mask: a blocker, no alpha read
         else
             cls = rtWorldBlockCandidate(id, RT_HIT_PRIM(rq, false, id), rayQueryGetIntersectionBarycentricsEXT(rq, false),
-                                        t, d, rayQueryGetIntersectionObjectToWorldEXT(rq, false));
+                                        t, d, rq);
         if (cls == 0u) continue;
         if (commit) rayQueryConfirmIntersectionEXT(rq);
         else if (cls == 2u) { if (t < w.blend_t) { w.blend_t = t; w.blend_inst = id; } }

@@ -33,6 +33,7 @@
 enum EInventorySortGroup
 {
     SG_SYSTEM_FOLDER,
+    SG_RLV_FOLDER,      // RLV shared root, pinned just after the system folders
     SG_TRASH_FOLDER,
     SG_NORMAL_FOLDER,
     SG_ITEM

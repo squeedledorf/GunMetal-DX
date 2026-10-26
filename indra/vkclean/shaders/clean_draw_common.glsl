@@ -190,6 +190,7 @@ const uint LDBG_NO_LEGACY_ENV  = 512u;    // legacy shiny env (sharp lod-0 probe
 const uint LDBG_NO_AO          = 1024u;   // SSAO read off
 const uint LDBG_NO_MIRROR      = 2048u;   // planar mirror tap off
 const uint LDBG_VRS_VIEW       = 4096u;   // tint by the fragment's shading rate (2x1 red, 1x2 green, 2x2 blue)
+const uint LDBG_NO_IBL_NORM    = 8192u;   // (#872) PBR environment specular: no normalization to the diffuse ambient, raw sky fallback
 // DEBUG SPECIALIZATION (kDebugViews): clean_draw.frag and clean_deferred_light.comp declare
 // it as specialization constant 1 (CLEAN_DEBUG_CONST) -- the shipping lit pipelines are built
 // with it FALSE, so every debug path below (these cost switches, the RenderVKDebugView terms,
@@ -336,6 +337,38 @@ vec4 rtFwdIn(vec3 P)
     const float vz = dot(P - linfo.cam_pos.xyz, linfo.cam_fwd.xyz);
     if (abs(vz - v.a) > 0.02 * vz + 0.05) return vec4(0.0);   // (another layer / surface here)
     return vec4(max(v.rgb, vec3(0.0)), 1.0);
+}
+// <GMDX> water: the flat mirror image pass 14 traces for it, read bilinearly at a wave-displaced
+// position (offset in render pixels, capped at kWaterRtShiftPx); a tap counts when its traced layer
+// lies where the water plane does at THAT tap (the plane's screen-space depth gradient), not where
+// it is at this pixel -- a shifted tap sits at another depth on a grazing plane, and comparing it to
+// this pixel's threw nearly all of them out (the water fell back to the sky). a = the valid weight.
+const float kWaterRtShiftPx = 24.0;
+vec4 rtFwdInWater(vec3 P, vec2 offset)
+{
+    const float vz = dot(P - linfo.cam_pos.xyz, linfo.cam_fwd.xyz);
+    const vec2 gz = vec2(dFdx(vz), dFdy(vz));   // (before any early return: uniform control flow)
+    if (probeCapture() || mirrorPass()) return vec4(0.0);
+    const float ol = length(offset);
+    if (ol > kWaterRtShiftPx) offset *= kWaterRtShiftPx / ol;
+    const ivec2 sz = textureSize(uRtFwd, 0);
+    const vec2 h = (CLEAN_FRAG_XY + offset - 1.0) * 0.5;   // (texel hp's ray passes pixel corner 2 hp + 1)
+    const ivec2 b = ivec2(floor(h));
+    const vec2 f = h - vec2(b);
+    vec3 sum = vec3(0.0);
+    float wsum = 0.0;
+    for (int i = 0; i < 4; ++i)
+    {
+        const ivec2 o = ivec2(i & 1, i >> 1);
+        const vec4 v = texelFetch(uRtFwd, clamp(b + o, ivec2(0), sz - 1), 0);
+        const vec2 tap_px = vec2(b + o) * 2.0 + 1.0;   // the tap's ray, in render pixels
+        const float want = vz + dot(gz, tap_px - CLEAN_FRAG_XY);
+        if (!(v.a > 0.0) || any(isnan(v.rgb)) || any(isinf(v.rgb)) || abs(want - v.a) > 0.05 * max(want, vz) + 0.5) continue;
+        const float w = (o.x == 1 ? f.x : 1.0 - f.x) * (o.y == 1 ? f.y : 1.0 - f.y);
+        sum += max(v.rgb, vec3(0.0)) * w;
+        wsum += w;
+    }
+    return wsum > 1e-4 ? vec4(sum / wsum, wsum) : vec4(0.0);
 }
 // surfaceReflectionsW's hook: transparent (alpha-blend, v_flags bit 1) fragments only.
 #define CLEAN_REFL_RT_FWD(P) ((v_flags & 2u) != 0u ? rtFwdIn(P) : vec4(0.0))
@@ -817,16 +850,8 @@ vec3 projectorVisibility(Light L, uint light, vec3 P, vec3 N, inout RtMaskTaps t
 #endif
 }
 
-// LIT-PASS TRIM (RenderVKLightCutoff -> ssr.lit_dbg.z, linear radiance; 0 = off): a light
-// whose attenuated colour at this point is below the cutoff is faded out over [c, 2c] and
-// skipped below c -- before its shadow / gobo fetches. Smooth, so no visible edge where
-// the tail of a dim / distant light's falloff used to end.
-float lightCutoffFade(float atten, vec3 color)
-{
-    const float c = ssr.lit_dbg.z;
-    if (c <= 0.0) return 1.0;
-    return smoothstep(c, 2.0 * c, atten * max(max(color.r, color.g), color.b));
-}
+// LIT-PASS TRIM (RenderVKLightCutoff): clean_light_eval.glsl lightCutoffFade, part of the one light
+// reach predicate (lightReach / lightInRange + lightReachAt, #1043).
 
 // CEL SHADING (#550): lightSurface() sets this for a toon-lit surface; the local lights
 // then band their N.L x attenuation term (celRamp) like the sun. False everywhere else.
@@ -884,9 +909,9 @@ vec3 localLight(uint li, vec3 P, vec3 N, vec3 V, bool pbr, vec3 base, vec3 diffu
     // is loaded: most cluster candidates miss the fragment. Bit-identical outside the
     // last ulp of the radius, where the attenuation is 0 anyway.
     const vec4  pr = lightPosRadius(li, st);
-    vec3  lv   = pr.xyz - P;
-    const float d2 = dot(lv, lv);
-    if (d2 >= pr.w * pr.w) return vec3(0.0);
+    vec3  lv;
+    float d2;
+    if (!lightInRange(pr, P, lv, d2)) return vec3(0.0);
 #ifdef CLEAN_LIGHT_TAKEN
     // (#91 LIGHT TAKEOVER, the deferred lit kernels only: clean_deferred_light.comp deferLightTaken) a
     // point light whose prim's emitting triangles carry it this frame -- their light replaces it here
@@ -894,13 +919,9 @@ vec3 localLight(uint li, vec3 P, vec3 N, vec3 V, bool pbr, vec3 base, vec3 diffu
     if (CLEAN_LIGHT_TAKEN(li)) return vec3(0.0);
 #endif
     const vec4 cf = lightColorFalloff(li, st);   // linear rgb, falloff
-    float dist = sqrt(d2);
-    if (dist >= pr.w) return vec3(0.0);
-    float atten = legacyAtten(dist / pr.w, cf.w);
+    float dist;
+    const float atten = lightReachAt(pr, cf, d2, dist);   // (#1043: attenuation x cutoff fade)
     if (atten <= 0.0) return vec3(0.0);
-    const float fade = lightCutoffFade(atten, cf.rgb);
-    if (fade <= 0.0) return vec3(0.0);
-    atten *= fade;
     // LL's forward alpha path (materialF calcPointLightOrSpotLight) clamps each light's
     // legacy specular to [0, 1]; the deferred point light (multiPointLightF) does not.
     const bool blend = (v_flags & 2u) != 0u;
@@ -957,10 +978,8 @@ vec3 localLight(uint li, vec3 P, vec3 N, vec3 V, bool pbr, vec3 base, vec3 diffu
     // PROJECTOR (spotLightF): lit only inside the projected frustum. The full record now
     // (the helpers below take it whole; only its used members survive inlining).
     const Light L = lights[li];
-    vec4 ptc = L.proj_mat * vec4(P, 1.0);
-    if (ptc.z < 0.0) return vec3(0.0);
-    ptc.xyz /= ptc.w;
-    if (ptc.z <= 0.0 || ptc.x <= 0.0 || ptc.x >= 1.0 || ptc.y <= 0.0 || ptc.y >= 1.0) return vec3(0.0);
+    vec2 ptc;
+    if (!lightProjFrustum(L.proj_mat, P, ptc)) return vec3(0.0);
     float l_dist = -dot(lv, L.proj_axis.xyz);
     vec3  l  = normalize(L.proj_origin.xyz - P);
     float nl_raw = dot(N, l);
@@ -1095,21 +1114,17 @@ bool projDirectTerms(uint li, vec3 P, vec3 N, vec3 V, bool pbr, vec3 base, vec3 
 {
     dterm = vec3(0.0); sterm = vec3(0.0); pdist = 0.0;
     const vec4 pr = lights[li].pos_radius;
-    const vec3 lv = pr.xyz - P;
-    const float d2 = dot(lv, lv);
-    if (d2 >= pr.w * pr.w) return false;
+    vec3 lv;
+    float d2;
+    if (!lightInRange(pr, P, lv, d2)) return false;
     if (lights[li].proj_origin.w < 0.5)
     {
         // (#869 / #439 ReSTIR DI) A POINT LIGHT: localLight's point branch term for term (the
         // shadowed shares it multiplies by the ratios), N.L > 0 only as for the projectors.
         const vec4 cf = lights[li].color_falloff;
-        const float dist = sqrt(d2);
-        if (dist >= pr.w) return false;
-        float atten = legacyAtten(dist / pr.w, cf.w);
+        float dist;
+        const float atten = lightReachAt(pr, cf, d2, dist);
         if (atten <= 0.0) return false;
-        const float fade = lightCutoffFade(atten, cf.rgb);
-        if (fade <= 0.0) return false;
-        atten *= fade;
         const vec3 l = lv / max(dist, 1e-4);
         const float nl_raw = dot(N, l);
         if (nl_raw <= 0.0) return false;
@@ -1136,17 +1151,11 @@ bool projDirectTerms(uint li, vec3 P, vec3 N, vec3 V, bool pbr, vec3 base, vec3 
         return true;
     }
     const Light L = lights[li];
-    const float dist = sqrt(d2);
-    if (dist >= L.pos_radius.w) return false;
-    float atten = legacyAtten(dist / L.pos_radius.w, L.color_falloff.w);
+    float dist;
+    const float atten = lightReachAt(L.pos_radius, L.color_falloff, d2, dist);
     if (atten <= 0.0) return false;
-    const float fade = lightCutoffFade(atten, L.color_falloff.rgb);
-    if (fade <= 0.0) return false;
-    atten *= fade;
-    vec4 ptc = L.proj_mat * vec4(P, 1.0);
-    if (ptc.z < 0.0) return false;
-    ptc.xyz /= ptc.w;
-    if (ptc.z <= 0.0 || ptc.x <= 0.0 || ptc.x >= 1.0 || ptc.y <= 0.0 || ptc.y >= 1.0) return false;
+    vec2 ptc;
+    if (!lightProjFrustum(L.proj_mat, P, ptc)) return false;
     const float l_dist = -dot(lv, L.proj_axis.xyz);
     const vec3 l = normalize(L.proj_origin.xyz - P);
     const float nl_raw = dot(N, l);
@@ -1687,13 +1696,23 @@ bool probeClusterFactors(uint c, uint n, vec3 P, out vec3 k)
     return ws0 > 0.0 || ws1 > 0.0 || ws2 > 0.0;
 }
 
+// (#872) THE PROBE BLEND'S OWN IRRADIANCE, before the ambiance pulls it toward amblit: the
+// walk's sum of w x texel x max(ambiance, 1) (needIrr only; vec3(0) otherwise). Where every
+// probe's ambiance is >= 1 it equals the walk's irradiance exactly; with ambiance < 1 (legacy
+// skies: 0) the diffuse lights with amblit while the specular still reads the full capture --
+// surfaceReflectionsW's IBL NORMALIZATION compares the two. Set by sampleProbesEx (a global
+// like g_haze_add: no signature change for the walk's other callers).
+vec3 g_probe_irr_ref = vec3(0.0);
+// (no lit-guard note: the irradiance beside it carries the same texels and reports them)
+vec3 probeIrrRefFinite(vec3 c) { return (any(isnan(c)) || any(isinf(c))) ? vec3(0.0) : c; }
+
 // One probe's radiance / irradiance x w (box / sphere parallax as LL), for the caller to
-// add to its sums (zero for what isn't needed).
+// add to its sums (zero for what isn't needed). irs: its g_probe_irr_ref share.
 void probeAccum(Probe p, vec3 P, vec3 N, vec3 R, float lod, float lod2, vec3 amblit,
                 bool needRad, bool needRad2, bool needIrr, float w,
-                out vec3 rs, out vec3 r2s, out vec3 is)
+                out vec3 rs, out vec3 r2s, out vec3 is, out vec3 irs)
 {
-    rs = vec3(0.0); r2s = vec3(0.0); is = vec3(0.0);
+    rs = vec3(0.0); r2s = vec3(0.0); is = vec3(0.0); irs = vec3(0.0);
     const vec3 ctr = p.sphere.xyz;
     vec3 rdir = R, ndir = N;
     if (p.params.z > 0.5)
@@ -1715,6 +1734,7 @@ void probeAccum(Probe p, vec3 P, vec3 N, vec3 R, float lod, float lod2, vec3 amb
 #endif
         const vec3 it = itx * amb;
         is = mix(amblit, it, min(amb, 1.0)) * w;
+        irs = itx * (max(amb, 1.0) * w);
     }
 }
 
@@ -1792,22 +1812,24 @@ bool sampleProbesTopN(uint c, uint n, uint topN, vec3 P, vec3 N, vec3 R, float l
                       out vec3 rad, out vec3 rad2, out vec3 irr)
 {
     rad = vec3(0.0); rad2 = vec3(0.0); irr = amblit;
+    g_probe_irr_ref = vec3(0.0);
     uint  bi[PROBE_TOPN_MAX + 1];
     float bw[PROBE_TOPN_MAX + 1];
     const uint m = probeTopNWeights(c, n, topN, P, bi, bw);
     if (m == 0u) return false;
-    vec3 rs = vec3(0.0), r2s = vec3(0.0), is = vec3(0.0);
+    vec3 rs = vec3(0.0), r2s = vec3(0.0), is = vec3(0.0), irs = vec3(0.0);
     for (uint j = 0u; j < topN; ++j)
     {
         uint id; float w;
         probeTopNPick(bi, bw, j, id, w);
         if (w <= 0.0) continue;
-        vec3 dr, dr2, di;
-        probeAccum(probes[id], P, N, R, lod, lod2, amblit, needRad, needRad2, needIrr, w, dr, dr2, di);
-        rs += dr; r2s += dr2; is += di;
+        vec3 dr, dr2, di, dir;
+        probeAccum(probes[id], P, N, R, lod, lod2, amblit, needRad, needRad2, needIrr, w, dr, dr2, di, dir);
+        rs += dr; r2s += dr2; is += di; irs += dir;
     }
     rad = lgFinite(rs, LG_PROBE); rad2 = lgFinite(r2s, LG_PROBE);
     irr = needIrr ? lgFinite(is, LG_PROBE) : amblit;
+    if (needIrr) g_probe_irr_ref = probeIrrRefFinite(irs);
     return true;
 }
 
@@ -1822,6 +1844,7 @@ bool sampleProbesEx(vec3 P, vec3 N, vec3 R, float lod, float lod2, vec3 amblit,
                     out vec3 rad, out vec3 rad2, out vec3 irr)
 {
     rad = vec3(0.0); rad2 = vec3(0.0); irr = amblit;
+    g_probe_irr_ref = vec3(0.0);
     if (phdr.info.w < 0.5 || probeCapture() || litDbg(LDBG_NO_PROBES)) return false;
     uint count = uint(phdr.info.x);
     if (count == 0u) return false;
@@ -1844,6 +1867,7 @@ bool sampleProbesEx(vec3 P, vec3 N, vec3 R, float lod, float lod2, vec3 amblit,
     vec3  rsum0 = vec3(0.0), rsum1 = vec3(0.0), rsum2 = vec3(0.0);
     vec3  r2sum0 = vec3(0.0), r2sum1 = vec3(0.0), r2sum2 = vec3(0.0);
     vec3  isum0 = vec3(0.0), isum1 = vec3(0.0), isum2 = vec3(0.0);
+    vec3  irsum0 = vec3(0.0), irsum1 = vec3(0.0), irsum2 = vec3(0.0);   // (#872 g_probe_irr_ref)
     float wsum0 = 0.0, wsum1 = 0.0, wsum2 = 0.0;
     float dwA = 0.0, dwM = 0.0;
 
@@ -1856,11 +1880,11 @@ bool sampleProbesEx(vec3 P, vec3 N, vec3 R, float lod, float lod2, vec3 amblit,
         float w, dw;
         if (!probeWeight(p, P, w, dw)) continue;
         const uint g = probeGroup(pi, p);
-        vec3 dr, dr2, di;
-        probeAccum(p, P, N, R, lod, lod2, amblit, needRad, needRad2, needIrr, w, dr, dr2, di);
-        if (g == 0u)      { rsum0 += dr; r2sum0 += dr2; isum0 += di; wsum0 += w; }
-        else if (g == 1u) { rsum1 += dr; r2sum1 += dr2; isum1 += di; wsum1 += w; dwA += dw; }
-        else              { rsum2 += dr; r2sum2 += dr2; isum2 += di; wsum2 += w; dwM += dw; }
+        vec3 dr, dr2, di, dir;
+        probeAccum(p, P, N, R, lod, lod2, amblit, needRad, needRad2, needIrr, w, dr, dr2, di, dir);
+        if (g == 0u)      { rsum0 += dr; r2sum0 += dr2; isum0 += di; irsum0 += dir; wsum0 += w; }
+        else if (g == 1u) { rsum1 += dr; r2sum1 += dr2; isum1 += di; irsum1 += dir; wsum1 += w; dwA += dw; }
+        else              { rsum2 += dr; r2sum2 += dr2; isum2 += di; irsum2 += dir; wsum2 += w; dwM += dw; }
     }
     if (wsum0 <= 0.0 && wsum1 <= 0.0 && wsum2 <= 0.0) return false;
     vec3 gk;
@@ -1868,6 +1892,7 @@ bool sampleProbesEx(vec3 P, vec3 N, vec3 R, float lod, float lod2, vec3 amblit,
     rad  = lgFinite(rsum0  * gk.x + rsum1  * gk.y + rsum2  * gk.z, LG_PROBE);
     rad2 = lgFinite(r2sum0 * gk.x + r2sum1 * gk.y + r2sum2 * gk.z, LG_PROBE);
     irr  = needIrr ? lgFinite(isum0 * gk.x + isum1 * gk.y + isum2 * gk.z, LG_PROBE) : amblit;
+    if (needIrr) g_probe_irr_ref = probeIrrRefFinite(irsum0 * gk.x + irsum1 * gk.y + irsum2 * gk.z);
     return true;
 }
 

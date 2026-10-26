@@ -168,6 +168,34 @@ void LLCleanRendererVK::pdnInit(VkDevice dev)
                                   "mPdnMergeCorePipe (DeferShadowMergeCore)");
         destroyShaderModuleDeferred(dev, m, nullptr);
     }
+    if (mRtReflLayout)
+    {
+        // (#1031) the generic core split: SELECT (plain, merged), SUNVIS (merged), VIS + SHADE (both passes)
+        // (distinct names: RenderVKPipelineStats)
+        struct Stage { const uint32_t* code; size_t bytes; const char* mod; const char* name; VkPipeline* pipe; };
+        const Stage st[7] = {
+            {kWorldDeferShadowMergeSunVisIsoSpv, kWorldDeferShadowMergeSunVisIsoSpv_bytes, "DeferShadowMergeSunVisIso",
+             "mPdnSunVisIsoPipe (DeferShadowMergeSunVisIso)", &mPdnSunVisIsoPipe},
+            {kWorldDeferShadowSplitVisIsoSpv, kWorldDeferShadowSplitVisIsoSpv_bytes, "DeferShadowSplitVisIso",
+             "mPdnVisIsoPipe (DeferShadowSplitVisIso)", &mPdnVisIsoPipe},
+            {kWorldDeferProjStochSelectSpv, kWorldDeferProjStochSelectSpv_bytes, "DeferProjStochSelect",
+             "mPdnSelectPipe (DeferProjStochSelect)", &mPdnSelectPipe[0]},
+            {kWorldDeferShadowMergeSelectSpv, kWorldDeferShadowMergeSelectSpv_bytes, "DeferShadowMergeSelect",
+             "mPdnSelectPipe (DeferShadowMergeSelect)", &mPdnSelectPipe[1]},
+            {kWorldDeferShadowMergeSunVisSpv, kWorldDeferShadowMergeSunVisSpv_bytes, "DeferShadowMergeSunVis",
+             "mPdnSunVisPipe (DeferShadowMergeSunVis)", &mPdnSunVisPipe},
+            {kWorldDeferShadowSplitVisSpv, kWorldDeferShadowSplitVisSpv_bytes, "DeferShadowSplitVis",
+             "mPdnVisPipe (DeferShadowSplitVis)", &mPdnVisPipe},
+            {kWorldDeferShadowSplitShadeSpv, kWorldDeferShadowSplitShadeSpv_bytes, "DeferShadowSplitShade",
+             "mPdnShadePipe (DeferShadowSplitShade)", &mPdnShadePipe}};
+        for (const Stage& sg : st)
+        {
+            if (*sg.pipe) continue;
+            VkShaderModule m = pdnModule(dev, sg.code, sg.bytes, sg.mod);
+            createComputePipelineInto(dev, m, mRtReflLayout, 0u, pdnLitSpec(), sg.pipe, sg.name);
+            destroyShaderModuleDeferred(dev, m, nullptr);
+        }
+    }
     if (mRtReflLayout) sunCertInit(dev);   // (#771 Phase 2) the sun exposure certificates' maintenance kernel
     giInit(dev);   // (#87) the GI denoiser (set 3 bindings 18-23) + the GI kernels
 }
@@ -179,6 +207,12 @@ void LLCleanRendererVK::pdnDestroy()
     if (mPdnMergePipe) { vkDestroyPipeline(mCtx->device(), mPdnMergePipe, nullptr); mPdnMergePipe = VK_NULL_HANDLE; }
     if (mPdnSampleCorePipe) { vkDestroyPipeline(mCtx->device(), mPdnSampleCorePipe, nullptr); mPdnSampleCorePipe = VK_NULL_HANDLE; }
     if (mPdnMergeCorePipe) { vkDestroyPipeline(mCtx->device(), mPdnMergeCorePipe, nullptr); mPdnMergeCorePipe = VK_NULL_HANDLE; }
+    for (VkPipeline* sp : {&mPdnSelectPipe[0], &mPdnSelectPipe[1], &mPdnSunVisPipe, &mPdnVisPipe, &mPdnShadePipe,
+                           &mPdnSunVisIsoPipe, &mPdnVisIsoPipe})   // (#1031)
+        if (*sp) { vkDestroyPipeline(mCtx->device(), *sp, nullptr); *sp = VK_NULL_HANDLE; }
+    if (mPdnSel.buffer) { mCtx->destroyBuffer(mPdnSel); mPdnSel = GpuBuffer{}; }
+    if (mPdnVis.buffer) { mCtx->destroyBuffer(mPdnVis); mPdnVis = GpuBuffer{}; }
+    mPdnSelW = mPdnSelH = mPdnVisSlots = 0;
     sunCertDestroy();
     giDestroy();   // (#87)
     if (mRsEmPipe) { vkDestroyPipeline(mCtx->device(), mRsEmPipe, nullptr); mRsEmPipe = VK_NULL_HANDLE; }
@@ -209,6 +243,8 @@ void LLCleanRendererVK::writePdnBindings()
         mRsResPrevOk = false;
         writeRsResBinding();
     }
+    if (!mPdn->allocated() && (mPdnSel.buffer || mPdnVis.buffer))
+        pdnSelFree();   // (#1031: the split core's descriptors + visibilities go with them)
     const VkImageView v[4] = {mPdn->inView(), mPdn->geomView(), mPdn->motView(), mPdn->outView()};
     VkDescriptorImageInfo ii[4]{};
     VkWriteDescriptorSet w[4]{};
@@ -409,7 +445,7 @@ void LLCleanRendererVK::pdnFrame(uint32_t rw, uint32_t rh, bool sample)
     // the denoiser's images (syncFromStoresPrestep: rsResFrame writes set 3 b17 behind a device
     // wait); recordProjStoch uses them only once they match this extent)
     mRsResSampled = true;
-    if (!resizeAtFrameStart()) rsResFrame();
+    if (!resizeAtFrameStart()) { rsResFrame(); pdnSelFrame(); }
     // clean_deferred_light.comp DEFER_FLAG_PSTOCH (18) / _HALF (19) / _IN (20) / debug (21-23).
     const bool half = mPdn->width() < rw || mPdn->height() < rh;
     // (the lit pass's debug field is 3 bits: the #869 split views 8 / 9 show the denoised layer 0 --
@@ -556,9 +592,17 @@ void LLCleanRendererVK::recordProjStoch(VkCommandBuffer cmd, const VKDeferPush& 
     rp.rtr2[1] = slope == 0u ? 0.f : 0.0625f * (float)(1u << slope);
     // (PDN_OPT_BLEED: the no-information flag, RenderVKProjStochBleedFix; PDN_OPT_FACING: the
     // turned-away receiver gate, RenderVKProjStochFacingGate -- clean_deferred_light.comp)
+    // (#1031 PDN_OPT_OFIRST, RenderVKShadowOpaqueFirst: the generic core's walks try the opaque geometry
+    //  alone first -- clean_shadow_core.glsl OPAQUE FIRST)
+    bool ofirst = true;
+#if defined(LL_HAS_CLEAN_PIPELINE)
+    static LLCachedControl<bool> s_ofirst(gSavedSettings, "RenderVKShadowOpaqueFirst", false);
+    ofirst = s_ofirst;
+#endif
     rp.rtr2[2] = (float)((bleed != 0u ? 1u : 0u) | (merged && oneRay != 0u ? 2u : 0u) | (sunSkip ? 4u : 0u)
                          | (facing != 0u ? 8u : 0u) | (mPdnDebug == 7u ? 16u : 0u)
-                         | (merged && awayTrace != 0u ? 32u : 0u));   // (PDN_OPT_SUN_AWAY)
+                         | (merged && awayTrace != 0u ? 32u : 0u)   // (PDN_OPT_SUN_AWAY)
+                         | (ofirst ? 64u : 0u));                    // (PDN_OPT_OFIRST)
     // (#869 Phase 5b / 5c) rtr2.w: RS_RES_ON = the reservoirs are bound at this extent (pass 15 writes
     // this parity's), RS_RES_PREV = last frame's pass 15 wrote the other parity's at this extent
     uint32_t rsRes = 0u;
@@ -570,17 +614,24 @@ void LLCleanRendererVK::recordProjStoch(VkCommandBuffer cmd, const VKDeferPush& 
     // (#869 Phase 5) a ReSTIR frame runs the generic core (its candidates, reservoirs and light
     // samples live there; rsWanted made sure both core kernels exist)
     // (#869 SPLIT: only the generic core splits -- the per-light-type kernel writes empty slots)
+    // (#1031) ... as SELECT -> SUNVIS + VIS -> SHADE (RenderVKShadowSplitKernels) while the descriptors and
+    // the visibility slots fit this extent and the settings' longest sample list
+    bool split = false;
     if (core != 0u || mRsNow || splitK != 0u)
     {
         VkPipeline cp = merged ? mPdnMergeCorePipe : mPdnSampleCorePipe;
         if (cp != VK_NULL_HANDLE) pipe = cp;   // (still compiling: the per-light-type kernel this frame)
+        split = pdnSplitWanted() && mPdnSel.buffer && mPdnVis.buffer && mPdnSelW == dw && mPdnSelH == dh
+             && mPdnVisSlots >= pdnVisSlotsWanted();
     }
+    if (split) rp.rtr3[3] = mPdnVisSlots;   // (clean_deferred_light.comp pdnVisSlots)
     // (#771 Phase 2) SUN EXPOSURE CERTIFICATES: the table's header + maintenance before the pass
     // (its own pipeline: recorded before pass 15's binds below); the pass finds the table through
     // the push (rtr3.xy) and skips the sun sample where a certificate proves it blocked.
+    // (#1031: the split core's TRACE reads it -- the generic core's rules)
     if (merged && !sunSkip)
     {
-        const uint64_t sxc = sunCertRecord(cmd, onAsync, pipe == mPdnMergeCorePipe);
+        const uint64_t sxc = sunCertRecord(cmd, onAsync, split || pipe == mPdnMergeCorePipe);
         rp.rtr3[0] = (uint32_t)(sxc & 0xFFFFFFFFull);
         rp.rtr3[1] = (uint32_t)(sxc >> 32);
     }
@@ -759,6 +810,63 @@ void LLCleanRendererVK::recordProjStoch(VkCommandBuffer cmd, const VKDeferPush& 
             gpuSubMark(cmd, onAsync ? "c_rs_occ" : "g_rs_occ");
         }
     }
+    if (split)
+    {
+        // (#1031) SELECT (the candidates, the reservoirs, the sample list + its gate -> the descriptors + GEOM);
+        // SUNVIS (merged: the sun channel, whole) and VIS (the gated light samples' walks -> mPdnVis), both
+        // reading the descriptors, independent of each other; then SHADE (the terms x the visibilities +
+        // every other store). Compute -> compute RAW between the steps. VIS runs one thread per gated light
+        // sample: SELECT appends them to mPdnVis's job list, whose header (reset here) is VIS's indirect
+        // dispatch.
+        auto barrier = [cmd](VkPipelineStageFlags2 ss, VkAccessFlags2 sa, VkPipelineStageFlags2 ds, VkAccessFlags2 da)
+        {
+            VkMemoryBarrier2 m{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+            m.srcStageMask = ss; m.srcAccessMask = sa; m.dstStageMask = ds; m.dstAccessMask = da;
+            VkDependencyInfo d{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+            d.memoryBarrierCount = 1; d.pMemoryBarriers = &m;
+            vkCmdPipelineBarrier2(cmd, &d);
+        };
+        constexpr VkAccessFlags2 kRW = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+        auto raw = [&barrier]()
+        {
+            barrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                    VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
+                    kRW | VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT);
+        };
+        {   // the job list empty: count 0, (0, 1, 1) workgroups (WAR: last frame's VIS read it, SELECT appended)
+            static const uint32_t kHdr[4] = {0u, 0u, 1u, 1u};
+            barrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                    VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+            vkCmdUpdateBuffer(cmd, mPdnVis.buffer, 0, sizeof(kHdr), kHdr);
+            barrier(VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, kRW);
+        }
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPdnSelectPipe[merged ? 1 : 0]);
+        vkCmdDispatch(cmd, (dw + 7u) / 8u, (dh + 7u) / 8u, 1);
+        if (merged) gpuSubMark(cmd, onAsync ? "c_defer_shadowsel" : "g_defer_shadowsel");
+        else        gpuSubMark(cmd, onAsync ? "c_defer_pstochsel" : "g_defer_pstochsel");
+        raw();
+        // (RenderVKShadowIsoLod: the walk kernels' isotropic alpha-test LOD -- the footprint ones meanwhile
+        //  if those still compile)
+        bool isoLod = true;
+#if defined(LL_HAS_CLEAN_PIPELINE)
+        static LLCachedControl<bool> s_iso(gSavedSettings, "RenderVKShadowIsoLod", false);
+        isoLod = s_iso;
+#endif
+        const VkPipeline sunVis = isoLod && mPdnSunVisIsoPipe ? mPdnSunVisIsoPipe : mPdnSunVisPipe;
+        const VkPipeline vis = isoLod && mPdnVisIsoPipe ? mPdnVisIsoPipe : mPdnVisPipe;
+        if (merged && !sunSkip)
+        {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, sunVis);
+            vkCmdDispatch(cmd, (dw + 7u) / 8u, (dh + 7u) / 8u, 1);
+            gpuSubMark(cmd, onAsync ? "c_defer_shadowsun" : "g_defer_shadowsun");
+        }
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, vis);
+        vkCmdDispatchIndirect(cmd, mPdnVis.buffer, 4u);   // (one thread per gated light sample, 64 per workgroup)
+        if (merged) gpuSubMark(cmd, onAsync ? "c_defer_shadowvis" : "g_defer_shadowvis");
+        else        gpuSubMark(cmd, onAsync ? "c_defer_pstochvis" : "g_defer_pstochvis");
+        raw();
+        pipe = mPdnShadePipe;
+    }
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
     vkCmdDispatch(cmd, (dw + 7u) / 8u, (dh + 7u) / 8u, 1);
     if (merged) gpuSubMark(cmd, onAsync ? "c_defer_shadowmerge" : "g_defer_shadowmerge");
@@ -926,6 +1034,111 @@ void LLCleanRendererVK::writeRsResBinding()
     w.dstSet = mDsetDeferSplit; w.dstBinding = kDsBindingRsRes; w.descriptorCount = 1;
     w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w.pBufferInfo = &bi;
     vkUpdateDescriptorSets(mCtx->device(), 1, &w, 0, nullptr);
+}
+
+// ======================= THE SHADOW CORE SPLIT (#1031) =======================
+// RenderVKShadowSplitKernels: the generic core (pass 15 -DCLEAN_SHADOW_CORE) as SELECT -> SUNVIS (merged)
+// + VIS -> SHADE over a 64 B selection descriptor per denoiser texel (mPdnSel, set 3 binding 26) and the
+// light samples' visibilities (mPdnVis, binding 27: pdnVisSlotsWanted() x 4 B per texel). Allocated on a
+// sampling frame at the denoiser's extent (rsResFrame's rule: syncFromStoresPrestep, behind a device
+// wait), freed with the denoiser's images or the setting; a refusal (#697) runs the fused core, retry in
+// 30 s; a settings change that lengthens the sample list runs the fused core until the next prestep.
+bool LLCleanRendererVK::pdnSplitWanted() const
+{
+    bool on = true;
+#if defined(LL_HAS_CLEAN_PIPELINE)
+    static LLCachedControl<bool> s_on(gSavedSettings, "RenderVKShadowSplitKernels", true);
+    on = s_on;
+#endif
+    return on && mPdnSelectPipe[0] && mPdnSelectPipe[1] && mPdnSunVisPipe && mPdnVisPipe && mPdnShadePipe;
+}
+
+// The longest light-sample list a texel can have under the settings (clean_deferred_light.comp: nProj +
+// spN + the probe): the K picks or the exact list (<= K), or the dense window (RenderVKReSTIRMoveLights,
+// the header's rs_cfg.w bits 8-11) + the emitter stratum; + the split lights; + the occlusion probe.
+uint32_t LLCleanRendererVK::pdnVisSlotsWanted() const
+{
+    U32 moveCut = 1, moveLights = 4;
+#if defined(LL_HAS_CLEAN_PIPELINE)
+    static LLCachedControl<U32> s_mcut(gSavedSettings, "RenderVKReSTIRMoveCut", 1U);
+    static LLCachedControl<U32> s_mlights(gSavedSettings, "RenderVKReSTIRMoveLights", 4U);
+    moveCut = s_mcut; moveLights = s_mlights;
+#endif
+    const uint32_t dense = moveCut != 0u ? std::min<uint32_t>(moveLights, kRegirResMax - 1u) + 1u : 0u;
+    return std::max<uint32_t>(std::clamp<U32>(mPdnK, 1u, 2u), dense) + std::min<U32>(mPdnSplitK, 4u) + 1u;
+}
+
+void LLCleanRendererVK::pdnSelFree()
+{
+    if (mPdnSel.buffer) { mCtx->destroyBuffer(mPdnSel); mPdnSel = GpuBuffer{}; }
+    if (mPdnVis.buffer) { mCtx->destroyBuffer(mPdnVis); mPdnVis = GpuBuffer{}; }
+    mPdnSelW = mPdnSelH = mPdnVisSlots = 0;
+    writePdnSelBinding();
+}
+
+void LLCleanRendererVK::pdnSelFrame()
+{
+    if (!mCtx || !mPdn || !mPdn->allocated()) return;
+    const uint32_t w = mPdn->width(), h = mPdn->height();
+    if (!pdnSplitWanted())
+    {
+        if (mPdnSel.buffer || mPdnVis.buffer)
+        {
+            vkDeviceWaitIdle(mCtx->device());
+            pdnSelFree();
+        }
+        return;
+    }
+    const uint32_t slots = pdnVisSlotsWanted();
+    if (mPdnSel.buffer && mPdnVis.buffer && mPdnSelW == w && mPdnSelH == h && mPdnVisSlots == slots) return;
+    const double now = pdnClock();
+    if (now < mPdnSelRetryAt) return;
+    const VkDeviceSize selBytes = (VkDeviceSize)w * h * 64u;
+    const VkDeviceSize visBytes = 16u + (VkDeviceSize)w * h * slots * 8u;   // (the job list header, the jobs, the visibilities)
+    vkDeviceWaitIdle(mCtx->device());
+    pdnSelFree();
+    {
+        VkMemScope memcat(VKMEM_DENOISE);
+        VkDeviceContext::SoftAllocScope soft(mCtx);
+        mPdnSel = mCtx->createBuffer(selBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (mPdnSel.buffer)
+            mPdnVis = mCtx->createBuffer(visBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT
+                                         | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    }
+    if (!mPdnSel.buffer || !mPdnVis.buffer)
+    {
+        pdnSelFree();
+        mPdnSelRetryAt = now + 30.0;
+        LL_WARNS("Vulkan") << "split shadow core: the selection descriptors + visibilities ("
+                           << ((selBytes + visBytes + (1u << 19)) >> 20)
+                           << " MB) were refused (VRAM); the fused core instead -- retry in 30 s" << LL_ENDL;
+        return;
+    }
+    mCtx->setObjectName(VK_OBJECT_TYPE_BUFFER, (uint64_t)mPdnSel.buffer, "pdnSelect");
+    mCtx->setObjectName(VK_OBJECT_TYPE_BUFFER, (uint64_t)mPdnVis.buffer, "pdnVis");
+    mPdnSelW = w; mPdnSelH = h;
+    mPdnVisSlots = slots;
+    writePdnSelBinding();
+    LL_INFOS("Vulkan") << "split shadow core (RenderVKShadowSplitKernels): " << w << "x" << h << ", descriptors "
+                       << ((selBytes + (1u << 19)) >> 20) << " MB + light-sample jobs / visibilities (" << slots << " slots) "
+                       << ((visBytes + (1u << 19)) >> 20) << " MB" << LL_ENDL;
+}
+
+void LLCleanRendererVK::writePdnSelBinding()
+{
+    if (!mCtx || !mDsetDeferSplit) return;
+    const VkBuffer s = mPdnSel.buffer ? mPdnSel.buffer : mRsResDummy.buffer;
+    const VkBuffer v = mPdnVis.buffer ? mPdnVis.buffer : mRsResDummy.buffer;
+    if (!s || !v) return;
+    const VkDescriptorBufferInfo bi[2] = {{s, 0, VK_WHOLE_SIZE}, {v, 0, VK_WHOLE_SIZE}};
+    VkWriteDescriptorSet w[2]{};
+    for (uint32_t i = 0; i < 2; ++i)
+    {
+        w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        w[i].dstSet = mDsetDeferSplit; w[i].dstBinding = i == 0 ? kDsBindingPdnSel : kDsBindingPdnVis;
+        w[i].descriptorCount = 1; w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w[i].pBufferInfo = &bi[i];
+    }
+    vkUpdateDescriptorSets(mCtx->device(), 2, w, 0, nullptr);
 }
 
 // ======================= POINT LIGHT SHADOW MAPS (#439, the non-RT fallback) =======================

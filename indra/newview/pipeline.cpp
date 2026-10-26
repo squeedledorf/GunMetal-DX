@@ -596,7 +596,11 @@ static void vkStampMoveVisibility(LLDrawable* drawablep)
 void LLPipeline::updateMoveDampedAsync(LLDrawable* drawablep)
 {
     LL_PROFILE_ZONE_SCOPED;
-    if (LLWorldClock::isFrozen())   // FreezeTime or Freeze World
+    // A drawable that has never moved (generation < 0) still takes its first move while
+    // frozen (#880): until then getRenderPosition() falls back to the object's LIVE
+    // position, so an avatar that arrived after the freeze kept walking around. That one
+    // move pins it where it first appeared.
+    if (LLWorldClock::isFrozen() && !(drawablep && drawablep->getGeneration() < 0))   // FreezeTime or Freeze World
     {
         return;
     }
@@ -646,7 +650,11 @@ void LLPipeline::updateMoveDampedAsync(LLDrawable* drawablep)
 void LLPipeline::updateMoveNormalAsync(LLDrawable* drawablep)
 {
     LL_PROFILE_ZONE_SCOPED;
-    if (LLWorldClock::isFrozen())   // FreezeTime or Freeze World
+    // A drawable that has never moved (generation < 0) still takes its first move while
+    // frozen (#880): until then getRenderPosition() falls back to the object's LIVE
+    // position, so an avatar that arrived after the freeze kept walking around. That one
+    // move pins it where it first appeared.
+    if (LLWorldClock::isFrozen() && !(drawablep && drawablep->getGeneration() < 0))   // FreezeTime or Freeze World
     {
         return;
     }
@@ -693,11 +701,23 @@ void LLPipeline::updateMovedList(LLDrawable::drawable_vector_t& moved_list)
     // from inside an update) are kept for next frame instead of invalidating iterators.
     const size_t n0 = moved_list.size();
     size_t keep_n = 0;
+    const bool frozen = LLWorldClock::isFrozen();   // FreezeTime or Freeze World
     for (size_t r = 0; r < n0; ++r)
     {
         LLDrawable *drawablep = moved_list[r].get();
         if (!drawablep)
         {
+            continue;
+        }
+        if (frozen && drawablep->getGeneration() >= 0)
+        {
+            // World frozen: a drawable that has moved before holds its pose (and its
+            // EARLY_MOVE / list state) until the thaw.
+            if (keep_n != r)
+            {
+                moved_list[keep_n] = std::move(moved_list[r]);
+            }
+            ++keep_n;
             continue;
         }
         bool done = true;
@@ -746,11 +766,7 @@ void LLPipeline::updateMove()
 {
     LL_PROFILE_ZONE_SCOPED_CATEGORY_PIPELINE;
 
-    if (LLWorldClock::isFrozen())   // FreezeTime or Freeze World
-    {
-        return;
-    }
-
+    // Frozen: updateMovedList only gives never-moved drawables their first move (#880).
     updateMovedList(mMovedList);
 }
 

@@ -61,12 +61,17 @@ asset_of() { echo "Slipstream_${1#v}_x86_64.tar.xz"; }
 sha_of() {
   local tag=$1 asset sha=""
   asset=$(asset_of "$tag")
-  sha=$(curl -fsS "$API_BASE/releases/tags/$tag" 2>/dev/null \
-        | python3 -c 'import json,sys; print(json.load(sys.stdin).get("body",""))' 2>/dev/null \
-        | sed -nE "s/^([0-9a-f]{64})  ${asset//./\\.}\$/\1/p" | tail -1) || true
+  # release_lookup.py also finds a draft release (TOKEN in the environment), which the
+  # public tags endpoint hides.
+  sha=$(python3 -I "$HERE/../../ci/release_lookup.py" --api "$API_BASE" sha "$tag" "$asset" 2>/dev/null) || true
   if [ -z "$sha" ]; then
     echo "gen.sh: no checksum for $asset in the $tag release notes; downloading it" >&2
-    sha=$(curl -fsSL "$DOWNLOAD_BASE/$tag/$asset" | sha256sum | cut -d' ' -f1)
+    local tmp; tmp=$(mktemp)
+    if python3 -I "$HERE/../../ci/release_lookup.py" --api "$API_BASE" fetch "$tag" "$asset" "$tmp" 2>/dev/null \
+       || curl -fsSL -o "$tmp" "$DOWNLOAD_BASE/$tag/$asset"; then
+      sha=$(sha256sum "$tmp" | cut -d' ' -f1)
+    fi
+    rm -f "$tmp"
   fi
   [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || die "could not determine the sha256 of $asset"
   echo "$sha"

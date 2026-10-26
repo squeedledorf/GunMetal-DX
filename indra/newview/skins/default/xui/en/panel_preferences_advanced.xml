@@ -29,7 +29,7 @@
    left="0"
    top="0"
    width="500"
-   height="750"
+   height="885"
    name="advanced_scroll_panel">
   <text
    type="string"
@@ -249,7 +249,7 @@
    layout="topleft"
    left="80"
    name="gputex_cache_check"
-   tool_tip="Keeps the compressed textures the renderer made in a 'gputex' folder inside the cache folder, so textures seen before load straight from disk -- no JPEG2000 decode, no re-encode. Needs texture compression (Advanced Graphics). Clear Cache empties it."
+   tool_tip="Keeps the compressed textures the renderer made in a 'gputex' folder inside the cache folder, so textures seen before load straight from disk -- no JPEG2000 decode, no re-encode. Needs texture compression (Graphics > Textures). Clear Cache empties it."
    top_pad="10"
    width="420" />
   <spinner
@@ -331,6 +331,18 @@
    min_val="0.75"
    name="ui_scale_slider"
    top_pad="-14"
+   width="250" />
+  <!-- #1056: Phosphor vector icons drawn at the exact on-screen size; off = the original bitmaps. Live. -->
+  <check_box
+   control_name="SLClassicIcons"
+   follows="left|top"
+   height="15"
+   label="Classic icons"
+   layout="topleft"
+   left="33"
+   name="classic_icons_check"
+   tool_tip="Use the original bitmap icons instead of the sharp vector icons (drawn at the exact on-screen size at any UI size). Takes effect immediately."
+   top_pad="10"
    width="250" />
   <text
   type="string"
@@ -419,6 +431,61 @@
    tool_tip="Seconds the mouse must rest before a tooltip appears, in-world and on buttons and other controls."
    top_pad="-14"
    width="250" />
+  <!-- #1026: hover text (llSetText) range; hard limit is PrimTextMaxDrawDistance -->
+  <text
+   type="string"
+   length="1"
+   follows="left|top"
+   height="12"
+   layout="topleft"
+   left="33"
+   name="hover_text_fade_distance_label"
+   top_pad="15"
+   width="140">
+    Hover text visible to:
+  </text>
+  <slider
+   control_name="PrimTextFadeDistance"
+   decimal_digits="0"
+   follows="left|top"
+   height="17"
+   increment="1"
+   initial_value="8"
+   layout="topleft"
+   left_pad="0"
+   max_val="128"
+   min_val="2"
+   name="hover_text_fade_distance_slider"
+   tool_tip="Distance in meters at which object hover text (llSetText) starts to fade out. PrimTextMaxDrawDistance (default 64 m, never above 300 m) is the hard limit; it is raised as needed so the fade can finish."
+   top_pad="-14"
+   width="210" />
+  <text
+   type="string"
+   length="1"
+   follows="left|top"
+   height="12"
+   layout="topleft"
+   left="33"
+   name="hover_text_fade_range_label"
+   top_pad="15"
+   width="140">
+    Hover text fade length:
+  </text>
+  <slider
+   control_name="PrimTextFadeRange"
+   decimal_digits="1"
+   follows="left|top"
+   height="17"
+   increment="0.5"
+   initial_value="4"
+   layout="topleft"
+   left_pad="0"
+   max_val="32"
+   min_val="0.5"
+   name="hover_text_fade_range_slider"
+   tool_tip="Meters over which hover text fades from fully visible to gone, starting at the distance above. Text is never drawn beyond PrimTextMaxDrawDistance (hard limit 300 m)."
+   top_pad="-14"
+   width="210" />
       <text
        type="string"
        left="30"

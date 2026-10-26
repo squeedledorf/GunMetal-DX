@@ -131,6 +131,7 @@ const F32 AUTOPILOT_MAX_TIME_NO_PROGRESS_FLY = 2.5f;        // seconds. Flying i
 // than this away, rather than snapping the agent down onto distant terrain.
 const F32 MAX_SIT_ON_GROUND_DISTANCE = 30.f;                // meters
 static bool sOverlaySkippedInMouselook = false; // <GMDX> controller overlay kept up in mouselook
+static bool sInputOverlaySkippedInMouselook = false; // <GMDX> keyboard and mouse overlay, likewise
 
 const F32 MAX_VELOCITY_AUTO_LAND_SQUARED = 4.f * 4.f;
 const F64 CHAT_AGE_FAST_RATE = 3.0;
@@ -2511,6 +2512,10 @@ void LLAgent::endAnimationUpdateUI()
             {
                 skip_list.insert(LLFloaterReg::findInstance("game_control_overlay")); // <GMDX>
             }
+            if (sInputOverlaySkippedInMouselook && LLFloaterReg::findInstance("gmdx_input_overlay"))
+            {
+                skip_list.insert(LLFloaterReg::findInstance("gmdx_input_overlay")); // <GMDX>
+            }
             LLFloaterIMContainer* im_box = LLFloaterReg::getTypedInstance<LLFloaterIMContainer>("im_container");
             LLFloaterIMContainer::floater_list_t conversations;
             im_box->getDetachedConversationFloaters(conversations);
@@ -2655,6 +2660,13 @@ void LLAgent::endAnimationUpdateUI()
             {
                 skip_list.insert(LLFloaterReg::findInstance("game_control_overlay"));
             }
+            // <GMDX> and the keyboard and mouse overlay, likewise
+            sInputOverlaySkippedInMouselook = gSavedSettings.getBOOL("GMDXInputOverlayInMouselook");
+            if (sInputOverlaySkippedInMouselook)
+            {
+                skip_list.insert(LLFloaterReg::findInstance("gmdx_input_overlay"));
+            }
+            // </GMDX>
             gFloaterView->pushVisibleAll(false, skip_list);
 #endif
         }

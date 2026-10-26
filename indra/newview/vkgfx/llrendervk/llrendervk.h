@@ -161,8 +161,10 @@ public:
     // `fmt` (#405): the layout of `pixels` and the storage format (texelBytes(fmt) per
     // texel, tightly packed); RGBA8 by default. pixels == nullptr: the image is created
     // without contents; follow with a full-rectangle beginTextureUpdate (#458).
+    // <GMDX> levels > 1 (RGBA8 with pixels only): a mip chain, made from the upload on the GPU
+    // (box-filtered blits) -- for art the UI draws well below its size (textures.xml use_mips).
     uint32_t createTexture(uint32_t w, uint32_t h, const uint8_t* pixels,
-                           bool nearest, llrvk::eTexelFormat fmt = llrvk::TXF_RGBA8);
+                           bool nearest, llrvk::eTexelFormat fmt = llrvk::TXF_RGBA8, uint32_t levels = 1);
 
     // ---- texture update (analog of LLTextureData::setImage / setSubImage) --------
     // Re-uploads the full pixels of an existing texture id (font atlas growth, UI
@@ -603,6 +605,7 @@ private:
         VkDeviceSize off = 0;
         uint32_t x = 0, y = 0, w = 0, h = 0;
         bool preserve = false;
+        uint32_t levels = 1;   // <GMDX> > 1: the upload fills level 0, the blits the rest
     };
     std::vector<PendingUpload> mPendingUploads;
     // UPLOAD STAGING RING (#458). Live-frame uploads sub-allocate it (recorded by the
@@ -636,7 +639,7 @@ private:
     bool mRecordingFrame = false;
     void recordUploadCmds(VkCommandBuffer cmd, const PendingUpload& u);
     // Device-local sampled image in `fmt` with the swizzled view (see eTexelFormat).
-    GpuImage createSampledImage(uint32_t w, uint32_t h, llrvk::eTexelFormat fmt);
+    GpuImage createSampledImage(uint32_t w, uint32_t h, llrvk::eTexelFormat fmt, uint32_t levels = 1);   // <GMDX> levels
     struct DeferredFree
     {
         uint64_t frame = 0;

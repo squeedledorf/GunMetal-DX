@@ -81,19 +81,40 @@
 // direction, NaN / negative / Inf tmin, NaN tmax) becomes an EMPTY one far below the world and
 // returns false: a miss for closest-hit queries; shadow walks treat it as blocked (the G-7
 // over-budget rule) themselves. Valid rays are untouched, so normal images are bit-identical.
+// (#1049, the hang recurred) Also refused as non-finite: an origin / tmin past RT_RAY_WORLD_MAX and a
+// direction of absurd length (finite, but no world ray -- origins and spans that large are garbage
+// whose traversal math overflows inside the walk); tmax is clamped to a finite 2 x RT_RAY_WORLD_MAX.
+// PER-INVOCATION RAY-QUERY BUDGET (#1049): rt_query_left = the ray queries this invocation may still
+// start (unlimited by default; the RT reflection kernels set it per reflection ray, clean_deferred_
+// light.comp RTR_QUERY_BUDGET): past it a query is refused the same way (empty ray, false), so one
+// ray's total traversal work is bounded whatever its walks / re-traces / hit shading add up to. The
+// counters (rt_ray_rejected, rt_query_refused) are read by the kernels that set the budget.
+#define RT_RAY_WORLD_MAX 1.0e7
+uint rt_query_left = 0xFFFFFFFFu;
+uint rt_query_refused = 0u;
+uint rt_ray_rejected = 0u;
 bool rtRaySane(inout vec3 o, inout float tmin, inout vec3 d, inout float tmax)
 {
+    const vec3 ao = abs(o);
+    const float dd = dot(d, d);
     const bool ok = !any(isnan(o)) && !any(isinf(o)) && !any(isnan(d)) && !any(isinf(d))
-                 && dot(d, d) > 1e-24 && tmin >= 0.0 && !isinf(tmin) && !isnan(tmax);
-    if (!ok) { o = vec3(0.0, 0.0, -1.0e6); d = vec3(0.0, 0.0, -1.0); tmin = 0.0; tmax = 0.0; return false; }
+                 && max(max(ao.x, ao.y), ao.z) < RT_RAY_WORLD_MAX
+                 && dd > 1e-24 && dd < 1e24 && tmin >= 0.0 && tmin < RT_RAY_WORLD_MAX && !isnan(tmax);
+    if (!ok) ++rt_ray_rejected;
+    else if (rt_query_left == 0u) ++rt_query_refused;
+    if (!ok || rt_query_left == 0u) { o = vec3(0.0, 0.0, -1.0e6); d = vec3(0.0, 0.0, -1.0); tmin = 0.0; tmax = 0.0; return false; }
+    if (rt_query_left != 0xFFFFFFFFu) --rt_query_left;
+    tmax = min(tmax, 2.0 * RT_RAY_WORLD_MAX);
     if (!(tmax >= tmin)) tmax = tmin;   // (finite, empty: the legal empty query)
     return true;
 }
 
+// THE ALPHA-TEST RULE (#1044, clean_alpha_rule.glsl): the cutoffs / thresholds every candidate test uses.
+#include "clean_alpha_rule.glsl"
 // Alpha-blend materials have no cutoff (alpha_cutoff < 0): their any-hit treats
 // base-colour alpha below this as a hole (LL's shadow pass does the same).
 #ifndef RT_BLEND_CUTOFF
-#define RT_BLEND_CUTOFF 0.5
+#define RT_BLEND_CUTOFF ALPHA_BLEND_CUTOFF
 #endif
 
 // 224 B -- LLCleanInstanceStore::Instance.
@@ -613,6 +634,15 @@ float rt_mask_boost    = 1.0;
 bool rt_foot_on = false;
 vec3 rt_foot_a = vec3(0.0);
 vec3 rt_foot_b = vec3(0.0);
+// (#1031, RenderVKShadowIsoLod) RT_NO_FOOT_LOD: the includer's shadow walks take an ISOTROPIC LOD --
+// the footprint's minor axis as the ray cone's constant width (clean_shadow_core.glsl shadowSampleVis)
+// -- and the alpha test compiles no footprint projection / textureGrad path (rt_foot_on never set
+// when it runs). Only kernels that are shadow walks alone define it.
+#ifdef RT_NO_FOOT_LOD
+#define RT_FOOT_ON false
+#else
+#define RT_FOOT_ON rt_foot_on
+#endif
 
 // ALPHA-BLEND CASTERS in shadow rays (clean_shadow_rt.glsl shadowRayVis /
 // clean_rt_shade.glsl rtHitSunShadow set these around their traces; false for every
@@ -670,42 +700,41 @@ float rt_cand_ll_pass = 1.0;
 // the micromap lookup); 2 = TINTED: mode 1's rays, then ONE transmission ray per lit
 // receiver over the alpha-mask class (traceFoliageTransmit) that colours the light by the
 // first rt_fol_layers away-facing leaves it passes (rtFolLayer).
-uint  rt_fol_mode     = 0u;
-bool  rt_fol_cull     = false;   // inside a sun / moon trace (rtFoliageSet .. rtFoliageEnd)
-bool  rt_fol_rig      = false;   // rigged / worn facing parity (RenderVKRTRiggedFacingParity)
-bool  rt_fol_flip     = false;
-float rt_fol_strength = 0.35;
-float rt_fol_tint     = 0.5;
-uint  rt_fol_layers   = 2u;
+// (#1031) The parameters stay the frame info's raw vec4 (every caller loads ssr.foliage_rt -- a
+// dispatch-uniform value the compiler can keep in the constant bank) and are decoded where read
+// (rtFolMode() ...): no six derived private values live across the walks. rt_fol_cull is the
+// per-thread "inside a sun / moon trace" state; mode and rig read 0 / false outside one.
+vec4  rt_fol_p    = vec4(0.0, 0.35, 0.5, 2.0);   // x mode (bits 0-1) | flip (2) | rig (3), y strength, z tint, w layers
+bool  rt_fol_cull = false;   // inside a sun / moon trace (rtFoliageSet .. rtFoliageEnd)
+uint  rtFolBits()     { return uint(rt_fol_p.x + 0.5); }
+uint  rtFolMode()     { return rt_fol_cull ? min(rtFolBits() & 3u, 2u) : 0u; }
+bool  rtFolRig()      { return rt_fol_cull && (rtFolBits() & 8u) != 0u; }   // rigged / worn facing parity (RenderVKRTRiggedFacingParity)
+bool  rtFolFlip()     { return (rtFolBits() & 4u) != 0u; }
+float rtFolStrength() { return clamp(rt_fol_p.y, 0.0, 1.0); }
+float rtFolTint()     { return clamp(rt_fol_p.z, 0.0, 1.0); }
+uint  rtFolLayers()   { return clamp(uint(rt_fol_p.w + 0.5), 1u, 8u); }
 // A blend caster at or above this alpha is SOLID (LL's shadow-pass threshold; see
 // rt_blend_parity): the only blend hits the facing rule changes.
-#define RT_BLEND_SOLID 0.88
+#define RT_BLEND_SOLID ALPHA_BLEND_SOLID
 // p = frame info foliage_rt: x mode (bits 0-1) | facing flip (bit 2) | rigged / worn
 // facing parity (bit 3), y strength, z tint amount, w layer cap.
 void rtFoliageSet(vec4 p)
 {
-    const uint m = uint(p.x + 0.5);
-    rt_fol_mode     = min(m & 3u, 2u);
-    rt_fol_cull     = true;
-    rt_fol_rig      = (m & 8u) != 0u;
-    rt_fol_flip     = (m & 4u) != 0u;
-    rt_fol_strength = clamp(p.y, 0.0, 1.0);
-    rt_fol_tint     = clamp(p.z, 0.0, 1.0);
-    rt_fol_layers   = clamp(uint(p.w + 0.5), 1u, 8u);
+    rt_fol_p    = p;
+    rt_fol_cull = true;
 }
-// The end of a sun / moon trace: every other ray keeps every face an occluder.
+// The end of a sun / moon trace: every other ray keeps every face an occluder (the parameters keep
+// their values, as before: only mode / rig / the culling switch off).
 void rtFoliageEnd()
 {
-    rt_fol_mode = 0u;
     rt_fol_cull = false;
-    rt_fol_rig  = false;
 }
 // Sun / moon shadow rays (every mode): cull the away-facing faces of the cullable
 // instances -- those the TLAS left without CULL_DISABLE (see SCOPE above).
 uint rtFolShadowFlags()
 {
     if (!rt_fol_cull) return gl_RayFlagsNoneEXT;
-    return rt_fol_flip ? gl_RayFlagsCullBackFacingTrianglesEXT : gl_RayFlagsCullFrontFacingTrianglesEXT;
+    return rtFolFlip() ? gl_RayFlagsCullBackFacingTrianglesEXT : gl_RayFlagsCullFrontFacingTrianglesEXT;
 }
 // One transmissive layer: strength x the leaf's HUE (unit-max chroma, as
 // translucentTransmit) blended in by the tint amount. Luminance comes from the strength
@@ -714,7 +743,7 @@ vec3 rtFolLayer(vec3 col)
 {
     const float m = max(max(col.r, col.g), col.b);
     const vec3 hue = m > 1e-4 ? col / m : vec3(1.0);
-    return rt_fol_strength * mix(vec3(1.0), hue, rt_fol_tint);
+    return rtFolStrength() * mix(vec3(1.0), hue, rtFolTint());
 }
 // Candidate-side facing of a hit on an instance the culling flags cannot reach (alpha-blend
 // is CULL_DISABLE). The shadow pass's alpha FS drops the back faces of single-sided blend
@@ -732,12 +761,12 @@ vec3 rtFolLayer(vec3 col)
 #define RT_FOL_PASS    2u
 uint rtFolAway(uint id, bool front)
 {
-    if (!rt_fol_cull || front == rt_fol_flip || !rtIdIn(id)) return RT_FOL_OCCLUDE;
+    if (!rt_fol_cull || front == rtFolFlip() || !rtIdIn(id)) return RT_FOL_OCCLUDE;
     const uint f = rt_instances[id].flags;
     if ((f & 256u) != 0u) return RT_FOL_OCCLUDE;                                      // double-sided
     if ((f & (512u | 8192u)) != 0u || (rt_geom[id].z & 0x80000000u) != 0u)          // worn / own / rigged
-        return rt_fol_rig ? RT_FOL_PASS : RT_FOL_OCCLUDE;
-    return rt_fol_mode != 0u ? RT_FOL_LEAF : RT_FOL_OCCLUDE;
+        return rtFolRig() ? RT_FOL_PASS : RT_FOL_OCCLUDE;
+    return rtFolMode() != 0u ? RT_FOL_LEAF : RT_FOL_OCCLUDE;
 }
 
 struct RtHit {
@@ -897,14 +926,15 @@ vec2 rtVertexFaceUV(uint id, uint f, QvHeader h, uint v)
 // && base.a < alpha_cutoff. Terrain / untextured faces use the constant alpha.
 // Alpha-blend materials (cutoff < 0) cut at RT_BLEND_CUTOFF. The texel is sampled
 // through the SAME bindless sampler at the ray-cone LOD (see rt_cone_*).
-//   t   = hit distance, dir = normalized ray direction, o2w = the instance's
-//         object -> world transform (its positions are in BLAS space).
+//   t   = hit distance, dir = normalized ray direction, q = the ray query standing on the
+//         CANDIDATE: its object -> world transform (the positions are in BLAS space) is read
+//         only where a LOD path needs it (#1031: no 12-float argument per candidate).
 // Candidate coverage: alpha at the hit and the cutoff the raster would apply.
 // blend = true for alpha-blend materials (cutoff = RT_BLEND_CUTOFF for callers that
 // want a binary answer; shadow rays treat these as translucent instead).
 // col = the linear base colour at the hit (factor x tint x texel): the hue a
 // translucent caster gives the light it passes (#212).
-float rtCandidateAlphaCol(uint id, uint prim, vec2 bary, float t, vec3 dir, mat4x3 o2w,
+float rtCandidateAlphaCol(uint id, uint prim, vec2 bary, float t, vec3 dir, rayQueryEXT q,
                           out float cutoff, out bool blend, out vec3 col)
 {
     blend = false;
@@ -971,12 +1001,13 @@ float rtCandidateAlphaCol(uint id, uint prim, vec2 bary, float t, vec3 dir, mat4
         const float width = (mtest && rt_mask_width0 >= 0.0) ? rt_mask_width0 + rt_mask_spread * t
                                                               : rt_cone_width0 + rt_cone_spread * t;
         vec3 p0 = vec3(0.0), p1 = vec3(0.0), p2 = vec3(0.0);
-        if (rt_foot_on || width > 0.0) rtTriPositions(id, prim, p0, p1, p2);
+        if (RT_FOOT_ON || width > 0.0) rtTriPositions(id, prim, p0, p1, p2);
+#ifndef RT_NO_FOOT_LOD   // (#1031: the shadow walks' isotropic variants carry no anisotropic footprint code)
         if (rt_foot_on)
         {
             // Receiver footprint (rt_foot_a / _b) carried along the ray onto this
             // triangle's plane, then world -> UV through the triangle's own mapping.
-            const mat3 M = mat3(o2w);
+            const mat3 M = mat3(rayQueryGetIntersectionObjectToWorldEXT(q, false));   // (#1031: read here, not passed)
             const vec3 e1 = M * (p1 - p0), e2 = M * (p2 - p0);
             const vec3 n = cross(e1, e2);
             const float nl = length(n);
@@ -1002,11 +1033,12 @@ float rtCandidateAlphaCol(uint id, uint prim, vec2 bary, float t, vec3 dir, mat4
             col *= texel.rgb;
             return a;
         }
+#endif
         float lod = 0.0;
         float a_lod = 0.0;   // (the mask test's unclamped LOD: maskTestAlpha's input, as textureQueryLod)
         if (width > 0.0)
         {
-            mat3 M = mat3(o2w);
+            const mat3 M = mat3(rayQueryGetIntersectionObjectToWorldEXT(q, false));   // (#1031: read here, not passed)
             vec3 n = cross(M * (p1 - p0), M * (p2 - p0));
             float pa = length(n);                                          // 2 x world area
             vec2 e1 = t1 - t0, e2 = t2 - t0;
@@ -1032,7 +1064,7 @@ float rtCandidateAlphaCol(uint id, uint prim, vec2 bary, float t, vec3 dir, mat4
         // maskTestAlpha (the raster's per-mip coverage rule): only the tested alpha is scaled.
         if (mtest && rt_mask_cov_k > 0.0 && cutoff <= 0.9706)   // <GMDX> not above the ceiling (a dissolve: maskTestAlpha)
         {
-            rt_mask_boost = 1.0 + max(a_lod, 0.0) * rt_mask_cov_k;
+            rt_mask_boost = alphaCoverage(1.0, a_lod, rt_mask_cov_k);   // (#1044: THE rule's coverage scale)
             a *= rt_mask_boost;
         }
     }
@@ -1040,17 +1072,17 @@ float rtCandidateAlphaCol(uint id, uint prim, vec2 bary, float t, vec3 dir, mat4
     return a;
 }
 
-float rtCandidateAlpha(uint id, uint prim, vec2 bary, float t, vec3 dir, mat4x3 o2w,
+float rtCandidateAlpha(uint id, uint prim, vec2 bary, float t, vec3 dir, rayQueryEXT q,
                        out float cutoff, out bool blend)
 {
     vec3 col;
-    return rtCandidateAlphaCol(id, prim, bary, t, dir, o2w, cutoff, blend, col);
+    return rtCandidateAlphaCol(id, prim, bary, t, dir, q, cutoff, blend, col);
 }
 
-bool rtAlphaOpaque(uint id, uint prim, vec2 bary, float t, vec3 dir, mat4x3 o2w)
+bool rtAlphaOpaque(uint id, uint prim, vec2 bary, float t, vec3 dir, rayQueryEXT q)
 {
     float cutoff; bool blend;
-    float a = rtCandidateAlpha(id, prim, bary, t, dir, o2w, cutoff, blend);
+    float a = rtCandidateAlpha(id, prim, bary, t, dir, q, cutoff, blend);
     return a >= cutoff;
 }
 
@@ -1074,7 +1106,7 @@ bool rtAlphaOpaque(uint id, uint prim, vec2 bary, float t, vec3 dir, mat4x3 o2w)
 // (Faces the TLAS leaves out never reach this: RenderVKRTBlendCull drops non-fullbright
 // blend faces with face alpha < 0.05 at instance build, clean_rt_instances.comp passA.)
 #define RT_MASK_WORLD_BLOCK (RT_MASK_OPAQUE | RT_MASK_TERRAIN | RT_MASK_ALPHAMASK | RT_MASK_BLEND)
-#define RT_BLOCK_ALPHA_EPS  (1.0 / 255.0)
+#define RT_BLOCK_ALPHA_EPS  ALPHA_VISIBLE_EPS
 
 // Worn attachment (512), the agent's own avatar (8192), rigged / animesh skin (bit 0 with a
 // skin; a flexi chain carries bit 0 without one and is world geometry).
@@ -1085,7 +1117,7 @@ bool rtAvatarOwned(uint id)
     return (f & (512u | 8192u)) != 0u || ((f & 1u) != 0u && rt_instances[id].skin_id != 0xFFFFFFFFu);
 }
 
-uint rtWorldBlockCandidate(uint id, uint prim, vec2 bary, float t, vec3 dir, mat4x3 o2w)
+uint rtWorldBlockCandidate(uint id, uint prim, vec2 bary, float t, vec3 dir, rayQueryEXT q)
 {
     if (!rtIdIn(id)) return 1u;   // (#874 guard)
     const bool isBlend = (rt_instances[id].flags & 2u) != 0u;
@@ -1098,7 +1130,7 @@ uint rtWorldBlockCandidate(uint id, uint prim, vec2 bary, float t, vec3 dir, mat
         if (fa <= RT_BLOCK_ALPHA_EPS) return 0u;   // fully transparent face: no texture fetch
     }
     float cutoff; bool blend;
-    const float a = rtCandidateAlpha(id, prim, bary, t, dir, o2w, cutoff, blend);
+    const float a = rtCandidateAlpha(id, prim, bary, t, dir, q, cutoff, blend);
     if (isBlend) return a > RT_BLOCK_ALPHA_EPS ? 2u : 0u;
     return a >= cutoff ? 1u : 0u;
 }
@@ -1117,274 +1149,19 @@ bool rtCandidateFront(uint id, uint prim, vec3 dir, mat4x3 o2w)
     mat3 M = mat3(o2w);
     return dot(cross(M * (p1 - p0), M * (p2 - p0)), dir) < 0.0;
 }
-
-// ---- SHADOW-RAY WALKS ----
-// One any-hit walk serves every shadow-ray flavour below; `kind` picks the candidate
-// rules at run time (uniform per ray). It exists for COMPILE COST: glslc -O inlines every
-// call, and the lit FS reaches these walks from many places (sun + projector cores, hard
-// ray / disc / split tails, every lightSurface branch). Four separate walk functions, each
-// inlining the whole candidate alpha test (rtCandidateAlphaCol: UV fetch, ray cone,
-// texture sample -- ~7k SPIR-V instructions), made the ray-query lit FS ~870k words and
-// a ~90 s / 1.7 GB driver compile per pipeline. A call site that used to pick between
-// three walks now inlines one.
-//   RT_WALK_GREY / RT_WALK_RGB: the MIXED walk (traceShadowRay / traceShadowRayRGB).
-//   RT_WALK_VIS: the opaque set, binary (traceShadowRayVis).
-//   RT_WALK_TRANS / RT_WALK_TRANS_RGB: the translucent set (traceTransmittance).
-#define RT_WALK_GREY      0u
-#define RT_WALK_RGB       1u
-#define RT_WALK_VIS       2u
-#define RT_WALK_TRANS     3u
-#define RT_WALK_TRANS_RGB 4u
-
-// Shadow / visibility ray (RT_WALK_GREY): 1.0 = unoccluded over [tmin, tmax], 0.0 = blocked.
-// Double-sided (no facing cull). Alpha-mask / blend instances run the candidate
-// alpha test; FORCE_OPAQUE instances (the vast majority) never produce candidates.
-// Alpha-mask casters are binary (the raster's cutoff). Alpha-blend casters are
-// TRANSLUCENT: each passes (1 - alpha) of the light, so a blended prim (light-beam
-// cones, glow cards, animated-alpha effects) dims the light in proportion instead of
-// switching it fully on/off as its alpha crosses a threshold (that flickered whole
-// projectors on animated textures). Matches the shadow-map path's dithered blend.
-// Coloured shadow ray (RT_WALK_RGB, #212): each alpha-blend caster passes
-// translucentTransmit(colour, alpha) -- stained glass throws coloured light. Order
-// doesn't matter (the product commutes); an opaque hit, or transmittance under 1%,
-// ends the ray dark. (Grey = the same walk with (1 - alpha) in every channel.)
-//
-// TRANSLUCENT SPLIT (RenderVKRTTranslucentSplit; clean_shadow_rt.glsl): shadow
-// visibility is two independent traversals instead of one mixed walk.
-//   * RT_WALK_VIS: the OPAQUE set (callers pass a mask without RT_MASK_BLEND, or
-//     traceShadowRayVisSplit with it under parity -- only LL-solid blend texels block
-//     <SS:Skoomastream>): binary 0 / 1, alpha-mask cut-outs still alpha-tested (OMM where
-//     baked), blocker distance recorded. A soft shadow's disc rays stay 0 / 1 and the
-//     adaptive early-out settles.
-//   * RT_WALK_TRANS(_RGB): the TRANSLUCENT set only (RT_MASK_BLEND), ONE ray per
-//     receiver: the product of every blend caster's transmittance along it (order
-//     doesn't matter), the same per-caster rules as the mixed walk. It never
-//     touches rt_block_t: translucent casters do not size the denoiser's penumbra.
-//     Honours rt_blend_parity / rt_blend_coarse like the mixed walks. A blend-class
-//     instance whose material carries an alpha cutoff (rtCandidateAlphaCol: blend =
-//     false) is a binary caster here, as in the mixed walk. Its foliage rule (#735):
-//     an away-facing solid leaf passes in mode 1; mode 2 colours the light by the first
-//     rt_fol_layers of them (the rest pass: the walk can't stop early -- light-facing
-//     blend casters later in traversal order must still block). Their distance sizes
-//     the denoiser's penumbra.
-// Final visibility = opaque visibility x translucent transmittance.
-// <GMDX> PROJECTOR FACING (set by projShadowRayCoreImpl around its rays): LL renders spot
-// shadow maps back-face culled, so a single-sided face turned AWAY from the light never
-// casts -- e.g. the inside of a lantern's housing around its light prim. The ray runs
-// receiver -> light and meets such a face on its front side. Opaque walls are
-// CULL_DISABLE in the TLAS (the sun's rays keep them two-sided), so the rays go NoOpaque
-// and the walk skips those hits itself (opaque candidates confirm at once below).
-bool rt_proj_facing = false;
-// </GMDX>
-vec3 traceShadowWalk(vec3 origin, vec3 dir, float tmin, float tmax, uint mask, uint kind)
+// ... for the CANDIDATE q stands on (#1031: its transform read here, not passed)
+bool rtCandidateFrontQ(uint id, uint prim, vec3 dir, rayQueryEXT q)
 {
-    const bool trans_walk = kind >= RT_WALK_TRANS;
-    const bool rgb = kind == RT_WALK_RGB || kind == RT_WALK_TRANS_RGB;
-    if (!rtRaySane(origin, tmin, dir, tmax)) return vec3(0.0);   // (invalid ray: blocked, as G-7)
-    rayQueryEXT rq;
-    rayQueryInitializeEXT(rq, uTLAS, gl_RayFlagsTerminateOnFirstHitEXT | (trans_walk ? gl_RayFlagsNoneEXT : rtFolShadowFlags())
-                          | (rt_proj_facing ? gl_RayFlagsNoOpaqueEXT : gl_RayFlagsNoneEXT),   // <GMDX>
-                          mask & 0xFFu, origin, tmin, dir, tmax);
-    vec3 trans = vec3(1.0);
-    uint n_cand = 0u;
-    uint n_fol = 0u;   // #735 transmissive layers coloured so far (translucent walk)
-    while (rayQueryProceedEXT(rq))
-    {
-        if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionTriangleEXT)
-        {
-            if (++n_cand > (rt_proj_facing ? RT_CANDIDATE_BUDGET_NOOPAQUE : RT_CANDIDATE_BUDGET))   // <GMDX> NoOpaque budget
-            {   // over budget (G-7): treat as opaque -- the ray is blocked here
-                rayQueryConfirmIntersectionEXT(rq);
-                rayQueryTerminateEXT(rq);
-                break;
-            }
-            uint id   = rtHitInstance(uint(rayQueryGetIntersectionInstanceCustomIndexEXT(rq, false)),
-                                      uint(rayQueryGetIntersectionGeometryIndexEXT(rq, false)));
-            // <GMDX> projector rays: a single-sided face met on its front faces away from the light
-            if (rt_proj_facing && (rt_instances[id].flags & 256u) == 0u && rayQueryGetIntersectionFrontFaceEXT(rq, false)) continue;
-            // No-self-shadow characters (rtSelfCandidate): the receiver's own stale geometry
-            // never occludes it; another throttled character's opaque face is solid at once.
-            const uint self_c = rtSelfCandidate(RT_CAND_OWNER(rq), id);
-            if (self_c == 1u) continue;
-            if (self_c == 2u) { rayQueryConfirmIntersectionEXT(rq); continue; }
-            // An away-facing face of a single-sided worn / rigged caster (rt_fol_rig; only
-            // alpha-blend ones arrive -- the rest are culled in traversal): the shadow pass's
-            // alpha FS drops it at ANY alpha, so it neither occludes nor tints -- no alpha
-            // fetch. (Static leaves keep #735's solid-only rule below.)
-            const bool front = rayQueryGetIntersectionFrontFaceEXT(rq, false);
-            const uint fol = rtFolAway(id, front);
-            if (fol == RT_FOL_PASS) continue;
-            uint prim = RT_HIT_PRIM(rq, false, id);
-            vec2 bc   = rayQueryGetIntersectionBarycentricsEXT(rq, false);
-            float t   = rayQueryGetIntersectionTEXT(rq, false);
-            mat4x3 o2w = rayQueryGetIntersectionObjectToWorldEXT(rq, false);
-            float cutoff; bool blend; vec3 col;
-            float a = rtCandidateAlphaCol(id, prim, bc, t, dir, o2w, cutoff, blend, col);
-            if (kind == RT_WALK_VIS)
-            {
-                // <SS:Skoomastream> Blend candidates (the mask includes RT_MASK_BLEND under
-                // parity, traceShadowRayVisSplit): only LL-solid texels block; the
-                // translucent walk takes the rest.
-                if ((blend ? (rt_blend_parity && a >= LL_BLEND_SHADOW_SOLID) : a >= cutoff)
-                    && fol == RT_FOL_OCCLUDE)   // #735
-                    rayQueryConfirmIntersectionEXT(rq);
-            }
-            else if ((blend ? a >= RT_BLEND_SOLID : a >= cutoff) && fol == RT_FOL_LEAF)
-            {
-                // #735: a transmissive (away-facing solid) leaf. The mixed walks pass it;
-                // the translucent walk colours the light by the first layers in mode 2.
-                if (trans_walk && rt_fol_mode == 2u && n_fol < rt_fol_layers)
-                {
-                    trans *= rgb ? rtFolLayer(col) : vec3(rt_fol_strength);
-                    ++n_fol;
-                    rt_block_t = min(rt_block_t, t);
-                    if (max(max(trans.r, trans.g), trans.b) < 0.01) rayQueryConfirmIntersectionEXT(rq);
-                }
-            }
-            else if (blend && rt_blend_parity && a >= LL_BLEND_SHADOW_SOLID)
-            {   // LL: solid caster. <SS:Skoomastream> The translucent walk skips it: the
-                // split's opaque-set rays (traceShadowRayVisSplit) block it.
-                if (!trans_walk) rayQueryConfirmIntersectionEXT(rq);
-            }
-            else if (blend && !(rt_blend_parity && (rgb ? a < 0.05 : rt_cand_ll_pass >= 1.0)))
-            {
-                trans *= rgb ? translucentTransmit(col, a)
-                             : vec3(rt_blend_parity ? rt_cand_ll_pass : 1.0 - clamp(a, 0.0, 1.0));   // <SS:Skoomastream> LL's 50%
-                if (!trans_walk && a > 0.004) { rt_block_t = min(rt_block_t, t); RT_NOTE_BLOCKER(id); }
-                if (max(max(trans.r, trans.g), trans.b) < 0.01) rayQueryConfirmIntersectionEXT(rq);
-            }
-            else if (blend) {}                         // LL: casts nothing
-            else if (a >= cutoff)
-                rayQueryConfirmIntersectionEXT(rq);
-        }
-    }
-    if (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT) return trans;
-    if (!trans_walk)
-    {
-        rt_block_t = min(rt_block_t, rayQueryGetIntersectionTEXT(rq, true));
-        RT_NOTE_COMMITTED(rq);
-    }
-    return vec3(0.0);
+    if (!rtIdIn(id) || (rt_instances[id].flags & 256u) != 0u) return true;   // double-sided (/ #874 guard)
+    vec3 p0, p1, p2;
+    rtTriPositions(id, prim, p0, p1, p2);
+    const mat3 M = mat3(rayQueryGetIntersectionObjectToWorldEXT(q, false));
+    return dot(cross(M * (p1 - p0), M * (p2 - p0)), dir) < 0.0;
 }
 
-// The walks by their old names (one inlined walk per call site: prefer one call with a
-// run-time kind where a caller picks between them).
-float traceShadowRay(vec3 origin, vec3 dir, float tmin, float tmax, uint mask)
-{
-    return traceShadowWalk(origin, dir, tmin, tmax, mask, RT_WALK_GREY).x;
-}
-vec3 traceShadowRayRGB(vec3 origin, vec3 dir, float tmin, float tmax, uint mask)
-{
-    return traceShadowWalk(origin, dir, tmin, tmax, mask, RT_WALK_RGB);
-}
-float traceShadowRayVis(vec3 origin, vec3 dir, float tmin, float tmax, uint mask)
-{
-    return traceShadowWalk(origin, dir, tmin, tmax, mask, RT_WALK_VIS).x;
-}
-// rgb = coloured (#212, translucentTransmit) else the grey (1 - alpha) of traceShadowRay.
-vec3 traceTransmittance(vec3 origin, vec3 dir, float tmin, float tmax, bool rgb)
-{
-    return traceShadowWalk(origin, dir, tmin, tmax, RT_MASK_BLEND, rgb ? RT_WALK_TRANS_RGB : RT_WALK_TRANS);
-}
-
-// <SS:Skoomastream> The split's opaque-set ray. parity (RenderVKRTBlendShadowParity): the
-// alpha-blend class joins it and its LL-solid texels block like opaque casters (soft
-// penumbra, blocker distance) -- the leaf / fence shapes of LL's shadow pass;
-// traceTransmittance then skips those texels. Costs the disc rays the blend candidates.
-float traceShadowRayVisSplit(vec3 origin, vec3 dir, float tmin, float tmax, bool parity)
-{
-    rt_blend_parity = parity;
-    const float v = traceShadowRayVis(origin, dir, tmin, tmax,
-                                      parity ? RT_MASK_SHADOW : (RT_MASK_SHADOW & ~RT_MASK_BLEND));
-    rt_blend_parity = false;
-    return v;
-}
-
-// FOLIAGE TRANSMISSION RAY (#735, mode 2): ONE ray per lit receiver over the alpha-mask
-// class only, after the shadow rays found the light visible. Those rays already culled the
-// away-facing leaf faces and stopped on any occluder -- opaque, worn, rigged, terrain
-// AND light-facing leaves -- so nothing this walk could miss by stopping early is solid:
-// it is free to end after rt_fol_layers transmissive leaves ("collects colour from N
-// leaves and stops"), whatever order traversal hands them over in.
-//   * Culls the LIGHT-facing faces (the shadow rays' side) in traversal: only away-facing
-//     leaf faces become candidates. Double-sided instances (CULL_DISABLE) still arrive and
-//     are skipped -- the shadow rays treat them as occluders from both sides.
-//   * gl_RayFlagsNoOpaqueEXT: opacity micromaps commit "known opaque" micro-triangles in
-//     hardware, with no candidate -- the ray would end there without the leaf's colour.
-//     NoOpaque overrides the micromap's opaque result to non-opaque (a candidate), while
-//     "known transparent" micro-triangles stay ignored (the micromap lookup happens first),
-//     so the micromap still drops the holes for free. The mask holds only non-opaque
-//     instances, so it adds no other candidate. (Modes 0 / 1 and the shadow rays keep the
-//     micromaps' full benefit: facing culling runs before the micromap lookup.)
-// rgb = coloured (RenderVKTranslucentShadows) else grey. Lowers rt_block_t at each
-// coloured layer: the tinted spot is a shadow edge the mask denoiser must size and blur.
-vec3 traceFoliageTransmit(vec3 origin, vec3 dir, float tmin, float tmax, bool rgb)
-{
-    const uint cull = rt_fol_flip ? gl_RayFlagsCullFrontFacingTrianglesEXT : gl_RayFlagsCullBackFacingTrianglesEXT;
-    if (!rtRaySane(origin, tmin, dir, tmax)) return vec3(1.0);   // (invalid ray: no colour; visibility is the shadow rays')
-    rayQueryEXT rq;
-    rayQueryInitializeEXT(rq, uTLAS, gl_RayFlagsNoOpaqueEXT | cull, RT_MASK_ALPHAMASK,
-                          origin, tmin, dir, tmax);
-    vec3 trans = vec3(1.0);
-    uint n_cand = 0u, n_fol = 0u;
-    while (rayQueryProceedEXT(rq))
-    {
-        if (rayQueryGetIntersectionTypeEXT(rq, false) == gl_RayQueryCandidateIntersectionTriangleEXT)
-        {
-            if (++n_cand > RT_CANDIDATE_BUDGET_NOOPAQUE)
-            {   // over budget (G-7): keep the colour gathered so far (visibility is the shadow rays')
-                rayQueryTerminateEXT(rq);
-                break;
-            }
-            uint id = rtHitInstance(uint(rayQueryGetIntersectionInstanceCustomIndexEXT(rq, false)),
-                                    uint(rayQueryGetIntersectionGeometryIndexEXT(rq, false)));
-            if (!rtIdIn(id) || (rt_instances[id].flags & 256u) != 0u) continue;   // double-sided: an occluder (/ #874 guard)
-            uint prim = RT_HIT_PRIM(rq, false, id);
-            vec2 bc   = rayQueryGetIntersectionBarycentricsEXT(rq, false);
-            float t   = rayQueryGetIntersectionTEXT(rq, false);
-            mat4x3 o2w = rayQueryGetIntersectionObjectToWorldEXT(rq, false);
-            float cutoff; bool blend; vec3 col;
-            float a = rtCandidateAlphaCol(id, prim, bc, t, dir, o2w, cutoff, blend, col);
-            if (a < cutoff) continue;                                 // a hole in the leaf
-            trans *= rgb ? rtFolLayer(col) : vec3(rt_fol_strength);
-            rt_block_t = min(rt_block_t, t);
-            RT_NOTE_BLOCKER(id);
-            if (++n_fol >= rt_fol_layers || max(max(trans.r, trans.g), trans.b) < 0.01)
-            {
-                rayQueryTerminateEXT(rq);
-                break;
-            }
-        }
-    }
-    return trans;
-}
-
-// Opaque fast path: every instance treated as opaque (no alpha test, no candidates).
-// A receiver that may sit on a no-self-shadow character (rt_self_owner != 0) drops the
-// OPAQUE ray flag -- it would commit that character's own faces without a candidate -- and
-// confirms every candidate but the receiver's own (rtSelfCandidate), so it stays the same
-// all-opaque rule otherwise (one candidate before the first-hit termination, plus skips).
-float traceShadowRayOpaque(vec3 origin, vec3 dir, float tmin, float tmax, uint mask)
-{
-    if (!rtRaySane(origin, tmin, dir, tmax)) return 0.0;   // (invalid ray: blocked, as G-7)
-    rayQueryEXT rq;
-    const bool self_rule = rt_self_owner != 0u;
-    rayQueryInitializeEXT(rq, uTLAS, gl_RayFlagsTerminateOnFirstHitEXT | (self_rule ? gl_RayFlagsNoneEXT : gl_RayFlagsOpaqueEXT)
-                          | rtFolShadowFlags(), mask & 0xFFu, origin, tmin, dir, tmax);
-    uint n_cand = 0u;
-    while (rayQueryProceedEXT(rq))
-    {
-        if (rayQueryGetIntersectionTypeEXT(rq, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
-        if (++n_cand > RT_CANDIDATE_BUDGET) { rayQueryConfirmIntersectionEXT(rq); rayQueryTerminateEXT(rq); break; }
-        const uint id = rtHitInstance(uint(rayQueryGetIntersectionInstanceCustomIndexEXT(rq, false)),
-                                      uint(rayQueryGetIntersectionGeometryIndexEXT(rq, false)));
-        if (rtSelfCandidate(RT_CAND_OWNER(rq), id) != 1u) rayQueryConfirmIntersectionEXT(rq);
-    }
-    if (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT) return 1.0;
-    rt_block_t = min(rt_block_t, rayQueryGetIntersectionTEXT(rq, true));
-    RT_NOTE_COMMITTED(rq);
-    return 0.0;
-}
+// ---- SHADOW-RAY WALKS (#1039 M0: the one walk library -- every visibility walk, its old names, the
+//      own-fixture rule and the opaque-first pre-ray; the kinds RT_WALK_*) ----
+#include "clean_vis_walk.glsl"
 
 // Nearest hit with alpha-mask holes honoured. cull_back = the raster's back-face rule
 // (primary / camera-like rays); shadow-style queries pass false (double-sided). With
@@ -1412,10 +1189,9 @@ RtHit traceClosestHit(vec3 origin, vec3 dir, float tmin, float tmax, uint mask, 
             uint prim = RT_HIT_PRIM(rq, false, id);
             vec2 bc   = rayQueryGetIntersectionBarycentricsEXT(rq, false);
             float t   = rayQueryGetIntersectionTEXT(rq, false);
-            mat4x3 o2w = rayQueryGetIntersectionObjectToWorldEXT(rq, false);
-            if (cull_back && !rtCandidateFront(id, prim, dir, o2w)) continue;
+            if (cull_back && !rtCandidateFrontQ(id, prim, dir, rq)) continue;
             if (!rtIdIn(id) || (cull_back && rtInstanceOpaque(rt_instances[id].flags))
-                || rtAlphaOpaque(id, prim, bc, t, dir, o2w))
+                || rtAlphaOpaque(id, prim, bc, t, dir, rq))
                 rayQueryConfirmIntersectionEXT(rq);
         }
     }

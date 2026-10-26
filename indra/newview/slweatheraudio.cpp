@@ -342,7 +342,7 @@ void analyseBed(Decode& d, U32 seed)
     std::vector<size_t> pick;
     for (size_t i : cand)
     {
-        bool spaced = true;
+        bool spaced = true;   // ('far' is a Windows macro)
         for (size_t p : pick) spaced = spaced && (i > p ? i - p : p - i) >= sep;
         if (spaced) pick.push_back(i);
         if (pick.size() >= kMaxDrops) break;

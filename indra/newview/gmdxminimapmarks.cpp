@@ -34,6 +34,7 @@
 #include "llworld.h"
 
 #include <boost/json.hpp>
+#include <map>
 
 namespace
 {
@@ -42,6 +43,7 @@ struct Store
     std::string path;   // the account file the marks came from ("" = not loaded)
     std::vector<GMDXMapMark> marks;
     std::vector<GMDXMapZone> zones;
+    std::map<LLUUID, LLColor4> avatar_colors;
 };
 
 Store& store()
@@ -55,6 +57,7 @@ Store& store()
     s.path = path;
     s.marks.clear();
     s.zones.clear();
+    s.avatar_colors.clear();
     if (path.empty()) return s;
     llifstream f(path, std::ios::in | std::ios::binary);
     if (!f.is_open()) return s;
@@ -91,6 +94,15 @@ Store& store()
         if (zone.points.size() < need) continue;
         if (zone.id.isNull()) zone.id.generate();
         s.zones.push_back(zone);
+    }
+    for (const LLSD& a : llsd::inArray(data["avatar_colors"]))
+    {
+        const LLUUID id = a["id"].asUUID();
+        const LLSD& c = a["color"];
+        if (id.notNull() && c.isArray() && c.size() >= 3)
+        {
+            s.avatar_colors[id] = LLColor4((F32)c[0].asReal(), (F32)c[1].asReal(), (F32)c[2].asReal(), 1.f);
+        }
     }
     return s;
 }
@@ -132,6 +144,17 @@ void save()
         e["dotted"] = z.dotted;
         e["fill"] = z.fill;
         zones.append(e);
+    }
+    LLSD& avatars = data["avatar_colors"] = LLSD::emptyArray();
+    for (const auto& [id, c] : s.avatar_colors)
+    {
+        LLSD e;
+        e["id"] = id;
+        LLSD& rgb = e["color"] = LLSD::emptyArray();
+        rgb.append(c.mV[VRED]);
+        rgb.append(c.mV[VGREEN]);
+        rgb.append(c.mV[VBLUE]);
+        avatars.append(e);
     }
     const std::string text = boost::json::serialize(LlsdToJson(data)) + "\n";
     const std::string tmp = s.path + ".tmp";
@@ -269,6 +292,27 @@ void GMDXMinimapMarks::removeZone(const LLUUID& id)
     const size_t before = zones.size();
     zones.erase(std::remove_if(zones.begin(), zones.end(), [&id](const GMDXMapZone& z) { return z.id == id; }), zones.end());
     if (zones.size() != before) save();
+}
+
+bool GMDXMinimapMarks::avatarColor(const LLUUID& avatar_id, LLColor4& color)
+{
+    const Store& s = store();
+    const auto it = s.avatar_colors.find(avatar_id);
+    if (it == s.avatar_colors.end()) return false;
+    color = it->second;
+    return true;
+}
+
+void GMDXMinimapMarks::setAvatarColor(const LLUUID& avatar_id, const LLColor4& color)
+{
+    if (avatar_id.isNull()) return;
+    store().avatar_colors[avatar_id] = LLColor4(color.mV[VRED], color.mV[VGREEN], color.mV[VBLUE], 1.f);
+    save();
+}
+
+void GMDXMinimapMarks::clearAvatarColor(const LLUUID& avatar_id)
+{
+    if (store().avatar_colors.erase(avatar_id)) save();
 }
 
 LLVector3d GMDXMinimapMarks::onGround(LLVector3d pos_global)

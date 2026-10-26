@@ -125,9 +125,7 @@ add_pkg() {
 
 # sha256 that publish_release.sh appended to the release notes for ASSET.
 notes_sha() {
-  curl -fsS "$RELEASE_API/releases/tags/$1" \
-    | python3 -c 'import json,sys; print(json.load(sys.stdin).get("body",""))' \
-    | sed -nE "s/^([0-9a-f]{64})  ${2//./\\.}\$/\1/p" | tail -1
+  python3 -I "$HERE/../../ci/release_lookup.py" --api "$RELEASE_API" sha "$1" "$2"
 }
 
 # Build the package from the release tarball (what the arch-package job does), for a release
@@ -150,7 +148,7 @@ seed() {
   mkdir -p "$ROOT/incoming"
   for tag in "$@"; do
     ver=$(pkgver_of "$tag")
-    name=$(curl -fsS "$RELEASE_API/releases/tags/$tag" | python3 -c '
+    name=$(python3 -I "$HERE/../../ci/release_lookup.py" --api "$RELEASE_API" json "$tag" | python3 -c '
 import json, sys
 ver = sys.argv[1]
 for a in json.load(sys.stdin).get("assets", []):
@@ -160,7 +158,8 @@ for a in json.load(sys.stdin).get("assets", []):
         break' "$ver")
     if [ -n "$name" ]; then
       f="$ROOT/incoming/$name"
-      curl -fsSL -o "$f" "$DOWNLOAD_BASE/$tag/$name" || die "could not download $name for $tag"
+      python3 -I "$HERE/../../ci/release_lookup.py" --api "$RELEASE_API" fetch "$tag" "$name" "$f" 2>/dev/null \
+        || curl -fsSL -o "$f" "$DOWNLOAD_BASE/$tag/$name" || die "could not download $name for $tag"
       want=$(notes_sha "$tag" "$name"); got=$(sha256sum "$f" | cut -d' ' -f1)
       [ -n "$want" ] || die "$tag release notes list no sha256 for $name"
       [ "$want" = "$got" ] || die "$name sha256 $got does not match the release notes ($want)"

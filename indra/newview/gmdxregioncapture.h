@@ -132,6 +132,12 @@ public:
     // The mini-map's background for the region, null while there is none (or it is still loading,
     // or GMDXMinimapUseCapturedMaps is off).
     static LLViewerTexture* getMinimapTexture(const LLViewerRegion* region);
+    // The World Map (GMDXWorldMapUseCapturedMaps): calls draw(handle, tex, width in metres) for every region of this
+    // grid with a captured map that visible(handle) says is on screen and whose 512 px texture is
+    // loaded (loading the others on a worker; the folder is looked at again every few seconds).
+    // The map lays them over its own tiles.
+    static void forEachWorldMapTexture(const std::function<bool(U64 region_handle)>& visible,
+                                       const std::function<void(U64 region_handle, LLViewerTexture* tex, F32 region_width)>& draw);
 
     // LLVOVolume::calcLOD: an object at pos_agent (bounding radius) is in the region being mapped,
     // so it takes its highest LOD.

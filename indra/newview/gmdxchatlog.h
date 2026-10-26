@@ -115,6 +115,7 @@ private:
     LLRect barRect() const;
     bool typing() const;
     LLRect tabRect(S32 tab) const;
+    LLRect gearRect() const;   // the chat bar's options, in the tab row's right corner
 
     static GMDXChatLog* sInstance;
     std::deque<Entry> mEntries;

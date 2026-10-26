@@ -119,6 +119,7 @@ void LLPanelContents::getState(LLViewerObject *objectp )
     if( !objectp )
     {
         getChildView("button new script")->setEnabled(false);
+        getChildView("button reset scripts")->setEnabled(false);
         return;
     }
 
@@ -158,6 +159,9 @@ void LLPanelContents::getState(LLViewerObject *objectp )
             || (LLSelectMgr::getInstance()->getSelection()->getObjectCount() == 1)));
 
     getChildView("button permissions")->setEnabled(!objectp->isPermanentEnforced());
+    // Same gate as the Tools menu "Reset Scripts" item; its handler does the per-script permission checks
+    getChildView("button reset scripts")->setEnabled(
+        LLSelectMgr::getInstance()->getSelection()->getFirstEditableObject() != NULL);
     mPanelInventoryObject->setEnabled(!objectp->isPermanentEnforced());
     if (mFilterEditor)
     {

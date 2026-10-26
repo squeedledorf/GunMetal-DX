@@ -65,7 +65,7 @@ struct RezFxSlot {
                       // the impact (toward the camera when it died)
     vec4  aux1;       // printer: that box's half extents (m), w the infill rows per layer
 };
-layout(std430, set = 0, binding = 54) readonly buffer RezFxTable { RezFxSlot rezfx_slots[]; };
+layout(std430, set = 0, binding = 56) readonly buffer RezFxTable { RezFxSlot rezfx_slots[]; };
 
 // The slot of an instance's flags (0 = none) and whether the table holds it.
 uint rezfxSlotOf(uint flags) { return flags >> REZFX_SLOT_SHIFT; }

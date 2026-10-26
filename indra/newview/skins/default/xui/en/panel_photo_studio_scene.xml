@@ -930,7 +930,7 @@ buffer reallocation, and a shader rebuild); it stays a prefs-level switch.
 				 right="-32"
 				 height="18"
 				 name="shadow_res_scale_combo"
-				 tool_tip="Sun/moon shadow map resolution per cascade (same as Advanced Graphics &gt; Shadow quality). With ray-traced shadows it sets the rays per pixel instead (Low 1 ... Ultra 4)."
+				 tool_tip="Sun/moon shadow map resolution per cascade (same as Preferences &gt; Graphics &gt; Lighting &gt; Shadow quality). With ray-traced shadows it sets the rays per pixel instead (Low 1 ... Ultra 4)."
 				 control_name="RenderVKShadowResolution">
 					<combo_box.item
 					 label="Ultra"

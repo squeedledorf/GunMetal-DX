@@ -105,7 +105,7 @@ public:
 
     // mMaxLines of -1 means unlimited lines.
     void setMaxLines(S32 max_lines) { mMaxLines = max_lines; }
-    void setFadeDistance(F32 fade_distance, F32 fade_range) { mFadeDistance = fade_distance; mFadeRange = fade_range; }
+    void setFadeDistance(F32 fade_distance, F32 fade_range) { mFadeDistance = fade_distance; mFadeRange = fade_range; mFadeFromSettings = false; }
     void updateVisibility();
     LLVector2 updateScreenPos(LLVector2 &offset_target);
     void updateSize();
@@ -147,6 +147,8 @@ private:
     bool            mDoFade;
     F32             mFadeRange;
     F32             mFadeDistance;
+    bool            mFadeFromSettings = true;   // #1026: PrimTextFadeDistance / PrimTextFadeRange unless setFadeDistance() chose
+    void            updateFadeFromSettings();
     F32             mLastDistance;
     bool            mZCompare;
 //  bool            mVisibleOffScreen;

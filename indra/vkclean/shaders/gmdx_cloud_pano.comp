@@ -1,0 +1,39 @@
+#version 450
+// <GMDX> upstream's clean_vol_cloud_pano.comp on the GunMetal-DX cloud model (gmdx_cloud_common.glsl).
+#extension GL_GOOGLE_include_directive : require
+// vkclean -- VOLUMETRIC CLOUDS (#719): the CLOUD SKY PANORAMA (probes / mirror sky).
+//
+// 512 x 256 equirectangular (clean_vol_cloud_sky.glsl volCloudPanoUV: u azimuth, v = 0 zenith
+// .. 1 nadir), marched from the main eye with the full shape and lighting at a reduced step
+// budget, no scene depth (the views that read it draw their own geometry over their sky).
+// A band of rows per frame (vc.pano.xy); each refresh blends into the previous one with
+// weight 1 - vc.pano.w and a rotated dither, so the panorama converges like the main view's
+// history does. Out: rgb = in-scatter with the aerial perspective (LINEAR HDR, premultiplied),
+// a = transmittance.
+layout(local_size_x = 8, local_size_y = 8) in;
+
+#define PHYSKY_NOT_IN_PROBES   // <GMDX> the panorama is the probes' / mirrors' sky: WindLight, as clean_probe_sky.frag
+#include "clean_frame_info.glsl"
+#include "clean_atmos_common.glsl"
+#define VC_SET 1
+#include "gmdx_cloud_common.glsl"
+
+layout(set = 1, binding = 12, rgba16f) uniform image2D uPano;
+
+void main()
+{
+    const ivec2 sz = imageSize(uPano);
+    const ivec2 px = ivec2(gl_GlobalInvocationID.x, gl_GlobalInvocationID.y + uint(vc.pano.x + 0.5));
+    if (px.x >= sz.x || px.y >= sz.y || float(gl_GlobalInvocationID.y) >= vc.pano.y) return;
+    const vec2 uv = (vec2(px) + 0.5) / vec2(sz);
+    const float phi = (uv.x - 0.5) * 6.2831853;
+    const float th = uv.y * 3.14159265;
+    const vec3 V = vec3(sin(th) * cos(phi), sin(th) * sin(phi), cos(th));
+    const VcLight l = vcLightSetup();
+    const float jitter = vcIgn(vec2(px) + 5.588238 * float(uint(vc.march.z) % 64u));
+    VcResult r = vcMarch(l, V, VC_FAR, int(vc.pano.z), 4, jitter);
+    r = vcAtmosphere(r, V);
+    vec4 o = vec4(r.scat, r.T);
+    if (vc.pano.w > 0.0) o = mix(o, imageLoad(uPano, px), vc.pano.w);
+    imageStore(uPano, px, o);
+}

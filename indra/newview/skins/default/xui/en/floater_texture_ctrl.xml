@@ -30,6 +30,19 @@ PICK: MATERIAL
 PICK: TEXTURE
     </floater.string>
 
+    <floater.string
+     name="restricted_note">
+Worn: only copy + transfer items shown
+    </floater.string>
+    <floater.string
+     name="restricted_note_modify">
+Worn: only copy + transfer + modify items shown
+    </floater.string>
+    <floater.string
+     name="restricted_tip">
+This object is worn. Items without the required permissions are hidden, because the server cannot change the permissions of something that is both worn and in your inventory.
+    </floater.string>
+
     <view
      left="4"
      top="20"
@@ -108,6 +121,23 @@ PICK: TEXTURE
     
 <!--  middle: inventory mode -->
 
+    <text
+     type="string"
+     length="1"
+     text_color="Yellow"
+     font="SansSerifSmall"
+     word_wrap="true"
+     follows="left|top"
+     height="48"
+     width="84"
+     layout="topleft"
+     left="6"
+     top="230"
+     name="restricted_lbl"
+     visible="false">
+        Worn: only copy + transfer items shown
+    </text>
+
     <button
      enabled="false"
      follows="left|top"
@@ -157,7 +187,7 @@ PICK: TEXTURE
      image_unselected="eye_button_inactive.tga"
      layout="topleft"
      left_delta="-80"
-     top_delta="-25"
+     top_delta="-4"
      name="Pipette"
      width="28" />
    <text

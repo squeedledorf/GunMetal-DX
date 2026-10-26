@@ -5,6 +5,60 @@
 	<color
 	 name="EmphasisColor"
 	 value="0.38 0.694 0.573 1" />
+	<!-- Icon colours (#1056): the tint of the vector (Phosphor) UI icons. textures.xml entries name one of
+	     these in vector_color; changing a value here (or a skin overriding it) recolours every icon using it. -->
+	<color
+	 name="IconColor"
+	 value="0.906 0.906 0.906 1" />
+	<color
+	 name="IconColorDisabled"
+	 value="0.42 0.42 0.42 1" />
+	<color
+	 name="IconColorSelected"
+	 value="1 1 1 1" />
+	<color
+	 name="IconAccentColor"
+	 reference="EmphasisColor" />
+	<color
+	 name="IconWarningColor"
+	 value="0.91 0.757 0 1" />
+	<color
+	 name="IconErrorColor"
+	 value="0.851 0.188 0.188 1" />
+	<color
+	 name="IconSuccessColor"
+	 value="0.184 0.702 0.267 1" />
+	<!-- Small widget glyphs drawn as layered vector icons (checkbox, radio button, scroll buttons, tear-off grip) -->
+	<color
+	 name="IconWidgetFrame"
+	 value="0.04 0.04 0.04 0.9" />
+	<color
+	 name="IconWidgetFrameDisabled"
+	 value="0.04 0.04 0.04 0.35" />
+	<color
+	 name="IconWidgetFill"
+	 value="0.267 0.267 0.267 0.85" />
+	<color
+	 name="IconWidgetFillPress"
+	 value="0.17 0.17 0.17 0.9" />
+	<color
+	 name="IconWidgetFillDisabled"
+	 value="0.267 0.267 0.267 0.4" />
+	<color
+	 name="IconWidgetMark"
+	 value="1 1 1 1" />
+	<color
+	 name="IconWidgetMarkDisabled"
+	 value="0.6 0.6 0.6 0.55" />
+	<color
+	 name="IconWidgetArrow"
+	 value="0.75 0.75 0.75 1" />
+	<color
+	 name="IconWidgetTile"
+	 value="0.21 0.21 0.21 1" />
+	<color
+	 name="IconWidgetTileOver"
+	 value="0.31 0.31 0.31 1" />
 	<color
 	 name="EmphasisColor_13"
 	 value="0.38 0.694 0.573 0.13" />
@@ -1317,7 +1371,10 @@
     <!-- <GMDX> the chat bar in the chat log's look (gmdxchatlog.cpp) -->
     <color
      name="GMDXChatBarBackground"
-     value="0.055 0.067 0.078 0.92" />
+     value="0.063 0.075 0.090 0.82" />
+    <color
+     name="GMDXChatBarLabel"
+     value="0.58 0.62 0.67 1" />
     <color
      name="GMDXChatBarText"
      value="0.933 0.945 0.957 1" />

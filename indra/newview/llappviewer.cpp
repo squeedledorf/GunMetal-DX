@@ -4475,15 +4475,20 @@ void LLAppViewer::relaunchIfRequested()
     relaunchViewer(sRelaunchExe);
 }
 
-// #876 / #890: the compile-crash marker (logs/pipeline_compile_crash.marker, one line
+// #876 / #890: the compile-crash marker (logs/pipeline_compile_crash.marker, first line
 // "<unix time> <sessions left>", written by the crash handler: llwindebug.cpp / the Unix
 // fatal-signal hook). Read once at startup: a recent marker (< 30 days) with sessions left
 // means this session compiles one at a time; the count is rewritten one lower; the session
 // after the last one deletes the file and steps back to automatic.
+// #1064: the crash handler adds two lines, the driver token and the pipeline the crashing
+// thread was compiling (vk_pipeline.h). They are returned once -- the rewritten countdown
+// marker drops them -- so each crash counts once toward the per-pipeline quarantine.
 struct PipelineCrashMarkerState
 {
     enum Mode { NONE, SAFE, STEPPED_BACK } mode = NONE;
     S32 left_after = 0;     // clean sessions still to run one-at-a-time after this one
+    std::string crash_driver;     // #1064: a marker the crash handler just wrote: its driver token
+    std::string crash_pipeline;   // #1064: ... and the pipeline ("" = the crash named none)
 };
 
 static PipelineCrashMarkerState consumePipelineCrashMarker(const std::string& path)
@@ -4491,17 +4496,33 @@ static PipelineCrashMarkerState consumePipelineCrashMarker(const std::string& pa
     PipelineCrashMarkerState st;
     long long when = 0;
     int left = 0;
+    bool fresh = false;
+    std::string drv, pipe_name;
     {
         llifstream f(path.c_str());
         if (!f.is_open()) return st;
-        f >> when >> left;
-        if (f.fail()) { when = 0; left = 0; }
+        std::string line;
+        std::getline(f, line);
+        if (sscanf(line.c_str(), "%lld %d", &when, &left) != 2) { when = 0; left = 0; }
+        if (std::getline(f, drv))
+        {
+            fresh = true;
+            std::getline(f, pipe_name);
+        }
     }
+    auto trim = [](std::string& s) { while (!s.empty() && (s.back() == '\r' || s.back() == ' ')) s.pop_back(); };
+    trim(drv);
+    trim(pipe_name);
     const long long now = (long long)time(NULL);
     if (when <= 0 || now - when > 30LL * 24 * 3600)
     {
         LLFile::remove(path);   // unreadable or stale
         return st;
+    }
+    if (fresh)
+    {
+        st.crash_driver = drv;
+        st.crash_pipeline = pipe_name;
     }
     if (left <= 0)
     {
@@ -4516,6 +4537,135 @@ static PipelineCrashMarkerState consumePipelineCrashMarker(const std::string& pa
     return st;
 }
 
+// #1064: the PER-PIPELINE compile-crash quarantine (user_settings/vk_pipeline_quarantine.txt).
+// Compiling one at a time (above) only helps a driver that crashes on PARALLEL compiles; a
+// driver compiler bug on one shader crashes on it every launch. Format, one entry per line:
+//   driver <token>                            LLVulkanContext::driverIdentityToken
+//   strike <unix time> <pipeline name>        crashed the driver's compiler once on this driver
+//   quarantine <unix time> <pipeline name>    crashed it twice: never compiled again on it
+// A fresh crash marker naming a pipeline on THIS driver adds a strike, or turns its strike into
+// a quarantine. A different driver token clears the file (an update may have fixed it). At most
+// kPipelineQuarantineMax entries (the oldest strikes go first, then the oldest quarantines).
+// Returns the quarantined names; `newly` gets the ones quarantined by this call.
+static const size_t kPipelineQuarantineMax = 16;
+
+static std::vector<std::string> updatePipelineQuarantine(const std::string& path, const std::string& driver_token,
+                                                         const std::string& crash_driver,
+                                                         const std::string& crash_pipeline,
+                                                         std::vector<std::string>& newly)
+{
+    struct Entry
+    {
+        bool quarantined = false;
+        long long when = 0;
+        std::string name;
+    };
+    std::vector<Entry> entries;
+    std::vector<std::string> out;
+    if (driver_token.empty()) return out;   // (no Vulkan device identity: nothing to key by)
+    std::string file_driver;
+    bool had_file = false;
+    {
+        llifstream f(path.c_str());
+        std::string line;
+        while (f.is_open() && std::getline(f, line))
+        {
+            had_file = true;
+            while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+            if (line.compare(0, 7, "driver ") == 0) { file_driver = line.substr(7); continue; }
+            const bool q = line.compare(0, 11, "quarantine ") == 0;
+            if (!q && line.compare(0, 7, "strike ") != 0) continue;
+            const size_t at = q ? 11 : 7;
+            const size_t sp = line.find(' ', at);
+            if (sp == std::string::npos || sp + 1 >= line.size()) continue;
+            Entry e;
+            e.quarantined = q;
+            e.when = atoll(line.substr(at, sp - at).c_str());
+            e.name = line.substr(sp + 1);
+            if (entries.size() < kPipelineQuarantineMax * 2) entries.push_back(e);   // (a damaged file stays bounded)
+        }
+    }
+    bool changed = false;
+    if (had_file && file_driver != driver_token)
+    {
+        LL_INFOS("Vulkan") << "Pipeline quarantine (#1064): the graphics driver changed (" << (file_driver.empty() ? "?" : file_driver)
+                           << " -> " << driver_token << "): clearing " << entries.size() << " entr" << (entries.size() == 1 ? "y" : "ies")
+                           << LL_ENDL;
+        entries.clear();
+        changed = true;
+    }
+    const long long now = (long long)time(NULL);
+    if (!crash_pipeline.empty())
+    {
+        if (crash_driver != driver_token)
+        {
+            LL_INFOS("Vulkan") << "Pipeline quarantine (#1064): the previous crash compiling " << crash_pipeline << " was on another driver ("
+                               << crash_driver << "; now " << driver_token << "): not counted" << LL_ENDL;
+        }
+        else
+        {
+            Entry* hit = nullptr;
+            for (Entry& e : entries)
+                if (e.name == crash_pipeline) { hit = &e; break; }
+            if (hit && !hit->quarantined)
+            {
+                hit->quarantined = true;
+                hit->when = now;
+                newly.push_back(crash_pipeline);
+                LL_WARNS("Vulkan") << "Pipeline quarantine (#1064): " << crash_pipeline
+                                   << " crashed the graphics driver's shader compiler a second time on this driver: QUARANTINED"
+                                   << " (it is not compiled again until the driver changes; file " << path << ")" << LL_ENDL;
+            }
+            else if (hit)
+            {
+                hit->when = now;   // (already quarantined: a path that does not consult the list)
+                LL_WARNS("Vulkan") << "Pipeline quarantine (#1064): " << crash_pipeline << " crashed again although quarantined" << LL_ENDL;
+            }
+            else
+            {
+                Entry e;
+                e.when = now;
+                e.name = crash_pipeline;
+                entries.push_back(e);
+                LL_WARNS("Vulkan") << "Pipeline quarantine (#1064): the previous session crashed compiling " << crash_pipeline
+                                   << " (first time on this driver); one more crash on it quarantines it" << LL_ENDL;
+            }
+            changed = true;
+        }
+    }
+    while (entries.size() > kPipelineQuarantineMax)
+    {
+        // Oldest strike first (a strike that never came back), else the oldest quarantine.
+        size_t victim = entries.size();
+        for (int pass = 0; pass < 2 && victim == entries.size(); ++pass)
+            for (size_t i = 0; i < entries.size(); ++i)
+                if (entries[i].quarantined == (pass == 1) && (victim == entries.size() || entries[i].when < entries[victim].when))
+                    victim = i;
+        entries.erase(entries.begin() + victim);
+        changed = true;
+    }
+    if (changed)
+    {
+        if (entries.empty())
+        {
+            LLFile::remove(path);
+        }
+        else
+        {
+            llofstream o(path.c_str(), std::ios::out | std::ios::trunc);
+            if (o.is_open())
+            {
+                o << "driver " << driver_token << "\n";
+                for (const Entry& e : entries)
+                    o << (e.quarantined ? "quarantine " : "strike ") << e.when << " " << e.name << "\n";
+            }
+        }
+    }
+    for (const Entry& e : entries)
+        if (e.quarantined) out.push_back(e.name);
+    return out;
+}
+
 #if !LL_WINDOWS
 // Runs in the Unix fatal-signal handler (async-signal-safe): arm the marker when the faulting
 // thread was compiling a pipeline. (Windows does this in llwindebug.cpp, which also names the
@@ -4524,7 +4674,7 @@ static void pipelineCrashSignalHook()
 {
     if (vkPipelineCrashOnCurrentThread())
     {
-        vkPipelineCrashMarkerWrite();
+        vkPipelineCrashMarkerWriteForCurrentThread();   // (#1064: + driver token, pipeline name)
     }
 }
 #endif
@@ -4893,18 +5043,69 @@ static bool initVulkanForRealUI()
         // crashed while compiling (marker file written by the crash handler). An explicit
         // RenderVKPipelineCompileThreads wins; no setting is rewritten.
         const std::string marker_path = gDirUtilp->getExpandedFilename(LL_PATH_LOGS, "pipeline_compile_crash.marker");
-        const PipelineCrashMarkerState crash_state = consumePipelineCrashMarker(marker_path);
+        PipelineCrashMarkerState crash_state = consumePipelineCrashMarker(marker_path);
+        const std::string driver_token = LLVulkanContext::driverIdentityToken();
+        const std::string driver_label = LLVulkanContext::driverIdentityLabel();
         vkPipelineCrashMarkerSetPath(marker_path.c_str());
+        vkPipelineCrashMarkerSetDriver(driver_token.c_str());   // #1064
 #if !LL_WINDOWS
         LLApp::setFatalSignalHook(&pipelineCrashSignalHook);
 #endif
+        // #1064: the per-pipeline quarantine -- a pipeline that crashed the driver's compiler twice
+        // on this driver is skipped centrally (vkSetPipelineQuarantine). Testing without such a
+        // driver: RenderVKDebugPretendPipelineCrash counts as a crash marker naming that pipeline
+        // (two launches quarantine it); RenderVKDebugCrashCompilingPipeline really crashes while
+        // compiling it (the crash handler's marker path).
+        std::vector<std::string> quarantined;
+        {
+            const std::string pretend = gSavedSettings.getString("RenderVKDebugPretendPipelineCrash");
+            if (!pretend.empty() && crash_state.crash_pipeline.empty())
+            {
+                LL_WARNS("Vulkan") << "RenderVKDebugPretendPipelineCrash: treating the previous session as crashed compiling " << pretend
+                                   << " on this driver (#1064)" << LL_ENDL;
+                crash_state.crash_pipeline = pretend;
+                crash_state.crash_driver = driver_token;
+            }
+            if (!crash_state.crash_pipeline.empty())
+            {
+                LL_WARNS("Vulkan") << "previous session crashed while compiling pipeline: " << crash_state.crash_pipeline << " (driver "
+                                   << (crash_state.crash_driver.empty() ? "?" : crash_state.crash_driver) << ")" << LL_ENDL;
+            }
+            std::vector<std::string> newly;
+            const std::string quarantine_path = gDirUtilp->getExpandedFilename(LL_PATH_USER_SETTINGS, "vk_pipeline_quarantine.txt");
+            quarantined = updatePipelineQuarantine(quarantine_path, driver_token, crash_state.crash_driver,
+                                                   crash_state.crash_pipeline, newly);
+            vkSetPipelineQuarantine(quarantined, driver_label);
+            vkSetPipelineDebugCrashName(gSavedSettings.getString("RenderVKDebugCrashCompilingPipeline"));
+            for (const std::string& q : quarantined)
+            {
+                LL_WARNS("Vulkan") << "Pipeline quarantine (#1064): " << q << " is quarantined on this driver (" << driver_label << ", "
+                                   << driver_token << "): it will not be compiled and the feature using it is off. Updating the"
+                                   << " graphics driver clears this; or delete " << quarantine_path << LL_ENDL;
+            }
+            if (!newly.empty())
+            {
+                std::string names;
+                for (const std::string& n : newly) names += (names.empty() ? "" : ", ") + n;
+                LLSD args;
+                args["NAMES"] = names;
+                args["DRIVER"] = driver_label.empty() ? std::string("your graphics driver") : driver_label;
+                // (on the first idle pass: the notification channels do not exist yet here)
+                doOnIdleOneTime([args]() { LLNotificationsUtil::add("VKPipelineQuarantined", args); });
+            }
+        }
         const bool intel_win = LLVulkanContext::driverIsIntelWindows() || gSavedSettings.getBOOL("VKDebugForceIntelCompileCap");
         std::string cap_note;
+        if (!quarantined.empty())
+        {
+            cap_note = std::to_string(quarantined.size()) + " quarantined (#1064)";
+        }
         if (forced > 0)
         {
             vkSetPipelineCompileThreads((unsigned)forced);
             LL_INFOS("Vulkan") << "Pipeline compiles: at most " << forced << " at once (RenderVKPipelineCompileThreads)" << LL_ENDL;
-            cap_note = "capped to " + std::to_string(forced) + " (RenderVKPipelineCompileThreads)";
+            if (!cap_note.empty()) cap_note += "; ";
+            cap_note += "capped to " + std::to_string(forced) + " (RenderVKPipelineCompileThreads)";
             if (intel_win || crash_state.mode == PipelineCrashMarkerState::SAFE)
             {
                 LL_INFOS("Vulkan") << "Pipeline compiles: the automatic one-at-a-time cap ("
@@ -4917,7 +5118,8 @@ static bool initVulkanForRealUI()
             if (intel_win)
             {
                 LL_INFOS("Vulkan") << "Pipeline compiles: 1 at a time (Intel Windows driver: parallel pipeline creation crashes it, #876; set RenderVKPipelineCompileThreads to override)" << LL_ENDL;
-                cap_note = "1 at a time (Intel Windows driver, #876)";
+                if (!cap_note.empty()) cap_note += "; ";
+                cap_note += "1 at a time (Intel Windows driver, #876)";
             }
             if (crash_state.mode == PipelineCrashMarkerState::SAFE)
             {
@@ -8036,7 +8238,7 @@ U32 vkSnapshotFit(S32& w, S32& h, U32 aa_frames)
     const F64 req_px = (F64)w * h;
     const F32 lim = (F32)llmax((U32)1024, LLVulkanContext::instance().maxImageDimension());
     F32 f = llmin(1.f, llmin(lim / w, lim / h));
-    if (f < 1.f) sVKSnapshotFitLimit = llformat("graphics card's largest image size (%.0f px)", lim);
+    if (f < 1.f) sVKSnapshotFitLimit = llformat("the graphics card's largest image size (%.0f px)", lim);
     // Pixels allowed so far, and a cap on them with what set it.
     F64 px = req_px * f * f;
     auto cap = [&](F64 px_max, const std::string& why)
@@ -8060,8 +8262,8 @@ U32 vkSnapshotFit(S32& w, S32& h, U32 aa_frames)
             aa_frames = 0;
         }
         cap(usable / (bpp + (aa_frames ? 16.0 : 0.0)),
-            llformat("free video memory (%llu MB usable, about %.0f bytes per pixel with the current graphics settings)",
-                     (unsigned long long)(usable / 1048576.0), bpp));
+            llformat("not enough free video memory (%llu MB usable; the renderer needs about %.0f MB per megapixel at the current graphics settings)",
+                     (unsigned long long)(usable / 1048576.0), bpp * 1000000.0 / 1048576.0));
     }
     if (LLMemoryGovernor::getTotalRAM() > 0)
     {
@@ -8070,7 +8272,7 @@ U32 vkSnapshotFit(S32& w, S32& h, U32 aa_frames)
         const F64 ram = avail > reserve ? (F64)(avail - reserve) : 0.0;
         const F64 out_bytes = req_px * 3.0;   // the upscaled result, whatever the render size
         cap(ram > out_bytes ? (ram - out_bytes) / 10.0 : 0.0,
-            llformat("free system memory (%llu MB above the reserve)", (unsigned long long)(ram / 1048576.0)));
+            llformat("not enough free system memory (%llu MB above the reserve)", (unsigned long long)(ram / 1048576.0)));
     }
     // Below a usable picture (or no room for the result at all): refused, w = h = 0.
     constexpr F64 kMinPx = 256.0 * 256.0;
@@ -10430,11 +10632,13 @@ static void assetFetchTimelineTick()
         // rechecks = safety-net re-runs that found the event still pending, and scale with
         // the parked backlog, e.g. the decode queue at login),
         // decode queue (#307), texture-cache entry mirror (#300), mesh thread wakes (#308),
-        // pending-load index (#304), off-thread LLSD parses (#377), load callbacks (#309)
+        // pending-load index (#304), off-thread LLSD parses (#377), load callbacks (#309).
+        // (#951: the entry mirror is the LEGACY texture cache's -- always 0 with the J2C store
+        // backend; the store's reads / writes are on the "texture pipeline io" line.)
         LLTextureCache* tc = LLAppViewer::getTextureCache();
         LLImageDecodeThread* dec = LLAppViewer::getImageDecodeThread();
         LL_INFOS("AssetFetch") << llformat("        pipeline: fetch parked %d wakes %llu missed-wakes %llu rechecks %llu | decode queued %d cancelled %llu"
-                                           " | cache entries %.1f MB ram-hits %llu disk-reads %llu | mesh wakes %llu polls %llu delayed %d"
+                                           " | legacy-cache entries %.1f MB ram-hits %llu disk-reads %llu | mesh wakes %llu polls %llu delayed %d"
                                            " vol-index %d | async LLSD %llu (%.1f MB) | tex callbacks %d of %d",
                                            tf ? tf->getParkedCount() : 0,
                                            (unsigned long long)(tf ? tf->getWakeCount() : 0),

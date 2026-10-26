@@ -415,8 +415,10 @@ static void report_crash(const char* reason, PEXCEPTION_POINTERS ep, DWORD threa
     gEmergencyMemoryReserve.release();  // room for the log line if the heap ran dry
     // #876 / #890: a crash during pipeline compilation arms "compile one at a time" for the
     // next start (before the log + dump: the marker is a few bytes and must not be lost to them).
+    // #1064: it also names the driver and the pipeline the crashing thread was compiling, so a
+    // second crash on the same pipeline + driver quarantines that pipeline.
     const bool compile_crash = crash_in_pipeline_compile(ep, thread_id);
-    const bool marker_written = compile_crash && vkPipelineCrashMarkerWrite();
+    const bool marker_written = compile_crash && vkPipelineCrashMarkerWrite((uint64_t)thread_id);
     log_crash_report(reason, ep, thread_id, main_thread);
     if (compile_crash)
     {

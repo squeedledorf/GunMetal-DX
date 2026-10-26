@@ -632,6 +632,17 @@
            function="Floater.Toggle"
            parameter="game_control_overlay" />
         </menu_item_check>
+        <!-- <GMDX> the keyboard and mouse as a movable overlay showing live input -->
+        <menu_item_check
+          label="Keyboard &amp; mouse overlay"
+          name="Input Overlay">
+          <menu_item_check.on_check
+           function="Floater.Visible"
+           parameter="gmdx_input_overlay" />
+          <menu_item_check.on_click
+           function="Floater.Toggle"
+           parameter="gmdx_input_overlay" />
+        </menu_item_check>
       <menu_item_separator/>
       <menu_item_check
        label="Gestures..."

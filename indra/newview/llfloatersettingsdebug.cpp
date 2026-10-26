@@ -73,6 +73,9 @@ bool LLFloaterSettingsDebug::postBuild()
     mSettingList = getChild<LLScrollListCtrl>("setting_list");
     mSettingList->setCommitOnSelectionChange(true);
     mSettingList->setCommitCallback(boost::bind(&LLFloaterSettingsDebug::onSettingSelect, this));
+    // #943: the rows come from the settings' hash table (no meaningful order), so Up/Down
+    // stepped through what looked like random rows. Keep the list sorted by name.
+    mSettingList->sortByColumnIndex(1, true);
 
     updateList();
 

@@ -25,6 +25,9 @@
 
 #include "gmdxchatlog.h"
 
+#include "llmenubutton.h"
+#include "lltoggleablemenu.h"
+
 #include "fscombatads.h"
 #include "fscommon.h"
 #include "llagent.h"
@@ -361,11 +364,12 @@ void GMDXChatLog::layout(const Entry& e, F32 width, bool show_time, std::vector<
         put(mBold, e.name, plain ? name_color(e.from) : chan, 0.f);
         put(mText, e.emote ? " " : ": ", C_DIM, 0.f);
     }
+    // A merged line and every wrapped row start a short way in from the time (a hanging indent): under
+    // the name they ran far right with a long name, the wrapped rows back at the left edge.
+    const F32 hang = indent_merged + 14.f;
     if (merged)
     {
-        // under the line before's text: as far in as its name reached (approximately: the name's width)
-        x = indent_merged + (e.tag.empty() ? 0.f : mTagBold->getWidthF32(e.tag) + 6.f) + mBold->getWidthF32(e.name)
-            + mText->getWidthF32(": ");
+        x = hang;
     }
     const LLFontGL* body = (e.channel == Channel::Whisper || e.emote) ? mItalic
                          : e.channel == Channel::Shout ? mBold : mText;
@@ -374,7 +378,7 @@ void GMDXChatLog::layout(const Entry& e, F32 width, bool show_time, std::vector<
     LLWString w = utf8str_to_wstring(e.links_done || !e.shown.empty() ? e.shown : e.text);
     LLWStringUtil::replaceChar(w, '\n', ' ');
     const std::string count = e.repeat > 1 ? llformat(" \xC3\x97%u", e.repeat) : std::string();   // " xN"
-    const F32 wrap_x = (x > width * 0.5f) ? 12.f : x;   // continuation rows
+    const F32 wrap_x = hang;   // continuation rows
     S32 start = 0;
     const S32 len = (S32)w.size();
     while (true)
@@ -418,6 +422,11 @@ LLRect GMDXChatLog::tabRect(S32 tab) const
     for (S32 i = 0; i < tab; ++i) x += mTagBold->getWidth(std::string(kTabNames[i])) + 34;
     const S32 w = mTagBold->getWidth(std::string(kTabNames[tab])) + 24;
     return LLRect(x, mPanelRect.mTop - 4, x + w, mPanelRect.mTop - kTabH);
+}
+
+LLRect GMDXChatLog::gearRect() const
+{
+    return LLRect(mPanelRect.mRight - 28, mPanelRect.mTop - 2, mPanelRect.mRight - 6, mPanelRect.mTop - kTabH + 2);
 }
 
 void GMDXChatLog::draw()
@@ -521,6 +530,16 @@ void GMDXChatLog::draw()
         }
     }
 
+    // the chat bar's options (its own gear is hidden while the log is on: SLChatBar::updateChannelSelector)
+    if (LLUIImagePtr gear = LLUI::getUIImage("OptionsMenu_Off"))
+    {
+        const LLRect g = gearRect();
+        S32 mx = 0, my = 0;
+        LLUI::getInstance()->getMousePositionLocal(this, &mx, &my);
+        const S32 side = llmin(g.getWidth(), g.getHeight());
+        gear->draw(g.getCenterX() - side / 2, g.getCenterY() - side / 2, side, side, g.pointInRect(mx, my) ? C_TEXT : C_DIM);
+    }
+
     // the history of this tab, newest at the bottom, mScroll rows back
     std::vector<Row> all;
     const S32 need = rows_shown + mScroll;
@@ -557,6 +576,16 @@ void GMDXChatLog::draw()
 bool GMDXChatLog::handleMouseDown(S32 x, S32 y, MASK mask)
 {
     if (mPanelRect.isEmpty() || !mPanelRect.pointInRect(x, y)) return false;   // click-through outside the panel
+    if (gearRect().pointInRect(x, y))
+    {
+        SLChatBar* bar = LLFloaterReg::findTypedInstance<SLChatBar>("chatbar");
+        LLMenuButton* button = bar ? bar->findChild<LLMenuButton>("chatbar_gear_menu") : nullptr;
+        if (LLToggleableMenu* menu = button ? button->getMenu() : nullptr)
+        {
+            LLMenuGL::showPopup(this, menu, x, y);
+        }
+        return true;
+    }
     for (S32 t = 0; t < TAB_COUNT; ++t)
     {
         if (tabRect(t).pointInRect(x, y))

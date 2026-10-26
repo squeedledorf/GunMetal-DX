@@ -99,6 +99,11 @@
 #define RS_F_POP0     256u  // population 0 (the RT reflection hits' grid) is built too
 #define RS_F_OCC      512u  // (#869) OCCLUSION CULL (RenderVKReSTIROcclusionCull): pass 15 and the lit kernels
                             // leave out the lights the occlusion cache holds blocked at P (OCCLUSION CULL below)
+#define RS_F_OCC_HARD 1024u // (#1052, RenderVKReSTIROcclusionCull 2: A/B) the first cull's rules -- every sample a
+                            // note (untraced ones as blocked), 8 frames, a binary verdict per axis-aligned patch
+                            // (hard-edged rectangles); clear (1, default) = the SOFT cull (clean_deferred_light.comp)
+#define RS_F_CONV_ANY 2048u // (#1052, RenderVKReSTIRConvMultiLight 1: A/B) the denoiser's converged shortcut for
+                            // any reused reservoir; clear (default) = only where one light dominates the texel
 // (#869) THE MOVING-LIGHT SHADOW RULE (rs_cfg.w; RenderVKReSTIRMoveCut): a moving light's shadow
 // moves every frame, but the projector denoiser reprojects its history along the camera / surface
 // motion only -- the visibility history of a moved light is wrong wherever its shadow moved. Pass 15
