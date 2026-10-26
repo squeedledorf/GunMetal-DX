@@ -160,8 +160,10 @@ namespace
         headers->append("Range", llformat("bytes=%llu-%llu", (unsigned long long)first, (unsigned long long)last));
         LLSD result = adapter->getRawAndSuspend(request, url, options, headers);
         const LLSD& http = result[LLCoreHttpUtil::HttpCoroutineAdapter::HTTP_RESULTS];
-        const S32 code = http[LLCoreHttpUtil::HttpCoroutineAdapter::HTTP_RESULTS_STATUS].asInteger();
         const LLCore::HttpStatus status = LLCoreHttpUtil::HttpCoroutineAdapter::getStatusFromLLSD(http);
+        // <GMDX> The HTTP code is the status's TYPE; HTTP_RESULTS_STATUS is LLCore's error code (0 on
+        // success), so every good 206 read as "HTTP 0" and no update ever downloaded.
+        const S32 code = (S32)status.getType();
         if (status && code == 206)
         {
             const LLSD::Binary& raw = result[LLCoreHttpUtil::HttpCoroutineAdapter::HTTP_RESULTS_RAW].asBinary();
