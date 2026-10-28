@@ -1,10 +1,15 @@
 {
- "build": "0.2.1.1",
- "label": "0.2.1",
- "notes_url": "https://github.com/squeedledorf/GunMetal-DX/releases/tag/v0.2.1",
+ "build": "0.3.0.1",
+ "label": "0.3.0",
+ "notes_url": "https://github.com/squeedledorf/GunMetal-DX/releases/tag/v0.3.0",
  "downloads": {
-  "windows_setup": "https://github.com/squeedledorf/GunMetal-DX/releases/download/v0.2.1/GunMetal-DX_0.2.1_Setup.exe",
-  "windows_zip": "https://github.com/squeedledorf/GunMetal-DX/releases/download/v0.2.1/GunMetal-DX_0.2.1_win64.zip",
-  "linux_tarball": "https://github.com/squeedledorf/GunMetal-DX/releases/download/v0.2.1/GunMetal-DX_0.2.1_x86_64.tar.xz"
+  "windows_setup": "https://github.com/squeedledorf/GunMetal-DX/releases/download/v0.3.0/GunMetal-DX_0.3.0_Setup.exe",
+  "windows_zip": "https://github.com/squeedledorf/GunMetal-DX/releases/download/v0.3.0/GunMetal-DX_0.3.0_win64.zip",
+  "linux_tarball": "https://github.com/squeedledorf/GunMetal-DX/releases/download/v0.3.0/GunMetal-DX_0.3.0_x86_64.tar.xz"
+ },
+ "update": {
+  "manifest": "{\"artifacts\":{\"linux_tarball\":{\"name\":\"GunMetal-DX_0.3.0_x86_64.tar.xz\",\"sha256\":\"eca9e1095341368c7b1c9ebfebb880057c16f5b5c1dca4c72516c6bf8d4c6baf\",\"size\":217304336,\"url\":\"https://github.com/squeedledorf/GunMetal-DX/releases/download/v0.3.0/GunMetal-DX_0.3.0_x86_64.tar.xz\"},\"windows_setup\":{\"name\":\"GunMetal-DX_0.3.0_Setup.exe\",\"sha256\":\"a1ef6a1fd1143ade627746ddec5d9f7ade39ebba12fa4366fed8c87887782533\",\"size\":236655317,\"url\":\"https://github.com/squeedledorf/GunMetal-DX/releases/download/v0.3.0/GunMetal-DX_0.3.0_Setup.exe\"}},\"build\":\"0.3.0.1\",\"channel\":\"release\",\"issued\":\"2026-10-28T02:24:06Z\",\"schema\":1,\"version\":\"0.3.0\"}",
+  "signature": "Kk5J29bT8hV/wGaiGQfCSP7aAZP1uCdO6mKtBB2cCmFKuTkt9m6PebDS9zuqqEEz4k6KeRL05sZn+P3q3m8kBw==",
+  "key_id": "1"
  }
 }
