@@ -2482,7 +2482,7 @@ void RlvBehaviourToggleHandler<RLV_BHVR_SETDEBUG>::onCommandToggle(ERlvBehaviour
 template<> template<>
 void RlvBehaviourToggleHandler<RLV_BHVR_SETENV>::onCommandToggle(ERlvBehaviour eBhvr, bool fHasBhvr)
 {
-    const std::string strEnvFloaters[] = { "env_adjust_snapshot", "env_edit_extdaycycle", "env_fixed_environmentent_sky", "env_fixed_environmentent_water", "my_environments" };
+    const std::string strEnvFloaters[] = { "env_adjust_snapshot", "env_edit_extdaycycle", "env_fixed_environmentent_sky", "env_fixed_environmentent_water", "my_environments", "gmdx_sky_test" }; // <GMDX> + Sky Test
     for (int idxFloater = 0, cntFloater = sizeof(strEnvFloaters) / sizeof(std::string); idxFloater < cntFloater; idxFloater++)
     {
         if (fHasBhvr)
@@ -2558,6 +2558,9 @@ void RlvBehaviourToggleHandler<RLV_BHVR_SHOWINV>::onCommandToggle(ERlvBehaviour 
         LLFloaterReg::const_instance_list_t invFloaters = LLFloaterReg::getFloaterList("inventory");
         for (LLFloater* pFloater : invFloaters)
             pFloater->closeFloater();
+        // The Favorite Wearables window (#1132) lists inventory items too
+        if (LLFloater* pFavorites = LLFloaterReg::findInstance("wearable_favorites"))
+            pFavorites->closeFloater();
     }
 
     //

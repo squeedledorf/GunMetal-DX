@@ -318,6 +318,10 @@
 //              its RE-SHADE (GI_F_LIGHT_CHG) appends the texel to the re-shade list and stops. Run
 //              again (push rtr.z = 1, TAIL) over that list after 4: the same binary re-derives the
 //              same pick and finishes it with the re-shade's result.
+//              (#1039 M3, -DCLEAN_VIS_QUEUE_GIR) REUSE-VQ: the visibility ray is queued instead (the texel
+//              stops likewise, its pick stored in its record), the queue's walk traces it, and the VIS TAIL
+//              (#1039: -DCLEAN_GIR_VIS_TAIL, a kernel of its own) finishes those texels from the stored picks
+//              and the results.
 //   4 RESHADE  one lane per listed texel: the re-shade ray traced and shaded (the fused giTrace)
 // (#1036) THE SHADE SPLIT (RenderVKGIShadeSplit; push rtr.z = 1 in TRACE): stage 2 as three kernels
 // over compacted lists instead of one 8x8 pass over every texel -- TRACE appends each traced texel to
@@ -339,6 +343,15 @@
 #define GI_STAGE_MISS     5
 #define GI_STAGE_HITMAT   6
 #define GI_STAGE_HITLIGHT 7
+#define GI_STAGE_HITREQ   8   // (#1039 M2 REQ, -DCLEAN_VIS_QUEUE_M2 only: the producer, between HIT-MAT and HIT-LIGHT)
+// (#1039) 9 CHG-TAG: while lights changed (GI_F_LIGHT_CHG): one lane per texel of LAST frame's reservoirs -- the
+// changed / hot lights' significance at its stored sample (giChangedSig + giLightHot, what giTap computed per tap)
+// -> its CHANGE TAG (GI RECORDS). A reservoir's tag depends on that reservoir alone (its point, normal, radiance)
+// and this frame's header, so REUSE reads it per tap instead of running the light loops inline (they were its
+// register peak) -- and each reservoir is evaluated once, not once per receiver that taps it. It reads nothing
+// of this frame's GI (nor the G-buffer): it runs in the LIGHT PREP, ahead of the lighting chain; the tag's
+// bit 3 (the fresh hit) is set by HIT-LIGHT / SHADE when they store the hit's sample (giChgTagFresh).
+#define GI_STAGE_CHGTAG   9
 // (#1036) THE RT REFLECTION SPLIT (RenderVKRTReflectionsShadeSplit; pass 11 -DCLEAN_RT_LIST only): the
 // list trace's per-ray code as TRACE (the walk) -> MAT (the hit's material) -> LIGHT (its lighting, the
 // blend layers, the store) over per-ray records -- see the list trace's DEFER_MAIN.
@@ -350,6 +363,7 @@
 #define RT_STAGE_MAT   2
 #define RT_STAGE_LIGHT 3
 #define RT_STAGE_LAYERS 4   // (#1039 M2, -DCLEAN_VIS_QUEUE_M2 only: the blend layers of every entry, before LIGHT)
+#define RT_STAGE_REQ    5   // (#1039 M2 REQ, -DCLEAN_VIS_QUEUE_M2 only: the producer, between MAT and LAYERS / the walk)
 // (#1039 M1) THE VISIBILITY QUEUE (RenderVKVisQueue bit 1; clean_vis_queue.glsl): -DCLEAN_VIS_QUEUE builds the
 // hit-shading split's MATERIAL stage as the PRODUCER (the record, then the hit's sun ray as a request) and
 // its LIGHTING stage as the RESOLVE (the sun from the result: no sun walk in the kernel) -- the GI's
@@ -361,9 +375,13 @@
 // the RT split gains a LAYERS stage (CLEAN_RT_STAGE 4: the blend-layer gather + its sun rays per entry, into
 // the entry's layer slot), and the lighting stages resolve all of it from the results -- no ray query left
 // in DeferRtSplitLightVq2 / DeferGiSplitHitLightVq2.
+// M2's PRODUCER is a stage of its own (REQ: CLEAN_RT_STAGE 5 / CLEAN_GI_STAGE 8, after the material stage):
+// it reads the RT LIT RECORD back and runs vqHitRequests, so the material stage keeps only the material (a
+// miss / back-face stop lane returns at once) -- fused, the two working sets exceeded 128 registers.
 #if defined(CLEAN_VIS_QUEUE) && !(CLEAN_GI_STAGE == GI_STAGE_HITMAT || CLEAN_GI_STAGE == GI_STAGE_HITLIGHT \
+                                  || CLEAN_GI_STAGE == GI_STAGE_HITREQ \
                                   || CLEAN_RT_STAGE == RT_STAGE_MAT || CLEAN_RT_STAGE == RT_STAGE_LIGHT \
-                                  || CLEAN_RT_STAGE == RT_STAGE_LAYERS)
+                                  || CLEAN_RT_STAGE == RT_STAGE_LAYERS || CLEAN_RT_STAGE == RT_STAGE_REQ)
 #error "CLEAN_VIS_QUEUE builds the hit-shading split's material / lighting stages only"
 #endif
 #if defined(CLEAN_VIS_QUEUE_M2) && !defined(CLEAN_VIS_QUEUE)
@@ -371,6 +389,26 @@
 #endif
 #if CLEAN_RT_STAGE == RT_STAGE_LAYERS && !defined(CLEAN_VIS_QUEUE_M2)
 #error "the RT split's LAYERS stage is the visibility queue's (-DCLEAN_VIS_QUEUE -DCLEAN_VIS_QUEUE_M2)"
+#endif
+#if (CLEAN_RT_STAGE == RT_STAGE_REQ || CLEAN_GI_STAGE == GI_STAGE_HITREQ) && !defined(CLEAN_VIS_QUEUE_M2)
+#error "the REQ stages are the visibility queue's M2 producer (-DCLEAN_VIS_QUEUE -DCLEAN_VIS_QUEUE_M2)"
+#endif
+// The stage that runs vqHitRequests: M2's REQ, else (M1) the material stage itself
+#ifdef CLEAN_VIS_QUEUE_M2
+#define VQ_PRODUCER_STAGE (CLEAN_GI_STAGE == GI_STAGE_HITREQ || CLEAN_RT_STAGE == RT_STAGE_REQ)
+#else
+#define VQ_PRODUCER_STAGE (CLEAN_GI_STAGE == GI_STAGE_HITMAT || CLEAN_RT_STAGE == RT_STAGE_MAT)
+#endif
+// (#1039 M3, RenderVKVisQueue bit 4) -DCLEAN_VIS_QUEUE_GIR builds the GI split's REUSE stage (CLEAN_GI_STAGE 3) as
+// REUSE-VQ: the reused pick's visibility ray goes to the queue (region 2) instead of being walked here, and the
+// VIS TAIL finishes those texels after the walk -- see the REUSE stage.
+#if defined(CLEAN_VIS_QUEUE_GIR) && !(CLEAN_GI_STAGE == GI_STAGE_REUSE && DEFER_GI_TRACE)
+#error "CLEAN_VIS_QUEUE_GIR builds the GI split's REUSE stage only (-DCLEAN_GI_TRACE -DCLEAN_GI_STAGE=3)"
+#endif
+// (#1039) -DCLEAN_GIR_VIS_TAIL builds REUSE-VQ's VIS TAIL as a kernel of its own: the queued texels finished from the
+// pick REUSE-VQ stored (no candidate loop)
+#if defined(CLEAN_GIR_VIS_TAIL) && !defined(CLEAN_VIS_QUEUE_GIR)
+#error "CLEAN_GIR_VIS_TAIL is REUSE-VQ's VIS TAIL (-DCLEAN_VIS_QUEUE_GIR)"
 #endif
 #if defined(CLEAN_VIS_WALK) && !(CLEAN_DEFER_PASS == 11 && defined(CLEAN_RT_LIST) && CLEAN_RT_STAGE == RT_STAGE_FUSED && !DEFER_GI_TRACE)
 #error "CLEAN_VIS_WALK is built from pass 11 -DCLEAN_RT_LIST (the RT layout, no stage)"
@@ -439,6 +477,37 @@
 #if defined(CLEAN_SHADOW_ISO_LOD) && CLEAN_SHADOW_STAGE != SH_STAGE_VIS && CLEAN_SHADOW_STAGE != SH_STAGE_SUNVIS
 #error "CLEAN_SHADOW_ISO_LOD is the split walk kernels' (VIS / SUNVIS): every other kernel keeps the footprint LOD"
 #endif
+// (#1039, RenderVKVisQueue bit 8) THE SHADOW CORE THROUGH THE VISIBILITY QUEUE (clean_vis_queue.glsl SHADOW CORE
+// REQUESTS; LLCleanRendererVK::recordProjStoch): SUNVIS and VIS, each as
+//   GEN  (-DCLEAN_VQ_SHADOW=1) the kernel up to its walk -- the receiver (G-buffer, facet normal, pdnFacetNormal),
+//        the sample, the receiver rules and their probes (shadowRecvLight: terminator triangle, rig lift), the
+//        certificates' lookup (sun), shadowSampleSetup -- then, instead of the walk, the sample as a COMPACT
+//        REQUEST (64 B sun / 48 B light sample: what the walk cannot rebuild from the texel / the light index);
+//        what needs no ray (no surface, the gates, facing, the certificate's skip, a light sample's back-face
+//        self-shadow) it stores itself, as before; the sun's #771 certification rays (they need no visibility)
+//        run here too. No walk, no shared memory.
+//   WALK (-DCLEAN_VQ_SHADOW=2) one lane per request: the walk state restored (the footprint / noise / light
+//        sample rebuilt), shadowSampleRays with each ray's inputs rebuilt from the request (SH_PARK_VQ -- the
+//        fused kernels' shared-memory parking, in VRAM), the terminator post, then what the kernel stored after
+//        its walk: VIS the visibility word (+ the occlusion evidence bit), SUNVIS the certificate's revocation and
+//        the sun channel's texel. No G-buffer surface decode, no probes, no shared memory -- the walk and its
+//        alpha test, and nothing live across them.
+//   TAIL (-DCLEAN_VQ_SHADOW=3; VIS only) today's VIS kernel over the jobs past the region (the first one in the
+//        region header): the queue never drops a sample.
+// Built with SUNVIS's / VIS's own defines (MERGE / ISO_LOD / the kind specialisation), so the walk compiles with
+// exactly their rules.
+#ifndef CLEAN_VQ_SHADOW
+#define CLEAN_VQ_SHADOW 0
+#endif
+#if CLEAN_VQ_SHADOW != 0 && CLEAN_SHADOW_STAGE != SH_STAGE_VIS && CLEAN_SHADOW_STAGE != SH_STAGE_SUNVIS
+#error "CLEAN_VQ_SHADOW splits the shadow core's walk kernels (VIS / SUNVIS) only"
+#endif
+#if CLEAN_VQ_SHADOW == 3 && CLEAN_SHADOW_STAGE != SH_STAGE_VIS
+#error "the shadow queue's TAIL is VIS's (the sun region holds every texel)"
+#endif
+#if CLEAN_VQ_SHADOW == 1 && defined(CLEAN_SHADOW_ISO_LOD)
+#error "the shadow queue's GEN walks nothing: build it without CLEAN_SHADOW_ISO_LOD (the walk kernels pick the LOD)"
+#endif
 // (#859) the reflect kernels export the RT reflection mark (clean_surface_light.glsl)
 #if CLEAN_DEFER_PASS == 2 || CLEAN_DEFER_PASS == 5
 #define CLEAN_REFL_RT_MARK
@@ -473,7 +542,7 @@
 // SHADER CLOCK (-DCLEAN_SHADER_CLOCK, RenderVKShaderClockLighting; clean_shader_clock.glsl):
 // each kernel's body is DEFER_MAIN, wrapped by a main() at the end that starts the clock and
 // flushes the stage sums after it (whichever return the body took). Else DEFER_MAIN = main.
-#ifdef CLEAN_SHADER_CLOCK
+#if defined(CLEAN_SHADER_CLOCK) || defined(CLEAN_RT_HANG_BEACON)   // (#1128: the hang beacon's wrapper too)
 #define DEFER_MAIN deferMain
 #else
 #define DEFER_MAIN main
@@ -533,6 +602,14 @@ layout(local_size_x = 8, local_size_y = 8) in;   // (no shared tile state: finer
 // view's (jittered) view-projection.
 #define CLEAN_EXTERNAL_DRAW_PUSH
 #define CLEAN_DRAW_VIEW_UBO
+// #1075 LAYERED STEREO (research/VR_LAYERED_STEREO_DESIGN.md §3.2, "compute over view layers"):
+// the pixel-grid kernels light the N views of a stereo frame in ONE dispatch, z = N, view =
+// gl_WorkGroupID.z (clean_view.glsl CLEAN_VIEW_Z). Their stereo pipelines carry kViewCount = N
+// (spec constant 20); every other pipeline (the desktop's, and the record-list kernels not
+// converted yet: never dispatched in a stereo frame) has kViewCount 1 and CLEAN_VIEW folds to 0.
+// Per view: the G-buffer / depth / HDR / glow layer (DEFER_LAYER), the draw-view entry (pc: its
+// eye, its eye-relative inverse view-projection -- deferInvVP), the frame info's views[] block.
+#define CLEAN_VIEW CLEAN_VIEW_Z
 layout(push_constant) uniform DeferPush {
     uint view;          // main view's draw-view ring entry (pass 1's draw push)
     uint flags;         // split: DEFER_FLAG_PROJ / _RGB (uber: reserved, 0)
@@ -556,6 +633,16 @@ layout(push_constant) uniform DeferPush {
                         // tail), y 0, zw the records' device address (the split stages; else 0)
 #endif
 } g_draw_push;          // 80 B (RT kernels: 128 B)
+// THE VIEW'S CLIP -> EYE-RELATIVE WORLD (#1075): one view, the push's inv_vp_rel (pc.u_cam_time is
+// its eye); a layered stereo pipeline, its view's draw-view entry -- the host writes each eye's
+// own camera there for the lighting (u_cam_time.xyz = the eye, u_inv_view_proj = the inverse of
+// the eye's jittered view-projection relative to that eye: deferEyeBlock), so P = eye + h.xyz /
+// h.w, the view vector, the tile frusta (rays and side planes through the eye) are that eye's.
+// Folded to the push matrix at kViewCount 1.
+#define deferInvVP (kViewCount > 1 ? pc.u_inv_view_proj : g_draw_push.inv_vp_rel)
+// The view's layer of the G-buffer / depth / HDR / glow images (2D_ARRAY at every view count).
+#define DEFER_LAYER int(CLEAN_VIEW)
+#define defTexel(t, p) texelFetch(t, ivec3((p), DEFER_LAYER), 0)
 // The frame has shadowed projector records: the shadow pass resolves their slots (and the
 // combine reads them). Off: uVisProj is a placeholder, never touched.
 #define DEFER_FLAG_PROJ 1u
@@ -996,6 +1083,13 @@ layout(std430, set = 3, binding = 26) buffer PdnSelect { uvec4 pdn_sel[]; };
 layout(std430, set = 3, binding = 27) buffer PdnVis { uint pdn_vis[]; };
 #endif
 #endif
+#if defined(CLEAN_SHADOW_CORE) && (CLEAN_SHADOW_STAGE == SH_STAGE_FUSED || CLEAN_SHADOW_STAGE == SH_STAGE_SELECT)
+// (#1038, RS_F_REUSE_MV) the pre-pass motion vectors (render extent, UV current minus previous,
+// unjittered; texelFetch) for the ReSTIR DI reservoirs' reprojection of a moving surface (the GI
+// trace's binding; a 1 x 1 placeholder without a motion target -- never read then: taa_params.y 0)
+#define REUSE_MV_BOUND 1
+layout(set = 3, binding = 28) uniform sampler2D uReuseMotion;
+#endif
 #elif CLEAN_DEFER_PASS == 3 || CLEAN_DEFER_PASS == 7 || CLEAN_DEFER_PASS == 8 || DEFER_SHADOW
 // (DEFER_SHADOW: the merged RT shadow pass's denoised sun / moon, layer 2 -- deferMergedSunT;
 //  7 BASE: the #91 emitters' diffuse ratio -- deferEmitterLight)
@@ -1034,7 +1128,18 @@ layout(std430, set = 3, binding = 22) buffer GiReservoirs { uvec4 gi_res[]; };
 //                 q1..q4 and the hit distance in q5.x between them)
 //   REUSE writes  q4 = o.xyz, tmax; q5.xyz = the re-shade direction (a listed texel's request)
 //   RESHADE       q4 = L.rgb, t (< 0: nothing within the tolerance window -- rejected)
+// then (#1039) the CHANGE TAGS: one uint per texel of last frame's reservoirs, 4 per uvec4 (giChgTagWord), written by
+// CHG-TAG while GI_F_LIGHT_CHG is set (giTap's chg: giChangedSig in bits 0-1, bit 2 a hot light; 0 for a sky sample;
+// bit 3: the same tests on this frame's FRESH hit of the texel -- REUSE's changed share of its fresh candidate)
 layout(std430, set = 3, binding = 25) buffer GiRecords { uvec4 gi_hit[]; };
+#endif
+#if (CLEAN_GI_STAGE == GI_STAGE_FUSED || CLEAN_GI_STAGE == GI_STAGE_REUSE) && !defined(CLEAN_GI_RESOLVE)
+// (#1038, GI_F_REUSE_MV) the pre-pass motion vectors (render extent, UV current minus previous,
+// unjittered; texelFetch): the reservoir reuse's reprojection of a moving surface. A 1 x 1 placeholder
+// without a motion target (never read then: the frame info's taa_params.y is 0).
+#define GI_REUSE_MV_BOUND 1
+#define REUSE_MV_BOUND 1
+layout(set = 3, binding = 28) uniform sampler2D uReuseMotion;
 #endif
 #include "clean_gi_common.glsl"
 #elif CLEAN_DEFER_PASS == 3 || CLEAN_DEFER_PASS == 7
@@ -1213,10 +1318,184 @@ uint pdnOpts();
 #define PDN_OPT_OFIRST  64u
 #define RT_WALK_OFIRST ((pdnOpts() & PDN_OPT_OFIRST) != 0u)
 #endif
+#if defined(CLEAN_VIS_WALK)
+// (#1039 occupancy) THE VISIBILITY QUEUE'S WALK READS ITS WALK STATE FROM THE REQUEST where the walk uses it
+// (clean_rt_common.glsl WALK-STATE HOOKS), not from globals live across every traversal: the alpha test's ray
+// cone and draw time, the own fixture's light, the foliage parameters -- the same request words and the same
+// expressions the kernel's set-up used to fill those globals (VIS WALK below).
+float vqConeW0();
+float vqConeSpread();
+float vqConeAniso();
+float vqAnimTime();
+vec3 vqFixP();
+vec4 vqFolP();
+#define RT_CONE_WIDTH0 vqConeW0()
+#define RT_CONE_SPREAD vqConeSpread()
+#define RT_CONE_ANISO vqConeAniso()
+#define RT_ANIM_TIME vqAnimTime()
+#define RT_FIX_P vqFixP()
+#define RT_FOL_P vqFolP()
+#endif
+#if CLEAN_VQ_SHADOW == 2
+// (#1039 occupancy) THE SHADOW QUEUE'S WALKS READ THEIR WALK STATE FROM THE REQUEST where the walk uses it
+// (clean_rt_common.glsl WALK-STATE HOOKS), not from globals live across every traversal: the self probe's
+// receiver, the alpha test's cone width and footprint, the own fixture's light and size cap (the light
+// samples). Each is rebuilt from the same request words by the same expressions the kernel's set-up used
+// (SHADOW CORE QUEUE below), so the walk reads the values it read before.
+vec3 vqShSelfP();
+float vqShConeW0();
+void vqShFoot(out vec3 a, out vec3 b);
+#define RT_SELF_P vqShSelfP()
+vec3 vqShCam();
+#define RT_SELF_CAM vqShCam()   // (vqShWalkBegin's rt_self_cam: the camera itself)
+vec4 vqShFolP();
+#define RT_FOL_P vqShFolP()     // (rtFolBegin's rt_fol_p: the frame info's foliage parameters themselves)
+#define RT_CONE_WIDTH0 vqShConeW0()
+#define RT_FOOT_AB(A, B) vqShFoot(A, B)
+#if CLEAN_SHADOW_STAGE == SH_STAGE_VIS
+vec3 vqShFixP();
+float vqShFixMax();
+#define RT_FIX_P vqShFixP()
+#define RT_FIX_MAX vqShFixMax()
+#endif
+#endif
 
 #include "clean_draw_common.glsl"
 #include "clean_surface_light.glsl"
 #include "clean_gbuffer.glsl"
+
+#ifdef CLEAN_RT_HANG_BEACON
+// ---- (#1128) THE HANG BEACON (RenderVKRTHangBeacon; LLCleanRendererVK mRtBc, rtHangBeaconReport) ----
+// A GPU hang in a ray-query kernel leaves no trace of WHICH ray: every shader loop is bounded, so a lane that
+// never finishes is inside one ray query's traversal (or the driver's code around it). The beacon twins of the
+// ray-query kernels (CLEAN_RT_BC_KERNEL = LLCleanRendererVK kRtBcKernel*) write each lane's query into
+// HOST-VISIBLE memory before it starts (clean_rt_common.glsl rtRaySane -> rtBeaconQuery) and DONE when the lane's
+// body returns (the main() wrapper at the end of this file); the device-lost report lists the slots left IN QUERY.
+// No push word: the address sits in the lit guard buffer, lg_words[LG_BC_WORD .. + 1], [+ 2] = RTBC_MAGIC (or
+// RTBC_SELFTEST) -- written by the host every frame while the beacon is on (rtBcFrameBegin).
+// The buffer, in uvec4:
+//   [0]       host, every frame: x the frame tag (24 bits, non-zero), y the slot count, w RTBC_MAGIC
+//   [1], [2]  the list trace's first lane (kernel 1): the ray list's count / dispatch x y z, capacity / tile count /
+//             gl_NumWorkGroups.xy; [3] x the tag it read, y gl_NumWorkGroups.z, z push rtr3.x
+//   [15]      x: the self test spins until it equals RTBC_SELFTEST (the host never writes it)
+//   [16 + k]  kernel k's first lane, every dispatch: x the tag it read, yzw gl_NumWorkGroups
+//   [64 + 3 s ..] slot s (a lane claims (its id + k x 0x9E3779B1) mod the slot count at its FIRST query and never
+//             overwrites a slot still in a query -- a hung lane keeps its record):
+//             .0 x = tag << 8 | state (2 in a query, 3 done), y the lane id (list entry / global index), z its pixel
+//                (x | y << 15; else gl_GlobalInvocationID.xy), w = site (RT_BC_SITE_*) | query ordinal << 16 | bit 24
+//                the guard's verdict ok | bit 25 folded (float ok, bits refused) | bit 26 the query budget refused it |
+//                kernel << 27
+//             .1 the query's origin bits, tmin bits   .2 its direction bits, tmax bits (as the caller passed them)
+#ifndef CLEAN_RT_BC_KERNEL
+#error "CLEAN_RT_HANG_BEACON needs CLEAN_RT_BC_KERNEL (LLCleanRendererVK kRtBcKernel*)"
+#endif
+#ifdef CLEAN_SHADER_CLOCK
+#error "CLEAN_RT_HANG_BEACON and CLEAN_SHADER_CLOCK both wrap main()"
+#endif
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+#define LG_BC_WORD      60u   // = LLCleanRendererVK::kLgBcWord
+#define RTBC_HDR        64u
+#define RTBC_SLOT_MASK  ((1u << 21) - 1u)   // = LLCleanRendererVK::kRtBcSlots - 1
+#define RTBC_MAGIC      0x1128BEACu
+#define RTBC_SELFTEST   0x1128DEADu
+#define RTBC_QUERY      2u
+#define RTBC_DONE       3u
+layout(buffer_reference, std430, buffer_reference_align = 16) coherent buffer RtBcBuf { uvec4 q[]; };
+uint  g_bc_slot = 0xFFFFFFFFu;   // the claimed slot (its first uvec4), ~0 = none
+bool  g_bc_tried = false;        // the claim ran (a busy slot: this lane records nothing)
+uint  g_bc_id = 0xFFFFFFFFu;     // the lane's identity (rtBcLane), ~0 = its flattened global index
+uvec2 g_bc_px = uvec2(0u);
+uint  g_bc_tag = 0u;             // the frame tag << 8
+uint  g_bc_n = 0u;               // queries started
+bool rtBcOn()
+{
+    const uint m = lg_words[LG_BC_WORD + 2u];
+    return m == RTBC_MAGIC || m == RTBC_SELFTEST;
+}
+RtBcBuf rtBc() { return RtBcBuf(uvec2(lg_words[LG_BC_WORD], lg_words[LG_BC_WORD + 1u])); }
+// A kernel that knows a better identity than its global index (the list trace: the entry, its pixel).
+void rtBcLane(uint id, ivec2 px) { g_bc_id = id; g_bc_px = uvec2(px); }
+// (clean_rt_common.glsl rtRaySane, before every ray query of the lane: the inputs as passed)
+void rtBeaconQuery(vec3 o, float tmin, vec3 d, float tmax, bool ok, bool folded)
+{
+    const uint site = rt_bc_site;
+    rt_bc_site = 0u;
+    if (g_bc_slot == 0xFFFFFFFFu)
+    {
+        if (g_bc_tried || !rtBcOn()) return;
+        g_bc_tried = true;
+        if (g_bc_id == 0xFFFFFFFFu)
+        {
+            const uvec3 n = gl_NumWorkGroups * gl_WorkGroupSize;
+            g_bc_id = (gl_GlobalInvocationID.z * n.y + gl_GlobalInvocationID.y) * n.x + gl_GlobalInvocationID.x;
+            g_bc_px = gl_GlobalInvocationID.xy;
+        }
+        RtBcBuf b = rtBc();
+        const uint s = RTBC_HDR + 3u * ((g_bc_id + uint(CLEAN_RT_BC_KERNEL) * 0x9E3779B1u) & RTBC_SLOT_MASK);
+        if ((b.q[s].x & 0xFFu) == RTBC_QUERY) return;   // (another lane is in a query there: it may be the hung one)
+        g_bc_slot = s;
+        g_bc_tag = b.q[0].x << 8;
+    }
+    g_bc_n = min(g_bc_n + 1u, 255u);
+    RtBcBuf b = rtBc();
+    b.q[g_bc_slot + 1u] = uvec4(floatBitsToUint(o), floatBitsToUint(tmin));
+    b.q[g_bc_slot + 2u] = uvec4(floatBitsToUint(d), floatBitsToUint(tmax));
+    memoryBarrierBuffer();   // (the ray before the state that names it)
+    b.q[g_bc_slot] = uvec4(g_bc_tag | RTBC_QUERY, g_bc_id, (g_bc_px.x & 0x7FFFu) | ((g_bc_px.y & 0x7FFFu) << 15),
+                           (site & 0xFFFFu) | (g_bc_n << 16) | (ok ? 1u << 24 : 0u) | (folded ? 1u << 25 : 0u)
+                           | (ok && rt_query_left == 0u ? 1u << 26 : 0u) | (uint(CLEAN_RT_BC_KERNEL) << 27));
+    memoryBarrierBuffer();
+}
+// The wrapper's head: the kernel's start stamp; the deliberate-hang self test (RenderVKRTHangBeaconSelfTest: the
+// first beacon kernel to run with it set records a known query and never finishes -- validates the instrument).
+void rtBcHead()
+{
+    if (!all(equal(gl_GlobalInvocationID, uvec3(0u))) || !rtBcOn()) return;
+    RtBcBuf b = rtBc();
+    b.q[16u + uint(CLEAN_RT_BC_KERNEL)] = uvec4(b.q[0].x, gl_NumWorkGroups);
+    memoryBarrierBuffer();
+    if (lg_words[LG_BC_WORD + 2u] == RTBC_SELFTEST)
+    {
+        RT_BC_SITE(0xF000u);
+        rtBeaconQuery(vec3(1.0, 2.0, 3.0), 0.0, vec3(0.0, 0.0, 1.0), 4.0, true, false);
+        [[dont_unroll]] while (b.q[15].x != RTBC_SELFTEST) {}
+    }
+}
+void rtBcDone()
+{
+    if (g_bc_slot == 0xFFFFFFFFu) return;
+    rtBc().q[g_bc_slot].x = g_bc_tag | RTBC_DONE;
+    g_bc_slot = 0xFFFFFFFFu;
+}
+#endif
+#ifdef REUSE_MV_BOUND
+// (#1038) RESERVOIR REPROJECTION OF A MOVING SURFACE (the GI trace's GI_F_REUSE_MV, pass 15's
+// RS_F_REUSE_MV): the reservoirs' temporal candidate was looked up at the CAMERA-ONLY previous point
+// (giPrevDelta / pdnPrevDelta: this frame's P seen from last frame's camera) -- on a walking / dancing
+// avatar that is where the body was NOT last frame, so its texels lost every temporal candidate (and the
+// disocclusion taps around it found the background) for as long as it moved. dS (in: the camera-only
+// delta of texel m, extent D, sampling render pixel rp) becomes the motion vectors' (the denoisers'
+// reprojection, clean_dn_temporal.comp); returns the extra depth tolerance (m) for the camera-only
+// expected depth pw: the surface's own sideways motion through last frame's projection (it moved toward /
+// away from the camera by about as much), at most 25 % of pw. Static surfaces: dS unchanged, 0. Only
+// while the frame info says the motion vectors were written this frame (taa_params.y).
+float reuseMotionDelta(ivec2 m, ivec2 rp, vec2 D, float pw, inout vec2 dS)
+{
+    if (!(ssr.taa_params.y > 0.5) || !(pw > 0.0)) return 0.0;
+    const vec2 R2 = vec2(float(g_draw_push.width), float(g_draw_push.height));
+    const vec2 mv = texelFetch(uReuseMotion, rp, 0).xy;
+    const vec2 jit = ssr.taa_params.w > 0.5 ? ssr.taa_jitter.zw * 0.5 : vec2(0.0);
+    const vec2 puv = (vec2(rp) + 0.5) / R2 - jit - mv;
+    const vec2 dM = puv * D - 0.5 - vec2(m);
+    if (any(isnan(dM)) || any(isinf(dM))) return 0.0;
+    const vec2 dd = clamp(dM, vec2(-30000.0), vec2(30000.0)) - dS;
+    dS += dd;
+    const vec2 pk = vec2(abs(ssr.views[CLEAN_VIEW].prev_proj[0][0]), abs(ssr.views[CLEAN_VIEW].prev_proj[1][1]));
+    if (!(length(dd) > 0.5) || !(pk.x > 0.05 && pk.y > 0.05)) return 0.0;
+    return min(length(dd / D * 2.0 / pk) * pw, 0.25 * pw);
+}
+#endif
 #if DEFER_SHADOW_MERGE
 #include "clean_rt_moving_caster.glsl"   // rtNoteBlocker / rt_block_dyn (draw set 0 binding 23)
 #endif
@@ -1430,17 +1709,44 @@ void occStatAdd(uint k, uint v)
     if ((k & 1u) == 0u) atomicAdd(rg_cells[REGIR_OCC_BASE + (k >> 1u)].x, v);
     else                atomicAdd(rg_cells[REGIR_OCC_BASE + (k >> 1u)].y, v);
 }
-// (#1052) light li's cull weight in patch cell: hard rules 0 / 1 (count >= OCC_N); soft 0 below OCC_N_SOFT,
+// (#1052) the cull weight of a blocked-frames count n: hard rules 0 / 1 (n >= OCC_N); soft 0 below OCC_N_SOFT,
 // then 1/4, 1/2, 3/4, 1 over the counts 12 .. 15 (the nibble saturates at 15)
-float occWeight(uint cell, uint li)
+float occWeightOf(uint n)
 {
-    if (cell == OCC_NONE || li >= 256u) return 0.0;
-    const uint n = occCount(cell, li);
     if (!occSoft()) return n >= OCC_N ? 1.0 : 0.0;
     return n >= OCC_N_SOFT ? float(n - OCC_N_SOFT + 1u) / float(16u - OCC_N_SOFT) : 0.0;
 }
+// light li's cull weight in patch cell
+float occWeight(uint cell, uint li)
+{
+    if (cell == OCC_NONE || li >= 256u) return 0.0;
+    return occWeightOf(occCount(cell, li));
+}
 // light li is culled at this point (soft: for this texel's draw g_occ_u)
 bool occCulled(uint cell, uint li) { return occWeight(cell, li) > g_occ_u; }
+// THE POINT LIGHTS' SHARE (the patch-shaped blocks). The rules above take a culled light out of the
+// shadow RATIO's light set at P -- out of its numerator AND its denominator -- and the lit kernels give it
+// 0. But the ratio is DENOISED: the a-trous, the temporal history and the lit kernels' upsample average
+// ratios of NEIGHBOURING texels, and a patch's ratio is over a different light set (its basis) than the
+// patches around it that do not cull the light (not yet: each patch needs its own OCC_N(_SOFT) frames, and
+// the evidence comes in at a different pace per patch; never: no evidence there, a re-admitting ray, a
+// distance octave's new patches) -- or than its own history from before the cull. Inside a culling patch
+// the lit kernel multiplies that mixed ratio by the light set WITHOUT the light: a blocked light of
+// unshadowed share L next to the room's own light S -- inside V / S, outside V / (S + L) -- comes out as
+// S x (a mix of both) < V: a DARK box exactly the patch's shape (and a light halo outside it, a light box
+// on re-admission), healing only as the neighbours / the history catch up. Cull off: one basis
+// everywhere, only the noise.
+// A POINT light's unshadowed term is smooth (no gobo, no frustum), so a culled point light now STAYS in the
+// ratio's light set: pass 15 adds its exact unshadowed terms to the denominator (its visibility a known 0:
+// no ray, no sample -- the noise the cull removes stays removed) and the lit kernels give it the ratio like
+// any other light (no 1 - c). The basis no longer depends on the cull: any mix of texels is the same
+// light set's ratio, and the cull can no longer draw its patches into the image. Projectors keep the rules
+// above (a gobo / a moving frustum through the wall is what the cull exists to stop). RS_F_OCC_PT_DROP
+// (A/B): the old rule for points too.
+bool occKeepsShare(uint li)
+{
+    return (rg.rs_cfg.z & RS_F_OCC_PT_DROP) == 0u && li < 256u && lights[li].proj_origin.w < 0.5;
+}
 #endif
 #if DEFER_SPLIT_IO
 #include "clean_probe_pack.glsl"   // packRGB9E5
@@ -1606,11 +1912,12 @@ void occLitPatches(vec3 P, vec3 N)
 // shares), else the rest's ratios (diffuse, specular) -- the shared ratio over the other lights.
 // (#869 OCCLUSION CULL) a light P's cell holds blocked (OCCLUSION CULL above): 0 -- pass 15 left it out
 // of every estimate the same way. (#1052 SOFT CULL) x (1 - c), c its bilinear cull weight at P: pass 15
-// leaves it out with that probability (the jittered key).
+// leaves it out with that probability (the jittered key). (THE POINT LIGHTS' SHARE) A point light: never
+// -- pass 15 keeps it in the ratio's light set with its exact zero, so the ratio alone carries its cull.
 void deferPdnVisLight(uint li, vec3 P, vec3 N, out vec3 visD, out vec3 visS)
 {
     float keep = 1.0;
-    if (occFrameOn())   // (a header word: uniform)
+    if (occFrameOn() && !occKeepsShare(li))   // (a header word: uniform; then the light's kind)
     {
         if (g_occ_ok == 0)
         {
@@ -1824,7 +2131,7 @@ vec3 deferPdnSunFetch(vec3 P, vec3 Ng)
         float zp = vz;
         {
             const vec2 spx = floor((vec2(tp) + 0.5 + j) / r) + 0.5;
-            const vec4 h = g_draw_push.inv_vp_rel * vec4(spx / R * 2.0 - 1.0, 1.0, 1.0);
+            const vec4 h = deferInvVP * vec4(spx / R * 2.0 - 1.0, 1.0, 1.0);
             const vec3 dir = h.xyz / h.w;
             const float dn = dot(dir, Ng);
             if (abs(dn) > 1e-6 * length(dir))
@@ -1891,8 +2198,8 @@ uint rtrLightCluster(vec3 P)
     const vec4 v = linfo.view * vec4(P, 1.0);   // -Z forward
     const float z = -v.z;
     if (z <= 1e-3) return RT_SHADE_ALL_LIGHTS;
-    const float sx = (v.x / z) / max(linfo.grid.z, 1e-4);
-    const float sy = (v.y / z) / max(linfo.grid.w, 1e-4);
+    const float sx = (v.x / CL_VIEW_Z(linfo, z)) / max(linfo.grid.z, 1e-4);   // <GMDX>
+    const float sy = (v.y / CL_VIEW_Z(linfo, z)) / max(linfo.grid.w, 1e-4);
     if (abs(sx) > 1.0 || abs(sy) > 1.0) return RT_SHADE_ALL_LIGHTS;
     return mainClusterProject(P);
 }
@@ -2204,8 +2511,8 @@ vec3 vqHitLocal();
 #define RT_SHADE_LOCAL(P) vqHitLocal()
 #endif
 #endif
-#if defined(CLEAN_VIS_QUEUE_M2) && (CLEAN_GI_STAGE == GI_STAGE_HITMAT || CLEAN_RT_STAGE == RT_STAGE_MAT)
-// (#1039 M2) the PRODUCERS run rtShadeHit's local-light walk with every share unshadowed: the budget's valid
+#if defined(CLEAN_VIS_QUEUE_M2) && VQ_PRODUCER_STAGE
+// (#1039 M2) the PRODUCERS (the REQ stages) run rtShadeHit's local-light walk with every share unshadowed: the budget's valid
 // picks land here (their count, light indices, shares) and the producer queues their rays (vqHitRequests)
 uint g_vq_bn = 0u;
 uint g_vq_bl[RT_SHADE_PROJ_MAXK];
@@ -2287,7 +2594,7 @@ RtLitSurface rtLitUnpack(uvec4 r0, uvec4 r1, uvec4 r2, uvec4 r3)
     s.fb_env = fb ? s0 : 0.0;
     return s;
 }
-#if defined(CLEAN_VIS_QUEUE) || defined(CLEAN_VIS_WALK)
+#if defined(CLEAN_VIS_QUEUE) || defined(CLEAN_VIS_WALK) || defined(CLEAN_VIS_QUEUE_GIR)
 #include "clean_vis_queue.glsl"
 #endif
 #ifdef CLEAN_VIS_QUEUE
@@ -2309,8 +2616,8 @@ RtLitSurface rtLitUnpack(uvec4 r0, uvec4 r1, uvec4 r2, uvec4 r3)
 //     the SUM slot, and the hit shadow-ray budget's picks as VQ_K_LIGHT requests (rtrProjRaySetup; the share
 //     in the pick's slot, the walk leaves the blocked part there);
 //   * the BLEND LAYERS' cone flag into the layer slot (the RT split's LAYERS stage reads it).
-// hit false (M2's RT MAT runs every entry: a miss / a back-face stop has no material): only the layer flag.
-#if CLEAN_GI_STAGE == GI_STAGE_HITMAT || CLEAN_RT_STAGE == RT_STAGE_MAT
+// hit false (M2's RT REQ runs every entry: a miss / a back-face stop has no material): only the layer flag.
+#if VQ_PRODUCER_STAGE
 void vqHitRequests(uvec4 r0, uvec4 r1, uvec4 r2, uvec4 r3, vec3 eye, vec3 Rin, uint e, bool inCap, bool hit)
 {
     VqRegion r = vqRegion();
@@ -2345,7 +2652,7 @@ void vqHitRequests(uvec4 r0, uvec4 r1, uvec4 r2, uvec4 r3, vec3 eye, vec3 Rin, u
     const float cw = want ? rt_surf_foot : rt_cone_width0;
     const float cs = want ? 0.0 : rt_cone_spread;
     uint nOcc = 0u;
-#if CLEAN_RT_STAGE == RT_STAGE_MAT
+#if CLEAN_RT_STAGE == RT_STAGE_REQ
     // THE OCCLUSION RAY: every model but fullbright asks the environment (the water: unless the eye is under
     // it); the water asks before its glint's sun ray, so with the cone as it came in
     bool wantO = false;
@@ -2454,11 +2761,13 @@ vec3 vqLayers(vec3 behind, out uint layers)
 #endif
 #endif
 #endif
-layout(set = 2, binding = 0) uniform texture2D uG0;     // albedo (sRGB) + model alpha
-layout(set = 2, binding = 1) uniform texture2D uG1;     // oct N, oct Ng
-layout(set = 2, binding = 2) uniform texture2D uG2;     // rough/gloss, metal, glow, model byte
-layout(set = 2, binding = 3) uniform texture2D uG3;     // emissive | legacy spec
-layout(set = 2, binding = 4) uniform texture2D uDepthG; // pre-pass depth (DEPTH_READ_ONLY)
+// (#1075: one layer per view -- 2D_ARRAY views at every view count, layer DEFER_LAYER: defTexel /
+//  the ivec3 image accesses; at one view layer 0 is the one layer)
+layout(set = 2, binding = 0) uniform texture2DArray uG0;     // albedo (sRGB) + model alpha
+layout(set = 2, binding = 1) uniform texture2DArray uG1;     // oct N, oct Ng
+layout(set = 2, binding = 2) uniform texture2DArray uG2;     // rough/gloss, metal, glow, model byte
+layout(set = 2, binding = 3) uniform texture2DArray uG3;     // emissive | legacy spec
+layout(set = 2, binding = 4) uniform texture2DArray uDepthG; // pre-pass depth (DEPTH_READ_ONLY)
 // (#859) RT PRE-TRACE (uber frames; RenderVKDeferredSplit 0): pass 12 writes, the uber kernel reads
 // under DEFER_FLAG_RT_IN (rgb = the reflection ray's radiance, a = the splice weight; 0 = none).
 // Render extent while it runs, else a 1 x 1 placeholder.
@@ -2476,19 +2785,20 @@ layout(set = 2, binding = 11, rgba16f) uniform writeonly image2D uRtUber;
 #if DEFER_OUT
 #if CLEAN_DEFER_PASS == 8
 // (LOCAL reads BASE's output and adds to it: read-write, its own pixel only)
-layout(set = 2, binding = 5, rgba16f) uniform image2D uHdrOut;
+layout(set = 2, binding = 5, rgba16f) uniform image2DArray uHdrOut;
 #else
-layout(set = 2, binding = 5, rgba16f) uniform writeonly image2D uHdrOut;
+layout(set = 2, binding = 5, rgba16f) uniform writeonly image2DArray uHdrOut;
 #endif
 #ifndef GLOW_OUT_FORMAT
 #define GLOW_OUT_FORMAT rgba16f   // else r11f_g11f_b10f (compact glow target)
 #endif
-layout(set = 2, binding = 6, GLOW_OUT_FORMAT) uniform writeonly image2D uGlowOut;
+layout(set = 2, binding = 6, GLOW_OUT_FORMAT) uniform writeonly image2DArray uGlowOut;
 #endif
 #if DEFER_TILED
 // LIGHT GRID (pass 6 -> uber / combine; LLCleanRendererVK mLightGrid, sized by ensureDeferred):
 // per 16x16 tile (row-major over the dispatch: deferTileIndex) TILE_LIGHT_WORDS words, the
 // tile's light mask in light-index order. Bound always; read only under DEFER_FLAG_LIGHT_GRID.
+// (#1075: one grid per view, view v's after the first v -- the layered dispatch's z; + 0 at one view.)
 #if DEFER_GRID_BUILD
 layout(std430, set = 2, binding = 8) writeonly buffer LightGrid { uint light_grid[]; };
 #else
@@ -2500,7 +2810,10 @@ layout(std430, set = 2, binding = 8) readonly buffer LightGrid { uint light_grid
 uint g_tile = 0u;
 uint deferTileIndex() { return g_tile; }
 #else
-uint deferTileIndex() { return gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x; }
+uint deferTileIndex()
+{
+    return (CLEAN_VIEW * gl_NumWorkGroups.y + gl_WorkGroupID.y) * gl_NumWorkGroups.x + gl_WorkGroupID.x;
+}
 #endif
 #if DEFER_LIT || DEFER_CLASSIFY
 // This pixel's froxel cell (clean_lights_common.glsl FROXEL LIGHT MASKS): its pixel's tile and
@@ -2528,16 +2841,16 @@ uint tileLightBase(vec3 P)
 // projection the G-buffer draws used; eye-relative for precision, then + eye.
 vec3 deferPosition(ivec2 px)
 {
-    const float d = texelFetch(uDepthG, px, 0).r;
+    const float d = defTexel(uDepthG, px).r;
     const vec2 ndc = g_frag_xy / vec2(float(g_draw_push.width), float(g_draw_push.height)) * 2.0 - 1.0;
-    const vec4 h = g_draw_push.inv_vp_rel * vec4(ndc, d, 1.0);
+    const vec4 h = deferInvVP * vec4(ndc, d, 1.0);
     return pc.u_cam_time.xyz + h.xyz / h.w;
 }
 
 // The G-buffer surface of a pixel (all four texels: unused fields fold away per kernel).
 SurfaceLit deferSurface(ivec2 px, vec4 g2, out float glow, out bool noFade)
 {
-    return gbufferUnpack(texelFetch(uG0, px, 0), texelFetch(uG1, px, 0), g2, texelFetch(uG3, px, 0), glow, noFade);
+    return gbufferUnpack(defTexel(uG0, px), defTexel(uG1, px), g2, defTexel(uG3, px), glow, noFade);
 }
 bool deferHasSurface(vec4 g2) { return (uint(g2.w * 255.0 + 0.5) & 3u) != SURF_NONE; }
 #if DEFER_RT_TILES
@@ -2559,12 +2872,12 @@ vec2 rtrNormalSpread(ivec2 px, vec3 P, vec3 N, vec3 Ng, float camd)
     {
         const ivec2 q = px + (k == 0 ? ivec2(1, 0) : k == 1 ? ivec2(-1, 0) : k == 2 ? ivec2(0, 1) : ivec2(0, -1));
         if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, ext))) continue;
-        const float d = texelFetch(uDepthG, q, 0).r;
+        const float d = defTexel(uDepthG, q).r;
         const vec2 ndc = (vec2(q) + 0.5) / vec2(ext) * 2.0 - 1.0;
-        const vec4 h = g_draw_push.inv_vp_rel * vec4(ndc, d, 1.0);
+        const vec4 h = deferInvVP * vec4(ndc, d, 1.0);
         const vec3 Pq = pc.u_cam_time.xyz + h.xyz / h.w;
         if (!(abs(dot(Ng, Pq - P)) < tol)) continue;   // (sky / another surface; NaN: no)
-        const vec4 g1 = texelFetch(uG1, q, 0);
+        const vec4 g1 = defTexel(uG1, q);
         const float c = abs(dot(gbOctDecode(g1.zw), Ng));
         if (!(c >= 0.25)) continue;
         geo = max(geo, acos(min(c, 1.0)));
@@ -2902,7 +3215,7 @@ SurfaceRefl deferReflInBase(SurfaceLit s)
 // texel, or one the jittered GI sample missed), the best-matching texel of the 4 x 4 around it (depth,
 // then normal) stands in before the closest-depth fallback -- never an average across the silhouette.
 // (#978 phase 2, GI_F_LAG: RenderVKGILatencyFrame) ONE FRAME OF LATENCY: the GI images hold LAST frame's
-// result. REPROJECTION: P into last frame's unjittered view (ssr.taa_prev_vp, camera-relative to this
+// result. REPROJECTION: P into last frame's unjittered view (ssr.views[CLEAN_VIEW].taa_prev_vp, camera-relative to this
 // recording's eye as every temporal pass maps it) -- its uv in last frame's GI grid and its view depth
 // there (clip w, the images' alpha convention: the GI denoiser's own reprojection compares the same
 // pair, clean_deferred_light.comp giPrevDelta). The 4 bilinear taps around it count only on THIS
@@ -2919,7 +3232,7 @@ vec3 deferGiFetchLag(vec3 P, vec3 N, out bool ok, out float skyVis)
     ok = false;
     skyVis = 1.0;
     const bool stale = (gi.cfg.x & GI_F_LAG_STALE) != 0u || ssr.taa_params.z > 0.5;
-    const vec4 c = ssr.taa_prev_vp * vec4(P - ssr.cam_origin.xyz, 1.0);
+    const vec4 c = ssr.views[CLEAN_VIEW].taa_prev_vp * vec4(P - ssr.cam_origin.xyz, 1.0);
     const vec2 puv = c.w > 1e-4 ? c.xy / c.w * 0.5 + 0.5 : vec2(-1.0);
     if (!stale && all(greaterThanEqual(puv, vec2(0.0))) && all(lessThanEqual(puv, vec2(1.0))))
     {
@@ -3137,7 +3450,7 @@ SurfaceRefl deferReflIn(SurfaceLit s)
 vec3 tileRay(vec2 spx)
 {
     const vec2 ndc = spx / vec2(float(g_draw_push.width), float(g_draw_push.height)) * 2.0 - 1.0;
-    const vec4 h = g_draw_push.inv_vp_rel * vec4(ndc, 0.5, 1.0);
+    const vec4 h = deferInvVP * vec4(ndc, 0.5, 1.0);
     return h.xyz / h.w;
 }
 
@@ -3205,6 +3518,7 @@ void tileFrustum(out vec3 rays[4], out vec3 planes[4])
 // workgroup count works, the loop strides by it.)
 void lgClusterScan(uint lid)
 {
+    if (CLEAN_VIEW != 0u) return;   // (#1075: the clusters are the frame's, scanned once -- by view 0's layer)
     const uint nwg = gl_NumWorkGroups.x * gl_NumWorkGroups.y;
     const uint wg  = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
     const uint lcount = min(uint(linfo.cam_pos.w), TILE_LIGHT_WORDS * 32u);
@@ -3293,8 +3607,8 @@ void writeLitOutput(ivec2 px, vec3 color, float glow)
     if (rtrDebugOn()) { color = rtrDebugColor(px, color); glow = 0.0; }
 #endif
     if (!(glow >= 0.0 && glow <= LG_MAX_VALUE)) glow = 0.0;   // (NaN fails both)
-    imageStore(uHdrOut, px, vec4(color, 1.0));
-    imageStore(uGlowOut, px, vec4(vec3(glow), 1.0));
+    imageStore(uHdrOut, ivec3(px, DEFER_LAYER), vec4(color, 1.0));
+    imageStore(uGlowOut, ivec3(px, DEFER_LAYER), vec4(vec3(glow), 1.0));   // <SS:Skoomastream> the glow AMOUNT (clean_glow.comp)
 }
 // </SS:Skoomastream>
 #endif
@@ -3468,7 +3782,7 @@ float rtrDistFade(float camd, float maxd) { return 1.0 - smoothstep(0.8 * maxd, 
 vec3 rtrViewDir(vec2 spx)
 {
     const vec2 ndc = spx / vec2(float(g_draw_push.width), float(g_draw_push.height)) * 2.0 - 1.0;
-    const vec4 h = g_draw_push.inv_vp_rel * vec4(ndc, 0.5, 1.0);
+    const vec4 h = deferInvVP * vec4(ndc, 0.5, 1.0);
     return normalize(h.xyz / h.w);
 }
 // The camera's angle per render pixel (rad).
@@ -3477,9 +3791,9 @@ float rtrPixelAngle(vec2 spx) { return length(rtrViewDir(spx + vec2(1.0, 0.0)) -
 // g_frag_xy: any pixel).
 vec3 rtrPositionAt(ivec2 px)
 {
-    const float d = texelFetch(uDepthG, px, 0).r;
+    const float d = defTexel(uDepthG, px).r;
     const vec2 ndc = (vec2(px) + 0.5) / vec2(float(g_draw_push.width), float(g_draw_push.height)) * 2.0 - 1.0;
-    const vec4 h = g_draw_push.inv_vp_rel * vec4(ndc, d, 1.0);
+    const vec4 h = deferInvVP * vec4(ndc, d, 1.0);
     return pc.u_cam_time.xyz + h.xyz / h.w;
 }
 #endif
@@ -3686,6 +4000,7 @@ void rtrBlendLayersT(vec3 o, vec3 d, float tmax, vec3 sunlit, vec3 amblit, float
     float tmin = 0.0;
     lsum = vec3(0.0);
     lT = 1.0;
+    RT_BC_SITE(RT_BC_SITE_LAYERS | RT_MASK_BLEND);   // (#1128 hang beacon variants only)
     if (!rtRaySane(o, tmin, d, tmax)) { layers = 0u; return; }   // (Xid 109: an invalid ray -- no layers)
     rayQueryEXT rq;
     rayQueryInitializeEXT(rq, uTLAS, gl_RayFlagsNoneEXT, RT_MASK_BLEND, o, tmin, d, tmax);
@@ -4064,21 +4379,25 @@ void rtrQueryBudgetBegin() { rt_query_left = RTR_QUERY_BUDGET; }
 // The hang guard's counters -> the lit guard words (LLCleanRendererVK::kLgRt, logged by
 // readLitGuardStats with every frame -- not only while the GPU timers run -- and dumped in the
 // DEVICE_LOST report): + 0 reflection rays the query budget cut, + 1 rays rtRaySane refused
-// (non-finite / out of the world), + 2 reflection walks that hit RT_CANDIDATE_BUDGET. One subgroup
-// sum + atomic each, at the kernel's tail.
+// (non-finite / out of the world), + 2 reflection walks that hit RT_CANDIDATE_BUDGET, (#1128) + 3 rays the
+// float form of the guard passed and its bit pattern refused (clean_rt_common.glsl rt_ray_folded: the compiled
+// float guard let such a ray through). One subgroup sum + atomic each, at the kernel's tail.
 #define LG_RT_WORD (LG_WORD0 + 31u)   // = LLCleanRendererVK::kLgRt
 void rtrStatsGuard()
 {
     const uint a = subgroupAdd(rt_query_refused != 0u ? 1u : 0u);
     const uint b = subgroupAdd(rt_ray_rejected);
     const uint c = subgroupAdd((g_rc_flags & RC_BUDGET) != 0u ? 1u : 0u);
+    const uint f = subgroupAdd(rt_ray_folded);
     if (subgroupElect())
     {
         if (a != 0u) atomicAdd(lg_words[LG_RT_WORD], a);
         if (b != 0u) atomicAdd(lg_words[LG_RT_WORD + 1u], b);
         if (c != 0u) atomicAdd(lg_words[LG_RT_WORD + 2u], c);
+        if (f != 0u) atomicAdd(lg_words[LG_RT_WORD + 3u], f);
     }
 }
+
 #endif
 
 #if DEFER_SHADOW
@@ -4203,7 +4522,7 @@ void DEFER_MAIN()
     if (inside)
     {
         CLK_INV();
-        g2 = texelFetch(uG2, px, 0);
+        g2 = defTexel(uG2, px);
     }
     const bool surf = inside && deferHasSurface(g2);
     vec3 P = vec3(0.0);
@@ -4215,7 +4534,7 @@ void DEFER_MAIN()
     if (px.x >= int(g_draw_push.width) || px.y >= int(g_draw_push.height)) return;
     CLK_INV();
     g_frag_xy = vec2(px) + 0.5;
-    const vec4 g2 = texelFetch(uG2, px, 0);
+    const vec4 g2 = defTexel(uG2, px);
 #endif
     const bool visOut = (g_draw_push.flags & DEFER_FLAG_VIS_REUSE) != 0u;
     if (!deferHasSurface(g2))   // (the combine never reads sky pixels; the forward reuse does)
@@ -4283,7 +4602,7 @@ void DEFER_MAIN()
     {
         CLK_INV();
         g_frag_xy = vec2(px) + 0.5;
-        const vec4 g2 = texelFetch(uG2, px, 0);
+        const vec4 g2 = defTexel(uG2, px);
         if (!deferHasSurface(g2))
         {
             CLK_MARK(GBUF);
@@ -4328,7 +4647,7 @@ void DEFER_MAIN()
     {
         const ivec2 px = hp * 2 + ivec2(k & 1, k >> 1);
         if (px.x >= full.x || px.y >= full.y) continue;
-        const vec4 g2 = texelFetch(uG2, px, 0);
+        const vec4 g2 = defTexel(uG2, px);
         if (!deferHasSurface(g2)) continue;
         g_frag_xy = vec2(px) + 0.5;
         float glow;
@@ -4347,7 +4666,7 @@ void DEFER_MAIN()
     CLK_SURF();
     const ivec2 px = hp * 2 + ivec2(rep & 1, rep >> 1);
     g_frag_xy = vec2(px) + 0.5;
-    const vec4 g2 = texelFetch(uG2, px, 0);
+    const vec4 g2 = defTexel(uG2, px);
     const vec3 P = deferPosition(px);
     float glow;
     bool noFade;
@@ -4382,7 +4701,7 @@ void DEFER_MAIN()
     {
         CLK_INV();
         g_frag_xy = vec2(px) + 0.5;
-        const vec4 g2 = texelFetch(uG2, px, 0);
+        const vec4 g2 = defTexel(uG2, px);
         if (!deferHasSurface(g2))
         {
             CLK_MARK(GBUF);
@@ -4422,10 +4741,10 @@ void DEFER_MAIN()
 float giViewZ(ivec2 q)
 {
     q = clamp(q, ivec2(0), ivec2(int(g_draw_push.width), int(g_draw_push.height)) - 1);
-    const float d = texelFetch(uDepthG, q, 0).r;
+    const float d = defTexel(uDepthG, q).r;
     if (!(d > 0.0)) return -1.0;
     const vec2 ndc = (vec2(q) + 0.5) / vec2(float(g_draw_push.width), float(g_draw_push.height)) * 2.0 - 1.0;
-    const vec4 h = g_draw_push.inv_vp_rel * vec4(ndc, d, 1.0);
+    const vec4 h = deferInvVP * vec4(ndc, d, 1.0);
     return dot(pc.u_cam_time.xyz + h.xyz / h.w - linfo.cam_pos.xyz, linfo.cam_fwd.xyz);
 }
 float giGrad(ivec2 rp, ivec2 o, float vz)
@@ -4437,7 +4756,7 @@ float giGrad(ivec2 rp, ivec2 o, float vz)
 }
 vec2 giPrevDelta(vec3 X, ivec2 m, vec2 D, out float pw)
 {
-    const vec4 c = ssr.taa_prev_vp * vec4(X - ssr.cam_origin.xyz, 1.0);
+    const vec4 c = ssr.views[CLEAN_VIEW].taa_prev_vp * vec4(X - ssr.cam_origin.xyz, 1.0);
     pw = 0.0;
     if (!(c.w > 1e-4)) return vec2(0.0);
     pw = c.w;
@@ -4593,10 +4912,30 @@ void DEFER_MAIN()
                 if (dot(dd, dd) < rr * rr) { hitSph = true; break; }
             }
             if (hitSph) { n = 0u; E = vec3(0.0); ++inval; }
+            uint nWin = max(uint(gi.prm3.z + 0.5), 1u);
+            // (#1087) a cell inside a recently moved light's old or new sphere: a short mean window
+            // (prm6.z) -- it follows the moving light instead of averaging its path (a decay, its
+            // samples kept: never the restart #980 removed for colour-cycling lights)
+            if (gi.prm6.z > 0.0 && gi.prm6.x > 0.5)   // (header words: uniform)
+            {
+                const uint nh = min(uint(gi.prm6.x + 0.5), GI_HOT_MAX);
+                for (uint k = 0u; k < nh; ++k)
+                {
+                    const vec4 so = gi.hot[4u * k], sn = gi.hot[4u * k + 2u];
+                    const vec3 dO = cc - so.xyz, dN = cc - sn.xyz;
+                    const float ro = abs(so.w) + 0.87 * edge, rn = sn.w + 0.87 * edge;
+                    if (dot(dO, dO) < ro * ro || dot(dN, dN) < rn * rn)
+                    {
+                        nWin = min(nWin, max(uint(gi.prm6.z + 0.5), 1u));
+                        n = min(n, nWin);
+                        break;
+                    }
+                }
+            }
             if (acc.w > 0u)
             {
                 const vec3 mean = vec3(acc.xyz) / (GI_ACC_SCALE * float(acc.w));
-                n = min(n + 1u, max(uint(gi.prm3.z + 0.5), 1u));
+                n = min(n + 1u, nWin);
                 E = mix(E, mean, 1.0 / float(n));
                 age = 0u;
                 gi_data[a] = uvec4(0u);
@@ -4727,6 +5066,66 @@ uint giChangedSig(vec3 X, vec3 Nx, vec3 Ls)
     }
     return reached ? 1u : 0u;
 }
+// (#1087, GI_HOT_MAX) the hot list is on this frame (a header word: uniform)
+bool giHotOn() { return gi.prm6.x > 0.5; }
+// (#1087) A RECENTLY MOVED light is significant at a stored sample point X (normal Nx, stored radiance
+// Ls): giChangedSig's rule over the hot list -- per entry the larger of its old record's and its current
+// light's unshadowed light at X, summed, at least RenderVKGIReshadeThreshold x the stored luminance (0:
+// any reach). Cheap where nothing moved: entries whose old and new spheres both miss X cost one distance
+// test each; no entries, no loop (static scenes pay nothing).
+bool giLightHot(vec3 X, vec3 Nx, vec3 Ls)
+{
+    const uint n = min(uint(gi.prm6.x + 0.5), GI_HOT_MAX);
+    const uint count = min(uint(linfo.cam_pos.w), 256u);
+    const float thr = gi.prm5.x;
+    const float lim = thr * max(giLum(Ls), 1e-3);
+    vec3 acc = vec3(0.0);
+    [[dont_unroll]] for (uint k = 0u; k < n; ++k)
+    {
+        vec4 opr = gi.hot[4u * k];
+        const vec4 npr = gi.hot[4u * k + 2u];
+        const bool moved = opr.w < 0.0;
+        opr.w = abs(opr.w);
+        const vec3 dO = X - opr.xyz, dN = X - npr.xyz;
+        if (dot(dO, dO) > opr.w * opr.w && dot(dN, dN) > npr.w * npr.w) continue;   // (outside both spheres)
+        const int lis = int(gi.hot[4u * k + 3u].x);
+        bool proj = false, inF = true;
+        vec3 apex = opr.xyz;
+        float amb = 0.0;
+        vec3 E = vec3(0.0);
+        bool rN = false;
+        if (lis >= 0 && uint(lis) < count)
+        {
+            const uint li = uint(lis);
+            proj = lights[li].proj_origin.w >= 0.5;
+            amb = proj ? lights[li].proj_params.w : 0.0;
+            apex = lights[li].proj_origin.xyz;
+            if (proj && !(amb > 0.0))
+            {
+                vec2 ptc;
+                inF = lightProjFrustum(lights[li].proj_mat, X, ptc);
+            }
+            E = inF ? giChgLight(lights[li].pos_radius, lights[li].color_falloff, X, Nx, proj, apex, amb, rN) : vec3(0.0);
+            rN = rN && inF;
+        }
+        bool rO = false;
+        const vec3 Eo = (inF || moved)
+                      ? giChgLight(opr, gi.hot[4u * k + 1u], X, Nx, proj, moved ? opr.xyz : apex, amb, rO)
+                      : vec3(0.0);
+        rO = rO && (inF || moved);
+        if (thr <= 0.0)
+        {
+            if (rN || rO) return true;
+            continue;
+        }
+        acc += max(E, Eo);
+        if (giLum(acc) >= lim) return true;
+    }
+    return false;
+}
+// The candidate tag of giTap (chg): its giChangedSig in bits 0-1, bit 2 = a hot light is significant at
+// it (#1087). Counts toward the changed share (MOT w): significant changed lights, or hot ones.
+bool giTagCounts(uint tc) { return (tc & 3u) == 2u || (tc & 4u) != 0u; }
 // giCacheAdd, SUBGROUP-AGGREGATED: the lanes adding to the same cell (an 8 x 4 texel block mostly
 // shares one) sum their fixed-point values first and one lane does the 4 atomics -- 4 atomics per
 // receiver on a few hot addresses serialised in L2 before. Integer sums: the accumulator ends
@@ -4759,6 +5158,9 @@ void giCacheAddWave(uint s, vec3 E)
 // spatial reuse then hands on. Below this cosine a direction is no candidate (bias: the cosine-
 // weighted share below it, cos_min^2 -- 0.25 % at 0.05).
 float giCosMin() { return gi.prm4.x > 0.0 ? gi.prm4.x : 1e-4; }
+#if CLEAN_GI_STAGE == GI_STAGE_REUSE
+uint giChgTagAt(ivec2 q, ivec2 D);   // (#1039 CHG-TAG's tag of last frame's reservoir q: GI RECORDS)
+#endif
 // One of last frame's reservoirs (texel q of layer pl) RECONNECTED to this receiver (P, shading
 // normal N): on this surface (expected view depth zExp +- ztol, normal within ~25 deg), its sample
 // in front of P (receiver cosine >= giCosMin), re-weighted by the solid-angle Jacobian of the move
@@ -4811,7 +5213,29 @@ float giTap(ivec2 q, ivec2 D, uint pl, float zExp, float ztol, vec3 P, vec3 N, f
     Mq = M;
     const float wt = py * W * M * J;
     if (!(wt < 3.0e38)) return 0.0;
+#if CLEAN_GI_STAGE == GI_STAGE_REUSE
+    // (#1039) CHG-TAG computed the two tests below for this reservoir (the same inputs: its stored point, normal and
+    // radiance); without changed lights the tag is 0 as both tests are (giHotOn: the hot list is the changed
+    // lights' header block)
+    chg = (gi.cfg.x & GI_F_LIGHT_CHG) != 0u ? giChgTagAt(q, D) & 7u : 0u;
+    if ((chg & 4u) != 0u)
+    {
+#else
     chg = (!sky && (gi.cfg.x & GI_F_LIGHT_CHG) != 0u) ? giChangedSig(y.xs, y.ns, y.L) : 0u;
+    // (#1087) a light that moved within the hold is significant at its point: its radiance may be
+    // shaded under the light's old position -- bit 2, and its confidence clamped (prm6.y) so this
+    // frame's fresh samples take over in a few frames instead of the M cap's
+    if (!sky && giHotOn() && (chg == 2u || giLightHot(y.xs, y.ns, y.L)))
+    {
+        chg |= 4u;
+#endif
+        const float mc = gi.prm6.y;
+        if (mc > 0.0 && M > mc)
+        {
+            Mq = mc;
+            return wt * (mc / M);
+        }
+    }
     return wt;
 }
 
@@ -4822,6 +5246,16 @@ ivec2 giRenderPixel(ivec2 m, ivec2 D, out vec2 r)
     r = R2 / vec2(D);
     const vec2 J = (ssr.taa_params.w > 0.5 && D.x < int(g_draw_push.width)) ? ssr.taa_jitter.xy : vec2(0.0);
     return clamp(ivec2((vec2(m) + 0.5 + J) * r), ivec2(0), ivec2(R2) - 1);
+}
+// (RenderVKGITraceEvery: 1 texel in 2 / 4 traces this frame -- a checkerboard / a 2 x 2 rotation;
+//  the others take their reservoirs' reuse only, or hold the denoiser's history)
+bool giTracesNow(ivec2 m, uint frame)
+{
+    const uint everyLog = (gi.cfg.x >> GI_EVERY_SHIFT) & 3u;
+    bool traced = true;
+    if (everyLog == 1u) traced = ((uint(m.x) + uint(m.y) + frame) & 1u) == 0u;
+    else if (everyLog >= 2u) traced = ((uint(m.x) & 1u) + 2u * (uint(m.y) & 1u)) == (frame & 3u);
+    return traced;
 }
 // The fresh sample's ray (GI-1: one cosine-weighted direction) from receiver P (N / Ng toward the eye
 // V, camd from the camera; r render px per GI texel): its direction d, origin o and the walk's ray
@@ -4848,12 +5282,7 @@ void giFreshRay(ivec2 m, uint frame, vec2 r, vec3 P, vec3 N, vec3 Ng, vec3 V, fl
     rt_cone_spread = pa + 0.5;
     rt_cone_aniso = max(g_draw_push.rtr.w, 1.0);
     rtrMaskCone(camd * pa, pa);
-    // (RenderVKGITraceEvery: 1 texel in 2 / 4 traces this frame -- a checkerboard / a 2 x 2 rotation;
-    //  the others take their reservoirs' reuse only, or hold the denoiser's history)
-    const uint everyLog = (gi.cfg.x >> GI_EVERY_SHIFT) & 3u;
-    traced = true;
-    if (everyLog == 1u) traced = ((uint(m.x) + uint(m.y) + frame) & 1u) == 0u;
-    else if (everyLog >= 2u) traced = ((uint(m.x) & 1u) + 2u * (uint(m.y) & 1u)) == (frame & 3u);
+    traced = giTracesNow(m, frame);
 }
 // The walk's ray cone again for a stage that shades (or re-traces) what another one walked: the
 // receiver P's footprint, as giFreshRay set it (the alpha test's stays at its defaults).
@@ -4878,6 +5307,39 @@ void giRayCone(ivec2 rp, vec2 r, vec3 P)
 #define GI_REC_LIST 3u
 #define GI_ROW 65535u   // (the HIT / MISS dispatch's row width: maxComputeWorkGroupCount's floor)
 uint giRecIndex(ivec2 m, ivec2 D) { return GI_REC_LIST + (uint(D.x * D.y) + 3u) / 4u + 6u * uint(m.y * D.x + m.x); }
+// (#1039) the CHANGE TAG of texel q (last frame's reservoir there): its uvec4 after the records, the component q & 3
+uint giChgTagWord(ivec2 q, ivec2 D, out uint c)
+{
+    const uint n = uint(D.x * D.y), t = uint(q.y * D.x + q.x);
+    c = t & 3u;
+    return GI_REC_LIST + (n + 3u) / 4u + 6u * n + (t >> 2u);
+}
+#if CLEAN_GI_STAGE == GI_STAGE_SHADE || CLEAN_GI_STAGE == GI_STAGE_HITLIGHT
+// (#1039) the tag's BIT 3: giTap's two tests on texel m's FRESH hit (REUSE's changed share of the fresh candidate),
+// set by the stage that writes the hit's sample (HIT-LIGHT; SHADE without the shade split) from the very L / xs / ns
+// it stores -- the words the old CHG-TAG pass read back. Bits 0-2 (last frame's reservoir) were written over the
+// whole word by the light prep's tag pass (stage 9) before this frame's GI; the host runs it on the frames whose
+// header has GI_F_LIGHT_CHG and GI_F_RES (mGiHdrChg), the same gate as here. (A component store: the lanes of the
+// other texels in the uvec4 write other components.)
+void giChgTagFresh(ivec2 m, ivec2 D, vec3 xs, vec3 ns, vec3 L)
+{
+    if ((gi.cfg.x & (GI_F_LIGHT_CHG | GI_F_RES)) != (GI_F_LIGHT_CHG | GI_F_RES)) return;   // (a header word: uniform)
+    if (giChangedSig(xs, ns, L) == 2u || (giHotOn() && giLightHot(xs, ns, L)))
+    {
+        uint c;
+        const uint w = giChgTagWord(m, D, c);
+        gi_hit[w][c] |= 8u;
+    }
+}
+#endif
+#if CLEAN_GI_STAGE == GI_STAGE_REUSE
+uint giChgTagAt(ivec2 q, ivec2 D)
+{
+    uint c;
+    const uint w = giChgTagWord(q, D, c);
+    return gi_hit[w][c];
+}
+#endif
 // The re-shade list (RESHADE / TAIL: one lane per entry, 64 per workgroup over x): this lane's entry,
 // or ~0u past the count (clamped to the texels: Xid 109 hardening, as rttEntry).
 uint giListLane(ivec2 D)
@@ -4972,7 +5434,7 @@ void DEFER_MAIN()
     const ivec2 rp = giRenderPixel(m, D, r);
     g_frag_xy = vec2(rp) + 0.5;
     const uint ri = giRecIndex(m, D);
-    const vec4 g2 = texelFetch(uG2, rp, 0);
+    const vec4 g2 = defTexel(uG2, rp);
     bool surf = deferHasSurface(g2);
     float glow;
     bool noFade;
@@ -5074,6 +5536,7 @@ void DEFER_MAIN()
     gi_hit[ri + 1u] = uvec4(floatBitsToUint(L), floatBitsToUint(hdist));
     gi_hit[ri + 2u] = uvec4(floatBitsToUint(xs), floatBitsToUint(ns.x));
     gi_hit[ri + 3u] = uvec4(floatBitsToUint(ns.yz), 0u, 0u);
+    if (h.hit) giChgTagFresh(m, D, xs, ns, L);   // (#1039: the tag's bit 3 -- the old CHG-TAG's GI_REC_HIT texels)
     giShadeStats();
 }
 #elif CLEAN_GI_STAGE == GI_STAGE_MISS
@@ -5102,7 +5565,7 @@ void DEFER_MAIN()
 //      (rtSurfaceEval at the receiver's ray cone, the weather coat, the emitter split) -> the RT LIT
 //      RECORD over q1..q4, the hit distance in q5.x (the receiver P stays in q5.yzw) ----
 // (#1039 M1, -DCLEAN_VIS_QUEUE) + THE PRODUCER: the hit's sun ray queued (vqHitRequests) for the entries
-// below the queue's capacity (M2: + its local lights' walk and the budget's light rays).
+// below the queue's capacity. (M2: the producer is the HIT-REQ stage below -- the material only here.)
 void DEFER_MAIN()
 {
     const ivec2 D = ivec2(g_draw_push.rtr2.xy + 0.5);
@@ -5134,9 +5597,27 @@ void DEFER_MAIN()
     gi_hit[ri + 3u] = r2;
     gi_hit[ri + 4u] = r3;
     gi_hit[ri + 5u].x = floatBitsToUint(h.dist);
-#ifdef CLEAN_VIS_QUEUE
+#if defined(CLEAN_VIS_QUEUE) && !defined(CLEAN_VIS_QUEUE_M2)
     vqHitRequests(r0, r1, r2, r3, P, d, e, e < vqEntryCap(vqRegion()), true);
 #endif
+}
+#elif CLEAN_GI_STAGE == GI_STAGE_HITREQ
+// ---- (#1039 M2) STAGE 8, HIT-REQ: one lane per HIT-listed texel -- THE PRODUCER over HIT-MAT's RT LIT RECORD
+//      (q1..q4): the hit's sun ray, its local lights' unshadowed walk and the budget's light rays queued
+//      (vqHitRequests), with the state HIT-MAT had (the receiver's ray cone, the pixel, the draw time) ----
+void DEFER_MAIN()
+{
+    const ivec2 D = ivec2(g_draw_push.rtr2.xy + 0.5);
+    ivec2 m;
+    uint e;
+    if (!giShadeListTexel(GI_HDR_HIT, D, 0u, m, e)) return;
+    const uint ri = giRecIndex(m, D);
+    const vec3 d = uintBitsToFloat(gi_hit[ri].xyz);
+    const vec3 P = uintBitsToFloat(gi_hit[ri + 5u].yzw);
+    vec2 r;
+    giRayCone(giRenderPixel(m, D, r), r, P);
+    rt_anim_time = pc.u_cam_time.w;
+    vqHitRequests(gi_hit[ri + 1u], gi_hit[ri + 2u], gi_hit[ri + 3u], gi_hit[ri + 4u], P, d, e, e < vqEntryCap(vqRegion()), true);
 }
 #elif CLEAN_GI_STAGE == GI_STAGE_HITLIGHT
 // ---- (#1036) STAGE 7, HIT-LIGHT: one lane per HIT-listed texel -- the RT LIT RECORD lit from the
@@ -5169,7 +5650,42 @@ void DEFER_MAIN()
     gi_hit[ri + 1u] = uvec4(floatBitsToUint(L), q5.x);   // (the hit distance HIT-MAT kept)
     gi_hit[ri + 2u] = uvec4(floatBitsToUint(xs), floatBitsToUint(ns.x));
     gi_hit[ri + 3u] = uvec4(floatBitsToUint(ns.yz), 0u, 0u);
+    giChgTagFresh(m, D, xs, ns, L);   // (#1039: the tag's bit 3 -- every HIT-listed texel hit)
     giShadeStats();
+}
+#elif CLEAN_GI_STAGE == GI_STAGE_CHGTAG
+// ---- (#1039) STAGE 9, CHG-TAG: one lane per GI texel (8x8 over the GI extent, in the LIGHT PREP -- ahead of this
+//      frame's GI; the host runs it while the header has GI_F_LIGHT_CHG and the reservoirs, GI_F_RES) -- giTap's
+//      chg of last frame's reservoir there, from the same words giTap reads (its point, normal, radiance; sky: 0)
+//      -> the texel's change tag, the whole word (bit 3, the fresh hit's: HIT-LIGHT / SHADE, giChgTagFresh) ----
+void DEFER_MAIN()
+{
+    const ivec2 D = ivec2(g_draw_push.rtr2.xy + 0.5);
+    const ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(q, D)) || (gi.cfg.x & GI_F_LIGHT_CHG) == 0u) return;
+    uint chg = 0u;
+    // bits 0-2: last frame's reservoir (only while REUSE taps them: the temporal reuse over last frame's layer)
+    const uint gf = gi.cfg.x;
+    if ((gf & GI_F_TEMPORAL) != 0u && (gf & GI_F_RES_PREV) != 0u)
+    {
+        const uint pl = (uint(g_draw_push.rtr2.w + 0.5) & 1u) ^ 1u;   // (REUSE's layer of last frame's reservoirs)
+        const uint i = giResIndex(q, D, pl);
+        const uvec4 r0 = gi_res[i], r1 = gi_res[i + 1u];
+        const vec3 xs = uintBitsToFloat(r0.xyz);
+        const vec3 ns = giUnpackN(r1.x);
+        const vec2 lrg = unpackHalf2x16(r1.y), lbm = unpackHalf2x16(r1.z), dc = unpackHalf2x16(r1.w);
+        const vec3 L = vec3(lrg, lbm.x);
+        if (dc.x > 0.0)   // (giTap's !sky)
+        {
+            chg = giChangedSig(xs, ns, L);
+            // (#1087) a light that moved within the hold is significant at its point (giTap's bit 2)
+            if (giHotOn() && (chg == 2u || giLightHot(xs, ns, L))) chg |= 4u;
+        }
+    }
+    // (bit 3 clear: this frame's fresh hit sets it when its sample is stored -- giChgTagFresh)
+    uint c;
+    const uint w = giChgTagWord(q, D, c);
+    gi_hit[w][c] = chg;
 }
 #elif CLEAN_GI_STAGE == GI_STAGE_RESHADE
 // ---- (#1031) STAGE 4, RESHADE: one lane per listed texel -- its request's ray walked and shaded
@@ -5198,11 +5714,427 @@ void DEFER_MAIN()
 }
 #else
 
+// The fresh candidate's target p0 (its luminance x cosine; 0 for an untraced texel or a grazing direction -- giCosMin:
+// its W = pi / cos would be stored and re-weighed head-on by the neighbours, the firefly seeds of the spatial reuse),
+// its cosine c0 and pdf q0 (cos / pi) -- N the receiver's normal, d the fresh direction, L its radiance
+float giFreshTarget(vec3 N, vec3 d, bool traced, vec3 L, out float c0, out float q0)
+{
+    const float c0raw = dot(N, d);
+    const bool c0ok = c0raw >= giCosMin();
+    c0 = max(c0raw, 1e-4);
+    q0 = c0 * (1.0 / 3.14159265);
+    return (traced && c0ok) ? giLum(L) * c0 : 0.0;
+}
+// The reuse's FINISH (FUSED / REUSE after the trace loop; #1039 the VIS TAIL from the queued texel's stored pick):
+// the visibility verdict on the pick (visOk; a blocked reused pick falls back to the fresh sample y0), the
+// estimate + firefly clamp, the reservoir store, the radiance cache, the debug views, the GI denoiser's inputs
+// (IN / GEOM / MOT) and the counters. S: the fresh estimate (L; the reservoirs replace it), chgShare: the
+// changed lights' share of the candidates (MOT w; debug view 8).
+void giReuseFinish(ivec2 m, ivec2 D, int par, vec3 P, vec3 N, vec3 d, float vz, vec2 grad, bool traced, bool hit,
+                   float hdist, bool freshBack, vec3 S, GiSample y0, float p0, float q0, float c0, GiSample y,
+                   uint src, bool visOk, float W, float Msum, bool noInfo, uint keptT, uint keptS, uint chgRej,
+                   uint chgSkip, float chgShare, bool reuseTried)
+{
+    const uint gf = gi.cfg.x;
+    const vec3 cam = pc.u_cam_time.xyz;
+    float Mout = 1.0;
+    uint visRej = 0u;
+    bool wClamped = false;   // (debug view 8: the firefly clamp scaled the stored W)
+    if ((gf & GI_F_RES) != 0u)
+    {
+        if (src != 0u && !visOk)
+        {
+            ++visRej;
+            y = y0; src = 0u;
+            Msum = traced ? 1.0 : 0.0;
+            W = p0 > 0.0 ? (p0 / q0) / p0 : 0.0;
+        }
+        if (!(W > 0.0) || !(W < 3.0e38)) W = 0.0;
+        if (!traced && src == 0u) noInfo = true;   // (nothing traced, nothing reused: no estimate)
+        Mout = min(Msum, max(gi.prm2.x, 1.0));
+        // the estimate of the chosen sample: L x cos / pi x W (fresh alone: L). The fresh sample's
+        // cosine is its own direction's (c0, the one its target and pdf took), not the receiver's
+        // P -> x_s direction: the ray leaves from the offset origin o, and a contact hit (a crease)
+        // seen from P can face it far more than d did -- L x cos(P) / c0 was a crease firefly.
+        const float cy = src == 0u ? c0 : max(dot(N, normalize(y.xs - P)), 0.0);
+        S = y.L * (cy * (1.0 / 3.14159265)) * W;
+        if (any(isnan(S)) || any(isinf(S))) S = vec3(0.0);
+        // FIREFLY CLAMP BEFORE THE REUSE SEES IT (RenderVKGIFireflyClamp): the clamped estimate
+        // k S = f(y) (k W) -- the reservoir stores k W, so what neighbours / next frame resample is
+        // what this texel showed (before, the clamp touched S only: the unclamped W was stored and
+        // handed on by the spatial reuse -- a firefly re-seeded every frame)
+        const float clampR = gi.prm2.w;
+        if (clampR > 0.0)
+        {
+            const float l = giLum(S);
+            if (l > clampR) { const float k = clampR / l; S *= k; W *= k; wClamped = true; }
+        }
+        if (noInfo) giResStore(m, D, uint(par), y0, 0.0, 0.0);   // (W 0: nothing for the neighbours)
+        else giResStore(m, D, uint(par), y, W, Mout);
+    }
+    const float clampL = gi.prm2.w;
+    if (clampL > 0.0)
+    {
+        const float l = giLum(S);
+        if (l > clampL) S *= clampL / l;
+    }
+    // (no estimate this frame: a weight-0 sample for the GI denoiser -- its history holds, DN_F_INFO)
+    vec4 l0 = vec4(S, noInfo ? -1.0 : 1.0);
+    const uint dbg = gi.cfg.w;
+    // (#1039) everything that does not depend on the radiance cache comes first -- the debug views' colour (applied
+    // after the cache: it replaces its prior), IN layer 1, the guides, MOT, the counters but the cache's -- so the
+    // cache's probe and wave loops carry only what they use
+    vec3 dbgC = vec3(0.0);
+    if (dbg == GI_DBG_RES)
+        dbgC = (src == 0u ? vec3(1.0, 0.0, 0.0) : (src == 1u ? vec3(0.0, 1.0, 0.0) : vec3(0.0, 0.3, 1.0)))
+             * (0.2 + 0.8 * clamp(Mout / max(gi.prm2.x, 1.0), 0.0, 1.0));
+    if (dbg == GI_DBG_CHG)
+        dbgC = vec3(chgShare, chgRej != 0u ? 1.0 : (chgSkip != 0u ? 0.3 : 0.0), wClamped ? 1.0 : 0.0);
+    if (dbg == GI_DBG_OUTLIER)   // (a header word: uniform -- the subgroup sums see every surface lane)
+    {
+        // SPARKLE CAUSES: this texel's estimate against its subgroup's mean (the other lanes')
+        const float ls = giLum(S);
+        const float sum = subgroupAdd(noInfo ? 0.0 : ls);
+        const float cnt = subgroupAdd(noInfo ? 0.0 : 1.0);
+        const float meanO = cnt > 1.0 ? (sum - (noInfo ? 0.0 : ls)) / (cnt - (noInfo ? 0.0 : 1.0)) : ls;
+        vec3 c = vec3(clamp(ls, 0.0, 1.0) * 0.25);
+        if (!noInfo && ls > 4.0 * meanO && ls > 1e-3)
+        {
+            if (src == 1u)       c = chgRej != 0u ? vec3(0.0, 1.0, 1.0) : vec3(0.0, 1.0, 0.0);
+            else if (src == 2u)  c = chgRej != 0u ? vec3(0.0, 1.0, 1.0) : vec3(0.0, 0.3, 1.0);
+            else if (!hit)       c = vec3(1.0, 0.0, 0.0);
+            else if (dot(N, d) < 0.2) c = vec3(1.0, 0.5, 0.0);
+            else if (reuseTried && keptT == 0u && keptS == 0u) c = vec3(1.0);   // (a disocclusion: no candidate)
+            else                 c = vec3(1.0, 1.0, 0.0);
+        }
+        else if (freshBack) c = vec3(0.3, 0.0, 0.3);   // (not a sparkle: a caught leak is dark; dim so the outliers stand out)
+        dbgC = c;
+    }
+    // layer 1 (the denoiser's "specular" signal, rough 1: a full-length history and every a-trous
+    // iteration): the SKY VISIBILITY -- did this frame's FRESH cosine-weighted ray escape (the
+    // reservoir's pick is radiance-weighted, not cosine: never used here). The consumers occlude
+    // the probe / SSR / env specular with it (RenderVKGISpecOcclusion): a sealed room reflects no sky.
+    imageStore(uGiIn, ivec3(m, 1), traced ? vec4(vec3(hit ? 0.0 : 1.0), 0.0) : vec4(1.0, 1.0, 1.0, -1.0));
+    // ---- guides (the denoiser's: clean_pdn_common.glsl; grad: above) ----
+    imageStore(uGiGeom, ivec3(m, par), uvec4(floatBitsToUint(vz), pdnPackNR(N, 1.0), packHalf2x16(grad),
+                                            pdnPackMeta(0.0, 0.0, 0u, 1.0)));
+    {
+        float pw;
+        const vec2 dS = giPrevDelta(P, m, vec2(D), pw);
+        // (w: the changed lights' share x 255 -- clean_dn_temporal.comp's moving-light history cap, read
+        //  only when the host gives the GI denoiser a move history: RenderVKGILightChangeHistory)
+        imageStore(uGiMot, m, uvec4(packHalf2x16(dS), packHalf2x16(dS), floatBitsToUint(pw),
+                                    uint(chgShare * 255.0 + 0.5)));
+    }
+    // ---- stats (one atomic per subgroup; only while the host reads them: GI_F_STATS) ----
+    const bool stats = (gf & GI_F_STATS) != 0u;   // (a header word: uniform)
+    if (stats)
+    {
+        const uint sR = subgroupAdd(traced ? 1u : 0u);
+        const uint sH = subgroupAdd(hit ? 1u : 0u);
+        const uint sD = subgroupAdd(hit ? uint(min(hdist, 1000.0) * 10.0) : 0u);
+        const uint sT = subgroupAdd(keptT), sS = subgroupAdd(keptS), sV = subgroupAdd(visRej);
+        const uint sM = subgroupAdd(uint(Mout * 4.0 + 0.5));
+        if (subgroupElect())
+        {
+            atomicAdd(gi.stat.x, sR);
+            atomicAdd(gi.stat.y, sH);
+            atomicAdd(gi.stat.z, sR - sH);
+            atomicAdd(gi.stat.w, sD);
+            if (sT != 0u) atomicAdd(gi.stat2.x, sT);
+            if (sS != 0u) atomicAdd(gi.stat2.y, sS);
+            if (sV != 0u) atomicAdd(gi.stat2.z, sV);
+            atomicAdd(gi.stat2.w, sM);
+        }
+        const uint sC = subgroupAdd(chgRej), sK = subgroupAdd(chgSkip);
+        if (subgroupElect() && sC != 0u) atomicAdd(gi.stat4.w, sC);
+        if (subgroupElect() && sK != 0u) atomicAdd(gi.sph_n.z, sK);
+    }
+    // ---- (GI-4) THE RADIANCE CACHE: this receiver's estimate into its world cell ----
+    uint cInserts = 0u, cFull = 0u;
+    vec3 cacheDbg = vec3(1.0, 0.0, 0.0);
+    if ((gf & GI_F_CACHE_FILL) != 0u && giCacheSlots() != 0u && !noInfo)
+    {
+        float edge;
+        const uint key = giCellKey(P, N, cam, edge);
+        bool ins;
+        const uint slot = giCacheFindOrInsert(key, giCellCentre(P, edge), edge, ins);
+        if (slot != 0xFFFFFFFFu)
+        {
+            if (dbg == GI_DBG_CACHE)
+            {
+                vec3 E;
+                cacheDbg = giCacheRead(slot, E) ? E : vec3(1.0, 1.0, 0.0);
+            }
+            giCacheAddWave(slot, S);   // (the raw estimate: the prior below never feeds back into the cell)
+            if (ins) ++cInserts;
+            // (#1038, prm5.w RenderVKGIDisoccCache) THE DISOCCLUSION PRIOR: a texel left with its FRESH
+            // SAMPLE ALONE (reservoirs on, no temporal / spatial candidate survived -- a surface just
+            // uncovered, a history cut) shows the cell's resolved irradiance blended in as up to prm5.w
+            // samples (the cell's own count caps it: a young cell weighs less) instead of a 1-spp
+            // speckle. Its reservoir is untouched; the GI denoiser's history starts from this estimate.
+            // Only on such texels (steady-state texels keep M > 1): one 2-word read of the slot found above.
+            const float nCap = gi.prm5.w;
+            // (visRej: a reused pick blocked by its visibility ray had candidates -- not a disocclusion)
+            if (nCap > 0.0 && (gf & GI_F_RES) != 0u && (gf & GI_F_TEMPORAL) != 0u && src == 0u && Msum <= 1.0
+                && visRej == 0u)
+            {
+                vec3 E;
+                if (giCacheRead(slot, E))
+                {
+                    const float n = min(float(gi_data[2u * slot].y & 0xFFFFu), nCap);
+                    l0.rgb = (S + n * E) / (1.0 + n);
+                }
+            }
+        }
+        else ++cFull;
+    }
+    if (dbg == GI_DBG_CACHE) l0.rgb = cacheDbg;
+    else if (dbg == GI_DBG_RES || dbg == GI_DBG_CHG || dbg == GI_DBG_OUTLIER) l0.rgb = dbgC;
+    imageStore(uGiIn, ivec3(m, 0), l0);
+    if (stats)
+    {
+        const uint sL = subgroupAdd(g_gi_lookups), sF = subgroupAdd(g_gi_found);
+        const uint sI = subgroupAdd(cInserts), sX = subgroupAdd(cFull);
+        if (subgroupElect() && (sL | sI | sX) != 0u)
+        {
+            atomicAdd(gi.stat3.x, sL);
+            atomicAdd(gi.stat3.y, sF);
+            atomicAdd(gi.stat3.z, sI);
+            atomicAdd(gi.stat3.w, sX);
+        }
+    }
+}
+
+// (GI-2 / GI-3) THE CANDIDATES: last frame's reservoirs reconnected to this receiver (P, N; m / rp its texel /
+// render pixel, grad its depth gradient) -- the temporal tap (+ the reprojection search), the spatial taps, the
+// disocclusion taps -- resampled into the running reservoir (wsum, Msum; the pick y, its target py, source src,
+// change tag yChg; yq the picked reservoir's texel, x | y << 16) with the changed share's sums (wAll, wChg) and the
+// counters. The fused kernel keeps y; REUSE keeps yq and rebuilds y from it (giResPick).
+void giReusePick(ivec2 m, ivec2 D, int par, uint frame, ivec2 rp, vec3 P, vec3 N, vec2 grad, inout float wsum,
+                 inout float Msum, inout float wAll, inout float wChg, inout uint keptT, inout uint keptS,
+                 inout bool reuseTried, inout GiSample y, inout float py, inout uint src, inout uint yChg, inout uint yq)
+{
+    const uint gf = gi.cfg.x;
+    const bool reuse = (gf & GI_F_TEMPORAL) != 0u && (gf & GI_F_RES_PREV) != 0u && ssr.taa_params.z < 0.5;
+    if (reuse)
+    {
+        const float mcap = max(gi.prm2.x, 1.0);
+        uint rng = giPcg(uint(m.x) * 7919u + uint(m.y) * 104729u + frame * 15485863u);
+        float pw;
+        vec2 dS = giPrevDelta(P, m, vec2(D), pw);
+        float zx = 0.0;   // (#1038) the extra depth tolerance of a surface that moved on its own (m)
+#ifdef GI_REUSE_MV_BOUND
+        // (#1038, GI_F_REUSE_MV) a MOVING surface (an avatar): last frame's texel of this point is
+        // along the motion vectors, not at the camera-only point (reuseMotionDelta)
+        if ((gf & GI_F_REUSE_MV) != 0u) zx = reuseMotionDelta(m, rp, vec2(D), pw, dS);
+#endif
+        const ivec2 qt = ivec2(floor(vec2(m) + dS + 0.5));
+        const uint pl = uint(par) ^ 1u;
+        GiSample yt;
+        float pt, Mt;
+        uint tc;
+        if (pw > 0.0)
+        {
+            reuseTried = true;
+            float wt = giTap(qt, D, pl, pw, max(0.04 * pw, 0.03) + zx, P, N, mcap, yt, pt, Mt, tc);
+            ivec2 tq = qt;   // (the temporal candidate's texel: qt, or the search's)
+            if (!(wt > 0.0) && (gf & GI_F_REPROJ_SEARCH) != 0u)
+            {
+                // (GI_F_REPROJ_SEARCH) REPROJECTION SEARCH: the nearest texel is not this surface
+                // (sub-texel motion across a thin strand / a silhouette at the GI extent): the
+                // best-matching texel of the 3 x 3 around the reprojected point -- its depth against
+                // this surface's plane carried there (pw + the gradient over the offset), normal
+                // within ~25 deg -- is the temporal candidate (giTap's own tests at that plane depth)
+                const vec2 hc = vec2(m) + dS;
+                float best = 1.0, bz = 0.0, btol = 0.0;
+                ivec2 bq = ivec2(-1);
+                [[dont_unroll]] for (int k = 0; k < 9; ++k)
+                {
+                    const ivec2 q = qt + ivec2(k % 3 - 1, k / 3 - 1);
+                    if (q == qt || any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, D))) continue;
+                    const uvec4 gq = imageLoad(uGiGeom, ivec3(q, int(pl)));
+                    const float zq = uintBitsToFloat(gq.x);
+                    if (!(zq > 0.0) || dot(pdnUnpackN(gq.y), N) < 0.9) continue;
+                    const float dz = dot(grad, vec2(q) - hc);
+                    const float tq = max(0.04 * pw, 0.03) + 0.5 * abs(dz) + zx;
+                    const float e = abs(zq - (pw + dz)) / tq;
+                    if (e < best) { best = e; bq = q; bz = pw + dz; btol = tq; }
+                }
+                if (bq.x >= 0)
+                {
+                    wt = giTap(bq, D, pl, bz, btol, P, N, mcap, yt, pt, Mt, tc);
+                    tq = bq;
+                }
+            }
+            if (wt > 0.0)
+            {
+                wsum += wt; Msum += Mt; ++keptT; wAll += wt;
+                if (giTagCounts(tc)) wChg += wt;
+                if (giRand(rng) * wsum < wt)
+                {
+                    y = yt; py = pt; src = 1u; yChg = tc;
+                    yq = uint(tq.x) | (uint(tq.y) << 16u);
+                }
+            }
+            if ((gf & GI_F_SPATIAL) != 0u)
+            {
+                const uint taps = uint(gi.prm2.y + 0.5);
+                const float rad = max(gi.prm2.z, 1.0);
+                [[dont_unroll]] for (uint t = 0u; t < min(taps, 6u); ++t)
+                {
+                    const float a = 6.2831853 * giRand(rng);
+                    const float rr = rad * sqrt(max(giRand(rng), 0.02));
+                    const ivec2 q = qt + ivec2(round(vec2(cos(a), sin(a)) * rr));
+                    if (q == qt) continue;
+                    const float dz = dot(grad, vec2(q - qt));
+                    const float ws = giTap(q, D, pl, pw + dz, max(0.05 * pw, 0.05) + 0.25 * abs(dz) + zx, P, N, mcap, yt,
+                                           pt, Mt, tc);
+                    if (ws > 0.0)
+                    {
+                        wsum += ws; Msum += Mt; ++keptS; wAll += ws;
+                        if (giTagCounts(tc)) wChg += ws;
+                        if (giRand(rng) * wsum < ws)
+                        {
+                            y = yt; py = pt; src = 2u; yChg = tc;
+                            yq = uint(q.x) | (uint(q.y) << 16u);
+                        }
+                    }
+                }
+            }
+            // (prm4.z, RenderVKGIDisoccTaps) DISOCCLUSION: no temporal candidate (camera motion
+            // revealed this texel, or a thin strand's texel had none) -- extra neighbour taps at a
+            // SMALL radius (<= 3 texels: along a strand, beside a silhouette, where the wide taps
+            // above rarely land on the same surface), so the texel does not restart from M = 1.
+            // Also at RenderVKGI 2. Bounded: up to 8 taps, only on such texels; still one
+            // visibility ray for the pick.
+            const uint extra = min(uint(gi.prm4.z + 0.5), 8u);
+            if (keptT == 0u && extra > 0u)
+            {
+                const float rad2 = min(max(gi.prm2.z, 1.0), 3.0);
+                [[dont_unroll]] for (uint t = 0u; t < extra; ++t)
+                {
+                    const float a = 6.2831853 * giRand(rng);
+                    const float rr = rad2 * sqrt(max(giRand(rng), 0.1));
+                    const ivec2 q = qt + ivec2(round(vec2(cos(a), sin(a)) * rr));
+                    if (q == qt) continue;
+                    const float dz = dot(grad, vec2(q - qt));
+                    const float ws = giTap(q, D, pl, pw + dz, max(0.05 * pw, 0.05) + 0.25 * abs(dz) + zx, P, N, mcap, yt,
+                                           pt, Mt, tc);
+                    if (ws > 0.0)
+                    {
+                        wsum += ws; Msum += Mt; ++keptS; wAll += ws;
+                        if (giTagCounts(tc)) wChg += ws;
+                        if (giRand(rng) * wsum < ws)
+                        {
+                            y = yt; py = pt; src = 2u; yChg = tc;
+                            yq = uint(q.x) | (uint(q.y) << 16u);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#if CLEAN_GI_STAGE == GI_STAGE_REUSE
+// (REUSE / the VIS TAIL) the FRESH sample from the GI record ri (TRACE + SHADE's words; an untraced texel: the
+// defaults the fused kernel's loop starts from -- no radiance, the receiver itself), as the reservoir's y0 (d: the
+// fresh direction) -- and hit / its distance / the back-face stop
+GiSample giRecFresh(uint ri, bool traced, vec3 P, vec3 N, vec3 d, out bool hit, out float hdist, out bool bt)
+{
+    vec3 L = vec3(0.0), xs = P, ns = N;
+    hit = false;
+    bt = false;
+    hdist = 0.0;
+    if (traced)
+    {
+        const uvec4 rq0 = gi_hit[ri], q1 = gi_hit[ri + 1u], q2 = gi_hit[ri + 2u], q3 = gi_hit[ri + 3u];
+        L = uintBitsToFloat(q1.xyz);
+        hdist = uintBitsToFloat(q1.w);
+        xs = uintBitsToFloat(q2.xyz);
+        ns = vec3(uintBitsToFloat(q2.w), uintBitsToFloat(q3.xy));
+        hit = (rq0.w & GI_REC_HIT) != 0u;
+        bt = (rq0.w & GI_REC_BACK) != 0u;
+    }
+    return GiSample(xs, ns, L, hit ? hdist : 0.0, hit ? abs(dot(ns, -d)) : 1.0);
+}
+// (REUSE / the VIS TAIL) the pick y rebuilt: last frame's reservoir at q (layer pl: nothing writes it this frame) seen
+// from P -- giTap's words and expressions (a picked reservoir passed every giTap test)
+GiSample giResPick(ivec2 q, ivec2 D, uint pl, vec3 P)
+{
+    const uint i = giResIndex(q, D, pl);
+    const uvec4 r0 = gi_res[i], r1 = gi_res[i + 1u];
+    GiSample y;
+    y.xs = uintBitsToFloat(r0.xyz);
+    y.ns = giUnpackN(r1.x);
+    const vec2 lrg = unpackHalf2x16(r1.y), lbm = unpackHalf2x16(r1.z), dc = unpackHalf2x16(r1.w);
+    y.L = vec3(lrg, lbm.x);
+    const vec3 v = y.xs - P;
+    const float dn = sqrt(dot(v, v));
+    const vec3 w = v / dn;
+    const bool sky = !(dc.x > 0.0);
+    y.dist = sky ? 0.0 : dn;
+    y.cosv = sky ? 1.0 : abs(dot(y.ns, w));
+    return y;
+}
+#endif
+
+#ifdef CLEAN_GIR_VIS_TAIL
+// ---- (#1039) THE VIS TAIL (REUSE-VQ's, a pipeline of its own: -DCLEAN_GIR_VIS_TAIL): lane i = the region's request
+//      i (the walk's indirect dispatch), its dest the texel. REUSE-VQ stored the texel's pick in its record's q4 / q5
+//      when it queued the ray (GIR PICK below), so the tail holds no candidate loop: it rebuilds what the finish
+//      reads from the same words REUSE read (the receiver, the fresh sample, the reservoir picked) and finishes
+//      with the walk's verdict. ----
+void DEFER_MAIN()
+{
+    const ivec2 D = ivec2(g_draw_push.rtr2.xy + 0.5);
+    VqRegion vr = vqRegion();
+    const uint i = (gl_WorkGroupID.y * VQ_ROW + gl_WorkGroupID.x) * 64u + gl_LocalInvocationIndex;
+    if (i >= min(vr.q[0].x, vqReqCap(vr))) return;
+    const uint t = vr.q[VQ_HDR_WORDS + i * VQ_REQ_WORDS + 2u].x;
+    if (t >= min(vqEntryCap(vr), uint(D.x * D.y))) return;   // (Xid 109 hardening)
+    const ivec2 m = ivec2(int(t % uint(D.x)), int(t / uint(D.x)));
+    const bool visOk = vqResult(vr, vqDest(vr, t, 0u)).x > 0.5;
+    const uint frame = uint(g_draw_push.rtr2.z + 0.5);
+    const int par = int(uint(g_draw_push.rtr2.w + 0.5) & 1u);
+    vec2 r;
+    const ivec2 rp = giRenderPixel(m, D, r);
+    g_frag_xy = vec2(rp) + 0.5;
+    // the receiver (REUSE's: the same depth texel; N as REUSE flipped it, stored)
+    const vec3 P = deferPosition(rp);
+    const float vz = dot(P - linfo.cam_pos.xyz, linfo.cam_fwd.xyz);
+    const int stp = max(int(r.x + 0.5), 1);
+    const vec2 grad = vec2(giGrad(rp, ivec2(stp, 0), vz), giGrad(rp, ivec2(0, stp), vz));
+    const uint ri = giRecIndex(m, D);
+    const uvec4 q4 = gi_hit[ri + 4u], q5 = gi_hit[ri + 5u];
+    const vec3 N = uintBitsToFloat(q4.xyz);
+    const vec3 d = uintBitsToFloat(gi_hit[ri].xyz);
+    // the fresh sample y0 (the record's words, else the untraced defaults) and its target / pdf, as REUSE's
+    const bool traced = giTracesNow(m, frame);
+    bool hit, bt;
+    float hdist;
+    const GiSample y0 = giRecFresh(ri, traced, P, N, d, hit, hdist, bt);
+    float c0, q0;
+    const float p0 = giFreshTarget(N, d, traced, y0.L, c0, q0);
+    // the pick: last frame's reservoir at q as giTap read it
+    const ivec2 q = ivec2(int(q5.z & 0xFFFFu), int(q5.z >> 16u));
+    if (any(greaterThanEqual(q, D))) return;   // (Xid 109 hardening: REUSE-VQ wrote a tapped texel, inside D)
+    const GiSample y = giResPick(q, D, uint(par) ^ 1u, P);
+    const uint cnt = q5.w;
+    giReuseFinish(m, D, par, P, N, d, vz, grad, traced, hit, hdist, traced && bt, y0.L, y0, p0, q0, c0, y, cnt & 3u, visOk,
+                  uintBitsToFloat(q4.w), uintBitsToFloat(q5.x), !traced && (gi.cfg.x & GI_F_RES) == 0u,
+                  (cnt >> 2u) & 63u, (cnt >> 8u) & 255u, 0u, (cnt >> 16u) & 255u, uintBitsToFloat(q5.y),
+                  ((cnt >> 24u) & 1u) != 0u);
+}
+#else
 void DEFER_MAIN()
 {
     const ivec2 D = ivec2(g_draw_push.rtr2.xy + 0.5);
 #if CLEAN_GI_STAGE == GI_STAGE_REUSE
-    // (#1031) TAIL (push rtr.z = 1: a header-free uniform): the listed texels only, after their re-shade
+    // (#1031) TAIL (push rtr.z = 1: a header-free uniform): the listed texels only, after their re-shade -- it runs
+    // THIS binary, as the main pass did: the re-derived pick is the same, bit for bit. (#1039 M3: REUSE-VQ's VIS TAIL
+    // is a pipeline of its own, CLEAN_GIR_VIS_TAIL above.)
     const bool tail = g_draw_push.rtr.z > 0.5;
     ivec2 m = ivec2(gl_GlobalInvocationID.xy);
     if (tail)
@@ -5220,7 +6152,7 @@ void DEFER_MAIN()
     vec2 r;
     const ivec2 rp = giRenderPixel(m, D, r);
     g_frag_xy = vec2(rp) + 0.5;
-    const vec4 g2 = texelFetch(uG2, rp, 0);
+    const vec4 g2 = defTexel(uG2, rp);
     bool surf = deferHasSurface(g2);
     float glow;
     bool noFade;
@@ -5254,10 +6186,149 @@ void DEFER_MAIN()
     // (#1031) the direction TRACE walked, bit for bit (the record); the alpha test's defaults for the
     // visibility ray below (the fused kernel's walk reset them before it: giTraceRay)
     const uint ri = giRecIndex(m, D);
-    const uvec4 rq0 = gi_hit[ri];
-    d = uintBitsToFloat(rq0.xyz);
+    d = uintBitsToFloat(gi_hit[ri].xyz);
     rt_mask_width0 = -1.0; rt_mask_lod_bias = 0.0; rt_mask_lod_max = 64.0; rt_mask_cov_k = 0.0;
+    // the guides' depth gradient (also the spatial taps' plane)
+    const int stp = max(int(r.x + 0.5), 1);
+    const vec2 grad = vec2(giGrad(rp, ivec2(stp, 0), vz), giGrad(rp, ivec2(0, stp), vz));
+    // ---- (GI-2 / GI-3) RESERVOIR REUSE ----
+    // (#1039) STRAIGHT-LINE (both rays were walked and shaded by other stages: no trace loop). What the candidate
+    // loop does not need is not carried across it: the fresh sample is read from the record where it is used (its
+    // target before the candidates, y0 / S / the guides after them), the pick is its reservoir's texel (yq), rebuilt
+    // after the loop (giResPick: giTap's words and expressions), and the walk's ray cone is set again where the
+    // visibility ray leaves (giRayCone: giFreshRay's expressions).
+    const uint gf = gi.cfg.x;
+    bool noInfo = !traced && (gf & GI_F_RES) == 0u;   // (an untraced texel without reservoirs)
+    uint src = 0u;          // 0 fresh, 1 temporal, 2 spatial (debug view 5)
+    uint keptT = 0u, keptS = 0u, chgRej = 0u;   // (chgRej: picks RE-SHADED for a changed light)
+    uint chgSkip = 0u;   // (#980: a pick a changed light reaches, too weakly to re-shade)
+    // (GI_F_LIGHT_CHG) the candidates' weight whose sample point changed lights are SIGNIFICANT at
+    // (giChangedSig 2; #980: an insignificant reach keeps the full history), of all the candidates'
+    // weight: the share the GI denoiser's moving-light history cap reads (MOT w)
+    float wChg = 0.0, wAll = 0.0;
+    bool reuseTried = false;   // (debug view 9: the reuse looked for candidates)
+    float py = 0.0, W = 0.0, Msum = 0.0;
+    uint yChg = 0u;   // (the picked reused sample's change tag)
+    uint yq = 0u;     // (its reservoir's texel)
+    bool visOk = true;     // (the picked reused sample is visible from this receiver)
+    if ((gf & GI_F_RES) != 0u)
+    {
+        // the fresh candidate (the estimate L x cos / pi x (1 / (cos / pi)) = L: p / q, M 1; an untraced
+        // texel: none, M 0)
+        bool hit, bt;
+        float hdist;
+        const GiSample yf = giRecFresh(ri, traced, P, N, d, hit, hdist, bt);
+        float c0, q0;
+        const float p0 = giFreshTarget(N, d, traced, yf.L, c0, q0);
+        float wsum = p0 / q0;
+        Msum = traced ? 1.0 : 0.0;
+        py = p0;
+        wAll = wsum;
+        // ((#1087) or a light moved within the hold is significant at the fresh hit: the share -- the
+        //  GI denoiser's history cap -- holds for the whole motion, not only its flag frames; (#1039)
+        //  the tag's bit 3: the two tests on this texel's fresh hit, from the words HIT-LIGHT / SHADE stored --
+        //  giChgTagFresh)
+        if ((gf & GI_F_LIGHT_CHG) != 0u && hit && wsum > 0.0 && (giChgTagAt(m, D) & 8u) != 0u)
+            wChg = wsum;
+        GiSample yr = yf;   // (the fused kernel's pick; REUSE rebuilds it from yq)
+        giReusePick(m, D, par, frame, rp, P, N, grad, wsum, Msum, wAll, wChg, keptT, keptS, reuseTried, yr, py, src, yChg,
+                    yq);
+        W = (py > 0.0 && wsum > 0.0) ? wsum / (py * Msum) : 0.0;
+    }
+    GiSample y;   // (the pick: src != 0 here, else the fresh sample below)
+    if (src != 0u)
+    {
+        // A REUSED sample: its visibility from THIS receiver, one ray (a neighbour's sample behind
+        // a wall, or one a door / avatar now blocks, must not light this pixel) -- blocked: the
+        // fresh sample alone stands. A pick a changed light reaches takes the RE-SHADE ray instead
+        // (it is the visibility ray too).
+        y = giResPick(ivec2(int(yq & 0xFFFFu), int(yq >> 16u)), D, uint(par) ^ 1u, P);
+        const vec3 v = y.xs - o;
+        const float dl = length(v);
+        const vec3 dv = v / max(dl, 1e-6);
+        if ((yChg & 3u) == 2u && y.dist > 0.0)
+        {
+            // (GI_F_LIGHT_CHG) RE-SHADE: a changed light reaches the picked point, so its stored
+            // radiance is the old colour. One closest-hit ray toward it doubles as the visibility
+            // ray: the surface found within the tolerance of the point is shaded with THIS frame's
+            // lights (RESHADE: the fused kernel's hit shading + source clamp) and replaces the stored
+            // L -- reuse kept (its W is a contribution weight: valid for the current radiance), colour
+            // current. Anything nearer blocks it; nothing there (the surface moved / vanished)
+            // rejects it as well. (#1031) This lane asks for it (the request + the list) and stops
+            // here; its TAIL run comes back with the result.
+            const float rsTol = max(0.02, 0.02 * dl);
+            if (!tail)
+            {
+                gi_hit[ri + 4u] = uvec4(floatBitsToUint(o), floatBitsToUint(dl + rsTol));
+                gi_hit[ri + 5u] = uvec4(floatBitsToUint(dv), 0u);
+                giListAppend(uint(m.y * D.x + m.x));
+                return;
+            }
+            // the result -- for THIS pick only (the request's direction, bit for bit; a different
+            // one would be another sample's re-shade: rejected, as a surface not found)
+            const uvec4 q4 = gi_hit[ri + 4u], q5 = gi_hit[ri + 5u];
+            const float tt = uintBitsToFloat(q4.w);
+            const bool ht = tt >= 0.0 && all(equal(q5.xyz, floatBitsToUint(dv)));
+            const vec3 Lt = uintBitsToFloat(q4.xyz);
+            visOk = false;
+            if (ht && tt >= dl - rsTol)
+            {
+                // (RenderVKGIReshadeGain) W was resampled for the OLD radiance: a point whose light
+                // went from dim to bright is multiplied by L_new / L_old -- the edge sparkles under
+                // club lights. Brighter re-shades are capped at the gain (the light-change history
+                // cap lets the fresh samples catch up); dimmer ones pass as they are.
+                const float gmax = gi.prm4.y;
+                const float ln = giLum(Lt), lo = giLum(y.L);
+                y.L = (gmax > 0.0 && ln > gmax * lo) ? Lt * (gmax * lo / max(ln, 1e-8)) : Lt;
+                visOk = true;
+                ++chgRej;
+            }
+        }
+        else
+        {
+            if ((yChg & 3u) == 1u) ++chgSkip;   // (#980: kept as stored -- the change is insignificant there)
+            const float tm = y.dist > 0.0 ? max(dl - max(0.01, dl * 1e-3), 0.0) : max(g_draw_push.rtr.x, 1.0);
+            giRayCone(rp, r, P);   // (the walk's cone: giFreshRay's)
+#ifdef CLEAN_VIS_QUEUE_GIR
+            // (#1039 M3) the main pass queues this ray (VQ_K_GIVIS, dest = the texel: the walk kernel runs
+            // traceShadowRay's walk on the same o / dv / tm with this cone) and stops -- no RNG drawn after
+            // this point. One request per texel at most, the region holds every texel (the host's): never
+            // refused. GIR PICK: what the VIS TAIL's finish needs beyond what it rebuilds from the record /
+            // the reservoir / the depth (q4 / q5 are free: this texel is not on the re-shade list) --
+            //   q4 = N.xyz (the flipped shading normal), W;  q5 = Msum, the changed share, the picked
+            //   reservoir's texel (x | y << 16), src | keptT << 2 | keptS << 8 | chgSkip << 16 | reuseTried << 24
+            // (the re-shade TAIL never comes here: its texels' picks take the re-shade branch above)
+            const uint vti = uint(m.y * D.x + m.x);
+            if (!(tm > 0.0)) visOk = true;
+            else if (!tail)
+            {
+                gi_hit[ri + 4u] = uvec4(floatBitsToUint(N), floatBitsToUint(W));
+                gi_hit[ri + 5u] = uvec4(floatBitsToUint(Msum),
+                                        floatBitsToUint(wAll > 0.0 ? clamp(wChg / wAll, 0.0, 1.0) : 0.0), yq,
+                                        src | (keptT << 2u) | (keptS << 8u) | (chgSkip << 16u)
+                                        | ((reuseTried ? 1u : 0u) << 24u));
+                vqPush(vqRegion(), true, vqDest(vqRegion(), vti, 0u), o, tm, dv, rt_cone_width0, VQ_K_GIVIS,
+                       rt_cone_aniso, rt_cone_spread);
+                return;
+            }
+            else visOk = false;
+#else
+            visOk = (tm > 0.0 ? traceShadowRay(o, dv, 0.0, tm, RT_MASK_SHADOW & ~RT_MASK_BLEND) : 1.0) > 0.5;
 #endif
+        }
+    }
+    // the fresh sample again (the same record words): the finish's y0, S (= L), hit, guides
+    bool hit, bt;
+    float hdist;
+    d = uintBitsToFloat(gi_hit[ri].xyz);
+    const GiSample y0 = giRecFresh(ri, traced, P, N, d, hit, hdist, bt);
+    float c0, q0;
+    const float p0 = giFreshTarget(N, d, traced, y0.L, c0, q0);
+    if (src == 0u) y = y0;
+    giReuseFinish(m, D, par, P, N, d, vz, grad, traced, hit, hdist, traced && bt, y0.L, y0, p0, q0, c0, y, src, visOk, W,
+                  Msum, noInfo, keptT, keptS, chgRej, chgSkip, wAll > 0.0 ? clamp(wChg / wAll, 0.0, 1.0) : 0.0,
+                  reuseTried);
+#else
     vec3 xs = P, ns = N;
     bool hit = false;
     float hdist = 0.0;
@@ -5271,14 +6342,12 @@ void DEFER_MAIN()
     const uint gf = gi.cfg.x;
     bool noInfo = !traced && (gf & GI_F_RES) == 0u;   // (an untraced texel without reservoirs)
     uint src = 0u;          // 0 fresh, 1 temporal, 2 spatial (debug view 5)
-    float Mout = 1.0;
-    uint keptT = 0u, keptS = 0u, visRej = 0u, chgRej = 0u;   // (chgRej: picks RE-SHADED for a changed light)
+    uint keptT = 0u, keptS = 0u, chgRej = 0u;   // (chgRej: picks RE-SHADED for a changed light)
     uint chgSkip = 0u;   // (#980: a pick a changed light reaches, too weakly to re-shade)
     // (GI_F_LIGHT_CHG) the candidates' weight whose sample point changed lights are SIGNIFICANT at
     // (giChangedSig 2; #980: an insignificant reach keeps the full history), of all the candidates'
     // weight: the share the GI denoiser's moving-light history cap reads (MOT w)
     float wChg = 0.0, wAll = 0.0;
-    bool wClamped = false;   // (debug view 8: the firefly clamp scaled the stored W)
     bool reuseTried = false;   // (debug view 9: the reuse looked for candidates)
     // the reservoir across the trace loop: the fresh sample y0, the pick y (target py), its weight
     GiSample y0 = GiSample(vec3(0.0), vec3(0.0), vec3(0.0), 0.0, 0.0), y = y0;
@@ -5297,45 +6366,9 @@ void DEFER_MAIN()
         vec3 Lt = vec3(0.0), xt = P, nt = N;
         bool ht = false;
         float tt = 0.0;
-#if CLEAN_GI_STAGE == GI_STAGE_REUSE
-        // (#1031) both rays were walked and shaded by other stages: pass 0 by TRACE + SHADE (the
-        // record), pass 1 by RESHADE -- this lane asks for it (the request + the list) and stops here;
-        // its TAIL run comes back with the result
-        bool bt = false;
-        if (pass == 0u)
-        {
-            if (traced)
-            {
-                const uvec4 q1 = gi_hit[ri + 1u], q2 = gi_hit[ri + 2u], q3 = gi_hit[ri + 3u];
-                Lt = uintBitsToFloat(q1.xyz);
-                tt = uintBitsToFloat(q1.w);
-                xt = uintBitsToFloat(q2.xyz);
-                nt = vec3(uintBitsToFloat(q2.w), uintBitsToFloat(q3.xy));
-                ht = (rq0.w & GI_REC_HIT) != 0u;
-                bt = (rq0.w & GI_REC_BACK) != 0u;
-            }
-        }
-        else if (!tail)
-        {
-            gi_hit[ri + 4u] = uvec4(floatBitsToUint(o), floatBitsToUint(rsDl + rsTol));
-            gi_hit[ri + 5u] = uvec4(floatBitsToUint(rsDir), 0u);
-            giListAppend(uint(m.y * D.x + m.x));
-            return;
-        }
-        else
-        {
-            // the result -- for THIS pick only (the request's direction, bit for bit; a different
-            // one would be another sample's re-shade: rejected, as a surface not found)
-            const uvec4 q4 = gi_hit[ri + 4u], q5 = gi_hit[ri + 5u];
-            tt = uintBitsToFloat(q4.w);
-            ht = tt >= 0.0 && all(equal(q5.xyz, floatBitsToUint(rsDir)));
-            Lt = uintBitsToFloat(q4.xyz);
-        }
-#else
         if (pass != 0u || traced)
             Lt = giTrace(o, pass == 0u ? d : rsDir, pass == 0u ? max(g_draw_push.rtr.x, 1.0) : rsDl + rsTol, P,
                          xt, nt, ht, tt);
-#endif
         if (pass != 0u)
         {
             // (GI_F_LIGHT_CHG) RE-SHADE: a changed light reaches the picked point, so its stored
@@ -5361,11 +6394,7 @@ void DEFER_MAIN()
             break;
         }
         L = Lt; xs = xt; ns = nt; hit = ht; hdist = tt;
-#if CLEAN_GI_STAGE == GI_STAGE_REUSE
-        freshBack = traced && bt;
-#else
         freshBack = traced && g_gi_back;
-#endif
         // the estimate: L x cos / pi x (1 / (cos / pi)) = L (the cosine-weighted mean incoming radiance)
         S = L;
         if ((gf & GI_F_RES) == 0u) break;
@@ -5374,11 +6403,7 @@ void DEFER_MAIN()
         y0.cosv = hit ? abs(dot(ns, -d)) : 1.0;
         // (giCosMin: a grazing fresh direction is no candidate -- its W = pi / cos would be stored and
         //  re-weighed head-on by the neighbours: the firefly seeds of the spatial reuse)
-        const float c0raw = dot(N, d);
-        const bool c0ok = c0raw >= giCosMin();
-        c0 = max(c0raw, 1e-4);
-        p0 = (traced && c0ok) ? giLum(L) * c0 : 0.0;
-        q0 = c0 * (1.0 / 3.14159265);
+        p0 = giFreshTarget(N, d, traced, L, c0, q0);
         float wsum = p0 / q0;   // (the fresh candidate: p / q, M 1; an untraced texel: none, M 0)
         Msum = traced ? 1.0 : 0.0;
         y = y0;
@@ -5386,103 +6411,12 @@ void DEFER_MAIN()
         const bool chgOn = (gf & GI_F_LIGHT_CHG) != 0u;
         uint yChg = 0u;   // (the picked reused sample's giChangedSig)
         wAll = wsum;
-        if (chgOn && hit && wsum > 0.0 && giChangedSig(xs, ns, L) == 2u) wChg = wsum;
-        const bool reuse = (gf & GI_F_TEMPORAL) != 0u && (gf & GI_F_RES_PREV) != 0u && ssr.taa_params.z < 0.5;
-        if (reuse)
-        {
-            const float mcap = max(gi.prm2.x, 1.0);
-            uint rng = giPcg(uint(m.x) * 7919u + uint(m.y) * 104729u + frame * 15485863u);
-            float pw;
-            const vec2 dS = giPrevDelta(P, m, vec2(D), pw);
-            const ivec2 qt = ivec2(floor(vec2(m) + dS + 0.5));
-            const uint pl = uint(par) ^ 1u;
-            GiSample yt;
-            float pt, Mt;
-            uint tc;
-            if (pw > 0.0)
-            {
-                reuseTried = true;
-                float wt = giTap(qt, D, pl, pw, max(0.04 * pw, 0.03), P, N, mcap, yt, pt, Mt, tc);
-                if (!(wt > 0.0) && (gf & GI_F_REPROJ_SEARCH) != 0u)
-                {
-                    // (GI_F_REPROJ_SEARCH) REPROJECTION SEARCH: the nearest texel is not this surface
-                    // (sub-texel motion across a thin strand / a silhouette at the GI extent): the
-                    // best-matching texel of the 3 x 3 around the reprojected point -- its depth against
-                    // this surface's plane carried there (pw + the gradient over the offset), normal
-                    // within ~25 deg -- is the temporal candidate (giTap's own tests at that plane depth)
-                    const vec2 hc = vec2(m) + dS;
-                    float best = 1.0, bz = 0.0, btol = 0.0;
-                    ivec2 bq = ivec2(-1);
-                    [[dont_unroll]] for (int k = 0; k < 9; ++k)
-                    {
-                        const ivec2 q = qt + ivec2(k % 3 - 1, k / 3 - 1);
-                        if (q == qt || any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, D))) continue;
-                        const uvec4 gq = imageLoad(uGiGeom, ivec3(q, int(pl)));
-                        const float zq = uintBitsToFloat(gq.x);
-                        if (!(zq > 0.0) || dot(pdnUnpackN(gq.y), N) < 0.9) continue;
-                        const float dz = dot(grad, vec2(q) - hc);
-                        const float tq = max(0.04 * pw, 0.03) + 0.5 * abs(dz);
-                        const float e = abs(zq - (pw + dz)) / tq;
-                        if (e < best) { best = e; bq = q; bz = pw + dz; btol = tq; }
-                    }
-                    if (bq.x >= 0) wt = giTap(bq, D, pl, bz, btol, P, N, mcap, yt, pt, Mt, tc);
-                }
-                if (wt > 0.0)
-                {
-                    wsum += wt; Msum += Mt; ++keptT; wAll += wt;
-                    if (tc == 2u) wChg += wt;
-                    if (giRand(rng) * wsum < wt) { y = yt; py = pt; src = 1u; yChg = tc; }
-                }
-                if ((gf & GI_F_SPATIAL) != 0u)
-                {
-                    const uint taps = uint(gi.prm2.y + 0.5);
-                    const float rad = max(gi.prm2.z, 1.0);
-                    [[dont_unroll]] for (uint t = 0u; t < min(taps, 6u); ++t)
-                    {
-                        const float a = 6.2831853 * giRand(rng);
-                        const float rr = rad * sqrt(max(giRand(rng), 0.02));
-                        const ivec2 q = qt + ivec2(round(vec2(cos(a), sin(a)) * rr));
-                        if (q == qt) continue;
-                        const float dz = dot(grad, vec2(q - qt));
-                        const float ws = giTap(q, D, pl, pw + dz, max(0.05 * pw, 0.05) + 0.25 * abs(dz), P, N, mcap, yt,
-                                               pt, Mt, tc);
-                        if (ws > 0.0)
-                        {
-                            wsum += ws; Msum += Mt; ++keptS; wAll += ws;
-                            if (tc == 2u) wChg += ws;
-                            if (giRand(rng) * wsum < ws) { y = yt; py = pt; src = 2u; yChg = tc; }
-                        }
-                    }
-                }
-                // (prm4.z, RenderVKGIDisoccTaps) DISOCCLUSION: no temporal candidate (camera motion
-                // revealed this texel, or a thin strand's texel had none) -- extra neighbour taps at a
-                // SMALL radius (<= 3 texels: along a strand, beside a silhouette, where the wide taps
-                // above rarely land on the same surface), so the texel does not restart from M = 1.
-                // Also at RenderVKGI 2. Bounded: up to 8 taps, only on such texels; still one
-                // visibility ray for the pick.
-                const uint extra = min(uint(gi.prm4.z + 0.5), 8u);
-                if (keptT == 0u && extra > 0u)
-                {
-                    const float rad2 = min(max(gi.prm2.z, 1.0), 3.0);
-                    [[dont_unroll]] for (uint t = 0u; t < extra; ++t)
-                    {
-                        const float a = 6.2831853 * giRand(rng);
-                        const float rr = rad2 * sqrt(max(giRand(rng), 0.1));
-                        const ivec2 q = qt + ivec2(round(vec2(cos(a), sin(a)) * rr));
-                        if (q == qt) continue;
-                        const float dz = dot(grad, vec2(q - qt));
-                        const float ws = giTap(q, D, pl, pw + dz, max(0.05 * pw, 0.05) + 0.25 * abs(dz), P, N, mcap, yt,
-                                               pt, Mt, tc);
-                        if (ws > 0.0)
-                        {
-                            wsum += ws; Msum += Mt; ++keptS; wAll += ws;
-                            if (tc == 2u) wChg += ws;
-                            if (giRand(rng) * wsum < ws) { y = yt; py = pt; src = 2u; yChg = tc; }
-                        }
-                    }
-                }
-            }
-        }
+        // ((#1087) or a light moved within the hold is significant at the fresh hit: the share -- the
+        //  GI denoiser's history cap -- holds for the whole motion, not only its flag frames)
+        if (chgOn && hit && wsum > 0.0 && (giChangedSig(xs, ns, L) == 2u || (giHotOn() && giLightHot(xs, ns, L))))
+            wChg = wsum;
+        uint yq = 0u;   // (REUSE's: unused here)
+        giReusePick(m, D, par, frame, rp, P, N, grad, wsum, Msum, wAll, wChg, keptT, keptS, reuseTried, y, py, src, yChg, yq);
         W = (py > 0.0 && wsum > 0.0) ? wsum / (py * Msum) : 0.0;
         if (src != 0u)
         {
@@ -5493,7 +6427,7 @@ void DEFER_MAIN()
             const vec3 v = y.xs - o;
             const float dl = length(v);
             const vec3 dv = v / max(dl, 1e-6);
-            if (yChg == 2u && y.dist > 0.0)
+            if ((yChg & 3u) == 2u && y.dist > 0.0)
             {
                 rsWant = true;
                 rsDir = dv;
@@ -5502,151 +6436,19 @@ void DEFER_MAIN()
             }
             else
             {
-                if (yChg == 1u) ++chgSkip;   // (#980: kept as stored -- the change is insignificant there)
+                if ((yChg & 3u) == 1u) ++chgSkip;   // (#980: kept as stored -- the change is insignificant there)
                 const float tm = y.dist > 0.0 ? max(dl - max(0.01, dl * 1e-3), 0.0) : max(g_draw_push.rtr.x, 1.0);
                 visOk = (tm > 0.0 ? traceShadowRay(o, dv, 0.0, tm, RT_MASK_SHADOW & ~RT_MASK_BLEND) : 1.0) > 0.5;
             }
         }
         if (!rsWant) break;
     }
-    if ((gf & GI_F_RES) != 0u)
-    {
-        if (src != 0u && !visOk)
-        {
-            ++visRej;
-            y = y0; py = p0; src = 0u;
-            Msum = traced ? 1.0 : 0.0;
-            W = p0 > 0.0 ? (p0 / q0) / p0 : 0.0;
-        }
-        if (!(W > 0.0) || !(W < 3.0e38)) W = 0.0;
-        if (!traced && src == 0u) noInfo = true;   // (nothing traced, nothing reused: no estimate)
-        Mout = min(Msum, max(gi.prm2.x, 1.0));
-        // the estimate of the chosen sample: L x cos / pi x W (fresh alone: L). The fresh sample's
-        // cosine is its own direction's (c0, the one its target and pdf took), not the receiver's
-        // P -> x_s direction: the ray leaves from the offset origin o, and a contact hit (a crease)
-        // seen from P can face it far more than d did -- L x cos(P) / c0 was a crease firefly.
-        const float cy = src == 0u ? c0 : max(dot(N, normalize(y.xs - P)), 0.0);
-        S = y.L * (cy * (1.0 / 3.14159265)) * W;
-        if (any(isnan(S)) || any(isinf(S))) S = vec3(0.0);
-        // FIREFLY CLAMP BEFORE THE REUSE SEES IT (RenderVKGIFireflyClamp): the clamped estimate
-        // k S = f(y) (k W) -- the reservoir stores k W, so what neighbours / next frame resample is
-        // what this texel showed (before, the clamp touched S only: the unclamped W was stored and
-        // handed on by the spatial reuse -- a firefly re-seeded every frame)
-        const float clampR = gi.prm2.w;
-        if (clampR > 0.0)
-        {
-            const float l = giLum(S);
-            if (l > clampR) { const float k = clampR / l; S *= k; W *= k; wClamped = true; }
-        }
-        if (noInfo) giResStore(m, D, uint(par), y0, 0.0, 0.0);   // (W 0: nothing for the neighbours)
-        else giResStore(m, D, uint(par), y, W, Mout);
-    }
-    const float clampL = gi.prm2.w;
-    if (clampL > 0.0)
-    {
-        const float l = giLum(S);
-        if (l > clampL) S *= clampL / l;
-    }
     // (GI_F_LIGHT_CHG) the changed lights' share of the candidates (MOT w; debug view 8)
-    const float chgShare = wAll > 0.0 ? clamp(wChg / wAll, 0.0, 1.0) : 0.0;
-    // (no estimate this frame: a weight-0 sample for the GI denoiser -- its history holds, DN_F_INFO)
-    vec4 l0 = vec4(S, noInfo ? -1.0 : 1.0);
-    const uint dbg = gi.cfg.w;
-    // ---- (GI-4) THE RADIANCE CACHE: this receiver's estimate into its world cell ----
-    uint cInserts = 0u, cFull = 0u;
-    vec3 cacheDbg = vec3(1.0, 0.0, 0.0);
-    if ((gf & GI_F_CACHE_FILL) != 0u && giCacheSlots() != 0u && !noInfo)
-    {
-        float edge;
-        const uint key = giCellKey(P, N, cam, edge);
-        bool ins;
-        const uint slot = giCacheFindOrInsert(key, giCellCentre(P, edge), edge, ins);
-        if (slot != 0xFFFFFFFFu)
-        {
-            if (dbg == GI_DBG_CACHE)
-            {
-                vec3 E;
-                cacheDbg = giCacheRead(slot, E) ? E : vec3(1.0, 1.0, 0.0);
-            }
-            giCacheAddWave(slot, S);
-            if (ins) ++cInserts;
-        }
-        else ++cFull;
-    }
-    if (dbg == GI_DBG_CACHE) l0.rgb = cacheDbg;
-    if (dbg == GI_DBG_RES)
-        l0.rgb = (src == 0u ? vec3(1.0, 0.0, 0.0) : (src == 1u ? vec3(0.0, 1.0, 0.0) : vec3(0.0, 0.3, 1.0)))
-               * (0.2 + 0.8 * clamp(Mout / max(gi.prm2.x, 1.0), 0.0, 1.0));
-    if (dbg == GI_DBG_CHG)
-        l0.rgb = vec3(chgShare, chgRej != 0u ? 1.0 : (chgSkip != 0u ? 0.3 : 0.0), wClamped ? 1.0 : 0.0);
-    if (dbg == GI_DBG_OUTLIER)   // (a header word: uniform -- the subgroup sums see every surface lane)
-    {
-        // SPARKLE CAUSES: this texel's estimate against its subgroup's mean (the other lanes')
-        const float ls = giLum(S);
-        const float sum = subgroupAdd(noInfo ? 0.0 : ls);
-        const float cnt = subgroupAdd(noInfo ? 0.0 : 1.0);
-        const float meanO = cnt > 1.0 ? (sum - (noInfo ? 0.0 : ls)) / (cnt - (noInfo ? 0.0 : 1.0)) : ls;
-        vec3 c = vec3(clamp(ls, 0.0, 1.0) * 0.25);
-        if (!noInfo && ls > 4.0 * meanO && ls > 1e-3)
-        {
-            if (src == 1u)       c = chgRej != 0u ? vec3(0.0, 1.0, 1.0) : vec3(0.0, 1.0, 0.0);
-            else if (src == 2u)  c = chgRej != 0u ? vec3(0.0, 1.0, 1.0) : vec3(0.0, 0.3, 1.0);
-            else if (!hit)       c = vec3(1.0, 0.0, 0.0);
-            else if (dot(N, d) < 0.2) c = vec3(1.0, 0.5, 0.0);
-            else if (reuseTried && keptT == 0u && keptS == 0u) c = vec3(1.0);   // (a disocclusion: no candidate)
-            else                 c = vec3(1.0, 1.0, 0.0);
-        }
-        else if (freshBack) c = vec3(0.3, 0.0, 0.3);   // (not a sparkle: a caught leak is dark; dim so the outliers stand out)
-        l0.rgb = c;
-    }
-    imageStore(uGiIn, ivec3(m, 0), l0);
-    // layer 1 (the denoiser's "specular" signal, rough 1: a full-length history and every a-trous
-    // iteration): the SKY VISIBILITY -- did this frame's FRESH cosine-weighted ray escape (the
-    // reservoir's pick is radiance-weighted, not cosine: never used here). The consumers occlude
-    // the probe / SSR / env specular with it (RenderVKGISpecOcclusion): a sealed room reflects no sky.
-    imageStore(uGiIn, ivec3(m, 1), traced ? vec4(vec3(hit ? 0.0 : 1.0), 0.0) : vec4(1.0, 1.0, 1.0, -1.0));
-    // ---- guides (the denoiser's: clean_pdn_common.glsl; grad: above) ----
-    imageStore(uGiGeom, ivec3(m, par), uvec4(floatBitsToUint(vz), pdnPackNR(N, 1.0), packHalf2x16(grad),
-                                            pdnPackMeta(0.0, 0.0, 0u, 1.0)));
-    float pw;
-    const vec2 dS = giPrevDelta(P, m, vec2(D), pw);
-    // (w: the changed lights' share x 255 -- clean_dn_temporal.comp's moving-light history cap, read
-    //  only when the host gives the GI denoiser a move history: RenderVKGILightChangeHistory)
-    imageStore(uGiMot, m, uvec4(packHalf2x16(dS), packHalf2x16(dS), floatBitsToUint(pw),
-                                uint(chgShare * 255.0 + 0.5)));
-    // ---- stats (one atomic per subgroup; only while the host reads them: GI_F_STATS) ----
-    if ((gf & GI_F_STATS) != 0u)   // (a header word: uniform)
-    {
-        const uint sR = subgroupAdd(traced ? 1u : 0u);
-        const uint sH = subgroupAdd(hit ? 1u : 0u);
-        const uint sD = subgroupAdd(hit ? uint(min(hdist, 1000.0) * 10.0) : 0u);
-        const uint sT = subgroupAdd(keptT), sS = subgroupAdd(keptS), sV = subgroupAdd(visRej);
-        const uint sM = subgroupAdd(uint(Mout * 4.0 + 0.5));
-        if (subgroupElect())
-        {
-            atomicAdd(gi.stat.x, sR);
-            atomicAdd(gi.stat.y, sH);
-            atomicAdd(gi.stat.z, sR - sH);
-            atomicAdd(gi.stat.w, sD);
-            if (sT != 0u) atomicAdd(gi.stat2.x, sT);
-            if (sS != 0u) atomicAdd(gi.stat2.y, sS);
-            if (sV != 0u) atomicAdd(gi.stat2.z, sV);
-            atomicAdd(gi.stat2.w, sM);
-        }
-        const uint sL = subgroupAdd(g_gi_lookups), sF = subgroupAdd(g_gi_found);
-        const uint sI = subgroupAdd(cInserts), sX = subgroupAdd(cFull);
-        if (subgroupElect() && (sL | sI | sX) != 0u)
-        {
-            atomicAdd(gi.stat3.x, sL);
-            atomicAdd(gi.stat3.y, sF);
-            atomicAdd(gi.stat3.z, sI);
-            atomicAdd(gi.stat3.w, sX);
-        }
-        const uint sC = subgroupAdd(chgRej), sK = subgroupAdd(chgSkip);
-        if (subgroupElect() && sC != 0u) atomicAdd(gi.stat4.w, sC);
-        if (subgroupElect() && sK != 0u) atomicAdd(gi.sph_n.z, sK);
-    }
+    giReuseFinish(m, D, par, P, N, d, vz, grad, traced, hit, hdist, freshBack, S, y0, p0, q0, c0, y, src, visOk, W, Msum,
+                  noInfo, keptT, keptS, chgRej, chgSkip, wAll > 0.0 ? clamp(wChg / wAll, 0.0, 1.0) : 0.0, reuseTried);
+#endif
 }
+#endif   // CLEAN_GIR_VIS_TAIL
 #endif   // CLEAN_GI_STAGE
 #endif   // CLEAN_GI_RESOLVE
 #elif CLEAN_DEFER_PASS == 11 || CLEAN_DEFER_PASS == 16
@@ -5755,7 +6557,7 @@ void rtrRayBegin(ivec2 px, uvec4 m, bool blockRay, bool grad, float gs, out vec3
     g_frag_xy = vec2(px) + 0.5;
     CLK_INV();
     CLK_SURF();
-    const vec4 g2 = texelFetch(uG2, px, 0);
+    const vec4 g2 = defTexel(uG2, px);
     float glow;
     bool noFade;
     const SurfaceLit s = deferSurface(px, g2, glow, noFade);
@@ -5936,34 +6738,57 @@ void DEFER_MAIN()
 // blocker distance) and VQ_K_LIGHT (rtrProjRay's walk: coloured, the opaque set, the own fixture's re-trace
 // when flagged -> share x (1 - visibility), the share read from the slot first) -- every kind through ONE
 // walk site (clean_vis_walk.glsl rtVisQueued), with the cone each request carries.
+// (#1039 M3) + VQ_K_GIVIS (the GI reuse's visibility ray: traceShadowRay's grey walk over the opaque set ->
+// its visibility in x).
+// (#1039 occupancy) THE WALK-STATE HOOKS (above the includes): this lane's request (g_vq_w) read where the walk
+// uses it -- the cone, the draw time, the fixture's light, the foliage parameters; after the walk the request
+// again (its slot and kind) instead of holding them across it.
+uint g_vq_w = 0u;
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer VqReq { uvec4 q[]; };
+VqReq vqReq() { return VqReq(g_draw_push.rtr3.zw); }
+float vqConeW0()     { return uintBitsToFloat(vqReq().q[g_vq_w + 1u].w); }   // (rt_cone_width0)
+float vqConeSpread() { return uintBitsToFloat(vqReq().q[g_vq_w + 2u].w); }   // (rt_cone_spread)
+float vqConeAniso()  { return uintBitsToFloat(vqReq().q[g_vq_w + 2u].z); }   // (rt_cone_aniso)
+// (rt_anim_time -- VQ_K_GIVIS: draw time 0: the split REUSE stage it stands in for never sets rt_anim_time, so its
+//  inline walk alpha-tests animated casters at time 0; kept bit for bit. Aligning both with the fused GI kernel's
+//  draw time is a separate, default-path change.)
+float vqAnimTime()   { return (vqReq().q[g_vq_w + 2u].y & 15u) == VQ_K_GIVIS ? 0.0 : pc.u_cam_time.w; }
+vec3 vqFixP()        { return lights[vqReq().q[g_vq_w + 2u].y >> 16].pos_radius.xyz; }   // (rt_fix_P while rt_fix_on)
+vec4 vqFolP()        { return ssr.foliage_rt; }   // (rt_fol_p: rtFoliageSet(ssr.foliage_rt), read only while rt_fol_cull)
 void DEFER_MAIN()
 {
     VqRegion r = vqRegion();
     const uint i = (gl_WorkGroupID.y * VQ_ROW + gl_WorkGroupID.x) * 64u + gl_LocalInvocationIndex;
     if (i >= min(r.q[0].x, vqReqCap(r))) return;
     const uint w = VQ_HDR_WORDS + i * VQ_REQ_WORDS;
-    const uvec4 q0 = r.q[w], q1 = r.q[w + 1u], q2 = r.q[w + 2u];
-    if (q2.x >= vqEntryCap(r) * vqSlots(r)) return;   // (Xid 109 hardening: a result slot past the region)
-    rtrQueryBudgetBegin();   // (#1049: this request's rays, the hang guard -- a few at most, never binds)
-    const uint kf = q2.y;
-    const uint kind = kf & 15u;
-    rt_anim_time = pc.u_cam_time.w;
-    rt_cone_width0 = uintBitsToFloat(q1.w);
-    rt_cone_spread = uintBitsToFloat(q2.w);
-    rt_cone_aniso = uintBitsToFloat(q2.z);
-    rt_blend_coarse = (kf & VQ_F_COARSE) != 0u;
-    if ((kf & VQ_F_FOLIAGE) != 0u) rtFoliageSet(ssr.foliage_rt);
-    // (VQ_K_LIGHT) the light's own fixture (rtrProjRay under the GI: gi.prm5.z, RenderVKReSTIRFixtureSize)
-    rt_fix_on = (kf & VQ_F_FIXTURE) != 0u;
-    rt_fix_P = rt_fix_on ? lights[kf >> 16].pos_radius.xyz : vec3(0.0);
-    rt_fix_max = gi.prm5.z;
-    rt_block_t = 1e30;   // (VQ_K_OCC: its blocker distance)
-    const uint wkind = kind == VQ_K_OCC ? RT_WALK_GREY : RT_WALK_RGB;
-    const uint wmask = kind == VQ_K_OCC ? RT_MASK_WORLD_BLOCK : RTR_PROJ_MASK;
-    const vec3 vis = rtVisQueued(uintBitsToFloat(q0.xyz), uintBitsToFloat(q1.xyz), uintBitsToFloat(q0.w), kind == VQ_K_SUN,
-                                 wkind, wmask, (kf & VQ_F_OPAQUE) != 0u, (kf & VQ_F_SPLIT) != 0u, (kf & VQ_F_PARITY) != 0u,
-                                 (kf & VQ_F_RGB) != 0u);
+    g_vq_w = w;
+    vec3 vis;
+    {
+        const uvec4 q0 = r.q[w], q1 = r.q[w + 1u], q2 = r.q[w + 2u];
+        if (q2.x >= vqEntryCap(r) * vqSlots(r)) return;   // (Xid 109 hardening: a result slot past the region)
+        rtrQueryBudgetBegin();   // (#1049: this request's rays, the hang guard -- a few at most, never binds)
+        const uint kf = q2.y;
+        const uint kind = kf & 15u;
+        // (the cone and the draw time: the hooks)
+        rt_blend_coarse = (kf & VQ_F_COARSE) != 0u;
+        if ((kf & VQ_F_FOLIAGE) != 0u) rtFoliageSet(ssr.foliage_rt);
+        // (VQ_K_LIGHT) the light's own fixture (rtrProjRay under the GI: gi.prm5.z, RenderVKReSTIRFixtureSize; its
+        // centre: the hook)
+        rt_fix_on = (kf & VQ_F_FIXTURE) != 0u;
+        rt_fix_max = gi.prm5.z;
+        rt_block_t = 1e30;   // (VQ_K_OCC: its blocker distance)
+        // (VQ_K_GIVIS: the GI reuse's traceShadowRay -- grey, the opaque set)
+        const uint wkind = (kind == VQ_K_OCC || kind == VQ_K_GIVIS) ? RT_WALK_GREY : RT_WALK_RGB;
+        const uint wmask = kind == VQ_K_OCC ? RT_MASK_WORLD_BLOCK
+                         : (kind == VQ_K_GIVIS ? (RT_MASK_SHADOW & ~RT_MASK_BLEND) : RTR_PROJ_MASK);
+        vis = rtVisQueued(uintBitsToFloat(q0.xyz), uintBitsToFloat(q1.xyz), uintBitsToFloat(q0.w), kind == VQ_K_SUN,
+                          wkind, wmask, (kf & VQ_F_OPAQUE) != 0u, (kf & VQ_F_SPLIT) != 0u, (kf & VQ_F_PARITY) != 0u,
+                          (kf & VQ_F_RGB) != 0u);
+    }
     rt_fix_on = false;
+    // the request again: its result slot and kind
+    const uvec4 q2 = vqReq().q[w + 2u];
+    const uint kind = q2.y & 15u;
     const uint rw = vqResWord(r, q2.x);
     if (kind == VQ_K_LIGHT)
     {
@@ -5985,9 +6810,25 @@ void DEFER_MAIN()
 {
     const uint rb = 2u * rtt_args[3] + 1u;
     const uint i = g_draw_push.rtr3.x + (gl_WorkGroupID.y * RTT_ROW + gl_WorkGroupID.x) * 64u + gl_LocalInvocationIndex;
+#ifdef CLEAN_RT_HANG_BEACON
+    if (all(equal(gl_GlobalInvocationID, uvec3(0u))) && rtBcOn())
+    {
+        // (#1128, the list trace's beacon twin) the indirect arguments as this dispatch reads them (the header the
+        // select pass left) and its real size
+        RtBcBuf b = rtBc();
+        b.q[1] = uvec4(rtt_words[rb], rtt_words[rb + 1u], rtt_words[rb + 2u], rtt_words[rb + 3u]);
+        b.q[2] = uvec4(rtt_words[rb + 4u], rtt_args[3], gl_NumWorkGroups.x, gl_NumWorkGroups.y);
+        memoryBarrierBuffer();
+        b.q[3] = uvec4(b.q[0].x, gl_NumWorkGroups.z, g_draw_push.rtr3.x, 0u);
+        memoryBarrierBuffer();
+    }
+#endif
     if (i >= min(rtt_words[rb], rtt_words[rb + 4u])) return;
     const uint e = rtt_words[rb + 7u + i];
     const ivec2 px = ivec2(e & 0x7FFFu, (e >> 15) & 0x7FFFu);
+#ifdef CLEAN_RT_HANG_BEACON
+    rtBcLane(i, px);   // (#1128: the beacon names the list entry and its pixel)
+#endif
     const bool grad = rtrGradOn();   // (a header word: uniform)
     // (pass 16's entry-0 workgroup stored this frame's scale: bit-identical to its rtrGradScale)
     rtrTraceRay(px, imageLoad(uReflRtMark, px), (e >> 31) != 0u, grad, grad ? rtrGradScaleNow() : 1.0);
@@ -6083,10 +6924,7 @@ void DEFER_MAIN()
     const uint b = i * RTR_REC_WORDS;
     const uvec4 q0 = rec.q[b];
     const bool mat = (q0.w & (RTR_REC_HIT | RTR_REC_BACK)) == RTR_REC_HIT;   // (a miss / a back-face stop: no material)
-#ifndef CLEAN_VIS_QUEUE_M2
-    if (!mat) return;
-#endif
-    // (#1039 M2: every entry stays -- the producer writes the blend layers' slot of each)
+    if (!mat) return;   // (#1039 M2: REQ writes such an entry's blend-layer slot)
     const uvec4 q6 = rec.q[b + 6u];
     const vec3 R = uintBitsToFloat(q0.xyz);
     // TRACE's state at the material: the pixel, the ray cone (the hit's texture LOD), the draw time
@@ -6095,8 +6933,7 @@ void DEFER_MAIN()
     rt_cone_spread = uintBitsToFloat(q6.y);
     rt_cone_aniso  = uintBitsToFloat(q6.z);
     rt_anim_time = pc.u_cam_time.w;
-    uvec4 r0 = uvec4(0u), r1 = uvec4(0u), r2 = uvec4(0u), r3 = uvec4(0u);
-    if (mat)
+    uvec4 r0, r1, r2, r3;
     {
         const uvec4 q1 = rec.q[b + 1u], q2 = rec.q[b + 2u], q3 = rec.q[b + 3u], q4 = rec.q[b + 4u], q5 = rec.q[b + 5u];
         RtHit h;
@@ -6117,15 +6954,36 @@ void DEFER_MAIN()
         rec.q[b + 4u] = r3;
         rec.q[b + 5u].x = floatBitsToUint(hd);
     }
-#ifdef CLEAN_VIS_QUEUE
-    // (#1039 M1) THE PRODUCER: the hit's sun ray queued (the receiver is the eye of its shading); M2: + its
-    // occlusion ray, its local lights + the budget's rays, the blend layers' cone flag
-    vqHitRequests(r0, r1, r2, r3, deferPosition(px), R, i, i < vqEntryCap(vqRegion()), mat);
+#if defined(CLEAN_VIS_QUEUE) && !defined(CLEAN_VIS_QUEUE_M2)
+    // (#1039 M1) THE PRODUCER: the hit's sun ray queued (the receiver is the eye of its shading). (M2: the REQ
+    // stage, below.)
+    vqHitRequests(r0, r1, r2, r3, deferPosition(px), R, i, i < vqEntryCap(vqRegion()), true);
 #endif
-#ifdef CLEAN_VIS_QUEUE_M2
+}
+#elif CLEAN_RT_STAGE == RT_STAGE_REQ
+// (#1039 M2) THE PRODUCER over every entry (MAT's RT LIT RECORD where it shaded one: zeros and hit false for a
+// miss / a back-face stop): the hit's sun ray, its occlusion ray, its local lights + the budget's rays queued,
+// the blend layers' cone flag (vqHitRequests), with the state MAT had (the pixel, TRACE's ray cone, the draw
+// time). After MAT, before the walk / LAYERS.
+void DEFER_MAIN()
+{
+    uint i, e;
+    ivec2 px;
+    if (!rtrRecLane(i, e, px)) return;
+    RtrRecords rec = rtrRec();
+    const uint b = i * RTR_REC_WORDS;
+    const uvec4 q0 = rec.q[b], q6 = rec.q[b + 6u];
+    const bool mat = (q0.w & (RTR_REC_HIT | RTR_REC_BACK)) == RTR_REC_HIT;
+    g_frag_xy = vec2(px) + 0.5;
+    rt_cone_width0 = uintBitsToFloat(q6.x);
+    rt_cone_spread = uintBitsToFloat(q6.y);
+    rt_cone_aniso  = uintBitsToFloat(q6.z);
+    rt_anim_time = pc.u_cam_time.w;
+    uvec4 r0 = uvec4(0u), r1 = uvec4(0u), r2 = uvec4(0u), r3 = uvec4(0u);
+    if (mat) { r0 = rec.q[b + 1u]; r1 = rec.q[b + 2u]; r2 = rec.q[b + 3u]; r3 = rec.q[b + 4u]; }
+    vqHitRequests(r0, r1, r2, r3, deferPosition(px), uintBitsToFloat(q0.xyz), i, i < vqEntryCap(vqRegion()), mat);
     rtrStatsHit();     // (the local-light walk's counters: lights in range, ray records, rays queued)
     rtrStatsRegir();
-#endif
 }
 #elif CLEAN_RT_STAGE == RT_STAGE_LAYERS
 // (#1039 M2) THE BLEND LAYERS of every entry below the queue's capacity (RenderVKVisQueue bit 2, with the blend
@@ -6288,7 +7146,7 @@ void DEFER_MAIN()
     const float dn = dot(n, d);
     const float tQ = (s > 0.0 && dn < -1e-4) ? -s / dn : -1.0;
     // the opaque surface (G-buffer)
-    const vec4 g2 = texelFetch(uG2, px, 0);
+    const vec4 g2 = defTexel(uG2, px);
     SurfaceLit sf;
     vec3 P = E;
     float tP = 3.0e38;
@@ -6349,7 +7207,7 @@ void DEFER_MAIN()
     const ivec2 px = ivec2(gl_GlobalInvocationID.xy);
     if (px.x >= int(g_draw_push.width) || px.y >= int(g_draw_push.height)) return;
     g_frag_xy = vec2(px) + 0.5;
-    const vec4 g2 = texelFetch(uG2, px, 0);
+    const vec4 g2 = defTexel(uG2, px);
     vec4 outv = vec4(0.0);
     if (deferHasSurface(g2))
     {
@@ -6428,7 +7286,7 @@ bool rtrTap(ivec2 q, ivec2 self, vec3 P, vec3 Ng, float vz, out vec4 rt, out flo
     rt = imageLoad(uRtTrace, q);
     if (!(rt.a >= 0.0)) return false;
     if (q == self) { g = 1.0; return true; }
-    const vec4 g1 = texelFetch(uG1, q, 0);
+    const vec4 g1 = defTexel(uG1, q);
     const float nd = abs(dot(gbOctDecode(g1.zw), Ng));
     const bool lobe = g_rtr_dirK > 0.0;
     if (nd < (lobe ? 0.25 : 0.9)) return false;
@@ -6484,7 +7342,7 @@ bool rtrTemporalOn() { return (rtt_opts4 & 2u) != 0u; }   // (a header word: uni
 // view depth; false off screen / behind the previous camera.
 bool rtrPrevPx(vec3 Xr, out ivec2 hp, out float pw)
 {
-    const vec4 c = ssr.taa_prev_vp * vec4(Xr, 1.0);
+    const vec4 c = ssr.views[CLEAN_VIEW].taa_prev_vp * vec4(Xr, 1.0);
     pw = c.w;
     hp = ivec2(-1);
     if (!(c.w > 1e-4)) return false;
@@ -6512,7 +7370,7 @@ vec3 rtrTemporal(ivec2 px, vec3 res, vec3 mu, vec3 sigma, vec3 P, vec3 Ng, vec3 
         {
             // the receiver plane under that previous pixel: where the previous camera's ray through
             // it meets the plane, and that point's previous view depth
-            const mat4 iM = inverse(ssr.taa_prev_vp);
+            const mat4 iM = inverse(ssr.views[CLEAN_VIEW].taa_prev_vp);
             const vec2 ndc = (vec2(hp) + 0.5) / vec2(float(g_draw_push.width), float(g_draw_push.height)) * 2.0 - 1.0;
             vec4 a = iM * vec4(ndc, 1.0, 1.0), b = iM * vec4(ndc, 0.5, 1.0);
             a.xyz /= a.w;
@@ -6522,7 +7380,7 @@ vec3 rtrTemporal(ivec2 px, vec3 res, vec3 mu, vec3 sigma, vec3 P, vec3 Ng, vec3 
             if (abs(den) > 1e-6 * length(dl))
             {
                 const vec3 Q = a.xyz + dl * (dot(Ng, Pr - a.xyz) / den);
-                const float ew = (ssr.taa_prev_vp * vec4(Q, 1.0)).w;
+                const float ew = (ssr.views[CLEAN_VIEW].taa_prev_vp * vec4(Q, 1.0)).w;
                 h = imageLoad(uRtHist, ivec3(hp, int(par ^ 1u)));
                 ok = ew > 1e-3 && h.a > 0.01 && abs(h.a - ew) < 0.02 * ew + 0.05;
             }
@@ -6561,7 +7419,7 @@ void DEFER_MAIN()
     if (m.z == 0u) return;
     CLK_INV();
     CLK_SURF();
-    const vec4 g2 = texelFetch(uG2, px, 0);
+    const vec4 g2 = defTexel(uG2, px);
     float glow;
     bool noFade;
     const SurfaceLit s = deferSurface(px, g2, glow, noFade);
@@ -6808,12 +7666,15 @@ void DEFER_MAIN()
     const ivec2 hsz = (full + 1) / 2;
     if (hp.x >= hsz.x || hp.y >= hsz.y) return;
     const ivec2 px = min(hp * 2 + 1, full - 1);   // (the block's centre ray passes its corner pixel)
+#ifdef CLEAN_RT_HANG_BEACON
+    rtBcLane(uint(hp.y) * uint(hsz.x) + uint(hp.x), px);   // (#1128: the beacon names the render pixel)
+#endif
     const vec2 spx = vec2(hp * 2) + 1.0;
     g_frag_xy = vec2(px) + 0.5;
     const vec3 cam = pc.u_cam_time.xyz;
     const vec3 dir = rtrViewDir(spx);
     // The opaque surface along the ray (the forward layers lie in front of it); sky: far.
-    const float d = texelFetch(uDepthG, px, 0).r;
+    const float d = defTexel(uDepthG, px).r;
     const float tmaxCam = d > 0.0 ? length(rtrPositionAt(px) - cam) * 0.999 : 4096.0;
     const float pa = rtrPixelAngle(spx) * 2.0;
     rt_cone_width0 = 0.0;
@@ -6989,10 +7850,10 @@ float pdnInfoSpecA(float hitDist, float nCand, vec3 den, bool fix)
 float pdnViewZ(ivec2 q)
 {
     q = clamp(q, ivec2(0), ivec2(int(g_draw_push.width), int(g_draw_push.height)) - 1);
-    const float d = texelFetch(uDepthG, q, 0).r;
+    const float d = defTexel(uDepthG, q).r;
     if (!(d > 0.0)) return -1.0;   // (reversed-Z: 0 = cleared / far)
     const vec2 ndc = (vec2(q) + 0.5) / vec2(float(g_draw_push.width), float(g_draw_push.height)) * 2.0 - 1.0;
-    const vec4 h = g_draw_push.inv_vp_rel * vec4(ndc, d, 1.0);
+    const vec4 h = deferInvVP * vec4(ndc, d, 1.0);
     const vec3 P = pc.u_cam_time.xyz + h.xyz / h.w;
     return dot(P - linfo.cam_pos.xyz, linfo.cam_fwd.xyz);
 }
@@ -7112,7 +7973,7 @@ vec3 pdnShadow(uint li, vec3 P, vec3 Ng, vec2 npx)
 // The previous-frame denoiser texel coordinate of world point X (camera-only) - m; w: its view depth then.
 vec2 pdnPrevDelta(vec3 X, ivec2 m, vec2 D, out float pw)
 {
-    const vec4 c = ssr.taa_prev_vp * vec4(X - ssr.cam_origin.xyz, 1.0);
+    const vec4 c = ssr.views[CLEAN_VIEW].taa_prev_vp * vec4(X - ssr.cam_origin.xyz, 1.0);
     pw = 0.0;
     if (!(c.w > 1e-4)) return vec2(0.0);
     pw = c.w;
@@ -7145,16 +8006,16 @@ vec2 pdnPrevDelta(vec3 X, ivec2 m, vec2 D, out float pw)
 vec3 pdnWorldAtD(vec2 spx, float d)
 {
     const vec2 ndc = spx / vec2(float(g_draw_push.width), float(g_draw_push.height)) * 2.0 - 1.0;
-    const vec4 h = g_draw_push.inv_vp_rel * vec4(ndc, d, 1.0);
+    const vec4 h = deferInvVP * vec4(ndc, d, 1.0);
     return pc.u_cam_time.xyz + h.xyz / h.w;
 }
 // clean_rt_shadow_mask.comp maskTangent on the G-buffer depth (same rule, same tolerances).
 bool pdnTangent(ivec2 rp, ivec2 o, vec2 cpx, float d, vec3 P, float dtol, ivec2 mx, out vec3 t)
 {
-    const float dn1 = texelFetch(uDepthG, clamp(rp - o, ivec2(0), mx), 0).r;
-    const float dp1 = texelFetch(uDepthG, clamp(rp + o, ivec2(0), mx), 0).r;
-    const float dn2 = texelFetch(uDepthG, clamp(rp - 2 * o, ivec2(0), mx), 0).r;
-    const float dp2 = texelFetch(uDepthG, clamp(rp + 2 * o, ivec2(0), mx), 0).r;
+    const float dn1 = defTexel(uDepthG, clamp(rp - o, ivec2(0), mx)).r;
+    const float dp1 = defTexel(uDepthG, clamp(rp + o, ivec2(0), mx)).r;
+    const float dn2 = defTexel(uDepthG, clamp(rp - 2 * o, ivec2(0), mx)).r;
+    const float dp2 = defTexel(uDepthG, clamp(rp + 2 * o, ivec2(0), mx)).r;
     const float sp = abs(dp1 - d), sn = abs(d - dn1);
     const float tol = dtol + 0.125 * min(sp, sn);
     const float ep = abs(d - 2.0 * dp1 + dp2), en = abs(d - 2.0 * dn1 + dn2);
@@ -7213,7 +8074,7 @@ vec3 pdnFacetNormal(ivec2 rp, vec3 P, vec3 cam, vec3 gb, out bool onPlane)
     if (!have)
     {
         const vec2 cpx = vec2(rp) + 0.5;
-        const float d = texelFetch(uDepthG, rp, 0).r;
+        const float d = defTexel(uDepthG, rp).r;
         const ivec2 mx = ivec2(int(g_draw_push.width), int(g_draw_push.height)) - 1;
         const float vz = max(dot(P - linfo.cam_pos.xyz, linfo.cam_fwd.xyz), 1e-3);
         const float pm = max(max(abs(P.x), abs(P.y)), abs(P.z));
@@ -7238,7 +8099,7 @@ vec3 pdnFacetNormal(ivec2 rp, vec3 P, vec3 cam, vec3 gb, out bool onPlane)
 vec3 pdnWorldAt(vec2 spx, float d)
 {
     const vec2 ndc = spx / vec2(float(g_draw_push.width), float(g_draw_push.height)) * 2.0 - 1.0;
-    const vec4 h = g_draw_push.inv_vp_rel * vec4(ndc, d, 1.0);
+    const vec4 h = deferInvVP * vec4(ndc, d, 1.0);
     return pc.u_cam_time.xyz + h.xyz / h.w;
 }
 // Radical inverse of i in base b (Halton; the #841 footprint jitter, i in 1..16).
@@ -7306,7 +8167,7 @@ vec3 pdnSunTrace(SurfaceLit s, ivec2 rp, vec3 P, vec3 Ng, float vz, uint frame, 
     const vec3 cam = pc.u_cam_time.xyz;
     const float time = pc.u_cam_time.w;
     const vec2 cpx = vec2(rp) + 0.5;
-    const float d = texelFetch(uDepthG, rp, 0).r;
+    const float d = defTexel(uDepthG, rp).r;
     // world size of one render pixel at this depth (penumbra widths -> texels)
     const float pxw = max(length(pdnWorldAt(cpx + vec2(1.0, 0.0), d) - P), 1e-6);
     // the view-slope origin offset (RenderVKRTShadowSlopeBias; rtr2.y = the footprint fraction)
@@ -7326,7 +8187,7 @@ vec3 pdnSunTrace(SurfaceLit s, ivec2 rp, vec3 P, vec3 Ng, float vz, uint frame, 
         bool on = true;
         if (q != rp)
         {
-            const float dq = texelFetch(uDepthG, q, 0).r;
+            const float dq = defTexel(uDepthG, q).r;
             on = dq > 0.0 && abs(dot(pdnWorldAt(vec2(q) + 0.5, dq) - P, Ng)) <= 0.1 * pxw + 1e-4 * camd;
         }
         if (on)
@@ -7409,7 +8270,8 @@ vec3 pdnSunTrace(SurfaceLit s, ivec2 rp, vec3 P, vec3 Ng, float vz, uint frame, 
 //          sum W and the R_e strongest, walk 2 (only where M > R_e) the stratified samples and the
 //          aggregate of the rest -- except the LONG CELLS:
 //   mode 9 LONG CELLS: one workgroup per cell with more than EM_LONG_LIST candidates (mode 11's list),
-//          its pairs split over the lanes. ----
+//          its pairs split over the lanes; (#1108) on a GATHER build every cell of the grid, a workgroup
+//          each, its candidates the reaching record groups' records split over the lanes (mode 7 none). ----
 shared uint s_emList[64];
 shared vec4 s_emCr[64], s_emPl[64], s_emLa[64];
 shared vec4 s_emV0[64], s_emE1[64], s_emE2[64], s_emCol[64];   // (walk 2: the rest's aggregate)
@@ -7418,6 +8280,7 @@ shared uint s_entList[64];   // (the cell build: the record groups near the work
 shared uint s_entN;
 shared uint s_emScan[64];
 shared uint s_emNeed;
+shared uint s_emTk;          // (mode 1: the takeover rows' triangles)
 shared uint s_emGLo[3], s_emGHi[3];
 // (#91 LIGHT TAKEOVER, clean_regir.glsl) Instance id's row in the takeover table (REGIR_EM_NONE: none);
 // li its point light. The rows are sorted by instance: a binary search (only for qualifying emitters).
@@ -7634,6 +8497,25 @@ void emEntBuild()
         const vec3 l = h * vec3(length(Wm[0].xyz), length(Wm[1].xyz), length(Wm[2].xyz));
         const float r = length(l);
         if (any(isnan(c)) || any(isinf(c)) || !(r < 1e4)) continue;
+        // ---- OUTSIDE THE GRID (far emitters): the world AABB of the oriented box (every surface point of the
+        //      emitter lies in it AND in the sphere (c, r)). The light reaches at most `range` <= rangeMax from a
+        //      surface point (the range formula below, hard-capped at rangeMax), so an emitter whose AABB is
+        //      farther than reach from the grid's outermost level box [glo, ghi] (the clipmap's current extent:
+        //      rg.origin, shifted by mode 12 with the camera) cannot light any cell and is not listed -- it
+        //      neither takes an entry nor counts toward the triangle cap (a far emissive build otherwise
+        //      pushes the whole rest onto a coarser subset stride). Re-evaluated every build, so an emitter
+        //      the grid moves toward is admitted the build its reach touches the box. A LIGHT TAKEOVER row
+        //      (inside the grid by emTakeLightOk) is exempt: the exact test below runs for the others. ----
+        const uint nTriAll = (geo.w & 0x7FFFFFFFu) / 3u;
+        const vec3 ext = abs(Wm[0].xyz) * h.x + abs(Wm[1].xyz) * h.y + abs(Wm[2].xyz) * h.z;
+        const vec3 gapB = max(max(glo - (c + ext), (c - ext) - ghi), vec3(0.0));
+        const vec3 gapS = clamp(c, glo, ghi) - c;
+        // (the range's upper bound alone, before the area samples; a takeover candidate skips this early out)
+        if (!takeOn && (dot(gapB, gapB) >= rangeMax * rangeMax || dot(gapS, gapS) >= (rangeMax + r) * (rangeMax + r)))
+        {
+            if (statOn) { atomicAdd(rg_cells[emCcHdr(EM_CCH_OUT)].x, 1u); atomicAdd(rg_cells[emCcHdr(EM_CCH_OUT)].y, nTriAll); }
+            continue;
+        }
         // ---- the RANGE (one for the whole emitter): a white surface facing it at distance d reflects
         //      ~ lum x area / (pi d^2) -> the cutoff; the area from up to 32 strided triangles ----
         const uint nTri = (geo.w & 0x7FFFFFFFu) / 3u;
@@ -7660,9 +8542,12 @@ void emEntBuild()
         if (!take)
         {
             {   // (a takeover light is wholly inside the grid: this test is for the others)
-                const vec3 dq = clamp(c, glo, ghi) - c;
                 const float rr = range + r;
-                if (!(dot(dq, dq) < rr * rr)) continue;   // (its range misses the grid)
+                if (!(dot(gapS, gapS) < rr * rr) || !(dot(gapB, gapB) < range * range))
+                {   // (its range misses the grid)
+                    if (statOn) { atomicAdd(rg_cells[emCcHdr(EM_CCH_OUT)].x, 1u); atomicAdd(rg_cells[emCcHdr(EM_CCH_OUT)].y, nTri); }
+                    continue;
+                }
             }
             e = atomicAdd(rg.rs_em_cfg.w, 1u);
             if (e >= REGIR_EM_INST_CAP) { atomicAdd(rg.rs_em.y, nTri); continue; }   // (dropped: keeps its GI emission)
@@ -7741,23 +8626,60 @@ void emBlockAlloc()
     const uint nEnt = emEntCount();
     const uint cap = min(rg.rs_em.z, REGIR_EM_CAP);
     const uint T = rg.rs_em_cfg.y;
-    // the SUBSET stride: 1 while every emitter's triangles fit the cap, else one s for all (keeping a
-    // reserve of one record per emitter for each block's rounding up)
-    const uint room = max(cap > nEnt ? cap - nEnt : 0u, cap / 2u);
-    const uint s = T <= cap ? 1u : (T + room - 1u) / max(room, 1u);
-    if (lid == 0u) atomicOr(rg.rs_em.w, nEnt << 1u);   // (stats; bit 0, the parity, unchanged)
-    if (lid == 0u) rg_cells[emCcHdr(0u)].x += 1u;      // (#1006: this build's stamp -- every later mode reads it)
+    // (LIGHT TAKEOVER, clean_regir.glsl SUBSET STRIDE) the takeover rows -- entries [0, nT), laid out first --
+    // keep EVERY triangle (stride 1): a lamp's glass carries its point light's power, and a 1-in-s subset of a
+    // few triangles moves that light to a part of the glass (or, with off >= its triangles, takes none: the
+    // light is not taken and the point light comes back). Their triangles leave the cap first (while they
+    // take at most half of it; past that every row strides as before, and the verdict refuses what is dropped).
+    const uint nT = (rg.rs_em_cfg.z & EM_F_TAKE) != 0u ? min(min(rg.rs_em_take_cfg.x, REGIR_EM_TAKE_N), nEnt) : 0u;
+    if (lid == 0u) s_emTk = 0u;
+    barrier();
+    {
+        uint tk = 0u;
+        for (uint e = lid; e < nT; e += 64u) tk += rg_cells[emEntWord(e)].y;
+        tk = subgroupAdd(tk);
+        if (subgroupElect() && tk != 0u) atomicAdd(s_emTk, tk);
+    }
+    barrier();
+    const uint Tt = s_emTk;
+    const bool tkExact = nT != 0u && Tt <= cap / 2u;
+    const uint nTe = tkExact ? nT : 0u;
+    const uint capR = cap - (tkExact ? Tt : 0u);
+    const uint Tr = T - min(tkExact ? Tt : 0u, T);
+    const uint nEntR = nEnt - nTe;
+    // the SUBSET stride of the rest: 1 while their triangles fit, else one s for all (keeping a reserve of one
+    // record per emitter for each block's rounding up) -- with HYSTERESIS (clean_regir.glsl SUBSET STRIDE): a
+    // step re-subsets every emitter at once, so a step up is immediate (it must fit) and a step down waits
+    // until the triangles fit the lower stride with a quarter to spare (CC_HDR [EM_CCH_STRIDE]: the last
+    // build's stride, valid while it names the last build's stamp)
+    const uint room = max(capR > nEntR ? capR - nEntR : 0u, capR / 2u);
+    const uint sNeed = Tr <= capR ? 1u : (Tr + room - 1u) / max(room, 1u);
+    const uint Tm = Tr + Tr / 4u;
+    const uint sMargin = Tm <= capR ? 1u : (Tm + room - 1u) / max(room, 1u);
+    const uint stamp0 = rg_cells[emCcHdr(0u)].x;
+    const uvec2 hs = rg_cells[emCcHdr(EM_CCH_STRIDE)];
+    const uint sLast = (hs.y == stamp0 && hs.x >= 1u) ? hs.x : sNeed;
+    const uint s = sNeed >= sLast ? sNeed : min(sLast, sMargin);
+    barrier();   // (every lane read the stamp and the last stride before lane 0 writes them)
+    if (lid == 0u)
+    {
+        atomicOr(rg.rs_em.w, nEnt << 1u);                       // (stats; bit 0, the parity, unchanged)
+        rg_cells[emCcHdr(0u)].x = stamp0 + 1u;                 // (#1006: this build's stamp -- every later mode reads it)
+        rg_cells[emCcHdr(EM_CCH_STRIDE)] = uvec2(s, stamp0 + 1u);
+        rg.rs_em_take_cfg.w = s;                               // (stats: the host notes a stride step)
+    }
     uint run = 0u;   // (uniform) the records of the earlier steps' blocks
     for (uint c = 0u; c < nEnt; c += 64u)
     {
         const uint e = c + lid;
         uvec2 w0 = uvec2(0u);
-        uint off = 0u, kept = 0u;
+        uint off = 0u, kept = 0u, se = 1u;
         if (e < nEnt)
         {
             w0 = rg_cells[emEntWord(e)];   // instance, triangles
-            off = s > 1u ? regirHash(w0.x ^ 0x51ED27u) % s : 0u;   // (fixed per object: no frame noise)
-            kept = w0.y > off ? (w0.y - off + s - 1u) / s : 0u;
+            se = e < nTe ? 1u : s;         // (a takeover row: every triangle)
+            off = se > 1u ? regirHash(w0.x ^ 0x51ED27u) % se : 0u;   // (fixed per object: no frame noise)
+            kept = w0.y > off ? (w0.y - off + se - 1u) / se : 0u;
         }
         barrier();
         s_emScan[lid] = kept;
@@ -7777,7 +8699,7 @@ void emBlockAlloc()
         {
             const uint eb = emEntWordP(par, e);
             rg_cells[eb + 1u] = uvec2(first, k);
-            rg_cells[eb + 2u] = uvec2(s, off);
+            rg_cells[eb + 2u] = uvec2(se, off);
             if (k > 0u)
             {
                 atomicAdd(rg.rs_em.x, k);
@@ -7806,7 +8728,7 @@ void emBlockAlloc()
                     {
                         const uint pb = emEntWordP(par ^ 1u, pe);
                         const uvec2 pk = rg_cells[pb + 1u];
-                        if (rg_cells[pb] == w0 && rg_cells[pb + 2u] == uvec2(s, off) && pk.y == k
+                        if (rg_cells[pb] == w0 && rg_cells[pb + 2u] == uvec2(se, off) && pk.y == k
                             && pk.x < REGIR_EM_CAP && REGIR_EM_CAP - pk.x >= k
                             && rg_cells[pb + 11u] == rg_cells[eb + 11u] && (rg_cells[pb + 12u].y & EM_E_DYN) == 0u)
                             reuse = pk.x;
@@ -8347,7 +9269,8 @@ void emListScan()
 // pairs this build (rs_em_cache.z) and EM_C_GATHER past REGIR_EM_PAIR_CAP; then (#1006) the build's verdict:
 // FULL (CC_HDR [40].x), the budget's threshold age and quota (oldest first: the histogram from the oldest
 // bin down), the indirect dispatch of mode 7 (mode 11 counts its groups) -- or, on a gather build, the
-// cache made invalid (the next build is FULL) and mode 7's whole grid.
+// cache made invalid (the next build is FULL) and the whole grid to mode 9 (#1108; mode 7's with the long
+// cells off).
 void emListSums()
 {
     const uint lid = gl_LocalInvocationIndex;
@@ -8389,9 +9312,11 @@ void emListSums()
         rg_cells[emCcHdr(40u)].x = full ? 1u : 0u;
         if (full) atomicAdd(rg_cells[emCcHdr(EM_CCH_STAT + 3u)].y, 1u);
         if (gather)
-        {   // (mode 7 gathers over the whole grid, mode 11 does nothing; the next build starts over)
+        {   // (mode 11 does nothing; the next build starts over) (#1108) with the LONG CELLS on, mode 9 builds
+            // every cell of the grid -- a workgroup per cell, its candidates split over the lanes (emLongCells) --
+            // and mode 7 none (0 groups); else mode 7 gathers over the whole grid (a lane per cell)
             rg_cells[emCcHdr(0u)].y = 0u;
-            rg_cells[emCcHdr(18u)] = uvec2(regirLevels() * (REGIR_CELLS_PER_LEVEL / 64u), 1u);
+            rg_cells[emCcHdr(18u)] = uvec2(emLongOn() ? 0u : regirLevels() * (REGIR_CELLS_PER_LEVEL / 64u), 1u);
             rg_cells[emCcHdr(19u)].x = 1u;
         }
         else
@@ -8895,7 +9820,22 @@ void occResolve()
     }
 }
 // ---- (#986) LONG CELLS (clean_regir.glsl): mode 9, one workgroup per long cell (grid-stride over mode
-//      4's list) -- emCellBuild's result for that cell with its pairs split over the 64 lanes ----
+//      11's list) -- emCellBuild's result for that cell with its pairs split over the 64 lanes.
+//      (#1108 GATHER) on a gather build (no lists: the pairs passed the cap) EVERY cell of the grid, its
+//      candidates the records of each group whose light box reaches the cell (emLongCand) -- the same
+//      candidates and result as mode 7's gather walk, without its serial per-lane tail ----
+// Lane lid's candidate in step k of a cell's walk: the list's pair lid + 64 k, or (gather) record 64 k + lid
+// when record group k's light box reaches the cell box [lo, hi] (uniform per k: one group per step).
+// REGIR_EM_NONE: none this step.
+uint emLongCand(bool lists, uint k, uint lid, uint lst, uint ln, vec3 lo, vec3 hi)
+{
+    if (lists)
+    {
+        const uint i = k * 64u + lid;
+        return i < ln ? emPairGet(lst + i) : REGIR_EM_NONE;
+    }
+    return emGrpReach(k, lo, hi) ? k * 64u + lid : REGIR_EM_NONE;
+}
 shared float s_lgT[64u * REGIR_EM_SLOTS_MAX];   // each lane's R strongest (walk 1)
 shared uint  s_lgS[64u * REGIR_EM_SLOTS_MAX];
 shared uint  s_lgN[64];
@@ -8914,31 +9854,43 @@ shared float s_smpW[REGIR_EM_SLOTS_MAX];
 void emLongCells()
 {
     const uint lid = gl_LocalInvocationIndex;
-    if (!emListsOn() || !emLongOn()) return;   // (uniform: header words)
-    const uint nLong = min(rg_cells[REGIR_EM_LONG_BASE].x, REGIR_EM_NCELLS);
+    if (!emLongOn()) return;   // (uniform: header words)
+    // (#1108) EM_F_LONG is set with the lists only (never with the host's EM_F_GATHER): no lists here is mode
+    // 5's verdict -- a gather build, every cell of the grid this mode's
+    const bool lists = emListsOn();
+    const uint nLong = lists ? min(rg_cells[REGIR_EM_LONG_BASE].x, REGIR_EM_NCELLS)
+                             : regirLevels() * REGIR_CELLS_PER_LEVEL;
     const uint nRec = emCount();
+    const uint nGrp = (nRec + 63u) / 64u;
     const uint par = emParity();
     const uint R = emSlots();
     const uint nWG = gl_NumWorkGroups.x * gl_NumWorkGroups.y;
     [[dont_unroll]] for (uint c = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x; c < nLong; c += nWG)
     {
-        const uint cell = emLongGet(c);
+        const uint cell = lists ? emLongGet(c) : c;
         if (!emCellInUse(cell)) continue;   // (uniform: one cell per workgroup; #1006 an overlay cell too)
         vec3 lo, hi;
         emCellBoxAny(cell, lo, hi);
-        const uvec2 lc = rg_cells[emLCellWord(cell)];
-        const uint lst = rg_cells[emLBlkWord(cell >> 6u)].y + lc.y;
-        uint ln = min(lc.x & 0xFFFFu, lc.x >> 16u);
-        ln = lst < REGIR_EM_PAIR_CAP ? min(ln, REGIR_EM_PAIR_CAP - lst) : 0u;
-        // ---- walk 1 (lane l: pairs l, l + 64, ...): this lane's M, W and R strongest ----
+        uint lst = 0u, ln = 0u;
+        if (lists)
+        {
+            const uvec2 lc = rg_cells[emLCellWord(cell)];
+            lst = rg_cells[emLBlkWord(cell >> 6u)].y + lc.y;
+            ln = min(lc.x & 0xFFFFu, lc.x >> 16u);
+            ln = lst < REGIR_EM_PAIR_CAP ? min(ln, REGIR_EM_PAIR_CAP - lst) : 0u;
+        }
+        // the walks' steps (uniform): the list's 64-pair steps, or (gather) one per record group
+        const uint nIt = lists ? (ln + 63u) / 64u : nGrp;
+        // ---- walk 1 (lane l: pairs l, l + 64, ... / its record of each group reaching the cell): this lane's
+        //      M, W and R strongest ----
         float W = 0.0;
         uint M = 0u, nTop = 0u;
         uint topS[REGIR_EM_SLOTS_MAX];
         float topT[REGIR_EM_SLOTS_MAX];
         [[unroll]] for (uint k = 0u; k < REGIR_EM_SLOTS_MAX; ++k) { topS[k] = 0u; topT[k] = 0.0; }
-        [[dont_unroll]] for (uint i = lid; i < ln; i += 64u)
+        [[dont_unroll]] for (uint it = 0u; it < nIt; ++it)
         {
-            const uint sl = emPairGet(lst + i);
+            const uint sl = emLongCand(lists, it, lid, lst, ln, lo, hi);
             if (sl >= nRec) continue;
             vec4 cr, pl, la;
             emTriCompact(emLoad(par, sl), cr, pl, la);
@@ -9024,9 +9976,9 @@ void emLongCells()
         vec3 aggV = vec3(0.0), aggC = vec3(0.0);
         float aggS = 0.0, cum = off, lastT = 0.0;
         uint lastS = REGIR_EM_NONE;
-        [[dont_unroll]] for (uint i = lid; i < ln && rest; i += 64u)
+        [[dont_unroll]] for (uint it = 0u; it < nIt && rest; ++it)
         {
-            const uint sl = emPairGet(lst + i);
+            const uint sl = emLongCand(lists, it, lid, lst, ln, lo, hi);
             if (sl >= nRec) continue;
             const EmTri tr = emLoad(par, sl);
             vec4 cr, pl, la;
@@ -9126,7 +10078,7 @@ void DEFER_MAIN()
     const ivec2 rp = clamp(ivec2((vec2(m) + 0.5 + J) * r), ivec2(0), ivec2(R) - 1);
     g_frag_xy = vec2(rp) + 0.5;
     CLK_INV();
-    const vec4 g2 = texelFetch(uG2, rp, 0);
+    const vec4 g2 = defTexel(uG2, rp);
     bool surf = deferHasSurface(g2);
     float glow;
     bool noFade;
@@ -9281,7 +10233,13 @@ void DEFER_MAIN()
 // (#1031) the split's walk kernels trace one light kind each, and the opaque-first switch: SH_KIND_* /
 // RT_WALK_OFIRST, defined before clean_draw_common.glsl (the shared walk library compiles by them)
 // (#1031) pass 15 runs 8 x 8 workgroups: shadowSampleVis parks its rays' inputs in shared memory
+// (#1039 bit 8: the queue's walk kernels reload them from the request -- SH_PARK_VQ, no shared memory; its
+//  producers walk nothing and park nothing)
+#if CLEAN_VQ_SHADOW == 2
+#define SH_PARK_VQ
+#elif CLEAN_VQ_SHADOW != 1
 #define SH_PARK
+#endif
 #include "clean_shadow_core.glsl"
 
 // The ray-traced projector li as a light sample: its apex, soft radius, axis + near plane, the
@@ -9378,7 +10336,7 @@ bool pdnSunSample(SurfaceLit s, ShadowRecv R, float d, float vz, uint frame, flo
         bool on = true;
         if (q != rp)
         {
-            const float dq = texelFetch(uDepthG, q, 0).r;
+            const float dq = defTexel(uDepthG, q).r;
             on = dq > 0.0 && abs(dot(pdnWorldAt(vec2(q) + 0.5, dq) - P, Ng)) <= 0.1 * pxw + 1e-4 * camd;
         }
         if (on)
@@ -9453,6 +10411,11 @@ void rsEmSample(uint es, vec3 P, vec3 N, vec3 xi, out ShadowSample S)
     S.nearClip = clamp(0.002 * length(T - P), 0.005, 0.05);
     S.bias = rg.rs_params.w;
     S.flags = SH_POSITIONAL | SH_SPHERE | (rtSplitOn() ? SH_SPLIT : 0u);
+    // (LIGHT TAKEOVER) a taken-over lamp's glass keeps its point light's OWN-FIXTURE rule around the sampled
+    // point (rt_fix_P = S.pos): the shade, frame or outer glass whose small box holds the point does not
+    // shadow its own light -- without it a random share of the rays ended on the lamp itself (constant
+    // crawling noise on everything the lamp lights)
+    if ((t.flags & EM_R_TAKE) != 0u) S.flags |= SH_FIXTURE;
     S.tmax = 0.0;
     S.nRays = 1u;
     S.noise = vec2(0.0);
@@ -9668,6 +10631,16 @@ bool occEvidence(bool traced, vec3 vis, vec3 P)
     //  edge would stop a floor near the shared wall from ever noting the wall)
     return rt_block_t < 1e29 && rt_block_t >= clamp(occEdge(occLevel(P)), OCC_BLOCK_MIN, OCC_BLOCK_MAX);
 }
+// (#1039, RenderVKVisQueue bit 8) occEvidence of a TRACED sample in two halves: the producer's (the receiver's
+// blocker minimum: it knows P) and the walk's (the visibility + rt_block_t). The same rules as above: keep the
+// two in step.
+float occBlockMin(vec3 P) { return clamp(occEdge(occLevel(P)), OCC_BLOCK_MIN, OCC_BLOCK_MAX); }
+bool occEvidenceTraced(vec3 vis, float blockMin)
+{
+    if (!occSoft()) return true;
+    if (max(max(vis.r, vis.g), vis.b) > OCC_VIS_MIN) return true;
+    return rt_block_t < 1e29 && rt_block_t >= blockMin;
+}
 
 // ---- (#1031) THE TEXEL'S LIGHT-SAMPLE LIST: the evaluation list (the fused kernel's locals, or
 //      SELECT's descriptor) and its j-th LIGHT sample (the sun is not one of them) -- ONE definition
@@ -9808,7 +10781,7 @@ bool pdnVisRecv(ivec2 m, ivec2 D, uint frame, out SurfaceLit s, out vec3 P, out 
     const vec2 J = (ssr.taa_params.w > 0.5 && D.x < int(g_draw_push.width)) ? ssr.taa_jitter.xy : vec2(0.0);
     const ivec2 rp = clamp(ivec2((vec2(m) + 0.5 + J) * r), ivec2(0), ivec2(R2) - 1);
     g_frag_xy = vec2(rp) + 0.5;
-    const vec4 g2 = texelFetch(uG2, rp, 0);
+    const vec4 g2 = defTexel(uG2, rp);
     P = vec3(0.0); vz = 0.0; dR = 0.0; ngOnPlane = false;
     if (!deferHasSurface(g2)) return false;
     float glow;
@@ -9822,7 +10795,7 @@ bool pdnVisRecv(ivec2 m, ivec2 D, uint frame, out SurfaceLit s, out vec3 P, out 
     s.cel = s.cel && specCelOn();
     g_cel = s.cel;
     const vec3 cam = pc.u_cam_time.xyz;
-    dR = texelFetch(uDepthG, rp, 0).r;
+    dR = defTexel(uDepthG, rp).r;
     const vec3 Nf = pdnFacetNormal(rp, P, cam, Ng, ngOnPlane);
     Rv.P = P; Rv.Ng = Nf; Rv.cam = cam; Rv.rp = rp;
     Rv.pxw = max(length(pdnWorldAt(vec2(rp) + 0.5 + vec2(1.0, 0.0), dR) - P), 1e-6);
@@ -9838,18 +10811,400 @@ bool pdnVisRecv(ivec2 m, ivec2 D, uint frame, out SurfaceLit s, out vec3 P, out 
 }
 #endif
 
+#if CLEAN_VQ_SHADOW != 0
+// ---- (#1039, RenderVKVisQueue bit 8) THE SHADOW CORE QUEUE (the header's THE SHADOW CORE THROUGH THE VISIBILITY
+//      QUEUE; clean_vis_queue.glsl SHADOW CORE REQUESTS): region 4 for the light samples (VIS: push rtr3.xy --
+//      its rtr3.w is the visibility slots), region 3 for the sun (SUNVIS: rtr3.zw -- its rtr3.xy the
+//      certificates) ----
+#include "clean_vis_queue.glsl"
 #if CLEAN_SHADOW_STAGE == SH_STAGE_VIS
+VqRegion vqShRegion() { return VqRegion(g_draw_push.rtr3.xy); }
+#else
+VqRegion vqShRegion() { return VqRegion(g_draw_push.rtr3.zw); }
+#endif
+// The terminator post (rtTerminatorPost) the walk applies, from the receiver rules' globals (rt_term_*) the
+// producer holds: the debug view's colour (independent of the visibility), mix(1, vis, t), or none.
+void vqShPostOf(vec3 l, out float tg, out uint flags)
+{
+    tg = 0.0;
+    flags = 0u;
+    if (rtTermDebug())
+    {
+        const vec3 c = rtTerminatorPost(vec3(0.0), l);   // (r, b in {0, 0.5, 1}; g the lift)
+        tg = c.g;
+        flags = (c.r > 0.5 ? VQ_SH_TDBG_R : 0u) | (c.b >= 1.0 ? VQ_SH_TDBG_B1 : (c.b > 0.0 ? VQ_SH_TDBG_BH : 0u));
+    }
+    else if (rt_term_on)
+    {
+        tg = rtTerminatorPostT(l);
+        flags = VQ_SH_TERM;
+    }
+}
+vec3 vqShPost(vec3 vis, float tg, uint bits)
+{
+    if (rtTermDebug())
+        return vec3((bits & VQ_SH_TDBG_R) != 0u ? 1.0 : 0.0, tg,
+                    (bits & VQ_SH_TDBG_B1) != 0u ? 1.0 : ((bits & VQ_SH_TDBG_BH) != 0u ? 0.5 : 0.0));
+    return (bits & VQ_SH_TERM) != 0u ? mix(vec3(1.0), vis, tg) : vis;
+}
+// The walk state shadowSampleSetup leaves for the rays (the footprint / cone, the foliage rules, the self-shadow
+// owner), restored in the walk kernel as the producer had it (footOn / footA / footB: rtSetShadowFootprint's;
+// width0: the cone fallback).
+void vqShWalkBegin(bool footOn, vec3 footA, vec3 footB, float width0, uint owner, vec3 selfP, bool fol)
+{
+    if (fol) rtFolBegin();
+    rt_anim_time   = pc.u_cam_time.w;
+    rt_cone_spread = 0.0;
+    rt_cone_width0 = width0;
+    rt_cone_aniso  = 1.0;
+    rt_foot_on = footOn;
+    rt_foot_a = footA;
+    rt_foot_b = footB;
+#ifdef RT_NO_FOOT_LOD
+    // (shadowSampleSetup's ISOTROPIC SHADOW LOD, line for line)
+    if (rt_foot_on)
+    {
+        rt_cone_width0 = length(rt_foot_a);
+        rt_foot_on = false;
+    }
+#endif
+    g_rt_self_set = true;   // (rtSelfBegin's state: the producer's, possibly resolved by its probes)
+    rt_self_owner = owner;
+    rt_self_P = selfP;
+    rt_self_cam = pc.u_cam_time.xyz;
+    rt_block_t = 1e30;
+}
+#if CLEAN_VQ_SHADOW == 2
+vec3 vqShCam() { return pc.u_cam_time.xyz; }   // (RT_SELF_CAM)
+vec4 vqShFolP() { return ssr.foliage_rt; }      // (RT_FOL_P)
+#endif
+uint vqShOwner16(uint o) { return o == RT_SELF_UNKNOWN ? VQ_SH_OWNER_UNKNOWN : min(o, VQ_SH_OWNER_UNKNOWN - 1u); }
+uint vqShOwnerOf16(uint o) { return o == VQ_SH_OWNER_UNKNOWN ? RT_SELF_UNKNOWN : o; }
+#if CLEAN_VQ_SHADOW == 2
+// SH_PARK_VQ: this lane's request (its first word) -- shadowSampleRays rebuilds the sample's ray-generation
+// inputs from it before every ray (compact requests: the rest is rebuilt from the texel / the light, below)
+uint g_vqsh_w = 0u;
+void vqShSetW(uint w) { g_vqsh_w = w; }
+uint vqShW() { return g_vqsh_w; }
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer VqShParked { uvec4 q[]; };
+VqShParked vqShParked()
+{
+#if CLEAN_SHADOW_STAGE == SH_STAGE_VIS
+    return VqShParked(g_draw_push.rtr3.xy);
+#else
+    return VqShParked(g_draw_push.rtr3.zw);
+#endif
+}
+// texel tex's coordinates on the denoiser extent D
+ivec2 vqShTexel(uint tex, ivec2 D) { return ivec2(int(tex % uint(D.x)), int(tex / uint(D.x))); }
+// (pdnVisRecv's lines: the noise phase of the frame)
+vec2 vqShNoiseShift(uint frame) { return fract(float(frame) * vec2(0.7548776662, 0.5698402910)); }
+#if CLEAN_SHADOW_STAGE == SH_STAGE_VIS
+// A light sample's receiver P from its request: Pb minus the terminator lift where lifted (exact unlifted).
+vec3 vqShVisP(uvec4 q0, uvec4 q1, uvec4 q2, out vec3 tlift)
+{
+    const vec2 t2 = unpackHalf2x16(q2.y);
+    tlift = vec3(unpackHalf2x16(q2.x), t2.x);
+    const vec3 Pb = uintBitsToFloat(q0.xyz);
+    return (q1.w & SHG_LIFTED) != 0u ? Pb - tlift : Pb;
+}
+// The light sample the producer built (VIS's: pdnProjSample of light li with noise index ni at texel m, or an
+// emitting triangle's point -- rsEmSample's values around the stored point). rt_noise_shift set (the frame's).
+void vqShVisSample(uvec4 q0, uvec4 q1, uvec4 q2, vec3 P, ivec2 m, out ShadowSample S)
+{
+    if ((q1.w & VQ_SH_EM) != 0u)
+    {
+        const vec3 T = uintBitsToFloat(q0.xyz) + vqOctUnpack(q1.z) * uintBitsToFloat(q2.z);
+        S.pos = T;
+        S.radius = 0.0;
+        S.axis = vec3(0.0);
+        S.nearClip = clamp(0.002 * length(T - P), 0.005, 0.05);
+        S.bias = rg.rs_params.w;
+        S.flags = SH_POSITIONAL | SH_SPHERE | (rtSplitOn() ? SH_SPLIT : 0u)
+                | ((q1.w & VQ_SH_EMFIX) != 0u ? SH_FIXTURE : 0u);   // (rsEmSample's takeover rule)
+        S.tmax = 0.0;
+        S.nRays = 1u;
+        S.noise = vec2(0.0);
+        return;
+    }
+    pdnProjSample(q1.x & 255u, vec2(m) + 0.5 + vec2(17.0, 59.0) * float((q1.x >> 8u) & 255u), S);
+}
+#else
+vec2 g_vqsh_nz = vec2(0.0);   // (the sun walk: this sample's disc noise, vqShSunNoise of its texel -- set once per lane)
+// The sun sample's noise at texel m (pdnVisRecv's render pixel, pdnSunSample's pattern: the same lines -- keep in step)
+vec2 vqShSunNoise(ivec2 m, ivec2 D)
+{
+    const vec2 R2 = vec2(float(g_draw_push.width), float(g_draw_push.height));
+    const vec2 r = R2 / vec2(D);
+    const vec2 J = (ssr.taa_params.w > 0.5 && D.x < int(g_draw_push.width)) ? ssr.taa_jitter.xy : vec2(0.0);
+    const ivec2 rp = clamp(ivec2((vec2(m) + 0.5 + J) * r), ivec2(0), ivec2(R2) - 1);
+    const vec2 cpx = vec2(rp) + 0.5;
+    return vec2(fract(projIGN(cpx + vec2(31.0, 7.0)) + rt_noise_shift.x),
+                6.2831853 * fract(projIGN(cpx.yx + vec2(3.0, 91.0)) + rt_noise_shift.y));
+}
+// The receiver at texel m (pdnVisRecv's render pixel and deferPosition: the sun's lazy self-shadow probe)
+vec3 vqShSunP(ivec2 m, ivec2 D)
+{
+    const vec2 R2 = vec2(float(g_draw_push.width), float(g_draw_push.height));
+    const vec2 r = R2 / vec2(D);
+    const vec2 J = (ssr.taa_params.w > 0.5 && D.x < int(g_draw_push.width)) ? ssr.taa_jitter.xy : vec2(0.0);
+    const ivec2 rp = clamp(ivec2((vec2(m) + 0.5 + J) * r), ivec2(0), ivec2(R2) - 1);
+    return deferPosition(rp);
+}
+#endif
+ShRayGen shRayGenUnpark()
+{
+    VqShParked r = vqShParked();
+    const uint w = vqShW();
+    const ivec2 D = ivec2(g_draw_push.rtr.xy + 0.5);
+    rt_noise_shift = vqShNoiseShift(uint(g_draw_push.rtr.z + 0.5));   // (pdnVisRecv's: the sample's noise -- set here, per ray)
+    ShRayGen g;
+    uvec4 q;
+#if CLEAN_SHADOW_STAGE == SH_STAGE_VIS
+    const uvec4 q0 = r.q[w], q1 = r.q[w + 1u], q2 = r.q[w + 2u];
+    vec3 tlift;
+    const vec3 P = vqShVisP(q0, q1, q2, tlift);
+    ShadowSample S;
+    vqShVisSample(q0, q1, q2, P, vqShTexel(q0.w & 0x7FFFFFu, D), S);
+    const uint bits = q1.w;
+    g.pos = S.pos; g.radius = S.radius; g.axis = S.axis; g.nearClip = S.nearClip;
+    g.noiseX = S.noise.x; g.noiseY = S.noise.y;
+    g.Pb = uintBitsToFloat(q0.xyz);
+    g.biasLift = uintBitsToFloat(q2.w);
+    g.Nin = vqOctUnpack(q1.y);
+    g.camd = length(P - pc.u_cam_time.xyz);
+    // (shadowSampleSetup: Nv = rtVisibleSide(Nin): Nin or -Nin; an emitter's sample is hard: no floor)
+    g.Nv = (bits & VQ_SH_NVFLIP) != 0u ? -g.Nin : g.Nin;
+    const bool em = (bits & VQ_SH_EM) != 0u;
+    g.Nf = em ? vec3(0.0) : vqOctUnpack(q1.z);
+    g.efloor = em ? -2.0 : uintBitsToFloat(q2.z);
+    g.tlift = tlift;
+    g.bits = bits & 0x1FFFu;
+    g.n = (bits >> VQ_SH_N_SHIFT) & 31u;
+    // the disc frame (shadowSampleSetup's lines: a point light's disc faces the receiver)
+    g.u = vec3(0.0); g.v = vec3(0.0);
+    if ((g.bits & SHG_HARD) == 0u)
+    {
+        const vec3 toO = S.pos - g.Pb;
+        const float dO = length(toO);
+        const vec3 A = (g.bits & SHG_SPHERE) != 0u ? (dO > 1e-4 ? toO / dO : vec3(0.0, 0.0, 1.0)) : S.axis;
+        g.u = normalize(abs(A.z) < 0.9 ? cross(A, vec3(0.0, 0.0, 1.0)) : cross(A, vec3(1.0, 0.0, 0.0)));
+        g.v = cross(A, g.u);
+    }
+    g.tmax = 0.0;
+    g.oL = vec3(0.0);
+#else
+    // (the sun / moon: the frame's disc constants from the region header, the sample's own words, the noise
+    //  rebuilt from the texel)
+    q = r.q[5u]; g.pos = uintBitsToFloat(q.xyz); g.radius = uintBitsToFloat(q.w);
+    q = r.q[6u]; g.u   = uintBitsToFloat(q.xyz); g.tmax   = uintBitsToFloat(q.w);
+    q = r.q[7u]; g.v   = uintBitsToFloat(q.xyz);
+    q = r.q[w];      g.oL = uintBitsToFloat(q.xyz);
+    g.noiseX = g_vqsh_nz.x; g.noiseY = g_vqsh_nz.y;   // (the walk's set-up computed it once: two floats, not its inputs)
+    q = r.q[w + 1u]; g.Nf = uintBitsToFloat(q.xyz);
+    g.bits = q.w & 0x1FFFu;
+    g.n = (q.w >> VQ_SH_N_SHIFT) & 31u;
+    g.efloor = uintBitsToFloat(r.q[w + 2u].y);
+    g.axis = vec3(0.0); g.nearClip = 0.0; g.Pb = vec3(0.0); g.biasLift = 0.0; g.Nin = vec3(0.0); g.camd = 0.0;
+    g.Nv = vec3(0.0); g.tlift = vec3(0.0);
+#endif
+    g.post = vec3(0.0);   // (the walk applies the producer's post: vqShPost)
+    return g;
+}
+#endif
+#endif
+
+#if CLEAN_SHADOW_STAGE == SH_STAGE_VIS && CLEAN_VQ_SHADOW == 2
+// (#1039 occupancy) THE WALK-STATE HOOKS (above the includes) of the light samples' walk: this lane's request
+// (vqShW()) read where the walk uses it -- the same words and expressions as the set-up below used to fill
+// the globals they replace.
+vec3 vqShSelfP()   // the receiver P (vqShWalkBegin's rt_self_P)
+{
+    VqShParked r = vqShParked();
+    const uint w = vqShW();
+    vec3 tlift;
+    return vqShVisP(r.q[w], r.q[w + 1u], r.q[w + 2u], tlift);
+}
+void vqShFoot(out vec3 a, out vec3 b)   // rtSetShadowFootprint(P, Nin, cam)'s rt_foot_a / _b (read while rt_foot_on)
+{
+    a = vec3(0.0); b = vec3(0.0);
+    rtShadowFootprint(vqShSelfP(), vqOctUnpack(vqShParked().q[vqShW() + 1u].y), pc.u_cam_time.xyz, a, b);
+}
+float vqShConeW0()   // vqShWalkBegin's rt_cone_width0: the cone fallback, or (isotropic LOD) the footprint's minor axis
+{
+    const vec3 P = vqShSelfP();
+#ifdef RT_NO_FOOT_LOD
+    vec3 a = vec3(0.0), b = vec3(0.0);
+    if (rtShadowFootprint(P, vqOctUnpack(vqShParked().q[vqShW() + 1u].y), pc.u_cam_time.xyz, a, b)) return length(a);
+#endif
+    return length(P - pc.u_cam_time.xyz) * 0.001;
+}
+vec3 vqShFixP()   // the sample's S.pos while rt_fix_on (a point light: pdnProjSample's lights[li] centre;
+{                 // a taken-over lamp's emitting triangle: its sampled point, vqShVisSample's T)
+    VqShParked r = vqShParked();
+    const uint w = vqShW();
+    const uvec4 q1 = r.q[w + 1u];
+    if ((q1.w & VQ_SH_EM) != 0u)
+        return uintBitsToFloat(r.q[w].xyz) + vqOctUnpack(q1.z) * uintBitsToFloat(r.q[w + 2u].z);
+    return lights[q1.x & 255u].pos_radius.xyz;
+}
+float vqShFixMax()   // VIS's rule: P in the light grid -> the grid's fixture cap, else the default 0
+{
+    return (vqShParked().q[vqShW() + 1u].w & VQ_SH_CELL) != 0u ? rg.rs_params.y : 0.0;
+}
+// ---- (#1039 bit 8) THE LIGHT SAMPLES' WALK: one lane per request (the producer's indirect dispatch). The
+//      walk state back, the sample's rays (shadowSampleRays: VIS's disc + the translucent split, the own
+//      fixture), the terminator post, then VIS's store: the visibility word + the occlusion evidence bit. ----
+// (#1039 occupancy) Across the walk the lane holds only its request's index and the walk's own accumulators:
+// the receiver, the footprint, the fixture's light, the post and the store's indices are read back from the
+// request where they are used (the hooks above; after the walk, below).
+void DEFER_MAIN()
+{
+    VqRegion r = vqShRegion();
+    const uint i = (gl_WorkGroupID.y * VQ_ROW + gl_WorkGroupID.x) * 64u + gl_LocalInvocationIndex;
+    if (i >= min(r.q[0].x, vqReqCap(r))) return;
+    const uint w = vqShReqWord(i, VQ_SH_VIS_WORDS);
+    vqShSetW(w);
+    {
+        const ivec2 D = ivec2(g_draw_push.rtr.xy + 0.5);
+        const uvec4 q0 = r.q[w], q1 = r.q[w + 1u], q2 = r.q[w + 2u];
+        const uint tex = q0.w & 0x7FFFFFu, j = q0.w >> 23u;
+        if (tex >= uint(D.x * D.y) || j >= pdnVisSlots()) return;   // (Xid 109 hardening: past the visibilities)
+        vec3 tlift;
+        const vec3 P = vqShVisP(q0, q1, q2, tlift);
+        // (shadowSampleSetup's globals: SH_KIND_POSITIONAL -- the own fixture of a point light, no foliage; its
+        //  light centre and size cap: the hooks.) vqShVisSample's S.flags & SH_FIXTURE: a point light's sample
+        // (pdnProjSample: proj_origin.w < 0.5), never an emitting triangle's
+        rt_fix_on = (q1.w & VQ_SH_EM) != 0u ? (q1.w & VQ_SH_EMFIX) != 0u
+                                            : lights[q1.x & 255u].proj_origin.w < 0.5;
+        // the footprint / cone fallback of (P, Nin) -- shadowSampleSetup's rtSetShadowFootprint and width0 (the
+        // values: the hooks; rt_foot_on here)
+        rtSetShadowFootprint(P, vqOctUnpack(q1.y), pc.u_cam_time.xyz);
+        vqShWalkBegin(rt_foot_on, vec3(0.0), vec3(0.0), 0.0, vqShOwnerOf16(q1.x >> 16u), vec3(0.0), false);
+    }
+    vec3 vis = shadowSampleRays(shRayGenUnpark(), (r.q[w + 1u].w >> VQ_SH_N_SHIFT) & 31u, true, false);   // (THE walk site; G: unused)
+    shadowSampleEnd(false);
+    // the request again: the post, the receiver for the evidence, the visibility slot
+    const ivec2 D = ivec2(g_draw_push.rtr.xy + 0.5);
+    const uvec4 q0 = vqShParked().q[w], q1 = vqShParked().q[w + 1u], q2 = vqShParked().q[w + 2u];
+    vis = vqShPost(vis, vqUnorm16Of(q2.y >> 16u), q1.w);
+    // (#1052) bit 30: occlusion evidence for SHADE's note (occEvidence of a traced sample)
+    vec3 tlift;
+    const bool ev = occEvidenceTraced(vis, occBlockMin(vqShVisP(q0, q1, q2, tlift)));
+    pdn_vis[pdnVisBase(D) + (q0.w & 0x7FFFFFu) * pdnVisSlots() + (q0.w >> 23u)] = pdnVisPack(vis, ev);
+}
+#elif CLEAN_SHADOW_STAGE == SH_STAGE_SUNVIS && CLEAN_VQ_SHADOW == 2
+// ---- (#1039 bit 8) THE SUN / MOON WALK: one lane per request (the producer's indirect dispatch). The walk
+//      state back, the sample's rays (the disc, the translucent split, the foliage ray), the terminator post,
+//      then SUNVIS's tail: the certificates' post rays (#771: revocation + certification), the fades, the
+//      penumbra estimate, the sun channel's texel. ----
+// (#1039 occupancy) THE WALK-STATE HOOKS (above the includes) of the sun / moon walk: this lane's request
+// (vqShW()) read where the walk uses it -- the same words and expressions as the set-up below used to fill
+// the globals they replace.
+vec3 vqShSelfP()   // the receiver for the lazy self-shadow probe (only run while the owner is unknown)
+{
+    const ivec2 D = ivec2(g_draw_push.rtr.xy + 0.5);
+    return vqShSunP(vqShTexel(vqShParked().q[vqShW()].w, D), D);
+}
+void vqShFoot(out vec3 a, out vec3 b)   // the request's footprint (read while rt_foot_on = VQ_SH_FOOT)
+{
+    const uvec4 q3 = vqShParked().q[vqShW() + 3u];
+    const vec2 fz = unpackHalf2x16(q3.z);
+    a = vec3(unpackHalf2x16(q3.y), fz.x);
+    b = vec3(fz.y, unpackHalf2x16(q3.w));
+}
+float vqShConeW0()   // vqShWalkBegin's rt_cone_width0: 0 with a footprint (isotropic LOD: its minor axis), else q3.y
+{
+    const bool foot = (vqShParked().q[vqShW() + 1u].w & VQ_SH_FOOT) != 0u;
+#ifdef RT_NO_FOOT_LOD
+    if (foot)
+    {
+        vec3 a, b;
+        vqShFoot(a, b);
+        return length(a);
+    }
+#endif
+    return foot ? 0.0 : uintBitsToFloat(vqShParked().q[vqShW() + 3u].y);
+}
+void DEFER_MAIN()
+{
+    VqRegion r = vqShRegion();
+    const uint i = (gl_WorkGroupID.y * VQ_ROW + gl_WorkGroupID.x) * 64u + gl_LocalInvocationIndex;
+    if (i >= min(r.q[0].x, vqReqCap(r))) return;
+    const uint w = vqShReqWord(i, VQ_SH_SUN_WORDS);
+    vqShSetW(w);
+    {
+        const ivec2 D = ivec2(g_draw_push.rtr.xy + 0.5);
+        const uvec4 q1 = r.q[w + 1u], q2 = r.q[w + 2u];
+        if (r.q[w].w >= uint(D.x * D.y)) return;   // (Xid 109 hardening: past the denoiser's extent)
+        rt_noise_shift = vqShNoiseShift(uint(g_draw_push.rtr.z + 0.5));   // (pdnVisRecv's: the sample's noise)
+        g_vqsh_nz = vqShSunNoise(vqShTexel(r.q[w].w, D), D);
+        rt_fix_on = false;   // (SH_KIND_DIRECTIONAL)
+        // the cone (the footprint as halves, else the width fallback) and the receiver for the lazy self-shadow
+        // probe: the hooks; rt_foot_on here
+        vqShWalkBegin((q1.w & VQ_SH_FOOT) != 0u, vec3(0.0), vec3(0.0), 0.0, vqShOwnerOf16(q2.x & 0xFFFFu), vec3(0.0),
+                      (q1.w & SHG_FOL) != 0u);
+    }
+    rt_block_dyn = false;
+    vec3 vis;
+    {
+        const uint bits = r.q[w + 1u].w;   // (through the region: its own load, not the reads after the walk)
+        vis = shadowSampleRays(shRayGenUnpark(), (bits >> VQ_SH_N_SHIFT) & 31u, false, (bits & VQ_SH_SELF) != 0u);   // (THE walk site)
+    }
+    // the request again: everything after the walk
+    const ivec2 D = ivec2(g_draw_push.rtr.xy + 0.5);
+    const uvec4 q0 = vqShParked().q[w], q1 = vqShParked().q[w + 1u], q2 = vqShParked().q[w + 2u], q3 = vqShParked().q[w + 3u];
+    const ivec2 m = vqShTexel(q0.w, D);
+    const uint bits = q1.w;
+    shadowSampleEnd((bits & SHG_FOL) != 0u);
+    vis = vqShPost(vis, vqUnorm16Of(q2.z), bits);
+    // SUNVIS after its walk: the certificate's revocation by a lit ray (its certification rays ran in the producer)
+    const uint sx = q2.x >> 16u;
+    SxcTexel sxp = sxcNone();
+    sxp.e = q3.x; sxp.cls = sx & 15u; sxp.sub = (sx >> 4u) & 15u; sxp.certNow = (sx & 256u) != 0u; sxp.ticket = (sx & 512u) != 0u;
+    sxcSunRevoke(sxp, vis);
+    const float sw = g_draw_push.rtr2.x;
+    const vec3 sun = mix(vis, vec3(1.0), vqUnorm16Of(q2.z >> 16u));
+    const bool sdyn = rt_block_dyn;
+    float srad = -1.0;
+    if (rt_block_t < 1e29) srad = rt_block_t * uintBitsToFloat(q2.w);   // (the producer's penumbra factor)
+    // weak sun / moon (the host's weight, a ramp over the threshold band): fade toward lit
+    vec3 sunOut = mix(vec3(1.0), clamp(sun, vec3(0.0), vec3(1.0)), clamp(sw, 0.0, 1.0));
+    sunOut = sxcDebug(sxp, sunOut, vis);   // (RenderVKSunCertDebug)
+    imageStore(uPdnIn, ivec3(m, 2), vec4(sunOut, pdnSunEncA(srad, sdyn)));
+}
+#elif CLEAN_SHADOW_STAGE == SH_STAGE_VIS
 // ---- (#1031) VIS: ONE THREAD PER GATED LIGHT SAMPLE (SELECT's job list, an indirect dispatch: every
 //      lane has a sample to trace). The job's texel's receiver, its light sample j (pdnProjSample /
 //      rsEmSample), the receiver rules (shadowRecvLight: the terminator / rig probes) and the sample's
 //      walk(s) (shadowSampleVis: its disc rays + the translucent split, the inputs parked between
 //      rays) -> its visibility slot. No per-texel sample loop: nothing of a texel's other samples is
 //      live across a walk. ----
+// (#1039 bit 8) -DCLEAN_VQ_SHADOW=1: the queue's PRODUCER (GEN) -- the same up to the walk, then the sample as a
+// request (the jobs past the region's capacity: the TAIL's); =3: the TAIL -- this kernel from the region's first
+// job past its capacity on.
 void DEFER_MAIN()
 {
     const ivec2 D = ivec2(g_draw_push.rtr.xy + 0.5);
     const uint slots = pdnVisSlots();
+#if CLEAN_VQ_SHADOW == 3
+    const uint e = vqShRegion().q[2].w + gl_WorkGroupID.x * 64u + gl_LocalInvocationIndex;
+#else
     const uint e = gl_WorkGroupID.x * 64u + gl_LocalInvocationIndex;
+#endif
+#if CLEAN_VQ_SHADOW == 1
+    VqRegion r = vqShRegion();
+    if (e == 0u)
+    {
+        // (the first job's lane, alone) the TAIL's indirect dispatch over the jobs past the capacity + the counts
+        const uint nJobs = min(pdn_vis[0], uint(D.x * D.y) * slots);
+        const uint past = nJobs > vqEntryCap(r) ? nJobs - vqEntryCap(r) : 0u;
+        r.q[2].xyz = uvec3((past + 63u) / 64u, 1u, 1u);
+        r.q[3].z = past;
+        r.q[4].x = nJobs;
+    }
+    if (e >= vqEntryCap(r)) return;   // (the TAIL's)
+#endif
     if (e >= min(pdn_vis[0], uint(D.x * D.y) * slots)) return;   // (the count clamped to the list: Xid 109 hardening)
     const uint job = pdn_vis[4u + e];
     const uint tex = job >> PDN_JOB_SLOT_BITS, j = job & ((1u << PDN_JOB_SLOT_BITS) - 1u);
@@ -9876,6 +11231,9 @@ void DEFER_MAIN()
         if (occAny(c)) ocCull = c;
     }
     ShadowSample S;
+#if CLEAN_VQ_SHADOW == 1
+    uint vqLi = 0u, vqNi = 0u;   // (#1039 bit 8: the request names the light; the walk rebuilds its sample)
+#endif
     {
         const PdnSelD sel = pdnSelLoad(sdi, sd0);
         uint ni;
@@ -9884,6 +11242,10 @@ void DEFER_MAIN()
         bool ocP;
         const uint li = pdnSampleLight(sel, j, count, ocCull, ni, wgt, spT, ocP);
         if (li == 0xFFFFFFFFu) return;   // (never: the gate bit)
+#if CLEAN_VQ_SHADOW == 1
+        vqLi = li;
+        vqNi = ni;
+#endif
         if (li >= REGIR_EM_KEY)
         {   // (#91) an EMITTING TRIANGLE: one ray to a point of its part above the horizon -- the
             // triangle point: a per-texel random offset + the R3 sequence over the frames
@@ -9905,7 +11267,55 @@ void DEFER_MAIN()
     const float nsl = shadowRecvLight(Rv, (S.flags & SH_POSITIONAL) != 0u ? normalize(S.pos - P) : S.pos, Nin);
     const bool trace = !((S.flags & SH_POSITIONAL) != 0u && (pdnOpts() & PDN_OPT_FACING) != 0u && nsl < -0.25);
     rt_block_t = 1e30;
+#if CLEAN_VQ_SHADOW == 1
+    // ---- (#1039 bit 8) GEN: shadowSampleVis's set-up, then the sample as a COMPACT request instead of its walk
+    //      (clean_vis_queue.glsl LIGHT-SAMPLE REQUEST: what the walk cannot rebuild from the texel / the light) ----
+    ShRayGen G;
+    bool pos = true, fol = false, ss = false;
+    if (trace) G = shadowSampleSetup(S, P, Nin, pc.u_cam_time.xyz, pc.u_cam_time.w, pos, fol, ss);
+    const bool want = trace && !ss;
+    const uint slot = vqAlloc(r, want);   // (every lane still here: the ballot)
+    if (want && slot < vqReqCap(r))
+    {
+        float tg;
+        uint pf;
+        vqShPostOf(G.post, tg, pf);
+        const bool nvflip = dot(Nin, pc.u_cam_time.xyz - P) < 0.0;   // (rtVisibleSide's test: G.Nv = -Nin)
+        const bool em = vqLi >= REGIR_EM_KEY;   // (an emitting triangle: always hard -- its point where the floor was)
+        pf |= (nvflip ? VQ_SH_NVFLIP : 0u) | ((sd0.x & PDN_SEL_CELL) != 0u ? VQ_SH_CELL : 0u) | (em ? VQ_SH_EM : 0u)
+            | ((em && (S.flags & SH_FIXTURE) != 0u) ? VQ_SH_EMFIX : 0u);
+        uint nf = vqOctPack(G.Nf), ef = floatBitsToUint(G.efloor);
+        if (em)
+        {
+            const vec3 toT = G.pos - G.Pb;
+            const float dT = length(toT);
+            nf = vqOctPack(toT);
+            ef = floatBitsToUint(dT);
+        }
+        const uint w = vqShReqWord(slot, VQ_SH_VIS_WORDS);
+        r.q[w]      = uvec4(floatBitsToUint(G.Pb), tex | (j << 23u));
+        r.q[w + 1u] = uvec4((em ? 0u : (vqLi & 255u) | ((vqNi & 255u) << 8u)) | (vqShOwner16(rt_self_owner) << 16u),
+                            vqOctPack(G.Nin), nf, G.bits | (min(G.n, 31u) << VQ_SH_N_SHIFT) | pf);
+        r.q[w + 2u] = uvec4(packHalf2x16(G.tlift.xy), packHalf2x16(vec2(G.tlift.z, 0.0)) | (vqUnorm16(tg) << 16u), ef,
+                            floatBitsToUint(G.biasLift));
+        vqCount(r, 1u, 0u, 0u);
+        return;
+    }
+    // no ray: turned away (the facing gate), or its own surface shadows it (the back-face rule: shadowSampleVis
+    // traced nothing and returned the terminator post of 0) -- stored here, as VIS stores it
+    vec3 vis = vec3(0.0);
+    if (trace)
+    {
+        shadowSampleEnd(fol);
+        // (want && no slot: never -- the region serves at most one request per job it holds; unshadowed)
+        vis = want ? vec3(1.0) : rtTerminatorPost(vis, G.post);
+        rt_term_rej = false;
+        if (want) atomicAdd(r.q[3].w, 1u);
+    }
+    vqCount(r, 1u, 1u, 0u);
+#else
     const vec3 vis = trace ? shadowSampleVis(S, P, Nin, pc.u_cam_time.xyz, pc.u_cam_time.w) : vec3(0.0);
+#endif
     // (#1052) bit 30: occlusion evidence for SHADE's note (before shadowRecvLightEnd: rt_block_t is the walk's)
     const bool ev = occEvidence(trace, vis, P);
     shadowRecvLightEnd();
@@ -9915,7 +11325,11 @@ void DEFER_MAIN()
 // ---- (#1031) SUNVIS (merged): the sun / moon sample -- the fused loop's sample 0 line for line: the
 //      exposure certificate, the gates, pdnSunSample (footprint jitter, terrain re-anchor), the receiver
 //      rules, ONE walk, the certificates' post rays -> the denoiser's sun channel (layer 2) ----
+// (#1039 bit 8) -DCLEAN_VQ_SHADOW=1: the queue's PRODUCER (GEN) -- the same up to the walk; a sample that needs
+// its walk becomes a request (the walk kernel finishes the texel), every other texel is stored here as before.
+#if CLEAN_VQ_SHADOW == 0
 shared uvec4 s_sunPost[64][4];   // (per lane: the certificate texel + the post rays' inputs, across the walk)
+#endif
 void DEFER_MAIN()
 {
     const ivec2 m = ivec2(gl_GlobalInvocationID.xy);
@@ -9939,6 +11353,9 @@ void DEFER_MAIN()
     vec3 sunOut = vec3(1.0);
     float srad = -1.0;
     bool sdyn = false;
+#if CLEAN_VQ_SHADOW == 1
+    bool queued = false;   // (#1039 bit 8: the texel's sample went to the queue)
+#endif
     [[dont_unroll]] for (uint once = 0u; once < 1u; ++once)   // (the fused loop's sample 0: continue = done)
     {
         ShadowSample S;
@@ -9978,6 +11395,49 @@ void DEFER_MAIN()
             srad = 0.0;
             continue;
         }
+#if CLEAN_VQ_SHADOW == 1
+        // ---- (#1039 bit 8) GEN: shadowSampleVis's set-up, then the sample as a request instead of its walk
+        //      (a self-shadowed one too: its post work -- the certificates' rays -- is the walk kernel's) ----
+        {
+            VqRegion r = vqShRegion();
+            const uint slot = vqAlloc(r, true);   // (every lane still here: the ballot)
+            if (slot >= vqReqCap(r))
+            {   // (never: the region holds every texel; unshadowed)
+                atomicAdd(r.q[3].w, 1u);
+                sunOut = vec3(1.0); srad = -1.0;
+                shadowRecvLightEnd();
+                continue;
+            }
+            bool pos, fol, ss;
+            const ShRayGen G = shadowSampleSetup(S, Pin, Nin, cam, time, pos, fol, ss);
+            float tg;
+            uint pf;
+            vqShPostOf(G.post, tg, pf);
+            pf |= (ss ? VQ_SH_SELF : 0u) | (rt_foot_on ? VQ_SH_FOOT : 0u);
+            if (subgroupElect())
+            {   // the frame's disc constants (every requesting lane has the same ones)
+                r.q[5u] = uvec4(floatBitsToUint(G.pos), floatBitsToUint(G.radius));
+                r.q[6u] = uvec4(floatBitsToUint(G.u), floatBitsToUint(G.tmax));
+                r.q[7u] = uvec4(floatBitsToUint(G.v), 0u);
+            }
+            // the COMPACT request (clean_vis_queue.glsl SUN REQUEST): the noise and the receiver are rebuilt from the
+            // texel; the cone as the footprint's halves (or the width fallback); the penumbra estimate's factor
+            const uint sx = sxc.cls | (sxc.sub << 4u) | (sxc.certNow ? 256u : 0u) | (sxc.ticket ? 512u : 0u);
+            const uvec3 cone = rt_foot_on ? uvec3(packHalf2x16(rt_foot_a.xy), packHalf2x16(vec2(rt_foot_a.z, rt_foot_b.x)),
+                                                  packHalf2x16(rt_foot_b.yz))
+                                          : uvec3(floatBitsToUint(rt_cone_width0), 0u, 0u);
+            const float sradK = tan(ssr.sun_rt.x) / max(nsl, 0.15) / Rv.pxw * texPerPx;
+            const uint w = vqShReqWord(slot, VQ_SH_SUN_WORDS);
+            r.q[w]      = uvec4(floatBitsToUint(G.oL), uint(m.y * D.x + m.x));
+            r.q[w + 1u] = uvec4(floatBitsToUint(G.Nf), G.bits | (min(G.n, 31u) << VQ_SH_N_SHIFT) | pf);
+            r.q[w + 2u] = uvec4(vqShOwner16(rt_self_owner) | (sx << 16u), floatBitsToUint(G.efloor),
+                                vqUnorm16(tg) | (vqUnorm16(sfade) << 16u), floatBitsToUint(sradK));
+            r.q[w + 3u] = uvec4(sxc.e, cone);
+            // (#771) the certification rays need no visibility: here, while shadowRecvLight's rt_cl_lift holds
+            sxcSunCertify(sxc, Pin, Nin, cam, S.bias, frame);
+            queued = true;
+        }
+#else
         // (#1031) what the certificates' post rays and the channel's encoding need after the walk waits
         // in shared memory (this lane's slot), not in registers across it
         {
@@ -10005,7 +11465,12 @@ void DEFER_MAIN()
         // weak sun / moon (the host's weight, a ramp over the threshold band): fade toward lit
         sunOut = mix(vec3(1.0), clamp(sun, vec3(0.0), vec3(1.0)), clamp(sw, 0.0, 1.0));
         sunOut = sxcDebug(sxp, sunOut, vis);   // (RenderVKSunCertDebug)
+#endif
     }
+#if CLEAN_VQ_SHADOW == 1
+    vqCount(vqShRegion(), 1u, queued ? 0u : 1u, 0u);
+    if (queued) return;   // (the walk kernel stores this texel)
+#endif
     imageStore(uPdnIn, ivec3(m, 2), vec4(sunOut, pdnSunEncA(srad, sdyn)));
 }
 #else
@@ -10031,7 +11496,7 @@ void DEFER_MAIN()
     const ivec2 rp = clamp(ivec2((vec2(m) + 0.5 + J) * r), ivec2(0), ivec2(R2) - 1);
     g_frag_xy = vec2(rp) + 0.5;
     CLK_INV();
-    const vec4 g2 = texelFetch(uG2, rp, 0);
+    const vec4 g2 = defTexel(uG2, rp);
     bool surf = deferHasSurface(g2);
     float glow;
     bool noFade;
@@ -10083,7 +11548,7 @@ void DEFER_MAIN()
     //      pixel footprint, view-slope offset; the self-shadow owner, the noise phase ----
     const vec3 cam = pc.u_cam_time.xyz;
     const float time = pc.u_cam_time.w;
-    const float dR = texelFetch(uDepthG, rp, 0).r;
+    const float dR = defTexel(uDepthG, rp).r;
 #if CLEAN_SHADOW_STAGE == SH_STAGE_FUSED   // (#1031: the walks' receiver -- VIS / SUNVIS build their own)
     ShadowRecv Rv;
     // the FACET normal (pdnFacetNormal: the mask's receiver normal, not the G-buffer's smooth
@@ -10390,14 +11855,20 @@ void DEFER_MAIN()
             const float mcap = float(max(rg.rs_cfg2.x, 1u));
             uint rng = pdnPcg(uint(m.x) * 7919u + uint(m.y) * 104729u + frame * 15485863u);
             float pw;
-            const vec2 dS = pdnPrevDelta(P, m, vec2(D), pw);
+            vec2 dS = pdnPrevDelta(P, m, vec2(D), pw);
+            float zx = 0.0;   // (#1038) the extra depth tolerance of a surface that moved on its own (m)
+#ifdef REUSE_MV_BOUND
+            // (#1038, RS_F_REUSE_MV) a MOVING surface (an avatar): last frame's reservoir of this point is
+            // along the motion vectors, not at the camera-only point (reuseMotionDelta)
+            if ((rg.rs_cfg.z & RS_F_REUSE_MV) != 0u) zx = reuseMotionDelta(m, rp, vec2(D), pw, dS);
+#endif
             const ivec2 qt = ivec2(floor(vec2(m) + dS + 0.5));
             const uint pl = uint(par) ^ 1u;
             uint ly; float lp, lM;
             if (pw > 0.0)
             {
                 // TEMPORAL (5b)
-                const float wt = rsTap(qt, D, pl, pw, max(0.04 * pw, 0.03), P, s.N, min(W0, 60000.0), mcap, count, spLi,
+                const float wt = rsTap(qt, D, pl, pw, max(0.04 * pw, 0.03) + zx, P, s.N, min(W0, 60000.0), mcap, count, spLi,
                                        ocCull, ly, lp, lM);
                 if (wt > 0.0)
                 {
@@ -10416,7 +11887,7 @@ void DEFER_MAIN()
                         const ivec2 q = qt + ivec2(round(vec2(cos(a), sin(a)) * rr));
                         if (q == qt) continue;
                         const float dz = dot(grad, vec2(q - qt));
-                        const float ws = rsTap(q, D, pl, pw + dz, max(0.05 * pw, 0.05) + 0.25 * abs(dz), P, s.N, -1.0, mcap,
+                        const float ws = rsTap(q, D, pl, pw + dz, max(0.05 * pw, 0.05) + 0.25 * abs(dz) + zx, P, s.N, -1.0, mcap,
                                                count, spLi, ocCull, ly, lp, lM);
                         if (ws > 0.0)
                         {
@@ -10784,6 +12255,36 @@ void DEFER_MAIN()
     const float rsM = uintBitsToFloat(sd3.y);
     const float rsDom = uintBitsToFloat(sd3.w);   // (#1052: SELECT's strongest-candidate share)
 #endif
+    // (#869 OCCLUSION CULL, THE POINT LIGHTS' SHARE above) every POINT light this texel's patch culls (its
+    // draw: occCulled, the same g_occ_u that kept it out of the candidates, the reservoirs, the split and the
+    // dense window) that the lit kernels shade with the ratio here (deferRsStoch: in the set, no record, in
+    // the grid; not taken over) joins the DENOMINATORS with its exact unshadowed terms -- weight 1, visibility
+    // a known 0, no ray. The ratio stays over the whole light set whatever the cull did. Each one counts as an
+    // evaluated candidate (a texel whose only lights are culled holds a real 0, not "no information").
+    if (ocCull != OCC_NONE && projOn && rsCell != REGIR_NO_CELL && (rg.rs_cfg.z & RS_F_OCC_PT_DROP) == 0u)
+    {
+        float nPt = 0.0;
+        [[dont_unroll]] for (uint ow = 0u; ow < 32u; ++ow)
+        {
+            const uint cw = occLoad(occWord(ocCull, OCC_W_CNT + ow));
+            if (cw == 0u) continue;
+            [[dont_unroll]] for (uint oq = 0u; oq < 8u; ++oq)
+            {
+                const uint li = ow * 8u + oq;
+                if (!(occWeightOf((cw >> (oq * 4u)) & 15u) > g_occ_u)) continue;
+                if (li >= count || !occKeepsShare(li) || !rsInSet(li) || rsRecordLight(li) || emTaken(li)
+                    || pdnSplitHas(spLi, li)) continue;
+                vec3 xd = vec3(0.0), xs = vec3(0.0);
+                float xp = 0.0;
+                if (!projDirectTerms(li, P, s.N, V, pbr, base, diffuseColor, specularColor, rough, ls, false, xd, xs, xp))
+                    continue;
+                denD += xd;
+                denS += xs;
+                nPt += 1.0;
+            }
+        }
+        nCand += nPt;
+    }
     if (ocOn)   // (#869 OCCLUSION CULL stats: probes fired, patch claims refused; ocOn is uniform)
     {
         const uint sP = subgroupAdd(nOcP), sR = subgroupAdd(ocRefused);
@@ -10890,7 +12391,7 @@ void DEFER_MAIN()
     if (inside)
     {
         CLK_INV();
-        surf = deferHasSurface(texelFetch(uG2, px, 0));
+        surf = deferHasSurface(defTexel(uG2, px));
     }
     if (surf)
     {
@@ -10910,7 +12411,7 @@ void DEFER_MAIN()
     if (px.x >= int(g_draw_push.width) || px.y >= int(g_draw_push.height)) return;
     CLK_INV();
     g_frag_xy = vec2(px) + 0.5;
-    const vec4 g2 = texelFetch(uG2, px, 0);
+    const vec4 g2 = defTexel(uG2, px);
     if (!deferHasSurface(g2))
     {
         writeLitOutput(px, vec3(0.0), 0.0);   // pass 1's clear; the sky draws over it (no gain: LOCAL skips it)
@@ -10961,7 +12462,7 @@ void DEFER_MAIN()
     if (px.x >= int(g_draw_push.width) || px.y >= int(g_draw_push.height)) return;
     CLK_INV();
     g_frag_xy = vec2(px) + 0.5;
-    const vec4 g2 = texelFetch(uG2, px, 0);
+    const vec4 g2 = defTexel(uG2, px);
     if (!deferHasSurface(g2)) { CLK_MARK(GBUF); return; }   // (sky / cleared: BASE's black stands)
     float glow;
     bool noFade;
@@ -10986,7 +12487,7 @@ void DEFER_MAIN()
     // No light reached this pixel: BASE's output is already this pixel's (an exact + 0).
     if (local.r == 0.0 && local.g == 0.0 && local.b == 0.0) return;
     const float gain = imageLoad(uLocalGain, px).r;
-    const vec3 base = imageLoad(uHdrOut, px).rgb;
+    const vec3 base = imageLoad(uHdrOut, ivec3(px, DEFER_LAYER)).rgb;
     writeLitOutput(px, base + local * gain, glow);
     CLK_MARK(STORE);
 }
@@ -11034,7 +12535,7 @@ void DEFER_MAIN()
     bool surf = false;
     if (inside)
     {
-        g2 = texelFetch(uG2, px, 0);
+        g2 = defTexel(uG2, px);
         surf = deferHasSurface(g2);
     }
     if (surf)
@@ -11158,5 +12659,14 @@ void main()
     clkAdd(base, CLK_S_FROXEL,       g_clk_FROXEL);
     clkAdd(base, CLK_SLOT_INV,       g_clk_inv ? 1u : 0u);
     clkAdd(base, CLK_SLOT_SURF,      g_clk_surf ? 1u : 0u);
+}
+#endif
+#ifdef CLEAN_RT_HANG_BEACON
+// (#1128) the hang beacon's wrapper: whichever return the body took, a lane that claimed a slot marks it DONE
+void main()
+{
+    rtBcHead();
+    deferMain();
+    rtBcDone();
 }
 #endif

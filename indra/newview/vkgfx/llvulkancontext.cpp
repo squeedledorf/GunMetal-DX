@@ -18,6 +18,7 @@
 #include "llcleansnapshotvk.h"           // #873 live snapshots
 #include "llcleanclustercaps.h"          // #743 cluster LOD tier log line
 #include "llvkneuralrecon.h"             // #870 / #962 optional DLSS shim (slip_nr: SR + RR)
+#include "llxrsession.h"                 // #1073 VR (OpenXR); inert unless VR was chosen at startup
 #include "llfxruntimevk.h"               // FX compile watchdog (shutdown)
 #include "llrendervk/vk_offscreen.h"     // OffscreenTarget: milestone PNG readback
 
@@ -29,6 +30,7 @@
 #include "vk_pipeline.h"                 // #462 vkSetPipelineCompileThreads / progress hook
 #include "vk_pipecache.h"                // #471 learned compile costs (load / save)
 #include "workqueue.h"                   // post-batch malloc_trim (General queue)
+#include "llthread.h"                    // #1103 on_main_thread (where the post-batch trim runs)
 
 #if LL_WINDOWS
 #   include "llwin32headers.h"
@@ -39,9 +41,6 @@
 #   include <vulkan/vulkan_win32.h>
 #endif
 
-#if LL_LINUX
-#include <malloc.h>                       // malloc_trim after a pipeline batch
-#endif
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
 
@@ -88,6 +87,30 @@ struct LLVulkanContext::Impl
     // frame that requests world rendering; null until then. Behind the VK flag.
     LLCleanRendererVK* mWorld = nullptr;
     bool mWorldInitTried = false;
+
+    // #1074 VR: while an OpenXR session runs, the world renders into this eye-size target
+    // (window format, so the final pipelines are reused) instead of the window image; it is
+    // copied into both eye images and blitted aspect-fit onto the window (the mirror). Only
+    // ever created in VR; released when the session stops.
+    GpuImage mVrTarget;
+    bool     mVrBlitChecked = false;
+    bool     mVrBlitOk = false;
+    VkFilter mVrBlitFilter = VK_FILTER_LINEAR;
+    bool     mVrWorldLast = false;   // the previous frame was a VR world frame
+    // #1076 VR: the UI wall's own image (window size and format): the UI replayed over a
+    // transparent clear, so the wall shows the world between the floaters. VR world frames
+    // with the wall shown only; released with the eye target.
+    GpuImage mVrUiTarget;
+    GpuImage mVrHudDepth;   // #1076 the HUD pass's depth when the HUDs go onto the wall (same size)
+    // #1076: the two soft-cap sources the renderer gets merged: "Keep my FPS" and the VR
+    // safety governor (default-constructed = no cap).
+    LLVKPerfCaps mAutoTuneCaps;
+    LLVKPerfCaps mVrSafetyCaps;
+    bool vrEnsureTarget(uint32_t w, uint32_t h);   // (defined with renderFrame)
+    bool vrEnsureUiTarget(VkExtent2D ext);
+    bool vrEnsureHudDepth(VkExtent2D ext, VkFormat fmt);
+    void vrReleaseTarget(bool waitIdle);
+    void vrRecordMirror(VkCommandBuffer cmd, VkImage windowImage, VkExtent2D windowExtent);
 
     // #919 full-screen exclusive (Windows). mFseExt: the device has the extension and every
     // entry point resolved. The swapchain carries the exclusive chain (mFseChained) while
@@ -221,6 +244,15 @@ static std::atomic<U64> s_pipeDriverMargin{0};
 static uint64_t pipelineMemProbe();
 static uint64_t pipelineMemBudget()
 {
+    // #1103: the compile concurrency follows the memory governor while batches run (every
+    // worker asks here before each admission): 2 at once while tight, 1 while critical
+    // (incl. the #698 shed window), no cap when comfortable. Restored as soon as the
+    // governor reports comfortable again (it holds an improvement 2 s before reporting it).
+    {
+        const LLMemoryGovernor::EState st = LLMemoryGovernor::getState();
+        const unsigned pcap = st == LLMemoryGovernor::CRITICAL ? 1u : (st == LLMemoryGovernor::TIGHT ? 2u : 0u);
+        vkSetPipelinePressureCap(pcap, LLMemoryGovernor::stateName(st));
+    }
     const U64 forced = s_pipeBudgetForced.load(std::memory_order_relaxed);
     if (forced)
     {
@@ -300,10 +332,92 @@ static std::mutex s_pipeReportMutex;
 static std::string s_pipeReportText;
 static double s_pipeReportSumMs = -1.0;
 
+// #1103: the driver compilers' memory is freed on the compile threads, into glibc's
+// per-thread arenas, which keep it resident (#1059: Arc B580 / Mesa, 16 GB: 8.6-9.9 GB
+// resident after a cold compile, then the OOM killer). After a batch -- its workers have
+// all been joined when the report hook runs -- and once no other batch is compiling, the
+// freed memory goes back to the OS with malloc_trim(0), measured (RSS before / after, the
+// arenas' free bytes before it). Small batches (single admitted creates) add up until they
+// are worth an arena walk. Off the main thread it runs right here (the batch's own thread,
+// before its job reports done), on the main thread (a synchronous flush) on a General worker.
+#if LL_LINUX && defined(__GLIBC__)
+static std::atomic<bool> s_trimRunning{false};
+static std::atomic<unsigned> s_trimDebtCompiles{0};
+static std::atomic<U64> s_trimDebtBytes{0};
+constexpr unsigned kTrimDebtCompiles = 4;      // real compiles since the last trim ...
+constexpr U64 kTrimDebtBytes = 64ull << 20;    // ... or this much batch growth
+
+static std::string heapTrimText(const LLMemoryGovernor::HeapTrim& t)
+{
+    constexpr U64 MB = 1ull << 20;
+    return llformat("rss %llu MB -> %llu MB after malloc_trim (%lld MB, %.0f ms; %llu MB free in %u arenas before it)",
+                    (unsigned long long)(t.rss_before / MB), (unsigned long long)(t.rss_after / MB),
+                    (long long)(t.rss_after / MB) - (long long)(t.rss_before / MB), t.ms,
+                    (unsigned long long)(t.free_before / MB), t.arenas);
+}
+#endif
+
+// Text for the batch report line ("" when nothing was compiled / not supported).
+static std::string pipelineHeapTrim(const VkPipelineBatchReport& r)
+{
+#if LL_LINUX && defined(__GLIBC__)
+    unsigned real = 0;
+    for (const VkPipelineCompileStat& s : r.items)
+        if (!s.hit && !s.rest && !s.failed) ++real;
+    if (real)
+    {
+        s_trimDebtCompiles.fetch_add(real);
+        s_trimDebtBytes.fetch_add(r.peakBytes > r.baseBytes ? r.peakBytes - r.baseBytes : 0);
+    }
+    const unsigned debtN = s_trimDebtCompiles.load();
+    const U64 debtB = s_trimDebtBytes.load();
+    if (!debtN) return std::string();   // nothing compiled since the last trim
+    if (debtN < kTrimDebtCompiles && debtB < kTrimDebtBytes)
+        return llformat("; heap trim deferred (%u compile(s), +%llu MB since the last)", debtN,
+                        (unsigned long long)(debtB >> 20));
+    if (const unsigned inflight = vkPipelineCompilesInFlight())
+        return llformat("; heap trim deferred (%u compiling in another batch)", inflight);
+    if (s_trimRunning.exchange(true)) return "; heap trim already running";
+    s_trimDebtCompiles.store(0);
+    s_trimDebtBytes.store(0);
+    if (on_main_thread())
+    {
+        const char* what = r.what;   // (a static string)
+        try
+        {
+            if (LL::WorkQueue::ptr_t q = LL::WorkQueue::getInstance("General"))
+            {
+                q->post([what]()
+                        {
+                            const LLMemoryGovernor::HeapTrim t = LLMemoryGovernor::trimMallocHeap();
+                            s_trimRunning.store(false);
+                            LL_INFOS("VKPipe") << "pipeline batch (" << what << "): " << heapTrimText(t) << LL_ENDL;
+                        });
+                return "; heap trim queued (General worker)";
+            }
+        }
+        catch (...)
+        {
+            // queue closed (shutdown): no trim
+        }
+        s_trimRunning.store(false);
+        return "; heap trim skipped (no General queue)";
+    }
+    const LLMemoryGovernor::HeapTrim t = LLMemoryGovernor::trimMallocHeap();
+    s_trimRunning.store(false);
+    return "; " + heapTrimText(t);
+#else
+    (void)r;
+    return std::string();
+#endif
+}
+
 static void pipelineBatchReport(const VkPipelineBatchReport& r)
 {
     constexpr int64_t MB = 1 << 20;
     const int64_t growth = ((int64_t)r.peakBytes - (int64_t)r.baseBytes) / MB;
+    const U64 endBytes = pipelineMemProbe();             // #1103: at the batch end, before any trim
+    const std::string trimText = pipelineHeapTrim(r);
     LL_INFOS("VKPipe") << "pipeline batch (" << r.what << "): " << r.total << " pipelines, "
                        << r.compiled << " compiled + " << r.fromCache << " dedup twins; wall "
                        << (S64)r.wallMs << " ms, sum of compiles " << (S64)r.sumMs << " ms; "
@@ -312,7 +426,10 @@ static void pipelineBatchReport(const VkPipelineBatchReport& r)
                        << growth << " MB); budget min "
                        << (r.budgetMin != UINT64_MAX ? std::to_string(r.budgetMin / MB) + " MB" : std::string("unlimited"))
                        << ", " << r.overBudget << " started over budget, " << (S64)r.waitMs
-                       << " ms waiting for budget" << LL_ENDL;
+                       << " ms waiting for budget; at the end " << (S64)(endBytes / MB) << " MB"
+                       << (r.pressureCapMin ? "; memory-pressure cap down to " + std::to_string(r.pressureCapMin)
+                                            : std::string())
+                       << trimText << LL_ENDL;
     if (r.oomRetries || r.failed)
     {
         LL_WARNS("VKPipe") << "pipeline batch (" << r.what << "): #672 " << r.oomRetries
@@ -340,16 +457,6 @@ static void pipelineBatchReport(const VkPipelineBatchReport& r)
     for (size_t i = 0; i < byTime.size() && i < 10; ++i) line("time", i, *byTime[i]);
     if (r.peakBytes)
         for (size_t i = 0; i < byMem.size() && i < 10; ++i) line("mem ", i, *byMem[i]);
-#if LL_LINUX
-    // The driver compilers' memory is freed on the compile threads, into glibc's per-thread
-    // arenas, which keep it: RSS stayed GBs above what the viewer used after a batch (Arc
-    // B580 / Mesa, 16 GB: ~10 GB at the login screen, then the OOM killer). Hand it back
-    // once per batch that compiled, on a worker thread (malloc_trim locks the arenas).
-    if (r.compiled)
-        if (LL::WorkQueue::ptr_t q = LL::WorkQueue::getInstance("General"))
-            q->post([]() { malloc_trim(0); });
-#endif
-
     // Snapshot for bug reports: the batch that compiled the most (the world batch).
     std::string text = llformat("%s %d/%d %.1fs +%lldMB t%u c%u ob%u:", r.what, (int)r.total, (int)r.compiled,
                                 r.wallMs / 1000.0, (long long)growth, r.threads, r.maxConcurrency, r.overBudget);
@@ -548,6 +655,15 @@ bool LLVulkanContext::init(SDL_Window* window, uint32_t width, uint32_t height,
         }
     }
 
+    // #1073 VR (startup only): the OpenXR probe succeeded, so the runtime creates the instance
+    // and the device from the same requests (XR_KHR_vulkan_enable2) on the GPU it requires. On
+    // the desktop LLXrSession::active() is false: no hook, creation exactly as without VR.
+    if (LLXrSession::active())
+    {
+        LLXrSession::instance().installDeviceHooks(mImpl->mDevice);
+        mXrHooked = true;
+    }
+
     // 2) Instance + device (with VK_KHR_swapchain). RT extensions only when requested.
     mImpl->mDevice.setRayTracingRequested(mRayTracingRequested);
     mImpl->mDevice.setClusterRequested(mClusterRequested);
@@ -586,6 +702,19 @@ bool LLVulkanContext::init(SDL_Window* window, uint32_t width, uint32_t height,
         LLVKNeuralRecon::instance().initDevice(mImpl->mDevice.instance(), mImpl->mDevice.physicalDevice(),
                                                mImpl->mDevice.device(), mImpl->mDevice.lateExtensionsEnabled(),
                                                mImpl->mDevice.lateExtensionsWhy());
+    // #1073 VR: the session on this device (graphics queue, index 0). A refusal leaves the
+    // desktop running on the device (LLXrSession logs why; the viewer shows the notice).
+    if (mXrHooked && LLXrSession::active())
+    {
+        LLXrSession& xr = LLXrSession::instance();
+        if (xr.createSession(mImpl->mDevice))
+        {
+            mXrSession = true;
+            xr.setRunningCallback([this](bool running) { onXrRunningChanged(running); });
+            LL_INFOS("VR") << "device created by the OpenXR runtime; multiview "
+                           << (mImpl->mDevice.multiviewEnabled() ? "enabled" : "not supported") << LL_ENDL;
+        }
+    }
     // Device limits for every vkdCreatePipelineLayout check (UI, RT, world), logged once
     // incl. maxPushConstantsSize (#238) -- before the first pipeline layout exists.
     vkdInitDeviceLimits(mImpl->mDevice.physicalDevice());
@@ -619,13 +748,20 @@ bool LLVulkanContext::init(SDL_Window* window, uint32_t width, uint32_t height,
             s_driverIdToken = tok;
             s_driverIdLabel = label;
         }
-        const U64 defaultCost = amdProprietary ? (3072ull << 20) : (512ull << 20);
-        vkSetPipelineDefaultCost(defaultCost);
+        U64 defaultCost = amdProprietary ? (3072ull << 20) : (512ull << 20);
         vkSetPipelineCompileThreads(0);   // auto; RenderVKPipelineCompileThreads (llappviewer) may cap it
         const bool warm = mImpl->mDevice.pipelineCacheWarm();
         vkSetPipelineCacheWarm(warm);
         s_pipeCostPath = mPipeCostPath;
         const size_t learned = vkpipecache::loadCosts(mImpl->mDevice.physicalDevice(), s_pipeCostPath);
+        // #1103: Mesa's compilers (ANV / RADV / NVK) measured heavier than the 512 MB default
+        // on the reporter's machine. A pipeline never measured on this device is assumed to
+        // cost what 90% of the measured ones stay under, when that is more (at most 2 GB).
+        const bool mesa = drv.driverID == VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA || drv.driverID == VK_DRIVER_ID_MESA_RADV
+                       || drv.driverID == VK_DRIVER_ID_MESA_NVK || drv.driverID == VK_DRIVER_ID_MESA_LLVMPIPE;
+        const U64 learnedP90 = vkPipelineLearnedColdBytes(90);
+        if (mesa && learnedP90 > defaultCost) defaultCost = std::min<U64>(learnedP90, 2048ull << 20);
+        vkSetPipelineDefaultCost(defaultCost);
         const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
         // #672: AMD's proprietary compiler ran out of host memory mid cold-compile (#667 /
         // #669: every launch crashed, 11 workers, budget ~25 GB on 32 GB). A margin on top of
@@ -645,15 +781,17 @@ bool LLVulkanContext::init(SDL_Window* window, uint32_t width, uint32_t height,
         vkSetPipelineMemCap(cap);
         LL_INFOS("Vulkan") << "Pipeline compiles: memory-budgeted, up to " << std::max(1u, hw > 2 ? hw - 1 : hw)
                            << " at once (driver " << drv.driverName << (amdProprietary ? ", AMD proprietary" : "")
-                           << "; " << (defaultCost >> 20) << " MB assumed per unknown pipeline, " << learned
-                           << " learned; compile budget now "
+                           << "; " << (defaultCost >> 20) << " MB assumed per unknown pipeline"
+                           << (mesa ? " (Mesa: at least the learned 90th percentile)" : "") << ", " << learned
+                           << " learned (90th percentile " << (learnedP90 >> 20) << " MB); compile budget now "
                            << (budget == UINT64_MAX ? std::string("unlimited") : std::to_string(budget >> 20) + " MB")
                            << " (available memory, less the reserve"
                            << (amdProprietary ? " + 2048 MB driver margin" : "") << ")"
                            << "; pipeline cache " << (warm ? "warm" : "cold")
                            << "; compiles in flight capped at "
                            << (cap ? std::to_string(cap >> 20) + " MB (25% of RAM)" : std::string("no cap (RAM unknown)"))
-                           << ")" << LL_ENDL;
+                           << "; memory pressure caps concurrency at 2 (tight) / 1 (critical)"
+                           << "; malloc arenas " << LLMemoryGovernor::mallocArenaText() << ")" << LL_ENDL;
         if (startCap)
             LL_INFOS("VKPipe") << "#672: cold pipeline cache on AMD's proprietary driver: starting at " << startCap
                                << " compiles at once, ramping up as measured costs show headroom" << LL_ENDL;
@@ -756,8 +894,33 @@ bool LLVulkanContext::init(SDL_Window* window, uint32_t width, uint32_t height,
 
 void LLVulkanContext::setVSync(bool on)
 {
+    mUserVSync = on;
+    if (mXrPresentOverride) return;   // #1073: a VR session runs; applied when it stops
     if (VkSwapchain::sVSync == on) return;
     VkSwapchain::sVSync = on;
+    if (mImpl) mImpl->mNeedsRecreate = true;
+}
+
+// #1073 VR: while the session runs, xrWaitFrame paces the viewer and the window is a mirror: a
+// FIFO present would cap the headset at the monitor's rate, so the window goes MAILBOX /
+// IMMEDIATE (RenderVKNoVsyncPresentMode). The user's vsync comes back when the session stops.
+void LLVulkanContext::onXrRunningChanged(bool running)
+{
+    mXrPresentOverride = running;
+    const bool want = running ? false : mUserVSync;
+    LL_INFOS("VR") << (running ? "session running: the window presents without vsync (it must never block the headset)"
+                               : "session stopped: the window presents with the user's vsync setting again")
+                   << LL_ENDL;
+    if (mImpl)
+    {
+        // #1074: nor may its acquire: a short timeout skips the window's frame instead.
+        mImpl->mSwapchain.setAcquireTimeout(running ? 2000000ull : UINT64_MAX);
+        // The eye-size world target is only used while the session runs (called between
+        // frames: waits for the frames in flight before freeing it).
+        if (!running) mImpl->vrReleaseTarget(true);
+    }
+    if (VkSwapchain::sVSync == want) return;
+    VkSwapchain::sVSync = want;
     if (mImpl) mImpl->mNeedsRecreate = true;
 }
 
@@ -1290,7 +1453,8 @@ LLRenderBackend* LLVulkanContext::initRenderBackend()
 static void imageBarrier(VkCommandBuffer cmd, VkImage image,
                          VkImageLayout oldLayout, VkImageLayout newLayout,
                          VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess,
-                         VkPipelineStageFlags2 dstStage, VkAccessFlags2 dstAccess)
+                         VkPipelineStageFlags2 dstStage, VkAccessFlags2 dstAccess,
+                         uint32_t layers = 1)   // #1075: every layer of a layered (stereo) target
 {
     VkImageMemoryBarrier2 b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
     b.srcStageMask = srcStage;
@@ -1302,7 +1466,7 @@ static void imageBarrier(VkCommandBuffer cmd, VkImage image,
     b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     b.image = image;
-    b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, layers};
 
     VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
     dep.imageMemoryBarrierCount = 1;
@@ -1419,6 +1583,7 @@ bool LLVulkanContext::beginLiveSnapshot(const LiveSnapshot& req, std::string& wh
     r.frames = req.frames;
     r.motionReject = req.motionReject;
     r.dither = req.dither;
+    r.sharpen = req.sharpen; r.adaptiveSigma = req.adaptiveSigma; r.mipBias = req.mipBias;   // (#1093)
     r.depthRange[0] = req.depthNear; r.depthRange[1] = req.depthFar;
     return mImpl->mWorld->liveSnap()->arm(&mImpl->mDevice, r, sw, sh, why);
 }
@@ -1501,6 +1666,14 @@ bool LLVulkanContext::renderOffscreen(const LLVKWorldFrame& world, uint32_t w, u
     if (vkDeviceIsLost()) return false;   // #135
     LLCleanRendererVK* W = mImpl->mWorld;
     if (!W || !W->ready()) return false;
+    // #1075: a stereo session's recordings are N-view (layered targets, multiview scopes); an
+    // offscreen snapshot is one view into a one-layer image -- refused (snapshots are in the
+    // stereo-off set, design §8.3).
+    if (W->stereoActive())
+    {
+        LL_WARNS_ONCE("Vulkan") << "offscreen snapshot refused: not available while rendering stereo views (#1075)" << LL_ENDL;
+        return false;
+    }
     VkDevice dev = mImpl->mDevice.device();
     vkDeviceWaitIdle(dev);   // no frame in flight: the renderer's per-slot state is ours
 
@@ -1537,12 +1710,14 @@ bool LLVulkanContext::renderOffscreen(const LLVKWorldFrame& world, uint32_t w, u
     // `frames` unjittered recordings (warm-up for the history-based passes) as before.
     const uint32_t aa = W->beginOffscreen(w, h, depth ? 0u : aaFrames);
     frames = aa ? aa + 1u : std::max(frames, 1u);
+    W->snapMatteBegin(world.avatar_matte && !depth, w, h);   // <GMDX> avatar matte snapshot
     if (aa)
         LL_DEBUGS("Vulkan") << "offscreen snapshot " << w << "x" << h << ": supersampled, " << aa
                            << " jittered frames" << LL_ENDL;
     for (uint32_t f = 0; f < frames; ++f)
     {
         W->mOffscreenFrame = f;
+        W->snapMatteFrame(f);   // <GMDX>
         const bool last = (f + 1 == frames);
         if (last) W->requestCapture(world.hud_enabled ? 2u : 1u);
         VK_CHECK(vkResetCommandBuffer(cmd, 0));
@@ -1571,6 +1746,7 @@ bool LLVulkanContext::renderOffscreen(const LLVKWorldFrame& world, uint32_t w, u
         W->mHideSelfHead = world.hide_self_head;
         W->mOrtho = world.ortho;            // <GMDX> region map capture
         W->mOrthoPpm = world.ortho_ppm;     // <GMDX>
+        W->mOrthoView = world.ortho_view;   // <GMDX> snapshot of the orthographic view
         W->setSelection(world);
         W->setAtmosphere(world);
         W->setSwapImage(img.image);
@@ -1579,6 +1755,7 @@ bool LLVulkanContext::renderOffscreen(const LLVKWorldFrame& world, uint32_t w, u
                        world.hud_enabled ? world.hud_view_proj : nullptr, world.hud_viewport);
         W->recordCaptureAt(cmd, 2, w, h);
         if (last && depth) W->recordDepthCapture(cmd, w, h);
+        W->snapMatteRecord(cmd, w, h);   // <GMDX>
         VK_CHECK(vkEndCommandBuffer(cmd));
 
         VkCommandBufferSubmitInfo ci{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
@@ -1588,8 +1765,10 @@ bool LLVulkanContext::renderOffscreen(const LLVKWorldFrame& world, uint32_t w, u
         VK_CHECK(vkQueueSubmit2(mImpl->mDevice.queue(), 1, &si, fence));
         VK_CHECK(vkWaitForFences(dev, 1, &fence, VK_TRUE, UINT64_MAX));
         if (vkDeviceIsLost()) break;   // #135: the readback below would be garbage
+        W->snapMatteCollect();   // <GMDX>
         VK_CHECK(vkResetFences(dev, 1, &fence));
     }
+    W->snapMatteEnd();   // <GMDX>
     uint32_t cw = 0, ch = 0;
     bool ok = !vkDeviceIsLost() && W->readCaptureRGB(rgb, cw, ch) && cw == w && ch == h;
     if (ok && depth)
@@ -1597,14 +1776,21 @@ bool LLVulkanContext::renderOffscreen(const LLVKWorldFrame& world, uint32_t w, u
         uint32_t dw = 0, dh = 0;
         ok = W->readDepthCapture(*depth, dw, dh) && dw == w && dh == h;
     }
-    W->mOrtho = false;      // <GMDX> (live frames are never orthographic)
+    W->mOrtho = false;      // <GMDX> (live frames are never a map capture)
     W->mOrthoPpm = 0.f;     // <GMDX>
+    W->mOrthoView = false;  // <GMDX> (the next live frame sets its own)
     W->endOffscreen();   // the next on-screen frame resets like a window resize
     W->setSwapImage(VK_NULL_HANDLE);   // the next presented frame sets its own
     vkFreeCommandBuffers(dev, mImpl->mDevice.commandPool(), 1, &cmd);
     vkDestroyFence(dev, fence, nullptr);
     mImpl->mDevice.destroyImage(img);
     return ok;
+}
+
+// <GMDX> avatar matte snapshots (gmdxsnapshotavatars.h)
+bool LLVulkanContext::takeSnapshotMatte(std::vector<uint8_t>& alpha, uint32_t& w, uint32_t& h)
+{
+    return mImpl && mImpl->mWorld && mImpl->mWorld->snapMatteTake(alpha, w, h);
 }
 
 uint32_t LLVulkanContext::maxImageDimension() const
@@ -1902,7 +2088,18 @@ bool LLVulkanContext::autoTuneSample(LLVKAutoTuneSample& out) const
 
 void LLVulkanContext::setAutoTunePerfCaps(const LLVKPerfCaps& caps)
 {
-    if (mImpl && mImpl->mWorld) mImpl->mWorld->setPerfCaps(caps);
+    if (!mImpl) return;
+    mImpl->mAutoTuneCaps = caps;
+    // #1076: with the VR safety governor's caps (default: no cap -- merged() then returns
+    // `caps` unchanged, as on the desktop where the governor never runs).
+    if (mImpl->mWorld) mImpl->mWorld->setPerfCaps(LLVKPerfCaps::merged(caps, mImpl->mVrSafetyCaps));
+}
+
+void LLVulkanContext::setVrSafetyPerfCaps(const LLVKPerfCaps& caps)
+{
+    if (!mImpl) return;
+    mImpl->mVrSafetyCaps = caps;
+    if (mImpl->mWorld) mImpl->mWorld->setPerfCaps(LLVKPerfCaps::merged(mImpl->mAutoTuneCaps, caps));
 }
 
 uint32_t LLVulkanContext::shadowMapResolution() const
@@ -2017,10 +2214,175 @@ uint32_t LLVulkanContext::acousticsBounceDispatched() const
     return (mImpl && mImpl->mWorld) ? mImpl->mWorld->acousticsBounceDispatched() : 0u;
 }
 
+uint32_t LLVulkanContext::worldViewCount() const
+{
+    return (mImpl && mImpl->mWorld) ? mImpl->mWorld->viewCount() : 1u;
+}
+
 bool LLVulkanContext::partPickNow(const LLVKPickRequest& req, LLVKPartPickResult& out)
 {
     if (vkDeviceIsLost()) return false;   // #135
     return mImpl && mImpl->mWorld && mImpl->mWorld->ready() && mImpl->mWorld->partPickNow(req, out);
+}
+
+// #1074 VR: the eye-size world target. The window format (the final / UI pipelines are
+// compiled for it, and its bytes are the eye images' UNORM sibling); kept while the session
+// runs, so the renderer's screen targets keep one size (no target churn).
+bool LLVulkanContext::Impl::vrEnsureTarget(uint32_t w, uint32_t h)
+{
+    const VkFormat fmt = mSwapchain.format();
+    if (!w || !h || fmt == VK_FORMAT_UNDEFINED) return false;
+    // #1075 LAYERED STEREO: one layer per view the world renders (the eyes; 1 = M1 mono).
+    const uint32_t layers = mWorld ? std::max(1u, mWorld->viewCount()) : 1u;
+    if (mVrTarget.image && mVrTarget.extent.width == w && mVrTarget.extent.height == h && mVrTarget.format == fmt &&
+        mVrTarget.layers == layers)
+        return true;
+    if (mVrTarget.image) vrReleaseTarget(true);   // (another size / format: rare)
+    if (!mVrBlitChecked)
+    {
+        mVrBlitChecked = true;
+        VkFormatProperties fp{};
+        vkGetPhysicalDeviceFormatProperties(mDevice.physicalDevice(), fmt, &fp);
+        const VkFormatFeatureFlags ff = fp.optimalTilingFeatures;
+        mVrBlitOk = (ff & VK_FORMAT_FEATURE_BLIT_SRC_BIT) && (ff & VK_FORMAT_FEATURE_BLIT_DST_BIT);
+        mVrBlitFilter = (ff & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+        if (!mVrBlitOk)
+            LL_WARNS("VR") << "the window format cannot be blitted: the desktop window shows no mirror of the headset" << LL_ENDL;
+    }
+    {
+        VkMemScope memcat(VKMEM_TARGET);
+        // Soft: out of memory leaves VR without the world for now (logged), never fatal.
+        VkDeviceContext::SoftAllocScope soft(&mDevice);
+        // (#1075: layers 1 is exactly the M1 createImage2D target)
+        mVrTarget = mDevice.createScreenImage(w, h, layers, fmt,
+            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT);
+    }
+    if (!mVrTarget.image)
+    {
+        static uint32_t s_warned = 0;
+        if (s_warned++ < 5) LL_WARNS("VR") << "could not allocate the " << w << "x" << h << " world target for the headset" << LL_ENDL;
+        mVrTarget = GpuImage{};
+        return false;
+    }
+    LL_INFOS("VR") << "world target for the headset: " << w << "x" << h << " x" << layers
+                   << (layers > 1 ? " layers (stereo: one per eye)" : "")
+                   << " (the world renders at the eye size while the session runs)" << LL_ENDL;
+    return true;
+}
+
+void LLVulkanContext::Impl::vrReleaseTarget(bool waitIdle)
+{
+    if ((!mVrTarget.image && !mVrUiTarget.image && !mVrHudDepth.image) || vkDeviceIsLost()) return;
+    if (waitIdle && mDevice.device()) vkDeviceWaitIdle(mDevice.device());
+    if (mVrTarget.image) mDevice.destroyImage(mVrTarget);
+    mVrTarget = GpuImage{};
+    if (mVrUiTarget.image) mDevice.destroyImage(mVrUiTarget);   // #1076
+    mVrUiTarget = GpuImage{};
+    if (mVrHudDepth.image) mDevice.destroyImage(mVrHudDepth);
+    mVrHudDepth = GpuImage{};
+}
+
+// #1076 VR: the HUD pass's depth for HUDs drawn onto the UI wall image (its size, the world
+// depth format the HUD pipelines are compiled for). Recreated only when the window size changes.
+bool LLVulkanContext::Impl::vrEnsureHudDepth(VkExtent2D ext, VkFormat fmt)
+{
+    if (!ext.width || !ext.height || fmt == VK_FORMAT_UNDEFINED) return false;
+    if (mVrHudDepth.image && mVrHudDepth.extent.width == ext.width && mVrHudDepth.extent.height == ext.height &&
+        mVrHudDepth.format == fmt)
+        return true;
+    if (mVrHudDepth.image)
+    {
+        if (mDevice.device()) vkDeviceWaitIdle(mDevice.device());   // (a window resize: rare)
+        mDevice.destroyImage(mVrHudDepth);
+        mVrHudDepth = GpuImage{};
+    }
+    {
+        VkMemScope memcat(VKMEM_TARGET);
+        VkDeviceContext::SoftAllocScope soft(&mDevice);   // out of memory: no HUDs on the wall for now
+        mVrHudDepth = mDevice.createImage2D(ext.width, ext.height, fmt, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+                                            VK_IMAGE_ASPECT_DEPTH_BIT);
+    }
+    if (!mVrHudDepth.image)
+    {
+        mVrHudDepth = GpuImage{};
+        return false;
+    }
+    return true;
+}
+
+// #1076 VR: the UI wall image at the window size (the UI is laid out in window pixels), in the
+// window format (the UI pipelines are compiled for it; its bytes are the UI swapchain's UNORM
+// sibling). Recreated only when the window size changes.
+bool LLVulkanContext::Impl::vrEnsureUiTarget(VkExtent2D ext)
+{
+    const VkFormat fmt = mSwapchain.format();
+    if (!ext.width || !ext.height || fmt == VK_FORMAT_UNDEFINED) return false;
+    if (mVrUiTarget.image && mVrUiTarget.extent.width == ext.width && mVrUiTarget.extent.height == ext.height &&
+        mVrUiTarget.format == fmt)
+        return true;
+    if (mVrUiTarget.image)
+    {
+        if (mDevice.device()) vkDeviceWaitIdle(mDevice.device());   // (a window resize: rare)
+        mDevice.destroyImage(mVrUiTarget);
+        mVrUiTarget = GpuImage{};
+    }
+    {
+        VkMemScope memcat(VKMEM_TARGET);
+        VkDeviceContext::SoftAllocScope soft(&mDevice);   // out of memory: no wall content for now, never fatal
+        mVrUiTarget = mDevice.createImage2D(ext.width, ext.height, fmt,
+            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+            VK_IMAGE_ASPECT_COLOR_BIT);
+    }
+    if (!mVrUiTarget.image)
+    {
+        static uint32_t s_warned = 0;
+        if (s_warned++ < 5) LL_WARNS("VR") << "could not allocate the " << ext.width << "x" << ext.height << " UI wall image" << LL_ENDL;
+        mVrUiTarget = GpuImage{};
+        return false;
+    }
+    LL_INFOS("VR") << "UI wall image: " << ext.width << "x" << ext.height << LL_ENDL;
+    return true;
+}
+
+// After the world (and its captures): the target, in COLOR_ATTACHMENT_OPTIMAL, blitted
+// aspect-fit (centred, bars in the window's clear colour) onto the window image, which is in
+// COLOR_ATTACHMENT_OPTIMAL; both are left there. Same-format UNORM blit: the sRGB-encoded bytes
+// are scaled, never re-encoded. A null windowImage (no window image this frame): nothing.
+void LLVulkanContext::Impl::vrRecordMirror(VkCommandBuffer cmd, VkImage windowImage, VkExtent2D windowExtent)
+{
+    if (!windowImage || !mVrTarget.image || !mVrBlitOk || !windowExtent.width || !windowExtent.height) return;
+    const uint32_t sw = mVrTarget.extent.width, sh = mVrTarget.extent.height;
+    const float fit = std::min((float)windowExtent.width / (float)sw, (float)windowExtent.height / (float)sh);
+    const int32_t dw = std::max(1, (int32_t)((float)sw * fit)), dh = std::max(1, (int32_t)((float)sh * fit));
+    const int32_t dx = ((int32_t)windowExtent.width - dw) / 2, dy = ((int32_t)windowExtent.height - dh) / 2;
+    // (#1075: a stereo target's every layer moves together; the mirror shows layer 0, the left eye)
+    imageBarrier(cmd, mVrTarget.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                 VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT |
+                     VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                 VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                 VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_READ_BIT, mVrTarget.layers);
+    imageBarrier(cmd, windowImage, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                 VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_CLEAR_BIT,
+                 VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                 VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    VkImageBlit rg{};
+    rg.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    rg.srcOffsets[1] = {(int32_t)sw, (int32_t)sh, 1};
+    rg.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    rg.dstOffsets[0] = {dx, dy, 0};
+    rg.dstOffsets[1] = {dx + dw, dy + dh, 1};
+    vkCmdBlitImage(cmd, mVrTarget.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, windowImage,
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &rg, mVrBlitFilter);
+    imageBarrier(cmd, windowImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                 VK_PIPELINE_STAGE_2_BLIT_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                 VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                 VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+    imageBarrier(cmd, mVrTarget.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                 VK_PIPELINE_STAGE_2_BLIT_BIT, 0,
+                 VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+                 VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_TRANSFER_READ_BIT,
+                 mVrTarget.layers);
 }
 
 bool LLVulkanContext::renderFrame(const std::function<void()>& uiRender,
@@ -2039,7 +2401,18 @@ bool LLVulkanContext::renderFrame(const std::function<void()>& uiRender,
     }
 
     fseBeforeRecreate();   // #919 (Windows): exclusive chain on / off, release before a rebuild
-    if (mImpl->mNeedsRecreate)
+    bool recreateNow = mImpl->mNeedsRecreate;
+    if (recreateNow && mXrPresentOverride && mImpl->mFseMinimized)
+    {
+        // #1074 VR: the mirror window is minimised, so every recreate fails -- and each one
+        // waits for the device to idle, which would stall the headset every frame. Retry
+        // twice a second until the window is back. (mXrPresentOverride: a session runs.)
+        static std::chrono::steady_clock::time_point s_last{};
+        const auto now = std::chrono::steady_clock::now();
+        if (now - s_last < std::chrono::milliseconds(500)) recreateNow = false;
+        else s_last = now;
+    }
+    if (recreateNow)
     {
         mImpl->mSwapchain.recreate(mImpl->mDevice, mImpl->mWidth, mImpl->mHeight);
         mImpl->mNeedsRecreate = false;
@@ -2060,6 +2433,9 @@ bool LLVulkanContext::renderFrame(const std::function<void()>& uiRender,
     {
         mImpl->mWorldInitTried = true;
         LLCleanRendererVK* w = new LLCleanRendererVK();
+        w->mWantVrHudPipes = mXrSession;   // #1076 VR: the wall's HUD pipelines (desktop: false)
+        // #1075: a stereo VR session renders one layer per eye (desktop: false).
+        w->mStereoRequested = mXrSession && LLXrSession::instance().stereo();
         if (w->init(mImpl->mDevice, mImpl->mSwapchain.format()))
         {
             mImpl->mWorld = w;
@@ -2073,6 +2449,24 @@ bool LLVulkanContext::renderFrame(const std::function<void()>& uiRender,
         }
     }
     const bool doWorld = wantWorld && mImpl->mWorld && mImpl->mWorld->ready();
+    // #1074 VR world frame: the session runs and LLVRCamera put this frame's head pose into the
+    // camera. The world then renders into the eye-size target (copied into both eyes, mirrored
+    // onto the window) instead of the window image. Desktop: mXrSession is false.
+    uint32_t vrW = 0, vrH = 0;
+    const bool vrWorld = mXrSession && doWorld && LLXrSession::instance().sessionRunning() &&
+                         LLXrSession::instance().worldCameraApplied() && LLXrSession::instance().renderExtent(vrW, vrH) &&
+                         mImpl->vrEnsureTarget(vrW, vrH);
+    if (vrWorld != mImpl->mVrWorldLast)
+    {
+        // Into / out of VR world frames (session start / stop, login): the render size and the
+        // view count change. Let the frames in flight (and their compute work) finish first;
+        // once per transition.
+        mImpl->mVrWorldLast = vrWorld;
+        if (vrWorld && mImpl->mDevice.device()) vkDeviceWaitIdle(mImpl->mDevice.device());
+        LL_INFOS("VR") << (vrWorld ? "the world renders for the headset now (eye size, head-tracked camera)"
+                                   : "the world renders for the desktop window again")
+                       << LL_ENDL;
+    }
     if (doWorld)
     {
         // CPU-side: mirror the latest clean-store arrays into VK buffers (or keep
@@ -2116,13 +2510,19 @@ bool LLVulkanContext::renderFrame(const std::function<void()>& uiRender,
         { VK_HITCH_SCOPE("vk_acquireWait"); acquired = mImpl->mSwapchain.acquire(mImpl->mDevice, &imageIndex, &needsRecreate); }
         LLVKHitch::timelineAcquire(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
     }
+    // #1074 VR: no window image (the mirror window is minimised, resizing, or its acquire timed
+    // out): the headset still gets this frame -- recorded and submitted on the slot's fence
+    // with no window image, no UI pass and no present. Desktop: skip the frame as before.
+    bool headless = false;
     if (!acquired)
     {
         if (needsRecreate)
         {
             mImpl->mNeedsRecreate = true;
         }
-        return true; // benign; skip this frame
+        if (!vrWorld || !mImpl->mSwapchain.beginFrameWithoutImage(mImpl->mDevice))
+            return true; // benign; skip this frame
+        headless = true;
     }
     // acquire() returned true but may still flag SUBOPTIMAL: render + present this
     // frame normally, then recreate the swapchain afterward.
@@ -2132,7 +2532,7 @@ bool LLVulkanContext::renderFrame(const std::function<void()>& uiRender,
     }
 
     VkCommandBuffer cmd = mImpl->mCmds[slot];
-    VkImage img = mImpl->mSwapchain.image(imageIndex);
+    VkImage img = headless ? VK_NULL_HANDLE : mImpl->mSwapchain.image(imageIndex);
 
     // Record: UNDEFINED -> TRANSFER_DST, clear, (UI pass), -> PRESENT_SRC.
     VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -2148,6 +2548,15 @@ bool LLVulkanContext::renderFrame(const std::function<void()>& uiRender,
     // (asyncCurrentCmd); the swapchain clear goes into a separate command buffer
     // (asyncWsiCmd), the only submission that waits the acquire semaphore, and
     // asyncSubmitFrame submits everything in order on both queues.
+    // #1075 VR world frames too: the XR eye copies, the depth layer copy and the mirror blit
+    // are recorded into the frame's LAST graphics command buffer (asyncCurrentCmd below), the
+    // tail asyncSubmitFrame submits last on the graphics queue -- after the joins of every
+    // segment the world's output depends on -- so xrEndFrame (after the submit, main thread)
+    // still follows all the eye work on the graphics queue the runtime was given (family /
+    // index 0). The async queue is another VkQueue, never handed to the runtime, and every
+    // submit stays on the main thread (VR_QUEUE_AUDIT option A: no lock). A window-less frame
+    // has no acquire / render-finished semaphores (asyncSubmitFrame and the #697 drop path
+    // take null ones) and no WSI command buffer.
     LLCleanRendererVK* asyncW = (doWorld && mImpl->mWorld->asyncAvailable()) ? mImpl->mWorld : nullptr;
     if (asyncW)
     {
@@ -2155,24 +2564,41 @@ bool LLVulkanContext::renderFrame(const std::function<void()>& uiRender,
         asyncW->setFrameSlot(slot);
         asyncW->asyncBeginFrame(cmd);
     }
+    // #1074: the facade's per-frame recording (uploads, offscreen segments, world overlays)
+    // only in frames whose UI pass is recorded too: gVK.recordFrame closes the facade's frame
+    // (upload ring marks, deferred frees). A VR frame can have no UI pass (no window image, or
+    // the window minimised); its uploads wait for the next frame that has one. Desktop
+    // (mXrSession false, never headless): exactly as before.
+    const bool uiRecords = doUI && !headless;
+    const bool uiFrame = !mXrSession || uiRecords;
+    // #1076 VR: a VR world frame with the UI wall shown also lays the UI into the wall's own
+    // image (cleared transparent, so the world shows between the floaters). Desktop: vrWorld
+    // is false, so this is false and nothing below that depends on it runs.
+    const bool vrUi = vrWorld && uiRecords && LLXrSession::instance().uiImageWanted() &&
+                      mImpl->vrEnsureUiTarget(mImpl->mSwapchain.extent());
     // UI texture uploads queued since the last frame (minimap, font atlas, previews):
     // recorded first, before any pass samples them (no per-upload submit-and-wait).
-    if (mImpl->mFacadeReady) { VK_HITCH_SCOPE("vk_uiUploads"); gVK.recordUploads(cmd); vkBreadcrumb(cmd, "f_ui_uploads"); }
+    if (mImpl->mFacadeReady && uiFrame) { VK_HITCH_SCOPE("vk_uiUploads"); gVK.recordUploads(cmd); vkBreadcrumb(cmd, "f_ui_uploads"); }
     // Offscreen render targets buffered this frame (#83: previews, visual-param
     // hints, the avatar appearance composite): before the world (which copies the
     // composite into its BOM slot) and the UI (which samples the previews).
-    if (mImpl->mFacadeReady && doUI) { VK_HITCH_SCOPE("vk_uiOffscreen"); gVK.recordOffscreen(cmd, slot); vkBreadcrumb(cmd, "f_ui_offscreen"); }
+    if (mImpl->mFacadeReady && uiRecords) { VK_HITCH_SCOPE("vk_uiOffscreen"); gVK.recordOffscreen(cmd, slot); vkBreadcrumb(cmd, "f_ui_offscreen"); }
 
     // Swapchain clear + transitions: `cmd`, or the async frame's WSI command buffer.
-    VkCommandBuffer wsiCmd = asyncW ? asyncW->asyncWsiCmd() : VK_NULL_HANDLE;
+    // (#1075: a window-less VR frame has no window image to clear: no WSI command buffer)
+    VkCommandBuffer wsiCmd = (asyncW && !headless) ? asyncW->asyncWsiCmd() : VK_NULL_HANDLE;
     VkCommandBuffer clearCmd = wsiCmd ? wsiCmd : cmd;
 
     // First scope = the acquire semaphore's wait stages (see the submit below), so the
     // layout transition + clear chain after the presentation engine releases the image.
-    imageBarrier(clearCmd, img,
-                 VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                 VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_CLEAR_BIT, 0,
-                 VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    // (#1074: a window-less VR frame has no window image: every window step is skipped.)
+    if (!headless)
+    {
+        imageBarrier(clearCmd, img,
+                     VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                     VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_CLEAR_BIT, 0,
+                     VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    }
 
     // Background clear. A mild dark slate behind the UI (or the animated teal when
     // no UI is drawn, so a human can confirm the frame is live).
@@ -2190,27 +2616,76 @@ bool LLVulkanContext::renderFrame(const std::function<void()>& uiRender,
     }
     clear.float32[3] = 1.0f;
     VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    vkCmdClearColorImage(clearCmd, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                         &clear, 1, &range);
+    if (!headless)
+    {
+        vkCmdClearColorImage(clearCmd, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                             &clear, 1, &range);
+    }
     vkBreadcrumb(clearCmd, "f_clear");
 
     if (doWorld || doUI)
     {
         VkExtent2D ext = mImpl->mSwapchain.extent();
-        VkImageView view = mImpl->mSwapchain.imageView(imageIndex);
+        VkImageView view = headless ? VK_NULL_HANDLE : mImpl->mSwapchain.imageView(imageIndex);
 
         // TRANSFER_DST -> COLOR_ATTACHMENT so both the world pass and the UI pass
         // render into this image view with the clear preserved (LOAD). (Async frames: the
         // world's later swap-image accesses chain on this barrier's COLOR_ATTACHMENT
         // second scope across the submission boundary -- same queue, submission order.)
-        imageBarrier(clearCmd, img,
-                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                     VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
-                     VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                     VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);   // LOAD reads
+        if (!headless)
+        {
+            imageBarrier(clearCmd, img,
+                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                         VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                         VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                         VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);   // LOAD reads
+        }
         if (wsiCmd && asyncW) asyncW->vkEndOrNoteOom(wsiCmd);   // #697 (OOM: the frame is dropped)
         else if (wsiCmd) VK_CHECK(vkEndCommandBuffer(wsiCmd));
+
+        // #1074 VR world frame: the world's colour target is the eye-size VR target (cleared
+        // here; the world LOADs it), not the window image. Its previous use (last frame's eye
+        // copies and mirror blit, transfer reads) is ordered before by the first scope.
+        VkImage worldImg = img;
+        VkImageView worldView = view;
+        VkExtent2D worldExt = ext;
+        uint32_t worldLayers = 1;   // #1075: the VR target's layers (one per eye in stereo)
+        if (vrWorld)
+        {
+            worldImg = mImpl->mVrTarget.image;
+            worldLayers = std::max(1u, mImpl->mVrTarget.layers);
+            // (stereo: the whole array -- the world's final pass writes one layer per view)
+            worldView = worldLayers > 1u && mImpl->mVrTarget.arrayView ? mImpl->mVrTarget.arrayView : mImpl->mVrTarget.view;
+            worldExt = mImpl->mVrTarget.extent;
+            imageBarrier(cmd, worldImg, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                         VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT | VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, 0,
+                         VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, worldLayers);
+            VkClearColorValue black{};
+            black.float32[3] = 1.0f;
+            const VkImageSubresourceRange worldRange{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, worldLayers};
+            vkCmdClearColorImage(cmd, worldImg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &worldRange);
+            imageBarrier(cmd, worldImg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                         VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                         VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                         VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, worldLayers);
+        }
+        // #1076 VR: the UI wall image, cleared to transparent black (the UI's premultiplied
+        // blend over it gives the coverage in alpha). Its previous use (last frame's copy into
+        // the UI swapchain) is ordered before by the first scope.
+        if (vrUi)
+        {
+            const VkImage uiT = mImpl->mVrUiTarget.image;
+            imageBarrier(cmd, uiT, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                         VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT | VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, 0,
+                         VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+            VkClearColorValue clearUi{};   // (0, 0, 0, 0)
+            vkCmdClearColorImage(cmd, uiT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clearUi, 1, &range);
+            imageBarrier(cmd, uiT, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                         VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                         VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                         VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+        }
 
         // WORLD FIRST: GPU-driven static-opaque geometry into the swapchain, with
         // the renderer's own depth buffer. Its dynamic-rendering scope LOADs the
@@ -2230,11 +2705,12 @@ bool LLVulkanContext::renderFrame(const std::function<void()>& uiRender,
             { VK_HITCH_SCOPE("ws_temporal"); mImpl->mWorld->setTemporal(*world); }
             mImpl->mWorld->mHideSelf = world->hide_self;
             mImpl->mWorld->mHideSelfHead = world->hide_self_head;
+            mImpl->mWorld->mOrthoView = world->ortho_view;   // <GMDX> orthographic view
             { VK_HITCH_SCOPE("ws_selection"); mImpl->mWorld->setSelection(*world); }
             { VK_HITCH_SCOPE("ws_pick"); mImpl->mWorld->setPick(*world); }   // raster (#702) + particle (#481) cursor pick rays
             { VK_HITCH_SCOPE("ws_acoustics"); mImpl->mWorld->setAcoustics(*world); }   // acoustics probe (#683)
             { VK_HITCH_SCOPE("ws_atmos"); mImpl->mWorld->setAtmosphere(*world); }
-            mImpl->mWorld->setSwapImage(img);   // SSR copies the lit scene out
+            mImpl->mWorld->setSwapImage(worldImg);   // SSR copies the lit scene out
             mImpl->mWorld->setSwapchainBytes(swapchainBytes(mImpl->mSwapchain));   // #407
             // World-overlay segment (property/ban lines, beacons, manipulators),
             // recorded against the world depth before the HUD pass clears it, then
@@ -2244,51 +2720,123 @@ bool LLVulkanContext::renderFrame(const std::function<void()>& uiRender,
             // that frame leaves it to the UI replay, after the capture.
             LLCleanRendererVK* W = mImpl->mWorld;
             mImpl->mWorld->mWorldOverlayHook =
-                [slot, doUI, W](VkCommandBuffer c, VkImageView color, VkImageView depth,
-                                VkImage depthImage, uint32_t w, uint32_t h)
+                [slot, uiRecords, W](VkCommandBuffer c, VkImageView color, VkImageView depth,
+                                     VkImage depthImage, uint32_t w, uint32_t h)
                 {
-                    if (doUI)
+                    if (uiRecords)   // (#1074: = doUI on the desktop)
                         gVK.recordWorldOverlay(c, slot, color, depth, depthImage, w, h,
                                                W->capturePending() != 2u && !W->liveSnapPoint2Pending());
                 };
-            mImpl->mWorld->recordWorld(cmd, view, ext.width, ext.height,
+            const float* hudViewProj = world->hud_enabled ? world->hud_view_proj : nullptr;
+            if (mXrSession)
+            {
+                // #1076 VR: HUD attachments go onto the UI wall's image (laid out in window
+                // pixels, like the UI), never into the eye-size world; no wall, no HUDs.
+                // Desktop: mXrSession is false -- the HUD target is never written.
+                LLCleanRendererVK::HudTarget ht;
+                if (vrUi && hudViewProj && mImpl->vrEnsureHudDepth(ext, mImpl->mWorld->worldDepthFormat()))
+                {
+                    ht.color = mImpl->mVrUiTarget.view;
+                    ht.depth = mImpl->mVrHudDepth.view;
+                    ht.depthImage = mImpl->mVrHudDepth.image;
+                    ht.width = ext.width;
+                    ht.height = ext.height;
+                }
+                mImpl->mWorld->mHudTarget = ht;
+                if (vrWorld && !ht.color) hudViewProj = nullptr;
+            }
+            // #1075: the layers worldView spans (the VR target's 2D_ARRAY view: one per eye; else 1)
+            mImpl->mWorld->mOutputLayers = (vrWorld && worldLayers > 1u && worldView == mImpl->mVrTarget.arrayView)
+                                         ? worldLayers : 1u;
+            // #1075 VR: the lens' hidden area per eye (XR_KHR_visibility_mask), drawn into the eyes'
+            // depth in a stereo world frame whose views are the located eyes. Desktop: never called.
+            if (mXrSession)
+            {
+                const LLXrSession& xs = LLXrSession::instance();
+                mImpl->mWorld->setVisibilityMask(xs.visibilityMaskGeneration(), xs.visibilityMask(0), xs.visibilityMask(1),
+                                                 mImpl->mWorld->mOutputLayers > 1u && world->views_are_eyes);
+            }
+            mImpl->mWorld->recordWorld(cmd, worldView, worldExt.width, worldExt.height,
                                        draw, cull, sky,
-                                       world->hud_enabled ? world->hud_view_proj : nullptr,
+                                       hudViewProj,
                                        world->hud_viewport);
             // Async compute: recordWorld may have ended `cmd`; continue in its last one.
             if (asyncW) cmd = asyncW->asyncCurrentCmd(cmd);
             // user snapshot, world + HUD (before the UI replay)
-            mImpl->mWorld->recordCaptureAt(cmd, 2, ext.width, ext.height);
-            mImpl->mWorld->recordLiveSnap(cmd, 2, ext.width, ext.height);   // #873
+            mImpl->mWorld->recordCaptureAt(cmd, 2, worldExt.width, worldExt.height);
+            mImpl->mWorld->recordLiveSnap(cmd, 2, worldExt.width, worldExt.height);   // #873
         }
+        // #1074 VR: the eye-size world, aspect-fit onto the window (the mirror), before the UI.
+        if (vrWorld) mImpl->vrRecordMirror(cmd, img, ext);
 
         // UI ON TOP: replay the buffered UI batches over the (cleared + world)
         // color. Its own dynamic-rendering scope also LOADs, so it composites.
-        if (doUI)
+        if (uiRecords)
         {
             VK_HITCH_SCOPE("vk_uiRecord");
             vkBreadcrumb(cmd, "f_ui");
+            // #1076 VR: the same UI into the wall's image first (the batches stay for the
+            // window's replay below), then ready for the copy into the UI swapchain.
+            if (vrUi)
+            {
+                gVK.replayTo(cmd, slot, mImpl->mVrUiTarget.view);
+                imageBarrier(cmd, mImpl->mVrUiTarget.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                             VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                             VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
+                vkBreadcrumb(cmd, "f_ui_wall");
+            }
             gVK.setFrameColorView(view);
             gVK.recordFrame(cmd, slot);
             vkBreadcrumb(cmd, "f_ui_done");
         }
-        // user snapshot, full frame incl. UI (the swap image was set by the world pass)
+        // user snapshot, full frame incl. UI (the swap image was set by the world pass;
+        // #1074 in VR world frames: the eye-size world without the UI)
         if (doWorld)
         {
-            mImpl->mWorld->recordCaptureAt(cmd, 3, ext.width, ext.height);
-            mImpl->mWorld->recordLiveSnap(cmd, 3, ext.width, ext.height);   // #873
+            mImpl->mWorld->recordCaptureAt(cmd, 3, worldExt.width, worldExt.height);
+            mImpl->mWorld->recordLiveSnap(cmd, 3, worldExt.width, worldExt.height);   // #873
+        }
+        // #1073 VR: the headset's images for the XR frame begun at the top of this viewer frame,
+        // in the frame's last graphics command buffer. Desktop: mXrSession false.
+        // #1074: in VR world frames the world target (-> TRANSFER_SRC) is copied into both eyes;
+        // otherwise (login, loading) the eyes are dark and the window shows as the panel.
+        if (mXrSession)
+        {
+            if (vrWorld)
+            {
+                imageBarrier(cmd, worldImg, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                             VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT |
+                                 VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                             VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT |
+                                 VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                             VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT, worldLayers);
+            }
+            // #1075: a stereo world (one layer per eye) and its depth for the depth layer.
+            LLXrWorldDepth xrDepth;
+            const bool haveDepth = vrWorld && worldLayers > 1u && mImpl->mWorld &&
+                                   mImpl->mWorld->worldDepthForXr(xrDepth.image, xrDepth.format, xrDepth.layout,
+                                                                  xrDepth.extent, xrDepth.layers, xrDepth.distAtZero,
+                                                                  xrDepth.distAtOne);
+            LLXrSession::instance().recordFrame(cmd, img, mImpl->mSwapchain.format(), ext,
+                                                vrWorld ? worldImg : VK_NULL_HANDLE, mImpl->mSwapchain.format(), worldExt,
+                                                vrUi ? mImpl->mVrUiTarget.image : VK_NULL_HANDLE, worldLayers,
+                                                haveDepth ? &xrDepth : nullptr);
         }
         // <GMDX> instant replay: the finished frame, UI included (in world only)
-        if (doWorld && !vkDeviceIsLost())
+        if (doWorld && !headless && !vkDeviceIsLost())   // (#1074 headless VR frames have no window image)
             GMDXReplay::captureFrame(cmd, img, mImpl->mSwapchain.format(), ext.width, ext.height, mImpl->mDevice);
         vkBreadcrumb(cmd, "f_present");
 
-        imageBarrier(cmd, img,
-                     VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                     VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-                     VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                     VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-                     VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, 0);
+        if (!headless)
+        {
+            imageBarrier(cmd, img,
+                         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                         VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                         VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                         VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                         VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, 0);
+        }
     }
     else
     {
@@ -2302,9 +2850,10 @@ bool LLVulkanContext::renderFrame(const std::function<void()>& uiRender,
     // DROPPED FRAMES): an empty submission keeps the swapchain + fence contract and the
     // renderer re-streams next frame. Other failures stay fatal (VK_CHECK / device lost).
     LLCleanRendererVK::AsyncWsi wsi;
-    wsi.acquire = mImpl->mSwapchain.imageAvailableSemaphore();
+    // (#1074 window-less VR frame: no acquire to wait, no present to signal; the fence only.)
+    wsi.acquire = headless ? VK_NULL_HANDLE : mImpl->mSwapchain.imageAvailableSemaphore();
     wsi.acquireStage = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_CLEAR_BIT;
-    wsi.renderFinished = mImpl->mSwapchain.renderFinishedSemaphore(imageIndex);
+    wsi.renderFinished = headless ? VK_NULL_HANDLE : mImpl->mSwapchain.renderFinishedSemaphore(imageIndex);
     wsi.fence = mImpl->mSwapchain.inFlightFence();
     LLCleanRendererVK* dropW = doWorld ? mImpl->mWorld : nullptr;   // (re-streams after a drop)
     const uint32_t dropsBefore = dropW ? dropW->framesDropped() : 0;   // <GMDX> instant replay
@@ -2337,26 +2886,26 @@ bool LLVulkanContext::renderFrame(const std::function<void()>& uiRender,
     {
     // Submit: wait on image-available, signal render-finished, fence in-flight.
     VkSemaphoreSubmitInfo waitSem{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
-    waitSem.semaphore = mImpl->mSwapchain.imageAvailableSemaphore();
+    waitSem.semaphore = wsi.acquire;
     // The image's first use is the CLEAR (vkCmdClearColorImage) + its layout transition:
     // the wait must cover that stage too, not only attachment output.
     waitSem.stageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_CLEAR_BIT;
 
     VkSemaphoreSubmitInfo signalSem{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
     // Per-IMAGE render-finished semaphore: present(imageIndex) waits this exact one.
-    signalSem.semaphore = mImpl->mSwapchain.renderFinishedSemaphore(imageIndex);
+    signalSem.semaphore = wsi.renderFinished;
     signalSem.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
 
     VkCommandBufferSubmitInfo cmdInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
     cmdInfo.commandBuffer = cmd;
 
     VkSubmitInfo2 submit{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
-    submit.waitSemaphoreInfoCount = 1;
-    submit.pWaitSemaphoreInfos = &waitSem;
+    submit.waitSemaphoreInfoCount = headless ? 0u : 1u;   // (#1074 window-less VR frame: no semaphores)
+    submit.pWaitSemaphoreInfos = headless ? nullptr : &waitSem;
     submit.commandBufferInfoCount = 1;
     submit.pCommandBufferInfos = &cmdInfo;
-    submit.signalSemaphoreInfoCount = 1;
-    submit.pSignalSemaphoreInfos = &signalSem;
+    submit.signalSemaphoreInfoCount = headless ? 0u : 1u;
+    submit.pSignalSemaphoreInfos = headless ? nullptr : &signalSem;
 
     VkResult sr;
     { VK_HITCH_SCOPE("vk_submit");
@@ -2379,7 +2928,16 @@ bool LLVulkanContext::renderFrame(const std::function<void()>& uiRender,
     // <GMDX> instant replay: queue the encode, or forget the capture of a dropped frame (#697 paths)
     if (!vkDeviceIsLost()) GMDXReplay::afterSubmit(!dropW || dropW->framesDropped() == dropsBefore);
     LLVKHitch::timelineSubmitted();   // (frame timeline: frame start -> submit)
+    // #1073 VR: release the XR images and xrEndFrame after the frame's submit (the runtime's
+    // reads follow our work on the same queue), before the mirror present. Desktop: skipped.
+    if (mXrSession) LLXrSession::instance().endFrame();
     bool presentNeedsRecreate = false;
+    if (headless)
+    {
+        // #1074: nothing to present; the next frame takes the next slot as after a present.
+        mImpl->mSwapchain.endFrameWithoutPresent();
+    }
+    else
     {
         const auto t0 = std::chrono::steady_clock::now();
         { VK_HITCH_SCOPE("vk_present"); mImpl->mSwapchain.present(mImpl->mDevice, imageIndex, &presentNeedsRecreate); }
@@ -2392,6 +2950,38 @@ bool LLVulkanContext::renderFrame(const std::function<void()>& uiRender,
 
     ++mImpl->mFrameCounter;
     return true;
+}
+
+// #1074 VR: the OpenXR teardown at the viewer's exit. LLAppViewer::cleanup calls this while
+// logging still runs (shutdown() below is not reached on a normal exit, which is why M0's
+// teardown lines were missing): the session ends (xrRequestExitSession, xrEndSession,
+// xrDestroySession, the swapchains and views), then the XrInstance is destroyed. The Vulkan
+// device and instance the runtime created stay until process exit, as on the desktop; nothing
+// of the runtime uses them after its session is gone. No-op without VR.
+void LLVulkanContext::shutdownXr()
+{
+    if (!mXrHooked && !mXrSession) return;
+    if (!mImpl || vkDeviceIsLost())
+    {
+        // #135: never touch a lost device; the runtime cleans up with the process.
+        LL_WARNS("VR") << "VR teardown skipped: the graphics device was lost" << LL_ENDL;
+        return;
+    }
+    LL_INFOS("VR") << "VR teardown at exit" << LL_ENDL;
+    if (mImpl->mDevice.device()) vkDeviceWaitIdle(mImpl->mDevice.device());
+    if (mXrSession)
+    {
+        LLXrSession::instance().shutdownSession();
+        mXrSession = false;
+        mXrPresentOverride = false;
+    }
+    mImpl->vrReleaseTarget(false);
+    if (mXrHooked)
+    {
+        LLXrSession::instance().shutdownInstance();
+        mXrHooked = false;
+    }
+    LL_INFOS("VR") << "VR teardown done" << LL_ENDL;
 }
 
 void LLVulkanContext::shutdown()
@@ -2419,7 +3009,15 @@ void LLVulkanContext::shutdown()
     {
         vkDeviceWaitIdle(mImpl->mDevice.device());
     }
+    // #1073 VR: the session, its swapchains and image views go before the device.
+    if (mXrSession)
+    {
+        LLXrSession::instance().shutdownSession();
+        mXrSession = false;
+        mXrPresentOverride = false;
+    }
     GMDXReplay::shutdown(false);   // <GMDX> instant replay: its encoder objects go before the device
+    mImpl->vrReleaseTarget(false);   // #1074 (device idle above; none outside VR)
     // EXPERIMENTAL Vulkan world: tear down the GPU-driven world renderer first.
     if (mImpl->mWorld)
     {
@@ -2464,6 +3062,12 @@ void LLVulkanContext::shutdown()
         return;
     }
     mImpl->mDevice.shutdown();
+    // #1073 VR: the XrInstance after the VkInstance the runtime created for it.
+    if (mXrHooked)
+    {
+        LLXrSession::instance().shutdownInstance();
+        mXrHooked = false;
+    }
     delete mImpl;
     mImpl = nullptr;
     mInitialized = false;

@@ -337,6 +337,10 @@ PCRE Copyright (c) 1997-2012 University of Cambridge
 SDL Copyright (C) 1997, 1998, 1999, 2000, 2001, 2002 Sam Lantinga
 SSLeay Copyright (C) 1995-1998 Eric Young (eay@cryptsoft.com)
 Weather sound recordings from Freesound.org (CC0 1.0, public domain): audible-edge, bbrownmuse, BudJillett, Cinetony, cocaine, csengeri, felix.blume, Fission9, gyzhor, jmbphilmes, Kinoton, kyles, milosaudio, musmaster, Nox_Sound, pheiland, qubodup, ragamuffin, Sadiquecat, Sassaby, SoundsLikeYukon, swiftoid, TRP, visionear, xkeril, xUMR.
+Night sky stars: The Bright Star Catalogue, 5th Revised Ed., D. Hoffleit and W. H. Warren Jr. (Yale University Observatory / NASA ADC, 1991), from CDS Strasbourg (catalogue V/50).
+Night sky Milky Way: "The Milky Way panorama", ESO/S. Brunier (eso0932a), CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/); resized and its resolved stars removed.
+Night sky planets: mean orbital elements from E. M. Standish, "Keplerian Elements for Approximate Positions of the Major Planets" (JPL Solar System Dynamics, https://ssd.jpl.nasa.gov/planets/approx_pos.html).
+Toolbar pin icons: "gun" from Font Awesome Free 6 by Fonticons, Inc., CC BY 4.0 (https://fontawesome.com/license/free); "winchester-rifle" and "rifle" by Lorc and Delapouite, game-icons.net, CC BY 3.0 (https://creativecommons.org/licenses/by/3.0/); "flintlock-pistol" from Pinhead Icons, CC0. Letters and digits: Barlow SemiBold outlines, SIL Open Font License 1.1.
 xmlrpc-epi Copyright (C) 2000 Epinions, Inc.
 xxHash Copyright (C) 2012-2020 Yann Collet.
 zlib Copyright (C) 1995-2012 Jean-loup Gailly and Mark Adler.

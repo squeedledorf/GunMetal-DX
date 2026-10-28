@@ -17,6 +17,12 @@
 //   region -> viewer : Combat 2.0 events from the region combat log, only while the
 //                      viewer asks for them: every death (the kill feed), and the
 //                      owner's own hits and kills (the hit marker)
+//   map shares       : "mto|<seq>|<key>,<key>,..." then "msay|<seq>|<line>" from the viewer
+//                      say one readable map share / ping line to each listed avatar in this
+//                      region with llRegionSayTo on channel 0 (private to that avatar, never
+//                      local chat), under the name "Ping from <owner's username>" ("Mark from",
+//                      "Zone from"), then the helper's own name again; the recipients wait in
+//                      the object's linkset data (protected), never in script memory
 // Identity always comes from the sim: llGetOwnerKey() of the speaking attachment, or the
 // key of the avatar answering a dialog. The viewer never trusts a key in a message body.
 // Only well-formed lines of the known kinds are forwarded, within per-speaker and overall
@@ -40,6 +46,17 @@ integer CONFIRM_CHANNEL = [CONFIRM_CHANNEL];
 integer QUIET_AFTER = 60;       // seconds without a viewer command before we stop forwarding
 integer MAX_DEATHS = 8;         // combat log deaths forwarded per second at most
 integer MAX_HITS = 16;          // the owner's hits forwarded per second at most (kills get MAX_DEATHS more)
+string HELPER_NAME = "[HELPER_NAME]";   // the object's own name (slbridge.cpp)
+integer MAX_TO = 50;            // map share recipients per line
+integer MEM_FLOOR = 6000;       // bytes left (of the 64 KB) under which map shares stop: room for a line
+integer LSD_FLOOR = 4096;       // linkset data bytes left under which no more recipients are stored
+// The map share recipients live in the object's linkset data, one entry each ("gmdx.to.<key>"),
+// protected with this pass: only this script uses the helper's linkset data (no other script is in
+// it; the viewer strips them), and the script's memory never holds the list.
+string TO_PASS = "gmdx.mapshare.to.v1";
+string TO_FIND = "^gmdx\\.to\\.";
+float SAY_BURST = 6.0;          // map share lines (the viewer's limits allow 15 in 10 s, 15 in 30 s) ...
+float SAY_RATE = 1.0;           // ... a second
 
 // Forwarding budgets (token buckets): per speaking owner, and for everything together.
 float OWNER_BURST = 20.0;
@@ -72,6 +89,12 @@ integer gPublicOn;      // public listens enabled (only while the viewer drives 
 list gBuckets;          // [owner, tokens, time] per tracked owner, least recently heard first
 float gTotalTokens;
 float gTotalTime;
+string gToSeq;          // the map share the stored recipients are for
+integer gToCount;       // how many are stored (linkset data, see TO_PASS), at most MAX_TO
+integer gMemLow;        // low script memory was reported (again once there was enough meanwhile)
+integer gLsdLow;        // ... and low linkset data
+float gSayTokens;
+float gSayTime;
 
 integer INFO_MAX_KEYS = 25;     // keys per batch (the viewer sends at most this many)
 integer INFO_WINDOW = 10;       // seconds
@@ -83,8 +106,30 @@ integer INFO_MAX_BATCHES = 20;  // batches per window; more are answered "busy"
 // attachment may sit from its point (viewer and sim clamp further offsets).
 vector HIDDEN_POS = <0.0, 2.4, -2.4>;
 
+// The name a map share line goes out under, from the line's tag; "" for anything else.
+string sharePrefix(string line)
+{
+    string tag = llGetSubString(line, 0, 6);
+    if (tag == "[Ping] ")
+        return "Ping from ";
+    if (tag == "[Mark] ")
+        return "Mark from ";
+    if (tag == "[Zone] ")
+        return "Zone from ";
+    return "";
+}
+
+integer shareName(string name)
+{
+    string head = llGetSubString(name, 0, 9);
+    return head == "Ping from " || head == "Mark from " || head == "Zone from ";
+}
+
 hide()
 {
+    // A detach in the middle of a map share would keep its name: our own again.
+    if (shareName(llGetObjectName()))
+        llSetObjectName(HELPER_NAME);
     llSetLinkPrimitiveParamsFast(LINK_THIS, [PRIM_SIZE, <0.01, 0.01, 0.01>,
         PRIM_COLOR, ALL_SIDES, <1.0, 1.0, 1.0>, 0.0, PRIM_TEXT, "", ZERO_VECTOR, 0.0]);
     // Off screen, so it never sits over the middle of the view (or catches clicks there).
@@ -121,6 +166,9 @@ start()
     gBuckets = [];
     gTotalTokens = TOTAL_BURST;
     gTotalTime = llGetTime();
+    clearTo();   // (left over from a detach in the middle of a share)
+    gSayTokens = SAY_BURST;
+    gSayTime = llGetTime();
 }
 
 // The public listens only run while the viewer drives us; an idle helper hears nothing.
@@ -247,6 +295,129 @@ scriptInfo(string arg)
     }
     if (out != "")
         llOwnerSay("#slb:scripts|" + batch + out);
+}
+
+// Room for map shares: below MEM_FLOOR free script memory (now, not the low-water mark
+// llGetFreeMemory gives under Mono) they stop, and the viewer is told once:
+// "#slb:mem|script|<free bytes>" (or "#slb:mem|lsd|<free bytes>" for linkset data, see mapTo).
+integer memOk()
+{
+    integer free = llGetMemoryLimit() - llGetUsedMemory();
+    if (free >= MEM_FLOOR)
+    {
+        gMemLow = FALSE;
+        return TRUE;
+    }
+    if (!gMemLow)
+        llOwnerSay("#slb:mem|script|" + (string)free);
+    gMemLow = TRUE;
+    return FALSE;
+}
+
+// The stored recipients gone (a new share, one said, a detach).
+clearTo()
+{
+    llLinksetDataDeleteFound(TO_FIND, TO_PASS);
+    gToCount = 0;
+    gToSeq = "";
+}
+
+// "mto|<seq>|<key>,<key>,...": recipients for map share <seq> (a new seq starts a new list, so
+// a share cut short never reaches the next one's people). Only valid keys, never the owner, no
+// repeats, at most MAX_TO; none once the linkset data is nearly full (told once, as memOk).
+mapTo(string arg)
+{
+    integer bar = llSubStringIndex(arg, "|");
+    if (bar < 1 || bar > 9)
+        return;
+    string seq = llGetSubString(arg, 0, bar - 1);
+    if (seq != gToSeq)
+    {
+        clearTo();
+        gToSeq = seq;
+    }
+    list ids = llParseString2List(llGetSubString(arg, bar + 1, -1), [","], []);
+    integer n = llGetListLength(ids);
+    integer i;
+    if (llLinksetDataAvailable() >= LSD_FLOOR)
+        gLsdLow = FALSE;
+    for (i = 0; i < n && gToCount < MAX_TO && memOk(); ++i)
+    {
+        string id = llList2String(ids, i);
+        if (llLinksetDataAvailable() < LSD_FLOOR)
+        {
+            if (!gLsdLow)
+                llOwnerSay("#slb:mem|lsd|" + (string)llLinksetDataAvailable());
+            gLsdLow = TRUE;
+            i = n;
+        }
+        else if (llStringLength(id) == 36)
+            if ((key)id)
+                if (id != (string)gOwner && llLinksetDataReadProtected("gmdx.to." + id, TO_PASS) == "")
+                    if (llLinksetDataWriteProtected("gmdx.to." + id, "1", TO_PASS) == LINKSETDATA_OK)
+                        ++gToCount;
+    }
+}
+
+// "msay|<seq>|<line>": says the line to map share <seq>'s recipients still in this region, each
+// alone (llRegionSayTo, channel 0), under "Ping from <owner>" (the owner's own username, from the
+// sim: never a name the viewer sends), then the helper's own name again. Only a line that looks
+// like a share ("[Ping] ...", "[Mark] ...", "[Zone] ..." ending in its "(gmdx:...)" tail), within
+// the budget; the recipients are used once.
+mapSay(string arg)
+{
+    integer bar = llSubStringIndex(arg, "|");
+    if (bar < 1 || bar > 9)
+        return;
+    // (the recipients are read from the linkset data one at a time, each deleted once said)
+    if (llGetSubString(arg, 0, bar - 1) != gToSeq)
+        clearTo();
+    gToSeq = "";
+    string line = llGetSubString(arg, bar + 1, -1);
+    string prefix = sharePrefix(line);
+    if (gToCount == 0 || prefix == "" || llGetSubString(line, -1, -1) != ")" || llSubStringIndex(line, " (gmdx:") < 0
+        || !memOk())
+    {
+        clearTo();
+        return;
+    }
+    float now = llGetTime();
+    gSayTokens += (now - gSayTime) * SAY_RATE;
+    if (gSayTokens > SAY_BURST)
+        gSayTokens = SAY_BURST;
+    gSayTime = now;
+    if (gSayTokens < 1.0)
+    {
+        clearTo();
+        return;
+    }
+    gSayTokens -= 1.0;
+    string name = llGetUsername(gOwner);
+    if (name == "")
+        name = llKey2Name(gOwner);
+    if (name == "")
+    {
+        clearTo();
+        return;
+    }
+    string own = llGetObjectName();
+    if (shareName(own))
+        own = HELPER_NAME;
+    llSetObjectName(llGetSubString(prefix + name, 0, 62));
+    // at most MAX_TO rounds, so an entry that would not delete cannot keep this going
+    integer i;
+    list one = llLinksetDataFindKeys(TO_FIND, 0, 1);
+    for (i = 0; i < MAX_TO && one != []; ++i)
+    {
+        string entry = llList2String(one, 0);
+        key k = (key)llGetSubString(entry, 8, -1);
+        if (llGetAgentSize(k) != ZERO_VECTOR)
+            llRegionSayTo(k, 0, line);
+        llLinksetDataDeleteProtected(entry, TO_PASS);
+        one = llLinksetDataFindKeys(TO_FIND, 0, 1);
+    }
+    clearTo();
+    llSetObjectName(own);
 }
 
 integer driven()
@@ -453,6 +624,14 @@ command(string msg)
         gHitsWanted = (arg == "1");
         combatListen(gCombatWanted || gHitsWanted);
     }
+    else if (cmd == "mto")
+    {
+        mapTo(arg);
+    }
+    else if (cmd == "msay")
+    {
+        mapSay(arg);
+    }
     else if (cmd == "csay")
     {
         // Our owner's own consent statements (grant renewals, revocations), which other
@@ -488,6 +667,7 @@ default
 
     attach(key id)
     {
+        clearTo();   // (a share cut short by a detach, or left from before)
         if (id != NULL_KEY)
             hide();
         if (id == NULL_KEY)

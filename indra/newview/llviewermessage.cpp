@@ -28,6 +28,7 @@
 #include "llcrossingtrace.h"
 #include "llcrossingkeep.h"
 #include "llderenderlist.h"     // #202
+#include "fssoundemitterblacklist.h" // <GMDX>
 #include "llviewermessage.h"
 #include "slsoundlog.h"
 #include "fskeywords.h"
@@ -138,6 +139,8 @@
 #include "slposesync.h"
 // [/RLVa:KB]
 #include "fscombataim.h" // <SS:Skoomastream/>
+#include "fsrezqueue.h" // <GMDX> Rez queue watch
+#include "gmdxmapshare.h" // <GMDX> map shares said by helpers
 
 #include "llnotificationmanager.h" //
 #include "llexperiencecache.h"
@@ -1066,6 +1069,28 @@ void set_dad_inbox_object(const LLUUID& object_id)
     gInventory.addObserver(move_observer);
 }
 
+// <GMDX> <OTS> Folders whose freshly-created items should not auto-open a preview.
+// Used by the bulk sound->notecard upload so its generated notecard does not
+// pop a notecard editor window when it lands in inventory.
+static std::set<LLUUID> sSuppressAutoOpenFolders;
+void suppress_inventory_auto_open_for_folder(const LLUUID& folder_id, bool suppress)
+{
+    if (suppress)
+    {
+        sSuppressAutoOpenFolders.insert(folder_id);
+    }
+    else
+    {
+        sSuppressAutoOpenFolders.erase(folder_id);
+    }
+}
+static bool is_auto_open_suppressed_for_item(const LLInventoryItem* item)
+{
+    return item && !sSuppressAutoOpenFolders.empty()
+        && sSuppressAutoOpenFolders.count(item->getParentUUID()) > 0;
+}
+// </OTS> </GMDX>
+
 //unlike the FetchObserver for AgentOffer, we only make one
 //instance of the AddedObserver for TaskOffers
 //and it never dies.  We do this because we don't know the UUID of
@@ -1098,6 +1123,7 @@ protected:
                         LL_DEBUGS("Inventory_Move") << "Found asset UUID: " << asset_uuid << LL_ENDL;
                         was_moved = true;
                     }
+                    was_moved = was_moved || is_auto_open_suppressed_for_item(added_item); // <GMDX> <OTS> sound->notecard upload
                 }
             }
 
@@ -2867,7 +2893,14 @@ void process_chat_from_simulator(LLMessageSystem *msg, void **user_data)
 // [/RLVa:KB]
             case CHAT_TYPE_DEBUG_MSG:
             case CHAT_TYPE_NORMAL:
+                break;
             case CHAT_TYPE_DIRECT:
+                // <GMDX> a map share or ping said to me by someone's helper (gmdxmapshare.h): drawn, not shown
+                if ((CHAT_SOURCE_OBJECT == chat.mSourceType) && GMDXMapShare::consumeObjectChat(from_id, owner_id, from_name, mesg))
+                {
+                    return;
+                }
+                // </GMDX>
                 break;
             case CHAT_TYPE_SHOUT:
                 chat.mText = LLTrans::getString("shout") + " ";
@@ -3018,6 +3051,21 @@ void process_teleport_start(LLMessageSystem *msg, void**)
 
     if( gAgent.getTeleportState() == LLAgent::TELEPORT_NONE )
     {
+        // <GMDX> SoapStorm bb9b10d59f + baf3208b2d: the server sends two TeleportStart packets for
+        // some teleports (landmarks, some llTeleportAgent calls, TeleportLocal racing its Start).
+        // One arriving within a few seconds of a completed teleport is a stale duplicate: taking it
+        // re-opened the progress screen with no TeleportFinish to close it, until the timeout.
+        // A real teleport that does lose its Start here still completes through TeleportFinish's
+        // "finish without start" path.
+        constexpr F32 TP_DUPLICATE_START_GRACE_SECONDS = 3.0f;
+        if (gTeleportCompletionTimer.getElapsedTimeF32() < TP_DUPLICATE_START_GRACE_SECONDS)
+        {
+            LL_WARNS("Teleport","Messaging") << "Discarding TeleportStart " << gTeleportCompletionTimer.getElapsedTimeF32()
+                << "s after the last teleport completed, likely a duplicate packet." << LL_ENDL;
+            return;
+        }
+        gTeleportDisplayTimer.reset();
+        // </GMDX>
         gTeleportDisplay = true;
         gAgent.setTeleportState( LLAgent::TELEPORT_START );
         make_teleport_sound();
@@ -4356,6 +4404,9 @@ void process_sound_trigger(LLMessageSystem *msg, void **)
         return;
     }
 
+    // <GMDX> Sound emitter blacklist: the emitter, the root ParentID names, or its linkset root
+    if (FSSoundEmitterBlacklist::instance().isEmitterBlacklisted(object_id, parent_id)) return;
+
     // Don't play sounds from a region with maturity above current agent maturity
     if( !gAgent.canAccessMaturityInRegion( region_handle ) )
     {
@@ -4413,6 +4464,7 @@ void process_preload_sound(LLMessageSystem *msg, void **user_data)
 
     if (LLMuteList::getInstance()->isMuted(object_id)) return;
     if (LLMuteList::getInstance()->isMuted(owner_id, LLMute::flagObjectSounds)) return;
+    if (FSSoundEmitterBlacklist::instance().isEmitterBlacklisted(objectp)) return; // <GMDX> sound emitter blacklist
 
     LLAudioSource *sourcep = objectp->getAudioSource(owner_id);
     if (!sourcep) return;
@@ -4513,6 +4565,7 @@ void process_sim_stats(LLMessageSystem *msg, void **user_data)
         F32 stat_value;
         msg->getU32("Stat", "StatID", stat_id, i);
         msg->getF32("Stat", "StatValue", stat_value, i);
+        FSRezQueue::onSimStat(stat_id, stat_value); // <GMDX> Rez queue watch: the region's pending asset queue
         auto measurementp = LLStatViewer::SimMeasurementSampler::getInstance((ESimStatID)stat_id);
 
         if (measurementp )
@@ -6828,6 +6881,10 @@ void process_teleport_local(LLMessageSystem *msg,void**)
             gAgent.setTeleportState( LLAgent::TELEPORT_NONE );
         }
     }
+    // <GMDX> SoapStorm bb9b10d59f: a same-region teleport just completed; the TeleportStart sent
+    // alongside every TeleportLocal can arrive after it (UDP race) and must not reopen the progress screen.
+    gTeleportCompletionTimer.reset();
+    // </GMDX>
 
     // Sim tells us whether the new position is off the ground
     if (teleport_flags & TELEPORT_FLAGS_IS_FLYING)

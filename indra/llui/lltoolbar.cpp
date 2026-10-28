@@ -451,6 +451,9 @@ bool LLToolBar::handleRightMouseDown(S32 x, S32 y, MASK mask)
             }
         }
 
+        // <GMDX> for the menu's pin entries (newview gmdxtoolbarpins.cpp)
+        sGMDXMenuButton = mRightMouseTargetButton ? mRightMouseTargetButton->getHandle() : LLHandle<LLView>();
+
         createContextMenu();
 
         LLContextMenu * menu = (LLContextMenu *) mPopupMenuHandle.get();
@@ -1211,12 +1214,71 @@ boost::signals2::connection LLToolBar::setButtonRemoveCallback(const button_sign
     return connectSignal(mButtonRemoveSignal, cb);
 }
 
+LLToolBar::pin_cargo_callback_t LLToolBar::sGMDXPinCargo; // <GMDX>
+LLHandle<LLView> LLToolBar::sGMDXMenuButton; // <GMDX>
+
+// <GMDX> The button row across the toolbar's whole thickness, reaching one button length past
+// each end, so a drop just before the first or after the last button still lands; an empty
+// toolbar takes a few buttons' length around where its first button would go.
+LLRect LLToolBar::getGMDXPinZone() const
+{
+    LLRect zone;
+    mButtonPanel->localRectToOtherView(mButtonPanel->getLocalRect(), &zone, this);
+    const bool horizontal = getOrientation(mSideType) == LLLayoutStack::HORIZONTAL;
+    const S32 girth = horizontal ? getRect().getHeight() : getRect().getWidth();
+    S32 reach = 3 * llmax(girth, 38);
+    if (!mButtons.empty())
+    {
+        const LLRect& end = mButtons.back()->getRect();
+        reach = horizontal ? end.getWidth() : end.getHeight();
+    }
+    if (horizontal)
+    {
+        zone.mLeft -= reach;
+        zone.mRight += reach;
+        zone.mBottom = 0;
+        zone.mTop = getRect().getHeight();
+    }
+    else
+    {
+        zone.mBottom -= reach;
+        zone.mTop += reach;
+        zone.mLeft = 0;
+        zone.mRight = getRect().getWidth();
+    }
+    zone.intersectWith(getLocalRect());
+    return zone;
+}
+// </GMDX>
+
 bool LLToolBar::handleDragAndDrop(S32 x, S32 y, MASK mask, bool drop,
                                         EDragAndDropType cargo_type,
                                         void* cargo_data,
                                         EAcceptance* accept,
                                         std::string& tooltip_msg)
 {
+    // <GMDX> an inventory item or folder: pinned here as a button of its own. Only inside the pin
+    // zone (getGMDXPinZone): the bottom toolbar spans the screen, and anywhere else the drag goes
+    // on to the world (rezzing an object dropped there) as it always did.
+    if (cargo_type != DAD_WIDGET && !mReadOnly && sGMDXPinCargo && getGMDXPinZone().pointInRect(x, y))
+    {
+        const LLCommandId pin = sGMDXPinCargo(cargo_type, cargo_data, drop);
+        if (pin != LLCommandId::null)
+        {
+            *accept = ACCEPT_YES_SINGLE;
+            if (drop)
+            {
+                addCommand(pin, getRankFromPosition(x, y));
+            }
+            else
+            {
+                mDragRank = getRankFromPosition(x, y);
+                mDragAndDropTarget = true;  // the caret
+            }
+            return true;
+        }
+    }
+    // </GMDX>
     // If we have a drop callback, that means that we can handle the drop
     bool handled = mHandleDropCallback != nullptr;
 

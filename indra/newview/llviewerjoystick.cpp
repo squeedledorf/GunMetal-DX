@@ -40,6 +40,7 @@
 #include "llwindow.h"
 #include "llagent.h"
 #include "llagentcamera.h"
+#include "llframetimer.h" // <GMDX> pinned device retry
 #include "llfocusmgr.h"
 #include "llgamecontrol.h"
 
@@ -256,7 +257,14 @@ void LLViewerJoystick::updateEnabled(bool autoenable)
 {
     if (mDriverState == JDS_UNINITIALIZED)
     {
-        gSavedSettings.setBOOL("JoystickEnabled", false);
+        // <GMDX> SoapStorm c798038fa5 (Nexii): only forget the enable when no device was pinned.
+        // Clearing it whenever the device is missing right now (not enumerated yet at startup,
+        // unplugged for a moment) latched the feature off for good, since startup init() is gated on it.
+        if (!isDeviceUUIDSet())
+        {
+            gSavedSettings.setBOOL("JoystickEnabled", false);
+        }
+        // </GMDX>
     }
     else
     {
@@ -430,7 +438,10 @@ void LLViewerJoystick::init(bool autoenable)
                 {
                     LL_INFOS("Joystick") << "Failed to gather input devices. Falling back to ndof's init" << LL_ENDL;
                     // Failed to gather devices, init first suitable one
-                mLastDeviceUUID = LLSD();
+                // <GMDX> SoapStorm c798038fa5 (Nexii): keep the pinned id through a failed enumeration;
+                // clearing it let the next saveDeviceIdToSettings() write the empty id over the stored one.
+                //mLastDeviceUUID = LLSD();
+                // </GMDX>
                 void *preffered_device = NULL;
                 initDevice(preffered_device);
             }
@@ -1398,10 +1409,36 @@ bool LLViewerJoystick::toggleFlycam()
 
 void LLViewerJoystick::scanJoystick()
 {
+    // <GMDX> Retry backoff for a pinned device that is not live (see below). A live device resets it.
+    constexpr F32 JOYSTICK_RETRY_MIN = 5.f;
+    constexpr F32 JOYSTICK_RETRY_MAX = 60.f;
+    static LLFrameTimer retry_timer;
+    static F32 retry_interval = JOYSTICK_RETRY_MIN;
+    if (mDriverState == JDS_INITIALIZED)
+    {
+        retry_interval = JOYSTICK_RETRY_MIN;
+    }
+    // </GMDX>
+
     if (mDriverState != JDS_INITIALIZED
             || !gSavedSettings.getBOOL("JoystickEnabled")
             || !mDeviceIs3DConnexion)
     {
+        // <GMDX> SoapStorm c798038fa5 (Nexii): the pinned device is wanted but not live, so retry on a
+        // slow timer. Devices are not always enumerable when startup init() runs, and the ndof hot plug
+        // callbacks do not fire on Windows. init() enumerates every DirectInput device, which hitches on
+        // Windows, so a device that stays unplugged is retried less and less often (5 s doubling to 60 s).
+        if (mDriverState != JDS_INITIALIZED && gSavedSettings.getBOOL("JoystickEnabled") && isDeviceUUIDSet())
+        {
+            if (retry_timer.getElapsedTimeF32() > retry_interval)
+            {
+                retry_timer.reset();
+                LL_DEBUGS("Joystick") << "Pinned device is not initialized, retrying" << LL_ENDL;
+                init(false);
+                retry_interval = llmin(retry_interval * 2.f, JOYSTICK_RETRY_MAX); // reset at the top on success
+            }
+        }
+        // </GMDX>
         return;
     }
 
@@ -1496,7 +1533,14 @@ void LLViewerJoystick::saveDeviceIdToSettings()
     // someone editing the xml will corrupt it
     // so convert to string first
     std::string device_string = getDeviceUUIDString();
-    gSavedSettings.setLLSD("JoystickDeviceUUID", LLSD(device_string));
+    // <GMDX> SoapStorm c798038fa5 (Nexii): store the id in a map. JoystickDeviceUUID is an LLSD control
+    // and LLControlVariable::getComparableValue() re-parses a String as LLSD notation; a GUID string
+    // "{6F1D...}" opens a map there, so every id collapsed to {} and nothing could be restored.
+    //gSavedSettings.setLLSD("JoystickDeviceUUID", LLSD(device_string));
+    LLSD device_data;
+    device_data["guid"] = device_string;
+    gSavedSettings.setLLSD("JoystickDeviceUUID", device_data);
+    // </GMDX>
 #else
     LLSD device_id = getDeviceUUID();
     gSavedSettings.setLLSD("JoystickDeviceUUID", device_id);
@@ -1511,7 +1555,13 @@ void LLViewerJoystick::loadDeviceIdFromSettings()
     // so _GUID data gets converted to string (we probably can convert it to LLUUID with memcpy)
     // and here we need to convert it back to binary from string
     std::string device_string;
-    if (dev_id.isString())
+    // <GMDX> SoapStorm c798038fa5 (Nexii): map form from saveDeviceIdToSettings(); the plain string is the old format
+    if (dev_id.isMap())
+    {
+        device_string = dev_id["guid"].asString();
+    }
+    else if (dev_id.isString())
+    // </GMDX>
     {
         device_string = dev_id.asString();
     }

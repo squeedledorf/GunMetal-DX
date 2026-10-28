@@ -105,6 +105,49 @@ std::string gLastRunVersion;
 extern bool gResizeScreenTexture;
 extern bool gResizeShadowTexture;
 extern bool gDebugGL;
+
+namespace
+{
+    std::string renderSettingText(const LLSD& v)
+    {
+        std::string text = v.isBoolean() ? (v.asBoolean() ? "1" : "0")
+                         : v.isReal()    ? llformat("%g", v.asReal())
+                                         : v.asString();
+        if (text.size() > 40) text = text.substr(0, 40) + "...";
+        return text;
+    }
+
+    struct NonDefaultRenderCollector : public LLControlGroup::ApplyFunctor
+    {
+        std::vector<std::string> items;
+        void apply(const std::string& name, LLControlVariable* control) override
+        {
+            if (name.compare(0, 8, "RenderVK") != 0) return;
+            const std::string now = renderSettingText(control->getValue());
+            if (now == renderSettingText(control->getDefault())) return;
+            items.push_back(name + "=" + now);
+        }
+    };
+}
+
+std::string nonDefaultRenderSettings(size_t max_items)
+{
+    NonDefaultRenderCollector collector;
+    gSavedSettings.applyToAll(&collector);
+    std::sort(collector.items.begin(), collector.items.end());
+    std::string out;
+    const size_t shown = std::min(max_items, collector.items.size());
+    for (size_t i = 0; i < shown; ++i)
+    {
+        if (i) out += " ";
+        out += collector.items[i];
+    }
+    if (collector.items.size() > shown)
+    {
+        out += " +" + std::to_string(collector.items.size() - shown) + " more";
+    }
+    return out;
+}
 ////////////////////////////////////////////////////////////////////////////
 // Listeners
 

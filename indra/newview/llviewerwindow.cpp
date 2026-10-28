@@ -33,6 +33,7 @@
 #include "llvkhitch.h"
 
 #include "vkgfx/llvulkancontext.h"  // EXPERIMENTAL Vulkan: swapchain recreate on resize
+#include "llvrcamera.h"             // #1074 VR: a minimised mirror window keeps the viewer active
 
 // system library includes
 #include <stdio.h>
@@ -101,8 +102,13 @@
 #include "sltpscamera.h"
 #include "fscombathitmarker.h" // <GMDX>
 #include "fsfloaterkillfeed.h" // <GMDX>
+#include "fsghostprojectile.h" // <GMDX>
+#include "fsrezqueue.h" // <GMDX>
+#include "fsrmbscript.h" // <GMDX>
 #include "gmdxselectionoutline.h" // <GMDX>
+#include "gmdxhudeditpan.h" // <GMDX> HUD edit bounds overlay
 #include "gmdxchatlog.h" // <GMDX>
+#include "gmdxsnapshotavatars.h" // <GMDX> snapshot avatar layers / scope
 #include "llagent.h"
 // [SL:KB] - Patch: Build-DragNDrop | Checked: 2013-07-22 (Catznip-3.6)
 #include "llagentbenefits.h"
@@ -784,6 +790,18 @@ public:
 
             LLPipeline::sVisibleLightCount = 0;
         }
+        // <GMDX> Ghost projectile watch (SoapStorm): counts only, no positions or names
+        static LLCachedControl<bool> debug_show_soapstorm_projectiles_info(gSavedSettings, "DebugShowSoapstormProjectilesInfo", false);
+        if (debug_show_soapstorm_projectiles_info())
+        {
+            addText(xpos, ypos, llformat("Projectiles: %u", FSGhostProjectile::getNumLikely()));
+            ypos += y_inc;
+            addText(xpos, ypos, llformat("Ghost projectiles dropped: %u", FSGhostProjectile::getNumDropped()));
+            ypos += y_inc;
+            addText(xpos, ypos, llformat("Ghost projectiles watched: %u", FSGhostProjectile::getNumWatched()));
+            ypos += y_inc;
+        }
+        // </GMDX>
         static LLCachedControl<bool> debug_show_avatar_render_info(gSavedSettings, "DebugShowAvatarRenderInfo", false);
         if (debug_show_avatar_render_info())
         {
@@ -1447,12 +1465,14 @@ bool LLViewerWindow::handleMouseUp(LLWindow *window,  LLCoordGL pos, MASK mask)
 }
 bool LLViewerWindow::handleRightMouseDown(LLWindow *window,  LLCoordGL pos, MASK mask)
 {
+    FSRMBScript::onRightMouse(true); // <GMDX> right button to scripts in mouselook (FSRMBScriptEnabled)
     bool down = true;
     return gViewerInput.handleMouse(window, pos, mask, CLICK_RIGHT, down);
 }
 
 bool LLViewerWindow::handleRightMouseUp(LLWindow *window,  LLCoordGL pos, MASK mask)
 {
+    FSRMBScript::onRightMouse(false); // <GMDX>
     bool down = false;
     return gViewerInput.handleMouse(window, pos, mask, CLICK_RIGHT, down);
 }
@@ -2112,6 +2132,14 @@ bool LLViewerWindow::handleActivate(LLWindow *window, bool activated)
 {
     // #919: minimised (activated false) / restored: exclusive fullscreen released / re-acquired
     LLVulkanContext::instance().onWindowMinimized(!activated);
+    if (!activated && LLVRCamera::sessionRunning())
+    {
+        // #1074 VR: the headset is the display; the desktop window is only its mirror. Minimising
+        // it must not pause the agent (the simulator would stop sending updates: a frozen world
+        // in the headset), mute audio, set away or leave the camera mode. The viewer stays active.
+        LL_INFOS("VR") << "mirror window minimised while the VR session runs: the viewer stays active" << LL_ENDL;
+        return true;
+    }
     if (activated)
     {
         mActive = true;
@@ -3470,6 +3498,8 @@ void LLViewerWindow::draw()
         // <GMDX> Kill feed: text-only overlay, in and out of mouselook
         FSFloaterKillFeed::drawOverlay();
         FSCombatHitMarker::draw(); // <GMDX> hit marker flash and fading hit report
+        FSRezQueue::draw(); // <GMDX> rez queue warning above the crosshair (mouselook and OTS)
+        gmdx_draw_hud_edit_bounds(); // <GMDX> HUD edit: where the real screen is
 
         // Draw all nested UI views.
         // No translation needed, this view is glued to 0,0
@@ -3605,6 +3635,14 @@ namespace
 }
 // </GMDX>
 
+// <GMDX> True while a text field (chat, IM, script editor, notecard) has the keyboard
+static bool text_input_has_focus()
+{
+    const LLUICtrl* ctrl = dynamic_cast<LLUICtrl*>(gFocusMgr.getKeyboardFocus());
+    return ctrl && ctrl->acceptsTextInput();
+}
+// </GMDX>
+
 bool LLViewerWindow::handleKey(KEY key, MASK mask)
 {
     // hide tooltips on keypress
@@ -3651,7 +3689,8 @@ bool LLViewerWindow::handleKey(KEY key, MASK mask)
         const bool fullscreen_key = (!focus_now || !types_text)
             && (SLKeyCommands::instance().matchesMenuItem("viewer", "Fullscreen", key, mask)
                 || SLKeyCommands::instance().matchesMenuItem("login", "Fullscreen", key, mask));
-        const bool gesture_owns = fullscreen_key && LLGestureMgr::instance().hasKeyTrigger(key, mask);
+        // A gesture does not fire while a text field has the keyboard (see below), so it does not own the key then
+        const bool gesture_owns = fullscreen_key && !text_input_has_focus() && LLGestureMgr::instance().hasKeyTrigger(key, mask); // <GMDX>
         if (gesture_owns && !gKeyboard->getKeyRepeated(key))
         {
             // Say once per key (log) and once per session (hint) why the shortcut did nothing
@@ -3890,8 +3929,14 @@ bool LLViewerWindow::handleKey(KEY key, MASK mask)
         return true;
     }
 
+    // <GMDX> Keys a text field did not use (numpad +/-, F-keys, Ctrl combos) do not fire gestures while
+    // it has the keyboard: typing in chat or the script editor must not start an animation. The tool and
+    // the menu accelerators below still get the key.
+    const bool text_focus = text_input_has_focus();
+    // </GMDX>
+
     // Try for a new-format gesture
-    if (LLGestureMgr::instance().triggerGesture(key, mask))
+    if (!text_focus && LLGestureMgr::instance().triggerGesture(key, mask)) // <GMDX>
     {
         LL_DEBUGS() << "LLviewerWindow::handleKey new gesture feature" << LL_ENDL;
         LLViewerEventRecorder::instance().logKeyEvent(key,mask);
@@ -3900,7 +3945,7 @@ bool LLViewerWindow::handleKey(KEY key, MASK mask)
 
     // See if this is a gesture trigger.  If so, eat the key and
     // don't pass it down to the menus.
-    if (gGestureList.trigger(key, mask))
+    if (!text_focus && gGestureList.trigger(key, mask)) // <GMDX>
     {
         LL_DEBUGS() << "LLviewerWindow::handleKey check gesture trigger" << LL_ENDL;
         LLViewerEventRecorder::instance().logKeyEvent(key,mask);
@@ -4904,6 +4949,11 @@ void LLViewerWindow::updateMouseDelta()
     {
         mMouseInWindow = true;
     }
+    // #1076 VR: the controller pointer on the UI wall is the mouse, not the OS cursor.
+    if (mVRPointerInWindow)
+    {
+        mMouseInWindow = true;
+    }
 
     LLVector2 mouse_vel;
 
@@ -5440,6 +5490,9 @@ LLHUDIcon* LLViewerWindow::cursorIntersectIcon(S32 mouse_x, S32 mouse_y, F32 dep
         y = getCurrentMouseY();
     }
 
+    // #1076: the VR world pointer's ray is not the camera's: no HUD icon picks on it.
+    if (LLCleanCursorPick::vrRayOn()) return nullptr;
+
     // world coordinates of mouse
     // VECTORIZE THIS
     LLVector3 mouse_direction_global = mouseDirectionGlobal(x,y);
@@ -5497,9 +5550,20 @@ LLViewerObject* LLViewerWindow::cursorIntersect(S32 mouse_x, S32 mouse_y, F32 de
     LLVector3 pos;
     line_plane(mouse_point_global, mouse_direction_global, p, n, pos);
     mouse_point_global = pos;
+    // <GMDX> orthographic view: parallel rays from the near plane under the cursor
+    LLViewerCamera::getInstance()->orthoMouseRay(x, y, mouse_point_global, mouse_direction_global);
 
     LLVector3 mouse_world_start = mouse_point_global;
     LLVector3 mouse_world_end   = mouse_point_global + mouse_direction_global * depth;
+    // #1076 VR world pointer: the controller's ray is the cursor ray (no HUD picks: HUDs are
+    // on the VR UI wall). Off on the desktop and whenever no VR pointer is aimed at the world.
+    LLVector3 vr_origin, vr_dir;
+    const bool vr_ray = LLCleanCursorPick::vrRay(vr_origin, vr_dir);
+    if (vr_ray)
+    {
+        mouse_world_start = vr_origin;
+        mouse_world_end = vr_origin + vr_dir * depth;
+    }
 
     // (LL kept the last hit here for the flycam / pointer DoF focus; DoF reads the GPU
     // cursor pick's own answer now, LLCleanCursorPick::focusPoint, #724.)
@@ -5534,7 +5598,7 @@ LLViewerObject* LLViewerWindow::cursorIntersect(S32 mouse_x, S32 mouse_y, F32 de
         // joints, the drawn LOD), with the face, LL's surface ST, normal and tangent that
         // touch / media / face select read. Hidden HUDs (Ctrl+Alt+H) can't be picked (#187).
         const bool hud = this_object->isHUDAttachment();
-        if (hud ? LLPipeline::sShowHUDAttachments : (pick_reflection_probe || !this_object->isReflectionProbe()))
+        if (hud ? (LLPipeline::sShowHUDAttachments && !vr_ray) : (pick_reflection_probe || !this_object->isReflectionProbe()))
         {
             if (LLCleanCursorPick::intersectObject(this_object, x, y, hud ? mh_start : mw_start, hud ? mh_end : mw_end,
                                                    this_face, pick_transparent, pick_unselectable, face_hit,
@@ -5548,8 +5612,8 @@ LLViewerObject* LLViewerWindow::cursorIntersect(S32 mouse_x, S32 mouse_y, F32 de
     {
 // [RLVa:KB] - Checked: 2010-03-31 (RLVa-1.2.0c) | Modified: RLVa-1.2.0c
         // The camera tool's Alt pick ignores HUDs.
-        const bool hud_blocked = (rlv_handler_t::isEnabled()) && (LLToolCamera::getInstance()->hasMouseCapture())
-                                 && (gKeyboard->currentMask(true) & MASK_ALT);
+        const bool hud_blocked = vr_ray || ((rlv_handler_t::isEnabled()) && (LLToolCamera::getInstance()->hasMouseCapture())
+                                            && (gKeyboard->currentMask(true) & MASK_ALT));
 // [/RLVa:KB]
         // The GPU raster pick (#702 / #704, llcleancursorpick.h): the renderer's answer for
         // this ray -- what is drawn there, under LL's pick rules. A click no answer covers
@@ -6002,6 +6066,7 @@ void LLViewerWindow::saveImageLocal(LLImageFormatted *image, const snapshot_save
     LL_INFOS() << "Saving snapshot to " << filepath << LL_ENDL;
     if (image->save(filepath))
     {
+        gmdxSaveSnapshotMattes(image, filepath, extension);   // <GMDX> FSSaveAvatarMasksWithSnapshot
         playSnapshotAnimAndSound();
         success_cb();
     }
@@ -6033,7 +6098,8 @@ bool LLViewerWindow::saveSnapshot(const std::string& filepath, S32 image_width, 
     LL_INFOS() << "Saving snapshot to: " << filepath << LL_ENDL;
 
     LLPointer<LLImageRaw> raw = new LLImageRaw;
-    bool success = rawSnapshot(raw, image_width, image_height, true, false, show_ui, show_hud, do_rebuild, show_balance);
+    // <GMDX> (was show_balance as no_post and no layer type)
+    bool success = rawSnapshot(raw, image_width, image_height, true, false, show_ui, show_hud, do_rebuild, false, show_balance, type);
 
     if (success)
     {
@@ -6050,6 +6116,7 @@ bool LLViewerWindow::saveSnapshot(const std::string& filepath, S32 image_width, 
             image_codec = IMG_CODEC_BMP;
             break;
         }
+        if (type == LLSnapshotModel::SNAPSHOT_TYPE_AVATAR_TRANSPARENT) image_codec = IMG_CODEC_PNG;   // <GMDX> (alpha)
 
         LLPointer<LLImageFormatted> formated_image = LLImageFormatted::createFromType(image_codec);
         success = formated_image->encode(raw, 0.0f);
@@ -6217,6 +6284,21 @@ static bool vk_live_snapshot(LLImageRaw* raw, S32 image_width, S32 image_height,
     for (;;)
     {
         req.outW = (uint32_t)out_w; req.outH = (uint32_t)out_h;
+        if (req.mode == 2)
+        {
+            // #1093: an accumulated shot is softer than the live view. A/B settings: sharpen the
+            // averaged result once (the live frame's CAS strength x RenderSnapshotSharpenScale;
+            // the samples themselves stay unsharpened, #932), narrow the splat with sample
+            // density, and bias texture LOD by log2(1 / upscale) while the samples render.
+            static LLCachedControl<F32> s_sharp_scale(gSavedSettings, "RenderSnapshotSharpenScale", 1.f);
+            static LLCachedControl<F32> s_cas(gSavedSettings, "RenderCASSharpness", 0.4f);
+            static LLCachedControl<bool> s_adapt(gSavedSettings, "RenderSnapshotAdaptiveSigma", true);
+            static LLCachedControl<bool> s_mip(gSavedSettings, "RenderSnapshotMipBias", true);
+            req.sharpen = llclamp((F32)s_cas * llmax((F32)s_sharp_scale, 0.f), 0.f, 1.f);
+            req.adaptiveSigma = s_adapt;
+            const F64 shot_up = (F64)out_w / crop_w;
+            req.mipBias = s_mip ? (F32)-llclamp(log2(shot_up), 0.0, 3.0) : 0.f;
+        }
         if (vk.beginLiveSnapshot(req, why)) break;
         LL_WARNS("Snapshot") << "live snapshot " << out_w << "x" << out_h << " (mode " << req.mode << "): " << why << LL_ENDL;
         if (req.mode == 2 && (F64)out_w / crop_w > 1.25)
@@ -6308,6 +6390,21 @@ bool LLViewerWindow::rawSnapshot(LLImageRaw *raw, S32 image_width, S32 image_hei
         ~HudAttachmentHold() { LLPipeline::sShowHUDAttachments = saved; }
     } hud_hold(show_ui && !show_hud);
 
+    // <GMDX> Avatar layers (transparent avatar, holdout mattes): their own offscreen render. The
+    // snapshot avatar scope applies to the world snapshots below, which then render offscreen
+    // (gmdxsnapshotavatars.h; the interface snapshots are the presented frame, unfiltered).
+    if (gmdxIsAvatarLayer(type))
+    {
+        setCursor(UI_CURSOR_WAIT);
+        const bool ok = gmdxRawAvatarSnapshot(raw, image_width, image_height, type, max_size);
+        setCursor(UI_CURSOR_ARROW);
+        return ok;
+    }
+    const bool gmdx_world = !show_ui || type == LLSnapshotModel::SNAPSHOT_TYPE_DEPTH;
+    GMDXSnapshotScopeHold gmdx_scope(gmdx_world);
+    const bool gmdx_offscreen = gmdx_world && gmdxSnapshotWantsOffscreen(type);
+    // </GMDX>
+
     //  * #873: every snapshot is taken from the MAIN RENDER PATH (vk_live_snapshot, above) --
     //    unless RenderSnapshotOffscreen (A/B, fallback) or "No post-processing" (the live
     //    frame has its post) asks for the offscreen renderer, or the live path cannot take it.
@@ -6319,7 +6416,7 @@ bool LLViewerWindow::rawSnapshot(LLImageRaw *raw, S32 image_width, S32 image_hei
     {
         static LLCachedControl<bool> s_offscreen(gSavedSettings, "RenderSnapshotOffscreen", false);
         const bool want_depth = (type == LLSnapshotModel::SNAPSHOT_TYPE_DEPTH);
-        if (!s_offscreen && !(no_post && !show_ui && !want_depth))
+        if (!s_offscreen && !(no_post && !show_ui && !want_depth) && !gmdx_offscreen)   // <GMDX> (+ avatar scope / mattes)
         {
             setCursor(UI_CURSOR_WAIT);
             if (show_ui) setBalanceVisible(show_balance);
@@ -6402,13 +6499,15 @@ bool LLViewerWindow::rawSnapshot(LLImageRaw *raw, S32 image_width, S32 image_hei
             const F32 znear = LLViewerCamera::getInstance()->getNear();
             const F32 zfar = llmax(LLViewerCamera::getInstance()->getFar(), (F32)far_clip);
             U8* out = raw->getData();
+            const bool ortho = LLViewerCamera::getInstance()->getOrtho();   // <GMDX> linear: D = (P14 - d) / P10
             for (S32 y = 0; y < rh; ++y)
             {
                 const F32* row = depth.data() + (size_t)(rh - 1 - y) * rw;   // bottom-up
                 for (S32 x = 0; x < rw; ++x)
                 {
                     const F32 den = row[x] + proj[0];
-                    const F32 lin = (fabsf(den) > 1e-7f) ? proj[1] / den : zfar;
+                    const F32 lin = ortho ? (fabsf(proj[0]) > 1e-12f ? (proj[1] - row[x]) / proj[0] : zfar)   // <GMDX>
+                                          : (fabsf(den) > 1e-7f) ? proj[1] / den : zfar;
                     const U8 b = F32_to_U8(lin, znear, zfar);
                     U8* px = out + ((size_t)y * rw + x) * 3;
                     px[0] = px[1] = px[2] = b;
@@ -7312,7 +7411,13 @@ void LLPickInfo::fetchResults()
 
             // put global position into land_pos
             LLVector3d land_pos;
-            if (!gViewerWindow->mousePointOnLandGlobal(mPickPt.mX, mPickPt.mY, &land_pos, mPickUnselectable))
+            if (LLCleanCursorPick::vrRayOn())
+            {
+                // #1076: the VR pointer's ray hit the terrain here (mousePointOnLandGlobal
+                // would re-trace the camera ray through the mouse pixel).
+                land_pos = gAgent.getPosGlobalFromAgent(LLVector3(intersection.getF32ptr()));
+            }
+            else if (!gViewerWindow->mousePointOnLandGlobal(mPickPt.mX, mPickPt.mY, &land_pos, mPickUnselectable))
             {
                 // The selected point is beyond the draw distance or is otherwise
                 // not selectable. Return before calling mPickCallback().

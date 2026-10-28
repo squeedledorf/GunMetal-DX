@@ -92,7 +92,8 @@ public:
 
     // A map point (no height) on the ground: z = the terrain's height there (unchanged off the loaded regions).
     static LLVector3d onGround(LLVector3d pos_global);
-    // "Region (x, y, z)" and the SLURL of a global position, as the mini-map copies them.
+    // "Region (x, y, z)" and the SLURL of a global position, as the mini-map copies them (under RLV
+    // @showloc: the region's name hidden, and no SLURL).
     static std::string coordinatesText(const LLVector3d& pos_global);
     static std::string slurl(const LLVector3d& pos_global);
 };

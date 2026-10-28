@@ -100,6 +100,7 @@ public:
         mSystemToTop = (mSortOrder & LLInventoryFilter::SO_SYSTEM_FOLDERS_TO_TOP);
         mFoldersByName = (mSortOrder & LLInventoryFilter::SO_FOLDERS_BY_NAME);
         mFoldersByWeight = (mSortOrder & LLInventoryFilter::SO_FOLDERS_BY_WEIGHT);
+        mByType = (mSortOrder & LLInventoryFilter::SO_WEARABLE_KIND);
     }
 
     bool operator()(const LLFolderViewModelItemInventory* const& a, const LLFolderViewModelItemInventory* const& b) const;
@@ -109,6 +110,7 @@ private:
     bool mSystemToTop;
     bool mFoldersByName;
     bool mFoldersByWeight;
+    bool mByType = false;
 };
 
 class LLFolderViewModelInventory

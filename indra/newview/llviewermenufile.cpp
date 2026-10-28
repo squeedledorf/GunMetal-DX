@@ -27,6 +27,7 @@
 #include "llviewerprecompiledheaders.h"
 
 #include "llviewermenufile.h"
+#include "llsoundnotecardupload.h" // <GMDX> <OTS> bulk sound -> notecard upload
 
 // project includes
 #include "llagent.h"
@@ -1015,6 +1016,21 @@ class LLFileUploadBulk : public view_listener_t
     }
 };
 
+// <GMDX> <OTS> Bulk-upload sounds and emit a music-player notecard
+class LLFileUploadSoundNotecard : public view_listener_t
+{
+    bool handleEvent(const LLSD& userdata)
+    {
+        if (gAgentCamera.cameraMouselook())
+        {
+            gAgentCamera.changeCameraToDefault();
+        }
+        LLFilePickerReplyThread::startPicker(boost::bind(&start_sound_notecard_upload, _1), LLFilePicker::FFLOAD_WAV, true);
+        return true;
+    }
+};
+// </OTS> </GMDX>
+
 void upload_error(const std::string& error_message, const std::string& label, const std::string& filename, const LLSD& args)
 {
     LL_WARNS() << error_message << LL_ENDL;
@@ -1508,6 +1524,7 @@ void init_menu_file()
     view_listener_t::addCommit(new LLFileUploadModelBulk(), "File.UploadModelBulk");
     view_listener_t::addCommit(new LLFileUploadMaterial(), "File.UploadMaterial");
     view_listener_t::addCommit(new LLFileUploadBulk(), "File.UploadBulk");
+    view_listener_t::addCommit(new LLFileUploadSoundNotecard(), "File.UploadSoundNotecard"); // <GMDX> <OTS>
     view_listener_t::addCommit(new LLFileCloseWindow(), "File.CloseWindow");
     view_listener_t::addCommit(new LLFileCloseAllWindows(), "File.CloseAllWindows");
     view_listener_t::addEnable(new LLFileEnableCloseWindow(), "File.EnableCloseWindow");

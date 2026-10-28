@@ -123,6 +123,12 @@ uint64_t keyWith(uint64_t key, uint32_t id, uint32_t v)
 {
     return (key & ~(15ull << (4u * id))) | ((uint64_t)(v & 15u) << (4u * id));
 }
+// #1075 LAYERED STEREO: the key's VIEW-COUNT field (N - 1; 0 at N = 1, so every desktop key and
+// cache file is unchanged): a multiview set (viewMask, kViewCount) never shares a key -- or a
+// per-key pipeline cache -- with a single-view one. Not a SpecId (no setting, no kSpecTable
+// row): the session's view count, fixed at startup.
+constexpr uint32_t kSpecViewsField = 15;   // bits 60-63 (the SpecIds use 0 .. 4 * SPEC_COUNT - 1)
+static_assert(LLCleanRendererVK::SPEC_COUNT < kSpecViewsField, "the view-count field overlaps a SpecId");
 
 // The UI snapshot (specStatusText): written by the render thread's tick, read by the prefs.
 std::mutex  sStatusMutex;
@@ -247,6 +253,14 @@ struct LLCleanRendererVK::SpecSet
     int32_t  data[1 + SPEC_COUNT] = {};
     VkSpecializationMapEntry entries[1 + SPEC_COUNT] = {};
     VkSpecializationInfo info{};
+    // #1075 LAYERED STEREO: the LAYERED lighting kernels' info -- `info` + kViewCount (constant 20)
+    // = the key's view count. A one-view key: &info itself (layeredInfo). Graphics pipelines never
+    // take it (GraphicsPipelineDesc::views merges their kViewCount).
+    int32_t  vdata[2 + SPEC_COUNT] = {};
+    VkSpecializationMapEntry ventries[2 + SPEC_COUNT] = {};
+    VkSpecializationInfo vinfo{};
+    bool     layered = false;
+    const VkSpecializationInfo* layeredInfo() const { return layered ? &vinfo : &info; }
     VkPipelineCache cache = VK_NULL_HANDLE;   // per key, seeded from vk_spec_<key>.bin; freed once saved
     size_t   diskBytes = 0;                    // what the file held (0 = cold build)
     uint64_t bytes = 0;                        // the key's cache size once saved (its footprint)
@@ -354,6 +368,7 @@ uint64_t LLCleanRendererVK::specKeyFromSettings() const
     if (!v[SPEC_SUN] && !v[SPEC_PROJ]) { v[SPEC_FILTER] = 0u; v[SPEC_TRANS] = 0u; }
     uint64_t key = 0;
     for (uint32_t i = 0; i < SPEC_COUNT; ++i) key = keyWith(key, i, std::min(v[i], kSpecTable[i].maxValue));
+    if (mViewCount > 1u) key = keyWith(key, kSpecViewsField, mViewCount - 1u);   // #1075 (N = 1: no change)
     return key;
 #else
     return kSpecNone;
@@ -458,6 +473,19 @@ bool LLCleanRendererVK::specStartBuild(uint64_t key, const char* why)
     s.info.pMapEntries = s.entries;
     s.info.dataSize = sizeof(s.data);
     s.info.pData = s.data;
+    // #1075: a stereo key's layered kernels also take kViewCount (the key's view-count field = N - 1)
+    {
+        const uint32_t views = keyField(key, kSpecViewsField) + 1u;
+        s.layered = views > 1u;
+        for (uint32_t i = 0; i < 1 + SPEC_COUNT; ++i) { s.ventries[i] = s.entries[i]; s.vdata[i] = s.data[i]; }
+        s.ventries[1 + SPEC_COUNT] = {GraphicsPipelineDesc::kViewCountConstId, (uint32_t)((1 + SPEC_COUNT) * sizeof(int32_t)),
+                                      sizeof(int32_t)};
+        s.vdata[1 + SPEC_COUNT] = (int32_t)views;
+        s.vinfo.mapEntryCount = 2 + SPEC_COUNT;
+        s.vinfo.pMapEntries = s.ventries;
+        s.vinfo.dataSize = sizeof(s.vdata);
+        s.vinfo.pData = s.vdata;
+    }
     // The ray-query slots only where the key can trace (cascades-only sun and mapped
     // projectors fold every ray query: selectLitVariant never picks that variant then, the
     // particle RT pipe / RT lighting compute are picked only with a traced sun or projector
@@ -615,7 +643,8 @@ void LLCleanRendererVK::specAdvanceBuild(SpecSet*& lane)
                 }
             }
             // Compute (a failure leaves VK_NULL_HANDLE: that slot binds the generic one).
-            createComputePipelineInto(dev, s->mods[SM_DEFER], mDeferLayout, 0, &s->info, &s->defer, "spec compute");
+            // (#1075: the uber kernel lights a stereo frame's views as layers -- kViewCount on a stereo key)
+            createComputePipelineInto(dev, s->mods[SM_DEFER], mDeferLayout, 0, s->layeredInfo(), &s->defer, "spec compute");
 #if defined(LL_HAS_CLEAN_PIPELINE)
             {
                 // LIGHTING REGISTER PROBES (RenderVKLightRegProbe, measurement only): the G11 uber

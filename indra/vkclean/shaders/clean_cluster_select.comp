@@ -235,7 +235,10 @@ void main()
     // Our own avatar hidden in the main view (mouselook, CLV_HIDE_SELF): its cut is still
     // selected (the shared rig lists -- shadows, captures -- and the RT cut derive from it) but
     // the main view draws none of it.
-    const bool hide_main = (v.flags & CLV_HIDE_SELF) != 0u && (inst.flags & CLI_SELF) != 0u;
+    // <GMDX> Avatar matte snapshot (CLV_AVATARS_ONLY, the legacy cull's kCullAvatarsOnly): the same
+    // for every static -- the main view draws avatars only (worn rigid attachments are never here).
+    const bool hide_main = ((v.flags & CLV_HIDE_SELF) != 0u && (inst.flags & CLI_SELF) != 0u)
+                        || ((v.flags & CLV_AVATARS_ONLY) != 0u && (inst.flags & CLI_RIGGED) == 0u);
     // (#748 perf pass 3) RESIDENCY ONLY for an instance no view draws this frame (a registered
     // avatar not switched yet, a static not on the cluster path): the main view walks its cut
     // every 4th frame, staggered (page usage stays well under the stream's kEvictMinAge, its

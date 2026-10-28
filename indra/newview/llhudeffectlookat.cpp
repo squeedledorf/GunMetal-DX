@@ -48,6 +48,8 @@
 #include "llviewercontrol.h"
 #include "slposelookat.h"
 
+#include <cmath>
+
 // packet layout
 const S32 SOURCE_AVATAR = 0;
 const S32 TARGET_OBJECT = 16;
@@ -60,6 +62,21 @@ const F32 MAX_SENDS_PER_SEC = 4.f;
 
 const F32 MIN_DELTAPOS_FOR_UPDATE_SQUARED = 0.05f * 0.05f;
 const F32 MIN_TARGET_OFFSET_SQUARED = 0.0001f;
+
+// Slipstream (#1121): head tilt (roll) in the effect's 4-byte Color field, which every
+// ViewerEffect carries and no viewer reads for a look-at (the beacon colours come from the
+// attention table). Bytes: ROLL_TAG, ROLL_VERSION, roll in whole degrees (S8, -90..90), and
+// a check byte (the XOR of the other three with 0xFF), so a stock viewer's default colour
+// (0, 0, 0, 255) or any other colour never decodes as a roll.
+const U8 ROLL_TAG = 0x53;
+const U8 ROLL_VERSION = 1;
+const S32 ROLL_MAX_DEG = 90;
+const S32 ROLL_SEND_DEG = 2;    // a tilt change this large is worth a send (the target's 5 cm is ~3 deg)
+
+static U8 rollCheck(U8 a, U8 b, U8 c)
+{
+    return (U8)(a ^ b ^ c ^ 0xFF);
+}
 
 
 // can't use actual F32_MAX, because we add this to the current frametime
@@ -264,6 +281,21 @@ LLHUDEffectLookAt::~LLHUDEffectLookAt()
 //-----------------------------------------------------------------------------
 void LLHUDEffectLookAt::packData(LLMessageSystem *mesgsys)
 {
+    // #1121: the head tilt rides in the Color field while there is a target; otherwise the
+    // default colour goes out as before.
+    const bool send_roll = mHasRoll && mTargetType != LOOKAT_TARGET_NONE && mTargetType != LOOKAT_TARGET_CLEAR;
+    mSentHasRoll = send_roll;
+    mSentRollDeg = send_roll ? llclamp(ll_round(mTargetRoll * RAD_TO_DEG), -ROLL_MAX_DEG, ROLL_MAX_DEG) : 0;
+    if (send_roll)
+    {
+        const U8 roll_byte = (U8)(S8)mSentRollDeg;
+        mColor.set(ROLL_TAG, ROLL_VERSION, roll_byte, rollCheck(ROLL_TAG, ROLL_VERSION, roll_byte));
+    }
+    else
+    {
+        mColor = LLColor4U();
+    }
+
     // Pack the default data
     LLHUDEffect::packData(mesgsys);
 
@@ -319,6 +351,12 @@ void LLHUDEffectLookAt::unpackData(LLMessageSystem *mesgsys, S32 blocknum)
     }
 
     LLHUDEffect::unpackData(mesgsys, blocknum);
+    // #1121: a Slipstream sender's head tilt, in the Color field (see packData).
+    {
+        const U8* c = mColor.mV;
+        mHasRoll = c[0] == ROLL_TAG && c[1] == ROLL_VERSION && c[3] == rollCheck(c[0], c[1], c[2]);
+        mTargetRoll = mHasRoll ? (F32)llclamp((S32)(S8)c[2], -ROLL_MAX_DEG, ROLL_MAX_DEG) * DEG_TO_RAD : 0.f;
+    }
     LLUUID source_id;
     LLUUID target_id;
     S32 size = mesgsys->getSizeFast(_PREHASH_Effect, blocknum, _PREHASH_TypeData);
@@ -524,11 +562,31 @@ bool LLHUDEffectLookAt::setLookAt(ELookAtType target_type, LLViewerObject *objec
 //-----------------------------------------------------------------------------
 // clearLookAtTarget()
 //-----------------------------------------------------------------------------
+void LLHUDEffectLookAt::setHeadRoll(F32 radians, bool valid)
+{
+    valid = valid && std::isfinite(radians);
+    mHasRoll = valid;
+    mTargetRoll = valid ? radians : 0.f;
+    if (mTargetType == LOOKAT_TARGET_NONE || mTargetType == LOOKAT_TARGET_CLEAR)
+    {
+        return;     // nothing to tilt; packData sends no roll then
+    }
+    // The target's own send gate: a tilt change worth sending, at most MAX_SENDS_PER_SEC.
+    const S32 deg = valid ? llclamp(ll_round(radians * RAD_TO_DEG), -ROLL_MAX_DEG, ROLL_MAX_DEG) : 0;
+    const bool changed = valid != mSentHasRoll || llabs(deg - mSentRollDeg) >= ROLL_SEND_DEG;
+    if (changed && (mTimer.getElapsedTimeF32() - mLastSendTime) > (1.f / MAX_SENDS_PER_SEC))
+    {
+        setNeedsSendToSim(true);
+    }
+}
+
 void LLHUDEffectLookAt::clearLookAtTarget()
 {
     mTargetObject = NULL;
     mTargetOffsetGlobal.clearVec();
     mTargetType = LOOKAT_TARGET_NONE;
+    mTargetRoll = 0.f;
+    mHasRoll = false;
     if (mSourceObject.notNull())
     {
         ((LLVOAvatar*)(LLViewerObject*)mSourceObject)->stopMotion(ANIM_AGENT_HEAD_ROT);
@@ -543,6 +601,7 @@ void LLHUDEffectLookAt::markDead()
     if (mSourceObject.notNull())
     {
         ((LLVOAvatar*)(LLViewerObject*)mSourceObject)->removeAnimationData(LLCharacter::ANIM_DATA_LOOK_AT_POINT);
+        ((LLVOAvatar*)(LLViewerObject*)mSourceObject)->removeAnimationData(LLCharacter::ANIM_DATA_LOOK_AT_ROLL);
     }
 
     mSourceObject = NULL;
@@ -815,10 +874,20 @@ bool LLHUDEffectLookAt::calcTargetPosition()
     if (disable_look_at())
     {
         source_avatar->removeAnimationData(LLCharacter::ANIM_DATA_LOOK_AT_POINT);
+        source_avatar->removeAnimationData(LLCharacter::ANIM_DATA_LOOK_AT_ROLL);
     }
     else
     {
         source_avatar->setAnimationData(LLCharacter::ANIM_DATA_LOOK_AT_POINT, (void*)&mTargetPos);
+        // #1121: the head tilt with it (head_rot and the look-at sync layer read it).
+        if (mHasRoll)
+        {
+            source_avatar->setAnimationData(LLCharacter::ANIM_DATA_LOOK_AT_ROLL, (void*)&mTargetRoll);
+        }
+        else
+        {
+            source_avatar->removeAnimationData(LLCharacter::ANIM_DATA_LOOK_AT_ROLL);
+        }
     }
 
     return true;

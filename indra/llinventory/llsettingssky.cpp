@@ -1343,10 +1343,24 @@ void LLSettingsSky::calculateHeavenlyBodyPositions()  const
     mSunDirection.normalize();
     mMoonDirection.normalize();
 
+    // <GMDX> SoapStorm 0640cc8829 (#73): answer a degenerate body rotation instead of only
+    // complaining about it. normalize() clears a too-short vector to (0,0,0), getIsSunUp() reads
+    // z >= 0 as up, and the renderer got a zero-length light direction (NaN view matrices
+    // downstream). z_axis_neg reads as "down", so getLightDirection() falls through to the moon
+    // or its own default, as on any night. Logged once, it can repeat every frame.
     if (mSunDirection.lengthSquared() < 0.01f)
-        LL_WARNS("SETTINGS") << "Zero length sun direction. Wailing and gnashing of teeth may follow... or not." << LL_ENDL;
+    {
+        LL_WARNS_ONCE("SETTINGS") << "Zero length sun direction from a degenerate sun rotation in sky '"
+                                  << getName() << "' (" << getAssetId() << "); treating the sun as down." << LL_ENDL;
+        mSunDirection = LLVector3::z_axis_neg;
+    }
     if (mMoonDirection.lengthSquared() < 0.01f)
-        LL_WARNS("SETTINGS") << "Zero length moon direction. Wailing and gnashing of teeth may follow... or not." << LL_ENDL;
+    {
+        LL_WARNS_ONCE("SETTINGS") << "Zero length moon direction from a degenerate moon rotation in sky '"
+                                  << getName() << "' (" << getAssetId() << "); treating the moon as down." << LL_ENDL;
+        mMoonDirection = LLVector3::z_axis_neg;
+    }
+    // </GMDX>
 }
 
 LLVector3 LLSettingsSky::getLightDirection() const

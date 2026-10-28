@@ -59,6 +59,9 @@
 #include "llagentaccess.h"
 #include "llagentbenefits.h"
 #include "llagentcamera.h"
+#include "llviewercamera.h"   // <GMDX> orthographic view
+#include "llvrcamera.h"          // #1074 VR: Recenter VR View
+#include "llvrinput.h"           // #1076 VR: Show UI Wall in VR
 #include "llagentui.h"
 #include "llagentwearables.h"
 #include "llagentpilot.h"
@@ -71,6 +74,7 @@
 #include "lldebugview.h"
 // [SL:KB] - Patch: World-Derender | Checked: 2011-12-15 (Catznip-3.2)
 #include "llderenderlist.h"
+#include "fssoundemitterblacklist.h" // <GMDX>
 // [/SL:KB]
 #include "lldiskcache.h"
 #include "slcachestore.h"         // #714 Develop > Cache > Cache Store entries
@@ -5031,6 +5035,25 @@ class LLViewResetView : public view_listener_t
         return true;
     }
 };
+
+// <GMDX> orthographic view (SoapStorm 7179701d85)
+class LLViewToggleOrthoView : public view_listener_t
+{
+    bool handleEvent(const LLSD& userdata) override
+    {
+        LLViewerCamera::getInstance()->toggleOrtho();
+        return true;
+    }
+};
+
+class LLViewCheckOrthoView : public view_listener_t
+{
+    bool handleEvent(const LLSD& userdata) override
+    {
+        return LLViewerCamera::getInstance()->getOrtho();
+    }
+};
+// </GMDX>
 
 // Note: extra parameters allow this function to be called from dialog.
 void reset_view_final(bool proceed)
@@ -10905,6 +10928,8 @@ void initialize_menus()
     view_listener_t::addMenu(new LLViewMouselook(), "View.Mouselook");
     view_listener_t::addMenu(new LLViewJoystickFlycam(), "View.JoystickFlycam");
     view_listener_t::addMenu(new LLViewResetView(), "View.ResetView");
+    view_listener_t::addMenu(new LLViewToggleOrthoView(), "View.ToggleOrthoView");   // <GMDX>
+    view_listener_t::addMenu(new LLViewCheckOrthoView(), "View.CheckOrthoView");     // <GMDX>
     view_listener_t::addMenu(new LLViewLookAtLastChatter(), "View.LookAtLastChatter");
     view_listener_t::addMenu(new LLViewShowHoverTips(), "View.ShowHoverTips");
     view_listener_t::addMenu(new LLViewHighlightTransparent(), "View.HighlightTransparent");
@@ -10916,6 +10941,13 @@ void initialize_menus()
     view_listener_t::addMenu(new LLZoomer(DEFAULT_FIELD_OF_VIEW, false), "View.ZoomDefault");
     view_listener_t::addMenu(new LLViewDefaultUISize(), "View.DefaultUISize");
     view_listener_t::addMenu(new LLViewToggleUI(), "View.ToggleUI");
+
+    // #1074 VR: recentre + its visibility (VR running only).
+    commit.add("View.VRRecenter", boost::bind(&LLVRCamera::recenter));
+    enable.add("View.VRRunning", boost::bind(&LLVRCamera::sessionRunning));
+    // #1076 VR: the UI wall (also on the controller's menu button).
+    commit.add("View.VRToggleWall", boost::bind(&LLVRInput::toggleWall));
+    enable.add("View.VRWallVisible", boost::bind(&LLVRInput::wallVisible));
 
     view_listener_t::addMenu(new LLViewEnableMouselook(), "View.EnableMouselook");
     view_listener_t::addMenu(new LLViewEnableJoystickFlycam(), "View.EnableJoystickFlycam");
@@ -11322,6 +11354,10 @@ void initialize_menus()
     commit.add("Avatar.Derender", boost::bind(&handle_avatar_derender, _2));
     enable.add("Avatar.EnableDerender", boost::bind(&enable_avatar_derender));
 // [/SL:KB]
+    // <GMDX> SkoomaStorm's sound emitter blacklist (fssoundemitterblacklist.cpp)
+    commit.add("Object.BlacklistSoundEmitter", [](LLUICtrl*, const LLSD&) { FSSoundEmitterBlacklist::blacklistSelection(false); });
+    commit.add("Object.BlacklistSoundEmitterPermanent", [](LLUICtrl*, const LLSD&) { FSSoundEmitterBlacklist::blacklistSelection(true); });
+    // </GMDX>
     commit.add("Object.PlayLocalAnim", boost::bind(&handle_play_local_anim));
     commit.add("Object.StopLocalAnim", boost::bind(&handle_stop_local_anim));
     view_listener_t::addMenu(new LLObjectAttachToAvatar(true), "Object.AttachToAvatar");

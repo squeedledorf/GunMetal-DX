@@ -155,7 +155,11 @@ std::string vkTakePreferenceNote();
 VkGpuRequirements vkEvaluateDevice(VkPhysicalDevice dev, bool wantSwapchain);
 // Enumerates + evaluates every device of `instance` and ranks the qualifying ones
 // (fills gpus / best / bestWhy; instanceOk / instanceResult describe the enumeration).
-void vkEvaluateDevices(VkInstance instance, bool wantSwapchain, VkRequirementsReport& out);
+// #1073 VR: `forced` (the GPU the OpenXR runtime requires) wins over the ranking and the
+// RenderVKDeviceSelect choice when it qualifies; when it does not (or is not one of the
+// instance's devices) *forcedRefusal says why and the normal choice stands. Desktop: both unset.
+void vkEvaluateDevices(VkInstance instance, bool wantSwapchain, VkRequirementsReport& out,
+                       VkPhysicalDevice forced = VK_NULL_HANDLE, std::string* forcedRefusal = nullptr);
 // The pre-flight: throwaway 1.3 instance, evaluate (with the swapchain extension), destroy.
 VkRequirementsReport vkCheckRequirements();
 

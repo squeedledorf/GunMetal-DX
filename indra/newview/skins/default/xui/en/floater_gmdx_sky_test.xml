@@ -1,0 +1,417 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<!-- <GMDX> Sky Test (gmdxskytest.cpp): every control binds a GMDXSkyTest* setting. Local only. -->
+<floater
+ can_close="true"
+ can_minimize="true"
+ can_resize="false"
+ height="556"
+ layout="topleft"
+ name="gmdx_sky_test"
+ save_rect="true"
+ single_instance="true"
+ title="SKY TEST"
+ width="386">
+  <check_box
+   control_name="GMDXSkyTest"
+   follows="left|top"
+   height="16"
+   label="Sky test on (this screen only)"
+   layout="topleft"
+   left="12"
+   name="GMDXSkyTest"
+   tool_tip="A test sky on your screen only: nobody else sees it and nothing is sent. Off = back to the region's sky. Touching any control below turns it on."
+   top="10"
+   width="300" />
+  <text
+   follows="left|top"
+   height="16"
+   layout="topleft"
+   left="12"
+   name="base_label"
+   top="36"
+   width="110">Start from</text>
+  <combo_box
+   control_name="GMDXSkyTestBase"
+   follows="left|top"
+   height="23"
+   layout="topleft"
+   left="126"
+   name="GMDXSkyTestBase"
+   tool_tip="The sky the test starts from: its colours, ambient and glow (everything the controls below do not set). 'Day cycle' blends Second Life's Midday, Sunset and Midnight by the sun's height. 'The sky in use' is the region's sky, or a personal sky you pick while testing (World &gt; Environment &gt; Midnight...)."
+   top="32"
+   width="200">
+    <combo_box.item label="Day cycle (by sun height)" name="5" value="5" />
+    <combo_box.item label="The sky in use" name="0" value="0" />
+    <combo_box.item label="Sunrise (Second Life)" name="1" value="1" />
+    <combo_box.item label="Midday (Second Life)" name="2" value="2" />
+    <combo_box.item label="Sunset (Second Life)" name="3" value="3" />
+    <combo_box.item label="Midnight (Second Life)" name="4" value="4" />
+  </combo_box>
+  <text
+   follows="left|top"
+   font="SansSerifBold"
+   height="16"
+   layout="topleft"
+   left="12"
+   name="hdr_2"
+   top="62"
+   width="350">Presets</text>
+  <button
+   follows="left|top"
+   height="22"
+   label="Full moon high"
+   layout="topleft"
+   left="12"
+   name="preset_1"
+   tool_tip="Sun 60 below, a full moon 60 up opposite it."
+   top="82"
+   width="114">
+    <button.commit_callback function="GMDX.SkyTest.Preset" parameter="1" />
+  </button>
+  <button
+   follows="left|top"
+   height="22"
+   label="Full moon low"
+   layout="topleft"
+   left="132"
+   name="preset_2"
+   tool_tip="Sun 12 below, a full moon 12 up opposite it."
+   top="82"
+   width="114">
+    <button.commit_callback function="GMDX.SkyTest.Preset" parameter="2" />
+  </button>
+  <button
+   follows="left|top"
+   height="22"
+   label="Quarter moon"
+   layout="topleft"
+   left="252"
+   name="preset_3"
+   tool_tip="Sun 30 below, a quarter moon 40 up."
+   top="82"
+   width="114">
+    <button.commit_callback function="GMDX.SkyTest.Preset" parameter="3" />
+  </button>
+  <button
+   follows="left|top"
+   height="22"
+   label="Crescent"
+   layout="topleft"
+   left="12"
+   name="preset_4"
+   tool_tip="Sun 20 below, a thin crescent 15 up near where it set."
+   top="108"
+   width="114">
+    <button.commit_callback function="GMDX.SkyTest.Preset" parameter="4" />
+  </button>
+  <button
+   follows="left|top"
+   height="22"
+   label="Moonless"
+   layout="topleft"
+   left="132"
+   name="preset_5"
+   tool_tip="No moon (below the horizon), clear sky: stars only."
+   top="108"
+   width="114">
+    <button.commit_callback function="GMDX.SkyTest.Preset" parameter="5" />
+  </button>
+  <button
+   follows="left|top"
+   height="22"
+   label="Dusk (sun -3)"
+   layout="topleft"
+   left="252"
+   name="preset_6"
+   tool_tip="Sun 3 degrees below the horizon, a gibbous moon 25 up."
+   top="108"
+   width="114">
+    <button.commit_callback function="GMDX.SkyTest.Preset" parameter="6" />
+  </button>
+  <button
+   follows="left|top"
+   height="22"
+   label="Deep twilight (-8)"
+   layout="topleft"
+   left="12"
+   name="preset_7"
+   tool_tip="Sun 8 degrees below, a gibbous moon 25 up."
+   top="134"
+   width="114">
+    <button.commit_callback function="GMDX.SkyTest.Preset" parameter="7" />
+  </button>
+  <button
+   follows="left|top"
+   height="22"
+   label="Noon"
+   layout="topleft"
+   left="132"
+   name="preset_8"
+   tool_tip="Sun 70 up, midday."
+   top="134"
+   width="114">
+    <button.commit_callback function="GMDX.SkyTest.Preset" parameter="8" />
+  </button>
+  <button
+   follows="left|top"
+   height="22"
+   label="Cloud over moon"
+   layout="topleft"
+   left="252"
+   name="preset_9"
+   tool_tip="A high full moon behind nearly full cloud cover (slide Cloud shift to move a gap over it)."
+   top="134"
+   width="114">
+    <button.commit_callback function="GMDX.SkyTest.Preset" parameter="9" />
+  </button>
+  <text
+   follows="left|top"
+   font="SansSerifBold"
+   height="16"
+   layout="topleft"
+   left="12"
+   name="hdr_12"
+   top="164"
+   width="350">Sun</text>
+  <slider
+   can_edit_text="true"
+   control_name="GMDXSkyTestSunElevation"
+   decimal_digits="1"
+   follows="left|top"
+   height="16"
+   increment="0.5"
+   label="Elevation"
+   label_width="110"
+   layout="topleft"
+   left="16"
+   max_val="90"
+   min_val="-90"
+   name="GMDXSkyTestSunElevation"
+   tool_tip="The sun's height in degrees: below 0 it has set (dusk ends around -8 to -10)."
+   top="184"
+   width="350" />
+  <slider
+   can_edit_text="true"
+   control_name="GMDXSkyTestSunAzimuth"
+   decimal_digits="0"
+   follows="left|top"
+   height="16"
+   increment="1"
+   label="Azimuth"
+   label_width="110"
+   layout="topleft"
+   left="16"
+   max_val="360"
+   min_val="0"
+   name="GMDXSkyTestSunAzimuth"
+   tool_tip="The sun's azimuth in degrees (as in Personal Lighting)."
+   top="206"
+   width="350" />
+  <text
+   follows="left|top"
+   font="SansSerifBold"
+   height="16"
+   layout="topleft"
+   left="12"
+   name="hdr_15"
+   top="232"
+   width="350">Moon</text>
+  <check_box
+   control_name="GMDXSkyTestMoonByPhase"
+   follows="left|top"
+   height="16"
+   label="Place by phase"
+   layout="topleft"
+   left="12"
+   name="GMDXSkyTestMoonByPhase"
+   tool_tip="The moon's azimuth follows from the phase: the angle to the sun that gives it, at the moon's height. Off = set the azimuth yourself."
+   top="252"
+   width="300" />
+  <slider
+   can_edit_text="true"
+   control_name="GMDXSkyTestMoonPhase"
+   enabled_control="GMDXSkyTestMoonByPhase"
+   decimal_digits="0"
+   follows="left|top"
+   height="16"
+   increment="1"
+   label="Phase"
+   label_width="110"
+   layout="topleft"
+   left="16"
+   max_val="180"
+   min_val="0"
+   name="GMDXSkyTestMoonPhase"
+   tool_tip="Phase angle: 0 full, 45 gibbous, 90 quarter, 135 crescent, 180 new. If the two heights cannot give this phase, the nearest phase they can."
+   top="274"
+   width="350" />
+  <slider
+   can_edit_text="true"
+   control_name="GMDXSkyTestMoonElevation"
+   decimal_digits="1"
+   follows="left|top"
+   height="16"
+   increment="0.5"
+   label="Elevation"
+   label_width="110"
+   layout="topleft"
+   left="16"
+   max_val="90"
+   min_val="-90"
+   name="GMDXSkyTestMoonElevation"
+   tool_tip="The moon's height in degrees: below 0 it has set (a moonless night)."
+   top="296"
+   width="350" />
+  <slider
+   can_edit_text="true"
+   control_name="GMDXSkyTestMoonAzimuth"
+   disabled_control="GMDXSkyTestMoonByPhase"
+   decimal_digits="0"
+   follows="left|top"
+   height="16"
+   increment="1"
+   label="Azimuth"
+   label_width="110"
+   layout="topleft"
+   left="16"
+   max_val="360"
+   min_val="0"
+   name="GMDXSkyTestMoonAzimuth"
+   tool_tip="The moon's azimuth in degrees. Set from the phase while Place by phase is on."
+   top="318"
+   width="350" />
+  <text
+   follows="left|top"
+   font="SansSerifBold"
+   height="16"
+   layout="topleft"
+   left="12"
+   name="hdr_20"
+   top="344"
+   width="350">Clouds and haze</text>
+  <slider
+   can_edit_text="true"
+   control_name="GMDXSkyTestCloudCoverage"
+   decimal_digits="2"
+   follows="left|top"
+   height="16"
+   increment="0.01"
+   label="Coverage"
+   label_width="110"
+   layout="topleft"
+   left="16"
+   max_val="1"
+   min_val="0"
+   name="GMDXSkyTestCloudCoverage"
+   tool_tip="How much of the sky is cloud: near 1 the moon is behind cloud wherever it is."
+   top="364"
+   width="350" />
+  <slider
+   can_edit_text="true"
+   control_name="GMDXSkyTestCloudDensity"
+   decimal_digits="2"
+   follows="left|top"
+   height="16"
+   increment="0.01"
+   label="Density"
+   label_width="110"
+   layout="topleft"
+   left="16"
+   max_val="3"
+   min_val="0"
+   name="GMDXSkyTestCloudDensity"
+   tool_tip="How thick the clouds are."
+   top="386"
+   width="350" />
+  <slider
+   can_edit_text="true"
+   control_name="GMDXSkyTestCloudScale"
+   decimal_digits="2"
+   follows="left|top"
+   height="16"
+   increment="0.01"
+   label="Scale"
+   label_width="110"
+   layout="topleft"
+   left="16"
+   max_val="3"
+   min_val="0.01"
+   name="GMDXSkyTestCloudScale"
+   tool_tip="Cloud size."
+   top="408"
+   width="350" />
+  <slider
+   can_edit_text="true"
+   control_name="GMDXSkyTestCloudShiftX"
+   decimal_digits="3"
+   follows="left|top"
+   height="16"
+   increment="0.005"
+   label="Shift X"
+   label_width="110"
+   layout="topleft"
+   left="16"
+   max_val="1"
+   min_val="0"
+   name="GMDXSkyTestCloudShiftX"
+   tool_tip="Slides the cloud field east-west (1 = a whole tile): with the clouds frozen, put a cloud or a gap in front of the moon."
+   top="430"
+   width="350" />
+  <slider
+   can_edit_text="true"
+   control_name="GMDXSkyTestCloudShiftY"
+   decimal_digits="3"
+   follows="left|top"
+   height="16"
+   increment="0.005"
+   label="Shift Y"
+   label_width="110"
+   layout="topleft"
+   left="16"
+   max_val="1"
+   min_val="0"
+   name="GMDXSkyTestCloudShiftY"
+   tool_tip="Slides the cloud field north-south (1 = a whole tile)."
+   top="452"
+   width="350" />
+  <check_box
+   control_name="GMDXSkyTestFreezeClouds"
+   follows="left|top"
+   height="16"
+   label="Freeze clouds"
+   layout="topleft"
+   left="12"
+   name="GMDXSkyTestFreezeClouds"
+   tool_tip="The clouds stand still, so they stay where Shift put them. Off = they drift as the start sky's do."
+   top="474"
+   width="300" />
+  <slider
+   can_edit_text="true"
+   control_name="GMDXSkyTestHazeDensity"
+   decimal_digits="2"
+   follows="left|top"
+   height="16"
+   increment="0.01"
+   label="Haze"
+   label_width="110"
+   layout="topleft"
+   left="16"
+   max_val="5"
+   min_val="0"
+   name="GMDXSkyTestHazeDensity"
+   tool_tip="Haze density: more = a thicker, brighter horizon and dimmer distance."
+   top="496"
+   width="350" />
+  <button
+   follows="left|top"
+   height="23"
+   label="Back to region sky"
+   layout="topleft"
+   left="12"
+   name="off"
+   tool_tip="Ends the test: drops the personal sky (as World &gt; Environment &gt; Use Shared Environment)."
+   top="524"
+   width="160">
+    <button.commit_callback function="GMDX.SkyTest.Off" />
+  </button>
+</floater>

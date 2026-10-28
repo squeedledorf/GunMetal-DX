@@ -61,6 +61,9 @@ public:
     /** resets current camera mode to orbit mode */
     static void resetCameraMode();
 
+    /** <GMDX> Updates the camera floater's item selection (the ortho toggle) */
+    static void updateAllItemsSelection();
+
     /** Called when Avatar is entered/exited editing appearance mode */
     static void onAvatarEditingAppearance(bool editing);
 

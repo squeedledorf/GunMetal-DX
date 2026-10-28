@@ -114,7 +114,10 @@ help:
 	@printf '  venv            create .venv with the build'"'"'s Python modules\n'
 	@printf '  version         print version/channel (TAG=v0.11.0-beta.1 to preview)\n'
 	@printf '  version-bump    set VIEWER_VERSION.txt (VERSION=X.Y.Z)\n'
-	@printf '  glibc-check     portability checks on the packaged binaries\n'
+	@printf '  check           regression checks on the source tree (no build needed)\n'
+	@printf '  check-package   regression checks on the packaged viewer (after build; glibc-check is the old name)\n'
+	@printf '  check-list      list every regression check and what it guards\n'
+	@printf '  validate        runtime regression suite on the test box (PKG= NAME= SCENARIO=core|sync)\n'
 	@printf '  clean           remove %s\n' '$(BUILD_DIR)'
 	@printf '  distclean       remove build dirs, venv, build-variables leftover\n'
 	@printf '\nVariables (override with make VAR=value):\n'
@@ -142,28 +145,59 @@ configure: $(BUILD_DIR)/CMakeCache.txt
 # TARBALL=1 to also produce the distributable tar.xz (xz of the ~330MB
 # packaged tree costs minutes; local iteration runs from packaged/ directly).
 TARBALL ?= 0
+# `build` runs `make check` first and `make check-package` last, `windows` runs `make check`.
+# RUN_CHECKS=0 skips those; CI does that because it runs them as their own workflow steps.
+RUN_CHECKS ?= 1
 build: $(BUILD_DIR)/CMakeCache.txt
-	@python3 -I scripts/ci/check_win_macros.py
+	$(if $(filter 1,$(RUN_CHECKS)),@$(MAKE) --no-print-directory check)
 	$(if $(filter 1,$(TARBALL)),,ALCH_SKIP_TARBALL=1) cmake --build $(BUILD_DIR)
 	@printf '\nLauncher: %s\n' '$(LAUNCHER)'
-	@$(MAKE) --no-print-directory glibc-check
+	$(if $(filter 1,$(RUN_CHECKS)),@$(MAKE) --no-print-directory check-package)
 
-# Portability guard: fail if any packaged binary needs a glibc newer than
-# GLIBC_MAX (default 2.38 -> Fedora 39+/Ubuntu 24.04+). New re-versioned libm
-# symbols get pinned in indra/cmake/glibc_compat.h.
+# ---- Regression checks: scripts/check/ (one module per guard; see doc/DEVELOPER_GUIDE.md) ----
+# make check          source stage: runs on the repo tree, no build needed
+# make check-package  package stage: the packaged viewer tree after `make build`
+# make validate       runtime suite on the test box (PKG=... NAME=... SCENARIO=core|sync)
+# make check-list     list every check and what it guards
+CHECK_RUN := python3 -I scripts/check/run.py
+
+# Portability limits for the package stage. GLIBC_MAX: fail if any packaged binary needs a
+# glibc newer than this (2.38 -> Fedora 39+/Ubuntu 24.04+); new re-versioned libm symbols
+# get pinned in indra/cmake/glibc_compat.h. GLIBCXX_MAX (#147): 3.4.32 = GCC 13's libstdc++,
+# what the CI builder (applejack, GCC 14 headers) produces; a local build with a newer GCC
+# only warns, CI passes GLIBCXX_STRICT=1 so a release can never raise it.
 GLIBC_MAX ?= 2.38
-# Same for the C++ runtime (#147): GLIBCXX_MAX 3.4.32 = GCC 13's libstdc++, what
-# the CI builder (applejack, GCC 14 headers) produces. A local build with a newer
-# GCC only warns; CI passes GLIBCXX_STRICT=1 so a release can never raise it.
 GLIBCXX_MAX ?= 3.4.32
 GLIBCXX_STRICT ?= 0
-# Packaged libraries outside lib/ (libdecor sits in lib/libdecor so it doesn't
-# shadow a system copy, #197).
-GLIBC_CHECK_EXTRA = $(BUILD_DIR)/newview/packaged/lib/libdecor/*.so* $(BUILD_DIR)/newview/packaged/lib/libdecor/plugins-1/*.so
-.PHONY: glibc-check
+PACKAGED_DIR ?= $(BUILD_DIR)/newview/packaged
+
+.PHONY: check check-package check-list glibc-check validate
+check:
+	@$(CHECK_RUN) --stage source
+
+check-package:
+	@$(CHECK_RUN) --stage package --package "$(PACKAGED_DIR)" --glibc-max $(GLIBC_MAX) \
+	    --glibcxx-max $(GLIBCXX_MAX) $(if $(filter 1,$(GLIBCXX_STRICT)),--glibcxx-strict)
+
+check-list:
+	@$(CHECK_RUN) --list
+
+# Old name of check-package, kept so existing docs and habits keep working.
+glibc-check: check-package
+
+# Standard pre-release runtime regression suite (scripts/testctl/slvalidate.sh): runs a TESTCTL
+# package (make TESTCTL=1) on the test box under the Vulkan validation layers, logs in, drives
+# the scenario, and prints the report. Results land in ./slval-NAME-SCENARIO/.
+#   make validate PKG=/path/to/package NAME=rc1 SCENARIO=core    (SCENARIO: core | sync)
+# Optional PLAN=plan.json overrides the step plan. Run it on the exact release candidate.
+SCENARIO ?= core
+validate:
+	@[ -n "$(PKG)" ] && [ -n "$(NAME)" ] || { echo "usage: make validate PKG=<testctl package dir> NAME=<run name> [SCENARIO=core|sync] [PLAN=plan.json]"; exit 2; }
+	bash scripts/testctl/slvalidate.sh "$(PKG)" "$(NAME)" "$(SCENARIO)" $(PLAN)
+
 # Windows x64 cross build (clang-cl + xwin); see scripts/wincross/build.sh.
 windows: venv
-	@python3 -I scripts/ci/check_win_macros.py
+	$(if $(filter 1,$(RUN_CHECKS)),@$(MAKE) --no-print-directory check)
 	VIEWER_CHANNEL="$(VIEWER_CHANNEL)" BUILD_ID="$(BUILD_ID)" SL_3P_CACHE="$(SL_3P_CACHE)" UPDATE_PUBKEY_HEX="$(UPDATE_PUBKEY_HEX)" bash scripts/wincross/build.sh
 
 # Print the resolved version/channel (TAG=v0.11.0-beta.1 to preview a tag).
@@ -175,39 +209,6 @@ version-bump:
 	@[[ "$(VERSION)" =~ ^[0-9]+\.[0-9]+\.[0-9]+$$ ]] || { echo "usage: make version-bump VERSION=X.Y.Z"; exit 1; }
 	@echo "$(VERSION)" > indra/newview/VIEWER_VERSION.txt
 	@echo "VIEWER_VERSION.txt -> $(VERSION) (commit it, then tag v$(VERSION) or v$(VERSION)-beta.N)"
-
-glibc-check:
-	@bad=0; for f in $(BUILD_DIR)/newview/packaged/bin/* $(BUILD_DIR)/newview/packaged/lib/*.so* $(GLIBC_CHECK_EXTRA); do \
-	  [ -f "$$f" ] || continue; \
-	  v=$$( (objdump -T "$$f" 2>/dev/null || true) | (grep -oE 'GLIBC_2\.[0-9]+' || true) | sort -t. -k2 -n -u | tail -1); \
-	  [ -z "$$v" ] && continue; \
-	  if [ "$$(printf '%s\n%s\n' "GLIBC_$(GLIBC_MAX)" "$$v" | sort -t. -k2 -n | tail -1)" != "GLIBC_$(GLIBC_MAX)" ]; then \
-	    echo "glibc-check: $$f needs $$v (> $(GLIBC_MAX)):"; \
-	    (objdump -T "$$f" | grep -F "$$v)" || true) | awk '{print "    " $$NF}'; bad=1; fi; \
-	done; \
-	if [ $$bad = 0 ]; then echo "glibc-check: all packaged binaries need <= GLIBC_$(GLIBC_MAX)"; else exit 1; fi
-	@bad=0; for f in $(BUILD_DIR)/newview/packaged/bin/* $(BUILD_DIR)/newview/packaged/lib/*.so* $(GLIBC_CHECK_EXTRA); do \
-	  [ -f "$$f" ] || continue; \
-	  if (readelf -n "$$f" 2>/dev/null || true) | grep -q 'ISA needed:.*x86-64-v4'; then \
-	    echo "isa-check: $$f declares it needs x86-64-v4 (AVX-512)"; bad=1; fi; \
-	done; \
-	if [ $$bad = 0 ]; then echo "isa-check: no packaged binary requires x86-64-v4"; else exit 1; fi
-	@for f in $(GLIBC_CHECK_EXTRA); do \
-	  [ -f "$$f" ] || continue; \
-	  if (readelf -n "$$f" 2>/dev/null || true) | grep -qE 'ISA used:.*x86-64-v[34]'; then \
-	    echo "isa-check: WARNING: $$f (copied from this build host) was compiled for x86-64-v3/v4;" \
-	         "a tarball for other machines needs a generic build (SLIPSTREAM_LIBDECOR_LIBDIR, see viewer_manifest.py)"; fi; \
-	done
-	@bad=0; for f in $(BUILD_DIR)/newview/packaged/bin/* $(BUILD_DIR)/newview/packaged/lib/*.so* $(BUILD_DIR)/newview/packaged/bin/llplugin/*.so* $(GLIBC_CHECK_EXTRA); do \
-	  [ -f "$$f" ] || continue; \
-	  v=$$( (objdump -T "$$f" 2>/dev/null || true) | (grep -oE 'GLIBCXX_3\.4\.[0-9]+' || true) | sort -V -u | tail -1); \
-	  [ -z "$$v" ] && continue; \
-	  if [ "$$(printf '%s\n%s\n' "GLIBCXX_$(GLIBCXX_MAX)" "$$v" | sort -V | tail -1)" != "GLIBCXX_$(GLIBCXX_MAX)" ]; then \
-	    echo "glibcxx-check: $$f needs $$v (> $(GLIBCXX_MAX))"; bad=1; fi; \
-	done; \
-	if [ $$bad = 0 ]; then echo "glibcxx-check: all packaged binaries need <= GLIBCXX_$(GLIBCXX_MAX)"; \
-	elif [ "$(GLIBCXX_STRICT)" = 1 ]; then exit 1; \
-	else echo "glibcxx-check: WARNING (local build; CI enforces this with GLIBCXX_STRICT=1)"; fi
 
 # run does NOT depend on build: a build re-runs the packaging step (and with
 # TARBALL=1 the minutes-long xz of the ~330MB tree). Build explicitly (make build)

@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<floater
+ positioning="cascading"
+ can_close="true"
+ can_minimize="true"
+ can_resize="true"
+ save_rect="true"
+ height="420"
+ width="330"
+ min_height="240"
+ min_width="290"
+ layout="topleft"
+ name="wearable_favorites"
+ single_instance="true"
+ title="FAVORITE WEARABLES">
+    <string name="empty_text">No favorite wearables yet. Right-click a wearable or attachment in your inventory (or the Wearing tab) and choose Add to Favorite Wearables, or drag one here. A favorite is a link: the item itself stays where it is.</string>
+    <string name="no_match_text">No favorite wearables match.</string>
+    <filter_editor
+     background_image="TextField_Search_Off"
+     follows="left|right|top"
+     height="22"
+     label="Filter favorites"
+     layout="topleft"
+     left="6"
+     name="filter_editor"
+     search_button_visible="true"
+     top="24"
+     width="212" />
+    <combo_box
+     follows="right|top"
+     height="22"
+     layout="topleft"
+     left_pad="4"
+     name="sort_combo"
+     tool_tip="Sort the favorites"
+     top_delta="0"
+     width="102">
+        <combo_box.item
+         label="Name"
+         name="sort_name"
+         value="2" />
+        <combo_box.item
+         label="Type"
+         name="sort_type"
+         value="18" />
+        <combo_box.item
+         label="Date added"
+         name="sort_date"
+         value="3" />
+    </combo_box>
+    <wearable_favorites_panel
+     accepts_drag_and_drop="false"
+     allow_multi_select="true"
+     background_visible="true"
+     bevel_style="none"
+     bg_alpha_color="DkGray2"
+     bg_opaque_color="DkGray2"
+     border="false"
+     follows="all"
+     height="336"
+     layout="topleft"
+     left="6"
+     name="favorites_panel"
+     scroll.reserve_scroll_corner="false"
+     show_empty_message="false"
+     show_item_link_overlays="true"
+     suppress_folder_menu="true"
+     top_pad="4"
+     width="318" />
+    <text
+     follows="left|right|top"
+     halign="center"
+     height="90"
+     layout="topleft"
+     left="20"
+     name="status_text"
+     text_color="LtGray"
+     top="90"
+     word_wrap="true"
+     width="290" />
+    <button
+     follows="left|bottom"
+     height="22"
+     label="Wear"
+     layout="topleft"
+     left="6"
+     name="wear_btn"
+     tool_tip="Wear the selected favorites, replacing what is worn in the same place"
+     top="388"
+     width="96" />
+    <button
+     follows="left|bottom"
+     height="22"
+     label="Add"
+     layout="topleft"
+     left_pad="4"
+     name="add_btn"
+     tool_tip="Add the selected favorites to what you are wearing"
+     top_delta="0"
+     width="76" />
+    <button
+     follows="left|bottom"
+     height="22"
+     label="Take Off / Detach"
+     layout="topleft"
+     left_pad="4"
+     name="take_off_btn"
+     tool_tip="Take off or detach the selected favorites that you are wearing"
+     top_delta="0"
+     width="130" />
+</floater>

@@ -177,6 +177,16 @@
     halign="center">
     Password help
   </text>
+  <button
+    follows="left|top"
+    font="SansSerifSmall"
+    label="Start in VR"
+    tool_tip="Restart Slipstream in VR (beta) through your VR runtime, e.g. SteamVR. Without a headset it starts on the desktop again."
+    name="start_vr_btn"
+    left="905"
+    bottom_delta="3"
+    width="100"
+    height="22" />
   </layout_panel>
   <layout_panel
       height="172"

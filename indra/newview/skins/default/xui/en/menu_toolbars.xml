@@ -3,6 +3,119 @@
       layout="topleft"
       name="Toolbars Popup"
       visible="false">
+  <!-- <GMDX> a pinned inventory button (gmdxtoolbarpins.cpp): wear it, and its look -->
+  <menu_item_call label="Wear (Replace)"
+                  layout="topleft"
+                  name="gmdx_pin_wear">
+    <menu_item_call.on_click function="GMDX.ToolbarPin.Menu"
+                             parameter="wear" />
+    <menu_item_call.on_visible function="GMDX.ToolbarPin.MenuVisible"
+                               parameter="wear" />
+  </menu_item_call>
+  <menu_item_call label="Wear (Add)"
+                  layout="topleft"
+                  name="gmdx_pin_add">
+    <menu_item_call.on_click function="GMDX.ToolbarPin.Menu"
+                             parameter="add" />
+    <menu_item_call.on_visible function="GMDX.ToolbarPin.MenuVisible"
+                               parameter="add" />
+  </menu_item_call>
+  <menu_item_call label="Take Off"
+                  layout="topleft"
+                  name="gmdx_pin_take_off">
+    <menu_item_call.on_click function="GMDX.ToolbarPin.Menu"
+                             parameter="take_off" />
+    <menu_item_call.on_visible function="GMDX.ToolbarPin.MenuVisible"
+                               parameter="take_off" />
+  </menu_item_call>
+  <menu_item_separator layout="topleft"
+                       name="gmdx_pin_click_separator">
+    <menu_item_separator.on_visible function="GMDX.ToolbarPin.MenuVisible"
+                                    parameter="click_default" />
+  </menu_item_separator>
+  <menu_item_check label="Left Click: As in Inventory"
+                   layout="topleft"
+                   name="gmdx_pin_click_default">
+    <menu_item_check.on_click function="GMDX.ToolbarPin.Menu"
+                              parameter="click_default" />
+    <menu_item_check.on_check function="GMDX.ToolbarPin.MenuCheck"
+                              parameter="click_default" />
+    <menu_item_check.on_visible function="GMDX.ToolbarPin.MenuVisible"
+                                parameter="click_default" />
+  </menu_item_check>
+  <menu_item_check label="Left Click: Wear (Replace)"
+                   layout="topleft"
+                   name="gmdx_pin_click_replace">
+    <menu_item_check.on_click function="GMDX.ToolbarPin.Menu"
+                              parameter="click_replace" />
+    <menu_item_check.on_check function="GMDX.ToolbarPin.MenuCheck"
+                              parameter="click_replace" />
+    <menu_item_check.on_visible function="GMDX.ToolbarPin.MenuVisible"
+                                parameter="click_replace" />
+  </menu_item_check>
+  <menu_item_check label="Left Click: Wear (Add)"
+                   layout="topleft"
+                   name="gmdx_pin_click_add">
+    <menu_item_check.on_click function="GMDX.ToolbarPin.Menu"
+                              parameter="click_add" />
+    <menu_item_check.on_check function="GMDX.ToolbarPin.MenuCheck"
+                              parameter="click_add" />
+    <menu_item_check.on_visible function="GMDX.ToolbarPin.MenuVisible"
+                                parameter="click_add" />
+  </menu_item_check>
+  <menu_item_check label="Left Click: Ask Each Time"
+                   layout="topleft"
+                   name="gmdx_pin_click_ask">
+    <menu_item_check.on_click function="GMDX.ToolbarPin.Menu"
+                              parameter="click_ask" />
+    <menu_item_check.on_check function="GMDX.ToolbarPin.MenuCheck"
+                              parameter="click_ask" />
+    <menu_item_check.on_visible function="GMDX.ToolbarPin.MenuVisible"
+                                parameter="click_ask" />
+  </menu_item_check>
+  <menu_item_separator layout="topleft"
+                       name="gmdx_pin_wear_separator">
+    <menu_item_separator.on_visible function="GMDX.ToolbarPin.MenuVisible"
+                                    parameter="separator" />
+  </menu_item_separator>
+  <menu_item_call label="Change Icon..."
+                  layout="topleft"
+                  name="gmdx_pin_icon">
+    <menu_item_call.on_click function="GMDX.ToolbarPin.Menu"
+                             parameter="icon" />
+    <menu_item_call.on_visible function="GMDX.ToolbarPin.MenuVisible"
+                               parameter="icon" />
+  </menu_item_call>
+  <menu_item_call label="Reset Icon"
+                  layout="topleft"
+                  name="gmdx_pin_reset_icon">
+    <menu_item_call.on_click function="GMDX.ToolbarPin.Menu"
+                             parameter="reset_icon" />
+    <menu_item_call.on_visible function="GMDX.ToolbarPin.MenuVisible"
+                               parameter="reset_icon" />
+  </menu_item_call>
+  <menu_item_call label="Rename..."
+                  layout="topleft"
+                  name="gmdx_pin_rename">
+    <menu_item_call.on_click function="GMDX.ToolbarPin.Menu"
+                             parameter="rename" />
+    <menu_item_call.on_visible function="GMDX.ToolbarPin.MenuVisible"
+                               parameter="rename" />
+  </menu_item_call>
+  <menu_item_call label="Reset Name"
+                  layout="topleft"
+                  name="gmdx_pin_reset_name">
+    <menu_item_call.on_click function="GMDX.ToolbarPin.Menu"
+                             parameter="reset_name" />
+    <menu_item_call.on_visible function="GMDX.ToolbarPin.MenuVisible"
+                               parameter="reset_name" />
+  </menu_item_call>
+  <menu_item_separator layout="topleft"
+                       name="gmdx_pin_separator">
+    <menu_item_separator.on_visible function="GMDX.ToolbarPin.MenuVisible"
+                                    parameter="separator" />
+  </menu_item_separator>
+  <!-- </GMDX> -->
   <menu_item_call label="Remove this button"
                   layout="topleft"
                   name="Remove button">

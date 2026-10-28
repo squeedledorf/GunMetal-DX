@@ -230,6 +230,52 @@
          value="Toggle OTS / First Person" />
     </rows>
     <!-- </SS:Skoomastream> -->
+    <!-- <GMDX> pings (gmdxmapshare.h) -->
+    <rows
+     name="map_ping"
+     value="map_ping">
+        <columns
+         column="lst_action"
+         font="SansSerif"
+         halign="left"
+         name="lst_action"
+         tool_tip="Mark the place under the cursor (the crosshair in mouselook) for the people you send pings to in your region"
+         value="Ping" />
+    </rows>
+    <rows
+     name="map_ping_enemy"
+     value="map_ping_enemy">
+        <columns
+         column="lst_action"
+         font="SansSerif"
+         halign="left"
+         name="lst_action"
+         tool_tip="Ping the place under the cursor as an enemy"
+         value="Ping Enemy" />
+    </rows>
+    <rows
+     name="map_ping_rally"
+     value="map_ping_rally">
+        <columns
+         column="lst_action"
+         font="SansSerif"
+         halign="left"
+         name="lst_action"
+         tool_tip="Ping the place under the cursor as a rally point"
+         value="Ping Rally" />
+    </rows>
+    <rows
+     name="map_ping_wheel"
+     value="map_ping_wheel">
+        <columns
+         column="lst_action"
+         font="SansSerif"
+         halign="left"
+         name="lst_action"
+         tool_tip="Tap: ping the place under the cursor (the crosshair in mouselook). Hold: a wheel to choose Ping, Enemy or Rally, sent when you let go"
+         value="Ping Wheel" />
+    </rows>
+    <!-- </GMDX> -->
     <rows
      name="stop_moving"
      value="stop_moving">

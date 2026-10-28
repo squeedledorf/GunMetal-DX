@@ -58,7 +58,7 @@ layout(push_constant) uniform PfPush { uvec4 q; } pp;   // y self-shadowed light
 uint pfCluster(vec3 P)
 {
     const vec4 v = linfo.view * vec4(P, 1.0);
-    const float z = max(-v.z, 1e-3);
+    const float z = CL_VIEW_Z(linfo, max(-v.z, 1e-3));   // <GMDX>
     const float sx = (v.x / z) / max(linfo.grid.z, 1e-4);
     const float sy = (v.y / z) / max(linfo.grid.w, 1e-4);
     const uint cx = uint(clamp((sx * 0.5 + 0.5) * float(GX), 0.0, float(GX) - 1.0));

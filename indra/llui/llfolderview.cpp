@@ -257,13 +257,11 @@ LLFolderView::LLFolderView(const Params& p)
 // Destroys the object
 LLFolderView::~LLFolderView( void )
 {
-    mRenamerTopLostSignalConnection.disconnect();
-    if (mRenamer)
-    {
-        // instead of using closeRenamer remove it directly,
-        // since it might already be hidden
-        LLUI::getInstance()->removePopup(mRenamer);
-    }
+    // <GMDX> SoapStorm 984a07fa80: give up the renamer's focus while the view is still whole.
+    // Otherwise the base destructor's focus release committed a pending rename into a half
+    // destroyed view (arrange() with mViewModel already NULL) and crashed.
+    cancelRenaming();
+    // </GMDX>
 
     // The release focus call can potentially call the
     // scrollcontainer, which can potentially be called with a partly
@@ -729,7 +727,10 @@ bool LLFolderView::startDrag()
 void LLFolderView::commitRename( const LLSD& data )
 {
     finishRenamingItem();
-    arrange( NULL, NULL );
+    if (mRenamer && mViewModel) // <GMDX> SoapStorm 984a07fa80: not during teardown
+    {
+        arrange( NULL, NULL );
+    }
 
 }
 
@@ -804,7 +805,7 @@ void LLFolderView::draw()
 
 void LLFolderView::finishRenamingItem( void )
 {
-    if(!mRenamer)
+    if(!mRenamer || !mViewModel) // <GMDX> SoapStorm 984a07fa80
     {
         return;
     }
@@ -828,6 +829,23 @@ void LLFolderView::closeRenamer( void )
         LLUI::getInstance()->removePopup(mRenamer);
     }
 }
+
+// <GMDX> SoapStorm 984a07fa80
+void LLFolderView::cancelRenaming( void )
+{
+    // disconnect first, so removing the popup does not run onRenamerLost() (which commits)
+    mRenamerTopLostSignalConnection.disconnect();
+
+    if (mRenamer)
+    {
+        mRenamer->setCommitOnFocusLost(false);
+        gFocusMgr.releaseFocusIfNeeded(mRenamer); // also removes the popup, even if already hidden
+        mRenamer->setVisible(false);
+    }
+
+    mRenameItem = NULL;
+}
+// </GMDX>
 
 void LLFolderView::removeSelectedItems()
 {
@@ -1007,7 +1025,7 @@ bool LLFolderView::canCopy() const
     for (selected_items_t::const_iterator selected_it = mSelectedItems.begin(); selected_it != mSelectedItems.end(); ++selected_it)
     {
         const LLFolderViewItem* item = *selected_it;
-        if (!item->getViewModelItem()->isItemCopyable())
+        if (!item->getViewModelItem()->canCopyToClipboard())
         {
             return false;
         }
@@ -1200,6 +1218,7 @@ void LLFolderView::startRenamingSelectedItem( void )
         mRenamer->setText(item->getName());
         mRenamer->selectAll();
         mRenamer->setVisible( true );
+        mRenamer->setCommitOnFocusLost( true ); // <GMDX> SoapStorm 984a07fa80: cancelRenaming() turns it off
         // set focus will fail unless item is visible
         mRenamer->setFocus( true );
         if (!mRenamerTopLostSignalConnection.connected())
@@ -1845,11 +1864,7 @@ bool LLFolderView::handleDragAndDrop(S32 x, S32 y, MASK mask, bool drop,
 
 void LLFolderView::deleteAllChildren()
 {
-    mRenamerTopLostSignalConnection.disconnect();
-    if (mRenamer)
-    {
-        LLUI::getInstance()->removePopup(mRenamer);
-    }
+    cancelRenaming(); // <GMDX> SoapStorm 984a07fa80
     if (mPopupMenuHandle.get())
     {
         mPopupMenuHandle.get()->die();

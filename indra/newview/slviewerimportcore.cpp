@@ -488,6 +488,7 @@ const Candidate CANDIDATES[] = {
 #if defined(_WIN32) || defined(__APPLE__)
     { "Firestorm_x64", "firestorm", "Firestorm", true, true },
     { "Firestorm", "firestorm", "Firestorm", true, true },
+    { "FirestormOS_x64", "firestorm", "Firestorm (OpenSim build)", true, true },   // <GMDX> SoapStorm c6d090301f; only its SL accounts are used
     { "BlackDragon", "blackdragon", "Black Dragon", false, false },
     { "AlchemyViewer", "alchemy", "Alchemy", false, true },
     { "AlchemyNext", "alchemy", "Alchemy (older)", false, true },
@@ -495,6 +496,7 @@ const Candidate CANDIDATES[] = {
 #else
     { ".firestorm_x64", "firestorm", "Firestorm", true, true },
     { ".firestorm", "firestorm", "Firestorm (32-bit)", true, true },
+    { ".firestormos_x64", "firestorm", "Firestorm (OpenSim build)", true, true },  // <GMDX> SoapStorm c6d090301f; only its SL accounts are used
     { ".blackdragon", "blackdragon", "Black Dragon", false, false },
     { ".alchemyviewer", "alchemy", "Alchemy", false, true },
     { ".alchemynext", "alchemy", "Alchemy (older)", false, true },

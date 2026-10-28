@@ -28,6 +28,7 @@
 #include "llviewerprecompiledheaders.h"
 
 #include "llnetmap.h"
+#include "llfloatermap.h" // <GMDX> Show Whole Region is the floater's
 #include "gmdxminimapterrain.h" // <GMDX>
 #include "gmdxminimapcompass.h" // <GMDX>
 #include "gmdxminimapimage.h" // <GMDX>
@@ -83,6 +84,7 @@
 #include "lggcontactsets.h"
 #include "gmdxregioncapture.h"   // <GMDX> region map capture (menu)
 #include "gmdxminimapmarks.h"    // <GMDX> marks
+#include "gmdxmapshare.h"        // <GMDX> shared marks, zones, pings
 #include "llclipboard.h"         // <GMDX> copy coordinates
 #include "llnotificationsutil.h" // <GMDX> mark names
 #include "llavataractions.h"     // <GMDX> a dot's profile
@@ -105,6 +107,20 @@ constexpr F32 MIN_PICK_PX = 8.f;   // <GMDX> the zone around a dot that picks it
 constexpr S32 MOUSE_DRAG_SLOP = 2;      // How far the mouse needs to move before we think it's a drag
 
 constexpr F64 COARSEUPDATE_MAX_Z = 1020.0f;
+
+// <GMDX> GMDXMiniMapHideAbove: an avatar more than GMDXMiniMapHideAboveMeters above me (the dot's
+// position) gets no dot, no hover and no pick. One known only from the coarse locations as "1020 m
+// or higher" (exactly 1020 m: a loaded avatar has its real height) is hidden whenever I am below 1020 m.
+static bool gmdx_hidden_above(const LLVector3d& pos_global)
+{
+    static LLCachedControl<bool> hide(gSavedSettings, "GMDXMiniMapHideAbove", false);
+    static LLCachedControl<F32> meters(gSavedSettings, "GMDXMiniMapHideAboveMeters", 250.f);
+    if (!hide) return false;
+    const F64 my_z = gAgent.getPositionGlobal().mdV[VZ];
+    if (pos_global.mdV[VZ] == COARSEUPDATE_MAX_Z && my_z < COARSEUPDATE_MAX_Z) return true;
+    return pos_global.mdV[VZ] - my_z > llclamp((F32)meters, 250.f, 1000.f);
+}
+// </GMDX>
 
 LLNetMap::LLNetMap (const Params & p)
 :   LLUICtrl (p),
@@ -144,6 +160,14 @@ LLNetMap::LLNetMap (const Params & p)
 
 LLNetMap::~LLNetMap()
 {
+    // <GMDX> the Dot Colour swatch cancels its open picker when it is destroyed (with the other
+    // children, after this), which would call back into this map: detach and close the picker first
+    if (mDotColorSwatch)
+    {
+        mDotColorSwatch->closeFloaterColorPicker();
+        mDotColorSwatch = nullptr;
+    }
+    // </GMDX>
     auto menu = static_cast<LLMenuGL*>(mPopupMenuHandle.get());
     if (menu)
     {
@@ -198,8 +222,12 @@ bool LLNetMap::postBuild()
     commitRegistrar.add("Minimap.CopyImage", [](LLUICtrl*, const LLSD&) { gmdx_copy_region_map_image(); });
     commitRegistrar.add("Minimap.SaveImage", [](LLUICtrl*, const LLSD&) { gmdx_save_region_map_image(); });
     // View: Follow Me / Whole Region (GMDXMiniMapWholeRegion)
-    enableRegistrar.add("Minimap.ViewMode.Check", [](LLUICtrl*, const LLSD& param)
-        { return gSavedSettings.getBOOL("GMDXMiniMapWholeRegion") == (param.asString() == "region"); });
+    enableRegistrar.add("Minimap.ViewMode.Check", [this](LLUICtrl*, const LLSD& param)
+        {
+            // (the People floater's map always follows)
+            const bool whole = gSavedSettings.getBOOL("GMDXMiniMapWholeRegion") && getParentByType<LLFloaterMap>();
+            return whole == (param.asString() == "region");
+        });
     commitRegistrar.add("Minimap.ViewMode.Set", [](LLUICtrl*, const LLSD& param)
         { gSavedSettings.setBOOL("GMDXMiniMapWholeRegion", param.asString() == "region"); });
     enableRegistrar.add("Minimap.CanRecenter", [this](LLUICtrl*, const LLSD&) { return mCanRecenter; });
@@ -236,10 +264,13 @@ bool LLNetMap::postBuild()
     commitRegistrar.add("Minimap.RegionMap.Upload", [](LLUICtrl*, const LLSD&) { GMDXRegionCapture::uploadMap(gAgent.getRegion()); });
     // Where the menu was opened: copy it, mark it; the mark under it: track, rename, recolour, remove
     commitRegistrar.add("Minimap.CopyPosition", [this](LLUICtrl*, const LLSD& param) { copyPopupPosition(param.asString() == "slurl"); });
+    enableRegistrar.add("Minimap.CanShowLocation", [](LLUICtrl*, const LLSD&) { return RlvActions::canShowLocation(); });
     commitRegistrar.add("Minimap.Mark.Add", [this](LLUICtrl*, const LLSD& param) { addMarkAtPopup(param.asInteger()); });
     commitRegistrar.add("Minimap.Mark.Track", [this](LLUICtrl*, const LLSD&)
         {
-            if (const GMDXMapMark* m = GMDXMinimapMarks::find(mPopupMark)) LLTracker::trackLocation(m->pos_global, m->name, m->region);
+            // ([RLVa] the tooltip is the region's name: none while the location is hidden)
+            if (const GMDXMapMark* m = GMDXMinimapMarks::find(mPopupMark))
+                LLTracker::trackLocation(m->pos_global, m->name, RlvActions::canShowLocation() ? m->region : std::string());
         });
     commitRegistrar.add("Minimap.Mark.Rename", [this](LLUICtrl*, const LLSD&)
         {
@@ -292,6 +323,29 @@ bool LLNetMap::postBuild()
                 });
         });
     commitRegistrar.add("Minimap.Zone.Remove", [this](LLUICtrl*, const LLSD&) { GMDXMinimapMarks::removeZone(mPopupZone); });
+    // Sharing (gmdxmapshare.h): my mark / zone to my group ("group") or the Send To targets
+    // ("list") in this region (Send To is filled in on right-click), a ping here, a shared item kept
+    // or removed
+    commitRegistrar.add("Minimap.Share", [this](LLUICtrl*, const LLSD& param)
+        {
+            const bool group_only = param.asString() == "group";
+            if (mPopupMark.notNull()) GMDXMapShare::shareMark(mPopupMark, group_only);
+            else if (mPopupZone.notNull()) GMDXMapShare::shareZone(mPopupZone, group_only);
+        });
+    commitRegistrar.add("Minimap.Ping", [this](LLUICtrl*, const LLSD& param)
+        { GMDXMapShare::ping(GMDXMinimapMarks::onGround(mPopupWorldPos), param.asInteger()); });
+    commitRegistrar.add("Minimap.Shared.Keep", [this](LLUICtrl*, const LLSD&) { GMDXMapShare::keep(mPopupShared); });
+    commitRegistrar.add("Minimap.Shared.Remove", [this](LLUICtrl*, const LLSD&) { GMDXMapShare::remove(mPopupShared); });
+    commitRegistrar.add("Minimap.Shared.RemoveSender", [this](LLUICtrl*, const LLSD&)
+        {
+            if (const GMDXSharedItem* item = GMDXMapShare::find(mPopupShared)) GMDXMapShare::removeFrom(item->sender);
+        });
+    commitRegistrar.add("Minimap.Shared.BlockSender", [this](LLUICtrl*, const LLSD&)
+        {
+            if (const GMDXSharedItem* item = GMDXMapShare::find(mPopupShared)) GMDXMapShare::block(item->sender);
+        });
+    commitRegistrar.add("Minimap.Shared.Clear", [](LLUICtrl*, const LLSD&) { GMDXMapShare::clear(); });
+    commitRegistrar.add("Minimap.Shared.UnblockAll", [](LLUICtrl*, const LLSD&) { GMDXMapShare::unblockAll(); });
     // </GMDX>
 
     LLMenuGL* menu = LLUICtrlFactory::getInstance()->createFromFile<LLMenuGL>("menu_mini_map.xml", gMenuHolder, LLViewerMenuHolderGL::child_registry_t::instance());
@@ -358,7 +412,7 @@ LLVector2 LLNetMap::toRadarRim(const LLVector2& p) const
 {
     const LLVector2 c = radarCenter();
     const LLVector2 d = p - c;
-    if (mRadarSquare)
+    if (mRadarRadius <= 0.f)   // the square radar, or the north-up Whole Region map
     {
         const F32 hx = llmax(mFitMapRect.getWidth() * 0.5f - 3.f, 1.f), hy = llmax(mFitMapRect.getHeight() * 0.5f - 3.f, 1.f);
         const F32 k = llmax(fabsf(d.mV[VX]) / hx, fabsf(d.mV[VY]) / hy);
@@ -440,7 +494,9 @@ void LLNetMap::draw()
 
     // <GMDX> Show Whole Region: the agent's region fitted to the view's centred square (inside
     // the compass frame, if the compass style has one), north up, no pan / zoom.
-    static LLCachedControl<bool> whole_region(gSavedSettings, "GMDXMiniMapWholeRegion", false);
+    static LLCachedControl<bool> s_whole_region(gSavedSettings, "GMDXMiniMapWholeRegion", false);
+    // (only the mini-map floater's map: the one in the People floater's Nearby tab stays as it is)
+    const bool whole_region = s_whole_region && getParentByType<LLFloaterMap>();
     static LLCachedControl<bool> physical_only(gSavedSettings, "GMDXMiniMapPhysicalOnly", false);
     LLRectf fit_square;
     F32 fit_ppm = 0.f;
@@ -904,6 +960,7 @@ void LLNetMap::draw()
             if (uuid == gAgent.getID()) continue;
             // <GMDX> Show Whole Region: only the avatars in the region
             if (mFitRegion && !current_region->pointInRegionGlobal(positions[i])) continue;
+            if (gmdx_hidden_above(positions[i])) continue;
             // </GMDX>
 
             pos_map = globalPosToView(positions[i]);
@@ -996,6 +1053,7 @@ void LLNetMap::draw()
         drawZonePreview();   // <GMDX>
         sDiscRadius = 0.f;   // <GMDX>
         drawMarks();   // <GMDX>
+        drawShared();  // <GMDX>
 
         // Draw dot for self avatar position
         LLVector3d pos_global = gAgent.getPositionGlobal();
@@ -1425,7 +1483,38 @@ void LLNetMap::drawZones()
             }
         }
     }
+    drawSharedZones();
 }
+
+// <GMDX> Shared zones (gmdxmapshare.h): drawn as mine are, the name then the sender (in the sender's
+// group colour) above the top.
+void LLNetMap::drawSharedZones()
+{
+    static LLCachedControl<bool> show_shared(gSavedSettings, "GMDXMapShareShow", true);
+    if (!show_shared) return;
+    const LLFontGL* font = LLFontGL::getFontSansSerifSmallBold();
+    for (const GMDXSharedItem& s : GMDXMapShare::items())
+    {
+        if (s.type != GMDXShareText::Type::Zone) continue;
+        const GMDXMapZone& z = s.zone;
+        const std::vector<LLVector2> pts = zoneOutline(z.kind, z.points);
+        if (pts.empty()) continue;
+        const LLColor4 c = GMDXMinimapMarks::color(z.color);
+        if (z.fill != GMDXMapZone::FILL_NONE) zone_fill(pts, z.fill, c, pts[0]);
+        zone_shape(pts, true, c, z.dotted);
+        const LLVector2* top = &pts[0];
+        for (const LLVector2& p : pts) if (p.mV[VY] > top->mV[VY]) top = &p;
+        if (mRadarRadius > 0.f && (*top - radarCenter()).length() > mRadarRadius) continue;   // off the radar
+        const std::string name = z.name.empty() ? std::string() : z.name + "  ";
+        const std::string sender = GMDXMapShare::senderName(s);
+        const F32 left = top->mV[VX] - 0.5f * (F32)(font->getWidth(name) + font->getWidth(sender));
+        if (!name.empty())
+            font->renderUTF8(name, 0, left, top->mV[VY] + 3.f, c, LLFontGL::LEFT, LLFontGL::BOTTOM, LLFontGL::NORMAL, LLFontGL::DROP_SHADOW);
+        font->renderUTF8(sender, 0, left + (F32)font->getWidth(name), top->mV[VY] + 3.f, GMDXMapShare::senderColor(s), LLFontGL::LEFT,
+                         LLFontGL::BOTTOM, LLFontGL::NORMAL, LLFontGL::DROP_SHADOW);
+    }
+}
+// </GMDX>
 
 void LLNetMap::drawZonePreview()
 {
@@ -1567,6 +1656,92 @@ LLUUID LLNetMap::markAt(S32 x, S32 y)
     }
     return best;
 }
+
+// <GMDX> Shared marks and pings (gmdxmapshare.h): a diamond in the item's colour ringed in the sender's
+// group colour, the name then the sender beside it. A ping blips as it arrives and fades out
+// (GMDXMapShare::drawBlip / pingAlpha) and, off the map, waits on its edge in its direction.
+void LLNetMap::drawShared()
+{
+    static LLCachedControl<bool> show_shared(gSavedSettings, "GMDXMapShareShow", true);
+    if (!show_shared) return;
+    const LLFontGL* font = LLFontGL::getFontSansSerifSmallBold();
+    for (const GMDXSharedItem& s : GMDXMapShare::items())
+    {
+        if (s.type == GMDXShareText::Type::Zone) continue;
+        const bool ping = s.type == GMDXShareText::Type::Ping;
+        const LLVector3 p = globalPosToView(s.mark.pos_global);
+        LLVector2 at(p.mV[VX], p.mV[VY]);
+        if (!onMap(p))
+        {
+            if (!ping) continue;
+            if (radarOn() || mFitRegion) at = toRadarRim(at);
+            else at.set(llclamp(at.mV[VX], 6.f, (F32)getRect().getWidth() - 6.f), llclamp(at.mV[VY], 6.f, (F32)getRect().getHeight() - 6.f));
+        }
+        const F32 x = (F32)ll_round(at.mV[VX]), y = (F32)ll_round(at.mV[VY]);
+        const F32 alpha = ping ? GMDXMapShare::pingAlpha(s, true) : 1.f;
+        LLColor4 c = GMDXMinimapMarks::color(s.mark.color);
+        LLColor4 ring = GMDXMapShare::senderColor(s);
+        c.mV[VALPHA] *= alpha;
+        ring.mV[VALPHA] *= alpha;
+        gGL.getTexUnit(0)->unbind(LLTexUnit::TT_TEXTURE);
+        if (ping) GMDXMapShare::drawBlip(x, y, s, 26.f);   // a radar blip as it arrives (GMDXPingBlip)
+        gGL.color4fv(ring.mV);
+        gl_circle_2d(x, y, 7.5f, 20, false);
+        for (int pass = 0; pass < 2; ++pass)   // outline, then the colour
+        {
+            const F32 r = pass ? 4.5f : 6.f;
+            gGL.color4fv((pass ? c : LLColor4(0.05f, 0.06f, 0.07f, 0.9f * alpha)).mV);
+            gGL.begin(LLRender::TRIANGLES);
+            gGL.vertex2f(x, y + r); gGL.vertex2f(x - r, y); gGL.vertex2f(x + r, y);
+            gGL.vertex2f(x - r, y); gGL.vertex2f(x, y - r); gGL.vertex2f(x + r, y);
+            gGL.end();
+        }
+        const std::string name = s.mark.name.empty() ? std::string() : s.mark.name + "  ";
+        if (!name.empty())
+            font->renderUTF8(name, 0, x + 10.f, y, c, LLFontGL::LEFT, LLFontGL::VCENTER, LLFontGL::NORMAL, LLFontGL::DROP_SHADOW);
+        font->renderUTF8(GMDXMapShare::senderName(s), 0, x + 10.f + (F32)font->getWidth(name), y, ring, LLFontGL::LEFT,
+                         LLFontGL::VCENTER, LLFontGL::NORMAL, LLFontGL::DROP_SHADOW);
+    }
+}
+
+LLUUID LLNetMap::sharedAt(S32 x, S32 y, bool zones)
+{
+    static LLCachedControl<bool> show_shared(gSavedSettings, "GMDXMapShareShow", true);
+    if (!show_shared) return LLUUID::null;
+    const LLVector2 q((F32)x, (F32)y);
+    if (zones && radarOn() && !onMap(LLVector3(q.mV[VX], q.mV[VY], 0.f))) return LLUUID::null;   // off the radar
+    LLUUID best, inside_best;
+    F32 best_d = zones ? 6.f : 8.f;   // px from the outline / the diamond
+    for (const GMDXSharedItem& s : GMDXMapShare::items())
+    {
+        if ((s.type == GMDXShareText::Type::Zone) != zones) continue;
+        if (!zones)
+        {
+            const LLVector3 p = globalPosToView(s.mark.pos_global);
+            if (!onMap(p)) continue;
+            const F32 d = (LLVector2(p.mV[VX], p.mV[VY]) - q).length();
+            if (d < best_d) { best_d = d; best = s.id; }
+            continue;
+        }
+        const std::vector<LLVector2> pts = zoneOutline(s.zone.kind, s.zone.points);
+        bool inside = false;   // (even-odd: a ray to the right crosses the outline an odd number of times)
+        for (size_t i = 0; i < pts.size(); ++i)
+        {
+            const LLVector2 a = pts[i], b = pts[(i + 1) % pts.size()];
+            const LLVector2 ab = b - a;
+            const F32 len2 = ab.lengthSquared();
+            const F32 t = len2 > 0.f ? llclamp(((q - a) * ab) / len2, 0.f, 1.f) : 0.f;
+            const F32 d = (a + ab * t - q).length();
+            if (d < best_d) { best_d = d; best = s.id; }
+            if ((a.mV[VY] > q.mV[VY]) != (b.mV[VY] > q.mV[VY])
+                && q.mV[VX] < a.mV[VX] + (q.mV[VY] - a.mV[VY]) * ab.mV[VX] / ab.mV[VY])
+                inside = !inside;
+        }
+        if (inside) inside_best = s.id;   // (of zones the cursor is in, the last drawn: on top)
+    }
+    return best.notNull() ? best : inside_best;   // an outline near the cursor first, else the zone it is in
+}
+// </GMDX>
 
 // The region coordinates under the cursor (GMDXMiniMapCursorCoords), on a dark pill beside it;
 // over a mark, its name first.
@@ -1731,8 +1906,9 @@ void LLNetMap::drawTracking(const LLVector3d& pos_global, const LLColor4& color,
                             bool draw_arrow )
 {
     LLVector3 pos_local = globalPosToView(pos_global);
-    // <GMDX> the radar: on its rim when past it
-    if (radarOn())
+    // <GMDX> the radar, and the Whole Region map: on its rim / edge when past it (the map is
+    // clipped to its square, so an arrow at the view's edge would be cut away)
+    if (radarOn() || mFitRegion)
     {
         const LLVector2 rim = toRadarRim(LLVector2(pos_local.mV[VX], pos_local.mV[VY]));
         LLWorldMapView::drawTrackingDot(rim.mV[VX], rim.mV[VY], color, pos_local.mV[VZ]);
@@ -2451,13 +2627,33 @@ bool LLNetMap::handleRightMouseDown(S32 x, S32 y, MASK mask)
         menu->setItemVisible("Avatar Profile", on_avatar);
         menu->setItemVisible("Avatar Dot Colour", on_avatar);
         menu->setItemVisible("Avatar Separator", on_avatar);
+        // (a shared mark or ping before my zones; a shared zone only where nothing else is)
         mPopupMark = on_avatar ? LLUUID::null : markAt(x, y);
-        mPopupZone = (on_avatar || mPopupMark.notNull()) ? LLUUID::null : zoneAt(x, y);
-        const bool on_mark = mPopupMark.notNull(), on_zone = mPopupZone.notNull();
+        mPopupShared = (on_avatar || mPopupMark.notNull()) ? LLUUID::null : sharedAt(x, y, false);
+        mPopupZone = (on_avatar || mPopupMark.notNull() || mPopupShared.notNull()) ? LLUUID::null : zoneAt(x, y);
+        if (!on_avatar && mPopupMark.isNull() && mPopupZone.isNull() && mPopupShared.isNull()) mPopupShared = sharedAt(x, y, true);
+        const bool on_mark = mPopupMark.notNull(), on_zone = mPopupZone.notNull(), on_shared = mPopupShared.notNull();
+        const GMDXSharedItem* shared = GMDXMapShare::find(mPopupShared);
+        // (in someone's zone, which can cover the map: still a spot to mark, draw on or ping)
+        const bool free_spot = !on_mark && !on_zone && (!on_shared || (shared && shared->type == GMDXShareText::Type::Zone));
         for (const char* item : { "Track Mark", "Rename Mark", "Mark Colour", "Remove Mark" }) menu->setItemVisible(item, on_mark);
         for (const char* item : { "Zone Line", "Zone Fill", "Zone Colour", "Rename Zone", "Remove Zone" }) menu->setItemVisible(item, on_zone);
-        menu->setItemVisible("Add Mark Here", !on_mark && !on_zone);
-        menu->setItemVisible("Draw Zone", !on_mark && !on_zone);
+        menu->setItemVisible("Add Mark Here", free_spot);
+        menu->setItemVisible("Draw Zone", free_spot);
+        // sharing: my mark / zone to someone; a shared item kept / removed; a ping on a free spot
+        menu->setItemVisible("Share With", on_mark || on_zone);
+        for (const char* item : { "Keep Shared", "Remove Shared", "Remove Shared Sender" }) menu->setItemVisible(item, on_shared);
+        menu->setItemVisible("Block Shared Sender", shared && shared->sender != gAgentID);   // (not my own pings)
+        if (shared)
+        {
+            std::string sender = GMDXMapShare::senderName(*shared);
+            LLStringUtil::replaceChar(sender, '[', '(');
+            LLStringUtil::replaceChar(sender, ']', ')');
+            menu->setItemLabel("Remove Shared Sender", "Remove All From " + sender);
+            menu->setItemLabel("Block Shared Sender", "Block Map Shares From " + sender);
+        }
+        menu->setItemVisible("Ping", free_spot);
+        GMDXMapShare::fillShareMenus(menu);
         // </GMDX>
         menu->buildDrawLabels();
         menu->updateParent(LLMenuGL::sMenuContainer);
@@ -2466,6 +2662,10 @@ bool LLNetMap::handleRightMouseDown(S32 x, S32 y, MASK mask)
         if (LLMenuGL* view = menu->findChild<LLMenuGL>("View"))
         {
             view->setItemVisible("Zoom", !mFitRegion);
+            // (Show Whole Region is the mini-map floater's: not offered on the People floater's map)
+            const bool in_floater = getParentByType<LLFloaterMap>() != nullptr;
+            view->setItemVisible("View Follow Me", in_floater);
+            view->setItemVisible("View Whole Region", in_floater);
         }
         menu->setItemVisible("Compass Style", mFitRegion);
         if (LLMenuGL* compass = menu->findChildMenuByName("Compass Style", true))
@@ -2499,6 +2699,8 @@ void LLNetMap::updateCamToAvatarMenu(LLMenuGL* menu, S32 x, S32 y)
             continue;
         // <GMDX> Show Whole Region: only the avatars it draws
         if (mFitRegion && gAgent.getRegion() && !gAgent.getRegion()->pointInRegionGlobal(positions[i]))
+            continue;
+        if (gmdx_hidden_above(positions[i]))
             continue;
         // </GMDX>
 
@@ -2634,7 +2836,11 @@ bool LLNetMap::handleDoubleClick(S32 x, S32 y, MASK mask)
     {
         if (mDrawKind == GMDXMapZone::POLYGON)
         {
-            mDrawPoints.push_back(viewPosToGlobal(x, y));
+            const LLVector3 last = mDrawPoints.empty() ? LLVector3(-1000.f, -1000.f, 0.f) : globalPosToView(mDrawPoints.back());
+            if (fabsf(last.mV[VX] - (F32)x) + fabsf(last.mV[VY] - (F32)y) >= 4.f)   // (the click before it put a corner there)
+            {
+                mDrawPoints.push_back(viewPosToGlobal(x, y));
+            }
             if (mDrawPoints.size() >= 3) finishZone();
         }
         return true;

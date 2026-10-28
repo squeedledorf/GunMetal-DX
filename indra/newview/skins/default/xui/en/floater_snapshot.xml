@@ -5,7 +5,7 @@
  can_minimize="true"
  can_resize="false"
  can_close="true"
- height="492"
+ height="541"
  layout="topleft"
  name="Snapshot"
  single_instance="true"
@@ -14,10 +14,19 @@
  save_visibility="false"
  title="SNAPSHOT"
  width="624"
- min_height="472">
+ min_height="521">
     <floater.string
      name="unknown">
         unknown
+    </floater.string>
+    <!-- <GMDX> orientation swap tooltips (gmdxsnapshotavatars.cpp) -->
+    <floater.string
+     name="orientation_landscape_tip">
+        Orientation: Landscape (click to switch to Portrait)
+    </floater.string>
+    <floater.string
+     name="orientation_portrait_tip">
+        Orientation: Portrait (click to switch to Landscape)
     </floater.string>
     <string
      name="postcard_progress_str">
@@ -83,7 +92,21 @@
 	 label="REFRESH"
      name="new_snapshot_btn"
      top_pad="26"
-     width="167" />
+     width="136" />
+    <!-- <GMDX> landscape / portrait swap (SoapStorm) -->
+    <button
+     follows="left|top"
+     height="25"
+     image_hover_unselected="Toolbar_Middle_Over"
+     image_selected="Toolbar_Middle_Off"
+     image_unselected="Toolbar_Middle_Off"
+     image_overlay="Icon_Orientation_Landscape"
+     layout="topleft"
+     left_pad="1"
+     top_delta="0"
+     width="31"
+     name="swap_portrait_btn"
+     tool_tip="Orientation: Landscape (click to switch to Portrait)" />
 	<button
        follows="left|top"
 	   control_name="AdvanceSnapshot"
@@ -115,7 +138,7 @@
 	   top_delta="0"
        width="31" />
 	<panel
-     height="196"
+     height="223"
      layout="topleft"
 	 follows="top|left"
      left="0"
@@ -160,7 +183,57 @@
              label="Depth"
              name="Depth"
              value="depth" />
+            <!-- <GMDX> avatar layers (SoapStorm; gmdxsnapshotavatars.h) -->
+            <combo_box.item
+             label="Avatar (Transparent)"
+             name="AvatarTransparent"
+             value="avatar_transparent" />
+            <combo_box.item
+             label="Avatar Matte (Black on White)"
+             name="AvatarMaskBlack"
+             value="avatar_mask_black" />
+            <combo_box.item
+             label="Avatar Matte (White on Black)"
+             name="AvatarMaskWhite"
+             value="avatar_mask_white" />
         </combo_box>
+        <!-- <GMDX> which avatars snapshots include (FSSnapshotAvatarScope) + the picker -->
+        <combo_box
+         control_name="FSSnapshotAvatarScope"
+         follows="left|top|right"
+         height="23"
+         layout="topleft"
+         left="30"
+         name="avatar_scope_combo"
+         top_pad="4"
+         right="-29"
+         tool_tip="Which avatars snapshots and the avatar layers include. Your own avatar, attachments and animesh are always in. Snapshots with the interface show everyone.">
+            <combo_box.item
+             label="Avatars: All"
+             name="AvatarsAll"
+             value="2" />
+            <combo_box.item
+             label="Avatars: Self + Selected"
+             name="AvatarsSelected"
+             value="1" />
+            <combo_box.item
+             label="Avatars: Self only"
+             name="AvatarsSelf"
+             value="0" />
+        </combo_box>
+        <button
+         follows="right|top"
+         height="23"
+         layout="topleft"
+         left_pad="3"
+         top_delta="0"
+         width="24"
+         image_overlay="Command_Avatar_Icon"
+         image_hover_unselected="Toolbar_Middle_Over"
+         image_selected="Toolbar_Middle_Off"
+         image_unselected="Toolbar_Middle_Off"
+         name="avatar_scope_popout_btn"
+         tool_tip="Choose the avatars for Self + Selected" />
         <check_box
          label="Interface"
          layout="topleft"
@@ -263,7 +336,7 @@
     </panel>
 	<panel_container
      follows="left|top"
-     height="230"
+     height="252"
      layout="topleft"
      left="0"
      name="panel_container"

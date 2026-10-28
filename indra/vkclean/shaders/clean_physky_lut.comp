@@ -6,6 +6,7 @@
 //                     directions per texel summed in shared memory (Hillaire's eq. 5-10)
 //   PK_PASS_SKYVIEW   sky radiance around the viewer, 192 x 108 (azimuth to the light, zenith),
 //                     single scattering + the multiple-scattering LUT, light illuminance applied
+//                     (<GMDX> physical night: the image is 192 x 216, the moon's pass the lower half)
 // The maths and the integrator follow Epic Games' MIT-licensed reference
 // (clean_physky.glsl carries the notice).
 
@@ -222,6 +223,7 @@ void main()
     vec3 dir = vec3(vzs * lightViewCos, vzs * sqrt(max(1.0 - lightViewCos * lightViewCos, 0.0)), viewZenithCos);
     vec3 pos = vec3(0.0, 0.0, viewHeight);
     PkResult r = pkIntegrate(pos, dir, sunDir, false, 30.0, true, true, true, pkLight());
-    imageStore(uOut, px, vec4(r.L, 1.0));
+    // <GMDX> Physical night (gmdxphysskyvk.cpp): [4].w = 3 is the moon's pass, into the lower half.
+    imageStore(uOut, px + ivec2(0, pc.p[4].w > 2.5 ? int(PK_SV_H) : 0), vec4(r.L, 1.0));
 #endif
 }

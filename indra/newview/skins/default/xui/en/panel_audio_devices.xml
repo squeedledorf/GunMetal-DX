@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<!-- Slipstream #1122: one output / input device for all of the viewer's audio (llaudiodevices.cpp). -->
+<panel
+ background_visible="false"
+ follows="left|top"
+ height="56"
+ layout="topleft"
+ name="audio_devices_panel"
+ width="480">
+  <panel.string
+   name="system_default">
+    System default
+  </panel.string>
+  <panel.string
+   name="not_connected">
+    (not connected)
+  </panel.string>
+  <text
+   type="string"
+   length="1"
+   follows="left|top"
+   layout="topleft"
+   left="5"
+   top="4"
+   height="15"
+   width="165"
+   halign="right"
+   name="audio_output_device_label">
+    Output device
+  </text>
+  <combo_box
+   control_name="SlipstreamAudioOutputDevice"
+   follows="left|top"
+   layout="topleft"
+   left_pad="5"
+   top_delta="-4"
+   height="23"
+   width="300"
+   max_chars="256"
+   name="audio_output_device"
+   tool_tip="Where all of the viewer's sound plays: world sounds and voice. System default follows your system's sound settings. A device picked under Voice Input/Output devices still wins for voice. Media (web pages, video, music played through the media plugins) stays on the system default." />
+  <text
+   type="string"
+   length="1"
+   follows="left|top"
+   layout="topleft"
+   left="5"
+   top_pad="8"
+   height="15"
+   width="165"
+   halign="right"
+   name="audio_input_device_label">
+    Input device
+  </text>
+  <combo_box
+   control_name="SlipstreamAudioInputDevice"
+   follows="left|top"
+   layout="topleft"
+   left_pad="5"
+   top_delta="-4"
+   height="23"
+   width="300"
+   max_chars="256"
+   name="audio_input_device"
+   tool_tip="The microphone the viewer uses (voice). System default follows your system's sound settings. A device picked under Voice Input/Output devices still wins for voice." />
+</panel>

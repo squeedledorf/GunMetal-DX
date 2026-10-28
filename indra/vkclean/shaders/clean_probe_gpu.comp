@@ -869,6 +869,7 @@ bool sphereVisible(vec3 p, float r)
     const float z = -v.z;
     if (z < -r) return false;
     const float tx = linfo.grid.z, ty = linfo.grid.w;
+    if (linfo.cam_fwd.w > 0.5) return abs(v.x) <= tx + r && abs(v.y) <= ty + r;   // <GMDX> orthographic: half extents
     return abs(v.x) <= z * tx + r * sqrt(1.0 + tx * tx) && abs(v.y) <= z * ty + r * sqrt(1.0 + ty * ty);
 }
 

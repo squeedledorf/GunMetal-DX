@@ -10,7 +10,7 @@
  width="360">
     <panel.string
       name="default_text">
-        Default
+        Same as main device
     </panel.string>
     <string
      name="name_no_device">

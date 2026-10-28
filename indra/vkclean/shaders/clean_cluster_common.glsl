@@ -73,6 +73,7 @@
 #define CLV_NO_CONE   128u
 #define CLV_HIDE_SELF 256u   // main view: CLI_SELF instances selected (rig lists / RT) but not drawn / picked
 #define CLV_NO_RIGGED 512u   // <GMDX> avatars render type off: no rigged instance is selected in any view
+#define CLV_AVATARS_ONLY 1024u   // <GMDX> main view, avatar matte snapshot: statics selected but not drawn
 // Stats counter indices
 #define CLS_INSTANCES      0u
 #define CLS_TESTED         1u

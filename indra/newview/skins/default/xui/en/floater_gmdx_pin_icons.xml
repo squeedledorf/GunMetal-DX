@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<!-- <GMDX> toolbar pins: "Change Icon..." on a pinned button (gmdxtoolbarpins.cpp). The grid is filled in code. -->
+<floater
+ can_close="true"
+ can_minimize="false"
+ can_resize="true"
+ height="380"
+ layout="topleft"
+ min_height="160"
+ min_width="180"
+ name="gmdx_pin_icons"
+ save_rect="true"
+ single_instance="true"
+ title="CHOOSE AN ICON"
+ width="352">
+  <search_editor
+   follows="left|top|right"
+   height="23"
+   label="Search icons"
+   layout="topleft"
+   left="8"
+   name="filter"
+   top="6"
+   width="336" />
+  <scroll_container
+   follows="all"
+   height="340"
+   layout="topleft"
+   left="8"
+   name="scroll"
+   opaque="false"
+   reserve_scroll_corner="false"
+   top="34"
+   width="336">
+    <panel
+     background_visible="false"
+     follows="left|top"
+     height="40"
+     layout="topleft"
+     left="0"
+     name="grid"
+     top="0"
+     width="320" />
+  </scroll_container>
+</floater>

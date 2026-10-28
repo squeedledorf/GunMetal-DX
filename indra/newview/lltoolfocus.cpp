@@ -48,6 +48,7 @@
 #include "lltoolmgr.h"
 #include "llviewercamera.h"
 #include "llviewerobject.h"
+#include "llviewerregion.h"   // <GMDX> alt-cam reach: the region water plane fallback in pickCallback
 #include "llviewerwindow.h"
 #include "llvoavatarself.h"
 #include "llmorphview.h"
@@ -148,7 +149,7 @@ bool LLToolCamera::handleMouseDown(S32 x, S32 y, MASK mask)
     return true;
 }
 
-void LLToolCamera::pickCallback(const LLPickInfo& pick_info)
+void LLToolCamera::pickCallback(const LLPickInfo& pick_in)
 {
     LLToolCamera* camera = LLToolCamera::getInstance();
     if (!camera->mClickPickPending)
@@ -159,6 +160,9 @@ void LLToolCamera::pickCallback(const LLPickInfo& pick_info)
     const bool self_click = camera->mSelfClick;
     camera->mSelfClick = false;
 
+    // <GMDX> A local copy so the alt-cam reach fallback below can fill mPosGlobal in.
+    LLPickInfo pick_info = pick_in;
+
     camera->mMouseDownX = pick_info.mMousePt.mX;
     camera->mMouseDownY = pick_info.mMousePt.mY;
 
@@ -166,6 +170,50 @@ void LLToolCamera::pickCallback(const LLPickInfo& pick_info)
 
     // Potentially recenter if click outside rectangle
     LLViewerObject* hit_obj = pick_info.getObject();
+
+    // <GMDX> Alt-cam reach (SoapStorm 1f04dc44c9): the pick reaches 512 m and water has no ray
+    // intersection, so an ALT click on the sky, on terrain past 512 m or on void water hit nothing
+    // and the camera stayed put. For an ALT click that hit nothing: a long-range cast along the
+    // same mouse ray out to 4096 m, then the region water plane along that ray.
+    // Other clicks (mouse steering, selection) are untouched. The reach is a fixed constant, not a
+    // setting (SoapStorm's SSAltCamMaxDistance): the focus point it finds is sent to the sim.
+    if (!hit_obj && pick_info.mPosGlobal.isExactlyZero() && (pick_info.mKeyMask & MASK_ALT))
+    {
+        constexpr F32 reach = 4096.f;
+        const S32 mx = pick_info.mMousePt.mX;
+        const S32 my = pick_info.mMousePt.mY;
+
+        LLVector4a far_hit;
+        LLViewerObject* far_obj = gViewerWindow->cursorIntersect(mx, my, reach, nullptr, -1,
+                                                                 /*pick_transparent*/ false, /*pick_rigged*/ false,
+                                                                 /*pick_unselectable*/ true, /*pick_reflection_probe*/ false,
+                                                                 nullptr, nullptr, nullptr, &far_hit);
+        if (far_obj)
+        {
+            pick_info.mPosGlobal = gAgent.getPosGlobalFromAgent(LLVector3(far_hit.getF32ptr()));
+        }
+        else
+        {
+            LLVector3 dir = gViewerWindow->mouseDirectionGlobal(mx, my);
+            LLVector3d ray_start = gAgentCamera.getCameraPositionGlobal();
+            LLVector3 ortho_start;
+            if (LLViewerCamera::getInstance()->orthoMouseRay(mx, my, ortho_start, dir))   // (parallel rays)
+            {
+                ray_start = gAgent.getPosGlobalFromAgent(ortho_start);
+            }
+            LLViewerRegion* region = gAgent.getRegion();
+            if (region && fabsf(dir.mV[VZ]) > 1e-4f)
+            {
+                const F64 water_z = (F64)region->getWaterHeight();
+                const F64 t = (water_z - ray_start.mdV[VZ]) / (F64)dir.mV[VZ];   // where the ray meets the water plane
+                if (t > 1.0 && t <= (F64)reach)
+                {
+                    pick_info.mPosGlobal = ray_start + LLVector3d(dir) * t;
+                }
+            }
+        }
+    }
+    // </GMDX>
 
     // Check for hit the sky, or some other invalid point
     if (!hit_obj && pick_info.mPosGlobal.isExactlyZero())
@@ -402,15 +450,24 @@ bool LLToolCamera::handleHover(S32 x, S32 y, MASK mask)
             {
                 const F32 RADIANS_PER_PIXEL = 360.f * DEG_TO_RAD / gViewerWindow->getWorldViewWidthScaled();
 
-                if (dx != 0)
+                // <GMDX> (SoapStorm ed0f69bd0e) screen deltas into the unrolled camera's
+                // input, so a rolled camera orbits the way the mouse moves on screen
+                const F32 rot = gAgentCamera.getRollAngle();
+                const F32 cos_r = cosf(rot);
+                const F32 sin_r = sinf(rot);
+                const F32 left_input = -(F32)dx * cos_r - (F32)dy * sin_r;   // roll 0: -dx
+                const F32 up_input   =  (F32)dx * sin_r - (F32)dy * cos_r;   // roll 0: -dy
+
+                if (left_input != 0.f)
                 {
-                    gAgentCamera.cameraOrbitAround( -dx * RADIANS_PER_PIXEL );
+                    gAgentCamera.cameraOrbitAround( left_input * RADIANS_PER_PIXEL );
                 }
 
-                if (dy != 0)
+                if (up_input != 0.f)
                 {
-                    gAgentCamera.cameraOrbitOver( -dy * RADIANS_PER_PIXEL );
+                    gAgentCamera.cameraOrbitOver( up_input * RADIANS_PER_PIXEL );
                 }
+                // </GMDX>
 
                 gViewerWindow->moveCursorToCenter();
             }
@@ -452,10 +509,18 @@ bool LLToolCamera::handleHover(S32 x, S32 y, MASK mask)
 
                 const F32 RADIANS_PER_PIXEL = 360.f * DEG_TO_RAD / gViewerWindow->getWorldViewWidthScaled();
 
-                if (dx != 0)
+                // <GMDX> unrolled input, as the orbit tool above
+                const F32 rot = gAgentCamera.getRollAngle();
+                const F32 cos_r = cosf(rot);
+                const F32 sin_r = sinf(rot);
+                const F32 left_input = -(F32)dx * cos_r - (F32)dy * sin_r;
+                const F32 up_input   =  (F32)dx * sin_r - (F32)dy * cos_r;
+
+                if (left_input != 0.f)
                 {
-                    gAgentCamera.cameraOrbitAround( -dx * RADIANS_PER_PIXEL );
+                    gAgentCamera.cameraOrbitAround( left_input * RADIANS_PER_PIXEL );
                 }
+                // </GMDX>
 
                 const F32 IN_FACTOR = 0.99f;
 
@@ -463,7 +528,7 @@ bool LLToolCamera::handleHover(S32 x, S32 y, MASK mask)
                 {
                     if (mMouseSteering)
                     {
-                        gAgentCamera.cameraOrbitOver( -dy * RADIANS_PER_PIXEL );
+                        gAgentCamera.cameraOrbitOver( up_input * RADIANS_PER_PIXEL );   // <GMDX>
                     }
                     else
                     {

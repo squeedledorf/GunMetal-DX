@@ -28,8 +28,8 @@ Also avoid function and method names that collide with the Win32 `A`/`W` macros
 
 Use descriptive names instead: `nearPlane` / `farPlane`, `nearDist` / `farDist`, `spaced`, `isSmall`.
 
-**Checked by** `scripts/ci/check_win_macros.py` (declarations using the first rows of the
-table), run at the start of `make`, `make windows` and the CI build. Add a name to its list
+**Checked by** the `win-macros` check in `scripts/check/` (declarations using the first rows of
+the table; run it with `make check`), run at the start of `make`, `make windows` and the CI build. Add a name to its list
 when a Windows build breaks on another one. A line that genuinely needs the name (after an
 `#undef`) can opt out with the comment `// win-macro-ok`.
 

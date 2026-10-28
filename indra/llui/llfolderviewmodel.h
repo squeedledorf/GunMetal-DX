@@ -178,6 +178,8 @@ public:
     virtual void removeBatch(std::vector<LLFolderViewModelItem*>& batch) = 0;
 
     virtual bool isItemCopyable(bool can_copy_as_link = true) const = 0;
+    // True if Copy may put this item on the clipboard (inventory links copy as their target).
+    virtual bool canCopyToClipboard() const { return isItemCopyable(); }
     virtual bool copyToClipboard() const = 0;
     virtual bool cutToClipboard() = 0;
     virtual bool isCutToClipboard() { return false; };

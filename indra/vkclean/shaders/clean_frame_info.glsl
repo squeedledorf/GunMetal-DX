@@ -10,10 +10,22 @@
 // offset moves (C++: the static_asserts at VKSSRInfo). 4.8 KB << maxUniformBufferRange
 // (>= 16 KB by the spec, 64 KB on NVIDIA). Descriptor type UNIFORM_BUFFER in draw set 0 and
 // the AO set (LLCleanRendererVK writeSSRDescriptors / writeAoSet).
-layout(std140, set = 0, binding = 9) uniform SSRBuf {
-    mat4 prev_view;
+// LAYERED STEREO (#1075; research/VR_LAYERED_STEREO_DESIGN.md §4.1): the PER-VIEW part of the
+// block, one SSRView per view at the end (C++ VKSSRView, VKSSRInfo::views). Readers index it by
+// their view: ssr.views[CLEAN_VIEW] (clean_view.glsl: the multiview raster stages' gl_ViewIndex,
+// folded to 0 on single-view pipelines; 0 in compute until a kernel says otherwise). Every
+// matrix maps camera-relative positions (P - cam_origin): ONE origin for all views (the head in
+// VR), so cam_origin and shadow_mat stay shared. The desktop fills views[0] only.
+#include "clean_view.glsl"
+struct SSRView {
+    mat4 prev_view;       // SSR: last frame's world -> view (camera-relative), projection, inverse
     mat4 prev_proj;
     mat4 prev_inv_proj;
+    mat4 cur_view;        // current world -> view (the depth+normal pre-pass writes view-space normals)
+    mat4 taa_cur_vp;      // TEMPORAL: UNJITTERED (P - cam_origin) -> clip of this frame / the previous one
+    mat4 taa_prev_vp;
+};                        // 384 B
+layout(std140, set = 0, binding = 9) uniform SSRBuf {
     vec4 params0;   // iterations, ray step, distance bias, depth reject bias
     vec4 params1;   // adaptive step multiplier, enabled
     vec4 atmos[16]; // atmosphere + post (clean_atmos_common.glsl)
@@ -42,10 +54,9 @@ layout(std140, set = 0, binding = 9) uniform SSRBuf {
     // Ambient occlusion (clean_draw.frag adjustIrradiance; params1.w = enabled):
     // RenderSSAOIrradianceScale, RenderSSAOIrradianceMax, effect-matrix diag, nondiag.
     vec4 ao_params;
-    // Current camera view (world -> view; the depth+normal pre-pass writes view-space
-    // normals) and AO extras: x = specular occlusion on (RenderVKSpecularOcclusion),
-    // y = standard AO multiply (RenderVKAOStandard; else LL adjustIrradiance).
-    mat4 cur_view;
+    // AO extras (the current camera view is per view: views[v].cur_view): x = specular
+    // occlusion on (RenderVKSpecularOcclusion), y = standard AO multiply (RenderVKAOStandard;
+    // else LL adjustIrradiance).
     vec4 ao_params2;        // .z: Highlight Transparent (LLPipeline::sShowDebugAlpha),
                             // .w: opaque water (RenderTransparentWater off)
     // Lightbox sky effects (clean_sky.frag / atmosStarField): sky_fx = aurora
@@ -54,7 +65,8 @@ layout(std140, set = 0, binding = 9) uniform SSRBuf {
     vec4 sky_fx;
     vec4 sky_fx2;
     // Per meteor i: [3i] head dir.xyz (world, unit), width scale; [3i+1] tail dir.xyz;
-    // [3i+2] linear colour x envelope.
+    // [3i+2] linear colour x envelope. <GMDX> At most 56 meteors: [168..191] are the night
+    // sky's (gmdx_night_sky.glsl NS_SPACE: planets, satellites, star options).
     vec4 meteors[192];
     // Cloud layer (clean_clouds.glsl): [0] colour.rgb, scale  [1] pos/density1 (scrolled),
     // variance  [2] pos/density2, noise blend  [3] noise idx A, B, 0, enabled.
@@ -64,15 +76,14 @@ layout(std140, set = 0, binding = 9) uniform SSRBuf {
     // [7] star alpha, rotation, twinkle time  [8] tex idx sun A, B, moon, bloom
     // [9] tex idx rainbow, halo.
     vec4 bodies[10];
-    // TEMPORAL (#84, stage 1): UNJITTERED camera-relative world (P - cam_origin, #555)
-    // -> clip of this frame and of the previous frame (motion vectors are computed from these, never from the jittered push
-    // matrix), the projection jitter of this frame's main view (xy pixels, x right / y
-    // down; zw the same offset in NDC, added to clip.xy / w) and params: x previous
-    // frame's time (s, GPU spinners' prev pose), y 1 = the motion-vector target was
-    // written this frame, z 1 = history reset this frame (teleport / region crossing /
-    // origin shift / camera cut: prev == current), w 1 = jitter on (RenderVKTAA).
-    mat4 taa_cur_vp;
-    mat4 taa_prev_vp;
+    // TEMPORAL (#84, stage 1): the UNJITTERED camera-relative world (P - cam_origin, #555)
+    // -> clip of this frame and of the previous frame are per view (views[v].taa_cur_vp /
+    // taa_prev_vp: motion vectors are computed from these, never from the jittered push
+    // matrix); here the projection jitter of this frame's main view (xy pixels, x right / y
+    // down; zw the same offset in NDC, added to clip.xy / w -- ONE phase for every view) and
+    // params: x previous frame's time (s, GPU spinners' prev pose), y 1 = the motion-vector
+    // target was written this frame, z 1 = history reset this frame (teleport / region
+    // crossing / origin shift / camera cut: prev == current), w 1 = jitter on (RenderVKTAA).
     vec4 taa_jitter;
     vec4 taa_params;
     // RENDER SCALE (#181, RenderVKRenderScale): x the material mip bias while jittered
@@ -133,13 +144,17 @@ layout(std140, set = 0, binding = 9) uniform SSRBuf {
     // of lift per metre of camera distance (the main view's tolerance / px_scale x
     // RenderVKClusterShadowLiftScale), y the near clip (m), z 1 = an avatar is drawn by the
     // cluster path this frame (0: no lift, no probe).
+    // w <GMDX> (unused upstream): space at altitude, 0 .. 1 (clean_atmos_common.glsl gmdxSpace).
     vec4 cluster_rt;
     // AMBIENT OCCLUSION RESOLUTION (RenderVKAOHalfRes / RenderVKAOUpsample; clean_surface_light
     // aoSample): x 0 = the AO target is full resolution (read at the pixel), 1 = half resolution,
     // plain bilinear, 2 = half resolution, depth-aware (the meta at draw set 0 binding 21 [1]);
     // y the upsample's absolute plane tolerance (m: RenderVKAOBlurTol, 0.01 when that is 0).
     // z (#819, not AO): 1 = the sky-view LUT (draw set 0 binding 52) holds this frame's sky
-    // (RenderVKSkyLUT; clean_atmos_common.glsl skyColor), w unused.
+    // (RenderVKSkyLUT; clean_atmos_common.glsl skyColor), w (#1086, not AO; an exact integer): bit 0 the RT
+    // shadow mask upsample's thin-receiver fallback (RenderVKRTShadowMaskThinFallback), bits 1+
+    // its plane tolerance floor in mm (RenderVKRTShadowMaskUpsampleTolMM;
+    // clean_shadow_mask_read.glsl rtMaskThinFallback / rtMaskPlaneTolFloor).
     vec4 ao_up;
     // PER-FRAME HAZE CONSTANTS (#816; clean_atmos_common.glsl header, LLCleanRendererVK
     // fillAtmosK): what atmosScatter / atmosLightTerms used to recompute per pixel from atmos[].
@@ -173,7 +188,9 @@ layout(std140, set = 0, binding = 9) uniform SSRBuf {
     // [0] mode (0 = classic 2D layer, 2 = volumetric layer live), base / top altitude (m),
     //     cloud shadow strength (0 = no cloud shadow map)
     // [1] shadow map centre xy (agent world, on the base plane), 1 / extent (per m), panorama valid
-    // [2] light direction the shadow map was built for (xyz), unused   [3] reserved
+    // [2] light direction the shadow map was built for (xyz), w <GMDX> the clouds' moonlight gain
+    //     (GMDXNightCloudLight; clean_atmos_common.glsl gmdxCloudMoonGain, every frame)
+    // [3] reserved (<GMDX> cloud corona xyz, the night sky's light w)
     vec4 vol_clouds[4];
     // WEATHER (#783; LLCleanWeatherVK::fillFrameInfo, clean_weather_surface.glsl has the
     // contract): [0] wetness, rain, time, ripple strength; [1] coarse occlusion map corner xy,
@@ -188,7 +205,8 @@ layout(std140, set = 0, binding = 9) uniform SSRBuf {
     // fills it from RenderVKShadowReceiverFit / RenderVKShadowPlaneTolerance /
     // RenderVKShadowPCSSMaxRadius): x 1 = on (0 = the old receiver offsets and filter compares),
     // y the receiver-plane slope tolerance (depth m per m of filter-tap offset), z the PCSS filter
-    // radius cap (world m, 0 = none), w unused.
+    // radius cap (world m, 0 = none), w <GMDX> the moon disc's brightness as a light (GMDXMoonDisc,
+    // clean_atmos_common.glsl gmdxMoonDiscGain; 0 = LL's disc, -1 = a creator's moon texture: LL's disc, no phase).
     vec4 shadow_fit;
     // <GMDX> PHYSICAL SKY parameters (RenderVKPhysicalSky; clean_physky.glsl has the layout,
     // LLCleanRendererVK::physSkyFill fills them). [4].w = 0: the WindLight sky as before.
@@ -196,6 +214,8 @@ layout(std140, set = 0, binding = 9) uniform SSRBuf {
     // <GMDX> ALPHA-MASK PULL (clean_draw.vert; GMDXAlphaMaskPull*): x base metres, y metres per
     // metre of distance, z grazing-factor cap; x = 0: off.
     vec4 gmdx_misc;
+    // LAYERED STEREO (#1075): the per-view block (SSRView above), [0] = the desktop's / the left eye's.
+    SSRView views[CLEAN_MAX_VIEWS];
 } ssr;
 
 // Cascade c's shadow NDC (xy [-1,1] -> uv, z [0,1]) of world position P (#555).

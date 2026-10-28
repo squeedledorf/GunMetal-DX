@@ -8,7 +8,7 @@
 
   Menu accelerators do not need an entry: every menu item with a shortcut attribute is
   picked up from the menu XUI files by name (see slkeycommands.cpp).
-  scripts/ci/check_key_commands.py fails the build on a shortcut or a key check that is
+  The key-commands check (scripts/check/, `make check`) fails the build on a shortcut or a key check that is
   not registered.
 -->
 <commands>
@@ -24,7 +24,7 @@
   <scope_group scope="inventory_gear" label="Inventory" />
   <scope_group scope="script_editor" label="Script editor" prefix="true" />
 
-  <!-- Keys that stay fixed; listed read-only in the Controls panel (see key_compare_allowlist.txt) -->
+  <!-- Keys that stay fixed; listed read-only in the Controls panel (see scripts/check/data/key_compare_allowlist.txt) -->
   <fixed_group label="Fixed keys (cannot be changed)" />
   <fixed_key label="Say the typed chat" keys="Enter" />
   <fixed_key label="Cancel chat typing, close dialogs and pickers" keys="Esc" />

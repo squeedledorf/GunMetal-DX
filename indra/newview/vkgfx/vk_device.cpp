@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <chrono>
+#include <ctime>   // (#1128: the vendor binary dump's file name)
 #include <map>
 #include <mutex>
 #include <thread>
@@ -47,6 +48,9 @@ static constexpr uint32_t          CRUMB_RING = 1024;
 static const char*                 sCrumbNames[CRUMB_RING] = {};
 static uint32_t                    sCrumbSeq = 0;
 bool gVkBreadcrumbsWanted = true;
+bool gVkFaultVendorBinaryWanted = false;   // (#1128)
+std::string gVkFaultDumpDir;
+static bool sFaultVendorBinary = false;     // (#1128) deviceFaultVendorBinary enabled
 // #973 debug labels (vk_common.h): the instance-level entry point, null = off / not listed.
 bool gVkDebugLabelsWanted = true;
 static PFN_vkCmdInsertDebugUtilsLabelEXT sCmdInsertLabel = nullptr;
@@ -1615,7 +1619,7 @@ static void vkReportDeviceLostImpl()
     }
     VkDeviceFaultCountsEXT counts{VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT};
     if (sGetFaultInfo(sFaultDevice, &counts, nullptr) != VK_SUCCESS &&
-        counts.addressInfoCount == 0 && counts.vendorInfoCount == 0)
+        counts.addressInfoCount == 0 && counts.vendorInfoCount == 0 && counts.vendorBinarySize == 0)
     {
         // #973: no fault record at all -- what a hang (TDR) leaves on AMD / Windows.
         vkFaultLog("[vktest] DEVICE_LOST: vkGetDeviceFaultInfoEXT returned nothing -- no fault address: GPU hang / "
@@ -1624,12 +1628,38 @@ static void vkReportDeviceLostImpl()
     }
     std::vector<VkDeviceFaultAddressInfoEXT> addrs(counts.addressInfoCount);
     std::vector<VkDeviceFaultVendorInfoEXT>  vend(counts.vendorInfoCount);
-    counts.vendorBinarySize = 0;   // no vendor binary dump
+    // (#1128, RenderVKFaultVendorBinary) the driver's vendor binary crash dump, when enabled and produced
+    std::vector<uint8_t> vbin(sFaultVendorBinary ? (size_t)std::min<VkDeviceSize>(counts.vendorBinarySize, 256ull << 20) : 0u);
+    counts.vendorBinarySize = vbin.size();
     VkDeviceFaultInfoEXT info{VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT};
     info.pAddressInfos = addrs.empty() ? nullptr : addrs.data();
     info.pVendorInfos  = vend.empty()  ? nullptr : vend.data();
+    info.pVendorBinaryData = vbin.empty() ? nullptr : vbin.data();
     sGetFaultInfo(sFaultDevice, &counts, &info);
     vkFaultLog("[vktest] DEVICE_LOST fault: %s\n", info.description);
+    if (sFaultVendorBinary)
+    {
+        if (vbin.empty() || counts.vendorBinarySize == 0)
+            vkFaultLog("[vktest] DEVICE_LOST vendor binary crash dump: none produced by the driver\n");
+        else
+        {
+            const std::string path = gVkFaultDumpDir + "gpu_fault_vendor_binary_" + std::to_string((long long)std::time(nullptr)) + ".bin";
+            FILE* f = std::fopen(path.c_str(), "wb");
+            const size_t n = (size_t)std::min<VkDeviceSize>(counts.vendorBinarySize, vbin.size());
+            const bool ok = f && std::fwrite(vbin.data(), 1, n, f) == n;
+            if (f) std::fclose(f);
+            uint32_t vid = 0, did = 0, drv = 0;
+            if (n >= sizeof(VkDeviceFaultVendorBinaryHeaderVersionOneEXT))
+            {
+                VkDeviceFaultVendorBinaryHeaderVersionOneEXT h{};
+                std::memcpy(&h, vbin.data(), sizeof(h));
+                vid = h.vendorID; did = h.deviceID; drv = h.driverVersion;
+            }
+            vkFaultLog("[vktest] DEVICE_LOST vendor binary crash dump: %zu bytes (vendor 0x%x device 0x%x driver 0x%x) %s %s "
+                       "(open it with the vendor's crash dump tool: the hung warps' shader location)\n",
+                       n, vid, did, drv, ok ? "written to" : "could NOT be written to", path.c_str());
+        }
+    }
     // #973: a hang (TDR) reports no DATA address (an AMD RX 9070 XT hang in the RT shadow mask
     // read as a bare description); say so instead of leaving the reader to infer it from an
     // empty list -- a page fault (#874 / #889) names the address the GPU could not translate.
@@ -1853,7 +1883,15 @@ bool VkDeviceContext::createInstance(bool enableValidation,
     ci.ppEnabledExtensionNames = exts.data();
     if (enableValidation) ci.pNext = &layerSettings;
 
-    VkResult vr = vkCreateInstance(&ci, nullptr, &mInstance);
+    // #1073: both creation calls go through here. VR mode: the OpenXR runtime creates the
+    // instance from this create info (xrCreateVulkanInstanceKHR, its extensions appended).
+    // Desktop: no hook, the plain call.
+    auto doCreateInstance = [this](const VkInstanceCreateInfo& c) -> VkResult
+    {
+        if (mXrHooks.createInstance) return mXrHooks.createInstance(c, &mInstance);
+        return vkCreateInstance(&c, nullptr, &mInstance);
+    };
+    VkResult vr = doCreateInstance(ci);
     if (enableValidation && vr != VK_SUCCESS) {
         // The layer may reject the GPU-assisted feature set (old layer / no support).
         // Fall back to validation WITHOUT the extra features so we still get the
@@ -1870,7 +1908,7 @@ bool VkDeviceContext::createInstance(bool enableValidation,
         layerSettings.pNext = nullptr;
         ci.enabledExtensionCount = (uint32_t)exts2.size();
         ci.ppEnabledExtensionNames = exts2.data();
-        vr = vkCreateInstance(&ci, nullptr, &mInstance);
+        vr = doCreateInstance(ci);
     }
     if (vr == VK_SUCCESS && vkSimulateUnsupportedMode() == "noinstance") {
         vkDestroyInstance(mInstance, nullptr);
@@ -2032,7 +2070,23 @@ bool VkDeviceContext::asyncAutoDecide(const VkPhysicalDeviceProperties& p, std::
 bool VkDeviceContext::pickPhysicalDevice(bool wantSwapchain) {
     // The report (one line per device + the choice) is logged by the caller
     // (LLVulkanContext::init: vkRequirementsLogLines).
-    vkEvaluateDevices(mInstance, wantSwapchain, mReqReport);
+    if (mXrHooks.physicalDevice)
+    {
+        // #1073 VR: the GPU the OpenXR runtime requires (the headset is attached to it) wins
+        // over the ranking and the user's choice; if it does not qualify VR is refused and the
+        // normal pick stands.
+        const VkPhysicalDevice xrDev = mXrHooks.physicalDevice(mInstance);
+        std::string refusal;
+        if (xrDev == VK_NULL_HANDLE) refusal = "the OpenXR runtime did not name a Vulkan device";
+        vkEvaluateDevices(mInstance, wantSwapchain, mReqReport, xrDev, &refusal);
+        if (!refusal.empty())
+        {
+            mXrRefused = true;
+            if (mXrHooks.refuse) mXrHooks.refuse(refusal);
+        }
+    }
+    else
+        vkEvaluateDevices(mInstance, wantSwapchain, mReqReport);
     if (mReqReport.instanceResult != VK_SUCCESS) {
         mReqReport.instanceOk = false;
         mReqReport.failure = std::string("vkEnumeratePhysicalDevices: ") + vkResultString(mReqReport.instanceResult);
@@ -2556,6 +2610,31 @@ bool VkDeviceContext::createLogicalDevice(bool wantSwapchain) {
         }
     }
     f12.pNext = &f11;
+    // #1073 VR: the runtime creates the device (doCreateDevice below).
+    // #1075 LAYERED STEREO (step 2; research/VR_LAYERED_STEREO_DESIGN.md §3.1 item 1, owner
+    // decision §10.1): multiview (core 1.1, a mandatory feature of Vulkan 1.1) is enabled on EVERY
+    // device that reports it, desktop included: the world shaders are one SPIR-V for N = 1 and
+    // N = 2 views, and a module that reads gl_ViewIndex declares the MultiView capability, which
+    // is only valid with the feature on. Enabling it changes nothing by itself: no pipeline sets a
+    // viewMask at N = 1 (the desktop), so no pass renders multiview.
+    const bool xrDevice = mXrHooks.createDevice && !mXrRefused;
+    mMultiview = false;
+    {
+        VkPhysicalDeviceVulkan11Features q11{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES};
+        VkPhysicalDeviceFeatures2 q{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+        q.pNext = &q11;
+        vkGetPhysicalDeviceFeatures2(mPhysical, &q);
+        f11.multiview = q11.multiview;
+        mMultiview = q11.multiview == VK_TRUE;
+        VkPhysicalDeviceMultiviewProperties mvp{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MULTIVIEW_PROPERTIES};
+        VkPhysicalDeviceProperties2 pp{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+        pp.pNext = &mvp;
+        vkGetPhysicalDeviceProperties2(mPhysical, &pp);
+        mMaxMultiviewViews = mMultiview ? mvp.maxMultiviewViewCount : 0u;
+        VK_LOG("multiview: %s (max views %u, max instance index %u)",
+               mMultiview ? "enabled" : "NOT supported (VR stereo unavailable)", mMaxMultiviewViews,
+               mvp.maxMultiviewInstanceIndex);
+    }
 
     VkPhysicalDeviceFeatures2 f2{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
@@ -2819,6 +2898,14 @@ bool VkDeviceContext::createLogicalDevice(bool wantSwapchain) {
         vkGetPhysicalDeviceFeatures2(mPhysical, &q);
         if (qf.deviceFault) {
             fFault.deviceFault = VK_TRUE;
+            // (#1128) the driver's own crash dump, when asked for and offered (a GPU hang names no address)
+            if (gVkFaultVendorBinaryWanted && qf.deviceFaultVendorBinary) {
+                fFault.deviceFaultVendorBinary = VK_TRUE;
+                sFaultVendorBinary = true;
+            }
+            std::fprintf(stdout, "[vkgfx] device fault vendor binary: %s\n",
+                         !qf.deviceFaultVendorBinary ? "not offered by the driver"
+                         : (gVkFaultVendorBinaryWanted ? "on" : "offered, off (RenderVKFaultVendorBinary)"));
             fFault.pNext = f2.pNext;
             f2.pNext = &fFault;
             devExts.push_back(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
@@ -3149,7 +3236,16 @@ bool VkDeviceContext::createLogicalDevice(bool wantSwapchain) {
 
     {   // #526: a driver that refuses the device despite the requirements check (or a
         // broken install) is reported to the caller -- message box + clean exit, no crash.
-        VkResult dr = vkCreateDevice(mPhysical, &dci, nullptr, &mDevice);
+        // #1073: all three creation calls go through here. VR mode: the OpenXR runtime creates
+        // the device from this create info (xrCreateVulkanDeviceKHR), read at call time, so the
+        // retries below (which trim devExts / the feature chain in place) reach it unchanged.
+        // Desktop: no hook, the plain call.
+        auto doCreateDevice = [&]() -> VkResult
+        {
+            if (xrDevice) return mXrHooks.createDevice(mPhysical, dci, &mDevice);
+            return vkCreateDevice(mPhysical, &dci, nullptr, &mDevice);
+        };
+        VkResult dr = doCreateDevice();
         if (dr != VK_SUCCESS && wantEncode)
         {   // <GMDX> never fail the device over the instant replay encoder: retry without it
             std::fprintf(stderr, "[vkgfx] vkCreateDevice with the video encode queue failed (%s); retrying without\n",
@@ -3167,7 +3263,7 @@ bool VkDeviceContext::createLogicalDevice(bool wantSwapchain) {
             dci.enabledExtensionCount = (uint32_t)devExts.size();
             dci.ppEnabledExtensionNames = devExts.data();
             mDevice = VK_NULL_HANDLE;
-            dr = vkCreateDevice(mPhysical, &dci, nullptr, &mDevice);
+            dr = doCreateDevice();
             encFam = ~0u;
         }
         if (dr != VK_SUCCESS && (devExts.size() != preClusterExts || f2.pNext != preClusterHead))
@@ -3184,7 +3280,7 @@ bool VkDeviceContext::createLogicalDevice(bool wantSwapchain) {
             dci.enabledExtensionCount = (uint32_t)devExts.size();
             dci.ppEnabledExtensionNames = devExts.data();
             mDevice = VK_NULL_HANDLE;
-            dr = vkCreateDevice(mPhysical, &dci, nullptr, &mDevice);
+            dr = doCreateDevice();
         }
         if (dr != VK_SUCCESS && mLateExtsOn)
         {   // #870: never fail the device over the late provider's optional extensions either.
@@ -3203,8 +3299,9 @@ bool VkDeviceContext::createLogicalDevice(bool wantSwapchain) {
             dci.enabledExtensionCount = (uint32_t)devExts.size();
             dci.ppEnabledExtensionNames = devExts.data();
             mDevice = VK_NULL_HANDLE;
-            dr = vkCreateDevice(mPhysical, &dci, nullptr, &mDevice);
+            dr = doCreateDevice();
         }
+        mXrDeviceCreated = xrDevice && dr == VK_SUCCESS;
         if (dr != VK_SUCCESS) {
             mDevice = VK_NULL_HANDLE;
             mReqReport.failure = std::string("vkCreateDevice: ") + vkResultString(dr);
@@ -5585,6 +5682,7 @@ GpuImage VkDeviceContext::createImageLayers(uint32_t w, uint32_t h, uint32_t lay
     GpuImage img{};
     img.format = format;
     img.extent = {w, h};
+    img.layers = layers;   // (#1075)
     VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     ci.flags = cube_compatible ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0;
     VkImageFormatListCreateInfo fl{VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO};
@@ -5653,6 +5751,50 @@ GpuImage VkDeviceContext::createImageLayers(uint32_t w, uint32_t h, uint32_t lay
     img.view = createView(img.image, format, viewType, aspect, 0, mipLevels, 0, layers,
                           extra ? extra->defaultViewUsage : 0);
     return img;
+}
+
+GpuImage VkDeviceContext::createScreenImage(uint32_t w, uint32_t h, uint32_t layers, VkFormat format,
+                                            VkImageUsageFlags usage, VkImageAspectFlags aspect, uint32_t mipLevels,
+                                            VkFormat mutableAltFormat, const char* site) {
+    if (layers <= 1u)
+        return createImage2D(w, h, format, usage, aspect, mipLevels, mutableAltFormat, site);   // (the desktop: as before)
+    layers = std::min<uint32_t>(layers, GpuImage::kMaxLayerViews);
+    VkImageExtra extra{};
+    const VkFormat fmtList[2] = {format, mutableAltFormat};
+    if (mutableAltFormat != VK_FORMAT_UNDEFINED && mutableAltFormat != format) {
+        extra.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+        extra.viewFormats = fmtList;
+        extra.viewFormatCount = 2;
+    }
+    GpuImage img = createImageLayers(w, h, layers, mipLevels, format, usage, aspect, false,
+                                     VK_IMAGE_VIEW_TYPE_2D_ARRAY, site, &extra);
+    if (!img.image) return GpuImage{};
+    img.arrayView = img.view;   // (2D_ARRAY over every layer)
+    img.view = VK_NULL_HANDLE;
+    for (uint32_t v = 0; v < layers; ++v) {
+        img.layerView[v] = t_softAlloc ? createViewSoft(img.image, format, VK_IMAGE_VIEW_TYPE_2D, aspect, 0, mipLevels, v, 1)
+                                       : createView(img.image, format, VK_IMAGE_VIEW_TYPE_2D, aspect, 0, mipLevels, v, 1);
+        if (!img.layerView[v]) {   // (soft: out of host memory -- the whole target goes)
+            img.view = img.layerView[0];
+            img.layerView[0] = VK_NULL_HANDLE;
+            destroyImage(img);
+            vkLowMemNote(VKLM_VIEW, false);
+            return GpuImage{};
+        }
+    }
+    img.view = img.layerView[0];
+    img.layerView[0] = VK_NULL_HANDLE;   // ([0] is `view`; destroyImage destroys it once)
+    return img;
+}
+
+bool VkDeviceContext::addArrayView(GpuImage& img, VkImageAspectFlags aspect, uint32_t mipLevels) {
+    if (img.arrayView) return true;
+    if (!img.image) return false;
+    img.arrayView = t_softAlloc ? createViewSoft(img.image, img.format, VK_IMAGE_VIEW_TYPE_2D_ARRAY, aspect, 0, mipLevels, 0,
+                                                 std::max(img.layers, 1u))
+                                : createView(img.image, img.format, VK_IMAGE_VIEW_TYPE_2D_ARRAY, aspect, 0, mipLevels, 0,
+                                             std::max(img.layers, 1u));
+    return img.arrayView != VK_NULL_HANDLE;
 }
 
 uint64_t VkDeviceContext::imageMemoryBytes(uint32_t w, uint32_t h, uint32_t layers, uint32_t mipLevels,
@@ -5738,6 +5880,10 @@ VkImageView VkDeviceContext::createViewSoft(VkImage image, VkFormat format, VkIm
 void VkDeviceContext::destroyImage(GpuImage& img) {
     if (vkDeviceIsLost()) { img = GpuImage{}; return; }
     if (img.view) vkDestroyImageView(mDevice, img.view, nullptr);   // (hook: untracks the view)
+    // #1075: a layered screen target's extra views ([0] is `view` itself, never destroyed twice).
+    if (img.arrayView && img.arrayView != img.view) vkDestroyImageView(mDevice, img.arrayView, nullptr);
+    for (uint32_t v = 1; v < GpuImage::kMaxLayerViews; ++v)
+        if (img.layerView[v]) vkDestroyImageView(mDevice, img.layerView[v], nullptr);
     // A pooled image (#411) is found by its VkImage (callers may hand back only
     // {image, memory}); its memory is a shared block: free the suballocation -- a
     // free-list operation; vkFreeMemory happens only when VMA releases an empty block.

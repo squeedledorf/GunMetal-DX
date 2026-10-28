@@ -1029,6 +1029,26 @@ void LLFloaterReportBug::refreshSystemInfo()
         settings[name] = clip(text, SYSTEM_VALUE_MAX);
     }
     sys["settings"] = settings;
+    // RenderVK* settings that differ from their defaults, in chunks that fit the relay's
+    // per-value limit (at most 3 chunks; the list ends in "+N more" when it was cut).
+    {
+        const std::string list = nonDefaultRenderSettings(24);
+        S32 chunk = 0;
+        size_t pos = 0;
+        while (pos < list.size() && chunk < 3)
+        {
+            size_t end = list.size();
+            if (end - pos > SYSTEM_VALUE_MAX)
+            {
+                end = list.rfind(' ', pos + SYSTEM_VALUE_MAX);
+                if (end == std::string::npos || end <= pos) end = pos + SYSTEM_VALUE_MAX;
+            }
+            sys[chunk == 0 ? "non_default_render" : llformat("non_default_render_%d", chunk + 1)] = list.substr(pos, end - pos);
+            pos = end + 1;
+            ++chunk;
+        }
+        if (list.empty()) sys["non_default_render"] = "none";
+    }
     mSystem = sys;
 
     std::ostringstream out;
@@ -1040,6 +1060,8 @@ void LLFloaterReportBug::refreshSystemInfo()
         { "alloc_failures", "Allocation failures" }, { "pipelines", "Pipeline compiles" }, { "display", "Display" },
         { "data_usage", "Data usage" }, { "data_usage_http", "Data HTTP" }, { "data_usage_udp", "Data UDP" },
         { "data_usage_cache", "Data caches" },
+        { "non_default_render", "Non-default render settings" }, { "non_default_render_2", "  (continued)" },
+        { "non_default_render_3", "  (continued)" },
         { "window", "Window" }, { "build_config", "Build" }, { "grid", "Grid" }, { "region", "Region" } };
     for (const auto& [key, label] : LABELS)
     {

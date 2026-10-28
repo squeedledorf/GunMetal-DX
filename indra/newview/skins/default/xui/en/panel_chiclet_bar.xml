@@ -80,6 +80,45 @@
     <layout_panel auto_resize="false"
                       width="4"
                       min_width="4"/>
+    <!-- <GMDX> unread IMs (gmdximwell.cpp): shown while Conversations has unread messages -->
+    <layout_panel
+         auto_resize="false"
+         follows="right"
+         height="28"
+         layout="topleft"
+         min_height="28"
+         min_width="37"
+         name="im_well_panel"
+         top="0"
+         visible="false"
+         width="37">
+      <gmdx_chiclet_im_well
+             follows="right"
+             height="23"
+             layout="topleft"
+             left="0"
+             max_displayed_count="99"
+             name="im_well"
+             top="5"
+             width="35">
+        <button
+                 auto_resize="false"
+                 bottom_pad="3"
+                 follows="right"
+                 halign="center"
+                 height="23"
+                 image_overlay="GMDX_IM_Unread"
+                 image_overlay_alignment="center"
+                 image_pressed="WellButton_Lit"
+                 image_pressed_selected="WellButton_Lit_Selected"
+                 image_selected="PushButton_Press"
+                 left="0"
+                 name="Unread IM"
+                 tool_tip="Unread IMs: click to open the newest in Conversations"
+                 width="34" />
+      </gmdx_chiclet_im_well>
+    </layout_panel>
+    <!-- </GMDX> -->
     <layout_panel
          auto_resize="false"
          follows="right"

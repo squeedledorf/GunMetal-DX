@@ -1496,6 +1496,19 @@ void LLPanelObjectInventory::clearContents()
 
     clearItemIDs();
 
+    // <GMDX> SoapStorm 984a07fa80: the object died (llDie, temp expiry, deleted) or its inventory is
+    // being rebuilt. Drop a pending rename and the edit menu handler now, while mFolders is still
+    // whole, instead of committing the rename from inside its destruction.
+    if (mFolders)
+    {
+        mFolders->cancelRenaming();
+        if (LLEditMenuHandler::gEditMenuHandler == mFolders)
+        {
+            LLEditMenuHandler::gEditMenuHandler = NULL;
+        }
+    }
+    // </GMDX>
+
     if( mScroller )
     {
         // removes mFolders

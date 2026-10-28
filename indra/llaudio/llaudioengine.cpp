@@ -742,12 +742,20 @@ void LLAudioEngine::setMuted(bool muted)
 void LLAudioEngine::setMasterGain(const F32 gain)
 {
     mMasterGain = gain;
-    F32 internal_gain = getMuted() ? 0.f : gain;
+    F32 internal_gain = getMuted() ? 0.f : gain * mOutputBoost;
     if (internal_gain != mInternalGain)
     {
         mInternalGain = internal_gain;
         setInternalGain(mInternalGain);
     }
+}
+
+void LLAudioEngine::setOutputBoost(F32 boost)
+{
+    boost = llclamp(boost, 0.f, 8.f);
+    if (boost == mOutputBoost) return;
+    mOutputBoost = boost;
+    setMasterGain(mMasterGain);   // (re-applies the internal gain)
 }
 
 F32 LLAudioEngine::getMasterGain()

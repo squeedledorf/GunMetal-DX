@@ -146,7 +146,7 @@ double nowSec() { return LLFrameTimer::getElapsedSeconds(); }
 bool LLCleanRendererVK::terrBakeOn() const
 {
 #if defined(LL_HAS_CLEAN_PIPELINE)
-    static LLCachedControl<bool> s_on(gSavedSettings, "RenderVKTerrainBake", false);
+    static LLCachedControl<bool> s_on(gSavedSettings, "RenderVKTerrainBake", true);
     // (mGbufTerrBakePipe: the live terrain VS drops the patches a ready bake covers, so no row
     // may say "ready" unless the slim pipeline that draws them exists)
     // (the clamp sampler is made by the first tick that finds this true)

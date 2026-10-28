@@ -1846,6 +1846,38 @@ SDL_AppResult LLWindowSDL::handleEvents(const SDL_Event& event, bool app_has_foc
     return gWindowImplementation->handleEvent(event, app_has_focus);
 }
 
+// <GMDX> Cursor scaling (from SoapStorm): the viewer's own tool cursors are small bitmaps that do
+// not follow the cursor size of the desktop the way the system cursors do. Whole-number scale from
+// FS_CURSOR_SCALE / SOAPSTORM_CURSOR_SCALE (1-8), else XCURSOR_SIZE / 24, else 1.
+static int getCursorScaleFactor()
+{
+    const char* env_scale = getenv("FS_CURSOR_SCALE");
+    if (!env_scale)
+    {
+        env_scale = getenv("SOAPSTORM_CURSOR_SCALE");
+    }
+    if (env_scale)
+    {
+        const int env_val = atoi(env_scale);
+        if (env_val >= 1 && env_val <= 8)
+        {
+            LL_INFOS("Window") << "Cursor scale " << env_val << " (from FS_CURSOR_SCALE / SOAPSTORM_CURSOR_SCALE)" << LL_ENDL;
+            return env_val;
+        }
+    }
+
+    const char* env_size = getenv("XCURSOR_SIZE");
+    if (env_size && atoi(env_size) > 0)
+    {
+        // The standard cursor is 24 px
+        const int scale = llclamp(atoi(env_size) / 24, 1, 8);
+        LL_INFOS("Window") << "Cursor scale " << scale << " (from XCURSOR_SIZE=" << env_size << ")" << LL_ENDL;
+        return scale;
+    }
+    return 1;
+}
+// </GMDX>
+
 static SDL_Cursor *makeSDLCursorFromBMP(const char *filename, int hotx, int hoty)
 {
     SDL_Cursor *sdlcursor = nullptr;
@@ -1853,7 +1885,7 @@ static SDL_Cursor *makeSDLCursorFromBMP(const char *filename, int hotx, int hoty
 
     // Load cursor pixel data from BMP file
     bmpsurface = Load_BMP_Resource(filename);
-    if (bmpsurface && bmpsurface->w%8==0)
+    if (bmpsurface) // <GMDX> a colour cursor has no width-multiple-of-8 limit
     {
         SDL_Surface *cursurface;
         LL_DEBUGS() << "Loaded cursor file " << filename << " "
@@ -1884,41 +1916,35 @@ static SDL_Cursor *makeSDLCursorFromBMP(const char *filename, int hotx, int hoty
         if (SDL_BlitSurface(bmpsurface, nullptr,
                                  cursurface, nullptr))
         {
-            // n.b. we already checked that width is a multiple of 8.
-            const int bitmap_bytes = (cursurface->w * cursurface->h) / 8;
-            unsigned char *cursor_data = new unsigned char[bitmap_bytes];
-            unsigned char *cursor_mask = new unsigned char[bitmap_bytes];
-            memset(cursor_data, 0, bitmap_bytes);
-            memset(cursor_mask, 0, bitmap_bytes);
-            int i,j;
-            // Walk the RGBA cursor pixel data, extracting both data and
-            // mask to build SDL-friendly cursor bitmaps from.  The mask
-            // is inferred by color-keying against 200,200,200
-            for (i=0; i<cursurface->h; ++i) {
-                for (j=0; j<cursurface->w; ++j) {
-                    U8 *pixelp =
-                            ((U8*)cursurface->pixels)
-                            + cursurface->pitch * i
-                            + j*pix_format_details->bytes_per_pixel;
-                    U8 srcred = pixelp[0];
-                    U8 srcgreen = pixelp[1];
-                    U8 srcblue = pixelp[2];
-                    bool mask_bit = (srcred != 200)
-                                    || (srcgreen != 200)
-                                    || (srcblue != 200);
-                    bool data_bit = mask_bit && (srcgreen <= 80);//not 0x80
-                    unsigned char bit_offset = (cursurface->w/8) * i
-                                               + j/8;
-                    cursor_data[bit_offset] |= (data_bit) << (7 - (j&7));
-                    cursor_mask[bit_offset] |= (mask_bit) << (7 - (j&7));
+            // <GMDX> Scaled up by whole pixels into a colour cursor with alpha (was a 1-bit
+            // SDL_CreateCursor at the bitmap's own size). Transparent where the bitmap is the
+            // 200,200,200 colour key.
+            static const int scale = getCursorScaleFactor();
+            SDL_Surface* scaled = SDL_CreateSurface(cursurface->w * scale, cursurface->h * scale, pix_format);
+            if (scaled)
+            {
+                const int bpp = pix_format_details->bytes_per_pixel;
+                for (int i = 0; i < scaled->h; ++i)
+                {
+                    for (int j = 0; j < scaled->w; ++j)
+                    {
+                        const U8* src = (const U8*)cursurface->pixels + cursurface->pitch * (i / scale) + (j / scale) * bpp;
+                        U8* dst = (U8*)scaled->pixels + scaled->pitch * i + j * bpp;
+                        const bool transparent = src[0] == 200 && src[1] == 200 && src[2] == 200;
+                        dst[0] = transparent ? 0 : src[0];
+                        dst[1] = transparent ? 0 : src[1];
+                        dst[2] = transparent ? 0 : src[2];
+                        dst[3] = transparent ? 0 : 255;
+                    }
                 }
+                sdlcursor = SDL_CreateColorCursor(scaled, hotx * scale, hoty * scale);
+                if (!sdlcursor)
+                {
+                    LL_WARNS() << "SDL_CreateColorCursor failed for " << filename << ": " << SDL_GetError() << LL_ENDL;
+                }
+                SDL_DestroySurface(scaled);
             }
-            sdlcursor = SDL_CreateCursor((Uint8*)cursor_data,
-                                         (Uint8*)cursor_mask,
-                                         cursurface->w, cursurface->h,
-                                         hotx, hoty);
-            delete[] cursor_data;
-            delete[] cursor_mask;
+            // </GMDX>
         } else {
             LL_WARNS() << "CURSOR BLIT FAILURE, cursurface: " << cursurface << LL_ENDL;
         }

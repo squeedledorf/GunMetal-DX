@@ -461,6 +461,14 @@ void LLFloaterJoystick::onCommitJoystickEnabled(LLUICtrl*, void *joy_panel)
 
     LLViewerJoystick::getInstance()->saveDeviceIdToSettings();
 
+    // <GMDX> SoapStorm c798038fa5 (Nexii): move the revert snapshot forward with the committed
+    // device. The combo applies immediately, but cancel() (the X button, Cancel, quitting with the
+    // floater open) wrote the id snapshotted at open back over JoystickDeviceUUID: the device worked
+    // all session and was forgotten on the next start. mJoystickEnabled is carried forward the same way.
+    self->mJoystickId = gSavedSettings.getLLSD("JoystickDeviceUUID");
+    self->mJoystickEnabled = joystick_enabled;
+    // </GMDX>
+
     std::string device_string = LLViewerJoystick::getInstance()->getDeviceUUIDString();
     LL_DEBUGS("Joystick") << "Selected " << device_string << " as joystick." << LL_ENDL;
 

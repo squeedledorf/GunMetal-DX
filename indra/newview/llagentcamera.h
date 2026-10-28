@@ -165,10 +165,11 @@ public:
     void setInitSitRot(LLQuaternion sit_rot) { mInitSitRot = sit_rot; };
     void rotateToInitSitRot();
 
-private:
     /** Determines maximum camera distance from target for mouselook, opposite to LAND_MIN_ZOOM */
+    // (#1076: public -- the VR fly cam keeps to the same limit.)
     F32 getCameraMaxZoomDistance();
 
+private:
     /** Camera preset in Third Person Mode */
     ECameraPreset mCameraPreset;
 
@@ -439,6 +440,8 @@ public:
     void            resetCameraOrbit();
     void            resetOrbitDiff();
     void            resetCameraRoll();
+    F32             getRollAngle() const { return mRollAngle; }         // <GMDX> (camera floater 90 degree portrait)
+    void            setRollAngle(F32 radians) { mRollAngle = radians; } // <GMDX>
     //--------------------------------------------------------------------
     // Zoom
     //--------------------------------------------------------------------

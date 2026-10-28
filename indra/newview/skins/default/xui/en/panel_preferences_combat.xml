@@ -201,6 +201,23 @@
          show_text="false"
          top="272"
          width="200" />
+        <!-- <GMDX> -->
+        <slider
+         control_name="MouseSensitivityZoomed"
+         follows="left|top"
+         height="15"
+         initial_value="3"
+         label="Zoomed sensitivity"
+         label_width="110"
+         layout="topleft"
+         left="262"
+         max_val="15"
+         name="mouse_sensitivity_zoomed"
+         show_text="false"
+         tool_tip="Mouse sensitivity while you hold the right button to zoom in mouselook, on the same scale as Sensitivity. Aiming down sights has its own setting on the ADS tab."
+         top="272"
+         width="240" />
+        <!-- </GMDX> -->
         <check_box
          control_name="InvertMouse"
          follows="left|top"
@@ -386,6 +403,17 @@
          tool_tip="Scroll-wheel step for adjusting the ADS zoom level while held."
          top_pad="8"
          width="440" />
+        <check_box
+         control_name="FSRMBScriptEnabled"
+         follows="left|top"
+         height="16"
+         label="Also send right-click to scripts (as CONTROL_LBUTTON)"
+         layout="topleft"
+         left="12"
+         name="rmb_script_enabled"
+         tool_tip="In mouselook and OTS, report the right mouse button to your weapons as the normal left button (CONTROL_LBUTTON in a control event), next to the mouselook left button (CONTROL_ML_LBUTTON). Right-click zoom and ADS keep working."
+         top_pad="10"
+         width="470" />
         <text
          type="string"
          follows="left|top"
@@ -621,6 +649,17 @@
          tool_tip="How many line-of-sight answers in a row (about one a frame) must report the shot blocked before the crosshair moves. Higher is steadier, lower reacts sooner."
          top_pad="8"
          width="440" />
+        <check_box
+         control_name="FSRezQueueIndicator"
+         follows="left|top"
+         height="16"
+         label="Rez queue warning at crosshair"
+         layout="topleft"
+         left="12"
+         name="rez_queue_indicator_prefs"
+         tool_tip="Watch the region's pending asset downloads and warn above the crosshair in mouselook and OTS while the sim is backed up and refusing to rez objects, then report how long the queue lasted."
+         top_pad="10"
+         width="470" />
         <!-- </GMDX> -->
     </panel>
     <!-- <GMDX> ============================ Kill Feed ============================ -->
@@ -1173,6 +1212,280 @@
             <button.commit_callback
              function="Pref.TestKillSound" />
         </button>
+    </panel>
+    <!-- </GMDX> -->
+    <!-- <GMDX> ============================ Map Share ============================ -->
+    <!-- gmdxmapshare.h: marks, zones and pings shared as readable lines, said by my helper to the people I send to in my region -->
+    <panel
+     follows="all"
+     layout="topleft"
+     label="Map Share"
+     name="combat_mapshare">
+
+        <text
+         type="string"
+         follows="left|top"
+         font="SansSerifSmallBold"
+         height="16"
+         layout="topleft"
+         left="10"
+         top="10"
+         width="490">
+            Shared Map Marks, Zones and Pings
+        </text>
+        <check_box
+         control_name="GMDXMapShareShow"
+         follows="left|top"
+         height="16"
+         label="Show what others share on the mini-map (and pings over the world)"
+         layout="topleft"
+         left="12"
+         name="map_share_show_pref"
+         tool_tip="Shares said to you by the helpers of the people in your list and of the members of the groups you send to (in your region) are drawn instead of shown as chat lines. Off: they stay plain chat text."
+         top_pad="8"
+         width="470" />
+        <text
+         type="string"
+         follows="left|top"
+         height="30"
+         layout="topleft"
+         left="30"
+         name="map_share_accept_help"
+         top_pad="6"
+         width="450"
+         wrap="true">
+Drawn only from the people in your list and the members of the groups you send to (mini-map: Ping > Send To). Anyone else's stays a chat line; their marks and zones ask first, their pings are not drawn.
+        </text>
+        <check_box
+         control_name="GMDXMapShareShowAsText"
+         enabled_control="GMDXMapShareShow"
+         follows="left|top"
+         height="16"
+         label="Also keep share lines in the chat as text (for checking)"
+         layout="topleft"
+         left="30"
+         name="map_share_as_text_pref"
+         tool_tip="Shared lines stay in the nearby chat as they arrived, as well as being drawn."
+         top_pad="6"
+         width="450" />
+
+        <text
+         type="string"
+         follows="left|top"
+         font="SansSerifSmallBold"
+         height="16"
+         layout="topleft"
+         left="10"
+         top_pad="16"
+         width="490">
+            Sending Shares and Pings
+        </text>
+        <check_box
+         control_name="GMDXMapShareSend"
+         follows="left|top"
+         height="16"
+         label="Send map shares and pings (wears the #GunMetal-DX Helper)"
+         layout="topleft"
+         left="12"
+         name="map_share_send_pref"
+         tool_tip="Your helper says each share or ping privately to the people you send to who are in your region. Nobody outside your region ever gets one. Off: the helper comes off (unless another feature uses it) and nothing can be sent."
+         top_pad="8"
+         width="470" />
+        <check_box
+         control_name="GMDXMapShareMyGroup"
+         enabled_control="GMDXMapShareSend"
+         follows="left|top"
+         height="16"
+         label="Send to my group (the one whose tag I wear)"
+         layout="topleft"
+         left="30"
+         name="map_share_my_group_pref"
+         tool_tip="Its members in your region get your shares and pings. Other groups and people in your region: the mini-map's right-click menu, Ping > Send To."
+         top_pad="6"
+         width="450" />
+    </panel>
+    <!-- </GMDX> -->
+    <!-- <GMDX> ============================== Pings ============================== -->
+    <!-- gmdxmapshare.h / gmdxpingwheel.h: how received pings show, and the ping keys -->
+    <panel
+     follows="all"
+     layout="topleft"
+     label="Pings"
+     name="combat_pings">
+
+        <text
+         type="string"
+         follows="left|top"
+         font="SansSerifSmallBold"
+         height="16"
+         layout="topleft"
+         left="10"
+         top="10"
+         width="490">
+            Pings
+        </text>
+        <slider
+         control_name="GMDXPingSeconds"
+         can_edit_text="true"
+         decimal_digits="0"
+         follows="left|top"
+         height="15"
+         increment="1"
+         initial_value="10"
+         layout="topleft"
+         label="Pings last (seconds):"
+         label_width="180"
+         show_text="true"
+         left="30"
+         max_val="60"
+         min_val="3"
+         name="ping_seconds_pref"
+         tool_tip="How long a ping you receive shows on the mini-map and over the world."
+         top_pad="8"
+         width="440" />
+        <check_box
+         control_name="GMDXPingBlip"
+         follows="left|top"
+         height="16"
+         label="Pings blip on the maps like radar contacts"
+         layout="topleft"
+         left="30"
+         name="ping_blip_pref"
+         tool_tip="A flash and rings spreading out as a ping arrives, then its dot fades away over the time above. Off: a simple pulse, and it fades at the end."
+         top_pad="8"
+         width="450" />
+        <check_box
+         control_name="GMDXPingSound"
+         follows="left|top"
+         height="16"
+         label="Sound when a ping arrives"
+         layout="topleft"
+         left="30"
+         name="ping_sound_pref"
+         top_pad="8"
+         width="450" />
+        <!-- the ping keys (gmdxpingwheel.cpp), with the viewer's key capture dialog -->
+        <panel
+         class="gmdx_ping_keys"
+         follows="left|top"
+         height="100"
+         layout="topleft"
+         left="30"
+         name="ping_keys_panel"
+         top_pad="10"
+         width="440">
+            <text
+             type="string"
+             follows="left|top"
+             height="20"
+             layout="topleft"
+             left="0"
+             name="ping_wheel_key_label"
+             top="0"
+             width="230">
+                Ping wheel (tap: Ping, hold: choose):
+            </text>
+            <button
+             follows="left|top"
+             height="20"
+             layout="topleft"
+             left_pad="4"
+             name="ping_wheel_key"
+             tool_tip="Click, then press the key (or mouse button) for map_ping_wheel: set for walking, mouselook and sitting, saved at once. Also in Preferences &gt; Controls."
+             top_delta="-2"
+             width="170" />
+            <text
+             type="string"
+             follows="left|top"
+             height="20"
+             layout="topleft"
+             left="0"
+             name="ping_key_label"
+             top_pad="4"
+             width="230">
+                Ping:
+            </text>
+            <button
+             follows="left|top"
+             height="20"
+             layout="topleft"
+             left_pad="4"
+             name="ping_key"
+             tool_tip="Click, then press the key (or mouse button) for map_ping: set for walking, mouselook and sitting, saved at once. Also in Preferences &gt; Controls."
+             top_delta="-2"
+             width="170" />
+            <text
+             type="string"
+             follows="left|top"
+             height="20"
+             layout="topleft"
+             left="0"
+             name="ping_enemy_key_label"
+             top_pad="4"
+             width="230">
+                Ping Enemy:
+            </text>
+            <button
+             follows="left|top"
+             height="20"
+             layout="topleft"
+             left_pad="4"
+             name="ping_enemy_key"
+             tool_tip="Click, then press the key (or mouse button) for map_ping_enemy: set for walking, mouselook and sitting, saved at once. Also in Preferences &gt; Controls."
+             top_delta="-2"
+             width="170" />
+            <text
+             type="string"
+             follows="left|top"
+             height="20"
+             layout="topleft"
+             left="0"
+             name="ping_rally_key_label"
+             top_pad="4"
+             width="230">
+                Ping Rally:
+            </text>
+            <button
+             follows="left|top"
+             height="20"
+             layout="topleft"
+             left_pad="4"
+             name="ping_rally_key"
+             tool_tip="Click, then press the key (or mouse button) for map_ping_rally: set for walking, mouselook and sitting, saved at once. Also in Preferences &gt; Controls."
+             top_delta="-2"
+             width="170" />
+        </panel>
+        <slider
+         control_name="GMDXPingWheelHoldMs"
+         can_edit_text="true"
+         decimal_digits="0"
+         follows="left|top"
+         height="15"
+         increment="10"
+         initial_value="250"
+         layout="topleft"
+         label="Hold for the wheel (ms):"
+         label_width="180"
+         show_text="true"
+         left="30"
+         max_val="2000"
+         min_val="50"
+         name="ping_wheel_hold_pref"
+         tool_tip="Let go of the ping wheel's key sooner: a plain Ping. Held this long: the wheel opens."
+         top_pad="6"
+         width="440" />
+        <text
+         type="string"
+         follows="left|top"
+         height="88"
+         layout="topleft"
+         left="30"
+         name="ping_help"
+         top_pad="10"
+         width="460"
+         wrap="true">
+B pings the place under the mouse pointer (in mouselook, under the crosshair). Shift+B, the ping wheel, does too when tapped; held, a wheel opens: move toward Ping, Enemy or Rally and let go (in the middle: nothing). Pings go to your list: your group and the groups and people ticked in the mini-map's Ping > Send To (Keep makes one stay). A ping placed from the mini-map's menu shows on maps only, not over the world. On your marks and zones, the mini-map's Share sends to your group or your list. Only people in your region get them, never everyone there, as an ordinary chat line with a map link, so people on other viewers can read it.
+        </text>
     </panel>
     <!-- </GMDX> -->
 </tab_container>

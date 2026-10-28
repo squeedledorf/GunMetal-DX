@@ -50,6 +50,7 @@
 #include "v2math.h"
 #include "lluictrlfactory.h"
 #include "lltooltip.h"
+#include "llscrollcontainer.h"   // <GMDX> wheel over a scrolling page
 
 // Globals
 S32 MAX_COMBO_WIDTH = 500;
@@ -960,6 +961,25 @@ bool LLComboBox::handleUnicodeCharHere(llwchar uni_char)
     return result;
 }
 
+// <GMDX> On a page that scrolls (the nearest LLScrollContainer has somewhere to go) the wheel
+// scrolls the page, not this control: scrolling a long page changed whatever combo box or spinner
+// passed under the pointer (GMDXWheelScrollsPage). The page's scroll container takes the wheel
+// when this returns false.
+static bool gmdx_wheel_scrolls_page(const LLView* view)
+{
+    static LLUICachedControl<bool> s_on("GMDXWheelScrollsPage", true);
+    if (!s_on) return false;
+    for (const LLView* v = view->getParent(); v; v = v->getParent())
+    {
+        if (const LLScrollContainer* page = dynamic_cast<const LLScrollContainer*>(v))
+        {
+            return !(page->isAtTop() && page->isAtBottom());
+        }
+    }
+    return false;
+}
+// </GMDX>
+
 // virtual
 bool LLComboBox::handleScrollWheel(S32 x, S32 y, S32 clicks)
 {
@@ -967,6 +987,7 @@ bool LLComboBox::handleScrollWheel(S32 x, S32 y, S32 clicks)
     {
         return mList->handleScrollWheel(x, y, clicks);
     }
+    if (gmdx_wheel_scrolls_page(this)) return false;   // <GMDX>
 
     if (mAllowTextEntry) // We might be editable
     {

@@ -145,6 +145,28 @@ public:
     // One-line status (state, available, budget, in flight, waits/s ...).
     static std::string statusString();
 
+    // ---- MALLOC HEAP (#1103; Linux / glibc only, no-ops elsewhere) ----
+    // Caps glibc's malloc arenas (M_ARENA_MAX) at clamp(hardware threads / 2, 4, 16) unless
+    // MALLOC_ARENA_MAX / GLIBC_TUNABLES already set it. Call FIRST in main(), before any
+    // thread exists: glibc fixes its arena limit for good once more than 8 arenas were
+    // created, so a later call has no effect. No logging (the log does not exist yet);
+    // mallocArenaText() says what was decided, for a later log line.
+    static void limitMallocArenas();
+    static std::string mallocArenaText();
+    // Hands freed heap memory back to the OS (glibc malloc_trim(0)) and measures it. Any
+    // thread; it locks each arena in turn while it walks it (tens to hundreds of ms on a
+    // large fragmented heap), so call it on a worker. done = false where unsupported.
+    struct HeapTrim
+    {
+        bool done = false;
+        U64 rss_before = 0;     // resident set before / after the trim
+        U64 rss_after = 0;
+        U64 free_before = 0;    // free bytes the arenas held before it (malloc_info fast + rest)
+        U32 arenas = 0;         // arenas in the process (malloc_info heaps)
+        F64 ms = 0.0;           // time malloc_trim took
+    };
+    static HeapTrim trimMallocHeap();
+
     // ---- ALLOCATION FAILURES (#698) ----
     // Owner policy: a failed allocation is NEVER a crash. The job that failed frees what
     // it built, its OWNER requeues the asset with backoff (retryDelaySec) and gives it up

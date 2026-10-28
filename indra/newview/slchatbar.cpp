@@ -57,8 +57,11 @@
 #include "llfloaterimnearbychat.h"
 #include "llkeyboard.h"
 #include "lllineeditor.h"
+#include "llrender2dutils.h"   // <GMDX>
+#include "lluicolortable.h"    // <GMDX>
 #include "llstatusbar.h"
 #include "lltextbox.h"
+#include "lltooldraganddrop.h"  // <GMDX>
 #include "lluiconstants.h"
 #include "llviewergesture.h"            // for triggering gestures
 #include "llviewermenu.h"       // for deleting object with DEL key
@@ -75,6 +78,10 @@
 // [RLVa:KB] - Checked: 2010-02-27 (RLVa-1.2.0b)
 #include "rlvactions.h"
 #include "rlvcommon.h"
+#include "llavatarnamecache.h"   // <GMDX> IM mode
+#include "llimview.h"            // <GMDX>
+#include "llinstantmessage.h"    // <GMDX>
+#include "llslurl.h"             // <GMDX>
 // [/RLVa:KB]
 
 class SLChatBarGestureObserver final : public LLGestureManagerObserver
@@ -107,6 +114,7 @@ SLChatBar::SLChatBar(const LLSD& key)
 {
     mCommitCallbackRegistrar.add("Chatbar.Shout", boost::bind(&SLChatBar::sendChat, this, CHAT_TYPE_SHOUT, false));
     mCommitCallbackRegistrar.add("Chatbar.Whisper", boost::bind(&SLChatBar::sendChat, this, CHAT_TYPE_WHISPER, false));
+    mCommitCallbackRegistrar.add("Chatbar.ResetChatLogPosition", boost::bind(&SLChatBar::resetChatLogPosition, this));   // <GMDX>
 }
 
 
@@ -170,6 +178,20 @@ bool SLChatBar::postBuild()
     {
         setOrigin(5, getRect().mBottom);
     }
+    // the channel spinner's number without a skin box, on the bar's own fill (draw)
+    if (LLLineEditor* number = findChild<LLLineEditor>("SpinCtrl Editor"))
+    {
+        number->setBgImage(nullptr);
+        number->setBgImageFocused(nullptr);
+    }
+    // IM mode's x: back to nearby chat
+    if (LLButton* cancel = findChild<LLButton>("im_cancel"))
+    {
+        cancel->setCommitCallback([this](LLUICtrl*, const LLSD&) { cancelIM(); mInputEditor->setFocus(TRUE); });
+    }
+    // where Reset chat log position puts it (the saved rect, if any, is applied after postBuild)
+    mDefaultRect = getRect();
+    mDefaultRect.setOriginAndSize(5, mDefaultRect.mBottom, mDefaultRect.getWidth(), mDefaultRect.getHeight());
     // </GMDX>
 
     return TRUE;
@@ -224,6 +246,10 @@ bool SLChatBar::handleKeyHere( KEY key, MASK mask )
     // only do this in main chatbar
     else if ( KEY_ESCAPE == key)
     {
+        // <GMDX> IM mode: back to nearby chat first
+        if (mIMTarget.notNull()) cancelIM();
+        else
+        // </GMDX>
         stopChat();
 
         handled = TRUE;
@@ -361,6 +387,15 @@ void SLChatBar::sendChat( EChatType type, bool ooc )
         LLWString text = mInputEditor->getConvertedText();
         LLWStringUtil::trim(text);
         LLWStringUtil::replaceChar(text, 182, '\n'); // Convert paragraph symbols back into newlines.
+        // <GMDX> IM mode: to the person picked in the chat log, not nearby
+        if (mIMTarget.notNull() && !text.empty())
+        {
+            mInputEditor->updateHistory();
+            if (ooc) text = FSCommon::wrapOOC(text);
+            sendIM(text);
+            text.clear();
+        }
+        // </GMDX>
         if (!text.empty())
         {
             // store sent line for Ctrl+Up/Down recall, duplicates get filtered
@@ -433,7 +468,8 @@ void SLChatBar::changeChannelLabel(S32 channel)
 {
     if (mInputEditor)
     {
-        mInputEditor->setLabel(LLFloaterIMNearbyChat::getChannelLabel(channel));
+        // <GMDX> IM mode names who it goes to
+        mInputEditor->setLabel(mIMTarget.notNull() ? "To " + mIMName : LLFloaterIMNearbyChat::getChannelLabel(channel));
     }
 }
 
@@ -465,6 +501,20 @@ void SLChatBar::updateChannelSelector()
     {
         editor_rect.mRight = right_limit;
     }
+    // <GMDX> IM mode: its x (back to nearby chat) at the line's right end
+    if (LLView* cancel = findChild<LLView>("im_cancel"))
+    {
+        const bool im = mIMTarget.notNull();
+        cancel->setVisible(im);
+        if (im)
+        {
+            LLRect cancel_rect;
+            cancel_rect.setLeftTopAndSize(editor_rect.mRight - 22, editor_rect.mTop, 22, editor_rect.getHeight());
+            cancel->setShape(cancel_rect);
+            editor_rect.mRight -= 24;
+        }
+    }
+    // </GMDX>
     mInputEditor->setShape(editor_rect);
     spinner->setVisible(show);
 }
@@ -515,8 +565,66 @@ void SLChatBar::stopChat()
     SLChatBar* bar = LLFloaterReg::getTypedInstance<SLChatBar>("chatbar");
     bar->mInputEditor->setFocus(FALSE);
     bar->setVisible(FALSE);
+    bar->cancelIM();   // <GMDX> (closing ends IM mode)
     gAgent.stopTyping();
 }
+
+// <GMDX> IM mode (gmdxchatlog.cpp: a name clicked)
+// static
+void SLChatBar::startIM(const LLUUID& id, const std::string& name)
+{
+    if (id.isNull() || id == gAgentID)
+    {
+        return;
+    }
+    // [RLVa:KB] as LLAvatarActions::startIM
+    if (!RlvActions::canStartIM(id))
+    {
+        make_ui_sound("UISndInvalidOp");
+        RlvUtil::notifyBlocked(RlvStringKeys::Blocked::StartIm, LLSD().with("RECIPIENT", LLSLURL("agent", id, "completename").getSLURLString()));
+        return;
+    }
+    startChat(nullptr);
+    SLChatBar* bar = LLFloaterReg::getTypedInstance<SLChatBar>("chatbar");
+    LLAvatarName av_name;
+    bar->mIMTarget = id;
+    bar->mIMName = LLAvatarNameCache::get(id, &av_name) ? av_name.getDisplayName() : name;
+    bar->changeChannelLabel(0);
+    bar->updateChannelSelector();
+    gAgent.stopTyping();   // (no nearby typing animation for an IM)
+}
+
+void SLChatBar::cancelIM()
+{
+    if (mIMTarget.isNull())
+    {
+        return;
+    }
+    mIMTarget.setNull();
+    mIMName.clear();
+    changeChannelLabel(LLFloaterIMNearbyChat::getDefaultChatChannel());
+    updateChannelSelector();
+}
+
+void SLChatBar::sendIM(const LLWString& text)
+{
+    // as LLFloaterIMSession::sendMsgFromInputEditor / sendMsg for a P2P session
+    std::string utf8_text = wstring_to_utf8str(text);
+    utf8_text = FSCommon::applyAutoCloseOoc(utf8_text);
+    utf8_text = FSCommon::applyMuPose(utf8_text);
+    utf8_text = utf8str_truncate(utf8_text, MAX_MSG_BUF_SIZE - 1);
+    if (!RlvActions::canSendIM(mIMTarget))
+    {
+        utf8_text = RlvStrings::getString(RlvStringKeys::Blocked::SendIm);
+    }
+    // the conversation, new or the one there is (Conversations lists it; nothing is opened)
+    const LLUUID session_id = gIMMgr->addSession(mIMName, IM_NOTHING_SPECIAL, mIMTarget);
+    if (session_id.notNull())
+    {
+        LLIMModel::sendMessage(utf8_text, session_id, mIMTarget, IM_NOTHING_SPECIAL);
+    }
+}
+// </GMDX>
 
 // static
 void SLChatBar::updateChatFont()
@@ -543,6 +651,7 @@ void SLChatBar::onInputEditorKeystroke(LLTextEditor* caller)
         && (raw_text[0] != '/')     // forward slash is used for escape (eg. emote) sequences
             && (raw_text[0] != ':') // colon is used in for MUD poses
             && (LLFloaterIMNearbyChat::getDefaultChatChannel() == 0) // <FS> no typing animation off channel 0
+            && mIMTarget.isNull() // <GMDX> nor for an IM
       )
     {
         gAgent.startTyping();
@@ -639,9 +748,45 @@ void SLChatBar::onCommitGesture(LLUICtrl* ctrl)
 // no-op once it is inside). Not for a bar hosted inside another window.
 void SLChatBar::draw()
 {
-    if (gFloaterView && getParent() == gFloaterView && !isMinimized())
+    // <GMDX> With the chat log on, the bar moves and resizes with it (its lock), not on its own; once
+    // the panel has been moved, the bar is right under it, as wide as it (the panel keeps that place
+    // inside the floater area; while dragged, GMDXChatLog places the bar as the mouse moves).
+    const bool owned = GMDXChatLog::active() && gFloaterView && getParent() == gFloaterView;
+    if (owned != mDocked)
     {
-        const LLRect area = gFloaterView->getSnapRect();
+        mDocked = owned;
+        setCanDrag(!owned);
+        setCanResize(!owned);
+        if (LLView* grip = findChild<LLView>("drag")) grip->setVisible(!owned);
+    }
+    LLRect docked;
+    const bool dock = owned && !isMinimized() && GMDXChatLog::dockedBarRect(gFloaterView, docked);
+    if (dock && docked != getRect()) setShape(docked);
+    // The chat log panel's bottom row: its fill and edge (no skin box, floater_sl_chatbar.xml), no
+    // top edge while the panel sits on it (the panel draws the rule between them).
+    {
+        static LLUIColor fill = LLUIColorTable::instance().getColor("GMDXChatBarBackground");
+        static LLUIColor edge = LLUIColorTable::instance().getColor("GMDXChatBarEdge");
+        const S32 r = getRect().getWidth() - 1, t = getRect().getHeight() - 1;
+        gl_rect_2d(getLocalRect(), fill.get());
+        gl_line_2d(0, t, 0, 0, edge.get());
+        gl_line_2d(0, 0, r, 0, edge.get());
+        gl_line_2d(r, 0, r, t, edge.get());
+        if (!GMDXChatLog::panelOnBar()) gl_line_2d(0, t, r, t, edge.get());
+    }
+    if (dock)
+    {
+        LLFloater::draw();
+        return;
+    }
+    // </GMDX>
+    // <GMDX> not while something is dragged: the toolbars that show during a drag (empty ones to drop
+    // on) shrink the area for the drag only, and a fit would be kept (a too wide bar made narrower)
+    if (gFloaterView && getParent() == gFloaterView && !isMinimized()
+        && !LLToolDragAndDrop::getInstance()->hasMouseCapture())
+    // </GMDX>
+    {
+        const LLRect area = gFloaterView->getLocalRect();   // <GMDX> the window, not the snap region (left of it: the toolbar strips)
         const LLRect& r = getRect();
         if (r.mBottom < area.mBottom || r.mTop > area.mTop || r.mLeft < area.mLeft || r.mRight > area.mRight)
         {
@@ -650,6 +795,16 @@ void SLChatBar::draw()
     }
     LLFloater::draw();
 }
+
+// <GMDX> the chat log's place back to over this bar, and this bar back to where it first opens
+void SLChatBar::resetChatLogPosition()
+{
+    gSavedSettings.setRect("GMDXChatLogRect", LLRect());
+    LLFloater::getControlGroup()->setRect(LLFloaterReg::getRectControlName("chatbar"), LLRect());
+    setShape(mDefaultRect);
+    if (gFloaterView && getParent() == gFloaterView) gFloaterView->adjustToFitScreen(this, false);
+}
+// </GMDX>
 
 // [SL:KB] - Patch: Chat-NearbyToastWidth | Checked: 2010-11-10 (Catznip-2.4)
 // virtual

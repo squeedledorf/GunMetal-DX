@@ -14,6 +14,7 @@ layout(set = 1, binding = 0) uniform sampler2D uTextures[];   // bindless (cloud
 #include "clean_sky_bodies.glsl"
 
 layout(location = 0) in vec2 v_ndc;
+layout(location = 1) noperspective in vec4 v_eye_p;   // (#1075 stereo: this view's eye-relative point, clean_sky.vert)
 
 layout(location = 0) out vec4 outColor;
 
@@ -265,6 +266,8 @@ void main()
         // Z 3000-8000 -- stars jumping from frame to frame.
         vec4 p = pc.u_inv_view_proj * vec4(v_ndc, 0.5, 1.0);
         dir = normalize(p.xyz / p.w - (pc.u_cam.w > 1.5 ? vec3(0.0) : pc.u_cam.xyz));
+        // #1075 STEREO: each view's own ray from its eye (the push's inverse is the head's).
+        if (kViewCount > 1) dir = normalize(v_eye_p.xyz / v_eye_p.w);
     }
     // LL's sky gbuffer order: haze + rainbow/halo, then the sun, moon and stars, then
     // the cloud dome over them; then resolve to linear HDR.

@@ -40,11 +40,14 @@
 // write). It replaced a separate pass that drew the whole post-water alpha list into
 // the exclusion target's G channel just to find the water.
 layout(location = 2) out vec4 outWaterMask;
-layout(set = 2, binding = 0) uniform sampler2D uSceneDepth;    // solid-scene depth (pass 1)
-layout(set = 2, binding = 1) uniform sampler2D uSceneColor;    // solid-scene HDR colour (pass 1)
+// LAYERED STEREO (#1075): the main view's targets have a layer per view; this view's is
+// CLEAN_VIEW (0 on the desktop: kViewCount folds it). 2D_ARRAY views at every view count.
+layout(set = 2, binding = 0) uniform sampler2DArray uSceneDepth;    // solid-scene depth (pass 1)
+layout(set = 2, binding = 1) uniform sampler2DArray uSceneColor;    // solid-scene HDR colour (pass 1)
 // Water exclusion mask (clean_water_excl.frag, #27): 1 = water, < 1 = an invisiprim
 // covers it -- no water surface there (LL waterF: `if (mask < 1) discard`).
-layout(set = 2, binding = 2) uniform sampler2D uWaterExcl;
+layout(set = 2, binding = 2) uniform sampler2DArray uWaterExcl;
+#define WATER_LAYER float(CLEAN_VIEW)
 #endif
 
 vec3 waterNormalTex(int idx, vec2 uv)
@@ -57,7 +60,7 @@ vec3 waterNormalTex(int idx, vec2 uv)
 // World position of the solid scene at screen uv (VK depth is [0,1]).
 vec3 scenePos(vec2 uv)
 {
-    float d = textureLod(uSceneDepth, uv, 0.0).r;
+    float d = textureLod(uSceneDepth, vec3(uv, WATER_LAYER), 0.0).r;
     vec4 wp = pc.u_inv_view_proj * vec4(uv * 2.0 - 1.0, d, 1.0);
     return wp.xyz / wp.w;
 }
@@ -75,7 +78,7 @@ void main()
     const bool opaque = true;
     const bool under  = eye.z < waterHeight();
 #else
-    if (texelFetch(uWaterExcl, ivec2(gl_FragCoord.xy), 0).r < 1.0) demote;    // excluded (invisiprim)
+    if (texelFetch(uWaterExcl, ivec3(ivec2(gl_FragCoord.xy), int(CLEAN_VIEW)), 0).r < 1.0) demote;    // excluded (invisiprim)
     outWaterMask = vec4(0.0, 1.0, 0.0, 0.0);   // (every path below; helpers write nothing)
     const bool opaque = ssr.ao_params2.w > 0.5;   // RenderTransparentWater off
     const bool under  = camUnderwater();
@@ -114,11 +117,11 @@ void main()
 #ifndef WATER_OPAQUE
         if (!opaque)
         {
-            vec2 res_u = vec2(textureSize(uSceneDepth, 0));
+            vec2 res_u = vec2(textureSize(uSceneDepth, 0).xy);
             vec2 uv = gl_FragCoord.xy / res_u;
             vec3 wn = normalize(wave1 + wave2 + wave3);
             uv = clamp(uv + wn.xy * ssr.water[2].w, vec2(0.0), vec2(0.999));
-            above = textureLod(uSceneColor, uv, 0.0).rgb;
+            above = textureLod(uSceneColor, vec3(uv, WATER_LAYER), 0.0).rgb;
         }
 #endif
         outColor = vec4(max(applyWaterFog(above, view, eye.z - waterHeight()), vec3(0.0)), 1.0);
@@ -153,7 +156,7 @@ void main()
     if (!opaque)
     {
         // ---- refraction (TRANSPARENT_WATER + SHORELINE_FADE) ----
-        vec2 res     = vec2(textureSize(uSceneDepth, 0));
+        vec2 res     = vec2(textureSize(uSceneDepth, 0).xy);
         vec2 distort = gl_FragCoord.xy / res;
         float dmod   = sqrt(dist);
         vec3 waver   = wavef * 3.0;
@@ -169,7 +172,7 @@ void main()
         // bright shallow sand out over deep water in jagged patches (real refraction shifts with
         // the depth: over deep water it shows deep water).
         else if (P.z - refPos2.z < 0.5 * (P.z - refPos.z) - 0.25) { distort2 = distort; refPos2 = refPos; }
-        fb = textureLod(uSceneColor, distort2, 0.0).rgb;
+        fb = textureLod(uSceneColor, vec3(distort2, WATER_LAYER), 0.0).rgb;
         // VOLUMETRIC FOG (#718): the solid scene was fogged over the air in front of the
         // water by clean_vol_apply.frag; the surface applies it again below -- take it back
         // out of the refraction first (no extra fog under the water: the same segment).
@@ -196,7 +199,7 @@ void main()
     {
         // <GMDX> a flat mirror image, displaced by the waves as the refraction is
         const vec2 roff = wavef.xy * 3.0 * ssr.water[2].w / max(sqrt(dist), 1.0) * 2.0
-                        * vec2(textureSize(uSceneDepth, 0));
+                        * vec2(textureSize(uSceneDepth, 0).xy);
         const vec4 ri = rtFwdInWater(P, roff);
         radiance = mix(radiance, ri.rgb, ri.a);
     }

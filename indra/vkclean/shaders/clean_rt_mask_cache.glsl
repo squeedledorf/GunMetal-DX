@@ -177,10 +177,10 @@ uint rcHistTapWhy(vec3 P, ivec2 rp, out ivec2 hn)
         const ivec2 t = hb + ivec2(i & 1, i >> 1);
         if (any(lessThan(t, ivec2(0))) || any(greaterThan(t, mx))) continue;
         any_in = true;
-        const float hz = texelFetch(uHistDepth, t, 0).x;
+        const float hz = texelFetch(uHistDepth, ivec3(t, RT_MASK_L), 0).x;
         if (!(hz > 0.0)) continue;
         any_surf = true;
-        const vec2 hg = texelFetch(uHistDepthG, t, 0).xy;
+        const vec2 hg = texelFetch(uHistDepthG, ivec3(t, RT_MASK_L), 0).xy;
         const vec2 off = ex ? prpx - rtPrevCentre(vec2(t), jp, Jp, s) : (hc - vec2(t)) / s;
         const float zp = hz + clamp(dot(hg, off), -0.25 * hz, 0.25 * hz);
         const float e = abs(zp - pw) / tol;

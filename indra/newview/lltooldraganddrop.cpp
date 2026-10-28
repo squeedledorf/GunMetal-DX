@@ -38,6 +38,7 @@
 #include "lldictionary.h"
 #include "llfloaterreg.h"
 #include "llfloatertools.h"
+#include "gmdxtoolbarpins.h" // <GMDX> system folders: pin cargo only
 #include "llgesturemgr.h"
 #include "llgiveinventory.h"
 #include "llgltfmateriallist.h"
@@ -618,6 +619,14 @@ void LLToolDragAndDrop::dragOrDrop( S32 x, S32 y, MASK mask, bool drop,
     {
         sOperationId++;
     }
+
+    // <GMDX> a system folder (only ever dragged to be pinned): a toolbar's pin zone takes it, nothing else
+    if (GMDXToolbarPins::pinOnlyDragOrDrop(x, y, mask, drop, acceptance, mToolTipMsg))
+    {
+        mLastAccept = *acceptance;
+        return;
+    }
+    // </GMDX>
 
     // For people drag and drop we don't need an actual inventory object,
     // instead we need the current cargo id, which should be a person id.

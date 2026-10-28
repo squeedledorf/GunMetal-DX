@@ -2791,7 +2791,9 @@ void LLScrollListCtrl::selectItem(LLScrollListItem* itemp, S32 cell, bool select
     onRetainedDirty();
     if (!itemp) return;
 
-    if (!itemp->getSelected() || itemp->getSelectedCell() != cell)
+    // <GMDX> another cell of a selected row only matters in cell selection; row
+    // lists store -1 whatever column was clicked
+    if (!itemp->getSelected() || (mSelectionType == CELL && itemp->getSelectedCell() != cell))
     {
         if (mLastSelected)
         {

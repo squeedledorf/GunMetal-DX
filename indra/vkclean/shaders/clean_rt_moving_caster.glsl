@@ -35,7 +35,11 @@ void rtNoteBlocker(uint id)
         return;
     }
     if (id >= uint(prev_instances.length())) return;
-    const mat4 a = rt_instances[id].model_matrix, b = prev_instances[id].model_matrix;
-    rt_block_dyn = any(notEqual(a[0].xyz, b[0].xyz)) || any(notEqual(a[1].xyz, b[1].xyz))
-                || any(notEqual(a[2].xyz, b[2].xyz)) || any(notEqual(a[3].xyz, b[3].xyz));
+    // (#1039 occupancy) the rows compared a column at a time (a loop, not unrolled): the walks note blockers
+    // at their candidates, and both matrices loaded up front were 24 floats live at that peak. The same
+    // verdict (any column's xyz differs).
+    bool moved = false;
+    [[dont_unroll]] for (uint c = 0u; c < 4u && !moved; ++c)
+        moved = any(notEqual(rt_instances[id].model_matrix[c].xyz, prev_instances[id].model_matrix[c].xyz));
+    rt_block_dyn = moved;
 }

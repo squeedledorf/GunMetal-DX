@@ -260,6 +260,15 @@ public:
 
     LLToolBarButton* createButton(const LLCommandId& id);
 
+    // <GMDX> inventory items and folders dragged onto an editable toolbar become pinned buttons
+    // (newview gmdxtoolbarpins.cpp). Returns the pin's command for this cargo, LLCommandId::null when
+    // it can't be pinned; on a drop it also makes the command so addCommand() can take it.
+    typedef boost::function<LLCommandId (EDragAndDropType cargo_type, void* cargo_data, bool drop)> pin_cargo_callback_t;
+    static pin_cargo_callback_t sGMDXPinCargo;
+    LLRect getGMDXPinZone() const;  // where such a drop is taken, in toolbar coordinates
+    static LLHandle<LLView> sGMDXMenuButton;  // the button the right-click menu was last opened on
+    // </GMDX>
+
     typedef boost::signals2::signal<void (LLView* button)> button_signal_t;
     boost::signals2::connection setButtonAddCallback(const button_signal_t::slot_type& cb);
     boost::signals2::connection setButtonEnterCallback(const button_signal_t::slot_type& cb);

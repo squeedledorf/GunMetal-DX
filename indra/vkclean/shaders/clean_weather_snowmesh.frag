@@ -92,15 +92,15 @@ void main()
         // the G-buffer's shading normal (the relief) and the smooth one, view space
         float glintP;
         const vec3 Np = wxSnowRelief(Ng, v_wpos.xy, px, glintP);
-        outNormal = vec4(octEncode(normalize(mat3(ssr.cur_view) * Np)), octEncode(normalize(mat3(ssr.cur_view) * Ng)));
+        outNormal = vec4(octEncode(normalize(mat3(ssr.views[CLEAN_VIEW].cur_view) * Np)), octEncode(normalize(mat3(ssr.views[CLEAN_VIEW].cur_view) * Ng)));
     }
 #endif
 #if WX_MESH_PRE == 2 || WX_MESH_PRE == 3
     {
         // The snow is static in the world (its rebuilds / geomorph are not motion): camera-only,
         // as the world pre-pass's static geometry (camera-relative, #555).
-        const vec4 cur  = ssr.taa_cur_vp  * vec4(v_wpos - ssr.cam_origin.xyz, 1.0);
-        const vec4 prev = ssr.taa_prev_vp * vec4(v_wpos - ssr.cam_origin.xyz, 1.0);
+        const vec4 cur  = ssr.views[CLEAN_VIEW].taa_cur_vp  * vec4(v_wpos - ssr.cam_origin.xyz, 1.0);
+        const vec4 prev = ssr.views[CLEAN_VIEW].taa_prev_vp * vec4(v_wpos - ssr.cam_origin.xyz, 1.0);
         outMotion = prev.w > 1e-6 ? (cur.xy / cur.w - prev.xy / prev.w) * 0.5 : vec2(0.0);
         outNoTemporal = 0.0;
     }

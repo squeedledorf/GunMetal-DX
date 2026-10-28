@@ -102,6 +102,7 @@ std::atomic<uint64_t (*)()> s_memProbe{nullptr};
 std::atomic<void (*)(const VkPipelineBatchReport&)> s_batchHook{nullptr};
 std::atomic<uint64_t (*)()> s_memBudget{nullptr};
 std::atomic<uint64_t> s_memCap{0};   // vkSetPipelineMemCap
+std::atomic<unsigned> s_pressureCap{0};   // #1103 vkSetPipelinePressureCap
 std::atomic<uint64_t> s_defaultCost{512ull << 20};
 std::atomic<bool> s_cacheWarm{false};
 
@@ -650,10 +651,14 @@ struct DynRaster
     VkFrontFace front;
     VkBool32 test, write;
     VkCompareOp compare;
+    VkCompareOp relaxed;   // #1088: NEVER = none
 };
 std::mutex& dynMutex() { static std::mutex m; return m; }
 std::unordered_map<VkPipeline, DynRaster>& dynRegistry() { static std::unordered_map<VkPipeline, DynRaster> r; return r; }
+std::atomic<bool> sPrepassRelaxed{true};   // (RenderVKPrepassEqualCompare's default)
 }
+
+void vkSetPrepassRelaxedCompare(bool on) { sPrepassRelaxed.store(on, std::memory_order_relaxed); }
 
 void vkForgetPipeline(VkPipeline pipeline)
 {
@@ -682,7 +687,9 @@ void bindGraphicsPipeline(VkCommandBuffer cmd, VkPipeline pipeline)
     vkCmdSetFrontFace(cmd, d.front);
     vkCmdSetDepthTestEnable(cmd, d.test);
     vkCmdSetDepthWriteEnable(cmd, d.write);
-    vkCmdSetDepthCompareOp(cmd, d.compare);
+    // #1088: a pre-pass shading pipeline's ordered twin of EQUAL (reversed-Z: GEQUAL).
+    const bool relax = d.relaxed != VK_COMPARE_OP_NEVER && sPrepassRelaxed.load(std::memory_order_relaxed);
+    vkCmdSetDepthCompareOp(cmd, relax ? d.relaxed : d.compare);
 }
 
 // One vkCreateGraphicsPipelines call (#672: no retry, no fatal; *out = VK_NULL_HANDLE
@@ -716,14 +723,18 @@ static VkResult createGraphicsPipelineOnce(VkDevice device, const GraphicsPipeli
     if (desc.reverseZ)
     {
         rz = desc;
-        switch (rz.depthCompare)
-        {
-        case VK_COMPARE_OP_LESS:             rz.depthCompare = VK_COMPARE_OP_GREATER; break;
-        case VK_COMPARE_OP_LESS_OR_EQUAL:    rz.depthCompare = VK_COMPARE_OP_GREATER_OR_EQUAL; break;
-        case VK_COMPARE_OP_GREATER:          rz.depthCompare = VK_COMPARE_OP_LESS; break;
-        case VK_COMPARE_OP_GREATER_OR_EQUAL: rz.depthCompare = VK_COMPARE_OP_LESS_OR_EQUAL; break;
-        default: break;   // EQUAL / NOT_EQUAL / ALWAYS / NEVER are symmetric
-        }
+        auto flip = [](VkCompareOp op) {
+            switch (op)
+            {
+            case VK_COMPARE_OP_LESS:             return VK_COMPARE_OP_GREATER;
+            case VK_COMPARE_OP_LESS_OR_EQUAL:    return VK_COMPARE_OP_GREATER_OR_EQUAL;
+            case VK_COMPARE_OP_GREATER:          return VK_COMPARE_OP_LESS;
+            case VK_COMPARE_OP_GREATER_OR_EQUAL: return VK_COMPARE_OP_LESS_OR_EQUAL;
+            default: return op;   // EQUAL / NOT_EQUAL / ALWAYS / NEVER are symmetric
+            }
+        };
+        rz.depthCompare = flip(rz.depthCompare);
+        rz.relaxedDepthCompare = flip(rz.relaxedDepthCompare);   // (#1088; NEVER stays NEVER)
         rz.depthBiasConstant = -rz.depthBiasConstant;
         rz.depthBiasSlope = -rz.depthBiasSlope;
         rz.depthBiasClamp = -rz.depthBiasClamp;   // <GMDX>
@@ -753,10 +764,43 @@ static VkResult createGraphicsPipelineOnce(VkDevice device, const GraphicsPipeli
     if (meshPipe) return VK_ERROR_FEATURE_NOT_PRESENT;   // headers without VK_EXT_mesh_shader
 #endif
         addStage(VK_SHADER_STAGE_VERTEX_BIT, desc.vert);
+    // #1075 LAYERED STEREO (views > 1 only): kViewCount (constant 20, clean_view.glsl) on every
+    // stage -- the front stages get {20}, the fragment stage its fragSpec + {20}. A stage whose
+    // module declares no constant 20 ignores the entry. views 1 (every desktop pipeline): no
+    // specialization added, the create info is exactly as before.
+    const bool multiView = desc.views > 1u;
+    const int32_t viewCountData = (int32_t)desc.views;
+    const VkSpecializationMapEntry viewEntry{GraphicsPipelineDesc::kViewCountConstId, 0u, sizeof(int32_t)};
+    VkSpecializationInfo viewSpec{1u, &viewEntry, sizeof(int32_t), &viewCountData};
+    std::vector<VkSpecializationMapEntry> fragEntries;
+    std::vector<uint8_t> fragData;
+    VkSpecializationInfo fragMerged{};
+    if (multiView)
+        for (uint32_t i = 0; i < stageCount; ++i) stages[i].pSpecializationInfo = &viewSpec;
     if (desc.frag != VK_NULL_HANDLE)
     {
         addStage(VK_SHADER_STAGE_FRAGMENT_BIT, desc.frag);
         stages[stageCount - 1].pSpecializationInfo = desc.fragSpec;
+        if (multiView)
+        {
+            if (desc.fragSpec && desc.fragSpec->mapEntryCount)
+            {
+                const VkSpecializationInfo& s = *desc.fragSpec;
+                fragEntries.assign(s.pMapEntries, s.pMapEntries + s.mapEntryCount);
+                const uint8_t* d = static_cast<const uint8_t*>(s.pData);
+                fragData.assign(d, d + s.dataSize);
+            }
+            VkSpecializationMapEntry e = viewEntry;
+            e.offset = (uint32_t)fragData.size();
+            fragEntries.push_back(e);
+            const uint8_t* vd = reinterpret_cast<const uint8_t*>(&viewCountData);
+            fragData.insert(fragData.end(), vd, vd + sizeof(int32_t));
+            fragMerged.mapEntryCount = (uint32_t)fragEntries.size();
+            fragMerged.pMapEntries = fragEntries.data();
+            fragMerged.dataSize = fragData.size();
+            fragMerged.pData = fragData.data();
+            stages[stageCount - 1].pSpecializationInfo = &fragMerged;
+        }
     }
 
     VkPipelineVertexInputStateCreateInfo vin{
@@ -878,6 +922,18 @@ static VkResult createGraphicsPipelineOnce(VkDevice device, const GraphicsPipeli
                           : (has_react ? 3u : (has_glow ? 2u : 1u));
     cb.attachmentCount = nColor;
     cb.pAttachments = cbas;
+    if (desc.alphaOne)
+    {
+        // #1076: colour replaced as without blending, alpha = the constant 1.
+        cbas[0].blendEnable = VK_TRUE;
+        cbas[0].srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+        cbas[0].dstColorBlendFactor = VK_BLEND_FACTOR_ZERO;
+        cbas[0].colorBlendOp = VK_BLEND_OP_ADD;
+        cbas[0].srcAlphaBlendFactor = VK_BLEND_FACTOR_CONSTANT_ALPHA;
+        cbas[0].dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+        cbas[0].alphaBlendOp = VK_BLEND_OP_ADD;
+        cb.blendConstants[3] = 1.f;
+    }
 
     VkDynamicState dyn[] = {VK_DYNAMIC_STATE_VIEWPORT,
                             VK_DYNAMIC_STATE_SCISSOR,
@@ -913,6 +969,9 @@ static VkResult createGraphicsPipelineOnce(VkDevice device, const GraphicsPipeli
         mrt ? desc.mrtFormats[2] : desc.reactFormat, mrt ? desc.mrtFormats[3] : VK_FORMAT_UNDEFINED};
     rendering.colorAttachmentCount = nColor;
     rendering.pColorAttachmentFormats = colorFormats;
+    // #1075: a multiview pipeline matches the multiview scopes it is bound in (VkRenderingInfo::
+    // viewMask must equal it). views 1: 0, as before.
+    if (multiView) rendering.viewMask = (1u << desc.views) - 1u;
     if (desc.depthFormat != VK_FORMAT_UNDEFINED)
         rendering.depthAttachmentFormat = desc.depthFormat;
 
@@ -942,7 +1001,10 @@ static VkResult createGraphicsPipelineOnce(VkDevice device, const GraphicsPipeli
         const DynRaster d{desc.cullMode, desc.frontFace,
                           (desc.depthFormat != VK_FORMAT_UNDEFINED && desc.depthTest) ? VK_TRUE : VK_FALSE,
                           (desc.depthFormat != VK_FORMAT_UNDEFINED && desc.depthWrite) ? VK_TRUE : VK_FALSE,
-                          desc.depthCompare};
+                          desc.depthCompare,
+                          // (#1088: only an EQUAL test has an ordered twin; a desc copied on from
+                          // an EQUAL one keeps its own compare)
+                          desc.depthCompare == VK_COMPARE_OP_EQUAL ? desc.relaxedDepthCompare : VK_COMPARE_OP_NEVER};
         std::lock_guard<std::mutex> lk(dynMutex());
         dynRegistry()[pipeline] = d;
     }
@@ -1184,6 +1246,8 @@ void appendPipelineState(std::string& k, const QueuedPipeline& q)
     pv(d.colorWrite); pv(d.dynamicDepthCull); pv(d.dynamicShadingRate); pv(d.reverseZ);
     pv(d.fsrAttachment); pv(d.reactFormat); pv(d.reactWriteMask);
     pv(d.mrtCount); for (uint32_t i = 0; i < GraphicsPipelineDesc::kMaxMrt; ++i) pv(d.mrtFormats[i]);
+    if (d.alphaOne) pv(d.alphaOne);   // #1076 (only when set: every other pipeline's key is unchanged)
+    if (d.views > 1u) pv(d.views);    // #1075 multiview (only when set: N = 1 keys are unchanged)
     if (!d.dynamicDepthCull)
     {
         pv(d.depthTest); pv(d.depthWrite); pv(d.depthCompare); pv(d.cullMode); pv(d.frontFace);
@@ -1341,6 +1405,30 @@ unsigned vkPipelineConcurrencyCap()
     Sched& s = sched();
     std::lock_guard<std::mutex> lk(s.m);
     return s.cap;
+}
+
+void vkSetPipelinePressureCap(unsigned cap, const char* why)
+{
+    const unsigned prev = s_pressureCap.exchange(cap, std::memory_order_relaxed);
+    if (prev == cap) return;
+    unsigned inflight = 0;
+    {
+        Sched& s = sched();
+        std::lock_guard<std::mutex> lk(s.m);
+        inflight = (unsigned)s.inflight.size();
+    }
+    pipeEvent(false, "VKPipe: memory %s: compile concurrency cap %u -> %u (0 = none; %u compiling now) (#1103)",
+              why ? why : "?", prev, cap, inflight);
+    sched().cv.notify_all();   // a raised cap admits waiting workers at once
+}
+
+unsigned vkPipelinePressureCap() { return s_pressureCap.load(std::memory_order_relaxed); }
+
+unsigned vkPipelineCompilesInFlight()
+{
+    Sched& s = sched();
+    std::lock_guard<std::mutex> lk(s.m);
+    return (unsigned)s.inflight.size();
 }
 
 static VkPipeline createWithRecovery(const char* what, const std::function<VkResult(VkPipeline*)>& once,
@@ -1667,6 +1755,22 @@ std::string vkPipelineCostExport()
     return out;
 }
 
+uint64_t vkPipelineLearnedColdBytes(unsigned pct)
+{
+    std::vector<uint64_t> v;
+    {
+        CostTable& t = costs();
+        std::lock_guard<std::mutex> lk(t.m);
+        v.reserve(t.map.size());
+        for (const auto& kv : t.map)
+            if (kv.second.coldBytes) v.push_back(kv.second.coldBytes);
+    }
+    if (v.empty()) return 0;
+    std::sort(v.begin(), v.end());
+    const size_t i = std::min(v.size() - 1, v.size() * (size_t)std::min(pct, 100u) / 100u);
+    return v[i];
+}
+
 namespace {
 
 void printReport(const VkPipelineBatchReport& r)
@@ -1810,6 +1914,7 @@ void compileQueue(VkDevice device, std::vector<QueuedPipeline>& queue, const cha
     std::vector<VkPipelineCompileStat> stats(n);
     unsigned threadsUsed = 0, overBudget = 0;
     unsigned oomRetries = 0, failedN = 0;   // #672 (under s.m)
+    unsigned pressureMin = 0;               // #1103 (under s.m)
     uint64_t budgetMin = UINT64_MAX;
     double waitMs = 0.0;
     using Clock = std::chrono::steady_clock;
@@ -1896,6 +2001,18 @@ void compileQueue(VkDevice device, std::vector<QueuedPipeline>& queue, const cha
                     s.cv.wait_for(lk, std::chrono::milliseconds(50));
                     waitMs += std::chrono::duration<double, std::milli>(Clock::now() - w0).count();
                     continue;
+                }
+                // #1103: and at most the memory-pressure cap (the budget hook above refreshed it).
+                if (const unsigned pcap = s_pressureCap.load(std::memory_order_relaxed))
+                {
+                    pressureMin = pressureMin ? std::min(pressureMin, pcap) : pcap;
+                    if (s.inflight.size() >= pcap)
+                    {
+                        const auto w0 = Clock::now();
+                        s.cv.wait_for(lk, std::chrono::milliseconds(50));
+                        waitMs += std::chrono::duration<double, std::milli>(Clock::now() - w0).count();
+                        continue;
+                    }
                 }
                 // What the compiles in flight (every batch) may still allocate, and what
                 // they hold or may hold in all (the cap's measure).
@@ -2116,6 +2233,7 @@ void compileQueue(VkDevice device, std::vector<QueuedPipeline>& queue, const cha
         rep.oomRetries = oomRetries;
         rep.failed = failedN;
         rep.capEnd = s.cap;
+        rep.pressureCapMin = pressureMin;
     }
     rep.items = std::move(stats);
     printReport(rep);

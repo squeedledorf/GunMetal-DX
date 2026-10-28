@@ -83,8 +83,17 @@ struct FrameViews
     F32 hud_vp[16] = {};
     int hud_viewport[4] = {};
     U32 mode = 0;
+    F32 cam_at[3] = {}, cam_left[3] = {}, cam_up[3] = {};   // the camera's axes (the VR ray's projection)
 };
 FrameViews sViews;
+
+// #1076 VR world pointer (setVRRay): the agent-space ray that replaces the cursor ray.
+struct VRRay
+{
+    bool on = false;
+    LLVector3 s, d;   // origin, unit direction
+};
+VRRay sVRRay;
 
 // The surface the last pick reported (getSurfaceInfo's single-object pick right after it,
 // surfaceTexture).
@@ -225,10 +234,55 @@ void pixelZoom(const F32 vp[16], const LLVector3& p, const int vp_rect[4], F32 o
     }
 }
 
+// #1076 VR world pointer: the world layer's 1x1 projection for a ray that does not start at
+// the camera. The camera's own projection (view_proj_rel: apex-relative -> VK clip) behind a
+// rigid move of the scene: translate the ray's origin onto the apex, then the PROPER rotation
+// taking the ray's frame (at = the ray, left, up) onto the camera's (at, left, up). The ray then
+// is the camera's centre line, and the camera projection pixel-zoomed on its at axis puts it
+// in the target's centre. A proper rotation and the camera's own projection keep the view's
+// handedness (gl_FrontFacing, clean_pick.frag) and clip conventions. Depth along the ray is
+// measured in the fragment shader from the request's origin / dir, not from this matrix.
+void vrRayProjection(const RayQ& q, F32 out[16])
+{
+    const LLVector3 at(sViews.cam_at), left(sViews.cam_left), up(sViews.cam_up);
+    const LLVector3 at_c = q.d;
+    LLVector3 left_c = LLVector3::z_axis % at_c;
+    if (left_c.normVec() < 1e-3f) left_c = left;   // (straight up / down: any left will do)
+    LLVector3 up_c = at_c % left_c;
+    up_c.normVec();
+    // R v = at (v . at_c) + left (v . left_c) + up (v . up_c); column-major rigid move A.
+    F32 a[16] = {};
+    for (int k = 0; k < 3; ++k)
+        for (int r = 0; r < 3; ++r)
+            a[k * 4 + r] = at.mV[r] * at_c.mV[k] + left.mV[r] * left_c.mV[k] + up.mV[r] * up_c.mV[k];
+    const LLVector3 c = q.s - LLVector3(sViews.apex);   // the origin, apex-relative
+    for (int r = 0; r < 3; ++r) a[12 + r] = -(a[r] * c.mV[0] + a[4 + r] * c.mV[1] + a[8 + r] * c.mV[2]);
+    a[15] = 1.f;
+    F32 z[16];
+    pixelZoom(sViews.view_proj_rel, at * 16.f, sViews.rect, z);
+    for (int col = 0; col < 4; ++col)
+        for (int row = 0; row < 4; ++row)
+        {
+            F32 s = 0.f;
+            for (int k = 0; k < 4; ++k) s += z[k * 4 + row] * a[col * 4 + k];
+            out[col * 4 + row] = s;
+        }
+}
+
 // The world ray exactly as LLViewerWindow::cursorIntersect builds it for pixel (x, y):
 // camera origin + mouse direction, started on the near plane. False = degenerate.
 bool cursorRay(S32 x, S32 y, RayQ& q)
 {
+    if (sVRRay.on)
+    {
+        // #1076: the VR controller's ray (the pixel still keys the answer).
+        q.x = x;
+        q.y = y;
+        q.s = sVRRay.s;
+        q.d = sVRRay.d;
+        q.len = kRayLength;
+        return true;
+    }
     LLViewerCamera* cam = LLViewerCamera::getInstance();
     const LLVector3 dir = gViewerWindow->mouseDirectionGlobal(x, y);
     const LLVector3 eye = cam->getOrigin();
@@ -238,6 +292,7 @@ bool cursorRay(S32 x, S32 y, RayQ& q)
     q.s = eye;
     line_plane(eye, dir, eye + at * cam->getNear(), at, q.s);
     q.d = dir;
+    cam->orthoMouseRay(x, y, q.s, q.d);   // <GMDX> orthographic view: parallel rays
     q.len = kRayLength;
     return q.d.normVec() >= 1e-6f;
 }
@@ -257,9 +312,19 @@ bool makeRequest(const RayQ& q, LLVKPickRequest& r)
     r.mouse_y = q.y;
     r.serial = nextSerial();
     std::memcpy(r.apex, sViews.apex, sizeof(r.apex));
-    // (A point on the ray 16 m out, relative to the projection's eye.)
-    const LLVector3 p = q.s + q.d * 16.f - LLVector3(sViews.apex);
-    pixelZoom(sViews.view_proj_rel, p, sViews.rect, r.world_vp);
+    if (sVRRay.on)
+    {
+        // #1076: the ray does not start at the camera (a VR controller's): the 1x1 raster's
+        // centre of projection must be the ray's origin, or its pixel would be the camera ray
+        // through a point of it.
+        vrRayProjection(q, r.world_vp);
+    }
+    else
+    {
+        // (A point on the ray 16 m out, relative to the projection's eye.)
+        const LLVector3 p = q.s + q.d * 16.f - LLVector3(sViews.apex);
+        pixelZoom(sViews.view_proj_rel, p, sViews.rect, r.world_vp);
+    }
     if (q.hud && sViews.hud)
     {
         r.hud = true;
@@ -851,6 +916,9 @@ void fillRequest(LLVKWorldFrame& wf)
         LLViewerCamera* cam = LLViewerCamera::getInstance();
         std::memcpy(sViews.view_proj_rel, wf.view_proj_rel, sizeof(sViews.view_proj_rel));
         std::memcpy(sViews.apex, cam->getOrigin().mV, sizeof(sViews.apex));
+        std::memcpy(sViews.cam_at, cam->getAtAxis().mV, sizeof(sViews.cam_at));
+        std::memcpy(sViews.cam_left, cam->getLeftAxis().mV, sizeof(sViews.cam_left));
+        std::memcpy(sViews.cam_up, cam->getUpAxis().mV, sizeof(sViews.cam_up));
         sViews.rect[0] = sViews.rect[1] = 0;
         sViews.rect[2] = gViewerWindow->getWorldViewWidthRaw();
         sViews.rect[3] = gViewerWindow->getWorldViewHeightRaw();
@@ -864,7 +932,7 @@ void fillRequest(LLVKWorldFrame& wf)
     // Armed by recent picks (LLToolPie's hover picks every frame) -- and always while the
     // mouse is over the window: the build / edit tools don't hover-pick, and a click then
     // has an answer in flight (a click no answer covers is answered between frames).
-    if (gViewerWindow->getMouseInWindow() || gAgentCamera.cameraMouselook()) arm();
+    if (gViewerWindow->getMouseInWindow() || gAgentCamera.cameraMouselook() || sVRRay.on) arm();
     if (!sArmed || (S32)(sArmedUntil - (U32)gFrameCount) < 0)
     {
         sArmed = false;
@@ -879,7 +947,7 @@ void fillRequest(LLVKWorldFrame& wf)
     if (!cursorRay(held ? sHeld.x : ml ? gViewerWindow->getWorldViewRectScaled().getWidth() / 2 : gViewerWindow->getCurrentMouseX(),
                    held ? sHeld.y : ml ? gViewerWindow->getWorldViewRectScaled().getHeight() / 2 : gViewerWindow->getCurrentMouseY(), q))
         return;
-    if (sViews.hud)
+    if (sViews.hud && !sVRRay.on)   // (#1076: the VR pointer never picks HUDs: they are on the UI wall)
     {
         const LLVector3 p = gViewerWindow->mousePointHUD(q.x, q.y);
         q.hud = true;
@@ -1297,6 +1365,72 @@ Focus focusPoint(LLVector3& pos)
         {
             const LLTextureEntry* te = obj->getTE((U8)face);
             if (te && te->getColor().mV[3] == 0.f) continue;   // completely transparent face
+        }
+        pos.set(f->pos);
+        return FOCUS_HIT;
+    }
+    return hi >= r.req.length ? FOCUS_NONE : FOCUS_UNKNOWN;
+}
+
+void setVRRay(const LLVector3& origin, const LLVector3& dir)
+{
+    LLVector3 d = dir;
+    if (d.normVec() < 1e-6f || !origin.isFinite() || !d.isFinite())
+    {
+        sVRRay.on = false;
+        return;
+    }
+    sVRRay.on = true;
+    sVRRay.s = origin;
+    sVRRay.d = d;
+}
+
+void clearVRRay()
+{
+    sVRRay.on = false;
+}
+
+bool vrRay(LLVector3& origin, LLVector3& dir)
+{
+    if (!sVRRay.on) return false;
+    origin = sVRRay.s;
+    dir = sVRRay.d;
+    return true;
+}
+
+bool vrRayOn()
+{
+    return sVRRay.on;
+}
+
+Focus vrRayHit(LLVector3& pos)
+{
+    if (!sVRRay.on || !gpuEnabled()) return FOCUS_UNKNOWN;
+    LLVKPickResult r;
+    if (!LLVulkanContext::instance().latestPick(r) || !recent(r)) return FOCUS_UNKNOWN;
+    // The newest per-frame answer trails the controller by a frame or two: accept one asked for
+    // a ray within 10 cm / ~3 degrees of this one (the beam's length only), not a camera ray
+    // from before the pointer took over.
+    if ((LLVector3(r.req.origin) - sVRRay.s).length() > 0.1f || LLVector3(r.req.dir) * sVRRay.d < 0.9986f)
+        return FOCUS_UNKNOWN;
+    if (r.overflow_world || r.cand_overflow_world) return FOCUS_UNKNOWN;
+    const F32 lo = r.win[0], hi = r.win[1];
+    for (const LLVKPickFrag* f : sorted(r.world))
+    {
+        if (f->t < lo || f->t >= hi) continue;
+        if (!(f->flags & LLVKPickFrag::ALPHA_PASS)) continue;
+        LLViewerObject* obj = nullptr;
+        S32 face = -1;
+        if (!fragObject(*f, obj, face)) continue;   // (the hands / beam: rows of no object)
+        if (obj->isReflectionProbe()) continue;
+        const LLVOAvatar* av = obj->isAvatar() ? (const LLVOAvatar*)obj : obj->getAvatar();
+        if (av && av->isSelf() && !gAgent.needsRenderAvatar()) continue;
+        if (LLVOAvatar::isHiddenOwnAttachment(obj)) continue;
+        if (obj->mDrawable.notNull() && !gPipeline.hasRenderType(obj->mDrawable->getRenderType())) continue;
+        if (obj->getPCode() == LL_PCODE_VOLUME && !obj->mGLTFAsset && face >= 0 && face < obj->getNumTEs())
+        {
+            const LLTextureEntry* te = obj->getTE((U8)face);
+            if (te && te->getColor().mV[3] == 0.f) continue;
         }
         pos.set(f->pos);
         return FOCUS_HIT;

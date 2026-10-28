@@ -178,7 +178,7 @@ vec3 beamColor()
     const vec3  blue_density = ssr.atmos[1].rgb;
     const float haze_density = ssr.atmos[1].w;
     const float max_y        = ssr.atmos[3].w;
-    const vec3  lightnorm    = ssr.atmos[4].xyz;
+    const vec3  lightnorm    = atmosLightNorm();   // <GMDX> (physical night: atmos[7]'s)
     const float density_mul  = ssr.atmos[4].w;
     const vec3 light_atten = (blue_density + vec3(haze_density * 0.25)) * (density_mul * max_y);
     // <GMDX> Physical sky: the light through the physical air (transmittance LUT at the viewer:

@@ -2363,6 +2363,13 @@ U32 LLViewerObject::processUpdateMessage(LLMessageSystem *mesgsys,
         setScale(new_scale);  // Must follow setting permYouOwner()
     }
 
+    // <GMDX> Ghost projectile watch: the first update that carries a velocity tags likely projectiles
+    if (update_type == OUT_TERSE_IMPROVED || (!dp && update_type == OUT_FULL))
+    {
+        FSGhostProjectile::onVelocityUpdate(this);
+    }
+    // </GMDX>
+
     // first, let's see if the new position is actually a change
 
     //static S32 counter = 0;
@@ -2464,6 +2471,7 @@ U32 LLViewerObject::processUpdateMessage(LLMessageSystem *mesgsys,
         (MAG_CUTOFF >= accel_mag_sq) &&
         (MAG_CUTOFF >= getAngularVelocity().magVecSquared()))
     {
+        FSGhostProjectile::onGoingStatic(this); // <GMDX> a projectile stopping dead may be a ghost
         mStatic = true; // This object doesn't move!
     }
     else
@@ -2532,6 +2540,8 @@ U32 LLViewerObject::processUpdateMessage(LLMessageSystem *mesgsys,
         mDrawable->updateSpecialHoverCursor(special_hover_cursor);
     }
 
+    FSGhostProjectile::onSimUpdate(this); // <GMDX> a fresh update re-arms the ghost probe budget
+
     return retval;
 }
 
@@ -2579,6 +2589,12 @@ void LLViewerObject::idleUpdate(LLAgent &agent, const F64 &frame_time)
                 interpolateLinearMotion(frame_time, dt);
             }
         }
+        // <GMDX> Ghost projectile watch: static objects are not interpolated, so watch them from here
+        else if (mStatic)
+        {
+            FSGhostProjectile::onIdleStatic(this);
+        }
+        // </GMDX>
 
         updateDrawable(false);
     }
@@ -2614,6 +2630,10 @@ void LLViewerObject::interpolateLinearMotion(const F64SecondsImplicit& frame_tim
     {
         return;
     }
+
+    // <GMDX> Ghost projectile probe, ahead of the branches below so it covers moving,
+    // phased-out and fully stalled projectiles alike
+    FSGhostProjectile::onInterpolate(this, frame_time, time_since_last_update);
 
     LLVector3 accel = getAcceleration();
     LLVector3 vel   = getVelocity();
@@ -3938,6 +3958,10 @@ void LLViewerObject::setPixelAreaAndAngle(LLAgent &agent)
     F32 range = sqrt(dx*dx + dy*dy + dz*dz) - min_scale/2;
 
     LLViewerCamera* camera = LLViewerCamera::getInstance();
+    if (camera->getOrtho())   // <GMDX> orthographic: every object is shown at the focus distance's scale
+    {
+        range = camera->getOrthoFocusDist();
+    }
     if (range < 0.001f || isHUDAttachment())        // range == zero
     {
         mAppAngle = 180.f;

@@ -48,6 +48,11 @@ void settings_setup_listeners();
 // once per idle frame. Never writes a setting.
 void applyVramDetailCaps();
 
+// Every RenderVK* setting whose current value differs from its settings.xml default, sorted,
+// as "Name=value Name=value ... +N more" (at most max_items listed). Empty when all are at
+// their defaults. Used by the startup log and the bug report / performance capture header.
+std::string nonDefaultRenderSettings(size_t max_items = 40);
+
 // for the graphics settings
 void create_graphics_group(LLControlGroup& group);
 

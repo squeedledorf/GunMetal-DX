@@ -449,6 +449,8 @@ static bool ensureCelPipelines(LLCelShadeVK& c, VkDevice dev,
                 if (k < 3) vkWorldStaticVI(d); else vkWorldRiggedVI(d);   // (#573)
                 d.frag = t == 2 ? afs : fs;
                 d.cullMode = cm[t];
+                // (EQUAL stays exact under #1088's RenderVKPrepassEqualCompare: the opaque / mask
+                // id FS has no alpha test -- EQUAL is what rejects a cut-out texel's pixel.)
                 d.depthCompare = t == 2 ? VK_COMPARE_OP_LESS_OR_EQUAL : VK_COMPARE_OP_EQUAL;
                 c.mIdPipe[k] = createGraphicsPipeline(dev, d);
             }
@@ -540,7 +542,8 @@ void LLCleanRendererVK::recordCelPasses(VkCommandBuffer cmd, const VkDescriptorS
             {
                 if (c.mId.image) mCtx->destroyImage(c.mId);
                 c.mId = mCtx->createImage2D(rw, rh, LLCelShadeVK::kIdFormat,
-                                            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                                            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
+                                                | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,   // <GMDX> avatar matte snapshots read it back
                                             VK_IMAGE_ASPECT_COLOR_BIT);
                 c.mIdW = rw; c.mIdH = rh;
             }

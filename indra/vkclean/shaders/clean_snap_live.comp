@@ -148,6 +148,49 @@ vec3 bilinearLinear(vec2 pos)
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
+// OUTPUT SHARPEN (#1093; RESOLVE only, p1.x = strength 0..1, 0 = off). The accumulation's
+// Gaussian splat and the 8-bit-free average leave the shot softer than the live view, whose
+// frame goes through CAS (clean_final.frag casSample, RenderCASSharpness). The same filter
+// runs here ONCE on the finished mean: the 3x3 min / max headroom sets a per-channel
+// amplitude (so flat areas and already-contrasty edges are left alone, no halos), a
+// negative-lobe cross filter does the rest. Averaging has already removed the per-sample
+// noise, so this sharpens detail, not grain. It runs on the sRGB-ENCODED mean, the same
+// domain the live frame's CAS sees, so the strength means the same thing there as here.
+// Neighbours that moved / are empty (motion fallback) count as the centre: no halo against them.
+vec3 encode3(vec3 c) { return vec3(linearToSrgb(c.r), linearToSrgb(c.g), linearToSrgb(c.b)); }
+vec3 meanEnc(ivec2 p, vec3 centre)
+{
+    const ivec2 q = clamp(p, ivec2(0), ivec2(int(pc.size.z) - 1, int(pc.size.w) - 1));
+    vec3 m; float ws; bool mv;
+    unpackAcc(work[uint(q.y) * pc.size.z + uint(q.x)], m, ws, mv);
+    return (mv || ws < 1e-3) ? centre : encode3(m);
+}
+vec3 sharpenMean(ivec2 o, vec3 meanLin)
+{
+    const vec3 e = encode3(meanLin);
+    const vec3 a = meanEnc(o + ivec2(-1, -1), e), b = meanEnc(o + ivec2(0, -1), e), c = meanEnc(o + ivec2(1, -1), e);
+    const vec3 d = meanEnc(o + ivec2(-1,  0), e), f = meanEnc(o + ivec2(1,  0), e);
+    const vec3 g = meanEnc(o + ivec2(-1,  1), e), h = meanEnc(o + ivec2(0,  1), e), i = meanEnc(o + ivec2(1,  1), e);
+    vec3 mn = min(min(min(d, e), min(f, b)), h);
+    const vec3 mn2 = min(mn, min(min(a, c), min(g, i)));
+    mn += mn2;
+    vec3 mx = max(max(max(d, e), max(f, b)), h);
+    const vec3 mx2 = max(mx, max(max(a, c), max(g, i)));
+    mx += mx2;
+    vec3 amp = clamp(min(mn, 2.0 - mx) / max(mx, vec3(1e-5)), 0.0, 1.0);
+    amp = sqrt(amp);
+    const float peak = -1.0 / mix(8.0, 5.0, clamp(pc.p1.x, 0.0, 1.0));
+    const vec3 w = amp * peak;
+    const vec3 rcpW = 1.0 / (1.0 + 4.0 * w);
+    return clamp((b * w + d * w + f * w + h * w + e) * rcpW, 0.0, 1.0);
+}
+uvec3 toBytesEnc(vec3 enc, uint x, uint y)
+{
+    const float n = (pc.aux.x & kDither) != 0u ? ditherTpdf(x, y) : 0.0;
+    const vec3 v = clamp(enc * 255.0 + 0.5 + n, 0.0, 255.0);
+    return uvec3(v);
+}
+
 void main()
 {
     const uint dstW = pc.size.z, dstH = pc.size.w;
@@ -273,6 +316,14 @@ void main()
             // Moving content (motion vectors) or no sample landed: this frame alone, upsampled.
             const vec2 pos = pc.crop.xy + (vec2(x, y) + 0.5) * pc.crop.zw / vec2(dstW, dstH);
             c = bilinearLinear(pos);
+        }
+        else if (pc.p1.x > 0.0)
+        {
+            // #1093: one contrast-adaptive sharpen of the AVERAGED image (never of the
+            // jittered samples: that sharpened their noise, #932). See sharpenMean().
+            c = sharpenMean(ivec2(int(x), int(y)), mean);
+            px[k] = toBytesEnc(c, x, y);
+            continue;
         }
         px[k] = toBytes(c, x, y);
 #endif

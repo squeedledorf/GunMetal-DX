@@ -136,16 +136,33 @@ bool  rt_fix_on  = false;
 vec3  rt_fix_P   = vec3(0.0);   // the light's centre (absolute world)
 float rt_fix_max = 0.0;         // the largest fixture box edge (m; RenderVKReSTIRFixtureSize)
 float rt_fix_t   = -1.0;        // out: the committed caster was the fixture -- its box entry t
-bool rtFixtureBox(uint id, mat4x3 w2o, mat4x3 o2w, out vec3 a, out vec3 b)
+// (#1039 occupancy: clean_rt_common.glsl WALK-STATE HOOKS -- the visibility queue's walks read these from the request)
+#ifndef RT_FIX_P
+#define RT_FIX_P rt_fix_P
+#endif
+#ifndef RT_FIX_MAX
+#define RT_FIX_MAX rt_fix_max
+#endif
+// rtFixtureBox(id, q, committed, out a, out b): instance id's box (a, b) holds the light's centre and is
+// small enough. (#1039 occupancy) In three steps, each transform read from the query where it is used (the
+// world-to-object for the centre, the object-to-world's scale only for a box that holds it) instead of both
+// fetched up front as arguments -- 24 floats live at the candidate's peak. The same arithmetic.
+#define rtFixtureBox(ID, Q, C, A, B) (rtFixtureBoxAB((ID), (A), (B)) \
+    && rtFixtureHolds(rayQueryGetIntersectionWorldToObjectEXT((Q), (C)) * vec4(RT_FIX_P, 1.0), (A), (B)) \
+    && rtFixtureSmall((A), (B), rayQueryGetIntersectionObjectToWorldEXT((Q), (C))))
+bool rtFixtureBoxAB(uint id, out vec3 a, out vec3 b)
 {
     a = vec3(0.0); b = vec3(0.0);
     if (!rtIdIn(id)) return false;
     a = rt_instances[id].aabb_min.xyz;
     b = rt_instances[id].aabb_max.xyz;
-    const vec3 lo = w2o * vec4(rt_fix_P, 1.0);
-    if (!(all(greaterThanEqual(lo, a)) && all(lessThanEqual(lo, b)))) return false;
+    return true;
+}
+bool rtFixtureHolds(vec3 lo, vec3 a, vec3 b) { return all(greaterThanEqual(lo, a)) && all(lessThanEqual(lo, b)); }
+bool rtFixtureSmall(vec3 a, vec3 b, mat4x3 o2w)
+{
     const vec3 e = abs(b - a) * vec3(length(o2w[0]), length(o2w[1]), length(o2w[2]));
-    return max(max(e.x, e.y), e.z) <= rt_fix_max;
+    return max(max(e.x, e.y), e.z) <= RT_FIX_MAX;
 }
 // A walk ended by a committed (opaque / confirmed) caster: blocked. OWN FIXTURE: the committed caster's
 // box entry (the slab test in its object space: the ray parameter is the same through the affine map) --
@@ -159,10 +176,8 @@ vec3 rtWalkBlocked(vec3 origin, vec3 dir, bool trans_walk, rayQueryEXT q)
 #else
     const uint fid = 0u;   // (neither rule reads the committed caster's identity here: no id lookup)
 #endif
-    vec3 fa, fb;
-    if (SH_FIX_ON && !trans_walk
-        && rtFixtureBox(fid, rayQueryGetIntersectionWorldToObjectEXT(q, true), rayQueryGetIntersectionObjectToWorldEXT(q, true),
-                        fa, fb))
+    vec3 fa = vec3(0.0), fb = vec3(0.0);   // (#1039 occupancy: initialised -- no value carried across the walks)
+    if (SH_FIX_ON && !trans_walk && rtFixtureBox(fid, q, true, fa, fb))
     {
         const mat4x3 w2o = rayQueryGetIntersectionWorldToObjectEXT(q, true);
         const vec3 oo = w2o * vec4(origin, 1.0);
@@ -188,7 +203,7 @@ bool rtWalkCand(uint id, uint prim, vec2 bc, float t, vec3 dir, rayQueryEXT q, u
 {
     const bool rgb = rtWalkRgb(kind);
     const bool trans_walk = rtWalkTrans(kind, ks);
-    float cutoff; bool blend; vec3 col;
+    float cutoff = 0.0; bool blend = false; vec3 col = vec3(1.0);   // (rtCandidateAlphaCol sets them; initialised: nothing carried across walks)
     const float a = rtCandidateAlphaCol(id, prim, bc, t, dir, q, cutoff, blend, col);   // (the ONE alpha test)
 #ifndef SH_KIND_POSITIONAL
     if (rtWalkFol(kind, ks))
@@ -200,7 +215,7 @@ bool rtWalkCand(uint id, uint prim, vec2 bc, float t, vec3 dir, rayQueryEXT q, u
         return ++n_fol >= rtFolLayers() || max(max(trans.r, trans.g), trans.b) < 0.01;
     }
 #endif
-    vec3 fa, fb;   // (rtFixtureBox's box)
+    vec3 fa = vec3(0.0), fb = vec3(0.0);   // (rtFixtureBox's box; initialised: nothing carried across walks)
     if (rtWalkVisK(kind, ks))
         return a >= cutoff && fol == RT_FOL_OCCLUDE;   // #735
     if ((blend ? a >= RT_BLEND_SOLID : a >= cutoff) && fol == RT_FOL_LEAF)
@@ -216,8 +231,7 @@ bool rtWalkCand(uint id, uint prim, vec2 bc, float t, vec3 dir, rayQueryEXT q, u
         }
         return false;
     }
-    if (blend && SH_FIX_ON && rtFixtureBox(id, rayQueryGetIntersectionWorldToObjectEXT(q, false),
-                                             rayQueryGetIntersectionObjectToWorldEXT(q, false), fa, fb))
+    if (blend && SH_FIX_ON && rtFixtureBox(id, q, false, fa, fb))
         return false;   // (the light's own translucent shade: no tint)
     if (blend && rt_blend_parity && a >= ALPHA_BLEND_SOLID) return true;   // LL: solid caster
     if (blend && !(rt_blend_parity && a < ALPHA_BLEND_NONE))
@@ -235,6 +249,10 @@ bool rtWalkCand(uint id, uint prim, vec2 bc, float t, vec3 dir, rayQueryEXT q, u
 // (no-self-shadow characters), rt_cone_* (the alpha test's LOD), rt_fix_* (own fixture: rtVisTrace).
 // Writes rt_block_t (the nearest blocker distance, lowered) and RT_NOTE_BLOCKER. ks: the kinds this call
 // site may pass (RT_WALK_KS_*; rtVisWalk: any).
+// (#1039 occupancy) probeOut (a constant per call site): the walk does NOT run the self probe itself (see THE
+// SELF PROBE OUTSIDE THE TRAVERSAL below) -- it ends at that candidate with rt_walk_probe set and its result
+// void, and its caller probes and walks again from where its own results start (clean_shadow_core.glsl
+// shadowSampleRays: the whole sample), so the probe's code and queries are not part of the walk's at all.
 // <GMDX> PROJECTOR FACING (set by projShadowRayCoreImpl around its rays, clean_shadow_rt.glsl): LL
 // renders spot shadow maps back-face culled, so a single-sided face turned AWAY from the light never
 // casts -- e.g. the inside of a lantern's housing around its light prim. The ray runs receiver ->
@@ -243,7 +261,8 @@ bool rtWalkCand(uint id, uint prim, vec2 bc, float t, vec3 dir, rayQueryEXT q, u
 // and the walk skips those hits itself.
 bool rt_proj_facing = false;
 // </GMDX>
-vec3 rtVisWalkF(vec3 origin, vec3 dir, float tmin, float tmax, uint mask, uint kind, uint ks)
+bool rt_walk_probe = false;
+vec3 rtVisWalkFP(vec3 origin, vec3 dir, float tmin, float tmax, uint mask, uint kind, uint ks, bool probeOut)
 {
     const bool fol_walk = rtWalkFol(kind, ks);
     const bool trans_walk = rtWalkTrans(kind, ks);
@@ -263,10 +282,9 @@ vec3 rtVisWalkF(vec3 origin, vec3 dir, float tmin, float tmax, uint mask, uint k
               | rtFolShadowFlags();
     else
         flags = gl_RayFlagsTerminateOnFirstHitEXT | (trans_walk ? gl_RayFlagsNoneEXT : rtFolShadowFlags());
-    if (rt_proj_facing && !fol_walk)   // <GMDX> every candidate reaches the walk (see rt_proj_facing)
-        flags = (flags & ~gl_RayFlagsOpaqueEXT) | gl_RayFlagsNoOpaqueEXT;
     // (Xid 109, rtRaySane: an invalid ray is blocked as G-7; the foliage walk keeps no colour)
-    if (!rtRaySane(origin, tmin, dir, tmax)) return fol_walk ? vec3(1.0) : vec3(0.0);
+    RT_BC_SITE(RT_BC_SITE_VIS | ((kind & 15u) << 8) | (mask & 0xFFu));   // (#1128 hang beacon variants only)
+    if (!rtRaySaneT(origin, tmin, dir, tmax)) return fol_walk ? vec3(1.0) : vec3(0.0);   // (#1039: the ray itself untouched)
     // OPAQUE FIRST (RT_WALK_OFIRST): a blocking walk over the full shadow classes (the disc rays: not the
     // translucent split's, the foliage transmission's or a force-opaque walk's -- those meet only one
     // kind of geometry anyway) first asks the hardware alone: the same ray and flags with the non-opaque
@@ -274,7 +292,7 @@ vec3 rtVisWalkF(vec3 origin, vec3 dir, float tmin, float tmax, uint mask, uint k
     // in front (every kind adds 0 for a committed caster: the walk below returns 0 then, tinted layers
     // and budget alike). Clear: nothing opaque lies on the segment, so the walk below meets only the
     // non-opaque layers -- it culls the opaque geometry and comes to the same result.
-    if (RT_WALK_OFIRST && !fol_walk && !trans_walk && !rt_proj_facing && (flags & gl_RayFlagsOpaqueEXT) == 0u)   // <GMDX> (not NoOpaque)
+    if (RT_WALK_OFIRST && !fol_walk && !trans_walk && (flags & gl_RayFlagsOpaqueEXT) == 0u)
     {
         rayQueryEXT rq0;
         rayQueryInitializeEXT(rq0, uTLAS, flags | gl_RayFlagsCullNoOpaqueEXT, mask & 0xFFu, origin, tmin, dir, tmax);
@@ -284,58 +302,88 @@ vec3 rtVisWalkF(vec3 origin, vec3 dir, float tmin, float tmax, uint mask, uint k
         flags |= gl_RayFlagsCullOpaqueEXT;
     }
     rayQueryEXT rq;
-    rayQueryInitializeEXT(rq, uTLAS, flags, mask & 0xFFu, origin, tmin, dir, tmax);
     vec3 trans = vec3(1.0);
     uint n_cand = 0u;
     uint n_fol = 0u;   // #735 transmissive layers coloured so far
     const uint budget = (fol_walk || rt_proj_facing) ? RT_CANDIDATE_BUDGET_NOOPAQUE : RT_CANDIDATE_BUDGET;   // <GMDX> rt_proj_facing
-    while (rayQueryProceedEXT(rq))
+    // (#1039 occupancy) THE SELF PROBE OUTSIDE THE TRAVERSAL: a receiver whose no-self-shadow owner is still
+    // UNKNOWN (rtSelfCandidate) resolves it by its own probe ray the first time a throttled character's
+    // candidate arrives. Run there, inside this loop, the probe's traversal was nested in the walk's -- two
+    // queries and the walk's whole state live at once, the walk kernels' register peak. Instead the walk ENDS
+    // at that candidate (no decision taken on it), the probe runs with no query live, and the walk runs again
+    // from its start (pass 2: the owner known). Exact: every candidate before that one had owner 0, whose
+    // rules never read the owner, so pass 2 takes the same decisions on them (the same ray, flags and
+    // budget count), then decides the rest as the nested probe would have let the walk go on; rt_block_t
+    // starts pass 2 from its entry value (rt_block_dyn only ever turns on, and pass 2 meets those casters
+    // again). The ray was sanitised once (no second rtRaySane: the query budget counts as before). A walk
+    // whose owner is known (0 or resolved) or a foliage walk (no self rules) takes one pass.
+    const float bt0 = rt_block_t;
+    [[dont_unroll]] for (uint pass = 0u; pass < (probeOut ? 1u : 2u); ++pass)   // (probeOut: one pass, no ray kept for a second)
     {
-        if (rayQueryGetIntersectionTypeEXT(rq, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
-        if (++n_cand > budget)
+        bool probe = false;
+        rayQueryInitializeEXT(rq, uTLAS, flags, mask & 0xFFu, origin, tmin, dir, tmax);
+        while (rayQueryProceedEXT(rq))
         {
-            // over budget (G-7): the shadow walks treat it as opaque -- the ray is blocked here; the
-            // foliage ray keeps the colour gathered so far (visibility is the shadow rays')
-            if (!fol_walk) rayQueryConfirmIntersectionEXT(rq);
-            rayQueryTerminateEXT(rq);
-            break;
+            if (rayQueryGetIntersectionTypeEXT(rq, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
+            if (++n_cand > budget)
+            {
+                // over budget (G-7): the shadow walks treat it as opaque -- the ray is blocked here; the
+                // foliage ray keeps the colour gathered so far (visibility is the shadow rays')
+                if (!fol_walk) rayQueryConfirmIntersectionEXT(rq);
+                rayQueryTerminateEXT(rq);
+                break;
+            }
+            const uint id = rtHitInstance(uint(rayQueryGetIntersectionInstanceCustomIndexEXT(rq, false)),
+                                          uint(rayQueryGetIntersectionGeometryIndexEXT(rq, false)));
+            // <GMDX> projector rays: a single-sided face met on its front faces away from the light
+            if (rt_proj_facing && !fol_walk && rtIdIn(id) && (rt_instances[id].flags & 256u) == 0u
+                && rayQueryGetIntersectionFrontFaceEXT(rq, false)) continue;
+            uint fol = RT_FOL_OCCLUDE;
+            if (fol_walk)
+            {
+                if (!rtIdIn(id) || (rt_instances[id].flags & 256u) != 0u) continue;   // double-sided: an occluder (/ #874 guard)
+            }
+            else
+            {
+                // No-self-shadow characters (rtSelfCandidate): the receiver's own stale geometry never
+                // occludes it; another throttled character's opaque face is solid at once.
+                const uint owner = RT_CAND_OWNER(rq);
+                if (owner != 0u && rt_self_owner == RT_SELF_UNKNOWN) { probe = true; rayQueryTerminateEXT(rq); break; }
+                const uint self_c = rtSelfCandidate(owner, id);
+                if (self_c == 1u) continue;
+                if (self_c == 2u || opaque_walk) { rayQueryConfirmIntersectionEXT(rq); continue; }
+                // An away-facing face of a single-sided worn / rigged caster (rt_fol_rig; only alpha-blend
+                // ones arrive -- the rest are culled in traversal): the shadow pass's alpha FS drops it at
+                // ANY alpha, so it neither occludes nor tints -- no alpha fetch. (Static leaves keep #735's
+                // solid-only rule in rtWalkCand.)
+                fol = rtFolAway(id, rayQueryGetIntersectionFrontFaceEXT(rq, false));
+                if (fol == RT_FOL_PASS) continue;
+            }
+            // (the candidate's rule: its own function of the intersection + the small accumulator -- nothing
+            //  of the caller is needed past the alpha test; the transforms are read inside, where used)
+            if (rtWalkCand(id, RT_HIT_PRIM(rq, false, id), rayQueryGetIntersectionBarycentricsEXT(rq, false),
+                           rayQueryGetIntersectionTEXT(rq, false), dir, rq, kind, ks, fol, trans, n_fol))
+            {
+                if (fol_walk) { rayQueryTerminateEXT(rq); break; }
+                rayQueryConfirmIntersectionEXT(rq);
+            }
         }
-        const uint id = rtHitInstance(uint(rayQueryGetIntersectionInstanceCustomIndexEXT(rq, false)),
-                                      uint(rayQueryGetIntersectionGeometryIndexEXT(rq, false)));
-        // <GMDX> projector rays: a single-sided face met on its front faces away from the light
-        if (rt_proj_facing && !fol_walk && rtIdIn(id) && (rt_instances[id].flags & 256u) == 0u
-            && rayQueryGetIntersectionFrontFaceEXT(rq, false)) continue;
-        uint fol = RT_FOL_OCCLUDE;
-        if (fol_walk)
-        {
-            if (!rtIdIn(id) || (rt_instances[id].flags & 256u) != 0u) continue;   // double-sided: an occluder (/ #874 guard)
-        }
-        else
-        {
-            // No-self-shadow characters (rtSelfCandidate): the receiver's own stale geometry never
-            // occludes it; another throttled character's opaque face is solid at once.
-            const uint self_c = rtSelfCandidate(RT_CAND_OWNER(rq), id);
-            if (self_c == 1u) continue;
-            if (self_c == 2u || opaque_walk) { rayQueryConfirmIntersectionEXT(rq); continue; }
-            // An away-facing face of a single-sided worn / rigged caster (rt_fol_rig; only alpha-blend
-            // ones arrive -- the rest are culled in traversal): the shadow pass's alpha FS drops it at
-            // ANY alpha, so it neither occludes nor tints -- no alpha fetch. (Static leaves keep #735's
-            // solid-only rule in rtWalkCand.)
-            fol = rtFolAway(id, rayQueryGetIntersectionFrontFaceEXT(rq, false));
-            if (fol == RT_FOL_PASS) continue;
-        }
-        // (the candidate's rule: its own function of the intersection + the small accumulator -- nothing
-        //  of the caller is needed past the alpha test; the transforms are read inside, where used)
-        if (rtWalkCand(id, RT_HIT_PRIM(rq, false, id), rayQueryGetIntersectionBarycentricsEXT(rq, false),
-                       rayQueryGetIntersectionTEXT(rq, false), dir, rq, kind, ks, fol, trans, n_fol))
-        {
-            if (fol_walk) { rayQueryTerminateEXT(rq); break; }
-            rayQueryConfirmIntersectionEXT(rq);
-        }
+        if (!probe) break;
+        if (probeOut) { rt_walk_probe = true; return vec3(0.0); }   // (the caller probes and walks again)
+        // (pass 2: the walk from its start, the owner resolved)
+        rt_self_owner = rtSelfProbe();
+        rt_block_t = bt0;
+        trans = vec3(1.0);
+        n_cand = 0u;
+        n_fol = 0u;
     }
     if (fol_walk) return trans;
     if (rayQueryGetIntersectionTypeEXT(rq, true) == gl_RayQueryCommittedIntersectionNoneEXT) return trans;
     return rtWalkBlocked(origin, dir, trans_walk, rq);
+}
+vec3 rtVisWalkF(vec3 origin, vec3 dir, float tmin, float tmax, uint mask, uint kind, uint ks)
+{
+    return rtVisWalkFP(origin, dir, tmin, tmax, mask, kind, ks, false);
 }
 vec3 rtVisWalk(vec3 origin, vec3 dir, float tmin, float tmax, uint mask, uint kind)
 {

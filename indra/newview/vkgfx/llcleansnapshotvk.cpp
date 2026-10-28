@@ -48,6 +48,23 @@ constexpr uint64_t kFenceTimeoutNs = 10ull * 1000ull * 1000ull * 1000ull;
 
 enum { PIPE_H = 0, PIPE_V, PIPE_DEPTH, PIPE_ACC, PIPE_RESOLVE, PIPE_COUNT };
 
+// The accumulation's Gaussian width in OUTPUT px (#1093). Fixed (RenderSnapshotAdaptiveSigma
+// off, the old behaviour): kAccSigma. Adaptive: the samples per output pixel are
+// frames / up^2 (up = output px per live px). Four per pixel (the minimum the frame count
+// guarantees, a 2x or 4x shot) leave gaps of about half an output pixel, which a sigma of 0.5
+// bridges; at 8 or more per pixel (a 1.25x - 1.5x shot) the grid is dense and a narrower
+// splat keeps the detail: sigma = 0.5 * sqrt(4 / spp), clamped to [0.3, 0.5]. A Gaussian
+// (never a Lanczos / Mitchell weight) because the splat gathers irregular, jittered samples:
+// its weights are positive, so it cannot ring on a high-contrast edge; the contrast-adaptive
+// sharpen of the mean (RESOLVE) restores the edge response without ringing.
+float accSigma(const LLCleanSnapshotVK::Request& r, float cropW)
+{
+    if (!r.adaptiveSigma || cropW <= 0.f) return kAccSigma;
+    const float up = (float)r.outW / cropW;
+    const float spp = (float)r.frames / std::max(up * up, 1e-3f);
+    return std::min(std::max(0.5f * std::sqrt(4.f / std::max(spp, 1e-3f)), 0.3f), kAccSigma);
+}
+
 VkShaderModule snapModule(VkDevice dev, const uint32_t* code, size_t bytes, const char* name)
 {
     VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
@@ -413,7 +430,8 @@ void LLCleanSnapshotVK::record(VkCommandBuffer cmd, const Source& s)
         if (first) pc.aux[0] |= kFlagFirst;
         if (mMotionNow) { pc.aux[0] |= kFlagMotion; pc.aux[1] = s.motionW; pc.aux[2] = s.motionH; }
         pc.p0[0] = s.jitterPx[0]; pc.p0[1] = s.jitterPx[1];
-        pc.p0[2] = kAccSigma; pc.p0[3] = kMotionPx;
+        pc.p0[2] = accSigma(r, pc.crop[2]); pc.p0[3] = kMotionPx;
+        pc.p1[0] = r.sharpen;   // RESOLVE: CAS on the mean (#1093)
         push();
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPipe[PIPE_ACC]);
         vkCmdDispatch(cmd, (r.outW + 7u) / 8u, (r.outH + 7u) / 8u, 1);

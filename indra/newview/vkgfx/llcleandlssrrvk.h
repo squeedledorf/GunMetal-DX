@@ -96,6 +96,9 @@ public:
         float    marchDist = 30.f;          // RenderVKDlssHitMarch (m)
         uint32_t marchSteps = 24;
         uint32_t slot = 0, slotCount = 2;
+        // Milliseconds since the previous frame, shared by every view's instance (#1075 stereo:
+        // one clock for both eyes); < 0: this instance's own clock (a single view, as before).
+        float    frameTimeMs = -1.f;
         // The output IS the scene colour input (render = display): it is moved
         // SHADER_READ_ONLY -> GENERAL inside record(), after the guide pass read it.
         bool     outIsScene = false;

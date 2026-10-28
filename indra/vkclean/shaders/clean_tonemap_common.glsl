@@ -21,6 +21,11 @@ layout(push_constant) uniform Push {
                // final pass is skipped and its dither runs here): amount (0 = off),
                // frame id (mod 2^20), animate; w = (#820) the baked tail LUT's edge size N
                // (0 = evaluate the tail per pixel)
+#ifdef GMDX_TONEMAP_NIGHT_EYE   // <GMDX> clean_tonemap.frag only (the LUT bake's range stays 64 B)
+    vec4 p3;   // night vision: Purkinje strength, cd/m^2 per renderer unit, log2 exposure at 5 / 0.005 cd/m^2
+    vec4 p4;   // low-light noise + acuity loss (0 = off), frame id (mod 1024), photo night's cold grade
+               // (GMDXNightLook 1; 0 = none), 0
+#endif
 } pc;
 
 // ---- Colour grade (Lightbox; upstream Alchemy colorCorrectF + colorGradeUtilF) ----

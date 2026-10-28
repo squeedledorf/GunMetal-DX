@@ -155,6 +155,10 @@ bool LLCleanVolCloudsVK::create(VkDeviceContext* ctx, VkDescriptorSetLayout dslD
         VkDescriptorSetLayoutCreateInfo lci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
         lci.bindingCount = 1; lci.pBindings = &b;
         VK_CHECK(vkdCreateSetLayout(dev, &lci, &mNoiseDsl, "mDslVolCloudsNoise"));
+        // <GMDX> the weather map + 1 the params UBO (gmdx_cloud_weather.comp: the tile and the smallest footprint)
+        VkDescriptorSetLayoutBinding wb[2] = {b, b};
+        wb[1].binding = 1; wb[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        lci.bindingCount = 2; lci.pBindings = wb;
         VK_CHECK(vkdCreateSetLayout(dev, &lci, &mWxDsl, "mDslVolCloudsWeather"));
     }
     {
@@ -251,6 +255,11 @@ bool LLCleanVolCloudsVK::create(VkDeviceContext* ctx, VkDescriptorSetLayout dslD
             nw[i].descriptorCount = 1; nw[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; nw[i].pImageInfo = &ni[i];
         }
         vkUpdateDescriptorSets(dev, 3, nw, 0, nullptr);
+        // <GMDX> the weather pass reads the params too
+        VkWriteDescriptorSet wu{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        wu.dstSet = mWxSet; wu.dstBinding = 1; wu.descriptorCount = 1;
+        wu.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; wu.pBufferInfo = &ub;
+        vkUpdateDescriptorSets(dev, 1, &wu, 0, nullptr);
     }
 
     // ---- pipeline layouts (no push constants: everything comes from the params UBO) ----
@@ -507,9 +516,9 @@ void LLCleanVolCloudsVK::writeMainSets()
 // ---------------------------------------------------------------------------
 bool LLCleanVolCloudsVK::prepare(const Frame& f)
 {
-    static LLCachedControl<U32> s_quality(gSavedSettings, "RenderVKVolCloudQuality", 2);
+    static LLCachedControl<U32> s_quality(gSavedSettings, "RenderVKVolCloudQuality", 3);   // <GMDX> default High
     static LLCachedControl<F32> s_alt(gSavedSettings, "RenderVKVolCloudAltitude", 1500.f);
-    static LLCachedControl<F32> s_thick(gSavedSettings, "RenderVKVolCloudThickness", 1500.f);
+    static LLCachedControl<F32> s_thick(gSavedSettings, "RenderVKVolCloudThickness", 2500.f);   // <GMDX> default 2500 m
     static LLCachedControl<bool> s_shadows(gSavedSettings, "RenderVKVolCloudShadows", true);
     static LLCachedControl<F32> s_shadow_k(gSavedSettings, "RenderVKVolCloudShadowStrength", 0.85f);
     static LLCachedControl<F32> s_scale(gSavedSettings, "RenderVKVolCloudScale", 1.f);
@@ -543,11 +552,14 @@ bool LLCleanVolCloudsVK::prepare(const Frame& f)
 
     const U32 q = llclamp((U32)s_quality, 1u, 3u);
     const Tier& tt = kTiers[q];
-    // <GMDX> No history while the camera is in (or at the edge of) the layer: the cloud is all
-    // around and close, history smeared it off the avatar and nearby objects as trails.
+    // <GMDX> In (or at the edge of) the layer every texel is marched each frame and the history
+    // only averages the dither: the cloud is all around and close. The trails history once left
+    // on the avatar and nearby objects came from blending texels whose march ended at a different
+    // surface; the temporal pass now drops those (vc.temporal.w). Without the history the step
+    // jitter stood still and every step showed as a band.
     const bool inLayer = f.camTime[2] > base - 300.f && f.camTime[2] < top + 300.f;
-    const bool temporal = s_temporal && !f.offscreen && !inLayer;
-    uint32_t pattern = temporal ? tt.pattern : 0u;
+    const bool temporal = s_temporal && !f.offscreen;
+    uint32_t pattern = temporal && !inLayer ? tt.pattern : 0u;
     uint32_t steps = tt.steps, light = tt.light;
     if (f.offscreen) { steps = steps * 3 / 2; light = 6; }
 
@@ -608,6 +620,11 @@ bool LLCleanVolCloudsVK::prepare(const Frame& f)
         static LLCachedControl<F32> s_bodies(gSavedSettings, "GMDXCloudBodies", 1.f);
         P.gmdx[4] = (float)mShapes.count();
         P.gmdx[5] = llclamp((F32)s_bodies, 0.f, 1.f);
+        // The smallest cloud footprint the EEP cloud texture may draw (m), a share of the shell's
+        // thickness: the coverage stands straight up through the cloud type's height band, so a
+        // feature narrower than that is a column, not a cloud (gmdx_cloud_weather.comp).
+        static LLCachedControl<F32> s_minw(gSavedSettings, "GMDXCloudMinWidth", 0.05f);
+        P.gmdx[6] = llclamp((F32)s_minw, 0.f, 0.5f) * (top - base);
     }
     {
         // #783 M2 LIGHTNING: the flash lights the cloud layer from inside (the composite adds it
@@ -701,9 +718,10 @@ bool LLCleanVolCloudsVK::prepare(const Frame& f)
             }
         const bool jump = dl[0] * dl[0] + dl[1] * dl[1] + dl[2] * dl[2] > kCamJump * kCamJump;
         const bool reset = !mHistValid || f.cameraCut || jump || q != mPrevQuality || w != mW || h != mH;
-        P.temporal[0] = (float)tt.hist;
+        P.temporal[0] = (float)(inLayer ? std::min(tt.hist, 8u) : tt.hist);   // <GMDX> (in the layer: quicker to follow)
         P.temporal[1] = reset ? 1.f : 0.f;
-        P.temporal[2] = tt.widen;
+        P.temporal[2] = pattern == 0u ? kTiers[3].widen : tt.widen;   // <GMDX> (the widening of the pattern marched)
+        P.temporal[3] = inLayer ? 1.f : 0.f;   // <GMDX> march-end test + march end kept (clean_vol_cloud_temporal.comp)
         mHistCur ^= 1u;
     }
     if (q != mLogQuality || w != mLogW || h != mLogH)

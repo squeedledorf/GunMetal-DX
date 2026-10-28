@@ -206,6 +206,7 @@ void invalid_message_callback(LLMessageSystem*, void*, EMessageException);
 
 void process_initiate_download(LLMessageSystem* msg, void**);
 void start_new_inventory_observer();
+void suppress_inventory_auto_open_for_folder(const LLUUID& folder_id, bool suppress); // <GMDX> <OTS> sound->notecard upload
 void open_inventory_offer(const uuid_vec_t& items, const std::string& from_name);
 
 // Returns true if item is not in certain "quiet" folder which don't need UI

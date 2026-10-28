@@ -89,6 +89,11 @@ class ViewerManifest(LLManifest):
                 # scripts/clouds/corvae_shapes.py)
                 self.path("gmdx_cloud_shapes.bin")
 
+                # <GMDX> the night sky's stars (Yale Bright Star Catalogue) and Milky Way
+                # (ESO/S. Brunier, CC BY 4.0; scripts/nightsky/gmdx_night_sky_assets.py)
+                self.path("gmdx_bsc5.bin")
+                self.path("gmdx_milkyway.jpg")
+
                 # ... and the default camera position settings
                 self.path("camera")
 
@@ -197,6 +202,7 @@ class ViewerManifest(LLManifest):
                     self.path("phosphor/*.svg")
                     self.path("phosphor/LICENSE")
                     self.path("phosphor_authored/*.svg")   # our own, in the same style
+                    self.path("icons_cc/*.svg")            # <GMDX> pin icons under CC licences (credits: Help > About)
                     self.path("salt_and_pepper.jpg")
                     self.path("*.tga")
                     self.path("*.j2c")
@@ -626,6 +632,10 @@ class Windows_x86_64_Manifest(ViewerManifest):
                     'llwebrtc.dll',
             ):
                 self.path(libfile)
+
+            # #1118 VR dictation: whisper.cpp, loaded at run time on first use
+            # (cmake/Whisper.cmake; absent when configured with SL_WHISPER=OFF).
+            self.path_optional("slwhisper.dll")
 
             if self.args['openal'] == 'ON':
                 # Get openal dll
@@ -1138,6 +1148,11 @@ class LinuxManifest(ViewerManifest):
         with self.prefix(src=os.path.join(self.args['build'], os.pardir, "llwebrtc" ), dst="lib"):
             self.path("libllwebrtc.so")
 
+        # #1118 VR dictation: whisper.cpp, loaded at run time on first use (cmake/Whisper.cmake;
+        # absent when configured with SL_WHISPER=OFF).
+        with self.prefix(dst="lib"):
+            self.path_optional("libslwhisper.so")
+
         # plugins
         with self.prefix(dst="bin/llplugin"):
             with self.prefix(src=os.path.join(self.args['build'], os.pardir, 'media_plugins')):
@@ -1477,7 +1492,7 @@ class Linux_x86_64_Manifest(LinuxManifest):
 
         SLIPSTREAM_LIBDECOR_LIBDIR overrides the search (a directory laid out
         like the ones above). Use it for a tarball built on a distribution whose
-        packages target x86-64-v3/v4 (CachyOS; `make glibc-check` warns): e.g.
+        packages target x86-64-v3/v4 (CachyOS; `make check-package` warns): e.g.
         extract Arch's generic extra/libdecor package and point it at <dir>/usr/lib.
         Release builds (CI, Ubuntu 24.04) copy generic x86-64 files needing
         GLIBC_2.38 at most."""

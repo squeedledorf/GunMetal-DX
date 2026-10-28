@@ -11,7 +11,7 @@ layout(set = 0, binding = 0) uniform sampler2D uSrc;    // scene (extract) or th
 layout(set = 0, binding = 1) uniform sampler2D uGlow;   // per-face glow target (extract only)
 
 layout(push_constant) uniform BloomPush {
-    vec4 p0;   // texel size of the source (xy), mode, scatter
+    vec4 p0;   // texel size of the source (xy), mode, scatter (mode 3) / <GMDX> threshold term weight (mode 0, 0 = 1)
     vec4 p1;   // threshold, knee, firefly clamp, alpha glow boost
     vec4 p2;   // halation luminance weights (rgb), halation on
 } pc;
@@ -49,6 +49,7 @@ void main()
         // face glow blooms. Halation is a threshold effect too and goes with it.
         const bool thr_on = pc.p1.x >= 0.0;
         float factor = thr_on ? softThreshold(lum, pc.p1.x, pc.p1.y) / max(lum, 1e-4) : 0.0;
+        factor *= pc.p0.w > 0.0 ? pc.p0.w : 1.0;   // <GMDX> night bloom (llcleanrenderervk.cpp recordBloom)
         // Per-face glow as LL: the glow target holds the glow amount (blended coverage),
         // the colour comes from the composited scene here -- clamped to the LDR range
         // (peak normalised to 1), since LL's glowExtract reads the tone-mapped pixel

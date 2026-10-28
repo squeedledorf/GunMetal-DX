@@ -272,9 +272,14 @@ bool VkSwapchain::acquire(VkDeviceContext& ctx, uint32_t* outImageIndex,
     if (vkDeviceIsLost()) return false;
     vkAddrFrameTick();
 
-    VkResult r = vkAcquireNextImageKHR(ctx.device(), mSwapchain, UINT64_MAX,
+    VkResult r = vkAcquireNextImageKHR(ctx.device(), mSwapchain, mAcquireTimeout,
                                        mImageAvailable[mFrame], VK_NULL_HANDLE,
                                        outImageIndex);
+    if (r == VK_TIMEOUT || r == VK_NOT_READY) {
+        // #1074 (VR only: the timeout is UINT64_MAX otherwise): no image in time, the semaphore
+        // was not signaled, the fence is not reset -- skip the window's frame.
+        return false;
+    }
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT) {
         // No image delivered and the semaphore was NOT signaled: skip the frame
         // and recreate. Do not reset the fence (no submit this frame).
@@ -304,6 +309,15 @@ bool VkSwapchain::acquire(VkDeviceContext& ctx, uint32_t* outImageIndex,
         return false;
     }
     // Only reset the fence once we know we'll submit work this frame.
+    VK_CHECK(vkResetFences(ctx.device(), 1, &mInFlight[mFrame]));
+    return true;
+}
+
+bool VkSwapchain::beginFrameWithoutImage(VkDeviceContext& ctx) {
+    if (vkDeviceIsLost() || !ctx.device()) return false;   // #135
+    if (mFrame >= mInFlight.size() || !mInFlight[mFrame]) return false;
+    VK_CHECK(vkWaitForFences(ctx.device(), 1, &mInFlight[mFrame], VK_TRUE, UINT64_MAX));
+    if (vkDeviceIsLost()) return false;
     VK_CHECK(vkResetFences(ctx.device(), 1, &mInFlight[mFrame]));
     return true;
 }

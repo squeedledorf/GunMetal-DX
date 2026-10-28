@@ -37,7 +37,7 @@
    left="0"
    top="0"
    width="500"
-   height="785"
+   height="849"
    name="sound_scroll_panel">
     <slider
      control_name="AudioLevelMaster"
@@ -827,6 +827,14 @@
      name="parcel_speakers_outside_silent"
      value="2"/>
   </combo_box>
+  <panel
+   layout="topleft"
+   filename="panel_audio_devices.xml"
+   name="audio_devices_panel"
+   top_pad="8"
+   width="480"
+   left="18"
+   class="panel_audio_devices"/>
   <button
    control_name="ShowDeviceSettings"
    enabled_control="EnableVoiceChat"
@@ -837,6 +845,7 @@
    layout="topleft"
    left="20"
    top_pad="5"
+   tool_tip="Voice-only devices and the microphone level. 'Same as main device' follows the Output / Input device above."
    name="device_settings_btn"
    width="200">
   </button>

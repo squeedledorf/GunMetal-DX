@@ -32,6 +32,9 @@
 //   [6] moisture level, droplet radius, ice level, 0
 //   [7] star alpha (star_brightness / 500), field rotation (rad about Z), twinkle time, 0
 //   [8] tex idx sun A, sun B, moon, bloom           [9] tex idx rainbow, halo, -, -
+// <GMDX> The night sky (gmdx_night_sky.glsl) takes the spare .w of [2], [4] - [7], [9].zw,
+// sky_fx2.yzw and the top 24 slots of ssr.meteors (NS_SPACE); all zero while GMDXPhysicalNight
+// is off.
 
 const float SKY_STAR_RADIUS = 15000.0;   // LLVOWLSky DISTANCE_TO_STARS (dome radius)
 const float SKY_STAR_GRID   = 32.0;      // cells per cube-face edge
@@ -125,6 +128,33 @@ vec3 skyProceduralSun(vec3 pre, vec3 d)
     return min(pre + 2.0 * ssr.atmos[8].rgb * (core + skirt) * sun_gate, vec3(5.0));
 }
 
+// <GMDX> PHYSICAL NIGHT: the moon's disc (texture colour c, sRGB as LL samples it) over the sky
+// pre value as an HDR light, gain = gmdxMoonDiscGain(); composited in linear light (an alpha
+// blend of an HDR value in the pre space would harden the disc's soft edge). Never darker than
+// LL's own disc (texture x moon_brightness), so a dusk moon with little light keeps its look.
+vec3 gmdxMoonDiscOver(vec3 pre, vec3 c, float gain, float a)
+{
+    const vec3 ll = skyResolve(c * ssr.atmos[12].x);
+    const vec3 lin = max(atmosSrgbToLinear(max(c, vec3(0.0))) * gain, ll);
+    return physkyPre(mix(skyResolve(pre), lin, clamp(a, 0.0, 1.0)));
+}
+
+// <GMDX> PHYSICAL NIGHT: the moon's phase on its disc, from the real sun-moon geometry (EEP moves
+// the two independently). n: the disc's sphere normal at the pixel (toward the viewer), sun and
+// mdir unit directions in the same frame. The lit side faces the sun with a crisp terminator (the
+// moon's dust scatters nearly flat to its edge, not like a Lambert ball), the dark side keeps a
+// faint earthshine, strongest for a crescent (the Earth is then nearly full from the moon).
+// The texture's detail is multiplied, never replaced. The disc's overall brightness by phase is
+// the moon light's own (night-light's K&S factor).
+const float kGmdxEarthshine = 0.04;
+float gmdxMoonPhase(vec3 n, vec3 sun, vec3 mdir)
+{
+    const float lit = smoothstep(-0.03, 0.10, dot(n, sun));
+    const float dark_share = 0.5 * (1.0 + dot(mdir, sun));   // 1 at new moon, 0 at full
+    const float es = kGmdxEarthshine * dark_share;
+    return es + (1.0 - es) * lit;
+}
+
 vec3 skyProceduralMoon(vec3 pre, vec3 d)
 {
     vec3  u_sun_dir   = atmosToYUp(ssr.atmos[10].xyz);
@@ -148,6 +178,11 @@ vec3 skyProceduralMoon(vec3 pre, vec3 d)
     vec3 n = right * u + up * v - mdir * w;
     float lit = clamp(dot(n, normalize(u_sun_dir)), 0.0, 1.0);
     float edge = smoothstep(1.0, 0.8, r2);
+    // <GMDX> physical night: the disc as a light (clean_atmos_common.glsl gmdxMoonDiscGain)
+    const float hdr = gmdxMoonDiscGain();
+    if (gmdxNightOn()) lit = gmdxMoonPhase(n, normalize(u_sun_dir), mdir);   // (the faint 0.05 floor became the earthshine)
+    if (hdr > 0.0)
+        return gmdxMoonDiscOver(pre, ssr.atmos[9].rgb * lit, hdr, edge * moon_gate);
     vec3 moon_col = ssr.atmos[9].rgb * ssr.atmos[12].x * (0.05 + 0.95 * lit);
     return mix(pre, clamp(moon_col * 2.0, vec3(0), vec3(5)), edge * moon_gate);
 }
@@ -165,6 +200,8 @@ vec3 skyHash33(vec3 p)
     p += dot(p, p.yxz + 33.33);
     return fract((p.xxy + p.yxx) * p.zyx);
 }
+
+#include "gmdx_night_sky.glsl"   // <GMDX> the catalogue's stars, Milky Way, airglow, zodiacal light
 
 // starsV/F for the star whose quad could cover world dir d (additive rgb * a). Must be
 // called in uniform control flow (derivatives).
@@ -234,9 +271,17 @@ vec3 skyBodiesComposite(vec3 pre, vec3 dir_world)
     vec2 moon_uv = 0.5 + 0.5 * moon_xy;
     vec2 sdx = dFdx(sun_uv),  sdy = dFdy(sun_uv);
     vec2 mdx = dFdx(moon_uv), mdy = dFdy(moon_uv);
-    vec3 stars = skyStars(d);
+    // <GMDX> GMDXPhysicalNight: the catalogue's stars in place of LL's random ones (uniform branch)
+    const bool ns_on = ssr.bodies[7].w > 0.0;
+    const bool ns_glow = ssr.bodies[4].w + ssr.bodies[5].w + ssr.bodies[6].w + nsSpace(16).w > 0.0;   // (+ the deep sky)
+    const float ns_pix = max(max(length(dFdx(d)), length(dFdy(d))), 1e-6);
+    const mat3 ns_sky = (ns_on || ns_glow) ? nsWorldToSky() : mat3(1.0);
+    vec3 stars = ns_on ? nsStars(d, ns_sky * d, ns_pix) + nsPlanets(d, ns_sky * d, ns_pix) + nsSatellites(d, ns_pix)
+                       : skyStars(d);   // <GMDX> + planets, satellites
     bool stars_hidden = false;
     vec3 d_yup = atmosToYUp(d);   // the procedural fallbacks work in LL's Y-up frame
+    // <GMDX> ... and the Milky Way, airglow and zodiacal light, under the sun and moon
+    if (ns_glow) pre = nsAddLinear(pre, nsSkyGlow(d, ns_sky));
 
     // ---- sun (sunDiscF): A/B mixed by the blend factor, alpha-blended ----
     if (ssr.bodies[8].x < 0.0)
@@ -248,11 +293,20 @@ vec3 skyBodiesComposite(vec3 pre, vec3 dir_world)
         vec4 c = skyTexClampGrad(ssr.bodies[8].x, sun_uv, sdx, sdy);
         if (ssr.bodies[1].w > 0.0 && ssr.bodies[8].y != ssr.bodies[8].x)
             c = mix(c, skyTexClampGrad(ssr.bodies[8].y, sun_uv, sdx, sdy), ssr.bodies[1].w);
+        // <GMDX> space at altitude (clean_atmos_common.glsl gmdxSpace): no air to spread or redden it,
+        // a sharper, whiter disc (the texture's soft glow tightened, its colour toward white).
+        const float sp = gmdxSpace();
+        if (sp > 0.0)
+        {
+            c.a = pow(clamp(c.a, 0.0, 1.0), 1.0 + 3.0 * sp);
+            c.rgb = mix(c.rgb, vec3(max(max(c.r, c.g), c.b)), 0.7 * sp);
+        }
         pre = mix(pre, c.rgb, clamp(c.a, 0.0, 1.0));
         stars_hidden = true;   // the sun quad writes depth (no discard)
     }
 
     // ---- moon (moonF): tex * moon_brightness, faded near the horizon ----
+    // (<GMDX> physical night: an HDR light, gmdxMoonDiscOver; the EEP texture's detail and alpha kept)
     if (ssr.bodies[8].z < 0.0)
     {
         pre = skyProceduralMoon(pre, d_yup);
@@ -264,13 +318,27 @@ vec3 skyBodiesComposite(vec3 pre, vec3 dir_world)
         {
             float mz = ssr.bodies[3].z;
             float fade = (mz > 0.0) ? clamp(mz * mz * 4.0, 0.0, 1.0) : 1.0;
-            pre = mix(pre, c.rgb * ssr.atmos[12].x, clamp(c.a * fade, 0.0, 1.0));
+            // <GMDX> physical night: the phase on the EEP texture (sphere normal from the billboard);
+            // not on a creator's own moon texture (shadow_fit.w < 0), drawn as Second Life draws it
+            if (gmdxNightOn() && ssr.shadow_fit.w >= 0.0)
+            {
+                const vec3 mc = normalize(ssr.bodies[3].xyz);
+                const vec2 q = moon_xy / max(length(moon_xy), 1.0);
+                const vec3 n = normalize(normalize(ssr.bodies[4].xyz) * q.x + normalize(ssr.bodies[5].xyz) * q.y
+                                         - mc * sqrt(max(1.0 - dot(q, q), 0.0)));
+                c.rgb *= gmdxMoonPhase(n, normalize(ssr.atmos[10].xyz), mc);
+            }
+            const float hdr = gmdxMoonDiscGain();   // <GMDX> physical night: the disc as a light
+            if (hdr > 0.0) pre = gmdxMoonDiscOver(pre, c.rgb, hdr, c.a * fade);
+            else           pre = mix(pre, c.rgb * ssr.atmos[12].x, clamp(c.a * fade, 0.0, 1.0));
             stars_hidden = true;
         }
     }
 
     // ---- stars (starsF, additive, behind the bodies) ----
-    if (!stars_hidden) pre += stars;
+    // <GMDX> the catalogue's in linear light
+    if (!stars_hidden && ns_on) { if (any(greaterThan(stars, vec3(0.0)))) pre = nsAddLinear(pre, stars); }
+    else if (!stars_hidden) pre += stars;
     return pre;
 }
 #endif   // CLEAN_SKY_SCENERY_ONLY

@@ -128,13 +128,15 @@ bool LLAudioEngine_OpenAL::init(void* userdata, const std::string &app_title)
         return false;
     }
     mDevice = alcOpenDevice(NULL);
+    mOutputName.clear();
     if (!mDevice)
     {
         LL_WARNS() << "LLAudioEngine_OpenAL::init() alcOpenDevice failed" << LL_ENDL;
         alutExit();
         return false;
     }
-    std::vector<ALCint> attrs;
+    std::vector<ALCint>& attrs = mDeviceAttrs;   // kept: a device switch (#1122) reopens with them
+    attrs.clear();
     const bool has_hrtf_ext = alcIsExtensionPresent(mDevice, "ALC_SOFT_HRTF") == ALC_TRUE;
     if (has_hrtf_ext)
     {
@@ -262,6 +264,8 @@ void LLAudioEngine_OpenAL::shutdown()
     mContext = nullptr;
     if (mDevice) alcCloseDevice(mDevice);
     mDevice = nullptr;
+    mOutputName.clear();
+    mOutputLimiter = false;
 
     LL_INFOS() << "About to alutExit()" << LL_ENDL;
     if(!alutExit())
@@ -273,6 +277,119 @@ void LLAudioEngine_OpenAL::shutdown()
 
     delete mListenerp;
     mListenerp = NULL;
+}
+
+// ---- #1122 output device (VR headset audio; the user's device choice, LLAudioDevices) ----
+// Only reached while a VR session starts / ends (LLVRAudio) or when the user chose a device in
+// Sound preferences; with the default choice the desktop never enumerates.
+
+#ifndef ALC_OUTPUT_LIMITER_SOFT
+#define ALC_OUTPUT_LIMITER_SOFT 0x199A
+#endif
+
+namespace
+{
+bool alcEnumerateAll()
+{
+    return alcIsExtensionPresent(NULL, "ALC_ENUMERATE_ALL_EXT") == ALC_TRUE;
+}
+
+// A list of NUL-terminated names ending with an empty one.
+std::vector<std::string> alcNameList(const ALCchar* list)
+{
+    std::vector<std::string> out;
+    while (list && *list)
+    {
+        out.emplace_back(list);
+        list += out.back().size() + 1;
+    }
+    return out;
+}
+}
+
+// virtual
+std::vector<std::string> LLAudioEngine_OpenAL::listOutputDevices()
+{
+    return alcNameList(alcGetString(NULL, alcEnumerateAll() ? ALC_ALL_DEVICES_SPECIFIER : ALC_DEVICE_SPECIFIER));
+}
+
+// virtual
+std::vector<std::string> LLAudioEngine_OpenAL::listInputDevices()
+{
+    return alcNameList(alcGetString(NULL, ALC_CAPTURE_DEVICE_SPECIFIER));
+}
+
+// virtual
+std::string LLAudioEngine_OpenAL::defaultOutputDevice()
+{
+    const ALCchar* name = alcGetString(NULL, alcEnumerateAll() ? ALC_DEFAULT_ALL_DEVICES_SPECIFIER
+                                                               : ALC_DEFAULT_DEVICE_SPECIFIER);
+    return name ? std::string(name) : std::string();
+}
+
+// virtual
+std::string LLAudioEngine_OpenAL::defaultInputDevice()
+{
+    const ALCchar* name = alcGetString(NULL, ALC_CAPTURE_DEFAULT_DEVICE_SPECIFIER);
+    return name ? std::string(name) : std::string();
+}
+
+// virtual
+bool LLAudioEngine_OpenAL::switchOutputDevice(const std::string& name, bool limiter)
+{
+    if (!mDevice || !mContext) return false;
+    if (name == mOutputName && limiter == mOutputLimiter) return true;
+    // ALC_SOFT_reopen_device (OpenAL Soft >= 1.22; we ship 1.24.3) moves the open device -- its
+    // contexts, sources and buffers -- to another output, so playing sounds carry on. NULL
+    // goes back to the system default (which the backend then follows again).
+    LPALCREOPENDEVICESOFT reopen = nullptr;
+    if (alcIsExtensionPresent(mDevice, "ALC_SOFT_reopen_device") == ALC_TRUE)
+    {
+        reopen = reinterpret_cast<LPALCREOPENDEVICESOFT>(alcGetProcAddress(mDevice, "alcReopenDeviceSOFT"));
+    }
+    if (!reopen)
+    {
+        LL_WARNS("VRAudio") << "OpenAL has no ALC_SOFT_reopen_device: world audio stays on its device" << LL_ENDL;
+        return false;
+    }
+    // The init attributes, plus the output limiter when asked for: with the output boosted above
+    // unity gain (the VR headset gain) peaks over full scale are compressed instead of clipped.
+    // (OpenAL Soft only applies its limiter by default to integer output formats; PipeWire /
+    // PulseAudio may run it in float.) Not asked for: the attributes init used, as before.
+    std::vector<ALCint> attrs = mDeviceAttrs;
+    const bool limiter_ext = alcIsExtensionPresent(mDevice, "ALC_SOFT_output_limiter") == ALC_TRUE;
+    if (limiter && limiter_ext)
+    {
+        if (!attrs.empty() && attrs.back() == 0) attrs.pop_back();
+        attrs.push_back(ALC_OUTPUT_LIMITER_SOFT);
+        attrs.push_back(ALC_TRUE);
+        attrs.push_back(0);
+    }
+    const ALCchar* target = name.empty() ? nullptr : name.c_str();
+    if (reopen(mDevice, target, attrs.empty() ? nullptr : attrs.data()) != ALC_TRUE)
+    {
+        // On failure the device keeps playing on the output it had.
+        LL_WARNS("VRAudio") << "alcReopenDeviceSOFT('" << (name.empty() ? "<system default>" : name)
+                            << "') failed (ALC error " << alcGetError(mDevice) << "): world audio stays on '"
+                            << (mOutputName.empty() ? "<system default>" : mOutputName) << "'" << LL_ENDL;
+        return false;
+    }
+    mOutputName = name;
+    mOutputLimiter = limiter;
+    if (limiter && !limiter_ext)
+        LL_INFOS("VRAudio") << "OpenAL has no ALC_SOFT_output_limiter: a boosted output can clip on loud peaks" << LL_ENDL;
+    ALCint freq = 0, hrtf = 0;
+    alcGetIntegerv(mDevice, ALC_FREQUENCY, 1, &freq);
+    const bool has_hrtf_ext = alcIsExtensionPresent(mDevice, "ALC_SOFT_HRTF") == ALC_TRUE;
+    if (has_hrtf_ext) alcGetIntegerv(mDevice, ALC_HRTF_SOFT, 1, &hrtf);
+    const ALCchar* now_on = alcGetString(mDevice, alcEnumerateAll() ? ALC_ALL_DEVICES_SPECIFIER : ALC_DEVICE_SPECIFIER);
+    ALCint lim = 0;
+    if (limiter_ext) alcGetIntegerv(mDevice, ALC_OUTPUT_LIMITER_SOFT, 1, &lim);
+    LL_INFOS("VRAudio") << "world audio (OpenAL) now on '" << ll_safe_string(now_on) << "'"
+                        << (name.empty() ? " (system default)" : "") << ": " << freq << " Hz, HRTF "
+                        << (has_hrtf_ext ? (hrtf ? "on" : "off") : "unsupported") << ", output limiter "
+                        << (limiter_ext ? (lim ? "on" : "off") : "unsupported") << LL_ENDL;
+    return true;
 }
 
 LLAudioBuffer *LLAudioEngine_OpenAL::createBuffer()

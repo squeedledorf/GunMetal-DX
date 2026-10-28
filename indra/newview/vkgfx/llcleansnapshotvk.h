@@ -65,6 +65,9 @@ public:
         uint32_t frames = 1;             // MODE_ACCUM: jittered live frames (<= 64)
         bool     motionReject = false;   // MODE_ACCUM: drop moving pixels by motion vectors
         bool     dither = true;          // MODE_ACCUM: TPDF-dither the resolved 8-bit output once (#932)
+        float    sharpen = 0.f;          // MODE_ACCUM: CAS strength 0..1 on the resolved mean (#1093); 0 = off
+        bool     adaptiveSigma = true;   // MODE_ACCUM: reconstruction width from the samples per pixel (#1093)
+        float    mipBias = 0.f;          // MODE_ACCUM: texture LOD bias offset while the shot renders (#1093)
         float    depthRange[2] = {0.1f, 128.f};    // MODE_DEPTH: metres mapped to 0 .. 255
     };
 
@@ -100,6 +103,7 @@ public:
     bool jitterActive() const { return mState == ST_ARMED && mReq.mode == MODE_ACCUM; }
     uint32_t jitterIndex() const { return mFrame + 1u; }
     uint32_t jitterPhases() const { return mReq.frames; }
+    float    mipBiasOffset() const { return mReq.mipBias; }   // #1093: added to the material LOD bias
     uint32_t point() const { return mReq.point; }
     // The renderer, at each capture point of a live (on-screen) frame.
     void record(VkCommandBuffer cmd, const Source& s);

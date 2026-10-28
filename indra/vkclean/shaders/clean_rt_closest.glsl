@@ -76,6 +76,7 @@ RtHit rtClosestWalk(vec3 o, vec3 d, float tmin, float tmax, RtClosestRules r)
         // non-terminating traversal on NVIDIA). Nothing is left on the interval: a miss. And a ray
         // the caller built from non-finite inputs (rtRaySane): a miss.
         if (!(tmin < tmax)) return h;
+        RT_BC_SITE(RT_BC_SITE_CLOSEST | (uint(k) << 8) | (r.mask & 0xFFu));   // (#1128 hang beacon variants only)
         if (!rtRaySane(o, tmin, d, tmax)) return h;
         rayQueryEXT rq;
         rayQueryInitializeEXT(rq, uTLAS, rflags, r.mask & 0xFFu, o, tmin, d, tmax);

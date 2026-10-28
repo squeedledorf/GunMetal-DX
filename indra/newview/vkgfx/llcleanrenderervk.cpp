@@ -18,7 +18,9 @@
 #include "../llmutelist.h"
 #include "../fscombatads.h"   // <GMDX> ADS vignette (final pass)
 #include "../gmdxrezfx.h"   // <GMDX> rez effects (table binding 45, per-frame update)
+#include "../gmdxnightsky.h"   // <GMDX> night sky (its textures, sky pass parameters)
 #include "../gmdxregioncapture.h"   // <GMDX> region map capture (the VRAM hard step stops it)
+#include "../gmdxsnapshotavatars.h"   // <GMDX> snapshot avatar scope (avatarHiddenByPolicy)
 #include "llfocusmgr.h"   // app focus (texture bias recovery after alt-tab)
 #include "llapp.h"        // LLApp::getPid (VRAM sharing peer files, #403)
 #include "lldir.h"        // gDirUtilp (VRAM sharing peer files, #403)
@@ -26,6 +28,7 @@
 #include "llcleanrenderervk.h"
 #include "llcleandenoisevk.h"   // #85 phase 2 (the projector stochastic sampler's denoiser)
 #include "llcleanrtvk.h"
+#include "llxrsession.h"
 #include "llcleangodraysvk.h"
 #include "llcleanvolfogvk.h"
 #include "llcleanpartfogvk.h"   // particle fog (#1003)
@@ -48,6 +51,8 @@
 #include "llcleanrigdecimate.h"   // #561 decimated rigged steps (cull binding 29)
 #include "llcleanrigshadowlod.h"  // #564 shadow-caster LOD (shadow rig cull)
 #include "../llcleanqvertex.h"    // #573 quantized static vertex + slot header
+#include "../gmdxnightlight.h"     // <GMDX> physical night (frame info gmdx_misc.w)
+#include "../gmdxspacealt.h"       // <GMDX> space at altitude (exposure)
 
 #include "vk_pipeline.h"
 #include "vk_world_shaders_spv.h"
@@ -119,6 +124,7 @@
 #  include "llgputexcache.h"       // GPU-ready texture disk cache (tier 2, #274)
 #  include "llcachemetrics.h"      // #715 read-use metrics (what a tier-2 read was needed for)
 #  include "llfeaturemanager.h"     // #824 GPU class (RenderVKDeferredSplit auto)
+#  include "gmdxnighteyevk.h"       // <GMDX> night eye (exposure curve, night vision)
 #endif
 
 namespace
@@ -386,13 +392,41 @@ VkShaderModule moduleFromSpv(VkDevice dev, const uint32_t* code, size_t bytes, c
 
 // DEBUG SPECIALIZATION of the lit FS / deferred lighting compute (clean_draw_common.glsl
 // kDebugViews, constant_id 1): static, so a queued pipeline's pointer outlives any batch.
-static const VkSpecializationInfo* litDebugSpec(bool on)
+// #1075 LAYERED STEREO: views > 1 (a layered lighting kernel's stereo pipeline, compute only --
+// graphics pipelines get kViewCount from GraphicsPipelineDesc::views) adds kViewCount
+// (clean_view.glsl, constant 20) = views. views 1: exactly the one-entry info of before.
+static const VkSpecializationInfo* litDebugSpec(bool on, uint32_t views = 1)
 {
     static const VkBool32 kOff = VK_FALSE, kOn = VK_TRUE;
     static const VkSpecializationMapEntry kEntry{1u, 0u, sizeof(VkBool32)};
     static const VkSpecializationInfo kSiOff{1u, &kEntry, sizeof(VkBool32), &kOff};
     static const VkSpecializationInfo kSiOn{1u, &kEntry, sizeof(VkBool32), &kOn};
-    return on ? &kSiOn : &kSiOff;
+    if (views <= 1u) return on ? &kSiOn : &kSiOff;
+    struct ViewSpecData { VkBool32 dbg; int32_t views; };
+    static const VkSpecializationMapEntry kEntries[2] = {{1u, 0u, sizeof(VkBool32)},
+                                                         {GraphicsPipelineDesc::kViewCountConstId, 4u, sizeof(int32_t)}};
+    static const ViewSpecData kData[2][3] = {{{VK_FALSE, 2}, {VK_FALSE, 3}, {VK_FALSE, 4}},
+                                             {{VK_TRUE, 2}, {VK_TRUE, 3}, {VK_TRUE, 4}}};
+    static const VkSpecializationInfo kInfo[2][3] = {
+        {{2u, kEntries, sizeof(ViewSpecData), &kData[0][0]}, {2u, kEntries, sizeof(ViewSpecData), &kData[0][1]},
+         {2u, kEntries, sizeof(ViewSpecData), &kData[0][2]}},
+        {{2u, kEntries, sizeof(ViewSpecData), &kData[1][0]}, {2u, kEntries, sizeof(ViewSpecData), &kData[1][1]},
+         {2u, kEntries, sizeof(ViewSpecData), &kData[1][2]}}};
+    static_assert(sizeof(ViewSpecData) == 8, "kEntries' offsets");
+    return &kInfo[on ? 1 : 0][std::min<uint32_t>(views, 4u) - 2u];
+}
+
+// #1075 LAYERED STEREO: kViewCount (clean_view.glsl, constant 20) = views for a layered compute
+// kernel's stereo pipeline that has no other specialization; nullptr at one view (as before).
+static const VkSpecializationInfo* viewCountSpec(uint32_t views)
+{
+    if (views <= 1u) return nullptr;
+    static const VkSpecializationMapEntry kEntry{GraphicsPipelineDesc::kViewCountConstId, 0u, sizeof(int32_t)};
+    static const int32_t kViews[3] = {2, 3, 4};
+    static const VkSpecializationInfo kInfo[3] = {{1u, &kEntry, sizeof(int32_t), &kViews[0]},
+                                                  {1u, &kEntry, sizeof(int32_t), &kViews[1]},
+                                                  {1u, &kEntry, sizeof(int32_t), &kViews[2]}};
+    return &kInfo[std::min<uint32_t>(views, 4u) - 2u];
 }
 
 // ---- prototype geometry (mirrors indra/vkclean/clean_scene.cpp) -------------
@@ -3782,6 +3816,9 @@ LLCleanRendererVK::TexEncPick LLCleanRendererVK::pickTexEnc(const TexEncIn& in) 
     // otherwise retry a refused encode for ever).
     if (in.pinned)
     {
+        // <GMDX> the night sky's star grid holds data, not colour: never block-compressed
+        const LLUUID& star_grid = GMDXNightSky::starGridId();
+        if (star_grid.notNull() && in.key == (texUuidKey(star_grid.mData) | 1ull)) return p;
         if (std::max(in.w, in.h) >= mTexEnc->minDim()) p.enc = TEXENC_BC7HQ;
         return p;
     }
@@ -4233,7 +4270,7 @@ uint32_t LLCleanRendererVK::uploadRealMaterialTextures(bool full)
     // TEXTURE COMPRESSION LEVEL (#263): read every pass -- a change takes effect at once
     // for new uploads, and the residency scan re-encodes resident images progressively.
     {
-        static LLCachedControl<U32> s_comp(gSavedSettings, "RenderVKTextureCompression", 0);
+        static LLCachedControl<U32> s_comp(gSavedSettings, "RenderVKTextureCompression", 4U);
         static LLCachedControl<U32> s_small_hq(gSavedSettings, "RenderVKTexSmallHQDim", 128);
         static LLCachedControl<F32> s_adapt_psnr(gSavedSettings, "RenderVKTexAdaptiveMinPSNR", 42.f);
         static LLCachedControl<F32> s_adapt_smooth(gSavedSettings, "RenderVKTexAdaptiveSmoothMarginDB", 3.f);
@@ -5563,7 +5600,7 @@ uint32_t LLCleanRendererVK::uploadRealMaterialTextures(bool full)
             mCloudNoiseIdx[i] = mCloudNoiseId[i].notNull() ? resolve_tex(mCloudNoiseId[i], false) : -1;
         // Sky bodies (sun/moon/bloom/rainbow/halo): LL samples them raw into the sky's
         // pre-resolve space, so UNORM.
-        for (int i = 0; i < 6; ++i)
+        for (int i = 0; i < 8; ++i)   // <GMDX> 8: + the night sky's
             mSkyTexIdx[i] = mSkyTexId[i].notNull() ? resolve_tex(mSkyTexId[i], false) : -1;
         force_img = false;
         mLightTexDirty = false;
@@ -9134,6 +9171,7 @@ void LLCleanRendererVK::writeCullAvatarDescriptors()
 // pre-skin work is skipped. Nametags are LL's and unaffected.
 static bool avatarHiddenByPolicy(LLVOAvatar* av)
 {
+    if (gmdxSnapshotHidesAvatar(av)) return true;   // <GMDX> snapshot avatar scope (gmdxsnapshotavatars.h)
     if (!av || av->isSelf() || av->isUIAvatar()) return false;
     static LLCachedControl<bool> friends_only(gSavedSettings, "RenderAvatarFriendsOnly", false);
     if (friends_only && !av->isControlAvatar() && !av->isBuddy()) return true;
@@ -13956,6 +13994,31 @@ void LLCleanRendererVK::setLights(const LLVKWorldFrame& wf)
         eps = std::max(eps, 0.f);
         rel = std::clamp(rel, 0.f, 1.f);
         const float fe = std::max(feps, 0.f);
+        // (#1087) THE HOT LIST (mGiHot): the lights flagged as MOVED stay in it RenderVKGILightChangeHold frames
+        // after their latest move flag -- a moving light flags only every few frames (its reference rule), and the
+        // reservoirs' confidence / the GI denoiser's history must not regrow in between. Aged here (each
+        // entry's index is this frame's: set in the walk below, -1 when its key is not in the list).
+        bool hotOn = true;
+        U32 hotHold = 8;
+#if defined(LL_HAS_CLEAN_PIPELINE)
+        static LLCachedControl<bool> s_hotOn(gSavedSettings, "RenderVKGILightMoveFix", true);
+        static LLCachedControl<U32>  s_hold(gSavedSettings, "RenderVKGILightChangeHold", 8U);
+        hotOn = s_hotOn;
+        hotHold = s_hold;
+#endif
+        const uint32_t hotLeft = std::min<U32>(hotHold, 600u) + 1u;   // (this frame + the hold)
+        std::vector<GiHotLight> hotNew;   // (flagged lights not in the list yet: inserted after the walk, sorted)
+        if (!hotOn) mGiHot.clear();
+        else
+        {
+            for (GiHotLight& h : mGiHot)
+            {
+                h.li = -1;
+                if (h.left) --h.left;
+            }
+            mGiHot.erase(std::remove_if(mGiHot.begin(), mGiHot.end(), [](const GiHotLight& h) { return h.left == 0u; }),
+                         mGiHot.end());
+        }
         // (the debug log: GPU timers on, one frame's list every 5 s + the window's per-frame means)
         const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
         const bool logOn = mTsOn;
@@ -13978,6 +14041,19 @@ void LLCleanRendererVK::setLights(const LLVKWorldFrame& wf)
             {
                 e.po[a] = proj ? g.proj_origin[a] : g.pos_radius[a];
                 e.pa[a] = proj ? g.proj_axis[a] : 0.f;
+            }
+            // (#1087) a hot light: its index and sphere this frame
+            GiHotLight* hl = nullptr;
+            if (!mGiHot.empty())
+            {
+                const auto hi = std::lower_bound(mGiHot.begin(), mGiHot.end(), L.key,
+                                                 [](const GiHotLight& a, uint64_t k) { return a.key < k; });
+                if (hi != mGiHot.end() && hi->key == L.key)
+                {
+                    hl = &*hi;
+                    hl->li = (int32_t)i;
+                    std::memcpy(hl->npr, e.pr, sizeof(hl->npr));
+                }
             }
             const auto it = std::lower_bound(mGiRef.begin(), mGiRef.end(), L.key,
                                              [](const GiRefLight& a, uint64_t k) { return a.key < k; });
@@ -14034,6 +14110,21 @@ void LLCleanRendererVK::setLights(const LLVKWorldFrame& wf)
                     std::memcpy(mGiChgPrev[2u * mGiChgPrevN + 1u], it->cf, sizeof(it->cf));
                     ++mGiChgPrevN;
                 }
+                if (hotOn && moved)
+                {
+                    // (#1087) a MOVED light into the hot list for the hold: its reference before this flag
+                    // (w < 0) and its current sphere. Radiance-only changes stay #980's (the pick's re-shade
+                    // fixes their colour; the distribution of the stale samples is still right): a colour-
+                    // cycling club light would otherwise stay hot forever -- M clamped, history pinned,
+                    // the per-tap loop under every club light
+                    GiHotLight nh{L.key, {}, {}, {}, (int32_t)i, hotLeft};
+                    std::memcpy(nh.opr, it->pr, sizeof(nh.opr));
+                    nh.opr[3] = -std::max(nh.opr[3], 1e-6f);
+                    std::memcpy(nh.ocf, it->cf, sizeof(nh.ocf));
+                    std::memcpy(nh.npr, e.pr, sizeof(nh.npr));
+                    if (hl) *hl = nh;
+                    else hotNew.push_back(nh);
+                }
                 cur.push_back(e);   // (the new reference)
             }
             else
@@ -14043,6 +14134,22 @@ void LLCleanRendererVK::setLights(const LLVKWorldFrame& wf)
         }
         std::sort(cur.begin(), cur.end(), [](const GiRefLight& a, const GiRefLight& b) { return a.key < b.key; });
         mGiRef.swap(cur);
+        if (!hotNew.empty())
+        {
+            // (#1087) bounded: past kGiHotMax a new flag replaces the entry closest to expiry
+            for (const GiHotLight& nh : hotNew)
+            {
+                if (mGiHot.size() < kGiHotMax)
+                {
+                    mGiHot.push_back(nh);
+                    continue;
+                }
+                const auto mn = std::min_element(mGiHot.begin(), mGiHot.end(),
+                                                 [](const GiHotLight& a, const GiHotLight& b) { return a.left < b.left; });
+                if (mn->left < nh.left) *mn = nh;
+            }
+            std::sort(mGiHot.begin(), mGiHot.end(), [](const GiHotLight& a, const GiHotLight& b) { return a.key < b.key; });
+        }
         if (logOn) ++mGiChgLog.frames;
         if (logFrame)
         {
@@ -14085,7 +14192,8 @@ void LLCleanRendererVK::setLights(const LLVKWorldFrame& wf)
     VKLightInfo& li = mLightInfoCPU;
     li.cam_pos[0] = wf.cam_pos[0]; li.cam_pos[1] = wf.cam_pos[1]; li.cam_pos[2] = wf.cam_pos[2];
     li.cam_pos[3] = (float)mLightsCPU.size();
-    li.cam_fwd[0] = wf.cam_fwd[0]; li.cam_fwd[1] = wf.cam_fwd[1]; li.cam_fwd[2] = wf.cam_fwd[2]; li.cam_fwd[3] = 0.f;
+    li.cam_fwd[0] = wf.cam_fwd[0]; li.cam_fwd[1] = wf.cam_fwd[1]; li.cam_fwd[2] = wf.cam_fwd[2];
+    li.cam_fwd[3] = wf.ortho_view ? 1.f : 0.f;   // <GMDX> grid.zw are half extents (m): CL_VIEW_Z
     const float zn = std::max(wf.cluster_near, 0.01f), zf = std::max(wf.cluster_far, zn + 1.f);
     li.zinfo[0] = zn; li.zinfo[1] = zf; li.zinfo[2] = (float)CLUSTER_GZ / std::log(zf / zn);
     // Projection far (P[14] / P[10] of the reversed-Z projection wf.proj; >= the cluster far, which
@@ -14098,7 +14206,25 @@ void LLCleanRendererVK::setLights(const LLVKWorldFrame& wf)
     std::memcpy(mCurProj, wf.proj, sizeof(mCurProj));
     mCamNear = std::max(wf.cluster_near, 0.01f);   // cluster LOD (#749): the camera's near clip
     std::memcpy(mCurInvProj, wf.inv_proj, sizeof(mCurInvProj));
-    mDofEnabled = wf.dof_enabled;
+    // #1075 LAYERED STEREO (step 1, the frame split): with N > 1 views every view's camera --
+    // view 0 included -- comes from the frame's views[] (the eyes; the shared fields above are the
+    // head / union camera then). N = 1 (the desktop): view 0 stays exactly the camera above
+    // (wf.views[0] carries the same numbers).
+    static_assert(LLVKWorldFrame::kMaxViews == kMaxViews, "LLVKWorldFrame::kMaxViews = LLCleanRendererVK::kMaxViews");
+    if (mViewCount > 1u)
+    {
+        for (uint32_t v = 0; v < mViewCount; ++v)
+        {
+            const LLVKViewFrame& vf = wf.views[v < wf.view_count ? v : 0u];
+            std::memcpy(mCurViewV[v], vf.view, sizeof(mCurViewV[v]));
+            std::memcpy(mCurProjV[v], vf.proj, sizeof(mCurProjV[v]));
+            std::memcpy(mCurInvProjV[v], vf.inv_proj, sizeof(mCurInvProjV[v]));
+            std::memcpy(mViewProjRelV[v], vf.view_proj_rel, sizeof(mViewProjRelV[v]));
+            std::memcpy(mCurInvVPV[v], vf.inv_view_proj, sizeof(mCurInvVPV[v]));
+            std::memcpy(mEyePosV[v], vf.eye, sizeof(mEyePosV[v]));   // (the stereo lighting's eye: deferEyeBlock)
+        }
+    }
+    mDofEnabled = wf.dof_enabled && !stereoActive();   // (#1075: off in stereo -- design §2 row 35)
     mRlvSphereCount = std::min(wf.rlv_sphere_count, LLVKWorldFrame::kMaxRlvSpheres);
     std::copy(wf.rlv_spheres, wf.rlv_spheres + mRlvSphereCount, mRlvSpheres);
     std::memcpy(mDofLens, wf.dof_lens, sizeof(mDofLens));
@@ -14289,6 +14415,83 @@ uint32_t LLCleanRendererVK::pushDrawView(VkCommandBuffer cmd, VkPipelineLayout l
     vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT,
                        0, sizeof(VKDrawViewPush), &p);
     return p.view;
+}
+
+uint32_t LLCleanRendererVK::ringAllocBlock(ParamRegion& r, const void* data, uint32_t bytes, uint32_t n)
+{
+    if (n <= 1u) return ringAlloc(r, data, bytes);
+    llassert(bytes == r.stride);
+    bytes = std::min(bytes, r.stride);
+    if (r.used + n > r.perSlot)
+    {
+        if (!r.overflowLogged)
+        {
+            r.overflowLogged = true;
+            LL_WARNS("Vulkan") << "param ring: " << r.name << " overflow (" << r.perSlot
+                               << " per frame); reusing the last entries -- raise the cap" << LL_ENDL;
+        }
+        return r.base + r.perSlot - n;   // (n <= kMaxViews << perSlot: in range)
+    }
+    const uint32_t e = r.base + r.used;
+    r.used += n;
+    for (uint32_t i = 0; i < n; ++i)
+        std::memcpy(static_cast<uint8_t*>(mParamRing.mapped) + r.offset + (VkDeviceSize)(e + i) * r.stride,
+                    static_cast<const uint8_t*>(data) + (size_t)i * bytes, bytes);
+    r.peak = std::max(r.peak, r.used);
+    return e;
+}
+
+uint32_t LLCleanRendererVK::pushDrawViews(VkCommandBuffer cmd, VkPipelineLayout layout, const VKDrawPush* v, uint32_t n)
+{
+    if (n <= 1u) return pushDrawView(cmd, layout, v[0]);
+    VKDrawViewPush p{};
+    p.view = ringAllocBlock(mViewRgn, v, (uint32_t)sizeof(VKDrawPush), n);
+    p.f8 = 0u;
+    vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT,
+                       0, sizeof(VKDrawViewPush), &p);
+    return p.view;
+}
+
+uint32_t LLCleanRendererVK::pushMainView(VkCommandBuffer cmd, VkPipelineLayout layout, const VKDrawPush& p, bool eyeInverse)
+{
+    if (mViewCount <= 1u) return pushDrawView(cmd, layout, p);
+    VKDrawPush v[kMaxViews];
+    for (uint32_t i = 0; i < mViewCount; ++i)
+    {
+        v[i] = p;
+        std::memcpy(v[i].view_proj, mEyeVP[i], sizeof(v[i].view_proj));
+        if (eyeInverse) std::memcpy(v[i].inv_view_proj, mEyeInvVP[i], sizeof(v[i].inv_view_proj));
+    }
+    return pushDrawViews(cmd, layout, v, mViewCount);
+}
+
+// #1075 STEREO DEFERRED LIGHTING: the lighting kernels' N draw-view entries (set 2 binding 10, the
+// layered kernels read [view]). Each is the main view's push p with ITS eye: cam_time.xyz = the eye
+// (the view vector, the tile frusta's apex, deferPosition's origin) and inv_view_proj = clip -> (P -
+// eye), the inverse of the eye's jittered camera-relative view-projection (mEyeVP: it maps P - the
+// head, cam_time of p) moved to the eye in double. One block, never deduplicated (ringAllocBlock).
+// Only while N > 1 (the desktop's lighting reads the push's inv_vp_rel and the G-buffer's entry).
+namespace { void vkInvert4(const float* m, float* invOut); }   // (below, in the anonymous namespace)
+uint32_t LLCleanRendererVK::deferEyeBlock(const VKDrawPush& p)
+{
+    VKDrawPush v[kMaxViews];
+    const uint32_t n = std::min(mViewCount, kMaxViews);
+    for (uint32_t i = 0; i < n; ++i)
+    {
+        v[i] = p;
+        std::memcpy(v[i].view_proj, mEyeVP[i], sizeof(v[i].view_proj));
+        float inv[16];
+        vkInvert4(mEyeVP[i], inv);   // clip -> P - head
+        const double d[3] = {(double)mEyePosV[i][0] - (double)p.cam_time[0], (double)mEyePosV[i][1] - (double)p.cam_time[1],
+                             (double)mEyePosV[i][2] - (double)p.cam_time[2]};
+        // (P - eye) = (P - head) - d: per column, xyz -= d * w (homogeneous)
+        for (int c = 0; c < 4; ++c)
+            for (int r = 0; r < 3; ++r)
+                inv[c * 4 + r] = (float)((double)inv[c * 4 + r] - d[r] * (double)inv[c * 4 + 3]);
+        std::memcpy(v[i].inv_view_proj, inv, sizeof(v[i].inv_view_proj));
+        v[i].cam_time[0] = mEyePosV[i][0]; v[i].cam_time[1] = mEyePosV[i][1]; v[i].cam_time[2] = mEyePosV[i][2];
+    }
+    return ringAllocBlock(mViewRgn, v, (uint32_t)sizeof(VKDrawPush), n);
 }
 
 uint32_t LLCleanRendererVK::pushCullParams(VkCommandBuffer cmd, const VKCullPush& p, uint32_t mode, uint32_t slot_b)
@@ -15803,7 +16006,8 @@ void LLCleanRendererVK::setProbes(const LLVKWorldFrame& wf)
     mPrbEnvDrift = false;
     {
         const float* a = wf.atmos;
-        const int lanes[] = { 2*4, 2*4+1, 2*4+2, 3*4, 3*4+1, 3*4+2, 7*4, 7*4+1, 7*4+2, 8*4, 8*4+1, 8*4+2 };
+        const int lanes[] = { 2*4, 2*4+1, 2*4+2, 3*4, 3*4+1, 3*4+2, 7*4, 7*4+1, 7*4+2, 8*4, 8*4+1, 8*4+2,
+                              6*4+2 };   // <GMDX> + physical night's ambient (gmdxnightlight.h, 2 - amb)
         float diff = 0.f, frame_diff = 0.f;
         for (int l : lanes) diff = std::max(diff, std::fabs(a[l] - mProbeEnvSnap[l]));
         for (int l : lanes) frame_diff = std::max(frame_diff, std::fabs(a[l] - mProbeEnvFrame[l]));
@@ -18848,7 +19052,9 @@ bool LLCleanRendererVK::probeStatsBegin(VkCommandBuffer cmd)
 
 void LLCleanRendererVK::p2StatsBegin(VkCommandBuffer cmd)
 {
-    if (!mTsOn || !mOdQueryOk) return;
+    // (#1075: a query inside a multiview scope takes N consecutive indices -- off in stereo; the
+    //  pool is then never made, so p2Query records nothing)
+    if (!mTsOn || !mOdQueryOk || stereoActive()) return;
     VkDevice dev = mCtx->device();
     if (!mP2Pool)
     {
@@ -19151,7 +19357,8 @@ void LLCleanRendererVK::setMirror(const LLVKWorldFrame& wf)
     // VRAM ladder step 6 (#405): mirrors off for now (their targets are released in
     // recordWorld); the setting is untouched.
     mMirrorOn = wf.mirror_valid && !mBudgetCaps.mirrorsOff && mMirrorSkyPipe && mMirrorAlphaPipe && mDsetCullMirror
-                && mMirrorCmd[0].buffer && mMirrorCounters.buffer && mProbeDrawPipe;
+                && mMirrorCmd[0].buffer && mMirrorCounters.buffer && mProbeDrawPipe
+                && !stereoActive();   // (#1075: planar mirrors are off in stereo -- design §2 row 24)
 
     // Mirror identity: a different mirror (or none) invalidates the visibility state.
     // Results recorded before this point never apply (serial guard: A -> B -> A).
@@ -24716,6 +24923,10 @@ bool LLCleanRendererVK::partPipeDesc(uint32_t variant, uint32_t pair, GraphicsPi
     default:
         return false;
     }
+    // #1075: the main view's variants draw its N views (the reduced-resolution accumulator --
+    // one layer, off in stereo -- and the mirror stay one view).
+    if (variant == PART_PIPE_MAIN || variant == PART_PIPE_MAIN_RT || variant == PART_PIPE_LIT)
+        d.views = mViewCount;
     return d.frag != VK_NULL_HANDLE && d.layout != VK_NULL_HANDLE;
 }
 
@@ -25592,7 +25803,10 @@ void LLCleanRendererVK::recordParticleDraw(VkCommandBuffer cmd, const VKDrawPush
     {
         pp.water_fog[2] = routeVal;
         if (vrs) mCtx->cmdSetShadingRate(cmd, rateW, rateH);
-        pushDrawView(cmd, lay, pp);
+        // (#1075: the main view's N entries -- each eye's view_proj; the inv_view_proj slot keeps
+        //  the head's camera basis, so both eyes billboard a sprite the same way)
+        if (mirror) pushDrawView(cmd, lay, pp);
+        else        pushMainView(cmd, lay, pp, false);
         // Mirror: both water sides of the pair (far side first), from its own list
         // (sorted by the reflected eye).
         for (uint32_t side = (pass == PART_DRAW_POST_WATER ? 1u : 0u);
@@ -25757,9 +25971,11 @@ void LLCleanRendererVK::setAtmosphere(const LLVKWorldFrame& wf)
     }
     if (mCloudNoiseId[0].notNull() && (mCloudNoiseIdx[0] < 0 || mCloudNoiseIdx[1] < 0)) mLightTexDirty = true;
     std::memcpy(mBodies, wf.bodies, sizeof(mBodies));
-    for (int i = 0; i < 6; ++i)
+    for (int i = 0; i < 8; ++i)   // <GMDX> 6, 7: the night sky's (made on first use)
     {
-        LLUUID id; std::memcpy(id.mData, wf.sky_tex[i], 16);
+        LLUUID id;
+        if (i < 6) std::memcpy(id.mData, wf.sky_tex[i], 16);
+        else id = GMDXNightSky::textureId(i - 6);   // <GMDX>
         if (id != mSkyTexId[i]) { mSkyTexId[i] = id; mSkyTexIdx[i] = -1; mLightTexDirty = true; }
         if (id.notNull() && mSkyTexIdx[i] < 0) mLightTexDirty = true;
     }
@@ -25786,9 +26002,10 @@ void LLCleanRendererVK::ensureSSR(uint32_t w, uint32_t h)
     {
         if (mPrevColor.image) mCtx->destroyImage(mPrevColor);
         if (mPrevDepth.image) mCtx->destroyImage(mPrevDepth);
-        mPrevColor = mCtx->createImage2D(w, h, mHdrFormat,   // linear scene (LL sceneMap)
+        // (#1075: one layer per view -- createScreenImage at N = 1 is createImage2D exactly)
+        mPrevColor = mCtx->createScreenImage(w, h, mViewCount, mHdrFormat,   // linear scene (LL sceneMap)
             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
-        mPrevDepth = mCtx->createImage2D(w, h, mDepthFormat,
+        mPrevDepth = mCtx->createScreenImage(w, h, mViewCount, mDepthFormat,
             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_DEPTH_BIT);
         mPrevW = w; mPrevH = h;
         mPrevValid = false;   // nothing captured at this size yet
@@ -25798,20 +26015,22 @@ void LLCleanRendererVK::ensureSSR(uint32_t w, uint32_t h)
     {
         // Water refraction source (solid-scene HDR colour, copied after pass 1).
         if (mRefract.image) mCtx->destroyImage(mRefract);
-        mRefract = mCtx->createImage2D(w, h, mHdrFormat,
+        mRefract = mCtx->createScreenImage(w, h, mViewCount, mHdrFormat,   // (#1075: a layer per view)
             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+        mCtx->addArrayView(mRefract, VK_IMAGE_ASPECT_COLOR_BIT);   // (the water FS's 2D_ARRAY)
         mRefractW = w; mRefractH = h;
 
         // Water exclusion mask (#27): written as a colour attachment (before pass 2b),
         // sampled by the water FS (R). (The TAA water mask moved to mReact, F2.)
         if (mWaterExcl.image) mCtx->destroyImage(mWaterExcl);
-        mWaterExcl = mCtx->createImage2D(w, h, VK_FORMAT_R8_UNORM,
+        mWaterExcl = mCtx->createScreenImage(w, h, mViewCount, VK_FORMAT_R8_UNORM,
             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+        mCtx->addArrayView(mWaterExcl, VK_IMAGE_ASPECT_COLOR_BIT);   // (the water FS's 2D_ARRAY)
         mCtx->setObjectName(VK_OBJECT_TYPE_IMAGE, (uint64_t)mWaterExcl.image, "waterExclusion");
         mWaterExclAllOne = false;   // new contents are garbage: clear before skipping (B3)
         // Reactive + water mask (F5 / F2): render pass 2's third attachment, read by TAA.
         if (mReact.image) mCtx->destroyImage(mReact);
-        mReact = mCtx->createImage2D(w, h, kReactFormat,
+        mReact = mCtx->createScreenImage(w, h, mViewCount, kReactFormat,
             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
         mCtx->setObjectName(VK_OBJECT_TYPE_IMAGE, (uint64_t)mReact.image, "reactiveMask");
     }
@@ -25831,7 +26050,7 @@ void LLCleanRendererVK::ensureSSR(uint32_t w, uint32_t h)
             x.dstStageMask=VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
             x.dstAccessMask=VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
             x.oldLayout=VK_IMAGE_LAYOUT_UNDEFINED; x.newLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            x.image=im; x.subresourceRange={aspect,0,1,0,1};
+            x.image=im; x.subresourceRange={aspect,0,1,0,VK_REMAINING_ARRAY_LAYERS};   // (#1075: every view's layer)
         };
         if (!prevOk)
         {
@@ -25864,9 +26083,10 @@ void LLCleanRendererVK::writeSSRDescriptors()
     w3[2].dstBinding=9; w3[2].descriptorType=VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; w3[2].pBufferInfo=&si;   // (#814)
     vkUpdateDescriptorSets(mCtx->device(), 3, w3, 0, nullptr);
 
-    if (!mRefract.view || !mWaterExcl.view) return;
-    VkDescriptorImageInfo ri{mGlowSampler, mRefract.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};  // linear clamp
-    VkDescriptorImageInfo xi{mDepthSampler, mWaterExcl.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}; // nearest (texelFetch)
+    // (#1075: the water FS reads both as 2D_ARRAY, layer = the view)
+    if (!mRefract.arrayView || !mWaterExcl.arrayView) return;
+    VkDescriptorImageInfo ri{mGlowSampler, mRefract.arrayView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};  // linear clamp
+    VkDescriptorImageInfo xi{mDepthSampler, mWaterExcl.arrayView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}; // nearest (texelFetch)
     VkWriteDescriptorSet wr[2]{};
     for (int i = 0; i < 2; ++i)
     {
@@ -26075,9 +26295,11 @@ void LLCleanRendererVK::writeRtMaskMotionDescriptor()
 {
     writePdnMotion();   // (#85 phase 2: the denoiser's reprojection reads the same target)
     if (!mDsetRtMask[0]) return;
+    // (#1075: the mask reads its view's layer -- the 2D_ARRAY views; the placeholder depth too)
     VkDescriptorImageInfo ii{};
-    if (mMotion.view)    ii = {mDepthSampler, mMotion.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    else if (mDepth.view) ii = {mShadowRawSampler, mDepth.view, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL};
+    if (mMotion.view && mCtx->addArrayView(mMotion, VK_IMAGE_ASPECT_COLOR_BIT))
+        ii = {mDepthSampler, mMotion.arrayView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    else if (mDepth.arrayView) ii = {mShadowRawSampler, mDepth.arrayView, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL};
     else return;
     for (VkDescriptorSet set : mDsetRtMask)
     {
@@ -26249,6 +26471,10 @@ void LLCleanRendererVK::ensureTemporal(uint32_t w, uint32_t h)
     // the plumbing's reset verdict (!mTaaResolveReset) -- camera cuts, teleports, origin shifts.
     dbg = dbg || aoWantsTemporal();
     VkDevice dev = mCtx->device();
+    // #1075 step 10: stereo frames keep the plumbing for the per-view resolve only (TAA / FSR /
+    // DLSS): the other motion readers (motion blur, AO, the RT mask / denoisers, VRS) are in the
+    // stereo-off set, so a stereo frame without a resolve pays nothing (no split pass 1a).
+    if (stereoActive()) dbg = false;
     if (!(taa || dbg) || !mPreMvPipe[0] || !mInstanceSSBO.buffer)
     {
         // Off: free everything (VRAM discipline) and restart the history when back on.
@@ -26290,13 +26516,14 @@ void LLCleanRendererVK::ensureTemporal(uint32_t w, uint32_t h)
         {
             if (mMotion.image) mCtx->destroyImage(mMotion);
             VkMemScope memtgt(VKMEM_TARGET);   // #407
-            mMotion = mCtx->createImage2D(w, h, kMotionFormat,
+            // (#1075 step 10: a layer per view -- each eye's motion; 1 layer = createImage2D exactly)
+            mMotion = mCtx->createScreenImage(w, h, mViewCount, kMotionFormat,
                 VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                 VK_IMAGE_ASPECT_COLOR_BIT);
-            // The no-history mask (#605) lives and dies with it (same size and layouts).
+            // The no-history mask (#605) lives and dies with it (same size, layers and layouts).
             if (mNoTemporal.image) mCtx->destroyImage(mNoTemporal);
             mNoTemporal = mMotion.image
-                ? mCtx->createImage2D(w, h, kNoTemporalFormat,
+                ? mCtx->createScreenImage(w, h, mViewCount, kNoTemporalFormat,
                     VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                     VK_IMAGE_ASPECT_COLOR_BIT)
                 : GpuImage{};
@@ -26670,7 +26897,9 @@ bool LLCleanRendererVK::taaGlowWanted() const
 #if defined(LL_HAS_CLEAN_PIPELINE)
     static LLCachedControl<bool> s_on(gSavedSettings, "RenderVKTAAGlow", true);
     static LLCachedControl<bool> s_glow(gSavedSettings, "RenderGlow", true);
-    return s_on && s_glow && mGlowTarget.view && mTaaGlow[0].view && mTaaGlow[1].view;
+    // (#1075: no glow consumer runs in a stereo frame -- bloom / LDR glow are in the stereo-off
+    //  set -- and the resolved glow pair is one layer)
+    return s_on && s_glow && mGlowTarget.view && mTaaGlow[0].view && mTaaGlow[1].view && !stereoActive();
 #else
     return false;
 #endif
@@ -26713,6 +26942,15 @@ void LLCleanRendererVK::ensureTAA(VkCommandBuffer cmd, uint32_t w, uint32_t h)
                                   mExposureImg.view, mReact.view, mGlowTarget.view, mNoTemporal.view};
     for (VkImageView v : views)
         if (!v) { mTaaHistValid = mTaaGlowValid = false; return; }
+    // #1075 step 10: every view's layer of every per-view input (a stereo frame resolves each
+    // eye from its own layers; N = 1: the views above).
+    {
+        const GpuImage* const perView[8] = {&sceneHdr(), &mMotion, &mDepth, &mPrevDepth, &mRefract, &mReact,
+                                            &mGlowTarget, &mNoTemporal};
+        for (uint32_t v = 1; v < mViewCount; ++v)
+            for (const GpuImage* im : perView)
+                if (!layerOf(*im, v)) { mTaaHistValid = mTaaGlowValid = false; return; }
+    }
     if (resize || std::memcmp(views, mTaaViews, sizeof(views)) != 0 || mTaaGen != mTargetGen)
     {
         vkDeviceWaitIdle(dev);   // descriptor rewrites below (sets in use by frames in flight)
@@ -26723,14 +26961,15 @@ void LLCleanRendererVK::ensureTAA(VkCommandBuffer cmd, uint32_t w, uint32_t h)
             mTaaW = mTaaH = 0;
             for (int i = 0; i < 2; ++i)
             {
-                mTaaHist[i] = mCtx->createImage2D(w, h, mHdrFormat,
+                // (#1075 step 10: a layer per view -- each eye's own history; 1 layer = createImage2D)
+                mTaaHist[i] = mCtx->createScreenImage(w, h, mViewCount, mHdrFormat,
                     VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
                     VK_IMAGE_ASPECT_COLOR_BIT);
                 if (mTaaHist[i].image)
                     mCtx->setObjectName(VK_OBJECT_TYPE_IMAGE, (uint64_t)mTaaHist[i].image, i ? "taaHistory1" : "taaHistory0");
                 // Accumulation weight (#182): R16F where the device supports it (mTaaAccFormat,
                 // picked with the pipeline), else R32F (a mandatory storage format).
-                mTaaAcc[i] = mCtx->createImage2D(w, h, mTaaAccFormat,
+                mTaaAcc[i] = mCtx->createScreenImage(w, h, mViewCount, mTaaAccFormat,
                     VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
                 if (mTaaAcc[i].image)
                     mCtx->setObjectName(VK_OBJECT_TYPE_IMAGE, (uint64_t)mTaaAcc[i].image, i ? "taaWeight1" : "taaWeight0");
@@ -26760,43 +26999,48 @@ void LLCleanRendererVK::ensureTAA(VkCommandBuffer cmd, uint32_t w, uint32_t h)
                 b[i].dstAccessMask=VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT|VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
                 b[i].oldLayout=VK_IMAGE_LAYOUT_UNDEFINED; b[i].newLayout=VK_IMAGE_LAYOUT_GENERAL;
                 b[i].image=i < 2 ? mTaaHist[i].image : (i < 4 ? mTaaAcc[i - 2].image : mTaaGlow[i - 4].image);
-                b[i].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+                b[i].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};   // (#1075: every view's)
             }
             VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
             dep.imageMemoryBarrierCount=6; dep.pImageMemoryBarriers=b;
             vkCmdPipelineBarrier2(cmd,&dep);
         }
-        // Set i writes history i and reads history i ^ 1 (see clean_taa.comp bindings).
+        // Set [v][i] writes history i and reads history i ^ 1 (see clean_taa.comp bindings), of
+        // view v's layer (#1075 step 10: every input and history through layerOf -- the 2D views
+        // of before at v = 0). The resolved glow pair stays one layer: no glow consumer runs in a
+        // stereo frame (taaGlowWanted), so the glow outputs are never written there.
+        for (uint32_t v = 0; v < mViewCount; ++v)
         for (int i = 0; i < 2; ++i)
         {
             const VkDescriptorImageInfo ii[16] = {
-                {mDepthSampler, sceneHdr().view,         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-                {mGlowSampler,  mTaaHist[i ^ 1].view,    VK_IMAGE_LAYOUT_GENERAL},   // linear clamp
-                {mDepthSampler, mMotion.view,            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-                {mDepthSampler, mDepth.view,             VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL},
-                {mDepthSampler, mPrevDepth.view,         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-                {mDepthSampler, mRefract.view,           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
-                {VK_NULL_HANDLE, mTaaHist[i].view,       VK_IMAGE_LAYOUT_GENERAL},
-                {VK_NULL_HANDLE, mExposureImg.view,      VK_IMAGE_LAYOUT_GENERAL},
-                {mGlowSampler,  mTaaAcc[i ^ 1].view,     VK_IMAGE_LAYOUT_GENERAL},   // linear clamp
-                {VK_NULL_HANDLE, mTaaAcc[i].view,        VK_IMAGE_LAYOUT_GENERAL},
-                {mDepthSampler, mReact.view,             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},   // G water (#204), R reactive (F5)
-                {mDepthSampler, mGlowTarget.view,        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},   // glow (texelFetch)
-                {mGlowSampler,  mTaaGlow[i ^ 1].view,    VK_IMAGE_LAYOUT_GENERAL},   // linear clamp
-                {VK_NULL_HANDLE, mTaaGlow[i].view,       VK_IMAGE_LAYOUT_GENERAL},
-                {},                                                                  // b14: the params UBO (init)
-                {mDepthSampler, mNoTemporal.view,        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};   // #605 (texelFetch)
+                {mDepthSampler, layerOf(sceneHdr(), v),       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+                {mGlowSampler,  layerOf(mTaaHist[i ^ 1], v),  VK_IMAGE_LAYOUT_GENERAL},   // linear clamp
+                {mDepthSampler, layerOf(mMotion, v),          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+                {mDepthSampler, layerOf(mDepth, v),           VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL},
+                {mDepthSampler, layerOf(mPrevDepth, v),       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+                {mDepthSampler, layerOf(mRefract, v),         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+                {VK_NULL_HANDLE, layerOf(mTaaHist[i], v),     VK_IMAGE_LAYOUT_GENERAL},
+                {VK_NULL_HANDLE, mExposureImg.view,           VK_IMAGE_LAYOUT_GENERAL},
+                {mGlowSampler,  layerOf(mTaaAcc[i ^ 1], v),   VK_IMAGE_LAYOUT_GENERAL},   // linear clamp
+                {VK_NULL_HANDLE, layerOf(mTaaAcc[i], v),      VK_IMAGE_LAYOUT_GENERAL},
+                {mDepthSampler, layerOf(mReact, v),           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},   // G water (#204), R reactive (F5)
+                {mDepthSampler, layerOf(mGlowTarget, v),      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},   // glow (texelFetch)
+                {mGlowSampler,  mTaaGlow[i ^ 1].view,         VK_IMAGE_LAYOUT_GENERAL},   // linear clamp
+                {VK_NULL_HANDLE, mTaaGlow[i].view,            VK_IMAGE_LAYOUT_GENERAL},
+                {},                                                                       // b14: the params UBO (init)
+                {mDepthSampler, layerOf(mNoTemporal, v),      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};   // #605 (texelFetch)
             VkWriteDescriptorSet wr[16]{};
             for (int b = 0; b < 16; ++b)
             {
                 if (b == 14) continue;   // (written once at init)
-                wr[b].sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; wr[b].dstSet=mDsetTaa[i]; wr[b].dstBinding=b;
+                wr[b].sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; wr[b].dstSet=mDsetTaa[v][i]; wr[b].dstBinding=b;
                 wr[b].descriptorCount=1; wr[b].pImageInfo=&ii[b];
                 wr[b].descriptorType = (b == 6 || b == 7 || b == 9 || b == 13) ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
                                                                               : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             }
             wr[14] = wr[15];   // (dense: the UBO slot skipped above)
             vkUpdateDescriptorSets(dev, 15, wr, 0, nullptr);
+            if (v != 0u) continue;   // (the glow extract below reads view 0's resolve: one set pair)
             // The LDR glow's extract from the resolved glow (b1: the fixed 512 chain's E).
             if (mDsetGlowExtractTaa[i] && mGlowE.view)
             {
@@ -26844,7 +27088,7 @@ void LLCleanRendererVK::recordTaaInputBarriers(VkCommandBuffer cmd)
         hb.srcStageMask=VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT; hb.srcAccessMask=VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
         hb.dstStageMask=VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT; hb.dstAccessMask=VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
         hb.oldLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL; hb.newLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        hb.image=scene.image; hb.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+        hb.image=scene.image; hb.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
         // The glow target (passes 1 + 2) -> sampled, on EVERY TAA frame (the set declares
         // it SHADER_READ_ONLY whether or not the glow is resolved). It stays there: the
         // bloom extract (FS) / LDR glow (compute) skip their own transition of it on TAA
@@ -26891,8 +27135,17 @@ void LLCleanRendererVK::recordTAA(VkCommandBuffer cmd, uint32_t width, uint32_t 
         VK_PUSH_BUDGET_CHECK(idx);
         vkCmdPushConstants(cmd, mTaaLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(idx), idx);
     };
-    std::memcpy(p.reproj, mTaaReproj, sizeof(p.reproj));
-    std::memcpy(p.wplane, mTaaWaterPlane, sizeof(p.wplane));   // water depth (#204)
+    // #1075 step 10: the view-dependent fields (reproj, wplane, lin) are view v's, filled per
+    // dispatch by viewParams; everything else is shared (one jitter phase for every eye).
+    auto viewParams = [&](uint32_t v)
+    {
+        std::memcpy(p.reproj, mTaaReprojV[v], sizeof(p.reproj));
+        std::memcpy(p.wplane, mTaaWaterPlaneV[v], sizeof(p.wplane));   // water depth (#204)
+        // View depth from NDC depth: rows 2 / 3 of the (unjittered) inverse projection.
+        const float* ip = mCurInvProjV[v];
+        p.lin[0] = ip[10]; p.lin[1] = ip[14]; p.lin[2] = ip[11]; p.lin[3] = ip[15];
+    };
+    viewParams(0);
     p.screen[0] = (float)width; p.screen[1] = (float)height;
     p.screen[2] = 1.f / (float)std::max(width, 1u); p.screen[3] = 1.f / (float)std::max(height, 1u);
     const uint32_t rw = mScaled ? mSceneW : width, rh = mScaled ? mSceneH : height;
@@ -26901,8 +27154,6 @@ void LLCleanRendererVK::recordTAA(VkCommandBuffer cmd, uint32_t width, uint32_t 
     // Jitter is in render pixels (its uv offset too).
     p.jitter[0] = mTaaJitter[0]; p.jitter[1] = mTaaJitter[1];
     p.jitter[2] = mTaaJitter[0] * p.rscreen[2]; p.jitter[3] = mTaaJitter[1] * p.rscreen[3];
-    // View depth from NDC depth: rows 2 / 3 of the (unjittered) inverse projection.
-    p.lin[0] = mCurInvProj[10]; p.lin[1] = mCurInvProj[14]; p.lin[2] = mCurInvProj[11]; p.lin[3] = mCurInvProj[15];
     p.params0[0] = (mTaaHistValid && !mTaaResolveReset) ? 1.f : 0.f;
     p.params0[1] = mv_valid ? 1.f : 0.f;
     p.params0[2] = mAtmos[13 * 4 + 0];                                   // RenderExposure
@@ -26945,9 +27196,16 @@ void LLCleanRendererVK::recordTAA(VkCommandBuffer cmd, uint32_t width, uint32_t 
     p.params1[3] = dbgView ? 0.f : (float)dbg;
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mTaaPipe);
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mTaaLayout, 0, 1, &mDsetTaa[cur], 0, nullptr);
-    pushTaa();
-    vkCmdDispatch(cmd, (width + 7) / 8, (height + 7) / 8, 1);
+    // #1075 step 10: one dispatch per view, each through its own set (its layer of every input
+    // and history) and its own params entry; the views write disjoint layers, so no barrier
+    // between them. N = 1: the one dispatch of before.
+    for (uint32_t v = 0; v < mViewCount; ++v)
+    {
+        if (v) viewParams(v);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mTaaLayout, 0, 1, &mDsetTaa[v][cur], 0, nullptr);
+        pushTaa();
+        vkCmdDispatch(cmd, (width + 7) / 8, (height + 7) / 8, 1);
+    }
     if (glowOnly)
     {
         // FSR frame: FSR upscales the scene; this dispatch was for its glow output. The
@@ -26978,9 +27236,13 @@ void LLCleanRendererVK::recordTAA(VkCommandBuffer cmd, uint32_t width, uint32_t 
         shown = cur ^ 1u;
         p.params1[3] = (float)dbg;
         p.params2[1] = 0.f;   // its glow output is mTaaGlow[cur ^ 1]: keep this frame's resolve
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mTaaLayout, 0, 1, &mDsetTaa[shown], 0, nullptr);
-        pushTaa();
-        vkCmdDispatch(cmd, (width + 7) / 8, (height + 7) / 8, 1);
+        for (uint32_t v = 0; v < mViewCount; ++v)   // (#1075: every view's layer)
+        {
+            viewParams(v);
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mTaaLayout, 0, 1, &mDsetTaa[v][shown], 0, nullptr);
+            pushTaa();
+            vkCmdDispatch(cmd, (width + 7) / 8, (height + 7) / 8, 1);
+        }
     }
 
     // Resolved history -> mHdr (copy). History: compute write -> copy read (GENERAL
@@ -26989,7 +27251,9 @@ void LLCleanRendererVK::recordTAA(VkCommandBuffer cmd, uint32_t width, uint32_t 
     // SHARPENING (#183): RCAS writes it instead of the copy (GENERAL, compute); the
     // history itself stays unsharpened. Not on debug views.
     const float sharp = dbgView ? 0.f : sharpenAmount();
-    const bool  rcas  = sharp > 0.f && updateRcasSets();
+    // (#1075: the RCAS sets are one layer -- no sharpening in a stereo frame; the copy covers
+    //  every view's layer)
+    const bool  rcas  = sharp > 0.f && !stereoActive() && updateRcasSets();
     mRcasRan = rcas;   // B1: the final pass's CAS stands down (RenderVKSharpenOnce)
     const VkPipelineStageFlags2 wStage  = rcas ? VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT : VK_PIPELINE_STAGE_2_COPY_BIT;
     const VkAccessFlags2        wAccess = rcas ? VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT : VK_ACCESS_2_TRANSFER_WRITE_BIT;
@@ -27001,11 +27265,11 @@ void LLCleanRendererVK::recordTAA(VkCommandBuffer cmd, uint32_t width, uint32_t 
         b[0].dstStageMask=rcas ? VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT : VK_PIPELINE_STAGE_2_COPY_BIT;
         b[0].dstAccessMask=rcas ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT : VK_ACCESS_2_TRANSFER_READ_BIT;
         b[0].oldLayout=VK_IMAGE_LAYOUT_GENERAL; b[0].newLayout=VK_IMAGE_LAYOUT_GENERAL;
-        b[0].image=mTaaHist[shown].image; b[0].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+        b[0].image=mTaaHist[shown].image; b[0].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
         b[1].srcStageMask=VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT; b[1].srcAccessMask=VK_ACCESS_2_NONE;
         b[1].dstStageMask=wStage; b[1].dstAccessMask=wAccess;
         b[1].oldLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; b[1].newLayout=wLayout;
-        b[1].image=mHdr.image; b[1].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+        b[1].image=mHdr.image; b[1].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
         if (mScaled)
         {
             b[1].srcStageMask=VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT|VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
@@ -27027,7 +27291,7 @@ void LLCleanRendererVK::recordTAA(VkCommandBuffer cmd, uint32_t width, uint32_t 
     else
     {
         VkImageCopy cc{};
-        cc.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1}; cc.dstSubresource=cc.srcSubresource;
+        cc.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,mViewCount}; cc.dstSubresource=cc.srcSubresource;   // (#1075: layer v -> layer v)
         cc.extent={width, height, 1};
         vkCmdCopyImage(cmd, mTaaHist[shown].image, VK_IMAGE_LAYOUT_GENERAL,
                        mHdr.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cc);
@@ -27044,12 +27308,12 @@ void LLCleanRendererVK::recordTAA(VkCommandBuffer cmd, uint32_t width, uint32_t 
         a[0].dstAccessMask=VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT|VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT
                           |VK_ACCESS_2_TRANSFER_READ_BIT;
         a[0].oldLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; a[0].newLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        a[0].image=scene.image; a[0].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+        a[0].image=scene.image; a[0].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
         a[1].srcStageMask=wStage; a[1].srcAccessMask=wAccess;
         a[1].dstStageMask=VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT|VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
         a[1].dstAccessMask=VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
         a[1].oldLayout=wLayout; a[1].newLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        a[1].image=mHdr.image; a[1].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+        a[1].image=mHdr.image; a[1].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
         VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; dep.imageMemoryBarrierCount=2; dep.pImageMemoryBarriers=a;
         vkCmdPipelineBarrier2(cmd,&dep);
     }
@@ -27061,7 +27325,7 @@ void LLCleanRendererVK::recordTAA(VkCommandBuffer cmd, uint32_t width, uint32_t 
         a.dstAccessMask=VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT|VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT
                        |VK_ACCESS_2_TRANSFER_READ_BIT;
         a.oldLayout=wLayout; a.newLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        a.image=mHdr.image; a.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+        a.image=mHdr.image; a.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
         VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; dep.imageMemoryBarrierCount=1; dep.pImageMemoryBarriers=&a;
         vkCmdPipelineBarrier2(cmd,&dep);
     }
@@ -27387,7 +27651,7 @@ void LLCleanRendererVK::recordSnapAccum(VkCommandBuffer cmd, uint32_t width, uin
         hb.srcStageMask=VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT; hb.srcAccessMask=VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
         hb.dstStageMask=VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT; hb.dstAccessMask=VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
         hb.oldLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL; hb.newLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        hb.image=mHdr.image; hb.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+        hb.image=mHdr.image; hb.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
         VkImageMemoryBarrier2 gb = hb;
         gb.dstStageMask=VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT|VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
         gb.image=mGlowTarget.image;
@@ -27437,7 +27701,7 @@ void LLCleanRendererVK::recordSnapAccum(VkCommandBuffer cmd, uint32_t width, uin
         a.dstAccessMask=VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT|VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT
                        |VK_ACCESS_2_TRANSFER_READ_BIT;
         a.oldLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; a.newLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        a.image=mHdr.image; a.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+        a.image=mHdr.image; a.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
         VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; dep.imageMemoryBarrierCount=1; dep.pImageMemoryBarriers=&a;
         vkCmdPipelineBarrier2(cmd,&dep);
     }
@@ -27461,7 +27725,8 @@ bool LLCleanRendererVK::fsrRequested() const
 
 namespace
 {
-LLCleanFSR3VK::Frame s_fsrFrame;          // prepareFSR -> recordFSR (main thread)
+// prepareFSR -> recordFSR (main thread), one per view (#1075 step 10; [0] on the desktop)
+LLCleanFSR3VK::Frame s_fsrFrame[LLCleanRendererVK::kMaxViews];
 // RenderVKFSRDebugProbe (llcleanfsr3vk.h): created on first use, freed when the setting
 // goes off or at shutdown. s_fsrProbeOn: this frame probes (set by the resolve block).
 LLCleanFSRProbeVK* s_fsrProbe = nullptr;
@@ -27473,60 +27738,74 @@ bool LLCleanRendererVK::prepareFSR(VkCommandBuffer cmd, uint32_t width, uint32_t
 {
     if (!mTaaNow || !mHdr.image || !mExposureImg.view || !mReact.view || !mRefract.view || !mMotion.view)
         return false;
-    if (!mFsr) mFsr = new LLCleanFSR3VK();
-    LLCleanFSR3VK::Frame& f = s_fsrFrame;
-    f = LLCleanFSR3VK::Frame{};
-    f.ctx = mCtx;
-    f.rw = mScaled ? mSceneW : width; f.rh = mScaled ? mSceneH : height;
-    f.dw = width; f.dh = height;
-    f.colorView = sceneHdr().view;
-    f.depthView = mDepth.view;
-    f.motionView = mMotion.view;
-    f.reactView = mReact.view;
-    f.noTemporalView = mNoTemporal.view;   // #605
-    f.refView = mRefract.view;
-    f.exposureView = mExposureImg.view;
-    f.nearestSampler = mDepthSampler;
-    f.targetGen = mTargetGen;   // its sets follow the target generation (recycled view handles)
-    // Scaled: straight into the display-size HDR target the post chain reads. Native:
-    // that target IS the colour input, so FSR writes its staging image (copied below).
-    if (mScaled) { f.outImage = mHdr.image; f.outView = mHdr.view; }
-    f.reproj = mTaaReproj;
-    f.waterPlane = mTaaWaterPlane;
-    f.proj = mCurProj;
-    f.invProj = mCurInvProj;
-    f.jitterPx[0] = mTaaJitter[0]; f.jitterPx[1] = mTaaJitter[1];
-    f.jitterPhases = mTaaJitterPhases;
-    f.motionValid = mv_valid;
-    f.staticExposure = mAtmos[13 * 4 + 0];                                  // RenderExposure
-    f.dynamicExposure = mAtmos[15 * 4 + 2] > 0.5f && mExposurePipe;
-    f.reactiveMaskGain = 0.f;
-    f.reactiveDiffGain = 4.f;   // clean_taa.comp params1.y
-    f.sharpness = sharpenAmount();
-    // Camera cut / teleport (the frame info's reset), or FSR did not run last frame
-    // (another mode, a snapshot in between).
-    f.reset = mTaaResolveReset || !mFsrRanLast;
-    f.slot = mFrameSlot % kRingSlots;
-    f.slotCount = kRingSlots;
+    // #1075 step 10: one instance per view, fed view v's layer of every input (layerOf: the 2D
+    // views of before at v = 0) and view v's camera; ALL views prepare or the frame takes the TAA
+    // resolve for every view (never one eye on FSR and the other on TAA).
+    for (uint32_t v = 0; v < mViewCount; ++v)
+    {
+        if (!mFsr[v]) mFsr[v] = new LLCleanFSR3VK();
+        LLCleanFSR3VK::Frame& f = s_fsrFrame[v];
+        f = LLCleanFSR3VK::Frame{};
+        f.ctx = mCtx;
+        f.rw = mScaled ? mSceneW : width; f.rh = mScaled ? mSceneH : height;
+        f.dw = width; f.dh = height;
+        f.colorView = layerOf(sceneHdr(), v);
+        f.depthView = layerOf(mDepth, v);
+        f.motionView = layerOf(mMotion, v);
+        f.reactView = layerOf(mReact, v);
+        f.noTemporalView = layerOf(mNoTemporal, v);   // #605
+        f.refView = layerOf(mRefract, v);
+        f.exposureView = mExposureImg.view;           // (one exposure for every view)
+        f.nearestSampler = mDepthSampler;
+        f.targetGen = mTargetGen;   // its sets follow the target generation (recycled view handles)
+        // Scaled: straight into the display-size HDR target the post chain reads (view v's layer).
+        // Native: that target IS the colour input, so FSR writes its staging image (copied below).
+        if (mScaled) { f.outImage = mHdr.image; f.outView = layerOf(mHdr, v); }
+        f.reproj = mTaaReprojV[v];
+        f.waterPlane = mTaaWaterPlaneV[v];
+        f.proj = mCurProjV[v];
+        f.invProj = mCurInvProjV[v];
+        f.jitterPx[0] = mTaaJitter[0]; f.jitterPx[1] = mTaaJitter[1];   // (one jitter phase for every view)
+        f.jitterPhases = mTaaJitterPhases;
+        f.motionValid = mv_valid;
+        f.staticExposure = mAtmos[13 * 4 + 0];                                  // RenderExposure
+        f.dynamicExposure = mAtmos[15 * 4 + 2] > 0.5f && mExposurePipe;
+        f.reactiveMaskGain = 0.f;
+        f.reactiveDiffGain = 4.f;   // clean_taa.comp params1.y
+        f.sharpness = sharpenAmount();
+        // Camera cut / teleport (the frame info's reset), or FSR did not run last frame
+        // (another mode, a snapshot in between).
+        f.reset = mTaaResolveReset || !mFsrRanLast;
+        f.slot = mFrameSlot % kRingSlots;
+        f.slotCount = kRingSlots;
+        if (mViewCount > 1u) f.deltaTime = mUpscaleDt;   // (one clock for every eye; N = 1: FSR's own)
 #if defined(LL_HAS_CLEAN_PIPELINE)
-    if (mReactMaskNow)
-    {
-        static LLCachedControl<F32> s_react_gain(gSavedSettings, "RenderVKReactiveMaskGain", 1.f);
-        f.reactiveMaskGain = llclamp((F32)s_react_gain, 0.01f, 16.f);
-    }
-    static LLCachedControl<F32> s_tc(gSavedSettings, "RenderVKFSRWaterComposition", 0.5f);
-    static LLCachedControl<F32> s_cap(gSavedSettings, "RenderVKFSRReactiveCap", 0.9f);
-    static LLCachedControl<U32> s_dbg(gSavedSettings, "RenderVKFSRDebug", 0U);
-    f.waterTc = llclamp((F32)s_tc, 0.f, 1.f);
-    f.reactiveCap = llclamp((F32)s_cap, 0.f, 1.f);
-    f.debugView = s_dbg;
+        if (mReactMaskNow)
+        {
+            static LLCachedControl<F32> s_react_gain(gSavedSettings, "RenderVKReactiveMaskGain", 1.f);
+            f.reactiveMaskGain = llclamp((F32)s_react_gain, 0.01f, 16.f);
+        }
+        static LLCachedControl<F32> s_tc(gSavedSettings, "RenderVKFSRWaterComposition", 0.5f);
+        static LLCachedControl<F32> s_cap(gSavedSettings, "RenderVKFSRReactiveCap", 0.9f);
+        static LLCachedControl<U32> s_dbg(gSavedSettings, "RenderVKFSRDebug", 0U);
+        f.waterTc = llclamp((F32)s_tc, 0.f, 1.f);
+        f.reactiveCap = llclamp((F32)s_cap, 0.f, 1.f);
+        f.debugView = s_dbg;
 #endif
-    if (s_fsrProbeOn && s_fsrProbe)
-    {
-        f.probe = s_fsrProbe;
-        f.probeUv[0] = s_fsrProbeUv[0]; f.probeUv[1] = s_fsrProbeUv[1];
+        if (s_fsrProbeOn && s_fsrProbe && v == 0u)   // (the probe reads view 0)
+        {
+            f.probe = s_fsrProbe;
+            f.probeUv[0] = s_fsrProbeUv[0]; f.probeUv[1] = s_fsrProbeUv[1];
+        }
+        if (!mFsr[v]->prepare(cmd, f)) return false;
     }
-    return mFsr->prepare(cmd, f);
+    return true;
+}
+
+void LLCleanRendererVK::destroyFsr()
+{
+    for (LLCleanFSR3VK*& fsr : mFsr)
+        if (fsr) { fsr->destroy(mCtx->device()); delete fsr; fsr = nullptr; }
 }
 
 // After recordTaaInputBarriers (+ the glow-only TAA dispatch). Leaves what recordTAA
@@ -27534,7 +27813,6 @@ bool LLCleanRendererVK::prepareFSR(VkCommandBuffer cmd, uint32_t width, uint32_t
 // display mHdr SHADER_READ_ONLY (the post chain's), native mHdr COLOR_ATTACHMENT_OPTIMAL.
 void LLCleanRendererVK::recordFSR(VkCommandBuffer cmd, uint32_t width, uint32_t height)
 {
-    const LLCleanFSR3VK::Frame& f = s_fsrFrame;
     const GpuImage& scene = sceneHdr();
     if (mScaled)
     {
@@ -27546,12 +27824,20 @@ void LLCleanRendererVK::recordFSR(VkCommandBuffer cmd, uint32_t width, uint32_t 
         b.srcAccessMask=VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT|VK_ACCESS_2_TRANSFER_WRITE_BIT;
         b.dstStageMask=VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT; b.dstAccessMask=VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
         b.oldLayout=VK_IMAGE_LAYOUT_UNDEFINED; b.newLayout=VK_IMAGE_LAYOUT_GENERAL;
-        b.image=mHdr.image; b.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+        b.image=mHdr.image; b.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
         VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; dep.imageMemoryBarrierCount=1; dep.pImageMemoryBarriers=&b;
         vkCmdPipelineBarrier2(cmd,&dep);
     }
+    // #1075 step 10: every view's instance in view order (each writes only its own resources
+    // and view v's output: its staging image, or layer v of mHdr when scaled). N = 1: the one
+    // record of before.
     bool sharpened = false;
-    mFsr->record(cmd, f, &sharpened);
+    for (uint32_t v = 0; v < mViewCount; ++v)
+    {
+        bool viewSharpened = false;
+        mFsr[v]->record(cmd, s_fsrFrame[v], &viewSharpened);
+        sharpened = sharpened || viewSharpened;
+    }
     mRcasRan = sharpened;   // B1: the final pass's CAS stands down
     if (mScaled)
     {
@@ -27562,12 +27848,12 @@ void LLCleanRendererVK::recordFSR(VkCommandBuffer cmd, uint32_t width, uint32_t 
         a[0].dstAccessMask=VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT|VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT
                           |VK_ACCESS_2_TRANSFER_READ_BIT;
         a[0].oldLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; a[0].newLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        a[0].image=scene.image; a[0].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+        a[0].image=scene.image; a[0].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
         a[1].srcStageMask=VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT; a[1].srcAccessMask=VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
         a[1].dstStageMask=VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT|VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
         a[1].dstAccessMask=VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
         a[1].oldLayout=VK_IMAGE_LAYOUT_GENERAL; a[1].newLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        a[1].image=mHdr.image; a[1].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+        a[1].image=mHdr.image; a[1].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
         VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; dep.imageMemoryBarrierCount=2; dep.pImageMemoryBarriers=a;
         vkCmdPipelineBarrier2(cmd,&dep);
     }
@@ -27575,30 +27861,40 @@ void LLCleanRendererVK::recordFSR(VkCommandBuffer cmd, uint32_t width, uint32_t 
     {
         // Staging (FSR's compute writes) -> copy source; mHdr (= the scene, read by FSR)
         // -> copy destination; copy; mHdr -> COLOR_ATTACHMENT_OPTIMAL (recordSSRCopy).
-        VkImageMemoryBarrier2 b[2]{};
+        // (#1075 step 10: after EVERY view's upscale -- each read its own layer of mHdr -- view
+        //  v's staging image -> layer v; N = 1: b[0] staging, b[1] mHdr, one copy, as before)
+        VkImageMemoryBarrier2 b[kMaxViews + 1]{};
         for (auto& x : b) x.sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-        b[0].srcStageMask=VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT; b[0].srcAccessMask=VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
-        b[0].dstStageMask=VK_PIPELINE_STAGE_2_COPY_BIT; b[0].dstAccessMask=VK_ACCESS_2_TRANSFER_READ_BIT;
-        b[0].oldLayout=VK_IMAGE_LAYOUT_GENERAL; b[0].newLayout=VK_IMAGE_LAYOUT_GENERAL;
-        b[0].image=mFsr->stagingImage(); b[0].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
-        b[1].srcStageMask=VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT; b[1].srcAccessMask=VK_ACCESS_2_NONE;
-        b[1].dstStageMask=VK_PIPELINE_STAGE_2_COPY_BIT; b[1].dstAccessMask=VK_ACCESS_2_TRANSFER_WRITE_BIT;
-        b[1].oldLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; b[1].newLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        b[1].image=mHdr.image; b[1].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
-        VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; dep.imageMemoryBarrierCount=2; dep.pImageMemoryBarriers=b;
+        for (uint32_t v = 0; v < mViewCount; ++v)
+        {
+            b[v].srcStageMask=VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT; b[v].srcAccessMask=VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+            b[v].dstStageMask=VK_PIPELINE_STAGE_2_COPY_BIT; b[v].dstAccessMask=VK_ACCESS_2_TRANSFER_READ_BIT;
+            b[v].oldLayout=VK_IMAGE_LAYOUT_GENERAL; b[v].newLayout=VK_IMAGE_LAYOUT_GENERAL;
+            b[v].image=mFsr[v]->stagingImage(); b[v].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+        }
+        VkImageMemoryBarrier2& hb = b[mViewCount];
+        hb.srcStageMask=VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT; hb.srcAccessMask=VK_ACCESS_2_NONE;
+        hb.dstStageMask=VK_PIPELINE_STAGE_2_COPY_BIT; hb.dstAccessMask=VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        hb.oldLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; hb.newLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        hb.image=mHdr.image; hb.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
+        VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; dep.imageMemoryBarrierCount=mViewCount + 1u; dep.pImageMemoryBarriers=b;
         vkCmdPipelineBarrier2(cmd,&dep);
-        VkImageCopy cc{};
-        cc.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1}; cc.dstSubresource=cc.srcSubresource;
-        cc.extent={width, height, 1};
-        vkCmdCopyImage(cmd, mFsr->stagingImage(), VK_IMAGE_LAYOUT_GENERAL,
-                       mHdr.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cc);
+        for (uint32_t v = 0; v < mViewCount; ++v)
+        {
+            VkImageCopy cc{};
+            cc.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};
+            cc.dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,v,1};
+            cc.extent={width, height, 1};
+            vkCmdCopyImage(cmd, mFsr[v]->stagingImage(), VK_IMAGE_LAYOUT_GENERAL,
+                           mHdr.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cc);
+        }
         VkImageMemoryBarrier2 a{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
         a.srcStageMask=VK_PIPELINE_STAGE_2_COPY_BIT; a.srcAccessMask=VK_ACCESS_2_TRANSFER_WRITE_BIT;
         a.dstStageMask=VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT|VK_PIPELINE_STAGE_2_COPY_BIT;
         a.dstAccessMask=VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT|VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT
                        |VK_ACCESS_2_TRANSFER_READ_BIT;
         a.oldLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; a.newLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        a.image=mHdr.image; a.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+        a.image=mHdr.image; a.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
         VkDependencyInfo d2{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; d2.imageMemoryBarrierCount=1; d2.pImageMemoryBarriers=&a;
         vkCmdPipelineBarrier2(cmd,&d2);
     }
@@ -27637,7 +27933,8 @@ bool LLCleanRendererVK::dlssNoisyRtOn() const
     static LLCachedControl<U32>  s_rs(gSavedSettings, "RenderVKReSTIRDI", 0);
     static LLCachedControl<U32>  s_stoch(gSavedSettings, "RenderVKProjStochastic", 1U);
     if ((U32)s_refl == 1u && (bool)s_defer && mRtTracePipe && mDeferSplitOk) return true;   // RT reflections
-    if ((U32)s_gi != 0u) return true;                                                        // ray-traced GI
+    if ((U32)s_gi != 0u && !(LLXrSession::active() && LLXrSession::instance().sessionRunning()))
+        return true;                                                                         // ray-traced GI (#1076: off in VR)
     if ((U32)s_rs != 0u && (U32)s_stoch != 0u && mProjMode == 2u) return true;              // ReSTIR DI
 #endif
     return false;
@@ -27666,8 +27963,15 @@ bool LLCleanRendererVK::dlssPickKind(LLVKNeuralRecon::FeatureKind& kind, std::st
     }
     const bool rrOk = nr.available(LLVKNeuralRecon::F_RR), srOk = nr.available(LLVKNeuralRecon::F_SR);
     static const char* const kSetting[3] = {"Off", "On", "Auto"};
-    const std::string base = std::string("Ray Reconstruction ") + kSetting[setting]
-                           + (setting == 2u ? (wantRr ? ": a noisy RT signal is on" : ": no noisy RT signal") : "");
+    std::string base = std::string("Ray Reconstruction ") + kSetting[setting]
+                     + (setting == 2u ? (wantRr ? ": a noisy RT signal is on" : ": no noisy RT signal") : "");
+    // #1075 step 10: a stereo frame is forward-lit (no G-buffer for Ray Reconstruction's guides):
+    // Super Resolution where the shim has it (else RR is asked for and the frame takes FSR 3.1).
+    if (stereoActive() && wantRr && srOk)
+    {
+        wantRr = false;
+        base += "; stereo views are forward-lit (no G-buffer): Super Resolution";
+    }
     if (wantRr && rrOk) { kind = LLVKNeuralRecon::F_RR; why = base; return true; }
     if (wantRr && srOk)
     {
@@ -27751,24 +28055,30 @@ bool LLCleanRendererVK::rrPlan(uint32_t dw, uint32_t dh, uint32_t& rw, uint32_t&
 }
 
 LLCleanDlssRRVK::Want LLCleanRendererVK::rrWant(LLVKNeuralRecon::FeatureKind kind, uint32_t rw, uint32_t rh,
-                                                uint32_t dw, uint32_t dh, uint32_t q) const
+                                                uint32_t dw, uint32_t dh, uint32_t q, uint32_t view) const
 {
     LLCleanDlssRRVK::Want w;
     w.kind = kind;
     w.rw = rw; w.rh = rh; w.dw = dw; w.dh = dh;
     // (render = display: the DLAA network whatever the mode asked)
     w.q = (rw == dw && rh == dh) ? LLVKNeuralRecon::Q_DLAA : (LLVKNeuralRecon::Quality)q;
-    w.outImage = mHdr.image;
+    // #1075 step 10: view `view`'s layer of every input (layerOf: the 2D views of before at view
+    // 0); a stereo frame's output is that view's staging image (see mRrStage).
+    const uint32_t v = view;
+    const bool staged = stereoActive();
+    w.outImage = staged ? mRrStage[v].image : mHdr.image;
     w.outFormat = mHdrFormat;
     LLCleanDlssRRVK::Targets& t = w.t;
-    t.depth = mDepth.view; t.motion = mMotion.view; t.react = mReact.view; t.noTemporal = mNoTemporal.view;
-    t.scene = sceneHdr().view; t.ref = mRefract.view; t.exposure = mExposureImg.view; t.out = mHdr.view;
-    for (uint32_t i = 0; i < 4; ++i) t.gbuf[i] = mGbuf[i].view;
+    t.depth = layerOf(mDepth, v); t.motion = layerOf(mMotion, v); t.react = layerOf(mReact, v);
+    t.noTemporal = layerOf(mNoTemporal, v);
+    t.scene = layerOf(sceneHdr(), v); t.ref = layerOf(mRefract, v); t.exposure = mExposureImg.view;
+    t.out = staged ? mRrStage[v].view : mHdr.view;
+    for (uint32_t i = 0; i < 4; ++i) t.gbuf[i] = layerOf(mGbuf[i], v);
     // The RT reflection trace at this render extent (else the guide pass's placeholder; RR only:
-    // SR's Want never names it, so an RT re-creation does not re-make SR's sets).
+    // SR's Want never names it, so an RT re-creation does not re-make SR's sets). (View 0's only.)
     const uint32_t tiles = ((rw + 7u) / 8u) * ((rh + 7u) / 8u);
     const bool rt = kind == LLVKNeuralRecon::F_RR && mDsRtTileCount && mDsRtTileCount == tiles && mDsRtTrace.view
-                 && mDsRtTiles.buffer;
+                 && mDsRtTiles.buffer && v == 0u;
     t.rtTrace = rt ? mDsRtTrace.view : VK_NULL_HANDLE;
     t.rtTiles = rt ? mDsRtTiles.buffer : VK_NULL_HANDLE;
     t.nearest = mDepthSampler;
@@ -27797,27 +28107,73 @@ void LLCleanRendererVK::rrPrestep()
     mRrReq = RrReq{};
     if (r.release)
     {
-        if (mRr) mRr->release();   // (waits for the device when it holds anything)
+        for (LLCleanDlssRRVK* rrv : mRr)   // (#1075: every view's instance)
+            if (rrv) rrv->release();       // (waits for the device when it holds anything)
+        destroyRrStages();
         return;
     }
     // RR took FSR 3.1's slot: FSR's resources go here, not under an open command buffer.
-    if (mRrRanLast && mFsr)
-    {
-        mFsr->destroy(mCtx->device());
-        delete mFsr;
-        mFsr = nullptr;
-    }
+    if (mRrRanLast && mFsr[0]) destroyFsr();
     if (!r.pending) return;
-    if (!mRr) mRr = new LLCleanDlssRRVK();
     std::string err;
-    if (!mRr->prestep(mCtx, rrWant(r.kind, r.rw, r.rh, r.dw, r.dh, r.q), kRingSlots, err))
+    // #1075 step 10: every view's instance from the one request (a stereo frame first gets its
+    // per-view output staging images: rrWant names them); all prepare or none stays.
+    bool ok = !stereoActive() || ensureRrStages(r.dw, r.dh);
+    if (!ok) err = "no video memory for the per-view output images";
+    for (uint32_t v = 0; ok && v < mViewCount; ++v)
+    {
+        if (!mRr[v]) mRr[v] = new LLCleanDlssRRVK();
+        ok = mRr[v]->prestep(mCtx, rrWant(r.kind, r.rw, r.rh, r.dw, r.dh, r.q, v), kRingSlots, err);
+    }
+    if (!ok)
     {
         // #697 / allocation-failure policy: back off, run FSR meanwhile, retry later.
         mRrRetryAt = LLFrameTimer::getElapsedSeconds() + 30.0;
         LL_WARNS("Vulkan") << "DLSS " << LLVKNeuralRecon::kindName(r.kind) << ": could not prepare " << r.rw << "x"
                            << r.rh << " -> " << r.dw << "x" << r.dh << " (" << err << "); FSR 3.1 for 30 s" << LL_ENDL;
-        mRr->release();
+        for (LLCleanDlssRRVK* rrv : mRr)
+            if (rrv) rrv->release();
+        destroyRrStages();
     }
+}
+
+bool LLCleanRendererVK::ensureRrStages(uint32_t dw, uint32_t dh)
+{
+    bool have = mRrStageW == dw && mRrStageH == dh;
+    for (uint32_t v = 0; v < mViewCount; ++v) have = have && mRrStage[v].image != VK_NULL_HANDLE;
+    if (have) return true;
+    destroyRrStages();   // (the previous size's: the device is idle after it)
+    VkMemScope memcat(VKMEM_UPSCALER);   // #407
+    {
+        // #697: soft -- a refusal backs DLSS off (rrPrestep), the frame runs FSR 3.1 per view.
+        VkDeviceContext::SoftAllocScope soft(mCtx, true);
+        for (uint32_t v = 0; v < mViewCount; ++v)
+        {
+            // Written by the network (storage, GENERAL), copied into layer v of mHdr.
+            mRrStage[v] = mCtx->createImage2D(dw, dh, mHdrFormat,
+                VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                VK_IMAGE_ASPECT_COLOR_BIT);
+            if (!mRrStage[v].image) break;
+            mCtx->setObjectName(VK_OBJECT_TYPE_IMAGE, (uint64_t)mRrStage[v].image, v ? "dlssViewOutput1" : "dlssViewOutput0");
+        }
+    }
+    for (uint32_t v = 0; v < mViewCount; ++v)
+        if (!mRrStage[v].image) { destroyRrStages(); return false; }
+    mRrStageW = dw; mRrStageH = dh;
+    return true;
+}
+
+void LLCleanRendererVK::destroyRrStages()
+{
+    bool any = false;
+    for (const GpuImage& im : mRrStage) any = any || im.image != VK_NULL_HANDLE;
+    if (any)
+    {
+        vkDeviceWaitIdle(mCtx->device());   // (the DLSS sets / last frames' copies name them)
+        for (GpuImage& im : mRrStage)
+            if (im.image) { mCtx->destroyImage(im); im = GpuImage{}; }
+    }
+    mRrStageW = mRrStageH = 0;
 }
 
 bool LLCleanRendererVK::rrTry(VkCommandBuffer cmd, uint32_t width, uint32_t height, uint32_t rw, uint32_t rh,
@@ -27835,8 +28191,18 @@ bool LLCleanRendererVK::rrTry(VkCommandBuffer cmd, uint32_t width, uint32_t heig
         rrNote("no deferred G-buffer this frame (forward-lit frame)");
         return false;
     }
-    const LLCleanDlssRRVK::Want want = rrWant(mDlssKind, rw, rh, width, height, mRrQuality);
-    if (!mRr || !mRr->ready(want))
+    // #1075 step 10: every view's instance must be ready for its own Want (view v's layers and,
+    // in stereo, its staging output); [0]'s Want also names what runs (the log line).
+    LLCleanDlssRRVK::Want wants[kMaxViews];
+    bool allReady = true;
+    for (uint32_t v = 0; v < mViewCount; ++v)
+    {
+        wants[v] = rrWant(mDlssKind, rw, rh, width, height, mRrQuality, v);
+        allReady = allReady && mRr[v] && mRr[v]->ready(wants[v]);
+    }
+    const LLCleanDlssRRVK::Want& want = wants[0];
+    const bool staged = stereoActive();   // view v's output: mRrStage[v], copied into layer v of mHdr below
+    if (!allReady)
     {
         // Built for another network / extent / mode / target generation: rrPrestep makes it
         // before the next recording; this frame runs FSR.
@@ -27856,7 +28222,24 @@ bool LLCleanRendererVK::rrTry(VkCommandBuffer cmd, uint32_t width, uint32_t heig
     else
         mTaaHistValid = mTaaGlowValid = false;   // the TAA history skipped this frame
     const GpuImage& scene = sceneHdr();
-    if (mScaled)
+    if (staged)
+    {
+        // The staging outputs: last frame's copy out of them done -> the networks' storage
+        // writes (old contents discarded).
+        VkImageMemoryBarrier2 sb[kMaxViews]{};
+        for (uint32_t v = 0; v < mViewCount; ++v)
+        {
+            sb[v].sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+            sb[v].srcStageMask=VK_PIPELINE_STAGE_2_COPY_BIT; sb[v].srcAccessMask=VK_ACCESS_2_NONE;
+            sb[v].dstStageMask=VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+            sb[v].dstAccessMask=VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT|VK_ACCESS_2_SHADER_WRITE_BIT;
+            sb[v].oldLayout=VK_IMAGE_LAYOUT_UNDEFINED; sb[v].newLayout=VK_IMAGE_LAYOUT_GENERAL;
+            sb[v].image=mRrStage[v].image; sb[v].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+        }
+        VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; dep.imageMemoryBarrierCount=mViewCount; dep.pImageMemoryBarriers=sb;
+        vkCmdPipelineBarrier2(cmd,&dep);
+    }
+    else if (mScaled)
     {
         // mHdr: last frame's post-chain reads / writes done -> the network's storage writes.
         VkImageMemoryBarrier2 b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
@@ -27866,53 +28249,60 @@ bool LLCleanRendererVK::rrTry(VkCommandBuffer cmd, uint32_t width, uint32_t heig
         b.dstStageMask=VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
         b.dstAccessMask=VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT|VK_ACCESS_2_SHADER_WRITE_BIT;
         b.oldLayout=VK_IMAGE_LAYOUT_UNDEFINED; b.newLayout=VK_IMAGE_LAYOUT_GENERAL;
-        b.image=mHdr.image; b.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+        b.image=mHdr.image; b.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
         VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; dep.imageMemoryBarrierCount=1; dep.pImageMemoryBarriers=&b;
         vkCmdPipelineBarrier2(cmd,&dep);
     }
-    LLCleanDlssRRVK::Frame f;
-    f.w = want;
-    f.sceneImage = scene.image;
-    f.sceneFormat = mHdrFormat;
-    f.outIsScene = !mScaled;
-    f.reproj = mTaaReproj;
-    f.waterPlane = mTaaWaterPlane;
-    f.view = mCurView;
-    f.proj = mCurProj;
-    f.viewProjRel = mViewProjRel;
-    f.jitterPx[0] = mTaaJitter[0]; f.jitterPx[1] = mTaaJitter[1];
-    f.jitterNdc[0] = mTaaJitter[2]; f.jitterNdc[1] = mTaaJitter[3];
-    f.motionValid = mvNow;
-    f.staticExposure = mAtmos[13 * 4 + 0];                                  // RenderExposure
-    f.dynamicExposure = mAtmos[15 * 4 + 2] > 0.5f && mExposurePipe;
-    // Camera cut / teleport, or this network did not run last frame (FSR / a snapshot / the
-    // other network in between; a re-created feature also resets on its first evaluate).
-    f.reset = mTaaResolveReset || !mRrRanLast || mDlssRanKind != mDlssKind;
-    const uint32_t tiles = ((rw + 7u) / 8u) * ((rh + 7u) / 8u);
-    f.rtValid = rr && mRtReflNow && want.t.rtTrace && mDsRtTileCount == tiles;
-    f.rtTilesPerRow = (rw + 7u) / 8u;
-    f.rtTileCount = tiles;
-    f.rtHdrWords = kRtTilesHdrWords;
-    f.slot = mFrameSlot % kRingSlots;
-    f.slotCount = kRingSlots;
-#if defined(LL_HAS_CLEAN_PIPELINE)
-    static LLCachedControl<F32> s_jsign(gSavedSettings, "RenderVKDlssJitterSign", 1.f);
-    static LLCachedControl<F32> s_march(gSavedSettings, "RenderVKDlssHitMarch", 30.f);
-    static LLCachedControl<U32> s_steps(gSavedSettings, "RenderVKDlssHitMarchSteps", 24U);
-    f.jitterSign = (F32)s_jsign < 0.f ? -1.f : 1.f;
-    f.marchDist = llclamp((F32)s_march, 0.f, 500.f);
-    f.marchSteps = std::min((U32)s_steps, 128u);
-    static LLCachedControl<U32> s_rrdbg(gSavedSettings, "RenderVKDlssDebug", 0U);
-    static LLCachedControl<F32> s_resp(gSavedSettings, "RenderVKDlssResponsivity", 1.f);
-    static LLCachedControl<U32> s_srexp(gSavedSettings, "RenderVKDlssSRExposure", 0U);
-    f.debug = rr ? std::min((U32)s_rrdbg, 11u) : 0u;
-    f.responsivity = LLVKNeuralRecon::instance().supportsOverlay() ? llclamp((F32)s_resp, -1.f, 1.f) : 0.f;
-    f.srPreExpose = (U32)s_srexp == 1u;
-#endif
-    // (rrOverlayNow: the colour input is the opaque scene -- mRefract was copied this frame; RR only)
-    f.overlay = rr && mRrOverlayNow;
+    // Every view in view order, each with its own Want, camera and network (#1075 step 10; one
+    // record at N = 1); a failure stops the remaining views (one bad frame, as before).
     std::string err;
-    const bool ok = mRr->record(cmd, f, err);
+    bool ok = true;
+    for (uint32_t v = 0; ok && v < mViewCount; ++v)
+    {
+        LLCleanDlssRRVK::Frame f;
+        f.w = wants[v];
+        f.sceneImage = scene.image;
+        f.sceneFormat = mHdrFormat;
+        f.outIsScene = !mScaled && !staged;
+        f.reproj = mTaaReprojV[v];
+        f.waterPlane = mTaaWaterPlaneV[v];
+        f.view = mCurViewV[v];
+        f.proj = mCurProjV[v];
+        f.viewProjRel = mViewProjRelV[v];
+        f.jitterPx[0] = mTaaJitter[0]; f.jitterPx[1] = mTaaJitter[1];   // (one jitter phase for every view)
+        f.jitterNdc[0] = mTaaJitter[2]; f.jitterNdc[1] = mTaaJitter[3];
+        f.motionValid = mvNow;
+        f.staticExposure = mAtmos[13 * 4 + 0];                                  // RenderExposure
+        f.dynamicExposure = mAtmos[15 * 4 + 2] > 0.5f && mExposurePipe;
+        // Camera cut / teleport, or this network did not run last frame (FSR / a snapshot / the
+        // other network in between; a re-created feature also resets on its first evaluate).
+        f.reset = mTaaResolveReset || !mRrRanLast || mDlssRanKind != mDlssKind;
+        const uint32_t tiles = ((rw + 7u) / 8u) * ((rh + 7u) / 8u);
+        f.rtValid = rr && mRtReflNow && f.w.t.rtTrace && mDsRtTileCount == tiles;
+        f.rtTilesPerRow = (rw + 7u) / 8u;
+        f.rtTileCount = tiles;
+        f.rtHdrWords = kRtTilesHdrWords;
+        f.slot = mFrameSlot % kRingSlots;
+        f.slotCount = kRingSlots;
+        if (mViewCount > 1u) f.frameTimeMs = mUpscaleDt * 1000.f;   // (one clock for every eye; N = 1: its own)
+#if defined(LL_HAS_CLEAN_PIPELINE)
+        static LLCachedControl<F32> s_jsign(gSavedSettings, "RenderVKDlssJitterSign", 1.f);
+        static LLCachedControl<F32> s_march(gSavedSettings, "RenderVKDlssHitMarch", 30.f);
+        static LLCachedControl<U32> s_steps(gSavedSettings, "RenderVKDlssHitMarchSteps", 24U);
+        f.jitterSign = (F32)s_jsign < 0.f ? -1.f : 1.f;
+        f.marchDist = llclamp((F32)s_march, 0.f, 500.f);
+        f.marchSteps = std::min((U32)s_steps, 128u);
+        static LLCachedControl<U32> s_rrdbg(gSavedSettings, "RenderVKDlssDebug", 0U);
+        static LLCachedControl<F32> s_resp(gSavedSettings, "RenderVKDlssResponsivity", 1.f);
+        static LLCachedControl<U32> s_srexp(gSavedSettings, "RenderVKDlssSRExposure", 0U);
+        f.debug = rr ? std::min((U32)s_rrdbg, 11u) : 0u;
+        f.responsivity = LLVKNeuralRecon::instance().supportsOverlay() ? llclamp((F32)s_resp, -1.f, 1.f) : 0.f;
+        f.srPreExpose = (U32)s_srexp == 1u;
+#endif
+        // (rrOverlayNow: the colour input is the opaque scene -- mRefract was copied this frame; RR only)
+        f.overlay = rr && mRrOverlayNow;
+        ok = mRr[v]->record(cmd, f, err);
+    }
     if (!ok)
     {
         // The output is undefined this frame (one bad frame at most): back off to FSR.
@@ -27936,6 +28326,65 @@ bool LLCleanRendererVK::rrTry(VkCommandBuffer cmd, uint32_t width, uint32_t heig
         }
     }
     mRcasRan = false;   // RR does not sharpen: the final pass's CAS (RenderCASSharpness) runs after it
+    if (staged)
+    {
+        // #1075 step 10: after EVERY view's network (each read its own layer of the scene) -- the
+        // staging outputs -> copy sources, mHdr -> copy destination (scaled: old contents
+        // discarded after last frame's post chain; native: the scene the guide / colour passes
+        // just read), view v's output -> layer v, then the exit layouts below (as recordFSR).
+        VkImageMemoryBarrier2 b[kMaxViews + 1]{};
+        for (auto& x : b) x.sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        for (uint32_t v = 0; v < mViewCount; ++v)
+        {
+            b[v].srcStageMask=VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+            b[v].srcAccessMask=VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT|VK_ACCESS_2_SHADER_WRITE_BIT;
+            b[v].dstStageMask=VK_PIPELINE_STAGE_2_COPY_BIT; b[v].dstAccessMask=VK_ACCESS_2_TRANSFER_READ_BIT;
+            b[v].oldLayout=VK_IMAGE_LAYOUT_GENERAL; b[v].newLayout=VK_IMAGE_LAYOUT_GENERAL;
+            b[v].image=mRrStage[v].image; b[v].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+        }
+        VkImageMemoryBarrier2& hb = b[mViewCount];
+        hb.srcStageMask=mScaled ? (VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT|VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
+                                   |VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT|VK_PIPELINE_STAGE_2_COPY_BIT)
+                                : VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        hb.srcAccessMask=mScaled ? (VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT|VK_ACCESS_2_TRANSFER_WRITE_BIT) : VK_ACCESS_2_NONE;
+        hb.dstStageMask=VK_PIPELINE_STAGE_2_COPY_BIT; hb.dstAccessMask=VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        hb.oldLayout=mScaled ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        hb.newLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        hb.image=mHdr.image; hb.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
+        VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; dep.imageMemoryBarrierCount=mViewCount + 1u; dep.pImageMemoryBarriers=b;
+        vkCmdPipelineBarrier2(cmd,&dep);
+        for (uint32_t v = 0; v < mViewCount; ++v)
+        {
+            VkImageCopy cc{};
+            cc.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};
+            cc.dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,v,1};
+            cc.extent={width, height, 1};
+            vkCmdCopyImage(cmd, mRrStage[v].image, VK_IMAGE_LAYOUT_GENERAL, mHdr.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cc);
+        }
+        VkImageMemoryBarrier2 a[2]{};
+        for (auto& x : a) x.sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        // mHdr: scaled -> the post chain's SHADER_READ_ONLY; native -> COLOR_ATTACHMENT_OPTIMAL
+        // (recordSSRCopy's input, it is the scene).
+        a[0].srcStageMask=VK_PIPELINE_STAGE_2_COPY_BIT; a[0].srcAccessMask=VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        a[0].dstStageMask=mScaled ? (VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT|VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT)
+                                  : (VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT|VK_PIPELINE_STAGE_2_COPY_BIT);
+        a[0].dstAccessMask=mScaled ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT
+                                   : (VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT|VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT
+                                      |VK_ACCESS_2_TRANSFER_READ_BIT);
+        a[0].oldLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        a[0].newLayout=mScaled ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        a[0].image=mHdr.image; a[0].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
+        // Scaled: the render-size scene back to its attachment layout (recordSSRCopy's input).
+        a[1].srcStageMask=VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT; a[1].srcAccessMask=0;
+        a[1].dstStageMask=VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT|VK_PIPELINE_STAGE_2_COPY_BIT;
+        a[1].dstAccessMask=VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT|VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT
+                          |VK_ACCESS_2_TRANSFER_READ_BIT;
+        a[1].oldLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; a[1].newLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        a[1].image=scene.image; a[1].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
+        VkDependencyInfo d2{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; d2.imageMemoryBarrierCount=mScaled ? 2u : 1u; d2.pImageMemoryBarriers=a;
+        vkCmdPipelineBarrier2(cmd,&d2);
+        return true;
+    }
     // Exit layouts as recordFSR: scaled -- the scene COLOR_ATTACHMENT_OPTIMAL (recordSSRCopy's
     // input), the display mHdr SHADER_READ_ONLY; native -- mHdr (= the scene) COLOR_ATTACHMENT_OPTIMAL.
     if (mScaled)
@@ -27947,12 +28396,12 @@ bool LLCleanRendererVK::rrTry(VkCommandBuffer cmd, uint32_t width, uint32_t heig
         a[0].dstAccessMask=VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT|VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT
                           |VK_ACCESS_2_TRANSFER_READ_BIT;
         a[0].oldLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; a[0].newLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        a[0].image=scene.image; a[0].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+        a[0].image=scene.image; a[0].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
         a[1].srcStageMask=VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT; a[1].srcAccessMask=VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
         a[1].dstStageMask=VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT|VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
         a[1].dstAccessMask=VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
         a[1].oldLayout=VK_IMAGE_LAYOUT_GENERAL; a[1].newLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        a[1].image=mHdr.image; a[1].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+        a[1].image=mHdr.image; a[1].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
         VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; dep.imageMemoryBarrierCount=2; dep.pImageMemoryBarriers=a;
         vkCmdPipelineBarrier2(cmd,&dep);
     }
@@ -27964,9 +28413,9 @@ bool LLCleanRendererVK::rrTry(VkCommandBuffer cmd, uint32_t width, uint32_t heig
         a.dstStageMask=VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT|VK_PIPELINE_STAGE_2_COPY_BIT;
         a.dstAccessMask=VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT|VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT
                        |VK_ACCESS_2_TRANSFER_READ_BIT;
-        a.oldLayout=mRr->outputMovedToGeneral() ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        a.oldLayout=mRr[0]->outputMovedToGeneral() ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         a.newLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        a.image=mHdr.image; a.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+        a.image=mHdr.image; a.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
         VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; dep.imageMemoryBarrierCount=1; dep.pImageMemoryBarriers=&a;
         vkCmdPipelineBarrier2(cmd,&dep);
     }
@@ -28045,11 +28494,11 @@ void LLCleanRendererVK::recordSharpenNoTaa(VkCommandBuffer cmd, uint32_t w, uint
     b[0].srcStageMask=VK_PIPELINE_STAGE_2_COPY_BIT; b[0].srcAccessMask=VK_ACCESS_2_TRANSFER_WRITE_BIT;
     b[0].dstStageMask=VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT; b[0].dstAccessMask=VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
     b[0].oldLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; b[0].newLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    b[0].image=mPrevColor.image; b[0].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+    b[0].image=mPrevColor.image; b[0].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
     b[1].srcStageMask=VK_PIPELINE_STAGE_2_COPY_BIT; b[1].srcAccessMask=0;   // the SSR copy read it
     b[1].dstStageMask=VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT; b[1].dstAccessMask=VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
     b[1].oldLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; b[1].newLayout=VK_IMAGE_LAYOUT_GENERAL;
-    b[1].image=mHdr.image; b[1].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+    b[1].image=mHdr.image; b[1].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
     VkDependencyInfo d0{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; d0.imageMemoryBarrierCount=2; d0.pImageMemoryBarriers=b;
     vkCmdPipelineBarrier2(cmd,&d0);
     dispatchRcas(cmd, 2, w, h, amount);
@@ -28058,7 +28507,7 @@ void LLCleanRendererVK::recordSharpenNoTaa(VkCommandBuffer cmd, uint32_t w, uint
     a.dstStageMask=VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT|VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
     a.dstAccessMask=VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
     a.oldLayout=VK_IMAGE_LAYOUT_GENERAL; a.newLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    a.image=mHdr.image; a.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+    a.image=mHdr.image; a.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
     VkDependencyInfo d1{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; d1.imageMemoryBarrierCount=1; d1.pImageMemoryBarriers=&a;
     vkCmdPipelineBarrier2(cmd,&d1);
 }
@@ -28072,17 +28521,18 @@ void LLCleanRendererVK::recordRefractCopy(VkCommandBuffer cmd, uint32_t width, u
     b[0].srcStageMask=VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT; b[0].srcAccessMask=VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
     b[0].dstStageMask=VK_PIPELINE_STAGE_2_COPY_BIT; b[0].dstAccessMask=VK_ACCESS_2_TRANSFER_READ_BIT;
     b[0].oldLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL; b[0].newLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    b[0].image=scene.image; b[0].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+    b[0].image=scene.image; b[0].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
     b[1].srcStageMask=VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT|VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;   // water FS / TAA
     b[1].srcAccessMask=VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
     b[1].dstStageMask=VK_PIPELINE_STAGE_2_COPY_BIT; b[1].dstAccessMask=VK_ACCESS_2_TRANSFER_WRITE_BIT;
     b[1].oldLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; b[1].newLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    b[1].image=mRefract.image; b[1].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+    b[1].image=mRefract.image; b[1].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
     VkDependencyInfo d0{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; d0.imageMemoryBarrierCount=2; d0.pImageMemoryBarriers=b;
     vkCmdPipelineBarrier2(cmd,&d0);
 
     VkImageCopy cc{};
-    cc.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1}; cc.dstSubresource=cc.srcSubresource;
+    // (#1075: every view's layer -- one region, layerCount = the target's layers; 1 = as before)
+    cc.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,std::min(scene.layers, mRefract.layers)}; cc.dstSubresource=cc.srcSubresource;
     cc.extent={width, height, 1};
     vkCmdCopyImage(cmd, scene.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                    mRefract.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cc);
@@ -28093,11 +28543,11 @@ void LLCleanRendererVK::recordRefractCopy(VkCommandBuffer cmd, uint32_t width, u
     a[0].dstStageMask=VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
     a[0].dstAccessMask=VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT|VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT;
     a[0].oldLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL; a[0].newLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    a[0].image=scene.image; a[0].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+    a[0].image=scene.image; a[0].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
     a[1].srcStageMask=VK_PIPELINE_STAGE_2_COPY_BIT; a[1].srcAccessMask=VK_ACCESS_2_TRANSFER_WRITE_BIT;
     a[1].dstStageMask=VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT; a[1].dstAccessMask=VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
     a[1].oldLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; a[1].newLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    a[1].image=mRefract.image; a[1].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+    a[1].image=mRefract.image; a[1].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
     VkDependencyInfo d1{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; d1.imageMemoryBarrierCount=2; d1.pImageMemoryBarriers=a;
     vkCmdPipelineBarrier2(cmd,&d1);
 }
@@ -28126,21 +28576,22 @@ void LLCleanRendererVK::recordWaterExclusion(VkCommandBuffer cmd, uint32_t width
     b.dstStageMask=VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
     b.dstAccessMask=VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
     b.oldLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; b.newLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    b.image=mWaterExcl.image; b.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+    b.image=mWaterExcl.image; b.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
     VkDependencyInfo d0{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; d0.imageMemoryBarrierCount=1; d0.pImageMemoryBarriers=&b;
     vkCmdPipelineBarrier2(cmd,&d0);
 
     VkRenderingAttachmentInfo ca{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-    ca.imageView=mWaterExcl.view; ca.imageLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    // (#1075: the main view's scope -- every view's layer in stereo)
+    ca.imageView=mainAtt(mWaterExcl); ca.imageLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     ca.loadOp=VK_ATTACHMENT_LOAD_OP_CLEAR; ca.storeOp=VK_ATTACHMENT_STORE_OP_STORE;
     ca.clearValue.color = {{1.f, 0.f, 0.f, 0.f}};   // R exclusion 1 (none)
     VkRenderingAttachmentInfo da{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-    da.imageView=mDepth.view; da.imageLayout=VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
+    da.imageView=mainAtt(mDepth); da.imageLayout=VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
     da.loadOp=VK_ATTACHMENT_LOAD_OP_LOAD; da.storeOp=VK_ATTACHMENT_STORE_OP_NONE;   // read-only (see beginPass2)
     VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
     ri.renderArea={{0,0},{width,height}}; ri.layerCount=1; ri.colorAttachmentCount=1;
     ri.pColorAttachments=&ca; ri.pDepthAttachment=&da;
-    vkCmdBeginRendering(cmd,&ri);
+    beginMain(cmd, ri);
     // F2: the exclusion list (only the invisiprims); lists off, the whole post-water
     // alpha list (the FS discards everything else).
     const VkBuffer exclBuf = mWaterListsNow ? mExclList.buffer : mAlphaPost[0].buffer;
@@ -28153,12 +28604,12 @@ void LLCleanRendererVK::recordWaterExclusion(VkCommandBuffer cmd, uint32_t width
         vkCmdBindIndexBuffer(cmd, mIbo.buffer, 0, VK_INDEX_TYPE_UINT16);
         const VkDescriptorSet s2[2] = {mDsetDraw0, mDsetDraw1};
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, mDrawLayout, 0, 2, s2, 0, nullptr);
-        pushDrawView(cmd, mDrawLayout, push);
+        pushMainView(cmd, mDrawLayout, push);
         bindGraphicsPipeline(cmd, mWaterExclPipe);
         bucketDraw(cmd, exclBuf, 0, mCounters.buffer, exclCtr * sizeof(uint32_t),
                                       mdiMaxSlot(exclCtr), sizeof(DrawCmd));
     }
-    vkCmdEndRendering(cmd);
+    endRenderingViews(cmd);
     mWaterExclAllOne = !any_excl;
 
     VkImageMemoryBarrier2 a = b;
@@ -28217,7 +28668,8 @@ void LLCleanRendererVK::recordCaptureAt(VkCommandBuffer cmd, uint32_t point, uin
 {
     if (!mCapPending || mCapPending != point) return;
     mCapPending = 0;
-    if (!recordSwapCopy(cmd, mCapBuf, mCapCap, width, height)) { mCapValid = false; return; }
+    // (#1075: the swap copy reads one layer of a one-layer image -- refused in stereo, design §8.3)
+    if (stereoActive() || !recordSwapCopy(cmd, mCapBuf, mCapCap, width, height)) { mCapValid = false; return; }
     mCapW = width; mCapH = height;
     mCapValid = true;
 }
@@ -28283,7 +28735,7 @@ void LLCleanRendererVK::recordDepthCapture(VkCommandBuffer cmd, uint32_t width, 
     b.srcAccessMask=VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
     b.dstStageMask=VK_PIPELINE_STAGE_2_COPY_BIT; b.dstAccessMask=VK_ACCESS_2_TRANSFER_READ_BIT;
     b.oldLayout=VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL; b.newLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    b.image=mDepth.image; b.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,1};
+    b.image=mDepth.image; b.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
     VkDependencyInfo d0{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; d0.imageMemoryBarrierCount=1; d0.pImageMemoryBarriers=&b;
     vkCmdPipelineBarrier2(cmd,&d0);
     VkBufferImageCopy r{};
@@ -28349,7 +28801,7 @@ uint32_t LLCleanRendererVK::postNoiseFrame() const
 
 void LLCleanRendererVK::recordLiveSnap(VkCommandBuffer cmd, uint32_t point, uint32_t width, uint32_t height)
 {
-    if (!mLiveSnap || !mLiveSnap->armed() || mLiveSnap->point() != point || mOffscreen) return;
+    if (!mLiveSnap || !mLiveSnap->armed() || mLiveSnap->point() != point || mOffscreen || stereoActive()) return;
     LLCleanSnapshotVK::Source s;
     s.point = point;
     s.swapImage = mSwapImage;
@@ -28423,12 +28875,12 @@ void LLCleanRendererVK::recordSSRCopy(VkCommandBuffer cmd, uint32_t width, uint3
     b[0].srcStageMask=VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT; b[0].srcAccessMask=VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
     b[0].dstStageMask=VK_PIPELINE_STAGE_2_COPY_BIT; b[0].dstAccessMask=VK_ACCESS_2_TRANSFER_READ_BIT;
     b[0].oldLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL; b[0].newLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    b[0].image=scene.image; b[0].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+    b[0].image=scene.image; b[0].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
     b[1].srcStageMask=VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT|VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT|VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
     b[1].srcAccessMask=VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
     b[1].dstStageMask=VK_PIPELINE_STAGE_2_COPY_BIT; b[1].dstAccessMask=VK_ACCESS_2_TRANSFER_READ_BIT;
     b[1].oldLayout=VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL; b[1].newLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    b[1].image=mDepth.image; b[1].subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,1};
+    b[1].image=mDepth.image; b[1].subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
     for (int i = 2; i < 4; ++i)
     {
         // WAR: this frame's SSR reads -- the lit FS, or the deferred lighting compute.
@@ -28437,8 +28889,8 @@ void LLCleanRendererVK::recordSSRCopy(VkCommandBuffer cmd, uint32_t width, uint3
         b[i].dstStageMask=VK_PIPELINE_STAGE_2_COPY_BIT; b[i].dstAccessMask=VK_ACCESS_2_TRANSFER_WRITE_BIT;
         b[i].oldLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL; b[i].newLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     }
-    b[2].image=mPrevColor.image; b[2].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
-    b[3].image=mPrevDepth.image; b[3].subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,1};
+    b[2].image=mPrevColor.image; b[2].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
+    b[3].image=mPrevDepth.image; b[3].subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
     uint32_t nb = 4;
     if (!needColor)
     {
@@ -28454,13 +28906,15 @@ void LLCleanRendererVK::recordSSRCopy(VkCommandBuffer cmd, uint32_t width, uint3
     vkCmdPipelineBarrier2(cmd,&d0);
 
     VkImageCopy cc{};
-    cc.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1}; cc.dstSubresource=cc.srcSubresource;
+    // (#1075: every view's layer in one region; 1 layer = as before)
+    const uint32_t cl = std::min(scene.layers, mPrevColor.layers), dl = std::min(mDepth.layers, mPrevDepth.layers);
+    cc.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,cl}; cc.dstSubresource=cc.srcSubresource;
     cc.extent={width, height, 1};
     if (needColor)
         vkCmdCopyImage(cmd, scene.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                        mPrevColor.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &cc);
     VkImageCopy dc = cc;
-    dc.srcSubresource={VK_IMAGE_ASPECT_DEPTH_BIT,0,0,1}; dc.dstSubresource=dc.srcSubresource;
+    dc.srcSubresource={VK_IMAGE_ASPECT_DEPTH_BIT,0,0,dl}; dc.dstSubresource=dc.srcSubresource;
     vkCmdCopyImage(cmd, mDepth.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                    mPrevDepth.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &dc);
 
@@ -28472,12 +28926,12 @@ void LLCleanRendererVK::recordSSRCopy(VkCommandBuffer cmd, uint32_t width, uint3
     a[0].dstStageMask=VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT|VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
     a[0].dstAccessMask=VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
     a[0].oldLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL; a[0].newLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    a[0].image=scene.image; a[0].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+    a[0].image=scene.image; a[0].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
     a[1].srcStageMask=VK_PIPELINE_STAGE_2_COPY_BIT; a[1].srcAccessMask=0;
     a[1].dstStageMask=VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT|VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
     a[1].dstAccessMask=VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT|VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
     a[1].oldLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL; a[1].newLayout=VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-    a[1].image=mDepth.image; a[1].subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,1};
+    a[1].image=mDepth.image; a[1].subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
     for (int i = 2; i < 4; ++i)
     {
         a[i].srcStageMask=VK_PIPELINE_STAGE_2_COPY_BIT; a[i].srcAccessMask=VK_ACCESS_2_TRANSFER_WRITE_BIT;
@@ -28486,8 +28940,8 @@ void LLCleanRendererVK::recordSSRCopy(VkCommandBuffer cmd, uint32_t width, uint3
         a[i].dstAccessMask=VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
         a[i].oldLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; a[i].newLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     }
-    a[2].image=mPrevColor.image; a[2].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
-    a[3].image=mPrevDepth.image; a[3].subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,1};
+    a[2].image=mPrevColor.image; a[2].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
+    a[3].image=mPrevDepth.image; a[3].subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
     uint32_t na = 4;
     const VkImageMemoryBarrier2* pa = a;
     if (!needColor)
@@ -28500,10 +28954,13 @@ void LLCleanRendererVK::recordSSRCopy(VkCommandBuffer cmd, uint32_t width, uint3
     VkDependencyInfo d1{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; d1.imageMemoryBarrierCount=na; d1.pImageMemoryBarriers=pa;
     vkCmdPipelineBarrier2(cmd,&d1);
 
-    // What was just captured is "previous" for the next frame.
-    std::memcpy(mPrevView, mCurView, sizeof(mPrevView));
-    std::memcpy(mPrevProj, mCurProj, sizeof(mPrevProj));
-    std::memcpy(mPrevInvProj, mCurInvProj, sizeof(mPrevInvProj));
+    // What was just captured is "previous" for the next frame (#1075: every view's).
+    for (uint32_t v = 0; v < mViewCount; ++v)
+    {
+        std::memcpy(mPrevViewV[v], mCurViewV[v], sizeof(mPrevViewV[v]));
+        std::memcpy(mPrevProjV[v], mCurProjV[v], sizeof(mPrevProjV[v]));
+        std::memcpy(mPrevInvProjV[v], mCurInvProjV[v], sizeof(mPrevInvProjV[v]));
+    }
     mPrevValid = true;
 }
 
@@ -28581,7 +29038,10 @@ void LLCleanRendererVK::ensureScaleTargets(uint32_t w, uint32_t h, uint32_t rw, 
     // exist) and the next attempt waits out a backoff -- no device wait + failed allocation
     // per frame.
     const bool need_scene = !(mSceneHdr.image && mSceneW == rw && mSceneH == rh);
-    const bool need_depth = !(mDepthDisp.image && mDepthDispW == w && mDepthDispH == h);
+    // #1075 step 10: a stereo frame has no display-size depth reader (selection, LL's overlays /
+    // in-world text: stereo-off; the VR wall's HUD has its own depth) -- none is made.
+    const bool want_depth = !stereoActive();
+    const bool need_depth = want_depth && !(mDepthDisp.image && mDepthDispW == w && mDepthDispH == h);
     if ((need_scene || need_depth) && LLFrameTimer::getElapsedSeconds() < mScaleRetryAt) return;
     VkDeviceContext::SoftAllocScope scale_soft(mCtx);
     if (need_scene)
@@ -28589,10 +29049,14 @@ void LLCleanRendererVK::ensureScaleTargets(uint32_t w, uint32_t h, uint32_t rw, 
         vkDeviceWaitIdle(mCtx->device());
         if (mSceneHdr.image) mCtx->destroyImage(mSceneHdr);
         // STORAGE: the deferred lighting compute writes the scene target (RenderVKDeferredLighting).
-        mSceneHdr = mCtx->createImage2D(rw, rh, mHdrFormat,
+        // (#1075 step 10: a layer per view -- the stereo frame's passes attach its 2D_ARRAY view
+        //  through mainAtt; 1 layer = createImage2D exactly)
+        mSceneHdr = mCtx->createScreenImage(rw, rh, mViewCount, mHdrFormat,
             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
             | VK_IMAGE_USAGE_TRANSFER_DST_BIT | (mDeferPipe ? VK_IMAGE_USAGE_STORAGE_BIT : 0u),
             VK_IMAGE_ASPECT_COLOR_BIT);
+        // (#1075: the deferred lighting's 2D_ARRAY view -- sceneHdr() is this image on scaled frames)
+        if (mSceneHdr.image) mCtx->addArrayView(mSceneHdr, VK_IMAGE_ASPECT_COLOR_BIT);
         mSceneW = mSceneHdr.image ? rw : 0; mSceneH = mSceneHdr.image ? rh : 0;
         ++mTargetGen;
         if (mSceneHdr.image) mCtx->setObjectName(VK_OBJECT_TYPE_IMAGE, (uint64_t)mSceneHdr.image, "worldSceneHDR");
@@ -28610,7 +29074,7 @@ void LLCleanRendererVK::ensureScaleTargets(uint32_t w, uint32_t h, uint32_t rw, 
         ++mTargetGen;
         if (mDepthDisp.image) mCtx->setObjectName(VK_OBJECT_TYPE_IMAGE, (uint64_t)mDepthDisp.image, "worldDepthDisplay");
     }
-    if (!mSceneHdr.image || !mDepthDisp.image)
+    if (!mSceneHdr.image || (want_depth && !mDepthDisp.image) || (stereoActive() && mSceneHdr.layers < mViewCount))
     {
         mScaleRetryAt = LLFrameTimer::getElapsedSeconds() + 5.0;   // #697
         vkLowMemNote(VKLM_TARGET, false, (uint64_t)rw * rh * 8u + (uint64_t)w * h * 4u);
@@ -28632,19 +29096,19 @@ void LLCleanRendererVK::recordSceneUpscaleBlit(VkCommandBuffer cmd)
     b[0].srcStageMask=VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT; b[0].srcAccessMask=VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
     b[0].dstStageMask=VK_PIPELINE_STAGE_2_BLIT_BIT; b[0].dstAccessMask=VK_ACCESS_2_TRANSFER_READ_BIT;
     b[0].oldLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL; b[0].newLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    b[0].image=mSceneHdr.image; b[0].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+    b[0].image=mSceneHdr.image; b[0].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
     // Contents discarded; waits on the previous frame's post-chain reads / DoF write.
     b[1].srcStageMask=VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT|VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
                      |VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT|VK_PIPELINE_STAGE_2_COPY_BIT;
     b[1].srcAccessMask=VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT|VK_ACCESS_2_TRANSFER_WRITE_BIT;
     b[1].dstStageMask=VK_PIPELINE_STAGE_2_BLIT_BIT; b[1].dstAccessMask=VK_ACCESS_2_TRANSFER_WRITE_BIT;
     b[1].oldLayout=VK_IMAGE_LAYOUT_UNDEFINED; b[1].newLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    b[1].image=mHdr.image; b[1].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+    b[1].image=mHdr.image; b[1].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
     VkDependencyInfo d0{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; d0.imageMemoryBarrierCount=2; d0.pImageMemoryBarriers=b;
     vkCmdPipelineBarrier2(cmd,&d0);
 
     VkImageBlit bl{};
-    bl.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1}; bl.dstSubresource=bl.srcSubresource;
+    bl.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,mViewCount}; bl.dstSubresource=bl.srcSubresource;   // (#1075: layer v -> layer v)
     bl.srcOffsets[1]={(int32_t)mSceneW, (int32_t)mSceneH, 1};
     bl.dstOffsets[1]={(int32_t)mHdrW, (int32_t)mHdrH, 1};
     vkCmdBlitImage(cmd, mSceneHdr.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -28656,12 +29120,12 @@ void LLCleanRendererVK::recordSceneUpscaleBlit(VkCommandBuffer cmd)
     a[0].dstStageMask=VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT|VK_PIPELINE_STAGE_2_COPY_BIT;
     a[0].dstAccessMask=VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT|VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT|VK_ACCESS_2_TRANSFER_READ_BIT;
     a[0].oldLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL; a[0].newLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    a[0].image=mSceneHdr.image; a[0].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+    a[0].image=mSceneHdr.image; a[0].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
     a[1].srcStageMask=VK_PIPELINE_STAGE_2_BLIT_BIT; a[1].srcAccessMask=VK_ACCESS_2_TRANSFER_WRITE_BIT;
     a[1].dstStageMask=VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT|VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
     a[1].dstAccessMask=VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
     a[1].oldLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; a[1].newLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    a[1].image=mHdr.image; a[1].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+    a[1].image=mHdr.image; a[1].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
     VkDependencyInfo d1{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; d1.imageMemoryBarrierCount=2; d1.pImageMemoryBarriers=a;
     vkCmdPipelineBarrier2(cmd,&d1);
 }
@@ -28710,7 +29174,7 @@ void LLCleanRendererVK::recordDepthUpscale(VkCommandBuffer cmd)
                 d.srcAccessMask=VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT|VK_ACCESS_2_TRANSFER_WRITE_BIT;
                 d.dstStageMask=VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT; d.dstAccessMask=VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
                 d.oldLayout=VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL; d.newLayout=VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
-                d.image=mDepth.image; d.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,1};
+                d.image=mDepth.image; d.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
                 VkMemoryBarrier2 m{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
                 m.srcStageMask=VK_PIPELINE_STAGE_2_COPY_BIT; m.srcAccessMask=0;
                 m.dstStageMask=VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT; m.dstAccessMask=VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
@@ -28758,7 +29222,7 @@ void LLCleanRendererVK::recordDepthUpscale(VkCommandBuffer cmd)
                 a[0].dstStageMask=kTests;
                 a[0].dstAccessMask=VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT|VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
                 a[0].oldLayout=VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL; a[0].newLayout=VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-                a[0].image=mDepth.image; a[0].subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,1};
+                a[0].image=mDepth.image; a[0].subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
                 a[1] = a[0];
                 a[1].srcStageMask=VK_PIPELINE_STAGE_2_COPY_BIT; a[1].srcAccessMask=VK_ACCESS_2_TRANSFER_WRITE_BIT;
                 a[1].oldLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
@@ -28775,7 +29239,7 @@ void LLCleanRendererVK::recordDepthUpscale(VkCommandBuffer cmd)
     b[0].srcAccessMask=VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT|VK_ACCESS_2_TRANSFER_WRITE_BIT;
     b[0].dstStageMask=VK_PIPELINE_STAGE_2_BLIT_BIT; b[0].dstAccessMask=VK_ACCESS_2_TRANSFER_READ_BIT;
     b[0].oldLayout=VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL; b[0].newLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    b[0].image=mDepth.image; b[0].subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,1};
+    b[0].image=mDepth.image; b[0].subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
     // Contents discarded; waits on the previous frame's selection / overlay / HUD use.
     b[1].srcStageMask=kTests; b[1].srcAccessMask=VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
     b[1].dstStageMask=VK_PIPELINE_STAGE_2_BLIT_BIT; b[1].dstAccessMask=VK_ACCESS_2_TRANSFER_WRITE_BIT;
@@ -28797,7 +29261,7 @@ void LLCleanRendererVK::recordDepthUpscale(VkCommandBuffer cmd)
     a[0].dstStageMask=kTests;
     a[0].dstAccessMask=VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT|VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
     a[0].oldLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL; a[0].newLayout=VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-    a[0].image=mDepth.image; a[0].subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,1};
+    a[0].image=mDepth.image; a[0].subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
     a[1] = a[0];
     a[1].srcAccessMask=VK_ACCESS_2_TRANSFER_WRITE_BIT;
     a[1].oldLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
@@ -28822,14 +29286,16 @@ void LLCleanRendererVK::ensureHdr(uint32_t w, uint32_t h)
         | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     // STORAGE also for the deferred lighting compute (native: it writes mHdr directly).
     if (mRcasPipe || mDeferPipe) hu |= VK_IMAGE_USAGE_STORAGE_BIT;
-    mHdr = mCtx->createImage2D(w, h, mHdrFormat, hu,
+    mHdr = mCtx->createScreenImage(w, h, mViewCount, mHdrFormat, hu,   // (#1075: a layer per view)
         VK_IMAGE_ASPECT_COLOR_BIT);
+    // (#1075: the tonemap / exposure / LDR glow read it as a 2D_ARRAY -- binding 0 below)
+    mCtx->addArrayView(mHdr, VK_IMAGE_ASPECT_COLOR_BIT);
     mHdrW = w; mHdrH = h;
     ++mTargetGen;
     mCtx->setObjectName(VK_OBJECT_TYPE_IMAGE, (uint64_t)mHdr.image, "worldHDR");
     mExposureReset = true;
 
-    VkDescriptorImageInfo si0{mGlowSampler, mHdr.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkDescriptorImageInfo si0{mGlowSampler, mHdr.arrayView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     VkDescriptorImageInfo si1{VK_NULL_HANDLE, mExposureImg.view, VK_IMAGE_LAYOUT_GENERAL};
     VkWriteDescriptorSet wr[2]{};
     for (int i = 0; i < 2; ++i) { wr[i].sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; wr[i].dstSet=mDsetTonemap; wr[i].descriptorCount=1; }
@@ -29381,7 +29847,7 @@ void LLCleanRendererVK::recordGradeUBO(VkCommandBuffer cmd)
         static LLCachedControl<F32> ca_bx(gSavedSettings, "RenderChromaticAberrationOffsetBX", 1.f);
         static LLCachedControl<F32> ca_by(gSavedSettings, "RenderChromaticAberrationOffsetBY", 0.f);
         static LLCachedControl<F32> ca_aniso(gSavedSettings, "RenderChromaticAberrationAnisotropy", 0.f);
-        const F32 st = mOrtho ? 0.f : llclamp((F32)ca_strength, 0.f, 1.f);   // <GMDX> (region map: per tile)
+        const F32 st = (mOrtho || mSnapMatte) ? 0.f : llclamp((F32)ca_strength, 0.f, 1.f);   // <GMDX> (region map: per tile; avatar matte)
         const F32 ang = llclamp((F32)ca_angle, 0.f, 360.f) * 0.01745329252f;
         u.ca0[0] = st * st * 0.02f;
         u.ca0[1] = 1.f / llclamp((F32)ca_falloff, 0.5f, 4.f);
@@ -29474,7 +29940,7 @@ void LLCleanRendererVK::recordTonemap(VkCommandBuffer cmd, VkImageView colorView
                 d.dstAccessMask=VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT|VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
                 d.oldLayout=VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL; d.newLayout=VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
             }
-            d.image=mDepth.image; d.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,1};
+            d.image=mDepth.image; d.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
             VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; dep.imageMemoryBarrierCount=1; dep.pImageMemoryBarriers=&d;
             vkCmdPipelineBarrier2(cmd,&dep);
         };
@@ -29491,8 +29957,25 @@ void LLCleanRendererVK::recordTonemap(VkCommandBuffer cmd, VkImageView colorView
             VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; dep.imageMemoryBarrierCount=1; dep.pImageMemoryBarriers=&bb;
             vkCmdPipelineBarrier2(cmd,&dep);
         }
-        float ep[12] = { p14[0], p14[1], p14[2], p14[3], p15[0], p15[1], mExposureReset ? 1.f : 0.f, 0.f,
-                         diffuse_scale, sky_test ? 1.f : 0.f, bloom_w, 0.f };
+        float ep[16] = { p14[0], p14[1], p14[2], p14[3], p15[0], p15[1], mExposureReset ? 1.f : 0.f, 0.f,
+                         diffuse_scale, sky_test ? 1.f : 0.f, bloom_w, 0.f,
+                         0.f, 0.f, 0.f, 0.f };
+#if defined(LL_HAS_CLEAN_PIPELINE)
+        {   // <GMDX> night eye: the night exposure curve (params4; zero = LL's curve)
+            const GMDXNightEye ne = gmdxNightEye(p14[0], p14[1], p14[2]);
+            std::memcpy(&ep[12], ne.curve, sizeof(ne.curve));
+            // params3.w (spare): at night (physical night, the sun past half GMDXDuskSunLow) no
+            // metered tap counts above the coefficient, so the moon's HDR disc (GMDXMoonDisc) and
+            // its bloom do not pump the exposure as they cross the sample grid. 0 by day: no cap.
+            const GMDXNightLight& nl = gmdxNightLight();
+            if (nl.on && nl.night > 0.f && !nl.custom_moon) ep[11] = llmax(p14[0], 1e-4f);   // (a creator's moon: LL's disc)
+            // <GMDX> space at altitude (gmdxspacealt.h): a black sky by day is not night; no night lift
+            // for it, so it stays black (and the stars in it) instead of being pumped up to grey.
+            const float day_space = gmdxSpaceAmount() * (1.f - llclamp(nl.night, 0.f, 1.f));
+            ep[12] *= 1.f - day_space;
+            ep[14] *= 1.f - day_space;
+        }
+#endif
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mExposurePipe);
         const VkDescriptorSet esets[2] = {mDsetTonemap, mDsetExposureAux};
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mExposureLayout, 0, 2, esets, 0, nullptr);
@@ -29524,10 +30007,21 @@ void LLCleanRendererVK::recordTonemap(VkCommandBuffer cmd, VkImageView colorView
     extern bool gSnapshotNoPost;
     snap_no_post = mOffscreen && gSnapshotNoPost;
 #endif
-    float tp[16] = { p13[0], p13[1], p13[2], p13[3], snap_no_post ? 1.f : p15[3], 0.f, dyn ? 1.f : 0.f, 0.f,
+    float tp[24] = { p13[0], p13[1], p13[2], p13[3], snap_no_post ? 1.f : p15[3], 0.f, dyn ? 1.f : 0.f, 0.f,
                      0.f, 0.f, 0.f, 0.f,
+                     0.f, 0.f, 0.f, 0.f,
+                     0.f, 0.f, 0.f, 0.f,     // <GMDX> p3, p4: night vision (clean_tonemap.frag)
                      0.f, 0.f, 0.f, 0.f };
-    static_assert(sizeof(tp) == 64, "clean_tonemap.frag Push (4 x vec4; range in the layout)");
+    static_assert(sizeof(tp) == 96, "clean_tonemap.frag Push (6 x vec4; range in the layout)");
+#if defined(LL_HAS_CLEAN_PIPELINE)
+    {   // <GMDX> night eye: Purkinje band + low-light noise (zero = off)
+        const GMDXNightEye ne = gmdxNightEye(p14[0], p14[1], p14[2]);
+        std::memcpy(&tp[16], ne.vision, sizeof(ne.vision));
+        tp[20] = ne.noise;
+        tp[21] = (float)(postNoiseFrame() & 1023u);
+        tp[22] = ne.grade;   // p4.z (spare before): the photographic night's cold grade (GMDXNightLook)
+    }
+#endif
 #if defined(LL_HAS_CLEAN_PIPELINE)
     // Output dither (B1 / F4a; prepareFinal decided the final pass is not running).
     if (mDitherInTonemap)
@@ -29607,17 +30101,21 @@ void LLCleanRendererVK::recordTonemap(VkCommandBuffer cmd, VkImageView colorView
     VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
     ri.renderArea={{0,0},{width,height}}; ri.layerCount=1; ri.colorAttachmentCount=1;
     ri.pColorAttachments=&ca;
-    vkCmdBeginRendering(cmd,&ri);
+    // #1075 STEREO: the N views into the layered output (multiview, the colour view is its
+    // 2D_ARRAY); a one-layer output (desktop debug N > 1) takes view 0 through the one-view twin.
+    // N = 1: viewMask 0, mTonemapPipe -- as before.
+    const bool layeredOut = stereoActive() && mOutputLayers >= mViewCount;
+    beginRenderingViews(cmd, ri, layeredOut ? mainViewMask() : 0u);
     VkViewport vp{0,0,(float)width,(float)height,0,1};
     VkRect2D sc{{0,0},{width,height}};
     vkCmdSetViewport(cmd,0,1,&vp); vkCmdSetScissor(cmd,0,1,&sc);
-    bindGraphicsPipeline(cmd, mTonemapPipe);
+    bindGraphicsPipeline(cmd, (stereoActive() && !layeredOut && mTonemapPipe1) ? mTonemapPipe1 : mTonemapPipe);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, mTonemapLayout, 0, 1, &mDsetTonemap, 0, nullptr);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, mTonemapLayout, 1, 1, &mDsetGrade, 0, nullptr);
     VK_PUSH_BUDGET_CHECK(tp);
     vkCmdPushConstants(cmd, mTonemapLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(tp), tp);
     vkCmdDraw(cmd, 3, 1, 0, 0);
-    vkCmdEndRendering(cmd);
+    endRenderingViews(cmd);
 }
 
 // ======================= POST-PROCESS AA (FXAA / SMAA 1x) =======================
@@ -30047,7 +30545,7 @@ void LLCleanRendererVK::updateLensDirt(VkCommandBuffer cmd, uint32_t width, uint
 {
     VkMemScope memcat(VKMEM_TARGET);   // #407
     mDirtActive = false;
-    if (!mDirtPipe || mOrtho) return;   // <GMDX> (region map: the dirt's pattern is per tile)
+    if (!mDirtPipe || mOrtho || mSnapMatte) return;   // <GMDX> (region map: the dirt's pattern is per tile; avatar matte)
     float key[10] = {};
 #if defined(LL_HAS_CLEAN_PIPELINE)
     static LLCachedControl<F32> s_strength(gSavedSettings, "RenderLensDirtStrength", 0.f);
@@ -30117,6 +30615,9 @@ void LLCleanRendererVK::recordFlareState(VkCommandBuffer cmd, uint32_t width, ui
     if (sun_up != mFlareSunUp) { mFlareSunUp = sun_up; mFlareStateInit = false; }
     // Light direction (world) -> clip with this frame's view/projection (VK NDC, y down).
     const float* L = &mAtmos[7 * 4];
+    // <GMDX> Physical night's dusk turns the scene light between the sun and the moon: the flare
+    // stays on the disc (atmos[10] / [11], the true directions).
+    if (gmdxNightLight().on && gmdxNightLight().blended) L = &mAtmos[(sun_up ? 10 : 11) * 4];
     float v[4] = {0.f, 0.f, 0.f, 0.f}, cl[4] = {0.f, 0.f, 0.f, 0.f};
     for (int r = 0; r < 4; ++r)
         for (int k = 0; k < 3; ++k) v[r] += mCurView[k * 4 + r] * L[k];
@@ -30194,7 +30695,7 @@ void LLCleanRendererVK::recordFlareState(VkCommandBuffer cmd, uint32_t width, ui
         d.srcAccessMask=VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT|VK_ACCESS_2_TRANSFER_WRITE_BIT;
         d.dstStageMask=FS; d.dstAccessMask=VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
         d.oldLayout=VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL; d.newLayout=VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
-        d.image=mDepth.image; d.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,1};
+        d.image=mDepth.image; d.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
         VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; dep.imageMemoryBarrierCount=1; dep.pImageMemoryBarriers=&d;
         vkCmdPipelineBarrier2(cmd,&dep);
     }
@@ -30239,7 +30740,7 @@ void LLCleanRendererVK::recordFlareState(VkCommandBuffer cmd, uint32_t width, ui
         d.dstStageMask=VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT|VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
         d.dstAccessMask=VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT|VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
         d.oldLayout=VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL; d.newLayout=VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-        d.image=mDepth.image; d.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,1};
+        d.image=mDepth.image; d.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
         VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; dep.imageMemoryBarrierCount=1; dep.pImageMemoryBarriers=&d;
         vkCmdPipelineBarrier2(cmd,&dep);
     }
@@ -30434,6 +30935,30 @@ void LLCleanRendererVK::recordBloom(VkCommandBuffer cmd)
     // bloom (Firestorm parity: only face glow blooms); the shader skips the term on < 0.
     p[4] = threshold >= 8.f ? -1.f : llmax(threshold, 0.f); p[5] = llmax(knee, 0.f); p[6] = 24.f; p[7] = llmax(boost, 0.f);
     p[8] = warm.mV[0]; p[9] = warm.mV[1]; p[10] = warm.mV[2]; p[11] = halation ? 1.f : 0.f;
+#if defined(LL_HAS_CLEAN_PIPELINE)
+    // <GMDX> NIGHT BLOOM (GMDXPhysicalNight; GMDXMoonGlow the strength, 0 = none). At night the whole
+    // HDR scene goes into the pyramid (threshold 0, an energy bloom like a lens's), weighed so the
+    // bloom adds about kNightBloom of the light, spread over every mip: the moon's disc
+    // (GMDXMoonDisc, far brighter than anything it lights) gets a wide soft halo, the rest of the
+    // night barely a softening. It reads the composited scene, so cloud in front of the moon blocks
+    // it and thin edges glow. Faded in with the night (GMDXNightLight::night: the sun from half
+    // GMDXDuskSunLow down to it); by day, with physical night off and with a user threshold
+    // (RenderBloomThreshold < 8) the bloom is as before. The extract's weight goes in p0.w, which
+    // only the upsample (scatter) reads otherwise.
+    {
+        static LLCachedControl<F32> s_moon_glow(gSavedSettings, "GMDXMoonGlow", 1.f);
+        static LLCachedControl<F32> s_strength(gSavedSettings, "RenderBloomStrength", 0.325f);
+        constexpr F32 kNightBloom = 0.08f;
+        const GMDXNightLight& nl = gmdxNightLight();
+        const F32 w = (nl.on && p[4] < 0.f) ? nl.night * llclamp((F32)s_moon_glow, 0.f, 8.f) : 0.f;
+        if (w > 0.f)
+        {
+            p[4] = 0.f; p[5] = 1e-3f;
+            p[11] = 0.f;   // (no halation from it)
+            p[3] = kNightBloom * w / (llmax((F32)s_strength, 0.01f) * (F32)llmax(mBloomCount, 1u));
+        }
+    }
+#endif
     const VkPipelineStageFlags2 FS = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
     const VkPipelineStageFlags2 CO = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
     auto pass = [&](uint32_t dst, VkPipeline pipe, VkDescriptorSet set, bool load)
@@ -30616,7 +31141,7 @@ bool LLCleanRendererVK::prepareFinal(VkCommandBuffer cmd, uint32_t width, uint32
     // snapshots keep the look (upstream: gSnapshotNoPost only)
     // <GMDX> a region map (orthographic) drops the screen-position effects: lens distortion,
     // vignette, grain, CVD / effect previews would differ from one tile to the next
-    const bool clean_plate = (mOffscreen && false) || mOrtho;
+    const bool clean_plate = (mOffscreen && false) || mOrtho || mSnapMatte;   // <GMDX> (+ avatar matte: vignette, grain, distortion off)
     u.res_frame[0] = (float)width; u.res_frame[1] = (float)height;
     u.res_frame[2] = (float)postNoiseFrame();
 
@@ -30965,7 +31490,7 @@ void LLCleanRendererVK::recordSphere(VkCommandBuffer cmd, uint32_t width, uint32
         d.srcAccessMask=VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT|VK_ACCESS_2_TRANSFER_WRITE_BIT;
         d.dstStageMask=FS; d.dstAccessMask=VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
         d.oldLayout=VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL; d.newLayout=VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
-        d.image=mDepth.image; d.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,1};
+        d.image=mDepth.image; d.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
         VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
         dep.imageMemoryBarrierCount=1; dep.pImageMemoryBarriers=&d;
         vkCmdPipelineBarrier2(cmd,&dep);
@@ -31022,7 +31547,7 @@ void LLCleanRendererVK::recordSphere(VkCommandBuffer cmd, uint32_t width, uint32
         d.dstStageMask=kTests;
         d.dstAccessMask=VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT|VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
         d.oldLayout=VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL; d.newLayout=VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-        d.image=mDepth.image; d.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,1};
+        d.image=mDepth.image; d.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
         VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
         dep.imageMemoryBarrierCount=1; dep.pImageMemoryBarriers=&d;
         vkCmdPipelineBarrier2(cmd,&dep);
@@ -31047,7 +31572,8 @@ struct VKMeteor
     LLColor3 color;                // sRGB
     F32 peak, width_scale;
 };
-constexpr U32 kVKMeteorHardMax = 64;
+constexpr U32 kVKMeteorHardMax = 56;   // <GMDX> was 64: the night sky takes meteors[168..191] (gmdxnightsky.h kSpaceSlots)
+static_assert(kVKMeteorHardMax * 3 + GMDXNightSky::kSpaceSlots <= 192, "meteors[] shared with the night sky");   // <GMDX>
 std::vector<VKMeteor> sVKMeteors;
 F32 sVKAuroraTime = 0.f;
 
@@ -31100,11 +31626,14 @@ void vkTickMeteors(F32 dt)
     const U32 max_count  = (U32)llclamp((S32)max_count_setting, 0, (S32)kVKMeteorHardMax);
     const F32 spawn_secs = llmax(0.05f, (F32)spawn_secs_setting);
     // Poisson-ish spawn: per-frame probability dt / mean interval.
-    if (sVKMeteors.size() >= max_count || ll_frand() >= dt / spawn_secs) return;
+    // <GMDX> physical night (gmdxnightsky.cpp): the rate by darkness x GMDXMeteors x a shower
+    const F32 gmdx_rate = GMDXNightSky::meteorRateScale();
+    if (sVKMeteors.size() >= max_count || ll_frand() >= dt / spawn_secs * (gmdx_rate < 0.f ? 1.f : gmdx_rate)) return;
 
     LLVector3 start_dir = vkUpperHemisphere();
     if (start_dir.mV[2] < 0.1f) { start_dir.mV[2] = 0.1f; start_dir.normVec(); }
-    const LLVector3 travel_dir = vkRandomTangent(start_dir);
+    LLVector3 travel_dir = vkRandomTangent(start_dir);   // <GMDX> (not const: a shower's radiant turns it)
+    GMDXNightSky::meteorShowerPath(start_dir, travel_dir);   // <GMDX>
 
     // Visual archetypes (upstream weights): common / standard / fast / fireball.
     const F32 roll = ll_frand();
@@ -31172,9 +31701,16 @@ void LLCleanRendererVK::fillAtmosK(VKSSRInfo& si)
     const float* a = si.atmos;
     auto v = [&](int row, int c) { return a[row * 4 + c]; };
     const float haze_horizon = v(0, 3), haze_density = v(1, 3), cloud_shadow = v(2, 3), max_y = v(3, 3);
-    const float density_mul = v(4, 3), distance_mul = v(5, 3), lightnorm_z = v(4, 2);
+    // <GMDX> (Physical night: atmos[4] is the WindLight sky's own light; the ground's clamped norm
+    // is atmos[7]'s, gmdxnightlight.h.)
+    const float density_mul = v(4, 3), distance_mul = v(5, 3),
+                lightnorm_z = gmdxNightLight().on ? std::max(v(7, 2), -0.1f) : v(4, 2);
     const bool classic = v(8, 3) > 0.5f;
     const float sun_scale = v(12, 2);
+    // <GMDX> the night's ambient in the haze's sRGB-ish space (gmdxnightlight.h; atmos[6].z = 2 - amb,
+    // clean_atmos_common.glsl gmdxNightAmbient): the haze's fill light follows the moon as the surfaces'
+    // does. (amblit's base below stays EEP's: the shader scales it in linear light.)
+    const float night_amb = std::pow(std::clamp(2.f - v(6, 2), 0.f, 1.f), 1.f / 2.4f);
     // above_horizon_factor = 1 / max(1e-6, lightnorm.z)
     const float ahf = 1.0f / std::max(1e-6f, lightnorm_z);
     auto srgbToLinear = [](float cs)   // atmosSrgbToLinear, per channel
@@ -31198,8 +31734,8 @@ void LLCleanRendererVK::fillAtmosK(VKSSRInfo& si)
         const float cs = sunlight * (1.0f - cloud_shadow);
         si.atmos_k[0][c] = sunlight;                                        // sunlit_out (sRGB space)
         si.atmos_k[1][c] = combined * density_mul * distance_mul;           // extinction per metre
-        si.atmos_k[2][c] = (blue_horizon * blue_weight) * (cs + tmpAmbient)
-                         + (haze_horizon * haze_weight) * tmpAmbient;       // in-scatter, glow-free part
+        si.atmos_k[2][c] = (blue_horizon * blue_weight) * (cs + tmpAmbient * night_amb)
+                         + (haze_horizon * haze_weight) * tmpAmbient * night_amb;   // in-scatter, glow-free part (<GMDX> night_amb)
         si.atmos_k[3][c] = (haze_horizon * haze_weight) * cs;               // ... x haze_glow
         si.atmos_k[4][c] = std::pow(tmpAmbient, 0.9f) * 0.57f;              // amblit base
         si.atmos_k[5][c] = (classic ? sunlight : srgbToLinear(sunlight)) * sun_scale;   // atmosLightTerms sunlit
@@ -31744,7 +32280,7 @@ void LLCleanRendererVK::recordDoF(VkCommandBuffer cmd, uint32_t width, uint32_t 
         d.srcAccessMask=VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT|VK_ACCESS_2_TRANSFER_WRITE_BIT;
         d.dstStageMask=FS; d.dstAccessMask=VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
         d.oldLayout=VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL; d.newLayout=VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
-        d.image=mDepth.image; d.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,1};
+        d.image=mDepth.image; d.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
         VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
         dep.imageMemoryBarrierCount=1; dep.pImageMemoryBarriers=&d;
         vkCmdPipelineBarrier2(cmd,&dep);
@@ -31777,7 +32313,7 @@ void LLCleanRendererVK::recordDoF(VkCommandBuffer cmd, uint32_t width, uint32_t 
         d.dstStageMask=VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT|VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
         d.dstAccessMask=VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT|VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
         d.oldLayout=VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL; d.newLayout=VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-        d.image=mDepth.image; d.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,1};
+        d.image=mDepth.image; d.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
         VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
         dep.imageMemoryBarrierCount=1; dep.pImageMemoryBarriers=&d;
         vkCmdPipelineBarrier2(cmd,&dep);
@@ -31792,10 +32328,11 @@ void LLCleanRendererVK::ensureGlow(uint32_t w, uint32_t h)
     vkDeviceWaitIdle(mCtx->device());
     if (mGlowTarget.image) mCtx->destroyImage(mGlowTarget);
     // STORAGE: the deferred lighting compute writes pass 1's glow (RenderVKDeferredLighting).
-    mGlowTarget = mCtx->createImage2D(w, h, mGlowFormat,
+    mGlowTarget = mCtx->createScreenImage(w, h, mViewCount, mGlowFormat,   // (#1075: a layer per view)
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
         | (mDeferPipe ? VK_IMAGE_USAGE_STORAGE_BIT : 0u),
         VK_IMAGE_ASPECT_COLOR_BIT);
+    mCtx->addArrayView(mGlowTarget, VK_IMAGE_ASPECT_COLOR_BIT);   // (#1075: the deferred lighting's 2D_ARRAY)
     mGlowW = w; mGlowH = h;
     ++mTargetGen;
 
@@ -32152,10 +32689,12 @@ void LLCleanRendererVK::ensureDepth(uint32_t w, uint32_t h)
     vkDeviceWaitIdle(mCtx->device());
     if (mDepth.image) mCtx->destroyImage(mDepth);
     // SAMPLED_BIT: the water FS samples this depth in pass 2 (depth-fog).
-    mDepth = mCtx->createImage2D(w, h, mDepthFormat,
+    mDepth = mCtx->createScreenImage(w, h, mViewCount, mDepthFormat,   // (#1075: a layer per view)
         VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT
         | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,   // copied out for next frame's SSR
         VK_IMAGE_ASPECT_DEPTH_BIT);
+    // (#1075: the water FS and draw set 0 binding 40 read it as a 2D_ARRAY, layer = the view)
+    mCtx->addArrayView(mDepth, VK_IMAGE_ASPECT_DEPTH_BIT);
     mDepthW = w; mDepthH = h;
     ++mTargetGen;
     ++mDepthGen;
@@ -32167,7 +32706,7 @@ void LLCleanRendererVK::ensureDepth(uint32_t w, uint32_t h)
     {
         VkDescriptorImageInfo di{};
         di.sampler     = mDepthSampler;
-        di.imageView   = mDepth.view;
+        di.imageView   = mDepth.arrayView;
         di.imageLayout = VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
         VkWriteDescriptorSet wd{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
         wd.dstSet=mDsetWaterDepth; wd.dstBinding=0; wd.dstArrayElement=0;
@@ -32181,7 +32720,7 @@ void LLCleanRendererVK::ensureDepth(uint32_t w, uint32_t h)
     {
         VkDescriptorImageInfo di{};
         di.sampler     = mDepthSampler;
-        di.imageView   = mDepth.view;
+        di.imageView   = mDepth.arrayView;
         di.imageLayout = VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
         VkWriteDescriptorSet wd{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
         wd.dstSet=mDsetDraw0; wd.dstBinding=40; wd.dstArrayElement=0;
@@ -32218,7 +32757,7 @@ uint64_t LLCleanRendererVK::rtMaskBytesAt(uint32_t w, uint32_t h) const
                                 VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     uint64_t b = 0;
     for (const auto& e : kRtMaskFmt)
-        b += mCtx->imageMemoryBytes(w, h, e.layers ? 4u : 1u, 1, e.f, u, false);
+        b += mCtx->imageMemoryBytes(w, h, (e.layers ? 4u : 1u) * mViewCount, 1, e.f, u, false);   // (#1075: per view)
     return b;
 }
 
@@ -32402,10 +32941,14 @@ void LLCleanRendererVK::ensureRtMask(VkCommandBuffer cmd, uint32_t rw, uint32_t 
                 VkDeviceContext::SoftAllocScope scope(mCtx, soft);
                 for (auto& e : imgs)
                 {
-                    *e.im = e.layers ? mCtx->createImageLayers(w, h, 4, 1, e.f, u, VK_IMAGE_ASPECT_COLOR_BIT,
+                    // #1075 LAYERED STEREO: a layer per view (the projector images: 4 slot layers per
+                    // view, view v's at 4v..4v+3) and a 2D_ARRAY view on every image -- every mask
+                    // reader declares arrays. N = 1: the same images (+ one view object each).
+                    *e.im = e.layers ? mCtx->createImageLayers(w, h, 4u * mViewCount, 1, e.f, u, VK_IMAGE_ASPECT_COLOR_BIT,
                                                                false, VK_IMAGE_VIEW_TYPE_2D_ARRAY)
-                                     : mCtx->createImage2D(w, h, e.f, u, VK_IMAGE_ASPECT_COLOR_BIT);
+                                     : mCtx->createScreenImage(w, h, mViewCount, e.f, u, VK_IMAGE_ASPECT_COLOR_BIT);
                     if (!e.im->image) { ok = false; break; }
+                    if (!e.layers && !mCtx->addArrayView(*e.im, VK_IMAGE_ASPECT_COLOR_BIT)) { ok = false; break; }
                 }
             }
             if (ok) break;
@@ -32447,20 +32990,22 @@ void LLCleanRendererVK::ensureRtMask(VkCommandBuffer cmd, uint32_t rw, uint32_t 
             b[i].dstAccessMask=VK_ACCESS_2_MEMORY_READ_BIT|VK_ACCESS_2_MEMORY_WRITE_BIT;
             b[i].oldLayout=VK_IMAGE_LAYOUT_UNDEFINED; b[i].newLayout=VK_IMAGE_LAYOUT_GENERAL;
             b[i].image=imgs[i].im->image;
-            b[i].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,imgs[i].layers ? 4u : 1u};
+            b[i].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};   // (#1075: every layer)
         }
         VkDependencyInfo d{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; d.imageMemoryBarrierCount=N; d.pImageMemoryBarriers=b;
         vkCmdPipelineBarrier2(cmd,&d);
         // Lit FS side (set 0): texelFetch only, the sampler is irrelevant. 33 / 34 hold
         // both history slots' ids / depth (the lit FS picks this frame's: rt_mask.x).
-        VkDescriptorImageInfo fi[8] = {{mShadowRawSampler, mRtMaskSun.view, VK_IMAGE_LAYOUT_GENERAL},
+        // (#1075: the 2D_ARRAY views -- clean_shadow_mask_read.glsl reads its view's layer; the
+        //  projector image's default view is already the array over every layer)
+        VkDescriptorImageInfo fi[8] = {{mShadowRawSampler, mRtMaskSun.arrayView, VK_IMAGE_LAYOUT_GENERAL},
                                        {mShadowRawSampler, mRtMaskProj.view, VK_IMAGE_LAYOUT_GENERAL},
-                                       {mShadowRawSampler, mRtMaskIds.view, VK_IMAGE_LAYOUT_GENERAL},
-                                       {mShadowRawSampler, mRtMaskHist[2].view, VK_IMAGE_LAYOUT_GENERAL},
-                                       {mShadowRawSampler, mRtMaskDepth.view, VK_IMAGE_LAYOUT_GENERAL},
-                                       {mShadowRawSampler, mRtMaskHist[3].view, VK_IMAGE_LAYOUT_GENERAL},
-                                       {mShadowRawSampler, mRtMaskGrad.view, VK_IMAGE_LAYOUT_GENERAL},
-                                       {mShadowRawSampler, mRtMaskHistGrad.view, VK_IMAGE_LAYOUT_GENERAL}};
+                                       {mShadowRawSampler, mRtMaskIds.arrayView, VK_IMAGE_LAYOUT_GENERAL},
+                                       {mShadowRawSampler, mRtMaskHist[2].arrayView, VK_IMAGE_LAYOUT_GENERAL},
+                                       {mShadowRawSampler, mRtMaskDepth.arrayView, VK_IMAGE_LAYOUT_GENERAL},
+                                       {mShadowRawSampler, mRtMaskHist[3].arrayView, VK_IMAGE_LAYOUT_GENERAL},
+                                       {mShadowRawSampler, mRtMaskGrad.arrayView, VK_IMAGE_LAYOUT_GENERAL},
+                                       {mShadowRawSampler, mRtMaskHistGrad.arrayView, VK_IMAGE_LAYOUT_GENERAL}};
         VkWriteDescriptorSet fw[4]{};
         // 34 = [depth slot 0, depth slot 1, gradient slot 0, gradient slot 1].
         const uint32_t first[4] = {0, 1, 2, 4}, count[4] = {1, 1, 2, 4};
@@ -32473,8 +33018,10 @@ void LLCleanRendererVK::ensureRtMask(VkCommandBuffer cmd, uint32_t rw, uint32_t 
         vkUpdateDescriptorSets(dev, 4, fw, 0, nullptr);
         rtMaskCacheResize(cmd, w, h);   // #771: the tile classifier's block lists (device idle)
     }
-    if (mDsetRtMask[0] && mDsetRtMask[1] && mDepth.view)
+    if (mDsetRtMask[0] && mDsetRtMask[1] && mDepth.arrayView)
     {
+        // (#1075: every image through its 2D_ARRAY view -- the mask kernels index their view's
+        //  layer; the projector images' default views are the arrays already)
         // Layout: clean_rt_mask_common.glsl. 0, 5-9 and 15 sampled, the rest storage.
         // F3a: set p writes history slot p (12-14 temporal, 3-4 trace ids / depth) and
         // samples slot 1 - p (5-9). Slot 0 = the Acc images + mRtMaskIds / mRtMaskDepth,
@@ -32487,21 +33034,21 @@ void LLCleanRendererVK::ensureRtMask(VkCommandBuffer cmd, uint32_t rw, uint32_t 
         {
             const Slot& wr = slot[p];       // written this frame
             const Slot& rd = slot[1 - p];   // last mask frame's (history)
-            VkDescriptorImageInfo mi[15] = {{mShadowRawSampler, mDepth.view, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL},
-                                            {VK_NULL_HANDLE, mRtMaskSun.view, VK_IMAGE_LAYOUT_GENERAL},
+            VkDescriptorImageInfo mi[15] = {{mShadowRawSampler, mDepth.arrayView, VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL},
+                                            {VK_NULL_HANDLE, mRtMaskSun.arrayView, VK_IMAGE_LAYOUT_GENERAL},
                                             {VK_NULL_HANDLE, mRtMaskProj.view, VK_IMAGE_LAYOUT_GENERAL},
-                                            {VK_NULL_HANDLE, wr.ids->view, VK_IMAGE_LAYOUT_GENERAL},
-                                            {VK_NULL_HANDLE, wr.depth->view, VK_IMAGE_LAYOUT_GENERAL},
-                                            {mShadowRawSampler, rd.sun->view, VK_IMAGE_LAYOUT_GENERAL},
+                                            {VK_NULL_HANDLE, wr.ids->arrayView, VK_IMAGE_LAYOUT_GENERAL},
+                                            {VK_NULL_HANDLE, wr.depth->arrayView, VK_IMAGE_LAYOUT_GENERAL},
+                                            {mShadowRawSampler, rd.sun->arrayView, VK_IMAGE_LAYOUT_GENERAL},
                                             {mShadowRawSampler, rd.proj->view, VK_IMAGE_LAYOUT_GENERAL},
-                                            {mShadowRawSampler, rd.ids->view, VK_IMAGE_LAYOUT_GENERAL},
-                                            {mShadowRawSampler, rd.depth->view, VK_IMAGE_LAYOUT_GENERAL},
-                                            {mShadowRawSampler, rd.meta->view, VK_IMAGE_LAYOUT_GENERAL},
-                                            {VK_NULL_HANDLE, mRtMaskRawSun.view, VK_IMAGE_LAYOUT_GENERAL},
+                                            {mShadowRawSampler, rd.ids->arrayView, VK_IMAGE_LAYOUT_GENERAL},
+                                            {mShadowRawSampler, rd.depth->arrayView, VK_IMAGE_LAYOUT_GENERAL},
+                                            {mShadowRawSampler, rd.meta->arrayView, VK_IMAGE_LAYOUT_GENERAL},
+                                            {VK_NULL_HANDLE, mRtMaskRawSun.arrayView, VK_IMAGE_LAYOUT_GENERAL},
                                             {VK_NULL_HANDLE, mRtMaskProj.view, VK_IMAGE_LAYOUT_GENERAL},
-                                            {VK_NULL_HANDLE, wr.sun->view, VK_IMAGE_LAYOUT_GENERAL},
+                                            {VK_NULL_HANDLE, wr.sun->arrayView, VK_IMAGE_LAYOUT_GENERAL},
                                             {VK_NULL_HANDLE, wr.proj->view, VK_IMAGE_LAYOUT_GENERAL},
-                                            {VK_NULL_HANDLE, wr.meta->view, VK_IMAGE_LAYOUT_GENERAL}};
+                                            {VK_NULL_HANDLE, wr.meta->arrayView, VK_IMAGE_LAYOUT_GENERAL}};
             VkWriteDescriptorSet mw[15]{};
             for (int i = 0; i < 15; ++i)   // (15 = motion, below)
             {
@@ -32514,8 +33061,8 @@ void LLCleanRendererVK::ensureRtMask(VkCommandBuffer cmd, uint32_t rw, uint32_t 
             // The depth's gradient + flags (rgba16f): 21 this slot's (storage), 22 the read
             // slot's (sampled) -- the fp16 half of the old rgba32f depth (4 / 8).
             {
-                const VkDescriptorImageInfo gi[2] = {{VK_NULL_HANDLE, wr.grad->view, VK_IMAGE_LAYOUT_GENERAL},
-                                                     {mShadowRawSampler, rd.grad->view, VK_IMAGE_LAYOUT_GENERAL}};
+                const VkDescriptorImageInfo gi[2] = {{VK_NULL_HANDLE, wr.grad->arrayView, VK_IMAGE_LAYOUT_GENERAL},
+                                                     {mShadowRawSampler, rd.grad->arrayView, VK_IMAGE_LAYOUT_GENERAL}};
                 VkWriteDescriptorSet gw[2]{};
                 for (int i = 0; i < 2; ++i)
                 {
@@ -32530,8 +33077,8 @@ void LLCleanRendererVK::ensureRtMask(VkCommandBuffer cmd, uint32_t rw, uint32_t 
             // slot's (B reads). Slot 0 = mRtMaskProjMeta[0]. (18: writeRtMaskAtrousDescriptors.)
             if (mRtMaskProjMeta[0].view && mRtMaskProjMeta[1].view)
             {
-                const VkDescriptorImageInfo pi[2] = {{VK_NULL_HANDLE, mRtMaskProjMeta[p].view, VK_IMAGE_LAYOUT_GENERAL},
-                                                     {VK_NULL_HANDLE, mRtMaskProjMeta[1 - p].view, VK_IMAGE_LAYOUT_GENERAL}};
+                const VkDescriptorImageInfo pi[2] = {{VK_NULL_HANDLE, mRtMaskProjMeta[p].arrayView, VK_IMAGE_LAYOUT_GENERAL},
+                                                     {VK_NULL_HANDLE, mRtMaskProjMeta[1 - p].arrayView, VK_IMAGE_LAYOUT_GENERAL}};
                 VkWriteDescriptorSet pw[2]{};
                 for (int i = 0; i < 2; ++i)
                 {
@@ -32672,7 +33219,7 @@ void LLCleanRendererVK::rtMaskHistory(VkCommandBuffer cmd)
         {
             if (i == 1 && !copyProj) continue;
             VkImageCopy c{};
-            c.srcSubresource=c.dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,i == 1 ? 4u : 1u};
+            c.srcSubresource=c.dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,i == 1 ? 4u * mViewCount : mViewCount};
             c.extent={mRtMaskW, mRtMaskH, 1};
             vkCmdCopyImage(cmd, src[i]->image, VK_IMAGE_LAYOUT_GENERAL,
                            mRtMaskHist[i].image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
@@ -32680,7 +33227,7 @@ void LLCleanRendererVK::rtMaskHistory(VkCommandBuffer cmd)
         if (mRtMaskGrad.image && mRtMaskHistGrad.image)   // the depth's gradient + flags ride with the depth
         {
             VkImageCopy c{};
-            c.srcSubresource=c.dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};
+            c.srcSubresource=c.dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,mViewCount};
             c.extent={mRtMaskW, mRtMaskH, 1};
             vkCmdCopyImage(cmd, mRtMaskGrad.image, VK_IMAGE_LAYOUT_GENERAL,
                            mRtMaskHistGrad.image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
@@ -32689,7 +33236,7 @@ void LLCleanRendererVK::rtMaskHistory(VkCommandBuffer cmd)
         if (copyProj && mRtMaskProjMeta[0].image && mRtMaskProjMeta[1].image)
         {
             VkImageCopy c{};
-            c.srcSubresource=c.dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};
+            c.srcSubresource=c.dstSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,mViewCount};
             c.extent={mRtMaskW, mRtMaskH, 1};
             vkCmdCopyImage(cmd, mRtMaskProjMeta[0].image, VK_IMAGE_LAYOUT_GENERAL,
                            mRtMaskProjMeta[1].image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
@@ -32698,7 +33245,7 @@ void LLCleanRendererVK::rtMaskHistory(VkCommandBuffer cmd)
     else
     {
         VkClearColorValue cv{}; cv.float32[0] = -1.f;
-        const VkImageSubresourceRange r{VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+        const VkImageSubresourceRange r{VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
         vkCmdClearColorImage(cmd, histDepthIn.image, VK_IMAGE_LAYOUT_GENERAL, &cv, 1, &r);
     }
     mRtMaskRecorded = true;
@@ -33002,7 +33549,7 @@ void LLCleanRendererVK::rtMaskStage(VkCommandBuffer cmd, uint32_t stage)
         vkCmdPushConstants(cmd, mRtMaskLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
     }
     const uint32_t gx = (mRtMaskW + 7u) / 8u, gy = (mRtMaskH + 7u) / 8u;
-    vkCmdDispatch(cmd, gx, gy, 1);
+    vkCmdDispatch(cmd, gx, gy, mViewCount);   // (#1075: every view's layer in one dispatch, z = N)
     if (stage == 0) rtMaskGuardHostBarrier(cmd);
     // (A) trace -> raw, ids, depth plane; (B) temporal -> accumulated + lengths (next
     // frame's history); (C) spatial -> the final mask the lit FS reads.
@@ -33151,7 +33698,7 @@ void LLCleanRendererVK::recordRtMask(VkCommandBuffer cmd, const VKDrawPush& draw
     db.srcAccessMask=VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
     db.dstStageMask=VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT; db.dstAccessMask=VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
     db.oldLayout=VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL; db.newLayout=VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
-    db.image=mDepth.image; db.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,1};
+    db.image=mDepth.image; db.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
     VkDependencyInfo dd{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; dd.imageMemoryBarrierCount=1; dd.pImageMemoryBarriers=&db;
     vkCmdPipelineBarrier2(cmd,&dd);
 
@@ -33185,7 +33732,7 @@ void LLCleanRendererVK::ensureTermTri(VkCommandBuffer cmd, uint32_t w, uint32_t 
 {
     VkMemScope memcat(VKMEM_RT_MASK);   // #407
     mTermTriUse = false;
-    if (mOffscreen) return;
+    if (mOffscreen || stereoActive()) return;   // (#1075: one view's target -- off in stereo)
     bool want = false;
 #if defined(LL_HAS_CLEAN_PIPELINE)
     {
@@ -33607,7 +34154,7 @@ float LLCleanRendererVK::aoEffectRadius(uint32_t height) const
 {
     float r = 0.5f;
 #if defined(LL_HAS_CLEAN_PIPELINE)
-    static LLCachedControl<U32> s_method(gSavedSettings, "RenderVKAOMethod", 0U);
+    static LLCachedControl<U32> s_method(gSavedSettings, "RenderVKAOMethod", 1U);
     static LLCachedControl<F32> s_rad(gSavedSettings, "RenderVKGTAORadius", 0.5f);
     static LLCachedControl<F32> s_scale(gSavedSettings, "RenderSSAOScale", 500.f);
     if (s_method >= 1u)   // (#86 RTAO: its GTAO contact pass reads the chain at the GTAO setting)
@@ -33831,7 +34378,7 @@ void LLCleanRendererVK::aoStage(VkCommandBuffer cmd, uint32_t width, uint32_t he
     {
         U32 method = 0;
 #if defined(LL_HAS_CLEAN_PIPELINE)
-        static LLCachedControl<U32> s_method(gSavedSettings, "RenderVKAOMethod", 0U);
+        static LLCachedControl<U32> s_method(gSavedSettings, "RenderVKAOMethod", 1U);
         method = s_method;
 #endif
         // #86: 2 = RTAO where this recording can trace (rtaoReady), else GTAO -- the non-RT tier
@@ -33860,7 +34407,7 @@ void LLCleanRendererVK::aoStage(VkCommandBuffer cmd, uint32_t width, uint32_t he
         static LLCachedControl<U32> s_sl(gSavedSettings, "RenderVKGTAOSlices", 2U);
         static LLCachedControl<U32> s_st(gSavedSettings, "RenderVKGTAOSteps", 6U);
         static LLCachedControl<F32> s_rad(gSavedSettings, "RenderVKGTAORadius", 0.5f);
-        static LLCachedControl<F32> s_mpx(gSavedSettings, "RenderVKGTAOMaxPixels", 192.f);
+        static LLCachedControl<F32> s_mpx(gSavedSettings, "RenderVKGTAOMaxPixels", 0.f);
         static LLCachedControl<F32> s_fo(gSavedSettings, "RenderVKGTAOFalloff", 0.6f);
         static LLCachedControl<F32> s_th(gSavedSettings, "RenderVKGTAOThinOccluder", 0.f);
         static LLCachedControl<F32> s_mb(gSavedSettings, "RenderVKGTAOMultiBounce", 0.f);
@@ -34206,7 +34753,7 @@ void LLCleanRendererVK::recordAO(VkCommandBuffer cmd, uint32_t width, uint32_t h
         d.dstStageMask=VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
         d.dstAccessMask=VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
         d.oldLayout=VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL; d.newLayout=VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
-        d.image=mDepth.image; d.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,1};
+        d.image=mDepth.image; d.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
         VkMemoryBarrier2 m{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
         // (+ COPY: last frame's #843 history copy -> this frame's stage 3 reads / writes)
         m.srcStageMask=VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT|VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT|VK_PIPELINE_STAGE_2_COPY_BIT;
@@ -34260,7 +34807,7 @@ void LLCleanRendererVK::recordAO(VkCommandBuffer cmd, uint32_t width, uint32_t h
         d.dstStageMask=VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT|VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
         d.dstAccessMask=VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT|VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
         d.oldLayout=VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL; d.newLayout=VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-        d.image=mDepth.image; d.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,1};
+        d.image=mDepth.image; d.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
         VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
         dep.memoryBarrierCount=1; dep.pMemoryBarriers=&m;
         if (!depthHeld) { dep.imageMemoryBarrierCount=1; dep.pImageMemoryBarriers=&d; }
@@ -34288,7 +34835,7 @@ void LLCleanRendererVK::recordAoMaskOverlap(VkCommandBuffer cmd, const VKDrawPus
         d.dstStageMask=VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
         d.dstAccessMask=VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
         d.oldLayout=VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL; d.newLayout=VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
-        d.image=mDepth.image; d.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,1};
+        d.image=mDepth.image; d.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
         // AO images (GENERAL): the prior frame's lit-FS / blur reads and writes -> this
         // frame's compute writes (as recordAO; + last frame's #843 history copy). The mask
         // images' WAR was ordered by rtMaskHistory's barriers before pass 1a.
@@ -34368,7 +34915,7 @@ void LLCleanRendererVK::recordAoMaskOverlap(VkCommandBuffer cmd, const VKDrawPus
         d.dstStageMask=VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT|VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
         d.dstAccessMask=VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT|VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
         d.oldLayout=VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL; d.newLayout=VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-        d.image=mDepth.image; d.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,1};
+        d.image=mDepth.image; d.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
         VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
         dep.memoryBarrierCount=1; dep.pMemoryBarriers=&m;
         // (depthHeld: stays READ_ONLY; the caller's graphics queue restores it after the join)
@@ -34666,7 +35213,7 @@ void LLCleanRendererVK::recordOcclusion(VkCommandBuffer cmd, const float* view_p
         ib[0].dstStageMask=VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
         ib[0].dstAccessMask=VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
         ib[0].oldLayout=VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL; ib[0].newLayout=VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
-        ib[0].image=mDepth.image; ib[0].subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,1};
+        ib[0].image=mDepth.image; ib[0].subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
         ib[1].sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
         ib[1].srcStageMask=VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
         ib[1].srcAccessMask=VK_ACCESS_2_NONE;
@@ -34752,7 +35299,7 @@ void LLCleanRendererVK::recordOcclusion(VkCommandBuffer cmd, const float* view_p
         d.dstStageMask=VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT|VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
         d.dstAccessMask=VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT|VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
         d.oldLayout=VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL; d.newLayout=VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-        d.image=mDepth.image; d.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,1};
+        d.image=mDepth.image; d.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
         VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
         dep.memoryBarrierCount=1; dep.pMemoryBarriers=&m;
         dep.imageMemoryBarrierCount=1; dep.pImageMemoryBarriers=&d;
@@ -35087,7 +35634,7 @@ void LLCleanRendererVK::recordOcclusion2Test(VkCommandBuffer cmd, const float* v
         d.dstStageMask=VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
         d.dstAccessMask=VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
         d.oldLayout=VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL; d.newLayout=VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
-        d.image=mDepth.image; d.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,1};
+        d.image=mDepth.image; d.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
         VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
         dep.memoryBarrierCount=1; dep.pMemoryBarriers=&m;
         dep.imageMemoryBarrierCount=1; dep.pImageMemoryBarriers=&d;
@@ -35145,7 +35692,7 @@ void LLCleanRendererVK::recordOcclusion2Test(VkCommandBuffer cmd, const float* v
         d.dstStageMask=VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT|VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
         d.dstAccessMask=VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT|VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
         d.oldLayout=VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL; d.newLayout=VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-        d.image=mDepth.image; d.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,1};
+        d.image=mDepth.image; d.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
         VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
         dep.memoryBarrierCount=1; dep.pMemoryBarriers=&m;
         dep.imageMemoryBarrierCount=1; dep.pImageMemoryBarriers=&d;
@@ -35172,6 +35719,7 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
     LLFxRuntimeVK::setAvatarMaskProvider([this]() -> VkImageView
                                          { return hasAvatarMask() ? getAvatarMaskView() : VK_NULL_HANDLE; });
     VkDevice dev = ctx.device();
+    initViewCount();   // #1075: N, before any target or pipeline is made (startup-latched)
     {
         // #615: phase 0 = the G-buffer + the split lighting's intermediates, phase 1 = the
         // bloom pyramid + cross filter.
@@ -36254,6 +36802,7 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
     {
         const int lv = (lay == mDrawLayout) ? 0 : 1;
         GraphicsPipelineDesc d = base;
+        d.views = mViewCount;   // (#1075: the main view's slots; the capture ones below are `pd`, one view)
         d.vert = vs; vkWorldStaticVI(d); d.frag = lfs; d.layout = lay;
         // Opaque: depth test + write, no blend. BACK-FACE CULLED like LL (GL_CULL_FACE;
         // front = CCW, the same winding gl_FrontFacing already treats as front); the
@@ -36349,7 +36898,7 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
         litInto(lv, pd, o, LIT_PROBE_MASK_DS, "LIT_PROBE_MASK_DS", false, LITF_LIT);
         // Mask after the probe pre-pass: EQUAL, no depth write (early depth test stays
         // on despite the FS's discards).
-        pd.depthWrite = false; pd.depthCompare = VK_COMPARE_OP_EQUAL;
+        pd.depthWrite = false; pd.depthCompare = VK_COMPARE_OP_EQUAL; pd.relaxedDepthCompare = VK_COMPARE_OP_LESS_OR_EQUAL;   // (#1088)
         pd.cullMode = VK_CULL_MODE_BACK_BIT; litInto(lv, pd, o, LIT_PROBE_MASK_EQ, "LIT_PROBE_MASK_EQ", false, LITF_LIT);
         pd.cullMode = VK_CULL_MODE_NONE;     litInto(lv, pd, o, LIT_PROBE_MASK_DS_EQ, "LIT_PROBE_MASK_DS_EQ", false, LITF_LIT);
 
@@ -36365,7 +36914,7 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
         pd.cullMode = VK_CULL_MODE_NONE;
         litInto(lv, pd, o, LIT_CAP_DRAW_DS, "LIT_CAP_DRAW_DS", false, LITF_CAP);
         litInto(lv, pd, o, LIT_CAP_MASK_DS, "LIT_CAP_MASK_DS", false, LITF_CAP);
-        pd.depthWrite = false; pd.depthCompare = VK_COMPARE_OP_EQUAL;
+        pd.depthWrite = false; pd.depthCompare = VK_COMPARE_OP_EQUAL; pd.relaxedDepthCompare = VK_COMPARE_OP_LESS_OR_EQUAL;   // (#1088)
         pd.cullMode = VK_CULL_MODE_BACK_BIT; litInto(lv, pd, o, LIT_CAP_MASK_EQ, "LIT_CAP_MASK_EQ", false, LITF_CAP);
         pd.cullMode = VK_CULL_MODE_NONE;     litInto(lv, pd, o, LIT_CAP_MASK_DS_EQ, "LIT_CAP_MASK_DS_EQ", false, LITF_CAP);
         // Static alpha + rigged opaque / mask / alpha: PLAIN only, the states of the mirror's
@@ -36423,6 +36972,16 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
     gd.depthTest=true; gd.depthWrite=true;  gd.blend=false; createGraphicsPipelineInto(dev, gd, &mHudGlowMaskPipe, "mHudGlowMaskPipe");
     gd.depthTest=true; gd.depthWrite=false; gd.blend=true;  createGraphicsPipelineInto(dev, gd, &mHudGlowAlphaPipe, "mHudGlowAlphaPipe");
     // </SS:Skoomastream>
+    // #1076 VR: the HUDs on the UI wall image (premultiplied alpha): opaque / mask faces
+    // write alpha 1 whatever their texture alpha (an emissive-mask or "none" alpha mode face
+    // would leave holes). VR sessions only (mWantVrHudPipes, set before init).
+    if (mWantVrHudPipes)
+    {
+        gd.alphaOne = true;
+        gd.depthTest=true; gd.depthWrite=true;  gd.blend=false; createGraphicsPipelineInto(dev, gd, &mHudDrawPipeVr, "mHudDrawPipeVr");
+        gd.depthTest=true; gd.depthWrite=true;  gd.blend=false; createGraphicsPipelineInto(dev, gd, &mHudMaskPipeVr, "mHudMaskPipeVr");
+        gd.alphaOne = false;
+    }
     gd.reverseZ = kReverseZ;
     gd.cullMode=VK_CULL_MODE_NONE;
     gd.glowFormat=mGlowFormat;
@@ -36447,6 +37006,7 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
         gd.glowWrite=false;   // water emits no glow (and its FS writes no location 1)
         // Pass 2's third attachment: the water surface into G (the TAA water mask, F2).
         gd.reactFormat = kReactFormat; gd.reactWriteMask = VK_COLOR_COMPONENT_G_BIT;
+        gd.views = mViewCount;   // (#1075: the main view's water + exclusion; the capture water and gd's later users: one)
         createGraphicsPipelineInto(dev, gd, &mWaterPipe, "mWaterPipe");
         mWaterDesc = gd;   // (the spec sets' template: static VS + water FS, modules by kind)
         mWaterDesc.vert = VK_NULL_HANDLE; mWaterDesc.frag = VK_NULL_HANDLE;
@@ -36477,6 +37037,8 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
         // (no set 2 -> mDrawLayout). RGBA16F, no glow, depth test + write, blend off.
         // Two-sided: the FS never reads gl_FrontFacing, so one pipe serves both views.
         GraphicsPipelineDesc cd = gd;
+        cd.views = 1;
+        gd.views = 1;
         cd.reverseZ = false;   // probe / mirror capture: conventional depth
         VkShaderModule cfs = moduleFromSpv(dev, kWorldWaterCapFragSpv, kWorldWaterCapFragSpv_bytes, "kWorldWaterCapFragSpv");
         cd.frag = cfs; cd.layout = mDrawLayout;
@@ -36504,6 +37066,9 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
     // set-0/1 compatible with the RT layout). Mirror / probe captures are not pre-passed.
     {
         GraphicsPipelineDesc lit = base;   // pass-1 formats (HDR + glow + depth), vertex input
+        // (#1075: the main view's N views -- the pre-pass family, the EQUAL / G-buffer twins; the
+        //  probe pre-mask twin below resets it to one)
+        lit.views = mViewCount;
         lit.vert = vs; vkWorldStaticVI(lit); lit.frag = fs; lit.layout = mDrawLayout;
         lit.depthTest = true; lit.depthWrite = true; lit.blend = false;
         lit.depthCompare = VK_COMPARE_OP_LESS_OR_EQUAL;
@@ -36527,6 +37092,8 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
             pp.vert = prvs; vkWorldRiggedVI(pp); pp.frag = VK_NULL_HANDLE; cdv(pp, &mPreRigPipe[i], "mPreRigPipe[i]");
             pp.vert = prvs; vkWorldRiggedVI(pp); pp.frag = pmf;            cdv(pp, &mPreRigMaskPipe[i], "mPreRigMaskPipe[i]");
         }
+        // #1075 VR visibility mask: drawn in the same scope as the pre-pass (stereo sessions only).
+        if (mViewCount > 1u) initVisMask(pp);
         // Cluster LOD (#749): the pre-pass templates its pre-pass draw pipelines are built against.
         auto preTemplate = [](const GraphicsPipelineDesc& src) {
             GraphicsPipelineDesc t = src;
@@ -36550,6 +37117,7 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
         // glow) and its mirrored winding (front = CLOCKWISE, see LIT_PROBE_*).
         {
             GraphicsPipelineDesc qp = pp;
+            qp.views = 1;          // (#1075: a probe face is one view)
             qp.reverseZ = false;   // probe capture: conventional depth
             qp.colorFormat = VK_FORMAT_R16G16B16A16_SFLOAT; qp.glowFormat = VK_FORMAT_UNDEFINED;
             qp.glowWrite = false; qp.frontFace = VK_FRONT_FACE_CLOCKWISE;
@@ -36585,7 +37153,7 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
                 g.vert = prvs; vkWorldRiggedVI(g);  createGraphicsPipelineInto(dev, g, &mProbeGbRigPipe[i], "mProbeGbRigPipe[i]");
             }
             GraphicsPipelineDesc e = g;
-            e.depthWrite = false; e.depthCompare = VK_COMPARE_OP_EQUAL;
+            e.depthWrite = false; e.depthCompare = VK_COMPARE_OP_EQUAL; e.relaxedDepthCompare = VK_COMPARE_OP_LESS_OR_EQUAL;   // (#1088)
             e.vert = vs; vkWorldStaticVI(e);
             for (int i = 0; i < 2; ++i)
             {
@@ -36695,6 +37263,9 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
             GraphicsPipelineDesc tp = pp;
             tp.colorFormat = kTermTriFormat; tp.glowFormat = VK_FORMAT_UNDEFINED;
             tp.colorWrite = true; tp.glowWrite = false; tp.blend = false;
+            // (Stays exact under #1088's RenderVKPrepassEqualCompare: this FS has no alpha test,
+            // so only EQUAL rejects a mask surface's cut-out texels -- the pixel holds what is
+            // behind, which an ordered compare would let it overwrite.)
             tp.depthWrite = false; tp.depthCompare = VK_COMPARE_OP_EQUAL;
             tp.frag = ttf;
             for (int i = 0; i < 2; ++i)
@@ -36718,6 +37289,14 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
             GraphicsPipelineDesc eq = lit;
             eq.frag = ezf; eq.layout = v ? mDrawLayoutRt : mDrawLayout;
             eq.depthWrite = false; eq.depthCompare = VK_COMPARE_OP_EQUAL;
+            // #1088 (RenderVKPrepassEqualCompare): the ordered twin bindGraphicsPipeline sets
+            // instead (written conventionally: GEQUAL under reversed-Z). With the pre-pass's
+            // nearest depth already in the buffer and no depth write, a hidden fragment still
+            // fails it exactly as it fails EQUAL; only a fragment the last ulp NEARER than the
+            // pre-pass's (a driver that breaks `invariant` across pipelines: AMD Windows,
+            // Vega) now shades instead of leaving an unlit hole. Exactly coplanar duplicates
+            // pass either way. The compare op is dynamic state: no recompile, early-Z kept.
+            eq.relaxedDepthCompare = VK_COMPARE_OP_LESS_OR_EQUAL;
             // VRS tier 2 (RenderVKOpaqueShadingRate): every pass-1b pipeline accepts the
             // rate attachment; the static twins carry the dynamic rate so recordWorld picks
             // per bucket -- the attachment's rate for opaque, full rate for mask.
@@ -36737,7 +37316,7 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
             VkShaderModule gbf = moduleFromSpv(dev, kWorldFragGbufSpv, kWorldFragGbufSpv_bytes, "kWorldFragGbufSpv");
             GraphicsPipelineDesc gb = lit;
             gb.frag = gbf; gb.layout = mDrawLayout;
-            gb.depthWrite = false; gb.depthCompare = VK_COMPARE_OP_EQUAL;
+            gb.depthWrite = false; gb.depthCompare = VK_COMPARE_OP_EQUAL; gb.relaxedDepthCompare = VK_COMPARE_OP_LESS_OR_EQUAL;   // (#1088)
             gb.mrtCount = kGbufCount;
             for (uint32_t i = 0; i < kGbufCount; ++i) gb.mrtFormats[i] = kGbufFormats[i];
             gb.fsrAttachment = mCtx->shadingRateImageEnabled();
@@ -37093,6 +37672,7 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
     sd.depthTest=false; sd.depthWrite=false; sd.blend=false;
     sd.cullMode=VK_CULL_MODE_NONE;   // no vertex input -> fullscreen triangle
     sd.fsrAttachment = mCtx->shadingRateImageEnabled();   // pass 1b may carry the VRS rate image
+    sd.views = mViewCount;   // (#1075: the main view's N views; the mirror sky below is one)
     createGraphicsPipelineInto(dev, sd, &mSkyPipe, "mSkyPipe");
     // F9: the same sky, depth-tested EQUAL against the far value (no write). The sky
     // triangle sits at z = 0, the main view's reversed-Z far / clear value, so only
@@ -37102,6 +37682,7 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
     createGraphicsPipelineInto(dev, sd, &mSkyDepthPipe, "mSkyDepthPipe");
     sd.depthTest=false; sd.depthCompare=VK_COMPARE_OP_LESS_OR_EQUAL;
     sd.fsrAttachment = false;
+    sd.views = 1;
     sd.glowFormat = VK_FORMAT_UNDEFINED;   // mirror capture: colour only
     createGraphicsPipelineInto(dev, sd, &mMirrorSkyPipe, "mMirrorSkyPipe");
     destroyShaderModuleDeferred(dev, svs, nullptr);
@@ -37272,16 +37853,27 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
                 static const VkSpecializationMapEntry kGEnt{40u, 0u, sizeof(VkBool32)};
                 static const VkSpecializationInfo kGSiOn{1u, &kGEnt, sizeof(VkBool32), &kGOn};
                 static const VkSpecializationInfo kGSiOff{1u, &kGEnt, sizeof(VkBool32), &kGOff};
-                createComputePipelineInto(dev, mm, mRtMaskLayout, 0, guard ? &kGSiOn : &kGSiOff, &mRtMaskPipe, "mRtMaskPipe");
+                // #1075 LAYERED STEREO: + kViewCount (constant 20) -- the trace runs every view's layer
+                // in one dispatch (z = N). One view: the guard's info alone, as before.
+                struct GuardViews { VkBool32 guard; int32_t views; };
+                static const VkSpecializationMapEntry kGVEnt[2] = {{40u, 0u, sizeof(VkBool32)},
+                                                                   {GraphicsPipelineDesc::kViewCountConstId, 4u, sizeof(int32_t)}};
+                static GuardViews sGV{};
+                static VkSpecializationInfo sGVSi{2u, kGVEnt, sizeof(GuardViews), &sGV};
+                sGV.guard = guard ? VK_TRUE : VK_FALSE;
+                sGV.views = (int32_t)mViewCount;
+                createComputePipelineInto(dev, mm, mRtMaskLayout, 0,
+                                          mViewCount > 1u ? &sGVSi : (guard ? &kGSiOn : &kGSiOff), &mRtMaskPipe, "mRtMaskPipe");
                 if (!guard) LL_WARNS("VKRT") << "RT read guard (#874) OFF (RenderVKRTGuard 0): the RT shadow mask reads unchecked" << LL_ENDL;
             }
             destroyShaderModuleDeferred(dev, mm, nullptr);
             // Shadow denoiser: temporal (B) and spatial (C) passes, same layout.
             VkShaderModule mt = moduleFromSpv(dev, kWorldRtMaskTemporalSpv, kWorldRtMaskTemporalSpv_bytes, "kWorldRtMaskTemporalSpv");
-            createComputePipelineInto(dev, mt, mRtMaskLayout, 0, nullptr, &mRtMaskTmpPipe, "mRtMaskTmpPipe");
+            // (#1075: both layered like the trace -- kViewCount = N in a stereo session; nullptr at N = 1)
+            createComputePipelineInto(dev, mt, mRtMaskLayout, 0, viewCountSpec(mViewCount), &mRtMaskTmpPipe, "mRtMaskTmpPipe");
             destroyShaderModuleDeferred(dev, mt, nullptr);
             VkShaderModule msp = moduleFromSpv(dev, kWorldRtMaskSpatialSpv, kWorldRtMaskSpatialSpv_bytes, "kWorldRtMaskSpatialSpv");
-            createComputePipelineInto(dev, msp, mRtMaskLayout, 0, nullptr, &mRtMaskSpPipe, "mRtMaskSpPipe");
+            createComputePipelineInto(dev, msp, mRtMaskLayout, 0, viewCountSpec(mViewCount), &mRtMaskSpPipe, "mRtMaskSpPipe");
             destroyShaderModuleDeferred(dev, msp, nullptr);
             // #771 RT sun shadow cache: tile classifier + indirect-args finalize, same layout.
             VkShaderModule mcl = moduleFromSpv(dev, kWorldRtMaskCacheSpv, kWorldRtMaskCacheSpv_bytes, "kWorldRtMaskCacheSpv");
@@ -37419,19 +38011,23 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
             VkDescriptorSetLayoutCreateInfo tl{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
             tl.bindingCount=16; tl.pBindings=tb;
             VK_CHECK(vkdCreateSetLayout(dev, &tl, &mDslTaa, "mDslTaa"));
-            VK_CHECK(mTaaPool.create(dev, "taa", {{mDslTaa, 2}}));
-            VK_CHECK(mTaaPool.allocate(mDslTaa, &mDsetTaa[0]));
-            VK_CHECK(mTaaPool.allocate(mDslTaa, &mDsetTaa[1]));
+            // (#1075 step 10: two per view -- the per-view resolve's sets; N = 1: the two of before)
+            VK_CHECK(mTaaPool.create(dev, "taa", {{mDslTaa, 2u * mViewCount}}));
+            for (uint32_t v = 0; v < mViewCount; ++v)
+            {
+                VK_CHECK(mTaaPool.allocate(mDslTaa, &mDsetTaa[v][0]));
+                VK_CHECK(mTaaPool.allocate(mDslTaa, &mDsetTaa[v][1]));
+            }
             {
                 VkDescriptorBufferInfo ub{mParamRing.buffer, mTaaRgn.offset,
                                           (VkDeviceSize)mTaaRgn.stride * mTaaRgn.perSlot * kRingSlots};
-                VkWriteDescriptorSet uw[2]{};
-                for (int i = 0; i < 2; ++i)
+                VkWriteDescriptorSet uw[2 * kMaxViews]{};
+                for (uint32_t i = 0; i < 2u * mViewCount; ++i)
                 {
-                    uw[i].sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; uw[i].dstSet=mDsetTaa[i]; uw[i].dstBinding=14;
+                    uw[i].sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; uw[i].dstSet=mDsetTaa[i / 2u][i & 1u]; uw[i].dstBinding=14;
                     uw[i].descriptorCount=1; uw[i].descriptorType=VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; uw[i].pBufferInfo=&ub;
                 }
-                vkUpdateDescriptorSets(dev, 2, uw, 0, nullptr);
+                vkUpdateDescriptorSets(dev, 2u * mViewCount, uw, 0, nullptr);
             }
             VkPushConstantRange tpc{VK_SHADER_STAGE_COMPUTE_BIT, 0, 16};   // clean_taa.comp TaaPush {params index} (#238)
             VkPipelineLayoutCreateInfo tli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
@@ -37567,8 +38163,10 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
         VK_CHECK(mDeferPool.allocate(mDslDefer, &mDsetDefer));
         writeFroxelDescriptors();   // b9: the masks once they exist, a placeholder until then
         writeRegirDescriptors();    // b12: the light reservoir grid once it exists, a placeholder until then
-        {   // b10: the view-ring region, one entry wide (the param ring exists: created above)
-            const VkDescriptorBufferInfo vbi{mParamRing.buffer, mViewRgn.offset, (VkDeviceSize)mViewRgn.stride};
+        {   // b10: the view-ring region, one entry wide (the param ring exists: created above) -- #1075: N
+            // entries, the N consecutive views of a stereo frame's lighting (clean_draw_view.glsl
+            // draw_view_main[kViewCount]; N = 1: the one entry)
+            const VkDescriptorBufferInfo vbi{mParamRing.buffer, mViewRgn.offset, (VkDeviceSize)mViewRgn.stride * mViewCount};
             VkWriteDescriptorSet vw{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
             vw.dstSet = mDsetDefer; vw.dstBinding = 10; vw.descriptorCount = 1;
             vw.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC; vw.pBufferInfo = &vbi;
@@ -37586,7 +38184,9 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
         VkShaderModule gm = moduleFromSpv(dev, gs.code, gs.bytes, gs.name);
         // kDebugViews FALSE: no RenderVKLitDebugMask cost switches (twin: ensureDeferDebug).
         mDeferG11 = g11;
-        createComputePipelineInto(dev, gm, mDeferLayout, 0, litDebugSpec(false), &mDeferPipe, "mDeferPipe");
+        // (#1075: a stereo session's uber kernel lights its N views as layers -- kViewCount = N; the
+        //  light grid build below likewise. N = 1: the one-entry info, as before.)
+        createComputePipelineInto(dev, gm, mDeferLayout, 0, litDebugSpec(false, mViewCount), &mDeferPipe, "mDeferPipe");
         destroyShaderModuleDeferred(dev, gm, nullptr);
         // The light grid build (RenderVKLightCulling 1; CLEAN_DEFER_PASS 6) for the uber frames
         // (initDeferSplit adds its split-layout twin). No settings specialization: it reads no
@@ -37601,8 +38201,8 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
         {
             const VKDeferSpv ls = vkDeferLightingSpv(6, false, mClkOn);
             VkShaderModule lm = moduleFromSpv(dev, ls.code, ls.bytes, ls.name);
-            createComputePipelineInto(dev, lm, mDeferLayout, deferTileStageFlags(), litDebugSpec(false), &mLightGridPipe[0],
-                                      "mLightGridPipe (LightGrid)");
+            createComputePipelineInto(dev, lm, mDeferLayout, deferTileStageFlags(), litDebugSpec(false, mViewCount),
+                                      &mLightGridPipe[0], "mLightGridPipe (LightGrid)");
             destroyShaderModuleDeferred(dev, lm, nullptr);
         }
         // The split passes (RenderVKDeferredSplit 1, the default) in the same world batch:
@@ -37791,7 +38391,7 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
         // TONEMAP: fullscreen HDR scene -> swapchain (LL postDeferredTonemap), same
         // post set layout (b0 = HDR scene, b1 = 1x1 exposure image).
         {
-            VkPushConstantRange tpcr{VK_SHADER_STAGE_FRAGMENT_BIT, 0, 64};
+            VkPushConstantRange tpcr{VK_SHADER_STAGE_FRAGMENT_BIT, 0, 96};   // <GMDX> 64 -> 96: night vision
             initGrade();
             const VkDescriptorSetLayout tsl[2] = {mDslPost, mDslGrade};
             VkPipelineLayoutCreateInfo tli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
@@ -37804,6 +38404,10 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
             td.colorFormat=mColorFormat; td.depthFormat=VK_FORMAT_UNDEFINED;
             td.depthTest=false; td.depthWrite=false; td.blend=false;
             td.cullMode=VK_CULL_MODE_NONE;
+            // (#1075: N views into the layered output; + the one-view twin for a one-layer output)
+            if (mViewCount > 1u)
+                createGraphicsPipelineInto(dev, td, &mTonemapPipe1, "mTonemapPipe1");
+            td.views = mViewCount;
             createGraphicsPipelineInto(dev, td, &mTonemapPipe, "mTonemapPipe");
             destroyShaderModuleDeferred(dev, tfs, nullptr);
             // (#820) the tonemap / grade LUT bake: {LUT storage image, the grade set} + the tonemap push.
@@ -37833,7 +38437,7 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
             VK_CHECK(mExposureAuxPool.allocate(mDslExposureAux, &mDsetExposureAux));
             mExpAuxDepthView = mExpAuxBloomView = VK_NULL_HANDLE;
             const VkDescriptorSetLayout esl[2] = {mDslPost, mDslExposureAux};
-            VkPushConstantRange epcr{VK_SHADER_STAGE_COMPUTE_BIT, 0, 48};
+            VkPushConstantRange epcr{VK_SHADER_STAGE_COMPUTE_BIT, 0, 64};   // <GMDX> 48 -> 64: params4 (night eye)
             VkPipelineLayoutCreateInfo eli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
             eli.setLayoutCount=2; eli.pSetLayouts=esl;
             eli.pushConstantRangeCount=1; eli.pPushConstantRanges=&epcr;
@@ -38231,8 +38835,11 @@ void LLCleanRendererVK::shutdown()
     destroyCel();   // avatar mask + cel (#549 / #550): its buffers back draw set 0 bindings 37 / 38
     destroySelOutline();   // <GMDX> selection styles: its mask layout references the draw set layouts
     LLFxRuntimeVK::instance().detachDevice();   // FX (#544): every effect GPU object
-    if (mFsr) { mFsr->destroy(dev); delete mFsr; mFsr = nullptr; }
-    if (mRr) { mRr->destroy(); delete mRr; mRr = nullptr; }   // #870 (before LLVulkanContext's NGX shutdown)
+    for (LLCleanFSR3VK*& fsr : mFsr)   // (#1075: every view's instance)
+        if (fsr) { fsr->destroy(dev); delete fsr; fsr = nullptr; }
+    for (LLCleanDlssRRVK*& rrv : mRr)   // #870 (before LLVulkanContext's NGX shutdown); #1075: every view's
+        if (rrv) { rrv->destroy(); delete rrv; rrv = nullptr; }
+    destroyRrStages();
     if (s_fsrProbe) { s_fsrProbe->destroy(dev); delete s_fsrProbe; s_fsrProbe = nullptr; }
     // Texture streaming: join the staging workers, then free queued staging/transients
     // (their images belong to the slot registry, freed below) and every retire list.
@@ -38349,6 +38956,7 @@ void LLCleanRendererVK::shutdown()
     if (mReact.image) mCtx->destroyImage(mReact);
     if (mSnapBuf.buffer) mCtx->destroyBuffer(mSnapBuf);
     if (mCapBuf.buffer) mCtx->destroyBuffer(mCapBuf);
+    frameHashDestroy();   // #1075 step 0 (debug; nothing unless RenderVKDebugFrameHash ran)
     if (mDepthCapBuf.buffer) { mCtx->destroyBuffer(mDepthCapBuf); mDepthCapBuf = GpuBuffer{}; mDepthCapCap = 0; }
     if (mSSRInfoSSBO.buffer) mCtx->destroyBuffer(mSSRInfoSSBO);
     if (mLightsPipe) vkDestroyPipeline(dev, mLightsPipe, nullptr);
@@ -38391,6 +38999,15 @@ void LLCleanRendererVK::shutdown()
     if (mMirrorOccPool) vkDestroyQueryPool(dev, mMirrorOccPool, nullptr);
     mMirrorOccPipe = VK_NULL_HANDLE; mMirrorOccLayout = VK_NULL_HANDLE; mMirrorOccPool = VK_NULL_HANDLE;
     for (MirrorOccRec& r : mMirrorOccRec) r = MirrorOccRec{};
+    // #1075 VR visibility mask
+    if (mVisMaskPipe) vkDestroyPipeline(dev, mVisMaskPipe, nullptr);
+    if (mVisMaskMoPipe) vkDestroyPipeline(dev, mVisMaskMoPipe, nullptr);
+    if (mVisMaskLayout) vkDestroyPipelineLayout(dev, mVisMaskLayout, nullptr);
+    mVisMaskPipe = VK_NULL_HANDLE; mVisMaskMoPipe = VK_NULL_HANDLE; mVisMaskLayout = VK_NULL_HANDLE;
+    if (mVisMaskBuf.buffer) { mCtx->destroyBuffer(mVisMaskBuf); mVisMaskBuf = GpuBuffer{}; }
+    mVisMaskCount[0] = mVisMaskCount[1] = 0;
+    mVisMaskGenValid = false;
+    mVisMaskUse = false;
     for (uint32_t i = 0; i < TS_RING; ++i)
     {
         if (mTsPoolR[i]) vkDestroyQueryPool(dev, mTsPoolR[i], nullptr);
@@ -38417,6 +39034,7 @@ void LLCleanRendererVK::shutdown()
     mSkyLut = GpuImage{};
     if (mSkyLutSampler) { vkDestroySampler(dev, mSkyLutSampler, nullptr); mSkyLutSampler = VK_NULL_HANDLE; }
     if (mTonemapPipe) vkDestroyPipeline(dev, mTonemapPipe, nullptr);
+    if (mTonemapPipe1) { vkDestroyPipeline(dev, mTonemapPipe1, nullptr); mTonemapPipe1 = VK_NULL_HANDLE; }
     if (mTonemapLayout) vkDestroyPipelineLayout(dev, mTonemapLayout, nullptr);
     mGradePool.destroy();
     // (#820) the tonemap LUT bake
@@ -38580,7 +39198,7 @@ void LLCleanRendererVK::shutdown()
     if (mTaaPipe) { vkDestroyPipeline(dev, mTaaPipe, nullptr); mTaaPipe = VK_NULL_HANDLE; }
     if (mTaaLayout) { vkDestroyPipelineLayout(dev, mTaaLayout, nullptr); mTaaLayout = VK_NULL_HANDLE; }
     mTaaPool.destroy();
-    mDsetTaa[0] = mDsetTaa[1] = VK_NULL_HANDLE;
+    for (auto& vs : mDsetTaa) vs[0] = vs[1] = VK_NULL_HANDLE;
     if (mDslTaa) { vkdDestroySetLayout(dev, mDslTaa); mDslTaa = VK_NULL_HANDLE; }
     // Snapshot supersampling (#417).
     destroySnapAccumTargets();
@@ -38662,6 +39280,9 @@ void LLCleanRendererVK::shutdown()
     if (mHudGlowDrawPipe)  vkDestroyPipeline(dev, mHudGlowDrawPipe,  nullptr);
     if (mHudGlowMaskPipe)  vkDestroyPipeline(dev, mHudGlowMaskPipe,  nullptr);
     if (mHudGlowAlphaPipe) vkDestroyPipeline(dev, mHudGlowAlphaPipe, nullptr);
+    if (mHudDrawPipeVr) vkDestroyPipeline(dev, mHudDrawPipeVr, nullptr);   // #1076
+    if (mHudMaskPipeVr) vkDestroyPipeline(dev, mHudMaskPipeVr, nullptr);
+    mHudDrawPipeVr = mHudMaskPipeVr = VK_NULL_HANDLE;
     if (mWaterPipe) vkDestroyPipeline(dev, mWaterPipe, nullptr);
     if (mWaterExclPipe) vkDestroyPipeline(dev, mWaterExclPipe, nullptr);
     if (mWaterCapPipe) vkDestroyPipeline(dev, mWaterCapPipe, nullptr);
@@ -39306,10 +39927,17 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     // RenderVKDepthOnlyVS: this recording's depth-only pipeline set (live A/B; the async
     // batch is in -- mReady -- so no queued compile still writes a member or twin).
     applyDepthOnlyVS();
+    // #1088 (RenderVKPrepassEqualCompare, live): the post-pre-pass shading pipelines' depth
+    // compare for this recording -- exact EQUAL, or its ordered twin (bindGraphicsPipeline).
+    {
+        static LLCachedControl<bool> s_eq(gSavedSettings, "RenderVKPrepassEqualCompare", false);
+        vkSetPrepassRelaxedCompare(!s_eq);
+    }
     // #238: this frame slot's param-ring regions start empty. Every draw view / cull
     // params / TAA block this recording uses is written from here on (the slot's last
     // submission has completed: see ParamRegion).
     beginParamRings();
+    frameHashBegin();   // #1075 step 0: RenderVKDebugFrameHash (debug; off: one cached-control read)
     // Cursor picks (#702 / #481): this slot's previous answers are complete (slot fence).
     if (mPick && !mOffscreen) mPick->beginFrame();
     if (mAudioRT && !mOffscreen) mAudioRT->beginFrame();   // acoustics probe (#683): same slot rule
@@ -39474,6 +40102,9 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     {
         // #870 / #962: DLSS (RR or SR) renders at the network's exact size for its fixed mode.
         uint32_t rrW = width, rrH = height;
+        // #1075 step 10: a stereo frame renders scaled too (every eye at rw x rh, each resolved to
+        // the eye extent by its own TAA / FSR / DLSS instance; the scene target has a layer per
+        // view). DLSS plans once for both eyes (same network, mode and extents).
         mDlssFrame = rrPlan(width, height, rrW, rrH);
         const float scale = mDlssFrame ? 1.f : renderScaleWanted();
         if (mDlssFrame) { rw = rrW; rh = rrH; }
@@ -39655,6 +40286,19 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     float viewProjWorldMain[16];
     std::memcpy(viewProjWorldMain, drawPush.view_proj, sizeof(viewProjWorldMain));
     vkSetDrawOrigin(drawPush, viewProjRelMain, drawPushIn.cam_time);
+    // #1075 STEREO: each view's main draw-view matrices (pushMainView), jittered as view 0's
+    // would be. N = 1: not used (pushMainView is pushDrawView).
+    if (mViewCount > 1u)
+        for (uint32_t v = 0; v < mViewCount; ++v)
+        {
+            std::memcpy(mEyeVP[v], mViewProjRelV[v], sizeof(mEyeVP[v]));
+            std::memcpy(mEyeInvVP[v], mCurInvVPV[v], sizeof(mEyeInvVP[v]));
+            if (mTaaJitterOn)
+            {
+                jitterClip(mEyeVP[v], mTaaJitter[2], mTaaJitter[3]);
+                jitterInvClip(mEyeInvVP[v], mTaaJitter[2], mTaaJitter[3]);
+            }
+        }
     // This frame's pre-pass writes motion vectors (needs the pre-pass: pass 1a carries
     // the motion target; otherwise the target is cleared to 0 below).
     bool mvFrame = false;
@@ -39666,7 +40310,13 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         pre = s_pre;
 #endif
         mvFrame = mTemporalOn && pre && mPreOpaquePipe[0] && mDrawEqPipe[0] && mPreMvPipe[0]
-               && mAoNormal.image && mMotion.image;
+               && (mAoNormal.image || stereoActive()) && mMotion.image;
+        // #1075 step 10: a stereo pass 1a writes {motion, no-history} without the (one-layer) AO
+        // normal target -- the motion-only twins (p1aMo below), which carry the N views.
+        if (stereoActive())
+            mvFrame = mvFrame && mPreMoPipe[0] && mPreMoPipe[1] && mPreMoMaskPipe[0] && mPreMoMaskPipe[1]
+                   && mPreMoRigPipe[0] && mPreMoRigPipe[1] && mPreMoRigMaskPipe[0] && mPreMoRigMaskPipe[1]
+                   && mMotion.layers >= mViewCount && mNoTemporal.layers >= mViewCount;
     }
     // #860 RT mirrors: the target's mode (ray traced at the render extent vs the planar capture).
     mMirrorRtMode = rtMirrorModeWanted();
@@ -39757,11 +40407,12 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     // is then px per metre at every depth; the cull divides by no distance and takes every LOD
     // at its finest (CULL_ORTHO). ortho_ppm: the capture's final px per metre, so a small
     // preparation render asks for the textures the map will need.
-    if (mOrtho)
+    if (mOrtho || mOrthoView)   // <GMDX> (the live orthographic view: the projection's own px per metre)
     {
         push.flags |= kCullOrtho;
-        if (mOrthoPpm > 0.f) push.lod_cam_pos[3] = mOrthoPpm;
+        if (mOrtho && mOrthoPpm > 0.f) push.lod_cam_pos[3] = mOrthoPpm;
     }
+    if (mSnapMatte) push.flags |= kCullAvatarsOnly;   // <GMDX> avatar matte snapshot: the main view keeps avatars only
     {
         // Texel demand quality (clean_cull.comp demandAt): bias x the sampler's anisotropy.
         static LLCachedControl<F32> s_dem_bias(gSavedSettings, "RenderVKTexDemandBias", 1.f);
@@ -40251,7 +40902,9 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         //  Off: the module's own camera-jump test covers teleports and region crossings.)
         vf.cameraCut = mTemporalOn && mTemporalReset;
         mVolClouds->prepare(vf);
-        mVolCloudsComposite = mVolClouds->compositeWanted() && mLightsPipe;
+        // (#1075: the march / composite are per view, design step 13: off in stereo -- the shared
+        //  weather / shadow / panorama parts still run)
+        mVolCloudsComposite = mVolClouds->compositeWanted() && mLightsPipe && !stereoActive();
     }
     if (mLightsPipe)
     {
@@ -40268,11 +40921,13 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         {
             uint32_t culling = 2;
 #if defined(LL_HAS_CLEAN_PIPELINE)
-            static LLCachedControl<U32> s_culling(gSavedSettings, "RenderVKLightCulling", 0);
+            static LLCachedControl<U32> s_culling(gSavedSettings, "RenderVKLightCulling", 2U);
             culling = s_culling;
 #endif
             froxelCells = froxelSetup(rw, rh, viewProjRelMain, drawPushIn.cam_time);
-            froxelGo = culling == 2 && mFroxelPipe && mDsetFroxel && ensureFroxelBuffer(froxelCells);
+            // (#1075: the froxels are screen tiles of one view -- stereo frames walk the cluster
+            //  lists, which every eye reaches by projecting into the head's grid; step 9)
+            froxelGo = culling == 2 && mFroxelPipe && mDsetFroxel && !stereoActive() && ensureFroxelBuffer(froxelCells);
         }
         // FORWARD LIT FS (clean_lights_common.glsl LightInfo.fwd): .xy the froxel masks' device
         // address while the forward walk reads them (RenderVKForwardFroxels, this recording
@@ -40402,15 +41057,25 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
             {
                 // Region crossing: x_old = x_new - off, so V' = V * T(-off) keeps the
                 // previous frame's view in the new agent frame (no one-frame SSR smear).
-                for (int r = 0; r < 3; ++r)
-                    mPrevView[12 + r] -= mPrevView[0 + r] * gVKPrevViewShift[0]
-                                       + mPrevView[4 + r] * gVKPrevViewShift[1]
-                                       + mPrevView[8 + r] * gVKPrevViewShift[2];
+                // (#1075: every view's, in the one place the shift is consumed.)
+                for (uint32_t v = 0; v < mViewCount; ++v)
+                {
+                    float* pv = mPrevViewV[v];
+                    for (int r = 0; r < 3; ++r)
+                        pv[12 + r] -= pv[0 + r] * gVKPrevViewShift[0]
+                                    + pv[4 + r] * gVKPrevViewShift[1]
+                                    + pv[8 + r] * gVKPrevViewShift[2];
+                }
                 gVKPrevViewShift[0] = gVKPrevViewShift[1] = gVKPrevViewShift[2] = 0.f;
             }
-            std::memcpy(si.prev_view, mPrevView, sizeof(si.prev_view));
-            std::memcpy(si.prev_proj, mPrevProj, sizeof(si.prev_proj));
-            std::memcpy(si.prev_inv_proj, mPrevInvProj, sizeof(si.prev_inv_proj));
+            // #1075: the per-view block, views [0, mViewCount) (the desktop: view 0 only).
+            for (uint32_t v = 0; v < mViewCount; ++v)
+            {
+                std::memcpy(si.views[v].prev_view, mPrevViewV[v], sizeof(si.views[v].prev_view));
+                std::memcpy(si.views[v].prev_proj, mPrevProjV[v], sizeof(si.views[v].prev_proj));
+                std::memcpy(si.views[v].prev_inv_proj, mPrevInvProjV[v], sizeof(si.views[v].prev_inv_proj));
+                std::memcpy(si.views[v].cur_view, mCurViewV[v], sizeof(si.views[v].cur_view));
+            }
             bool ssr_on = false;
             F32 it = 25.f, step = 0.1f, dbias = 0.015f, rbias = 0.001f, amul = 1.6f;
 #if defined(LL_HAS_CLEAN_PIPELINE)
@@ -40426,7 +41091,9 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
             // mPrevColorFresh (B2): last frame's SSR copy took the colour too.
             // (specApply: the bound spec key's SSR cap, clean_frame_info.glsl constant 12.)
             si.params1[0] = amul;
-            si.params1[1] = (F32)specApply(SPEC_SSR, (ssr_on && mPrevValid && mPrevColorFresh) ? 1u : 0u);
+            // (#1075: SSR traces one view's previous frame: off in stereo -- the prev colour / depth
+            //  are layered copies, the march is not, design step 5)
+            si.params1[1] = (F32)specApply(SPEC_SSR, (ssr_on && mPrevValid && mPrevColorFresh && !stereoActive()) ? 1u : 0u);
             // Debug view (RenderVKDebugView): clean_draw.frag shows one shading term.
             static LLCachedControl<U32> s_dbgview(gSavedSettings, "RenderVKDebugView", 0);
             // 13-15, 18: RT overlays (not a lit-FS term); 16: ambient occlusion; 17: probe clusters.
@@ -40513,7 +41180,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
                 si.terrain_lod[1] = cullIn.lod_cam_pos[1];
                 si.terrain_lod[2] = cullIn.lod_cam_pos[2];
                 si.terrain_lod[3] = smooth ? (float)(1u + (tsnap ? 1u : 0u) + (tdiag ? 2u : 0u)) : 0.f;
-                if (mOrtho) si.terrain_lod[3] = 0.f;   // <GMDX> orthographic: the finest level, unmorphed
+                if (mOrtho || mOrthoView) si.terrain_lod[3] = 0.f;   // <GMDX> orthographic: the finest level, unmorphed
             }
             // Ambient occlusion (RenderDeferredSSAO): computed between the depth pre-pass
             // and the lit pass, so it needs the pre-pass. LL softenLightF adjustIrradiance
@@ -40533,7 +41200,8 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
 #endif
                 mAoThisFrame = ao && pre && mPreOpaquePipe[0] && mDrawEqPipe[0] && mAoPipe && mAoA.image
                             && mPreNrmPipe[0] && mAoNormal.image
-                            && specApply(SPEC_AO, 1u) > 0u;   // (bound spec key: AO folded away -> not computed)
+                            && specApply(SPEC_AO, 1u) > 0u    // (bound spec key: AO folded away -> not computed)
+                            && !stereoActive();               // (#1075: AO not layered yet, design step 7)
                 si.params1[3] = mAoThisFrame ? 1.f : 0.f;
                 // AO resolution (ensureAO's latch: the targets this frame's AO writes) and the
                 // depth-aware upsample's absolute plane tolerance -- the AO blur's
@@ -40554,6 +41222,20 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
 #endif
                     mSkyLutNow = skyLut && mSkyLutPipe && mDsetSkyLut && mSkyLut.image;
                     si.ao_up[2] = mSkyLutNow ? 1.f : 0.f;
+                    // (#1086, not AO) w, an exact integer: bit 0 the RT shadow mask upsample's
+                    // thin-receiver fallback (clean_shadow_mask_read.glsl rtMaskThinFallback:
+                    // 1 = the brightest tap close behind a receiver no tap matches, 0 = the
+                    // closest-depth tap), bits 1+ its plane tolerance floor in mm
+                    // (rtMaskPlaneTolFloor; 30 = the old 3 cm).
+                    bool thinFb = true;
+                    U32 tolMM = 30;
+#if defined(LL_HAS_CLEAN_PIPELINE)
+                    static LLCachedControl<bool> s_thin_fb(gSavedSettings, "RenderVKRTShadowMaskThinFallback", true);
+                    static LLCachedControl<F32> s_up_mm(gSavedSettings, "RenderVKRTShadowMaskUpsampleTolMM", 30.f);
+                    thinFb = s_thin_fb;
+                    tolMM = (U32)llclamp((S32)std::lround((F32)s_up_mm), 1, 1000);
+#endif
+                    si.ao_up[3] = (F32)((thinFb ? 1u : 0u) | (tolMM << 1));
                 }
                 si.ao_params[0] = irr_scale;
                 si.ao_params[1] = irr_max;
@@ -40564,7 +41246,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
                 static LLCachedControl<bool> s_spec_occ(gSavedSettings, "RenderVKSpecularOcclusion", true);
                 spec_occ = s_spec_occ;
 #endif
-                std::memcpy(si.cur_view, mCurView, sizeof(si.cur_view));
+                // (si.views[v].cur_view: filled with the per-view block above, #1075)
                 si.ao_params2[0] = spec_occ ? 1.f : 0.f;
                 bool ao_std = true;
 #if defined(LL_HAS_CLEAN_PIPELINE)
@@ -40606,9 +41288,33 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
             si.clouds[3][0] = (float)mCloudNoiseIdx[0];
             si.clouds[3][1] = (float)(mCloudNoiseIdx[1] >= 0 ? mCloudNoiseIdx[1] : mCloudNoiseIdx[0]);
             std::memcpy(si.bodies, mBodies, sizeof(si.bodies));
-            for (int i = 0; i < 6; ++i) si.bodies[8 + i / 4][i % 4] = (float)mSkyTexIdx[i];
+            for (int i = 0; i < 8; ++i) si.bodies[8 + i / 4][i % 4] = (float)mSkyTexIdx[i];   // <GMDX> 8: [9].zw the night sky's
             // #719: the volumetric cloud layer's switch + shadow map / panorama frame (zeros: off).
             if (mVolClouds) mVolClouds->fillFrameInfo(si.vol_clouds);
+            {
+                // <GMDX> CLOUD CORONA (gmdx_cloud_corona.glsl): vol_clouds[3] (reserved upstream) =
+                // strength, droplet diameter (um), 22-degree halo strength, 0; every frame, the volumetric
+                // layer live or not (the physical 2D layer reads it too). Strengths 0: the clouds as before.
+                static LLCachedControl<F32> s_corona(gSavedSettings, "GMDXCloudCorona", 1.f);
+                static LLCachedControl<F32> s_droplet(gSavedSettings, "GMDXCloudCoronaDroplet", 15.f);
+                // Part of physical night: GMDXPhysicalNight off, all zeros (the old clouds). (The setting,
+                // not night.on: a creator's sky keeps the corona around Second Life's own light.)
+                static LLCachedControl<bool> s_phys_night(gSavedSettings, "GMDXPhysicalNight", true);
+                const bool night_on = gmdxNightLight().on;
+                const bool corona_on = s_phys_night;
+                si.vol_clouds[3][0] = corona_on ? llclamp((F32)s_corona, 0.f, 4.f) : 0.f;
+                si.vol_clouds[3][1] = corona_on ? llclamp((F32)s_droplet, 5.f, 50.f) : 0.f;
+                static LLCachedControl<F32> s_halo(gSavedSettings, "GMDXCloudHalo22", 0.f);
+                si.vol_clouds[3][2] = corona_on ? llclamp((F32)s_halo, 0.f, 4.f) : 0.f;
+                // <GMDX> w: physical night's WindLight sky light strength (gmdxnightlight.h sky_q).
+                si.vol_clouds[3][3] = night_on ? gmdxNightLight().sky_q : 0.f;
+                // <GMDX> vol_clouds[2].w (unused upstream; .xyz is the cloud shadow map's light): the
+                // clouds' moonlight gain (GMDXNightCloudLight, clean_atmos_common.glsl gmdxCloudMoonGain),
+                // by the moon's share of the scene light; 1 by day and with physical night off.
+                static LLCachedControl<F32> s_cloud_moon(gSavedSettings, "GMDXNightCloudLight", 4.5f);
+                si.vol_clouds[2][3] = night_on ? 1.f + (llclamp((F32)s_cloud_moon, 0.f, 20.f) - 1.f)
+                                                     * gmdxNightLight().moon_share : 1.f;
+            }
             // #783: wetness, ripples and the published occlusion map's frame (zeros: no weather --
             // the lit / G-buffer FS's wet branch is one uniform test).
             if (mWeather && mWeatherNow) mWeather->fillFrameInfo(si.weather);
@@ -40622,6 +41328,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
             si.cam_origin[2] = drawPushIn.cam_time[2];
             mRtaoTime = drawPushIn.cam_time[3];   // #86 RTAO: the alpha test's texture animation
             physSkyFill(si);   // <GMDX> the physical sky's parameters (needs atmos + the eye)
+            GMDXNightSky::fillFrame(si.bodies, si.sky_fx2, si.meteors + 192 - GMDXNightSky::kSpaceSlots);   // <GMDX> night sky (bodies' spare .w, sky_fx2.yzw, the meteors' top slots)
             {
                 // <GMDX> ALPHA-MASK PULL (clean_draw.vert): alpha-masked world surfaces move this far toward
                 // the camera, so a path / decal mesh built a millimetre over the ground stays on top despite the
@@ -40632,7 +41339,11 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
                 si.gmdx_misc[0] = llclamp((F32)s_mm, 0.f, 50.f) * 0.001f;
                 si.gmdx_misc[1] = llclamp((F32)s_per_m, 0.f, 10.f) * 0.001f;
                 si.gmdx_misc[2] = llclamp((F32)s_graze, 1.f, 32.f);
-                si.gmdx_misc[3] = 0.f;
+                // <GMDX> PHYSICAL NIGHT (gmdxnightlight.h; clean_atmos_common.glsl gmdxNightOn): 0 = off,
+                // > 0 the moon's light (a fraction of the sun's) while the physical sky draws its half
+                // (physSkyFill: physky[4].w = 2), else -1.
+                const GMDXNightLight& night = gmdxNightLight();
+                si.gmdx_misc[3] = !night.on ? 0.f : (si.physky[4][3] > 1.5f ? std::max(night.moon, 1e-30f) : -1.f);
             }
             // w: temporal-exclusion bits (#605, clean_frame_info.glsl noTemporalFace) --
             // live media / animated-texture faces keep no TAA / FSR history. Only while
@@ -40772,7 +41483,12 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
                 si.shadow_fit[0] = fit ? 1.f : 0.f;
                 si.shadow_fit[1] = llclamp(tol, 0.f, 4.f);
                 si.shadow_fit[2] = llmax(pcss_max, 0.f);
-                si.shadow_fit[3] = 0.f;
+                // <GMDX> w: the moon disc's brightness as a light (GMDXMoonDisc; clean_atmos_common.glsl
+                // gmdxMoonDiscGain), part of physical night: off, 0 (LL's disc). -1: a creator's own
+                // moon texture (gmdxnightlight.h custom_moon), LL's disc without the phase shading.
+                static LLCachedControl<F32> s_moon_disc(gSavedSettings, "GMDXMoonDisc", 1.f);
+                si.shadow_fit[3] = !gmdxNightLight().on ? 0.f
+                                 : gmdxNightLight().custom_moon ? -1.f : llclamp((F32)s_moon_disc, 0.f, 100.f);
             }
             // Planar mirror: box + plane + (valid, 1/main size) for tapMirror.
             std::memcpy(si.mirror_box, mMirrorBox, sizeof(si.mirror_box));
@@ -40792,7 +41508,8 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
                 prePred = s_pre_m; odPred = s_od_m;
 #endif
                 prePred = prePred && mPreOpaquePipe[0] && mDrawEqPipe[0];
-                mRtMirrorNow = rtMirrorFrameReady() && deferredWanted(prePred, odPred, nullptr);
+                // (#1075: one view's image -- mirrors are off in stereo)
+                mRtMirrorNow = rtMirrorFrameReady() && !stereoActive() && deferredWanted(prePred, odPred, nullptr);
                 rtMirTap = mRtMirrorNow || mRtMirrorHaveImage;
             }
             si.mirror_params[0] = (F32)specApply(SPEC_MIRROR,
@@ -40811,9 +41528,15 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
                 // double. World-space, each matrix cancelled the km-sized eye on its own,
                 // so the two rounding errors did not cancel in the difference: ~1 px of
                 // motion-vector noise at 1 m at Z 3000 (TAA smear / shimmer).
-                std::memcpy(si.taa_cur_vp, mViewProjRel, sizeof(si.taa_cur_vp));
-                if (hist) vkRebaseOrigin(mTaaPrevVPRel, mTaaPrevEye, si.cam_origin, si.taa_prev_vp);
-                else      std::memcpy(si.taa_prev_vp, mViewProjRel, sizeof(si.taa_prev_vp));
+                // (#1075: per view -- each eye's own P * rotation-only V, last frame's rebased onto
+                // this frame's ONE origin.)
+                for (uint32_t v = 0; v < mViewCount; ++v)
+                {
+                    VKSSRView& sv = si.views[v];
+                    std::memcpy(sv.taa_cur_vp, mViewProjRelV[v], sizeof(sv.taa_cur_vp));
+                    if (hist) vkRebaseOrigin(mTaaPrevVPRelV[v], mTaaPrevEye, si.cam_origin, sv.taa_prev_vp);
+                    else      std::memcpy(sv.taa_prev_vp, mViewProjRelV[v], sizeof(sv.taa_prev_vp));
+                }
                 std::memcpy(si.taa_jitter, mTaaJitter, sizeof(si.taa_jitter));
                 si.taa_params[0] = hist ? mTaaPrevTime : drawPushIn.cam_time[3];
                 si.taa_params[1] = mvFrame ? 1.f : 0.f;
@@ -40830,6 +41553,9 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
 #endif
                     // #870 / #962: DLSS, both networks (Programming Guide 3.5): native bias + log2(render / display) - 1
                     if (mDlssFrame) mip_bias = std::min(mip_bias, -1.f);
+                    // #1093: a shot accumulated at up x the live pixels has up x the texels per world
+                    // area: log2(1 / up) sharper while its samples render (0 outside a shot).
+                    if (mLiveCapNow && mLiveSnap) mip_bias += mLiveSnap->mipBiasOffset();
                     si.taa_scale[0] = mip_bias + (float)std::log2((double)rh / (double)std::max(height, 1u));
                 }
                 si.taa_scale[1] = (float)rh / (float)std::max(height, 1u);
@@ -40878,8 +41604,6 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
                 // before the double product could cancel them (~0.2 px camera shake of
                 // the history at 1 m at Z 3000).
                 mTaaResolveReset = !hist;
-                float invRel[16];
-                vkInvert4(mViewProjRel, invRel);
                 // Speed-based FoV (#663): the TAA / FSR reprojection above uses the REAL
                 // previous and current projections (a FoV ramp is genuine screen motion for
                 // history). Motion blur must not read the FoV change as camera motion, so its
@@ -40902,42 +41626,57 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
                     }
                 }
                 mMbFovK = kFov;
-                double prevRel[16];
+                // #1075 step 10: PER VIEW -- each eye's unjittered clip -> that eye's last-frame clip
+                // (its own P * rotation-only V, last frame's rebased onto this frame's ONE head
+                // origin, exactly as the frame info's taa_prev_vp[v] the pre-pass motion uses) and
+                // each eye's water plane. The motion blur's two copies stay view 0's (off in stereo).
+                // N = 1: v = 0 only, the arithmetic of before (mViewProjRel / mTaaPrevVPRel are [0]).
+                for (uint32_t v = 0; v < mViewCount; ++v)
                 {
-                    const double dl[3] = {(double)drawPushIn.cam_time[0] - (double)mTaaPrevEye[0],
-                                          (double)drawPushIn.cam_time[1] - (double)mTaaPrevEye[1],
-                                          (double)drawPushIn.cam_time[2] - (double)mTaaPrevEye[2]};
-                    for (int i = 0; i < 16; ++i) prevRel[i] = (double)mTaaPrevVPRel[i];
-                    for (int r = 0; r < 4; ++r)
-                        prevRel[12 + r] += prevRel[r] * dl[0] + prevRel[4 + r] * dl[1] + prevRel[8 + r] * dl[2];
-                }
-                for (int c = 0; c < 4; ++c)
-                    for (int r = 0; r < 4; ++r)
+                    const float* curRelV = mViewProjRelV[v];
+                    const float* prevRelV = mTaaPrevVPRelV[v];
+                    float invRel[16];
+                    vkInvert4(curRelV, invRel);
+                    double prevRel[16];
                     {
-                        double acc = 0.0, rot = 0.0;
-                        if (hist)
-                            for (int k = 0; k < 4; ++k)
-                            {
-                                acc += prevRel[k * 4 + r] * (double)invRel[c * 4 + k];
-                                // Motion blur's rotation-only reprojection (#118): last
-                                // frame's matrix NOT rebased -- its eye moved onto this one.
-                                rot += (double)mTaaPrevVPRel[k * 4 + r] * (double)invRel[c * 4 + k];
-                            }
-                        else
-                            acc = rot = (c == r) ? 1.0 : 0.0;
-                        mTaaReproj[c * 4 + r] = (float)acc;
-                        const double sFov = (r < 2) ? (double)kFov : 1.0;   // clip x / y rows
-                        mMbReprojCam[c * 4 + r] = (float)(acc * sFov);
-                        mMbReprojRot[c * 4 + r] = (float)(rot * sFov);
+                        const double dl[3] = {(double)drawPushIn.cam_time[0] - (double)mTaaPrevEye[0],
+                                              (double)drawPushIn.cam_time[1] - (double)mTaaPrevEye[1],
+                                              (double)drawPushIn.cam_time[2] - (double)mTaaPrevEye[2]};
+                        for (int i = 0; i < 16; ++i) prevRel[i] = (double)prevRelV[i];
+                        for (int r = 0; r < 4; ++r)
+                            prevRel[12 + r] += prevRel[r] * dl[0] + prevRel[4 + r] * dl[1] + prevRel[8 + r] * dl[2];
                     }
-                // TAA WATER PLANE (#204): z = water height in this frame's unjittered
-                // clip space -- the plane z = h through the transpose of the clip ->
-                // world inverse. Camera-relative (#555): z_rel = h - eye.z, i.e. the plane
-                // (0, 0, 1, eye.z - h) through inverse(view_proj_rel).
-                {
-                    const double wz = (double)drawPushIn.cam_time[2] - (double)mWater[3 * 4 + 3];
                     for (int c = 0; c < 4; ++c)
-                        mTaaWaterPlane[c] = (float)((double)invRel[c * 4 + 2] + wz * (double)invRel[c * 4 + 3]);
+                        for (int r = 0; r < 4; ++r)
+                        {
+                            double acc = 0.0, rot = 0.0;
+                            if (hist)
+                                for (int k = 0; k < 4; ++k)
+                                {
+                                    acc += prevRel[k * 4 + r] * (double)invRel[c * 4 + k];
+                                    // Motion blur's rotation-only reprojection (#118): last
+                                    // frame's matrix NOT rebased -- its eye moved onto this one.
+                                    rot += (double)prevRelV[k * 4 + r] * (double)invRel[c * 4 + k];
+                                }
+                            else
+                                acc = rot = (c == r) ? 1.0 : 0.0;
+                            mTaaReprojV[v][c * 4 + r] = (float)acc;
+                            if (v == 0u)
+                            {
+                                const double sFov = (r < 2) ? (double)kFov : 1.0;   // clip x / y rows
+                                mMbReprojCam[c * 4 + r] = (float)(acc * sFov);
+                                mMbReprojRot[c * 4 + r] = (float)(rot * sFov);
+                            }
+                        }
+                    // TAA WATER PLANE (#204): z = water height in this frame's unjittered
+                    // clip space -- the plane z = h through the transpose of the clip ->
+                    // world inverse. Camera-relative (#555): z_rel = h - eye.z, i.e. the plane
+                    // (0, 0, 1, eye.z - h) through inverse(view_proj_rel).
+                    {
+                        const double wz = (double)drawPushIn.cam_time[2] - (double)mWater[3 * 4 + 3];
+                        for (int c = 0; c < 4; ++c)
+                            mTaaWaterPlaneV[v][c] = (float)((double)invRel[c * 4 + 2] + wz * (double)invRel[c * 4 + 3]);
+                    }
                 }
             }
             vkCmdUpdateBuffer(cmd, mSSRInfoSSBO.buffer, 0, sizeof(si), &si);
@@ -40972,7 +41711,8 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     if (mTemporalOn)
     {
         std::memcpy(mTaaPrevVP, drawPushIn.view_proj, sizeof(mTaaPrevVP));
-        std::memcpy(mTaaPrevVPRel, mViewProjRel, sizeof(mTaaPrevVPRel));
+        for (uint32_t v = 0; v < mViewCount; ++v)   // (#1075: every view's, once per frame)
+            std::memcpy(mTaaPrevVPRelV[v], mViewProjRelV[v], sizeof(mTaaPrevVPRelV[v]));
         std::memcpy(mTaaPrevEye, drawPushIn.cam_time, sizeof(mTaaPrevEye));
         mTaaPrevBoost = mOffscreen ? 0.f : vkCamSpeedFovBoost();
         mTaaPrevTime = drawPushIn.cam_time[3];
@@ -41683,7 +42423,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     }
 #endif
     if (!mPreOpaquePipe[0] || !mDrawEqPipe[0]) prepass = false;
-    od = od && buildOverdrawPipes();
+    od = od && !stereoActive() && buildOverdrawPipes();   // (#1075: one-view pipelines + queries: off in stereo)
     const uint32_t odSlot = (uint32_t)(mOdFrame % 3u);
     // Alternate: even frames count with the atomic pipelines, odd frames run the
     // unmodified pipelines inside the FS-invocation query (see buildOverdrawPipes).
@@ -41707,7 +42447,9 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     // deferred lighting alone, so that split does not draw it. (The merged RT shadow pass
     // reads it too when 1a is split for AO / motion -- the usual case: the denoiser keeps the
     // motion vectors -- else its terminator probe takes the camera ray.)
-    bool termTriNow = mTermTriUse && prepass && (aoNow || mvNow || maskNow)
+    // (#1075: its target is one layer -- never drawn in a stereo frame, whose pass 1a now splits
+    //  for the motion vectors; the clear path below keeps it defined)
+    bool termTriNow = mTermTriUse && prepass && (aoNow || mvNow || maskNow) && !stereoActive()
                    && mTermTriPipe[0][0] && mTermTriPipe[0][1] && mTermTriPipe[1][0] && mTermTriPipe[1][1];
     // DEFERRED LIGHTING (RenderVKDeferredLighting, phase 5.2): pass 1b draws the opaque /
     // mask / rigged buckets into the G-buffer (EQUAL, same draws and VS as the forward
@@ -41717,6 +42459,10 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     bool deferNow = false;
     {
         const char* why = "";
+        // #1075 STEREO (N > 1 views): the G-buffer is a multiview raster pass into a layer per
+        // view and the lighting kernel lights every view's layer in one dispatch (z = N). The
+        // families not layered yet stay off in a stereo frame (deferSplitFrame below: the uber
+        // kernel; the RT shadow mask, AO, SSR, GI, RT reflections: their own decision sites).
         deferNow = deferredWanted(prepass, od, &why) && ensureDeferred(cmd, rw, rh);
         if (!deferNow && !*why) why = "G-buffer unavailable";
         // #783 M3: the snow surface mesh -- in the G-buffer, or (frames that do not go deferred:
@@ -41735,7 +42481,8 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
             static LLCachedControl<U32> s_litdbg_d(gSavedSettings, "RenderVKLitDebugMask", 0);
             litdbg = s_litdbg_d;
 #endif
-            mDeferDbgNow = deferNow && (litdbg & 0xFFFFu) != 0u && ensureDeferDebug();
+            // (#1075: the twin is one view -- not in a stereo frame)
+            mDeferDbgNow = deferNow && (litdbg & 0xFFFFu) != 0u && !stereoActive() && ensureDeferDebug();
         }
         // SPLIT LIGHTING (RenderVKDeferredSplit, default on): this frame's kernel set and the
         // intermediates. On-screen only (snapshots light with the uber kernel: no
@@ -41747,7 +42494,9 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         mRtReflNow = mRtFwdNow = mRtUberNow = false;   // (#859; deferSplitFrame decides)
         mPdnNow = false;                               // (#85 phase 2; likewise)
         mPdnFlags = 0u;
-        if (!mOffscreen) deferSplitFrame(deferNow && !mDeferDbgNow, rw, rh);
+        // (#1075 STEREO: the uber kernel -- the split's kernels and intermediates are one view
+        //  until their family is layered; deferred = false keeps them allocated, untouched)
+        if (!mOffscreen) deferSplitFrame(deferNow && !mDeferDbgNow && !stereoActive(), rw, rh);
         // (#1039 M1) the visibility queue: which hit-shading splits queue their sun rays, the regions, the
         // buffer -- after the GI's (giDecide) and the RT split's (rtSplitDecide) decisions
         visQueueDecide();
@@ -41796,7 +42545,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
                 mPdnFlags = 0u;
             }
             maskNow = mRtMaskOn && prepass;
-            termTriNow = mTermTriUse && prepass && (aoNow || mvNow || maskNow)
+            termTriNow = mTermTriUse && prepass && (aoNow || mvNow || maskNow) && !stereoActive()
                       && mTermTriPipe[0][0] && mTermTriPipe[0][1] && mTermTriPipe[1][0] && mTermTriPipe[1][1];
             mWeatherMeshFwdRt = mLitRt && !mRtMaskOn && mRT && mDrawLayoutRt;
             mWeatherMeshNow = mWeather && mWeatherNow
@@ -41880,8 +42629,10 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     // Pass 1a writes the AO normal (+ motion) targets only when something reads them (p1aNrm),
     // motion + no-history alone (p1aMo: slim deferred temporal frames); else it is depth-only
     // (begin1a).
-    const bool p1aNrm = !slimDefer && (aoNow || mvNow);
-    const bool p1aMo  = slimDefer && mvNow;
+    // #1075 step 10: a stereo frame's pass 1a is motion-only too (its AO normal target is one
+    // layer; AO is in the stereo-off set). N = 1: exactly the slim-deferred rule.
+    const bool p1aMo  = (slimDefer || stereoActive()) && mvNow;
+    const bool p1aNrm = !p1aMo && !slimDefer && (aoNow || mvNow);
     // The normal target is complete + SHADER_READ_ONLY this frame (FX normals, fxFrame).
     mAoNormalWritten = aoPre;
     // PASS 1 SPLIT: 1a (pre-pass) | AO / RT mask / VRS rate / G-buffer + lighting | 1b.
@@ -41890,18 +42641,19 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     const bool split1a = split1aBase || deferNow;
     auto beginPass1 = [&](bool clearDepth, bool vrsAttach, bool loadColor = false)
     {
+        // (#1075: mainAtt / beginMain -- every view's layer in stereo; N = 1 the 2D views, as before)
         VkRenderingAttachmentInfo ca{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-        ca.imageView=sceneHdr().view; ca.imageLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        ca.imageView=mainAtt(sceneHdr()); ca.imageLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         ca.loadOp=loadColor ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR;
         ca.storeOp=VK_ATTACHMENT_STORE_OP_STORE;
         ca.clearValue.color={{0.f,0.f,0.f,1.f}};
         VkRenderingAttachmentInfo da{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-        da.imageView=mDepth.view; da.imageLayout=VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+        da.imageView=mainAtt(mDepth); da.imageLayout=VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
         da.loadOp=clearDepth ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
         da.storeOp=VK_ATTACHMENT_STORE_OP_STORE;
         da.clearValue.depthStencil={kReverseZ ? 0.0f : 1.0f, 0}   /* main view: reversed-Z far */;
         VkRenderingAttachmentInfo cas[2] = {ca, ca};
-        cas[1].imageView=mGlowTarget.view;
+        cas[1].imageView=mainAtt(mGlowTarget);
         cas[1].clearValue.color={{0.f,0.f,0.f,0.f}};
         VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
         ri.renderArea={{0,0},{rw,rh}}; ri.layerCount=1; ri.colorAttachmentCount=2;
@@ -41917,7 +42669,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
             fsr.shadingRateAttachmentTexelSize = {t, t};
             ri.pNext = &fsr;
         }
-        vkCmdBeginRendering(cmd,&ri);
+        beginMain(cmd, ri);
         vkCmdSetViewport(cmd,0,1,&vp); vkCmdSetScissor(cmd,0,1,&sc);
     };
     // Deferred pass 1b, scope 1: the four G-buffer targets + the pre-pass depth (LOAD,
@@ -41941,22 +42693,24 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
             gb[i].dstStageMask=VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
             gb[i].dstAccessMask=VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
             gb[i].oldLayout=VK_IMAGE_LAYOUT_UNDEFINED; gb[i].newLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-            gb[i].image=mGbuf[i].image; gb[i].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+            gb[i].image=mGbuf[i].image; gb[i].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
         }
         VkDependencyInfo gdep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
         gdep.imageMemoryBarrierCount=kGbufCount; gdep.pImageMemoryBarriers=gb;
         vkCmdPipelineBarrier2(cmd,&gdep);
+        // (#1075: mainAtt / beginMain -- every view's layer in stereo, one multiview scope; N = 1 the
+        //  2D views and vkCmdBeginRendering, as before)
         VkRenderingAttachmentInfo ga[kGbufCount]{};
         for (uint32_t i = 0; i < kGbufCount; ++i)
         {
             ga[i].sType=VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-            ga[i].imageView=mGbuf[i].view; ga[i].imageLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            ga[i].imageView=mainAtt(mGbuf[i]); ga[i].imageLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
             ga[i].loadOp=(i == 2) ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
             ga[i].storeOp=VK_ATTACHMENT_STORE_OP_STORE;
             ga[i].clearValue.color={{0.f,0.f,0.f,0.f}};
         }
         VkRenderingAttachmentInfo da{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-        da.imageView=mDepth.view; da.imageLayout=VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+        da.imageView=mainAtt(mDepth); da.imageLayout=VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
         da.loadOp=VK_ATTACHMENT_LOAD_OP_LOAD; da.storeOp=VK_ATTACHMENT_STORE_OP_STORE;
         VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
         ri.renderArea={{0,0},{rw,rh}}; ri.layerCount=1; ri.colorAttachmentCount=kGbufCount;
@@ -41970,7 +42724,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
             fsr.shadingRateAttachmentTexelSize = {t, t};
             ri.pNext = &fsr;
         }
-        vkCmdBeginRendering(cmd,&ri);
+        beginMain(cmd, ri);
         vkCmdSetViewport(cmd,0,1,&vp); vkCmdSetScissor(cmd,0,1,&sc);
     };
     // PHASE 2 (F3b, RenderVKOverlapMaskAO): SSAO + RT mask share one depth transition
@@ -41991,7 +42745,9 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         static LLCachedControl<bool> s_occl2(gSavedSettings, "RenderVKOcclusion2Phase", false);
         occl2Want = s_occl2;
         if (!occl2Want && (mOccl2Vis.buffer || mOccl2List.buffer)) destroyOcclusion2Resources();
-        occl2Ready = occl2Want && prepass && !mOffscreen && mOccl2Pipe != VK_NULL_HANDLE && ensureOcclusion2();
+        // (#1075: off in stereo until the either-eye OR test, design step 9 / owner decision 5)
+        occl2Ready = occl2Want && prepass && !mOffscreen && !stereoActive() && mOccl2Pipe != VK_NULL_HANDLE
+                  && ensureOcclusion2();
         occl2Seed = occl2Ready && mOccl2Cut;
         occl2Now = occl2Ready && !occl2Seed;
     }
@@ -42001,7 +42757,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
 #if defined(LL_HAS_CLEAN_PIPELINE)
     {
         static LLCachedControl<bool> s_occl_plan(gSavedSettings, "RenderVKOcclusionCull", false);
-        occlPlanned = s_occl_plan && prepass && mOcclPipe != VK_NULL_HANDLE && !occl2Ready;
+        occlPlanned = s_occl_plan && prepass && mOcclPipe != VK_NULL_HANDLE && !occl2Ready && !stereoActive();
     }
 #endif
     const bool ovAoMask = mOv.maskAo && split1a && !occlPlanned && (aoPre || maskNow);
@@ -42022,7 +42778,8 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     // (#870: not under DLSS Ray Reconstruction -- a coarse-shaded tile hands the network 2x2 / 2x1
     // blocks of identical samples, correlated noise and texture it reconstructs as smears; #962:
     // nor under Super Resolution, which accumulates those blocks the same way)
-    const bool vrsNow = vrsMode >= 2 && vrsReady && split1a && !od && !mOffscreen && !mLiveCapNow && !mDlssFrame;
+    const bool vrsNow = vrsMode >= 2 && vrsReady && split1a && !od && !mOffscreen && !mLiveCapNow && !mDlssFrame
+                     && !stereoActive();   // (#1075: the rate image is not layered yet, design step 7)
     const uint32_t vrsForce = vrsMode >= 3 ? 3u : 0u;
     // The static EQUAL twins carry the dynamic shading rate whenever the device has the
     // rate attachment: it must be set on every bind (full rate unless vrsNow).
@@ -42033,7 +42790,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
 #if defined(LL_HAS_CLEAN_PIPELINE)
     {
         static LLCachedControl<bool> s_occl(gSavedSettings, "RenderVKOcclusionCull", false);
-        occlNow = s_occl && prepass && mOcclPipe != VK_NULL_HANDLE && !occl2Ready;
+        occlNow = s_occl && prepass && mOcclPipe != VK_NULL_HANDLE && !occl2Ready && !stereoActive();   // (#1075)
         // (the Hi-Z is shared with the two-phase path: kept while that is wanted)
         if (!s_occl && (mOcclCand.buffer || (!occl2Want && mHiz.image))) destroyOcclusionResources(!occl2Want, true);
     }
@@ -42056,7 +42813,8 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         gpuSubMark(cmd, "g_gbuf_wait");
         beginGbuffer(vrsAttach);
         bindDrawSets(cmd, dsets);
-        deferViewIdx = pushDrawView(cmd, mDrawLayout, drawPush);
+        deferViewIdx = pushMainView(cmd, mDrawLayout, drawPush);
+        if (stereoActive()) mDeferEyeBase = deferEyeBlock(drawPush);   // (#1075: the lighting's per-eye entries)
         vkCmdBindVertexBuffers(cmd,0,1,&mVbo.buffer,&off);
         vkCmdBindIndexBuffer(cmd, mIbo.buffer, 0, VK_INDEX_TYPE_UINT16);
         auto drawG = [&](VkPipeline pipe, uint32_t bucket, bool opaque){
@@ -42132,7 +42890,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
             std::memcpy(rigPush.view_proj, viewProjRelMain, sizeof(rigPush.view_proj));
             rigPush.ambient_color[3] = selfHideW();   // main view: hide own avatar
             rigPush.sky_zenith[3] = 1.f;   // main view: drop the cluster path's avatars (#747)
-            pushDrawView(cmd, mDrawLayout, rigPush);
+            pushMainView(cmd, mDrawLayout, rigPush);
             vkCmdBindVertexBuffers(cmd,0,1,&mSkinVbo.buffer,&off);
             drawBucket(gbp[2], 3);   // rigged opaque
             drawBucket(gbp[2], 4);   // rigged mask
@@ -42166,7 +42924,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
             mWeather->recordMeshDraw(cmd, false);   // (full shading rate: its pipeline has no dynamic rate)
             gpuSubMark(cmd, "g_gbuf_snow");
         }
-        vkCmdEndRendering(cmd);
+        endRenderingViews(cmd);
         VkImageMemoryBarrier2 b[kGbufCount]{};
         for (uint32_t i = 0; i < kGbufCount; ++i)
         {
@@ -42176,7 +42934,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
             b[i].dstStageMask=VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
             b[i].dstAccessMask=VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
             b[i].oldLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL; b[i].newLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            b[i].image=mGbuf[i].image; b[i].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+            b[i].image=mGbuf[i].image; b[i].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
         }
         VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
         dep.imageMemoryBarrierCount=kGbufCount; dep.pImageMemoryBarriers=b;
@@ -42214,7 +42972,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         d.dstStageMask=VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT|VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
         d.dstAccessMask=VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
         d.oldLayout=VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL; d.newLayout=VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
-        d.image=mDepth.image; d.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,1};
+        d.image=mDepth.image; d.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
         VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
         dep.imageMemoryBarrierCount=1; dep.pImageMemoryBarriers=&d;
         vkCmdPipelineBarrier2(c,&dep);
@@ -42227,7 +42985,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         d.dstStageMask=VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT|VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
         d.dstAccessMask=VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT|VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
         d.oldLayout=VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL; d.newLayout=VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-        d.image=mDepth.image; d.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,1};
+        d.image=mDepth.image; d.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
         VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
         dep.imageMemoryBarrierCount=1; dep.pImageMemoryBarriers=&d;
         vkCmdPipelineBarrier2(c,&dep);
@@ -42245,7 +43003,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
             b[k].dstStageMask=VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
             b[k].dstAccessMask=VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
             b[k].oldLayout=VK_IMAGE_LAYOUT_UNDEFINED; b[k].newLayout=VK_IMAGE_LAYOUT_GENERAL;
-            b[k].image=outs[k]; b[k].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+            b[k].image=outs[k]; b[k].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
         }
         VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
         dep.imageMemoryBarrierCount=2; dep.pImageMemoryBarriers=b;
@@ -42262,7 +43020,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         b[0].srcAccessMask=VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
         b[0].dstStageMask=VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT; b[0].dstAccessMask=VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
         b[0].oldLayout=VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL; b[0].newLayout=VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
-        b[0].image=mDepth.image; b[0].subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,1};
+        b[0].image=mDepth.image; b[0].subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
         // Scene HDR + glow: pass 1a's UNDEFINED -> ATTACHMENT transition left them
         // unwritten; the compute overwrites every pixel (contents discarded).
         const VkImage outs[2] = {sceneHdr().image, mGlowTarget.image};
@@ -42273,7 +43031,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
             b[1 + k].dstStageMask=VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
             b[1 + k].dstAccessMask=VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
             b[1 + k].oldLayout=VK_IMAGE_LAYOUT_UNDEFINED; b[1 + k].newLayout=VK_IMAGE_LAYOUT_GENERAL;
-            b[1 + k].image=outs[k]; b[1 + k].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+            b[1 + k].image=outs[k]; b[1 + k].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
         }
         // Everything the forward lit FS samples was released to FRAGMENT only (light
         // clusters, frame info, cascades, projector atlas, mirror colour, probes, AO,
@@ -42341,7 +43099,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
             b[k].dstStageMask=VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
             b[k].dstAccessMask=VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT|VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
             b[k].oldLayout=VK_IMAGE_LAYOUT_GENERAL; b[k].newLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-            b[k].image=outs[k]; b[k].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+            b[k].image=outs[k]; b[k].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
         }
         // Visibility reuse: the shadow pass's buffers -> pass 2's LIT_ALPHA FS (same layout,
         // GENERAL; an async lighting segment is also covered by the join's semaphore).
@@ -42360,20 +43118,27 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     // way; mirrorReset = false moves only the mirror-occlusion query reset to pass 1b.
     // Pass 1a's scope (split frames): normals (+ motion) + depth. clear = false re-opens it
     // over P1's contents for the two-phase occlusion's P2 draws.
+    // (#1075 STEREO: every view's layer, multiview through beginMain, in two forms -- the
+    //  motion-only set (p1aMo: {motion, no-history} + depth; step 10's temporal frames) and the
+    //  DEPTH-ONLY set (HDR + glow + depth; the deferred lighting's split without motion, steps
+    //  6-7). The AO normal target stays one layer; a stereo frame never attaches it (AO is off
+    //  in stereo until its family is layered). N = 1: the 2D views and vkCmdBeginRendering.)
     auto begin1a = [&](bool clear)
     {
         const VkAttachmentLoadOp load = clear ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
         VkRenderingAttachmentInfo na[3]{};
         na[0].sType=VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+        // (#1075 step 10: mainAtt / beginMain -- every view's layer of motion / no-history / depth in
+        //  a stereo frame, which always takes the motion-only set (p1aMo); N = 1 the 2D views, as before)
         na[0].imageView=mAoNormal.view; na[0].imageLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         na[0].loadOp=load; na[0].storeOp=VK_ATTACHMENT_STORE_OP_STORE;
         na[0].clearValue.color={{0.f,0.f,0.f,0.f}};
         na[1] = na[0];
-        na[1].imageView=mMotion.view;   // clear 0: no geometry -> no (object) motion
+        na[1].imageView=mainAtt(mMotion);   // clear 0: no geometry -> no (object) motion
         na[2] = na[0];
-        na[2].imageView=mNoTemporal.view;   // #605: clear 0 (sky, ordinary faces keep history)
+        na[2].imageView=mainAtt(mNoTemporal);   // #605: clear 0 (sky, ordinary faces keep history)
         VkRenderingAttachmentInfo da{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-        da.imageView=mDepth.view; da.imageLayout=VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+        da.imageView=mainAtt(mDepth); da.imageLayout=VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
         da.loadOp=load; da.storeOp=VK_ATTACHMENT_STORE_OP_STORE;
         da.clearValue.depthStencil={kReverseZ ? 0.0f : 1.0f, 0}   /* main view: reversed-Z far */;
         VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
@@ -42396,13 +43161,13 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
             // LOAD (undefined contents, nothing reads them) and STORE_OP_NONE, i.e. no colour
             // traffic at all. (Before, mask-only frames opened this scope on the AO normal
             // target -- a format mismatch with those pipelines -- and cleared it for nothing.)
-            na[0].imageView=sceneHdr().view;
+            na[0].imageView=mainAtt(sceneHdr());
             na[0].loadOp=VK_ATTACHMENT_LOAD_OP_LOAD; na[0].storeOp=VK_ATTACHMENT_STORE_OP_NONE;
             na[1] = na[0];
-            na[1].imageView=mGlowTarget.view;
+            na[1].imageView=mainAtt(mGlowTarget);
             ri.colorAttachmentCount=2;
         }
-        vkCmdBeginRendering(cmd,&ri);
+        beginMain(cmd, ri);
         vkCmdSetViewport(cmd,0,1,&vp); vkCmdSetScissor(cmd,0,1,&sc);
     };
     // Two-phase occlusion: a pre-pass bucket's P list row (P1, then P2) and its count.
@@ -42427,21 +43192,21 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
             d.dstStageMask=VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT|VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
             d.dstAccessMask=VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT|VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
             d.oldLayout=VK_IMAGE_LAYOUT_UNDEFINED; d.newLayout=VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-            d.image=mDepth.image; d.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,1};
+            d.image=mDepth.image; d.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
             // Glow target: cleared by pass 1; wait on the PRIOR frame's compute extract read.
             VkImageMemoryBarrier2 g{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
             g.srcStageMask=VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
             g.dstStageMask=VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
             g.dstAccessMask=VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT|VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT;
             g.oldLayout=VK_IMAGE_LAYOUT_UNDEFINED; g.newLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-            g.image=mGlowTarget.image; g.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+            g.image=mGlowTarget.image; g.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
             // HDR scene: cleared by pass 1; wait on the PRIOR frame's tonemap/exposure reads.
             VkImageMemoryBarrier2 hb{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
             hb.srcStageMask=VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT|VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
             hb.dstStageMask=VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
             hb.dstAccessMask=VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT|VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT;
             hb.oldLayout=VK_IMAGE_LAYOUT_UNDEFINED; hb.newLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-            hb.image=sceneHdr().image; hb.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+            hb.image=sceneHdr().image; hb.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
             VkImageMemoryBarrier2 ib[3] = {d, g, hb};
             VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; dep.imageMemoryBarrierCount=3; dep.pImageMemoryBarriers=ib;
             vkCmdPipelineBarrier2(cmd,&dep);
@@ -42521,13 +43286,14 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
             mb[0].srcStageMask=VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT|VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
             mb[0].dstStageMask=VK_PIPELINE_STAGE_2_CLEAR_BIT; mb[0].dstAccessMask=VK_ACCESS_2_TRANSFER_WRITE_BIT;
             mb[0].oldLayout=VK_IMAGE_LAYOUT_UNDEFINED; mb[0].newLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-            mb[0].image=mMotion.image; mb[0].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+            // (#1075: every view's layer; one layer on the desktop)
+            mb[0].image=mMotion.image; mb[0].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
             mb[1] = mb[0];
             mb[1].image=mNoTemporal.image;
             VkDependencyInfo mdep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; mdep.imageMemoryBarrierCount=2; mdep.pImageMemoryBarriers=mb;
             vkCmdPipelineBarrier2(cmd,&mdep);
             const VkClearColorValue zero{};
-            const VkImageSubresourceRange rng{VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+            const VkImageSubresourceRange rng{VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
             vkCmdClearColorImage(cmd, mMotion.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &zero, 1, &rng);
             vkCmdClearColorImage(cmd, mNoTemporal.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &zero, 1, &rng);
             for (VkImageMemoryBarrier2& b : mb)
@@ -42567,6 +43333,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
             nb[1] = nb[0];
             nb[1].srcStageMask=VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT|VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
             nb[1].image=mMotion.image;
+            nb[1].subresourceRange.layerCount=VK_REMAINING_ARRAY_LAYERS;   // (#1075: every view's layer)
             nb[2] = nb[1];
             nb[2].image=mNoTemporal.image;   // #605: last frame's resolve / FSR-inputs reads
             VkDependencyInfo ndep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
@@ -42583,6 +43350,14 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
             beginPass1(true, false);
         }
         gpuSubMark(cmd, "g_pass1_begin");   // (attachment clears + pass-1 barriers since c_mirror)
+        // #1075 VR: the lens' hidden area into every eye's depth at the near plane, before any
+        // depth-tested draw. Desktop: never set (mark g_vr_vismask absent). #1075 step 10: a
+        // temporal stereo frame splits pass 1a (motion-only, multiview through begin1a) -- the
+        // mask's twin with those formats draws there; pass 1b LOADs the depth, so it holds for
+        // the lit pass too. Steps 6-7: a deferred stereo frame without motion splits it in the
+        // depth-only form (pass 1's formats: the plain mask pipeline). (The AO-normal form of 1a
+        // never runs in stereo: no pipeline for it.)
+        if (!split1a || !p1aNrm) recordVisMask(cmd, split1a && p1aMo);
 
         // ---- DEPTH PRE-PASS: depth-only over the SAME opaque + mask indirect draws ----
         // Same buffers/counters, VS modules (invariant gl_Position), push constants and
@@ -42593,7 +43368,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         if (prepass)
         {
             bindDrawSets(cmd, dsets);
-            pushDrawView(cmd, mDrawLayout, drawPush);
+            pushMainView(cmd, mDrawLayout, drawPush);
             vkCmdBindVertexBuffers(cmd,0,1,&mVbo.buffer,&off);
             vkCmdBindIndexBuffer(cmd, mIbo.buffer, 0, VK_INDEX_TYPE_UINT16);
             // AO frames: the depth + normal twins (pass 1a's attachment set); motion-vector
@@ -42631,7 +43406,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
                 std::memcpy(rigPrePush.view_proj, viewProjRelMain, sizeof(rigPrePush.view_proj));
                 rigPrePush.ambient_color[3] = selfHideW();   // main view: hide own avatar
                 rigPrePush.sky_zenith[3] = 1.f;   // main view: drop the cluster path's avatars (#747)
-                pushDrawView(cmd, mDrawLayout, rigPrePush);
+                pushMainView(cmd, mDrawLayout, rigPrePush);
                 vkCmdBindVertexBuffers(cmd,0,1,&mSkinVbo.buffer,&off);
                 drawBucket(preRig[0],  3);   // rigged opaque
                 drawBucket(preRigM[0], 4);   // rigged mask
@@ -42651,7 +43426,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
                 gpuSubMark(cmd, "g_pre_cl_begin");
                 LLClusterDrawIn ci;
                 ci.cmd = cmd; ci.view = clusterMainView; ci.pass = CLPASS_PREPASS;
-                ci.draw_view = pushDrawView(cmd, mDrawLayout, drawPush);   // (the rigged push replaced it)
+                ci.draw_view = pushMainView(cmd, mDrawLayout, drawPush);   // (the rigged push replaced it)
                 ci.draw_sets[0] = dsets[0]; ci.draw_sets[1] = dsets[1];
                 ci.pre_variant = p1aMo ? 3u : mvNow ? 2u : aoPre ? 1u : 0u;
                 mCluster->recordDraw(ci);
@@ -42681,7 +43456,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
                 {
                     gpuSubMark(cmd, "g_pre_pre_snow");   // (#946: g_pre_snow is then the mesh alone)
                     bindDrawSets(cmd, dsets);
-                    pushDrawView(cmd, mDrawLayout, drawPush);
+                    pushMainView(cmd, mDrawLayout, drawPush);
                     mWeather->recordMeshDrawPre(cmd, snowVar);
                     // (the mesh bound its own streams: restore the world's for what follows)
                     vkCmdBindVertexBuffers(cmd,0,1,&mVbo.buffer,&off);
@@ -42695,13 +43470,13 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
                 // Hi-Z from P1's depth + the test (marks c_hiz / c_occl_p2): buckets 0 1 6 7
                 // and the static alpha lists now hold only what is not hidden behind P1;
                 // the P list holds the survivors P1 did not draw.
-                vkCmdEndRendering(cmd);
+                endRenderingViews(cmd);
                 recordOcclusion2Test(cmd, drawPushIn.view_proj);
                 // PHASE 2: the revealed draws, over P1's depth (+ normals / motion).
                 if (split1a) begin1a(false);
                 else         beginPass1(false, false);   // (clears pass 1's colour again: P1 wrote none)
                 bindDrawSets(cmd, dsets);
-                pushDrawView(cmd, mDrawLayout, drawPush);
+                pushMainView(cmd, mDrawLayout, drawPush);
                 vkCmdBindVertexBuffers(cmd,0,1,&mVbo.buffer,&off);
                 vkCmdBindIndexBuffer(cmd, mIbo.buffer, 0, VK_INDEX_TYPE_UINT16);
                 drawPList(preOpq[0],  0);
@@ -42716,7 +43491,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         // (+ the motion target -> SHADER_READ_ONLY for the rest of the frame on MV frames)
         if (split1a)
         {
-            vkCmdEndRendering(cmd);
+            endRenderingViews(cmd);
             VkImageMemoryBarrier2 nb[3]{};
             nb[0].sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
             nb[0].srcStageMask=VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
@@ -42728,6 +43503,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
             nb[1] = nb[0];
             nb[1].dstStageMask=VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT|VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
             nb[1].image=mMotion.image;
+            nb[1].subresourceRange.layerCount=VK_REMAINING_ARRAY_LAYERS;   // (#1075: every view's layer)
             nb[2] = nb[1];
             nb[2].image=mNoTemporal.image;   // #605 (MV frames, with the motion target)
             uint32_t nnb = 0;
@@ -42758,7 +43534,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
             db.dstStageMask=VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT|VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
             db.dstAccessMask=VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
             db.oldLayout=VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL; db.newLayout=VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-            db.image=mDepth.image; db.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,1};
+            db.image=mDepth.image; db.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
             VkDependencyInfo ddep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; ddep.imageMemoryBarrierCount=1; ddep.pImageMemoryBarriers=&db;
             vkCmdPipelineBarrier2(cmd,&ddep);
 
@@ -42776,7 +43552,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
             vkCmdBeginRendering(cmd,&tri);
             vkCmdSetViewport(cmd,0,1,&vp); vkCmdSetScissor(cmd,0,1,&sc);
             bindDrawSets(cmd, dsets);
-            pushDrawView(cmd, mDrawLayout, drawPush);
+            pushMainView(cmd, mDrawLayout, drawPush);
             vkCmdBindVertexBuffers(cmd,0,1,&mVbo.buffer,&off);
             vkCmdBindIndexBuffer(cmd, mIbo.buffer, 0, VK_INDEX_TYPE_UINT16);
             drawBucket(mTermTriPipe[0][0], BUCKET_OPAQUE);
@@ -42789,14 +43565,14 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
                 std::memcpy(rigTriPush.view_proj, viewProjRelMain, sizeof(rigTriPush.view_proj));
                 rigTriPush.ambient_color[3] = selfHideW();
                 rigTriPush.sky_zenith[3] = 1.f;   // main view: drop the cluster path's avatars (#747)
-                pushDrawView(cmd, mDrawLayout, rigTriPush);
+                pushMainView(cmd, mDrawLayout, rigTriPush);
                 vkCmdBindVertexBuffers(cmd,0,1,&mSkinVbo.buffer,&off);
                 drawBucket(mTermTriPipe[1][0], 3);   // rigged opaque
                 drawBucket(mTermTriPipe[1][0], 4);   // rigged mask
                 drawBucket(mTermTriPipe[1][1], 8);   // double-sided rigged opaque
                 drawBucket(mTermTriPipe[1][1], 9);   // double-sided rigged mask
             }
-            vkCmdEndRendering(cmd);
+            endRenderingViews(cmd);
             VkImageMemoryBarrier2 tb{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
             tb.srcStageMask=VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
             tb.srcAccessMask=VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
@@ -42871,6 +43647,39 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
                 gpuSubMark(cmd, "c_audio_bounce");
         }
     };
+    // ---- THE LIGHT PREP (llcleanprojstochvk.cpp THE LIGHT PREP): the lighting's G-buffer-independent head --
+    // the sun exposure certificates, the ReSTIR emissive build, the occlusion resolve -- planned here (the
+    // deferred path, the split, the denoiser and the merge are settled; the RT build whose geometry rows the
+    // emissive build reads is recorded: on the async queue before this segment, or on graphics before this
+    // fork) and recorded AHEAD of pass 1a: its own async segment q_light_prep, which runs beside the pre-pass /
+    // G-buffer / shadow views instead of on the lighting chain (q_defer_light), or inline on graphics here
+    // (async compute off / no fork budget). Nothing on graphics before the lighting reads or writes what it
+    // writes (its regions are read only by the lighting kernels). Joined by the lighting chain through queue
+    // order (its closing barrier), by a graphics lighting through lightPrepValue below. Stereo frames
+    // (#1075) light with the uber kernel (no denoiser, GI split or tile list): nothing is planned.
+    mLightPrep = LightPrep{};
+    uint64_t lightPrepValue = 0;    // the segment's compute timeline value (0: none / inline)
+    uint64_t lightPrepBefore = 0;   // the async queue's work before it (the RT build, last frame's post)
+    if (deferNow && lightPrepPlan(rw, rh))
+    {
+        // (the main view's draw-view entry: the emissive build reads its time -- the G-buffer's own push
+        //  dedupes to the same entry)
+        const uint32_t pv = ringAlloc(mViewRgn, &drawPush, (uint32_t)sizeof(VKDrawPush));
+        lightPrepBefore = std::max(mAsyncOutstanding, mAsyncPostPrev);
+        VkCommandBuffer pc = mAsyncNow.on ? asyncFork(cmd, "q_light_prep") : VK_NULL_HANDLE;
+        if (pc)
+        {
+            recordLightPrep(pc, pv, deferViewOffset(pv), true, true);
+            asyncEndCompute(pc, "q_light_prep");
+            lightPrepValue = mAsyncOutstanding;
+        }
+        else
+        {
+            if (mAsyncNow.on) LLVKHitch::count("lightPrepInline", 1u);   // (async on, no fork budget)
+            recordLightPrep(cmd, pv, deferViewOffset(pv), false, true);
+            gpuSubMark(cmd, "g_light_prep");
+        }
+    }
     if (p1aEarly)
     {
         recordPass1a(false);
@@ -42885,7 +43694,10 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     }
     // JOIN (async RT build, and last frame's async post segment): before the first other
     // cull and before anything samples the probe arrays the post segment filtered.
-    asyncJoin(cmd);
+    // (THE LIGHT PREP: up to the work before it -- the prep itself stays outstanding: the lighting
+    //  chain follows it on the async queue, a graphics lighting joins it below.)
+    if (lightPrepValue) asyncJoinUpTo(cmd, lightPrepBefore);
+    else asyncJoin(cmd);
     // (#1008) its own mark: the wait used to land in c_shadow_rigcull, which read as a 1.3 ms
     // cull under cluster LOD when it was the graphics queue waiting for the longer cluster RT build.
     gpuSubMark(cmd, "g_join_rt_build");
@@ -42894,15 +43706,26 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     // The projector tiles' work is decided first (which tiles draw avatars), then one
     // dispatch builds every cascade's and tile's own rigged caster lists.
     invalidateProjShadows();
-    recordShadowRigCull(cmd, push, do_rigged);
+    // <GMDX> The live orthographic view's CULL_ORTHO (every LOD at its finest) is the main view's
+    // alone: the shadow cascades, projector tiles, weather map and probe faces keep their own LOD
+    // rules. The region map capture (mOrtho) keeps it in every pass: its one shadow map is fitted
+    // to the map box and drawn from the finest casters, like the map.
+    auto secondaryCull = [&]()
+    {
+        VKCullPush p = push;
+        if (mOrthoView && !mOrtho) p.flags &= ~kCullOrtho;
+        return p;
+    };
+    // </GMDX>
+    recordShadowRigCull(cmd, secondaryCull(), do_rigged);   // <GMDX> (secondaryCull)
     gpuSubMark(cmd, "c_shadow_rigcull");
 
     // ---- SUN/MOON SHADOW CASCADES (depth-only, sampled by every world FS) ----
-    recordShadows(cmd, push, drawPushIn, do_rigged);
+    recordShadows(cmd, secondaryCull(), drawPushIn, do_rigged);   // <GMDX> (secondaryCull)
     gpuSubMark(cmd, "c_shadows");
 
     // ---- PROJECTOR SHADOW tiles (cached; only invalidated ones re-render) ----
-    recordProjShadows(cmd, push, drawPushIn, do_rigged);
+    recordProjShadows(cmd, secondaryCull(), drawPushIn, do_rigged);   // <GMDX> (secondaryCull)
     gpuSubMark(cmd, "c_projshadow");
 
     // ---- WEATHER (#783): the occlusion map (when due) + the precipitation simulation ----
@@ -42913,7 +43736,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     {
         if (mWeather->occlusionDue())
         {
-            recordWeatherOcclusion(cmd, push, drawPushIn);
+            recordWeatherOcclusion(cmd, secondaryCull(), drawPushIn);   // <GMDX> (secondaryCull)
             gpuSubMark(cmd, "c_weather_occl");
         }
         if (mWeather->precipNow())
@@ -43082,7 +43905,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         // Ray-traced faces (detail 3) wait for pass 1b, where they run on the async queue
         // beside the lit pass (flushProbeTraces); their filters are deferred anyway.
         mProbeTraceDefer = true;
-        recordProbeCapture(cmd, drawPushIn, push, do_rigged);
+        recordProbeCapture(cmd, drawPushIn, secondaryCull(), do_rigged);   // <GMDX> (secondaryCull)
         mProbeDeferFilter = false;   // (queued filters stay in mProbeFilterPending)
         mProbeTraceDefer = false;    // (queued traces stay in mProbeTracePending)
         probeDoneEarly = true;
@@ -43210,6 +44033,9 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
             }
             if (!lightDone)
             {
+                // (the light prep's segment, when it forked: the lighting on graphics reads its results --
+                //  no-op when an earlier join covered it)
+                if (lightPrepValue) asyncJoinUpTo(cmd, lightPrepValue);
                 gpuSubMark(cmd, "g_gbuf_barrier");
                 recordDeferLight(cmd, "g_defer_light");
             }
@@ -43228,7 +44054,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     else if (occlNow)
     {
         // Occlusion needs the finished pre-pass depth outside the rendering scope.
-        vkCmdEndRendering(cmd);
+        endRenderingViews(cmd);
         recordOcclusion(cmd, drawPushIn.view_proj);
         gpuSubMark(cmd, "g_occl");
         releaseTlas(cmd, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
@@ -43280,7 +44106,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     if (!deferNow)
     {
         bindDrawSets(cmd, dsets);
-        const uint32_t fwdViewIdx = pushDrawView(cmd, mDrawLayout, drawPush);   // (world view: the cluster draw below)
+        const uint32_t fwdViewIdx = pushMainView(cmd, mDrawLayout, drawPush);   // (world view: the cluster draw below)
         vkCmdBindVertexBuffers(cmd,0,1,&mVbo.buffer,&off);
         vkCmdBindIndexBuffer(cmd, mIbo.buffer, 0, VK_INDEX_TYPE_UINT16);
         // Pre-pass on: the EQUAL / no-write / early-Z twins (one per cull mode serves the
@@ -43328,7 +44154,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
             std::memcpy(rigPush.view_proj, viewProjRelMain, sizeof(rigPush.view_proj));
             rigPush.ambient_color[3] = selfHideW();   // main view: hide own avatar
             rigPush.sky_zenith[3] = 1.f;   // main view: drop the cluster path's avatars (#747)
-            pushDrawView(cmd, mDrawLayout, rigPush);
+            pushMainView(cmd, mDrawLayout, rigPush);
             vkCmdBindVertexBuffers(cmd,0,1,&mSkinVbo.buffer,&off);
             drawBucket(litRig, BUCKET_R_OPAQUE);
             drawBucket(litRig, BUCKET_R_MASK);
@@ -43376,7 +44202,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         if (s_alpha_depth && mPreBlendPipe[0] && !odAtomic)
         {
             bindDrawSets(cmd, dsets);
-            pushDrawView(cmd, mDrawLayout, drawPush);
+            pushMainView(cmd, mDrawLayout, drawPush);
             vkCmdBindVertexBuffers(cmd,0,1,&mVbo.buffer,&off);
             // (B6 validation VUID-vkCmdDrawIndexedIndirectCount-None-07312: deferred frames bound
             // the index buffer in the G-buffer scope, and the async lighting join since then
@@ -43392,7 +44218,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
                 VKDrawPush rp = drawPush;
                 std::memcpy(rp.view_proj, viewProjRelMain, sizeof(rp.view_proj));
                 rp.ambient_color[3] = selfHideW();
-                pushDrawView(cmd, mDrawLayout, rp);
+                pushMainView(cmd, mDrawLayout, rp);
                 vkCmdBindVertexBuffers(cmd,0,1,&mSkinVbo.buffer,&off);
                 bindGraphicsPipeline(cmd, mPreBlendPipe[1]);
                 bucketDraw(cmd, mCmd[BUCKET_R_ALPHA].buffer, 0, mCounters.buffer,
@@ -43407,7 +44233,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
             gpuSubMark(cmd, "g_alpha_depth");
         }
     }
-    vkCmdEndRendering(cmd);
+    endRenderingViews(cmd);
     gpuSubMark(cmd, "g_pass1");   // sky + lit opaque/mask/rigged (+ mirror occlusion proxy)
 
     if (od)
@@ -43458,7 +44284,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         d.dstStageMask=VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT|VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT|VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
         d.dstAccessMask=VK_ACCESS_2_SHADER_SAMPLED_READ_BIT|VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
         d.oldLayout=VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL; d.newLayout=VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
-        d.image=mDepth.image; d.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,1};
+        d.image=mDepth.image; d.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
 
         VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
         dep.memoryBarrierCount=1; dep.pMemoryBarriers=&cbar;
@@ -43483,7 +44309,8 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     // The avatar-id pass against the finished opaque depth, its display-res resolve (FX),
     // the id debug view and the cel outlines into the render-res scene, so TAA smooths
     // them and pass 2's alpha / water draw over them. Nothing recorded when unused.
-    recordCelPasses(cmd, dsets, drawPush, viewProjRelMain, do_rigged, rw, rh, width, height);
+    // (#1075: one view's passes -- off in stereo)
+    if (!stereoActive()) recordCelPasses(cmd, dsets, drawPush, viewProjRelMain, do_rigged, rw, rh, width, height);
 
     // VOLUMETRIC FOG (#718) fallback: a recording without the pass-1a / 1b split (pass 1 in
     // one scope) records the froxel passes here, on graphics (nothing left to overlap).
@@ -43508,7 +44335,8 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         // the god rays pass is not dispatched on a frame the fog runs -- one sun single-scatter,
         // never two. (Their object and history stay; the history restarts when they resume.)
         if (mVolFogNow && mGodRays) mGodRays->invalidateHistory();
-        if ((s_godrays > 0 || mGodRays) && mDsetDraw0 && !mVolFogNow)
+        // (#1075: off in stereo -- design §2 row 32 / step 13)
+        if ((s_godrays > 0 || mGodRays) && mDsetDraw0 && !mVolFogNow && !mOrthoView && !stereoActive())   // <GMDX> (!mOrthoView: eye-ray march)
         {
             releaseTlas(cmd, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);   // (no-op by now)
             if (!mGodRays) mGodRays = new LLCleanGodRaysVK();
@@ -43594,23 +44422,24 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     // are thrown away (DONT_CARE); 2b clears it before the water (reactLoad CLEAR).
     auto beginPass2 = [&](VkAttachmentLoadOp reactLoad, VkAttachmentStoreOp reactStore)
     {
+        // (#1075: mainAtt / beginMain, as pass 1)
         VkRenderingAttachmentInfo ca{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-        ca.imageView=sceneHdr().view; ca.imageLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        ca.imageView=mainAtt(sceneHdr()); ca.imageLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         ca.loadOp=VK_ATTACHMENT_LOAD_OP_LOAD; ca.storeOp=VK_ATTACHMENT_STORE_OP_STORE;
         VkRenderingAttachmentInfo da{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-        da.imageView=mDepth.view; da.imageLayout=VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
+        da.imageView=mainAtt(mDepth); da.imageLayout=VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
         // Read-only depth that the FS also samples: STORE_OP_NONE (no store write). DONT_CARE
         // would leave the world depth UNDEFINED for every later reader (next pass-2 split,
         // SSR copy, overlays, selection) and is a store write racing the FS samples.
         da.loadOp=VK_ATTACHMENT_LOAD_OP_LOAD; da.storeOp=VK_ATTACHMENT_STORE_OP_NONE;
         VkRenderingAttachmentInfo cas[3] = {ca, ca, ca};
-        cas[1].imageView=mGlowTarget.view;
-        cas[2].imageView=mReact.view; cas[2].loadOp=reactLoad; cas[2].storeOp=reactStore;
+        cas[1].imageView=mainAtt(mGlowTarget);
+        cas[2].imageView=mainAtt(mReact); cas[2].loadOp=reactLoad; cas[2].storeOp=reactStore;
         cas[2].clearValue.color = {{0.f, 0.f, 0.f, 0.f}};
         VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
         ri.renderArea={{0,0},{rw,rh}}; ri.layerCount=1; ri.colorAttachmentCount=3;
         ri.pColorAttachments=cas; ri.pDepthAttachment=&da;
-        vkCmdBeginRendering(cmd,&ri);
+        beginMain(cmd, ri);
         vkCmdSetViewport(cmd,0,1,&vp); vkCmdSetScissor(cmd,0,1,&sc);
     };
     auto drawList = [&](VkPipeline pipe, VkBuffer buf, uint32_t counter){
@@ -43709,7 +44538,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         vkCmdBindVertexBuffers(cmd,0,1,&mVbo.buffer,&off);
         vkCmdBindIndexBuffer(cmd, mIbo.buffer, 0, VK_INDEX_TYPE_UINT16);
         bindDrawSets(cmd, dsets);
-        pushDrawView(cmd, mDrawLayout, drawPush);
+        pushMainView(cmd, mDrawLayout, drawPush);
         // Split-lighting visibility reuse for the static alpha FS (pad0; the next
         // pushDrawView -- the rigged draws below -- resets it to 0).
         if (mVisReuseFlags)
@@ -43723,7 +44552,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         gpuSubMark(cmd, post ? "g_p2_post_static" : "g_p2_pre_static");
         if (do_rigged)
         {
-            pushDrawView(cmd, mDrawLayout, rigPush);
+            pushMainView(cmd, mDrawLayout, rigPush);
             vkCmdBindVertexBuffers(cmd,0,1,&mSkinVbo.buffer,&off);
             p2Query(cmd, post ? P2_POST_RIG : P2_PRE_RIG, true);
             drawListBlend(mRiggedAlphaPipe, rig, rig_ctr);
@@ -43735,7 +44564,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
             clusterDrawAlpha(cmd, CLPASS_ALPHA, post ? 1u : 0u, drawPush);
             p2Query(cmd, post ? P2_POST_RIG : P2_PRE_RIG, false);
             vkCmdBindVertexBuffers(cmd,0,1,&mVbo.buffer,&off);
-            pushDrawView(cmd, mDrawLayout, drawPush);
+            pushMainView(cmd, mDrawLayout, drawPush);
             gpuSubMark(cmd, post ? "g_p2_post_rig" : "g_p2_pre_rig");
         }
     };
@@ -43757,7 +44586,8 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         static LLCachedControl<F32> s_lr_exit(gSavedSettings, "RenderVKParticleLowResExit", 1.0f);
         const U32 mode = s_lr;
         bool want = false;
-        if (mode != 0 && s_lr_scale < 0.75f && mPartLitNow && !mOffscreen)
+        // (#1075: the half-resolution accumulator is one view: off in stereo)
+        if (mode != 0 && s_lr_scale < 0.75f && mPartLitNow && !mOffscreen && !stereoActive())
         {
             if (mode == 1) want = true;
             else
@@ -43851,7 +44681,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         // half-res (large) sprites' dst * T + C over them -- small sprites are mostly the
         // distant ones. (No-op with RenderVKParticleSmallPx 0.)
         recordParticleDraw(cmd, drawPush, side, PART_SET_LOWRES_SMALL);
-        vkCmdEndRendering(cmd);
+        endRenderingViews(cmd);
         mPartLowRes->beginScope(cmd);
         p2Query(cmd, grp, true);   // (half-res fragments; the full-res pairs below are not counted)
         recordParticleDraw(cmd, drawPush, side, PART_SET_LOWRES);
@@ -43890,7 +44720,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         b.dstStageMask=VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
         b.dstAccessMask=VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT|VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT;
         b.oldLayout=VK_IMAGE_LAYOUT_UNDEFINED; b.newLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        b.image=mReact.image; b.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+        b.image=mReact.image; b.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
         VkDependencyInfo d{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; d.imageMemoryBarrierCount=1; d.pImageMemoryBarriers=&b;
         vkCmdPipelineBarrier2(cmd,&d);
     };
@@ -43944,7 +44774,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     const bool godRaysIn2a = godRaysNow && !godRaysAfterAlpha;
     if (godRaysIn2a && mOv.godRays)
     {
-        vkCmdEndRendering(cmd);
+        endRenderingViews(cmd);
         // Phase 3a: the march / temporal ran on the async queue -- the composite's wait.
         if (godRaysAsync) asyncJoin(cmd);
         mGodRays->recordCompositeRelease(cmd);
@@ -43965,7 +44795,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         mGodRays->recordComposite(cmd);
         gpuSubMark(cmd, "g_godrays_comp");
     }
-    vkCmdEndRendering(cmd);
+    endRenderingViews(cmd);
 
     // Water refraction source (solid + pre-water alpha); opaque water (RenderTransparentWater
     // off, #36) never samples it. mRefract stays SHADER_READ_ONLY either way.
@@ -44019,7 +44849,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         // discards everything else.
         VkDescriptorSet wsets[3]={mDsetDraw0, mDsetDraw1, mDsetWaterDepth};
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, mWaterLayout, 0, 3, wsets, 0, nullptr);
-        pushDrawView(cmd, mWaterLayout, drawPush);
+        pushMainView(cmd, mWaterLayout, drawPush);
         p2Query(cmd, P2_WATER, true);
         if (mWaterListsNow) drawList(waterPipe(), mWaterList.buffer, WATER_LIST_SLOT);
         else                drawList(waterPipe(), mAlphaPost[0].buffer, 6);
@@ -44046,7 +44876,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     {
         if (mOv.godRays)
         {
-            vkCmdEndRendering(cmd);
+            endRenderingViews(cmd);
             if (godRaysAsync) asyncJoin(cmd);   // phase 3a: the composite's wait
             mGodRays->recordCompositeRelease(cmd);
             VkMemoryBarrier2 cb{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
@@ -44085,7 +44915,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     if (godRaysLate && mTaaNow && !mReactMaskNow) compositeGodRaysLate();
     if (mTaaNow && !mReactMaskNow)
     {
-        vkCmdEndRendering(cmd);
+        endRenderingViews(cmd);
         recordRefractCopy(cmd, rw, rh);
         // The water's mReact (G) / glow writes -> the reopened scope's LOAD + blend.
         VkMemoryBarrier2 rb{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
@@ -44120,7 +44950,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     // (green, clean_draw.frag) -- drawn over the post-water alpha from their own list.
     if (mWaterListsNow && LLPipeline::sShowDebugAlpha)
     {
-        pushDrawView(cmd, mDrawLayout, drawPush);
+        pushMainView(cmd, mDrawLayout, drawPush);
         vkCmdBindVertexBuffers(cmd,0,1,&mVbo.buffer,&off);
         drawListBlend(mAlphaPipe, mExclList.buffer, EXCL_LIST_SLOT);
     }
@@ -44141,11 +44971,11 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     {
         gpuSubMark(cmd, "g_p2_particles");   // (before the join: the wait books to g_godrays_comp)
         compositeGodRaysLate();               // last thing in pass 2
-        vkCmdEndRendering(cmd);
+        endRenderingViews(cmd);
     }
     else
     {
-        vkCmdEndRendering(cmd);
+        endRenderingViews(cmd);
         gpuSubMark(cmd, "g_p2_particles");
     }
     mP2Px = (uint64_t)rw * rh;
@@ -44157,7 +44987,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     gpuSubMark(cmd, "g_pass2");
     // MOTION BLUR (#118, RenderVKMotionBlur): on the render-size scene, before every
     // resolve / copy below reads it (llcleanmotionblurvk.h says why here).
-    recordMotionBlur(cmd, rw, rh, mvNow);
+    if (!stereoActive()) recordMotionBlur(cmd, rw, rh, mvNow);   // (#1075: off in stereo -- design §2 row 35)
     // TAA RESOLVE (temporal #84; RenderFSAAType 3 / RenderVKTAA): the whole HDR scene,
     // transparents included (reactive mask, see clean_taa.comp), before every consumer:
     // SSR's previous-frame copy, eyedropper, DoF, bloom, exposure, tonemap. It replaces
@@ -44172,6 +45002,13 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     // resolved glow -- p_taa is then that glow resolve, p_fsr the upscale. Off: the FSR
     // object is freed (not on snapshots, which never resolve).
     mRcasRan = false;
+    if (stereoActive())
+    {
+        // #1075 step 10: the views' shared upscaler clock (mUpscaleDt), once per recording.
+        const double now = LLFrameTimer::getElapsedSeconds();
+        if (mUpscaleClock >= 0.0) mUpscaleDt = (float)std::clamp(now - mUpscaleClock, 0.0, 1.0);
+        mUpscaleClock = now;
+    }
     // RenderVKFSRDebugProbe: log what this slot's last frame measured, then probe again
     // (inside FSR and below, after the resolve, and after the bloom). Offscreen snapshot
     // frames probe too (labelled SNAP, always logged): their post-chain input, exposure
@@ -44201,17 +45038,13 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         }
     }
     const bool fsrWanted = mTaaNow && fsrRequested();
-    if (!fsrWanted && mFsr && !mOffscreen && !mLiveCapNow)   // (#873: a shot's samples skip it, keep it)
-    {
-        mFsr->destroy(mCtx->device());
-        delete mFsr;
-        mFsr = nullptr;
-    }
+    if (!fsrWanted && mFsr[0] && !mOffscreen && !mLiveCapNow)   // (#873: a shot's samples skip it, keep it)
+        destroyFsr();   // (#1075: every view's instance)
     bool fsrNow = false;
     bool rrNow = false;
     // #870: DLSS off (another mode / unavailable) -> its targets + network feature are freed
     // before the next recording (rrPrestep), never here (the pdnPrestep rule).
-    if (!mDlssFrame && mRr && mRr->holding() && !mOffscreen && !mLiveCapNow && !mSnapAccNow)
+    if (!mDlssFrame && mRr[0] && mRr[0]->holding() && !mOffscreen && !mLiveCapNow && !mSnapAccNow)   // (#1075: [0] runs whenever any view does)
         mRrReq.release = true;
     if (mSnapAccNow)
     {
@@ -44347,7 +45180,10 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     // TAA (RenderFSAAType 3, or RenderVKTAA over FXAA / SMAA) replaces the post AA.
     // (A supersampled snapshot, #417, is anti-aliased already: no FXAA / SMAA blur on top.)
     // (Nor on a live snapshot's accumulation sample, #873: the raw jittered frame is the sample.)
-    const bool aa_on = (aa_type == 1 || aa_type == 2) && !mTaaNow && !mSnapAccNow && !mLiveCapNow && ensureAA(width, height);
+    // (#1075: FXAA / SMAA are not layered: off in stereo)
+    const bool aa_on = (aa_type == 1 || aa_type == 2) && !mTaaNow && !mSnapAccNow && !mLiveCapNow && !stereoActive()
+                    && !mSnapMatte   // <GMDX> avatar matte: FXAA / SMAA would blur the edge against the black
+                    && ensureAA(width, height);
     if (!aa_on && !mOffscreen && !mLiveCapNow) freeAATargets();   // (a snapshot keeps the main view's)
     // Final display-space effects (Lightbox): the chain ends in mFinalColor instead
     // of the swapchain, and clean_final.frag resolves it.
@@ -44362,11 +45198,19 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         want = s_hdr_on && s_glow_on && (F32)s_bloom_strength > 0.f;
 #endif
         want = want && !mOrtho;   // <GMDX> region map: bloom spreads past the tiles' guard band
-        mBloomActive = want && ensureBloom(width, height);
+        want = want && !mSnapMatte;   // <GMDX> avatar matte: no glow past the avatars
+        // (#1075: the bloom chain, flare state, lens dirt and the eyedropper are not layered:
+        //  off in stereo -- the post chain's family, design step 4)
+        mBloomActive = want && !stereoActive() && ensureBloom(width, height);
         if (!mBloomActive) mCrossActive = false;
-        recordFlareState(cmd, width, height);
-        updateLensDirt(cmd, width, height);
-        recordScenePixel(cmd, width, height);   // eyedropper: linear scene, pre-DoF / pre-grade
+        if (!stereoActive())
+        {
+            recordFlareState(cmd, width, height);
+            updateLensDirt(cmd, width, height);
+            recordScenePixel(cmd, width, height);   // eyedropper: linear scene, pre-DoF / pre-grade
+        }
+        else
+            mFlareActive = mDirtActive = false;   // (the tonemap's lens terms read neither)
         // Depth of field on the linear scene, ahead of bloom and the tonemapper.
         if (mDofEnabled && ensureDoF(width, height))
         {
@@ -44412,7 +45256,8 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         static LLCachedControl<bool> s_glow_ldr(gSavedSettings, "RenderGlow", true);
         ldr_glow = s_glow_ldr;
 #endif
-        ldr_glow = ldr_glow && !mBloomActive;
+        // (#1075: the LDR glow is not layered: off in stereo, so the tonemap ends the chain)
+        ldr_glow = ldr_glow && !mBloomActive && !stereoActive();
         mTonemapLast = !aa_on && !ldr_glow;
     }
     // RLVa @setsphere forces the final pass; with an odd pass count the chain writes the
@@ -44420,15 +45265,17 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     // <SS:Skoomastream> So does the LDR glow without AA: its extract samples the tone-mapped
     // image, and the swapchain is not sampleable (only matters with the dither and every
     // final effect off; the dither alone already runs the final pass).
-    const uint32_t sphere_passes = rlvSpherePassCount();
+    // (#1075 STEREO: the tonemap writes the layered output directly -- no final pass, no RLVa
+    //  sphere, no FX: none of them is layered yet; listed in the stereo-off log)
+    const uint32_t sphere_passes = stereoActive() ? 0u : rlvSpherePassCount();
     // ---- FX (#544): display-point effects force the final pass, like the sphere ----
     // Keep the avatar mask produced while an active effect samples it or runs avatars-only
     // (one frame behind the effect plan; the first frame reads a zero mask).
-    requestAvatarMask(LLFxRuntimeVK::instance().wantsAvatarMask());
+    requestAvatarMask(!stereoActive() && (LLFxRuntimeVK::instance().wantsAvatarMask() || mSnapMatteSeq));   // <GMDX> (+ avatar matte snapshots)
     LLFxRuntimeVK::Frame fxf = fxFrame();
     LLFxRuntimeVK& fx = LLFxRuntimeVK::instance();
-    const bool fx_want = fx.wantsDisplay(fxf);
-    const bool final_on = prepareFinal(cmd, width, height, sphere_passes > 0 || fx_want || (ldr_glow && !aa_on));   // <SS:Skoomastream> LDR glow samples the tone target
+    const bool fx_want = !stereoActive() && fx.wantsDisplay(fxf);
+    const bool final_on = !stereoActive() && prepareFinal(cmd, width, height, sphere_passes > 0 || fx_want || (ldr_glow && !aa_on));   // <SS:Skoomastream> LDR glow samples the tone target
     const bool sphere_on = final_on && sphere_passes > 0 && ensureSphere(width, height);
     if (sphere_passes == 0 && !mOffscreen) freeSphereTargets();
     const bool sphere_odd = sphere_on && (sphere_passes & 1u);
@@ -44464,7 +45311,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
                       kAliasSrcStages, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, FS, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
     }
     // FX (#548): HDR-point effects on the linear scene (after bloom, before the tonemapper).
-    if (fx.recordHdr(cmd, fxf)) gpuSubMark(cmd, "p_fx_hdr");
+    if (!stereoActive() && fx.recordHdr(cmd, fxf)) gpuSubMark(cmd, "p_fx_hdr");
     recordTonemap(cmd, toneView, width, height);
     gpuTimerMark(cmd, 5);   // exposure + tonemap
 
@@ -44475,8 +45322,8 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         static LLCachedControl<bool> s_glow(gSavedSettings, "RenderGlow", true);
         glow_on = s_glow;
 #endif
-        glow_on = glow_on && !mOrtho;   // <GMDX> region map: the LDR glow neither (as bloom)
-        if (glow_on && !mBloomActive)
+        glow_on = glow_on && !mOrtho && !mSnapMatte;   // <GMDX> region map / avatar matte: the LDR glow neither (as bloom)
+        if (glow_on && !mBloomActive && !stereoActive())   // (#1075: not layered yet)
             recordGlow(cmd, toneView, width, height);
     }
     gpuSubMark(cmd, "g_to_glow");   // pass2 .. glow (g_pass1_begin / g_prepass / g_pass1 split pass 1)
@@ -44501,7 +45348,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         gpuSubMark(cmd, "p_final");
     }
 #if defined(LL_HAS_CLEAN_PIPELINE)
-    if (mRT)
+    if (mRT && !stereoActive())   // (#1075: one-view debug overlays -- off in stereo)
     {   // RenderVKDebugView 13 / 14: ray-query acceptance views over the final world image;
         // 15: RenderVKRTDebugFlicker's focus projector visibility (+ blocker stats);
         // 18: the RT sun's blocking instance per surface point.
@@ -44517,6 +45364,10 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     // Edit-mode selection outline over the world, against the world depth (the SSR
     // copy leaves depth + colour back in their attachment layouts).
     gpuTimerMark(cmd, 6);   // glow
+    // #1075 STEREO: the swap-image copies below (logout screenshot, user snapshot, live snapshot)
+    // read one layer with one-layer barriers: refused while the output is layered (design §8.3);
+    // the frame hash copies every layer.
+    if (!stereoActive())
     {   // Logout screenshot source: the world frame, refreshed every ~2 s.
         const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
         if (mSwapImage && !mOffscreen && now >= mSnapNext)
@@ -44525,10 +45376,12 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
             recordSnapshotCopy(cmd, width, height);
         }
     }
-    recordCaptureAt(cmd, 1, width, height);   // user snapshot: world only (no HUD/UI)
-    if (!mOffscreen) recordLiveSnap(cmd, 1, width, height);   // #873 live snapshot, point 1 (world / depth)
+    if (!stereoActive()) recordCaptureAt(cmd, 1, width, height);   // user snapshot: world only (no HUD/UI)
+    if (mFrameHashOn) recordFrameHash(cmd, width, height);   // #1075 step 0 (debug A/B gate)
+    if (!mOffscreen && !stereoActive()) recordLiveSnap(cmd, 1, width, height);   // #873 live snapshot, point 1 (world / depth)
     // Scaled: the display-space passes below depth-test against a display-size copy.
-    if (mScaled) recordDepthUpscale(cmd);
+    // (#1075: not in a stereo frame -- none of those passes runs there and it has no display depth)
+    if (mScaled && !stereoActive()) recordDepthUpscale(cmd);
     gpuSubMark(cmd, "p_snap_depthup");   // #125 breakdown of the sel+hud timer
     const GpuImage& dispDepth = displayDepth();
     uint32_t sel_world_n = 0;   // static + rigged world (root, child, hover)
@@ -44541,7 +45394,8 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         wireframe = gUseWireframe;
     }
 #endif
-    if (sel_world_n > 0 || wireframe)
+    // (#1075: the selection outline / wireframe are not multiview yet: off in stereo)
+    if ((sel_world_n > 0 || wireframe) && !stereoActive())
     {
         VkRenderingAttachmentInfo ca{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
         ca.imageView=colorView; ca.imageLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -44562,7 +45416,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         vkCmdBindIndexBuffer(cmd, mIbo.buffer, 0, VK_INDEX_TYPE_UINT16);
         if (wireframe) recordWireframe(cmd, drawPushIn, do_rigged);
         if (sel_world_n > 0) recordSelection(cmd, drawPushIn, false);
-        vkCmdEndRendering(cmd);
+        endRenderingViews(cmd);
     }
     // <GMDX> Outline selection style: mask + edge pass over the world (no-op otherwise)
     if (sel_world_n > 0) recordSelOutline(cmd, dsets, drawPushIn, false, colorView, dispDepth, width, height, vpD, scD);
@@ -44571,7 +45425,9 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     // below clears it), then the in-world text layer (name tags / hover text, #468):
     // both UNDER the HUD attachments, as LL. See mWorldOverlayHook.
     gpuSubMark(cmd, "g_sel");
-    if (mWorldOverlayHook && dispDepth.view)
+    // (#1075: LL's overlays / in-world text draw one view: off in stereo -- name tags become
+    //  world-space billboards drawn multiview later, design §8.9)
+    if (mWorldOverlayHook && dispDepth.view && !stereoActive())
         mWorldOverlayHook(cmd, colorView, dispDepth.view, dispDepth.image, width, height);
     gpuSubMark(cmd, "g_overlay");
 
@@ -44587,7 +45443,12 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     // read before this reuse. Frustum culling is disabled (all-pass planes): HUD
     // space is not world space and HUDs are few. Rigged HUDs are not skinned here
     // (skin_count 0 => the cull drops them; the world pass owns the skin buffers).
-    if (hud_view_proj)
+    // (#1075 STEREO: only onto the VR wall's own image -- never over the layered world.)
+    // (#1075 step 10: in stereo only with the wall's COMPLETE own target -- the hudOwn rule below:
+    //  a scaled stereo frame has no display depth to fall back to)
+    if (hud_view_proj && (!stereoActive() || (mHudTarget.color != VK_NULL_HANDLE && mHudTarget.depth != VK_NULL_HANDLE
+                                              && mHudTarget.depthImage != VK_NULL_HANDLE && mHudTarget.width
+                                              && mHudTarget.height)))
     {
         {
             VkMemoryBarrier2 mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
@@ -44685,6 +45546,16 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         }
         gpuSubMark(cmd, "c_hud_cull");
 
+        // #1076 VR: the HUDs go onto the UI wall's image (window size) with its own depth;
+        // otherwise (always on the desktop) over the world in colorView with the world depth.
+        const bool hudOwn = mHudTarget.color != VK_NULL_HANDLE && mHudTarget.depth != VK_NULL_HANDLE &&
+                            mHudTarget.depthImage != VK_NULL_HANDLE && mHudTarget.width && mHudTarget.height;
+        const VkImageView hudColor = hudOwn ? mHudTarget.color : colorView;
+        const VkImageView hudDepthView = hudOwn ? mHudTarget.depth : dispDepth.view;
+        const VkImage hudDepthImage = hudOwn ? mHudTarget.depthImage : dispDepth.image;
+        const uint32_t hudW = hudOwn ? mHudTarget.width : width;
+        const uint32_t hudH = hudOwn ? mHudTarget.height : height;
+        if (hudOwn) hudGlow = false;   // <GMDX> the glow target and outline are window-sized: desktop HUD only
         {
             VkMemoryBarrier2 mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
             mb.srcStageMask=VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
@@ -44700,7 +45571,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
             d.dstStageMask=VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT|VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
             d.dstAccessMask=VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT|VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
             d.oldLayout=VK_IMAGE_LAYOUT_UNDEFINED; d.newLayout=VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-            d.image=dispDepth.image; d.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,1};
+            d.image=hudDepthImage; d.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,1};
             // color: pass-2 writes -> HUD blend reads/writes
             VkMemoryBarrier2 cb{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
             cb.srcStageMask=VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
@@ -44728,26 +45599,26 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         // The HUD's colour (+ the HUD glow target) and depth attachments. With the glow
         // target the selection outline (colour-only pipelines) gets its own rendering
         // after the buckets, so the depth is kept for it.
-        const bool hudSelOutline = selOutlineWanted(true);   // <GMDX> the outline mask reads the HUD depth
+        const bool hudSelOutline = selOutlineWanted(true) && !hudOwn;   // <GMDX> the outline mask reads the HUD depth
         VkRenderingAttachmentInfo hca[2]{{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO},
                                          {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO}};
         VkRenderingAttachmentInfo hda{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
         VkRenderingInfo hri{VK_STRUCTURE_TYPE_RENDERING_INFO};
         {
             VkRenderingAttachmentInfo& ca = hca[0];
-            ca.imageView=colorView; ca.imageLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            ca.imageView=hudColor; ca.imageLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
             ca.loadOp=VK_ATTACHMENT_LOAD_OP_LOAD; ca.storeOp=VK_ATTACHMENT_STORE_OP_STORE;
             VkRenderingAttachmentInfo& ga = hca[1];
             ga.imageView=mHudGlow.view; ga.imageLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
             ga.loadOp=VK_ATTACHMENT_LOAD_OP_CLEAR; ga.storeOp=VK_ATTACHMENT_STORE_OP_STORE;
             ga.clearValue.color={{0.f, 0.f, 0.f, 0.f}};
             VkRenderingAttachmentInfo& da = hda;
-            da.imageView=dispDepth.view; da.imageLayout=VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+            da.imageView=hudDepthView; da.imageLayout=VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
             da.loadOp=VK_ATTACHMENT_LOAD_OP_CLEAR;
             da.storeOp=(hudGlow || hudSelOutline) ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE; // <GMDX> || hudSelOutline
             da.clearValue.depthStencil={1.0f,0};
             VkRenderingInfo& ri = hri;
-            ri.renderArea={{0,0},{width,height}}; ri.layerCount=1; ri.colorAttachmentCount=hudGlow ? 2 : 1;
+            ri.renderArea={{0,0},{hudW,hudH}}; ri.layerCount=1; ri.colorAttachmentCount=hudGlow ? 2 : 1;
             ri.pColorAttachments=hca; ri.pDepthAttachment=&da;
             vkCmdBeginRendering(cmd,&ri);
         }
@@ -44755,14 +45626,14 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         // HUD viewport = LL's world-view rect (as GL's setup3DViewport): LL's HUD
         // projection and its HUD mouse pick are both relative to that rect, not the
         // whole window (which also contains the top menu/nav bars).
-        VkViewport hvp = vpD;
-        VkRect2D   hsc = scD;
+        VkViewport hvp = hudOwn ? VkViewport{0.f, 0.f, (float)hudW, (float)hudH, 0.f, 1.f} : vpD;
+        VkRect2D   hsc = hudOwn ? VkRect2D{{0, 0}, {hudW, hudH}} : scD;
         if (hud_viewport && hud_viewport[2] > 0 && hud_viewport[3] > 0)
         {
-            const int x = std::clamp(hud_viewport[0], 0, (int)width);
-            const int y = std::clamp(hud_viewport[1], 0, (int)height);
-            const int w = std::clamp(hud_viewport[2], 1, (int)width  - x);
-            const int h = std::clamp(hud_viewport[3], 1, (int)height - y);
+            const int x = std::clamp(hud_viewport[0], 0, (int)hudW);
+            const int y = std::clamp(hud_viewport[1], 0, (int)hudH);
+            const int w = std::clamp(hud_viewport[2], 1, (int)hudW  - x);
+            const int h = std::clamp(hud_viewport[3], 1, (int)hudH - y);
             hvp = VkViewport{(float)x, (float)y, (float)w, (float)h, 0.f, 1.f};
             hsc = VkRect2D{{x, y}, {(uint32_t)w, (uint32_t)h}};
         }
@@ -44792,8 +45663,8 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         vkCmdBindIndexBuffer(cmd, mIbo.buffer, 0, VK_INDEX_TYPE_UINT16);
         bindDrawSets(cmd, dsets);
         pushDrawView(cmd, mDrawLayout, hudPush);
-        drawBucket(hudGlow ? mHudGlowDrawPipe  : mHudDrawPipe,  BUCKET_OPAQUE);   // <SS:Skoomastream>
-        drawBucket(hudGlow ? mHudGlowMaskPipe  : mHudMaskPipe,  BUCKET_MASK);
+        drawBucket(hudGlow ? mHudGlowDrawPipe  : (hudOwn && mHudDrawPipeVr) ? mHudDrawPipeVr : mHudDrawPipe,  BUCKET_OPAQUE);   // (#1076 VR pipes)   // <SS:Skoomastream>
+        drawBucket(hudGlow ? mHudGlowMaskPipe  : (hudOwn && mHudMaskPipeVr) ? mHudMaskPipeVr : mHudMaskPipe,  BUCKET_MASK);
         drawBucket(hudGlow ? mHudGlowAlphaPipe : mHudAlphaPipe, BUCKET_ALPHA);
         // <SS:Skoomastream> HUD glow: the selection outline in a colour-only rendering
         if (hudGlow)
@@ -44820,7 +45691,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         }
         // </SS:Skoomastream>
         recordSelection(cmd, hudPush, true);   // HUD selection outline
-        vkCmdEndRendering(cmd);
+        endRenderingViews(cmd);
         // <GMDX> Outline selection style: HUD mask + edge pass (no-op otherwise)
         if (hudSelOutline) recordSelOutline(cmd, dsets, hudPush, true, colorView, dispDepth, width, height, hvp, hsc);
         // <SS:Skoomastream> the HUD glow halo over the HUD layer (before the UI)
@@ -44873,7 +45744,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     }
     else
     {
-        recordProbeCapture(cmd, drawPushIn, push, do_rigged);
+        recordProbeCapture(cmd, drawPushIn, secondaryCull(), do_rigged);   // <GMDX> (secondaryCull)
         pipeSignal(cmd);
     }
     gpuTimerMark(cmd, 8);   // probe capture (faces early: only the deferred filters)
@@ -45633,6 +46504,8 @@ void LLCleanRendererVK::ensureVolFog(VkCommandBuffer cmd, const float* camTime, 
 #if defined(LL_HAS_CLEAN_PIPELINE)
     static LLCachedControl<U32> s_vf(gSavedSettings, "RenderVKVolumetricFog", 0);
     if ((s_vf == 0 && !mVolFog) || !mDsetDraw0 || !mDslDraw1) return;
+    if (mOrthoView) return;   // <GMDX> the froxels' depth is clip.w, 1 everywhere in an orthographic view
+    if (stereoActive()) return;   // #1075: the froxel march + history are per view (design step 13): off in stereo
     if (!mVolFog) mVolFog = new LLCleanVolFogVK();
     LLCleanVolFogVK::Frame f;
     f.ctx = mCtx; f.dslDraw0 = mDslDraw0; f.dslDraw1 = mDslDraw1;
@@ -45687,6 +46560,8 @@ void LLCleanRendererVK::ensurePartFog(VkCommandBuffer cmd, const float* camTime,
 #if defined(LL_HAS_CLEAN_PIPELINE)
     static LLCachedControl<U32> s_pf(gSavedSettings, "RenderVKParticleFog", 0);
     if ((s_pf == 0 && !mPartFog) || !mDsetDraw0 || !mDslDraw1) return;
+    if (mOrthoView) return;   // <GMDX> (eye-ray march over perspective froxels)
+    if (stereoActive()) return;   // #1075: per view (design step 13): off in stereo
     if (!mPartFog) mPartFog = new LLCleanPartFogVK();
     static LLCachedControl<U32> s_plit(gSavedSettings, "RenderVKParticleLighting", 1);
     LLCleanPartFogVK::Frame f;
@@ -45809,6 +46684,10 @@ void LLCleanRendererVK::ensureWeather(VkCommandBuffer cmd, const VKDrawPush& dp,
         }
     }
     if ((!wx.state().visible() && !LLCleanWeatherVK::avatarsWetHold() && !mWeather) || !mDsetDraw0) return;   // (#901: wet avatars dry on)
+    // #1075: the weather module draws into the main view with its own pipelines (rain / snow
+    // particles, veil, snow mesh): not multiview yet -- off in stereo (binding 49 keeps its
+    // stand-ins; the state above still steps).
+    if (stereoActive()) return;
     if (!mWeather) mWeather = new LLCleanWeatherVK();
     LLCleanWeatherVK::Frame f;
     f.ctx = mCtx;
@@ -46204,10 +47083,16 @@ void LLCleanRendererVK::asyncLostHook()
         if (!r->mLgRb[k].mapped) continue;
         const uint32_t* w = static_cast<const uint32_t*>(r->mLgRb[k].mapped);
         std::snprintf(line, sizeof(line), "[vktest] RT reflection hang guard (#1049), lit guard ring %u (guard frame %llu): "
-                      "query budget cut %u rays, rtRaySane refused %u rays, candidate budget hit %u walks",
-                      k, (unsigned long long)r->mLgRbFrame[k], w[kLgRt], w[kLgRt + 1], w[kLgRt + 2]);
+                      "query budget cut %u rays, rtRaySane refused %u rays (float form passed %u of them, #1128), "
+                      "candidate budget hit %u walks",
+                      k, (unsigned long long)r->mLgRbFrame[k], w[kLgRt], w[kLgRt + 1], w[kLgRt + 3], w[kLgRt + 2]);
+        vkFaultLogLine(line);
+        std::snprintf(line, sizeof(line), "[vktest] shadow core hang guard (#1128), lit guard ring %u: query budget cut %u "
+                      "samples, rtRaySane refused %u rays (float form passed %u of them)",
+                      k, w[kLgRtSh], w[kLgRtSh + 1], w[kLgRtSh + 2]);
         vkFaultLogLine(line);
     }
+    r->rtHangBeaconReport();   // (#1128: the ray list header of the frames in flight + the hang beacon)
     const uint32_t have = std::min(r->mAsyncFrameLogN, kAsyncFrameLog);
     for (uint32_t k = 0; k < have; ++k)
     {
@@ -46463,7 +47348,7 @@ void LLCleanRendererVK::recordVrsRate(VkCommandBuffer cmd, uint32_t rw, uint32_t
     db.srcAccessMask=VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
     db.dstStageMask=VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT; db.dstAccessMask=VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
     db.oldLayout=VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL; db.newLayout=VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
-    db.image=mDepth.image; db.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,1};
+    db.image=mDepth.image; db.subresourceRange={VK_IMAGE_ASPECT_DEPTH_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
     VkMemoryBarrier2 mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};   // last frame's attachment read / rate write -> this write
     mb.srcStageMask=VK_PIPELINE_STAGE_2_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR|VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
     mb.srcAccessMask=VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
@@ -46612,7 +47497,9 @@ bool LLCleanRendererVK::ensureDeferred(VkCommandBuffer cmd, uint32_t rw, uint32_
         static const char* names[kGbufCount] = {"gbufAlbedo", "gbufNormal", "gbufMaterial", "gbufEmissive"};
         const VkImageUsageFlags gu = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
         // ALIASED (#615): phase 0 of mAlias, sharing memory with the bloom pyramid.
-        if (!mOffscreen && mAlias.enabled())
+        // (#1075 LAYERED STEREO: a layer per view -- the arena's slots are one-layer images, and bloom,
+        //  its partner, is off in stereo: own allocations, 2 x 20 B / px.)
+        if (!mOffscreen && mAlias.enabled() && !stereoActive())
         {
             VkAliasArena::Desc ad[kGbufCount];
             for (uint32_t i = 0; i < kGbufCount; ++i)
@@ -46625,9 +47512,14 @@ bool LLCleanRendererVK::ensureDeferred(VkCommandBuffer cmd, uint32_t rw, uint32_
         }
         for (uint32_t i = 0; i < kGbufCount; ++i)
         {
-            if (!mGbufAliased)
-                mGbuf[i] = mCtx->createImage2D(rw, rh, kGbufFormats[i], gu, VK_IMAGE_ASPECT_COLOR_BIT);
-            if (!mGbuf[i].image) { destroyDeferredTargets(); return false; }
+            if (!mGbufAliased)   // (#1075: one layer per view; N = 1 exactly createImage2D)
+                mGbuf[i] = mCtx->createScreenImage(rw, rh, mViewCount, kGbufFormats[i], gu, VK_IMAGE_ASPECT_COLOR_BIT);
+            // (#1075) the lighting's 2D_ARRAY view (at N = 1 the one new object: a view of the one layer)
+            if (!mGbuf[i].image || !mCtx->addArrayView(mGbuf[i], VK_IMAGE_ASPECT_COLOR_BIT))
+            {
+                destroyDeferredTargets();
+                return false;
+            }
             mCtx->setObjectName(VK_OBJECT_TYPE_IMAGE, (uint64_t)mGbuf[i].image, names[i]);
         }
         mGbufW = rw; mGbufH = rh;
@@ -46637,8 +47529,9 @@ bool LLCleanRendererVK::ensureDeferred(VkCommandBuffer cmd, uint32_t rw, uint32_
     // The light grid (set 2 binding 8): one record per 16 px tile of the render extent, re-created
     // only when the tile count changes. Refused (#697): no deferred lighting this frame (the
     // forward path), retried on the next -- the lit kernels declare the binding, so it must hold
-    // a live buffer whichever path RenderVKLightCulling picks.
-    const uint32_t gridTiles = ((rw + 15u) / 16u) * ((rh + 15u) / 16u);
+    // a live buffer whichever path RenderVKLightCulling picks. (#1075: one grid per view, view v's
+    // after the first v -- clean_deferred_light.comp deferTileIndex; N = 1: the one grid.)
+    const uint32_t gridTiles = ((rw + 15u) / 16u) * ((rh + 15u) / 16u) * mViewCount;
     if (!mLightGrid.buffer || mLightGridTiles != gridTiles)
     {
         vkDeviceWaitIdle(dev);   // the buffer / set may be in use by frames in flight
@@ -46662,8 +47555,11 @@ bool LLCleanRendererVK::ensureDeferred(VkCommandBuffer cmd, uint32_t rw, uint32_
         w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; w.pBufferInfo = &bi;
         vkUpdateDescriptorSets(dev, 1, &w, 0, nullptr);
     }
-    const VkImageView views[7] = {mGbuf[0].view, mGbuf[1].view, mGbuf[2].view, mGbuf[3].view,
-                                  mDepth.view, sceneHdr().view, mGlowTarget.view};
+    // (#1075: the 2D_ARRAY views -- the lighting kernels read / write the layer of their view; at
+    //  N = 1 views of the one layer)
+    if (!sceneHdr().arrayView || !mGlowTarget.arrayView || !mDepth.arrayView) return false;
+    const VkImageView views[7] = {mGbuf[0].arrayView, mGbuf[1].arrayView, mGbuf[2].arrayView, mGbuf[3].arrayView,
+                                  mDepth.arrayView, sceneHdr().arrayView, mGlowTarget.arrayView};
     // #snapcrash ROOT CAUSE: a handle compare alone is NOT enough. An offscreen snapshot
     // re-creates depth / HDR / glow (other size) and the next main frame re-creates them
     // again (back to the window size) while the G-buffer keeps its size; the driver hands
@@ -46859,7 +47755,7 @@ bool LLCleanRendererVK::regirWanted()
     bool on = false;
     U32 rtMode = 0;
 #if defined(LL_HAS_CLEAN_PIPELINE)
-    static LLCachedControl<bool> s_on(gSavedSettings, "RenderVKLightGrid", false);
+    static LLCachedControl<bool> s_on(gSavedSettings, "RenderVKLightGrid", true);
     static LLCachedControl<U32>  s_picks(gSavedSettings, "RenderVKLightGridPicks", 2);
     static LLCachedControl<F32>  s_cell(gSavedSettings, "RenderVKLightGridCellSize", 1.f);
     static LLCachedControl<U32>  s_levels(gSavedSettings, "RenderVKLightGridLevels", 4);
@@ -46967,7 +47863,7 @@ void LLCleanRendererVK::regirHeaderFill(RegirHeader& h)
     {   // (#869 RS_F_OCC: the OCCLUSION CULL, RenderVKReSTIROcclusionCull; clean_deferred_light.comp)
         U32 occ = 1;
 #if defined(LL_HAS_CLEAN_PIPELINE)
-        static LLCachedControl<U32> s_occ(gSavedSettings, "RenderVKReSTIROcclusionCull", 1U);
+        static LLCachedControl<U32> s_occ(gSavedSettings, "RenderVKReSTIROcclusionCull", 2U);
         occ = s_occ;
 #endif
         // (the resolve -- mode 8 of the emissive build kernel -- carries the counts to this frame's light
@@ -46979,6 +47875,15 @@ void LLCleanRendererVK::regirHeaderFill(RegirHeader& h)
         // (#1052) 1 = the soft cull (evidence filter, 12 frames, a weight dithered / blended across patches);
         // 2 = the first cull's hard rules (RS_F_OCC_HARD, A/B). The counts mean the same: no clear on a switch.
         if (mRsOccNow && occ >= 2u) h.rs_cfg[2] |= 1024u;
+        // (RS_F_OCC_PT_DROP, RenderVKReSTIROcclusionPointDrop: A/B) the old rule for POINT lights: a culled one
+        // leaves the shadow ratio's light set (the patch-shaped blocks); off (default) = it stays in the set with
+        // its exact zero (clean_deferred_light.comp OCCLUSION CULL, THE POINT LIGHTS' SHARE)
+        bool ptDrop = false;
+#if defined(LL_HAS_CLEAN_PIPELINE)
+        static LLCachedControl<bool> s_ptDrop(gSavedSettings, "RenderVKReSTIROcclusionPointDrop", false);
+        ptDrop = s_ptDrop;
+#endif
+        if (mRsOccNow && ptDrop) h.rs_cfg[2] |= 8192u;
     }
     {   // (#1052 RS_F_CONV_ANY, RenderVKReSTIRConvMultiLight: A/B) the denoiser's converged shortcut for any
         // reused reservoir (the old rule) instead of only where one light dominates the texel
@@ -46988,6 +47893,15 @@ void LLCleanRendererVK::regirHeaderFill(RegirHeader& h)
         convAny = s_convAny;
 #endif
         if (convAny) h.rs_cfg[2] |= 2048u;
+    }
+    {   // (#1038 RS_F_REUSE_MV, RenderVKReSTIRReuseMotion) the temporal reservoir candidate follows the motion
+        // vectors (set 3 binding 28: writeGiMotion) -- a moving avatar's texels keep their reservoirs
+        bool reuseMv = true;
+#if defined(LL_HAS_CLEAN_PIPELINE)
+        static LLCachedControl<bool> s_reuseMv(gSavedSettings, "RenderVKReSTIRReuseMotion", true);
+        reuseMv = s_reuseMv;
+#endif
+        if (reuseMv && mMotion.view) h.rs_cfg[2] |= 4096u;
     }
     h.rs_cfg2[0] = std::clamp<U32>(mcap, 1u, 64u);
     h.rs_cfg2[1] = std::min<U32>(taps, 5u);
@@ -47203,7 +48117,7 @@ bool LLCleanRendererVK::rsWanted()
 {
     U32 stoch = 0;
 #if defined(LL_HAS_CLEAN_PIPELINE)
-    static LLCachedControl<U32> s_stoch(gSavedSettings, "RenderVKProjStochastic", 0U);
+    static LLCachedControl<U32> s_stoch(gSavedSettings, "RenderVKProjStochastic", 1U);
     stoch = s_stoch;
 #endif
     // (Decided in the light pass, BEFORE this frame's TLAS build: tlasValid() is false there by
@@ -47299,12 +48213,23 @@ void LLCleanRendererVK::recordDeferCombine(VkCommandBuffer cmd, bool feat, uint3
 
 // In: the G-buffer SHADER_READ_ONLY, depth DEPTH_READ_ONLY, scene HDR + glow GENERAL (the
 // caller's barriers). Writes every pixel of HDR + glow (no-surface pixels: black, no glow).
+// FEATURE SPLIT (#827) frame at this render extent: the kernels + targets (deferSplitFrame) and the light grid at
+// this extent. (recordDeferredLighting; THE LIGHT PREP resets the tile list's header ahead of the lighting.)
+bool LLCleanRendererVK::deferFeatFrame(uint32_t rw, uint32_t rh) const
+{
+    const uint32_t tilesX = (rw + 15) / 16, tilesY = (rh + 15) / 16;
+    return mDeferSplitNow && mDeferFeatNow && mLightGrid.buffer && mLightGridTiles == tilesX * tilesY * mViewCount
+        && mDsFeatFull && mDsW == rw && mDsH == rh && mDsTileList.buffer;
+}
+
 void LLCleanRendererVK::recordDeferredLighting(VkCommandBuffer& cmd, uint32_t rw, uint32_t rh, uint32_t viewIndex,
                                                const float viewProjRel[16],
                                                const std::function<void(VkCommandBuffer&)>* beforeCombine)
 {
     VKDeferPush p{};
-    p.view = viewIndex;
+    // (#1075 STEREO: the N per-eye entries the G-buffer scope stored -- deferEyeBlock; the layered
+    //  kernels read entry [view] of the binding's N-entry window)
+    p.view = stereoActive() ? mDeferEyeBase : viewIndex;
     p.flags = 0u;
     p.width = rw; p.height = rh;
     vkInvert4(viewProjRel, p.inv_vp_rel);
@@ -47320,12 +48245,12 @@ void LLCleanRendererVK::recordDeferredLighting(VkCommandBuffer& cmd, uint32_t rw
     //   0 (or the chosen path's pipeline / buffer missing): the in-kernel tile test.
     uint32_t culling = 2;
 #if defined(LL_HAS_CLEAN_PIPELINE)
-    static LLCachedControl<U32> s_culling(gSavedSettings, "RenderVKLightCulling", 0);
+    static LLCachedControl<U32> s_culling(gSavedSettings, "RenderVKLightCulling", 2U);
     culling = s_culling;
 #endif
     const bool froxel = culling == 2 && mFroxelNow && mFroxelW == rw && mFroxelH == rh && mFroxel.buffer;
     const uint32_t tilesX = (rw + 15) / 16, tilesY = (rh + 15) / 16;
-    const bool grid = culling == 1 && mLightGrid.buffer && mLightGridTiles == tilesX * tilesY
+    const bool grid = culling == 1 && mLightGrid.buffer && mLightGridTiles == tilesX * tilesY * mViewCount
         && mLightGridPipe[mDeferSplitNow ? 1 : 0] != VK_NULL_HANDLE;
     constexpr uint32_t kDeferFlagLightGrid = 16u;     // clean_deferred_light.comp DEFER_FLAG_LIGHT_GRID
     constexpr uint32_t kDeferFlagLightFroxel = 32u;   // ... DEFER_FLAG_LIGHT_FROXEL
@@ -47345,8 +48270,9 @@ void LLCleanRendererVK::recordDeferredLighting(VkCommandBuffer& cmd, uint32_t rw
     // the listed tiles (clean_deferred_light.comp FEATURE SPLIT). The classification builds the
     // light grid itself (culling 0 / 1 alike: the grid test is lossless + bit-identical), so it needs
     // the grid buffer at this extent; froxel frames (culling 2) walk the cells as before.
-    const bool feat = mDeferSplitNow && mDeferFeatNow && mLightGrid.buffer && mLightGridTiles == tilesX * tilesY
-                   && mDsFeatFull && mDsW == rw && mDsH == rh;
+    // (THE LIGHT PREP reset the tile list's header ahead of the lighting -- llcleanprojstochvk.cpp; a frame whose
+    //  early point did not -- never expected -- takes the plain split)
+    const bool feat = deferFeatFrame(rw, rh) && mLightPrep.headersDone && mLightPrep.dsTiles;
     if (feat)
     {
         // Pass timers: the queue's prefix (the lighting may run on the async compute queue).
@@ -47371,26 +48297,13 @@ void LLCleanRendererVK::recordDeferredLighting(VkCommandBuffer& cmd, uint32_t rw
             ib[k].image=k == DS_ALIASED ? mDsVisProj.image : (k == DS_ALIASED + 1u ? mDsGain.image : mDsImg[k].image);
             ib[k].subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,VK_REMAINING_ARRAY_LAYERS};
         }
-        // The tile list's header is rewritten below: after the previous frame's LOCAL read it as
-        // its indirect arguments and its CLASSIFY appended to it (WAR: an execution dependency).
-        VkMemoryBarrier2 tw{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
-        tw.srcStageMask=VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
-        tw.dstStageMask=VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT; tw.dstAccessMask=VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        // (The tile list's header -- VkDispatchIndirectCommand (0, 1, 1) + pad, CLASSIFY counts x up -- was reset
+        //  by THE LIGHT PREP: after the previous frame's LOCAL indirect read / CLASSIFY appends (its opening
+        //  barrier), published to CLASSIFY by its closing barrier on this queue / the join on graphics. No
+        //  transfer -> compute drain here any more.)
         VkDependencyInfo idep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
-        idep.memoryBarrierCount=1; idep.pMemoryBarriers=&tw;
         idep.imageMemoryBarrierCount=nIb; idep.pImageMemoryBarriers=ib;
         vkCmdPipelineBarrier2(cmd,&idep);
-        // Header = VkDispatchIndirectCommand (0, 1, 1) + pad: CLASSIFY counts x up (compute-queue
-        // legal, as the lit guards' fills; no graphics-only command anywhere in this segment).
-        const uint32_t hdr[4] = {0u, 1u, 1u, 0u};
-        vkCmdUpdateBuffer(cmd, mDsTileList.buffer, 0, sizeof(hdr), hdr);
-        VkMemoryBarrier2 tr{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
-        tr.srcStageMask=VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT; tr.srcAccessMask=VK_ACCESS_2_TRANSFER_WRITE_BIT;
-        tr.dstStageMask=VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-        tr.dstAccessMask=VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
-        VkDependencyInfo tdep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
-        tdep.memoryBarrierCount=1; tdep.pMemoryBarriers=&tr;
-        vkCmdPipelineBarrier2(cmd,&tdep);
         const VkDescriptorSet sets[4] = {mDsetDraw0, mDsetDraw1, mDsetDefer, mDsetDeferSplit};
         const uint32_t viewOff = deferViewOffset(p.view);   // set 2 b10: the main view's entry (#814)
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mDeferSplitLayout, 0, 4, sets, 1, &viewOff);
@@ -47431,55 +48344,95 @@ void LLCleanRendererVK::recordDeferredLighting(VkCommandBuffer& cmd, uint32_t rw
 #endif
         // (#823) Nothing casts (mDeferShadowSkip): no SHADOW pass -- the classification alone.
         const VkPipeline shadowCls = (fused && !mDeferShadowSkip) ? deferFeatPipe(DFP_SHADOW_CLS) : VK_NULL_HANDLE;
-        // (#195 + #85) MERGED RT SHADOWS: the merged pass + the denoiser FIRST -- the SHADOW kernel
-        // below reads the denoised sun / moon (re-binds the split layout's sets + push after itself).
-        if (mShadowMergeNow) recordShadowMergeFirst(cmd, p, viewOff, onAsync);
-        if (shadowCls != VK_NULL_HANDLE)
+        auto shadowStep = [&]()
         {
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, shadowCls);
-            vkCmdDispatch(cmd, tilesX, tilesY, 1);                // one 16 px tile per workgroup
-            gpuSubMark(cmd, onAsync ? "c_defer_shadow_cls" : "g_defer_shadow_cls");
-        }
-        else
-        {
-            // TILE CLASSIFY first (the grid masks / froxel verdicts + the tile list): independent of
-            // SHADOW / REFLECT, which overlap it.
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, deferFeatPipe(DFP_CLASSIFY));
-            vkCmdDispatch(cmd, tilesX, tilesY, 1);                // one 16 px tile per workgroup
-            gpuSubMark(cmd, onAsync ? "c_defer_classify" : "g_defer_classify");
-            if (!mDeferShadowSkip)
+            if (shadowCls != VK_NULL_HANDLE)
             {
-                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, deferSplitPipe(DSP_SHADOW));
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, shadowCls);
+                vkCmdDispatch(cmd, tilesX, tilesY, 1);                // one 16 px tile per workgroup
+                gpuSubMark(cmd, onAsync ? "c_defer_shadow_cls" : "g_defer_shadow_cls");
+            }
+            else
+            {
+                // TILE CLASSIFY first (the grid masks / froxel verdicts + the tile list): independent of
+                // SHADOW / REFLECT, which overlap it.
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, deferFeatPipe(DFP_CLASSIFY));
+                vkCmdDispatch(cmd, tilesX, tilesY, 1);                // one 16 px tile per workgroup
+                gpuSubMark(cmd, onAsync ? "c_defer_classify" : "g_defer_classify");
+                if (!mDeferShadowSkip)
+                {
+                    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, deferSplitPipe(DSP_SHADOW));
+                    vkCmdDispatch(cmd, (rw + 7) / 8, (rh + 7) / 8, 1);   // 8x8
+                }
+                gpuSubMark(cmd, onAsync ? "c_defer_shadow" : "g_defer_shadow");   // (#823: ~0 when skipped)
+            }
+        };
+        auto reflectStep = [&]()
+        {
+            if (mDsReflHalf)
+            {
+                const uint32_t hw = (rw + 1) / 2, hh = (rh + 1) / 2;
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, deferSplitPipe(DSP_REFLECT_HALF));
+                vkCmdDispatch(cmd, (hw + 7) / 8, (hh + 7) / 8, 1);   // 8x8 blocks
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, deferSplitPipe(DSP_REFLECT_SHARP));
+                vkCmdDispatch(cmd, (rw + 7) / 8, (rh + 7) / 8, 1);   // 8x8 (soft pixels leave at once)
+            }
+            else
+            {
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, deferSplitPipe(DSP_REFLECT));
                 vkCmdDispatch(cmd, (rw + 7) / 8, (rh + 7) / 8, 1);   // 8x8
             }
-            gpuSubMark(cmd, onAsync ? "c_defer_shadow" : "g_defer_shadow");   // (#823: ~0 when skipped)
-        }
-        if (mDsReflHalf)
+            // (the timestamps land as each pass's predecessors finish: the three overlap, so shadow /
+            // refl are completion points, not exclusive costs)
+            gpuSubMark(cmd, onAsync ? "c_defer_refl" : "g_defer_refl");
+        };
+        if (mVqM6Now)
         {
-            const uint32_t hw = (rw + 1) / 2, hh = (rh + 1) / 2;
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, deferSplitPipe(DSP_REFLECT_HALF));
-            vkCmdDispatch(cmd, (hw + 7) / 8, (hh + 7) / 8, 1);   // 8x8 blocks
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, deferSplitPipe(DSP_REFLECT_SHARP));
-            vkCmdDispatch(cmd, (rw + 7) / 8, (rh + 7) / 8, 1);   // 8x8 (soft pixels leave at once)
+            // (#1039 M6, RenderVKVisQueue bit 16) THE FRAME WALK (llcleanvisqueuevk.cpp): every queued consumer's
+            // producers -- the merged pass's SELECT + GEN, REFLECT (the RT rays' source), the RT reflections' and
+            // the projector-only pass's and the GI's producers -- then ONE walk wave over all their requests, then
+            // the resolves: the merged pass's SHADE + denoiser before SHADOW (which reads the denoised sun), the RT
+            // and GI resolves after it. (REFLECT ran beside SHADOW without a barrier: it does not read it.)
+            auto splitBind = [&]()
+            {
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mDeferSplitLayout, 0, 4, sets, 1, &viewOff);
+                vkCmdPushConstants(cmd, mDeferSplitLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
+            };
+            visQueueBeginFrame(cmd, !mGiLagNow, onAsync);
+            mVqM6Collect = true;
+            if (mShadowMergeNow) recordShadowMergeFirst(cmd, p, viewOff, onAsync);
+            splitBind();   // (the merged pass's producers leave the RT layout bound)
+            reflectStep();
+            recordRtReflect(cmd, p, viewOff, onAsync);
+            if (!mShadowMergeNow) recordProjStoch(cmd, p, viewOff, onAsync);
+            if (!mGiLagNow) recordGI(cmd, p, viewOff, onAsync);
+            visQueueFrameWalk(cmd, viewOff, onAsync);   // (collecting ends here)
+            visQueueFramePost(cmd, VQC_SHADOW);
+            splitBind();
+            shadowStep();
+            visQueueFramePost(cmd, VQC_RT);
+            visQueueFramePost(cmd, VQC_GI);
+            visQueueM6End();
+            splitBind();   // (the split layout for the combine, as every consumer leaves it)
         }
         else
         {
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, deferSplitPipe(DSP_REFLECT));
-            vkCmdDispatch(cmd, (rw + 7) / 8, (rh + 7) / 8, 1);   // 8x8
+            // (#195 + #85) MERGED RT SHADOWS: the merged pass + the denoiser FIRST -- the SHADOW kernel
+            // below reads the denoised sun / moon (re-binds the split layout's sets + push after itself).
+            if (mShadowMergeNow) recordShadowMergeFirst(cmd, p, viewOff, onAsync);
+            shadowStep();
+            reflectStep();
+            // (#859) Hybrid RT reflections: the SSR-miss smooth pixels' rays, spliced into the words
+            // BASE reads (re-binds the split layout's sets + push after itself).
+            recordRtReflect(cmd, p, viewOff, onAsync);
+            // (#85 phase 2) the projector stochastic sampler + the diffuse / specular denoiser: LOCAL
+            // remodulates its result (re-binds the split layout's sets + push after itself).
+            // (Merged RT shadows: it already ran, before SHADOW.)
+            if (!mShadowMergeNow) recordProjStoch(cmd, p, viewOff, onAsync);
+            // (#87: the GI trace + its denoiser; BASE reads the result. #978 phase 2, GI_F_LAG: BASE reads LAST
+            //  frame's -- this frame's trace follows the combine: giLagRecord after the stash, else below.)
+            if (!mGiLagNow) recordGI(cmd, p, viewOff, onAsync);
         }
-        // (the timestamps land as each pass's predecessors finish: the three overlap, so shadow /
-        // refl are completion points, not exclusive costs)
-        gpuSubMark(cmd, onAsync ? "c_defer_refl" : "g_defer_refl");
-        // (#859) Hybrid RT reflections: the SSR-miss smooth pixels' rays, spliced into the words
-        // BASE reads (re-binds the split layout's sets + push after itself).
-        recordRtReflect(cmd, p, viewOff, onAsync);
-        // (#85 phase 2) the projector stochastic sampler + the diffuse / specular denoiser: LOCAL
-        // remodulates its result (re-binds the split layout's sets + push after itself).
-        // (Merged RT shadows: it already ran, before SHADOW.)
-        if (!mShadowMergeNow) recordProjStoch(cmd, p, viewOff, onAsync);
-        // (#87: the GI trace + its denoiser; BASE reads the result. #978 phase 2, GI_F_LAG: BASE reads LAST
-        //  frame's -- this frame's trace follows the combine: giLagRecord after the stash, else below.)
-        if (!mGiLagNow) recordGI(cmd, p, viewOff, onAsync);
         // (#978 GI EARLY TRACE) the async chain ends here: BASE + LOCAL stashed for pass 1b, on
         // graphics after a join up to this segment (recordDeferTail; no beforeCombine on an async chain).
         if (deferStashCombine(true, p, viewOff, rw, rh)) return;
@@ -47535,42 +48488,85 @@ void LLCleanRendererVK::recordDeferredLighting(VkCommandBuffer& cmd, uint32_t rw
         recordLitGuardBegin(cmd);   // (transfer only: the binds / push above stay bound)
         recordShaderClockBegin(cmd);   // (RenderVKShaderClockLighting; transfer only too)
         recordRtMarkInit(cmd);         // (#859: the RT reflection mark -> GENERAL, contents discarded)
-        // (#195 + #85) MERGED RT SHADOWS: the merged pass + the denoiser before SHADOW (above).
-        if (mShadowMergeNow) recordShadowMergeFirst(cmd, p, viewOff, mAsyncAvail && vkAsyncIsAsyncCmd(cmd));
-        if (grid)
+        auto gridStep = [&]()
         {
-            // The light grid first: independent of SHADOW / REFLECT (it writes only the grid +
-            // the lit-guard words), so they overlap it; the barrier before COMBINE covers it.
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mLightGridPipe[1]);
-            vkCmdDispatch(cmd, tilesX, tilesY, 1);   // one 16x16 tile per workgroup
-        }
-        if (!mDeferShadowSkip)   // (#823: nothing casts -- the combine takes the cloud layer itself)
+            if (grid)
+            {
+                // The light grid first: independent of SHADOW / REFLECT (it writes only the grid +
+                // the lit-guard words), so they overlap it; the barrier before COMBINE covers it.
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mLightGridPipe[1]);
+                vkCmdDispatch(cmd, tilesX, tilesY, 1);   // one 16x16 tile per workgroup
+            }
+        };
+        auto shadowStep = [&]()
         {
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, deferSplitPipe(DSP_SHADOW));
-            vkCmdDispatch(cmd, (rw + 7) / 8, (rh + 7) / 8, 1);       // 8x8
-        }
-        if (mDsReflHalf)
+            if (!mDeferShadowSkip)   // (#823: nothing casts -- the combine takes the cloud layer itself)
+            {
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, deferSplitPipe(DSP_SHADOW));
+                vkCmdDispatch(cmd, (rw + 7) / 8, (rh + 7) / 8, 1);       // 8x8
+            }
+        };
+        auto reflectStep = [&]()
         {
-            // Half-resolution reflections: one invocation per 2 x 2 block, then the sharp
-            // pixels at full resolution (independent of each other and of the shadow pass).
-            const uint32_t hw = (rw + 1) / 2, hh = (rh + 1) / 2;
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, deferSplitPipe(DSP_REFLECT_HALF));
-            vkCmdDispatch(cmd, (hw + 7) / 8, (hh + 7) / 8, 1);   // 8x8 blocks
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, deferSplitPipe(DSP_REFLECT_SHARP));
-            vkCmdDispatch(cmd, (rw + 7) / 8, (rh + 7) / 8, 1);   // 8x8 (soft pixels leave at once)
+            if (mDsReflHalf)
+            {
+                // Half-resolution reflections: one invocation per 2 x 2 block, then the sharp
+                // pixels at full resolution (independent of each other and of the shadow pass).
+                const uint32_t hw = (rw + 1) / 2, hh = (rh + 1) / 2;
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, deferSplitPipe(DSP_REFLECT_HALF));
+                vkCmdDispatch(cmd, (hw + 7) / 8, (hh + 7) / 8, 1);   // 8x8 blocks
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, deferSplitPipe(DSP_REFLECT_SHARP));
+                vkCmdDispatch(cmd, (rw + 7) / 8, (rh + 7) / 8, 1);   // 8x8 (soft pixels leave at once)
+            }
+            else
+            {
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, deferSplitPipe(DSP_REFLECT));
+                vkCmdDispatch(cmd, (rw + 7) / 8, (rh + 7) / 8, 1);   // 8x8
+            }
+        };
+        if (mVqM6Now)
+        {
+            // (#1039 M6, RenderVKVisQueue bit 16) THE FRAME WALK -- as the feature split above: the producers, ONE
+            // walk wave, the resolves (the merged pass's before SHADOW)
+            const bool onA = mAsyncAvail && vkAsyncIsAsyncCmd(cmd);
+            auto splitBind = [&]()
+            {
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mDeferSplitLayout, 0, 4, sets, 1, &viewOff);
+                vkCmdPushConstants(cmd, mDeferSplitLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(p), &p);
+            };
+            visQueueBeginFrame(cmd, !mGiLagNow, onA);
+            mVqM6Collect = true;
+            if (mShadowMergeNow) recordShadowMergeFirst(cmd, p, viewOff, onA);
+            splitBind();   // (the merged pass's producers leave the RT layout bound)
+            gridStep();
+            reflectStep();
+            recordRtReflect(cmd, p, viewOff, onA);
+            if (!mShadowMergeNow) recordProjStoch(cmd, p, viewOff, onA);
+            if (!mGiLagNow) recordGI(cmd, p, viewOff, onA);
+            visQueueFrameWalk(cmd, viewOff, onA);   // (collecting ends here)
+            visQueueFramePost(cmd, VQC_SHADOW);
+            splitBind();
+            shadowStep();
+            visQueueFramePost(cmd, VQC_RT);
+            visQueueFramePost(cmd, VQC_GI);
+            visQueueM6End();
+            splitBind();   // (the split layout for the combine, as every consumer leaves it)
         }
         else
         {
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, deferSplitPipe(DSP_REFLECT));
-            vkCmdDispatch(cmd, (rw + 7) / 8, (rh + 7) / 8, 1);   // 8x8
+            // (#195 + #85) MERGED RT SHADOWS: the merged pass + the denoiser before SHADOW (above).
+            if (mShadowMergeNow) recordShadowMergeFirst(cmd, p, viewOff, mAsyncAvail && vkAsyncIsAsyncCmd(cmd));
+            gridStep();
+            shadowStep();
+            reflectStep();
+            // (#859) Hybrid RT reflections between REFLECT and COMBINE (re-binds the split layout after).
+            recordRtReflect(cmd, p, viewOff, mAsyncAvail && vkAsyncIsAsyncCmd(cmd));
+            // (#85 phase 2) the projector stochastic sampler + denoiser: the combine remodulates it.
+            // (Merged RT shadows: it already ran, before SHADOW.)
+            if (!mShadowMergeNow) recordProjStoch(cmd, p, viewOff, mAsyncAvail && vkAsyncIsAsyncCmd(cmd));
+            // (#87: the combine reads it. #978 phase 2, GI_F_LAG: last frame's -- as the feature split above)
+            if (!mGiLagNow) recordGI(cmd, p, viewOff, mAsyncAvail && vkAsyncIsAsyncCmd(cmd));
         }
-        // (#859) Hybrid RT reflections between REFLECT and COMBINE (re-binds the split layout after).
-        recordRtReflect(cmd, p, viewOff, mAsyncAvail && vkAsyncIsAsyncCmd(cmd));
-        // (#85 phase 2) the projector stochastic sampler + denoiser: the combine remodulates it.
-        // (Merged RT shadows: it already ran, before SHADOW.)
-        if (!mShadowMergeNow) recordProjStoch(cmd, p, viewOff, mAsyncAvail && vkAsyncIsAsyncCmd(cmd));
-        // (#87: the combine reads it. #978 phase 2, GI_F_LAG: last frame's -- as the feature split above)
-        if (!mGiLagNow) recordGI(cmd, p, viewOff, mAsyncAvail && vkAsyncIsAsyncCmd(cmd));
         // (#978 GI EARLY TRACE: as the feature split above -- COMBINE stashed)
         if (deferStashCombine(false, p, viewOff, rw, rh)) return;
         // The async AO's join (aoPost + RenderVKAOAsync): only COMBINE reads AO, so the shadow /
@@ -47612,7 +48608,8 @@ void LLCleanRendererVK::recordDeferredLighting(VkCommandBuffer& cmd, uint32_t rw
     if (grid)
     {
         // The light grid, then the uber kernel behind one barrier (grid writes -> its reads).
-        vkCmdDispatch(cmd, tilesX, tilesY, 1);   // one 16x16 tile per workgroup
+        // (#1075: z = the views -- a layered dispatch, one grid per view; N = 1: z = 1)
+        vkCmdDispatch(cmd, tilesX, tilesY, mViewCount);   // one 16x16 tile per workgroup
         gpuSubMark(cmd, "g_light_grid");
         VkMemoryBarrier2 m{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
         m.srcStageMask=VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT; m.srcAccessMask=VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
@@ -47623,7 +48620,8 @@ void LLCleanRendererVK::recordDeferredLighting(VkCommandBuffer& cmd, uint32_t rw
         vkCmdPipelineBarrier2(cmd,&mdep);
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, litPipe);
     }
-    vkCmdDispatch(cmd, tilesX, tilesY, 1);   // one 16x16 tile per workgroup
+    // (#1075 STEREO: every view's layer in one dispatch, z = N -- clean_deferred_light.comp CLEAN_VIEW_Z)
+    vkCmdDispatch(cmd, tilesX, tilesY, mViewCount);   // one 16x16 tile per workgroup
     recordLitGuardEnd(cmd);
     recordShaderClockEnd(cmd);
 }
@@ -47676,6 +48674,7 @@ void LLCleanRendererVK::recordLitGuardBegin(VkCommandBuffer cmd)
     b.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
     vkCmdPipelineBarrier2(cmd, &d);
     mLgActive = true;
+    rtBcFrameBegin(cmd);   // (#1128: the hang beacon's address words + this recording's note)
 }
 
 void LLCleanRendererVK::recordLitGuardEnd(VkCommandBuffer cmd)
@@ -48007,15 +49006,31 @@ void LLCleanRendererVK::readLitGuardStats()
         "probe list entries past the probe count"};
     // (#1049) the RT reflection hang guard: first sighting of each kind, WARN (rare by design: the
     // first two budgets sit far above sane content: each count there is a pathological ray cut short)
-    static const char* const kRtNames[3] = {"rays cut by the per-ray query budget (RTR_QUERY_BUDGET)",
+    // (#1128) + 3: a non-zero count PROVES the float form of the guard (as the driver compiled it) passed a
+    // non-finite / out-of-world ray that the bit-pattern verdict now refuses -- see clean_rt_common.glsl
+    static const char* const kRtNames[kLgRtWords] = {"rays cut by the per-ray query budget (RTR_QUERY_BUDGET)",
         "rays refused by rtRaySane (non-finite / out-of-world origin, direction or interval)",
-        "walks over the candidate budget (RT_CANDIDATE_BUDGET: dense alpha-tested content, or a pathological ray)"};
-    for (uint32_t k = 0; k < 3; ++k)
+        "walks over the candidate budget (RT_CANDIDATE_BUDGET: dense alpha-tested content, or a pathological ray)",
+        "rays the float form of rtRaySane PASSED and its bit pattern refused (#1128: the compiled float guard let a "
+        "non-finite / out-of-world ray through -- such rays reached the traversal before this build)"};
+    for (uint32_t k = 0; k < kLgRtWords; ++k)
         if (w[kLgRt + k] != 0u && (mLgSeen & (1ull << (kLgRt + k))) == 0u)
         {
             mLgSeen |= 1ull << (kLgRt + k);
             LL_WARNS("VKLitGuard") << "VK lit guard (first): RT reflections (#1049 hang guard): " << kRtNames[k] << ": "
                                    << w[kLgRt + k] << " this frame" << LL_ENDL;
+        }
+    // (#1128) the shadow core's hang guard (clean_shadow_core.glsl shStatsGuard)
+    static const char* const kRtShNames[kLgRtShWords] = {
+        "shadow samples cut by the per-sample query budget (RT_SH_QUERY_BUDGET: a sample's walk logic ran away)",
+        "shadow rays refused by rtRaySane (non-finite / out-of-world origin, direction or interval)",
+        "shadow rays the float form of rtRaySane PASSED and its bit pattern refused (#1128)"};
+    for (uint32_t k = 0; k < kLgRtShWords; ++k)
+        if (w[kLgRtSh + k] != 0u && (mLgSeen & (1ull << (kLgRtSh + k))) == 0u)
+        {
+            mLgSeen |= 1ull << (kLgRtSh + k);
+            LL_WARNS("VKLitGuard") << "VK lit guard (first): shadow core (#1128 hang guard): " << kRtShNames[k] << ": "
+                                   << w[kLgRtSh + k] << " this frame" << LL_ENDL;
         }
     for (uint32_t i : {0u, 1u, 2u, 3u, 8u, 9u, 12u})
         if (w[i] != 0u && (mLgSeen & (1u << i)) == 0u)
@@ -48067,9 +49082,13 @@ void LLCleanRendererVK::readLitGuardStats()
         }
         else if (mLgAcc[1])
             os << " | probe blend tripped with NO bad probe texel / input (the blend math, or a texel x ambiance product)";
-        if (mLgAcc[kLgRt] || mLgAcc[kLgRt + 1] || mLgAcc[kLgRt + 2])   // (#1049)
+        if (mLgAcc[kLgRt] || mLgAcc[kLgRt + 1] || mLgAcc[kLgRt + 2] || mLgAcc[kLgRt + 3])   // (#1049, #1128)
             os << " | RT reflection hang guard (totals): query budget cut " << mLgAcc[kLgRt] << " rays, rtRaySane refused "
-               << mLgAcc[kLgRt + 1] << " rays, candidate budget hit " << mLgAcc[kLgRt + 2] << " walks";
+               << mLgAcc[kLgRt + 1] << " rays (float form passed " << mLgAcc[kLgRt + 3] << " of them), candidate budget hit "
+               << mLgAcc[kLgRt + 2] << " walks";
+        if (mLgAcc[kLgRtSh] || mLgAcc[kLgRtSh + 1] || mLgAcc[kLgRtSh + 2])   // (#1128)
+            os << " | shadow core hang guard (totals): query budget cut " << mLgAcc[kLgRtSh] << " samples, rtRaySane refused "
+               << mLgAcc[kLgRtSh + 1] << " rays (float form passed " << mLgAcc[kLgRtSh + 2] << " of them)";
         LL_INFOS("VKLitGuard") << os.str() << LL_ENDL;
     }
     for (uint64_t& v : mLgAcc) v = 0;
@@ -48408,6 +49427,8 @@ void LLCleanRendererVK::selectLitVariant()
         mask = rt && s_mask && s_prepass && !s_od && mRtMaskPipe && mRtMaskTmpPipe && mRtMaskSpPipe && mDsetRtMask[0] && mRtMaskW > 1
             && mPreOpaquePipe[0] && mLitVar[0][LIT_EQ]
             && !(mOffscreen && mSnapAccFrames > 0);   // #417: supersampled snapshots trace inline
+        // (#1075 LAYERED STEREO, step 6: a stereo frame's mask is a layer per view, traced in one
+        //  dispatch per stage -- the multiview lit FS and the layered lighting read their view's)
     }
 #endif
     // MERGED RT SHADOWS (#195 + #85, RenderVKRTShadowMerge): when this frame is predicted to run
@@ -48420,7 +49441,9 @@ void LLCleanRendererVK::selectLitVariant()
     // there): a frame that cannot merge after all re-arms the mask exactly as today.
     mRtMaskWant = mask;
     shadowMergeSunState();
-    mShadowMergeTry = rt && sun && shadowMergeWanted(true);
+    // (#1075: not predicted in a stereo frame -- the merged pass and its denoiser are one view's until
+    //  their family is layered; the layered mask shadows the stereo frame instead)
+    mShadowMergeTry = rt && sun && !stereoActive() && shadowMergeWanted(true);
     mShadowMergeNow = false;
     mRtMaskOn = mask && !mShadowMergeTry;
     mLitSlotsV = v;
@@ -48672,10 +49695,13 @@ void LLCleanRendererVK::initDeferSplit()
         // (#827: binding 8 = the feature split's tile list; #859: 10 = the RT tile list -- buffers)
         // (#87: 22 / 23 the GI reservoirs / state -- buffers; 18-21 the GI denoiser's images)
         // (#1031: 25 the split GI stages' records, 26 the split shadow core's descriptors -- buffers)
+        // (#1038: 28 the motion vectors for the GI trace / pass 15's reservoir reuse -- a combined image sampler)
         b[i].descriptorType = (i == kDsBindingTiles || i == kDsBindingRtTiles || i == kDsBindingRsRes
                                || i == kDsBindingGiRes || i == kDsBindingGiState || i == kDsBindingGiHit
                                || i == kDsBindingPdnSel || i == kDsBindingPdnVis)
-                                  ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+                                  ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
+                                  : (i == kDsBindingGiMotion ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
+                                                             : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
     }
     VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     li.bindingCount = kDsBindings; li.pBindings = b;
@@ -49186,6 +50212,7 @@ void LLCleanRendererVK::destroyDeferSplit()
     for (VkPipeline& q : mRtSplitPipe)   // (#1036)
         if (q) { vkDestroyPipeline(dev, q, nullptr); q = VK_NULL_HANDLE; }
     visQueueDestroy();   // (#1039 M1)
+    rtHangBeaconDestroy();   // (#1128)
     if (mRtRec.buffer) { mCtx->destroyBuffer(mRtRec); mRtRec = GpuBuffer{}; }
     mRtRecCap = 0;
     mRtSplitNow = false;
@@ -49423,6 +50450,7 @@ void LLCleanRendererVK::deferSplitFrame(bool deferred, uint32_t rw, uint32_t rh)
         else if (unused) mAlias.forget(AS_DSPLIT0, DS_ALIASED);   // (idempotent; also after a stale drop)
     }
     rtSplitDecide(rw, rh, now);   // (#1036: after this frame's mRtReflNow)
+    rtHangBeaconDecide(rw, rh, now);   // (#1128: after the split's decision -- the beacon traces the plain list only)
     // (#859) UBER frames (deferred, not split -- RenderVKDeferredSplit 0, a retry backoff): the
     // pre-trace target at the render extent while wanted (held like the split's), else 1 x 1.
     // Not on a frame that queued the split's re-creation (it would allocate the uber target for
@@ -49766,6 +50794,308 @@ void LLCleanRendererVK::rtSplitDecide(uint32_t rw, uint32_t rh, double now)
     mRtSplitNow = mRtReflNow && mRtSelectPipe && mRtTraceListPipe && mRtRec.buffer && mRtRec.address && mRtRecCap != 0u;
 }
 
+// (#1128) THE HANG BEACON's kernels: k = index + 1 = regen_world_spv.py RT_BC_KERNELS (keep in step). The normal
+// kernel each twin replaces (rtBcPipe), its twin's SPIR-V and a name for the report.
+namespace
+{
+struct RtBcEntry { const uint32_t* code; size_t bytes; const char* name; };
+const RtBcEntry kRtBcSpv[16] = {   // (= LLCleanRendererVK::kRtBcKernels: checked in rtBcPipe)
+    {kWorldDeferRtTraceListBcSpv, kWorldDeferRtTraceListBcSpv_bytes, "RT reflections list trace"},
+    {kWorldDeferRtFwdBcSpv, kWorldDeferRtFwdBcSpv_bytes, "RT reflections forward"},
+    {kWorldDeferVisWalkBcSpv, kWorldDeferVisWalkBcSpv_bytes, "vis queue walk (RT / GI hits, GI reuse)"},
+    {kWorldDeferRtSplitLayersVq2BcSpv, kWorldDeferRtSplitLayersVq2BcSpv_bytes, "RT reflections queued blend layers"},
+    {kWorldDeferShadowQSunWalkBcSpv, kWorldDeferShadowQSunWalkBcSpv_bytes, "shadow sun walk (queue)"},
+    {kWorldDeferShadowQSunWalkIsoBcSpv, kWorldDeferShadowQSunWalkIsoBcSpv_bytes, "shadow sun walk iso (queue)"},
+    {kWorldDeferShadowQVisWalkBcSpv, kWorldDeferShadowQVisWalkBcSpv_bytes, "shadow light-sample walk (queue)"},
+    {kWorldDeferShadowQVisWalkIsoBcSpv, kWorldDeferShadowQVisWalkIsoBcSpv_bytes, "shadow light-sample walk iso (queue)"},
+    {kWorldDeferShadowQVisTailBcSpv, kWorldDeferShadowQVisTailBcSpv_bytes, "shadow light-sample VIS tail (queue)"},
+    {kWorldDeferShadowQVisTailIsoBcSpv, kWorldDeferShadowQVisTailIsoBcSpv_bytes, "shadow light-sample VIS tail iso (queue)"},
+    {kWorldDeferShadowMergeSunVisBcSpv, kWorldDeferShadowMergeSunVisBcSpv_bytes, "shadow sun visibility (fused)"},
+    {kWorldDeferShadowMergeSunVisIsoBcSpv, kWorldDeferShadowMergeSunVisIsoBcSpv_bytes, "shadow sun visibility iso (fused)"},
+    {kWorldDeferShadowSplitVisBcSpv, kWorldDeferShadowSplitVisBcSpv_bytes, "shadow light-sample visibility (fused)"},
+    {kWorldDeferShadowSplitVisIsoBcSpv, kWorldDeferShadowSplitVisIsoBcSpv_bytes, "shadow light-sample visibility iso (fused)"},
+    {kWorldDeferGiTraceBcSpv, kWorldDeferGiTraceBcSpv_bytes, "GI trace (fused)"},
+    {kWorldDeferGiSplitTraceBcSpv, kWorldDeferGiSplitTraceBcSpv_bytes, "GI split TRACE"}};
+} // namespace
+
+// The normal kernel's handle each twin stands in for (same order as kRtBcSpv).
+VkPipeline LLCleanRendererVK::rtBcPipe(VkPipeline p) const
+{
+    static_assert(sizeof(kRtBcSpv) / sizeof(kRtBcSpv[0]) == kRtBcKernels, "kRtBcSpv = regen_world_spv.py RT_BC_KERNELS");
+    if (!mRtBcNow || p == VK_NULL_HANDLE) return p;
+    const VkPipeline normal[kRtBcKernels] = {
+        mRtTraceListPipe, mRtFwdPipe, mVisWalkPipe, mRtVqPipe[1][VQS_LAYERS],
+        mShVqPipe[VQSH_SUN_WALK], mShVqPipe[VQSH_SUN_WALK_ISO], mShVqPipe[VQSH_VIS_WALK], mShVqPipe[VQSH_VIS_WALK_ISO],
+        mShVqPipe[VQSH_VIS_TAIL], mShVqPipe[VQSH_VIS_TAIL_ISO], mPdnSunVisPipe, mPdnSunVisIsoPipe, mPdnVisPipe, mPdnVisIsoPipe,
+        mGiTracePipe, mGiSplitPipe[GIS_TRACE]};
+    for (uint32_t k = 0; k < kRtBcKernels; ++k)
+        if (normal[k] == p) return mRtBcPipe[k] != VK_NULL_HANDLE ? mRtBcPipe[k] : p;
+    return p;
+}
+
+// (#1128, RenderVKRTHangBeacon) THE HANG BEACON: with the setting on, the twins are queued once (compiled in the
+// background: the frame never waits); the buffer (HOST-VISIBLE system memory: readable after a device loss; 64
+// header uvec4 + 3 uvec4 per slot, kRtBcSlots slots shared by every kernel, ~96 MB) is allocated once and kept while
+// the setting stays on (its address must not change under kernels in flight); the twins are bound (mRtBcNow) once
+// kRtBcArmFrames recordings wrote the address (rtBcFrameBegin). Refused (#697): off, retried after 30 s. Off: the
+// buffer is retired (frames in flight may still write it) and the twins unbound.
+void LLCleanRendererVK::rtHangBeaconDecide(uint32_t rw, uint32_t rh, double now)
+{
+    (void)rw; (void)rh;
+    mRtBcNow = false;
+    if (!mCtx) return;
+    bool on = false;
+#if defined(LL_HAS_CLEAN_PIPELINE)
+    static LLCachedControl<bool> s_bc(gSavedSettings, "RenderVKRTHangBeacon", false);
+    on = s_bc;
+#endif
+    if (mRtBcJob.pending()) mRtBcJob.poll();
+    if (!on)
+    {
+        if (mRtBc.buffer)
+        {
+            retireBuffer(mRtBc);
+            mRtBc = GpuBuffer{};
+            mRtBcArmed = 0;
+            LL_INFOS("Vulkan") << "RT hang beacon (#1128): off, buffer released" << LL_ENDL;
+        }
+        return;
+    }
+    if (!mRtReflLayout) return;
+    if (!mRtBcQueued)
+    {
+        mRtBcQueued = true;
+        VkDevice dev = mCtx->device();
+        {
+            PipelineBatchScope scope(dev);
+            for (uint32_t k = 0; k < kRtBcKernels; ++k)
+            {
+                if (mRtBcPipe[k]) continue;
+                VkShaderModule m = moduleFromSpv(dev, kRtBcSpv[k].code, kRtBcSpv[k].bytes, kRtBcSpv[k].name);
+                createComputePipelineInto(dev, m, mRtReflLayout, 0u, litDebugSpec(false), &mRtBcPipe[k], kRtBcSpv[k].name);
+                destroyShaderModuleDeferred(dev, m, nullptr);
+            }
+            PipelineJobOpts o;
+            o.what = "RT hang beacon";
+            o.gate = false;   // (optional: never holds the login screen)
+            mRtBcJob.start(pipelineBatchFlushAsync(dev, o));
+        }
+        LL_INFOS("Vulkan") << "RT hang beacon (#1128): " << kRtBcKernels << " beacon kernels compiling in the background "
+                              "(the normal kernels run until they land)" << LL_ENDL;
+        return;
+    }
+    if (mRtBcJob.pending()) return;
+    if (!mRtBc.buffer && now >= mRtBcRetryAt)
+    {
+        const VkDeviceSize bytes = ((VkDeviceSize)kRtBcHdrQ + (VkDeviceSize)kRtBcSlotQ * kRtBcSlots) * 16u;
+        GpuBuffer nb{};
+        {
+            VkMemScope memcat(VKMEM_READBACK);
+            VkDeviceContext::SoftAllocScope soft(mCtx);
+            nb = mCtx->createBuffer(bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+                                    | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, true);
+        }
+        if (nb.buffer && nb.address && nb.mapped)
+        {
+            std::memset(nb.mapped, 0, (size_t)bytes);   // (state 0: no lane)
+            mRtBc = nb;
+            mRtBcArmed = 0;
+            mCtx->setObjectName(VK_OBJECT_TYPE_BUFFER, (uint64_t)mRtBc.buffer, "rtHangBeacon");
+            uint32_t built = 0;
+            for (VkPipeline p : mRtBcPipe) built += p ? 1u : 0u;
+            LL_INFOS("Vulkan") << "RT hang beacon (#1128): on -- " << built << " of " << kRtBcKernels << " beacon kernels, "
+                               << kRtBcSlots << " slots, " << ((bytes + (1u << 19)) >> 20) << " MB host-visible" << LL_ENDL;
+        }
+        else
+        {
+            if (nb.buffer) mCtx->destroyBuffer(nb);
+            mRtBcRetryAt = now + 30.0;
+            LL_WARNS("Vulkan") << "RT hang beacon (#1128): its " << ((bytes + (1u << 19)) >> 20)
+                               << " MB host-visible buffer was refused; off, retry in 30 s" << LL_ENDL;
+        }
+    }
+    mRtBcNow = mRtBc.buffer && mRtBc.address && mRtBc.mapped && mRtBcArmed >= kRtBcArmFrames;
+}
+
+// (recordLitGuardBegin, main view, every frame) The address words for the beacon twins (mOdCounter words kLgBcWord ..
+// + 2: the address, the magic -- or the self test's) and the beacon header (the frame tag); + this recording's note
+// of what ran (always: the device-lost report prints it with or without the beacon).
+void LLCleanRendererVK::rtBcFrameBegin(VkCommandBuffer cmd)
+{
+    {
+        RtBcFrameNote& n = mRtBcNotes[mRtBcNoteN++ % 4u];
+        n = RtBcFrameNote{};
+        n.frame = vkAddrCurrentFrame();
+        U32 vq = 0;
+#if defined(LL_HAS_CLEAN_PIPELINE)
+        static LLCachedControl<U32> s_vq(gSavedSettings, "RenderVKVisQueue", 0U);
+        vq = s_vq;
+#endif
+        n.vqMask = vq;
+        n.vqSet = mVqSet;
+        n.rtRefl = mRtReflNow; n.rtSplit = mRtSplitNow;
+        n.gi = mGiNow; n.giSplit = mGiSplitNow; n.giShadeSplit = mGiShadeSplitNow; n.pdn = mPdnNow;
+        n.vqRt = mVqRtNow; n.vqGi = mVqGiNow; n.vqGir = mVqGirNow; n.vqShSun = mVqShSunNow; n.vqShVis = mVqShVisNow;
+        n.vqM6 = mVqM6Now;
+        n.bcNow = mRtBcNow;
+    }
+    if (!mRtBc.buffer || !mRtBc.address || !mOdCounter.buffer || mOdCounter.size < kOdCounterBytes) return;
+    mRtBcTag = (mRtBcTag + 1u) & 0xFFFFFFu;
+    if (mRtBcTag == 0u) mRtBcTag = 1u;
+    mRtBcNotes[(mRtBcNoteN - 1u) % 4u].tag = mRtBcTag;
+    uint32_t magic = kRtBcMagic;
+#if defined(LL_HAS_CLEAN_PIPELINE)
+    // RenderVKRTHangBeaconSelfTest (one frame, then cleared): the first beacon kernel to run records a known query
+    // and HANGS on purpose (clean_deferred_light.comp rtBcHead) -- validates on a test machine that the device-lost
+    // report reads a hung lane's beacon
+    static LLCachedControl<bool> s_bcTest(gSavedSettings, "RenderVKRTHangBeaconSelfTest", false);
+    if (s_bcTest && mRtBcNow)
+    {
+        gSavedSettings.setBOOL("RenderVKRTHangBeaconSelfTest", false);
+        magic = kRtBcSelfTest;
+        LL_WARNS("Vulkan") << "RT hang beacon (#1128): SELF TEST -- the first ray-query beacon kernel of this frame hangs "
+                              "the GPU on purpose (expect a device loss naming its lane 0 at site 0xf000)" << LL_ENDL;
+    }
+#endif
+    VkMemoryBarrier2 m{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    m.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;
+    m.dstStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT; m.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    VkDependencyInfo d{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    d.memoryBarrierCount = 1; d.pMemoryBarriers = &m;
+    vkCmdPipelineBarrier2(cmd, &d);
+    const uint32_t w[3] = {(uint32_t)(mRtBc.address & 0xFFFFFFFFull), (uint32_t)(mRtBc.address >> 32), magic};
+    vkCmdUpdateBuffer(cmd, mOdCounter.buffer, kLgBcWord * sizeof(uint32_t), sizeof(w), w);
+    const uint32_t h[4] = {mRtBcTag, kRtBcSlots, 0u, kRtBcMagic};
+    vkCmdUpdateBuffer(cmd, mRtBc.buffer, 0, sizeof(h), h);
+    m.srcStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT; m.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    m.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    m.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+    vkCmdPipelineBarrier2(cmd, &d);
+    if (mRtBcArmed < kRtBcArmFrames) ++mRtBcArmed;
+}
+
+void LLCleanRendererVK::rtHangBeaconDestroy()
+{
+    if (!mCtx) return;
+    mRtBcJob.wait();   // (a background build writes these handles)
+    VkDevice dev = mCtx->device();
+    for (VkPipeline& q : mRtBcPipe)
+        if (q) { vkDestroyPipeline(dev, q, nullptr); q = VK_NULL_HANDLE; }
+    mRtBcQueued = false;
+    if (mRtBc.buffer) { mCtx->destroyBuffer(mRtBc); mRtBc = GpuBuffer{}; }
+    mRtBcArmed = 0;
+    mRtBcNow = false;
+    if (mRtArgsRb.buffer) { mCtx->destroyBuffer(mRtArgsRb); mRtArgsRb = GpuBuffer{}; }
+}
+
+// (#1128) Device-lost report (asyncLostHook): what the last recordings ran (RenderVKVisQueue bits, the splits), the
+// RAY LIST header of the recordings in flight -- the indirect arguments the reflection trace was launched with --
+// and, with RenderVKRTHangBeacon, the beacon: which beacon kernels started in the frame the GPU reached, and every
+// lane left IN A QUERY with the query (kernel, site, mask, inputs).
+void LLCleanRendererVK::rtHangBeaconReport() const
+{
+    char line[768];
+    const uint32_t notes = std::min<uint32_t>(mRtBcNoteN, 4u);
+    for (uint32_t k = 0; k < notes; ++k)
+    {
+        const RtBcFrameNote& n = mRtBcNotes[(mRtBcNoteN - notes + k) % 4u];
+        std::snprintf(line, sizeof(line), "[vktest] recording (#1128) registry frame %u%s (beacon tag %u): RenderVKVisQueue %u "
+                      "(set %u; queued: RT %d, GI %d, GI reuse %d, shadow sun %d, shadow light samples %d, frame walk %d) | "
+                      "RT reflections %d (split %d) | GI %d (split kernels %d, shade split %d) | shadow core %d | beacon %s",
+                      n.frame, k + 1u == notes ? ", newest" : "", n.tag, n.vqMask, n.vqSet, n.vqRt, n.vqGi, n.vqGir, n.vqShSun,
+                      n.vqShVis, n.vqM6, n.rtRefl, n.rtSplit, n.gi, n.giSplit, n.giShadeSplit, n.pdn,
+                      n.bcNow ? "ON" : "off");
+        vkFaultLogLine(line);
+    }
+    if (mRtArgsRb.mapped)
+    {
+        // (rtt_words[2n .. 2n + 5], copied after the select pass) [0] tiles listed, [1] rays appended, [2..4] the
+        // list trace's dispatch, [5] the capacity; [6] the tile grid's tiles (rtt_args[3]); [7] the recording's
+        // tag (a GPU fill beside the copy: equal to the host's tag = this recording's copy ran)
+        const uint32_t* a = static_cast<const uint32_t*>(mRtArgsRb.mapped);
+        for (uint32_t k = 0; k < 3; ++k)
+        {
+            const uint32_t* w = a + k * kRtArgsWords;
+            if (mRtArgsTag[k] == 0u) continue;
+            const uint64_t groups = (uint64_t)w[2] * w[3] * w[4];
+            const uint64_t rays = std::min<uint64_t>(w[1], w[5]);
+            const bool sane = w[2] <= 65535u && w[4] == 1u && w[5] == w[6] * 64u && groups * 64u >= rays
+                           && groups <= ((uint64_t)w[5] + 63u) / 64u + 65535u;
+            std::snprintf(line, sizeof(line), "[vktest] RT ray list header (#1128) slot %u (recording tag %u, GPU copy tag %u%s): "
+                          "rays appended %u (capacity %u, %u tiles x 64), list trace dispatch %u x %u x %u = %llu groups "
+                          "(%llu lanes), tiles listed %u -- %s",
+                          k, mRtArgsTag[k], w[7], k == mRtArgsSlot ? ", newest" : "", w[1], w[5], w[6], w[2], w[3], w[4],
+                          (unsigned long long)groups, (unsigned long long)(groups * 64u), w[0],
+                          w[7] != mRtArgsTag[k] ? "copy not executed (not this recording's values)"
+                          : sane ? "bounded (the dispatch covers the rays, within the capacity)" : "OUT OF BOUNDS");
+            vkFaultLogLine(line);
+        }
+    }
+    if (!mRtBc.mapped) return;
+    const uint32_t* q = static_cast<const uint32_t*>(mRtBc.mapped);   // (uvec4 k = q + 4 k)
+    const uint32_t tag = q[0];
+    if (q[3] != kRtBcMagic || tag == 0u)
+    {
+        vkFaultLogLine("[vktest] RT hang beacon (#1128): on, but no frame wrote its header yet");
+        return;
+    }
+    std::snprintf(line, sizeof(line), "[vktest] RT hang beacon (#1128): last frame tag the GPU reached %u (armed %u, twins bound "
+                  "this recording %s); list trace stamp: dispatch read rays %u, %u x %u x %u groups, capacity %u, launched "
+                  "%u x %u x %u (tag %u)",
+                  tag, mRtBcArmed, mRtBcNow ? "yes" : "no", q[4], q[5], q[6], q[7], q[8], q[10], q[11], q[13], q[12]);
+    vkFaultLogLine(line);
+    for (uint32_t k = 1; k <= kRtBcKernels; ++k)
+    {
+        const uint32_t* s = q + (16u + k) * 4u;
+        if (s[0] == 0u) continue;
+        std::snprintf(line, sizeof(line), "[vktest]   beacon kernel %2u %-44s last started in frame tag %u%s, %u x %u x %u groups",
+                      k, kRtBcSpv[k - 1].name, s[0], s[0] == tag ? " (THE LAST FRAME)" : "", s[1], s[2], s[3]);
+        vkFaultLogLine(line);
+    }
+    uint64_t inQuery[kRtBcKernels + 1] = {}, done = 0;
+    static constexpr uint32_t kShow = 32;
+    uint32_t shown = 0;
+    for (uint64_t sl = 0; sl < kRtBcSlots; ++sl)
+    {
+        const uint32_t* w = q + (kRtBcHdrQ + kRtBcSlotQ * sl) * 4u;
+        const uint32_t st = w[0] & 0xFFu;
+        if (st == 3u) { ++done; continue; }
+        if (st != 2u) continue;
+        const uint32_t kern = w[3] >> 27;
+        inQuery[kern <= kRtBcKernels ? kern : 0u] += 1u;
+        if (shown >= kShow) continue;
+        ++shown;
+        float f[8];
+        std::memcpy(f, w + 4, sizeof(f));
+        const uint32_t site = w[3] & 0xFFFFu;
+        const char* sk = (site >> 12) == 1u ? "closest walk (retrace k / mask)" : (site >> 12) == 2u ? "visibility walk (kind / mask)"
+                       : (site >> 12) == 3u ? "blend layers (- / mask)" : (site >> 12) == 15u ? "SELF TEST (deliberate hang)"
+                       : "other site (probe / certificate / terminator / ...)";
+        bool bad = false;
+        for (int i = 0; i < 8; ++i) bad = bad || !std::isfinite(f[i]);
+        std::snprintf(line, sizeof(line), "[vktest]   IN QUERY: kernel %u (%s) frame tag %u%s, lane %u px (%u, %u), query #%u at %s "
+                      "0x%04x [%u / 0x%02x], verdict %s%s%s; o (%g, %g, %g) tmin %g d (%g, %g, %g) tmax %g%s",
+                      kern, kern >= 1u && kern <= kRtBcKernels ? kRtBcSpv[kern - 1].name : "?", w[0] >> 8,
+                      (w[0] >> 8) == tag ? " (last)" : "", w[1], w[2] & 0x7FFFu, (w[2] >> 15) & 0x7FFFu,
+                      (w[3] >> 16) & 0xFFu, sk, site, (site >> 8) & 15u, site & 0xFFu,
+                      ((w[3] >> 24) & 1u) ? "accepted" : "refused", ((w[3] >> 25) & 1u) ? ", FLOAT FORM PASSED IT" : "",
+                      ((w[3] >> 26) & 1u) ? ", query budget spent" : "",
+                      f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7], bad ? " -- NON-FINITE INPUT" : "");
+        vkFaultLogLine(line);
+    }
+    std::ostringstream os;
+    os << "[vktest] RT hang beacon (#1128): " << done << " slots DONE; lanes left IN A QUERY per kernel:";
+    uint64_t total = 0;
+    for (uint32_t k = 0; k <= kRtBcKernels; ++k)
+        if (inQuery[k]) { os << " " << k << "=" << inQuery[k]; total += inQuery[k]; }
+    if (!total) os << " none -- the hung lanes' writes never reached memory (run RenderVKRTHangBeaconSelfTest on this "
+                      "GPU to check the instrument), or the hang was outside the beacon kernels";
+    else os << " -- every shader loop is bounded: a lane left in a query is a traversal that did not return";
+    vkFaultLogLine(os.str().c_str());
+}
+
+
 // Init (after the draw sets exist): the 1 x 1 zero forward-reflection placeholder (draw set 0
 // b45 is read by every forward lit / water FS: it must always name an image) and the uber
 // pre-trace placeholder (set 2 b11: the uber kernel declares it).
@@ -50048,11 +51378,36 @@ void LLCleanRendererVK::recordRtReflect(VkCommandBuffer cmd, const VKDeferPush& 
         vkCmdDispatchIndirect(cmd, mDsRtTiles.buffer, 0);
         VkMemoryBarrier2 sm{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
         sm.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT; sm.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
-        sm.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
-        sm.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT;
+        sm.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT
+                        | VK_PIPELINE_STAGE_2_COPY_BIT;   // (+ the #1128 header copy below)
+        sm.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT
+                         | VK_ACCESS_2_TRANSFER_READ_BIT;
         VkDependencyInfo sd{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
         sd.memoryBarrierCount = 1; sd.pMemoryBarriers = &sm;
         vkCmdPipelineBarrier2(cmd, &sd);
+        // (#1128) the ray list header the trace below is launched from (tiles listed, rays, its dispatch, the
+        // capacity) + the tile count -> a 3-slot host-visible ring the device-lost report prints, + this
+        // recording's tag (a fill beside the copy). Reads only; the next frame's header writes wait on it
+        // (recordRtMarkInit's barrier takes transfer work as its source).
+        if (!mRtArgsRb.buffer)
+        {
+            VkMemScope memcat(VKMEM_READBACK);
+            mRtArgsRb = mCtx->createBuffer(3u * kRtArgsWords * sizeof(uint32_t), VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            if (mRtArgsRb.mapped) std::memset(mRtArgsRb.mapped, 0, 3u * kRtArgsWords * sizeof(uint32_t));
+        }
+        if (mRtArgsRb.buffer && mRtArgsRb.mapped)
+        {
+            mRtArgsSlot = (mRtArgsSlot + 1u) % 3u;
+            mRtArgsSeq = mRtArgsSeq + 1u == 0u ? 1u : mRtArgsSeq + 1u;
+            mRtArgsTag[mRtArgsSlot] = mRtArgsSeq;
+            const VkDeviceSize dst = (VkDeviceSize)mRtArgsSlot * kRtArgsWords * sizeof(uint32_t);
+            const VkBufferCopy cp[2] = {
+                {kRtTilesHdrBytes + (VkDeviceSize)mDsRtTileCount * 2u * sizeof(uint32_t), dst, 6u * sizeof(uint32_t)},
+                {3u * sizeof(uint32_t), dst + 6u * sizeof(uint32_t), sizeof(uint32_t)}};
+            vkCmdCopyBuffer(cmd, mDsRtTiles.buffer, mRtArgsRb.buffer, 2, cp);
+            vkCmdFillBuffer(cmd, mRtArgsRb.buffer, dst + 7u * sizeof(uint32_t), sizeof(uint32_t), mRtArgsSeq);
+        }
         gpuSubMark(cmd, onAsync ? "c_defer_rtrefl_sel" : "g_defer_rtrefl_sel");
         // (clean_deferred_light.comp RAY LIST: the dispatch at rtt_words[2n + 2])
         const VkDeviceSize argOff = kRtTilesHdrBytes + ((VkDeviceSize)mDsRtTileCount * 2u + 2u) * sizeof(uint32_t);
@@ -50077,11 +51432,12 @@ void LLCleanRendererVK::recordRtReflect(VkCommandBuffer cmd, const VKDeferPush& 
             // variant), the walk traces them, LIGHT resolves (no sun walk in it); the entries past the region's
             // capacity take the fused LIGHT as a tail (push rtr3.y = the first). The queue's stages find the
             // records through the region header (their push rtr3.zw names the region).
-            // (#1039 M2, bit 2: pipeline set 1) MAT also queues the hits' occlusion ray and the budget's light
-            // rays, a LAYERS stage beside the walk gathers the blend layers, LIGHT holds no ray query.
+            // (#1039 M2, bit 2: pipeline set 1) the producer is a REQ stage after MAT (MAT holds only the material):
+            // it queues the hits' sun / occlusion rays and the budget's light rays, a LAYERS stage beside the walk
+            // gathers the blend layers, LIGHT holds no ray query.
             const uint32_t vs = mVqSet;
             const bool vq = mVqRtNow && mVq.buffer && mVisWalkPipe && mRtVqPipe[vs][VQS_MAT] && mRtVqPipe[vs][VQS_LIGHT]
-                         && (vs == 0u || mRtVqPipe[vs][VQS_LAYERS]);
+                         && (vs == 0u || (mRtVqPipe[vs][VQS_LAYERS] && mRtVqPipe[vs][VQS_REQ]));
             VKRtReflPush vp = sp;
             if (vq)
             {
@@ -50100,48 +51456,82 @@ void LLCleanRendererVK::recordRtReflect(VkCommandBuffer cmd, const VKDeferPush& 
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, vq ? mRtVqPipe[vs][VQS_MAT] : mRtSplitPipe[RTS_MAT]);
             vkCmdDispatchIndirect(cmd, mDsRtTiles.buffer, argOff);
             gpuSubMark(cmd, onAsync ? "c_defer_rtrefl_mat" : "g_defer_rtrefl_mat");
+            if (vq && vs == 1u)
+            {
+                // (set 1) REQ: MAT's RT LIT RECORDS -> every queued entry's requests, its sum / share / layer-flag
+                // slots, the walk's raised dispatch (the push stays the queue's)
+                vkCmdPipelineBarrier2(cmd, &rd);
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mRtVqPipe[vs][VQS_REQ]);
+                vkCmdDispatchIndirect(cmd, mDsRtTiles.buffer, argOff);
+                gpuSubMark(cmd, onAsync ? "c_defer_rtrefl_req" : "g_defer_rtrefl_req");
+            }
             // (the tail's rays are its own: no barrier against MAT; mostly workgroups that find no entry)
             if (vq) vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(sp), &sp);
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mRtTraceListPipe);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, rtBcPipe(mRtTraceListPipe));   // (#1128 beacon twin when on)
             vkCmdDispatchIndirect(cmd, mDsRtTiles.buffer, argOff);
             gpuSubMark(cmd, onAsync ? "c_defer_rtrefl_tail" : "g_defer_rtrefl_tail");
             if (vq)
             {
-                // MAT's requests + its raised dispatch -> the walk (storage + indirect); the walk's results ->
-                // LIGHT (storage)
+                // the walk (+ the blend layers beside it) and the resolve, as functions: recorded here, or (#1039 M6)
+                // in the frame walk and after it
+                auto walk = [this, sp, vp, vs, argOff, onAsync](VkCommandBuffer c)
+                {
+                    visQueueWalk(c, VQR_RT, sp);
+                    gpuSubMark(c, onAsync ? "c_defer_rtrefl_walk" : "g_defer_rtrefl_walk");
+                    if (vs == 1u && mRtReflBlend)
+                    {
+                        // (set 1) the blend layers of every queued entry -> its layer slot: MAT's records and REQ's
+                        // flags only (no barrier against the walk -- disjoint slots)
+                        vkCmdPushConstants(c, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(vp), &vp);
+                        vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_COMPUTE, rtBcPipe(mRtVqPipe[vs][VQS_LAYERS]));   // (#1128)
+                        vkCmdDispatchIndirect(c, mDsRtTiles.buffer, argOff);
+                        gpuSubMark(c, onAsync ? "c_defer_rtrefl_layers" : "g_defer_rtrefl_layers");
+                    }
+                };
+                auto light = [this, sp, vp, vs, argOff, onAsync](VkCommandBuffer c)
+                {
+                    vkCmdPushConstants(c, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(vp), &vp);
+                    vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_COMPUTE, mRtVqPipe[vs][VQS_LIGHT]);
+                    vkCmdDispatchIndirect(c, mDsRtTiles.buffer, argOff);
+                    if (mVqRegion[VQR_RT].entries < mRtRecCap)
+                    {
+                        // the entries past the region: the fused LIGHT from the first of them (independent entries:
+                        // no barrier against the resolve)
+                        VKRtReflPush tp = sp;
+                        tp.rtr3[1] = mVqRegion[VQR_RT].entries;
+                        vkCmdPushConstants(c, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(tp), &tp);
+                        vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_COMPUTE, mRtSplitPipe[RTS_LIGHT]);
+                        vkCmdDispatchIndirect(c, mDsRtTiles.buffer, argOff);
+                    }
+                    gpuSubMark(c, onAsync ? "c_defer_rtrefl_light" : "g_defer_rtrefl_light");
+                    visQueueStats(c, VQR_RT);
+                };
+                if (mVqM6Collect && !mVqM6Walk[VQC_RT] && !mVqM6Post[VQC_RT])
+                {
+                    // (#1039 M6) the walk in the frame walk; LIGHT + the rest of this function after it (the RT
+                    // layout's sets re-bound: other consumers ran between)
+                    visQueueM6Defer(VQC_RT, walk,
+                        [this, light, rp, p, viewOff, rtSet, onAsync](VkCommandBuffer c)
+                        {
+                            const VkDescriptorSet s5[5] = {mDsetDraw0, mDsetDraw1, mDsetDefer, mDsetDeferSplit, rtSet};
+                            vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_COMPUTE, mRtReflLayout, 0, 5, s5, 1, &viewOff);
+                            light(c);
+                            vkCmdPushConstants(c, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(rp), &rp);
+                            recordRtReflectTail(c, p, viewOff, onAsync);
+                        });
+                    return;
+                }
+                // MAT's (set 1: REQ's) requests + the raised dispatch -> the walk (storage + indirect); the walk's
+                // results -> LIGHT (storage)
                 VkMemoryBarrier2 im = rm;
                 im.dstStageMask |= VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
                 im.dstAccessMask |= VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT;
                 VkDependencyInfo id{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
                 id.memoryBarrierCount = 1; id.pMemoryBarriers = &im;
                 vkCmdPipelineBarrier2(cmd, &id);
-                visQueueWalk(cmd, VQR_RT, sp);
-                gpuSubMark(cmd, onAsync ? "c_defer_rtrefl_walk" : "g_defer_rtrefl_walk");
-                if (vs == 1u && mRtReflBlend)
-                {
-                    // (set 1) the blend layers of every queued entry -> its layer slot: MAT's records and flags
-                    // only (no barrier against the walk -- disjoint slots)
-                    vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(vp), &vp);
-                    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mRtVqPipe[vs][VQS_LAYERS]);
-                    vkCmdDispatchIndirect(cmd, mDsRtTiles.buffer, argOff);
-                    gpuSubMark(cmd, onAsync ? "c_defer_rtrefl_layers" : "g_defer_rtrefl_layers");
-                }
+                walk(cmd);
                 vkCmdPipelineBarrier2(cmd, &rd);
-                vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(vp), &vp);
-                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mRtVqPipe[vs][VQS_LIGHT]);
-                vkCmdDispatchIndirect(cmd, mDsRtTiles.buffer, argOff);
-                if (mVqRegion[VQR_RT].entries < mRtRecCap)
-                {
-                    // the entries past the region: the fused LIGHT from the first of them (independent entries:
-                    // no barrier against the resolve)
-                    VKRtReflPush tp = sp;
-                    tp.rtr3[1] = mVqRegion[VQR_RT].entries;
-                    vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(tp), &tp);
-                    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mRtSplitPipe[RTS_LIGHT]);
-                    vkCmdDispatchIndirect(cmd, mDsRtTiles.buffer, argOff);
-                }
-                gpuSubMark(cmd, onAsync ? "c_defer_rtrefl_light" : "g_defer_rtrefl_light");
-                visQueueStats(cmd, VQR_RT);
+                light(cmd);
             }
             else
             {
@@ -50154,7 +51544,9 @@ void LLCleanRendererVK::recordRtReflect(VkCommandBuffer cmd, const VKDeferPush& 
         }
         else
         {
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mRtTraceListPipe);
+            // (#1128: the beacon twin while RenderVKRTHangBeacon is on and built -- rtHangBeaconDecide)
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                              rtBcPipe(mRtTraceListPipe));
             vkCmdDispatchIndirect(cmd, mDsRtTiles.buffer, argOff);
             gpuSubMark(cmd, onAsync ? "c_defer_rtrefl_trace" : "g_defer_rtrefl_trace");
         }
@@ -50165,19 +51557,31 @@ void LLCleanRendererVK::recordRtReflect(VkCommandBuffer cmd, const VKDeferPush& 
         vkCmdDispatchIndirect(cmd, mDsRtTiles.buffer, 0);   // one 8x8 workgroup per listed tile
         gpuSubMark(cmd, onAsync ? "c_defer_rtrefl_trace" : "g_defer_rtrefl_trace");
     }
+    recordRtReflectTail(cmd, p, viewOff, onAsync);
+}
+
+// recordRtReflect after its trace / lighting stages (the forward pass, the resolve, the stats; the split layout
+// re-bound) -- a function of its own so the #1039 M6 frame walk can record it after the walks. The RT layout's
+// sets are bound.
+void LLCleanRendererVK::recordRtReflectTail(VkCommandBuffer cmd, const VKDeferPush& p, uint32_t viewOff, bool onAsync)
+{
     if (mRtFwdNow && mDsRtFwd.image)
     {
         const uint32_t hw = (p.width + 1u) / 2u, hh = (p.height + 1u) / 2u;
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mRtFwdPipe);
+        // (#1128: the beacon twin while RenderVKRTHangBeacon is on)
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, rtBcPipe(mRtFwdPipe));
         vkCmdDispatch(cmd, (hw + 7u) / 8u, (hh + 7u) / 8u, 1);   // 8x8 over the half-resolution grid
         mRtFwdDirty = true;
         gpuSubMark(cmd, onAsync ? "c_defer_rtrefl_fwd" : "g_defer_rtrefl_fwd");   // (the empty-screen floor)
     }
     // trace -> resolve; forward -> the forward / water FS (sampled; the async join covers it there)
+    VkMemoryBarrier2 m{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+    m.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT; m.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
     m.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
     m.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT
                     | VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
-    d.imageMemoryBarrierCount = 0; d.pImageMemoryBarriers = nullptr;
+    VkDependencyInfo d{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    d.memoryBarrierCount = 1; d.pMemoryBarriers = &m;
     vkCmdPipelineBarrier2(cmd, &d);
     // RT RESOLVE on the split layout (incompatible push range: every set re-bound) -- which the
     // passes after it keep.
@@ -50672,6 +52076,8 @@ void LLCleanRendererVK::gpuTimersBegin(VkCommandBuffer cmd)
                 {
                     switch (qs[i])
                     {
+                    case kSubFiller:   // #1075: a multiview scope's extra query (no mark)
+                        break;
                     case 0:
                     {
                         const double d = (double)((st[i] - st[prevG]) & mTsMask) * k;
@@ -50962,6 +52368,13 @@ void LLCleanRendererVK::gpuTimersTop(VkCommandBuffer cmd)
 void LLCleanRendererVK::gpuSubMark(VkCommandBuffer cmd, const char* name)
 {
     vkBreadcrumb(cmd, name);   // device-lost diagnostics (always, when supported)
+    if (mFrameHashOn && name)
+    {
+        // #1075 step 0: the recorded-stream signature (FNV-1a over the mark names, in order).
+        for (const char* p = name; *p; ++p) mStreamSig = (mStreamSig ^ (uint8_t)*p) * 1099511628211ull;
+        mStreamSig = (mStreamSig ^ 0xFFu) * 1099511628211ull;   // (name separator)
+        ++mStreamSigMarks;
+    }
     if (mRigTsRec) rigGpuTimeMark(cmd, name);   // #613 rigged GPU time (sampled frames)
     if (!mTsOn || mTsLean) return;
     if (mFeCmd && cmd == mFeCmd)
@@ -50972,7 +52385,10 @@ void LLCleanRendererVK::gpuSubMark(VkCommandBuffer cmd, const char* name)
         mFeNames[mFeCount++] = name;
         return;
     }
-    if (!mSubPool || mSubCount >= SUB_TS) return;
+    // #1075 step 0: inside a multiview scope (mMvViews > 1, never on the desktop) the timestamp
+    // takes mMvViews consecutive queries -- all of them must fit.
+    const uint32_t need = mMvViews > 1u ? mMvViews : 1u;
+    if (!mSubPool || mSubCount + need > SUB_TS) return;
     // Async compute (phase 3a): tag the queue; the harvest takes deltas per queue.
     uint8_t q = 0;
     if (mAsyncAvail && vkAsyncIsAsyncCmd(cmd))
@@ -50983,6 +52399,404 @@ void LLCleanRendererVK::gpuSubMark(VkCommandBuffer cmd, const char* name)
     vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, mSubPool, mSubCount);
     mSubQueue[mSubCount] = q;
     mSubNames[mSubCount++] = name;
+    for (uint32_t k = 1; k < need; ++k)
+    {
+        // The multiview scope's other views' queries (time or zero): reserved, never read as a mark.
+        mSubQueue[mSubCount] = kSubFiller;
+        mSubNames[mSubCount++] = name;
+    }
+}
+
+// #1075 step 0: the one place a main-view pass opens a multiview scope (step 8 routes the
+// main-view vkCmdBeginRendering sites through it). viewMask 0 -- the desktop, and every
+// auxiliary view (cascades, projector tiles, probe faces, pick, HUD) -- is exactly
+// vkCmdBeginRendering(cmd, &ri): no flag, no extra state.
+void LLCleanRendererVK::beginRenderingViews(VkCommandBuffer cmd, VkRenderingInfo ri, uint32_t viewMask)
+{
+    ri.viewMask = viewMask;
+    vkCmdBeginRendering(cmd, &ri);
+    uint32_t n = 0;
+    for (uint32_t m = viewMask; m; m &= m - 1u) ++n;
+    mMvViews = n;
+}
+
+void LLCleanRendererVK::endRenderingViews(VkCommandBuffer cmd)
+{
+    vkCmdEndRendering(cmd);
+    mMvViews = 0;
+}
+
+// ---- #1075 VR VISIBILITY MASK (XR_KHR_visibility_mask; clean_vr_vismask.vert) ----
+// The pixels the headset's lens never shows (~15-20 % of each eye on a Valve Index) cost a full
+// shade otherwise. Their triangles go into each eye's depth layer at the reversed-Z near value
+// (1.0) as the first draw of the stereo pass 1, so every depth-tested pass after it rejects them
+// before shading: the pre-pass (LESS), the lit draws (EQUAL), the sky (EQUAL against the far
+// clear), water, alpha, particles. Full-screen passes that do not test depth (tonemap, the eye
+// copy) still run over them -- cheap per pixel; those pixels stay the pass-1 clear (black).
+// Stereo sessions only: the pipeline exists only with N > 1 views and the context calls
+// setVisibilityMask only in VR, so the desktop records nothing new.
+namespace
+{
+struct VisMaskPush
+{
+    float proj[2][4];      // per eye: P00, P20, P11, P21 of its projection (column-major)
+    uint32_t verts[2];     // the vertex buffer's device address (lo, hi)
+    uint32_t first[2];     // per eye: first vertex
+    uint32_t count[2];     // per eye: vertices
+};
+static_assert(sizeof(VisMaskPush) == 56, "VisMaskPush = clean_vr_vismask.vert's push block");
+}
+
+void LLCleanRendererVK::initVisMask(const GraphicsPipelineDesc& pass1)
+{
+    if (mVisMaskPipe || mVisMaskLayout) return;
+    VkDevice dev = mCtx->device();
+    VkPushConstantRange pcr{VK_SHADER_STAGE_VERTEX_BIT, 0, (uint32_t)sizeof(VisMaskPush)};
+    VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    li.pushConstantRangeCount = 1; li.pPushConstantRanges = &pcr;
+    VK_CHECK(vkdCreatePipelineLayout(dev, &li, &mVisMaskLayout, "mVisMaskLayout"));
+    VkShaderModule vs = moduleFromSpv(dev, kWorldVrVisMaskVertSpv, kWorldVrVisMaskVertSpv_bytes, "kWorldVrVisMaskVertSpv");
+    GraphicsPipelineDesc d = pass1;   // pass 1's attachments (HDR + glow + depth), reversed-Z, N views
+    d.vert = vs; d.frag = VK_NULL_HANDLE; d.layout = mVisMaskLayout;
+    d.bindings.clear(); d.attributes.clear();   // (vertex pulling)
+    d.colorWrite = false;
+    d.depthTest = true; d.depthWrite = true;    // (writes need the test on: ALWAYS passes)
+    d.depthCompare = VK_COMPARE_OP_ALWAYS;
+    d.relaxedDepthCompare = VK_COMPARE_OP_NEVER;
+    d.depthBiasConstant = 0.f; d.depthBiasSlope = 0.f;
+    d.cullMode = VK_CULL_MODE_NONE;
+    createGraphicsPipelineInto(dev, d, &mVisMaskPipe, "mVisMaskPipe");
+    // #1075 step 10: the twin for a split, motion-only pass 1a (temporal stereo frames: TAA / FSR /
+    // DLSS) -- the mPreMo* attachment formats; colour writes off, so the hidden area keeps the
+    // scope's clear (motion 0, no-history 0).
+    GraphicsPipelineDesc mo = d;
+    mo.colorFormat = kMotionFormat; mo.glowFormat = kNoTemporalFormat;
+    mo.mrtCount = 2;
+    mo.mrtFormats[0] = kMotionFormat; mo.mrtFormats[1] = kNoTemporalFormat;
+    mo.colorWrite = false; mo.glowWrite = false;
+    createGraphicsPipelineInto(dev, mo, &mVisMaskMoPipe, "mVisMaskMoPipe");
+    destroyShaderModuleDeferred(dev, vs, nullptr);
+}
+
+void LLCleanRendererVK::setVisibilityMask(uint32_t generation, const std::vector<float>& eye0,
+                                          const std::vector<float>& eye1, bool use)
+{
+    mVisMaskUse = false;
+    // (not a located-eye stereo frame: nothing drawn, a new generation waits -- its log line then
+    //  measures the hidden share at a real eye projection)
+    if (!use || !stereoActive() || !mVisMaskLayout) return;
+    if (!mVisMaskGenValid || generation != mVisMaskGen)
+    {
+        mVisMaskGen = generation;
+        mVisMaskGenValid = true;
+        retireBuffer(mVisMaskBuf);   // (frames in flight may still read it)
+        mVisMaskBuf = GpuBuffer{};
+        mVisMaskCount[0] = mVisMaskCount[1] = 0;
+        const std::vector<float>* eyes[2] = {&eye0, &eye1};
+        uint32_t total = 0;
+        for (uint32_t e = 0; e < 2u; ++e)
+        {
+            mVisMaskFirst[e] = total;
+            mVisMaskCount[e] = (uint32_t)(eyes[e]->size() / 6u) * 3u;   // whole triangles (x y per vertex)
+            total += mVisMaskCount[e];
+        }
+        if (total)
+        {
+            VkMemScope memcat(VKMEM_STAGING);   // #407 (a few KB, host visible: read once per frame)
+            const VkDeviceSize bytes = (VkDeviceSize)total * 2u * sizeof(float);
+            mVisMaskBuf = mCtx->createBuffer(bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                                             true);
+            if (mVisMaskBuf.buffer && mVisMaskBuf.mapped && mVisMaskBuf.address)
+            {
+                float* dst = static_cast<float*>(mVisMaskBuf.mapped);
+                for (uint32_t e = 0; e < 2u; ++e)
+                    std::memcpy(dst + (size_t)mVisMaskFirst[e] * 2u, eyes[e]->data(),
+                                (size_t)mVisMaskCount[e] * 2u * sizeof(float));
+            }
+            else
+            {
+                // #697 allocation failure: no mask (every pixel shaded); retried at the next generation.
+                if (mVisMaskBuf.buffer) retireBuffer(mVisMaskBuf);
+                mVisMaskBuf = GpuBuffer{};
+                mVisMaskCount[0] = mVisMaskCount[1] = 0;
+                LL_WARNS("Vulkan") << "visibility mask: buffer allocation failed, every eye pixel is shaded" << LL_ENDL;
+            }
+        }
+        // The hidden share of each eye at this frame's projection (the expected pixel saving).
+        float hidden[2] = {0.f, 0.f};
+        for (uint32_t e = 0; e < 2u; ++e)
+        {
+            const float* P = mCurProjV[e];
+            const std::vector<float>& v = *eyes[e];
+            double area = 0.0;
+            for (uint32_t t = 0; t + 6u <= mVisMaskCount[e] * 2u; t += 6u)
+            {
+                const float x0 = P[0] * v[t] - P[8], y0 = P[5] * v[t + 1] - P[9];
+                const float x1 = P[0] * v[t + 2] - P[8], y1 = P[5] * v[t + 3] - P[9];
+                const float x2 = P[0] * v[t + 4] - P[8], y2 = P[5] * v[t + 5] - P[9];
+                area += 0.5 * std::fabs((double)(x1 - x0) * (y2 - y0) - (double)(x2 - x0) * (y1 - y0));
+            }
+            hidden[e] = (float)(area / 4.0);   // (NDC square = 4; overlapping triangles would overcount)
+        }
+        LL_INFOS("Vulkan") << "visibility mask generation " << generation << ": eye 0 " << mVisMaskCount[0] / 3u
+                         << " triangles (~" << (int)std::lround(hidden[0] * 100.f) << " % of the eye hidden), eye 1 "
+                         << mVisMaskCount[1] / 3u << " triangles (~" << (int)std::lround(hidden[1] * 100.f)
+                         << " %) -- at the current eye projection" << LL_ENDL;
+    }
+    bool on = true;
+#if defined(LL_HAS_CLEAN_PIPELINE)
+    static LLCachedControl<bool> s_on(gSavedSettings, "RenderVKVRVisibilityMask", true);
+    on = s_on;
+#endif
+    mVisMaskUse = on && mVisMaskBuf.address && (mVisMaskCount[0] || mVisMaskCount[1]);
+}
+
+void LLCleanRendererVK::recordVisMask(VkCommandBuffer cmd, bool motionScope)
+{
+    const VkPipeline pipe = motionScope ? mVisMaskMoPipe : mVisMaskPipe;
+    if (!mVisMaskUse || !pipe || !mVisMaskBuf.address || mViewCount < 2u) return;
+    VisMaskPush pc{};
+    for (uint32_t e = 0; e < 2u; ++e)
+    {
+        const float* P = mCurProjV[e];
+        pc.proj[e][0] = P[0]; pc.proj[e][1] = P[8]; pc.proj[e][2] = P[5]; pc.proj[e][3] = P[9];
+        pc.first[e] = mVisMaskFirst[e];
+        pc.count[e] = mVisMaskCount[e];
+    }
+    pc.verts[0] = (uint32_t)(mVisMaskBuf.address & 0xFFFFFFFFull);
+    pc.verts[1] = (uint32_t)(mVisMaskBuf.address >> 32);
+    bindGraphicsPipeline(cmd, pipe);
+    vkCmdPushConstants(cmd, mVisMaskLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(pc), &pc);
+    vkCmdDraw(cmd, std::max(mVisMaskCount[0], mVisMaskCount[1]), 1, 0, 0);
+    gpuSubMark(cmd, "g_vr_vismask");
+}
+
+void LLCleanRendererVK::initViewCount()
+{
+    uint32_t want = mStereoRequested ? 2u : 1u;
+#if defined(LL_HAS_CLEAN_PIPELINE)
+    // Desktop debug (design step 8): N views of the desktop camera (RenderVKDebugStereoIPD
+    // apart), the window showing layer 0. Startup only; ignored in VR (the session decides).
+    if (!mStereoRequested)
+        want = std::max(1u, gSavedSettings.getU32("RenderVKDebugViewCount"));
+#endif
+    const uint32_t devMax = mCtx && mCtx->multiviewEnabled() ? mCtx->maxMultiviewViews() : 1u;
+    const uint32_t cap = std::max(1u, std::min(kMaxViews, devMax));
+    if (want > cap)
+    {
+        LL_WARNS("Vulkan") << "stereo: " << want << " views requested, the device / renderer takes " << cap
+                           << (devMax <= 1u ? " (no multiview)" : "") << LL_ENDL;
+        want = cap;
+    }
+    if (want > 1u && !kStereoLayeredReady)
+    {
+        LL_WARNS("Vulkan") << "stereo: " << want << " views requested but the layered renderer is not complete yet "
+                              "(#1075): rendering ONE view (mono)" << LL_ENDL;
+        want = 1u;
+    }
+    mViewCount = want;
+    if (mViewCount > 1u)
+        LL_INFOS("Vulkan") << "stereo: rendering " << mViewCount << " views as layers (multiview). Off in stereo until "
+                              "their family is layered (#1075; research/VR_LAYERED_STEREO_DESIGN.md §7): the split / "
+                              "feature-split deferred kernels (the uber kernel lights the views), AO, the merged RT "
+                              "shadows + projector denoiser (the layered RT shadow mask shadows the views), the RT "
+                              "mask's #771 cache, SSR, VRS, occlusion culling, planar / RT mirrors, GI, "
+                              "god rays, volumetric fog / clouds march, particle fog, weather draws, motion blur, DoF, "
+                              "lens flare / dirt, bloom, LDR glow, FXAA / SMAA, DLSS Ray Reconstruction (Super "
+                              "Resolution instead), TAA sharpening (RCAS; TAA / FSR 3.1 / DLSS SR resolve per view, "
+                              "render scale applies), the XR depth layer below render scale 1, the final pass (grain / CAS / RLVa "
+                              "sphere), FX, cel shading, reduced-resolution particles, "
+                              "the cluster LOD path (legacy meshes), the selection outline / wireframe, LL's world "
+                              "overlays + in-world text, snapshots, the overdraw stats + pass-2 pipeline statistics "
+                              "(debug)" << LL_ENDL;
+}
+
+bool LLCleanRendererVK::worldDepthForXr(VkImage& image, VkFormat& format, VkImageLayout& layout, VkExtent2D& extent,
+                                        uint32_t& layers, float& distAtZero, float& distAtOne) const
+{
+    // Needs a layered display-size depth (one layer per view); until the depth target is layered
+    // (the depth / G-buffer family, design step 6) there is none to hand out.
+    const GpuImage& d = mDepth;
+    if (mViewCount <= 1u || !d.image || d.layers < mViewCount || mScaled) return false;
+    image = d.image;
+    format = mDepthFormat;
+    layout = mDepthXrLayout;
+    extent = {mRenderW, mRenderH};
+    layers = d.layers;
+    // Reversed-Z P (column-major): P[10] = n / (f - n), P[14] = n f / (f - n) -> f = P14 / P10,
+    // n = P14 / (1 + P10). Depth 0 is the far plane, 1 the near one.
+    const float p10 = mCurProj[10], p14 = mCurProj[14];
+    if (!(std::fabs(p10) > 1e-12f)) return false;
+    distAtZero = p14 / p10;
+    distAtOne = p14 / (1.f + p10);
+    return std::isfinite(distAtZero) && std::isfinite(distAtOne) && distAtOne > 0.f;
+}
+
+// ---- #1075 step 0: FRAME HASH + RECORDED-STREAM SIGNATURE (RenderVKDebugFrameHash) ----
+namespace
+{
+uint64_t frameHashBytes(const uint8_t* p, size_t n)
+{
+    // FNV-1a 64 over 8-byte words (then the tail): a debug comparison, not a checksum standard.
+    uint64_t h = 1469598103934665603ull;
+    size_t i = 0;
+    for (; i + 8 <= n; i += 8)
+    {
+        uint64_t w;
+        std::memcpy(&w, p + i, 8);
+        h = (h ^ w) * 1099511628211ull;
+    }
+    for (; i < n; ++i) h = (h ^ p[i]) * 1099511628211ull;
+    return h;
+}
+} // namespace
+
+void LLCleanRendererVK::frameHashBegin()
+{
+    bool setting = false;
+#if defined(LL_HAS_CLEAN_PIPELINE)
+    static LLCachedControl<bool> s_hash(gSavedSettings, "RenderVKDebugFrameHash", false);
+    setting = s_hash;
+#endif
+    // An offscreen recording (snapshot) neither hashes nor harvests, but keeps the buffers and
+    // the held count: only switching the setting off frees them.
+    const bool on = setting && !mOffscreen;
+    if (mOffscreen)
+    {
+        mFrameHashOn = false;
+        return;
+    }
+    // Close the previous recording's stream signature (its marks are all recorded by now).
+    if (mFrameHashOn && mStreamSigMarks)
+    {
+        if (mStreamSig != mStreamSigLast)
+        {
+            LL_INFOS("VKFrameHash") << "FRAMESIG frame=" << (uint32_t)gFrameCount << " sig=" << std::hex << mStreamSig
+                                    << std::dec << " marks=" << mStreamSigMarks << LL_ENDL;
+            mStreamSigLast = mStreamSig;
+        }
+    }
+    mStreamSig = 1469598103934665603ull;
+    mStreamSigMarks = 0;
+    // This slot's previous readback: its submission completed (the acquire waited the slot's
+    // fence before this recording began).
+    const uint32_t s = mFrameSlot & 1u;
+    if (mHashPending[s] && mHashBuf[s].mapped)
+    {
+        mHashPending[s] = false;
+        // One hash per layer (#1075: a stereo output has one per view); each layer's run of
+        // equal values is tracked on its own.
+        const size_t layerBytes = (size_t)mHashW[s] * mHashH[s] * mHashBpp[s];
+        for (uint32_t v = 0; v < std::min(mHashLayers[s], kMaxViews); ++v)
+        {
+            const uint64_t h = frameHashBytes((const uint8_t*)mHashBuf[s].mapped + layerBytes * v, layerBytes);
+            uint32_t& held = mHashHeldV[v];
+            uint64_t& last = mHashLastV[v];
+            ++held;
+            if (h != last || (held % 600u) == 0u)
+            {
+                LL_INFOS("VKFrameHash") << "FRAMEHASH frame=" << mHashFrame[s] << " size=" << mHashW[s] << "x" << mHashH[s]
+                                        << " layer=" << v << " hash=" << std::hex << h << std::dec
+                                        << (h != last ? " (changed" : " (held") << ", previous held "
+                                        << (h != last ? held - 1u : held) << " frames)" << LL_ENDL;
+                if (h != last) held = 1;
+                last = h;
+            }
+        }
+    }
+    if (!setting && (mHashBuf[0].buffer || mHashBuf[1].buffer)) frameHashDestroy();   // (switched off: free the buffers)
+    mFrameHashOn = on;
+}
+
+void LLCleanRendererVK::recordFrameHash(VkCommandBuffer cmd, uint32_t width, uint32_t height)
+{
+    const uint32_t s = mFrameSlot & 1u;
+    if (mViewCount <= 1u)
+    {
+        // recordSwapCopy: the world image (COLOR_ATTACHMENT_OPTIMAL at this point) -> host buffer,
+        // back to COLOR_ATTACHMENT_OPTIMAL (it grows the buffer with a device idle: first use only).
+        if (!recordSwapCopy(cmd, mHashBuf[s], mHashCap[s], width, height)) return;
+        mHashLayers[s] = 1;
+        mHashBpp[s] = 4;
+    }
+    else
+    {
+        // STEREO: every layer, layer v at v x w x h x bpp bytes -- of the layered output (VR), or,
+        // when the output has one layer (the desktop debug N > 1 mode: the window shows view 0),
+        // of the linear display-size HDR the post chain read (mHdr: SHADER_READ_ONLY after the
+        // tonemap; the resolved / upscaled scene, #1075 step 10 -- so the test also runs below
+        // render scale 1), so the IPD 0 equality test (design step 8: every layer's hash equal)
+        // reads every view.
+        VkMemScope memcat(VKMEM_READBACK);
+        const bool fromScene = mOutputLayers < mViewCount;
+        const GpuImage& scene = mHdr;
+        const VkImage src = fromScene ? scene.image : mSwapImage;
+        if (!src || !width || !height || (fromScene && scene.layers < mViewCount)) return;
+        const uint32_t bpp = (fromScene && mHdrFormat == VK_FORMAT_R16G16B16A16_SFLOAT) ? 8u : 4u;
+        const VkImageLayout srcLayout = fromScene ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+                                                  : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        const uint32_t n = mViewCount;
+        const VkDeviceSize layerBytes = (VkDeviceSize)width * height * bpp, need = layerBytes * n;
+        GpuBuffer& buf = mHashBuf[s];
+        if (!buf.buffer || mHashCap[s] < need)
+        {
+            vkDeviceWaitIdle(mCtx->device());   // (debug: first use / size change)
+            if (buf.buffer) mCtx->destroyBuffer(buf);
+            buf = mCtx->createBuffer(need, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+            mHashCap[s] = buf.buffer ? need : 0;
+        }
+        if (!buf.buffer || !buf.mapped) return;
+        VkImageMemoryBarrier2 b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+        b.srcStageMask = fromScene ? (VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT)
+                                   : VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+        b.srcAccessMask = fromScene ? VK_ACCESS_2_NONE : VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+        b.dstStageMask=VK_PIPELINE_STAGE_2_COPY_BIT; b.dstAccessMask=VK_ACCESS_2_TRANSFER_READ_BIT;
+        b.oldLayout=srcLayout; b.newLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        b.image=src; b.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,n};
+        VkDependencyInfo d0{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; d0.imageMemoryBarrierCount=1; d0.pImageMemoryBarriers=&b;
+        vkCmdPipelineBarrier2(cmd,&d0);
+        VkBufferImageCopy r[kMaxViews]{};
+        for (uint32_t v = 0; v < n; ++v)
+        {
+            r[v].bufferOffset = layerBytes * v;
+            r[v].imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, v, 1};
+            r[v].imageExtent = {width, height, 1};
+        }
+        vkCmdCopyImageToBuffer(cmd, src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buf.buffer, n, r);
+        VkImageMemoryBarrier2 a = b;
+        a.srcStageMask=VK_PIPELINE_STAGE_2_COPY_BIT; a.srcAccessMask=0;
+        a.dstStageMask = fromScene ? (VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT)
+                                   : VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+        a.dstAccessMask = fromScene ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT
+                                    : (VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT|VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT);
+        a.oldLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL; a.newLayout=srcLayout;
+        VkDependencyInfo d1{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; d1.imageMemoryBarrierCount=1; d1.pImageMemoryBarriers=&a;
+        vkCmdPipelineBarrier2(cmd,&d1);
+        mHashLayers[s] = n;
+        mHashBpp[s] = bpp;
+    }
+    mHashW[s] = width;
+    mHashH[s] = height;
+    mHashFrame[s] = (uint32_t)gFrameCount;
+    mHashPending[s] = true;
+}
+
+void LLCleanRendererVK::frameHashDestroy()
+{
+    for (uint32_t s = 0; s < 2; ++s)
+    {
+        if (mHashBuf[s].buffer)
+        {
+            if (mCtx) vkDeviceWaitIdle(mCtx->device());   // (debug toggle / shutdown only)
+            mCtx->destroyBuffer(mHashBuf[s]);
+        }
+        mHashBuf[s] = GpuBuffer{};
+        mHashCap[s] = 0;
+        mHashPending[s] = false;
+    }
+    for (uint32_t v = 0; v < kMaxViews; ++v) { mHashHeldV[v] = 0; mHashLastV[v] = 0; }
 }
 
 void LLCleanRendererVK::gpuTimerMark(VkCommandBuffer cmd, uint32_t idx)
@@ -50993,6 +52807,7 @@ void LLCleanRendererVK::gpuTimerMark(VkCommandBuffer cmd, uint32_t idx)
     if (idx < sizeof(kStageCrumb) / sizeof(kStageCrumb[0])) vkBreadcrumb(cmd, kStageCrumb[idx]);
     if (idx == TS_COUNT - 1 && mRigTsRec) rigGpuTimeMark(cmd, nullptr, 1);   // #613: the frame's GPU span ends
     if (!mTsOn || !mTsPool || idx >= TS_COUNT) return;
+    if (mMvViews > 1u) return;   // #1075: inside a multiview scope it would overwrite idx + 1 .. (never on the desktop)
     if (mTsLean && idx != 0 && idx != TS_COUNT - 1) return;   // lean: the frame total only
     vkCmdWriteTimestamp2(cmd, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, mTsPool, idx);
 }
@@ -51101,6 +52916,7 @@ void LLCleanRendererVK::rigGpuTimeBegin(VkCommandBuffer cmd)
 void LLCleanRendererVK::rigGpuTimeMark(VkCommandBuffer cmd, const char* name, int kind)
 {
     if (!mRigTsRec) return;
+    if (mMvViews > 1u) return;   // #1075: a multiview scope would take N queries (never on the desktop)
     if (kind < 0)
     {
         // graphics queue only (timestamps of two queues are not comparable)
@@ -51217,6 +53033,7 @@ bool LLCleanRendererVK::buildOverdrawPipes()
             d.frag = mode ? ezf : fs;
             d.depthWrite = mode == 0;
             d.depthCompare = mode ? VK_COMPARE_OP_EQUAL : VK_COMPARE_OP_LESS_OR_EQUAL;
+            d.relaxedDepthCompare = VK_COMPARE_OP_LESS_OR_EQUAL;   // (#1088: as the LIT_EQ twins)
             for (int i = 0; i < 2; ++i)
             {
                 d.cullMode = cm[i];
@@ -51367,7 +53184,9 @@ bool LLCleanRendererVK::clusterLodOn() const
 {
 #if defined(LL_HAS_CLEAN_PIPELINE)
     static LLCachedControl<bool> s_on(gSavedSettings, "RenderVKClusterLOD", false);
-    return s_on && mCluster && mCluster->ready();
+    // (#1075: the cluster path's main-view draws are not multiview -- its mesh tier needs
+    //  multiviewMeshShader, design §2: stereo sessions draw every mesh through the legacy path)
+    return s_on && mCluster && mCluster->ready() && !stereoActive();
 #else
     return false;
 #endif
@@ -51749,7 +53568,8 @@ uint32_t LLCleanRendererVK::clusterCullMain(VkCommandBuffer cmd, const VKCullPus
     // <GMDX> The avatars render type (Develop > Render Types, the region map capture) also covers
     // the avatars on the cluster path: the legacy cull's bit 4 never reaches them.
     if (!gPipeline.hasRenderType(LLPipeline::RENDER_TYPE_AVATAR)) v.flags |= CLV_NO_RIGGED;
-    if (mOrtho) v.flags |= CLV_ORTHO;   // <GMDX> region map capture: px_scale is px per metre
+    if (mOrtho || mOrthoView) v.flags |= CLV_ORTHO;   // <GMDX> region map capture / orthographic view: px_scale is px per metre
+    if (mSnapMatte) v.flags |= CLV_AVATARS_ONLY;      // <GMDX> avatar matte snapshot (as the legacy cull's kCullAvatarsOnly)
     v.role = CLROLE_MAIN;
     std::memcpy(v.view_proj, dp.view_proj, sizeof(v.view_proj));
     std::memcpy(v.planes, push.frustum_planes, sizeof(v.planes));

@@ -126,6 +126,9 @@ public:
     virtual void move(LLFolderViewModelItem* new_parent_bridge) {}
     virtual bool isItemCopyable(bool can_copy_as_link = true) const { return false; }
     virtual bool copyToClipboard() const;
+    // True if "Copy" may be offered: the item is copyable, or it is a link whose target
+    // can go on the clipboard (copying a link puts its TARGET there, see copyToClipboard()).
+    bool canCopyToClipboard() const override;
     virtual bool cutToClipboard();
     virtual bool isCutToClipboard();
     virtual bool isClipboardPasteable() const;

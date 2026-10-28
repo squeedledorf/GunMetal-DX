@@ -29,6 +29,7 @@
 
 #include "gmdxloadouts.h" // <GMDX> Equipment / Loadouts / Outdated shown as system folders
 #include "gmdxregioncapture.h" // <GMDX> Use as Region Map
+#include "gmdxtoolbarpins.h" // <GMDX> Pin to Toolbar
 
 // external projects
 #include "lltransfersourceasset.h"
@@ -46,6 +47,7 @@
 #include "llfloatermarketplacelistings.h"
 #include "llfloatersidepanelcontainer.h"
 #include "llsidepanelinventory.h"
+#include "slwearablefavorites.h"
 #include "llfloaterworldmap.h"
 #include "llfolderview.h"
 #include "llfriendcard.h"
@@ -398,10 +400,59 @@ bool LLInvFVBridge::perform_cutToClipboard()
     return false;
 }
 
+// The target of an item link (AT_LINK) whose target exists, else null. Folder links and broken
+// links resolve to null and keep the plain copy behaviour.
+static const LLViewerInventoryItem* get_item_link_target(const LLUUID& link_id)
+{
+    const LLViewerInventoryItem* link = gInventory.getItem(link_id);
+    if (!link || link->getActualType() != LLAssetType::AT_LINK)
+    {
+        return nullptr;
+    }
+    const LLViewerInventoryItem* target = gInventory.getItem(link->getLinkedUUID());
+    if (!target || target->getIsLinkType())
+    {
+        return nullptr;
+    }
+    return target;
+}
+
+bool LLInvFVBridge::canCopyToClipboard() const
+{
+    if (isItemCopyable())
+    {
+        return true;
+    }
+    // A link copies as its target. That is allowed even when the target is worn or no-copy:
+    // only "Paste As Link" can then use it (isClipboardPasteable() re-checks the TARGET with
+    // isItemCopyable(false), so a plain "Paste" is never offered for such a target).
+    static LLCachedControl<bool> inventory_linking(gSavedSettings, "InventoryLinking", true);
+    const LLViewerInventoryItem* target = get_item_link_target(mUUID);
+    return target && inventory_linking && LLAssetType::lookupCanLink(target->getType());
+}
+
 bool LLInvFVBridge::copyToClipboard() const
 {
     const LLInventoryObject* obj = gInventory.getObject(mUUID);
-    if (obj && isItemCopyable())
+    if (!obj)
+    {
+        return false;
+    }
+    // Copy on a link puts its TARGET on the clipboard, so Paste / Paste As Link act as if the
+    // original had been copied (no "Show Original" first). Cut is unchanged: it moves the link.
+    if (const LLViewerInventoryItem* target = get_item_link_target(mUUID))
+    {
+        if (!canCopyToClipboard())
+        {
+            return false;
+        }
+        if (LLClipboard::instance().isOnClipboard(target->getUUID()))
+        {
+            return true; // link and original both selected: one entry
+        }
+        return LLClipboard::instance().addToClipboard(target->getUUID());
+    }
+    if (isItemCopyable())
     {
         return LLClipboard::instance().addToClipboard(mUUID);
     }
@@ -900,7 +951,7 @@ void LLInvFVBridge::getClipboardEntries(bool show_asset_id,
             items.push_back(std::string("Copy Separator"));
         }
         items.push_back(std::string("Copy"));
-        if (!isItemCopyable())
+        if (!canCopyToClipboard())
         {
             disabled_items.push_back(std::string("Copy"));
         }
@@ -930,6 +981,19 @@ void LLInvFVBridge::getClipboardEntries(bool show_asset_id,
             {
                 disabled_items.push_back(std::string("Add to Favorites"));
             }
+        }
+
+        // <GMDX> an item or folder of the agent's inventory as a toolbar button (gmdxtoolbarpins.cpp)
+        if (is_agent_inventory && GMDXToolbarPins::canPin(mUUID))
+        {
+            items.push_back(std::string("Pin to Toolbar"));
+        }
+        // </GMDX>
+        // Favorite Wearables (#1132): wearables, body parts and attachments, links resolve to their original
+        if (is_agent_inventory && !isItemInTrash() && SLWearableFavorites::canFavorite(mUUID))
+        {
+            items.push_back(std::string(SLWearableFavorites::isFavorite(mUUID)
+                ? "Remove from Favorite Wearables" : "Add to Favorite Wearables"));
         }
 
         if (obj->getIsLinkType())
@@ -2682,6 +2746,29 @@ bool LLFolderBridge::isItemCopyable(bool can_copy_as_link) const
 
 bool LLFolderBridge::isClipboardPasteable() const
 {
+    // A copied item pasted into an outfit becomes a link (dropToOutfit), so the item only has to
+    // be linkable there, not copyable: worn and no-copy items can be pasted into an outfit.
+    const LLViewerInventoryCategory* dest = getCategory();
+    if (dest && dest->getPreferredType() == LLFolderType::FT_OUTFIT && !LLClipboard::instance().isCutMode())
+    {
+        LLInventoryModel* model = getInventoryModel();
+        if (!model || !isClipboardPasteableAsLink())
+        {
+            return false;
+        }
+        std::vector<LLUUID> objects;
+        LLClipboard::instance().pasteFromClipboard(objects);
+        for (const auto& obj_id : objects)
+        {
+            LLViewerInventoryItem* item = model->getItem(obj_id);
+            if (!item || !can_move_to_outfit(item, false))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
     if ( ! LLInvFVBridge::isClipboardPasteable() )
         return false;
 
@@ -4836,6 +4923,13 @@ void LLFolderBridge::buildContextMenuOptions(U32 flags, menuentry_vec_t&   items
                 // Want some but not all of the items from getClipboardEntries for outfits.
                 items.push_back(std::string("Rename"));
                 items.push_back(std::string("thumbnail"));
+                // Paste into an outfit adds links (dropToOutfit), so it is offered whenever the
+                // clipboard holds items that can be linked in, see isClipboardPasteable().
+                items.push_back(std::string("Paste"));
+                if (!isClipboardPasteable() || ((flags & FIRST_SELECTED_ITEM) == 0))
+                {
+                    disabled_items.push_back(std::string("Paste"));
+                }
 
                 addInventoryFavoritesMenuOptions(items);
                 addDeleteContextMenuOptions(items, disabled_items);
@@ -4995,6 +5089,14 @@ void LLFolderBridge::buildContextMenuOptions(U32 flags, menuentry_vec_t&   items
             disabled_items.push_back(std::string("Share"));
         }
     }
+
+    // <GMDX> every folder, system ones (Clothing, Current Outfit, My Outfits...) and outfits too, not
+    // only those whose menu has the clipboard entries
+    if (isAgentInventory() && GMDXToolbarPins::canPin(mUUID))
+    {
+        items.push_back(std::string("Pin to Toolbar"));
+    }
+    // </GMDX>
 
 
 

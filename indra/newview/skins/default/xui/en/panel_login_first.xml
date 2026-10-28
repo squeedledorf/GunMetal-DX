@@ -198,6 +198,16 @@
             width="200">
             Forgotten password
           </text>
+          <button
+            follows="left|top"
+            font="SansSerifMedium"
+            label="Start in VR"
+            tool_tip="Restart Slipstream in VR (beta) through your VR runtime, e.g. SteamVR. Without a headset it starts on the desktop again."
+            name="start_vr_btn"
+            left="42"
+            top="56"
+            width="110"
+            height="22" />
         </layout_panel>
         <layout_panel
           height="100"

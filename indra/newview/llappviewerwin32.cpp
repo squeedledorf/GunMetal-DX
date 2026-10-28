@@ -88,8 +88,10 @@ static void exceptionTerminateHandler()
     // reinstall default terminate() handler in case we re-terminate.
     if (gOldTerminateHandler) std::set_terminate(gOldTerminateHandler);
     // treat this like a regular viewer crash, with nice stacktrace etc.
-    long *null_ptr;
-    null_ptr = 0;
+    // <GMDX> SoapStorm 035af4bc62: volatile, so the compiler cannot treat the null store as
+    // undefined behaviour and drop it (or turn it into a trap) instead of faulting here.
+    volatile long *null_ptr = nullptr;
+    // </GMDX>
     *null_ptr = 0xDEADBEEF; //Force an exception that will trigger breakpad.
 
     // we've probably been killed-off before now, but...
@@ -648,6 +650,7 @@ bool LLAppViewerWin32::initParseCommandLine(LLCommandLineParser& clp)
     {
         return false;
     }
+    setLaunchArgs(std::vector<std::string>(), mCmdLine);   // #1074: kept for Start in VR's restart
 
     // Find the system language.
     FL_Locale *locale = NULL;

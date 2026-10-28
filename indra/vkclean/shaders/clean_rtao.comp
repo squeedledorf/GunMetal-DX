@@ -111,7 +111,7 @@ void rtaoSetFootprint(vec3 P, vec3 Ng, vec3 cam)
     rt_foot_on = false;
     const vec3 toC = cam - P;
     const float camd = length(toC);
-    const float p11 = length(vec3(ssr.taa_cur_vp[0][1], ssr.taa_cur_vp[1][1], ssr.taa_cur_vp[2][1]));
+    const float p11 = length(vec3(ssr.views[CLEAN_VIEW].taa_cur_vp[0][1], ssr.views[CLEAN_VIEW].taa_cur_vp[1][1], ssr.views[CLEAN_VIEW].taa_cur_vp[2][1]));
     if (camd < 1e-4 || p11 < 1e-6 || ssr.mirror_params.z <= 0.0) return;
     const vec3 V = toC / camd;
     vec3 N = Ng;
@@ -161,7 +161,7 @@ void main()
 
     // View -> camera-relative world (the view is a rotation about the eye) -> absolute
     // agent space, the TLAS's (ssr.cam_origin: this recording's eye).
-    const mat3 v2w = transpose(mat3(ssr.cur_view));
+    const mat3 v2w = transpose(mat3(ssr.views[CLEAN_VIEW].cur_view));
     const vec3 vpos = viewPos(tc, d);
     const vec3 cam = ssr.cam_origin.xyz;
     const vec3 rel = v2w * vpos;

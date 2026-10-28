@@ -737,6 +737,41 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 (libwebp also comes with an additional patent grant from Google; see the PATENTS
 file in the libwebp source release.)
 
+==========================
+whisper.cpp / ggml License
+==========================
+
+VR dictation (local speech-to-text) uses whisper.cpp 1.9.5 and the ggml library it
+contains (https://github.com/ggml-org/whisper.cpp), built from the upstream source
+release (CPU backend only).
+
+MIT License
+
+Copyright (c) 2023-2026 The ggml authors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+The speech recognition models are not part of Slipstream: they are downloaded
+on first use, with your consent. They are OpenAI's Whisper models
+(https://github.com/openai/whisper, Copyright (c) 2022 OpenAI, MIT License) in
+the ggml format published with whisper.cpp.
+
 ==================
 ReShade FX License
 ==================
@@ -801,6 +836,30 @@ PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIG
 HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF
 CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE MATERIALS
 OR THE USE OR OTHER DEALINGS IN THE MATERIALS.
+
+======================
+OpenXR Headers License
+======================
+
+VR support uses the OpenXR API headers of the Khronos Group (OpenXR SDK 1.1.60,
+https://github.com/KhronosGroup/OpenXR-SDK), dual-licensed Apache-2.0 OR MIT and used here
+under the Apache License 2.0 (full text: indra/newview/vkgfx/third_party/openxr/LICENSE.txt
+in the source). The OpenXR loader and runtime are not part of Slipstream: the viewer loads
+the loader installed on the system, only when VR is turned on.
+
+Copyright 2017-2026 The Khronos Group Inc.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    https://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
 
 ==========================================
 SweetFX and prod80 starter effects (MIT)

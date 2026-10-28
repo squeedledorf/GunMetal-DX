@@ -98,6 +98,7 @@ public:
         SO_FOLDERS_BY_NAME = 0x1 << 1,      // Force folder sort by name
         SO_SYSTEM_FOLDERS_TO_TOP = 0x1 << 2,// Force system folders to be on top
         SO_FOLDERS_BY_WEIGHT = 0x1 << 3,    // Force folder sort by weight, usually, amount of some elements in their descendants
+        SO_WEARABLE_KIND = 0x1 << 4,                 // Sort items by wearable kind (body parts, clothing by type, attachments), then name (#1132)
     };
 
     enum ESearchType

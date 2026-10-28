@@ -309,6 +309,7 @@ them was reachable from any UI before this; they were Debug Settings only.
 				 name="meteors_enable"
 				 tool_tip="Procedural meteor streaks, drawn on the client only, on the same night gate as the stars they cross."
 				 control_name="RenderMeteorsEnabled" />
+				<!-- <GMDX> max_val 56 (was 64): the night sky takes the meteor block's top slots (gmdxnightsky.h kSpaceSlots) -->
 				<slider
 				 follows="left|top|right"
 				 layout="topleft"
@@ -321,11 +322,11 @@ them was reachable from any UI before this; they were Debug Settings only.
 				 decimal_digits="0"
 				 increment="1"
 				 min_val="0"
-				 max_val="64"
+				 max_val="56"
 				 text_width="56"
 				 can_edit_text="true"
 				 name="meteor_max_count"
-				 tool_tip="How many streaks may be in the sky together. 64 is the ceiling because the vertex buffer is sized for it once and never reallocated."
+				 tool_tip="How many streaks may be in the sky together. 56 is the ceiling: the sky's parameter block holds that many (the GunMetal-DX night sky uses the rest)."
 				 enabled_control="RenderMeteorsEnabled"
 				 control_name="RenderMeteorMaxCount" />
 				<button

@@ -36,6 +36,8 @@
 #include "v3dmath.h"
 #include "llcriticaldamp.h"
 
+#include <cmath>
+
 //-----------------------------------------------------------------------------
 // Constants
 //-----------------------------------------------------------------------------
@@ -223,6 +225,14 @@ bool LLHeadRotMotion::onUpdate(F32 time, U8* joint_mask)
             LLVector3 up(headLookAt % left);
 
             targetHeadRotWorld = LLQuaternion(headLookAt, left, up);
+
+            // Slipstream (#1121): a head tilt (VR headsets) about the look axis, applied first,
+            // so the neck / head split below carries it like the turn. Absent or zero: unchanged.
+            const F32* roll = (const F32*)mCharacter->getAnimationData(LLCharacter::ANIM_DATA_LOOK_AT_ROLL);
+            if (roll && *roll != 0.f && std::isfinite(*roll))
+            {
+                targetHeadRotWorld = LLQuaternion(llclamp(*roll, -F_PI_BY_TWO, F_PI_BY_TWO), LLVector3::x_axis) * targetHeadRotWorld;
+            }
         }
     }
     else

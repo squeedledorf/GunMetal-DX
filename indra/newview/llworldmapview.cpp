@@ -29,6 +29,7 @@
 #include "llworldmapview.h"
 
 #include "gmdxregioncapture.h"   // <GMDX> captured maps on the World Map
+#include "gmdxmapshare.h"        // <GMDX> pings on the World Map
 
 #include "indra_constants.h"
 #include "llui.h"
@@ -682,6 +683,7 @@ void LLWorldMapView::draw()
     {
         drawAgents();
     }
+    GMDXMapShare::drawWorldMap(this);   // <GMDX> pings shared with me (gmdxmapshare.h)
 
     // Always draw tracking information
     LLTracker::ETrackingStatus tracking_status = LLTracker::getTrackingStatus();

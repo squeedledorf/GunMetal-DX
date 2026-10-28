@@ -413,6 +413,18 @@ void LLHUDNameTag::renderText()
 
             text_color = segment_iter->mColor;
             text_color.mV[VALPHA] *= alpha_factor;
+            // <GMDX> chat text gets a soft dark outline so it reads over bright backgrounds. Bold (shout)
+            // ignores font shadows, so it gets a drawn one.
+            if (gmdx_bubble)
+            {
+                shadow = LLFontGL::DROP_SHADOW_SOFT;
+                if (style & LLFontGL::BOLD)
+                {
+                    hud_render_text(segment_iter->getText(), render_position, *fontp, style, LLFontGL::NO_SHADOW,
+                                    x_offset + 1.f, y_offset - 1.f, LLColor4(0.f, 0.f, 0.f, 0.7f * text_color.mV[VALPHA]), false);
+                }
+            }
+            // </GMDX>
 
             hud_render_text(segment_iter->getText(), render_position, *fontp, style, shadow, x_offset, y_offset, text_color, false);
         }

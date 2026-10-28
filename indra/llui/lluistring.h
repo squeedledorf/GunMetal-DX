@@ -64,6 +64,35 @@ public:
     LLUIString(const LLWString& instring) : mArgs(NULL) { assign(instring); }
     ~LLUIString() { delete mArgs; }
 
+    // mArgs is owned: copies must deep-copy it. The implicit (shallow) copy shared the
+    // pointer, so both copies deleted the same map (double free on destruction), e.g.
+    // LLButton::setLabel()'s `mUnselectedLabel = mSelectedLabel = label` after a
+    // setLabelArg() had given the labels their own argument maps.
+    LLUIString(const LLUIString& other)
+        : mOrig(other.mOrig)
+        , mResult(other.mResult)
+        , mWResult(other.mWResult)
+        , mArgs(other.mArgs ? new LLStringUtil::format_map_t(*other.mArgs) : nullptr)
+        , mNeedsResult(other.mNeedsResult)
+        , mNeedsWResult(other.mNeedsWResult)
+    {
+    }
+    LLUIString& operator=(const LLUIString& other)
+    {
+        if (this != &other)
+        {
+            LLStringUtil::format_map_t* args = other.mArgs ? new LLStringUtil::format_map_t(*other.mArgs) : nullptr;
+            delete mArgs;
+            mArgs = args;
+            mOrig = other.mOrig;
+            mResult = other.mResult;
+            mWResult = other.mWResult;
+            mNeedsResult = other.mNeedsResult;
+            mNeedsWResult = other.mNeedsWResult;
+        }
+        return *this;
+    }
+
     void assign(const std::string& instring);
     void assign(const LLWString& instring);
     LLUIString& operator=(const std::string& s) { assign(s); return *this; }

@@ -67,11 +67,11 @@ layout(set = 0, binding = 3) uniform sampler2D uNormal;  // pre-pass normals (oc
 // normal pre-pass target (view-space oct, below); true = the deferred G-buffer's G1
 // (clean_gbuffer.glsl: xy oct WORLD shading normal, zw oct WORLD Ng -- the oriented smooth
 // interpolated vertex normal, the same value the pre-pass writes to .zw), rotated to view
-// space with the frame's world -> view (binding 9, the frame-info block: ssr.cur_view, the
+// space with the frame's world -> view (binding 9, the frame-info block: ssr.views[CLEAN_VIEW].cur_view, the
 // same rotation clean_prepass_normal.frag applies). Deferred frames then pre-pass depth
 // only, and AO runs after the G-buffer pass.
 layout(constant_id = 0) const bool kAoGbufNormals = false;
-#include "clean_frame_info.glsl"   // ssr.cur_view (binding 9)
+#include "clean_frame_info.glsl"   // ssr.views[CLEAN_VIEW].cur_view (binding 9)
 // Linear view-depth MIP chain (modes 6-7; clean_ao_depth.comp). When the chain is not
 // allocated the host binds the pre-pass depth here (valid, never read by modes 0-3).
 layout(set = 0, binding = 4) uniform sampler2D uViewZ;
@@ -692,8 +692,8 @@ float blurHalf(ivec2 q, ivec2 dir)
 //   * REPROJECTION (the RT mask's convention, clean_rt_mask_common.glsl rtMaskPrevPx): the
 //     receiver -- this texel's pixel (half grid: its representative, repPixel) -- rebuilt from
 //     the pre-pass depth with the frame's jitter taken out (as worldAt), camera-relative
-//     world P = transpose(mat3(ssr.cur_view)) * view, last frame's unjittered render px
-//     through ssr.taa_prev_vp, or along the pre-pass motion vector where this frame wrote one
+//     world P = transpose(mat3(ssr.views[CLEAN_VIEW].cur_view)) * view, last frame's unjittered render px
+//     through ssr.views[CLEAN_VIEW].taa_prev_vp, or along the pre-pass motion vector where this frame wrote one
 //     (skinned avatars, moved prims). The host keeps the temporal plumbing on for this
 //     (ensureTemporal: aoWantsTemporal), so taa_prev_vp is real without TAA / FSR too.
 //   * DISOCCLUSION: 2 x 2 bilinear taps of last frame's AO grid, each kept only when its
@@ -797,14 +797,14 @@ void aoTemporal(ivec2 q, bool halfGrid)
     {
         vec2 tc = (vec2(fp) + 0.5) * pc.screen.zw;
         if (ssr.taa_params.w > 0.5) tc -= ssr.taa_jitter.zw * 0.5;   // jitter (NDC) out, as worldAt
-        const vec3 P = transpose(mat3(ssr.cur_view)) * viewPos(tc, d);   // camera-relative (#555)
-        const vec4 c = ssr.taa_prev_vp * vec4(P, 1.0);
+        const vec3 P = transpose(mat3(ssr.views[CLEAN_VIEW].cur_view)) * viewPos(tc, d);   // camera-relative (#555)
+        const vec4 c = ssr.views[CLEAN_VIEW].taa_prev_vp * vec4(P, 1.0);
         if (c.w > 1e-4)
         {
             vec2 prpx = (c.xy / c.w * 0.5 + 0.5) * pc.screen.xy;
             if (ssr.taa_params.y > 0.5)   // object motion (as rtMaskPrevPx)
             {
-                const vec4 k = ssr.taa_cur_vp * vec4(P, 1.0);
+                const vec4 k = ssr.views[CLEAN_VIEW].taa_cur_vp * vec4(P, 1.0);
                 if (k.w > 1e-4)
                     prpx = ((k.xy / k.w * 0.5 + 0.5) - texelFetch(uMotion, fp, 0).xy) * pc.screen.xy;
             }

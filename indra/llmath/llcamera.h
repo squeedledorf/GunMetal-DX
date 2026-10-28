@@ -44,7 +44,10 @@ constexpr F32 MAX_FAR_PLANE     = 100000.0f; //1000000.0f; // Max allowed. Not g
 constexpr F32 MAX_FAR_CLIP      = 512.0f;
 
 constexpr F32 MIN_ASPECT_RATIO  = 0.02f;
-constexpr F32 MIN_NEAR_PLANE    = 0.1f;
+// <GMDX> Was 0.1f, which setNear() clamps to (SoapStorm 3b3d9f0154): LLViewerCamera::updateNearClip
+// pulls the near plane in with the alt-cam focus distance so the camera can get right up against a
+// surface. Only widens what is permitted; nothing passes this as a value.
+constexpr F32 MIN_NEAR_PLANE    = 0.01f;
 constexpr F32 MIN_FAR_PLANE     = 0.2f;
 
 // Min/Max FOV values for square views. Call getMin/MaxView to get extremes based on current aspect ratio.

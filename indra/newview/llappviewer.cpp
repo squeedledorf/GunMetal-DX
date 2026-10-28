@@ -48,6 +48,7 @@
 #include "llworldclock.h"
 
 #include "fsradar.h"
+#include "fsrmbscript.h" // <GMDX>
 #include "llthreadaffinity.h"
 #include "llcleandebug.h"   // CLEAN_DEBUG gate for #FrameProf idle-vs-display timing
 
@@ -103,6 +104,12 @@
 #include "llviewerwindow.h"
 #include "llfloater.h"
 #include "vkgfx/llvulkancontext.h"    // EXPERIMENTAL Vulkan integration
+#include "vkgfx/llxrsession.h"        // #1073 VR (OpenXR, startup-only; inert unless chosen)
+#include "llvrcamera.h"                // #1074 VR head-tracked camera (inert unless VR runs)
+#include "llvrinput.h"                 // #1076 VR controllers, UI wall (inert unless VR runs)
+#include "llvraudio.h"                 // #1122 VR headset audio devices (inert unless VR runs)
+#include "llvrdictation.h"             // #1118 VR dictation (inert unless used in VR)
+#include "llspeechtotext.h"            // #1118 dictation engine (nothing starts until used)
 #include "vkgfx/vk_pipeline.h"         // #462 vkSetPipelineCompileThreads
 #include "vk_world_shaders_hash.h"  // embedded shader content hash (pipeline-cache build tag; generated at build time)
 #include "llcleancursorpick.h"             // GPU raster cursor pick request (#702)
@@ -135,6 +142,7 @@
 #include "llviewertexture.h"          // VK synth-test: checkerboard texture injection
 #include "llimage.h"                  // LLImageRaw (synth checkerboard pixels)
 #include "llmemorygovernor.h"          // RAM #262: system memory governor
+#include <algorithm>                  // #1074 std::find (relaunch arguments)
 #include <cmath>                      // EXPERIMENTAL Vulkan: world MVP/frustum math
 #include <chrono>                     // RenderFPSLimit pacing
 #include <filesystem>
@@ -296,6 +304,8 @@
 #include "llselectmgr.h"
 #include "gmdxselectionoutline.h"   // <GMDX>
 #include "gmdxregioncapture.h"      // <GMDX> region map capture
+#include "gmdxsnapshotavatars.h"      // <GMDX> snapshot avatar layers
+#include "gmdxnightlight.h"           // <GMDX> physical night
 #include "llpanelobjectlinks.h"
 #include "lltrans.h"
 #include "lltransutil.h"
@@ -1073,6 +1083,24 @@ bool LLAppViewer::init()
     // ends the process; it replaces LLWinDebug's Slipstream.dmp).
     GMDXCrashReport::start();
 
+    // #1073 VR (startup only): with SlipstreamVREnabled / --vr, probe the OpenXR runtime on a
+    // worker now (loader, xrCreateInstance -- seconds when it brings SteamVR up -- and the
+    // headset), joined before the Vulkan context is created. Off: nothing is loaded or started.
+    if (gSavedSettings.getBOOL("SlipstreamVREnabled"))
+    {
+        LLXrSession::Config xc;
+#if LL_WINDOWS
+        xc.viewerLibDir = gDirUtilp->getExecutableDir();
+#else
+        xc.viewerLibDir = gDirUtilp->getExecutableDir() + gDirUtilp->getDirDelimiter() + ".." +
+                          gDirUtilp->getDirDelimiter() + "lib";
+#endif
+        xc.appVersion = LLVersionInfo::instance().getVersion();
+        xc.renderScale = gSavedSettings.getF32("SlipstreamVRRenderScale");   // #1074
+        xc.stereo = gSavedSettings.getBOOL("SlipstreamVRStereo");             // #1075 (startup)
+        LLXrSession::instance().startProbe(xc);
+    }
+
     // Log volume: telemetry tags quiet unless SlipstreamVerboseLogging (live).
     {
         extern void slipstreamApplyLogVerbosity();
@@ -1381,7 +1409,12 @@ bool LLAppViewer::init()
     gSimLastTime = gRenderStartTime.getElapsedTimeF32();
     gSimFrames = (F32)gFrameCount;
 
-    if (gSavedSettings.getBOOL("JoystickEnabled"))
+    // <GMDX> SoapStorm c798038fa5 (Nexii): also init when a device is pinned but the enable got
+    // cleared, so a config an older build latched off recovers by itself. String id on Windows
+    // (old format), map otherwise.
+    const LLSD joystick_id = gSavedSettings.getLLSD("JoystickDeviceUUID");
+    if (gSavedSettings.getBOOL("JoystickEnabled") || joystick_id.isMap() || !joystick_id.asString().empty())
+    // </GMDX>
     {
         LLViewerJoystick::getInstance()->init(false);
     }
@@ -1953,8 +1986,21 @@ bool LLAppViewer::doFrame()
     // attributed to this frame (vk_paceWait) like vk_acquireWait was.
     {
         static LLCachedControl<bool> s_pacing(gSavedSettings, "RenderVKFramePacing", true);
-        if (s_pacing && !LLApp::isExiting() && LLVulkanContext::instance().isInitialized())
+        // #1073 VR: while an OpenXR session runs, xrWaitFrame + xrBeginFrame ARE the pacing
+        // (mandatory, whatever RenderVKFramePacing says); otherwise (no session running, and
+        // always on the desktop, where active() is false) the frame-slot wait as before.
+        // #1074: after xrWaitFrame the frame slot is waited here too (whatever
+        // RenderVKFramePacing says), so a VR frame's simulation starts once the GPU freed its
+        // slot instead of stalling mid-frame in the acquire (or, with the mirror window
+        // minimised, in the window-less frame's fence wait).
+        bool xr_paced = false;
+        if (LLXrSession::active() && !LLApp::isExiting() && LLVulkanContext::instance().isInitialized())
+            xr_paced = LLXrSession::instance().waitFrame();
+        if ((xr_paced || s_pacing) && !LLApp::isExiting() && LLVulkanContext::instance().isInitialized())
             LLVulkanContext::instance().waitFrameSlot();
+        // #1122: audio follows the headset while the session runs (moves on its start / stop
+        // edges, restores on stop or loss). Desktop: active() is false, one bool compare.
+        LLVRAudio::update(LLXrSession::active() && LLXrSession::instance().sessionRunning());
     }
 
     {
@@ -2086,6 +2132,10 @@ bool LLAppViewer::doFrame()
                     // Hold the crouch toggle (Shift+C) for this frame.
                     gAgent.updateCrouch();
                 }
+                // #1076 VR: the controllers (UI wall, pointer, locomotion) -- outside the gate
+                // above (the mirror window may be unfocused or minimised while you are in the
+                // headset), before idle() sends the agent update. No-op without VR.
+                LLVRInput::update();
             }
 
             // Update state based on messages, user input, object idle.
@@ -2204,7 +2254,12 @@ bool LLAppViewer::doFrame()
             // "Background" = window hidden/minimized or the app does not have focus (same test
             // the legacy BackgroundYieldTime path has always used). Not applied while quitting
             // (causes trouble at mac's cleanup stage).
-            const bool in_background = !LLApp::isExiting()
+            // #1073 VR: while an OpenXR session runs, xrWaitFrame is the only pacing: the window
+            // losing focus (headset on, SteamVR's window) must not drop the headset to the
+            // background rate, and RenderFPSLimit must not cap it below the display. Desktop:
+            // active() is false.
+            const bool xr_running = LLXrSession::active() && LLXrSession::instance().sessionRunning();
+            const bool in_background = !LLApp::isExiting() && !xr_running
                 && ((gViewerWindow && !gViewerWindow->getWindow()->getVisible())
                     || !gFocusMgr.getAppHasFocus());
 
@@ -2217,7 +2272,7 @@ bool LLAppViewer::doFrame()
             {
                 using clock = std::chrono::steady_clock;
                 static clock::time_point s_deadline{};
-                S32 limit = fps_limit;
+                S32 limit = xr_running ? 0 : (S32)fps_limit;
                 const S32 bg_limit = in_background ? (S32)bg_fps_limit : 0;
                 const bool bg_paced = bg_limit > 0 && (limit <= 0 || bg_limit < limit);
                 if (bg_paced)
@@ -2447,6 +2502,11 @@ bool LLAppViewer::cleanup()
     }
 #endif
 
+    // #1074 VR: end the OpenXR session and destroy the XrInstance now, after the last frame
+    // and while logging runs (the headset returns to the runtime's home at once). Also after
+    // a VR refusal past the device hooks (the XrInstance exists). Returns at once without VR.
+    LLVulkanContext::instance().shutdownXr();
+
     // Kill off LLLeap objects. We can find them all because LLLeap is derived
     // from LLInstanceTracker.
     LLLeap::instance_snapshot().deleteAll();
@@ -2530,6 +2590,13 @@ bool LLAppViewer::cleanup()
     LL_INFOS() << "Global stuff deleted" << LL_ENDL;
 
     SLStreamInfo::deleteSingleton();
+
+    // #1118: dictation's worker (and its model) and a capture device go first. Nothing if
+    // dictation was never used.
+    LLSpeechToText::shutdown();
+    // #1122: a VR session still running at quit puts the audio devices (and a sound card profile
+    // it switched) back while the engine still exists. Nothing without a session.
+    LLVRAudio::shutdown();
 
     if (gAudiop)
     {
@@ -4112,6 +4179,13 @@ bool sGpuLostAppStateDone = false;   // main-thread state written
 bool sGpuLostExitStarted = false;
 bool sRelaunchAfterExit = false;
 std::string sRelaunchExe;
+std::vector<std::string> sRelaunchArgs;   // #1073 (e.g. "--vr")
+std::string sRelaunchRawTail;             // #1074 Windows: the original command line, verbatim
+std::string sRelaunchWhy = "after the graphics device loss";
+// #1074: the command line this process started with (Start in VR keeps it). POSIX: argv[1..];
+// Windows: WinMain's command line string.
+std::vector<std::string> sLaunchArgs;
+std::string sLaunchCmdLine;
 // Focus history (#209: the loss happened while the viewer was in the background).
 bool sVkFocusKnown = false;
 bool sVkFocusLast = true;
@@ -4241,12 +4315,15 @@ bool gpuLostAskRestart()
 
 // Starts a new viewer process (end of cleanup(), markers removed, log closed). No LLProcess:
 // it depends on the mainloop event pump, which cleanup() has torn down.
-void relaunchViewer(const std::string& exe)
+// rawTail (Windows only, #1074): the original command line, passed on verbatim before `args`.
+void relaunchViewer(const std::string& exe, const std::vector<std::string>& args, const std::string& rawTail)
 {
     if (exe.empty()) return;
 #if LL_WINDOWS
     const std::wstring wexe = ll_convert_string_to_wide(exe);
     std::wstring cmd = L"\"" + wexe + L"\"";
+    if (!rawTail.empty()) cmd += L" " + ll_convert_string_to_wide(rawTail);
+    for (const std::string& a : args) cmd += L" \"" + ll_convert_string_to_wide(a) + L"\"";
     std::vector<wchar_t> cmdbuf(cmd.begin(), cmd.end());
     cmdbuf.push_back(L'\0');
     STARTUPINFOW si;
@@ -4260,17 +4337,22 @@ void relaunchViewer(const std::string& exe)
         CloseHandle(pi.hProcess);
     }
 #else
+    (void)rawTail;   // (POSIX: the original arguments arrive in `args`)
     // The environment (LD_LIBRARY_PATH from the launcher script) and the working directory
     // are inherited. Bounded fd sweep: RLIMIT_NOFILE can be enormous.
     long max_fd = sysconf(_SC_OPEN_MAX);
     if (max_fd <= 0 || max_fd > 65536) max_fd = 65536;
+    // argv built before the fork (no allocation in the child).
+    std::vector<char*> argv;
+    argv.push_back(const_cast<char*>(exe.c_str()));
+    for (const std::string& a : args) argv.push_back(const_cast<char*>(a.c_str()));
+    argv.push_back(nullptr);
     const pid_t pid = fork();
     if (pid == 0)
     {
         // Child of a multi-threaded process: async-signal-safe calls only until exec.
         for (long fd = 3; fd < max_fd; ++fd) close((int)fd);
-        char* const argv[] = {const_cast<char*>(exe.c_str()), nullptr};
-        execv(exe.c_str(), argv);
+        execv(exe.c_str(), argv.data());
         _exit(127);
     }
 #endif
@@ -4470,9 +4552,61 @@ void LLAppViewer::relaunchIfRequested()
     // The new instance must not see this one as still running (exec marker) or rotate a
     // log this process still has open.
     removeMarkerFiles();
-    LL_INFOS("Vulkan") << "Restarting the viewer after the graphics device loss: " << sRelaunchExe << LL_ENDL;
+    std::string arg_text = sRelaunchRawTail.empty() ? std::string() : " " + sRelaunchRawTail;
+    for (const std::string& a : sRelaunchArgs) arg_text += " " + a;
+    LL_INFOS("Vulkan") << "Restarting the viewer " << sRelaunchWhy << ": " << sRelaunchExe << arg_text << LL_ENDL;
     LLError::logToFile("");
-    relaunchViewer(sRelaunchExe);
+    relaunchViewer(sRelaunchExe, sRelaunchArgs, sRelaunchRawTail);
+}
+
+void LLAppViewer::setLaunchArgs(const std::vector<std::string>& args, const std::string& raw_cmd_line)
+{
+    sLaunchArgs = args;
+    sLaunchCmdLine = raw_cmd_line;
+}
+
+void LLAppViewer::requestRelaunch(const std::vector<std::string>& args, const std::string& why, bool keep_launch_args)
+{
+    sRelaunchExe = gDirUtilp ? gDirUtilp->getExecutablePathAndName() : std::string();
+    if (sRelaunchExe.empty())
+    {
+        LL_WARNS() << "Restart " << why << " requested, but the executable path is unknown: not restarting" << LL_ENDL;
+        return;
+    }
+    sRelaunchArgs.clear();
+    sRelaunchRawTail.clear();
+    if (keep_launch_args)
+    {
+        // #1074: this launch's arguments first, then `args` -- each only once (the command
+        // line parser refuses an option given twice).
+        auto has_token = [](const std::string& line, const std::string& tok)
+        {
+            for (size_t p = line.find(tok); p != std::string::npos; p = line.find(tok, p + 1))
+            {
+                const bool start_ok = p == 0 || line[p - 1] == ' ' || line[p - 1] == '"';
+                const size_t e = p + tok.size();
+                const bool end_ok = e == line.size() || line[e] == ' ' || line[e] == '"';
+                if (start_ok && end_ok) return true;
+            }
+            return false;
+        };
+        sRelaunchRawTail = sLaunchCmdLine;
+        sRelaunchArgs = sLaunchArgs;
+        for (const std::string& a : args)
+        {
+            const bool dup = std::find(sRelaunchArgs.begin(), sRelaunchArgs.end(), a) != sRelaunchArgs.end() ||
+                             has_token(sRelaunchRawTail, a);
+            if (!dup) sRelaunchArgs.push_back(a);
+        }
+    }
+    else
+    {
+        sRelaunchArgs = args;
+    }
+    sRelaunchWhy = why;
+    sRelaunchAfterExit = true;
+    LL_INFOS() << "Quitting to restart " << why << LL_ENDL;
+    requestQuit();
 }
 
 // #876 / #890: the compile-crash marker (logs/pipeline_compile_crash.marker, first line
@@ -4822,6 +4956,9 @@ static bool initVulkanForRealUI()
     // device-lost check (#546 reads its own markers in initSingleton).
     SLFxStack::getInstance();
     gVkBreadcrumbsWanted = gSavedSettings.getBOOL("RenderVKGpuBreadcrumbs");
+    // (#1128) the driver's vendor binary crash dump on a device loss, written beside the logs
+    gVkFaultVendorBinaryWanted = gSavedSettings.getBOOL("RenderVKFaultVendorBinary");
+    gVkFaultDumpDir = gDirUtilp->getExpandedFilename(LL_PATH_LOGS, "") + gDirUtilp->getDirDelimiter();
     gVkDebugLabelsWanted = gSavedSettings.getBOOL("RenderVKDebugLabels");   // #973
     gVkMemoryReportWanted = gSavedSettings.getBOOL("RenderVKDriverMemoryReport");   // #407
     gVkTexPoolConfig.enabled = gSavedSettings.getBOOL("RenderVKTextureSuballoc");   // #411
@@ -4855,12 +4992,32 @@ static bool initVulkanForRealUI()
         LL_WARNS("VKPipe") << "RenderVKDebugSimulatePipelineOOM " << sim_oom << ": the next " << sim_oom
                            << " batch pipeline compiles report VK_ERROR_OUT_OF_HOST_MEMORY (testing aid)" << LL_ENDL;
     }
+    // #1073 VR: join the OpenXR probe started after the settings load. Failed (no loader, no
+    // runtime, no headset): VR stays off and the context below is created exactly as on the
+    // desktop; the notice is posted once the UI is up.
+    const bool vr_requested = gSavedSettings.getBOOL("SlipstreamVREnabled");
+    if (vr_requested)
+        LLXrSession::instance().finishProbe();
     LLVulkanContext::instance().setVSync(gSavedSettings.getBOOL("RenderVSyncEnable"));
     LLVulkanContext::instance().setNoVsyncPresentMode(gSavedSettings.getU32("RenderVKNoVsyncPresentMode"));
     if (!LLVulkanContext::instance().init(sdlwin->getSDLWindow(), w, h, enableValidation))
     {
         LL_WARNS("Vulkan") << "LLVulkanContext::init failed." << LL_ENDL;
         return false;
+    }
+    if (vr_requested)
+    {
+        // Every VR refusal so far (probe, GPU, device, session) -- the desktop runs.
+        const std::string notice = LLXrSession::instance().takeNotice();
+        if (!notice.empty())
+        {
+            doOnIdleOneTime([notice]()
+            {
+                LLSD args;
+                args["MESSAGE"] = notice;
+                LLNotificationsUtil::add("GenericAlert", args);
+            });
+        }
     }
 
     // #919: a FullScreen session enters fullscreen here -- the window was created windowed at
@@ -5018,6 +5175,14 @@ static bool initVulkanForRealUI()
             }
             gSavedSettings.setU32("RenderVKTexCompressionDefaultApplied", LLVulkanContext::kTexCompDefaultVersion);
         }
+    }
+
+    // Settings are loaded (profile + command line) and the recommended preset applied: say
+    // which render settings differ from their defaults, so a stale or experimental value is
+    // visible in every log.
+    {
+        const std::string non_default = nonDefaultRenderSettings();
+        LL_INFOS("RenderInit") << "non-default render settings: " << (non_default.empty() ? "none" : non_default) << LL_ENDL;
     }
 
     // The font system is normally initialized in the LLViewerWindow ctor with
@@ -5911,6 +6076,109 @@ static void vkCullPlanesForPose(const LLVector3& eye, const LLVector3& at, const
     setPlane(5, -at.mV[0], -at.mV[1], -at.mV[2], at * eye + zf_cull); // far = draw distance
 }
 
+// #1075 LAYERED STEREO (step 1, the frame split): one view's matrices -- eye `e` (agent space)
+// with axes (at, left, up), FOV tangents tan = {left, right, down, up}, the frame's reversed-Z
+// near / far -- in the conventions of buildVulkanWorldFrame's own (column-major, VK clip with
+// the Y flip). The camera-relative forms map (world - origin), the frame's ONE origin.
+static void vkBuildViewFrame(LLVKViewFrame& vf, const LLVector3& e, const LLVector3& at, const LLVector3& left,
+                             const LLVector3& up, const F32 tan[4], F32 zn, F32 zf, const LLVector3& origin)
+{
+    const LLVector3 right = -left;
+    const F32 V[16] = {
+        right.mV[0], up.mV[0], -at.mV[0], 0.f,
+        right.mV[1], up.mV[1], -at.mV[1], 0.f,
+        right.mV[2], up.mV[2], -at.mV[2], 0.f,
+        -(right * e), -(up * e), at * e,  1.f
+    };
+    // Off-axis reversed-Z perspective: x_ndc in [-1, 1] over [tanL, tanR], y over [tanD, tanU]
+    // (the symmetric case is buildVulkanWorldFrame's P exactly).
+    const F32 tl = tan[0], tr = tan[1], td = tan[2], tu = tan[3];
+    F32 P[16] = {
+        2.f / (tr - tl),           0.f,                       0.f,                 0.f,
+        0.f,                       2.f / (tu - td),           0.f,                 0.f,
+        (tr + tl) / (tr - tl),     (tu + td) / (tu - td),     zn / (zf - zn),     -1.f,
+        0.f,                       0.f,                       (zn * zf) / (zf - zn), 0.f
+    };
+    P[1] = -P[1]; P[5] = -P[5]; P[9] = -P[9]; P[13] = -P[13];   // Vulkan Y-flip
+    auto mul = [](const F32* A, const F32* B, F32* out) {   // out = A * B (column-major)
+        for (int c = 0; c < 4; ++c)
+            for (int r = 0; r < 4; ++r)
+            {
+                F32 s = 0.f;
+                for (int k = 0; k < 4; ++k) s += A[k * 4 + r] * B[c * 4 + k];
+                out[c * 4 + r] = s;
+            }
+    };
+    std::memcpy(vf.view, V, sizeof(vf.view));
+    std::memcpy(vf.proj, P, sizeof(vf.proj));
+    vkInvertMat4(P, vf.inv_proj);
+    mul(P, V, vf.view_proj);
+    vkInvertMat4(vf.view_proj, vf.inv_view_proj);
+    // (world - origin): R (q + origin - e) = R q + R (origin - e)
+    F32 Vr[16];
+    std::memcpy(Vr, V, sizeof(Vr));
+    const LLVector3 d = origin - e;
+    Vr[12] = right * d; Vr[13] = up * d; Vr[14] = -(at * d);
+    mul(P, Vr, vf.view_proj_rel);
+    vkInvertMat4(vf.view_proj_rel, vf.inv_view_proj_rel);
+    vf.eye[0] = e.mV[0]; vf.eye[1] = e.mV[1]; vf.eye[2] = e.mV[2]; vf.eye[3] = 0.f;
+    for (int k = 0; k < 4; ++k) vf.tan[k] = tan[k];
+}
+
+// #1075: views 1 .. n-1 of a stereo frame (views[0] is the camera, filled by the caller). VR: the
+// located eyes (LLVRCamera::eyeView) replace every view; the desktop debug mode
+// (RenderVKDebugStereoIPD, mm) puts the eyes at +-IPD/2 along the camera's left axis with the
+// camera's own projection (IPD 0: every view equals view 0 -- the layered path's equality test).
+// Returns the largest eye distance from the origin (the fused cull frustum's margin).
+static F32 vkBuildStereoViews(LLVKWorldFrame& wf, uint32_t n, const LLVector3& origin, const LLVector3& at,
+                              const LLVector3& left, const LLVector3& up, F32 zn, F32 zf)
+{
+    n = llmin(n, LLVKWorldFrame::kMaxViews);
+    F32 margin = 0.f;
+    bool vr = n == 2u && LLVRCamera::active();
+    if (vr)
+    {
+        LLVKViewFrame eyes[2];
+        for (U32 e = 0; e < 2 && vr; ++e)
+        {
+            LLVector3 p, ea, el, eu;
+            F32 t[4];
+            vr = LLVRCamera::eyeView(e, p, ea, el, eu, t);
+            if (vr)
+            {
+                vkBuildViewFrame(eyes[e], p, ea, el, eu, t, zn, zf, origin);
+                margin = llmax(margin, (p - origin).magVec());
+            }
+        }
+        if (vr)
+        {
+            wf.views[0] = eyes[0];
+            wf.views[1] = eyes[1];
+            wf.views_are_eyes = true;   // (#1075: the visibility mask matches these views only)
+            return margin;
+        }
+        margin = 0.f;   // (no eyes located this frame: every view = the head camera, mono)
+    }
+    static LLCachedControl<F32> s_ipd(gSavedSettings, "RenderVKDebugStereoIPD", 0.f);
+    const F32 ipd = LLVRCamera::active() ? 0.f : llclamp((F32)s_ipd, 0.f, 200.f) * 0.001f;
+    if (ipd <= 0.f)
+    {
+        for (uint32_t v = 1; v < n; ++v) wf.views[v] = wf.views[0];
+        return 0.f;
+    }
+    // Eye v of n spread along the camera's right axis (-left) from -IPD/2 to +IPD/2: view 0 is the
+    // leftmost, the last the rightmost; each keeps the camera's axes and projection.
+    const F32 t[4] = {wf.views[0].tan[0], wf.views[0].tan[1], wf.views[0].tan[2], wf.views[0].tan[3]};
+    LLVKViewFrame built[LLVKWorldFrame::kMaxViews];
+    for (uint32_t v = 0; v < n; ++v)
+    {
+        const F32 s = -0.5f * ipd + ipd * (F32)v / (F32)(n - 1u);   // metres to the right
+        vkBuildViewFrame(built[v], origin - left * s, at, left, up, t, zn, zf, origin);
+    }
+    for (uint32_t v = 0; v < n; ++v) wf.views[v] = built[v];
+    return 0.5f * ipd;
+}
+
 static bool buildVulkanWorldFrame(LLVKWorldFrame& wf)
 {
     wf.enabled = false;
@@ -5966,7 +6234,7 @@ static bool buildVulkanWorldFrame(LLVKWorldFrame& wf)
         aspect = (gViewerWindow ? gViewerWindow->getWorldViewAspectRatio() : 1.7778f);
     if (!(aspect > 0.05f)) aspect = 1.7778f;
     F32 zn     = cam->getNear();
-    if (!(zn > 0.01f)) zn = 0.25f;
+    if (!(zn >= MIN_NEAR_PLANE)) zn = 0.25f;   // <GMDX> (FSRenderNearClip reaches MIN_NEAR_PLANE itself)
     // Far (cull) = the draw distance, RenderFarClip, read directly: the camera far is
     // stale here (see above), which is what the OLD [64,1024] clamp tripped over. It
     // used to be floored at 512 m, which silently overrode every draw distance below
@@ -6028,10 +6296,40 @@ static bool buildVulkanWorldFrame(LLVKWorldFrame& wf)
     P[1] = -P[1]; P[5] = -P[5]; P[9] = -P[9]; P[13] = -P[13];
     Pconv[1] = -Pconv[1]; Pconv[5] = -Pconv[5]; Pconv[9] = -Pconv[9]; Pconv[13] = -Pconv[13];
 
+    // <GMDX> ORTHOGRAPHIC VIEW (LLViewerCamera::getOrtho, FSCameraOrtho): the same box the
+    // perspective frustum cuts at the focus distance, kept at every depth. Reversed-Z as the
+    // perspective (view z = -zn -> 1, -zf -> 0), Y flipped. Cull, LOD and texel demand run in
+    // their orthographic mode (ortho_view -> CULL_ORTHO / CLV_ORTHO: px per metre at any
+    // depth), the light / probe clusters take tan_half as half extents in metres (LightInfo
+    // cam_fwd.w), the shadow cascades are fitted to the box below; the sky keeps the
+    // perspective rays (Psky: parallel rays would paint the whole sky one colour), the mirror
+    // and depth of field are off. Pick rays: LLViewerCamera::orthoMouseRay.
+    F32 Psky[16];
+    std::memcpy(Psky, P, sizeof(Psky));
+    const bool ortho = cam->getOrtho();
+    F32 ortho_hw = 0.f, ortho_hh = 0.f;
+    if (ortho)
+    {
+        ortho_hh = cam->getOrthoHalfHeight();
+        ortho_hw = llmax(ortho_hh * aspect, 0.001f);
+        std::fill(P, P + 16, 0.f);
+        P[0]  =  1.f / ortho_hw;
+        P[5]  = -1.f / ortho_hh;           // (Y flip)
+        P[10] =  1.f / (zf - zn);
+        P[14] =  zf / (zf - zn);
+        P[15] =  1.f;
+        set_current_projection(glm::ortho(-ortho_hw, ortho_hw, -ortho_hh, ortho_hh, zn, zf));
+        wf.tan_half[0] = ortho_hw;
+        wf.tan_half[1] = ortho_hh;
+    }
+    wf.ortho_view = ortho;
+    // </GMDX>
+
     std::memcpy(wf.proj, P, sizeof(wf.proj));
     vkInvertMat4(P, wf.inv_proj);
 
     buildVKDoF(wf, fovY, eye, LLVector3(fwd[0], fwd[1], fwd[2]));
+    if (ortho) wf.dof_enabled = false;   // <GMDX> (a thin lens has no orthographic form)
 
     // Rotation-only view (camera-relative) projection for the rigged pre-skin output.
     {
@@ -6048,6 +6346,18 @@ static bool buildVulkanWorldFrame(LLVKWorldFrame& wf)
         // Sky view rays (#555): un-projected through the translation-free inverse, so
         // the direction never cancels a km-sized eye against a point ~2 near-planes away.
         vkInvertMat4(wf.view_proj_rel, wf.inv_view_proj_rel);
+        if (ortho)   // <GMDX> the sky alone keeps the perspective rays (its only reader)
+        {
+            F32 sky_vp[16];
+            for (int c = 0; c < 4; ++c)
+                for (int r = 0; r < 4; ++r)
+                {
+                    F32 s = 0.f;
+                    for (int k = 0; k < 4; ++k) s += Psky[k*4 + r] * Vr[c*4 + k];
+                    sky_vp[c*4 + r] = s;
+                }
+            vkInvertMat4(sky_vp, wf.inv_view_proj_rel);
+        }
     }
 
     // MVP = P * V (column-major multiply).
@@ -6116,7 +6426,39 @@ static bool buildVulkanWorldFrame(LLVKWorldFrame& wf)
             }
     }
 
-    buildVKMirror(wf, V, Pconv, eye);   // conventional depth (see P above)
+    // #1075 LAYERED STEREO, the FRAME SPLIT (research/VR_LAYERED_STEREO_DESIGN.md §7 step 1):
+    // the fields above are the SHARED camera (the head / union in VR: cull, LOD, lights,
+    // cascades); views[] the per-view ones. views[0] is this camera, bit for bit the numbers
+    // above -- the desktop (N = 1) renders from exactly them. N > 1 (the renderer's view count:
+    // VR stereo or the debug mode) builds the eyes, and the GPU cull's side planes widen by the
+    // largest eye offset (the FUSED frustum: every eye's frustum inside one union cull, design
+    // §5; the head's symmetric VR frustum already covers both eyes' angular extent).
+    {
+        LLVKViewFrame& v0 = wf.views[0];
+        std::memcpy(v0.view, V, sizeof(v0.view));
+        std::memcpy(v0.proj, wf.proj, sizeof(v0.proj));
+        std::memcpy(v0.inv_proj, wf.inv_proj, sizeof(v0.inv_proj));
+        std::memcpy(v0.view_proj, wf.view_proj, sizeof(v0.view_proj));
+        std::memcpy(v0.inv_view_proj, wf.inv_view_proj, sizeof(v0.inv_view_proj));
+        std::memcpy(v0.view_proj_rel, wf.view_proj_rel, sizeof(v0.view_proj_rel));
+        std::memcpy(v0.inv_view_proj_rel, wf.inv_view_proj_rel, sizeof(v0.inv_view_proj_rel));
+        v0.eye[0] = eye.mV[0]; v0.eye[1] = eye.mV[1]; v0.eye[2] = eye.mV[2]; v0.eye[3] = 0.f;
+        v0.tan[0] = -wf.tan_half[0]; v0.tan[1] = wf.tan_half[0];
+        v0.tan[2] = -wf.tan_half[1]; v0.tan[3] = wf.tan_half[1];
+        wf.view_count = 1;
+        wf.views_are_eyes = false;   // (#1075: vkBuildStereoViews sets it for located VR eyes)
+        const uint32_t nViews = LLVulkanContext::instance().worldViewCount();
+        if (nViews > 1u)
+        {
+            const F32 margin = vkBuildStereoViews(wf, nViews, eye, at, left, up, zn, zf);
+            wf.view_count = llmin(nViews, LLVKWorldFrame::kMaxViews);
+            // Fused cull frustum: the side planes (0-3) pushed out by the eyes' offset.
+            for (int i = 0; i < 4; ++i) wf.frustum_planes[i][3] += margin;
+        }
+    }
+
+    if (!ortho)   // <GMDX> (the mirror capture's projection rows are perspective-only)
+        buildVKMirror(wf, V, Pconv, eye);   // conventional depth (see P above)
     // "Show me in Mouselook" (FirstPersonAvatarVisible) off: hide the own avatar in
     // the main view only (renderer keeps it in mirrors, probes and shadows).
     // Picks follow the same rule (LLVOAvatar::isHiddenOwnAttachment, #554).
@@ -6335,6 +6677,11 @@ static bool buildVulkanWorldFrame(LLVKWorldFrame& wf)
     // Temporal history (#84): nothing from before or during a teleport is a valid
     // previous frame (the renderer adds origin shifts and camera cuts itself).
     wf.temporal_reset = gAgent.getTeleportState() != LLAgent::TELEPORT_NONE;
+    {   // <GMDX> switching projection is a camera cut (setTemporal sees only eye moves)
+        static bool s_was_ortho = false;
+        if (ortho != s_was_ortho) wf.temporal_reset = true;
+        s_was_ortho = ortho;
+    }
 
     // ---- Lighting + sky from the REAL environment (day cycle) ----
     // Sun direction and the sky/sun/ambient colors come straight from the active
@@ -6358,6 +6705,7 @@ static bool buildVulkanWorldFrame(LLVKWorldFrame& wf)
         }
 
         LLSettingsSky::ptr_t sky = env.getCurrentSky();
+        gmdxNightLight() = GMDXNightLight();   // <GMDX> (no sky: the old night's switches)
         if (sky)
         {
             LLColor3 sunc  = sky->getSunlightColor();
@@ -6426,7 +6774,7 @@ static bool buildVulkanWorldFrame(LLVKWorldFrame& wf)
 
             const bool sun_up = sky->getIsSunUp();
             const LLColor3 moonc = sky->getMoonlightColor();
-            const LLColor3 lc = sun_up ? sunc : moonc;
+            LLColor3 lc = sun_up ? sunc : moonc;
             const LLColor3 gl = sky->getGlow();
             LLVector3 ld = env.getLightDirection();
             LLVector3 ln = ld;
@@ -6434,6 +6782,51 @@ static bool buildVulkanWorldFrame(LLVKWorldFrame& wf)
             if (ld.lengthSquared() > 1e-6f) ld.normalize();
             const LLVector3 sdir = sky->getSunDirection();
             const LLVector3 mdir = sky->getMoonDirection();
+            // <GMDX> PHYSICAL NIGHT (gmdxnightlight.h): the moon lights the scene with its real
+            // brightness and phase instead of the sun's full strength. Off: the old night.
+            // At dusk the sun and moon light the scene together, the direction turning smoothly
+            // from one to the other, instead of the switch at the horizon.
+            static LLCachedControl<bool> s_phys_night(gSavedSettings, "GMDXPhysicalNight", true);
+            static LLCachedControl<F32> s_moon_scale(gSavedSettings, "GMDXMoonlightScale", 0.05f);
+            static LLCachedControl<F32> s_dusk_high(gSavedSettings, "GMDXDuskSunHigh", 4.f);
+            static LLCachedControl<F32> s_dusk_low(gSavedSettings, "GMDXDuskSunLow", -10.f);
+            static LLCachedControl<bool> s_respect_sky(gSavedSettings, "GMDXRespectRegionSky", true);
+            GMDXNightLight& night = gmdxNightLight();
+            night.creators_sky = gmdxSkyIsCreators();
+            // A creator's sky (GMDXRespectRegionSky): Second Life's own light, moon and dusk, so the
+            // moonlit look is the one they made; the catalogue stars and the corona stay.
+            night.on = s_phys_night && !(s_respect_sky && night.creators_sky);
+            F32 glow_factor = sky->getSunMoonGlowFactor();
+            if (night.on)
+            {
+                night.moon = gmdxMoonLight(sdir.mV, mdir.mV, sky->getMoonBrightness(), s_moon_scale);
+                night.moon_full = night.moon;
+                // WindLight's light-path extinction (fillAtmosK's light_atten), per channel.
+                const F32 dm = sky->getDensityMultiplier() * sky->getMaxY();
+                const F32 atten[3] = {(bd.mV[0] + sky->getHazeDensity() * 0.25f) * dm,
+                                      (bd.mV[1] + sky->getHazeDensity() * 0.25f) * dm,
+                                      (bd.mV[2] + sky->getHazeDensity() * 0.25f) * dm};
+                // No night exposure on this sky (gmdxnighteyevk.h needs an exposure range to lift in):
+                // the lift is baked into the light (gmdxnightlight.h THE NIGHT'S AMBIENT).
+                static LLCachedControl<F32> s_night_amb(gSavedSettings, "GMDXNightAmbient", 0.5f);
+                static LLCachedControl<F32> s_max_lift(gSavedSettings, "GMDXNightExposureMaxLift", 6.f);
+                static LLCachedControl<bool> s_hdr_n(gSavedSettings, "RenderHDREnabled", true);
+                static LLCachedControl<bool> s_dyn_n(gSavedSettings, "RenderDynamicExposureEnabled", true);
+                static LLCachedControl<bool> s_sky_exp_n(gSavedSettings, "RenderUseExposureSkySettings", false);
+                const bool night_exposure = s_hdr_n && s_dyn_n && !s_sky_exp_n && probe_amb > 0.f && sqrtf(g) * 2.f > 1.f;
+                gmdxBlendNightLight(night, sdir.mV, mdir.mV, sunc.mV, atten, s_dusk_high, s_dusk_low,
+                                    llclamp((F32)s_night_amb, 0.f, 1.f), night_exposure ? 0.f : llclamp((F32)s_max_lift, 0.f, 12.f));
+                if (night.blended)   // (above the band: the daytime light as it was)
+                {
+                    lc.set(night.color);
+                    ld.set(night.dir);
+                    ln = ld;
+                    if (ln.mV[VZ] < -0.1f) ln.mV[VZ] = -0.1f;
+                    // The haze glow belongs to whichever light gives more (getSunMoonGlowFactor).
+                    glow_factor = night.sun_lead ? 1.f : (sky->getIsMoonUp() ? sky->getMoonBrightness() * 0.25f : 0.f);
+                }
+            }
+            // </GMDX>
 
             static LLCachedControl<F32> s_fade(gSavedSettings, "RenderVKDistanceFade", 0.6f);
             static LLCachedControl<bool> s_hdr_on(gSavedSettings, "RenderHDREnabled", true);
@@ -6453,9 +6846,14 @@ static bool buildVulkanWorldFrame(LLVKWorldFrame& wf)
             put(1,  bd.mV[0], bd.mV[1], bd.mV[2], sky->getHazeDensity());
             put(2,  lc.mV[0], lc.mV[1], lc.mV[2], sky->getCloudShadow());
             put(3,  amb.mV[0], amb.mV[1], amb.mV[2], sky->getMaxY());
+            // <GMDX> Physical night: the WindLight sky's own light (gmdxnightlight.h); the ground's
+            // clamped norm is atmos[7]'s then.
+            if (night.on) ln.set(night.sky_dir);
             put(4,  ln.mV[0], ln.mV[1], ln.mV[2], sky->getDensityMultiplier());
             put(5,  gl.mV[0], gl.mV[1], gl.mV[2], sky->getDistanceMultiplier());
-            put(6,  sky->getSunMoonGlowFactor(), hdr, 1.f, s_emissive_buf ? 0.f : 1.f);
+            // <GMDX> glow_factor (was getSunMoonGlowFactor); .z (enabled) carries physical night's ambient
+            // as 2 - amb (gmdxnightlight.h THE NIGHT'S AMBIENT; 1 = stock)
+            put(6,  glow_factor, hdr, night.on ? 2.f - llclamp(night.amb, 0.f, 1.f) : 1.f, s_emissive_buf ? 0.f : 1.f);
             put(7,  ld.mV[0], ld.mV[1], ld.mV[2], llclamp((F32)s_fade, 0.f, 1.f));
             put(8,  sunc.mV[0], sunc.mV[1], sunc.mV[2], classic ? 1.f : 0.f);
             put(9,  moonc.mV[0], moonc.mV[1], moonc.mV[2], sun_up ? 1.f : 0.f);
@@ -6594,6 +6992,10 @@ static bool buildVulkanWorldFrame(LLVKWorldFrame& wf)
                 b[7] = sun_blend;
                 LLUUID moon = sky->getMoonTextureId();
                 if (moon.isNull()) moon = sky->getNextMoonTextureId();
+                // <GMDX> a creator's own moon texture (an eclipse, a planet) keeps its look: physical
+                // night's HDR disc and phase shading are for Second Life's moon (or the procedural one).
+                gmdxNightLight().custom_moon = gmdxNightLight().creators_sky && moon.notNull()
+                                               && moon != LLSettingsSky::GetDefaultMoonTextureId();
                 // Stars use bloom A only (starsF samples diffuseMap twice); null -> IMG_BLOOM1
                 // as LLVOSky::setBloomTextures.
                 LLUUID bloom = sky->getBloomTextureId();
@@ -6658,9 +7060,21 @@ static bool buildVulkanWorldFrame(LLVKWorldFrame& wf)
             if (env.getIsSunUp())       spec += sky ? sky->getSunlightColor()  : LLColor3::white;
             else if (env.getIsMoonUp()) spec += sky ? sky->getMoonlightColor() : LLColor3::white;
             LLVector3 ldir = env.getLightDirection(); ldir.normalize();
+            LLVector4 cln = env.getClampedLightNorm();
+            // <GMDX> Physical night's dusk: the scene light's blended direction (gmdxnightlight.h);
+            // the glint's colour stays the light's hue (its strength comes with sunlit, clean_water.frag).
+            const GMDXNightLight& night = gmdxNightLight();
+            if (night.on && night.blended)
+            {
+                spec.setToBlack();
+                if (night.color[0] + night.color[1] + night.color[2] > 0.f)
+                    spec = sky ? sky->getSunlightColor() : LLColor3::white;
+                ldir.set(night.dir);
+                cln.mV[2] = ldir.mV[VX];   // (toLightNorm's z: world x, as getClampedLightNorm)
+            }
+            // </GMDX>
             const F32 gp = ldir.mV[0] * ldir.mV[0] + ldir.mV[1] * ldir.mV[1];
             if (spec.normalize() > 0.f) spec *= (1.5f + 6.f * gp);
-            LLVector4 cln = env.getClampedLightNorm();
             const F32 fog_ks = 1.f / llmax(cln.mV[2], 0.3f);    // LLSettingsVOWater::WATER_FOG_LIGHT_CLAMP
             w[0] = d1.mV[0]; w[1] = d1.mV[1]; w[2] = d2.mV[0]; w[3] = d2.mV[1];
             w[4] = ns.mV[0]; w[5] = ns.mV[1]; w[6] = ns.mV[2]; w[7] = (F32)water->getBlendFactor();
@@ -6723,6 +7137,13 @@ static bool buildVulkanWorldFrame(LLVKWorldFrame& wf)
                 std::memcpy(wf.hud_model, &hmodel[0][0], sizeof(wf.hud_model));
             }
         }
+    }
+    // #1074 VR: the HUD pass and its picks are laid out in the desktop window's pixels; the world
+    // renders at the eye size. #1076: the HUDs are drawn onto the UI wall (the renderer's HUD
+    // target), so only while the wall is shown. Desktop: active() is false.
+    if (LLVRCamera::active() && !LLVRInput::wallVisible())
+    {
+        wf.hud_enabled = false;
     }
 
     // ---- Local lights (point + projector) ----
@@ -7366,8 +7787,13 @@ static bool buildVulkanWorldFrame(LLVKWorldFrame& wf)
                 const F32 a = (c == 0) ? n : clip[c - 1] * 0.75f;
                 const F32 b = (c == 3) ? clip[3] : clip[c] * 1.25f;
                 // Minimal sphere around the slice's 8 corners (centre on the view axis).
-                const F32 t = llmin(b, (a + b) * (1.f + k * k) * 0.5f);
+                F32 t = llmin(b, (a + b) * (1.f + k * k) * 0.5f);
                 F32 R = sqrtf(llmax((b - t) * (b - t) + b * b * k * k, (t - a) * (t - a) + a * a * k * k));
+                if (ortho)   // <GMDX> the box slice: the same half diagonal at both ends
+                {
+                    t = 0.5f * (a + b);
+                    R = sqrtf(0.25f * (b - a) * (b - a) + ortho_hw * ortho_hw + ortho_hh * ortho_hh);
+                }
                 const LLVector3 ctr = eye + at * t;
                 wf.shadow_slice[c][0] = ctr.mV[0]; wf.shadow_slice[c][1] = ctr.mV[1];
                 wf.shadow_slice[c][2] = ctr.mV[2]; wf.shadow_slice[c][3] = R;
@@ -7450,6 +7876,13 @@ static bool buildVulkanWorldFrame(LLVKWorldFrame& wf)
                     side(at * cosf(hx) - left * sinf(hx), up,   1);   // right
                     side(at * cosf(hy) + up * sinf(hy),   left, 2);   // top
                     side(at * cosf(hy) - up * sinf(hy),   left, 3);   // bottom
+                    if (ortho)   // <GMDX> the box's sides: parallel to the view axis
+                    {
+                        nrm[0] = -left; dd[0] = ortho_hw + left * eye;   // left
+                        nrm[1] =  left; dd[1] = ortho_hw - left * eye;   // right
+                        nrm[2] = -up;   dd[2] = ortho_hh + up * eye;     // top
+                        nrm[3] =  up;   dd[3] = ortho_hh - up * eye;     // bottom
+                    }
                     nrm[4] = at;  dd[4] = -(at * eye) - a;            // slice near
                     nrm[5] = -at; dd[5] =  (at * eye) + b;            // slice far
                     for (int i = 0; i < 6; ++i)
@@ -7520,7 +7953,7 @@ static void driveVulkanWorldVOCacheCull()
     static LLCachedControl<F32> s_render_far(gSavedSettings, "RenderFarClip", 128.f);
     F32 farp = llmax(cam->getFar(), (F32)s_render_far);
     farp = llclamp(farp, 64.f, 8192.f);   // draw distance reaches 4096 m
-    LLCullCamera::calcAgentFrustum(*cam, farp);
+    LLCullCamera::calcAgentFrustum(*cam, farp, cam->getOrthoHalfHeight());   // <GMDX> (ortho: the box)
 
     // #479: the culling camera -- the live world camera just refreshed, or the frozen
     // debug pose (Develop > Rendering > Freeze culling camera), rebuilt in agent space.
@@ -7565,11 +7998,18 @@ void displayVulkanUI()
     {
         return;
     }
+    // #1074 VR: the headset keeps rendering while the mirror window is minimised / hidden (then
+    // without the UI pass: the frame has no window image). Desktop: return as before.
+    bool window_hidden = false;
     if (!gViewerWindow->getActive()
         || !gViewerWindow->getWindow()->getVisible()
         || gViewerWindow->getWindow()->getMinimized())
     {
-        return;
+        if (!LLVRCamera::sessionRunning())
+        {
+            return;
+        }
+        window_hidden = true;
     }
 
     // MILESTONE SELF-TEST (no login): when SLIPSTREAM_VK_SYNTHTEST is set, inject a
@@ -7809,6 +8249,10 @@ void displayVulkanUI()
         gViewerWindow->updateDebugText();
         gViewerWindow->drawDebugText();
         gGL.flush();
+        // #1076 VR: the controller pointer's cursor on the UI wall (no-op without VR).
+        LLVRInput::drawCursor();
+        // #1118 VR dictation: listening / transcribing pill (one static read when idle).
+        LLVRDictation::draw();
     };
 
     // VK-SIDE INGEST TICK (step 3). gPipeline.init() is skipped in VK, so the GL
@@ -8092,6 +8536,13 @@ void displayVulkanUI()
         gShiftFrame = false;
     }
 
+    // #1074 VR: frames whose idle() returned before the camera update (teleport screen) still
+    // get the head-tracked camera. Desktop: active() is false.
+    if (LLXrSession::active() && !LLXrSession::instance().worldCameraApplied())
+    {
+        LLVRCamera::apply();
+    }
+    if (!LLXrSession::active()) LLViewerCamera::getInstance()->updateNearClip();   // <GMDX> FSRenderNearClip (display() did it in GL); VR keeps its own planes
     { VK_HITCH_SCOPE("buildWorldFrame"); buildVulkanWorldFrame(world); }   // world.enabled == false until in-world
     // Cursor ray for the GPU raster pick (#702): answered by this frame's GPU work.
     LLCleanCursorPick::fillRequest(world);
@@ -8154,9 +8605,29 @@ void displayVulkanUI()
         }
     }
 
-    { VK_HITCH_SCOPE("renderFrame"); LLVulkanContext::instance().renderFrame(uiRender, &world); }
+    {
+        VK_HITCH_SCOPE("renderFrame");
+        if (window_hidden)
+            LLVulkanContext::instance().renderFrame(std::function<void()>(), &world);   // #1074 VR: no UI build
+        else
+            LLVulkanContext::instance().renderFrame(uiRender, &world);
+    }
     // <GMDX> region map capture: its step for this frame (a preparation render or one map tile)
     { VK_HITCH_SCOPE("gmdx_regionMap"); GMDXRegionCapture::frameTick(); }
+    // #1073 VR: a begun XR frame is always ended -- renderFrame's early-outs (no window image,
+    // device lost, not initialised) submit it here with zero layers (a no-op when renderFrame
+    // already ended it). And a notice the session raised (it ended / was lost). Desktop: skipped.
+    if (LLXrSession::active())
+    {
+        LLXrSession::instance().endFrame();
+        const std::string notice = LLXrSession::instance().takeNotice();
+        if (!notice.empty())
+        {
+            LLSD args;
+            args["MESSAGE"] = notice;
+            LLNotificationsUtil::add("GenericAlert", args);
+        }
+    }
 
     // REPRO AID (RenderVKDebugSnapshotStress N > 0): every N frames an offscreen snapshot
     // render, cycling sizes / kinds (thumbnail, window size, square with HUD, half-size
@@ -8335,6 +8806,10 @@ bool vkRenderOffscreenSnapshot(S32 w, S32 h, bool show_hud, std::vector<U8>& rgb
         wf.hud_enabled = false;
     }
     if (proj) { proj[0] = wf.proj[10]; proj[1] = wf.proj[14]; }
+    // <GMDX> avatar layers (gmdxsnapshotavatars.h): the matte sequence, no depth of field
+    wf.avatar_matte = !depth && gmdxSnapshotAvatarOnly();
+    if (wf.avatar_matte) wf.dof_enabled = false;
+    // </GMDX>
     return LLVulkanContext::instance().renderOffscreen(wf, (uint32_t)w, (uint32_t)h, rgb, depth, 2u,
                                                        depth ? 0u : (uint32_t)aa_frames);
 }
@@ -8409,6 +8884,7 @@ bool vkRenderRegionOrthoView(const GMDXOrthoView& o, std::vector<U8>& rgb, std::
     wf.temporal_reset = true;
     wf.ortho = true;
     wf.ortho_ppm = o.demand_ppm;
+    wf.ortho_view = false;   // <GMDX> (the live view's orthographic toggle: this box has its own rules)
 
     // What a perspective / the live view brings that a map must not show.
     wf.dof_enabled = false;
@@ -11152,7 +11628,11 @@ void LLAppViewer::idle()
             if (LLGameControl::willControlAvatar() || LLGameControl::willControlFlycam())
             {
                 LLGameControl::AgentActions game_control_actions = LLGameControl::computeAgentActions();
-                gAgent.applyExternalActions(game_control_actions);
+                // <GMDX> a button pressed to bind it in the key dialog doesn't also act
+                if (!LLSetKeyBindDialog::isRecording())
+                {
+                    gAgent.applyExternalActions(game_control_actions);
+                }
             }
 
             // OCOL: controller key bindings and gesture buttons (not while the
@@ -11197,6 +11677,7 @@ void LLAppViewer::idle()
         // actually sent or not) because these will be recomputed based on
         // real-time key/controller input and resubmitted next frame.
         gAgent.resetControlFlags();
+        FSRMBScript::afterControlReset(); // <GMDX> keep a right button held for scripts held
     }
 
     //////////////////////////////////////
@@ -11499,6 +11980,9 @@ void LLAppViewer::idle()
         VK_HITCH_SCOPE("LL_updateCamera");
         gAgentCamera.updateCamera();
     }
+    // #1074 VR: the headset is the camera -- this frame's head pose on the avatar rig, over
+    // whatever moved the desktop camera above. No-op without VR (one static read).
+    LLVRCamera::apply();
 
     // HUD edit zoom (#413): ease toward the wheel target once per frame, whatever
     // drives the camera (flycam / pilot skip updateCamera).

@@ -28,6 +28,7 @@
 
 #include <boost/signals2.hpp>
 #include <boost/unordered_map.hpp>
+#include <map> // <GMDX>
 
 // ============================================================================
 // Forward declarations
@@ -102,6 +103,7 @@ public:
     U64                 idRegion = 0;   // region handle of the root (0 = not seen yet this session)
     U32                 idRootLocal = 0;// local id of the root (prim / avatar / attachment root)
     std::vector<U32>    idsChildLocal;  // blocked descendants (child prims, an avatar's attachments and their prims)
+    bool                m_fItemSeen = false; // <GMDX> TYPE_ATTACHMENT: this item id was seen worn this session (setRoot)
 };
 
 // ============================================================================
@@ -155,6 +157,14 @@ public:
     void              onRegionRemoved(U64 idRegion);
     // Another resident attached something: catches re-worn attachments of item-keyed entries
     void              onAttachmentAdded(LLVOAvatar* pAvatar, LLViewerObject* pAttachObj);
+    // <GMDX> An attachment's properties are worth asking for (GMDXAttachProbe): it is blocked
+    // and its entry's name is still unknown, or its wearer has a permanent entry that only
+    // wearer + name can find again and that has not been matched yet.
+    bool              wantsProperties(const LLUUID& idWearer, const LLUUID& idObject) const;
+    // <GMDX> An ObjectProperties reply. Fills in the name of a blocked attachment derendered
+    // before its name was known, and re-points a permanent attachment entry whose object came
+    // back with a new UUID (re-rez, relog, re-copied item) matched on wearer + object name.
+    void              onObjectProperties(const LLUUID& idObject, const LLUUID& idOwner, const std::string& strName);
 
     // Kills an object locally the way process_kill_object() does
     static void       killObject(LLViewerObject* pObj);
@@ -169,6 +179,13 @@ protected:
     void              clearLocals(LLDerenderEntry* pEntry);
     void              collectLocals(LLDerenderEntry* pEntry, const LLViewerObject* pObj);
     bool              processRootOrChild(U64 idRegion, const LLUUID& idObject, U32 idObjectLocal, U32 idParentLocal, bool fIsAvatar);
+    // <GMDX> owner + name index of the permanent attachment entries (rebuilt on change; user-sized)
+    void              reindexNames();
+    static bool       hasKnownName(const LLDerenderEntry* pEntry);
+    // <GMDX> A name match may move this entry onto another object: its own object is not in the
+    // sim now (idRootLocal is cleared by the sim's KillObject), and it is not an item the sim
+    // already showed worn this session (a second attachment with the same name is another item)
+    static bool       canRematch(const LLDerenderEntry* pEntry) { return (0 == pEntry->idRootLocal) && (!pEntry->isKeyedOnItem() || !pEntry->m_fItemSeen); }
 
     /*
      * Static member functions
@@ -184,6 +201,7 @@ protected:
     boost::unordered_map<LLUUID, LLDerenderEntry*>      m_BlockIds;             // object UUID -> entry
     boost::unordered_map<LLUUID, LLDerenderEntry*>      m_AttachItems;          // attachment item id -> entry
     boost::unordered_map<local_key_t, LLDerenderEntry*> m_BlockLocal;           // blocked root/descendant local ids -> entry
+    std::map<LLUUID, std::map<std::string, std::vector<LLDerenderEntry*>>> m_AttachNames; // <GMDX> wearer -> object name -> permanent attachment entries
 
     static change_signal_t  s_ChangeSignal;
     static std::string      s_PersistFilename;

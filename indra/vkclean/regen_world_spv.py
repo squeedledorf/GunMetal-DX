@@ -130,6 +130,8 @@ SHADERS = [
     # Planar-mirror occlusion-query proxy box (36 verts from gl_VertexIndex, no outputs).
     ("clean_occ_box.vert",      "vert", "kWorldOccBoxVertSpv"),
     ("clean_occ_box.frag",      "frag", "kWorldOccBoxFragSpv"),
+    # (#1075) VR visibility mask: each eye's hidden-area mesh into its depth layer at the near plane.
+    ("clean_vr_vismask.vert",   "vert", "kWorldVrVisMaskVertSpv"),
     ("clean_particle_sim.comp",      "comp", "kWorldPartSimSpv"),
     ("clean_particle_emit.comp",     "comp", "kWorldPartEmitSpv"),
     ("clean_particle_compact.comp",  "comp", "kWorldPartCompactSpv"),
@@ -519,6 +521,8 @@ SHADERS = [
     # (#1039 M2, RenderVKVisQueue bit 2) + the hits' occlusion / budgeted light rays queued, the blend layers in
     # a LAYERS stage of their own: no ray query left in the lighting stage
     ("clean_deferred_light.comp",     "comp", "kWorldDeferRtSplitMatVq2Spv",    ["-DCLEAN_DEFER_PASS=11", "-DCLEAN_PROJ_SHADOW_RAYQUERY", "-DRT_SET=4", "-DCLEAN_RT_LIST", "-DCLEAN_RT_STAGE=2", "-DCLEAN_VIS_QUEUE", "-DCLEAN_VIS_QUEUE_M2"]),
+    # (the M2 producer as its own REQ stage after MAT: neither kernel holds both working sets)
+    ("clean_deferred_light.comp",     "comp", "kWorldDeferRtSplitReqVq2Spv",    ["-DCLEAN_DEFER_PASS=11", "-DCLEAN_PROJ_SHADOW_RAYQUERY", "-DRT_SET=4", "-DCLEAN_RT_LIST", "-DCLEAN_RT_STAGE=5", "-DCLEAN_VIS_QUEUE", "-DCLEAN_VIS_QUEUE_M2"]),
     ("clean_deferred_light.comp",     "comp", "kWorldDeferRtSplitLayersVq2Spv", ["-DCLEAN_DEFER_PASS=11", "-DCLEAN_PROJ_SHADOW_RAYQUERY", "-DRT_SET=4", "-DCLEAN_RT_LIST", "-DCLEAN_RT_STAGE=4", "-DCLEAN_VIS_QUEUE", "-DCLEAN_VIS_QUEUE_M2"]),
     ("clean_deferred_light.comp",     "comp", "kWorldDeferRtSplitLightVq2Spv",  ["-DCLEAN_DEFER_PASS=11", "-DCLEAN_PROJ_SHADOW_RAYQUERY", "-DRT_SET=4", "-DCLEAN_RT_LIST", "-DCLEAN_RT_STAGE=3", "-DCLEAN_VIS_QUEUE", "-DCLEAN_VIS_QUEUE_M2"]),
     # (#87) the ray-traced GI trace (RenderVKGI; clean_gi_common.glsl): pass 11's layout + hit shading.
@@ -530,7 +534,14 @@ SHADERS = [
     ("clean_deferred_light.comp",     "comp", "kWorldDeferGiSplitTraceSpv",   ["-DCLEAN_DEFER_PASS=11", "-DCLEAN_PROJ_SHADOW_RAYQUERY", "-DRT_SET=4", "-DCLEAN_GI_TRACE", "-DCLEAN_GI_STAGE=1"]),
     ("clean_deferred_light.comp",     "comp", "kWorldDeferGiSplitShadeSpv",   ["-DCLEAN_DEFER_PASS=11", "-DCLEAN_PROJ_SHADOW_RAYQUERY", "-DRT_SET=4", "-DCLEAN_GI_TRACE", "-DCLEAN_GI_STAGE=2"]),
     ("clean_deferred_light.comp",     "comp", "kWorldDeferGiSplitReuseSpv",   ["-DCLEAN_DEFER_PASS=11", "-DCLEAN_PROJ_SHADOW_RAYQUERY", "-DRT_SET=4", "-DCLEAN_GI_TRACE", "-DCLEAN_GI_STAGE=3"]),
-    ("clean_deferred_light.comp",     "comp", "kWorldDeferGiSplitReshadeSpv", ["-DCLEAN_DEFER_PASS=11", "-DCLEAN_PROJ_SHADOW_RAYQUERY", "-DRT_SET=4", "-DCLEAN_GI_TRACE", "-DCLEAN_GI_STAGE=4"]),
+    # (#1039 M3, RenderVKVisQueue bit 4) REUSE with its visibility ray queued
+    ("clean_deferred_light.comp",     "comp", "kWorldDeferGiSplitReuseVqSpv", ["-DCLEAN_DEFER_PASS=11", "-DCLEAN_PROJ_SHADOW_RAYQUERY", "-DRT_SET=4", "-DCLEAN_GI_TRACE", "-DCLEAN_GI_STAGE=3", "-DCLEAN_VIS_QUEUE_GIR"]),
+    # (#1039) its VIS TAIL as a kernel of its own: the queued texels finished from the picks REUSE-VQ stored
+    ("clean_deferred_light.comp",     "comp", "kWorldDeferGiSplitVisTailSpv", ["-DCLEAN_DEFER_PASS=11", "-DCLEAN_PROJ_SHADOW_RAYQUERY", "-DRT_SET=4", "-DCLEAN_GI_TRACE", "-DCLEAN_GI_STAGE=3", "-DCLEAN_VIS_QUEUE_GIR", "-DCLEAN_GIR_VIS_TAIL"]),
+    ("clean_deferred_light.comp",     "comp", "kWorldDeferGiSplitReshadeSpv",["-DCLEAN_DEFER_PASS=11", "-DCLEAN_PROJ_SHADOW_RAYQUERY", "-DRT_SET=4", "-DCLEAN_GI_TRACE", "-DCLEAN_GI_STAGE=4"]),
+    # (#1039) CHG-TAG: the reservoirs' changed / hot-light tags REUSE's taps read (while lights changed; bits 0-2,
+    # in the light prep ahead of the lighting -- bit 3, the fresh hit's, is set by HIT-LIGHT / SHADE)
+    ("clean_deferred_light.comp",     "comp", "kWorldDeferGiSplitChgTagSpv", ["-DCLEAN_DEFER_PASS=11", "-DCLEAN_PROJ_SHADOW_RAYQUERY", "-DRT_SET=4", "-DCLEAN_GI_TRACE", "-DCLEAN_GI_STAGE=9"]),
     # (#1036, RenderVKGIShadeSplit) the hit shading as MISS / HIT-MAT / HIT-LIGHT over TRACE's hit / miss lists.
     ("clean_deferred_light.comp",     "comp", "kWorldDeferGiSplitMissSpv",     ["-DCLEAN_DEFER_PASS=11", "-DCLEAN_PROJ_SHADOW_RAYQUERY", "-DRT_SET=4", "-DCLEAN_GI_TRACE", "-DCLEAN_GI_STAGE=5"]),
     ("clean_deferred_light.comp",     "comp", "kWorldDeferGiSplitHitMatSpv",   ["-DCLEAN_DEFER_PASS=11", "-DCLEAN_PROJ_SHADOW_RAYQUERY", "-DRT_SET=4", "-DCLEAN_GI_TRACE", "-DCLEAN_GI_STAGE=6"]),
@@ -540,6 +551,7 @@ SHADERS = [
     ("clean_deferred_light.comp",     "comp", "kWorldDeferGiSplitHitLightVqSpv", ["-DCLEAN_DEFER_PASS=11", "-DCLEAN_PROJ_SHADOW_RAYQUERY", "-DRT_SET=4", "-DCLEAN_GI_TRACE", "-DCLEAN_GI_STAGE=7", "-DCLEAN_VIS_QUEUE"]),
     # (#1039 M2, RenderVKVisQueue bit 2) + the budgeted light rays queued (the producer walks the local lights)
     ("clean_deferred_light.comp",     "comp", "kWorldDeferGiSplitHitMatVq2Spv",   ["-DCLEAN_DEFER_PASS=11", "-DCLEAN_PROJ_SHADOW_RAYQUERY", "-DRT_SET=4", "-DCLEAN_GI_TRACE", "-DCLEAN_GI_STAGE=6", "-DCLEAN_VIS_QUEUE", "-DCLEAN_VIS_QUEUE_M2"]),
+    ("clean_deferred_light.comp",     "comp", "kWorldDeferGiSplitHitReqVq2Spv",   ["-DCLEAN_DEFER_PASS=11", "-DCLEAN_PROJ_SHADOW_RAYQUERY", "-DRT_SET=4", "-DCLEAN_GI_TRACE", "-DCLEAN_GI_STAGE=8", "-DCLEAN_VIS_QUEUE", "-DCLEAN_VIS_QUEUE_M2"]),
     ("clean_deferred_light.comp",     "comp", "kWorldDeferGiSplitHitLightVq2Spv", ["-DCLEAN_DEFER_PASS=11", "-DCLEAN_PROJ_SHADOW_RAYQUERY", "-DRT_SET=4", "-DCLEAN_GI_TRACE", "-DCLEAN_GI_STAGE=7", "-DCLEAN_VIS_QUEUE", "-DCLEAN_VIS_QUEUE_M2"]),
     ("clean_deferred_light.comp",     "comp", "kWorldDeferRtPreTraceSpv", ["-DCLEAN_DEFER_PASS=12", "-DCLEAN_PROJ_SHADOW_RAYQUERY", "-DRT_SET=3"]),
     # #860 (RenderVKRTMirrors): the hero mirror image ray traced (pass 12's layout + set 4: the image).
@@ -566,6 +578,17 @@ SHADERS = [
     ("clean_deferred_light.comp",     "comp", "kWorldDeferShadowMergeSunVisIsoSpv", ["-DCLEAN_DEFER_PASS=15", "-DCLEAN_PROJ_SHADOW_RAYQUERY", "-DRT_SET=4", "-DCLEAN_SHADOW_MERGE", "-DCLEAN_SHADOW_CORE", "-DCLEAN_SHADOW_STAGE=4", "-DCLEAN_SHADOW_ISO_LOD"]),
     ("clean_deferred_light.comp",     "comp", "kWorldDeferShadowSplitVisIsoSpv",    ["-DCLEAN_DEFER_PASS=15", "-DCLEAN_PROJ_SHADOW_RAYQUERY", "-DRT_SET=4", "-DCLEAN_SHADOW_CORE", "-DCLEAN_SHADOW_STAGE=3", "-DCLEAN_SHADOW_ISO_LOD"]),
     ("clean_deferred_light.comp",     "comp", "kWorldDeferShadowSplitShadeSpv",  ["-DCLEAN_DEFER_PASS=15", "-DCLEAN_PROJ_SHADOW_RAYQUERY", "-DRT_SET=4", "-DCLEAN_SHADOW_CORE", "-DCLEAN_SHADOW_STAGE=2"]),
+    # (#1039, RenderVKVisQueue bit 8) SUNVIS / VIS through the visibility queue: GEN (the kernel up to its walk, the
+    # sample as a request), WALK (the sample's rays from the request + the kernel's store; footprint / iso LOD),
+    # VIS's TAIL (VIS over the jobs past the region; footprint / iso LOD)
+    ("clean_deferred_light.comp",     "comp", "kWorldDeferShadowQSunGenSpv",     ["-DCLEAN_DEFER_PASS=15", "-DCLEAN_PROJ_SHADOW_RAYQUERY", "-DRT_SET=4", "-DCLEAN_SHADOW_MERGE", "-DCLEAN_SHADOW_CORE", "-DCLEAN_SHADOW_STAGE=4", "-DCLEAN_VQ_SHADOW=1"]),
+    ("clean_deferred_light.comp",     "comp", "kWorldDeferShadowQSunWalkSpv",    ["-DCLEAN_DEFER_PASS=15", "-DCLEAN_PROJ_SHADOW_RAYQUERY", "-DRT_SET=4", "-DCLEAN_SHADOW_MERGE", "-DCLEAN_SHADOW_CORE", "-DCLEAN_SHADOW_STAGE=4", "-DCLEAN_VQ_SHADOW=2"]),
+    ("clean_deferred_light.comp",     "comp", "kWorldDeferShadowQSunWalkIsoSpv", ["-DCLEAN_DEFER_PASS=15", "-DCLEAN_PROJ_SHADOW_RAYQUERY", "-DRT_SET=4", "-DCLEAN_SHADOW_MERGE", "-DCLEAN_SHADOW_CORE", "-DCLEAN_SHADOW_STAGE=4", "-DCLEAN_VQ_SHADOW=2", "-DCLEAN_SHADOW_ISO_LOD"]),
+    ("clean_deferred_light.comp",     "comp", "kWorldDeferShadowQVisGenSpv",     ["-DCLEAN_DEFER_PASS=15", "-DCLEAN_PROJ_SHADOW_RAYQUERY", "-DRT_SET=4", "-DCLEAN_SHADOW_CORE", "-DCLEAN_SHADOW_STAGE=3", "-DCLEAN_VQ_SHADOW=1"]),
+    ("clean_deferred_light.comp",     "comp", "kWorldDeferShadowQVisWalkSpv",    ["-DCLEAN_DEFER_PASS=15", "-DCLEAN_PROJ_SHADOW_RAYQUERY", "-DRT_SET=4", "-DCLEAN_SHADOW_CORE", "-DCLEAN_SHADOW_STAGE=3", "-DCLEAN_VQ_SHADOW=2"]),
+    ("clean_deferred_light.comp",     "comp", "kWorldDeferShadowQVisWalkIsoSpv", ["-DCLEAN_DEFER_PASS=15", "-DCLEAN_PROJ_SHADOW_RAYQUERY", "-DRT_SET=4", "-DCLEAN_SHADOW_CORE", "-DCLEAN_SHADOW_STAGE=3", "-DCLEAN_VQ_SHADOW=2", "-DCLEAN_SHADOW_ISO_LOD"]),
+    ("clean_deferred_light.comp",     "comp", "kWorldDeferShadowQVisTailSpv",    ["-DCLEAN_DEFER_PASS=15", "-DCLEAN_PROJ_SHADOW_RAYQUERY", "-DRT_SET=4", "-DCLEAN_SHADOW_CORE", "-DCLEAN_SHADOW_STAGE=3", "-DCLEAN_VQ_SHADOW=3"]),
+    ("clean_deferred_light.comp",     "comp", "kWorldDeferShadowQVisTailIsoSpv", ["-DCLEAN_DEFER_PASS=15", "-DCLEAN_PROJ_SHADOW_RAYQUERY", "-DRT_SET=4", "-DCLEAN_SHADOW_CORE", "-DCLEAN_SHADOW_STAGE=3", "-DCLEAN_VQ_SHADOW=3", "-DCLEAN_SHADOW_ISO_LOD"]),
     # (#91 / #869) the emissive triangle lights (RenderVKReSTIREmissive): pass 15's layout, before it.
     ("clean_deferred_light.comp",     "comp", "kWorldDeferRsEmissiveSpv", ["-DCLEAN_DEFER_PASS=15", "-DCLEAN_PROJ_SHADOW_RAYQUERY", "-DRT_SET=4", "-DCLEAN_RS_EMISSIVE_BUILD"]),
     # Shader-clock twins of every lighting kernel (RenderVKShaderClockLighting, restart; needs
@@ -660,6 +683,35 @@ SHADERS = [
     # ---- end 2b ----
 ]
 
+# (#1128, RenderVKRTHangBeacon) THE HANG BEACON TWINS of the ray-query kernels: the same flags +
+# -DCLEAN_RT_HANG_BEACON -DCLEAN_RT_BC_KERNEL=k (k = position here + 1 = LLCleanRendererVK kRtBcKernel*,
+# llcleanrenderervk.cpp rtBcTable -- keep the three in step). Each records every ray query's inputs in
+# host-visible memory before it starts (clean_deferred_light.comp THE HANG BEACON); built in the background
+# only while the setting is on -- the default kernels stay as they are.
+RT_BC_KERNELS = [
+    "kWorldDeferRtTraceListSpv",          # 1  RT reflections, the list trace (fused + the split's tail)
+    "kWorldDeferRtFwdSpv",                # 2  RT reflections, the forward pass
+    "kWorldDeferVisWalkSpv",              # 3  the visibility queue's walk (RT / GI hit rays, the GI reuse)
+    "kWorldDeferRtSplitLayersVq2Spv",     # 4  RT reflections, the queue's blend layers (bit 2)
+    "kWorldDeferShadowQSunWalkSpv",       # 5  the shadow core's sun walk (bit 8)
+    "kWorldDeferShadowQSunWalkIsoSpv",    # 6  ... iso LOD
+    "kWorldDeferShadowQVisWalkSpv",       # 7  the light-sample walk (bit 8)
+    "kWorldDeferShadowQVisWalkIsoSpv",    # 8  ... iso LOD
+    "kWorldDeferShadowQVisTailSpv",       # 9  the light samples' VIS tail (bit 8)
+    "kWorldDeferShadowQVisTailIsoSpv",    # 10 ... iso LOD
+    "kWorldDeferShadowMergeSunVisSpv",    # 11 the fused sun visibility (no queue)
+    "kWorldDeferShadowMergeSunVisIsoSpv", # 12 ... iso LOD
+    "kWorldDeferShadowSplitVisSpv",       # 13 the fused light-sample visibility (no queue)
+    "kWorldDeferShadowSplitVisIsoSpv",    # 14 ... iso LOD
+    "kWorldDeferGiTraceSpv",              # 15 the GI trace (fused)
+    "kWorldDeferGiSplitTraceSpv",         # 16 the GI split's TRACE
+]
+_rt_bc_src = {e[2]: e for e in SHADERS}
+for _k, _sym in enumerate(RT_BC_KERNELS, 1):
+    _e = _rt_bc_src[_sym]
+    SHADERS.append((_e[0], _e[1], _sym[:-3] + "BcSpv",
+                    list(_e[3]) + ["-DCLEAN_RT_HANG_BEACON", "-DCLEAN_RT_BC_KERNEL=%d" % _k]))
+
 # AMD FidelityFX Super Resolution 3.1 upscaler (RenderVKUpscaler 1-6): the SDK's
 # own Vulkan pass entry points (third_party/fidelityfx, MIT; see its README for the
 # version and the local patches), one permutation fixed to this renderer's inputs, plus
@@ -713,7 +765,11 @@ def variant(entry):
     fname, stage = entry[0], entry[1]
     if stage not in STAGES:
         raise SystemExit(f"{fname}: unknown stage '{stage}' (expected one of {', '.join(STAGES)})")
-    return (os.path.join(SRC, fname), stage, tuple(entry[3]) if len(entry) > 3 else ())
+    # #1075: every variant names its stage (-DCLEAN_STAGE_COMP / VERT / FRAG / TASK / MESH):
+    # clean_view.glsl derives CLEAN_VIEW from it (GLSL has no stage macro of its own). A shader
+    # that does not include clean_view.glsl compiles to the same SPIR-V as without it.
+    return (os.path.join(SRC, fname), stage,
+            (tuple(entry[3]) if len(entry) > 3 else ()) + ("-DCLEAN_STAGE_" + stage.upper(),))
 
 # SHADER CONTENT HASH (vk_world_shaders_hash.h): 64-bit BLAKE2b over every embedded SPIR-V word
 # (world + FSR headers, in table order). The viewer appends it to the pipeline-cache build

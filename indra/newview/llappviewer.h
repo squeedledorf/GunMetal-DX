@@ -110,6 +110,15 @@ public:
     void onGraphicsDeviceLost();
     // End of cleanup(): start a new viewer process if the user chose Restart above.
     void relaunchIfRequested();
+    // #1073: quit normally (requestQuit) and start the viewer again with `args` (e.g. "--vr")
+    // at the end of cleanup(), through the same path as the device-loss restart. `why`: log text.
+    // #1074 keep_launch_args: this launch's own arguments are passed on too (before `args`, no
+    // option twice) -- Start in VR keeps e.g. --channel / --settings. The device-loss restart
+    // does not.
+    void requestRelaunch(const std::vector<std::string>& args, const std::string& why, bool keep_launch_args = false);
+    // #1074: the command line this process was started with (platform initParseCommandLine).
+    // POSIX: argv[1..] in `args`; Windows: WinMain's command line string in raw_cmd_line.
+    void setLaunchArgs(const std::vector<std::string>& args, const std::string& raw_cmd_line);
     void fastQuit(S32 error_code = 0); // Shuts down the viewer immediately after sending a logout message
     void requestQuit(); // Request a quit. A kinder, gentler quit.
     void userQuit(); // The users asks to quit. Confirm, then requestQuit()

@@ -945,7 +945,19 @@
              name="checkbox planar align"
              tool_tip="Align textures on all selected faces with the last selected face. Requires Planar texture mapping."
              top_delta="20"
-             width="260" />
+             width="150" /><!-- <GMDX> was 260, the Sync button shares the row -->
+            <!-- <GMDX> -->
+            <button
+             follows="left|top"
+             height="18"
+             label="Sync"
+             layout="topleft"
+             left_pad="8"
+             name="button_sync_materials"
+             tool_tip="Copy diffuse texture settings (offset, repeats, rotation) to normal and specular for all selected faces"
+             top_delta="0"
+             width="66" />
+            <!-- </GMDX> -->
 			<button
              follows="left|top"
              layout="topleft"

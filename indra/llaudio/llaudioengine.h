@@ -148,6 +148,10 @@ public:
 #endif
     F32 getMasterGain();
     void setMasterGain(F32 gain);
+    // #1122: a linear gain on the whole engine output on top of the master volume (the VR
+    // headset gain). 1 = none (the default; nothing else ever sets it).
+    void setOutputBoost(F32 boost);
+    F32 getOutputBoost() const { return mOutputBoost; }
 
     F32 getSecondaryGain(S32 type);
     void setSecondaryGain(S32 type, F32 gain);
@@ -363,6 +367,23 @@ public:
     virtual F64  streamDeviceSeconds() { return -1.0; }
     virtual StreamStats streamStats() const { return StreamStats(); }
 
+    // #1122 output device (VR headset audio, and the user's output device choice in Sound
+    // preferences). Never called on the desktop unless the user chose a device or a VR session
+    // runs. listOutputDevices / listInputDevices: the backend's device names (enumerated on each
+    // call). defaultOutputDevice: the name the system default resolves to ("" = unknown).
+    // currentOutputDevice: the device the engine plays on ("" = it follows the system default).
+    // switchOutputDevice: move the open engine to `name` ("" = back to the system default)
+    // keeping every playing sound; `limiter` asks for the backend's output limiter (used while
+    // the output is boosted above unity gain); false = not possible (nothing changed).
+    virtual std::vector<std::string> listOutputDevices() { return {}; }
+    virtual std::vector<std::string> listInputDevices() { return {}; }
+    virtual std::string defaultOutputDevice() { return std::string(); }
+    // The name the system default capture device resolves to ("" = unknown): only used to see
+    // whether the default mic already is the headset's.
+    virtual std::string defaultInputDevice() { return std::string(); }
+    virtual std::string currentOutputDevice() const { return std::string(); }
+    virtual bool switchOutputDevice(const std::string& /*name*/, bool /*limiter*/ = false) { return false; }
+
 
     // Methods actually related to setting up and removing sounds
     // Owner ID is the owner of the object making the request
@@ -560,7 +581,8 @@ protected:
     std::array<LLAudioBuffer*, LL_MAX_AUDIO_BUFFERS> mBuffers;
 
     F32 mMasterGain;
-    F32 mInternalGain;          // Actual gain set; either mMasterGain or 0 when mMuted is true.
+    F32 mOutputBoost = 1.f;     // #1122 (setOutputBoost)
+    F32 mInternalGain;          // Actual gain set; mMasterGain x mOutputBoost, or 0 when mMuted is true.
     F32 mSecondaryGain[AUDIO_TYPE_COUNT];
 
     F32 mNextWindUpdate;

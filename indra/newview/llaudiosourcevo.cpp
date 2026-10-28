@@ -32,6 +32,7 @@
 #include "llagent.h"
 #include "llagentcamera.h"
 #include "llmutelist.h"
+#include "fssoundemitterblacklist.h" // <GMDX>
 #include "llviewercontrol.h"
 #include "llviewerparcelmgr.h"
 #include "llvoavatarself.h"
@@ -178,6 +179,10 @@ void LLAudioSourceVO::updateMute()
             mute = true;
         }
         else if (LLMuteList::getInstance()->isMuted(mObjectp->getID()))
+        {
+            mute = true;
+        }
+        else if (FSSoundEmitterBlacklist::instance().isEmitterBlacklisted(mObjectp)) // <GMDX> sound emitter blacklist
         {
             mute = true;
         }

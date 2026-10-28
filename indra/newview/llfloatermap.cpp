@@ -138,15 +138,17 @@ bool LLFloaterMap::postBuild()
     mHideButtonsConn = gSavedSettings.getControl("GMDXMiniMapHideButtons")->getSignal()->connect(
         [this](LLControlVariable*, const LLSD&, const LLSD&) { updateTitleButtons(); });
     updateTitleButtons();
-    // (a compass style change resizes it too: the heading tape adds its strip above the map)
-    mCompassStyleConn = gSavedSettings.getControl("GMDXMiniMapCompassStyle")->getSignal()->connect(
-        [this](LLControlVariable*, const LLSD&, const LLSD&)
+    // (a compass style or rotation change resizes it too: the heading tape adds its strip above
+    // the map, and only while north is at the top)
+    auto resquare = [this](LLControlVariable*, const LLSD&, const LLSD&)
+    {
+        if (gSavedSettings.getBOOL("GMDXMiniMapWholeRegion"))
         {
-            if (gSavedSettings.getBOOL("GMDXMiniMapWholeRegion"))
-            {
-                makeSquare();
-            }
-        });
+            makeSquare();
+        }
+    };
+    mCompassStyleConn = gSavedSettings.getControl("GMDXMiniMapCompassStyle")->getSignal()->connect(resquare);
+    mRotateConn = gSavedSettings.getControl("MiniMapRotate")->getSignal()->connect(resquare);
     // </GMDX>
 
     return true;

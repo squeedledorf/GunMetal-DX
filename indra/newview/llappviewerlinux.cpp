@@ -37,6 +37,7 @@
 #include "llmd5.h"
 #include "slupdateapply.h"
 #include "llfindlocale.h"
+#include "llmemorygovernor.h"       // #1103 limitMallocArenas
 
 #include <cstring>
 #include <exception>
@@ -76,8 +77,10 @@ static void exceptionTerminateHandler()
     // reinstall default terminate() handler in case we re-terminate.
     if (gOldTerminateHandler) std::set_terminate(gOldTerminateHandler);
     // treat this like a regular viewer crash, with nice stacktrace etc.
-    long *null_ptr;
-    null_ptr = 0;
+    // <GMDX> SoapStorm 035af4bc62: volatile, so the compiler cannot treat the null store as
+    // undefined behaviour and drop it (or turn it into a trap) instead of faulting here.
+    volatile long *null_ptr = nullptr;
+    // </GMDX>
     *null_ptr = 0xDEADBEEF; //Force an exception that will trigger breakpad.
     // we've probably been killed-off before now, but...
     gOldTerminateHandler(); // call old terminate() handler
@@ -85,6 +88,10 @@ static void exceptionTerminateHandler()
 
 int main( int argc, char **argv )
 {
+    // #1103: bound glibc's malloc arenas before any thread exists (glibc fixes the limit
+    // once a ninth arena was created). Logged later with the pipeline compile settings.
+    LLMemoryGovernor::limitMallocArenas();
+
     // Auto-update apply step, run by the launcher before the viewer proper (#421). Handled
     // before anything else is set up: it only verifies, unpacks and swaps directories.
     if (argc >= 3 && std::strcmp(argv[1], "--slipstream-apply-update") == 0)
@@ -448,6 +455,12 @@ bool LLAppViewerLinux::initParseCommandLine(LLCommandLineParser& clp)
     if (!clp.parseCommandLine(gArgC, gArgV))
     {
         return false;
+    }
+    {
+        // #1074: kept for a restart that passes them on (Start in VR).
+        std::vector<std::string> args;
+        for (int i = 1; i < gArgC; ++i) args.emplace_back(gArgV[i] ? gArgV[i] : "");
+        setLaunchArgs(args, std::string());
     }
 
     // Find the system language.

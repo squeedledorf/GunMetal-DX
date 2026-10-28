@@ -298,6 +298,12 @@ bool LLAppViewerMacOSX::initParseCommandLine(LLCommandLineParser& clp)
     {
         return false;
     }
+    {
+        // #1074: kept for a restart that passes them on (Start in VR).
+        std::vector<std::string> args;
+        for (int i = 1; i < gArgC; ++i) args.emplace_back(gArgV[i] ? gArgV[i] : "");
+        setLaunchArgs(args, std::string());
+    }
 
     // Get the user's preferred language string based on the Mac OS localization mechanism.
     // To add a new localization:

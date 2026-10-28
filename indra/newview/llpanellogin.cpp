@@ -66,6 +66,7 @@
 #include "llwin32headers.h"
 #include "llpanelloginlistener.h"
 #include "stringize.h"
+#include "vkgfx/llxrsession.h"      // #1073 Start in VR
 
 #if LL_WINDOWS
 #pragma warning(disable: 4355)      // 'this' used in initializer list
@@ -299,6 +300,19 @@ LLPanelLogin::LLPanelLogin(const LLRect &rect,
 
     LLButton* def_btn = getChild<LLButton>("connect_btn");
     setDefaultBtn(def_btn);
+
+    // #1073 Start in VR: VR is a startup choice, so the button restarts the viewer with --vr
+    // (the normal quit, then the device-loss restart path). Hidden while already in VR.
+    if (LLButton* vr_btn = findChild<LLButton>("start_vr_btn"))
+    {
+        vr_btn->setVisible(!LLXrSession::active());
+        vr_btn->setClickedCallback([](LLUICtrl*, const LLSD&)
+        {
+            LL_INFOS("VR") << "Start in VR clicked on the login screen" << LL_ENDL;
+            // #1074: with this launch's own arguments (--channel, --settings, ...), plus --vr.
+            LLAppViewer::instance()->requestRelaunch({"--vr"}, "in VR (Start in VR on the login screen)", true);
+        });
+    }
 
     std::string channel = LLVersionInfo::instance().getChannel();
     std::string version = stringize(LLVersionInfo::instance().getShortVersion(), " (",

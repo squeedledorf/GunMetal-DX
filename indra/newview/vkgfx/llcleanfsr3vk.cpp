@@ -626,6 +626,9 @@ void LLCleanFSR3VK::record(VkCommandBuffer cmd, const Frame& f, bool* sharpened)
     else if ((float)f.jitterPhases > mJitterPhaseCount) mJitterPhaseCount += 1.f;
     else if ((float)f.jitterPhases < mJitterPhaseCount) mJitterPhaseCount -= 1.f;
     k.jitterPhaseCount = mJitterPhaseCount;
+    if (f.deltaTime >= 0.f)
+        k.deltaTime = std::clamp(f.deltaTime, 0.f, 1.f);   // (#1075: the views' shared clock)
+    else
     {
         const auto now = std::chrono::steady_clock::now();
         float dt = 1.f / 60.f;

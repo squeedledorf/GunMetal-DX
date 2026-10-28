@@ -49,6 +49,9 @@ layout(local_size_x = 8, local_size_y = 8) in;
 #include "clean_denoise_common.glsl"   // accumulate / accumulateLum / changeDetect (the RT mask's: the sun channel)
 
 struct Tap { vec3 d; vec3 s; float vd; float vs; float ld; float ls; float W; };
+// (#1038, DN_F_MOVE_ZTOL) the extra depth tolerance (m) of this texel's history taps: its surface's
+// own motion (dnMoveDepthTol); 0 for static surfaces and without the bit.
+float g_dn_zx = 0.0;
 
 // Bilinear 2x2 history fetch at continuous texel coordinate hc of last frame's layer pl,
 // same-surface taps only. False: no tap survived.
@@ -72,7 +75,7 @@ bool dnFetchHistory(vec2 hc, uint pl, float pw, vec3 N, float ncos, float ztol, 
         if (bw <= 1e-4) continue;
         const DnGeom g = dnGeom(q, pl);
         if (g.z <= 0.0) continue;
-        if (abs(g.z - pw) > max(pw * ztol, 0.03)) continue;
+        if (abs(g.z - pw) > max(pw * ztol, 0.03) + g_dn_zx) continue;
         if (dot(g.n, N) < ncos) continue;
         vec3 hd, hs; float vd, vs;
         pdnUnpackHist(imageLoad(uDnHist, ivec3(q, int(pl))), hd, hs, vd, vs);
@@ -110,7 +113,7 @@ bool dnSearchHistory(vec2 hc, uint pl, float pw, vec3 N, vec2 grad, out Tap t)
         if (g.z <= 0.0 || dot(g.n, N) < 0.8) continue;
         if (pdnMetaLenD(g.meta) < 0.5 && pdnMetaLenS(g.meta) < 0.5) continue;
         const float dz = dot(grad, vec2(q) - hc);
-        const float e = abs(g.z - (pw + dz)) / (max(pw * 0.04, 0.03) + 0.5 * abs(dz));
+        const float e = abs(g.z - (pw + dz)) / (max(pw * 0.04, 0.03) + 0.5 * abs(dz) + g_dn_zx);
         if (e < best) { best = e; bq = q; bmeta = g.meta; }
     }
     if (bq.x < 0) return false;
@@ -575,6 +578,9 @@ void main()
     // reprojection disagrees with the camera-only one (static geometry: the same point)
     const float smT = dnSurfMoveTexels();
     const bool surfMoved = smT > 0.0 && hcMv && pw > 0.0 && length(hc - hcCam) > smT;
+    // (#1038, DN_F_MOVE_ZTOL) a surface that moved on its own (more than half a texel beyond the
+    // camera's reprojection): its history taps' depth tolerance grows by its own motion
+    if (dnMoveZTol() && hcMv && length(hc - hcCam) > 0.5) g_dn_zx = dnMoveDepthTol(hc - hcCam, pw);
     // (#869) the moving-light rule: the moved lights' share kMv (full at half the target)
     const float mvH = float(dnMoveHist());
     const float fMv = mvH > 0.0 ? float(mo.w & 0xFFu) / 255.0 : 0.0;
@@ -641,6 +647,15 @@ void main()
     const float aD = 1.0 / nD, aS = 1.0 / nS;
     vec3 accD = mix(hD, rD, aD);
     vec3 accS = mix(hS, rS, aS);
+    // (#1038, DN_F_YOUNG_BOOST) NO USABLE HISTORY (a disocclusion -- a whole avatar revealed at once
+    // has no settled neighbour to fill from): the first estimate is the same-surface 3x3 mean of this
+    // frame's raw samples (the centre included; informative ones only), not the lone sample. Still
+    // length 1: the next frames' own samples take over at 1/2, 1/3, ... Only on such texels.
+    if (!have && dnYoungBoost() && !dnRawView())   // (raw routing / views: this frame's samples, untouched)
+    {
+        if (infoD && nnD > 1.5) accD = mD;
+        if (infoS && nnS > 1.5) accS = mS;
+    }
     const float lD = pdnLum(rD), lS = pdnLum(rS);
     const float muD = pdnLum(hD), muS = pdnLum(hS);
     // (#869) A STABLE KERNEL under a moved light: the colour keeps the short (capped) history, but

@@ -27,6 +27,8 @@
 #include "llviewerprecompiledheaders.h"
 #include "llfolderviewmodelinventory.h"
 #include "llinventorymodelbackgroundfetch.h"
+#include "llinventorydefines.h"
+#include "llviewerinventory.h"
 #include "llinventoryfunctions.h"
 #include "llinventorypanel.h"
 #include "lltooldraganddrop.h"
@@ -331,6 +333,34 @@ bool LLFolderViewModelItemInventory::filter(LLFolderViewFilter& filter)
 //  return &mInventoryViewModel;
 //}
 
+// Rank of an item (or of the original a link stands for) for the "by type" sort.
+static S32 wearable_type_rank(const LLFolderViewModelItemInventory* item)
+{
+    const LLViewerInventoryItem* vitem = gInventory.getItem(item->getUUID());
+    if (!vitem)
+    {
+        return 0x7fff;
+    }
+    const LLViewerInventoryItem* original = gInventory.getItem(vitem->getLinkedUUID());
+    if (!original)
+    {
+        original = vitem;
+    }
+    S32 group = 3;
+    switch (original->getActualType())
+    {
+        case LLAssetType::AT_BODYPART: group = 0; break;
+        case LLAssetType::AT_CLOTHING: group = 1; break;
+        case LLAssetType::AT_OBJECT:   group = 2; break;
+        default: break;
+    }
+    // The wearable type is the item's subtype flag
+    const S32 subtype = (original->getInventoryType() == LLInventoryType::IT_WEARABLE)
+        ? (S32)(original->getFlags() & LLInventoryItemFlags::II_FLAGS_SUBTYPE_MASK)
+        : 0;
+    return group * 256 + subtype;
+}
+
 bool LLInventorySort::operator()(const LLFolderViewModelItemInventory* const& a, const LLFolderViewModelItemInventory* const& b) const
 {
     // Ignore sort order for landmarks in the Favorites folder.
@@ -388,6 +418,18 @@ bool LLInventorySort::operator()(const LLFolderViewModelItemInventory* const& a,
             {
                 return (b->getSortGroup() == SG_TRASH_FOLDER);
             }
+        }
+    }
+
+    // #1132: Favorite Wearables "by type": body parts, then clothing by wearable type, then
+    // attachments; name breaks ties. Only items are ranked, and only when the bit is set.
+    if (mByType && a->getSortGroup() == SG_ITEM && b->getSortGroup() == SG_ITEM)
+    {
+        const S32 rank_a = wearable_type_rank(a);
+        const S32 rank_b = wearable_type_rank(b);
+        if (rank_a != rank_b)
+        {
+            return rank_a < rank_b;
         }
     }
 

@@ -41,9 +41,11 @@
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <mutex>
 #include <new>
 #include <sstream>
+#include <thread>
 
 namespace
 {
@@ -841,6 +843,100 @@ std::string LLMemoryGovernor::statusString()
         if (!e.empty()) o << " | " << e;
     }
     return o.str();
+}
+
+// ---- #1103 malloc heap ----
+
+namespace
+{
+// Written once by limitMallocArenas (main(), before any thread), read later: no lock.
+char sArenaText[192] = "glibc default (limitMallocArenas was not called)";
+
+#if LL_LINUX && defined(__GLIBC__)
+// Free bytes held by every arena and the arena count, from malloc_info's XML: the heap
+// totals after the last </heap> ("fast" + "rest" free chunks, the top chunks included).
+bool readMallocFree(U64& free_bytes, U32& arenas)
+{
+    char* buf = nullptr;
+    size_t len = 0;
+    FILE* f = open_memstream(&buf, &len);
+    if (!f) return false;
+    const int rc = malloc_info(0, f);
+    fclose(f);
+    bool ok = false;
+    if (rc == 0 && buf)
+    {
+        U32 n = 0;
+        for (const char* p = strstr(buf, "<heap nr="); p; p = strstr(p + 1, "<heap nr=")) ++n;
+        const char* tail = buf;
+        for (const char* p = strstr(buf, "</heap>"); p; p = strstr(p + 1, "</heap>")) tail = p;
+        unsigned long long fast = 0, rest = 0;
+        const char* pf = strstr(tail, "<total type=\"fast\"");
+        const char* pr = strstr(tail, "<total type=\"rest\"");
+        if (pf && pr && sscanf(pf, "<total type=\"fast\" count=\"%*u\" size=\"%llu\"", &fast) == 1
+            && sscanf(pr, "<total type=\"rest\" count=\"%*u\" size=\"%llu\"", &rest) == 1)
+        {
+            free_bytes = (U64)(fast + rest);
+            arenas = n;
+            ok = true;
+        }
+    }
+    free(buf);
+    return ok;
+}
+#endif
+} // namespace
+
+// static
+void LLMemoryGovernor::limitMallocArenas()
+{
+#if LL_LINUX && defined(__GLIBC__)
+    // Every thread that allocates while the existing arenas are busy gets its own arena
+    // (glibc default: up to 8 x cores), and an arena keeps what its threads freed. The
+    // pipeline compile workers (up to hardware threads - 1, fresh threads per batch) run the
+    // driver's shader compiler, which allocates GBs; with an arena per worker that memory
+    // stayed resident after the batch (#1059 / #1103: Arc B580 / Mesa, 16 GB, ~9 GB after a
+    // cold compile, then the OOM killer). Half the hardware threads keeps about two
+    // allocating threads per arena (glibc's per-thread cache serves most small allocations
+    // without the arena lock, and a thread over the limit attaches to an arena nobody holds
+    // when one exists) while bounding how many arenas can each hold freed memory.
+    const char* env = getenv("MALLOC_ARENA_MAX");
+    const char* tunables = getenv("GLIBC_TUNABLES");
+    if ((env && *env) || (tunables && strstr(tunables, "malloc.arena_max")))
+    {
+        snprintf(sArenaText, sizeof(sArenaText), "left to the environment (%s%s)",
+                 (env && *env) ? "MALLOC_ARENA_MAX=" : "GLIBC_TUNABLES", (env && *env) ? env : "");
+        return;
+    }
+    const unsigned hw = (std::max)(1u, std::thread::hardware_concurrency());
+    const unsigned n = (std::min)((std::max)(hw / 2u, 4u), 16u);
+    if (mallopt(M_ARENA_MAX, (int)n))
+        snprintf(sArenaText, sizeof(sArenaText), "capped at %u (%u hardware threads; glibc default up to %u)", n, hw,
+                 8u * hw);
+    else
+        snprintf(sArenaText, sizeof(sArenaText), "mallopt(M_ARENA_MAX, %u) refused: glibc default", n);
+#else
+    snprintf(sArenaText, sizeof(sArenaText), "not applicable (no glibc)");
+#endif
+}
+
+// static
+std::string LLMemoryGovernor::mallocArenaText() { return sArenaText; }
+
+// static
+LLMemoryGovernor::HeapTrim LLMemoryGovernor::trimMallocHeap()
+{
+    HeapTrim r;
+#if LL_LINUX && defined(__GLIBC__)
+    r.rss_before = LLMemory::getCurrentRSS();
+    readMallocFree(r.free_before, r.arenas);
+    const auto t0 = std::chrono::steady_clock::now();
+    malloc_trim(0);
+    r.ms = std::chrono::duration<F64, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    r.rss_after = LLMemory::getCurrentRSS();
+    r.done = true;
+#endif
+    return r;
 }
 
 // ---- #698 allocation failures ----

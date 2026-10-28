@@ -38,6 +38,7 @@
 #include "llcleanrenderervk.h"
 #include "llcleandenoisevk.h"
 #include "llcleanrtvk.h"
+#include "llxrsession.h"
 
 #include "llviewercontrol.h"
 #include "../llvkhitch.h"
@@ -82,7 +83,8 @@ const VkSpecializationInfo* giLitSpec()
 constexpr uint32_t GI_F_ON = 1u, GI_F_FINAL_IN = 2u, GI_F_TEMPORAL = 4u, GI_F_SPATIAL = 8u, GI_F_CACHE = 16u,
                    GI_F_RES = 32u, GI_F_RES_PREV = 64u, GI_F_CACHE_FILL = 128u, GI_F_LIGHT_CHG = 65536u,
                    GI_F_BACK_STOP = 131072u, GI_F_POINT_SHADOW = 262144u, GI_F_REPROJ_SEARCH = 524288u,
-                   GI_F_UPS_NORMAL = 1048576u, GI_F_STATS = 2097152u, GI_F_LAG = 8388608u, GI_F_LAG_STALE = 16777216u;
+                   GI_F_UPS_NORMAL = 1048576u, GI_F_STATS = 2097152u, GI_F_LAG = 8388608u, GI_F_LAG_STALE = 16777216u,
+                   GI_F_REUSE_MV = 33554432u;   // (#1038)
 // One change sphere (xyz centre, w radius) into the next header's list: up to the header's 64; past
 // them the last sphere grows to enclose it (a coarser invalidation instead of wiping the whole
 // cache -- a sim with many small changes per frame kept it empty).
@@ -106,6 +108,7 @@ void giAddSphere(std::vector<float>& v, const float* s)
 struct GiCfg
 {
     U32 mode = 0;          // RenderVKGI: 0 off, 1 one bounce, 2 + temporal reuse, 3 + spatial reuse
+    bool vrOff = false;    // #1076: RenderVKGI is on but a VR session runs (mode forced 0; setting untouched)
     F32 scale = 0.5f;      // RenderVKGIScale
     F32 intensity = 1.f;   // RenderVKGIIntensity
     F32 minAmb = 0.f;      // RenderVKGIMinAmbient
@@ -147,6 +150,13 @@ struct GiCfg
     bool upsNormal = true; // RenderVKGIUpsampleNormal
     bool split = true;     // RenderVKGISplitKernels (#1031)
     bool shadeSplit = true;    // RenderVKGIShadeSplit (#1036)
+    bool reuseMotion = true;   // RenderVKGIReuseMotion (#1038)
+    U32 disoccCache = 4;   // RenderVKGIDisoccCache (#1038)
+    bool youngBoost = true;    // RenderVKDenoiseYoungBoost (#1038; the GI denoiser's half)
+    bool moveZTol = true;  // RenderVKDenoiseMovingDepthTol (#1038; the GI denoiser's half)
+    bool moveFix = true;   // RenderVKGILightMoveFix (#1087: the hot list)
+    U32 moveMCap = 2;      // RenderVKGILightMoveMCap (#1087)
+    F32 moveCache = 4.f;   // RenderVKGILightChangeCacheFrames (#1087)
 };
 GiCfg giCfg()
 {
@@ -194,6 +204,13 @@ GiCfg giCfg()
     static LLCachedControl<U32>  s_upsn(gSavedSettings, "RenderVKGIUpsampleNormal", 1U);
     static LLCachedControl<bool> s_split(gSavedSettings, "RenderVKGISplitKernels", true);
     static LLCachedControl<bool> s_shsplit(gSavedSettings, "RenderVKGIShadeSplit", true);
+    static LLCachedControl<bool> s_rmv(gSavedSettings, "RenderVKGIReuseMotion", true);
+    static LLCachedControl<U32>  s_dcache(gSavedSettings, "RenderVKGIDisoccCache", 4U);
+    static LLCachedControl<bool> s_yboost(gSavedSettings, "RenderVKDenoiseYoungBoost", true);
+    static LLCachedControl<bool> s_mztol(gSavedSettings, "RenderVKDenoiseMovingDepthTol", true);
+    static LLCachedControl<bool> s_mfix(gSavedSettings, "RenderVKGILightMoveFix", true);
+    static LLCachedControl<U32>  s_mmcap(gSavedSettings, "RenderVKGILightMoveMCap", 2U);
+    static LLCachedControl<F32>  s_mcache(gSavedSettings, "RenderVKGILightChangeCacheFrames", 4.f);
     c.mode = std::min<U32>(s_mode, 3u);
     c.scale = s_scale >= 0.75f ? 1.f : (s_scale >= 0.375f ? 0.5f : 0.25f);
     c.intensity = std::clamp((F32)s_int, 0.f, 16.f);
@@ -236,7 +253,23 @@ GiCfg giCfg()
     c.upsNormal = s_upsn != 0u;
     c.split = s_split;
     c.shadeSplit = s_shsplit;
+    c.reuseMotion = s_rmv;
+    c.disoccCache = std::min<U32>(s_dcache, 16u);
+    c.youngBoost = s_yboost;
+    c.moveZTol = s_mztol;
+    c.moveFix = s_mfix;
+    c.moveMCap = std::min<U32>(s_mmcap, 64u);
+    c.moveCache = std::clamp((F32)s_mcache, 0.f, 1024.f);
 #endif
+    // #1076 (VR scope, owner decision 2026-10-25): GI is off in VR until it renders smoothly at
+    // the headset's rate -- a soft override while the session runs, like the safety governor's
+    // caps: the setting is never written, and the desktop comes back with it as it was.
+    // Desktop: LLXrSession::active() is a static false.
+    if (c.mode != 0u && LLXrSession::active() && LLXrSession::instance().sessionRunning())
+    {
+        c.mode = 0u;
+        c.vrOff = true;
+    }
     return c;
 }
 } // namespace
@@ -255,8 +288,8 @@ void LLCleanRendererVK::giInit(VkDevice dev)
             delete mGiDn;
             mGiDn = nullptr;
         }
-        else writeGiMotion();
     }
+    writeGiMotion();   // (the GI denoiser's binding 5 + #1038 set 3 binding 28: valid from init on)
     if (mRtReflLayout && !mGiTracePipe)
     {
         VkShaderModule m = giModule(dev, kWorldDeferGiTraceSpv, kWorldDeferGiTraceSpv_bytes, "DeferGiTrace");
@@ -279,7 +312,9 @@ void LLCleanRendererVK::giInit(VkDevice dev)
             {kWorldDeferGiSplitShadeSpv, kWorldDeferGiSplitShadeSpv_bytes, "DeferGiSplitShade", "mGiSplitPipe (DeferGiSplitShade)"},
             {kWorldDeferGiSplitReuseSpv, kWorldDeferGiSplitReuseSpv_bytes, "DeferGiSplitReuse", "mGiSplitPipe (DeferGiSplitReuse)"},
             {kWorldDeferGiSplitReshadeSpv, kWorldDeferGiSplitReshadeSpv_bytes, "DeferGiSplitReshade",
-             "mGiSplitPipe (DeferGiSplitReshade)"}};
+             "mGiSplitPipe (DeferGiSplitReshade)"},
+            {kWorldDeferGiSplitChgTagSpv, kWorldDeferGiSplitChgTagSpv_bytes, "DeferGiSplitChgTag",
+             "mGiSplitPipe (DeferGiSplitChgTag)"}};
         for (uint32_t i = 0; i < GIS_COUNT; ++i)
         {
             if (mGiSplitPipe[i]) continue;
@@ -357,9 +392,27 @@ void LLCleanRendererVK::giDestroy()
 
 void LLCleanRendererVK::writeGiMotion()
 {
-    if (!mGiDn) return;
-    if (mMotion.view) mGiDn->setMotion(mMotion.view, mDepthSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    else              mGiDn->setMotion(VK_NULL_HANDLE, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL);
+    if (mGiDn)
+    {
+        if (mMotion.view) mGiDn->setMotion(mMotion.view, mDepthSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        else              mGiDn->setMotion(VK_NULL_HANDLE, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL);
+    }
+    // (#1038) set 3 binding 28: the same motion vectors for the reservoir reprojection of moving surfaces
+    // (the GI trace's GI_F_REUSE_MV, pass 15's RS_F_REUSE_MV; read only while the frame info says they
+    // were written: taa_params.y), else a
+    // denoiser's 1 x 1 placeholder (GENERAL) -- the binding stays valid for the pipelines declaring it.
+    // Same callers / guarantee as writePdnMotion (no frame in flight uses the set), + giInit.
+    if (!mDsetDeferSplit || !mCtx) return;
+    VkDescriptorImageInfo ii{};
+    const LLCleanDenoiserVK* dn = mPdn ? mPdn : mGiDn;
+    if (mMotion.view) ii = {mDepthSampler, mMotion.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    else if (dn && dn->motionPlaceholderView() && dn->nearestSampler())
+        ii = {dn->nearestSampler(), dn->motionPlaceholderView(), VK_IMAGE_LAYOUT_GENERAL};
+    else return;
+    VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    w.dstSet = mDsetDeferSplit; w.dstBinding = kDsBindingGiMotion; w.descriptorCount = 1;
+    w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; w.pImageInfo = &ii;
+    vkUpdateDescriptorSets(mCtx->device(), 1, &w, 0, nullptr);
 }
 
 // Set 3 bindings 18-23 + 25 (callers guarantee no frame in flight uses the set).
@@ -437,16 +490,27 @@ void LLCleanRendererVK::giDecide(uint32_t rw, uint32_t rh)
     mGiLagNow = false;      // (#978 phase 2: decided below, on a GI frame)
     mGiFwdCopied = false;
     mGiLagValue = 0;        // (joined by the last recording, at the latest by its tail: asyncSubmitFrame)
+    if (stereoActive()) return;   // #1075: GI is deferred (design step 13); stereo frames light forward
     GiCfg cfg = giCfg();
     cfg.scale = rtSignalScale(cfg.scale);   // (RenderVKDlssFullResSignalsMode)
     U32 split = 1;
     bool defer = true;
 #if defined(LL_HAS_CLEAN_PIPELINE)
-    static LLCachedControl<U32>  s_split(gSavedSettings, "RenderVKDeferredSplit", 1U);
+    static LLCachedControl<U32>  s_split(gSavedSettings, "RenderVKDeferredSplit", 2U);
     static LLCachedControl<bool> s_defer(gSavedSettings, "RenderVKDeferredLighting", true);
     split = s_split; defer = s_defer;
 #endif
     mGiModeSetting = cfg.mode;
+    {
+        static bool s_vr_off_logged = false;   // (#1076: once per VR on / off edge)
+        if (cfg.vrOff != s_vr_off_logged)
+        {
+            s_vr_off_logged = cfg.vrOff;
+            LL_INFOS("VR") << (cfg.vrOff ? "ray-traced GI is off while the VR session runs (RenderVKGI kept)"
+                                         : "ray-traced GI follows RenderVKGI again (the VR session stopped)")
+                           << LL_ENDL;
+        }
+    }
     // (Decided in the light pass, BEFORE this frame's TLAS build: tlasValid() is false there by
     // construction -- it wants this frame's slot -- so the decision takes last frame's build;
     // recordGI re-checks tlasValid() and skips the trace without one -- the consumers then read the
@@ -497,7 +561,9 @@ void LLCleanRendererVK::giDecide(uint32_t rw, uint32_t rh)
         else if (cfg.mode == 0u && mGiLogged)
         {
             mGiLogged = false;
-            LL_INFOS("VKShadow") << "ray-traced GI off (RenderVKGI 0): the probes' diffuse irradiance" << LL_ENDL;
+            LL_INFOS("VKShadow") << "ray-traced GI off ("
+                                 << (cfg.vrOff ? "a VR session runs: GI is off in VR, the setting is kept" : "RenderVKGI 0")
+                                 << "): the probes' diffuse irradiance" << LL_ENDL;
         }
     }
     if (!path)
@@ -776,6 +842,7 @@ void LLCleanRendererVK::giPrestep()
 // after them makes it visible to every compute stage).
 void LLCleanRendererVK::giWriteHeader(VkCommandBuffer cmd)
 {
+    mGiHdrChg = false;
     if (!mGiNow || !mGiState.buffer) return;
     const GiCfg cfg = giCfg();
     GiHeader h{};
@@ -810,6 +877,12 @@ void LLCleanRendererVK::giWriteHeader(VkCommandBuffer cmd)
     if (mTsOn) h.cfg[0] |= GI_F_STATS;
     if (cfg.reprojSearch) h.cfg[0] |= GI_F_REPROJ_SEARCH;
     if (cfg.upsNormal) h.cfg[0] |= GI_F_UPS_NORMAL;
+    // (#1038) DISOCCLUSION ON MOVING GEOMETRY: the reservoirs' temporal candidate follows the motion
+    // vectors (a walking avatar's surface, not the background behind where it stood -- set 3 binding
+    // 28; only while the frame info says they were written), and a texel left with its fresh sample
+    // alone takes the radiance cache's cell as a prior of up to RenderVKGIDisoccCache samples (prm5.w)
+    if (cfg.reuseMotion && mMotion.view) h.cfg[0] |= GI_F_REUSE_MV;
+    h.prm5[3] = (float)cfg.disoccCache;
     // (GI_F_BACK_STOP / GI_F_POINT_SHADOW: the edge sparkles' leaks -- clean_gi_common.glsl)
     if (cfg.backStop) h.cfg[0] |= GI_F_BACK_STOP;
     if (cfg.pointShadow) h.cfg[0] |= GI_F_POINT_SHADOW;
@@ -852,6 +925,26 @@ void LLCleanRendererVK::giWriteHeader(VkCommandBuffer cmd)
         }
         h.prm5[1] = (float)mGiChgPrevN;
         std::memcpy(h.chg_prev, mGiChgPrev, sizeof(float) * 8u * mGiChgPrevN);
+        // (#1087, RenderVKGILightMoveFix) THE HOT LIST: the lights flagged as moved within
+        // RenderVKGILightChangeHold frames (mGiHot) -- their reused samples' confidence clamped (RenderVKGILightMoveMCap), the changed
+        // share held through the whole motion, the radiance cache's window short inside their old / new
+        // spheres (RenderVKGILightChangeCacheFrames). Empty where nothing changed: no cost.
+        if (cfg.moveFix)
+        {
+            const size_t nh = std::min(mGiHot.size(), kGiHotMax);
+            for (size_t k = 0; k < nh; ++k)
+            {
+                const GiHotLight& e = mGiHot[k];
+                std::memcpy(h.hot[4u * k], e.opr, sizeof(e.opr));
+                std::memcpy(h.hot[4u * k + 1u], e.ocf, sizeof(e.ocf));
+                std::memcpy(h.hot[4u * k + 2u], e.npr, sizeof(e.npr));
+                h.hot[4u * k + 3u][0] = (float)e.li;
+            }
+            h.prm6[0] = (float)nh;
+            h.prm6[1] = (float)cfg.moveMCap;
+            h.prm6[2] = cfg.moveCache;
+            mGiStatAcc.hotLights += (double)nh;
+        }
         mGiStatAcc.chgLights += n;
         mGiStatAcc.allLights += (double)std::min<size_t>(mLightsCPU.size(), 256u);
         ++mGiStatAcc.hdrFrames;
@@ -884,6 +977,10 @@ void LLCleanRendererVK::giWriteHeader(VkCommandBuffer cmd)
         mGiStateFresh = false;
     }
     mGiSphOverflow = false;
+    // (#1039) REUSE reads the CHG-TAG stage's tags exactly while this header has GI_F_LIGHT_CHG and the reservoirs
+    // (GI_F_RES: the fresh candidate's bit; its taps' bits need the temporal reuse as well -- the stage tests that):
+    // recordGISplitReuse runs the stage on this, not on the settings again
+    mGiHdrChg = (h.cfg[0] & GI_F_LIGHT_CHG) != 0u && (h.cfg[0] & GI_F_RES) != 0u;
     vkCmdUpdateBuffer(cmd, mGiState.buffer, 0, sizeof(h), &h);
 }
 
@@ -1331,41 +1428,45 @@ void LLCleanRendererVK::recordGI(VkCommandBuffer cmd, const VKDeferPush& p, uint
     const GiCfg cfg = giCfg();
     const uint32_t dw = mGiDn->width(), dh = mGiDn->height();
     const bool split = mGiSplitNow && giSplitReady(dw, dh);
-    const bool shadeSplit = split && mGiShadeSplitNow && giShadeSplitReady();   // (#1036)
+    // (#1036; its HIT / MISS list headers were reset by THE LIGHT PREP ahead of the lighting -- a frame whose early
+    //  point did not, never expected, shades with SHADE)
+    const bool shadeSplit = split && mGiShadeSplitNow && giShadeSplitReady()
+                         && mLightPrep.headersDone && mLightPrep.giLists;
     // (#1039 M1, RenderVKVisQueue) THE VISIBILITY QUEUE: HIT-MAT queues the hits' sun rays, the walk traces
     // them, HIT-LIGHT resolves (no sun walk in it); the hits past the region take the fused HIT-LIGHT as a tail
-    // (#1039 M2, bit 2: pipeline set 1) + the budget's light rays queued: HIT-LIGHT holds no ray query
+    // (#1039 M2, bit 2: pipeline set 1) + the budget's light rays queued: HIT-LIGHT holds no ray query; the
+    // producer is a HIT-REQ stage after HIT-MAT (HIT-MAT holds only the material)
     const uint32_t vs = mVqSet;
-    const bool vq = shadeSplit && mVqGiNow && mVq.buffer && mVisWalkPipe && mGiVqPipe[vs][VQS_MAT] && mGiVqPipe[vs][VQS_LIGHT];
+    const bool vq = shadeSplit && mVqGiNow && mVq.buffer && mVisWalkPipe && mGiVqPipe[vs][VQS_MAT] && mGiVqPipe[vs][VQS_LIGHT]
+                 && (vs == 0u || mGiVqPipe[vs][VQS_REQ]);
     if (vq) visQueueBegin(cmd, VQR_GI, 0u, 0u);
-    if (shadeSplit)
+    // (#1039 M3, RenderVKVisQueue bit 4) REUSE-VQ queues the reused picks' visibility rays, the walk traces them,
+    // the VIS TAIL (#1039: its own kernel, from the picks REUSE-VQ stored) finishes those texels -- the region holds
+    // every texel (else: the fused REUSE)
+    const bool vqGir = split && mVqGirNow && mVq.buffer && mVisWalkPipe && mGirVqPipe && mGirVisTailPipe;
+    if (vqGir) visQueueBegin(cmd, VQR_GIR, 0u, 0u);
+    // (#1036: the HIT / MISS lists' headers -- count 0, dispatch (0, 0, 1) -- are THE LIGHT PREP's: reset after
+    //  last frame's stages read them, published to TRACE's appends and the stages' indirect reads by its closing
+    //  barrier on this queue / the join on graphics. No COMPUTE -> TRANSFER drain here any more.)
+    // WAR on the GI images / reservoirs / cache (last frame's readers) + the header upload
+    // (#1031: + the re-shade list's header, last frame's indirect dispatches read it). THE SPLIT, its trace before
+    // the combine (no one-frame-latency GI): not needed -- TRACE (+ the tags' late pass) writes only the GI records,
+    // the list headers / appends and the tag words; every reader of those (last frame's stages, here or on
+    // q_gi_lag) is earlier on this queue behind recordDeferLight's opening barrier (src COMPUTE: an execution
+    // dependency, the indirect reads included as logically earlier stages) or on graphics behind the fork's
+    // semaphore; the header upload is the front end's (that barrier / the semaphore). Nothing recorded before it in
+    // the chain (pass 15 + its denoiser, SHADOW / CLASSIFY, REFLECT, the RT reflections) writes what TRACE reads or
+    // reads what it writes (the frame walk's dependency audit, llcleanvisqueuevk.cpp); the GI images, reservoirs
+    // and cache are written only by the later stages, behind TRACE's own RAW barriers. Kept: the fused kernel
+    // (writes everything at once -- the RT reflections just before it read the cache) and the one-frame-latency
+    // GI (its trace follows BASE / LOCAL, which read the GI images / state, on the same queue).
+    if (!split || mGiLagNow)
     {
-        // (#1036) the HIT / MISS lists' headers (count 0, dispatch (0, 0, 1)) before TRACE appends: last
-        // frame's stages read them (storage + indirect) -- WAR -- then the clear
-        VkMemoryBarrier2 m{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
-        m.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
-        m.dstStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT; m.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-        VkDependencyInfo d{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
-        d.memoryBarrierCount = 1; d.pMemoryBarriers = &m;
-        vkCmdPipelineBarrier2(cmd, &d);
-        const uint32_t hdr[8] = {0u, 0u, 0u, 1u, 0u, 0u, 0u, 1u};
-        vkCmdUpdateBuffer(cmd, mGiHit.buffer, 16u, sizeof(hdr), hdr);
-    }
-    {   // WAR on the GI images / reservoirs / cache (last frame's readers) + the header upload
-        // (#1031: + the re-shade list's header, last frame's indirect dispatches read it)
-        // (#1036: + the HIT / MISS headers' clear -> TRACE's appends and the stages' indirect reads)
         VkMemoryBarrier2 m{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
         m.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
         m.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
         m.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
         m.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
-        if (shadeSplit)
-        {
-            m.srcStageMask |= VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;
-            m.srcAccessMask |= VK_ACCESS_2_TRANSFER_WRITE_BIT;
-            m.dstStageMask |= VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
-            m.dstAccessMask |= VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT;
-        }
         VkDependencyInfo d{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
         d.memoryBarrierCount = 1; d.pMemoryBarriers = &m;
         vkCmdPipelineBarrier2(cmd, &d);
@@ -1409,6 +1510,19 @@ void LLCleanRendererVK::recordGI(VkCommandBuffer cmd, const VKDeferPush& p, uint
             d.memoryBarrierCount = 1; d.pMemoryBarriers = &m;
             vkCmdPipelineBarrier2(cmd, &d);
         };
+        // (#1039) the CHANGE TAGS' bits 0-2 belong to the light prep (recordLightPrep: ahead of the lighting, it
+        // reads only last frame's reservoirs + this frame's header). Not recorded there this frame (never
+        // expected: giChgTagLate): here, beside TRACE -- it touches only the tag words and last frame's reservoir
+        // layer, neither of which TRACE reads or writes; the RAW after TRACE orders it before HIT-LIGHT's /
+        // SHADE's bit 3 and REUSE.
+        if (mGiHdrChg && !mLightPrep.chgDone && mGiSplitPipe[GIS_CHGTAG])
+        {
+            LLVKHitch::count("giChgTagLate", 1u);
+            mLightPrep.chgDone = true;
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mGiSplitPipe[GIS_CHGTAG]);
+            vkCmdDispatch(cmd, (dw + 7u) / 8u, (dh + 7u) / 8u, 1);
+            gpuSubMark(cmd, onAsync ? "c_gi_chgtag" : "g_gi_chgtag");
+        }
         // 1 TRACE: the fresh rays' walks -> hit records (+ the list's header reset; #1036: + the HIT /
         // MISS lists, push rtr.z = 1)
         if (shadeSplit)
@@ -1417,7 +1531,7 @@ void LLCleanRendererVK::recordGI(VkCommandBuffer cmd, const VKDeferPush& p, uint
             tp.rtr[2] = 1.f;
             vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(tp), &tp);
         }
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mGiSplitPipe[GIS_TRACE]);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, rtBcPipe(mGiSplitPipe[GIS_TRACE]));   // (#1128 beacon twin when on)
         vkCmdDispatch(cmd, (dw + 7u) / 8u, (dh + 7u) / 8u, 1);
         gpuSubMark(cmd, onAsync ? "c_gi_trace" : "g_gi_trace");
         if (shadeSplit)
@@ -1442,26 +1556,59 @@ void LLCleanRendererVK::recordGI(VkCommandBuffer cmd, const VKDeferPush& p, uint
             gpuSubMark(cmd, onAsync ? "c_gi_hitmat" : "g_gi_hitmat");
             if (vq)
             {
-                // HIT-MAT's requests + its raised dispatch -> the walk; the results -> HIT-LIGHT
-                raw(true);
-                visQueueWalk(cmd, VQR_GI, rp);
-                gpuSubMark(cmd, onAsync ? "c_gi_walk" : "g_gi_walk");
-                raw(false);
-                vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(vp), &vp);
-                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mGiVqPipe[vs][VQS_LIGHT]);
-                vkCmdDispatchIndirect(cmd, mGiHit.buffer, 1u * 16u + 4u);
-                if (mVqRegion[VQR_GI].entries < dw * dh)
+                if (vs == 1u)
                 {
-                    // the hits past the region: the fused HIT-LIGHT from the first of them (independent texels)
-                    VKRtReflPush tp = rp;
-                    tp.rtr3[1] = mVqRegion[VQR_GI].entries;
-                    vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(tp), &tp);
-                    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mGiShadePipe[GSS_HITLIGHT]);
+                    // (set 1) HIT-REQ: HIT-MAT's RT LIT RECORDS -> the hits' requests, sum / share slots, the walk's
+                    // raised dispatch (the push stays the queue's)
+                    raw(false);
+                    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mGiVqPipe[vs][VQS_REQ]);
                     vkCmdDispatchIndirect(cmd, mGiHit.buffer, 1u * 16u + 4u);
+                    gpuSubMark(cmd, onAsync ? "c_gi_hitreq" : "g_gi_hitreq");
                 }
-                gpuSubMark(cmd, onAsync ? "c_gi_hitlight" : "g_gi_hitlight");
-                vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(rp), &rp);
-                visQueueStats(cmd, VQR_GI);
+                // the walk and HIT-LIGHT as functions: recorded here, or (#1039 M6) in the frame walk and after it
+                auto walk = [this, rp, onAsync](VkCommandBuffer c)
+                {
+                    visQueueWalk(c, VQR_GI, rp);
+                    gpuSubMark(c, onAsync ? "c_gi_walk" : "g_gi_walk");
+                };
+                auto light = [this, rp, vp, vs, dw, dh, onAsync](VkCommandBuffer c)
+                {
+                    vkCmdPushConstants(c, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(vp), &vp);
+                    vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_COMPUTE, mGiVqPipe[vs][VQS_LIGHT]);
+                    vkCmdDispatchIndirect(c, mGiHit.buffer, 1u * 16u + 4u);
+                    if (mVqRegion[VQR_GI].entries < dw * dh)
+                    {
+                        // the hits past the region: the fused HIT-LIGHT from the first of them (independent texels)
+                        VKRtReflPush tp = rp;
+                        tp.rtr3[1] = mVqRegion[VQR_GI].entries;
+                        vkCmdPushConstants(c, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(tp), &tp);
+                        vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_COMPUTE, mGiShadePipe[GSS_HITLIGHT]);
+                        vkCmdDispatchIndirect(c, mGiHit.buffer, 1u * 16u + 4u);
+                    }
+                    gpuSubMark(c, onAsync ? "c_gi_hitlight" : "g_gi_hitlight");
+                    vkCmdPushConstants(c, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(rp), &rp);
+                    visQueueStats(c, VQR_GI);
+                };
+                if (mVqM6Collect && set2 == mDsetDefer && !mVqM6Walk[VQC_GI] && !mVqM6Post[VQC_GI])
+                {
+                    // (#1039 M6) the walk in the frame walk; HIT-LIGHT, REUSE (with its own walk) and the rest of
+                    // this function after it (the RT layout's sets re-bound: other consumers ran between)
+                    visQueueM6Defer(VQC_GI, walk,
+                        [this, light, rp, p, viewOff, onAsync, vqGir, rtSet](VkCommandBuffer c)
+                        {
+                            const VkDescriptorSet s5[5] = {mDsetDraw0, mDsetDraw1, mDsetDefer, mDsetDeferSplit, rtSet};
+                            vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_COMPUTE, mRtReflLayout, 0, 5, s5, 1, &viewOff);
+                            light(c);
+                            recordGISplitReuse(c, rp, onAsync, vqGir);
+                            recordGITail(c, p, viewOff, onAsync);
+                        });
+                    return;
+                }
+                // HIT-MAT's (set 1: HIT-REQ's) requests + the raised dispatch -> the walk; the results -> HIT-LIGHT
+                raw(true);
+                walk(cmd);
+                raw(false);
+                light(cmd);
             }
             else
             {
@@ -1479,35 +1626,109 @@ void LLCleanRendererVK::recordGI(VkCommandBuffer cmd, const VKDeferPush& p, uint
             vkCmdDispatch(cmd, (dw + 7u) / 8u, (dh + 7u) / 8u, 1);
             gpuSubMark(cmd, onAsync ? "c_gi_shade" : "g_gi_shade");
         }
-        // 3 REUSE: the reservoirs, the visibility rays, every store but the listed texels'
+        recordGISplitReuse(cmd, rp, onAsync, vqGir);
+    }
+    else
+    {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, rtBcPipe(mGiTracePipe));   // (#1128 beacon twin when on)
+        vkCmdDispatch(cmd, (dw + 7u) / 8u, (dh + 7u) / 8u, 1);
+        gpuSubMark(cmd, onAsync ? "c_gi_trace" : "g_gi_trace");
+    }
+    recordGITail(cmd, p, viewOff, onAsync);
+}
+
+// The GI split from its REUSE stage on (REUSE, the M3 walk + tails, RESHADE + its tail) -- a function of its own so
+// the #1039 M6 frame walk can record it after the walks. The RT layout's sets bound, rp = the GI push.
+void LLCleanRendererVK::recordGISplitReuse(VkCommandBuffer cmd, const VKRtReflPush& rp, bool onAsync, bool vqGir)
+{
+    const GiCfg cfg = giCfg();
+    const uint32_t dw = mGiDn->width(), dh = mGiDn->height();
+    auto raw = [cmd](bool indirect)
+    {
+        VkMemoryBarrier2 m{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+        m.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT; m.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+        m.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        m.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+        if (indirect)
+        {
+            m.dstStageMask |= VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
+            m.dstAccessMask |= VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT;
+        }
+        VkDependencyInfo d{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        d.memoryBarrierCount = 1; d.pMemoryBarriers = &m;
+        vkCmdPipelineBarrier2(cmd, &d);
+    };
+    {
+        // (the shade stages' samples -- and HIT-LIGHT's / SHADE's bit 3 on the change tags, whose bits 0-2 the light
+        //  prep wrote before this frame's GI: #1039, no CHG-TAG pass here any more -> REUSE)
         raw(false);
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mGiSplitPipe[GIS_REUSE]);
+        // 3 REUSE: the reservoirs, the visibility rays, every store but the listed texels'
+        // (#1039 M3: REUSE-VQ -- the visibility rays queued, those texels listed in the queue; push rtr3.zw = the
+        //  region, for it and both its tails)
+        VKRtReflPush gp = rp;
+        if (vqGir)
+        {
+            const VkDeviceAddress qa = visQueueAddr(VQR_GIR);
+            gp.rtr3[2] = (uint32_t)(qa & 0xFFFFFFFFull);
+            gp.rtr3[3] = (uint32_t)(qa >> 32);
+            vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(gp), &gp);
+        }
+        const VkPipeline reusePipe = vqGir ? mGirVqPipe : mGiSplitPipe[GIS_REUSE];
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, reusePipe);
         vkCmdDispatch(cmd, (dw + 7u) / 8u, (dh + 7u) / 8u, 1);
         gpuSubMark(cmd, onAsync ? "c_gi_reuse" : "g_gi_reuse");
         // 4 RESHADE + 3 again as TAIL over the re-shade list: only a frame whose picks can want a
         // re-shade (the temporal reuse + GI_F_LIGHT_CHG); empty lists dispatch no workgroup
-        if ((mGiFlags & GI_F_TEMPORAL) != 0u && cfg.lightChg)
+        // (#1039 M3: + the WALK over REUSE-VQ's requests, beside RESHADE -- disjoint data --, then the VIS TAIL
+        //  over them: its own kernel, finishing each texel from the pick REUSE-VQ stored in its record; the
+        //  re-shade TAIL runs REUSE-VQ as well: each texel's pick re-derived by the binary that derived it. An empty
+        //  queue dispatches no workgroup either.)
+        const bool reshade = (mGiFlags & GI_F_TEMPORAL) != 0u && cfg.lightChg;
+        if (reshade || vqGir) raw(true);
+        if (vqGir)
         {
-            raw(true);
+            visQueueWalk(cmd, VQR_GIR, rp);
+            gpuSubMark(cmd, onAsync ? "c_gi_reuse_walk" : "g_gi_reuse_walk");
+            vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(gp), &gp);
+        }
+        if (reshade)
+        {
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mGiSplitPipe[GIS_RESHADE]);
             vkCmdDispatchIndirect(cmd, mGiHit.buffer, 4u);
             gpuSubMark(cmd, onAsync ? "c_gi_reshade" : "g_gi_reshade");
-            raw(true);
-            VKRtReflPush tp = rp;
+        }
+        if (reshade || vqGir) raw(true);
+        if (reshade)
+        {
+            VKRtReflPush tp = gp;
             tp.rtr[2] = 1.f;   // (TAIL: the list's texels, with their re-shade results)
             vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(tp), &tp);
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mGiSplitPipe[GIS_REUSE]);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, reusePipe);
             vkCmdDispatchIndirect(cmd, mGiHit.buffer, 4u);
             gpuSubMark(cmd, onAsync ? "c_gi_tail" : "g_gi_tail");
-            vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(rp), &rp);
         }
+        if (vqGir)
+        {
+            // (disjoint texels from the re-shade TAIL's: no barrier between them)
+            VKRtReflPush tp = gp;
+            tp.rtr[2] = 2.f;   // (VIS TAIL: the queue's requests' texels, with their visibility results)
+            vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(tp), &tp);
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mGirVisTailPipe);
+            vkCmdDispatchIndirect(cmd, mVq.buffer, mVqRegion[VQR_GIR].offset + 4u);
+            gpuSubMark(cmd, onAsync ? "c_gi_vistail" : "g_gi_vistail");
+            visQueueStats(cmd, VQR_GIR);
+        }
+        if (reshade || vqGir) vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(rp), &rp);
     }
-    else
-    {
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mGiTracePipe);
-        vkCmdDispatch(cmd, (dw + 7u) / 8u, (dh + 7u) / 8u, 1);
-        gpuSubMark(cmd, onAsync ? "c_gi_trace" : "g_gi_trace");
-    }
+}
+
+// recordGI after its trace stages (the radiance cache, the counters, the GI denoiser, the split layout re-bound) --
+// a function of its own so the #1039 M6 frame walk can record it after the walks.
+void LLCleanRendererVK::recordGITail(VkCommandBuffer cmd, const VKDeferPush& p, uint32_t viewOff, bool onAsync)
+{
+    const GiCfg cfg = giCfg();
+    const uint32_t dw = mGiDn->width(), dh = mGiDn->height();
+    const VkDescriptorSet set2 = mGiSet2 ? mGiSet2 : mDsetDefer;
     if ((mGiFlags & GI_F_CACHE) != 0u && mGiResolvePipe && mGiStateSlots != ~0u && mGiStateSlots != 0u)
     {
         // (GI-4) the radiance cache: this frame's accumulations into the means, eviction, invalidation
@@ -1576,6 +1797,11 @@ void LLCleanRendererVK::recordGI(VkCommandBuffer cmd, const VKDeferPush& p, uint
     // projector denoiser keeps its rules (clean_dn_common.glsl DN_HFIX_SHIFT / DN_F_REPROJ_SEARCH)
     dp.histFix = cfg.disoccFix;
     dp.reprojSearch = cfg.reprojSearch;
+    // (#1038) a whole surface revealed at once (an avatar walking out from behind a wall): the no-history
+    // texels start from the same-surface 3x3 mean, young a-trous centres relax their normal stop / widen
+    // their step; a moving surface's history taps tolerate its own depth change
+    dp.youngBoost = cfg.youngBoost;
+    dp.moveZTol = cfg.moveZTol;
     // RenderVKGIDebug -> the denoiser's view (clean_pdn_common.glsl PDN_DBG_*): 2 / 5 / 6 / 8 / 9 raw (the
     // trace writes the false colour of 5 / 6 / 8 / 9), 3 the history length, 4 the variance; 1 the final image
     static const uint32_t kDnDbg[10] = {0u, 0u, 1u, 2u, 3u, 1u, 1u, 0u, 1u, 1u};
@@ -1626,7 +1852,8 @@ std::string LLCleanRendererVK::giStatsText()
            << ", invalidated/frame " << s[14] * k << ", restarts (change-sphere overflow) " << mGiCacheRestarts;
     if (a.hdrFrames)
         os << "; changed lights/frame " << std::setprecision(1) << a.chgLights / a.hdrFrames << " of "
-           << a.allLights / a.hdrFrames << " (moved or radiance changed against their GI reference: RenderVKGILightChangeCut, RenderVKGILightMoveRel)";
+           << a.allLights / a.hdrFrames << " (moved or radiance changed against their GI reference: RenderVKGILightChangeCut, RenderVKGILightMoveRel)"
+           << ", hot lights/frame " << a.hotLights / a.hdrFrames << " (#1087: moved within RenderVKGILightChangeHold frames)";
     mGiStatAcc = GiStatAcc{};
     return os.str();
 }

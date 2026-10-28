@@ -17,6 +17,10 @@
 //  - Unmarched texels keep the (clamped) reprojected history; without one (reset, off
 //    screen last frame) they take the mean of the marched neighbours.
 // Snapshots skip this pass (every texel marched, the composite reads the march directly).
+// <GMDX> Camera in the cloud layer (vc.temporal.w = 1; every texel marched): a texel whose march
+// ended at another surface than its history's (B.w: an avatar or a roof moved across it) starts
+// again from this frame -- that blend left the trails -- and B.w carries the march end on, so
+// the composite still thins the cloud in front of a near surface.
 layout(local_size_x = 8, local_size_y = 8) in;
 
 #include "clean_frame_info.glsl"
@@ -96,10 +100,13 @@ void main()
     if (valid) { hA = textureLod(uHistA, uv, 0.0); hB = textureLod(uHistB, uv, 0.0); }
 
     const vec4 widen = (mx - mn) * vc.temporal.z + vec4(vec3(0.002), 0.01);
+    // <GMDX> in the layer: the history's march ended at another surface (10% + 2 m apart)
+    const bool inLayer = vc.temporal.w > 0.5;
+    const bool endMoved = inLayer && abs(curB.w - hB.w) > 0.1 * min(curB.w, hB.w) + 2.0;
     vec4 outA, outB;
     if (cur)
     {
-        if (!valid)
+        if (!valid || endMoved)   // <GMDX> (|| endMoved)
         {
             outA = curA;
             outB = vec4(curB.xy, 1.0, 0.0);
@@ -122,6 +129,7 @@ void main()
         outA = mean;
         outB = vec4(meanB, 1.0, 0.0);
     }
+    if (inLayer) outB.w = cur ? curB.w : hB.w;   // <GMDX> the march end (the composite's thinning)
     outA = vec4(max(outA.rgb, vec3(0.0)), clamp(outA.a, 0.0, 1.0));
     imageStore(uOutA, px, outA);
     imageStore(uOutB, px, outB);

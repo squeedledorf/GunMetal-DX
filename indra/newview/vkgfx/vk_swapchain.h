@@ -64,6 +64,16 @@ public:
     bool present(VkDeviceContext& ctx, uint32_t imageIndex,
                  bool* outNeedsRecreate);
 
+    // #1074 VR only: a frame that renders for the headset with NO window image (the mirror
+    // window is minimised, or its acquire failed). beginFrameWithoutImage waits and resets the
+    // current slot's fence as acquire() does (true: a submit signalling inFlightFence() must
+    // follow); endFrameWithoutPresent moves to the next slot as present() does.
+    bool beginFrameWithoutImage(VkDeviceContext& ctx);
+    void endFrameWithoutPresent() { if (mFramesInFlight) mFrame = (mFrame + 1) % mFramesInFlight; }
+    // #1074 VR only: acquire()'s timeout (default: none, as on the desktop). A timed-out
+    // acquire returns false without a recreate: the mirror never blocks the headset.
+    void setAcquireTimeout(uint64_t ns) { mAcquireTimeout = ns; }
+
     // ---- per-frame accessors (indexed by the current frame-in-flight slot) ----
     // imageAvailable + the in-flight fence are per-frame-in-flight: acquire signals
     // the semaphore and the fence guards reuse of that slot's command buffer/VBO.
@@ -133,6 +143,7 @@ private:
     std::function<bool(std::vector<VkPresentModeKHR>&)> mPresentModeQuery;   // #919
     bool               mExclusiveLost = false;   // #919
     bool               mChainRejected = false;   // #919
+    uint64_t           mAcquireTimeout = UINT64_MAX;   // #1074 (VR sets a short one)
 
     std::vector<VkImage>     mImages;
     std::vector<VkImageView> mImageViews;

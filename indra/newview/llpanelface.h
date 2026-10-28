@@ -254,6 +254,7 @@ protected:
 
     void onClickAutoFix();
     void onAlignTexture();
+    void onClickSyncMaterials(); // <GMDX>
     void onClickBtnLoadInvPBR();
     void onClickBtnEditPBR();
     void onClickBtnSavePBR();
@@ -370,6 +371,7 @@ private:
 
     LLButton* mBtnAlign { nullptr };
     LLButton* mBtnAlignTex { nullptr };
+    LLButton* mBtnSyncMaterials { nullptr }; // <GMDX>
     LLButton* mBtnPbrFromInv { nullptr };
     LLButton* mBtnEditBbr { nullptr };
     LLButton* mBtnSaveBbr { nullptr };

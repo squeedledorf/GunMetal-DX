@@ -39,6 +39,8 @@
 #include "gmdxregioncapture.h" // <GMDX>
 #include "gmdxfloaterloadouts.h" // <GMDX>
 #include "gmdxweaponsorter.h" // <GMDX>
+#include "gmdxsnapshotavatars.h" // <GMDX> snapshot avatar picker
+#include "gmdxtoolbarpins.h" // <GMDX> toolbar pin icon picker
 #include "fsfloateraddtocontactset.h"
 #include "fsfloatercontacts.h"
 #include "fsfloatercontactsetconfiguration.h"
@@ -52,6 +54,7 @@
 #include "slfloatershapeeditor.h"
 #include "fsfloaterposer.h" // <FS:AR> [FIRE-30873]: Poser
 #include "slfloaterao.h"
+#include "slfloaterwearablefavorites.h"
 #include "slfloatergesturesets.h"
 #include "slfloaterfirstrun.h"
 #include "slfloaterposecreator.h"
@@ -154,6 +157,7 @@
 #include "llfloatersimplesnapshot.h"
 #include "fsareasearch.h"
 #include "slfloatersoundexplorer.h"
+#include "fsfloatersoundemitterblacklist.h" // <GMDX>
 #include "slfloaterspeakersetup.h"
 #include "slfloaterweather.h"
 #include "llfloaterpathfindingcharacters.h"
@@ -441,9 +445,13 @@ void LLViewerFloaterReg::registerFloaters()
     LLFloaterReg::add("gestures", "floater_gesture.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLFloaterGesture>);
     LLFloaterReg::add("game_control_gyro", "floater_game_control_gyro.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<SSFloaterGameControlGyro>); // <SS:GameControl>
     LLFloaterReg::add("game_control_overlay", "floater_game_control_overlay.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<SSFloaterGameControlOverlay>); // <SS:GameControl>
+    LLFloaterReg::add("gmdx_minimap_hide_above", "floater_gmdx_minimap_hide_above.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLFloater>); // <GMDX> mini-map hide-above height (settings-bound)
+    LLFloaterReg::add("gmdx_sky_test", "floater_gmdx_sky_test.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLFloater>); // <GMDX> Sky Test (settings-bound, gmdxskytest.cpp)
+    LLFloaterReg::add("gmdx_pin_icons", "floater_gmdx_pin_icons.xml", &GMDXToolbarPins::buildIconPicker); // <GMDX> toolbar pin icons
     LLFloaterReg::add("gmdx_input_overlay", "floater_gmdx_input_overlay.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<GMDXFloaterInputOverlay>); // <GMDX>
     LLFloaterReg::add("game_control_debug", "floater_game_control_debug.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<SSFloaterGameControlDebug>); // <SS:GameControl>
     LLFloaterReg::add("gesture_sets", "floater_gesture_sets.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<SLFloaterGestureSets>);
+    LLFloaterReg::add("wearable_favorites", "floater_wearable_favorites.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<SLFloaterWearableFavorites>);
     LLFloaterReg::add("sl_ao", "floater_sl_ao.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<SLFloaterAO>);
     LLFloaterReg::add("sl_ao_editor", "floater_sl_ao_editor.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<SLFloaterAOEditor>);
     LLFloaterReg::add("sl_ao_ignored", "floater_sl_ao_ignored.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<SLFloaterAOIgnored>);
@@ -512,6 +520,7 @@ void LLViewerFloaterReg::registerFloaters()
     LLFloaterPayUtil::registerFloater();
 
     LLFloaterReg::add("sound_explorer", "floater_sound_explorer.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<SLFloaterSoundExplorer>);
+    LLFloaterReg::add("fs_sound_emitter_blacklist", "floater_fs_sound_emitter_blacklist.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<FSFloaterSoundEmitterBlacklist>); // <GMDX>
     LLFloaterReg::add("sl_speaker_setup", "floater_sl_speaker_setup.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<SLFloaterSpeakerSetup>);
     LLFloaterReg::add("sl_weather", "floater_sl_weather.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<SLFloaterWeather>);
     LLFloaterReg::add("area_search", "floater_fs_area_search.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<FSAreaSearch>);
@@ -586,6 +595,7 @@ void LLViewerFloaterReg::registerFloaters()
     LLFloaterReg::add("scene_load_stats", "floater_scene_load_stats.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLFloaterSceneLoadStats>);
     LLFloaterReg::add("stop_queue", "floater_script_queue.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLFloaterNotRunQueue>);
     LLFloaterReg::add("snapshot", "floater_snapshot.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLFloaterSnapshot>);
+    LLFloaterReg::add("snapshot_avatar_select", "floater_snapshot_avatar_select.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLFloaterSnapshotAvatarSelect>);   // <GMDX> snapshot avatar picker
     LLFloaterReg::add("simple_snapshot", "floater_simple_snapshot.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLFloaterSimpleSnapshot>);
     //LLFloaterReg::add("search", "floater_search.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLFloaterSearch>);
 // [SL:KB] - Patch: UI-FloaterSearchReplace | Checked: 2010-10-26 (Catznip-2.3)

@@ -19,7 +19,10 @@
  title=""
  width="560"
  single_instance="true"
- save_rect="true">
+ save_rect="true"
+ background_visible="false">
+   <!-- <GMDX> no skin box: SLChatBar::draw fills it in the chat log panel's colours (gmdxchatlog.cpp), the
+        bar its bottom row; the editor draws no background or border of its own -->
    <chat_editor
     follows="left|bottom|right"
     font="SansSerifLarge"
@@ -29,12 +32,15 @@
     left="1"
     right="-35"
     name="Chat Editor"
-    bg_visible="true"
+    bg_visible="false"
+    border_visible="false"
     bg_writeable_color="GMDXChatBarBackground"
     bg_focus_color="GMDXChatBarBackground"
     text_color="GMDXChatBarText"
     text_tentative_color="GMDXChatBarLabel"
     cursor_color="GMDXChatBarCursor"
+    bg_selected_color="GMDXChatBarSelection"
+    text_selected_color="GMDXChatBarText"
     spellcheck="true" />
    <menu_button
     follows="right"
@@ -76,5 +82,51 @@
     label_width="0"
     max_val="2147483647"
     min_val="-2147483647"
-    tool_tip="Channel nearby chat is sent on when the message has no /channel prefix (same as /setchannel)." />
+    text_enabled_color="GMDXChatBarText"
+    tool_tip="Channel nearby chat is sent on when the message has no /channel prefix (same as /setchannel)." >
+    <!-- <GMDX> Phosphor carets in the log's muted icon colour, no stepper boxes (its number box: SLChatBar::postBuild) -->
+    <spinner.up_button
+     image_unselected="Arrow_Small_Up"
+     image_selected="Arrow_Small_Up"
+     image_hover_unselected="Arrow_Small_Up"
+     image_hover_selected="Arrow_Small_Up"
+     image_pressed="Arrow_Small_Up"
+     image_pressed_selected="Arrow_Small_Up"
+     image_disabled="Arrow_Small_Up"
+     image_disabled_selected="Arrow_Small_Up"
+     image_color="GMDXChatBarLabel"
+     image_color_disabled="GMDXChatBarEdge" />
+    <spinner.down_button
+     image_unselected="Arrow_Small_Down"
+     image_selected="Arrow_Small_Down"
+     image_hover_unselected="Arrow_Small_Down"
+     image_hover_selected="Arrow_Small_Down"
+     image_pressed="Arrow_Small_Down"
+     image_pressed_selected="Arrow_Small_Down"
+     image_disabled="Arrow_Small_Down"
+     image_disabled_selected="Arrow_Small_Down"
+     image_color="GMDXChatBarLabel"
+     image_color_disabled="GMDXChatBarEdge" />
+   </spinner>
+   <!-- <GMDX> IM mode (a name clicked in the chat log): back to nearby chat. Placed at runtime
+        (SLChatBar::updateChannelSelector), a Phosphor x in the log's muted icon colour, no box. -->
+   <button
+    name="im_cancel"
+    follows="right"
+    layout="topleft"
+    top="0"
+    left="0"
+    width="22"
+    height="25"
+    visible="false"
+    tab_stop="false"
+    image_unselected="transparent.j2c"
+    image_selected="transparent.j2c"
+    image_hover_unselected="transparent.j2c"
+    image_hover_selected="transparent.j2c"
+    image_pressed="transparent.j2c"
+    image_pressed_selected="transparent.j2c"
+    image_overlay="Conv_toolbar_close"
+    image_overlay_color="GMDXChatBarLabel"
+    tool_tip="Back to nearby chat (Esc)" />
 </floater>

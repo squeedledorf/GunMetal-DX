@@ -1548,6 +1548,12 @@ bool LLVOVolume::calcLOD()
         }
     }
 
+    // <GMDX> orthographic view: everything is drawn at the focus distance's scale
+    if (LLViewerCamera::getInstance()->getOrtho())
+    {
+        distance = LLViewerCamera::getInstance()->getOrthoFocusDist();
+    }
+
     // VK reduced-detail avatar tier (#31): their rigged mesh and worn attachments LOD
     // out sooner. (The cull applies the same bias to what is resident; this makes LL
     // fetch and the ingest capture the coarser level.)
@@ -7055,7 +7061,9 @@ void LLCleanIngest::registerCleanFace(LLFace* facep, bool force_reingest)
         // holding one), logged whenever any input of it changes -- the bake behind the
         // sentinel, its component count / alpha facts / discard, or the bucket chosen. A
         // face that sits in the wrong bucket after an alpha wearable change shows which
-        // fact it was classified on. Bounded: one entry per (object, face), cleared at 2048.
+        // fact it was classified on. Bounded: one entry per (object, face), at most kBomCap; on
+        // overflow the least recently seen half is dropped (a clear-all at 2048 re-logged every
+        // face of a crowded region over and over: 116k repeats of 4.8k faces in 21 min, #1059).
         if (te)
         {
             const LLFetchedGLTFMaterial* bgm = (const LLFetchedGLTFMaterial*)te->getGLTFRenderMaterial();
@@ -7087,12 +7095,22 @@ void LLCleanIngest::registerCleanFace(LLFace* facep, bool force_reingest)
                 auto bmix = [&bsig](U64 v) { bsig = (bsig ^ v) * 0x100000001b3ull; };
                 bmix(bid.getDigest64()); bmix((U64)(U32)bcomps); bmix((U64)(U32)bmask); bmix((U64)(U32)bgrad);
                 bmix((U64)(U32)bdisc); bmix(bucket); bmix(automask_reason); bmix((U64)(U32)bcut);
-                static std::map<std::pair<U32, S32>, U64> s_bom_last;
-                if (s_bom_last.size() > 2048) s_bom_last.clear();
-                U64& last = s_bom_last[std::make_pair(pObj->getLocalID(), face_idx)];
-                if (last != bsig)
+                struct BomLast { U64 sig = 0; U64 seen = 0; };
+                static std::map<std::pair<U32, S32>, BomLast> s_bom_last;
+                static U64 s_bom_tick = 0;
+                constexpr size_t kBomCap = 16384;
+                if (s_bom_last.size() >= kBomCap)
                 {
-                    last = bsig;
+                    // ticks are unique, so at most kBomCap / 2 entries are at or above the cut
+                    const U64 cut = s_bom_tick - kBomCap / 2;
+                    for (auto it = s_bom_last.begin(); it != s_bom_last.end();)
+                        it = it->second.seen < cut ? s_bom_last.erase(it) : std::next(it);
+                }
+                BomLast& last = s_bom_last[std::make_pair(pObj->getLocalID(), face_idx)];
+                last.seen = ++s_bom_tick;
+                if (last.sig != bsig)
+                {
+                    last.sig = bsig;
                     LL_INFOS("BOMAlpha") << "obj=" << pObj->getLocalID() << " face=" << face_idx
                         << " sentinel=" << te->getID() << " bake=" << bid
                         << " comps=" << bcomps << " strict_mask=" << bmask << " grad_class=" << bgrad

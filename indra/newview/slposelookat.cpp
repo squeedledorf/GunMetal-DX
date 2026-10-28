@@ -46,6 +46,7 @@
 #include "llvoavatarself.h"
 #include "llvolume.h"
 #include "llvovolume.h"
+#include "llvrcamera.h"
 #include "rlvactions.h"
 #include "slaoengine.h"
 #include "slbridge.h"
@@ -92,6 +93,7 @@ constexpr U8   WIRE_VERSION         = 1;
 constexpr S32  HEADER_BYTES         = 8;
 // Motion smoothing (time constant, seconds).
 constexpr F32  OWN_TAU              = 0.15f;
+constexpr F32  VR_EASE              = 0.1f;     // #1121: our own head on the headset (seconds)
 constexpr F32  MIN_PIXEL_AREA       = 500.f;    // as LL's head_rot: far avatars skip it
 constexpr F32  STATUS_INTERVAL      = 10.f;     // #PoseLookAt status line while in use
 constexpr size_t MAX_STATUS_ENTRIES = 8;        // remote entries described per status line
@@ -342,6 +344,12 @@ bool isAncestor(const LLJoint* ancestor, LLJoint* joint)
     return false;
 }
 
+// #1121: a chain bone's tilt limit when the map gives none (radians).
+F32 defaultRollLimit(const SLLookAtBone& bone)
+{
+    return 0.75f * llmin(bone.mPitchUpLimit, bone.mPitchDownLimit);
+}
+
 // The built-in human map, used when lookat_maps.xml is missing or has no "human".
 SLLookAtMap builtinHuman()
 {
@@ -357,6 +365,7 @@ SLLookAtMap builtinHuman()
         b.mYawLimit = yaw_lim * DEG_TO_RAD;
         b.mPitchUpLimit = up * DEG_TO_RAD;
         b.mPitchDownLimit = down * DEG_TO_RAD;
+        b.mRollLimit = defaultRollLimit(b);
         b.mPriority = defaultPriority(joint, 0);
         return b;
     };
@@ -455,7 +464,7 @@ bool SLPoseLookAtMotion::onActivate()
 {
     mLastTime = -1.f;
     mWeight = 0.f;
-    mYawVel = mPitchVel = mWeightVel = 0.f;
+    mYawVel = mPitchVel = mRollVel = mWeightVel = 0.f;
     mIdle = true;
     for (Slot& slot : mSlots)
     {
@@ -474,7 +483,7 @@ void SLPoseLookAtMotion::onDeactivate()
         slot.mCumLast = LLQuaternion::DEFAULT;
     }
     mWeight = 0.f;
-    mYawVel = mPitchVel = mWeightVel = 0.f;
+    mYawVel = mPitchVel = mRollVel = mWeightVel = 0.f;
     mAppliedAngle = 0.f;
     mIdle = true;
 }
@@ -506,6 +515,9 @@ void SLPoseLookAtMotion::bindMap(const SLLookAtMap* map)
     const size_t n = map ? map->mBones.size() : 0;
     mMapSlot.assign(n, -1);
     mMapParent.assign(n, -1);
+    mMapHeadNeck.assign(n, false);
+    for (size_t k = 0; k < n; ++k)
+        mMapHeadNeck[k] = map->mBones[k].mJoint == "mHead" || map->mBones[k].mJoint == "mNeck";
     mAppliedYaw.assign(n, 0.f);
     mAppliedPitch.assign(n, 0.f);
     for (size_t k = 0; k < n; ++k)
@@ -569,6 +581,22 @@ bool SLPoseLookAtMotion::onUpdate(F32 time, U8* joint_mask)
     if (have)
         mEase = llclamp(drive.mEase, 0.f, MAX_EASE);
     const F32 omega = (mEase > 0.01f) ? EASE_OMEGA / mEase : 0.f;     // 0: snap
+    // #1121: the head tilt -- our own VR head's, else a Slipstream VR sender's from LL's
+    // look-at (zero for everyone else).
+    F32 roll_to = 0.f;
+    if (have)
+    {
+        mHeadNeckOnly = drive.mHeadNeckOnly;
+        if (drive.mHasRoll)
+        {
+            roll_to = drive.mRoll;
+        }
+        else if (const F32* roll = (const F32*)mCharacter->getAnimationData(LLCharacter::ANIM_DATA_LOOK_AT_ROLL))
+        {
+            roll_to = *roll;
+        }
+        roll_to = std::isfinite(roll_to) ? llclamp(roll_to, -F_PI_BY_TWO, F_PI_BY_TWO) : 0.f;
+    }
     if (have)
     {
         if (mWeight < 0.001f || dt <= 0.f)
@@ -576,7 +604,8 @@ bool SLPoseLookAtMotion::onUpdate(F32 time, U8* joint_mask)
             // Fading in from nothing: start from where the target is, not from straight ahead.
             mYaw = drive.mYaw;
             mPitch = drive.mPitch;
-            mYawVel = mPitchVel = 0.f;
+            mRoll = roll_to;
+            mYawVel = mPitchVel = mRollVel = 0.f;
         }
         else
         {
@@ -585,6 +614,7 @@ bool SLPoseLookAtMotion::onUpdate(F32 time, U8* joint_mask)
             smoothDamp(mYaw, mYawVel, yaw_to, omega, dt);
             mYaw = wrapAngle(mYaw);
             smoothDamp(mPitch, mPitchVel, drive.mPitch, omega, dt);
+            smoothDamp(mRoll, mRollVel, roll_to, omega, dt);
         }
     }
     smoothDamp(mWeight, mWeightVel, target_weight, omega, dt);
@@ -623,12 +653,13 @@ bool SLPoseLookAtMotion::onUpdate(F32 time, U8* joint_mask)
     const F32 limit_scale = have ? llclamp(drive.mLimitScale, 0.f, 2.f) : 1.f;
     const F32 yaw = mYaw * mWeight;
     const F32 pitch = mPitch * mWeight;
+    const F32 roll = mRoll * mWeight;
     const LLQuaternion root = mRootJoint->getWorldRotation();
     const LLQuaternion inv_root = ~root;
     const std::vector<SLLookAtBone>& bones = mBoundMap->mBones;
     std::vector<LLQuaternion> cum(bones.size(), LLQuaternion::DEFAULT);
 
-    auto apply = [&](size_t k, F32 bone_yaw, F32 bone_pitch)
+    auto apply = [&](size_t k, F32 bone_yaw, F32 bone_pitch, F32 bone_roll)
     {
         const S32 s = mMapSlot[k];
         const LLQuaternion prev = (mMapParent[k] >= 0) ? cum[mMapParent[k]] : LLQuaternion::DEFAULT;
@@ -645,7 +676,10 @@ bool SLPoseLookAtMotion::onUpdate(F32 time, U8* joint_mask)
         }
         // The bone's change in the avatar's frame: pitch about its left axis, then yaw about
         // its up axis; then the same change expressed in the world.
-        const LLQuaternion change_avatar = LLQuaternion(-bone_pitch, LLVector3::y_axis) * LLQuaternion(bone_yaw, LLVector3::z_axis);
+        // #1121: a tilt first, about the bone's forward axis.
+        LLQuaternion change_avatar = LLQuaternion(-bone_pitch, LLVector3::y_axis) * LLQuaternion(bone_yaw, LLVector3::z_axis);
+        if (bone_roll != 0.f)
+            change_avatar = LLQuaternion(bone_roll, LLVector3::x_axis) * change_avatar;
         const LLQuaternion change_world = inv_root * change_avatar * root;
         cum[k] = prev * change_world;
 
@@ -670,19 +704,24 @@ bool SLPoseLookAtMotion::onUpdate(F32 time, U8* joint_mask)
     // only what is left over goes to the neck, then on down the chain (map order: head, neck,
     // chest, spine). Each bone but the last hands over smoothly, starting at KNEE of its limit
     // (see takeShare). A bone a pose owns, or one this skeleton lacks, has no capacity.
+    // #1121: our own VR head turns only the head and neck (see Drive::mHeadNeckOnly).
     const std::vector<size_t>& order = mBoundMap->mOrder;
-    std::vector<F32> got_yaw(bones.size(), 0.f), got_pitch(bones.size(), 0.f);
+    auto usable = [&](size_t k)
+    {
+        return mMapSlot[k] >= 0 && (!mHeadNeckOnly || (k < mMapHeadNeck.size() && mMapHeadNeck[k]));
+    };
+    std::vector<F32> got_yaw(bones.size(), 0.f), got_pitch(bones.size(), 0.f), got_roll(bones.size(), 0.f);
     size_t last_n = 0;
     for (size_t n = 0; n < order.size(); ++n)
     {
-        if (mMapSlot[order[n]] >= 0)
+        if (usable(order[n]))
             last_n = n;
     }
-    F32 rem_yaw = yaw, rem_pitch = pitch;
+    F32 rem_yaw = yaw, rem_pitch = pitch, rem_roll = roll;
     for (size_t n = 0; n < order.size(); ++n)
     {
         const size_t k = order[n];
-        if (mMapSlot[k] < 0)
+        if (!usable(k))
             continue;
         const SLLookAtBone& bone = bones[k];
         const F32 own = mSlots[mMapSlot[k]].mOwn;
@@ -690,14 +729,16 @@ bool SLPoseLookAtMotion::onUpdate(F32 time, U8* joint_mask)
         const F32 pitch_limit = (rem_pitch >= 0.f ? bone.mPitchUpLimit : bone.mPitchDownLimit) * limit_scale * own;
         got_yaw[k] = takeShare(rem_yaw, bone.mYawLimit * limit_scale * own, last);
         got_pitch[k] = takeShare(rem_pitch, pitch_limit, last);
+        got_roll[k] = takeShare(rem_roll, bone.mRollLimit * limit_scale * own, last);
         rem_yaw -= got_yaw[k];
         rem_pitch -= got_pitch[k];
+        rem_roll -= got_roll[k];
     }
     // Apply root to tip (a bone inherits the change of the map bone above it).
     for (size_t k = 0; k < bones.size(); ++k)
     {
         if (!bones[k].mEye)
-            apply(k, got_yaw[k], got_pitch[k]);
+            apply(k, got_yaw[k], got_pitch[k], got_roll[k]);
     }
     // Eyes aim with what the chain could not reach, plus their own share.
     for (size_t k = 0; k < bones.size(); ++k)
@@ -707,7 +748,7 @@ bool SLPoseLookAtMotion::onUpdate(F32 time, U8* joint_mask)
             continue;
         const F32 yaw_limit = bone.mYawLimit * limit_scale;
         apply(k, llclamp(bone.mYawShare * yaw + rem_yaw, -yaw_limit, yaw_limit),
-              llclamp(bone.mPitchShare * pitch + rem_pitch, -bone.mPitchDownLimit * limit_scale, bone.mPitchUpLimit * limit_scale));
+              llclamp(bone.mPitchShare * pitch + rem_pitch, -bone.mPitchDownLimit * limit_scale, bone.mPitchUpLimit * limit_scale), 0.f);
     }
     return true;
 }
@@ -814,6 +855,8 @@ void SLPoseLookAt::loadMaps()
                 bone.mPitchUpLimit = limitDegrees(b["pitch_up"], 0.f);
                 bone.mPitchDownLimit = limitDegrees(b["pitch_down"], bone.mPitchUpLimit * RAD_TO_DEG);
                 bone.mEye = b["eye"].asBoolean();
+                // #1121: tilt (VR); by default three quarters of the smaller pitch limit.
+                bone.mRollLimit = bone.mEye ? 0.f : limitDegrees(b["roll_limit"], defaultRollLimit(bone) * RAD_TO_DEG);
                 bone.mPriority = b.has("priority") ? llclamp(b["priority"].asInteger(), 0, 1000)
                                                    : defaultPriority(bone.mJoint, map.mBones.size());
                 map.mBones.push_back(bone);
@@ -1138,6 +1181,25 @@ bool SLPoseLookAt::getDrive(const LLUUID& avatar_id, Drive& out) const
     const Entry& entry = it->second;
     out.mYaw = entry.mYaw;
     out.mPitch = entry.mPitch;
+    out.mRoll = 0.f;
+    out.mHasRoll = false;
+    out.mHeadNeckOnly = false;
+    if (avatar_id == gAgentID && mVRDriving)
+    {
+        // #1121: our own head on the headset, read live (the motion runs every frame; tickVR
+        // keeps the entry) against the body as it is now, so a body turn never lags.
+        out.mRoll = entry.mRoll;
+        LLJoint* root = isAgentAvatarValid() ? gAgentAvatarp->getRootJoint() : nullptr;
+        F32 yaw, pitch, roll;
+        if (root && LLVRCamera::headAngles(root->getWorldRotation(), yaw, pitch, roll))
+        {
+            out.mYaw = yaw;
+            out.mPitch = pitch;
+            out.mRoll = roll;
+        }
+        out.mHasRoll = true;
+        out.mHeadNeckOnly = true;
+    }
     out.mWeight = effectiveWeight(entry);
     out.mEase = (entry.mEase >= 0.f) ? entry.mEase : localEase();
     out.mLimitScale = std::isfinite((F32)limit_scale) ? llclamp((F32)limit_scale, 0.f, 2.f) : 1.f;
@@ -1239,12 +1301,13 @@ void SLPoseLookAt::tickFast()
 {
     // Every frame, locally only (nothing here sends): sample where we look and move our own
     // avatar's displayed target, so its head follows at the frame rate, not at the network's.
+    tickVR();
     if (!mSendingNow || !isAgentAvatarValid() || !gAgent.getRegion())
         return;
     sampleSelf();
 
     static LLCachedControl<bool> show_self(gSavedSettings, "SLLookAtSyncShowSelf", true);
-    if (show_self && mEverSent)
+    if (show_self && mEverSent && !mVRDriving)
     {
         const bool is_new = !mEntries.count(gAgentID);
         Entry& entry = mEntries[gAgentID];
@@ -1259,6 +1322,49 @@ void SLPoseLookAt::tickFast()
         if (is_new)
             mChangedSignal();
     }
+}
+
+void SLPoseLookAt::tickVR()
+{
+    // #1121: in VR (first person) our own neck and head follow the headset, relative to the
+    // body, layered over the animations like the look-at (ADDITIVE_PRIORITY), whatever the
+    // sending options: the entry is kept here and getDrive reads the headset live. What
+    // others see goes out through LL's look-at (LLAgentCamera::updateLookAt) and, with
+    // "Send where I look", the pose channel as before. Desktop: headAngles is false at once.
+    F32 yaw = 0.f, pitch = 0.f, roll = 0.f;
+    LLJoint* root = (isAgentAvatarValid() && gAgent.getRegion()) ? gAgentAvatarp->getRootJoint() : nullptr;
+    if (root && LLVRCamera::headAngles(root->getWorldRotation(), yaw, pitch, roll))
+    {
+        const bool is_new = !mEntries.count(gAgentID);
+        Entry& entry = mEntries[gAgentID];
+        entry.mYaw = yaw;
+        entry.mPitch = pitch;
+        entry.mRoll = roll;
+        entry.mWeight = 1.f;
+        entry.mEase = VR_EASE;
+        entry.mMap = findMap(getOwnMapId());
+        if (!entry.mMap)
+            entry.mMap = findMap("human");
+        entry.mLastHeard.reset();
+        if (!mVRDriving)
+        {
+            mVRDriving = true;
+            LL_INFOS("PoseLookAt") << "VR: the avatar's head follows the headset (map " << (entry.mMap ? entry.mMap->mId : std::string("-"))
+                                   << ")" << LL_ENDL;
+        }
+        if (is_new)
+            mChangedSignal();
+        return;
+    }
+    if (!mVRDriving)
+        return;
+    mVRDriving = false;
+    LL_INFOS("PoseLookAt") << "VR: head follow off" << LL_ENDL;
+    // The own entry goes (the layer fades out), unless "Send where I look" shows our own
+    // look-at: tickFast refills it from LL's look-at on its next sample.
+    static LLCachedControl<bool> show_self(gSavedSettings, "SLLookAtSyncShowSelf", true);
+    if (!(mSendingNow && show_self && mEverSent) && mEntries.erase(gAgentID))
+        mChangedSignal();
 }
 
 void SLPoseLookAt::sampleSelf()
@@ -1395,7 +1501,7 @@ void SLPoseLookAt::tickSend()
             sendLine(mSentYaw, mSentPitch, 0.f, getOwnMapId(), easeCode(localEase()));
         mSentActive = false;
         mEverSent = false;
-        if (mEntries.erase(gAgentID))
+        if (!mVRDriving && mEntries.erase(gAgentID))   // #1121: tickVR owns it in VR
             mChangedSignal();
         return;
     }
@@ -1474,7 +1580,7 @@ void SLPoseLookAt::tickSend()
     }
 
     // Our own avatar's entry is kept by tickFast (every frame); here only its removal.
-    if (!(show_self && mEverSent) && mEntries.erase(gAgentID))
+    if (!(show_self && mEverSent) && !mVRDriving && mEntries.erase(gAgentID))
         mChangedSignal();
 }
 
@@ -1972,6 +2078,7 @@ void SLPoseLookAt::logStatus(const char* why)
                            << " pitch=" << llformat("%.1f", eased_pitch)
                            << " applied(yaw/pitch deg)=" << applied
                            << " | show=" << ((bool)show ? 1 : 0) << " show_self=" << ((bool)show_self ? 1 : 0)
+                           << " vr_head=" << (mVRDriving ? 1 : 0)
                            << " entries=" << mEntries.size() << " driven=" << driven
                            << " self_motion=" << self_motion
                            << " motion_w=" << llformat("%.2f", motion_weight)

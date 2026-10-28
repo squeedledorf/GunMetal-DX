@@ -85,7 +85,8 @@ struct SLLookAtBone
     F32 mYawLimit = 0.f;        // the most this bone turns, either way
     F32 mPitchUpLimit = 0.f;
     F32 mPitchDownLimit = 0.f;
-    bool mEye = false;          // eyes: aim with what the chain could not reach, do not consume it
+    F32 mRollLimit = 0.f;       // #1121: head tilt (VR), either way; chain bones only
+    bool mEye = false;         // eyes: aim with what the chain could not reach, do not consume it
 };
 
 struct SLLookAtMap
@@ -173,9 +174,13 @@ private:
     std::vector<S32> mMapParent;            // map bone -> nearest ancestor map bone (-1: none)
     F32 mYaw = 0.f;
     F32 mPitch = 0.f;
+    F32 mRoll = 0.f;                        // #1121: head tilt about the look axis
     F32 mWeight = 0.f;
     F32 mYawVel = 0.f;                      // critically damped easing state (radians / second)
     F32 mPitchVel = 0.f;
+    F32 mRollVel = 0.f;
+    bool mHeadNeckOnly = false;             // the last drive's (kept while fading out)
+    std::vector<bool> mMapHeadNeck;         // map bone -> mHead or mNeck
     F32 mWeightVel = 0.f;
     F32 mEase = 1.f;                        // seconds; the last drive's
     std::vector<F32> mAppliedYaw;           // by map bone, radians, last update
@@ -241,6 +246,11 @@ public:
     {
         F32 mYaw = 0.f;         // radians, avatar frame
         F32 mPitch = 0.f;
+        F32 mRoll = 0.f;        // #1121: tilt about the look axis (+ = the left ear up)
+        bool mHasRoll = false;  // false: the motion takes the tilt from LL's look-at
+                                // (ANIM_DATA_LOOK_AT_ROLL: a Slipstream VR sender's), if any
+        bool mHeadNeckOnly = false; // #1121 our own VR head: only mHead / mNeck turn (the
+                                    // camera's eye anchor is the neck pivot; eyes take the rest)
         F32 mWeight = 0.f;      // 0..1, staleness and behind-the-head fading applied
         F32 mLimitScale = 1.f;
         F32 mEase = 1.f;        // seconds: the sender's, else our setting
@@ -260,6 +270,7 @@ private:
     {
         F32 mYaw = 0.f;
         F32 mPitch = 0.f;
+        F32 mRoll = 0.f;        // #1121: our own VR head only
         F32 mWeight = 0.f;
         F32 mEase = -1.f;       // seconds the sender asked for; < 0: use our setting
         const SLLookAtMap* mMap = nullptr;
@@ -299,6 +310,7 @@ private:
     void loadMaps();
     void tick();
     void tickFast();
+    void tickVR();
     void sampleSelf();
     void tickSend();
     void tickStatus();
@@ -333,8 +345,13 @@ private:
     std::set<LLUUID> mMotionsRunning;   // avatars our motion runs on
     std::set<LLUUID> mHeadRotStopped;   // avatars whose head_rot we stood down
 
+    // #1121: in VR (first person) our own head follows the headset: the own entry is the
+    // headset's orientation relative to the body (getDrive reads it live), whether or not we
+    // send on the pose channel.
+    bool mVRDriving = false;
+
     // Sender: the live target (sampled every frame) and what last went out
-    bool mSendingNow = false;           // tickSend found sending possible: tickFast samples
+    bool mSendingNow = false;          // tickSend found sending possible: tickFast samples
     F32 mLiveYaw = 0.f;                 // the last direction while looking; held when not
     F32 mLivePitch = 0.f;
     F32 mLiveWeight = 0.f;

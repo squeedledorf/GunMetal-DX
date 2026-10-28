@@ -397,9 +397,37 @@ struct LLVKProbeRegion
     float    land[289] = {};     // [y * 17 + x]
 };
 
+// #1075 LAYERED STEREO (research/VR_LAYERED_STEREO_DESIGN.md §1, step 1 "frame split"): one
+// VIEW of the frame -- an eye in VR, the camera on the desktop. LLVKWorldFrame keeps everything
+// shared by the views (the head / union camera: cull frustum, LOD, lights, cascades, probes,
+// atmosphere) in its own fields; views[v] carries what differs per view. Matrices follow the
+// shared fields' conventions (column-major, VK clip with the Y flip, reversed-Z with the same
+// near / far). The camera-relative forms map (world - cam_pos.xyz): ONE origin for every view.
+struct LLVKViewFrame
+{
+    float view[16]      = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};   // world -> view (this eye)
+    float proj[16]      = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};   // view -> clip (off-axis in VR)
+    float inv_proj[16]  = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+    float view_proj[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};   // world -> clip
+    float inv_view_proj[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+    float view_proj_rel[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};   // (world - cam_pos) -> clip
+    float inv_view_proj_rel[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};
+    float eye[4]  = {};               // .xyz this view's eye (world); the shading eye of its pixels
+    float tan[4]  = {-1.f, 1.f, -1.f, 1.f};   // FOV tangents: left, right, down, up (left / down < 0)
+};
+
 struct LLVKWorldFrame
 {
     bool  enabled = false;         // render the 3D world this frame?
+    // #1075 LAYERED STEREO: the views of this frame (1 on the desktop: views[0] = the camera,
+    // the same numbers as the shared fields below; 2 in VR stereo: the eyes, the shared fields
+    // being the head / union camera). kMaxViews = LLCleanRendererVK::kMaxViews.
+    static constexpr uint32_t kMaxViews = 4;
+    uint32_t view_count = 1;
+    LLVKViewFrame views[kMaxViews];
+    // #1075: views[] are the headset's located eyes this frame (VR stereo; false on the desktop,
+    // the debug stereo mode, and VR frames whose eyes were not located: every view = the head).
+    bool views_are_eyes = false;
     float view_proj[16];            // column-major MVP (world -> clip, VK NDC)
     float frustum_planes[6][4];     // ax+by+cz+d >= 0 => inside
     float cam_pos[4];               // .xyz camera world pos, .w LOD factor
@@ -581,6 +609,14 @@ struct LLVKWorldFrame
     // the size of this render (0 = its own). Offscreen renders only (renderOffscreen).
     bool  ortho = false;
     float ortho_ppm = 0.f;
+    // <GMDX> The live orthographic view (LLViewerCamera::getOrtho, buildVulkanWorldFrame): the
+    // cull / LOD / texel demand of `ortho` above at the projection's own px per metre, and
+    // tan_half carries the half extents in metres; none of the map capture's clean-plate rules.
+    bool  ortho_view = false;
+    // <GMDX> AVATAR MATTE SNAPSHOT (gmdxsnapshotavatars.h): an avatar layer -- the recordings after
+    // the warm-up keep avatars only in the main view and read their coverage back
+    // (LLCleanRendererVK::snapMatte*; LLVulkanContext::takeSnapshotMatte). Offscreen renders only.
+    bool  avatar_matte = false;
 
     // Cursor pick ray for the GPU raster pick (#702; LLCleanCursorPick::fillRequest).
     LLVKPickRequest pick;
@@ -765,6 +801,9 @@ public:
         uint32_t frames = 1;             // mode 2
         bool     motionReject = false;   // mode 2: drop moving pixels by motion vectors
         bool     dither = true;          // mode 2: dither the resolved 8-bit output once (#932)
+        float    sharpen = 0.f;          // mode 2: CAS strength 0..1 on the resolved mean (#1093); 0 = off
+        bool     adaptiveSigma = true;   // mode 2: reconstruction width from the samples per pixel (#1093)
+        float    mipBias = 0.f;          // mode 2: texture LOD bias offset while the shot renders (#1093)
         float    depthNear = 0.1f, depthFar = 128.f;   // mode 1: 8-bit range (metres)
     };
     bool beginLiveSnapshot(const LiveSnapshot& req, std::string& why);
@@ -789,6 +828,8 @@ public:
     bool renderOffscreen(const LLVKWorldFrame& world, uint32_t w, uint32_t h,
                          std::vector<uint8_t>& rgb, std::vector<float>* depth = nullptr,
                          uint32_t frames = 2, uint32_t aaFrames = 0);
+    // <GMDX> The last avatar_matte render's matte (8-bit, LLImageRaw rows bottom-up), once.
+    bool takeSnapshotMatte(std::vector<uint8_t>& alpha, uint32_t& w, uint32_t& h);
     uint32_t maxImageDimension() const;
     // Best-case free device-local memory (budget minus usage) -- sizing snapshots.
     uint64_t freeDeviceMemory() const;
@@ -869,6 +910,9 @@ public:
     // ladder's caps (most restrictive wins), never a setting write. Main thread.
     bool autoTuneSample(LLVKAutoTuneSample& out) const;
     void setAutoTunePerfCaps(const LLVKPerfCaps& caps);
+    // #1076 VR safety governor (LLVRSafety): its temporary caps, merged with "Keep my FPS"'s
+    // (most restrictive wins) into what the renderer gets. Never called on the desktop.
+    void setVrSafetyPerfCaps(const LLVKPerfCaps& caps);
 
     // Initialize the LLRenderVK facade (gVK) against this context's device using
     // the embedded UI SPIR-V, and install the concrete LLRenderBackend into
@@ -876,9 +920,16 @@ public:
     // installed backend (owned by the context) or null on failure.
     LLRenderBackend* initRenderBackend();
 
+    // #1074 VR: end the OpenXR session and destroy the XrInstance at the viewer's exit
+    // (LLAppViewer::cleanup, while logging still runs; shutdown() is not reached on a normal
+    // exit). No-op without VR.
+    void shutdownXr();
     // Notify of a resize (defers actual recreate to the next renderFrame).
     void onResize(uint32_t width, uint32_t height);
     // RenderVSyncEnable: picks the present mode; rebuilds the swapchain next frame.
+    // #1073 VR: while an OpenXR session runs the window is a mirror that must never pace the
+    // headset, so its swapchain stays non-FIFO; the user's choice is kept and comes back when
+    // the session stops.
     void setVSync(bool on);
     // RenderVKNoVsyncPresentMode (vsync off only): 0 = MAILBOX first, 1 = IMMEDIATE first.
     // Rebuilds the swapchain next frame, like setVSync.
@@ -954,6 +1005,10 @@ public:
     // The request serial whose bounce sets were last DISPATCHED (0: none yet): the bounce pass
     // runs only on its own frames, so the CPU learns which of its source sets really went out.
     uint32_t acousticsBounceDispatched() const;
+    // #1075 LAYERED STEREO: the number of views the world renders (LLVKWorldFrame::view_count to
+    // fill): 1 on the desktop and before the world renderer exists; N in VR stereo / the debug
+    // N = 2 mode (fixed for the session).
+    uint32_t worldViewCount() const;
 
     // Physical-device identity for the (context-less-GL) info/stats paths. Filled
     // from VkPhysicalDeviceProperties of the selected device. No-op leaving the
@@ -1008,6 +1063,14 @@ private:
     int32_t mClusterForceTier = -1;   // #743 RenderVKClusterForceTier (startup tier log line)
     std::string mPipeCachePath, mPipeCacheTag;
     std::string mPipeCostPath;
+    // #1073 VR: an OpenXR session was created on this device (LLXrSession; false on the
+    // desktop: every VR branch in renderFrame tests only this). mXrPresentOverride: the session
+    // runs, so the window swapchain is non-FIFO whatever mUserVSync says.
+    bool mXrHooked = false;    // the device hooks were installed (VR chosen and the probe succeeded)
+    bool mXrSession = false;
+    bool mXrPresentOverride = false;
+    bool mUserVSync = true;
+    void onXrRunningChanged(bool running);
 };
 
 #endif // LL_LLVULKANCONTEXT_H

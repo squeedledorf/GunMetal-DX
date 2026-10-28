@@ -30,6 +30,7 @@
 #include "llcallbacklist.h"
 #include "llcheckboxctrl.h"
 #include "llcombobox.h"
+#include "lldirpicker.h"   // <GMDX> chosen Firestorm profile folder
 #include "llfiltereditor.h"
 #include "llfloaterreg.h"
 #include "llnotificationsutil.h"
@@ -105,8 +106,70 @@ bool SLFloaterViewerImport::postBuild()
     mImportBtn->setCommitCallback([this](LLUICtrl*, const LLSD&) { onImport(); });
     mUndoBtn->setCommitCallback([this](LLUICtrl*, const LLSD&) { onUndo(); });
     getChild<LLUICtrl>("close_btn")->setCommitCallback([this](LLUICtrl*, const LLSD&) { closeFloater(); });
+    getChild<LLUICtrl>("choose_folder_btn")->setCommitCallback([this](LLUICtrl*, const LLSD&) { onChooseFolder(); }); // <GMDX>
     return true;
 }
+
+// <GMDX> SoapStorm c6d090301f: when Firestorm's profile is not in the usual place (a copy,
+// a portable install, a Windows install seen from Linux), pick its folder by hand.
+void SLFloaterViewerImport::onChooseFolder()
+{
+    LLHandle<LLFloater> handle = getHandle();
+    (new LLDirPickerThread([handle](const std::vector<std::string>& dirs, std::string)
+    {
+        SLFloaterViewerImport* self = static_cast<SLFloaterViewerImport*>(handle.get());
+        if (self && !dirs.empty() && !dirs[0].empty())
+        {
+            self->addChosenFolder(dirs[0]);
+        }
+    }, gDirUtilp->getOSUserDir()))->getFile();
+}
+
+void SLFloaterViewerImport::addChosenFolder(const std::string& folder)
+{
+    fs::path dir = fs::u8path(folder).lexically_normal();
+    if (dir.filename().empty()) dir = dir.parent_path();      // trailing separator
+    if (dir.filename() == "user_settings") dir = dir.parent_path();   // picked one level too deep
+
+    LLStringUtil::format_map_t args;
+    args["[FOLDER]"] = utf8(dir);
+    std::error_code ec;
+    if (fs::equivalent(dir, fs::u8path(gDirUtilp->getOSUserAppDir()), ec))
+    {
+        mReport->setText(getString("folder_is_ours", args));
+        return;
+    }
+
+    slimport::SourceViewer viewer;
+    viewer.id = "firestorm";
+    viewer.label = getString("chosen_folder_label");
+    viewer.dir = dir;
+    viewer.legacy_im_names = true;
+    viewer.key_bindings_compatible = true;
+    if (!fs::exists(dir / "user_settings" / "settings.xml", ec) && slimport::findAccounts(viewer).empty())
+    {
+        mReport->setText(getString("folder_not_profile", args));
+        return;
+    }
+    for (size_t i = 0; i < mViewers.size(); ++i)
+    {
+        if (fs::equivalent(mViewers[i].dir, dir, ec))
+        {
+            mViewerCombo->setValue(LLSD((S32)i));   // already listed
+            onViewerChanged();
+            return;
+        }
+    }
+
+    mViewers.push_back(viewer);
+    const S32 index = (S32)mViewers.size() - 1;
+    mViewerCombo->add(viewer.label + "  (" + utf8(dir) + ")", LLSD(index));
+    mViewerCombo->setEnabled(true);
+    mViewerCombo->setValue(LLSD(index));
+    mReport->setText(getString("status_ready") + (loggedIn() ? std::string() : "\n" + getString("status_logged_out")));
+    onViewerChanged();
+}
+// </GMDX>
 
 void SLFloaterViewerImport::onOpen(const LLSD& key)
 {

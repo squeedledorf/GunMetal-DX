@@ -2462,12 +2462,16 @@ Source: [RATE] Hz, [CHANNELS]</string>
 	<string name="SoundPreviewChannelsStereo">stereo</string>
 	<string name="SoundPreviewChannelsOther">[COUNT] channels</string>
 	<string name="SoundPreviewTooLong">Longer than the 30 second upload limit.</string>
-	<string name="SoundPreviewSplitInfo">Longer than the 30 second upload limit: it will be split into [COUNT] consecutive clips of up to [SECONDS] s ([FIRST] ... [LAST]), uploaded one after another. Total cost L$[TOTAL] (L$[EACH] per clip).</string>
+	<string name="SoundPreviewSplitInfo">Longer than the 30 second upload limit: it will be split into [COUNT] consecutive clips of [SECONDS] s, the last one [LAST_SECONDS] s ([FIRST] ... [LAST]), uploaded one after another. Total cost L$[TOTAL] (L$[EACH] per clip).</string>
 	<string name="SoundSplitUploadButton">Upload [COUNT] clips (L$[AMOUNT])</string>
 	<string name="SoundSplitProgress">Part [INDEX] of [COUNT]: [NAME]</string>
 	<string name="SoundSplitNoCap">This region does not support sound uploads.</string>
 	<string name="SoundSplitDisconnected">Disconnected from the grid.</string>
 	<string name="SoundSplitUnknownReason">The upload failed.</string>
+	<!-- <GMDX> <OTS> sound -> notecard upload -->
+	<string name="SoundNotecardSplitInfo">[FILES] file(s) are longer than 30 seconds and will be split into consecutive clips of up to [SECONDS] s.</string>
+	<string name="SoundNotecardSkippedInfo">[SKIPPED] selected file(s) could not be read as sounds and will be skipped.</string>
+	<!-- </GMDX> -->
 
 	<string name="Open landmarks">Open landmarks</string>
   <string name="Unconstrained">Unconstrained</string>
@@ -4322,6 +4326,7 @@ name="Command_360_Capture_Label">360 snapshot</string>
   <string name="Command_Environments_Label">My Environments</string>
   <string name="Command_Gestures_Label">Gestures</string>
   <string name="Command_AO_Label">AO</string>
+  <string name="Command_FavoriteWearables_Label">Favorite wearables</string>
   <string name="Command_Weather_Label">Weather</string>
   <string name="Command_Grid_Status_Label">Grid status</string>
   <string name="Command_HowTo_Label">Guidebook</string>
@@ -4361,6 +4366,7 @@ name="Command_360_Capture_Label">360 snapshot</string>
   <string name="Command_AboutLand_Tooltip">Information about the land you're visiting</string>
   <string name="Command_Appearance_Tooltip">Change your avatar</string>
   <string name="Command_GMDXLoadouts_Tooltip">Swap weapons and loadouts (L)</string> <!-- <GMDX> -->
+  <string name="GMDXPinnedItem">Pinned</string> <!-- <GMDX> toolbar pins: label of an inventory item pinned on a toolbar -->
   <string name="Command_Avatar_Tooltip">Choose a complete avatar</string>
   <string name="Command_Build_Tooltip">Building objects and reshaping terrain</string>
   <string name="Command_Chat_Tooltip">Chat with people nearby using text</string>
@@ -4371,6 +4377,7 @@ name="Command_360_Capture_Label">360 snapshot</string>
   <string name="Command_Environments_Tooltip">My Environments</string>
   <string name="Command_Gestures_Tooltip">Gestures for your avatar</string>
   <string name="Command_AO_Tooltip">Animation overrider: replace your avatar's stand, walk, sit and other animations (lit while on)</string>
+  <string name="Command_FavoriteWearables_Tooltip">Favorite wearables: your own short list of clothing, body parts and attachments to wear in one click</string>
   <string name="Command_Weather_Tooltip">Weather: rain or snow, wind, wet surfaces</string>
   <string name="Command_Grid_Status_Tooltip">Show current Grid status</string>
   <string name="Command_HowTo_Tooltip">How to do common tasks</string>
@@ -4775,6 +4782,9 @@ Sections not recognised (skipped): [SECTIONS]</string>
   <string name="SLAOStatusActive">On ([SET]).</string>
   <string name="SLAOChatNoSuchSet">No AO set named &apos;[NAME]&apos;.</string>
   <string name="SLAOChatSets">AO sets: [SETS]</string>
+  <string name="FavoriteWearablesDrop">Add to Favorite Wearables (a link: the item stays where it is)</string>
+  <string name="FavoriteWearablesDropNo">Only wearables, body parts and attachments from your inventory can be favorites</string>
+  <string name="FavoriteWearablesDropAlready">Already a favorite</string>
   <string name="SLAODropNoCopy">No-copy animation: it can only stay in the object</string>
   <string name="SLAODropCopy">Copy this animation into your inventory and add it to the state</string>
   <string name="SLAODropObjectNotecard">Import this object's animations as a new set, using this notecard</string>

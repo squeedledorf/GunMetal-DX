@@ -1,0 +1,17 @@
+# Key comparisons that deliberately stay hard-coded (checked by check_key_commands.py)
+# <file name> | <the line, whitespace collapsed> | <reason>
+lllocationinputctrl.cpp | bool pasting = mask == MASK_CONTROL && key == 'V'; | standard paste into a text field
+llviewerwindow.cpp | if ((key == KEY_MOUSELOOK) && !(mask & (MASK_CONTROL | MASK_ALT))) | chat history / list navigation passthrough (not a binding), or dead code (#if 0)
+llviewerwindow.cpp | if (!(key == KEY_UP && mask == MASK_CONTROL) && !(key == KEY_DOWN && mask == MASK_CONTROL) && !(key == KEY_UP && mask == MASK_ALT) && !(key == KEY_DOWN && mask == MASK_ALT)) | chat history / list navigation passthrough (not a binding), or dead code (#if 0)
+slchatbar.cpp | if (KEY_RETURN == key && mask == (MASK_CONTROL | MASK_SHIFT)) | older whisper alias next to the rebindable chat_whisper
+llpreviewgesture.cpp | if(('S' == key) && (MASK_CONTROL == (mask & MASK_CONTROL))) | standard save in a floater
+llpreviewnotecard.cpp | if(('S' == key) && (MASK_CONTROL == (mask & MASK_CONTROL))) | standard save in a floater
+llpreviewscript.cpp | if (('A' == key) && (MASK_CONTROL == (mask & MASK_MODIFIERS))) | standard select-all in the script text editor
+llprogressview.cpp | if( ('Q' == key) && (MASK_CONTROL == mask) ) | quit on the progress screen, before any bindings are loaded
+llsetkeybinddialog.cpp | if ((key == 'Q' && mask == MASK_CONTROL) || key == KEY_ESCAPE) | the dialog that records bindings: cancel keys must stay fixed
+lltoastalertpanel.cpp | else if (KEY_TAB == key && mask == MASK_SHIFT) | dialog button navigation
+fsareasearch.cpp | if (key == 'C' && mask == MASK_CONTROL) | standard copy / select all in a list
+fsareasearch.cpp | if (key == 'A' && mask == MASK_CONTROL) | standard copy / select all in a list
+fsfloatercontacts.cpp | if (mask == MASK_CONTROL && key == 'F') | standard find (focus the active tab's filter) inside the Contacts floater
+fsfloatercontacts.cpp | if (mask == MASK_CONTROL && key == 'W' && getHost()) | standard close-tab inside the Contacts floater's host
+llviewerinput.cpp | if (it->command.getValue() == "map_ping_enemy" && LLKeyboard::keyFromString(it->key.getValue(), &key) && key == 'B' && LLKeyboard::maskFromString(it->mask.getValue(), &mask) && mask == MASK_SHIFT) | one-time key_bindings.xml migration: finds the old Shift+B default in the user's saved file (not a shortcut)

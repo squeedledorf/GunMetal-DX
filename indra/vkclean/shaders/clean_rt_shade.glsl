@@ -156,8 +156,27 @@ vec3 rtHitLocalLights(vec3 P, vec3 N, vec3 V, bool pbr, vec3 base, float metal, 
     if (useGrid) n = rgN;
 #endif
 #endif
+#ifdef RT_SHADE_BUDGET_OUT
+    // (#1039 register pass, the visibility queue's PRODUCER only -- the walk that traces no ray) one set of
+    // surface terms live across the walk, per model: PBR the BRDF's diffuse / specular colours and roughness,
+    // legacy its base colour, specular colour and glossiness, selected once (the same values each branch read
+    // before). The kernels that trace the budget's rays inline keep the form below unchanged: the selected
+    // form hung the fused RT LIGHT (DeferRtSplitLight) on NVIDIA 615.78 (see the commit message).
+    const vec3  diffuseColor  = pbr ? base * (1.0 - 0.04) * (1.0 - metal) : base;   // | base (legacy)
+    const vec3  specularColor = pbr ? mix(vec3(0.04), base, metal) : ls.spec;      // | ls.spec (legacy)
+    const float rghGloss      = pbr ? rough : ls.gloss;                             // rough | ls.gloss
+#define RTL_ROUGH rghGloss
+#define RTL_BASE  diffuseColor
+#define RTL_LSPEC specularColor
+#define RTL_GLOSS rghGloss
+#else
     const vec3 diffuseColor  = base * (1.0 - 0.04) * (1.0 - metal);
     const vec3 specularColor = mix(vec3(0.04), base, metal);
+#define RTL_ROUGH rough
+#define RTL_BASE  base
+#define RTL_LSPEC ls.spec
+#define RTL_GLOSS ls.gloss
+#endif
     vec3 sum = vec3(0.0);
 #if RT_SHADE_PROJ_BUDGETED
     // HIT SHADOW-RAY BUDGET (see RT_SHADE_PROJ_K): the K brightest shadowable projector shares,
@@ -202,7 +221,7 @@ vec3 rtHitLocalLights(vec3 P, vec3 N, vec3 V, bool pbr, vec3 base, float metal, 
             if (pbr)
             {
                 float nl; vec3 df, sp;
-                llPunctual(diffuseColor, specularColor, rough, N, V, l, nl, df, sp);
+                llPunctual(diffuseColor, specularColor, RTL_ROUGH, N, V, l, nl, df, sp);
                 pt = atten * L.color_falloff.rgb * 3.25 * clamp(nl * (df + sp), vec3(0.0), vec3(10.0));
             }
             else
@@ -210,12 +229,12 @@ vec3 rtHitLocalLights(vec3 P, vec3 N, vec3 V, bool pbr, vec3 base, float metal, 
                 const float nl = dot(N, l);
                 if (nl > 0.0)
                 {
-                    pt = L.color_falloff.rgb * (nl * atten) * base;
-                    if (ls.gloss > 0.0)   // legacy Blinn-Phong (#470, multiPointLightF)
+                    pt = L.color_falloff.rgb * (nl * atten) * RTL_BASE;
+                    if (RTL_GLOSS > 0.0)   // legacy Blinn-Phong (#470, multiPointLightF)
                     {
                         float slit;
-                        const float scol = legacySpecular(N, V, l, ls.gloss, slit);
-                        pt += (slit * atten * scol) * L.color_falloff.rgb * ls.spec;
+                        const float scol = legacySpecular(N, V, l, RTL_GLOSS, slit);
+                        pt += (slit * atten * scol) * L.color_falloff.rgb * RTL_LSPEC;
                     }
                 }
             }
@@ -253,7 +272,7 @@ vec3 rtHitLocalLights(vec3 P, vec3 N, vec3 V, bool pbr, vec3 base, float metal, 
             vec3 dlit = projDiffuse(L, l_dist, ptc.xy);
             // Capture rule (projectorVisibility): shadow-map records sample the atlas,
             // ray-traced records stay unshadowed.
-            const bool legacySpec = !pbr && ls.gloss > 0.0;
+            const bool legacySpec = !pbr && RTL_GLOSS > 0.0;
             const bool legacyEnv  = !pbr && ls.env > 0.0;
             vec3 vis = vec3(1.0);
             bool rayRec = false;   // (budgeted: a ray-traced record whose shadow is decided after the walk)
@@ -295,7 +314,7 @@ vec3 rtHitLocalLights(vec3 P, vec3 N, vec3 V, bool pbr, vec3 base, float metal, 
             if (pbr)
             {
                 float nlp; vec3 df, sp;
-                llPunctual(diffuseColor, specularColor, rough, N, V, l, nlp, df, sp);
+                llPunctual(diffuseColor, specularColor, RTL_ROUGH, N, V, l, nlp, df, sp);
                 const vec3 brdf = clamp(nlp * (df + sp), vec3(0.0), vec3(10.0));
                 sh += atten * dlit * 3.25 * brdf;
                 const vec3 at = projAmbiance(L, amb_da, atten, 0.0, nl, ptc.xy) * 3.25 * brdf * ambV;
@@ -304,17 +323,17 @@ vec3 rtHitLocalLights(vec3 P, vec3 N, vec3 V, bool pbr, vec3 base, float metal, 
             else
             {
                 const float lit = nl * atten;
-                sh += dlit * lit * base;
-                const vec3 at = base * projAmbiance(L, amb_da, atten, lit, nl, ptc.xy) * max(dot(-l, N), 0.0) * ambV;
+                sh += dlit * lit * RTL_BASE;
+                const vec3 at = RTL_BASE * projAmbiance(L, amb_da, atten, lit, nl, ptc.xy) * max(dot(-l, N), 0.0) * ambV;
                 if (ambSh) sh += at; else sum += lw * at;
                 if (legacySpec)   // legacy Blinn-Phong (#470, spotLightF)
                 {
                     float slit;
-                    const float scol = legacySpecular(N, V, l, ls.gloss, slit);
-                    sh += clamp(dlit * (slit * atten * scol) * ls.spec, vec3(0.0), vec3(1.0));
+                    const float scol = legacySpecular(N, V, l, RTL_GLOSS, slit);
+                    sh += clamp(dlit * (slit * atten * scol) * RTL_LSPEC, vec3(0.0), vec3(1.0));
                 }
                 if (legacyEnv && nl_raw > 0.0)   // projector image reflection (spotLightF)
-                    sh += projEnvReflect(L, P, N, V, ls.gloss) * vis * ls.env;
+                    sh += projEnvReflect(L, P, N, V, RTL_GLOSS) * vis * ls.env;
             }
             sh *= lw;   // (the weighted share: what the sum holds and the budget ranks / removes)
             sum += sh;
@@ -351,6 +370,10 @@ vec3 rtHitLocalLights(vec3 P, vec3 N, vec3 V, bool pbr, vec3 base, float metal, 
     sum = max(sum, vec3(0.0));
 #endif
 #endif
+#undef RTL_ROUGH
+#undef RTL_BASE
+#undef RTL_LSPEC
+#undef RTL_GLOSS
     return sum;
 }
 

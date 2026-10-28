@@ -61,7 +61,9 @@ layout(location = 14)      out vec4 v_pick_tangent;
 #endif
 // #749: the cluster draws now run in the depth PRE-PASS too (other pipelines, same module):
 // invariant keeps the G-buffer draw's depth bit-identical to the pre-pass's (as the static VS).
+// (+ precise, #1088: as the static VS below.)
 invariant gl_Position;
+precise gl_Position;
 
 void main()
 {
@@ -322,7 +324,12 @@ layout(location = 14)      out vec4 v_pick_tangent;
 // depth-tests EQUAL. Without `invariant` the driver may compile gl_Position differently
 // per pipeline / module (varying DCE, FMA contraction) and an ULP of difference punches
 // z-fighting holes. Every variant computes it through the same source lines.
+// #1088: + `precise` (NoContraction on every operation feeding the position): `invariant`
+// alone did not hold on an AMD Windows driver (Vega iGPU) across the pre-pass and shading
+// pipelines -- thin unlit lines along triangle edges. With no FMA contraction
+// left to the backend, every module evaluates the same exact IEEE operations in the same order.
 invariant gl_Position;
+precise gl_Position;
 
 // One axis of the ENCLOSES-CAMERA oriented-box test: |d . axis| within the half extent
 // (axis = an un-normalized model column, so both sides carry len^2). Called per axis, NOT
@@ -339,16 +346,19 @@ bool boxAxisInside(vec3 d, vec3 axis, float h)
 // rot * dQ with dQ = quat(angle, axis)).
 mat4 spinPose(mat4 M, vec4 spin_axis, vec4 spin_pivot, float time)
 {
-    float rate  = length(spin_axis.xyz);
+    // precise (#1088): the pose feeds gl_Position, and `precise gl_Position` does not reach
+    // into called functions (sqrt(dot) rather than length() so the decoration covers the dot).
+    precise float rate  = sqrt(dot(spin_axis.xyz, spin_axis.xyz));
     vec3  a     = spin_axis.xyz / rate;
-    float ang   = mod(rate * (time - spin_axis.w), 6.28318531);
+    precise float ang   = mod(rate * (time - spin_axis.w), 6.28318531);
     float c = cos(ang), s = sin(ang), t = 1.0 - c;
-    mat3 R = mat3(t*a.x*a.x + c,     t*a.x*a.y + s*a.z, t*a.x*a.z - s*a.y,
+    precise mat3 R = mat3(t*a.x*a.x + c,     t*a.x*a.y + s*a.z, t*a.x*a.z - s*a.y,
                   t*a.x*a.y - s*a.z, t*a.y*a.y + c,     t*a.y*a.z + s*a.x,
                   t*a.x*a.z + s*a.y, t*a.y*a.z - s*a.x, t*a.z*a.z + c);
     vec3 pv = spin_pivot.xyz;
-    return mat4(vec4(R * M[0].xyz, 0.0), vec4(R * M[1].xyz, 0.0), vec4(R * M[2].xyz, 0.0),
-                vec4(pv + R * (M[3].xyz - pv), 1.0));
+    precise mat4 P = mat4(vec4(R * M[0].xyz, 0.0), vec4(R * M[1].xyz, 0.0), vec4(R * M[2].xyz, 0.0),
+                          vec4(pv + R * (M[3].xyz - pv), 1.0));
+    return P;
 }
 
 void main()
@@ -444,7 +454,10 @@ void main()
     vec3 lpos = position;
     if ((inst.flags & 32u) != 0u && texcoord0.y != 0.0 && ssr.terrain_lod.w > 0.5)
     {
-        const float md = distance((M * vec4(position, 1.0)).xyz, ssr.terrain_lod.xyz);
+        // (precise, #1088: the morph feeds gl_Position; a call's arguments are outside the
+        // reach of `precise gl_Position`. sqrt(dot) so the decoration covers the dot.)
+        precise const vec3 mdv = (M * vec4(position, 1.0)).xyz - ssr.terrain_lod.xyz;
+        precise const float md = sqrt(dot(mdv, mdv));
         lpos.z += texcoord0.y * terrainMorph(position.xy, md);
     }
     lpos = rezfxDisplace(inst.flags, lpos, M);   // <GMDX> de-rez vertex effects (every variant)

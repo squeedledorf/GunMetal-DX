@@ -30,6 +30,7 @@ layout(push_constant) uniform DnPush {
 } dp;
 #define DN_F_HIST   1u    // the history is valid (the denoiser ran last frame at this size)
 #define DN_F_PARITY 2u    // this frame's GEOM / HIST layer (the producer wrote GEOM layer parity)
+                          // (bit 2: DN_F_YOUNG_BOOST, bit 31: DN_F_MOVE_ZTOL -- below, #1038)
 #define DN_DBG_SHIFT 4u   // bits 4-7: the debug view (PDN_DBG_*; 8 / 9 the #869 split views)
 #define DN_F_SUN       256u    // the producer wrote the sun / moon channel (IN layer 2)
 #define DN_F_SUN_HIST  512u    // ... and last frame's sun history is valid (no sun <-> moon cut)
@@ -114,6 +115,40 @@ float dnMaturity(float len)
 // reprojected point (the depth plane, the normal) gives the history instead of a restart.
 #define DN_F_REPROJ_SEARCH (1u << 30)
 bool dnReprojSearch() { return (dp.ctl.x & DN_F_REPROJ_SEARCH) != 0u; }
+// (#1038) YOUNG-TEXEL BOOST (RenderVKDenoiseYoungBoost; acts only with the history fix, DN_HFIX_SHIFT
+// > 0): a disocclusion that uncovers a WHOLE surface at once -- an avatar walking out from behind a
+// wall, its body revealed in one frame -- has no settled neighbour for the history fix to fill from:
+// every tap is as young as the centre, and the a-trous degenerated to plain SVGF on 1-sample texels,
+// its normal stop (power 64) cutting nearly every tap on a curved, normal-mapped body. With this bit:
+//   * temporal: a texel with NO usable history stores the same-surface 3x3 mean of this frame's raw
+//     samples (the centre included; informative ones only under DN_F_INFO) as its first estimate
+//     (length 1) instead of its own single sample -- the history starts ~9x less noisy and the
+//     clamp box of the next frames is not anchored on an outlier;
+//   * a-trous: a young centre's normal stop relaxes toward power 8 with its youth (indirect light is
+//     smooth over a body's curvature at this resolution; the depth plane still stops silhouettes) and,
+//     from the second iteration on, its step doubles (a wider footprint without another dispatch).
+// Texels at or past the history-fix length: exactly as before (no steady-state cost or change).
+#define DN_F_YOUNG_BOOST 4u
+bool dnYoungBoost() { return (dp.ctl.x & DN_F_YOUNG_BOOST) != 0u && dnHistFix() > 0.0; }
+// (#1038) MOVING-SURFACE DEPTH TOLERANCE (RenderVKDenoiseMovingDepthTol): the producer's expected
+// previous depth (MOT z) is the CAMERA-ONLY one -- this frame's point seen from last frame's camera.
+// A surface that moved on its own (a walking / running avatar, a moving prim) was elsewhere, at
+// another depth: toward / away from the camera by about as much as it moved sideways. The history
+// taps' depth test then rejected a fast mover's history every frame (a constant restart). With this
+// bit the tolerance grows by the surface's own sideways motion in metres (the motion vectors'
+// reprojection against the camera-only one, through last frame's projection), at most 25 % of the
+// depth; the normal test still applies. Static surfaces (no own motion): unchanged.
+#define DN_F_MOVE_ZTOL (1u << 31)
+bool dnMoveZTol() { return (dp.ctl.x & DN_F_MOVE_ZTOL) != 0u; }
+// The extra depth tolerance (m) for a surface whose motion-vector reprojection hc lands dTex denoiser
+// texels from its camera-only one, at expected depth pw (0: no own motion / no projection).
+float dnMoveDepthTol(vec2 dTex, float pw)
+{
+    const vec2 pk = vec2(abs(ssr.views[CLEAN_VIEW].prev_proj[0][0]), abs(ssr.views[CLEAN_VIEW].prev_proj[1][1]));
+    if (!(pk.x > 0.05 && pk.y > 0.05) || !(pw > 0.0)) return 0.0;
+    const float lat = length(dTex / dp.dims.xy * 2.0 / pk) * pw;
+    return (lat >= 0.0) ? min(lat, 0.25 * pw) : 0.0;
+}
 bool dnInfoOn() { return (dp.ctl.x & DN_F_INFO) != 0u; }
 // Informative diffuse / specular at texel q of THIS frame (W: its GEOM w's reference, raw: IN).
 bool dnInfoD(float W, vec4 raw) { return W > 0.0 && raw.a > 0.0; }

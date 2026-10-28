@@ -291,29 +291,34 @@ bool legacyBumpTN(Material m, vec2 uv, float bias, out vec3 tn)
 layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer FwdFroxelRef { uint w[]; };
 #endif
 
-// Main-view light/probe cluster of this fragment (screen tile + log depth slice).
-uint mainClusterFrag(vec3 P)
-{
-    uint cx = min(uint(CLEAN_FRAG_XY.x / linfo.grid.x), GX - 1u);
-    uint cy = min(uint(CLEAN_FRAG_XY.y / linfo.grid.y), GY - 1u);
-    float vz = dot(P - linfo.cam_pos.xyz, linfo.cam_fwd.xyz);
-    uint cz = (vz <= linfo.zinfo.x) ? 0u
-            : min(uint(log(vz / linfo.zinfo.x) * linfo.zinfo.z), GZ - 1u);
-    return (cz * GY + cy) * GX + cx;
-}
-
 // The main-view cluster a world point projects into, clamped to the grid edges (the
 // mirror capture sees points the main view doesn't: they take the nearest edge
 // tile's candidates -- approximate, but the probes there are still local ones).
 uint mainClusterProject(vec3 P)
 {
     vec4 v = linfo.view * vec4(P, 1.0);        // -Z forward
-    float z = max(-v.z, 1e-3);
+    float z = CL_VIEW_Z(linfo, max(-v.z, 1e-3));   // <GMDX>
     float sx = (v.x / z) / max(linfo.grid.z, 1e-4);   // [-1,1] across the view
     float sy = (v.y / z) / max(linfo.grid.w, 1e-4);
     uint cx = uint(clamp((sx * 0.5 + 0.5) * float(GX), 0.0, float(GX) - 1.0));
     uint cy = uint(clamp((0.5 - sy * 0.5) * float(GY), 0.0, float(GY) - 1.0));   // top-down tiles
     float vz = -v.z;
+    uint cz = (vz <= linfo.zinfo.x) ? 0u
+            : min(uint(log(vz / linfo.zinfo.x) * linfo.zinfo.z), GZ - 1u);
+    return (cz * GY + cy) * GX + cx;
+}
+
+// Main-view light/probe cluster of this fragment (screen tile + log depth slice).
+// #1075 STEREO (kViewCount > 1, the multiview pipelines only): the grid is the head camera's --
+// a superset of both eyes' frusta -- so an eye's own fragment coordinates are not its tiles: the
+// point is projected into it instead (design §5's "symmetric superset grid" until per-view grids,
+// step 9). Every other pipeline has kViewCount 1: folded to the screen-tile lookup below.
+uint mainClusterFrag(vec3 P)
+{
+    if (kViewCount > 1) return mainClusterProject(P);
+    uint cx = min(uint(CLEAN_FRAG_XY.x / linfo.grid.x), GX - 1u);
+    uint cy = min(uint(CLEAN_FRAG_XY.y / linfo.grid.y), GY - 1u);
+    float vz = dot(P - linfo.cam_pos.xyz, linfo.cam_fwd.xyz);
     uint cz = (vz <= linfo.zinfo.x) ? 0u
             : min(uint(log(vz / linfo.zinfo.x) * linfo.zinfo.z), GZ - 1u);
     return (cz * GY + cy) * GX + cx;
@@ -1342,7 +1347,7 @@ vec3 localLights(vec3 P, vec3 N, vec3 V, bool pbr, vec3 base, float metal, float
 //      thickness floor (m), DepthRejectBias = the minimum origin / ray depth (m). ----
 vec2 ssrProject(vec3 pos)
 {
-    vec4 c = ssr.prev_proj * vec4(pos, 1.0);
+    vec4 c = ssr.views[CLEAN_VIEW].prev_proj * vec4(pos, 1.0);
     return (c.xy / c.w) * 0.5 + 0.5;
 }
 
@@ -1354,7 +1359,7 @@ vec3 ssrPrevViewPos(ivec2 px, ivec2 sz)
     px = clamp(px, ivec2(0), sz - 1);
     const float d = texelFetch(uPrevDepth, px, 0).r;
     const vec2 ndc = (vec2(px) + 0.5) / vec2(sz) * 2.0 - 1.0;
-    const vec4 p = ssr.prev_inv_proj * vec4(ndc, d, 1.0);
+    const vec4 p = ssr.views[CLEAN_VIEW].prev_inv_proj * vec4(ndc, d, 1.0);
     if (abs(p.w) < 1e-20) return vec3(0.0, 0.0, -1e20);
     return p.xyz / p.w;
 }
@@ -1483,8 +1488,8 @@ float ssrTrace(vec3 position, vec3 reflection, out vec3 hitColor)
 // One tap, as LL's probe sampler calls it. Returns rgb + weight (confidence * vignette).
 vec4 ssrTap(vec3 P, vec3 N, float glossiness)
 {
-    vec3 viewPos = (ssr.prev_view * vec4(P, 1.0)).xyz;
-    vec3 n = normalize(mat3(ssr.prev_view) * N);
+    vec3 viewPos = (ssr.views[CLEAN_VIEW].prev_view * vec4(P, 1.0)).xyz;
+    vec3 n = normalize(mat3(ssr.views[CLEAN_VIEW].prev_view) * N);
     vec3 rayDirection = normalize(reflect(viewPos, n));
 
     vec2 tc = ssrProject(viewPos);

@@ -1374,7 +1374,13 @@
      value="0.063 0.075 0.090 0.82" />
     <color
      name="GMDXChatBarLabel"
-     value="0.58 0.62 0.67 1" />
+     value="0.682 0.718 0.753 1" />
+    <color
+     name="GMDXChatBarEdge"
+     value="0.227 0.259 0.298 1" />
+    <color
+     name="GMDXChatBarSelection"
+     value="0.435 0.827 1 0.35" />
     <color
      name="GMDXChatBarText"
      value="0.933 0.945 0.957 1" />

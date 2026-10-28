@@ -331,6 +331,14 @@
       <string>RotateRight</string>
     </map>
     
+    <key>vr</key>
+    <map>
+      <key>desc</key>
+      <string>Start in VR through the active OpenXR runtime (this launch only).</string>
+      <key>map-to</key>
+      <string>SlipstreamVREnabled</string>
+    </map>
+
     <key>safe</key>
     <map>
       <key>desc</key>

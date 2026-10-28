@@ -15,7 +15,7 @@
 // Attachments 0 / 1 (HDR, glow) get an additive zero (write-masked off for glow).
 #include "clean_frame_info.glsl"
 
-layout(set = 0, binding = 31) uniform sampler2D uRtMaskSun;   // a = shading change
+layout(set = 0, binding = 31) uniform sampler2DArray uRtMaskSun;   // a = shading change (#1075: a layer per view)
 
 layout(location = 0) in vec2 v_uv;
 layout(location = 0) out vec4 outColor;
@@ -36,7 +36,7 @@ void main()
     const ivec2 b = ivec2(floor(f));
     float r = 0.0;
     for (int k = 0; k < 4; ++k)
-        r = max(r, texelFetch(uRtMaskSun, clamp(b + ivec2(k & 1, k >> 1), ivec2(0), mx), 0).a);
+        r = max(r, texelFetch(uRtMaskSun, ivec3(clamp(b + ivec2(k & 1, k >> 1), ivec2(0), mx), int(CLEAN_VIEW)), 0).a);
     if (r <= 1.0 / 255.0) discard;
     outReact = vec4(r, 0.0, 0.0, 0.0);
 }

@@ -45,6 +45,8 @@
 #include "llfloaterreg.h"  // HACK for destinations guide on startup
 #include "llviewercontrol.h"  // HACK for destinations guide on startup
 #include "llinventorymodel.h" // HACK to disable starter avatars button for NUX
+#include "gmdxtoolbarpins.h" // <GMDX> inventory items and folders pinned on the toolbars
+#include "gmdxtoolbarcluster.h" // <GMDX> where the buttons sit along each strip
 
 LLToolBarView* gToolBarView = NULL;
 
@@ -267,6 +269,18 @@ bool LLToolBarView::loadToolbars(bool force_default)
         // Try to load the default toolbars
         return loadToolbars(true);
     }
+
+    // <GMDX> pinned inventory buttons are commands made at run time: make the saved ones first
+    GMDXToolbarPins::init();
+    for (const Toolbar* bar : { &toolbar_set.left_toolbar(), &toolbar_set.right_toolbar(),
+                                &toolbar_set.bottom_toolbar(), &toolbar_set.top_toolbar() })
+    {
+        for (const LLCommandId::Params& command_params : bar->commands)
+        {
+            GMDXToolbarPins::registerSaved(command_params.name());
+        }
+    }
+    // </GMDX>
 
     // Clear the toolbars now before adding the loaded commands and settings
     for (S32 i = LLToolBarEnums::TOOLBAR_FIRST; i <= LLToolBarEnums::TOOLBAR_LAST; i++)
@@ -584,6 +598,7 @@ void LLToolBarView::onToolBarButtonRemoved(LLView* button)
 
 void LLToolBarView::draw()
 {
+    GMDXToolbarCluster::update(); // <GMDX> clear of the chat log, where the grips put them
     LLRect toolbar_rects[LLToolBarEnums::TOOLBAR_COUNT];
 
     for (S32 i = LLToolBarEnums::TOOLBAR_FIRST; i <= LLToolBarEnums::TOOLBAR_LAST; i++)
@@ -605,11 +620,33 @@ void LLToolBarView::draw()
         }
     }
 
+    // <GMDX> an inventory drag shows an empty toolbar (to pin onto) only while the cursor is near that
+    // toolbar's edge of the screen: shown, it shrinks the floater area and lies over floaters there
+    const bool pin_drag = GMDXToolbarPins::isPinDrag();
+    S32 mouse_x = 0, mouse_y = 0;
+    if (pin_drag)
+    {
+        LLUI::getInstance()->getMousePositionLocal(this, &mouse_x, &mouse_y);
+    }
+    auto near_edge = [&](S32 i)
+    {
+        constexpr S32 REVEAL = 40;  // px from the edge
+        switch (i)
+        {
+            case LLToolBarEnums::TOOLBAR_LEFT:   return mouse_x < REVEAL;
+            case LLToolBarEnums::TOOLBAR_RIGHT:  return mouse_x >= getRect().getWidth() - REVEAL;
+            case LLToolBarEnums::TOOLBAR_BOTTOM: return mouse_y < REVEAL;
+            case LLToolBarEnums::TOOLBAR_TOP:    return mouse_y >= getRect().getHeight() - REVEAL;
+            default:                             return false;
+        }
+    };
+    // </GMDX>
     for (S32 i = LLToolBarEnums::TOOLBAR_FIRST; i <= LLToolBarEnums::TOOLBAR_LAST; i++)
     {
         mToolbars[i]->getParent()->setVisible(mShowToolbars
                                             && (mToolbars[i]->hasButtons()
-                                            || isToolDragged()));
+                                            || isToolDragged()
+                                            || (pin_drag && near_edge(i)))); // <GMDX>
     }
 
     // Draw drop zones if drop of a tool is active
@@ -622,6 +659,22 @@ void LLToolBarView::draw()
             gl_rect_2d(toolbar_rects[i], drop_color, true);
         }
     }
+    // <GMDX> an inventory drag: where on each toolbar it can be pinned (LLToolBar::getGMDXPinZone)
+    else if (pin_drag)
+    {
+        static const LLUIColor drop_color = LLUIColorTable::instance().getColor( "ToolbarDropZoneColor" );
+
+        for (S32 i = LLToolBarEnums::TOOLBAR_FIRST; i <= LLToolBarEnums::TOOLBAR_LAST; i++)
+        {
+            if (mToolbars[i]->getParent()->getVisible())
+            {
+                LLRect zone;
+                mToolbars[i]->localRectToOtherView(mToolbars[i]->getGMDXPinZone(), &zone, this);
+                gl_rect_2d(zone, drop_color, true);
+            }
+        }
+    }
+    // </GMDX>
 
     LLUICtrl::draw();
 }

@@ -139,13 +139,11 @@ namespace
                 { "Avatar", "Buttons", "Jump", "BUTTON_SOUTH" },
                 { "Avatar", "Buttons", "Crouch", "BUTTON_EAST" },
                 { "Avatar", "Buttons", "Toggle sit", "BUTTON_WEST" },
-                { "Avatar", "Buttons", "Interact", "BUTTON_NORTH" },
                 { "Avatar", "Buttons", "Zoom +", "BUTTON_DPAD_UP" },
                 { "Avatar", "Buttons", "Zoom -", "BUTTON_DPAD_DOWN" },
                 { "Avatar", "Buttons", "Toggle flycam", "BUTTON_RIGHT_STICK" },
                 GC_STICKS("Captive"), GC_SYSTEM("Captive"),
                 { "Captive", "Buttons", "Toggle sit", "BUTTON_WEST" },
-                { "Captive", "Buttons", "Interact", "BUTTON_NORTH" },
                 { "Captive", "Buttons", "Zoom +", "BUTTON_DPAD_UP" },
                 { "Captive", "Buttons", "Zoom -", "BUTTON_DPAD_DOWN" },
             }) },
@@ -186,7 +184,12 @@ namespace
         {
             return nullptr;
         }
-        size_t index = std::stoul(value.substr(BUILTIN_PRESET_PREFIX.size()));
+        // <GMDX> no throwing parse: a user preset name can start with the prefix
+        U32 index = 0;
+        if (!LLStringUtil::convertToU32(value.substr(BUILTIN_PRESET_PREFIX.size()), index))
+        {
+            return nullptr;
+        }
         return index < builtInPresets().size() ? &builtInPresets()[index].second : nullptr;
     }
 
@@ -499,7 +502,22 @@ void LLPanelPreferenceGameControl::cancel(const std::vector<std::string> setting
     {
         return;
     }
-    LLGameControl::applySettingsFromLLSD(mOrigSettings);
+    // <GMDX> Only this page's edits are undone. The Gyro Aim and Trackpads window and
+    // the debug window write to the same GameControl map and save straight away.
+    LLSD restore = mOrigSettings;
+    const LLSD& live = LLGameControl::getGameControlSettings();
+    for (const char* key : { "Gyro", "Trackpads", "Devices" })
+    {
+        if (live.has(key))
+        {
+            restore[key] = live[key];
+        }
+        else
+        {
+            restore.erase(key);
+        }
+    }
+    LLGameControl::applySettingsFromLLSD(restore);
     LLGameControl::saveToSettings();
 }
 
@@ -1279,6 +1297,7 @@ void LLPanelPreferenceGameControl::setListMode(bool list)
 // Each row's value is {input_type, action}.
 void LLPanelPreferenceGameControl::populateActionMappings()
 {
+    clearSelectionState(); // <GMDX> the selection points into the rows freed below
     mActionMappingsAxes->clearRows();
     mActionMappingsButtons->clearRows();
     const std::string mode = currentEditMode();
@@ -1669,7 +1688,7 @@ void LLPanelPreferenceGameControl::onPresetSave()
             std::string name = response["message"].asString();
             LLStringUtil::trim(name);
             LLPanelPreferenceGameControl* panel = static_cast<LLPanelPreferenceGameControl*>(handle.get());
-            if (name.empty() || !panel)
+            if (name.empty() || !panel || LLStringUtil::startsWith(name, BUILTIN_PRESET_PREFIX)) // <GMDX> reserved
             {
                 return false;
             }

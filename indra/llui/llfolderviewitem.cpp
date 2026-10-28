@@ -1836,6 +1836,10 @@ void LLFolderViewFolder::extractItem( LLFolderViewItem* item, bool deparent_mode
 {
     if (item->isSelected())
         getRoot()->clearSelection();
+    // <GMDX> SoapStorm 984a07fa80: the item being renamed is going away, so is its rename
+    if (getRoot() && getRoot()->getRenameItem() == item)
+        getRoot()->cancelRenaming();
+    // </GMDX>
     // Folders live in mFolders, so look there first for them instead of scanning all of
     // mItems for a miss (#348). If the guess is wrong, fall back to the other list, so
     // the result is the same as before.

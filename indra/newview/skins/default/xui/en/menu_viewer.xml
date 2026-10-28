@@ -100,6 +100,37 @@
          function="Floater.ToggleOrBringToFront"
          parameter="recorder" />
       </menu_item_call>
+      <!-- <GMDX> orthographic view (key binding toggle_ortho, numpad 5 by default) -->
+      <menu_item_check
+       label="Orthographic View"
+       name="Orthographic View">
+        <menu_item_check.on_check
+         function="View.CheckOrthoView" />
+        <menu_item_check.on_click
+         function="View.ToggleOrthoView" />
+      </menu_item_check>
+      <!-- </GMDX> -->
+      <menu_item_call
+       label="Recenter VR View"
+       name="VR Recenter"
+       shortcut="alt|shift|V">
+        <menu_item_call.on_click
+         function="View.VRRecenter" />
+        <menu_item_call.on_enable
+         function="View.VRRunning" />
+        <menu_item_call.on_visible
+         function="View.VRRunning" />
+      </menu_item_call>
+      <menu_item_check
+       label="Show UI Wall in VR"
+       name="VR UI Wall">
+        <menu_item_check.on_check
+         function="View.VRWallVisible" />
+        <menu_item_check.on_click
+         function="View.VRToggleWall" />
+        <menu_item_check.on_visible
+         function="View.VRRunning" />
+      </menu_item_check>
       <menu_item_call
        label="Import from Another Viewer..."
        name="Import from Another Viewer">
@@ -693,6 +724,19 @@
          function="Floater.Toggle"
          parameter="sl_ao_editor" />
       </menu_item_check>
+      <menu_item_check
+       label="Favorite Wearables..."
+       name="Favorite Wearables">
+        <menu_item_check.on_check
+         function="Floater.Visible"
+         parameter="wearable_favorites" />
+        <menu_item_check.on_click
+         function="Floater.Toggle"
+         parameter="wearable_favorites" />
+        <menu_item_check.on_enable
+         function="RLV.EnableIfNot"
+         parameter="showinv" />
+      </menu_item_check>
       <menu_item_separator/>
       <menu_item_call 
        label="Reset skeleton"
@@ -846,6 +890,19 @@
             <menu_item_check.on_click
              function="Floater.Toggle"
              parameter="sl_ao_editor" />
+        </menu_item_check>
+        <menu_item_check
+         label="Favorite Wearables..."
+         name="Favorite Wearables">
+            <menu_item_check.on_check
+             function="Floater.Visible"
+             parameter="wearable_favorites" />
+            <menu_item_check.on_click
+             function="Floater.Toggle"
+             parameter="wearable_favorites" />
+            <menu_item_check.on_enable
+             function="RLV.EnableIfNot"
+             parameter="showinv" />
         </menu_item_check>
         <menu_item_separator/>
         <menu_item_check
@@ -1038,6 +1095,18 @@
               function="Floater.ToggleOrBringToFront"
               parameter="sound_explorer" />
         </menu_item_call>
+        <!-- <GMDX> -->
+        <menu_item_check
+            label="Sound Emitter Blacklist"
+            name="sound_emitter_blacklist">
+          <menu_item_check.on_check
+              function="Floater.Visible"
+              parameter="fs_sound_emitter_blacklist" />
+          <menu_item_check.on_click
+              function="Floater.Toggle"
+              parameter="fs_sound_emitter_blacklist" />
+        </menu_item_check>
+        <!-- </GMDX> -->
         <menu_item_call
              label="Events"
              name="Events"
@@ -1458,6 +1527,18 @@
 					 function="RLV.EnableIfNot"
 					 parameter="setenv" />
 	     	 	</menu_item_call>
+            <!-- <GMDX> Sky Test (gmdxskytest.cpp) -->
+            <menu_item_call
+             label="Sky Test..."
+             name="gmdx_sky_test">
+                <menu_item_call.on_click
+                 function="Floater.ToggleOrBringToFront"
+                 parameter="gmdx_sky_test" />
+                <menu_item_call.on_enable
+                 function="RLV.EnableIfNot"
+                 parameter="setenv" />
+            </menu_item_call>
+            <!-- </GMDX> -->
 	     	 	<menu_item_separator/>
 	     	 	 <menu_item_check
 	     	 	 label="Pause Clouds"
@@ -2326,8 +2407,7 @@ function="World.EnvPreset"
             <menu_item_call
              label="Image..."
              layout="topleft"
-             name="Upload Image"
-             shortcut="control|U">
+             name="Upload Image">
                 <menu_item_call.on_click
                  function="File.UploadImage"
                  parameter="" />
@@ -2399,7 +2479,8 @@ function="World.EnvPreset"
 	   <menu_item_call
              label="Bulk..."
              layout="topleft"
-             name="Bulk Upload">
+             name="Bulk Upload"
+             shortcut="control|U"><!-- <GMDX> Ctrl+U opens Bulk upload -->
                 <menu_item_call.on_visible
                  function="Upload.CalculateCosts"
                  parameter="Bulk Upload,texture" />
@@ -2407,6 +2488,18 @@ function="World.EnvPreset"
                  function="File.UploadBulk"
                  parameter="" />
             </menu_item_call>
+            <!-- <GMDX> <OTS> Bulk sound upload that also writes a music-player notecard -->
+            <menu_item_call
+             label="Sounds to Notecard..."
+             layout="topleft"
+             name="Upload Sound Notecard">
+                <menu_item_call.on_click
+                 function="File.UploadSoundNotecard"
+                 parameter="" />
+                <menu_item_call.on_enable
+                 function="File.EnableUpload" />
+            </menu_item_call>
+            <!-- </OTS> </GMDX> -->
         </menu>
 
       <menu_item_separator/>
@@ -3581,6 +3674,18 @@ function="World.EnvPreset"
                  function="ToggleControl"
                  parameter="DebugShowRenderInfo" />
             </menu_item_check>
+            <!-- <GMDX> SoapStorm ghost projectile watch counts -->
+            <menu_item_check
+             label="Show Projectile Info"
+             name="Show Projectile Info">
+                <menu_item_check.on_check
+                 function="CheckControl"
+                 parameter="DebugShowSoapstormProjectilesInfo" />
+                <menu_item_check.on_click
+                 function="ToggleControl"
+                 parameter="DebugShowSoapstormProjectilesInfo" />
+            </menu_item_check>
+            <!-- </GMDX> -->
             <menu_item_check
              label="Show Avatar Render Info"
              name="Show Avatar Render Info">

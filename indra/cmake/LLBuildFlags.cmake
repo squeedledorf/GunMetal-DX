@@ -13,7 +13,7 @@
 # What each switch is for:
 #   all POSIX     -std=c++20 -fPIC -DPIC   language level; position-independent code
 #   Linux base    -march=x86-64-v2 -g -DLL_LINUX=1
-#                   ISA floor (SSE4.2/POPCNT; see fix_isa_note.py, glibc-check), debug
+#                   ISA floor (SSE4.2/POPCNT; see fix_isa_note.py, check-package), debug
 #                   info (stripped/split at packaging), platform macro
 #   Release       -O3 -fstack-protector -DLL_RELEASE=1 -DLL_RELEASE_FOR_DOWNLOAD=1 -DNDEBUG
 #   RelWithDebInfo -Og (Linux) / -O0 (macOS) / /Od /Ob0 (Windows)

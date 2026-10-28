@@ -39,6 +39,7 @@
 #include "llagentaccess.h"
 #include "llagentbenefits.h"
 #include "llagentcamera.h"
+#include "llvrcamera.h"   // #1074 VR camera: own head hidden as in mouselook
 #include "llagentlistener.h"
 #include "llagentwearables.h"
 #include "llagentui.h"
@@ -2331,7 +2332,8 @@ bool LLAgent::needsRenderHead()
     }
     // </SS:Skoomastream>
 // [RLVa:KB] - Checked: RLVa-2.0.2
-    return ((LLVOAvatar::sVisibleInFirstPerson && LLPipeline::sReflectionRender) || (mShowAvatar && !gAgentCamera.isHidingAvatarForFirstPerson())) && (!gRlvHandler.hasBehaviour(RLV_BHVR_SHOWSELFHEAD));
+    // #1074: the VR camera sits at the head like mouselook (#1076: not in fly cam; false on the desktop).
+    return ((LLVOAvatar::sVisibleInFirstPerson && LLPipeline::sReflectionRender) || (mShowAvatar && !gAgentCamera.isHidingAvatarForFirstPerson() && !LLVRCamera::firstPerson())) && (!gRlvHandler.hasBehaviour(RLV_BHVR_SHOWSELFHEAD));
 // [/RLVa:KB]
 //  return (LLVOAvatar::sVisibleInFirstPerson && LLPipeline::sReflectionRender) || (mShowAvatar && !gAgentCamera.cameraMouselook());
 }
@@ -4576,6 +4578,7 @@ void LLAgent::onCapabilitiesReceivedAfterTeleport()
         LL_WARNS("Teleport") << "called when agent region is null!" << LL_ENDL;
     }
 
+    LLAppearanceMgr::instance().checkForGhostTempAttachments(); // <GMDX> SS:Nexii ghost temp attachment cleanup after a teleport
     check_merchant_status();
 }
 
@@ -5790,6 +5793,13 @@ bool LLAgent::isUsingFlycam() const
 
 void LLAgent::toggleFlycam()
 {
+    // <GMDX> RLVa: the flycam bypasses updateCamera() and with it the camera distance
+    // limits, so it can't be turned on under them (it can still be turned off)
+    if (!isUsingFlycam() && RlvActions::isRlvEnabled() && RlvActions::isCameraDistanceClamped())
+    {
+        return;
+    }
+    // </GMDX>
     gAgentCamera.toggleFlycam();
 }
 

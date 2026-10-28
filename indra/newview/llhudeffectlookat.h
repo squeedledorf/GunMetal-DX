@@ -59,6 +59,11 @@ public:
 
     bool setLookAt(ELookAtType target_type, LLViewerObject *object, LLVector3 position);
     void clearLookAtTarget();
+    // Slipstream (#1121): the head's tilt about its look axis (radians; + = the left ear up),
+    // from a VR headset; valid false: none. Sent to the sim in the effect's Color field (see
+    // packData), under the same rate limit as the target; other Slipstream viewers tilt the
+    // head with it, stock viewers never read that field for a look-at.
+    void setHeadRoll(F32 radians, bool valid);
 
     ELookAtType getLookAtType() { return mTargetType; }
     const LLVector3& getTargetPos() { return mTargetPos; }
@@ -90,6 +95,10 @@ private:
     LLVector3                   mTargetPos;
     F32                         mLastSendTime;
     LLAttentionSet*             mAttentions;
+    F32                         mTargetRoll = 0.f;      // #1121: radians (ANIM_DATA_LOOK_AT_ROLL points here)
+    bool                        mHasRoll = false;
+    bool                        mSentHasRoll = false;   // what the last packData encoded
+    S32                         mSentRollDeg = 0;
 };
 
 #endif // LL_LLHUDEFFECTLOOKAT_H

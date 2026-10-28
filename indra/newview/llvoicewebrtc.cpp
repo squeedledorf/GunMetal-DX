@@ -66,6 +66,8 @@
 
 #include "llviewernetwork.h"
 #include "llnotificationsutil.h"
+#include "llvraudio.h"          // #1122 VR headset devices
+#include "llaudiodevices.h"     // #1122 the main device choice
 
 #include "llcorehttputil.h"
 #include "lleventfilter.h"
@@ -426,12 +428,21 @@ void LLWebRTCVoiceClient::updateSettings()
         setEarLocation(sVoiceEarLocation);
 
         static LLCachedControl<std::string> sInputDevice(gSavedSettings, "VoiceInputAudioDevice");
-        setCaptureDevice(sInputDevice);
-
         static LLCachedControl<std::string> sOutputDevice(gSavedSettings, "VoiceOutputAudioDevice");
-        setRenderDevice(sOutputDevice);
+        // #1122: a VR headset override (if any) wins over the saved devices while it is set; a
+        // "Default" voice device follows the main device choice (LLAudioDevices).
+        const std::string capture_dev = effectiveCaptureDevice();
+        const std::string render_dev = effectiveRenderDevice();
+        setCaptureDevice(capture_dev);
+        setRenderDevice(render_dev);
 
-        LL_INFOS("Voice") << "Input device: " << std::quoted(sInputDevice()) << ", output device: " << std::quoted(sOutputDevice()) << LL_ENDL;
+        LL_INFOS("Voice") << "Input device: " << std::quoted(sInputDevice()) << ", output device: " << std::quoted(sOutputDevice())
+                          << "; using input " << std::quoted(capture_dev) << ", output " << std::quoted(render_dev) << LL_ENDL;
+        if (!mCaptureOverride.empty() || !mRenderOverride.empty())
+        {
+            LL_INFOS("Voice") << "VR headset override: input " << std::quoted(mCaptureOverride) << ", output "
+                              << std::quoted(mRenderOverride) << " (\"\" = the saved device)" << LL_ENDL;
+        }
 
         static LLCachedControl<F32> sMicLevel(gSavedSettings, "AudioLevelMic");
         setMicGain(sMicLevel);
@@ -792,7 +803,6 @@ void LLWebRTCVoiceClient::OnDevicesChangedImpl(const llwebrtc::LLWebRTCVoiceDevi
     {
         addRenderDevice(LLVoiceDevice(device.mDisplayName, device.mID));
     }
-    setRenderDevice(outputDevice);
 
     clearCaptureDevices();
     for (auto &device : capture_devices)
@@ -801,7 +811,16 @@ void LLWebRTCVoiceClient::OnDevicesChangedImpl(const llwebrtc::LLWebRTCVoiceDevi
 
         addCaptureDevice(LLVoiceDevice(device.mDisplayName, device.mID));
     }
-    setCaptureDevice(inputDevice);
+
+    // #1122: while a VR session runs, the headset devices are looked up in the new lists (they
+    // can appear after the session started, or voice was only just enabled): may set or clear
+    // the override. Inert (one bool) without a session.
+    LLVRAudio::onVoiceDevicesChanged();
+    // (#1122: override > voice-only pick > the main device choice > the saved "Default".)
+    setRenderDevice(effectiveRenderDevice());
+    setCaptureDevice(effectiveCaptureDevice());
+    // A device was plugged / unplugged: a chosen world-audio output that was missing may be back.
+    LLAudioDevices::onDevicesChanged();
 
     setDevicesListUpdated(true);
 }
@@ -831,6 +850,60 @@ void LLWebRTCVoiceClient::setRenderDevice(const std::string& name)
         LL_INFOS("Voice") << "Render device selection: '" << name << "'" << LL_ENDL;
         mWebRTCDeviceInterface->setRenderDevice(name);
     }
+}
+
+namespace
+{
+// The voice-only pick, else the main device choice (#1122, LLAudioDevices) when it is listed.
+std::string userVoiceDevice(bool capture, const LLVoiceDeviceList& devices)
+{
+    const std::string saved = gSavedSettings.getString(capture ? "VoiceInputAudioDevice" : "VoiceOutputAudioDevice");
+    if (!saved.empty() && saved != "Default") return saved;
+    const std::string main_id = LLAudioDevices::voiceDeviceFor(capture, devices);
+    return main_id.empty() ? saved : main_id;
+}
+} // namespace
+
+std::string LLWebRTCVoiceClient::userCaptureDevice() const
+{
+    return userVoiceDevice(true, mCaptureDevices);
+}
+
+std::string LLWebRTCVoiceClient::userRenderDevice() const
+{
+    return userVoiceDevice(false, mRenderDevices);
+}
+
+std::string LLWebRTCVoiceClient::effectiveCaptureDevice() const
+{
+    return mCaptureOverride.empty() ? userCaptureDevice() : mCaptureOverride;
+}
+
+std::string LLWebRTCVoiceClient::effectiveRenderDevice() const
+{
+    return mRenderOverride.empty() ? userRenderDevice() : mRenderOverride;
+}
+
+void LLWebRTCVoiceClient::applyDevices()
+{
+    setCaptureDevice(effectiveCaptureDevice());
+    setRenderDevice(effectiveRenderDevice());
+}
+
+void LLWebRTCVoiceClient::setDeviceOverride(const std::string& capture_id, const std::string& render_id)
+{
+    const bool capture_changed = capture_id != mCaptureOverride;
+    const bool render_changed = render_id != mRenderOverride;
+    if (!capture_changed && !render_changed) return;
+    mCaptureOverride = capture_id;
+    mRenderOverride = render_id;
+    LL_INFOS("Voice") << "VR headset override: input " << std::quoted(capture_id) << ", output " << std::quoted(render_id)
+                      << " (\"\" = the saved device); now using input " << std::quoted(effectiveCaptureDevice())
+                      << ", output " << std::quoted(effectiveRenderDevice()) << LL_ENDL;
+    // setCaptureDevice / setRenderDevice are no-ops without the device interface (voice not
+    // started): the override is then applied by updateSettings / OnDevicesChangedImpl.
+    if (capture_changed) setCaptureDevice(effectiveCaptureDevice());
+    if (render_changed) setRenderDevice(effectiveRenderDevice());
 }
 
 void LLWebRTCVoiceClient::tuningStart()

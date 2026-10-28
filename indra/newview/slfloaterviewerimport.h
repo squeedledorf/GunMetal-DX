@@ -64,6 +64,10 @@ private:
     void onViewerChanged();
     void onAccountChanged();
     void rebuildPlan();
+    // <GMDX> SoapStorm c6d090301f: add a Firestorm profile folder picked by hand.
+    void onChooseFolder();
+    void addChosenFolder(const std::string& folder);
+    // </GMDX>
 
     void refreshCategories();
     void refreshItems();

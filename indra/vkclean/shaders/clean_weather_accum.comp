@@ -14,8 +14,9 @@
 //   -DWX_AC_ACCUM    one workgroup per item of the shelter chain's work list flagged accum-due
 //                    (indirect, the chain's dispatch): every triangle of the draw contributes ONE
 //                    vertex (its corner rotating per update, so every vertex is sampled every
-//                    third update) -- its current (animated) world position and normal, its
-//                    rest-pose position and normal. EXPOSURE at the current pose: the roof maps'
+//                    third update; a triangle larger than a cell or so -- a low-poly canopy --
+//                    a lattice of points over its area instead) -- its current (animated) world
+//                    position and normal, its rest-pose position and normal. EXPOSURE at the current pose: the roof maps'
 //                    openness (a porch, a room) x the avatar's OWN cover from its shelter map (the
 //                    column above it + the slanted fall line in wind: an umbrella, a hat brim) x
 //                    #909 its NEAR self-cover (a snout over the tongue: in wind too).
@@ -113,6 +114,8 @@ const uint kAcFlagSnow = 1u, kAcFlagWet = 2u, kAcFlagMotion = 4u, kAcFlagSkinMet
 const uint kSkinMetaWords = 1892u;    // LLCleanSkinStore::SkinMeta / 4 (word 0 the avatar's slot)
 const uint kSkinMetaBindShape = 1876u;   // ... its bind_shape (16 floats, column-major)
 const uint kAcMaxSamples = 1000u;     // per cell and update: 1000 x 63 fits the 16-bit sums
+const float kAcTriStep = 0.75;        // cells: the most a large triangle's samples are apart (ACCUM)
+const uint kAcTriMaxDiv = 24u;        // ... its lattice's most divisions per edge (325 samples)
 
 // The grid's scratch cell (k scratch slot, b bucket, c the cell) -> its first word.
 uint acScratch(uint k, uint b, uvec3 c, uvec3 res)
@@ -481,34 +484,64 @@ void main()
     uint mn[3] = uint[3](0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu), mx[3] = uint[3](0u, 0u, 0u);
     for (uint tri = lid; tri < nTri; tri += 64u)
     {
-        const uint ii = dc.firstIndex + 3u * tri + (tri + sp.a.z) % 3u;   // (one corner per triangle, rotating)
-        if (ii >= nIdx) break;
-        const uint li = QV_INDEX16(ibo, ii);
-        const uint src = qbase + li;
-        if ((src + 1u) * QV_WORDS > nQv) continue;
-        const uint q0 = qv_words[src * QV_WORDS], q1 = qv_words[src * QV_WORDS + 1u], q3 = qv_words[src * QV_WORDS + 3u];
-        const vec3 lp = qvPos(qh, q0, q1);
-        const vec3 ln = qvNormal(q3);
-        vec3 P, N, R, RN;
-        if (rigged)
+        if (dc.firstIndex + 3u * tri + 2u >= nIdx) break;
+        // the triangle's three corners
+        vec3 P[3], N[3], R[3], RN[3];
+        bool ok = true;
+        for (uint k3 = 0u; k3 < 3u && ok; ++k3)
         {
-            const uint v = vb + li;
-            if ((v + 1u) * SV_WORDS > uint(skin_v.length())) continue;
-            const vec3 p = SV_POS(skin_v, v);
-            P = local ? Rp * p + Mp[3].xyz : sp.b.xyz + p;
-            N = SV_NRM(skin_v, v);
-            if (local) N = Rp * N;
-            R = (BS * vec4(lp, 1.0)).xyz;
-            RN = BSn * ln;
+            const uint li = QV_INDEX16(ibo, dc.firstIndex + 3u * tri + k3);
+            const uint src = qbase + li;
+            if ((src + 1u) * QV_WORDS > nQv) { ok = false; break; }
+            const uint q0 = qv_words[src * QV_WORDS], q1 = qv_words[src * QV_WORDS + 1u], q3 = qv_words[src * QV_WORDS + 3u];
+            const vec3 lp = qvPos(qh, q0, q1);
+            const vec3 ln = qvNormal(q3);
+            if (rigged)
+            {
+                const uint v = vb + li;
+                if ((v + 1u) * SV_WORDS > uint(skin_v.length())) { ok = false; break; }
+                const vec3 p = SV_POS(skin_v, v);
+                P[k3] = local ? Rp * p + Mp[3].xyz : sp.b.xyz + p;
+                N[k3] = SV_NRM(skin_v, v);
+                if (local) N[k3] = Rp * N[k3];
+                R[k3] = (BS * vec4(lp, 1.0)).xyz;
+                RN[k3] = BSn * ln;
+            }
+            else
+            {
+                P[k3] = (Mi * vec4(lp, 1.0)).xyz;
+                N[k3] = Mn * ln;
+                R[k3] = (RJ * (Moff * vec4(lp, 1.0))).xyz;
+                RN[k3] = Rn * ln;
+            }
         }
-        else
+        if (!ok) continue;
+        // A triangle within about a cell: one corner (rotating per update). A LARGER one (a low-poly
+        // umbrella's canopy panel spans many ~4 cm cells): a barycentric lattice over its area, spaced
+        // at most kAcTriStep cells -- one sample per corner left the cells between the vertices empty,
+        // and the FS (weatherAvatarAccum) switched to the per-avatar fallback there: the canopy showed
+        // the grid's wetness as soft square blobs around its vertices.
+        uint n = 1u;
+        if (c.boxOk)
         {
-            P = (Mi * vec4(lp, 1.0)).xyz;
-            N = Mn * ln;
-            R = (RJ * (Moff * vec4(lp, 1.0))).xyz;
-            RN = Rn * ln;
+            const vec3 cs = c.inv * vec3(c.res);   // (cells per metre)
+            const float e = max(max(length((R[1] - R[0]) * cs), length((R[2] - R[1]) * cs)), length((R[0] - R[2]) * cs));
+            n = uint(clamp(ceil(e / kAcTriStep), 1.0, float(kAcTriMaxDiv)));
         }
-        acSample(c, P, N, R, RN, mn, mx, samples);
+        if (n <= 1u)
+        {
+            const uint k3 = (tri + sp.a.z) % 3u;
+            acSample(c, P[k3], N[k3], R[k3], RN[k3], mn, mx, samples);
+            continue;
+        }
+        const float fn = 1.0 / float(n);
+        for (uint i = 0u; i <= n; ++i)
+            for (uint j = 0u; i + j <= n; ++j)
+            {
+                const vec3 b = vec3(float(i), float(j), float(n - i - j)) * fn;
+                acSample(c, b.x * P[0] + b.y * P[1] + b.z * P[2], b.x * N[0] + b.y * N[1] + b.z * N[2],
+                         b.x * R[0] + b.y * R[1] + b.z * R[2], b.x * RN[0] + b.y * RN[1] + b.z * RN[2], mn, mx, samples);
+            }
     }
     acFlush(g, mn, mx, samples);
 }

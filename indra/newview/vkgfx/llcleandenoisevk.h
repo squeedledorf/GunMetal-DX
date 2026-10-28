@@ -105,6 +105,13 @@ public:
         // (#87) REPROJECTION SEARCH (RenderVKGIReprojSearch; DN_F_REPROJ_SEARCH): a failed bilinear
         // reprojection takes the best-matching texel of the 3x3 around it.
         bool reprojSearch = false;
+        // (#1038) YOUNG-TEXEL BOOST (RenderVKDenoiseYoungBoost; clean_dn_common.glsl DN_F_YOUNG_BOOST;
+        // acts only with histFix > 0): a texel without history starts from the same-surface 3x3 mean,
+        // and young a-trous centres relax their normal stop and widen their step.
+        bool youngBoost = false;
+        // (#1038) MOVING-SURFACE DEPTH TOLERANCE (RenderVKDenoiseMovingDepthTol; DN_F_MOVE_ZTOL): the
+        // history taps of a surface that moved on its own tolerate a depth change of its own motion.
+        bool moveZTol = false;
         // SUN / MOON CHANNEL (the merged RT shadow pass; used only when sun is set AND the
         // images carry the channel -- hasSun()).
         bool  sun = false;            // this frame's producer wrote the sun channel
@@ -157,6 +164,10 @@ public:
     VkImageView geomView() const { return mGeom.view; }
     VkImageView motView() const  { return mMot.view; }
     VkImageView outView() const  { return mOut.view; }
+    // (#1038) the 1 x 1 motion placeholder (GENERAL layout, sampled) and the nearest sampler: what
+    // another set binds while no motion target exists.
+    VkImageView motionPlaceholderView() const { return mMotionPh.view; }
+    VkSampler   nearestSampler() const { return mNearest; }
 
     // The pre-pass motion vectors (render extent; layout as the renderer keeps them), or
     // VK_NULL_HANDLE for the placeholder. Callers make sure no frame in flight uses the set.

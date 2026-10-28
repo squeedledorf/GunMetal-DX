@@ -191,6 +191,7 @@ public:
 
     // Special handling of temp attachments, which are not in the COF
     bool shouldRemoveTempAttachment(const LLUUID& item_id);
+    void checkForGhostTempAttachments(); // <GMDX> SS:Nexii: after a teleport, drop temp attachments the region no longer has (ssghosttempattachments.cpp)
 
     //has the current outfit changed since it was loaded?
     bool isOutfitDirty() { return mOutfitIsDirty; }

@@ -45,6 +45,7 @@
 #include "llbbox.h"
 #include "llgl.h"           // LLGLUpdate
 #include "llrigginginfo.h"
+#include "fsghostprojectile.h" // <GMDX> ghost projectile watch state
 
 namespace LL
 {
@@ -670,6 +671,10 @@ public:
 
     friend class LLViewerObjectList;
     friend class LLViewerMediaList;
+    // <GMDX> Ghost projectile watch (fsghostprojectile.cpp)
+    friend class FSGhostProjectile;
+    FSGhostProjectileState mGhostProjectile;
+    // </GMDX>
 
 public:
     LLViewerTexture* getBakedTextureForMagicId(const LLUUID& id);

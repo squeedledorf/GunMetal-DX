@@ -104,6 +104,14 @@
                             // (hard-edged rectangles); clear (1, default) = the SOFT cull (clean_deferred_light.comp)
 #define RS_F_CONV_ANY 2048u // (#1052, RenderVKReSTIRConvMultiLight 1: A/B) the denoiser's converged shortcut for
                             // any reused reservoir; clear (default) = only where one light dominates the texel
+#define RS_F_REUSE_MV 4096u // (#1038, RenderVKReSTIRReuseMotion) pass 15's temporal reservoir candidate (and the spatial
+                            // taps around it) follows the pre-pass MOTION VECTORS (set 3 binding 28; only while the frame
+                            // info says they were written), not the camera-only reprojection: a walking avatar's texels
+                            // kept no temporal candidate while it moved (clean_deferred_light.comp reuseMotionDelta)
+#define RS_F_OCC_PT_DROP 8192u // (RenderVKReSTIROcclusionPointDrop: A/B) the OCCLUSION CULL's old rule for POINT lights --
+                            // a culled point light leaves the ratio's light set (and the lit kernels' sum) like a
+                            // projector; clear (default) = it stays in the set with its exact zero (clean_deferred_light.comp
+                            // OCCLUSION CULL, THE POINT LIGHTS' SHARE)
 // (#869) THE MOVING-LIGHT SHADOW RULE (rs_cfg.w; RenderVKReSTIRMoveCut): a moving light's shadow
 // moves every frame, but the projector denoiser reprojects its history along the camera / surface
 // motion only -- the visibility history of a moved light is wrong wherever its shadow moved. Pass 15
@@ -162,7 +170,8 @@ struct RegirHeader
                           // an emitter candidate, w emitter samples traced (pass 15)
     // (#91) LIGHT TAKEOVER (RenderVKReSTIREmissiveLightTakeover; EMISSIVE LIGHTS below)
     uvec4 rs_em_take_cfg; // x the takeover table's rows T (host; the emitter entries [0, T) are theirs),
-                          // y lights taken over, z lights refused (a block dropped) (GPU: mode 1), w 0
+                          // y lights taken over, z lights refused (a block dropped) (GPU: mode 1), w the
+                          // rest's SUBSET STRIDE this build (GPU: mode 1; stats)
     // (#986) RECORD REUSE + CELL LISTS (EMISSIVE LIGHTS below; GPU, the header upload zeroes it)
     uvec4 rs_em_cache;    // x records copied from the last build (mode 2), y records built (mode 2),
                           // z cell candidate pairs (mode 5; may pass the cap), w EM_C_* (modes 4, 5)
@@ -392,7 +401,18 @@ uint rsSlots() { return clamp(rg.rs_cfg.x, 1u, REGIR_RES_MAX); }
 // REGIR_EM_CAP); else every emitter keeps every s-th (the same s for all, a FIXED offset per emitter: the
 // lit kernels' unshadowed sum is not denoised, so the subset must not change from frame to frame) and
 // each kept triangle carries s x its radiance (power-preserving). A block that still does not fit is
-// dropped whole with every later one (counted in rs_em.y with the skipped triangles). The AVERAGE
+// dropped whole with every later one (counted in rs_em.y with the skipped triangles).
+// SUBSET STRIDE (mode 1): a step of s re-subsets EVERY emitter at once -- every record rebuilt, every
+// reservoir whose triangle left the subset rejected (emRemap), every kept cell forced (no forward entry):
+// the DI shadows restart scene-wide and each emitter's light moves to its other triangles. A total near
+// a stride boundary (emitters entering / leaving the TLAS or the grid) steps s back and forth (the
+// periodic emissive pulse reported for 1.5.0 Beta 4). So: (1) the LIGHT TAKEOVER rows (below) keep stride
+// 1 -- laid out first, their triangles leave the cap before the rest's s is chosen (while they take at
+// most half of it); a subset of a lamp's few glass triangles moved its point light's power to one part of
+// the glass (the lit corner swapped), and with offset >= its triangle count took none (not taken: the
+// point light came back, the room brightened); (2) the rest's s has HYSTERESIS: up at once (it must fit),
+// down only when the triangles fit the lower stride with a quarter to spare (CC_HDR [EM_CCH_STRIDE]: the
+// last build's s and stamp). rs_em_take_cfg.w: this build's s (the host logs its steps). The AVERAGE
 // radiance [12..13] is the triangle's own this frame (its texture at the mip where the triangle is about
 // one texel). The SELECTION luminance [4] (cell targets, RIS targets, the light / no-light test) is that
 // average's on a static face -- a triangle on a black part of the texture is no light (range 0: never a
@@ -445,7 +465,8 @@ uint rsSlots() { return clamp(rg.rs_cfg.x, 1u, REGIR_RES_MAX); }
 // under the same EXACT TOP ranking; walk 2: the rest's aggregate summed over the lanes in lane order, the
 // stratified samples assigned in LANE-MAJOR order -- lane l owns the sample positions in [its offset, +
 // its rest target) -- the same estimator as the lane walk's order, which was the list's atomic order).
-// The same cell words, the same meaning.
+// The same cell words, the same meaning. (#1108: on a pairs-past-the-cap GATHER build mode 9 builds every
+// cell from the record groups instead of a list -- GATHER below.)
 // INCREMENTAL CELLS (#1006, RenderVKReSTIREmissiveIncremental): population 2 is NOT rebuilt from scratch
 // every frame any more. The cell lists (modes 3-6) still are -- they are the cheap part, and they are how
 // a cell's change is SEEN -- but a cell is re-gathered (mode 7 / 9) only when its candidate set changed,
@@ -525,6 +546,14 @@ uint rsSlots() { return clamp(rg.rs_cfg.x, 1u, REGIR_RES_MAX); }
 // overlay cell has a candidate this build (EM_C_OVL).
 // GATHER (EM_C_GATHER: the pairs passed the cap, or RenderVKReSTIREmissiveCellLists 0 -- EM_F_GATHER): the
 // cell build walks the record groups near its workgroup instead (the pre-#986 build; ~ cells x triangles).
+// (#1108) A pairs-past-the-cap gather (the long cells on) builds every cell in mode 9 instead: a workgroup per
+// cell, step k = record group k (skipped, uniformly, unless its light box reaches the cell), lane l its record
+// 64 k + l -- the same candidates and EXACT TOP as mode 7's walk, but a cell's candidates are split over 64
+// lanes and the cells over every workgroup. Mode 7's lane-per-cell walk put each candidate of a crowded
+// workgroup box on ONE lane serially: a camera high over a large all-emissive build (thousands of big
+// triangles whose reach -- bounding radius + range -- covers the fine levels' cells) ran ~7 ms in a few
+// workgroups at 4 % occupancy. The overflow itself: such a triangle lists in ~every cell of levels 0-1
+// (16384 each), so a few dozen of them pass REGIR_EM_PAIR_CAP.
 // POPULATION 2 (mode 7, after the lists): per grid cell (the same clipmap) REGIR_EM_CELL_WORDS uvec2:
 // [0] x = slots filled | the exact strongest K_t << 16 | REGIR_CELL_EXACT, y = float bits of the cell
 // target sum W; [1 .. n] x = record slot, y = float bits of its weight 1 / q; [SLOTS_MAX + 1 .. + 3] the
@@ -581,7 +610,8 @@ uint rsSlots() { return clamp(rg.rs_cfg.x, 1u, REGIR_RES_MAX); }
 //   rows (instance, row | li << 16) sorted by instance -- the prim's faces whose material may emit (not
 //   attached, not a projector); the rows of one light are contiguous, in light order. Row r IS emitter entry r: the host clears entries
 //   [0, T) and starts the entry counter at T, so a takeover face never competes for an entry and its
-//   block is laid out FIRST by mode 1 (it fits unless the takeover blocks alone pass the triangle cap).
+//   block is laid out FIRST by mode 1, every triangle (stride 1: SUBSET STRIDE above; it fits unless the
+//   takeover blocks alone pass half the triangle cap -- then they stride with the rest).
 //   Mode 0: a qualifying instance (the same threshold as any emitter) found in the table whose light is a
 //   point light wholly inside the grid's outermost level (every receiver it reaches has a cell: the lit
 //   kernels add emitter light only inside the grid) writes its own row, takeover light li + 1 in [6].y and
@@ -653,12 +683,14 @@ uint rsSlots() { return clamp(rg.rs_cfg.x, 1u, REGIR_RES_MAX); }
 // (#1006 INCREMENTAL CELLS) after the long cells' list (LLCleanRendererVK kRsEmXOffset = the old end):
 //   CC_HDR (64 uvec2): [0] x = the build stamp (mode 1 adds 1), y = VALID (mode 11: every cell holds a build
 //          at the stored origins; a gather build clears it); [1 + 2l], [2 + 2l] level l's origin of that build
-//          (xy, zw floats); per build, zeroed by the host from EM_CCH_FRAME on: [16] x = the build list's cells,
+//          (xy, zw floats); [9] EM_CCH_STRIDE (mode 1, every build, with the lists or not): the SUBSET STRIDE's
+//          hysteresis; per build, zeroed by the host from EM_CCH_FRAME on: [16] x = the build list's cells,
 //          y = the quota counter; [17] x = the threshold age bin (EM_NONE: every dirty cell), y = its quota;
 //          [18].xy, [19].x the INDIRECT dispatch of mode 7; [20..23] STATS (EM_CCH_STAT); [24..39] the age
 //          histogram (32 bins); [40] x = FULL this build (mode 5's verdict for mode 11); [41] (#1009, mode 0,
 //          with the lists) x = CLUSTER STATICS' emitters, y = their triangles (stats); [42..44] (#1009, mode 0,
-//          EM_F_SKIPSTAT) the SKIP DIAGNOSTIC's counters (clean_deferred_light.comp emSkipNote)
+//          EM_F_SKIPSTAT) the SKIP DIAGNOSTIC's counters (clean_deferred_light.comp emSkipNote); [45] (mode 0,
+//          with the lists) EM_CCH_OUT: the emitters left out for being outside the grid's reach (stats)
 //   FWD (REGIR_EM_CAP / 2 uvec2): last build's slot -> this build's (NONE: gone)
 //   RECX (2 parities x REGIR_EM_CAP uvec2): per record x = its emitter's reach range Rg, y = its PAIR KEY
 //   ENTX (2 parities x REGIR_EM_INST_CAP uvec2): per entry x = Rg, y = the emitter's GEOMETRY KEY
@@ -680,6 +712,7 @@ uint rsSlots() { return clamp(rg.rs_cfg.x, 1u, REGIR_RES_MAX); }
 #define REGIR_EM_SCR_BASE (REGIR_EM_CC_BASE + 2u * REGIR_EM_NCELLS_ALL)
 #define REGIR_EM_SCR2_BASE (REGIR_EM_SCR_BASE + REGIR_EM_NCELLS * REGIR_EM_CELL_WORDS)
 #define REGIR_EM_X_END (REGIR_EM_SCR2_BASE + REGIR_EM_OV_CELLS * REGIR_EM_CELL_WORDS + 2u * REGIR_EM_NCELLS_ALL)
+#define EM_CCH_STRIDE 9u            // CC_HDR [9] (mode 1): x = the rest's SUBSET STRIDE, y = the stamp of its build
 #define EM_CCH_FRAME 16u            // CC_HDR words from here on are per build (the host zeroes them)
 #define EM_CCH_STAT 20u             // [20] x dirty cells, y re-gathered; [21] x forced, y the most frames a cell
                                     // stayed dirty; [22] x weak emitters, y forward-map misses (forced);
@@ -701,7 +734,8 @@ uint rsSlots() { return clamp(rg.rs_cfg.x, 1u, REGIR_RES_MAX); }
 #define EM_F_LAST     1024u         // (#1006) the other parity holds the last build (the forward map, the reach range)
 #define EM_F_CLUSTER  2048u         // (#1009) CLUSTER STATICS: cluster-traced statics emit through their legacy row
 #define EM_CCH_CLUSTER 41u          // (#1009) CC_HDR per-build word: x cluster-static emitters, y their triangles
-#define EM_F_SKIPSTAT 4096u         // (#1009) the SKIP DIAGNOSTIC: emitting instances mode 0 left out, by why (CC_HDR [42..44])
+#define EM_CCH_OUT 45u              // CC_HDR per-build word (mode 0, lists build): x emitters outside the grid's reach, y their triangles
+#define EM_F_SKIPSTAT 4096u        // (#1009) the SKIP DIAGNOSTIC: emitting instances mode 0 left out, by why (CC_HDR [42..44])
 #define EM_C_GATHER   1u            // rs_em_cache.w: no CELL LISTS this build (the pairs passed the cap)
 #define EM_C_OVL      2u            // (#1006) rs_em_cache.w: an overlay cell has a candidate this build (mode 4)
 #define EM_E_DYN      1u            // entry [12].y: never reused (texture-animated, a takeover row)

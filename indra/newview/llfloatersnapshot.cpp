@@ -44,6 +44,7 @@
 #include "lltoolfocus.h"
 #include "lltoolmgr.h"
 #include "llwebprofile.h"
+#include "gmdxsnapshotavatars.h"   // <GMDX> avatar layers, avatar scope, orientation swap
 
 ///----------------------------------------------------------------------------
 /// Local function declarations, constants, enums, and typedefs
@@ -146,6 +147,14 @@ LLSnapshotModel::ESnapshotLayerType LLFloaterSnapshot::Impl::getLayerType(LLFloa
         type = LLSnapshotModel::SNAPSHOT_TYPE_COLOR;
     else if (id == "depth")
         type = LLSnapshotModel::SNAPSHOT_TYPE_DEPTH;
+    // <GMDX> avatar layers (gmdxsnapshotavatars.h)
+    else if (id == "avatar_transparent")
+        type = LLSnapshotModel::SNAPSHOT_TYPE_AVATAR_TRANSPARENT;
+    else if (id == "avatar_mask_black")
+        type = LLSnapshotModel::SNAPSHOT_TYPE_AVATAR_MASK_BLACK;
+    else if (id == "avatar_mask_white")
+        type = LLSnapshotModel::SNAPSHOT_TYPE_AVATAR_MASK_WHITE;
+    // </GMDX>
     return type;
 }
 
@@ -409,6 +418,7 @@ void LLFloaterSnapshot::Impl::updateControls(LLFloaterSnapshotBase* floater)
         info["have-snapshot"] = got_snap;
         current_panel->updateControls(info);
     }
+    gmdxSnapshotUpdateControls(floater);   // <GMDX> orientation icons, avatar picker button
     LL_DEBUGS() << "finished updating controls" << LL_ENDL;
 }
 
@@ -684,6 +694,7 @@ void LLFloaterSnapshot::Impl::updateResolution(LLUICtrl* ctrl, void* data, bool 
 
     S32 width = sdres[0];
     S32 height = sdres[1];
+    if (width < -1 || height < -1) return;   // <GMDX> a category header of the size list
 
     LLSnapshotLivePreview* previewp = getPreviewView();
     if (previewp && combobox->getCurrentIndex() >= 0)
@@ -788,12 +799,24 @@ void LLFloaterSnapshot::Impl::onCommitLayerTypes(LLUICtrl* ctrl, void*data)
     if (view)
     {
         LLSnapshotLivePreview* previewp = view->getPreviewView();
+        // <GMDX> by value (the avatar layers follow Depth); the transparent avatar is PNG (alpha)
+        const LLSnapshotModel::ESnapshotLayerType layer_type = view->impl->getLayerType(view);
         if (previewp)
         {
-            previewp->setSnapshotBufferType((LLSnapshotModel::ESnapshotLayerType)combobox->getCurrentIndex());
+            previewp->setSnapshotBufferType(layer_type);
         }
+        if (layer_type == LLSnapshotModel::SNAPSHOT_TYPE_AVATAR_TRANSPARENT
+            && gSavedSettings.getS32("SnapshotFormat") != LLSnapshotModel::SNAPSHOT_FORMAT_PNG)
+        {
+            gSavedSettings.setS32("SnapshotFormat", LLSnapshotModel::SNAPSHOT_FORMAT_PNG);
+            if (LLComboBox* format_combo = view->findChild<LLComboBox>("local_format_combo"))
+                format_combo->selectNthItem(LLSnapshotModel::SNAPSHOT_FORMAT_PNG);
+            if (previewp) previewp->setSnapshotFormat(LLSnapshotModel::SNAPSHOT_FORMAT_PNG);
+        }
+        // </GMDX>
         view->impl->checkAutoSnapshot(previewp, true);
-        previewp->updateSnapshot(true, true);
+        if (previewp) previewp->updateSnapshot(true, true);
+        view->impl->updateControls(view);   // <GMDX>
     }
 }
 
@@ -988,6 +1011,15 @@ bool LLFloaterSnapshot::postBuild()
     childSetCommitCallback("balance_check", ImplBase::onClickDisplaySetting, this);
     childSetCommitCallback("hud_check", ImplBase::onClickDisplaySetting, this);
     childSetCommitCallback("aa_check", ImplBase::onClickDisplaySetting, this);   // SnapshotAntialias (#417)
+    // <GMDX> avatar scope (+ its picker) and the orientation swap (gmdxsnapshotavatars.h)
+    getChild<LLUICtrl>("avatar_scope_combo")->setCommitCallback([this](LLUICtrl* ctrl, const LLSD&)
+    {
+        gmdxSnapshotScopeChanged(this);
+        ImplBase::onClickDisplaySetting(ctrl, this);
+    });
+    getChild<LLUICtrl>("avatar_scope_popout_btn")->setCommitCallback([this](LLUICtrl*, const LLSD&) { gmdxSnapshotShowPicker(this); });
+    getChild<LLUICtrl>("swap_portrait_btn")->setCommitCallback([this](LLUICtrl*, const LLSD&) { gmdxSnapshotSwapOrientation(this); });
+    // </GMDX>
 
     ((Impl*)impl)->setAspectRatioCheckboxValue(this, gSavedSettings.getBOOL("KeepAspectForSnapshot"));
 
@@ -1074,6 +1106,17 @@ static void draw_snapshot_crop_frame(LLView* floater, LLSnapshotLivePreview* pre
     static LLCachedControl<bool> s_frame(gSavedSettings, "SnapshotShowCropFrame", true);
     static LLCachedControl<bool> s_offscreen(gSavedSettings, "RenderSnapshotOffscreen", false);
     if (!s_frame || s_offscreen || !previewp || !gViewerWindow) return;
+    // <GMDX> an offscreen shot (avatar layer / avatar scope / mattes) is not a crop of the view
+    {
+        static LLCachedControl<bool> s_ui(gSavedSettings, "RenderUIInSnapshot", false);
+        LLUICtrl* layers = floater->findChild<LLUICtrl>("layer_types");
+        const std::string layer = layers ? layers->getValue().asString() : std::string("colors");
+        const bool avatar_layer = layer.compare(0, 7, "avatar_") == 0;
+        if (avatar_layer || (!s_ui && gmdxSnapshotWantsOffscreen(layer == "depth" ? LLSnapshotModel::SNAPSHOT_TYPE_DEPTH
+                                                                                   : LLSnapshotModel::SNAPSHOT_TYPE_COLOR)))
+            return;
+    }
+    // </GMDX>
     if (previewp->getVisible()) return;   // the full-screen freeze-frame preview shows the shot itself
     const S32 req_w = previewp->getWidth(), req_h = previewp->getHeight();
     const S32 win_w = gViewerWindow->getWindowWidthScaled(), win_h = gViewerWindow->getWindowHeightScaled();
@@ -1172,6 +1215,7 @@ void LLFloaterSnapshot::onOpen(const LLSD& key)
 
     // Initialize default tab.
     getChild<LLSideTrayPanelContainer>("panel_container")->getCurrentPanel()->onOpen(LLSD());
+    gmdxSnapshotScopeChanged(this);   // <GMDX> "Self + Selected": the picker opens with the floater
 }
 
 void LLFloaterSnapshot::onExtendFloater()

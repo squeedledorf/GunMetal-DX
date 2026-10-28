@@ -37,6 +37,8 @@
 #include "llviewercontrol.h"
 #include "llviewerwindow.h"
 #include "llvoiceclient.h"
+#include "llvraudio.h"          // #1122 VR headset gain on voice
+#include "llvrdictation.h"      // #1118 voice mic muted while dictation listens
 #include "llviewermedia.h"
 #include "llviewerregion.h"
 #include "llprogressview.h"
@@ -531,12 +533,17 @@ void audio_update_volume(bool force_update)
     {
         F32 voice_volume = level_voice();
         voice_volume = mute_volume * master_volume * voice_volume;
+        // #1122: the VR headset gain while voice plays on the headset (1 otherwise). WebRTC's
+        // receive volume takes 0..10 and scales each stream with saturation (no limiter on that
+        // path): loud peaks clip softly; the clamp and the modest default keep it rare on AGC'd voice.
+        voice_volume = llmin(voice_volume * LLVRAudio::voiceOutputBoost(), 10.f);
         bool voice_mute = mute_voice();
         LLVoiceClient *voice_inst = LLVoiceClient::getInstance();
         voice_inst->setVoiceVolume(voice_mute ? 0.f : voice_volume);
         voice_inst->setMicGain(voice_mute ? 0.f : level_mic());
 
-        if (!gViewerWindow->getActive() && (mute_when_minimized()))
+        // #1118: speech meant for VR dictation never goes out on voice chat.
+        if ((!gViewerWindow->getActive() && (mute_when_minimized())) || LLVRDictation::holdsVoiceMic())
         {
             voice_inst->setMuteMic(true);
         }

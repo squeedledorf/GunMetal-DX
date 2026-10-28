@@ -65,6 +65,7 @@ private:
     LLRect mDragStartRect;         // the rect when a resize drag began (empty: no drag)
     boost::signals2::scoped_connection mWholeRegionConn;
     boost::signals2::scoped_connection mCompassStyleConn;
+    boost::signals2::scoped_connection mRotateConn;
     boost::signals2::scoped_connection mHideButtonsConn;
     // </GMDX>
 

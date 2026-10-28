@@ -140,13 +140,43 @@
              <mouse_held_callback
                 function="Camera.roll_left" />
            </button>
+           <!-- <GMDX> roll reset / 90 degree portrait (SoapStorm ed0f69bd0e) -->
+           <button
+              follows="top|left"
+              height="14"
+              layout="topleft"
+              left="19"
+              name="roll_reset"
+              label="0°"
+              font="SansSerifSmall"
+              tool_tip="Reset camera roll to 0°"
+              width="19"
+              top="68">
+             <commit_callback
+                function="Camera.roll_reset" />
+           </button>
+           <button
+              follows="top|left"
+              height="14"
+              layout="topleft"
+              left_pad="1"
+              name="roll_portrait"
+              label="90°"
+              font="SansSerifSmall"
+              tool_tip="Toggle camera roll to 90° (portrait)"
+              width="20"
+              top="68">
+             <commit_callback
+                function="Camera.roll_portrait" />
+           </button>
+           <!-- </GMDX> -->
            <button
               follows="top|left"
               height="18"
               image_selected="VirtualTrackball_Rotate_Right_Active"
               image_unselected="VirtualTrackball_Rotate_Right"
               layout="topleft"
-              left_delta="60"
+              left="60"
               name="roll_right"
               width="18"
               top="66">
@@ -239,7 +269,7 @@
       name="group_view"
       tool_tip="Side View"
       width="23"
-      left_pad="4">
+      left_pad="3">
       <panel_camera_item.mousedown_callback
         function="CameraPresets.ChangeView"
         parameter="Side View" />
@@ -252,7 +282,7 @@
       name="rear_view"
       tool_tip="Rear View"
       width="23"
-      left_pad="4">
+      left_pad="3">
       <panel_camera_item.mousedown_callback
         function="CameraPresets.ChangeView"
         tool_tip="Rear View"
@@ -266,7 +296,7 @@
         name="object_view"
         tool_tip="Object View"
         width="23"
-        left_pad="4">
+        left_pad="3">
         <panel_camera_item.mousedown_callback
           function="CameraPresets.ChangeView"
           parameter="object_view" />
@@ -279,7 +309,7 @@
         name="mouselook_view"
         tool_tip="Mouselook View"
         width="23"
-        left_pad="4">
+        left_pad="3">
         <panel_camera_item.mousedown_callback
           function="CameraPresets.ChangeView"
           parameter="mouselook_view" />
@@ -288,6 +318,21 @@
         <panel_camera_item.selected_picture
           image_name="MouseLook_View_On" />
       </panel_camera_item>
+      <!-- <GMDX> orthographic view (SoapStorm 7179701d85) -->
+      <panel_camera_item
+        name="ortho_view"
+        tool_tip="Orthographic View (Blender style: back to perspective when the camera moves)"
+        width="23"
+        left_pad="3">
+        <panel_camera_item.mousedown_callback
+          function="CameraPresets.ChangeView"
+          parameter="ortho_view" />
+        <panel_camera_item.picture
+          image_name="Cam_Ortho_Off" />
+        <panel_camera_item.selected_picture
+          image_name="Cam_Ortho_On" />
+      </panel_camera_item>
+      <!-- </GMDX> -->
       <combo_box
         follows="top|left"
         layout="topleft"

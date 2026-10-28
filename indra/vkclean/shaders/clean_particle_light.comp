@@ -157,7 +157,8 @@ void main()
 
     // Near fade + coverage (billboards; ribbons keep 1 and are not counted).
     const float vz = dot(P - cam, fwd);
-    const float tanH = linfo.grid.w;   // tan(fovy / 2) (mainClusterProject)
+    // tan(fovy / 2) (mainClusterProject); <GMDX> orthographic: the half height over the depth
+    const float tanH = linfo.cam_fwd.w > 0.5 ? linfo.grid.w / max(vz, 1e-3) : linfo.grid.w;
     float fade = 1.0;
     const bool ribbon = (p.misc.x & F_RIBBON) != 0u;
     if (!ribbon)

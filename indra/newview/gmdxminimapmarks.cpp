@@ -32,6 +32,8 @@
 #include "llsurface.h"
 #include "llviewerregion.h"
 #include "llworld.h"
+#include "rlvactions.h"
+#include "rlvcommon.h"
 
 #include <boost/json.hpp>
 #include <map>
@@ -40,6 +42,7 @@ namespace
 {
 struct Store
 {
+    std::string account_dir;   // the account folder the path was made for (store() runs per avatar per frame)
     std::string path;   // the account file the marks came from ("" = not loaded)
     std::vector<GMDXMapMark> marks;
     std::vector<GMDXMapZone> zones;
@@ -51,6 +54,8 @@ Store& store()
     static Store s;
     // (re)loaded for the account logged in now
     const std::string& account_dir = gDirUtilp->getLindenUserDir();
+    if (account_dir == s.account_dir) return s;
+    s.account_dir = account_dir;
     const std::string path = account_dir.empty() ? std::string()
                            : gDirUtilp->getExpandedFilename(LL_PATH_PER_SL_ACCOUNT, "gmdx_minimap_marks.json");
     if (path == s.path) return s;
@@ -328,15 +333,18 @@ LLVector3d GMDXMinimapMarks::onGround(LLVector3d pos_global)
 std::string GMDXMinimapMarks::coordinatesText(const LLVector3d& pos_global)
 {
     LLViewerRegion* region = LLWorld::getInstance()->getRegionFromPosGlobal(pos_global);
-    if (!region) return llformat("%.0f, %.0f", pos_global.mdV[VX], pos_global.mdV[VY]);
+    // [RLVa] the region's name, and global coordinates off the loaded regions, are hidden while the location is
+    const bool show = RlvActions::canShowLocation();
+    if (!region) return show ? llformat("%.0f, %.0f", pos_global.mdV[VX], pos_global.mdV[VY]) : RlvStrings::getString(RlvStringKeys::Hidden::Region);
     const LLVector3 p = region->getPosRegionFromGlobal(pos_global);
-    return llformat("%s (%d, %d, %d)", region->getName().c_str(), ll_round(p.mV[VX]), ll_round(p.mV[VY]), ll_round(p.mV[VZ]));
+    const std::string name = show ? region->getName() : RlvStrings::getString(RlvStringKeys::Hidden::Region);
+    return llformat("%s (%d, %d, %d)", name.c_str(), ll_round(p.mV[VX]), ll_round(p.mV[VY]), ll_round(p.mV[VZ]));
 }
 
 std::string GMDXMinimapMarks::slurl(const LLVector3d& pos_global)
 {
     LLViewerRegion* region = LLWorld::getInstance()->getRegionFromPosGlobal(pos_global);
-    if (!region) return std::string();
+    if (!region || !RlvActions::canShowLocation()) return std::string();   // [RLVa] no SLURL while the location is hidden
     const LLVector3 p = region->getPosRegionFromGlobal(pos_global);
     return LLSLURL(region->getName(), LLVector3((F32)ll_round(p.mV[VX]), (F32)ll_round(p.mV[VY]), (F32)ll_round(p.mV[VZ])))
         .getSLURLString();

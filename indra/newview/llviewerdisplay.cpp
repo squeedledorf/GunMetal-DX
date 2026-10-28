@@ -70,6 +70,7 @@
 #include "llviewerwindow.h"
 #include "llvoavatarself.h"
 #include "llvograss.h"
+#include "llvrcamera.h"          // #1074 VR: render while the mirror window is minimised
 #include "llworld.h"
 #include "pipeline.h"
 
@@ -98,6 +99,10 @@ LLPointer<LLViewerTexture> gDisconnectedImagep = nullptr;
 bool         gTeleportDisplay = false;
 LLFrameTimer gTeleportDisplayTimer;
 LLFrameTimer gTeleportArrivalTimer;
+// <GMDX> SoapStorm bb9b10d59f: when the last teleport completed, so process_teleport_start()
+// can drop the late duplicate TeleportStart the server sends for some teleports.
+LLFrameTimer gTeleportCompletionTimer;
+// </GMDX>
 constexpr F32 RESTORE_GL_TIME = 5.f;  // Wait this long while reloading textures before we raise the curtain
 
 bool gForceRenderLandFence = false;
@@ -126,12 +131,20 @@ LLFrameTimer gAssetStorageLogTime;
 void display_startup()
 {
     if (   !gViewerWindow
-        || !gViewerWindow->getActive()
-        || !gViewerWindow->getWindow()->getVisible()
-        || gViewerWindow->getWindow()->getMinimized()
         || gNonInteractive)
     {
         return;
+    }
+    if (   !gViewerWindow->getActive()
+        || !gViewerWindow->getWindow()->getVisible()
+        || gViewerWindow->getWindow()->getMinimized())
+    {
+        // #1074 VR: the headset keeps its frames while the mirror window is minimised
+        // (displayVulkanUI renders them without the UI). Desktop: return as before.
+        if (!LLVRCamera::sessionRunning())
+        {
+            return;
+        }
     }
     // Startup progress / login frames go through the VK UI present path.
     displayVulkanUI();
@@ -305,6 +318,7 @@ static void update_tp_display(bool minimized)
                 //LLFirstUse::useTeleport();
                 LL_INFOS("Teleport") << "arrival_fraction is " << arrival_fraction << " changing state to TELEPORT_NONE" << LL_ENDL;
                 gAgent.setTeleportState(LLAgent::TELEPORT_NONE);
+                gTeleportCompletionTimer.reset(); // <GMDX> SoapStorm bb9b10d59f
             }
             if (!minimized)
             {
@@ -327,6 +341,7 @@ static void update_tp_display(bool minimized)
                                      << "; setting state to TELEPORT_NONE"
                                      << LL_ENDL;
                 gAgent.setTeleportState(LLAgent::TELEPORT_NONE);
+                gTeleportCompletionTimer.reset(); // <GMDX> SoapStorm bb9b10d59f
             }
             break;
         }

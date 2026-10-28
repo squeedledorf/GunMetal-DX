@@ -83,6 +83,10 @@ public:
         bool     reset = false;             // camera cut / history invalid
         uint32_t debugView = 0;             // RenderVKFSRDebug: 1 = the SDK's debug viewports
         uint32_t slot = 0, slotCount = 2;   // frame-in-flight slot (constant-buffer ring)
+        // Seconds since the previous frame, shared by every view's instance (#1075 stereo: one
+        // clock for both eyes, so identical inputs give identical outputs); < 0: this
+        // instance's own clock (a single view, as before).
+        float    deltaTime = -1.f;
         // RenderVKFSRDebugProbe: after the upscale, probe the colour input, the pre-RCAS
         // internal upscaled colour and the output (nullptr = off).
         LLCleanFSRProbeVK* probe = nullptr;

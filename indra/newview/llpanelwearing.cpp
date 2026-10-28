@@ -53,6 +53,7 @@
 #include "llwearableitemslist.h"
 #include "llsdserialize.h"
 #include "llclipboard.h"
+#include "slwearablefavorites.h"
 // [RLVa:KB] - Checked: 2012-07-28 (RLVa-1.4.7)
 #include "rlvcommon.h"
 #include "rlvhandler.h"
@@ -176,6 +177,18 @@ protected:
                       boost::bind(&LLAppearanceMgr::removeItemsFromAvatar, LLAppearanceMgr::getInstance(), mUUIDs, no_op));
 // [/SL:KB]
         registrar.add("Wearing.Favorite", boost::bind(toggle_favorites, mUUIDs));
+        // Favorite Wearables (#1132): links in the favorites folder, the worn items' originals stay put
+        registrar.add("Wearing.FavoriteWearable", [ids = mUUIDs](LLUICtrl*, const LLSD& param)
+            {
+                if (param.asString() == "add")
+                {
+                    SLWearableFavorites::add(ids);
+                }
+                else
+                {
+                    SLWearableFavorites::remove(ids);
+                }
+            });
         LLContextMenu* menu = createFromFile("menu_wearing_tab.xml");
 
         updateMenuItemsVisibility(menu);
@@ -190,6 +203,8 @@ protected:
         bool attachments_selected   = false;
         bool can_favorite = false;
         bool can_unfavorite = false;
+        bool can_favorite_wearable = false;
+        bool can_unfavorite_wearable = false;
 // [RLVa:KB] - Checked: 2012-07-28 (RLVa-1.4.7)
         S32 rlv_locked_count = 0;
 // [/RLVa:KB]
@@ -223,6 +238,17 @@ protected:
             }
             can_favorite |= !linked_item->getIsFavorite();
             can_unfavorite |= linked_item->getIsFavorite();
+            if (SLWearableFavorites::canFavorite(*it))
+            {
+                if (SLWearableFavorites::isFavorite(*it))
+                {
+                    can_unfavorite_wearable = true;
+                }
+                else
+                {
+                    can_favorite_wearable = true;
+                }
+            }
 // [RLVa:KB] - Checked: 2012-07-28 (RLVa-1.4.7)
             if ( (rlv_handler_t::isEnabled()) && (!rlvPredCanRemoveItem(*it)) )
             {
@@ -260,6 +286,8 @@ protected:
         menu->setItemVisible("show_original", mUUIDs.size() == 1);
         menu->setItemVisible("favorites_add", can_favorite);
         menu->setItemVisible("favorites_remove", can_unfavorite);
+        menu->setItemVisible("wearable_favorites_add", can_favorite_wearable);
+        menu->setItemVisible("wearable_favorites_remove", can_unfavorite_wearable);
     }
 };
 
@@ -297,6 +325,8 @@ protected:
         menu->setItemVisible("edit_outfit_separator", false);
         menu->setItemVisible("show_original", false);
         menu->setItemVisible("edit_outfit", false);
+        menu->setItemVisible("wearable_favorites_add", false);
+        menu->setItemVisible("wearable_favorites_remove", false);
     }
 
     LLPanelWearing*         mPanelWearing;

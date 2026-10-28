@@ -21,7 +21,9 @@ layout(location = 2) out vec4 o_react;   // (write-masked)
 #include "clean_atmos_common.glsl"
 #include "clean_vol_apply.glsl"
 
-layout(set = 0, binding = 40) uniform sampler2D uSceneDepth;
+// (#1075: the main depth has a layer per view -- a 2D_ARRAY view at every view count; the fog
+//  is off in stereo for now: CLEAN_VIEW 0)
+layout(set = 0, binding = 40) uniform sampler2DArray uSceneDepth;
 
 layout(push_constant) uniform VolApplyPush {
     vec4 dims;     // render w, h, 1 / w, 1 / h
@@ -33,7 +35,7 @@ void main()
     o_glow = vec4(0.0);
     o_react = vec4(0.0);
     const ivec2 p = ivec2(gl_FragCoord.xy);
-    const float d = texelFetch(uSceneDepth, p, 0).r;
+    const float d = texelFetch(uSceneDepth, ivec3(p, int(CLEAN_VIEW)), 0).r;
     const vec2 ndc = (vec2(p) + 0.5) * ap.dims.zw * 2.0 - 1.0 - ap.jitter.xy;
     vec3 rel;
     if (d > 0.0)

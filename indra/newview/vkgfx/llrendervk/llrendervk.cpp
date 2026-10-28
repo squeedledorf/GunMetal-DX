@@ -1334,6 +1334,40 @@ void LLRenderVK::recordWorldOverlay(VkCommandBuffer cmd, uint32_t frameSlot,
     }
 }
 
+// #1076 VR: the same 2D UI draws recordFrame() lays down, into another colour view of the
+// frame's size and format (the UI wall's own image), before recordFrame(): no state is
+// consumed, the batches stay for recordFrame. VR only (never called on the desktop).
+void LLRenderVK::replayTo(VkCommandBuffer cmd, uint32_t frameSlot, VkImageView colorView) {
+    if (colorView == VK_NULL_HANDLE) return;
+    if (mInOverlay) endWorldOverlay();
+    if (mInPreHud) endPreHudLayer();
+    flush();
+    if (!mFrameVbo) mFrameVbo = uploadFrameVerts(frameSlot);   // recordFrame() reuses it
+
+    VkRenderingAttachmentInfo color{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+    color.imageView = colorView;
+    color.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    color.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
+    ri.renderArea = {{0, 0}, {mSwapW, mSwapH}};
+    ri.layerCount = 1;
+    ri.colorAttachmentCount = 1;
+    ri.pColorAttachments = &color;
+    vkCmdBeginRendering(cmd, &ri);
+    // The ranges recordFrame() draws (the world overlay segment and a world-recorded pre-HUD
+    // layer are in-world, not UI).
+    recordDraws(cmd, mSwapW, mSwapH, mFrameVbo, 0, mOverlayBegin);
+    if (mPreHudRecorded)
+    {
+        recordDraws(cmd, mSwapW, mSwapH, mFrameVbo, mOverlayEnd, mPreHudBegin);
+        recordDraws(cmd, mSwapW, mSwapH, mFrameVbo, mPreHudEnd, (size_t)-1);
+    }
+    else
+        recordDraws(cmd, mSwapW, mSwapH, mFrameVbo, mOverlayEnd, (size_t)-1);
+    vkCmdEndRendering(cmd);
+}
+
 void LLRenderVK::recordFrame(VkCommandBuffer cmd, uint32_t frameSlot) {
     if (mInOverlay) endWorldOverlay();
     if (mInPreHud) endPreHudLayer();

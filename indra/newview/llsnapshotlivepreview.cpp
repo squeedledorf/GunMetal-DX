@@ -1012,6 +1012,9 @@ LLPointer<LLImageFormatted> LLSnapshotLivePreview::getFormattedImage()
 
         // Create the new formatted image of the appropriate format.
         LLSnapshotModel::ESnapshotFormat format = getSnapshotFormat();
+        // <GMDX> the transparent avatar layer is RGBA: PNG keeps the alpha (JPEG / BMP cannot)
+        if (mSnapshotBufferType == LLSnapshotModel::SNAPSHOT_TYPE_AVATAR_TRANSPARENT || mPreviewImage->getComponents() == 4)
+            format = LLSnapshotModel::SNAPSHOT_FORMAT_PNG;
         LL_DEBUGS("Snapshot") << "Encoding new image of format " << format << LL_ENDL;
 
         switch (format)

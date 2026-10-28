@@ -319,7 +319,8 @@ void LLFloaterSoundPreview::updateAudioInfo()
         const std::string base = getChild<LLUICtrl>("name_form")->getValue().asString();
         LLStringUtil::format_map_t sargs;
         sargs["[COUNT]"] = llformat("%d", mSplitCount);
-        sargs["[SECONDS]"] = llformat("%.1f", LLSoundSplitUpload::getSegmentSeconds());
+        sargs["[SECONDS]"] = LLSoundSplitUpload::formatPartSeconds(plan.front());
+        sargs["[LAST_SECONDS]"] = LLSoundSplitUpload::formatPartSeconds(plan.back());
         sargs["[FIRST]"] = llaudio_split_part_name(base, 1, plan.size(), DB_INV_ITEM_NAME_STR_LEN);
         sargs["[LAST]"] = llaudio_split_part_name(base, plan.size(), plan.size(), DB_INV_ITEM_NAME_STR_LEN);
         sargs["[TOTAL]"] = llformat("%d", total);
@@ -371,7 +372,8 @@ void LLFloaterSoundPreview::onBtnSoundOK()
     LLSD args;
     args["FILE"] = params.mBaseName;
     args["COUNT"] = llformat("%d", (S32)batch->getPartCount());
-    args["SECONDS"] = llformat("%.1f", LLSoundSplitUpload::getSegmentSeconds());
+    args["SECONDS"] = batch->getClipSeconds();
+    args["LAST_SECONDS"] = batch->getLastClipSeconds();
     args["FIRST"] = batch->getPartName(0);
     args["LAST"] = batch->getPartName(batch->getPartCount() - 1);
     args["TOTAL"] = llformat("%d", batch->getTotalCost());

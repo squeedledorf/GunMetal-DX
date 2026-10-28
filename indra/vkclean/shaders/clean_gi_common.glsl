@@ -78,7 +78,7 @@
 #define GI_F_LAG       8388608u // (#978 phase 2, RenderVKGILatencyFrame) ONE FRAME OF GI LATENCY: this frame's trace runs
                                // AFTER the combine (on the async queue beside the rest of the frame), so the GI images
                                // the combine / BASE read hold LAST frame's result -- in last frame's pixel grid, from
-                               // last frame's camera. deferGiFetch then reprojects (ssr.taa_prev_vp: the receiver's
+                               // last frame's camera. deferGiFetch then reprojects (ssr.views[CLEAN_VIEW].taa_prev_vp: the receiver's
                                // point into last frame's view; last frame's view depth = clip w, the images' alpha
                                // convention) and takes only taps on this surface; a disocclusion takes the radiance
                                // cache's cell, else no estimate (the probes). The header's GI_F_FINAL_IN and prm4.w
@@ -86,6 +86,19 @@
 #define GI_F_LAG_STALE 16777216u // (GI_F_LAG) last frame's GI images are unusable this frame (the first frame of the
                                // mode, a resize, the GI images / extent re-created, a frame without a trace, an
                                // offscreen / dropped recording in between): the cache, else the probes, everywhere
+#define GI_F_REUSE_MV  33554432u // (#1038, RenderVKGIReuseMotion) the reservoirs' temporal candidate (and the
+                               // disocclusion taps around it) follow the pre-pass MOTION VECTORS (set 3 binding 28,
+                               // only while the frame info says they were written: taa_params.y), not the camera-only
+                               // reprojection: on a walking / dancing avatar the camera-only point is where the body
+                               // was NOT last frame (the background, or another part of it), so its texels lost every
+                               // temporal candidate -- M 1, one fresh ray -- for as long as it moved. The expected
+                               // depth stays the camera-only one, its tolerance grown by the surface's own motion.
+                               // The reconnection (Jacobian + visibility ray) makes the moved receiver's reuse exact.
+                               // prm5.w (RenderVKGIDisoccCache): a texel left with its FRESH SAMPLE ALONE (no
+                               // temporal / spatial candidate survived: a disocclusion) blends the radiance cache's
+                               // cell at its point in as a prior of up to that many samples -- its estimate is the
+                               // cell's (many receivers over many frames) instead of a 1-spp speckle; the cache
+                               // itself still takes the raw estimate. 0 = off.
 #define GI_F_LIGHT_CHG  65536u // CHANGED LIGHTS (RenderVKGILightChangeCut): a reservoir sample stores the
                                // radiance its hit point had WHEN IT WAS SHADED; a reused sample whose
                                // point a light reaches that changed since last frame (moved, or its colour /
@@ -131,11 +144,31 @@
                                // fresh ray stopped at a back face this frame (GI_F_BACK_STOP: a leak caught --
                                // dark, never a sparkle itself)
 #define GI_DBG_CHG     8u      // GI_F_LIGHT_CHG: red = the significant changed lights' share of the candidates'
-                               // weight (the GI denoiser's history cap), green = the picked reused sample was
+                               // weight (the GI denoiser's history cap; #1087: with the hot lights'), green = the picked reused sample was
                                // re-shaded (changed lights significant at its point), DIM green = a changed light
                                // reaches the pick but too weakly there (RenderVKGIReshadeThreshold: kept as it
                                // was), blue = the reservoir's W was scaled by the firefly clamp
 
+// (#1087, RenderVKGILightMoveFix) RECENTLY MOVED LIGHTS -- the "hot" list (prm6.x entries, at most
+// GI_HOT_MAX): every light GI_F_LIGHT_CHG flagged as MOVED within the last RenderVKGILightChangeHold frames
+// (radiance-only changes stay #980's: the pick's re-shade fixes their colour, and a colour-cycling light
+// would stay hot forever), 4 vec4 each: [4k] its OLD record's pos_radius (the reference before its latest
+// move flag; w < 0: it MOVED), [4k + 1]
+// that record's color_falloff, [4k + 2] its CURRENT sphere (xyz centre, w radius), [4k + 3] x its index in
+// this frame's light list (-1: not in it this frame). The chg mask alone holds a moving light for single
+// frames only (its reference rule flags it every few frames: 0.5 % of its radius), so between flags the
+// reservoirs regrew their full confidence on samples shaded under the light's old position and the GI
+// denoiser's history cap lifted: stale and fresh light averaged into speckle around every moving lamp
+// (worst at half GI extent: one stale pick covers 2 x 2 pixels). While a light is hot:
+//   * a reused reservoir candidate whose point it is significant at (giLightHot: the #980 rule, old
+//     record or new) has its confidence M clamped to prm6.y (RenderVKGILightMoveMCap), so this frame's
+//     fresh samples outweigh the old ones within a few frames (static areas: the full M cap);
+//   * those candidates count toward the changed share (MOT w: the GI denoiser's history cap) every frame
+//     of the hold, not only on flag frames;
+//   * radiance-cache cells inside its old or new sphere keep a mean of at most prm6.z frames
+//     (RenderVKGILightChangeCacheFrames) instead of prm3.z: they follow the light instead of
+//     averaging 32 frames of its path (fast decay, never a restart: #980's objection to restarts).
+#define GI_HOT_MAX 32u
 #define GI_SPHERES_MAX 64u
 #define GI_CHG_PREV_MAX 64u   // (#980) chg_prev's records
 struct GiHeader
@@ -165,13 +198,19 @@ struct GiHeader
                    // against each light's GI reference), GI_F_LIGHT_CHG only
     vec4  prm5;    // (#980) x the re-shade significance threshold (RenderVKGIReshadeThreshold; 0 = re-shade
                    // wherever a changed light reaches), y the old records in chg_prev, z (#1041) the own-fixture
-                   // box limit of the hits' budgeted point-light rays (RenderVKReSTIRFixtureSize, m; 0 = off)
+                   // box limit of the hits' budgeted point-light rays (RenderVKReSTIRFixtureSize, m; 0 = off),
+                   // w (#1038) the disocclusion cache prior's largest weight in samples (RenderVKGIDisoccCache;
+                   // 0 = off)
     vec4  sph[GI_SPHERES_MAX];   // xyz centre (world), w radius
     vec4  chg_prev[128];   // (#980; 2 x GI_CHG_PREV_MAX) the changed lights' OLD records (their GI reference), in
                    // ascending light index (the k-th set bit of chg): [2k] pos_radius (w < 0: it MOVED --
                    // radius |w|, its old projector frustum unknown), [2k + 1] color_falloff. A changed light
                    // past prm5.y has none: significant wherever it reaches.
-};                 // 3280 B (LLCleanRendererVK::GiHeader)
+    vec4  prm6;    // (#1087) x the hot list's entries (0 = off), y the M clamp of a candidate a hot light is
+                   // significant at (RenderVKGILightMoveMCap; 0 = none), z the radiance cache's mean window
+                   // inside a hot light's spheres (RenderVKGILightChangeCacheFrames; 0 = none), w unused
+    vec4  hot[128];   // (#1087; 4 x GI_HOT_MAX) the hot list (see GI_HOT_MAX)
+};                 // 5344 B (LLCleanRendererVK::GiHeader)
 
 #ifndef GI_STATE_ACCESS
 #define GI_STATE_ACCESS

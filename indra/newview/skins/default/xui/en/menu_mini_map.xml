@@ -110,6 +110,8 @@
         <menu_item_call.on_click
          function="Minimap.CopyPosition"
          parameter="slurl" />
+        <menu_item_call.on_enable
+         function="Minimap.CanShowLocation" />
     </menu_item_call>
     <menu
      label="Add Mark Here"
@@ -363,6 +365,92 @@
         <menu_item_call.on_click
          function="Minimap.Zone.Remove" />
     </menu_item_call>
+    <!-- <GMDX> sharing (gmdxmapshare.h): my mark / zone under the menu goes out as a readable line,
+         through my helper, to the members in this region of the group whose tag I wear (Share to Group,
+         its name filled in on right-click), or to my Send To list; a shared one (someone else's) is kept
+         as mine or removed; a ping on an empty spot goes to my Send To list. Both Send To menus are
+         filled in on right-click. Nothing ever goes to everyone in the region. -->
+    <menu
+     label="Share"
+     name="Share With"
+     tear_off="false">
+        <menu_item_call
+         label="Share to Group"
+         name="Share Group">
+            <menu_item_call.on_click
+             function="Minimap.Share"
+             parameter="group" />
+        </menu_item_call>
+        <menu_item_call
+         label="Share to My List"
+         name="Share List"
+         tool_tip="Your group (when ticked in Send To) and the groups and people ticked in Send To, those of them in this region.">
+            <menu_item_call.on_click
+             function="Minimap.Share"
+             parameter="list" />
+        </menu_item_call>
+        <menu_item_separator />
+        <menu
+         label="Send To"
+         name="Share Send To"
+         tear_off="false" />
+    </menu>
+    <menu_item_call
+     label="Keep as Mine"
+     name="Keep Shared">
+        <menu_item_call.on_click
+         function="Minimap.Shared.Keep" />
+    </menu_item_call>
+    <menu_item_call
+     label="Remove"
+     name="Remove Shared">
+        <menu_item_call.on_click
+         function="Minimap.Shared.Remove" />
+    </menu_item_call>
+    <menu_item_call
+     label="Remove All From Sender"
+     name="Remove Shared Sender">
+        <menu_item_call.on_click
+         function="Minimap.Shared.RemoveSender" />
+    </menu_item_call>
+    <menu_item_call
+     label="Block Map Shares From Sender"
+     name="Block Shared Sender">
+        <menu_item_call.on_click
+         function="Minimap.Shared.BlockSender" />
+    </menu_item_call>
+    <menu
+     label="Ping"
+     name="Ping"
+     tear_off="false">
+        <menu_item_call
+         label="Ping Here"
+         name="Ping Here">
+            <menu_item_call.on_click
+             function="Minimap.Ping"
+             parameter="0" />
+        </menu_item_call>
+        <menu_item_call
+         label="Enemy Here"
+         name="Ping Enemy Here">
+            <menu_item_call.on_click
+             function="Minimap.Ping"
+             parameter="1" />
+        </menu_item_call>
+        <menu_item_call
+         label="Rally Here"
+         name="Ping Rally Here">
+            <menu_item_call.on_click
+             function="Minimap.Ping"
+             parameter="2" />
+        </menu_item_call>
+        <menu_item_separator />
+        <menu
+         label="Send To"
+         name="Ping Send To"
+         tear_off="false" />
+    </menu>
+    <!-- </GMDX> -->
     <menu_item_separator
      name="Marks Separator" />
 
@@ -683,6 +771,30 @@
              function="ToggleControl"
              parameter="GMDXMiniMapShowZones" />
         </menu_item_check>
+        <!-- <GMDX> what others shared (gmdxmapshare.h) -->
+        <menu_item_check
+         label="Shared Marks, Zones and Pings"
+         name="Show Shared">
+            <menu_item_check.on_check
+             control="GMDXMapShareShow" />
+            <menu_item_check.on_click
+             function="ToggleControl"
+             parameter="GMDXMapShareShow" />
+        </menu_item_check>
+        <menu_item_call
+         label="Clear Shared Items"
+         name="Clear Shared">
+            <menu_item_call.on_click
+             function="Minimap.Shared.Clear" />
+        </menu_item_call>
+        <!-- shares are drawn only from my Send To list and the groups I send to; the blocked count
+             is filled in on right-click -->
+        <menu_item_call
+         label="Unblock All Map Shares"
+         name="Unblock Map Shares">
+            <menu_item_call.on_click
+             function="Minimap.Shared.UnblockAll" />
+        </menu_item_call>
         <menu_item_check
          label="Cursor Coordinates"
          name="Show Cursor Coordinates">
@@ -729,6 +841,24 @@
              function="ToggleControl"
              parameter="SlipstreamMinimapChatRings" />
         </menu_item_check>
+        <!-- <GMDX> avatars high above me (llnetmap.cpp, gmdx_hidden_above); the height in a small floater -->
+        <menu_item_check
+         label="Hide avatars high above me"
+         name="Hide Avatars Above">
+            <menu_item_check.on_check
+             control="GMDXMiniMapHideAbove" />
+            <menu_item_check.on_click
+             function="ToggleControl"
+             parameter="GMDXMiniMapHideAbove" />
+        </menu_item_check>
+        <menu_item_call
+         label="Hide height..."
+         name="Hide Avatars Above Height">
+            <menu_item_call.on_click
+             function="Floater.Show"
+             parameter="gmdx_minimap_hide_above" />
+        </menu_item_call>
+        <!-- </GMDX> -->
         <menu_item_separator />
         <menu_item_check
          label="Parcel boundaries"

@@ -1080,6 +1080,9 @@ void LLViewerObjectList::update(LLAgent &agent)
         }
     }
 
+    // <GMDX> Probe ghost projectiles that went static and dropped off the active list
+    FSGhostProjectile::idleUpdate(frame_time);
+
 
 
     { VK_HITCH_SCOPE("objUpd_costs"); fetchObjectCosts();
@@ -1489,6 +1492,8 @@ void LLViewerObjectList::cleanupReferences(LLViewerObject *objectp)
 {
     LL_PROFILE_ZONE_SCOPED_CATEGORY_NETWORK;
 
+    FSGhostProjectile::onCleanup(objectp); // <GMDX> ghost projectile watch and counts
+
     bool new_dead_object = true;
     if (mDeadObjects.find(objectp->mID) != mDeadObjects.end())
     {
@@ -1690,6 +1695,7 @@ void LLViewerObjectList::killAllObjects()
     mIndexAndLocalIDToUUID.clear();
     mActiveObjects.clear();
     mMapObjects.clear();
+    FSGhostProjectile::clear(); // <GMDX>
 
     LLViewerObject *objectp;
     for (vobj_list_t::iterator iter = mObjects.begin(); iter != mObjects.end(); ++iter)

@@ -90,6 +90,8 @@ protected:
     F32     getOrbitRate(F32 time);
     void    onRollLeftHeldDown();
     void    onRollRightHeldDown();
+    void    onRollReset();      // <GMDX> (SoapStorm ed0f69bd0e)
+    void    onRollPortrait();   // <GMDX>
 
 private:
     LLButton*   mPlusBtn { nullptr };
@@ -183,6 +185,8 @@ void LLPanelCameraZoom::onCreate()
     mCommitCallbackRegistrar.add("Camera.rotate", boost::bind(&LLPanelCameraZoom::onCameraRotate, this));
     mCommitCallbackRegistrar.add("Camera.roll_left", boost::bind(&LLPanelCameraZoom::onRollLeftHeldDown, this));
     mCommitCallbackRegistrar.add("Camera.roll_right", boost::bind(&LLPanelCameraZoom::onRollRightHeldDown, this));
+    mCommitCallbackRegistrar.add("Camera.roll_reset", boost::bind(&LLPanelCameraZoom::onRollReset, this));         // <GMDX>
+    mCommitCallbackRegistrar.add("Camera.roll_portrait", boost::bind(&LLPanelCameraZoom::onRollPortrait, this));   // <GMDX>
 }
 
 bool LLPanelCameraZoom::postBuild()
@@ -234,6 +238,25 @@ void LLPanelCameraZoom::onRollRightHeldDown()
     gAgentCamera.unlockView();
     gAgentCamera.setRollRightKey(getOrbitRate(time));
 }
+
+// <GMDX> (SoapStorm ed0f69bd0e) roll reset, and a 90 degree portrait roll that toggles back
+void LLPanelCameraZoom::onRollReset()
+{
+    gAgentCamera.resetCameraRoll();
+}
+
+void LLPanelCameraZoom::onRollPortrait()
+{
+    if (fabsf(gAgentCamera.getRollAngle() - F_PI_BY_TWO) < 0.1f)
+    {
+        gAgentCamera.resetCameraRoll();
+    }
+    else
+    {
+        gAgentCamera.setRollAngle(F_PI_BY_TWO);
+    }
+}
+// </GMDX>
 
 void LLPanelCameraZoom::onCameraTrack()
 {
@@ -649,7 +672,24 @@ void LLFloaterCamera::updateItemsSelection()
     getChild<LLPanelCameraItem>("mouselook_view")->setValue(argument);
     argument["selected"] = mCurrMode == CAMERA_CTRL_MODE_FREE_CAMERA;
     getChild<LLPanelCameraItem>("object_view")->setValue(argument);
+    // <GMDX> orthographic view toggle
+    if (LLPanelCameraItem* ortho_item = findChild<LLPanelCameraItem>("ortho_view"))
+    {
+        argument["selected"] = LLViewerCamera::getInstance()->getOrtho();
+        ortho_item->setValue(argument);
+    }
+    // </GMDX>
 }
+
+// <GMDX> static: the ortho toggle changed outside the floater (key, menu, auto-perspective)
+void LLFloaterCamera::updateAllItemsSelection()
+{
+    if (LLFloaterCamera* camera_floater = LLFloaterCamera::findInstance())
+    {
+        camera_floater->updateItemsSelection();
+    }
+}
+// </GMDX>
 
 // static
 void LLFloaterCamera::onClickCameraItem(const LLSD& param)
@@ -659,6 +699,10 @@ void LLFloaterCamera::onClickCameraItem(const LLSD& param)
     if ("mouselook_view" == name)
     {
         gAgentCamera.changeCameraToMouselook();
+    }
+    else if ("ortho_view" == name)   // <GMDX>
+    {
+        LLViewerCamera::getInstance()->toggleOrtho();
     }
     else if ("object_view" == name)
     {

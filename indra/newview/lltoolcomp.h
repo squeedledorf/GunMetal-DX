@@ -244,6 +244,7 @@ public:
     void                    freeMouseForUI();
     void                    recaptureMouse();
     bool                    isMouseFreed() const { return mMouseFreed; }
+    bool                    isZoomed() const { return mRightMouseDown; } // <GMDX> right-click zoom held (or ADS, check that first)
     void                    updateAltHeld(MASK mask); // <GMDX> Alt held: mouse free for HUDs and windows
 
 protected:

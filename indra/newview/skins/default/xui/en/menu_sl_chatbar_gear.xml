@@ -24,6 +24,13 @@
      function="ToggleControl"
      parameter="LetterKeysFocusChatBar" />
   </menu_item_check>
+  <!-- <GMDX> the chat log's place, with the chat bar under it (gmdxchatlog.cpp: unlocked, they move and resize) -->
+  <menu_item_call
+   label="Reset chat log position"
+   name="reset_chat_log_rect">
+    <menu_item_call.on_click
+     function="Chatbar.ResetChatLogPosition" />
+  </menu_item_call>
   <menu_item_separator />
   <menu_item_call
    label="Shout (Control)"

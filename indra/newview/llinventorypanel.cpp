@@ -38,6 +38,7 @@
 #include "llfloatersidepanelcontainer.h"
 #include "llfolderview.h"
 #include "llfolderviewitem.h"
+#include "gmdxtoolbarpins.h" // <GMDX> system folders dragged onto a toolbar
 #include "llfloaterimcontainer.h"
 #include "llimview.h"
 #include "llinspecttexture.h"
@@ -1088,6 +1089,12 @@ LLFolderViewFolder * LLInventoryPanel::createFolderViewFolder(LLInvFVBridge * br
     params.font_color = (bridge->isLibraryItem() ? sLibraryColor : sDefaultColor);
     params.font_highlight_color = (bridge->isLibraryItem() ? sLibraryColor : sDefaultHighlightColor);
 
+    // <GMDX> a system folder that can be pinned: dragged for a pin only (gmdxtoolbarpins.h)
+    if (GMDXToolbarPins::isPinOnlyFolder(bridge->getUUID()))
+    {
+        return GMDXToolbarPins::createPinOnlyFolderView(params);
+    }
+    // </GMDX>
     return LLUICtrlFactory::create<LLFolderViewFolder>(params);
 }
 

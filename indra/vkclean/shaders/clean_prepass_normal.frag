@@ -17,7 +17,7 @@
 // the RG16F motion-vector target (colour attachment 1). CONVENTION: motion is in UV
 // units, current minus previous: mv = (cur_ndc.xy - prev_ndc.xy) * 0.5, so the pixel's
 // position last frame is uv - mv (Vulkan NDC y is down, like UV). Both positions go
-// through the UNJITTERED matrices (ssr.taa_cur_vp / taa_prev_vp), so jitter never
+// through the UNJITTERED matrices (ssr.views[CLEAN_VIEW].taa_cur_vp / taa_prev_vp), so jitter never
 // shows up as motion. Projecting the interpolated world positions per pixel keeps it
 // perspective-correct; static geometry under a static camera is exactly 0. Rigged
 // geometry's previous position is re-skinned with last frame's palettes (stage 2,
@@ -96,17 +96,17 @@ void main()
         N = applyNormalMap(normalize(v_world_normal), v_world_tangent, v_world_pos,
                            ((v_flags & 1024u) != 0u) ? mapUV(MAP_NORMAL) : v_uv, tn, gl_FrontFacing);   // <GMDX> animated: no vertex tangent, frame from the normal map's UV
     }
-    vec3 nv = normalize(mat3(ssr.cur_view) * N);
+    vec3 nv = normalize(mat3(ssr.views[CLEAN_VIEW].cur_view) * N);
     // .zw (#648): the smooth interpolated vertex normal, unperturbed (oriented as N), for
     // the AO kernel / blur -- smooth across triangle edges, no normal-map tilt.
     vec3 N0 = normalize(v_world_normal);
     if (!gl_FrontFacing) N0 = -N0;
-    vec3 nv0 = normalize(mat3(ssr.cur_view) * N0);
+    vec3 nv0 = normalize(mat3(ssr.views[CLEAN_VIEW].cur_view) * N0);
     outColor = vec4(octEncode(nv), octEncode(nv0));
 #ifdef PREPASS_MOTION
     // Camera-relative (#555): both matrices map (P - cam_origin).
-    const vec4 cur  = ssr.taa_cur_vp  * vec4(v_world_pos - ssr.cam_origin.xyz, 1.0);
-    const vec4 prev = ssr.taa_prev_vp * vec4(v_prev_world_pos - ssr.cam_origin.xyz, 1.0);
+    const vec4 cur  = ssr.views[CLEAN_VIEW].taa_cur_vp  * vec4(v_world_pos - ssr.cam_origin.xyz, 1.0);
+    const vec4 prev = ssr.views[CLEAN_VIEW].taa_prev_vp * vec4(v_prev_world_pos - ssr.cam_origin.xyz, 1.0);
     // Behind last frame's eye (w <= 0: no valid projection) -> 0; TAA rejects it anyway.
     outMotion = prev.w > 1e-6 ? (cur.xy / cur.w - prev.xy / prev.w) * 0.5 : vec2(0.0);
     outNoTemporal = noTemporalFace(v_flags) ? 1.0 : 0.0;

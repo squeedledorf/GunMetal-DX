@@ -70,8 +70,8 @@ void main()
     }
 #endif
     // Camera-relative (#555): both matrices map (P - cam_origin).
-    const vec4 cur  = ssr.taa_cur_vp  * vec4(v_world_pos - ssr.cam_origin.xyz, 1.0);
-    const vec4 prev = ssr.taa_prev_vp * vec4(v_prev_world_pos - ssr.cam_origin.xyz, 1.0);
+    const vec4 cur  = ssr.views[CLEAN_VIEW].taa_cur_vp  * vec4(v_world_pos - ssr.cam_origin.xyz, 1.0);
+    const vec4 prev = ssr.views[CLEAN_VIEW].taa_prev_vp * vec4(v_prev_world_pos - ssr.cam_origin.xyz, 1.0);
     // Behind last frame's eye (w <= 0: no valid projection) -> 0; TAA rejects it anyway.
     outMotion = prev.w > 1e-6 ? (cur.xy / cur.w - prev.xy / prev.w) * 0.5 : vec2(0.0);
     outNoTemporal = noTemporalFace(v_flags) ? 1.0 : 0.0;

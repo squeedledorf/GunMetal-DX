@@ -84,6 +84,18 @@ namespace LLCleanCursorPick
     // A pick wants per-frame answers (keeps the request alive a few frames).
     void arm();
 
+    // #1076 VR WORLD POINTER. While set, "the cursor ray" is this agent-space ray (a VR
+    // controller's aim) instead of the camera ray through the mouse pixel: the per-frame
+    // request, every pick a tool makes through LLViewerWindow::cursorIntersect (object, land),
+    // and the answers' 1x1 raster, whose centre of projection becomes the ray's origin (the
+    // camera's projection behind a rigid move onto the ray). HUDs are not picked (they are on
+    // the VR UI wall). The mouse pixel still keys the answers (covers / holdClick). Set and
+    // cleared by LLVRInput only (VR session running); never set on the desktop.
+    void setVRRay(const LLVector3& origin, const LLVector3& dir);
+    void clearVRRay();
+    bool vrRay(LLVector3& origin, LLVector3& dir);
+    bool vrRayOn();
+
     // Picks issued while one is alive are clicks (LLViewerWindow::handleAnyMouseClick):
     // exact answers only, answered now if needed.
     struct ClickScope
@@ -157,6 +169,11 @@ namespace LLCleanCursorPick
         FOCUS_HIT = 2,       // pos = agent-space point under the cursor
     };
     Focus focusPoint(LLVector3& pos);
+    // #1076: the VR pointer's hit (setVRRay): focusPoint on the newest answer when that answer
+    // was asked for (about) the current VR ray, skipping fragments that resolve to no object
+    // (the hand and beam meshes themselves: the beam lies on the ray). FOCUS_UNKNOWN when no
+    // answer for the VR ray is in yet.
+    Focus vrRayHit(LLVector3& pos);
 
     // The last surface a pick reported on (obj, face): the UV the raster samples there and
     // that UV per screen pixel (du/dx, dv/dx, du/dy, dv/dy; may be null). False = none.

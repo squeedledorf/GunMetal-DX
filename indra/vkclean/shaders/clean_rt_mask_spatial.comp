@@ -70,30 +70,36 @@
 // (white = RenderVKRTShadowHistory), 4 variance (sqrt x 4; SVGF mode: of the filtered
 // estimate), 5 final mask, 6 the temporal pass's events (red disocclusion, green the
 // history clamped / cut, blue the moving-caster detector), 7 the fast history.
+// #1075 LAYERED STEREO: a stereo frame's mask is one layer per view, traced in one dispatch with z = N
+// (clean_view.glsl CLEAN_VIEW_Z; folded to view 0 on the desktop pipeline). clean_rt_mask_common.glsl
+// RT_MASK_L / RT_MASK_PL: the layer of this view (projector slot s: view x 4 + s).
+#define CLEAN_VIEW CLEAN_VIEW_Z
+#define RT_MASK_L int(CLEAN_VIEW)
+#define RT_MASK_PL(s) (int(CLEAN_VIEW) * 4 + (s))
 layout(local_size_x = 8, local_size_y = 8) in;
 
 #include "clean_frame_info.glsl"
 
 // Read-write: alpha = the temporal pass's shading change (the TAA / FSR reactive),
 // passed through untouched (clean_rt_mask_temporal.comp; the same texel, B -> C barrier).
-layout(set = 3, binding = 1, rgba8) uniform image2D uSunOut;
+layout(set = 3, binding = 1, rgba8) uniform image2DArray uSunOut;
 // (Read-write: the projector a-trous's rgba8 scratch hop, #666 -- header.)
 layout(set = 3, binding = 2, rgba8) uniform image2DArray uProjOut;
-layout(set = 3, binding = 3, rgba16ui) readonly uniform uimage2D uIds;
-layout(set = 3, binding = 4, r32f) readonly uniform image2D uMDepthZ;        // view depth (32-bit)
-layout(set = 3, binding = 21, rgba16f) readonly uniform image2D uMDepthG;    // d/dx, d/dy, flags
-vec4 loadMD(ivec2 t) { return vec4(imageLoad(uMDepthZ, t).x, imageLoad(uMDepthG, t).xyz); }
-layout(set = 3, binding = 12, rgba16f) readonly uniform image2D uAccSun;
+layout(set = 3, binding = 3, rgba16ui) readonly uniform uimage2DArray uIds;
+layout(set = 3, binding = 4, r32f) readonly uniform image2DArray uMDepthZ;        // view depth (32-bit)
+layout(set = 3, binding = 21, rgba16f) readonly uniform image2DArray uMDepthG;    // d/dx, d/dy, flags
+vec4 loadMD(ivec2 t) { return vec4(imageLoad(uMDepthZ, ivec3(t, RT_MASK_L)).x, imageLoad(uMDepthG, ivec3(t, RT_MASK_L)).xyz); }
+layout(set = 3, binding = 12, rgba16f) readonly uniform image2DArray uAccSun;
 layout(set = 3, binding = 13, rgba16f) readonly uniform image2DArray uAccProj;
-layout(set = 3, binding = 14, rgba16f) readonly uniform image2D uMeta;
-layout(set = 3, binding = 10, rgba8) readonly uniform image2D uRawSun;   // A's raw estimate (debug 1)
+layout(set = 3, binding = 14, rgba16f) readonly uniform image2DArray uMeta;
+layout(set = 3, binding = 10, rgba8) readonly uniform image2DArray uRawSun;   // A's raw estimate (debug 1)
 // A-trous scratch (the read slot's sun accumulation / meta: dead after the temporal pass).
-layout(set = 3, binding = 16, rgba16f) uniform image2D uScrA;
-layout(set = 3, binding = 17, rgba16f) uniform image2D uScrB;
+layout(set = 3, binding = 16, rgba16f) uniform image2DArray uScrA;
+layout(set = 3, binding = 17, rgba16f) uniform image2DArray uScrB;
 // #666: the projector a-trous scratch (the read slot's projector accumulation) and this
 // frame's projector slot history (temporal pass: per-slot length, rtPMLen).
 layout(set = 3, binding = 18, rgba16f) uniform image2DArray uScrP;
-layout(set = 3, binding = 19, rgba16ui) readonly uniform uimage2D uProjPM;
+layout(set = 3, binding = 19, rgba16ui) readonly uniform uimage2DArray uProjPM;
 
 #include "clean_rt_mask_common.glsl"
 
@@ -146,17 +152,17 @@ float estVar(vec4 acc, vec4 meta) { return rawVar(acc, meta) / max(meta.x, 1.0);
 // Debug view override of the final sun mask (header). var < 0: from the meta.
 vec3 debugSun(uint dbg, ivec2 m, vec3 final_vis, float var)
 {
-    if (dbg == 1u) return imageLoad(uRawSun, m).rgb;
-    if (dbg == 2u) return clamp(imageLoad(uAccSun, m).rgb, vec3(0.0), vec3(1.0));
-    if (dbg == 3u) return vec3(clamp(imageLoad(uMeta, m).x / rtHistMax(), 0.0, 1.0));
+    if (dbg == 1u) return imageLoad(uRawSun, ivec3(m, RT_MASK_L)).rgb;
+    if (dbg == 2u) return clamp(imageLoad(uAccSun, ivec3(m, RT_MASK_L)).rgb, vec3(0.0), vec3(1.0));
+    if (dbg == 3u) return vec3(clamp(imageLoad(uMeta, ivec3(m, RT_MASK_L)).x / rtHistMax(), 0.0, 1.0));
     if (dbg == 4u)
     {
-        const float v = var >= 0.0 ? var : tempVar(imageLoad(uMeta, m));
+        const float v = var >= 0.0 ? var : tempVar(imageLoad(uMeta, ivec3(m, RT_MASK_L)));
         return vec3(clamp(sqrt(v) * 4.0, 0.0, 1.0));
     }
     // 6: the temporal pass's events, written into this image's rgb (clean_rt_mask_temporal.comp).
-    if (dbg == 6u) return imageLoad(uSunOut, m).rgb;
-    if (dbg == 7u) return vec3(clamp(imageLoad(uMeta, m).z, 0.0, 1.0));   // the fast history
+    if (dbg == 6u) return imageLoad(uSunOut, ivec3(m, RT_MASK_L)).rgb;
+    if (dbg == 7u) return vec3(clamp(imageLoad(uMeta, ivec3(m, RT_MASK_L)).z, 0.0, 1.0));   // the fast history
     return final_vis;
 }
 
@@ -166,20 +172,20 @@ vec4 atrousSrc(int k, ivec2 t)
 {
     if (k == 0)
     {
-        const vec4 a = imageLoad(uAccSun, t);
+        const vec4 a = imageLoad(uAccSun, ivec3(t, RT_MASK_L));
         const vec3 v = clamp(a.rgb, vec3(0.0), vec3(1.0));
-        const vec4 mt = imageLoad(uMeta, t);
+        const vec4 mt = imageLoad(uMeta, ivec3(t, RT_MASK_L));
         return vec4(v, rtSvgf() ? estVar(vec4(v, a.a), mt) : tempVar(mt));
     }
-    return ((k - 1) & 1) == 0 ? imageLoad(uScrA, t) : imageLoad(uScrB, t);
+    return ((k - 1) & 1) == 0 ? imageLoad(uScrA, ivec3(t, RT_MASK_L)) : imageLoad(uScrB, ivec3(t, RT_MASK_L));
 }
 
 void atrousSun(ivec2 m, int k, int n, uint dbg)
 {
     const ivec2 mx = ivec2(mp.dims.zw) - 1;
     const vec4 dc = loadMD(m);
-    const vec4 acc = imageLoad(uAccSun, m);
-    const vec4 meta = imageLoad(uMeta, m);
+    const vec4 acc = imageLoad(uAccSun, ivec3(m, RT_MASK_L));
+    const vec4 meta = imageLoad(uMeta, ivec3(m, RT_MASK_L));
     vec4 c = atrousSrc(k, m);
     const vec2 sm = rtMaskScale();
     const int step = 1 << k;
@@ -232,11 +238,11 @@ void atrousSun(ivec2 m, int k, int n, uint dbg)
                 float l;
                 if (sv)
                 {
-                    l = lum3(imageLoad(uRawSun, t).rgb);
-                    if (abs(i) <= 1 && abs(j) <= 1) rpen = max(rpen, imageLoad(uAccSun, t).a);
+                    l = lum3(imageLoad(uRawSun, ivec3(t, RT_MASK_L)).rgb);
+                    if (abs(i) <= 1 && abs(j) <= 1) rpen = max(rpen, imageLoad(uAccSun, ivec3(t, RT_MASK_L)).a);
                 }
                 else
-                    l = lum3(clamp(imageLoad(uAccSun, t).rgb, vec3(0.0), vec3(1.0)));
+                    l = lum3(clamp(imageLoad(uAccSun, ivec3(t, RT_MASK_L)).rgb, vec3(0.0), vec3(1.0)));
                 s1 += l; s2 += l * l; nn += 1.0;
             }
         if (nn > 0.0)
@@ -279,7 +285,7 @@ void atrousSun(ivec2 m, int k, int n, uint dbg)
                 const vec4 v = (t == m) ? c : atrousSrc(k, t);
                 const float wl = exp(-abs(lum3(v.rgb) - lc) / sl);
                 float w = kB3[i + 2] * kB3[j + 2] * wz * wn * wl;
-                if (young && !myoung && t != m) w *= clamp(imageLoad(uMeta, t).x / lenc, 1.0, 8.0);
+                if (young && !myoung && t != m) w *= clamp(imageLoad(uMeta, ivec3(t, RT_MASK_L)).x / lenc, 1.0, 8.0);
                 if (w <= 0.0) continue;
                 sum += w * v.rgb;
                 vsum += w * w * v.a;
@@ -291,12 +297,12 @@ void atrousSun(ivec2 m, int k, int n, uint dbg)
     if (k == n - 1)
     {
         const vec3 fin = debugSun(dbg, m, dc.x > 0.0 ? o.rgb : vec3(1.0), o.a);
-        imageStore(uSunOut, m, vec4(fin, imageLoad(uSunOut, m).a));
+        imageStore(uSunOut, ivec3(m, RT_MASK_L), vec4(fin, imageLoad(uSunOut, ivec3(m, RT_MASK_L)).a));
     }
     else if ((k & 1) == 0)
-        imageStore(uScrA, m, o);
+        imageStore(uScrA, ivec3(m, RT_MASK_L), o);
     else
-        imageStore(uScrB, m, o);
+        imageStore(uScrB, ivec3(m, RT_MASK_L), o);
 }
 
 // ---- A-trous iteration k of n for the projector slots (#666, header) ----
@@ -322,12 +328,12 @@ vec4 projSrc(int k, int n, ivec2 t, int s, float len)
 {
     if (k == 0)
     {
-        const vec4 a = imageLoad(uAccProj, ivec3(t, s));
+        const vec4 a = imageLoad(uAccProj, ivec3(t, RT_MASK_PL(s)));
         const vec3 v = clamp(a.rgb, vec3(0.0), vec3(1.0));
         return vec4(v, projEstVar(v, a.a, len));
     }
-    if (projDstScr(k - 1, n)) return imageLoad(uScrP, ivec3(t, s));
-    const vec4 f = imageLoad(uProjOut, ivec3(t, s));
+    if (projDstScr(k - 1, n)) return imageLoad(uScrP, ivec3(t, RT_MASK_PL(s)));
+    const vec4 f = imageLoad(uProjOut, ivec3(t, RT_MASK_PL(s)));
     const float sd = f.a * 0.5;
     return vec4(f.rgb, sd * sd);
 }
@@ -336,9 +342,9 @@ void atrousProj(ivec2 m, int k, int n)
 {
     const vec4 dc = loadMD(m);
     if (dc.x <= 0.0) return;   // sky: no projector traced
-    const uvec4 ids = imageLoad(uIds, m);
+    const uvec4 ids = imageLoad(uIds, ivec3(m, RT_MASK_L));
     if (all(equal(ids, uvec4(0u)))) return;
-    const uvec4 pmc = imageLoad(uProjPM, m);
+    const uvec4 pmc = imageLoad(uProjPM, ivec3(m, RT_MASK_L));
     const ivec2 mx = ivec2(mp.dims.zw) - 1;
     const vec2 sm = rtMaskScale();
     const int step = 1 << k;
@@ -352,7 +358,7 @@ void atrousProj(ivec2 m, int k, int n)
         const uint id = ids[s];
         if (id == 0u) continue;
         const float len = rtPMLen(pmc[s]);
-        const vec4 acc = imageLoad(uAccProj, ivec3(m, s));
+        const vec4 acc = imageLoad(uAccProj, ivec3(m, RT_MASK_PL(s)));
         vec4 c = projSrc(k, n, m, s, len);
         // YOUNG history (disocclusion, a mover's snap): filtered whether partial or not, at
         // the widest penumbra radius around it, with the spatial variance of this light's
@@ -374,9 +380,9 @@ void atrousProj(ivec2 m, int k, int n)
                     const vec4 dt = loadMD(t);
                     const float zp = dc.x + clamp(dot(dc.yz, vec2(o) / sm), -0.25 * dc.x, 0.25 * dc.x);
                     if (dt.x <= 0.0 || abs(dt.x - zp) >= tolN) continue;
-                    const int ts = (t == m) ? s : projSlotOf(imageLoad(uIds, t), id);
+                    const int ts = (t == m) ? s : projSlotOf(imageLoad(uIds, ivec3(t, RT_MASK_L)), id);
                     if (ts < 0) continue;
-                    const vec4 at = imageLoad(uAccProj, ivec3(t, ts));
+                    const vec4 at = imageLoad(uAccProj, ivec3(t, RT_MASK_PL(ts)));
                     if (abs(i) <= 1 && abs(j) <= 1) rpen = max(rpen, at.a);
                     const float l = lum3(clamp(at.rgb, vec3(0.0), vec3(1.0)));
                     s1 += l; s2 += l * l; nn += 1.0;
@@ -403,13 +409,13 @@ void atrousProj(ivec2 m, int k, int n)
                     const bool self = t == m;
                     const vec4 dt = self ? dc : loadMD(t);
                     if (dt.x <= 0.0) continue;
-                    const int ts = self ? s : projSlotOf(imageLoad(uIds, t), id);
+                    const int ts = self ? s : projSlotOf(imageLoad(uIds, ivec3(t, RT_MASK_L)), id);
                     if (ts < 0) continue;   // that texel did not trace this light
                     const vec2 orp = vec2(t - m) / sm;   // render px
                     const float zp = dc.x + clamp(dot(dc.yz, orp), -0.25 * dc.x, 0.25 * dc.x);
                     const float wz = exp(-abs(dt.x - zp) / tol);
                     const float wn = 1.0 / (1.0 + 200.0 * length(dt.yz / max(dt.x, 1e-3) - sc));
-                    const float lt = self ? len : rtPMLen(imageLoad(uProjPM, t)[ts]);
+                    const float lt = self ? len : rtPMLen(imageLoad(uProjPM, ivec3(t, RT_MASK_L))[ts]);
                     const vec4 v = self ? c : projSrc(k, n, t, ts, lt);
                     const float wl = exp(-abs(lum3(v.rgb) - lc) / sl);
                     float w = kB3[i + 2] * kB3[j + 2] * wz * wn * wl;
@@ -422,8 +428,8 @@ void atrousProj(ivec2 m, int k, int n)
             if (wsum > 1e-6) o = vec4(sum / wsum, vsum / (wsum * wsum));
         }
         o.rgb = clamp(o.rgb, vec3(0.0), vec3(1.0));
-        if (toScr) imageStore(uScrP, ivec3(m, s), o);
-        else imageStore(uProjOut, ivec3(m, s), vec4(o.rgb, last ? 1.0 : clamp(2.0 * sqrt(max(o.a, 0.0)), 0.0, 1.0)));
+        if (toScr) imageStore(uScrP, ivec3(m, RT_MASK_PL(s)), o);
+        else imageStore(uProjOut, ivec3(m, RT_MASK_PL(s)), vec4(o.rgb, last ? 1.0 : clamp(2.0 * sqrt(max(o.a, 0.0)), 0.0, 1.0)));
     }
 }
 
@@ -451,11 +457,11 @@ void main()
         if (rtProjFull()) { atrousProj(m, ak, an); return; }
         if (ak != 0) return;
     }
-    const vec4 c = imageLoad(uAccSun, m);
+    const vec4 c = imageLoad(uAccSun, ivec3(m, RT_MASK_L));
     const vec4 dc = loadMD(m);
-    const uvec4 ids = imageLoad(uIds, m);
+    const uvec4 ids = imageLoad(uIds, ivec3(m, RT_MASK_L));
     const bool on = rtDenoise() && spCap() > 0.0 && dc.x > 0.0;
-    const vec4 meta = on ? imageLoad(uMeta, m) : vec4(0.0);
+    const vec4 meta = on ? imageLoad(uMeta, ivec3(m, RT_MASK_L)) : vec4(0.0);
     const ivec2 mx = ivec2(mp.dims.zw) - 1;
     const vec2 sm = rtMaskScale();
     const float tol = max(dc.x * 0.01, 0.02);
@@ -487,12 +493,12 @@ void main()
             float w = clamp(1.0 - abs(dt.x - zp) / tol, 0.0, 1.0);
             w *= w * exp(-2.0 * u * u);
             if (w <= 0.0) continue;
-            acc += w * imageLoad(uAccSun, t).rgb;
+            acc += w * imageLoad(uAccSun, ivec3(t, RT_MASK_L)).rgb;
             ws += w;
         }
         sun = acc / ws;
     }
-    imageStore(uSunOut, m, vec4(debugSun(dbg, m, sun, -1.0), imageLoad(uSunOut, m).a));
+    imageStore(uSunOut, ivec3(m, RT_MASK_L), vec4(debugSun(dbg, m, sun, -1.0), imageLoad(uSunOut, ivec3(m, RT_MASK_L)).a));
     }
 
     // ---- projector slots ----
@@ -500,7 +506,7 @@ void main()
     {
         const uint id = ids[k];
         if (id == 0u) continue;
-        const vec4 pc = imageLoad(uAccProj, ivec3(m, k));
+        const vec4 pc = imageLoad(uAccProj, ivec3(m, RT_MASK_PL(k)));
         vec3 v = pc.rgb;
         // meta.y: the shortest projector history length at this texel (temporal pass).
         const float rp = on && partial(pc.rgb) ? blurRadius(pc.a, meta.y) : 0.0;
@@ -517,7 +523,7 @@ void main()
                 if (t == m) continue;
                 const vec4 dt = loadMD(t);
                 if (dt.x <= 0.0) continue;
-                const uvec4 tid = imageLoad(uIds, t);
+                const uvec4 tid = imageLoad(uIds, ivec3(t, RT_MASK_L));
                 int s = -1;
                 for (int j = 0; j < 4; ++j)
                     if (tid[j] == id) { s = j; break; }
@@ -527,11 +533,11 @@ void main()
                 float w = clamp(1.0 - abs(dt.x - zp) / tol, 0.0, 1.0);
                 w *= w * exp(-2.0 * u * u);
                 if (w <= 0.0) continue;
-                acc += w * imageLoad(uAccProj, ivec3(t, s)).rgb;
+                acc += w * imageLoad(uAccProj, ivec3(t, RT_MASK_PL(s))).rgb;
                 ws += w;
             }
             v = acc / ws;
         }
-        imageStore(uProjOut, ivec3(m, k), vec4(v, 1.0));
+        imageStore(uProjOut, ivec3(m, RT_MASK_PL(k)), vec4(v, 1.0));
     }
 }

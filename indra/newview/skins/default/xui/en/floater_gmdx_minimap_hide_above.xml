@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<!-- <GMDX> mini-map "Hide avatars high above me" (llnetmap.cpp, gmdx_hidden_above): both controls bind a setting. -->
+<floater
+ can_close="true"
+ can_minimize="false"
+ can_resize="false"
+ height="64"
+ layout="topleft"
+ name="gmdx_minimap_hide_above"
+ save_rect="true"
+ single_instance="true"
+ title="HIDE AVATARS HIGH ABOVE ME"
+ width="320">
+  <check_box
+   control_name="GMDXMiniMapHideAbove"
+   follows="left|top"
+   height="16"
+   label="Hide avatars high above me on the mini-map"
+   layout="topleft"
+   left="12"
+   name="hide_above"
+   tool_tip="Avatars more than this height above you get no dot, no hover info and no right-click, e.g. people sitting on build platforms during combat."
+   top="8"
+   width="296" />
+  <slider
+   can_edit_text="true"
+   control_name="GMDXMiniMapHideAboveMeters"
+   decimal_digits="0"
+   enabled_control="GMDXMiniMapHideAbove"
+   follows="left|top"
+   height="16"
+   increment="10"
+   label="Higher than (m)"
+   label_width="100"
+   layout="topleft"
+   left="12"
+   max_val="1000"
+   min_val="250"
+   name="hide_above_meters"
+   tool_tip="How many metres above your own height an avatar must be to be hidden."
+   top="34"
+   width="296" />
+</floater>

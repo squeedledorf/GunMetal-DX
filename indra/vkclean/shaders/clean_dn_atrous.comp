@@ -315,8 +315,20 @@ void main()
         const float lD = pdnLum(cD.rgb), lS = pdnLum(cS.rgb);
         const float lsD = unkD ? 0.0 : 1.0, lsS = unkS ? 0.0 : 1.0;   // (the luminance stop's scale)
         const bool specOn = k < pdnMetaSpecIt(g.meta);
-        const float pS = mix(256.0, 32.0, smoothstep(0.0, 0.6, g.rough));   // specular normal power
-        const int step = 1 << int(min(k, 7u));
+        float pS = mix(256.0, 32.0, smoothstep(0.0, 0.6, g.rough));   // specular normal power
+        float pD = dp.prm1.y;                                          // diffuse normal power
+        // (#1038, DN_F_YOUNG_BOOST) a YOUNG centre (a disocclusion with no settled neighbour -- a whole
+        // avatar revealed at once): the normal stop relaxes toward power 8 with its youth (a curved,
+        // normal-mapped body kept almost no taps at 64) and, from the second iteration on, a centre at
+        // least half young doubles its step (a wider footprint, no extra dispatch)
+        uint kStep = k;
+        if (dnYoungBoost())
+        {
+            pD = mix(pD, min(pD, 8.0), yD);
+            pS = mix(pS, min(pS, 8.0), yS);
+            if (k > 0u && max(yD, yS) >= 0.5) kStep = k + 1u;
+        }
+        const int step = 1 << int(min(kStep, 7u));
         vec3 sD = vec3(0.0), sS = vec3(0.0);
         float wD = 0.0, wS = 0.0, vD = 0.0, vS = 0.0, nbD = 0.0;
         for (int j = -2; j <= 2; ++j)
@@ -341,7 +353,7 @@ void main()
                 const vec4 qD = diffOn ? dnSrc(q, 0) : vec4(0.0);
                 // (DN_F_INFO) every tap counts -- an unknown one at DN_UNKNOWN_W (dnConf); the
                 // depth plane and the normal stop what lies across a wall
-                float w0 = diffOn ? h * wz * pow(nn, dp.prm1.y) * dnConf(pdnMetaLenD(gq.meta))
+                float w0 = diffOn ? h * wz * pow(nn, pD) * dnConf(pdnMetaLenD(gq.meta))
                                     * exp(-lsD * abs(pdnLum(qD.rgb) - lD) / phiD) : 0.0;
                 w0 *= yD > 0.0 ? clamp(pdnMetaLenD(gq.meta) / max(lcD, 1.0), 1.0, DN_HFIX_MAXW) : dnMaturity(pdnMetaLenD(gq.meta));
                 if (w0 > 1e-6) { sD += w0 * qD.rgb; vD += w0 * w0 * qD.a; wD += w0; if (dnConf(pdnMetaLenD(gq.meta)) >= 1.0) nbD += w0; }   // (fill: known taps only)

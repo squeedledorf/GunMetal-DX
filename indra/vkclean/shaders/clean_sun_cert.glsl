@@ -493,6 +493,59 @@ void sxcSunPost(SxcTexel t, vec3 vis, vec3 Pin, vec3 Nin, vec3 cam, float bias, 
         atomicAdd(b.w[SXC_STATS + SXC_S_CBLOCK], nbk);
     }
 }
+// (#1039, RenderVKVisQueue bit 8) sxcSunPost in its two halves for the visibility queue's shadow core: the
+// CERTIFICATION rays need no visibility, so the producer runs them (with Pin / Nin / the bias it holds; same
+// atomics, order-free); the REVOCATION needs the walk's visibility, so the walk kernel runs it (the keys from
+// the entry: a committed entry -- certNow -- holds exactly the keys the lookup matched). The same lines as above:
+// keep the three in step.
+void sxcSunRevoke(SxcTexel t, vec3 vis)
+{
+    if (t.cls == SXC_C_OFF || t.cls == SXC_C_SKIP || t.e == 0xFFFFFFFFu) return;
+    SxcBuf b = sxcBuf();
+    const bool lit = max(max(vis.r, vis.g), vis.b) > 0.02;
+    const bool revoke = lit && t.certNow;
+    sxcStat(b, SXC_S_SPOTLIT, lit && t.cls == SXC_C_SPOT);
+    sxcStat(b, SXC_S_REVLIT, revoke);
+    if (revoke)
+    {
+        atomicOr(b.w[t.e + SXC_E_FLAGS], SXC_F_REVOKE);
+        sxcRevokeNeighbours(b, b.w[t.e + SXC_E_KEY0], b.w[t.e + SXC_E_KEY1]);
+    }
+}
+void sxcSunCertify(SxcTexel t, vec3 Pin, vec3 Nin, vec3 cam, float bias, uint frame)
+{
+    if (t.cls == SXC_C_OFF || t.cls == SXC_C_SKIP || t.e == 0xFFFFFFFFu || !t.ticket) return;
+    SxcBuf b = sxcBuf();
+    const uint nb = max(b.w[SXC_H_NB], 1u);
+    const uint n = min(nb, 8u);
+    const uint rs = b.w[t.e + SXC_E_RS];
+    const uint seed = b.w[t.e + SXC_E_RFRAME];
+    const uint i0 = atomicAdd(b.w[t.e + SXC_E_RRAYS], n);
+    const bool cone = uintBitsToFloat(b.w[SXC_H_CONE]) > 0.0;
+    const float tmax = uintBitsToFloat(b.w[SXC_H_TMAX]);
+    const vec3 Nr = rtVisibleSide(Nin, Pin, cam);
+    const vec3 o = rtReceiverOrigin(Pin, Nr, length(Pin - cam), bias + rt_cl_lift);
+    uint open = 0u, nblock = 0u;
+    float tmin = 1e30;
+    for (uint j = 0u; j < n; ++j)
+    {
+        const uint idx = i0 + j;
+        const uint k = idx % nb;
+        const vec3 d = sxcWedgeDir(b, rs + k, sxcPattern(idx / nb, seed, cone));
+        float th = -1.0;
+        if (dot(Nr, d) > 0.035) th = sxcCertRay(o, d, tmax);
+        if (th < 0.0) open |= 1u << k;
+        else { tmin = min(tmin, th); ++nblock; }
+    }
+    if (open != 0u) atomicOr(b.w[t.e + SXC_E_ROPEN], open);
+    if (tmin < 1e29) atomicMin(b.w[t.e + SXC_E_RBT], floatBitsToUint(tmin));
+    const uint nr = subgroupAdd(n), nbk = subgroupAdd(nblock);
+    if (subgroupElect())
+    {
+        atomicAdd(b.w[SXC_STATS + SXC_S_CRAYS], nr);
+        atomicAdd(b.w[SXC_STATS + SXC_S_CBLOCK], nbk);
+    }
+}
 // RenderVKSunCertDebug: 1 = what SXC decided (green skipped, cyan spot check, orange traced in a
 // certified cell's uncovered part, blue traced uncertified, yellow + certifying rays this frame,
 // magenta no entry, grey not considered, red a lit ray revoked the cell); 2 = certificate age

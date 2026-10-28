@@ -280,6 +280,9 @@ public:
     // recordFrame(). The format was fixed at beginFrameToView() (all swapchain
     // images share it) so pipelines built during UI buffering stay valid.
     void setFrameColorView(VkImageView colorView) { mFrameColorView = colorView; }
+    // #1076 VR: lay this frame's 2D UI draws into another view of the frame's size / format
+    // too (the UI wall image; LOAD, the caller clears it). Before recordFrame(); keeps the batches.
+    void replayTo(VkCommandBuffer cmd, uint32_t frameSlot, VkImageView colorView);
     // flush + record draws into cmd, uploading this frame's vertices into the VBO
     // ring slot `frameSlot` (0..framesInFlight-1). The caller guarantees that slot
     // is retired (its in-flight fence was waited) before calling, so the previous

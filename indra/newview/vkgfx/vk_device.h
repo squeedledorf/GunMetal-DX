@@ -63,6 +63,18 @@ struct GpuImage {
     VkImageView view = VK_NULL_HANDLE;
     VkFormat format = VK_FORMAT_UNDEFINED;
     VkExtent2D extent = {0, 0};
+    // #1075 LAYERED STEREO (research/VR_LAYERED_STEREO_DESIGN.md §3.1 item 3): a screen target
+    // of N views is ONE image of N array layers (layer v = view v). `view` stays a 2D view of
+    // layer 0 (every consumer not converted yet reads view 0 -- exactly the image at N = 1);
+    // arrayView is the 2D_ARRAY view over all layers that converted (arrayed) shaders bind and
+    // multiview passes attach; layerView[v] the 2D view of layer v (v >= 1; [0] = view) for the
+    // modules that stay 2D (FSR / DLSS / FX) and per-eye copies. Created by the renderer
+    // (LLCleanRendererVK::createScreenImage), destroyed with the image (destroyImage). Every
+    // other image: layers = its array layer count, no extra views.
+    uint32_t layers = 1;
+    VkImageView arrayView = VK_NULL_HANDLE;
+    static constexpr uint32_t kMaxLayerViews = 4;   // = LLCleanRendererVK::kMaxViews
+    VkImageView layerView[kMaxLayerViews] = {};
 };
 
 // ---- VRAM CATEGORIES (#407) ----
@@ -383,6 +395,30 @@ public:
     using LateExtProvider = std::function<bool(VkInstance, VkPhysicalDevice, std::vector<std::string>& exts,
                                                std::string& why)>;
     void setLateExtensionProvider(LateExtProvider p) { mLateExtProvider = std::move(p); }
+    // #1073 VR (OpenXR, XR_KHR_vulkan_enable2): the runtime creates our instance and device from
+    // OUR create infos (it appends the extensions it needs) on the GPU it requires. Set BEFORE
+    // init*() and only when VR was chosen at startup. Unset (desktop, the default) instance and
+    // device creation are exactly the calls without VR: every hook below is a null check.
+    struct XrHooks
+    {
+        // Replaces vkCreateInstance (both createInstance sites, the validation retry included).
+        std::function<VkResult(const VkInstanceCreateInfo&, VkInstance*)> createInstance;
+        // After the instance exists: the physical device the runtime requires (VK_NULL_HANDLE:
+        // none). It wins over the ranking and RenderVKDeviceSelect when it qualifies.
+        std::function<VkPhysicalDevice(VkInstance)> physicalDevice;
+        // That device can't be used (the reason): VR is refused for the session, the device is
+        // picked and created as on the desktop.
+        std::function<void(const std::string&)> refuse;
+        // Replaces vkCreateDevice (all three createLogicalDevice sites, the retries included).
+        std::function<VkResult(VkPhysicalDevice, const VkDeviceCreateInfo&, VkDevice*)> createDevice;
+    };
+    void setXrHooks(XrHooks h) { mXrHooks = std::move(h); }
+    // The device was created through the runtime (VR hooks set and VR not refused).
+    bool xrDeviceCreated() const { return mXrDeviceCreated; }
+    // VkPhysicalDeviceVulkan11Features::multiview enabled (#1075: on every device that reports it,
+    // desktop included -- one SPIR-V for N = 1 and N = 2 views; no pipeline uses a viewMask at N = 1).
+    bool multiviewEnabled() const { return mMultiview; }
+    uint32_t maxMultiviewViews() const { return mMaxMultiviewViews; }   // 0 without multiview
     // The provider's extensions are enabled on the device (false: see lateExtensionsWhy()).
     bool lateExtensionsEnabled() const { return mLateExtsOn; }
     const std::vector<std::string>& lateExtensions() const { return mLateExts; }
@@ -715,6 +751,19 @@ public:
                                VkImageAspectFlags aspect, bool cube_compatible,
                                VkImageViewType viewType, const char* site = VK_MEM_SITE,
                                const struct VkImageExtra* extra = nullptr);
+    // #1075 LAYERED STEREO: a SCREEN TARGET of `layers` views (GpuImage::layers / arrayView /
+    // layerView). layers <= 1: EXACTLY createImage2D (same create info, memory and 2D view; no
+    // array view -- addArrayView makes one when a converted consumer needs it). layers > 1: the
+    // same image with `layers` array layers (createImageLayers: same memory path for render
+    // targets), `view` = the 2D view of layer 0, arrayView = 2D_ARRAY over every layer,
+    // layerView[v] = the 2D view of layer v. Soft allocation (#697) as createImage2D.
+    GpuImage createScreenImage(uint32_t w, uint32_t h, uint32_t layers, VkFormat format, VkImageUsageFlags usage,
+                               VkImageAspectFlags aspect, uint32_t mipLevels = 1,
+                               VkFormat mutableAltFormat = VK_FORMAT_UNDEFINED, const char* site = VK_MEM_SITE);
+    // The 2D_ARRAY view over every layer (+ every mip) of a screen target, made once (no-op when
+    // it has one). At 1 layer: the only extra object a converted (arrayed) consumer adds on the
+    // desktop -- a view, no memory. False: out of memory (soft) / no image.
+    bool addArrayView(GpuImage& img, VkImageAspectFlags aspect, uint32_t mipLevels = 1);
     // Extra view over a sub-range of an image (caller destroys it). viewUsage != 0 chains
     // VkImageViewUsageCreateInfo: required for a view of a MUTABLE_FORMAT | EXTENDED_USAGE
     // image whose format lacks some of the image's usage (e.g. STORAGE on E5B9G9R9).
@@ -863,6 +912,11 @@ private:
     std::vector<std::string> mLateExts;                // its list (enabled when mLateExtsOn)
     bool mLateExtsOn = false;
     std::string mLateExtsWhy = "no provider";
+    XrHooks mXrHooks;                                  // #1073 setXrHooks (empty = desktop)
+    bool mXrRefused = false;                           // the runtime's GPU could not be used
+    bool mXrDeviceCreated = false;
+    bool mMultiview = false;
+    uint32_t mMaxMultiviewViews = 0;
     bool mDebugRobustOn = false;    // device created with robustBufferAccess (+ robustness2 where supported)
     std::string mDebugRobustStatus = "off";
     VkPipelineRobustnessBufferBehaviorEXT mRobustBuffer = VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DEVICE_DEFAULT_EXT;

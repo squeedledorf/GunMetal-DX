@@ -1259,6 +1259,39 @@
       <key>Value</key>
       <integer>16</integer>
     </map>
+    <key>RenderSnapshotSharpenScale</key>
+    <map>
+      <key>Comment</key>
+      <string>Vulkan (#1093): snapshots larger than the window (accumulated from jittered live frames) are sharpened ONCE on the averaged result with the same contrast-adaptive filter as the live view, at RenderCASSharpness times this scale. The individual samples are never sharpened (that brought back the grain, #932). 1 = the live view's strength (default); 0 = off (the softer pre-#1093 look); above 1 = stronger. Window-size snapshots are unaffected.</string>
+      <key>Persist</key>
+      <integer>1</integer>
+      <key>Type</key>
+      <string>F32</string>
+      <key>Value</key>
+      <real>1.0</real>
+    </map>
+    <key>RenderSnapshotAdaptiveSigma</key>
+    <map>
+      <key>Comment</key>
+      <string>Vulkan (#1093): the width of the reconstruction filter of an accumulated snapshot follows the samples per output pixel (0.5 output px at 4 per pixel, down to 0.3 when dense) instead of a fixed 0.5. Off = the fixed 0.5 (softer). Window-size snapshots are unaffected.</string>
+      <key>Persist</key>
+      <integer>1</integer>
+      <key>Type</key>
+      <string>Boolean</string>
+      <key>Value</key>
+      <integer>1</integer>
+    </map>
+    <key>RenderSnapshotMipBias</key>
+    <map>
+      <key>Comment</key>
+      <string>Vulkan (#1093): while an accumulated snapshot renders its samples, textures use a sharper mip level by log2(1 / upscale) (2x: -1, 4x: -2; at most -3), so the shot keeps the extra texture detail it can resolve. Restored right after the shot. Off = the live view's bias. Window-size snapshots are unaffected.</string>
+      <key>Persist</key>
+      <integer>1</integer>
+      <key>Type</key>
+      <string>Boolean</string>
+      <key>Value</key>
+      <integer>1</integer>
+    </map>
     <key>RenderSnapshotOffscreen</key>
     <map>
       <key>Comment</key>
@@ -2195,6 +2228,41 @@
       <key>Value</key>
       <real>1.047197551</real>
     </map>
+    <!-- <GMDX> camera QOL from SoapStorm -->
+    <key>FSCameraOrtho</key>
+    <map>
+      <key>Comment</key>
+      <string>Render the 3D scene with an orthographic (parallel) projection at the scale the view had at the camera focus distance when it was switched on (camera floater, View menu, numpad 5). Not in mouselook or the OTS combat camera.</string>
+      <key>Persist</key>
+      <integer>0</integer>
+      <key>Type</key>
+      <string>Boolean</string>
+      <key>Value</key>
+      <integer>0</integer>
+    </map>
+    <key>FSAutoPerspectiveOnCameraMove</key>
+    <map>
+      <key>Comment</key>
+      <string>Switch from the orthographic view back to perspective as soon as the camera moves or turns (Blender-style Auto Perspective).</string>
+      <key>Persist</key>
+      <integer>1</integer>
+      <key>Type</key>
+      <string>Boolean</string>
+      <key>Value</key>
+      <integer>1</integer>
+    </map>
+    <key>FSRenderNearClip</key>
+    <map>
+      <key>Comment</key>
+      <string>Distance of the near clip plane from the camera (metres). Can only bring it closer than the standard 0.1: clamped to 0.01-0.1, since a deeper near plane would let the camera see through a wall it is pressed against. Ramps down toward 0.01 when the third person camera is focused closer than 3 m, so alt-cam can zoom right up to a surface.</string>
+      <key>Persist</key>
+      <integer>1</integer>
+      <key>Type</key>
+      <string>F32</string>
+      <key>Value</key>
+      <real>0.1</real>
+    </map>
+    <!-- </GMDX> -->
     <key>CameraOffset</key>
     <map>
       <key>Comment</key>
@@ -3888,6 +3956,28 @@
       <key>Value</key>
       <integer>-1</integer>
     </map>
+    <key>GMDXHUDEditKeepGizmoOnScreen</key>
+    <map>
+      <key>Comment</key>
+      <string>While editing a HUD attachment, pan the HUD view so the move/rotate/stretch manipulator stays on screen, also when zoomed in with the mouse wheel. The view eases back to the normal HUD layout when the edit ends.</string>
+      <key>Persist</key>
+      <integer>1</integer>
+      <key>Type</key>
+      <string>Boolean</string>
+      <key>Value</key>
+      <integer>1</integer>
+    </map>
+    <key>GMDXHUDEditShowBounds</key>
+    <map>
+      <key>Comment</key>
+      <string>While editing a HUD attachment, outline where the real screen is in the (zoomed or panned) HUD view, with centre lines and the HUD attachment points labelled, and box selected prims the normal view does not fully show (red: off screen, orange: over an edge).</string>
+      <key>Persist</key>
+      <integer>1</integer>
+      <key>Type</key>
+      <string>Boolean</string>
+      <key>Value</key>
+      <integer>1</integer>
+    </map>
     <key>GMDXInputOverlayInMouselook</key>
     <map>
       <key>Comment</key>
@@ -4809,6 +4899,63 @@
     <key>Value</key>
       <string></string>
     </map>
+  <!-- <GMDX> SoapStorm combat extras: rez queue warning, ghost projectile watch, right button to scripts -->
+  <key>FSRezQueueIndicator</key>
+    <map>
+    <key>Comment</key>
+        <string>Watch the region's pending asset downloads and show a rez queue warning next to the crosshair (mouselook and OTS) while the sim is refusing to rez objects</string>
+    <key>Persist</key>
+        <integer>1</integer>
+    <key>Type</key>
+        <string>Boolean</string>
+    <key>Value</key>
+      <integer>0</integer>
+    </map>
+  <key>FSRezQueueThreshold</key>
+    <map>
+    <key>Comment</key>
+        <string>Pending downloads at or above which the region is treated as blocking rezzing</string>
+    <key>Persist</key>
+        <integer>1</integer>
+    <key>Type</key>
+        <string>F32</string>
+    <key>Value</key>
+      <real>0.9</real>
+    </map>
+  <key>FSSoapstormGhostProjectileProbeDelay</key>
+    <map>
+    <key>Comment</key>
+        <string>DEBUG: Extra seconds beyond InterpolationTime that a projectile must go without a simulator update before it is probed as a suspected ghost. Raise this if healthy projectiles are being probed.</string>
+    <key>Persist</key>
+        <integer>1</integer>
+    <key>Type</key>
+        <string>F32</string>
+    <key>Value</key>
+      <real>2.0</real>
+    </map>
+  <key>DebugShowSoapstormProjectilesInfo</key>
+    <map>
+    <key>Comment</key>
+        <string>Show Soapstorm ghost projectile diagnostics (counts only) in debug overlay.</string>
+    <key>Persist</key>
+        <integer>1</integer>
+    <key>Type</key>
+        <string>Boolean</string>
+    <key>Value</key>
+      <integer>0</integer>
+    </map>
+  <key>FSRMBScriptEnabled</key>
+    <map>
+    <key>Comment</key>
+        <string>When enabled, the right mouse button in mouselook (OTS included) is reported to scripts as the normal left button (CONTROL_LBUTTON in a control event), next to the mouselook left button (CONTROL_ML_LBUTTON). Right-click zoom and ADS work as before.</string>
+    <key>Persist</key>
+        <integer>1</integer>
+    <key>Type</key>
+        <string>Boolean</string>
+    <key>Value</key>
+      <integer>0</integer>
+    </map>
+  <!-- </GMDX> -->
   <key>FSHitMarkerEnabled</key>
     <map>
     <key>Comment</key>
@@ -4952,6 +5099,250 @@
     <key>Value</key>
       <string>4cbf0d33-03ea-49b1-b671-fdfc37d98002</string>
     </map>
+  <!-- </GMDX> -->
+  <!-- <GMDX> night sky (gmdxnightsky.cpp, vkclean/shaders/gmdx_night_sky.glsl) -->
+  <key>GMDXSpaceAltitude</key>
+  <map>
+    <key>Comment</key>
+    <string>Vulkan: space at altitude. The higher the camera, the thinner the air: above GMDXSpaceStart the sky darkens to deep navy and black, haze thins, the sun turns into a sharp white disc, stars and the Milky Way show by day and a thin blue band of air lines the horizon. Off: the sky is the same at every height. Changes live.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>1</integer>
+  </map>
+  <key>GMDXSpaceStart</key>
+  <map>
+    <key>Comment</key>
+    <string>Vulkan, GMDXSpaceAltitude: the camera height in metres where the air starts to thin (below it nothing changes). Changes live.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>1500.0</real>
+  </map>
+  <key>GMDXSpaceFull</key>
+  <map>
+    <key>Comment</key>
+    <string>Vulkan, GMDXSpaceAltitude: the camera height in metres where the sky has its near-space look (held above). Changes live.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>4000.0</real>
+  </map>
+  <key>GMDXSpaceStrength</key>
+  <map>
+    <key>Comment</key>
+    <string>Vulkan, GMDXSpaceAltitude: how far toward the near-space look the sky goes at GMDXSpaceFull, 0 to 1 (1 = black sky, 0.5 = a dark blue one). Changes live.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>1.0</real>
+  </map>
+  <key>GMDXStarBrightness</key>
+  <map>
+    <key>Comment</key>
+    <string>Vulkan, GMDXPhysicalNight: brightness of the catalogue stars (the Yale Bright Star Catalogue's 9096 stars at their real places, brightness and colours), on top of the sky's own star brightness. 1 = default, 0 = no stars. Changes live.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>1.0</real>
+  </map>
+  <key>GMDXStarLatitude</key>
+  <map>
+    <key>Comment</key>
+    <string>Vulkan, GMDXPhysicalNight: the latitude the night sky is seen from, in degrees (north positive): the celestial pole stands this high over the north horizon and the stars turn about it with the sun. Changes live.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>35.0</real>
+  </map>
+  <key>GMDXNightSkySunLongitude</key>
+  <map>
+    <key>Comment</key>
+    <string>Vulkan, GMDXPhysicalNight: the season of the night sky, as the sun's ecliptic longitude in degrees (0 = March equinox, 90 = June solstice: a northern summer night with the Milky Way's core in the south, 180 = September, 270 = December). Changes live.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>90.0</real>
+  </map>
+  <key>GMDXStarScintillation</key>
+  <map>
+    <key>Comment</key>
+    <string>Vulkan, GMDXPhysicalNight: how much the stars twinkle (more near the horizon, where their colours also flicker apart). 1 = default, 0 = steady stars. Changes live.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>1.0</real>
+  </map>
+  <key>GMDXMilkyWay</key>
+  <map>
+    <key>Comment</key>
+    <string>Vulkan, GMDXPhysicalNight: brightness of the Milky Way (ESO/S. Brunier's panorama) in a dark night sky; twilight and moonlight wash it out. 1 = default, 0 = none. Changes live.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>1.0</real>
+  </map>
+  <key>GMDXAirglow</key>
+  <map>
+    <key>Comment</key>
+    <string>Vulkan, GMDXPhysicalNight: brightness of the dark sky's own glow: the dark navy that keeps a moonless sky from pure black, and the airglow's faint green-grey tint low over the horizon. Twilight and moonlight wash it out. 1 = default, 0 = none (a black sky). Changes live.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>1.0</real>
+  </map>
+  <key>GMDXZodiacalLight</key>
+  <map>
+    <key>Comment</key>
+    <string>Vulkan, GMDXPhysicalNight: brightness of the zodiacal light, sunlight off the solar system's dust: a faint warm cone over the horizon on the sun's side after dusk and before dawn. 1 = default, 0 = none. Changes live.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>1.0</real>
+  </map>
+  <key>GMDXPlanets</key>
+  <map>
+    <key>Comment</key>
+    <string>Vulkan, GMDXPhysicalNight: brightness of the planets Mercury, Venus, Mars, Jupiter and Saturn, steady points of their own colours on the stars' path of the sun (Venus and Mercury only near the sun, at dusk and dawn). They move on the real calendar from night to night; the season (GMDXNightSkySunLongitude) places the Earth. 1 = their real brightness next to the stars, 0 = none. Range 0 to 4. Changes live.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>1.0</real>
+  </map>
+  <key>GMDXMeteors</key>
+  <map>
+    <key>Comment</key>
+    <string>Vulkan, GMDXPhysicalNight: how often shooting stars cross a dark night sky. 1 = a few a minute (a quarter of the photo studio's meteor rate, RenderMeteorSpawnInterval, which with RenderMeteorsEnabled and RenderMeteorMaxCount still applies); none by day or in bright twilight, fewer under a bright moon. 0 = none. Range 0 to 4. Changes live.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>1.0</real>
+  </map>
+  <key>GMDXMeteorShower</key>
+  <map>
+    <key>Comment</key>
+    <string>Vulkan, GMDXPhysicalNight: a meteor shower. Many more shooting stars (up to 9 times as many with the radiant overhead), most flying away from one point, the radiant of the shower nearest the season (GMDXNightSkySunLongitude): the Perseids in August, the Geminids in December, and so on. Changes live.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>0</integer>
+  </map>
+  <key>GMDXSatellites</key>
+  <map>
+    <key>Comment</key>
+    <string>Vulkan, GMDXPhysicalNight: how many satellites glide across the sky after dusk and before dawn: faint steady points that shine while sunlight still reaches them high up and fade out as they pass into the Earth's shadow. 1 = one every 40 seconds or so (at most 6 at once), 0 = none. Range 0 to 4. Changes live.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>1.0</real>
+  </map>
+  <key>GMDXDeepSky</key>
+  <map>
+    <key>Comment</key>
+    <string>Vulkan, GMDXPhysicalNight: brightness of the faint smudges beyond the stars at their real places: the Andromeda galaxy, the Orion nebula, the Pleiades' blue haze, and in southern skies the Large and Small Magellanic Clouds. Twilight and moonlight wash them out like the Milky Way. 1 = default, 0 = none. Range 0 to 4. Changes live.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>1.0</real>
+  </map>
+  <key>GMDXStarLimitMagnitude</key>
+  <map>
+    <key>Comment</key>
+    <string>Vulkan, GMDXPhysicalNight: the faintest stars drawn, as a magnitude: fainter ones fade out (over half a magnitude). 8 = every star of the catalogue (default), 6.5 = what the eye sees in a dark sky, 3 = only the brightest 170 or so, the constellations' outlines. Range 3 to 8, step 0.1. Changes live.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>8.0</real>
+  </map>
+  <key>GMDXStarSize</key>
+  <map>
+    <key>Comment</key>
+    <string>Vulkan, GMDXPhysicalNight: size of the stars (and planets and satellites) on screen; their peak brightness is kept, so bigger stars also look brighter. 1 = default (as sharp as the screen allows). Range 0.5 to 3, step 0.05. Changes live.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>1.0</real>
+  </map>
+  <key>GMDXStarSaturation</key>
+  <map>
+    <key>Comment</key>
+    <string>Vulkan, GMDXPhysicalNight: colour saturation of the night sky: the stars' and planets' colours, the Milky Way and the deep-sky glow. 1 = their real colours (default), 0 = all white / grey, 2 = twice as colourful. Range 0 to 3, step 0.05. Changes live.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>1.0</real>
+  </map>
+  <key>GMDXMilkyWayRotation</key>
+  <map>
+    <key>Comment</key>
+    <string>Vulkan, GMDXPhysicalNight: turns the Milky Way along its own band, in degrees, moving its bright core away from Sagittarius (the stars stay where they are). 0 = the real sky (default). Range -180 to 180, step 1. Changes live.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>0.0</real>
+  </map>
+  <key>GMDXMilkyWayTilt</key>
+  <map>
+    <key>Comment</key>
+    <string>Vulkan, GMDXPhysicalNight: tilts the Milky Way's band about its core, in degrees, so it crosses the sky at another angle (the stars stay where they are). 0 = the real sky (default). Range -90 to 90, step 1. Changes live.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>0.0</real>
+  </map>
+  <key>GMDXFantasySky</key>
+  <map>
+    <key>Comment</key>
+    <string>Vulkan, GMDXPhysicalNight: a game look for the night sky on top of the other night sky settings: brighter, bigger and more colourful stars, a much brighter Milky Way with its faint outskirts lifted, more shooting stars, stronger deep-sky glow and zodiacal light. 0 = the real sky (default). Changes live.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>0</integer>
+  </map>
   <!-- </GMDX> -->
   <!-- <GMDX> avatars drawn while they load (llcleansysavatar.cpp, llvoavatar.cpp) -->
   <key>GMDXAlphaMaskPullMM</key>
@@ -5245,6 +5636,94 @@
     <key>Value</key>
       <integer>1</integer>
     </map>
+  <key>GMDXMapShareShow</key>
+    <map>
+    <key>Comment</key>
+        <string>Mini-map: draw the marks, zones and pings that people in your region share with you through their GunMetal-DX Helper (gmdxmapshare.h); those object chat lines are then hidden. Only from the people in your map share list (Send To, ticked or not) and the members of the groups you send to (your worn group while GMDXMapShareMyGroup, the ticked groups); anyone else's line stays chat text, and a mark or zone from them asks (Accept / Always / Deny / Mute); their pings are never drawn. Off: shares stay plain chat text and are not drawn.</string>
+    <key>Persist</key>
+        <integer>1</integer>
+    <key>Type</key>
+        <string>Boolean</string>
+    <key>Value</key>
+      <integer>1</integer>
+    </map>
+  <key>GMDXMapShareShowAsText</key>
+    <map>
+    <key>Comment</key>
+        <string>Mini-map: shared map lines also stay in the nearby chat as plain object chat (for checking what was sent).</string>
+    <key>Persist</key>
+        <integer>1</integer>
+    <key>Type</key>
+        <string>Boolean</string>
+    <key>Value</key>
+      <integer>0</integer>
+    </map>
+  <key>GMDXMapShareSend</key>
+    <map>
+    <key>Comment</key>
+        <string>Map shares and pings can be sent (gmdxmapshare.h): the #GunMetal-DX Helper is worn while this is on, and says each one privately (llRegionSayTo) to the people you send to who are in your region; nobody outside your region ever gets one. Off: the helper comes off unless another feature uses it, and nothing can be sent. Receiving needs no helper.</string>
+    <key>Persist</key>
+        <integer>1</integer>
+    <key>Type</key>
+        <string>Boolean</string>
+    <key>Value</key>
+      <integer>1</integer>
+    </map>
+  <key>GMDXPingSeconds</key>
+    <map>
+    <key>Comment</key>
+        <string>Mini-map: how long a received ping shows on the mini-map and over the world, in seconds (3 to 60, as in Preferences &gt; Combat &gt; Pings).</string>
+    <key>Persist</key>
+        <integer>1</integer>
+    <key>Type</key>
+        <string>F32</string>
+    <key>Value</key>
+      <real>10.0</real>
+    </map>
+  <key>GMDXPingBlip</key>
+    <map>
+    <key>Comment</key>
+        <string>Mini-map and World Map: a ping arrives as a radar blip (gmdxmapshare.h): a flash and three rings spreading out in the ping's colour, then its dot fades away over the ping's life (GMDXPingSeconds); the marker over the world pulses the same way as it appears. Off: one ring a second for its first 2 seconds, and it fades over its last 1.5 seconds.</string>
+    <key>Persist</key>
+        <integer>1</integer>
+    <key>Type</key>
+        <string>Boolean</string>
+    <key>Value</key>
+      <integer>1</integer>
+    </map>
+  <key>GMDXPingSound</key>
+    <map>
+    <key>Comment</key>
+        <string>Mini-map: a short sound (UISndChatPing) when someone's ping arrives.</string>
+    <key>Persist</key>
+        <integer>1</integer>
+    <key>Type</key>
+        <string>Boolean</string>
+    <key>Value</key>
+      <integer>1</integer>
+    </map>
+  <key>GMDXPingWheelHoldMs</key>
+    <map>
+    <key>Comment</key>
+        <string>The ping wheel's key (map_ping_wheel, default Shift+B; gmdxpingwheel.h): let go within this many milliseconds, it sends a plain Ping where it went down; held longer, a wheel of Ping / Enemy / Rally opens and letting go on a slice sends that kind (in the middle: nothing). 50 to 2000. Set in Preferences &gt; Combat &gt; Pings.</string>
+    <key>Persist</key>
+        <integer>1</integer>
+    <key>Type</key>
+        <string>S32</string>
+    <key>Value</key>
+      <integer>250</integer>
+    </map>
+  <key>GMDXPingWheelKeysMoved</key>
+    <map>
+    <key>Comment</key>
+        <string>Internal (llviewerinput.cpp): your key_bindings.xml was moved over to the ping wheel once: Shift+B, which pinged an enemy, opens the ping wheel where it still had that old default, and the wheel got Shift+B where it was free. Set back to 0 to do it again at the next start.</string>
+    <key>Persist</key>
+        <integer>1</integer>
+    <key>Type</key>
+        <string>Boolean</string>
+    <key>Value</key>
+      <integer>0</integer>
+    </map>
   <key>GMDXMiniMapZoneDotted</key>
     <map>
     <key>Comment</key>
@@ -5332,6 +5811,28 @@
         <string>S32</string>
     <key>Value</key>
       <integer>0</integer>
+    </map>
+  <key>GMDXMiniMapHideAbove</key>
+    <map>
+    <key>Comment</key>
+        <string>Mini-map (and the People panel's map) "Hide avatars high above me": avatars more than GMDXMiniMapHideAboveMeters above your own height get no dot, no hover info and cannot be picked by a right-click, e.g. people sitting on build platforms during combat. An avatar the viewer only knows as "1020 m or higher" (unknown altitude) is hidden whenever you are below 1020 m, whatever the height.</string>
+    <key>Persist</key>
+        <integer>1</integer>
+    <key>Type</key>
+        <string>Boolean</string>
+    <key>Value</key>
+      <integer>0</integer>
+    </map>
+  <key>GMDXMiniMapHideAboveMeters</key>
+    <map>
+    <key>Comment</key>
+        <string>Mini-map: with GMDXMiniMapHideAbove on, how many metres above your own height an avatar must be to be hidden (250 to 1000).</string>
+    <key>Persist</key>
+        <integer>1</integer>
+    <key>Type</key>
+        <string>F32</string>
+    <key>Value</key>
+      <real>250.0</real>
     </map>
   <key>GMDXMiniMapPhysicalOnly</key>
     <map>
@@ -6996,6 +7497,17 @@
       <key>Value</key>
       <integer>7</integer>
     </map>
+    <key>FavoriteWearablesSortOrder</key>
+    <map>
+      <key>Comment</key>
+      <string>Sort of the Favorite Wearables window (2 = name, 3 = date added, 18 = type)</string>
+      <key>Persist</key>
+      <integer>1</integer>
+      <key>Type</key>
+      <string>U32</string>
+      <key>Value</key>
+      <integer>2</integer>
+    </map>
     <key>InventoryTrashMaxCapacity</key>
     <map>
         <key>Comment</key>
@@ -8631,6 +9143,17 @@
       <key>Value</key>
       <real>3.0</real>
     </map>
+    <key>MouseSensitivityZoomed</key>
+    <map>
+      <key>Comment</key>
+      <string>Mouse sensitivity while the right button zooms in plain mouselook, on the same 0-15 scale as MouseSensitivity (and, like it, slowed by the zoom). Aiming down sights uses FSADSMouseSensitivity instead.</string>
+      <key>Persist</key>
+      <integer>1</integer>
+      <key>Type</key>
+      <string>F32</string>
+      <key>Value</key>
+      <real>3.0</real>
+    </map>
     <key>MouseSmooth</key>
     <map>
       <key>Comment</key>
@@ -9250,7 +9773,7 @@
     <key>GMDXChatBubbleStyle</key>
     <map>
       <key>Comment</key>
-      <string>Chat bubbles (UseChatBubbles) in the GunMetal-DX chat log look: the usual see-through bubble (ChatBubbleOpacity) in Barlow, edged in the speaker's name colour. Off: the standard bubbles.</string>
+      <string>Chat bubbles (UseChatBubbles) in the GunMetal-DX chat log look: the usual see-through bubble (ChatBubbleOpacity) in Barlow, edged in the speaker's name colour, the chat text near-white with a soft dark outline until it expires. Off: the standard bubbles.</string>
       <key>Persist</key>
       <integer>1</integer>
       <key>Type</key>
@@ -9301,6 +9824,33 @@
       <string>S32</string>
       <key>Value</key>
       <integer>560</integer>
+    </map>
+    <key>GMDXChatLogRect</key>
+    <map>
+      <key>Comment</key>
+      <string>GunMetal-DX chat log: the panel's place in the window (left, top, right, bottom), set by unlocking it (the lock left of its gear) and dragging it or its edges; the lines at rest show there too. All zeros: over the chat bar, as wide as it (the gear menu's Reset chat log position).</string>
+      <key>Persist</key>
+      <integer>1</integer>
+      <key>Type</key>
+      <string>Rect</string>
+      <key>Value</key>
+      <array>
+        <integer>0</integer>
+        <integer>0</integer>
+        <integer>0</integer>
+        <integer>0</integer>
+      </array>
+    </map>
+    <key>GMDXChatLogShade</key>
+    <map>
+      <key>Comment</key>
+      <string>GunMetal-DX chat log: strength (0 - 1) of the soft dark band under each line at rest and in combat, which keeps the lines readable over a bright world (snow, sky); 0 turns it off.</string>
+      <key>Persist</key>
+      <integer>1</integer>
+      <key>Type</key>
+      <string>F32</string>
+      <key>Value</key>
+      <real>0.4</real>
     </map>
     <key>GMDXChatLogTextSize</key>
     <map>
@@ -11300,7 +11850,7 @@
     <key>Comment</key>
     <string>Select-to-diagnose (Vulkan clean ingest, #88): when the edit selection changes, log one "VKIngestDiag" INFO block per selected object (every linkset member) with its face list, decode/capture/slot/LOD-group/instance state, rigged routing and GPU spin, then a one-line summary of what is NOT in the GPU scene. Only runs on selection changes.</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -11388,7 +11938,7 @@
     <key>Comment</key>
     <string>Vulkan diagnostic: log (VKWhiteBase, at most 8 lines per 2 s) when a live material LOSES its resolved base-colour map (with the texture, reason and the object / avatar drawing it), when an instance switches material (with the descriptor fields that differ -- what flips a face's material), when a dead material is revived, and when a stale dead verdict would have cleared a material still in use. Counts are always in the VKTexUpload summary line (white_base, revived, clear_refused, mat_flips)</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -11608,7 +12158,7 @@
     <key>Comment</key>
     <string>Vulkan diagnostic (#478): every ~2 s log one line (VKGpu) of the GPU-driven reflection probes' counters -- occupied / placed 16 m cells at the last re-bin, placements this frame and still queued, resident cube slots, the scheduled and realtime jobs' slots. Read back asynchronously (a 64-byte copy, three frames late); off = no copy at all. Placement and scheduling never read anything back.</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -11872,7 +12422,7 @@
     <key>Comment</key>
     <string>Debug: every 120 frames log (VKAnim) each attached animesh's frame alignment with its wearer: order_lag (frames the wearer's skeleton was behind when the animesh placed itself, want 0), gpu_follow (root from the wearer's GPU joint this frame), cpu_attach_rb_age (age of the CPU's readback copy of the attachment point). The same readout shows in the DebugAnimatedObjects hover text ("attach align"). Live.</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -11905,7 +12455,7 @@
     <key>Comment</key>
     <string>Debug for RenderVKAnimIncremental: about 1 in 8 cached pose exports per frame also run LL's full addMotion + export path; the blender calls and the resulting GPU blend inputs are compared bitwise, the full result is used, and mismatches are logged (tag VKAnimIncr, at most once per second; counters animVerify / animVerifyMismatch).</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -12532,7 +13082,7 @@
     <key>Comment</key>
     <string>Vulkan (#567, diagnostics): with RenderVKGpuTimers on, split c_shadows / c_projshadow into per-cascade and per-tile sub-marks (c_sun_cull, g_sun_draw, g_sun_overlay, c_proj_records, c_proj_cull, g_proj_static, g_proj_copy, g_proj_dyn...). Off by default. Live.</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -12576,7 +13126,7 @@
     <key>Comment</key>
     <string>Vulkan diagnostic: log the touch SurfaceInfo (face, ST, UV, position, normal, binormal) sent with every ObjectGrab / GrabUpdate / DeGrab (VKTouch).</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -12664,7 +13214,7 @@
     <key>Comment</key>
     <string>Vulkan: also use the GPU target-omega spin for physical, moving or sat-on linksets (old behaviour). Off (default): those take LL's eased drawable pose like Firestorm, so a turning vehicle's root and its scripted children (steering wheel, gauges) are smoothed (#180). Live for newly posed objects.</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -12708,7 +13258,7 @@
     <key>Comment</key>
     <string>Vulkan: log (throttled, VKHudDiag) what the clean pipeline does with HUD prim pose and colour/alpha changes. Diagnostic for HUDs that don't update.</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -12818,7 +13368,7 @@
     <key>Comment</key>
     <string>Vulkan (roadmap phase 2): master switch for the queue-overlap changes -- RenderVKOverlapMaskAO, RenderVKOverlapGodRays, RenderVKOverlapTlas, RenderVKOverlapParticles, RenderVKProbePrivateCull, RenderVKProbeEarly. Off = the pre-phase-2 barrier placement and pass order exactly, for A/B and bisecting. No visual difference either way</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -12829,7 +13379,7 @@
     <key>Comment</key>
     <string>Vulkan (phase 2, needs RenderVKPreciseBarriers): SSAO and the ray-traced shadow mask share one depth transition after the depth pre-pass and run interleaved (trace beside SSAO, temporal beside blur H, spatial beside blur V) instead of two serial chains; the mask's history copies move ahead of the pre-pass. Off = sequential. Occlusion culling forces sequential</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -13280,7 +13830,7 @@
     <key>Comment</key>
     <string>Vulkan cluster LOD (#745, debug view): 0 off, 1 colour by cluster, 2 colour by DAG level, 3 highlight clusters drawn as a fallback for a missing finer page (red; green = own level), 4 the cluster draw with its real materials, 5 seam view (#798): red = a cluster of a level that simplified the face's open border (the weld seam to the next mesh loses vertices there), orange = the same drawn as the fallback of a missing finer page, grey = border intact, 6 weld view (#798): per skinned cluster, grey = no weld candidate, green = candidates welded, cyan = every candidate already seamless (left alone, #798 no-op), yellow = some welded or seamless / some with no partner, red = candidates but none welded (no other mesh within RenderVKRigWeldDistance in the pairing space), blue = rejected by skin weights / max gap only. Any non-zero value also draws the selected clusters as an overlay in the G-buffer (rigged meshes of avatars on the cluster path skinned; those of avatars still on the legacy path in rest pose)</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>U32</string>
     <key>Value</key>
@@ -13456,7 +14006,7 @@
     <key>Comment</key>
     <string>Vulkan device-loss diagnostic (#845 / #917; restart required): create the device with robustBufferAccess and, where supported, VK_EXT_robustness2 (robustBufferAccess2, robustImageAccess2, nullDescriptor), so every pipeline's out-of-range or null descriptor reads return zero instead of faulting. If a device loss stops with this on, a descriptor read was out of range or unbound; if it persists, the fault is a raw device address or freed memory. Costs some GPU time. Logged at startup as 'debug robustness'</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -13467,7 +14017,7 @@
     <key>Comment</key>
     <string>Vulkan async compute (#845 / #917; live): the scene depth (ATTACHMENT / READ_ONLY) and the scene HDR + glow (UNDEFINED -> GENERAL) layout transitions around the async SSAO / RT mask and deferred lighting segments are recorded on the graphics queue right before the fork and after the join, instead of inside the compute-only command buffers. On (default) = no attachment-compression transitions on a queue without a graphics engine (the Windows device losses with the async queue on); off = the previous in-segment barriers (A/B testing)</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -13489,7 +14039,7 @@
     <key>Comment</key>
     <string>Vulkan (roadmap phase 3a): master switch for running compute work on the async compute queue (RenderVKAsyncComputeQueue) beside the graphics queue, with timeline-semaphore fork / join points. -1 (default) = automatic, per GPU architecture, decided at startup: ON for NVIDIA Turing and newer and AMD discrete GPUs (GCN / RDNA), OFF for NVIDIA Maxwell / Pascal / Volta (no documented concurrent graphics + compute benefit before Ampere; Windows device losses), AMD RDNA2 (RX 6000) on AMD's own driver (#845), AMD integrated GPUs, Intel (all), other vendors and NVIDIA on non-NVIDIA drivers (untested). Automatic off means no second queue at all (the pre-phase-3 device), so setting 1 then needs a restart. Applies only while RenderVKAsyncComputeQueue is at its default; the decision and its reason are logged at startup ('VKAsync: auto -> ...') and shown in About and the device-lost report. 1 = on whenever a second queue exists, 0 = off: everything recorded on the graphics queue exactly as before (the recorded command stream is the phase-2 one; live). Each workload has its own switch: RenderVKAsyncRTBuild, RenderVKAsyncMaskAO, RenderVKAsyncGodRays, RenderVKAsyncVolumetrics, RenderVKAsyncPost, RenderVKAsyncProbeRT, RenderVKAsyncDeferredLighting. No effect without a second queue, on snapshots / offscreen renders, or with RenderVKPreciseBarriers off. Research and sources: research/ASYNC_COMPUTE_BY_ARCH.md</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>S32</string>
     <key>Value</key>
@@ -13500,7 +14050,7 @@
     <key>Comment</key>
     <string>Vulkan (phase 3a, needs RenderVKAsyncCompute): BLAS builds / refits, the rig copy and the TLAS build run on the async compute queue while the graphics queue records the alpha sort, readbacks, particles and the main-view depth pre-pass (moved ahead of the shadow / probe / mirror views for this; the RT build's cull inputs are shared with those views' culls, so they wait for it). Off = recorded on the graphics queue. The pre-pass move (and so most of the overlap) needs the split pre-pass (RenderVKDepthPrepass with AO, motion vectors or the RT mask) and occlusion culling off; otherwise the build only overlaps the alpha sort / readbacks / particle compute</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -13511,7 +14061,7 @@
     <key>Comment</key>
     <string>Vulkan (phase 3a, needs RenderVKAsyncCompute and RenderVKOverlapMaskAO): the RT shadow mask (trace, temporal, spatial) and SSAO (+ blurs) run on the async compute queue from the finished pre-pass depth, while the graphics queue renders the reflection-probe faces and the planar mirror; pass 1b waits on them. Off = recorded on the graphics queue</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -13533,7 +14083,7 @@
     <key>Comment</key>
     <string>Vulkan (#978, phase 1; with the deferred lighting on the async queue -- RenderVKAsyncDeferredLighting --, RenderVKAsyncLayoutsOnGraphics and ray-traced GI on, RenderVKGI): 1 (default) = the async lighting chain (q_defer_light) ends after the GI trace + its denoiser, and the graphics queue no longer waits for it right after the reflection probe faces: it first records the acoustics trace and forks the volumetric fog / ray-traced probe face segments, then waits for the chain in pass 1b right before the combine (BASE + LOCAL / COMBINE), which it runs itself. The GI trace starts exactly as early as before (its inputs: this frame's G-buffer, TLAS, projector tiles and the ReSTIR emissive build at the chain's head; it cannot run beside the RT reflections or the ReSTIR pass, which share its buffers). Same frame's GI (no added latency). Timers: g_join_gi = the graphics queue's wait for the chain, q_gi_beside = graphics work done beside it, q_gi_hidden = chain time not waited for, g_defer_tail = the combine on graphics. 0 = the old order (graphics waits at g_join_defer after the probe faces; the combine inside q_defer_light). Live</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -13544,7 +14094,7 @@
     <key>Comment</key>
     <string>Vulkan (#978, phase 2; ray-traced GI on, RenderVKGI): 1 = ONE FRAME OF GI LATENCY. The combine (BASE + LOCAL / COMBINE) uses LAST frame's GI, reprojected to this frame's camera (a disocclusion, a teleport / camera cut or a resize takes the GI radiance cache there, else the reflection probes), and this frame's GI trace + radiance-cache resolve + GI denoiser run AFTER the combine on their own async compute segment (q_gi_lag) beside the rest of the frame (sky, alpha depth, particles, god rays, pass 2, motion blur, the TAA / DLSS / FSR resolve), joined right before the SSR copy / bloom (g_join_gi_lag: ~0 when it fit). The async lighting chain (q_defer_light) then holds only the shadows + reflections + RT reflections, which the graphics queue still waits for before the combine (g_join_gi). Costs while on: a depth snapshot (4 B / render pixel) and a copy of the GI state for the forward pass (32 B / cache slot: 8 MB at 2^18); the asynchronous god rays stay on graphics on such frames. Builds on RenderVKGIEarlyTrace's split (on whenever this is). Timers: q_gi_lag, g_join_gi_lag, q_gi_lag_hidden = the GI time not waited for. 0 (default) = phase 1 exactly (same frame's GI). Live</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -13555,7 +14105,7 @@
     <key>Comment</key>
     <string>Vulkan (phase 3a, needs RenderVKAsyncCompute and RenderVKOverlapGodRays): the god-ray march and its temporal pass run on the async compute queue while pass 2a (pre-water alpha + particles) rasterizes; the composite waits on them. Off = recorded on the graphics queue</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -13566,7 +14116,7 @@
     <key>Comment</key>
     <string>Vulkan (#718, needs RenderVKAsyncCompute): the volumetric fog's froxel passes (inject, light, temporal, integrate) run on the async compute queue beside pass 1b; the opaque apply at the start of pass 2 waits only for them. Off = recorded on the graphics queue.</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -13588,7 +14138,7 @@
     <key>Comment</key>
     <string>Vulkan (phase 3a, needs RenderVKAsyncCompute and RenderVKProbeEarly): the ray-traced reflection-probe faces (RenderReflectionProbeDetail 3) run on the async compute queue beside pass 1b (the main lit pass), joined before the frame-end probe filters. Works on any async family (compute only). Off = recorded on the graphics queue at the start of pass 1b</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -13610,7 +14160,7 @@
     <key>Comment</key>
     <string>Vulkan, diagnostic: the present mode used with vsync off (RenderVSyncEnable 0). 0 = MAILBOX (no tearing; falls back to IMMEDIATE, then FIFO), 1 = IMMEDIATE (may tear; falls back to MAILBOX, then FIFO). For uneven frame pacing under a compositor that paces MAILBOX on its own cadence (seen on Windows). Live (recreates the swapchain); the chosen mode is logged as 'Swapchain recreated'</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>U32</string>
     <key>Value</key>
@@ -13621,7 +14171,7 @@
     <key>Comment</key>
     <string>Vulkan (roadmap phase 3b, needs RenderVKAsyncCompute): frame pipelining. Each frame's GPU front end (instance / joint / geometry streams, GPU animation, buffer fills, main cull, light + probe clusters, frame info, skin palettes, pre-skin) runs on the async compute queue and waits only for the previous frame's graphics work up to its last reader of those buffers (after its HUD, or after its probe capture when the faces are recorded late) -- not for the previous frame's tail (probe filters, UI, present) or this frame's uploads, which it overlaps. Forces RenderVKAsyncPost off. Frames with buffer growth, the first frame after a non-pipelined one and offscreen renders record the front end on the graphics queue. GPU timers: q_frontend (the segment), q_fe_hidden (the part not waited on by graphics). Off = the phase-3a recording exactly. Default off until validated with sync validation</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -13643,7 +14193,7 @@
     <key>Comment</key>
     <string>Vulkan (phase 2, needs RenderVKPreciseBarriers): the god-ray composite keeps its place in the blend order (RenderVKGodRaysAfterAlpha) but in its own short rendering scope, so only the composite waits for the march and temporal pass and the alpha / water raster before it runs beside them. Off = the march blocks pass 2a</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -13654,7 +14204,7 @@
     <key>Comment</key>
     <string>Vulkan (phase 2, needs RenderVKPreciseBarriers): the TLAS build's release to its consumers (ray-query FS / compute) is recorded at the first consumer (probe faces, mirror, RT mask, pass 1) instead of right after the build, so work in between (alpha sort, particles, shadow tiles, pre-pass, probe culls) is not held behind the acceleration-structure build. Off = released right after the build</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -13665,7 +14215,7 @@
     <key>Comment</key>
     <string>Vulkan (phase 2, needs RenderVKPreciseBarriers): the particle sim / sort chain's release to its draws is recorded at the first particle draw (cascades, mirror or pass 2a) instead of right after the compute, so draws recorded in between are not held behind it. Off = released right after the compute</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -13676,7 +14226,7 @@
     <key>Comment</key>
     <string>Vulkan (phase 2, needs RenderVKPreciseBarriers): reflection-probe capture faces cull into their own buckets and counters (as the planar mirror does) instead of reusing the main cull's after the main and HUD draws consumed them. Needed by RenderVKProbeEarly. Off = shared buffers (about 5 x instance capacity x 20 bytes less VRAM)</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -13687,7 +14237,7 @@
     <key>Comment</key>
     <string>Vulkan (phase 2, needs RenderVKPreciseBarriers + RenderVKProbePrivateCull): record the probe capture faces before the mirror and pass 1 (after the shadow cascades / projector tiles they sample) instead of at the end of the frame, so their culls and raster overlap other work. The filter into the probe arrays stays at the end of the frame, so the main view samples the same probe data as before. Off = whole capture at the frame end</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -13764,7 +14314,7 @@
     <key>Comment</key>
     <string>Vulkan (#731): tint magenta the blended fragments that lay behind the opaque surface and drew only because of RenderVKBlendDepthTol</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -14567,7 +15117,7 @@
     <key>Comment</key>
     <string>Vulkan: how the deferred lighting compute (RenderVKDeferredLighting) runs. 2 (default) = AUTO, per GPU class (#824): the split below on GPUs with hardware ray tracing (where it was tuned, and which the RT shadow merge / projector stochastic / hybrid RT reflection paths need), the uber kernel on GPUs without it (Pascal and older, Polaris / Vega / RDNA1, integrated: a GTX 1080 at 4K lit 0.7-2.0 ms faster with the uber kernel); decided once per session and logged ("VKDeferSplit: RenderVKDeferredSplit 2 (auto)"). 1 = split by the data each part reads: a shadow resolve (sun cascades / RT mask, projector atlas -> a visibility buffer), a reflection resolve (probe blend, SSR, planar mirror, legacy env -> a reflection buffer) and a combine (G-buffer + both buffers + tiled local lights -> HDR + glow); ~20-25 % faster than the uber kernel (RTX 5090). Its pipelines compile with the world pipelines at login. 16 B per render pixel of intermediates (12 B with RenderVKDeferReflectHalfRes; + 8 B mono / 16 B colour projector slots while shadowed projectors are in view; below render scale 1 the 16 B share the G-buffer / bloom alias block with RenderVKAliasTargets), created on first use and freed only when this setting or RenderVKDeferredLighting is turned off; if VRAM refuses them the uber kernel lights those frames and the allocation is retried (1 s, backing off to 30 s; log: "VKDeferSplit: intermediates ... refused"). 0 = one uber kernel (shadows, probes, SSR, local lights and haze in one program: ~128 registers). Debug views, RenderVKLitDebugMask and snapshots always use the uber kernel. Same image within the intermediates' precision. Live</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>U32</string>
     <key>Value</key>
@@ -14578,7 +15128,7 @@
     <key>Comment</key>
     <string>Vulkan split deferred lighting (RenderVKDeferredSplit 1; #827): 1 (default) = the combine step is split by feature. A tile pass (beside the shadow / reflection resolves) builds each 16x16 tile's light mask and lists the tiles any local light reaches; a BASE kernel lights every pixel without local lights (sun / moon + shadow, ambient, reflections, emissive, haze: about half the combine's registers, so far higher occupancy on register-bound GPUs such as Pascal) and stores per pixel how strongly the final colour responds to local light; a LOCAL kernel then runs the local-light walk over the listed tiles only (indirect dispatch) and adds its sum onto BASE's result. Same image up to float rounding (the pre-local colour passes the RGBA16F target once more on lit pixels). +4 B per render pixel (the gain, ~32 MB at 4K) + a small tile list, allocated the first time this is on and kept until split lighting itself is freed (turning this off frees nothing, so a live toggle is safe). GPU timers: g_defer_classify / _shadow / _refl / _base / _local (c_ on the async compute queue). 0 = one combine kernel (A/B reference). Live</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -14600,7 +15150,7 @@
     <key>Comment</key>
     <string>Vulkan feature-split deferred lighting (RenderVKDeferredFeatureSplit 1; #831): 1 (default) = the tile classification (which tiles get the local-light pass, and their light lists) runs inside the shadow pass, one 16 px tile per workgroup, instead of as its own full-screen pass. 0 = the separate classification pass beside the 8x8 shadow pass. Same tile lists, same image; a performance A/B. GPU timers: g_defer_shadow_cls (1) vs g_defer_classify + g_defer_shadow (0); g_defer_prep = the barriers before them (c_ on the async compute queue). Live.</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -14620,9 +15170,9 @@
   <key>RenderVKLightStage</key>
   <map>
     <key>Comment</key>
-    <string>Vulkan deferred lighting (uber kernel and the split combine; #815): 1 (default) = with a per-tile light mask (RenderVKLightCulling 0 or 1) each 16x16 workgroup copies the position / radius, colour / falloff and projector flag of every light its tile mask holds into shared memory once (one light per thread, 8 KB per workgroup), and every pixel's light walk reads them from there instead of two dependent global loads per candidate light. Same lights, same order, same values: the image is bit-identical. 0 = every pixel loads them from the light buffer (A/B reference). No effect with RenderVKLightCulling 2 (froxel cells are per pixel). Shader clock: the copy is charged to stage "grid" / "tile_lights". Live</string>
+    <string>Vulkan deferred lighting (uber kernel and the split combine; #815): 1 = with a per-tile light mask (RenderVKLightCulling 0 or 1) each 16x16 workgroup copies the position / radius, colour / falloff and projector flag of every light its tile mask holds into shared memory once (one light per thread, 8 KB per workgroup), and every pixel's light walk reads them from there instead of two dependent global loads per candidate light. Same lights, same order, same values: the image is bit-identical. 0 (default) = every pixel loads them from the light buffer (A/B reference). No effect with RenderVKLightCulling 2 (the default) (froxel cells are per pixel). Shader clock: the copy is charged to stage "grid" / "tile_lights". Live</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -14633,7 +15183,7 @@
     <key>Comment</key>
     <string>Vulkan split deferred lighting (RenderVKDeferredSplit 1): 1 (default) = the reflection resolve runs at half resolution -- one probe walk per 2x2 pixel block for the irradiance and the soft (rough) specular, upsampled in the combine with a depth-plane + normal aware bilinear filter -- plus a full-resolution pass for the SHARP pixels only (roughness / 1 - glossiness below RenderVKDeferReflectSharpRough, so every SSR surface; a strong planar-mirror weight; legacy shiny (env) faces; fullbright shiny), which keep exact per-pixel reflections. ~4x fewer probe walks on rough surfaces; reflection intermediates 8 instead of 12 B per render pixel. 0 = every pixel at full resolution (A/B reference). Live (the intermediates are re-created)</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -14765,7 +15315,7 @@
     <key>Comment</key>
     <string>Vulkan (RenderVKRTReflections 1, split deferred lighting): trace the reflection rays from a compacted RAY LIST. On (default): a selection pass picks each listed 8 px tile's rays (the same density / budget / strength decisions) and appends them to a list, then the trace runs one lane per ray in full warps. Off: the old in-tile trace, one 64-lane workgroup per listed tile tracing that tile's few rays (at a scene full of weak reflectors ~2 rays per tile, so its cost followed the listed tiles, not the rays). Same rays, same images; GPU timers: c_defer_rtrefl_sel + c_defer_rtrefl_trace (on) vs c_defer_rtrefl_trace (off). Live</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -14775,6 +15325,39 @@
   <map>
     <key>Comment</key>
     <string>Vulkan (RenderVKRTReflections 1 with RenderVKRTReflectionsRayList on): trace the reflection rays as three kernels -- the traversal, the hit's material (surface, textures, weather) and its lighting (sun ray, local lights, environment, blend layers) -- handing each other per-ray records (112 B per ray, sized for RenderVKRTReflectionsRayBudget x the render pixels -- a quarter of them without a budget: ~100 MB at 1440p with the default budget), so each kernel holds only its own working set. Rays past the records' capacity are traced by the single kernel. Same image up to the record's rounding (normals 2 x 16-bit octahedral, colours fp16). 0 = the single trace kernel (also the fallback while the records cannot be allocated). GPU timers: c_defer_rtrefl_trace + c_defer_rtrefl_mat + c_defer_rtrefl_light (+ c_defer_rtrefl_tail). Live.</string>
+    <key>Persist</key>
+    <integer>0</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>0</integer>
+  </map>
+  <key>RenderVKRTHangBeacon</key>
+  <map>
+    <key>Comment</key>
+    <string>Vulkan ray tracing, diagnostic (#1128 GPU hangs in a ray-query kernel): run the ray-query kernels through their HANG BEACON twins -- the RT reflection list trace, forward pass and queued blend layers, the visibility queue's walk (RT / GI hit rays, GI reuse), the shadow core's sun / light-sample walks and VIS tails (queued and fused), the GI trace (fused and split). Before every ray query a lane writes its pixel, the walk about to start (kind, ray mask) and the query's origin / direction / interval into host-visible memory (about 100 MB of system memory while on), and marks itself done when it finishes. If the GPU is lost, the device-lost report names every lane left inside a query (the culprit traversal), the kernels that started in the last frame and the reflection trace's dispatch. The twins compile in the background when this is first switched on (the normal kernels run until they land; then a few frames pass before the twins are bound). Slower while on (every query writes to system memory). Off: nothing changes. Not saved. Live.</string>
+    <key>Persist</key>
+    <integer>0</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>0</integer>
+  </map>
+  <key>RenderVKRTHangBeaconSelfTest</key>
+  <map>
+    <key>Comment</key>
+    <string>TEST MACHINES ONLY -- HANGS THE GPU ON PURPOSE (device lost, the viewer closes). With RenderVKRTHangBeacon on and its kernels bound: for one frame the first ray-query beacon kernel to run records a known query in its lane 0 (site 0xf000, origin (1, 2, 3), direction (0, 0, 1), interval [0, 4]) and then never finishes, to check that the device-lost report reads a hung lane's beacon on this GPU / driver (it must list that lane IN QUERY). Any frame with ray tracing on (shadows, reflections or GI) triggers it. Cleared when used. Not saved.</string>
+    <key>Persist</key>
+    <integer>0</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>0</integer>
+  </map>
+  <key>RenderVKFaultVendorBinary</key>
+  <map>
+    <key>Comment</key>
+    <string>Vulkan diagnostic (#1128): when the driver offers it (VK_EXT_device_fault deviceFaultVendorBinary), ask for its own binary crash dump and, on a graphics device loss, write it to the logs folder (gpu_fault_vendor_binary_*.bin) for the vendor's crash-dump tool -- the one record that can say where hung GPU threads were in a hang that names no address. The startup log says whether the driver offers it. May cost a little GPU time while on (driver bookkeeping). Takes effect after restart. 0 = off.</string>
     <key>Persist</key>
     <integer>1</integer>
     <key>Type</key>
@@ -15123,6 +15706,17 @@
     <key>Value</key>
     <integer>1</integer>
   </map>
+  <key>RenderVKPrepassEqualCompare</key>
+  <map>
+    <key>Comment</key>
+    <string>#1088: how the passes after the depth pre-pass (lit main pass, deferred G-buffer, probe-face mask passes) test depth. 0 (default) = an ordered compare (greater-or-equal under reversed-Z) without depth write: hidden fragments still fail it exactly as with EQUAL, but a surface whose depth comes out one rounding step nearer than the pre-pass's still shades -- some drivers (AMD Windows, Vega iGPUs) compute positions slightly differently per pipeline, which with EQUAL left thin dark lines along triangle edges and holes in alpha-masked text. 1 = exact EQUAL (as before). The compare is dynamic state: no recompile, early depth rejection unchanged. The terminator-triangle and avatar-id passes keep EQUAL (they have no alpha test). Live A/B.</string>
+    <key>Persist</key>
+    <integer>0</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>0</integer>
+  </map>
   <key>RenderVKAOAsync</key>
   <map>
     <key>Comment</key>
@@ -15139,7 +15733,7 @@
     <key>Comment</key>
     <string>!!! DO NOT TURN THIS OFF. !!! Turning it off switches to an old forward fallback that is about 2.5x slower in busy places (measured 91 -> 38 FPS) AND disables ambient occlusion and the ray-traced shadow mask (avatars lose AO and soft RT shadows). Leave it ON (TRUE). The fallback is scheduled for removal (#640). Technical: depth-only pre-pass over the opaque + alpha-mask draws before the lit main pass, which then depth-tests EQUAL so every visible pixel is shaded once; its depth / normals / motion also feed AO, the RT shadow mask, VRS and Hi-Z occlusion.</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -15172,7 +15766,7 @@
     <key>Comment</key>
     <string>GPU raster cursor pick (#702 / #704) diagnostics: log every click pick (hover picks up to 4 per second) with its answer (to the exact ray / trailing / none), the candidate draws and fragments, any depth-window paging, and the object it chose with its claim; plus a per-second summary of exact / trailing / unanswered picks, picks answered between frames and pages (tag VKPick).</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -15238,7 +15832,7 @@
     <key>Comment</key>
     <string>Vulkan RT shadow mask diagnostic: at most every 10 s, one log line (VKRTMaskDiag) with how many of an 8x8 grid of surface texels the sun shadow covers at each stage of the mask (one-frame trace, temporal accumulation, final mask), the history length, the frame info's sun shadow mode as the GPU saw it, and the renderer's sun / mask state. Costs a few tiny GPU copies on the sampled frame. Live</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -15383,7 +15977,7 @@
     <key>Comment</key>
     <string>Vulkan (F10): fill the GPU cull's per-reason reject histogram (one same-address atomic per rejected instance and per emitted draw, in every cull) and log it with the per-bucket draw counts (VKFunnel CULL / CULLREASON) plus the skinVerts* / shadowRigDropped / rigCache* hitch counters. Off: only the two reasons the renderer acts on (rigged capacity, skin cache full) are counted. Switchable live</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -15395,6 +15989,50 @@
     <string>Vulkan (B1 / F4a): RenderCASSharpness sharpens once -- RCAS on the TAA resolve when it runs, else CAS in the final pass (it used to do both, and RCAS also ran without TAA). The output dither then moves into the tonemap whenever the tonemap is the last full-screen pass (no FXAA / SMAA, no LDR glow), so the final pass (and its full-resolution LDR round trip) is skipped unless vignette, grain, CVD, lens distortion, previews, the reference still or the scopes need it. 0 = the old double sharpening and always-on final pass. Switchable live</string>
     <key>Persist</key>
     <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>1</integer>
+  </map>
+  <key>RenderVKDebugFrameHash</key>
+  <map>
+    <key>Comment</key>
+    <string>Vulkan debug (#1075 layered stereo, step 0: the A/B gate): hash the world image at capture point 1 (after the final pass: world only, no selection outline, HUD or UI) every frame through a small readback ring, and log it (tag VKFrameHash, FRAMEHASH lines) when it changes and every 600 frames while it holds; also log the recorded-stream signature (FRAMESIG: the sub-mark names in order) when it changes. For a desktop A/B hold a fixed camera with TAA off and time / weather frozen, then compare two logs with scripts/perf/vk_ab_compare.py. Costs one full-image copy per frame while on. Switchable live</string>
+    <key>Persist</key>
+    <integer>0</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>0</integer>
+  </map>
+  <key>RenderVKDebugViewCount</key>
+  <map>
+    <key>Comment</key>
+    <string>Vulkan debug (#1075 layered stereo, design step 8): render the desktop world as this many views (1 = normal; 2 = stereo: both eyes as layers of one multiview recording, RenderVKDebugStereoIPD apart; up to 4), the window showing view 0. The decisive test of the layered path without a headset: with IPD 0 every layer must equal the single-view image (RenderVKDebugFrameHash logs one FRAMEHASH per layer). Effects not yet converted to layers are off while it is above 1. Read at startup (restart to apply); ignored in VR</string>
+    <key>Persist</key>
+    <integer>0</integer>
+    <key>Type</key>
+    <string>U32</string>
+    <key>Value</key>
+    <integer>1</integer>
+  </map>
+  <key>RenderVKDebugStereoIPD</key>
+  <map>
+    <key>Comment</key>
+    <string>Vulkan debug (#1075 layered stereo, the desktop N = 2 mode, RenderVKDebugViewCount 2): the eyes' separation in millimetres, along the camera's right axis, each eye with the camera's own projection. 0 = every view is the camera itself -- the decisive equality test (layer 0 == layer 1 == the single-view image). Ignored in VR (the headset's located eyes). Switchable live</string>
+    <key>Persist</key>
+    <integer>0</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>0.0</real>
+  </map>
+  <key>RenderVKVRVisibilityMask</key>
+  <map>
+    <key>Comment</key>
+    <string>Vulkan VR (#1075 layered stereo, A/B): the headset's hidden-area mesh (XR_KHR_visibility_mask) is laid into each eye's depth at the near plane before the pre-pass, so the pixels the lens never shows are rejected by every depth-tested pass instead of shaded. Off = every eye pixel is shaded (the old cost). No effect on the desktop or without the extension. GPU timer: g_vr_vismask. Live, not saved</string>
+    <key>Persist</key>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -15438,7 +16076,7 @@
     <key>Comment</key>
     <string>DEBUG (Vulkan, #238): use the 2048-draw alpha-sort variants (about 20 KiB of compute shared memory) even when the device could run the 4096-draw ones (about 36 KiB). Devices with less than that maxComputeSharedMemorySize (AMD GCN / Polaris: 32 KiB) always use them. For testing the fallback; takes effect after restart.</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -15592,7 +16230,7 @@
     <key>Comment</key>
     <string>Vulkan A/B bench: the setting to step (Boolean, U32, S32, F32 or String).</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>String</string>
     <key>Value</key>
@@ -15603,7 +16241,7 @@
     <key>Comment</key>
     <string>Vulkan A/B bench: comma-separated values to step RenderVKBenchSetting through (e.g. 1,3,0).</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>String</string>
     <key>Value</key>
@@ -15614,7 +16252,7 @@
     <key>Comment</key>
     <string>Vulkan A/B bench: comma-separated names to average per value -- GPU sub-marks (g_lit_static, pr_rt_face, c_rtmask, q_async_busy ...) and/or CPU section timers from the section log (sweep_total, vk_sync_total, ui_draw, LL_idle_total, renderFrame ...).</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>String</string>
     <key>Value</key>
@@ -15625,7 +16263,7 @@
     <key>Comment</key>
     <string>Vulkan A/B bench: seconds per value (min 2).</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>F32</string>
     <key>Value</key>
@@ -15636,7 +16274,7 @@
     <key>Comment</key>
     <string>Vulkan A/B bench: seconds discarded after each switch (pipeline builds, history resets, timer latency).</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>F32</string>
     <key>Value</key>
@@ -15647,7 +16285,7 @@
     <key>Comment</key>
     <string>Vulkan A/B bench: rounds through the value list (interleaved, so scene drift averages out).</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>U32</string>
     <key>Value</key>
@@ -15702,7 +16340,7 @@
     <key>Comment</key>
     <string>Vulkan (#695, testing, needs restart): in UMA mode (an integrated GPU with a carve-out, or RenderVKDebugForceUma), treat the carve-out (device-local) heap budget as at most this many MB, so the spill of device-local allocations to the shared host heap and the combined budget can be tested with a 512 MB carve-out on any card. 0 = the real budget.</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>U32</string>
     <key>Value</key>
@@ -15911,7 +16549,7 @@
     <key>Comment</key>
     <string>Vulkan rigged welding (RenderVKRigWeld, #641): 0 = rediscover the weld pairs every frame by a bind-space hash search (the original #574 path, for A/B); 1 = decide each avatar's pairs once, at its rest pose with its own shape (re-decided only on attach / detach, outfit, shape, joint overrides, rigged LOD switches and weld setting changes, asynchronously), and per frame only average the listed pairs. Governs the cluster LOD weld too (#798): 1 = pairs at each avatar's rest pose (per-avatar rest rows rebuilt on the same shape / joint-override triggers, searched per frame on the cut), 0 = bind space. Live.</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>U32</string>
     <key>Value</key>
@@ -15955,7 +16593,7 @@
     <key>Comment</key>
     <string>Vulkan (#167): after the depth pre-pass, build a Hi-Z pyramid from its depth and skip pass-1 drawing of static opaque/mask objects that are completely hidden behind it (exact for the current frame: no popping). Needs RenderVKDepthPrepass. Counters occlTested / occlCulled appear in the hitch-log averages. Experimental, off by default.</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -15966,7 +16604,7 @@
     <key>Comment</key>
     <string>OFF by default for now: in open outdoor scenes it measured ~3 ms a frame SLOWER at 4K on a GTX 1080 (the extra pre-pass phase + Hi-Z build + test cost more than it culls); scene-adaptive on/off is tracked in a ticket. With it and RenderVKOcclusionCull off no Hi-Z is built, so RenderVKClusterOcclusion is idle too. Vulkan: two-phase Hi-Z occlusion culling of the main view (clean_occl2.comp). The depth pre-pass first draws the static objects that were visible last frame (phase 1, plus every avatar), builds a Hi-Z pyramid from that depth, tests every static opaque / mask / alpha-blend draw against it, then draws the newly revealed ones (phase 2). Hidden objects leave the pre-pass, pass 1 and the alpha passes; the result is exact for the current frame (no popping), last frame only decides what goes first. Supersedes RenderVKOcclusionCull. Needs RenderVKDepthPrepass. On a camera cut (teleport, region crossing, sit / stand, camera preset, big jump: the TAA history-reset signal) the frame skips the two phases, draws the plain pre-pass and seeds the visibility list from its frustum set, so the next frame culls normally. Counters occl2Tested / occl2Culled / occl2Revealed / occl2P1 / occl2AlphaTested / occl2AlphaCulled / occl2Reset / occl2CutSkips; GPU sub-marks c_occl_split, c_occl_seed, g_prepass (phase 1), c_hiz, c_occl_p2, g_prepass_p2. Measured (RTX 5090, 4K): GPU -0.26 to -0.64 ms inside buildings, about +0.03 ms in an open view, no hitches.</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -15977,7 +16615,7 @@
     <key>Comment</key>
     <string>Vulkan (diagnostic, restart required): enable VK_KHR_pipeline_executable_properties and create every pipeline with CAPTURE_STATISTICS, then log one "VKPipeStats" line per pipeline and shader stage with every statistic the driver reports (registers, spills, instruction count, subgroup size, ...; vendor-specific) plus the pipeline's name and shader modules. Can slow pipeline creation and bypass the pipeline cache on some drivers; off = no effect at all</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -16553,6 +17191,28 @@
     <string>F32</string>
     <key>Value</key>
     <real>1.0</real>
+  </map>
+  <key>GMDXCloudMinWidth</key>
+  <map>
+    <key>Comment</key>
+    <string>GunMetal-DX volumetric clouds: the smallest cloud footprint the sky's EEP cloud texture may draw, as a share of the cloud layer's thickness (RenderVKVolCloudThickness; 0.05 = 125 m at 2500 m). Finer texture detail is filtered out of the coverage, so detailed cloud textures (Second Life's Midday sky) give clouds instead of thin vertical columns. It also ties a cloud's height to its width: only a cloud 4 x this wide (500 m) reaches the tall cumulus types, one narrower than 2 x sits low. Smaller = taller narrow clouds. 0 = the coverage as fine as the weather map, heights unlimited.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>0.05</real>
+  </map>
+  <key>GMDXWheelScrollsPage</key>
+  <map>
+    <key>Comment</key>
+    <string>GunMetal-DX: on a page that scrolls (Preferences tabs and other scrolling panels), the mouse wheel over a combo box or spinner scrolls the page instead of changing the setting. An open combo list still scrolls with the wheel. Off = the old behaviour (the wheel changes the control under the pointer).</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>1</integer>
   </map>
   <key>GMDXCloudWindSpeed</key>
   <map>
@@ -17791,7 +18451,7 @@
     <key>Comment</key>
     <string>Vulkan (#901): debug view of the rest-pose accumulation: avatar surfaces coloured by their grid -- grey to blue the wetness, white the snow; magenta where the grid has nothing (the per-avatar values apply), orange: no rest position (no skin meta / bind shape for the part yet -- since the #901 / #909 follow-up cluster LOD parts carry theirs); cyan: near self-covered (#909). Also logs every 2 s.</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -18353,6 +19013,331 @@
         <real>0.3</real>
     </map>
   <!-- </GMDX> -->
+  <!-- <GMDX> physical night (gmdxnightlight.cpp) -->
+  <key>GMDXPhysicalNight</key>
+    <map>
+    <key>Comment</key>
+        <string>Night lighting from the moon's real brightness and phase, a smooth dusk, stars, airglow and night vision (GMDX). Off: the old Second Life night.</string>
+    <key>Persist</key>
+        <integer>1</integer>
+    <key>Type</key>
+        <string>Boolean</string>
+    <key>Value</key>
+        <integer>1</integer>
+    </map>
+  <key>GMDXRespectRegionSky</key>
+    <map>
+    <key>Comment</key>
+        <string>Physical night (GMDXPhysicalNight): on a sky that is not one of Second Life's own (a region's or parcel's own EEP environment, a scripted one, a personal sky from inventory), the night exposure lift (GMDXNightExposure*) and the night colour grade (GMDXNightLook, with the Purkinje shift and night noise) are off, so the night keeps the exposure and colours its creator set up; and the light is Second Life's own: the moon at its full EEP strength (no GMDXMoonlightScale, no phase dimming), the sky, clouds, water glint and moon disc lit as with GMDXPhysicalNight off, and Second Life's switch from sun to moon at the horizon instead of physical night's dusk blend. The catalogue stars, Milky Way, planets and the cloud corona stay. Second Life's default skies (Sunrise, Midday, Sunset, Midnight, the default day cycle) and Sky Test keep the full night look. 0 = the night look on every sky. Changes live.</string>
+    <key>Persist</key>
+        <integer>1</integer>
+    <key>Type</key>
+        <string>Boolean</string>
+    <key>Value</key>
+        <integer>1</integer>
+    </map>
+  <key>GMDXNightAmbient</key>
+    <map>
+    <key>Comment</key>
+        <string>Physical night (GMDXPhysicalNight): at night EEP's ambient light (the sky's fill light on surfaces, the haze, the sky the reflection probes see) follows the moon too, as this multiple of the moon's light fraction (GMDXMoonlightScale x 2 x moon_brightness x the phase), at least 1/256 of the sky's own (starlight on a moonless night). Without it the fill light, set for Second Life's full-strength moon, drowned the dimmed moon: nothing looked moonlit and shadows (cloud shadows too) took nothing away. 0.5: moonlit ground against shadow about twice Second Life's old ratio; 1: Second Life's ratio; lower: darker shadows. The night exposure brings the whole scene back up; on a sky without one (legacy skies, dynamic exposure off) that lift is put into the light instead. Not on a creator's sky (GMDXRespectRegionSky). Changes live.</string>
+    <key>Persist</key>
+        <integer>1</integer>
+    <key>Type</key>
+        <string>F32</string>
+    <key>Value</key>
+        <real>0.5</real>
+    </map>
+  <key>GMDXMoonlightScale</key>
+    <map>
+    <key>Comment</key>
+        <string>Physical night (GMDXPhysicalNight): a full moon high in the sky lights the world, the clouds (times GMDXNightCloudLight) and the sky with this fraction of the sun's light (in the viewer's own units: real moonlight is far dimmer, the exposure brings it up). The moon's phase (from where the sun and moon stand) and the sky's moon brightness scale it further; the default moon brightness 0.5 counts as 1.</string>
+    <key>Persist</key>
+        <integer>1</integer>
+    <key>Type</key>
+        <string>F32</string>
+    <key>Value</key>
+        <real>0.05</real>
+    </map>
+  <key>GMDXNightCloudLight</key>
+    <map>
+    <key>Comment</key>
+        <string>Physical night (GMDXPhysicalNight): the moon lights the clouds this many times brighter than GMDXMoonlightScale lights everything else, so night clouds read while the moon's disc, the sky and the ground stay as they are. The default 4.5 lights the clouds as GMDXMoonlightScale 0.22 would with the default 0.05. 1 = the clouds lit like everything else. Only the moon's light: the day and dusk while the sun leads are unchanged. Live</string>
+    <key>Persist</key>
+        <integer>1</integer>
+    <key>Type</key>
+        <string>F32</string>
+    <key>Value</key>
+        <real>4.5</real>
+    </map>
+  <key>GMDXNightLook</key>
+    <map>
+    <key>Comment</key>
+        <string>Physical night (GMDXPhysicalNight): how the night is shown. 1 = photo: as a night photograph, about one stop under the day for a full moon (clouds readable), a cold blue film grade in the shadows, no Purkinje shift. 0 = eye: as the eye sees it, about two stops under the day, with the Purkinje shift (GMDXNightVisionPurkinje). Live</string>
+    <key>Persist</key>
+        <integer>1</integer>
+    <key>Type</key>
+        <string>S32</string>
+    <key>Value</key>
+        <integer>1</integer>
+    </map>
+  <key>GMDXMoonDisc</key>
+    <map>
+    <key>Comment</key>
+        <string>Physical night (GMDXPhysicalNight): brightness of the moon's disc as a light, a multiple of the moonlight (GMDXMoonlightScale, without GMDXNightCloudLight) (follows the phase and EEP moon_brightness; the EEP moon texture keeps its detail). 1 = far over white on screen, so it clips and blooms (GMDXMoonGlow) like a photographed moon; 0 = Second Life's disc. Only for Second Life's own moon texture: a sky creator's own moon texture (on a sky that is not one of Second Life's) is drawn as Second Life draws it, at its own brightness and without phase shading. Live</string>
+    <key>Persist</key>
+        <integer>1</integer>
+    <key>Type</key>
+        <string>F32</string>
+    <key>Value</key>
+        <real>1</real>
+    </map>
+  <key>GMDXMoonGlow</key>
+    <map>
+    <key>Comment</key>
+        <string>Physical night (GMDXPhysicalNight): strength of the night bloom, the soft halo round the bright moon disc (GMDXMoonDisc) and other true highlights, drawn on the final image so cloud in front of the moon blocks it and thin cloud edges glow. Fades in after sunset; the day's bloom is unchanged. Needs the bloom on (RenderBloomStrength above 0); a user bloom threshold (RenderBloomThreshold below 8) takes precedence. 0 = none, 1 = default. Live</string>
+    <key>Persist</key>
+        <integer>1</integer>
+    <key>Type</key>
+        <string>F32</string>
+    <key>Value</key>
+        <real>1</real>
+    </map>
+  <key>GMDXDuskSunHigh</key>
+    <map>
+    <key>Comment</key>
+        <string>Physical night (GMDXPhysicalNight): the sun's height in degrees where dusk begins. Above it the light is the day's as before; from here down to GMDXDuskSunLow the moon's light fades in while the sun's fades out at the horizon, and the light's direction (and the shadows) turns smoothly from the sun to the moon.</string>
+    <key>Persist</key>
+        <integer>1</integer>
+    <key>Type</key>
+        <string>F32</string>
+    <key>Value</key>
+        <real>4.0</real>
+    </map>
+  <key>GMDXDuskSunLow</key>
+    <map>
+    <key>Comment</key>
+        <string>Physical night (GMDXPhysicalNight): the sun's height in degrees (below the horizon) where dusk ends and the moon lights the scene at its full strength. See GMDXDuskSunHigh.</string>
+    <key>Persist</key>
+        <integer>1</integer>
+    <key>Type</key>
+        <string>F32</string>
+    <key>Value</key>
+        <real>-10.0</real>
+    </map>
+  <!-- </GMDX> -->
+  <!-- <GMDX> cloud corona (gmdx_cloud_corona.glsl) -->
+  <key>GMDXCloudCorona</key>
+    <map>
+    <key>Comment</key>
+        <string>The corona: the bright glow and the faint coloured rings (blue inside, red outside) that thin clouds show around the moon or the sun, from light diffracted by the cloud's water droplets, and the pastel colours (iridescence) on thin cloud edges up to about 20 degrees from them, where the droplets are smaller; strongest where the cloud in front of the light is thin, none in clear sky or behind thick cloud. 1 is the real strength (half of what a droplet scatters goes into this forward peak), 0 off: the clouds exactly as before. Volumetric clouds and the physical sky's cloud layer. Part of physical night: none while GMDXPhysicalNight is off.</string>
+    <key>Persist</key>
+        <integer>1</integer>
+    <key>Type</key>
+        <string>F32</string>
+    <key>Value</key>
+        <real>1.0</real>
+    </map>
+  <key>GMDXCloudCoronaDroplet</key>
+    <map>
+    <key>Comment</key>
+        <string>The corona (GMDXCloudCorona): the cloud droplets' typical diameter in micrometres. Smaller droplets give larger rings (the first red ring of 15 is about 4 degrees from the light, of 10 about 6). Typical clouds 10 to 20. The thinnest cloud edges use down to 0.3 times this size (the iridescence).</string>
+    <key>Persist</key>
+        <integer>1</integer>
+    <key>Type</key>
+        <string>F32</string>
+    <key>Value</key>
+        <real>15.0</real>
+    </map>
+  <key>GMDXCloudHalo22</key>
+    <map>
+    <key>Comment</key>
+        <string>The 22-degree halo: the ring, reddish on its sharp inner edge, that ice-crystal clouds (cirrostratus) show 22 degrees from the moon or the sun. Second Life skies do not say whether their clouds are ice, so it is off by default and, when on, every cloud shows it, faintest where the cloud is thick. 1 is a moderate halo (a tenth of the scattered light in the ring), 0 off. Volumetric clouds and the physical sky's cloud layer. Part of physical night: none while GMDXPhysicalNight is off.</string>
+    <key>Persist</key>
+        <integer>1</integer>
+    <key>Type</key>
+        <string>F32</string>
+    <key>Value</key>
+        <real>0.0</real>
+    </map>
+  <!-- </GMDX> -->
+  <!-- <GMDX> sky test (gmdxskytest.cpp) -->
+  <key>GMDXSkyTest</key>
+    <map>
+    <key>Comment</key>
+        <string>Sky Test (World > Environment > Sky Test...): a test sky for tuning the night look, on your screen only (a personal sky, never sent anywhere). The start sky (GMDXSkyTestBase; by default Second Life's skies blended by the sun's height) with the sun, moon, clouds and haze from the GMDXSkyTest* settings. 0 = back to the region sky. Not kept between sessions. Blocked by RLVa @setenv.</string>
+    <key>Persist</key>
+        <integer>0</integer>
+    <key>Type</key>
+        <string>Boolean</string>
+    <key>Value</key>
+        <integer>0</integer>
+    </map>
+  <key>GMDXSkyTestPreset</key>
+    <map>
+    <key>Comment</key>
+        <string>Sky Test: setting this loads a test sky into the GMDXSkyTest* values and turns the test on. 1 full moon high, 2 full moon low, 3 quarter moon, 4 crescent, 5 moonless, 6 dusk (sun -3), 7 deep twilight (sun -8), 8 noon, 9 cloud over a high full moon. At startup (--set) the values you also --set yourself win over the preset.</string>
+    <key>Persist</key>
+        <integer>0</integer>
+    <key>Type</key>
+        <string>S32</string>
+    <key>Value</key>
+        <integer>0</integer>
+    </map>
+  <key>GMDXSkyTestBase</key>
+    <map>
+    <key>Comment</key>
+        <string>Sky Test: the sky the test starts from (its colours, ambient, glow, everything the test does not set). 0 the sky in use (the region/parcel sky, or a personal sky you picked, e.g. World > Environment > Midnight), 1 Second Life Sunrise, 2 Midday, 3 Sunset, 4 Midnight, 5 day cycle (the default): Second Life's Midday, Sunset and Midnight blended by the test sun's height, as a day cycle dims them (Midday from +20 degrees, Sunset +8 to +2, Midnight from -9 down).</string>
+    <key>Persist</key>
+        <integer>0</integer>
+    <key>Type</key>
+        <string>S32</string>
+    <key>Value</key>
+        <integer>5</integer>
+    </map>
+  <key>GMDXSkyTestSunElevation</key>
+    <map>
+    <key>Comment</key>
+        <string>Sky Test: the sun's height in degrees (-90 to 90; below 0 it has set).</string>
+    <key>Persist</key>
+        <integer>0</integer>
+    <key>Type</key>
+        <string>F32</string>
+    <key>Value</key>
+        <real>-30.0</real>
+    </map>
+  <key>GMDXSkyTestSunAzimuth</key>
+    <map>
+    <key>Comment</key>
+        <string>Sky Test: the sun's azimuth in degrees (0 to 360, as Personal Lighting shows it).</string>
+    <key>Persist</key>
+        <integer>0</integer>
+    <key>Type</key>
+        <string>F32</string>
+    <key>Value</key>
+        <real>0.0</real>
+    </map>
+  <key>GMDXSkyTestMoonElevation</key>
+    <map>
+    <key>Comment</key>
+        <string>Sky Test: the moon's height in degrees (-90 to 90; below 0 it has set).</string>
+    <key>Persist</key>
+        <integer>0</integer>
+    <key>Type</key>
+        <string>F32</string>
+    <key>Value</key>
+        <real>40.0</real>
+    </map>
+  <key>GMDXSkyTestMoonAzimuth</key>
+    <map>
+    <key>Comment</key>
+        <string>Sky Test: the moon's azimuth in degrees (0 to 360). With GMDXSkyTestMoonByPhase on, the test sets it from the phase.</string>
+    <key>Persist</key>
+        <integer>0</integer>
+    <key>Type</key>
+        <string>F32</string>
+    <key>Value</key>
+        <real>180.0</real>
+    </map>
+  <key>GMDXSkyTestMoonByPhase</key>
+    <map>
+    <key>Comment</key>
+        <string>Sky Test: place the moon by its phase (GMDXSkyTestMoonPhase): its azimuth is chosen so the sun-moon angle gives that phase at the moon's height. When the two heights cannot give the phase, the nearest phase they can.</string>
+    <key>Persist</key>
+        <integer>0</integer>
+    <key>Type</key>
+        <string>Boolean</string>
+    <key>Value</key>
+        <integer>1</integer>
+    </map>
+  <key>GMDXSkyTestMoonPhase</key>
+    <map>
+    <key>Comment</key>
+        <string>Sky Test: the moon's phase angle in degrees: 0 full, 45 gibbous, 90 quarter, 135 crescent, 180 new (the sun-moon angle is 180 minus this). Used while GMDXSkyTestMoonByPhase is on.</string>
+    <key>Persist</key>
+        <integer>0</integer>
+    <key>Type</key>
+        <string>F32</string>
+    <key>Value</key>
+        <real>0.0</real>
+    </map>
+  <key>GMDXSkyTestCloudCoverage</key>
+    <map>
+    <key>Comment</key>
+        <string>Sky Test: cloud coverage (the sky's Cloud Coverage, 0 to 1). Near 1 the cloud field covers the whole sky, the moon too.</string>
+    <key>Persist</key>
+        <integer>0</integer>
+    <key>Type</key>
+        <string>F32</string>
+    <key>Value</key>
+        <real>0.27</real>
+    </map>
+  <key>GMDXSkyTestCloudDensity</key>
+    <map>
+    <key>Comment</key>
+        <string>Sky Test: cloud density (the sky's Cloud Density, 0 to 3).</string>
+    <key>Persist</key>
+        <integer>0</integer>
+    <key>Type</key>
+        <string>F32</string>
+    <key>Value</key>
+        <real>1.0</real>
+    </map>
+  <key>GMDXSkyTestCloudScale</key>
+    <map>
+    <key>Comment</key>
+        <string>Sky Test: cloud scale (the sky's Cloud Scale, 0.01 to 3).</string>
+    <key>Persist</key>
+        <integer>0</integer>
+    <key>Type</key>
+        <string>F32</string>
+    <key>Value</key>
+        <real>0.42</real>
+    </map>
+  <key>GMDXSkyTestCloudShiftX</key>
+    <map>
+    <key>Comment</key>
+        <string>Sky Test: slides the cloud field east-west (the sky's Cloud X, 0 to 1 = one whole tile): with the clouds frozen, puts a cloud in front of the moon.</string>
+    <key>Persist</key>
+        <integer>0</integer>
+    <key>Type</key>
+        <string>F32</string>
+    <key>Value</key>
+        <real>0.0</real>
+    </map>
+  <key>GMDXSkyTestCloudShiftY</key>
+    <map>
+    <key>Comment</key>
+        <string>Sky Test: slides the cloud field north-south (the sky's Cloud Y, 0 to 1 = one whole tile).</string>
+    <key>Persist</key>
+        <integer>0</integer>
+    <key>Type</key>
+        <string>F32</string>
+    <key>Value</key>
+        <real>0.0</real>
+    </map>
+  <key>GMDXSkyTestFreezeClouds</key>
+    <map>
+    <key>Comment</key>
+        <string>Sky Test: the clouds stand still (cloud scroll 0), so a cloud stays where Cloud Shift put it. Off = the start sky's own scroll.</string>
+    <key>Persist</key>
+        <integer>0</integer>
+    <key>Type</key>
+        <string>Boolean</string>
+    <key>Value</key>
+        <integer>1</integer>
+    </map>
+  <key>GMDXSkyTestHazeDensity</key>
+    <map>
+    <key>Comment</key>
+        <string>Sky Test: haze density (the sky's Haze Density, 0 to 5).</string>
+    <key>Persist</key>
+        <integer>0</integer>
+    <key>Type</key>
+        <string>F32</string>
+    <key>Value</key>
+        <real>0.7</real>
+    </map>
+  <!-- </GMDX> -->
   <key>RenderVKParticleFog</key>
   <map>
     <key>Comment</key>
@@ -18666,7 +19651,7 @@
     <key>Comment</key>
     <string>Vulkan (#657, RenderVKGodRaysDenoise): god ray denoiser debug view, added to the scene like the shafts: 0 off, 1 raw one-frame march, 2 temporal accumulation without the spatial filter, 3 history length (white = RenderVKGodRaysHistory), 4 remaining variance (sqrt x 4), 5 events (red = history length 1: disocclusion / reset / anti-lag snap, blue = this frame's rays met a moving caster, green = the reactive written).</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>U32</string>
     <key>Value</key>
@@ -18721,7 +19706,7 @@
     <key>Comment</key>
     <string>Vulkan sky-view lookup table (#819): 1 = the resolved haze sky colour (skyColor: ~6 exp, a pow, 2 sqrt and the sRGB decode per call) is baked once per frame into a 256 x 128 RGBA16F table (256 KB, created at login) over its two exact coordinates -- the dome direction's height (texels crowded at the horizon) and its angle to the light (crowded toward the sun's glow) -- and the probe-miss sky of the forward / deferred lighting, the water reflection's sky, the far-clip fade target and the RT miss shading read it with one bilinear fetch. The sky pass itself keeps the analytic haze. Exact up to interpolation (the horizon's above / below switch sits on a texel boundary). Pays only where the haze is ALU-bound rather than load-latency-bound, hence default 0 until measured: A/B the deferred lighting (g_defer_* / c_defer_*) and water timers on the GTX 1080 test box. GPU timer of the bake: c_sky_lut (~0.01 ms). Live</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -19348,7 +20333,7 @@
     <key>Comment</key>
     <string>Debug: every 5 s, log the largest world object near the camera (VKHuge) with its registered instances and a CPU replay of the cull. Walks the whole object list; off by default.</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -20142,7 +21127,7 @@
     <key>Comment</key>
     <string>DEBUG (#194): stop opacity-micromap work after a stage and discard the result -- 1 bake, 2 + micromap build, 3 + micromap BLAS build; 4 live but forced 2-state, 5 live with micromaps disabled per instance, 6 live and accumulating but never referenced by the TLAS. 0 = normal.</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>U32</string>
     <key>Value</key>
@@ -20153,7 +21138,7 @@
     <key>Comment</key>
     <string>DEBUG (#194): give each opacity micromap its own buffer instead of the shared RT arena.</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -20180,6 +21165,28 @@
     <string>F32</string>
     <key>Value</key>
     <real>0.5</real>
+  </map>
+  <key>RenderVKRTShadowMaskThinFallback</key>
+  <map>
+    <key>Comment</key>
+    <string>Vulkan (#1086): below full mask resolution (RenderVKRTShadowMaskScale &lt; 1), a pixel none of whose 4 mask taps lies on its own surface (a hair strand, the rim of an ear or a horn) takes the brightest tap close behind it instead of the closest-depth one -- which was the shadow that thin receiver casts on what is behind it (flickering dark specks on avatars, amplified by DLSS / FSR). Off = the closest-depth tap (A/B).</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>1</integer>
+  </map>
+  <key>RenderVKRTShadowMaskUpsampleTolMM</key>
+  <map>
+    <key>Comment</key>
+    <string>Vulkan (#1086): below full mask resolution, the smallest depth difference (mm, 1-1000) at which the RT shadow mask's plane-aware upsample still counts a mask texel as this pixel's surface (beyond 1.5 % of the distance). 30 = the previous 3 cm. Lower separates close-up layers -- hair cards over the scalp -- so one does not blend the other's shadow in (A/B).</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>30</real>
   </map>
   <key>RenderVKRTShadowDenoise</key>
   <map>
@@ -20461,7 +21468,7 @@
     <key>Comment</key>
     <string>Vulkan RT shadow denoiser debug view (#85), shown through the sun / moon term of the lighting: 0 off, 1 raw one-frame trace, 2 temporal accumulation (no spatial filter), 3 history length (white = RenderVKRTShadowHistory frames), 4 variance (sqrt x 4; with RenderVKRTShadowSvgf the variance left after filtering), 5 final mask, 10 (#674) per texel: red = how far the temporal result was pulled away from this frame's raw trace (full red = 0.25 or more), green = moving-caster path, blue = certainty bypass took the raw, 9 (#674) per texel: red = the history length the temporal pass used (white = RenderVKRTShadowHistory), green = the moving-caster path, blue = the change detector, 6 history events (red = no history: newly uncovered or first frame, green = history clamped because the shadow changed, the stronger the more, blue = a moving object's shadow moved), 7 the short running average the history is checked against, 8 shadow-terminator diagnostics (#664; every RT shadow -- sun and projectors, mask and inline -- shown through its light, in the terminator band: PRE-PASS TRIANGLE path red / yellow / white = red, green = Hanika lift length (5 mm = full), blue = escape check shortened (half) / cancelled (full) the lift; CAMERA-PROBE path blue / cyan (green = lift), magenta = probe hit rejected (no lift); black = outside the band). 11 self-hit detector (the raw trace; red = a sun ray blocked within 5 cm of its origin, blue = within 50 cm -- specks on open ground that turn red are rays hitting their own receiver; best with RenderVKRTShadowCache 0). 12 smooth-terrain receiver gap (#211; the raw trace, smooth terrain on): pixels whose drawn surface lies UNDER the ray-traced terrain show red rising to yellow with the gap along the normal (2 cm full red, 10 cm yellow), every other pixel the raw value at quarter brightness -- red patches mean the RT terrain does not match the drawn one there (RenderVKRTTerrainOriginSnap hides it). 1-7, 11 and 12 need RenderVKRTShadowMask; 8 reads best unfiltered (RenderVKRTShadowMask off, or RenderVKRTShadowAtrous 0). Live.</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>U32</string>
     <key>Value</key>
@@ -20516,7 +21523,7 @@
     <key>Comment</key>
     <string>Vulkan ray-traced shadows (#85 / #869 Phase 1): the stochastic projector pass and the merged RT shadow pass (RenderVKProjStochastic, RenderVKRTShadowMerge) run on the GENERIC SHADOW CORE -- one receiver setup per pixel, one light-sample loop (sun / moon, then the projector picks), one shadow-ray walk for every light type (6 ray-query sites in the merged kernel instead of 16, less than half its size). The sun / moon is traced exactly as before; projector rays gain the receiver bias the RT shadow mask always gave them (the shadow-terminator lift on smooth low-poly meshes, the cluster-LOD avatar lift and the view-slope offset): less shadow acne on projector-lit avatars and curved surfaces. 0 = the per-light-type kernels. Live (the core kernels compile at login; until they land the per-light-type kernels run).</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>U32</string>
     <key>Value</key>
@@ -20527,7 +21534,7 @@
     <key>Comment</key>
     <string>Vulkan ray-traced sun / moon shadows (#771 Phase 2): SUN EXPOSURE CERTIFICATES -- a world-space cache that proves a surface cannot see the sun for any sun direction along the next stretch of the sun's path (a few degrees of its arc; a cone around it for a sky that does not move), so the merged RT shadow pass skips the sun ray there (interiors, clubs, under roofs) and keeps skipping while the sun moves. Certificates expire only when the sun really leaves their arc (minutes), a static object near them changes, a ray proves them wrong, or they reach RenderVKSunCertMaxAge. The image is the same as without it. Needs the merged RT shadow pass on the generic shadow core (RenderVKRTShadowMerge, RenderVKProjStochastic, RenderVKShadowGenericCore). 0 = off, 1 = on. Live.</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>U32</string>
     <key>Value</key>
@@ -20538,7 +21545,7 @@
     <key>Comment</key>
     <string>Sun exposure certificates (RenderVKSunCert) debug view, drawn as the sun's colour: 1 = what each pixel did (green skipped, cyan spot check, orange traced in a certified cell's unseen part, blue traced: not certified, yellow certifying, magenta no table entry, grey not considered, red a lit ray revoked the cell); 2 = certificate age (green new to red at RenderVKSunCertMaxAge, blue none). 0 = off.</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>U32</string>
     <key>Value</key>
@@ -20758,7 +21765,7 @@
     <key>Comment</key>
     <string>Vulkan ReSTIR DI (#1052, A/B): which pixels may take the RenderVKReSTIRDenoiseIters converged shortcut. Off (default) = only pixels where one light holds 90 %+ of the light: elsewhere a long-standing reused light pick is still one light's on/off shadow per frame, shared by its whole neighbourhood, and the shortened spatial filter left organic blotches with hard rims in the stochastic light shadows. On = the old rule (any pixel with a long-standing reused pick; less denoiser cost, the blotches back). Live.</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -20769,7 +21776,7 @@
     <key>Comment</key>
     <string>Vulkan ReSTIR DI (A/B): 1 = cut the shadow denoiser's history and the reservoirs' reuse whenever the sum of the lights reaching the pixel's 1 m light-grid cell changes by 25 % (the original rule: any moving light in the cell, or the camera moving a pixel into the next cell, restarted the history -- grainy shadows near moving lights). 0 (default) = no such cut: reused lights are re-weighed with their current position and colour each frame, a light switching off drops out at once, and the denoiser's neighbourhood clamp limits the lag. Live.</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -20780,7 +21787,7 @@
     <key>Comment</key>
     <string>Vulkan merged RT shadows (RenderVKRTShadowMerge 1, A/B): 1 (default) = pixels whose shading normal faces away from the sun / moon still trace one sun ray (their real visibility, mostly self-shadowed) instead of being written 'lit'. Those pixels are never lit by the sun themselves, but the sun shadow denoiser and its upsample blend them into their neighbours: written 'lit' they drew thin BRIGHT lines along normal seams, mane strands and wing edges of a mesh avatar in sun shadow (a dark room). 0 = the old 'lit, no ray' rule. Costs one extra ray on the turned-away pixels whose facet is within the terminator slack (most others are self-shadowed without a ray). Live.</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>U32</string>
     <key>Value</key>
@@ -20791,7 +21798,7 @@
     <key>Comment</key>
     <string>Vulkan ReSTIR DI (#869, A/B): the MOVING-LIGHT shadow rule. A moving light's shadow moves every frame, but the shadow denoiser reprojects its history with the camera only, so that history is wrong wherever the shadow moved (grain under moving party / club lights). 1 (default) = pixels lit by a light that moved since the last frame (more than RenderVKReSTIRMoveEps) keep only RenderVKReSTIRMoveHistory frames of shadow history in proportion to that light's share, always take the full spatial filter (no RenderVKReSTIRDenoiseIters shortcut), and that light's shadow sample traces RenderVKReSTIRMoveRays rays. 0 = the old behaviour. Debug: RenderVKDenoiseDebug 7 draws white stripes over such pixels. Live.</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>U32</string>
     <key>Value</key>
@@ -21022,7 +22029,7 @@
     <key>Comment</key>
     <string>Vulkan (#1009, diagnostic, with RenderVKReSTIREmissiveCellLists 1 and the GPU timers' ReSTIR DI log line): counts the objects whose material emits but which the emissive light build leaves out, by reason -- rigged (legacy / cluster cut), a cluster-traced static without a legacy row, a worn or own-avatar attachment, not in the ray-tracing scene this frame. Costs one coarse texture fetch per such object per build. Live.</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -21088,7 +22095,7 @@
     <key>Comment</key>
     <string>Vulkan (#439, point light shadows WITHOUT ray tracing): 1 = choose the most important point lights for cube shadow maps each frame (RenderVKPointShadowMapMax of them, brightness x apparent size, 512 / 256 / 128 px by size) and log the selection with its planned VRAM. The cube-map render path itself is not implemented yet, so the lights stay unshadowed; with ray tracing, point lights are shadowed by ReSTIR DI instead (RenderVKReSTIRDI + RenderVKReSTIRLights 1). 0 = off. Live.</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>U32</string>
     <key>Value</key>
@@ -21314,6 +22321,50 @@
     <key>Value</key>
     <real>8.0</real>
   </map>
+  <key>RenderVKGILightMoveFix</key>
+  <map>
+    <key>Comment</key>
+    <string>#1087 Vulkan GI (RenderVKGI 2 / 3, RenderVKGILightChangeCut 1): GI keeps treating a light as moved for RenderVKGILightChangeHold frames after it last moved (RenderVKGILightMoveRel), instead of only on the frames it is counted as moved (a moving lamp is counted only every few frames). Colour / brightness changes alone stay with RenderVKGILightChangeCut's re-shade. While it does: reused GI samples it is significant at keep at most RenderVKGILightMoveMCap frames of confidence, so this frame's fresh samples take over quickly instead of averaging light from the lamp's old position; the GI denoiser keeps its light-change history cap through the whole motion; and the radiance cache around the light's old and new position keeps a short mean (RenderVKGILightChangeCacheFrames). Removes the noise on objects and avatars near scripted / animated moving lights, worst at half GI resolution. Areas no changed light reaches are unaffected (no extra cost there). 0 = the old behaviour. The GI stats line (GPU timers on) counts the hot lights per frame. Live.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <boolean>1</boolean>
+  </map>
+  <key>RenderVKGILightChangeHold</key>
+  <map>
+    <key>Comment</key>
+    <string>#1087 Vulkan GI (RenderVKGILightMoveFix 1): frames a light stays "moved" for GI after it was last counted as moved. Longer = smoother under lights that move in steps or slowly; shorter = full GI reuse returns sooner once a light stops. 0 = only the frame it is counted (close to the old behaviour). 0 .. 600. Live.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>U32</string>
+    <key>Value</key>
+    <integer>8</integer>
+  </map>
+  <key>RenderVKGILightMoveMCap</key>
+  <map>
+    <key>Comment</key>
+    <string>#1087 Vulkan GI (RenderVKGILightMoveFix 1): the confidence (in frames, like RenderVKGIMCap) a reused GI sample keeps where a recently moved light is significant at its point. Low = the bounce light follows a moving light within a few frames (the reuse still averages several samples); high = more stale light from the light's old position survives. 0 = no clamp (only the hold's denoiser and cache rules). 0 .. 64. Live.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>U32</string>
+    <key>Value</key>
+    <integer>2</integer>
+  </map>
+  <key>RenderVKGILightChangeCacheFrames</key>
+  <map>
+    <key>Comment</key>
+    <string>#1087 Vulkan GI (RenderVKGILightMoveFix 1, RenderVKGICache 1): the longest mean, in frames, of a GI radiance-cache cell inside a recently moved light's radius (at its old or new position), instead of RenderVKGICacheFrames. The cache then follows a moving light (the bounce of the bounce, and the fill of newly revealed pixels) instead of averaging the light's path. Its samples are kept, never restarted. 0 = no change (RenderVKGICacheFrames everywhere). 0 .. 1024. Live.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>4.0</real>
+  </map>
   <key>RenderVKGIAtrous</key>
   <map>
     <key>Comment</key>
@@ -21374,7 +22425,7 @@
     <key>Comment</key>
     <string>Vulkan GI debug view (RenderVKGI on): 1 the denoised GI irradiance, 2 this frame's raw GI samples, 3 the GI denoiser's history length, 4 its variance, 5 the reservoirs (red = a fresh sample, green = reused from last frame, blue = from a neighbour; brightness = its confidence M), 6 the radiance cache at each pixel (green = a cached value, red = no cell, yellow = a cell without samples yet), 7 the sky visibility the specular occlusion uses (white = open sky, black = enclosed), 8 changed lights and clamps (red = the share of the pixel's bounce light from lights that changed since the last frame -- what shortens the GI history, RenderVKGILightChangeCut; green = the reused sample was re-shaded because such a light reaches it; blue = the firefly clamp scaled the pixel's sample down), 9 sparkle causes (pixels whose GI is over 4x their neighbourhood's: red = a fresh ray that hit nothing / sky, orange = a fresh ray skimming the surface, yellow = a fresh hit, green = reused from the last frame, blue = from a neighbour, cyan = re-shaded; magenta = a ray stopped at a back face, RenderVKGIBackFaceStop; other pixels dim grey). 0 = off. Live.</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>U32</string>
     <key>Value</key>
@@ -21561,7 +22612,7 @@
     <key>Comment</key>
     <string>Vulkan ray-traced shadows (the split generic shadow core's sun and light-sample kernels, RenderVKShadowSplitKernels): alpha-tested and translucent casters are sampled at an ISOTROPIC texture level -- the receiver pixel's footprint as a constant ray width over the caster triangle's texel density -- instead of projecting the anisotropic footprint onto every caster (fewer registers in the shadow walks, faster). Cut-out shadows may differ slightly at grazing angles. 0 = the anisotropic footprint (the fused kernels always use it). Live.</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -21572,7 +22623,7 @@
     <key>Comment</key>
     <string>Vulkan ray-traced shadows (the generic shadow core: the merged sun / moon and the stochastic light samples): each shadow ray first asks the ray-tracing hardware for an OPAQUE caster alone (no alpha tests, no translucency); only a ray that finds none walks the alpha-tested / translucent / foliage layers, over that geometry only. Same visibility (an opaque caster blocks whatever lies in front of it); the penumbra size estimate behind an opaque caster no longer counts translucent layers in front of it. 0 = the full walk for every ray (default: in an open sunlit scene most rays come back clear and pay for two traversals; measured ~0.2 ms slower on an RTX 5090). Live.</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -21583,7 +22634,7 @@
     <key>Comment</key>
     <string>Vulkan ray-traced shadows (the generic shadow core: RenderVKShadowGenericCore, ReSTIR DI, the split lights): run the stochastic shadow pass as separate kernels -- one choosing each texel's light samples (candidates, reservoir reuse; a 64 B descriptor per denoiser texel of VRAM), one tracing the sun / moon, one tracing the light samples, a thread each (8 B per sample slot and denoiser texel for the job list and the visibilities: 64 B at the default settings), one combining the lights' terms with those visibilities -- so the shadow walks run in kernels that hold only their samples' working set (fewer registers, more warps hiding the traversal's latency). Same image. 0 = the single fused kernel (also the fallback while the buffers cannot be allocated). Live.</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -21594,7 +22645,7 @@
     <key>Comment</key>
     <string>Vulkan GI (RenderVKGI on): run the GI trace as separate stages -- the rays' traversal, the hit shading, the reservoir reuse, the re-shades -- that hand each other compact per-texel records (96 B per GI texel of VRAM), so each kernel holds only its own working set (fewer registers, more warps hiding the traversal's latency, less instruction-cache thrashing). Same image. 0 = the single fused GI kernel (also the fallback while the records cannot be allocated). Live.</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -21605,6 +22656,72 @@
     <key>Comment</key>
     <string>Vulkan GI (RenderVKGI and RenderVKGISplitKernels on): split the GI hit shading further -- the traversal stage sorts its rays into a hit list and a miss list, a small kernel shades the misses (sky + probes), and the hits run as a material kernel (surface, textures, weather) handing a 64 B record to a lighting kernel (sun ray, local lights, cache / probes). Each kernel runs only over its own rays and holds only its own working set. No extra VRAM (the lists and records live in the split stages' buffer). Same image up to the record's rounding (normals 2 x 16-bit octahedral, colours fp16). 0 = the single shading stage. GPU timers: c_gi_miss, c_gi_hitmat, c_gi_hitlight (1) vs c_gi_shade (0). Live.</string>
     <key>Persist</key>
+    <integer>0</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <boolean>1</boolean>
+  </map>
+  <key>RenderVKGIReuseMotion</key>
+  <map>
+    <key>Comment</key>
+    <string>#1038 Vulkan GI (RenderVKGI 2 / 3, temporal anti-aliasing / upscaling on so motion vectors exist): the GI's reused samples from the last frame follow each surface's own motion (the motion vectors), not only the camera's. A walking or dancing avatar used to look up the last frame at the spot where its body was NOT (the background behind it), so its pixels lost all their reused samples and fell back to one fresh ray each for as long as it moved -- the grain on moving avatars, and the slow settle after one walks out from behind something. Static scenery is unaffected. Costs one motion-vector read per GI pixel. 0 = the camera-only lookup (the old behaviour). Live.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <boolean>1</boolean>
+  </map>
+  <key>RenderVKGIDisoccCache</key>
+  <map>
+    <key>Comment</key>
+    <string>#1038 Vulkan GI (RenderVKGI 2 / 3 with RenderVKGICache): a GI pixel that has nothing to reuse from the last frame (just uncovered -- an avatar stepping out from behind a wall, a camera pan -- or a history reset) blends in the GI radiance cache's value at its position as up to this many extra samples, instead of showing a single noisy ray. The cache entry is the average of many pixels over many frames, so the newly visible area starts close to its final brightness and settles in a few frames without the noise burst. Pixels with reused samples (the steady state) are unaffected; the cache itself still receives the raw estimate. 0 = off (the old behaviour). 0 .. 16. Live.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>U32</string>
+    <key>Value</key>
+    <integer>4</integer>
+  </map>
+  <key>RenderVKDenoiseYoungBoost</key>
+  <map>
+    <key>Comment</key>
+    <string>#1038 Vulkan denoisers (the GI denoiser with RenderVKGIDisoccFix above 0, the local-light shadow denoiser with RenderVKDenoiseDisoccFix above 0): extra help for pixels whose history was just lost when a WHOLE surface appears at once -- an avatar walking out from behind a wall, whose body has no settled neighbours to borrow from. Such a pixel starts from the average of its same-surface 3x3 neighbourhood instead of its own single sample, and while young its blur accepts more of a curved / normal-mapped body (relaxed normal test) and reaches further (wider steps). Pixels with an established history are filtered exactly as before. 0 = off (the old behaviour). Live.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <boolean>1</boolean>
+  </map>
+  <key>RenderVKDenoiseMovingDepthTol</key>
+  <map>
+    <key>Comment</key>
+    <string>#1038 Vulkan denoisers (GI, local-light shadows): when a surface moved on its own since the last frame (a walking or running avatar, a moving object), its history is accepted even if its distance to the camera changed by up to about as much as it moved sideways (at most 25 % of the distance; the surface-direction test still applies). The depth check assumed only the camera moves, so an avatar moving toward or away from the camera lost its history every frame and stayed grainy. Static surfaces are unaffected. 0 = off (the old behaviour). Live.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <boolean>1</boolean>
+  </map>
+  <key>RenderVKDenoiseDisoccFix</key>
+  <map>
+    <key>Comment</key>
+    <string>#1038 Vulkan local-light shadow denoiser (ray-traced projectors / ReSTIR DI): the spatial boost for pixels whose history is shorter than this many frames -- what an avatar walking out from behind a wall or a camera pan uncovers. Such a pixel holds only a 1-few ray estimate; it is blurred with its neighbours weighted by how settled they are, with a wider brightness tolerance, fading out as its history reaches this length (the GI denoiser's RenderVKGIDisoccFix, for the local-light shadows). Pixels with an established history: unchanged. 0 = off (the old behaviour). 0 .. 7. Live.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>U32</string>
+    <key>Value</key>
+    <integer>4</integer>
+  </map>
+  <key>RenderVKReSTIRReuseMotion</key>
+  <map>
+    <key>Comment</key>
+    <string>#1038 Vulkan ReSTIR DI (RenderVKReSTIRDI 2+, motion vectors on): the light choices reused from the last frame follow each surface's own motion (the motion vectors), not only the camera's, so a moving avatar keeps its reused light samples instead of starting over every frame (less grain in local-light shadows on moving avatars). Static scenery is unaffected. 0 = the camera-only lookup (the old behaviour). Live.</string>
+    <key>Persist</key>
     <integer>1</integer>
     <key>Type</key>
     <string>Boolean</string>
@@ -21614,9 +22731,9 @@
   <key>RenderVKVisQueue</key>
   <map>
     <key>Comment</key>
-    <string>Vulkan ray tracing: the visibility queue (#1039), a bit mask. 1 = the RT hit shading's sun rays (GI with RenderVKGIShadeSplit, RT reflections with RenderVKRTReflectionsShadeSplit) leave the lighting kernels: the material kernel writes each hit's sun ray as a request, one lean walk kernel traces them all, the lighting kernel reads the results (it holds no sun walk any more: fewer registers). 2 = every hit ray leaves them (overrides 1): + the RT reflection hits' occlusion ray and the hit shadow-ray budget's projector / point-light rays (the material kernel walks the local lights unshadowed and queues the budget's rays), + the RT reflections' blend layers in a kernel of their own -- the lighting kernels hold no ray query at all. Same image (the walk runs the same functions on the same rays). Higher bits are reserved for the later steps. 0 = the rays inside the lighting kernels. GPU timers: c_gi_walk / c_defer_rtrefl_walk (+ c_defer_rtrefl_layers with 2); c_gi_hitmat / c_defer_rtrefl_mat then include the requests (with 2 also the local-light walk), c_gi_hitlight / c_defer_rtrefl_light the resolve. Live.</string>
+    <string>Vulkan ray tracing: the visibility queue (#1039), a bit mask. 1 = the RT hit shading's sun rays (GI with RenderVKGIShadeSplit, RT reflections with RenderVKRTReflectionsShadeSplit) leave the lighting kernels: the material kernel writes each hit's sun ray as a request, one lean walk kernel traces them all, the lighting kernel reads the results (it holds no sun walk any more: fewer registers). 2 = every hit ray leaves them (overrides 1): + the RT reflection hits' occlusion ray and the hit shadow-ray budget's projector / point-light rays (the material kernel walks the local lights unshadowed and queues the budget's rays), + the RT reflections' blend layers in a kernel of their own -- the lighting kernels hold no ray query at all. 4 = the GI reuse's visibility rays (with RenderVKGISplitKernels; combines with 1 or 2): the REUSE kernel queues each reused pick's visibility ray instead of tracing it, the walk kernel traces them, and a lean VIS TAIL kernel finishes those texels from the picks REUSE stored and the results (the queue holds every GI texel or the frame uses the old REUSE). 8 = the stochastic shadow pass's light-sample visibility (with RenderVKShadowSplitKernels; combines with the others): the sun / moon and the local-light samples are prepared by one kernel (receiver, sample, terminator / rig probes) and written as requests, a lean walk kernel per light kind traces each sample's rays and stores its visibility for the combining kernel (the sun: every denoiser texel or the old kernel that frame; the light samples: up to 2 per texel, the rest by the old kernel). 16 = one frame-level walk (with any of the above): the lighting chain records every queued consumer's request kernels first (the shadow pass, the RT reflections, the GI), then all their walks back to back between two barriers, then their resolves -- fewer barriers, and the walks of different consumers overlap. Same image (the walk runs the same functions on the same rays; the shadow pass's requests round a few inputs: see clean_vis_queue.glsl). Higher bits are reserved for the later steps. 0 = the rays inside the lighting kernels. GPU timers: c_gi_walk / c_defer_rtrefl_walk (+ c_defer_rtrefl_layers with 2); c_gi_hitmat / c_defer_rtrefl_mat then include the requests (with 2 the requests and the local-light walk are their own kernel: c_gi_hitreq / c_defer_rtrefl_req), c_gi_hitlight / c_defer_rtrefl_light the resolve; with 4 c_gi_reuse_walk and c_gi_vistail (the VIS TAIL that finishes the queued texels); with 8 c_defer_shadowsungen / c_defer_shadowvisgen (the requests) and c_defer_shadowsunwalk / c_defer_shadowviswalk / c_defer_shadowvistail in place of c_defer_shadowsun / c_defer_shadowvis (c_defer_pstoch* without merged shadows); with 16 c_vq_begin (the queue headers), c_vq_prod (the last producer up to the walk wave), then the walks' own marks (overlapping completion points). Live.</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>U32</string>
     <key>Value</key>
@@ -21625,9 +22742,9 @@
   <key>RenderVKVisQueueMB</key>
   <map>
     <key>Comment</key>
-    <string>Vulkan ray tracing (RenderVKVisQueue): the visibility queue's video memory cap in MB (per queued hit 64 B with RenderVKVisQueue 1; with 2, at one hit shadow ray, 224 B per RT reflection ray and 144 B per GI texel -- more per extra shadow ray; the hits past it take the old path). 0 = by video memory: 384 MB above 24 GB, 192 MB above 12.5 GB, 64 MB above 8.5 GB, else 32 MB. Live.</string>
+    <string>Vulkan ray tracing (RenderVKVisQueue): the visibility queue's video memory cap in MB (per queued hit 64 B with RenderVKVisQueue 1; with 2, at one hit shadow ray, 224 B per RT reflection ray and 144 B per GI texel -- more per extra shadow ray; with 8, 64 B per denoiser texel for the sun and 48 B per queued light sample; the hits past it take the old path). 0 = by the GPU's video memory size: 896 MB above 24 GB, 192 MB above 12.5 GB, 64 MB above 8.5 GB, else 32 MB (allocated by demand). Live.</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>U32</string>
     <key>Value</key>
@@ -21638,7 +22755,7 @@
     <key>Comment</key>
     <string>Vulkan stochastic RT projector shadows (RenderVKProjStochastic): the WALL-BLEED fix in the denoiser. A frame whose projector pick carried no light at a pixel (a black gobo texel) used to count as 'fully lit', so other projectors leaked through walls at the share of such picks. With this on it is a weight-0 sample: the pixel keeps its history (or takes its neighbours' estimate when it has none) and stays a full tap of every filter -- no extra noise around moving avatars; geometric edge-stops keep the filters from crossing walls. See RenderVKDenoiseDebug 1 (raw: magenta = no information this frame, dark blue = no RT projector), 2 (history length) and 4 (denoised). The turned-away gate is RenderVKProjStochFacingGate. 0 = the old behaviour (no-light picks count as lit). Live.</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>U32</string>
     <key>Value</key>
@@ -21660,7 +22777,7 @@
     <key>Comment</key>
     <string>Vulkan merged RT shadows (RenderVKRTShadowMerge): trace ONE stochastic sun / moon disc ray per pixel per frame (as the projectors do) and let the denoiser integrate the soft edge, instead of RenderVKRTSunSamples rays with the adaptive early-out. Outdoor A/B only: halves the sun rays on lit / umbra pixels, more penumbra noise. 0 = off. Live.</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>U32</string>
     <key>Value</key>
@@ -21691,13 +22808,24 @@
   <key>RenderVKReSTIROcclusionCull</key>
   <map>
     <key>Comment</key>
-    <string>Vulkan ReSTIR DI stochastic light shadows (#869): visibility-aware light lists. A small world-space cache of surface patches (0.25 m near the camera, coarser with distance; the two sides of a wall are separate patches) learns which lights every shadow ray from a patch found blocked for 8 frames in a row; those lights are left out of the patch's light set entirely (no shadow ray, no share of the shared shadow ratio, no light) -- so many blocked club projectors behind a wall no longer darken the next room's own lights in sweeping bands. A few probe rays per patch keep re-testing them: one visible ray (a door opens, a light swings into view) re-admits the light the next frame. Every patch tracks the whole light set (a count per light), so a hundred blocked projectors are handled like one. Stats: the ReSTIR DI VKGpu line (RenderVKGpuTimers 1), "occlusion cull: ...". 6.25 MB fixed. 1 (default) = the SOFT cull (#1052): only traced rays blocked by something farther than the patch size count (never a surface's own terminator / self-shadow), a light starts leaving after 12 such frames and fades out over 4 more, and the patch verdict is dithered (shadow pass) / blended (lighting) across neighbouring patches -- no hard-edged rectangles. 2 = the first version's rules (8 frames, any zero sample counts, a hard verdict per patch box; A/B). 0 = off. Live.</string>
+    <string>Vulkan ReSTIR DI stochastic light shadows (#869): visibility-aware light lists. A small world-space cache of surface patches (0.25 m near the camera, coarser with distance; the two sides of a wall are separate patches) learns which lights every shadow ray from a patch found blocked for 8 frames in a row; those lights are left out of the patch's light set entirely (no shadow ray, no share of the shared shadow ratio, no light) -- so many blocked club projectors behind a wall no longer darken the next room's own lights in sweeping bands. A few probe rays per patch keep re-testing them: one visible ray (a door opens, a light swings into view) re-admits the light the next frame. Every patch tracks the whole light set (a count per light), so a hundred blocked projectors are handled like one. Stats: the ReSTIR DI VKGpu line (RenderVKGpuTimers 1), "occlusion cull: ...". 6.25 MB fixed. 1 = the SOFT cull (#1052): only traced rays blocked by something farther than the patch size count (never a surface's own terminator / self-shadow), a light starts leaving after 12 such frames and fades out over 4 more, and the patch verdict is dithered (shadow pass) / blended (lighting) across neighbouring patches -- no hard-edged rectangles. 2 (default since 2026-10-25) = the first version's rules (8 frames, any zero sample counts, a hard verdict per patch box). The soft cull's neighbour blending let lit patches leak light into fully shadowed ones (bright rectangles inside a table's shadow), so the hard cull is the default until that is fixed. 0 = off. Live.</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>U32</string>
     <key>Value</key>
-    <integer>1</integer>
+    <integer>2</integer>
+  </map>
+  <key>RenderVKReSTIROcclusionPointDrop</key>
+  <map>
+    <key>Comment</key>
+    <string>Vulkan ReSTIR DI (A/B for RenderVKReSTIROcclusionCull): how a POINT light the occlusion cull holds blocked at a patch is handled. Off (default) = it stays in the patch's shadow ratio with an exact zero visibility (no shadow ray, no noise) and the lighting gives it the ratio like any other light, so the ratio means the same light set inside and outside culled patches and the denoiser can blend them. On = the old rule: it is taken out of the ratio and the lighting entirely, so a culled patch's ratio is over a different light set than its neighbours' and its own history -- the denoiser's blend of the two drew the patches as dark / light rectangles. Projectors always use the old rule. Live.</string>
+    <key>Persist</key>
+    <integer>0</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <boolean>0</boolean>
   </map>
   <key>RenderVKProjStochasticSplitK</key>
   <map>
@@ -21902,7 +23030,7 @@
     <key>Comment</key>
     <string>Vulkan: ray-traced shadow mask ray-skipping hint -- a texel whose accumulated history is uniformly lit / blocked stops after the first ray that agrees. Saves rays in settled areas, but at moving penumbra edges it can lock a stale 0 / 1 (blocky, lagging soft edges) and biases the denoiser's clamp. Off by default.</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -21913,7 +23041,7 @@
     <key>Comment</key>
     <string>Vulkan (#771): ray-traced sun / moon shadow cache. A GPU tile classifier re-traces only the shadow-mask tiles whose sun shadow can have changed -- no reprojected history, shadow edges / penumbrae / tints, moving casters, receivers inside the sun-swept volume of a MOVING avatar / animesh / object or of an edited / rezzed object, the shadow range's fade band, the progressive refresh slice -- and the rest reuse their accumulated (fully lit / fully shadowed) history without tracing the sun. Projector shadows are always traced. Off (default for now: the measured win is small until per-tile carry / projector skip land): every mask texel is traced every frame. Log: VKRTCache.</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>Boolean</string>
     <key>Value</key>
@@ -22881,7 +24009,7 @@
     <key>Comment</key>
     <string>Vulkan testing aid (#672): the next N pipeline creations report VK_ERROR_OUT_OF_HOST_MEMORY without calling the driver, exercising the recovery path: requeue with backoff, the compile concurrency cap halving (floor 1), retries, and -- when N exceeds the retries -- giving the pipeline up (its feature off, a one-time notice) instead of crashing. Read at Vulkan start-up (set it, then restart; delete vk_pipeline_cache.bin for a cold start): then only the background shader warm-up batch counts (the login screen UI stays real). Also read every frame: set in-world it counts every creation (batch, synchronous, UI, compute) -- e.g. before enabling depth of field. One-shot: resets to 0.</string>
     <key>Persist</key>
-    <integer>1</integer>
+    <integer>0</integer>
     <key>Type</key>
     <string>U32</string>
     <key>Value</key>
@@ -24222,6 +25350,85 @@
     <key>Value</key>
     <real>0.5</real>
   </map>
+  <!-- <GMDX> night eye: night exposure and night vision (clean_exposure.comp, clean_tonemap.frag, vkgfx/gmdxnighteyevk.h) -->
+  <key>GMDXNightExposureAdapt</key>
+  <map>
+    <key>Comment</key>
+    <string>Night exposure (GMDXPhysicalNight): at night only (fading in as the sun sinks from half GMDXDuskSunLow to GMDXDuskSunLow; by day the exposure is the stock one), once the scene is darker than a quarter of RenderDynamicExposureCoefficient (where the stock auto exposure stops brightening), the eye gives back this fraction of every stop the scene loses, down to GMDXNightExposureKnee. 0.5 = a scene 4 stops darker shows 2 stops darker. 1 = nights shown as bright as dusk; 0 = the stock curve (nights darken stop for stop). Changes live.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>0.5</real>
+  </map>
+  <key>GMDXNightExposureKnee</key>
+  <map>
+    <key>Comment</key>
+    <string>Night exposure (GMDXPhysicalNight): stops below the night start where GMDXNightExposureAdapt gives way to GMDXNightExposureDeepAdapt. Around a moonlit night's level; darker than this is moonless or deep shadow at night.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>4.0</real>
+  </map>
+  <key>GMDXNightExposureDeepAdapt</key>
+  <map>
+    <key>Comment</key>
+    <string>Night exposure (GMDXPhysicalNight): the fraction of every stop given back past GMDXNightExposureKnee, so a moonless night stays dark but readable instead of black. Changes live.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>0.75</real>
+  </map>
+  <key>GMDXNightExposureMaxLift</key>
+  <map>
+    <key>Comment</key>
+    <string>Night exposure (GMDXPhysicalNight): the most the night curve brightens over the stock auto exposure's maximum, in stops (6 = 64x). Below that the screen darkens stop for stop again, so near-black stays black and noise is not amplified. The lift is also never more than physical night took from Second Life's moon (log2 of 1 / (GMDXMoonlightScale x 2 x moon brightness x phase): 4.3 stops for the default full moon), so a night that was dark in the old Second Life night stays dark. Changes live.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>6.0</real>
+  </map>
+  <key>GMDXNightVisionPurkinje</key>
+  <map>
+    <key>Comment</key>
+    <string>Night vision (GMDXPhysicalNight): strength of the Purkinje shift, the blue cast and loss of colour as the eye's rods take over in low light (Kirk and O'Brien's model as used in Ghost of Tsushima). Faded in by how dark the scene the eye has adapted to is (GMDXNightVisionLuminance), so moonlight tints a little and a moonless night a lot; it changes colour only, never brightness. 0 = off. Changes live.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>1.0</real>
+  </map>
+  <key>GMDXNightVisionLuminance</key>
+  <map>
+    <key>Comment</key>
+    <string>Night vision (GMDXPhysicalNight): candelas per square metre for one renderer unit of scene brightness, which places the night in the eye's mesopic range (5 down to 0.005 cd/m^2, where the Purkinje shift fades in). Higher = night vision starts later and stays weaker; lower = it starts sooner. Changes live.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>10.0</real>
+  </map>
+  <key>GMDXNightVisionNoise</key>
+  <map>
+    <key>Comment</key>
+    <string>Night vision (GMDXPhysicalNight): low-light grain and loss of sharpness, scaled by how dark the scene is, as the eye sees in the dark. 0 = off (the default), 1 = strongest. Changes live.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>0.0</real>
+  </map>
+  <!-- </GMDX> -->
     <key>RenderTerrainLODFactor</key>
     <map>
       <key>Comment</key>
@@ -26416,7 +27623,7 @@
       <key>Comment</key>
       <string>DEBUG (Vulkan, #238): check every pipeline layout's push constants against this many bytes instead of the device's maxPushConstantsSize (128 = what AMD Polaris / RX 470-590 exposes, the Vulkan minimum). Violations are logged as ERROR at startup; layouts are still created on the real device. 0 = off. Takes effect after restart.</string>
       <key>Persist</key>
-      <integer>1</integer>
+      <integer>0</integer>
       <key>Type</key>
       <string>U32</string>
       <key>Value</key>
@@ -26449,7 +27656,7 @@
       <key>Comment</key>
       <string>Ray tracing debug A/B (#973): rigged (avatar) BLAS are rebuilt from scratch every frame they change instead of refit. Tests whether refits produce a broken BVH on a driver (a GPU hang / device lost in the RT shadow pass). Costs GPU time on crowded sims. A rebuild that does not fit this frame's build scratch budget still refits. 0 = normal (refit).</string>
       <key>Persist</key>
-      <integer>1</integer>
+      <integer>0</integer>
       <key>Type</key>
       <string>Boolean</string>
       <key>Value</key>
@@ -26460,7 +27667,7 @@
       <key>Comment</key>
       <string>Ray tracing debug A/B (#973): skip static BLAS compaction (the compacted-size queries and the compacting copies). Tests whether compaction copies corrupt a BLAS on a driver. Static BLAS then keep their full build size (more VRAM). 0 = normal (compact).</string>
       <key>Persist</key>
-      <integer>1</integer>
+      <integer>0</integer>
       <key>Type</key>
       <string>Boolean</string>
       <key>Value</key>
@@ -26471,7 +27678,7 @@
       <key>Comment</key>
       <string>Ray tracing debug A/B (#973): KB of guard band after every BLAS allocated while this is non-zero (e.g. 64), filled with a pattern; every 30 frames up to 1024 bands are read back and checked, and an overwritten band is logged with the BLAS before it (the one that wrote past its end) and the one after it. The last checks are also reported when the graphics device is lost. Applies to newly created arena chunks only (set it before logging in, or wait for the RT idle release). Costs VRAM (band size x BLAS count). 0 = off.</string>
       <key>Persist</key>
-      <integer>1</integer>
+      <integer>0</integer>
       <key>Type</key>
       <string>U32</string>
       <key>Value</key>
@@ -26663,6 +27870,28 @@
       <string>String</string>
       <key>Value</key>
       <string />
+    </map>
+    <key>FSSaveAvatarMasksWithSnapshot</key>
+    <map>
+      <key>Comment</key>
+      <string>Saving a snapshot to disk also saves the avatars' holdout alpha mattes beside it (name_matte: black avatars on white, name_matte_inv: white on black), from an offscreen avatar-only render of the same view. While on, world snapshots render offscreen so they frame exactly like their mattes.</string>
+      <key>Persist</key>
+      <integer>1</integer>
+      <key>Type</key>
+      <string>Boolean</string>
+      <key>Value</key>
+      <integer>0</integer>
+    </map>
+    <key>FSSnapshotAvatarScope</key>
+    <map>
+      <key>Comment</key>
+      <string>Which avatars snapshots and the avatar alpha layers include: 0 = Self only, 1 = Self + the avatars picked in the Select Avatars window, 2 = All. Your own attachments and animesh are always included. Below 2, world snapshots render offscreen; snapshots with the interface are not filtered.</string>
+      <key>Persist</key>
+      <integer>1</integer>
+      <key>Type</key>
+      <string>U32</string>
+      <key>Value</key>
+      <integer>2</integer>
     </map>
     <key>FSShowBackSLURL</key>
     <map>
@@ -32911,6 +34140,160 @@
       <string>Boolean</string>
       <key>Value</key>
       <integer>0</integer>
+  </map>
+  <key>SlipstreamVREnabled</key>
+  <map>
+    <key>Comment</key>
+    <string>VR (#1073, beta): start in VR through the active OpenXR runtime (e.g. SteamVR). Read once at startup (restart to apply); the command line option --vr and the login screen's Start in VR button turn it on for one launch. Off, the OpenXR loader is never loaded. No runtime or no headset: the viewer starts on the desktop with a notice.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>0</integer>
+  </map>
+  <key>SlipstreamVRRenderScale</key>
+  <map>
+    <key>Comment</key>
+    <string>VR (#1074): the per-eye render size as a multiple of the VR runtime's recommendation (1 = the runtime's size; 0.25 - 2, within the headset's maximum). Read when the VR session starts (restart to apply). VR only.</string>
+    <key>Persist</key>
+    <integer>0</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>1.0</real>
+  </map>
+  <key>SlipstreamVRStereo</key>
+  <map>
+    <key>Comment</key>
+    <string>VR (#1075, layered stereo; experimental): render one image per eye -- each from its own located eye pose and FOV, as layers of one recording -- instead of M1's one mono image for both eyes. The eyes go out through one 2-layer array swapchain (or one per eye) with the depth layer where the runtime offers it. Read when the VR session starts (start the viewer with --set SlipstreamVRStereo 1). Effects not yet converted to layers are off in stereo (see the log line "stereo: ..."). VR only.</string>
+    <key>Persist</key>
+    <integer>0</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>0</integer>
+  </map>
+  <key>SlipstreamVRNearClip</key>
+  <map>
+    <key>Comment</key>
+    <string>VR (#1074): the near clip plane in metres while the headset is the camera (0.01 - 0.5; the desktop camera keeps its own). VR only.</string>
+    <key>Persist</key>
+    <integer>0</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>0.05</real>
+  </map>
+  <key>SlipstreamVREyeHeight</key>
+  <map>
+    <key>Comment</key>
+    <string>VR (#1074): your standing eye height in metres (0.5 - 2.5). At that real height your view is at the avatar's eyes; lower (crouching, sitting) moves the view down. Recenter VR View replaces it with your current height. Also the floor estimate when the VR runtime offers no floor-level reference space. VR only.</string>
+    <key>Persist</key>
+    <integer>0</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>1.6</real>
+  </map>
+  <key>SlipstreamVRHeadSmoothing</key>
+  <map>
+    <key>Comment</key>
+    <string>VR (#1074): smoothing time (seconds, half-life) of the avatar eye position the head-tracked view is attached to, against the animation's head bob (walking, idle). 0 = attached rigidly to the avatar's head. Does not smooth your own head tracking. VR only.</string>
+    <key>Persist</key>
+    <integer>0</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>0.2</real>
+  </map>
+  <key>SlipstreamVRSafetyGovernor</key>
+  <map>
+    <key>Comment</key>
+    <string>VR (#1076): protect against low frame rate -- when the headset misses frames, temporarily lower draw distance and other costly settings until the frame rate recovers (settings are not changed). Off by default for now (2026-10-27: it judged pacing against SteamVR's throttled rate and oscillated; #1137) -- a fixed VR baseline caps the draw distance at 256 m during a session instead. A safety preference (Preferences > Safety), kept across sessions. VR only.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>0</integer>
+  </map>
+  <key>SlipstreamVRSmoothTurn</key>
+  <map>
+    <key>Comment</key>
+    <string>VR (#1076): the right thumbstick turns smoothly (90 degrees a second) instead of in 30-degree snaps. Smooth turning is a common cause of motion sickness; snap turning is the default. A comfort preference (Preferences > Safety), kept across sessions. VR only.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>Boolean</string>
+    <key>Value</key>
+    <integer>0</integer>
+  </map>
+  <key>SlipstreamVRDebugLayers</key>
+  <map>
+    <key>Comment</key>
+    <string>VR (#1076) diagnostic, not saved: what the headset frame submits, to pin a UI wall that looks different in each eye / moves with the head. 0 = normal. 1 = the UI wall layers only (no world: if the wall is then steady and sharp, the wall layers are right and the world's projection layer is what disagrees with them). 2 = the wall as ONE flat quad (1.6 m wide, the whole UI image) at the wall's centre instead of the facets. 3 = the world declared as rendered (the M1 declaration: the whole mono image at the symmetric render FOV and the head orientation for both eyes) instead of each eye's own FOV and pose with its part of the image. Every placement logs the exact layer poses once (tag VR). VR only; live.</string>
+    <key>Persist</key>
+    <integer>0</integer>
+    <key>Type</key>
+    <string>U32</string>
+    <key>Value</key>
+    <integer>0</integer>
+  </map>
+  <key>SlipstreamVRAudioGainDb</key>
+  <map>
+    <key>Comment</key>
+    <string>VR (#1122): extra gain in dB on world audio and voice while they play on the VR headset's own output during a VR session (headset DisplayPort / HDMI audio is usually quieter than desktop outputs). Clamped to -20..+12. Applied only during the session, removed when it ends. Above 0 dB the OpenAL output limiter is asked for so loud peaks are compressed instead of clipped.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>F32</string>
+    <key>Value</key>
+    <real>6.0</real>
+  </map>
+  <key>SlipstreamVRDictationLanguage</key>
+  <map>
+    <key>Comment</key>
+    <string>VR dictation (#1118, right thumbstick press held while a text field on the UI wall has focus): the spoken language. "en" uses the English speech model; any other Whisper language code ("de", "fr", "ja", ...) or "auto" (detect) uses the multilingual model. The English model is chosen by CPU: "small.en" (264 MB, more accurate) on CPUs with 24 or more hardware threads, else "base.en" (82 MB); the multilingual model is 82 MB. Each is downloaded on first use, after asking.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>String</string>
+    <key>Value</key>
+    <string>en</string>
+  </map>
+  <key>SlipstreamDictationVocabulary</key>
+  <map>
+    <key>Comment</key>
+    <string>VR dictation (#1118): your own names and terms, comma-separated (for example "Powy, Gemini, Noms"), that the speech model should spell correctly. They are passed to the speech model as a hint on this computer only, together with the names of avatars within chat range and the region / parcel name. Nothing is logged or sent anywhere.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>String</string>
+    <key>Value</key>
+    <string></string>
+  </map>
+  <key>SlipstreamAudioOutputDevice</key>
+  <map>
+    <key>Comment</key>
+    <string>#1122: the output device for all of the viewer's audio (world sounds and voice), by its name. Empty = the system default. A voice output device picked in the voice device settings still wins for voice; a VR session's headset output sits on top temporarily. A device that is not connected leaves audio on the system default until it is back.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>String</string>
+    <key>Value</key>
+    <string></string>
+  </map>
+  <key>SlipstreamAudioInputDevice</key>
+  <map>
+    <key>Comment</key>
+    <string>#1122: the input device (microphone) for the viewer's audio (voice), by its name. Empty = the system default. A voice input device picked in the voice device settings still wins; a VR session's headset microphone sits on top temporarily.</string>
+    <key>Persist</key>
+    <integer>1</integer>
+    <key>Type</key>
+    <string>String</string>
+    <key>Value</key>
+    <string></string>
   </map>
   <key>SlipstreamThreadAffinity</key>
   <map>

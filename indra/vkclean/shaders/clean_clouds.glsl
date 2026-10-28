@@ -20,6 +20,8 @@
 //   [2] cloud_pos_density2.xyz, noise blend factor
 //   [3] noise texture idx A, idx B (bindless), 0, enabled
 
+#include "gmdx_cloud_corona.glsl"   // <GMDX>
+
 const float CLOUD_DOME_RADIUS = 15000.0;          // LLSettingsSky::DOME_RADIUS
 const float CLOUD_CAM_HEIGHT  = 0.96 * 15000.0;   // DOME_OFFSET * DOME_RADIUS
 const float CLOUD_CAP_COS     = 0.92387953;       // cos(PI/8): LL's dome cap edge
@@ -31,6 +33,33 @@ vec4 cloudNoise(vec2 uv)
     if (ib == ia || ssr.clouds[2].w <= 0.0) return a;
     vec4 b = texture(uTextures[nonuniformEXT(uint(ib))], uv);
     return mix(a, b, ssr.clouds[2].w);
+}
+
+// <GMDX> The physical cloud layer's direct light from one light (E from Ld) toward dw. moon: the
+// moon's silver-lining lobe mixed in (gmdx_cloud_common.glsl gcPhaseMoon: g 0.8, 35%; straight on
+// ~2.2x, 90 degrees off ~10% less); the sun's light keeps the one lobe.
+float cloudHG4pi(float g, float c) { return (1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * c, 1e-4), 1.5); }
+vec3 cloudPhysLit(vec3 E, vec3 Ld, vec3 dw, float cloud_r, vec3 cloud_color, bool moon)
+{
+    // (A sun just below the horizon still lights the layer, until the planet's shadow reaches it.)
+    if (pkRaySphere(vec3(0.0, 0.0, cloud_r), Ld, pkBottom()) >= 0.0) return vec3(0.0);
+    vec3  at_cloud = E * textureLod(uPkTrans, pkTransUv(cloud_r, Ld.z), 0.0).rgb * step(-0.1, Ld.z);
+    float hg = cloudHG4pi(0.6, dot(dw, Ld));   // x 4 pi
+    if (moon) hg = mix(hg, cloudHG4pi(0.8, dot(dw, Ld)), 0.35);   // (gcPhaseMoon's kGcMoonG / kGcMoonW)
+    return at_cloud * cloud_color * (0.35 + 0.65 * hg) / PK_PI;
+}
+
+// <GMDX> The physical cloud layer's corona from one light (gmdx_cloud_corona.glsl): single
+// scattering into the droplets' diffraction peak through a layer of optical depth
+// tau = -ln(1 - alpha) along the view, tau exp(-tau), over alpha (the composite multiplies by it).
+// Iridescence: the layer's thin parts (alpha below 0.6) hold smaller droplets.
+vec3 cloudPhysCorona(vec3 E, vec3 Ld, vec3 dw, float cloud_r, vec3 cloud_color, float alpha)
+{
+    const vec3 ph = gcoPhase(dw, Ld, gcoDropletScale(alpha / 0.6));
+    if (ph == vec3(0.0) || pkRaySphere(vec3(0.0, 0.0, cloud_r), Ld, pkBottom()) >= 0.0) return vec3(0.0);
+    const vec3 at_cloud = E * textureLod(uPkTrans, pkTransUv(cloud_r, Ld.z), 0.0).rgb * step(-0.1, Ld.z);
+    const float a = clamp(alpha, 1e-4, 0.999);
+    return at_cloud * gcoAlbedo(cloud_color) * ph * (-log(1.0 - a) * (1.0 - a) / a);
 }
 
 // pre = LL's sky gbuffer value in this direction; returns it with the clouds blended over.
@@ -63,6 +92,12 @@ vec3 cloudComposite(vec3 pre, vec3 dir_world)
     vec3  glow         = ssr.atmos[5].xyz;
     float sun_moon_glow_factor = ssr.atmos[6].x;
     vec3  cloud_color  = ssr.clouds[0].rgb;
+    // <GMDX> Physical night: the sky's own light (clean_atmos_common.glsl gmdxSkyLight), as the dome.
+    if (gmdxNightOn())
+    {
+        sunlight_color = gmdxSkyLight(gmdxCloudMoonGain());   // (the moon's part x GMDXNightCloudLight)
+        sun_moon_glow_factor = gmdxSkyGlowFactor();
+    }
 
     // Planar dome texcoords (x/z transposed), flipped horizontally (SL-13084), scaled.
     vec2 tc0 = vec2((-pn.z + 1.0) * 0.5, (-pn.x + 1.0) * 0.5);
@@ -104,6 +139,7 @@ vec3 cloudComposite(vec3 pre, vec3 dir_world)
 
     vec3 tmpAmbient = ambient_color;
     tmpAmbient += (1.0 - tmpAmbient) * cloud_shadow * 0.5;
+    tmpAmbient *= gmdxNightAmbientSrgb();   // <GMDX> the night's ambient (1 by day)
     sunlight *= (1.0 - cloud_shadow);
 
     vec3 additiveColorBelowCloud = blue_horizon * blue_weight * (sunlight + tmpAmbient)
@@ -149,6 +185,7 @@ vec3 cloudComposite(vec3 pre, vec3 dir_world)
     alpha1 = 1.0 - alpha1 * alpha1;
     alpha1 = 1.0 - alpha1 * alpha1;
     alpha1 *= altitude_blend_factor;
+    alpha1 *= 1.0 - gmdxSpace();   // <GMDX> space at altitude: the dome layer is always overhead; above the clouds it fades
     alpha1 = clamp(alpha1, 0.0, 1.0);
 
     float alpha2 = (cloudNoise(uv2).x - 0.5);
@@ -160,22 +197,35 @@ vec3 cloudComposite(vec3 pre, vec3 dir_world)
     color = clamp(color, vec3(0.0), vec3(1.0)) * 2.0;
 
     // <GMDX> Physical sky (clean_atmos_common.glsl): the same cloud shapes, lit by the physical
-    // light -- the sun through the air above the cloud layer (transmittance LUT: white at noon,
-    // orange at sunset), forward scattering for silver linings, the sky above as ambient -- and
-    // fading into the physical sky with the slant distance to the layer.
+    // light (with physical night, the sun and the moon each) -- the sun through the air above the
+    // cloud layer (transmittance LUT: white at noon, orange at sunset), forward scattering for
+    // silver linings, the sky above as ambient -- and fading into the physical sky with the slant
+    // distance to the layer.
     if (physkyOn())
     {
         const float layer_km = 1.5;
         vec3  dw = normalize(dir_world);
-        vec3  Ld = pkLightDir();
         float cloud_r = pkBottom() + max(pkViewHeight(), 0.0) + layer_km;
-        vec3  sun_at_cloud = pkLight() * textureLod(uPkTrans, pkTransUv(cloud_r, Ld.z), 0.0).rgb
-                           * step(-0.1, Ld.z);
-        float g = 0.6;
-        float hg = (1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * dot(dw, Ld), 1e-4), 1.5);   // x 4 pi
-        vec3  lit = sun_at_cloud * cloud_color * (0.35 + 0.65 * hg) / PK_PI;
+        // <GMDX> Physical night: a night sky's cloud colour below EEP's default (0.41) made up for
+        // Second Life's full-strength moon; the moon's real light already darkens the clouds, so
+        // once the sun has left the WindLight sky (sky_q < 1) the colour keeps its hue at the default's
+        // brightness. By day as before.
+        if (gmdxNightOn())
+        {
+            const float ccMax = max(max(cloud_color.r, cloud_color.g), max(cloud_color.b, 1e-3));
+            cloud_color *= mix(1.0, max(1.0, 0.4099 / ccMax), 1.0 - clamp(ssr.vol_clouds[3].w, 0.0, 1.0));
+        }
+        vec3  lit =cloudPhysLit(pkLight(), pkLightDir(), dw, cloud_r, cloud_color, false);
+        // Physical night: the moon is a second light (the one above is then the sun's).
+        if (physkyMoonOn()) lit += cloudPhysLit(pkLight() * gmdxMoonSky() * gmdxCloudMoonGain(), physkyMoonDir(), dw, cloud_r, cloud_color, true);
         vec3  amb = physkySkyRaw(vec3(0.0, 0.0, 1.0)) * cloud_color * 1.2;
         vec3  c = lit * (1.0 - alpha2) + amb;
+        // <GMDX> corona (GMDXCloudCorona), each light as above
+        if (gcoOn())
+        {
+            c += cloudPhysCorona(pkLight(), pkLightDir(), dw, cloud_r, cloud_color, alpha1);
+            if (physkyMoonOn()) c += cloudPhysCorona(pkLight() * gmdxMoonSky() * gmdxCloudMoonGain(), physkyMoonDir(), dw, cloud_r, cloud_color, alpha1);
+        }
         float slant_km = layer_km / max(dw.z, 0.05);
         float tv = exp(-physkyExtinction() * slant_km * max(pkAerialScale() * 0.25, 1.0));
         c = c * tv + physkySkyRaw(dw) * (1.0 - tv);

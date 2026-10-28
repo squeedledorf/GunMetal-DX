@@ -30,6 +30,8 @@
 #define LLSELECTMGR_CPP
 #include "llselectmgr.h"
 #include "llgroupcolormap.h" // <GMDX>
+#include "fssoundemitterblacklist.h" // <GMDX>
+#include "llderenderlist.h" // <GMDX>
 #include "llmaterialmgr.h"
 
 // library includes
@@ -6203,6 +6205,49 @@ void LLSelectMgr::requestObjectPropertiesFamily(LLViewerObject* object)
 }
 
 
+// <GMDX>
+// Briefly select and deselect an object server-side to elicit a full
+// ObjectProperties reply. Unlike RequestObjectPropertiesFamily this also
+// works for worn attachments (same approach FSAreaSearch uses for bulk
+// property scans). The selection never enters the viewer-side selection
+// list, so user selection state is unaffected. (From SkoomaStorm.)
+void LLSelectMgr::requestObjectPropertiesViaSelect(LLViewerObject* object)
+{
+    LLViewerRegion* regionp = object ? object->getRegion() : nullptr;
+    if (!regionp || isLocalPreviewObject(object))
+    {
+        return;
+    }
+    requestObjectPropertiesViaSelect(regionp, object->getLocalID());
+}
+
+void LLSelectMgr::requestObjectPropertiesViaSelect(LLViewerRegion* regionp, U32 local_id)
+{
+    if (!regionp || !local_id)
+    {
+        return;
+    }
+
+    LLMessageSystem* msg = gMessageSystem;
+
+    msg->newMessageFast(_PREHASH_ObjectSelect);
+    msg->nextBlockFast(_PREHASH_AgentData);
+    msg->addUUIDFast(_PREHASH_AgentID, gAgent.getID());
+    msg->addUUIDFast(_PREHASH_SessionID, gAgent.getSessionID());
+    msg->nextBlockFast(_PREHASH_ObjectData);
+    msg->addU32Fast(_PREHASH_ObjectLocalID, local_id);
+    msg->sendReliable(regionp->getHost());
+
+    msg->newMessageFast(_PREHASH_ObjectDeselect);
+    msg->nextBlockFast(_PREHASH_AgentData);
+    msg->addUUIDFast(_PREHASH_AgentID, gAgent.getID());
+    msg->addUUIDFast(_PREHASH_SessionID, gAgent.getSessionID());
+    msg->nextBlockFast(_PREHASH_ObjectData);
+    msg->addU32Fast(_PREHASH_ObjectLocalID, local_id);
+    msg->sendReliable(regionp->getHost());
+}
+// </GMDX>
+
 // static
 void LLSelectMgr::processObjectProperties(LLMessageSystem* msg, void** user_data)
 {
@@ -6268,6 +6313,14 @@ void LLSelectMgr::processObjectProperties(LLMessageSystem* msg, void** user_data
         msg->getStringFast(_PREHASH_ObjectData, _PREHASH_Name, name, i);
         std::string desc;
         msg->getStringFast(_PREHASH_ObjectData, _PREHASH_Description, desc, i);
+
+        // <GMDX> Owner + name are how a permanent sound emitter blacklist or derender
+        // entry finds a worn attachment again after a re-rez gave it a new UUID. This is
+        // the only place both are known for someone else's object.
+        FSSoundEmitterBlacklist::instance().noteObjectProperties(id, owner_id, name);
+        if (LLDerenderList::instanceExists())
+            LLDerenderList::instance().onObjectProperties(id, owner_id, name);
+        // </GMDX>
 
         std::string touch_name;
         msg->getStringFast(_PREHASH_ObjectData, _PREHASH_TouchName, touch_name, i);
@@ -7799,8 +7852,15 @@ void LLSelectMgr::resetAgentHUDZoom()
     if (gAgentCamera.mHUDTargetZoom != 1 || !gAgentCamera.mHUDTargetPan.isExactlyZero())
     {
         gAgentCamera.resetHUDZoom();
-        gAgentCamera.mHUDCurZoom = 1.f;
-        gAgentCamera.mHUDCurPan.clearVec();
+        // <GMDX> With GMDXHUDEditKeepGizmoOnScreen the current zoom and pan ease home
+        // (LLAgentCamera::updateHUDZoom) instead of jumping.
+        static LLCachedControl<bool> keep_gizmo_on_screen(gSavedSettings, "GMDXHUDEditKeepGizmoOnScreen", true);
+        if (!keep_gizmo_on_screen)
+        // </GMDX>
+        {
+            gAgentCamera.mHUDCurZoom = 1.f;
+            gAgentCamera.mHUDCurPan.clearVec();
+        }
     }
 }
 

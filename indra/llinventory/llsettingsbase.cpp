@@ -330,10 +330,31 @@ LLSD LLSettingsBase::interpolateSDValue(const std::string& key_name, const LLSD 
 
     if (other_value.type() != setting_type)
     {
-        // The data type mismatched between this and other. Hard switch when we pass the break point
-        // but issue a warning.
-        LL_WARNS("SETTINGS") << "Setting lerp between mismatched types for '" << key_name << "'." << LL_ENDL;
-        new_value = (mix > BREAK_POINT) ? other_value : value;
+        // <GMDX> SoapStorm 0640cc8829 (#73): the hard switch computed here used to fall through
+        // into the switch below, which overwrote it by blending the mismatched types anyway; for
+        // a slerp key an Array against an Undefined built LLQuaternion(undef) == (0,0,0,0).
+        // An undefined target holds the source value instead of switching to the undef. Types
+        // that asReal() blends sensibly still lerp. The warning is once only: the sole caller,
+        // LLSettingsInjected::applyInjections, runs per frame per injected key.
+        if (other_value.isUndefined())
+        {
+            return value;
+        }
+
+        auto blends_as_number = [](LLSD::Type t)
+        {
+            return t == LLSD::TypeInteger || t == LLSD::TypeReal
+                || t == LLSD::TypeBoolean || t == LLSD::TypeString;
+        };
+        if (!blends_as_number(setting_type) || !blends_as_number(other_value.type()))
+        {
+            LL_WARNS_ONCE("SETTINGS") << "Setting lerp between mismatched types for '" << key_name
+                                      << "': " << LLSD::typeString(setting_type) << " against "
+                                      << LLSD::typeString(other_value.type())
+                                      << ". Taking one side rather than blending them." << LL_ENDL;
+            return (mix > BREAK_POINT) ? other_value : value;
+        }
+        // </GMDX>
     }
 
     switch (setting_type)

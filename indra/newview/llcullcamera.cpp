@@ -45,7 +45,7 @@ namespace
     // LLViewerCamera::setPerspective, so a field can sit at a constructor default).
     F32 saneFov(F32 v)    { return (v > 0.05f && v < 3.13f) ? v : 60.f * DEG_TO_RAD; }
     F32 saneAspect(F32 a) { return (a > 0.05f) ? a : 1.7778f; }
-    F32 saneNear(F32 n)   { return (n > 0.01f) ? n : 0.25f; }
+    F32 saneNear(F32 n)   { return (n >= MIN_NEAR_PLANE) ? n : 0.25f; }   // as buildVulkanWorldFrame
 
     void capture()
     {
@@ -67,7 +67,7 @@ namespace
 namespace LLCullCamera
 {
 
-void calcAgentFrustum(LLCamera& cam, F32 far_dist)
+void calcAgentFrustum(LLCamera& cam, F32 far_dist, F32 ortho_half_height)
 {
     const LLVector3 origin = cam.getOrigin();
     const LLVector3 at     = cam.getAtAxis();
@@ -79,7 +79,8 @@ void calcAgentFrustum(LLCamera& cam, F32 far_dist)
     const F32 nearp  = saneNear(cam.getNear());
     const F32 farp   = llclamp(far_dist, 64.f, 8192.f);
 
-    const F32 nhh = nearp * std::tan(fov * 0.5f);   // near half-height
+    const bool ortho = ortho_half_height > 0.f;   // <GMDX>
+    const F32 nhh = ortho ? ortho_half_height : nearp * std::tan(fov * 0.5f);   // near half-height
     const F32 nhw = nhh * aspect;                   // near half-width
     const LLVector3 nc = origin + at * nearp;       // near-plane centre
 
@@ -90,6 +91,11 @@ void calcAgentFrustum(LLCamera& cam, F32 far_dist)
     frust[3] = nc - right * nhw + up * nhh;   // near top-left
     for (U32 i = 0; i < 4; ++i)
     {
+        if (ortho)   // <GMDX> parallel sides
+        {
+            frust[i + 4] = frust[i] + at * farp;
+            continue;
+        }
         LLVector3 v = frust[i] - origin;
         v.normVec();
         frust[i + 4] = origin + v * farp;     // far corner along the same ray

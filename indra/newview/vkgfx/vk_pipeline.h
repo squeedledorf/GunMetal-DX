@@ -62,6 +62,13 @@ struct GraphicsPipelineDesc {
     // Wireframe / overlay knobs (defaults = the world pipelines' state).
     VkPolygonMode polygonMode = VK_POLYGON_MODE_FILL;
     VkCompareOp depthCompare = VK_COMPARE_OP_LESS_OR_EQUAL;
+    // DEPTH PRE-PASS SHADING COMPARE (#1088, RenderVKPrepassEqualCompare): a shading pass
+    // that depth-tests EQUAL against the pre-pass's depth names here, in conventional terms
+    // (reverseZ flips it like depthCompare), the ordered compare that replaces EQUAL while
+    // vkSetPrepassRelaxedCompare(true) -- VK_COMPARE_OP_LESS_OR_EQUAL against a LESS
+    // pre-pass. NEVER = no alternative (every other pipeline). Dynamic-depth pipelines only
+    // (dynamicDepthCull): bindGraphicsPipeline picks one per bind, no recompile.
+    VkCompareOp relaxedDepthCompare = VK_COMPARE_OP_NEVER;
     float depthBiasConstant = 0.f;   // != 0 enables depth bias
     float depthBiasSlope = 0.f;
     float depthBiasClamp = 0.f;      // <GMDX> the bias's largest magnitude (0 = none; needs the device feature)
@@ -82,6 +89,11 @@ struct GraphicsPipelineDesc {
     bool partAccum = false;
     // Glow attachment (1) blends additively (ONE, ONE) whatever attachment 0 does.
     bool glowAdditive = false;
+    // #1076 VR (the HUD pass onto the UI wall image): attachment 0 takes the colour unblended
+    // and alpha = 1 (blend constant), so opaque / masked HUD faces stay opaque in a
+    // premultiplied-alpha image whatever their texture alpha. Default off: no other pipeline
+    // changes (and its pipeline-cache key only grows when set).
+    bool alphaOne = false;
     // false: colorWriteMask 0 on EVERY colour attachment (attachments stay declared so
     // the pipeline matches the pass's dynamic-rendering formats; e.g. occlusion proxies).
     bool colorWrite = true;
@@ -106,11 +118,23 @@ struct GraphicsPipelineDesc {
     // depthCompare (LESS <-> GREATER, LEQUAL <-> GEQUAL) and the depth-bias sign. Write
     // the desc in conventional terms; shadow / probe / mirror / HUD pipelines leave it off.
     bool reverseZ = false;
+    // #1075 LAYERED STEREO (research/VR_LAYERED_STEREO_DESIGN.md §3.1 item 2, §3.2): the number
+    // of views a MULTIVIEW pipeline renders. > 1: VkPipelineRenderingCreateInfo::viewMask =
+    // (1 << views) - 1 and the specialization constant kViewCount (id kViewCountConstId,
+    // clean_view.glsl) = views on every stage (merged into fragSpec for the fragment stage),
+    // from the same SPIR-V. 1 (the default, every desktop pipeline and every auxiliary view in
+    // VR): viewMask 0, no constant -- the create info is exactly as without it.
+    static constexpr uint32_t kViewCountConstId = 20;
+    uint32_t views = 1;
 };
 
 // Binds a graphics pipeline and, for a dynamicDepthCull one, sets the cull / front
 // face / depth state it was created with. Use for every graphics bind.
 void bindGraphicsPipeline(VkCommandBuffer cmd, VkPipeline pipeline);
+// #1088: while on, bindGraphicsPipeline sets a pipeline's relaxedDepthCompare (when it has
+// one) instead of its exact EQUAL. Set once per frame before recording (the renderer, from
+// RenderVKPrepassEqualCompare); read by every recording thread.
+void vkSetPrepassRelaxedCompare(bool on);
 // The pipeline takes cull / front face / depth state dynamically (registered above).
 bool pipelineHasDynamicRaster(VkPipeline pipeline);
 // Drops a pipeline's dynamic-raster record: call right before vkDestroyPipeline of a
@@ -284,6 +308,7 @@ struct VkPipelineBatchReport
     unsigned oomRetries = 0;       // #672: out-of-memory results requeued
     unsigned failed = 0;           // #672: pipelines given up (handle left VK_NULL_HANDLE)
     unsigned capEnd = 0;           // #672: concurrency cap at the end (0 = none)
+    unsigned pressureCapMin = 0;   // #1103: lowest memory-pressure cap this batch ran under (0 = none)
     std::vector<VkPipelineCompileStat> items;
 };
 // Called once at the end of every batch (from the compiling thread; the async batch
@@ -314,8 +339,22 @@ void vkSetPipelineMemBudget(uint64_t (*fn)());
 // killer (Arc B580 / Mesa). The progress guarantee still starts one compile when nothing
 // is in flight. 0 = no cap. Any thread.
 void vkSetPipelineMemCap(uint64_t bytes);
+// #1103 MEMORY-PRESSURE CAP: at most `cap` compiles in flight (every batch) while the app's
+// memory governor reports pressure (the app sets 2 while tight, 1 while critical, 0 = none
+// when comfortable); applied with the #672 cap (the lower one wins), re-read at every
+// admission, so it follows the governor while a batch runs. Compiles already running are
+// not stopped. A change is logged through the event hook. Any thread; cheap when unchanged.
+// `why` (static string) names the reason in that log line.
+void vkSetPipelinePressureCap(unsigned cap, const char* why);
+unsigned vkPipelinePressureCap();
+// Compiles in flight right now across every batch (the post-batch heap trim waits for 0).
+unsigned vkPipelineCompilesInFlight();
 // Estimated cost of a pipeline with no learned cost (by driver; default 512 MB).
 void vkSetPipelineDefaultCost(uint64_t bytes);
+// #1103: the `pct` percentile (0-100) of the learned cold compile costs (bytes; 0 = none
+// learned). Call after vkPipelineCostImport, e.g. to raise the default cost on a driver
+// whose learned compiles are heavier than it.
+uint64_t vkPipelineLearnedColdBytes(unsigned pct);
 // The pipeline cache was loaded from disk this session: pipelines whose last compile was
 // a cache hit are expected to hit again and get a tiny estimate. Without a warm cache
 // their learned COLD cost applies (a hit says nothing about a cold compile).

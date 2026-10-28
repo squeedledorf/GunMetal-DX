@@ -43,6 +43,7 @@
 #include "llfocusmgr.h"
 #include "llresmgr.h"
 #include "lluictrlfactory.h"
+#include "llscrollcontainer.h"   // <GMDX> wheel over a scrolling page
 
 const U32 MAX_STRING_LENGTH = 255;
 
@@ -457,8 +458,28 @@ void LLSpinCtrl::reportInvalidData()
     make_ui_sound("UISndBadKeystroke");
 }
 
+// <GMDX> On a page that scrolls (the nearest LLScrollContainer has somewhere to go) the wheel
+// scrolls the page, not this control: scrolling a long page changed whatever combo box or spinner
+// passed under the pointer (GMDXWheelScrollsPage). The page's scroll container takes the wheel
+// when this returns false.
+static bool gmdx_wheel_scrolls_page(const LLView* view)
+{
+    static LLUICachedControl<bool> s_on("GMDXWheelScrollsPage", true);
+    if (!s_on) return false;
+    for (const LLView* v = view->getParent(); v; v = v->getParent())
+    {
+        if (const LLScrollContainer* page = dynamic_cast<const LLScrollContainer*>(v))
+        {
+            return !(page->isAtTop() && page->isAtBottom());
+        }
+    }
+    return false;
+}
+// </GMDX>
+
 bool LLSpinCtrl::handleScrollWheel(S32 x, S32 y, S32 clicks)
 {
+    if (gmdx_wheel_scrolls_page(this)) return false;   // <GMDX>
     if( clicks > 0 )
     {
         while( clicks-- )

@@ -104,6 +104,28 @@ const std::string kTextureTag = "GMDXMAP1 ";
 const std::string kTextureNamePrefix = "Region map: ";
 constexpr S64 kShareMaxBytes = 96 * 1024 * 1024;
 constexpr S32 kShareMinPx = 256, kShareMaxPx = 8192;
+constexpr S32 kGridMax = (1 << 24) - 1;   // a region's grid x / y (x * 256 fits a region handle's U32)
+
+// The grid in a shared map ("grid" in a map file): "Agni" / "Aditi" on Second Life, else the
+// grid's login host and port, lowercased ("grid.example.org:8002"), so that viewers which name
+// the same OpenSim grid differently (grids.xml here, Firestorm's grid list elsewhere) agree. The
+// maps folder keeps the grid manager's own id (getGridId), so maps saved before stay found.
+std::string share_grid_id()
+{
+    LLGridManager* grids = LLGridManager::getInstance();
+    if (!grids->isSystemGrid())
+    {
+        std::vector<std::string> uris;
+        grids->getLoginURIs(uris);
+        const LLURI uri(uris.empty() ? std::string() : uris.front());
+        const std::string host = utf8str_tolower(uri.hostName());
+        if (!host.empty())
+        {
+            return host + llformat(":%u", (U32)uri.hostPort());
+        }
+    }
+    return grids->getGridId();
+}
 
 // Windows that snapshot settings and write the snapshot back as saved values (Preferences'
 // Cancel / OK, with the advanced graphics tabs, saving a graphics preset): open during
@@ -1059,8 +1081,10 @@ SharedMap read_shared_map(const std::string& path)
     try { m.meta = LlsdFromJson(boost::json::parse(bytes.substr(kShareMagic.size(), eol - kShareMagic.size()))); }
     catch (...) { m.error = "its description is damaged"; return m; }
     const std::string format = m.meta["payload"].asString();
-    if (!m.meta.isMap() || (format != "j2c" && format != "png") || m.meta["region_grid_x"].asInteger() <= 0
-        || m.meta["region_grid_y"].asInteger() <= 0 || (size_t)m.meta["payload_size"].asInteger() != bytes.size() - eol - 1)
+    if (!m.meta.isMap() || (format != "j2c" && format != "png")
+        || m.meta["region_grid_x"].asInteger() <= 0 || m.meta["region_grid_x"].asInteger() > kGridMax
+        || m.meta["region_grid_y"].asInteger() <= 0 || m.meta["region_grid_y"].asInteger() > kGridMax
+        || (size_t)m.meta["payload_size"].asInteger() != bytes.size() - eol - 1)
     {
         m.error = "its description is damaged";
         return m;
@@ -1102,7 +1126,7 @@ void install_shared_map(const SharedMap& m, U64 handle)
     LLNotificationsUtil::add("GMDXRegionMapImported", args);
 }
 
-void import_checked(const std::string& file, const SharedMap& m)
+void import_checked(const std::string& file, SharedMap m)
 {
     auto fail = [&file](const std::string& why)
     {
@@ -1110,8 +1134,9 @@ void import_checked(const std::string& file, const SharedMap& m)
         GMDXRegionCaptureState::message("The region map was not imported: " + why + ".");
     };
     if (!m.error.empty()) { fail(m.error); return; }
-    const std::string grid = LLGridManager::getInstance()->getGridId();
-    if (m.meta["grid"].asString() != grid)
+    // (this grid's shared name, or the grid manager's own id, which maps exported before used)
+    const std::string grid = m.meta["grid"].asString();
+    if (grid != share_grid_id() && grid != LLGridManager::getInstance()->getGridId())
     {
         fail("it is a map of a region on another grid (" + m.meta["grid"].asString() + ")");
         return;
@@ -1123,10 +1148,19 @@ void import_checked(const std::string& file, const SharedMap& m)
     {
         if (m.meta["region_id"].asUUID() != known->getRegionID())
         {
+            // [RLVa] (the region known here may be the one the agent is in)
             fail("it is a map of " + m.meta["region_name"].asString() + ", which is no longer at the coordinates of "
-                 + known->getName());
+                 + (RlvActions::canShowLocation() ? known->getName() : std::string("that region")));
             return;
         }
+        m.meta["region_width"] = known->getWidth();
+    }
+    // The width the map covers is the region's as far as this viewer knows it, not what the file
+    // or texture claims: on Second Life every region is 256 m; elsewhere an unloaded region keeps
+    // the claimed width (var-regions), which the World Map clamps to 8192 m.
+    else if (LLGridManager::getInstance()->isSystemGrid())
+    {
+        m.meta["region_width"] = REGION_WIDTH_METERS;
     }
     GMDXRegionCaptureState& s = GMDXRegionCaptureState::get();
     if (GMDXRegionCapture::isRunning() && s.handle == handle) { fail("that region is being mapped right now"); return; }
@@ -1162,7 +1196,7 @@ void GMDXRegionCapture::exportMap(const LLViewerRegion* region)
     }
     U32 x = 0, y = 0;
     from_region_handle(region->getHandle(), &x, &y);
-    meta["grid"] = LLGridManager::getInstance()->getGridId();
+    meta["grid"] = share_grid_id();
     meta["region_id"] = region->getRegionID();
     meta["region_name"] = region->getName();
     meta["region_width"] = region->getWidth();
@@ -1296,14 +1330,14 @@ void on_map_texture_loaded(bool success, LLViewerFetchedTexture* src_vi, LLImage
     F32 width = 0.f;
     std::string id;
     in >> gx >> gy >> width >> id;
-    if (in.fail() || gx <= 0 || gy <= 0 || width < 16.f || !LLUUID::validate(id))
+    if (in.fail() || gx <= 0 || gy <= 0 || gx > kGridMax || gy > kGridMax || width < 16.f || !LLUUID::validate(id))
     {
         GMDXRegionCaptureState::message("The texture " + req->name + " is not a region map (its description was changed).");
         return;
     }
     std::string region = req->name;
     if (region.compare(0, kTextureNamePrefix.size(), kTextureNamePrefix) == 0) region = region.substr(kTextureNamePrefix.size());
-    m.meta["grid"] = LLGridManager::getInstance()->getGridId();   // (a texture is on this grid)
+    m.meta["grid"] = share_grid_id();   // (a texture is on this grid)
     m.meta["region_name"] = region;
     m.meta["region_id"] = LLUUID(id);
     m.meta["region_width"] = width;

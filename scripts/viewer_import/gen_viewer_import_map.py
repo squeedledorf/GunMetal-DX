@@ -193,6 +193,8 @@ deny_exact = sorted(set([
     'FSLastOpenIMs',
     # Their voice backend's device identifiers do not name our WebRTC devices.
     'VoiceInputAudioDevice', 'VoiceOutputAudioDevice',
+    # <GMDX> GunMetal-DX files bug reports through its own report window; another viewer's tracker link does not apply.
+    'ReportBugURL',
 ]))
 deny_regex = [
     '^Window(X|Y|Width|Height)$', '^FullScreen', 'SettingsFile$', '^(New)?CacheLocation',

@@ -35,6 +35,7 @@
 
 #include "llagent.h"
 #include "llagentpilot.h"
+#include "gmdxhudeditpan.h"   // <GMDX> HUD edit: manipulator stays on screen
 #include "sltpscamera.h"
 #include "llanimationstates.h"
 #include "llfloatercamera.h"
@@ -55,6 +56,7 @@
 #include "llviewerregion.h"
 #include "llviewerwindow.h"
 #include "llvoavatarself.h"
+#include "llvrcamera.h"
 #include "llwindow.h"
 #include "llworld.h"
 // [RLVa:KB] - Checked: 2010-05-10 (RLVa-1.2.0g)
@@ -921,6 +923,10 @@ void LLAgentCamera::updateHUDZoom()
     }
 
     const F32 target = getAgentHUDTargetZoom();
+    if (isEditingHUD())
+    {
+        gmdx_keep_hud_gizmo_on_screen(mHUDTargetPan, target);   // <GMDX> manipulator stays on screen
+    }
     const F32 t = LLSmoothInterpolation::getInterpolant(0.03f);
     mHUDCurZoom = lerp(mHUDCurZoom, target, t);
     mHUDCurPan = lerp(mHUDCurPan, mHUDTargetPan, t);
@@ -1041,8 +1047,20 @@ void LLAgentCamera::cameraOrbitOver(const F32 angle)
 
         F32 angle_from_up = acos( camera_offset_unit * gAgent.getReferenceUpVector() );
 
-        LLVector3d left_axis;
-        left_axis.setVec(LLViewerCamera::getInstance()->getLeftAxis());
+        // <GMDX> (SoapStorm ed0f69bd0e) Pitch about the UNROLLED axis, perpendicular to the line
+        // of sight and world up: the camera's left axis is rolled, so pitching about it twisted
+        // the orbit sideways while the camera was rolled.
+        LLVector3 unrolled_left = camera_offset_unit % gAgent.getReferenceUpVector();
+        if (unrolled_left.isNull() || !unrolled_left.isFinite())
+        {
+            unrolled_left = LLVector3(0.f, 1.f, 0.f);
+        }
+        else
+        {
+            unrolled_left.normalize();
+        }
+        const LLVector3d left_axis(unrolled_left);
+        // </GMDX>
         F32 new_angle = llclamp(angle_from_up - angle, 1.f * DEG_TO_RAD, 179.f * DEG_TO_RAD);
         mOrbitOverAngle += angle_from_up - new_angle;
         mCameraFocusOffsetTarget.rotVec(angle_from_up - new_angle, left_axis);
@@ -1069,8 +1087,18 @@ void LLAgentCamera::resetCameraOrbit()
     LLVector3 camera_offset_unit(mCameraFocusOffsetTarget);
     camera_offset_unit.normalize();
 
-    LLVector3d left_axis;
-    left_axis.setVec(LLViewerCamera::getInstance()->getLeftAxis());
+    // <GMDX> the unrolled pitch axis, as cameraOrbitOver
+    LLVector3 unrolled_left = camera_offset_unit % gAgent.getReferenceUpVector();
+    if (unrolled_left.isNull() || !unrolled_left.isFinite())
+    {
+        unrolled_left = LLVector3(0.f, 1.f, 0.f);
+    }
+    else
+    {
+        unrolled_left.normalize();
+    }
+    const LLVector3d left_axis(unrolled_left);
+    // </GMDX>
     mCameraFocusOffsetTarget.rotVec(-mOrbitOverAngle, left_axis);
 
     mCameraFocusOffsetTarget.rotVec(-mOrbitAroundRadians, 0.f, 0.f, 1.f);
@@ -1414,6 +1442,37 @@ void LLAgentCamera::updateLookAt(const S32 mouse_x, const S32 mouse_y)
 
     LLQuaternion av_inv_rot = ~gAgentAvatarp->mRoot->getWorldRotation();
     LLVector3 root_at = LLVector3::x_axis * gAgentAvatarp->mRoot->getWorldRotation();
+
+    // Slipstream (#1121) VR: the head looks where the headset looks -- the look-at others see,
+    // as in mouselook (a world-space direction from the head, LLHUDEffectLookAt's send
+    // throttle), with the head's tilt riding along (setHeadRoll). Ahead of the idle and
+    // free-camera looks below, which would pin the head while only the headset moves. On
+    // leaving (fly cam, session end) the mouselook-priority target is cleared: it never
+    // times out and would hold the head. Desktop: headAngles is false at once.
+    static bool s_vr_lookat = false;
+    F32 vr_yaw = 0.f, vr_pitch = 0.f, vr_roll = 0.f;
+    if (LLVRCamera::headAngles(LLQuaternion::DEFAULT, vr_yaw, vr_pitch, vr_roll))
+    {
+        const F32 cos_pitch = cosf(vr_pitch);
+        const LLVector3 look(cos_pitch * cosf(vr_yaw), cos_pitch * sinf(vr_yaw), sinf(vr_pitch));
+        setLookAt(LOOKAT_TARGET_MOUSELOOK, gAgentAvatarp, look);
+        if (mLookAt.notNull() && !mLookAt->isDead())
+        {
+            mLookAt->setHeadRoll(vr_roll, true);
+        }
+        s_vr_lookat = true;
+        last_at_axis = root_at;
+        return;
+    }
+    if (s_vr_lookat)
+    {
+        s_vr_lookat = false;
+        if (mLookAt.notNull() && !mLookAt->isDead())
+        {
+            mLookAt->setHeadRoll(0.f, false);
+        }
+        setLookAt(LOOKAT_TARGET_CLEAR);
+    }
 
     // Slipstream (#902): with the camera detached from the avatar, the head looks where the
     // camera looks; the idle / mouse free-look below is for the camera that follows the avatar.

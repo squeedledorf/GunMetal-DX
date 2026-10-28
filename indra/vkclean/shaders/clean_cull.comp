@@ -376,9 +376,11 @@ struct CullParams {
                              // probe capture (2): bit14 shared six-face pre-cull (phases 3 / 4)
                              // shadow passes (3), #567: bit15 static casters only, bit16
                              // dynamic casters only (SHADOW_SPLIT_*)
-                             // <GMDX> every pass: bit17 orthographic main view (CULL_ORTHO,
-                             // the region map capture): u_lod_cam_pos.w is px per metre at
-                             // any depth; every LOD at its finest
+                             // <GMDX> bit17 orthographic main view (CULL_ORTHO): u_lod_cam_pos.w
+                             // is px per metre at any depth; every LOD at its finest. Every pass
+                             // for the region map capture, the main view (and mirror / HUD) only
+                             // for the live orthographic view
+                             // <GMDX> main view (0): bit18 avatars only (avatar matte snapshot)
                              // bit31: diagnostic reject histogram on (dbgAdd; RenderVKCullDiag)
     uint  u_cache_base;      // reduced-tier skin cache arena: first vertex (pass 0)
     uint  u_cache_cap;       // its capacity in vertices (0 = cache off)
@@ -1165,6 +1167,17 @@ uint cullOne(uint id, out DrawCmd c)
     // pre-skinned buckets -- the main-view rigged VS discards it instead.
     if (pc.u_hud_pass == 0u && (pc.u_flags & 1u) != 0u && (_flags & 8192u) != 0u && (_flags & 1u) == 0u)
         return 0xFFu;
+    // <GMDX> AVATAR MATTE SNAPSHOT (u_flags bit18, C++ kCullAvatarsOnly; gmdxsnapmattevk.cpp): the
+    // main view keeps avatars only -- rigged (body, mesh, animesh), worn rigid attachments, and of the
+    // flexi chains only your own (a world flexi is rigged-routed too). Shadows, probes and the mirror
+    // keep the world: it still shadows and lights the avatars.
+    if (pc.u_hud_pass == 0u && (pc.u_flags & 262144u) != 0u)
+    {
+        const bool flexi = (_flags & FLEXI_FLAG) != 0u;
+        const bool avatar_part = ((_flags & 1u) != 0u && !flexi) || (_flags & 512u) != 0u
+                              || (flexi && (_flags & 8192u) != 0u);
+        if (!avatar_part) return 0xFFu;
+    }
     // Render-type toggles (LLPipeline::RENDER_TYPE_*), every world view.
     if (pc.u_hud_pass != 1u && (pc.u_flags & 510u) != 0u)
     {
@@ -1364,7 +1377,8 @@ uint cullOne(uint id, out DrawCmd c)
             if (_rigged)
             {
                 // The skin palette places (and scales) rigged geometry: no density.
-                const float texels = adiam * pc.u_lod_cam_pos.w / adist / uvSpan(id) * scale
+                // <GMDX> orthographic (CULL_ORTHO): the same px per metre at every depth
+                const float texels = adiam * pc.u_lod_cam_pos.w / ((pc.u_flags & CULL_ORTHO) != 0u ? 1.0 : adist) / uvSpan(id) * scale
                                    * texDemandParams().x;
                 demandWrite(id, uint(clamp(texels, 0.0, float(DEMAND_FULL))));
             }

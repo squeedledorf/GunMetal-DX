@@ -12,7 +12,12 @@
  min_width="660"
  width="800">
     <floater.string name="status_ready">Nothing in the other viewer is changed. Tick what you want, use Preview for a summary, then Import. Every import is backed up first and can be undone.</floater.string>
-    <floater.string name="status_none">No other viewer's data was found on this computer (Firestorm, Black Dragon, Alchemy or Second Life).</floater.string>
+    <floater.string name="status_none">No other viewer's data was found on this computer (Firestorm, Black Dragon, Alchemy or Second Life). Use Folder... to pick a Firestorm profile folder yourself.</floater.string>
+    <!-- <GMDX> chosen Firestorm profile folder -->
+    <floater.string name="chosen_folder_label">Firestorm (chosen folder)</floater.string>
+    <floater.string name="folder_not_profile">[FOLDER] is not a Firestorm profile folder: it has neither user_settings/settings.xml nor an account folder with settings_per_account.xml.</floater.string>
+    <floater.string name="folder_is_ours">[FOLDER] is this viewer's own profile folder.</floater.string>
+    <!-- </GMDX> -->
     <floater.string name="status_nothing">Nothing selected to import.</floater.string>
     <floater.string name="status_logged_out">You are not logged in: per-account data (per-account settings, toolbars, contact sets, teleport history, chat) can be imported after login.</floater.string>
     <floater.string name="preview_header">Preview (nothing has been changed yet):</floater.string>
@@ -59,7 +64,19 @@
      left_pad="4"
      name="source_viewer"
      top_delta="-4"
-     width="702" />
+     width="606" />
+    <!-- <GMDX> SoapStorm c6d090301f: a Firestorm profile folder that was not found on its own -->
+    <button
+     follows="right|top"
+     height="23"
+     label="Folder..."
+     layout="topleft"
+     left_pad="4"
+     name="choose_folder_btn"
+     tool_tip="Import from a Firestorm profile folder that is not in the usual place (the folder that holds user_settings and the account folders, for example a copy or a Windows install)."
+     top_delta="0"
+     width="92" />
+    <!-- </GMDX> -->
     <text
      follows="left|top"
      height="16"

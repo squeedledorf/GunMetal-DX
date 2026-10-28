@@ -208,6 +208,12 @@
          name="skins" />
         <panel
          class="panel_preference"
+         filename="panel_preferences_safety.xml"
+         label="Safety"
+         layout="topleft"
+         name="safety" />
+        <panel
+         class="panel_preference"
          filename="panel_preferences_advanced.xml"
          label="Advanced"
          layout="topleft"

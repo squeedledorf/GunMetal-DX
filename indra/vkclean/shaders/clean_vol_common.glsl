@@ -56,7 +56,8 @@ vec3 volAmbient()
         a = atmosSrgbToLinear(a);
         a = vec3(dot(a, vec3(0.2126, 0.7152, 0.0722)));
     }
-    return a * ssr.atmos[12].w * ssr.vol_fog.w;
+    return a * ssr.atmos[12].w * ssr.vol_fog.w
+         * (atmosClassic() ? gmdxNightAmbientSrgb() : gmdxNightAmbient());   // <GMDX> the night's ambient
 }
 
 // The WindLight haze's extinction (/m), LL's atten.r rate (atmos_k[1].r); 0 with the

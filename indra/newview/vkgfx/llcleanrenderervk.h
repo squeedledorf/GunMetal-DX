@@ -290,7 +290,34 @@ public:
     // ortho_ppm, set by renderOffscreen; clean_cull.comp CULL_ORTHO = kCullOrtho).
     bool  mOrtho = false;
     float mOrthoPpm = 0.f;
+    // <GMDX> the live orthographic view (LLVKWorldFrame::ortho_view): the orthographic cull / LOD
+    // only, no clean plate; the passes with perspective-only geometry (volumetric and particle
+    // fog froxels, god rays) are skipped.
+    bool  mOrthoView = false;
     static constexpr uint32_t kCullOrtho = 131072u;
+    // <GMDX> AVATAR MATTE SNAPSHOTS (gmdxsnapshotavatars.h; vkgfx/gmdxsnapmattevk.cpp defines these).
+    // An offscreen sequence for an avatar layer (LLVKWorldFrame::avatar_matte, driven by
+    // LLVulkanContext::renderOffscreen): the warm-up recording renders the normal view and reports
+    // the avatars its avatar-id pass saw (gmdxSnapshotMatteSetSeen); every later recording keeps only
+    // avatars in the main view (mSnapMatte: clean_cull.comp kCullAvatarsOnly, bloom / glow / lens /
+    // post AA off) and its coverage (the avatar ids, else the depth) is read back and averaged into
+    // the 8-bit matte (snapMatteTake).
+    bool mSnapMatte = false;                       // this recording: the avatar-only main view
+    static constexpr uint32_t kCullAvatarsOnly = 262144u;
+    void snapMatteBegin(bool on, uint32_t w, uint32_t h);
+    void snapMatteFrame(uint32_t frame);           // before recordWorld
+    void snapMatteRecord(VkCommandBuffer cmd, uint32_t w, uint32_t h);   // after recordWorld
+    void snapMatteCollect();                       // after the recording's fence
+    void snapMatteEnd();                           // after the sequence (frees the readback)
+    bool snapMatteTake(std::vector<uint8_t>& alpha, uint32_t& w, uint32_t& h);
+    bool     mSnapMatteSeq = false, mSnapMaskWas = false;
+    uint32_t mSnapMatteW = 0, mSnapMatteH = 0, mSnapMatteFrameNo = 0, mSnapMatteSamples = 0;
+    uint32_t mSnapMatteRec = 0;                    // this recording's readback: bit 0 ids, bit 1 depth
+    GpuBuffer mSnapIdBuf{};
+    std::vector<uint16_t> mSnapCov;                // covered samples per pixel (image rows)
+    std::vector<float>    mSnapOcc;                // world occluder depth per pixel, from recording 0 (image rows)
+    std::vector<uint8_t>  mSnapAlpha;              // the result (LLImageRaw rows, bottom-up)
+    // </GMDX>
     // Build pipelines + descriptor layouts against `ctx`. `colorFormat` is the
     // swapchain format the world renders into. Returns false (logged) on failure;
     // the caller then simply skips world rendering (UI-only present).
@@ -355,6 +382,29 @@ public:
     std::function<void(VkCommandBuffer, VkImageView color, VkImageView depth,
                        VkImage depthImage, uint32_t w, uint32_t h)> mWorldOverlayHook;
     VkFormat worldDepthFormat() const { return mDepthFormat; }
+    // #1076 VR: where the HUD pass draws instead of colorView / the world depth: the UI wall
+    // image (window size, window format, COLOR_ATTACHMENT_OPTIMAL) and a depth image of the
+    // same size (worldDepthFormat, depth attachment usage; any prior layout: the pass clears
+    // it). Set by the context before recordWorld, VR world frames only; never on the desktop
+    // (default = no override: the HUD pass is the one it always was).
+    struct HudTarget
+    {
+        VkImageView color = VK_NULL_HANDLE;
+        VkImageView depth = VK_NULL_HANDLE;
+        VkImage depthImage = VK_NULL_HANDLE;
+        uint32_t width = 0, height = 0;
+    };
+    HudTarget mHudTarget;
+    // #1076 VR: also build the HUD pipelines for the wall image (alpha 1 on opaque / mask
+    // faces). Set by the context before init() in VR sessions only.
+    bool mWantVrHudPipes = false;
+    // #1075 LAYERED STEREO: the VR session renders one layer per eye (LLXrSession stereo). Set
+    // by the context before init(); init decides the view count from it (initViewCount).
+    bool mStereoRequested = false;
+    // #1075: the layers of the colour view recordWorld is handed (the context sets it before each
+    // recordWorld): N for the VR target's 2D_ARRAY view in stereo, 1 for the window image. A
+    // stereo frame whose output has one layer (the desktop debug N > 1 mode) tonemaps view 0 only.
+    uint32_t mOutputLayers = 1;
 
     // Local lights for this frame (called by the context before recordWorld).
     void setLights(const LLVKWorldFrame& wf);
@@ -1647,11 +1697,12 @@ private:
     VkSemaphore mTlComp = VK_NULL_HANDLE;   // timeline: compute segment ends
     uint64_t mTlGfxNext = 0, mTlCompNext = 0;   // last value handed out on each
     static constexpr uint32_t kAsyncSlots = 2;   // == kRingSlots (frames in flight; static_assert in the .cpp)
-    static constexpr uint32_t kAsyncCompPerSlot = 11;   // A B C D, probe trace, front end F, deferred lighting E, volumetric fog V, GI lag L (#978), + headroom
+    static constexpr uint32_t kAsyncCompPerSlot = 12;   // A B C D, probe trace, front end F, deferred lighting E, volumetric fog V, GI lag L (#978), light prep, + headroom
     // (+2: the ray-traced probe capture's fork; +2 frame pipelining: the front end's join and the P split;
     //  +2: the async deferred lighting fork / join; +2: the volumetric fog's fork / join-up-to, #718;
-    //  +2: the one-frame-latency GI segment's fork / join-up-to, #978 phase 2.)
-    static constexpr uint32_t kAsyncGfxPerSlot = 20;
+    //  +2: the one-frame-latency GI segment's fork / join-up-to, #978 phase 2; +2: the light prep's fork /
+    //  join-up-to.)
+    static constexpr uint32_t kAsyncGfxPerSlot = 22;
     VkCommandPool   mAsyncCompPool[kAsyncSlots] = {};
     VkCommandBuffer mAsyncCompCmds[kAsyncSlots][kAsyncCompPerSlot] = {};
     VkCommandBuffer mAsyncGfxCmds[kAsyncSlots][kAsyncGfxPerSlot] = {};
@@ -1785,6 +1836,22 @@ private:
     void pushCullSlot(VkCommandBuffer cmd, uint32_t slot, uint32_t phase, uint32_t mode, uint32_t slot_b = ~0u);
     // Store a draw view and push {view, f8 = 0} on `layout` (a draw-family layout).
     uint32_t pushDrawView(VkCommandBuffer cmd, VkPipelineLayout layout, const VKDrawPush& v);
+    // #1075 LAYERED STEREO (design §4.1): the N views of a MAIN-VIEW pass as N CONSECUTIVE
+    // entries (eye 0 .. N-1), pushed as {base, f8 = 0}; its multiview stages read entry
+    // base + CLEAN_VIEW (clean_draw_view.glsl). n == 1 is exactly pushDrawView (one entry, the
+    // usual dedupe). n > 1 takes the n entries as ONE block and never deduplicates them (nor
+    // offers them to later dedupes): at IPD 0 the eyes' entries are byte-identical, and a
+    // per-entry dedupe would fold eye 1 onto eye 0 and break the consecutive contract.
+    uint32_t pushDrawViews(VkCommandBuffer cmd, VkPipelineLayout layout, const VKDrawPush* v, uint32_t n);
+    // The block allocation behind it (absolute index of entry 0; n consecutive entries).
+    uint32_t ringAllocBlock(ParamRegion& r, const void* data, uint32_t bytes, uint32_t n);
+    // #1075: a MAIN-VIEW draw view (one that maps (world - the main origin) through the main
+    // camera: the world, rigged, water, particle, sky pushes of the main view's passes). N = 1:
+    // exactly pushDrawView(p). N > 1: p's N copies with each view's own view_proj (mEyeVP) and,
+    // with eyeInverse, its world inverse in inv_view_proj (mEyeInvVP); cam_time (the shading /
+    // pre-skin origin) and every other field stay p's. eyeInverse false for pushes whose
+    // inv_view_proj holds something else (particles: the billboard basis).
+    uint32_t pushMainView(VkCommandBuffer cmd, VkPipelineLayout layout, const VKDrawPush& p, bool eyeInverse = true);
     // Store the cull params (phase zeroed) and push {slot, p.phase, slot_b, mode} on
     // mCullLayout; returns the entry's ring index (a multi-view dispatch names it again).
     uint32_t pushCullParams(VkCommandBuffer cmd, const VKCullPush& p, uint32_t mode = 0u,
@@ -1981,6 +2048,9 @@ private:
     VkDescriptorSet  mDsetTonemap = VK_NULL_HANDLE;   // b0 = HDR scene, b1 = exposure
     VkPipelineLayout mTonemapLayout = VK_NULL_HANDLE, mExposureLayout = VK_NULL_HANDLE;
     VkPipeline       mTonemapPipe = VK_NULL_HANDLE, mExposurePipe = VK_NULL_HANDLE;
+    // #1075: the single-view tonemap (view 0 into a one-layer output: the desktop debug N > 1
+    // mode); built only when N > 1 (mTonemapPipe is then the N-view one).
+    VkPipeline       mTonemapPipe1 = VK_NULL_HANDLE;
     // Exposure set 1 (#28, LL luminanceF weighting): b0 = world depth (sky test), b1 =
     // HDR bloom mip 0 (LL adds its glow buffer). Rewritten when either view / the target
     // generation changes (recordTonemap).
@@ -2133,6 +2203,117 @@ private:
     struct SubAcc { const char* name; double ms; double worst = 0.0; bool async = false; };
     std::vector<SubAcc> mSubAcc;
     void gpuSubMark(VkCommandBuffer cmd, const char* name);
+    // ---- LAYERED STEREO, step 0 (#1075; research/VR_LAYERED_STEREO_DESIGN.md §3.1 item 4, §7) ----
+    // MULTIVIEW TIMESTAMP GUARD. A timestamp written inside a render pass instance whose viewMask
+    // has N bits takes N CONSECUTIVE queries (the implementation may write the time into the first
+    // and zeros into the rest). mMvViews = the view count of the open multiview scope; 0 = none.
+    // Only beginRenderingViews sets it (endRenderingViews clears it), and only for a viewMask != 0:
+    // the desktop (N = 1, viewMask 0) never sets it, so every mark below records exactly as before.
+    // Inside a scope gpuSubMark reserves the N-1 extra slots (queue tag kSubFiller, skipped by the
+    // harvest) and gpuTimerMark / rigGpuTimeMark write nothing (their fixed indices would collide).
+    static constexpr uint8_t kSubFiller = 4;
+    uint32_t mMvViews = 0;
+    // vkCmdBeginRendering with ri.viewMask = viewMask (0: exactly vkCmdBeginRendering(cmd, &ri)).
+    void beginRenderingViews(VkCommandBuffer cmd, VkRenderingInfo ri, uint32_t viewMask);
+    void endRenderingViews(VkCommandBuffer cmd);
+    // #1075 step 4: THE MAIN VIEW'S SCOPES. mainViewMask(): the N views' bits (0 at N = 1);
+    // mainAtt(img): the attachment view of a main-view target -- its 2D_ARRAY view over every
+    // layer at N > 1, else its 2D view (the desktop: exactly as before); beginMain: open a main-view
+    // scope through beginRenderingViews (N = 1: vkCmdBeginRendering(cmd, &ri), nothing else).
+    uint32_t mainViewMask() const { return mViewCount > 1u ? (1u << mViewCount) - 1u : 0u; }
+    VkImageView mainAtt(const GpuImage& img) const
+    {
+        return (mViewCount > 1u && img.arrayView != VK_NULL_HANDLE) ? img.arrayView : img.view;
+    }
+    void beginMain(VkCommandBuffer cmd, const VkRenderingInfo& ri) { beginRenderingViews(cmd, ri, mainViewMask()); }
+    // #1075 step 10: view v's 2D view of a screen target -- `view` for v = 0 (the desktop: always),
+    // layerView[v] above it; VK_NULL_HANDLE when the image has no layer v (a consumer refuses
+    // then: two views must never alias one layer's history).
+    static VkImageView layerOf(const GpuImage& img, uint32_t v) { return v == 0u ? img.view : img.layerView[v]; }
+    // FRAME HASH (RenderVKDebugFrameHash, debug, not persisted): a 64-bit FNV-1a over the world
+    // image at capture point 1 (after the final pass: world only, no selection / HUD / UI), read
+    // back through a per-frame-slot host buffer and hashed when that slot comes round again (its
+    // fence was waited by the acquire: no stall). Logged (tag VKFrameHash) when the value changes
+    // and every 600 frames while it holds, with the frame number, size and how long it held. Plus
+    // the RECORDED-STREAM SIGNATURE: an FNV over the sub-mark names in recording order (the
+    // breadcrumbs: every gpuSubMark), logged when it changes. Off (0): nothing is recorded,
+    // allocated or hashed. The A/B gate of every stereo step (scripts/perf/vk_ab_compare.py).
+    GpuBuffer mHashBuf[2]{};
+    uint64_t  mHashCap[2] = {};
+    uint32_t  mHashW[2] = {}, mHashH[2] = {};
+    uint32_t  mHashFrame[2] = {};
+    bool      mHashPending[2] = {};
+    uint32_t  mHashLayers[2] = {1, 1};       // layers copied (#1075: one per view in stereo)
+    uint32_t  mHashBpp[2] = {4, 4};          // bytes per texel (#1075: 8 when the stereo source is the RGBA16F scene)
+    uint64_t  mHashLastV[4] = {};            // per layer (kMaxViews, declared below)
+    uint32_t  mHashHeldV[4] = {};
+    bool      mFrameHashOn = false;          // latched at the top of recordWorld
+    uint64_t  mStreamSig = 0, mStreamSigLast = 0;
+    uint32_t  mStreamSigMarks = 0;
+    void frameHashBegin();                   // top of recordWorld: harvest this slot, close the signature
+    void recordFrameHash(VkCommandBuffer cmd, uint32_t width, uint32_t height);   // capture point 1
+    void frameHashDestroy();
+public:
+    // ---- LAYERED STEREO, step 2: the VIEW COUNT (#1075; design §3.1 items 1-2, §3.2) ----
+    // kMaxViews: the array bound of every per-view block (frame info, light info, TAA params,
+    // the CPU camera arrays) = clean_view.glsl CLEAN_MAX_VIEWS (owner decision §10.6: 4, ship 2).
+    // mViewCount: N, the views every main-view screen pass renders as layers of one target. 1 on
+    // the desktop and in every recording until the stereo path sets it (VR / the debug N = 2
+    // mode, startup only). Multiview pipelines (GraphicsPipelineDesc::views = N) are built only
+    // when N > 1; the spec-set key carries N - 1 in its own field (kSpecViewsField, 0 at N = 1:
+    // every desktop key, and its vk_spec_<key>.bin cache file, is unchanged).
+    static constexpr uint32_t kMaxViews = 4;
+    static_assert(kMaxViews == 4 && GpuImage::kMaxLayerViews == kMaxViews,
+                  "mHashLastV / mHashHeldV / GpuImage::layerView are sized for 4 views");
+    uint32_t viewCount() const { return mViewCount; }
+    // #1075 (step 12, the XR depth layer): the world's depth after recordWorld -- one layer per
+    // view at the world extent, the layout it is left in, and the eye distance (m) depth 0 / 1
+    // stand for (reversed-Z: distAtZero = the projection's far distance, distAtOne = its near
+    // one). False until the depth is layered (a single-view frame has no per-eye depth).
+    bool worldDepthForXr(VkImage& image, VkFormat& format, VkImageLayout& layout, VkExtent2D& extent,
+                         uint32_t& layers, float& distAtZero, float& distAtOne) const;
+    // N > 1 this session: every main-view screen pass renders the N views as layers.
+    bool stereoActive() const { return mViewCount > 1u; }
+private:
+    uint32_t mViewCount = 1;
+    // THE STEREO GATE. N > 1 needs every pass that runs in a stereo frame layered (the main
+    // view's targets N-layer, its raster passes multiview, its draw views N entries, its
+    // per-view reads indexed); until that chain is complete init() logs the request and keeps
+    // N = 1 (mono). OPEN since step 8 (part 2): the forward-lit stereo frame (pre-pass, sky, lit,
+    // pass 2, exposure, tonemap) is layered end to end; every family that is not is in the
+    // stereo-off set (initViewCount's log line). Only read when N > 1 was asked for.
+    static constexpr bool kStereoLayeredReady = true;
+    // init(): N from mStereoRequested (VR: 2) or RenderVKDebugViewCount (desktop debug), clamped
+    // to kMaxViews and the device's maxMultiviewViewCount; 1 without multiview.
+    void initViewCount();
+    // The depth target's layout when recordWorld returns (the world overlay / HUD passes leave it
+    // an attachment): what worldDepthForXr reports.
+    VkImageLayout mDepthXrLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+public:
+    // #1075 VR VISIBILITY MASK (XR_KHR_visibility_mask, step 12): each eye's hidden-area triangle
+    // list (x y per vertex, the eye's view space on the z = -1 plane: LLXrSession::visibilityMask)
+    // for this frame. The context calls it before recordWorld in every frame of a VR session (never
+    // on the desktop); `use` = a stereo VR world frame whose views are the located eyes. A new
+    // generation re-uploads the lists (here: a CPU setter point, outside any recording).
+    void setVisibilityMask(uint32_t generation, const std::vector<float>& eye0, const std::vector<float>& eye1,
+                           bool use);
+private:
+    // The mask's pipeline (stereo sessions: pass 1's formats and views, depth ALWAYS + write at
+    // the reversed-Z near value, no colour, no FS) from pass 1's pipeline description.
+    void initVisMask(const GraphicsPipelineDesc& pass1);
+    // Inside the stereo pass 1 scope, before the pre-pass: one multiview draw (mark g_vr_vismask).
+    // motionScope (#1075 step 10): the scope is the split, motion-only pass 1a ({motion,
+    // no-history} + depth) -- the twin pipeline with those formats.
+    void recordVisMask(VkCommandBuffer cmd, bool motionScope = false);
+    VkPipeline mVisMaskMoPipe = VK_NULL_HANDLE;   // ... that twin (pass 1a's mPreMo* formats)
+    GpuBuffer mVisMaskBuf;                  // both eyes' lists (host visible, a few KB), x y floats
+    uint32_t mVisMaskFirst[2] = {};         // per eye: first vertex in mVisMaskBuf
+    uint32_t mVisMaskCount[2] = {};         // per eye: vertices (whole triangles)
+    uint32_t mVisMaskGen = 0;               // the generation in mVisMaskBuf
+    bool mVisMaskGenValid = false;
+    bool mVisMaskUse = false;               // this frame draws the mask (setVisibilityMask)
+    VkPipelineLayout mVisMaskLayout = VK_NULL_HANDLE;
+    VkPipeline mVisMaskPipe = VK_NULL_HANDLE;
     // RenderVKGpuSubMarks off: only timestamps 0 and TS_COUNT-1 are written (the frame
     // total), so the timer queries themselves cannot serialize overlapped work.
     bool mTsLean = false;
@@ -2638,13 +2819,29 @@ private:
     static_assert(sizeof(VKLightInfo) == 368, "VKLightInfo = clean_lights_common.glsl LightInfo (std430 = std140: draw set 0 binding 6 is a UBO, #814)");
     std::vector<VKLightGPU> mLightsCPU;
     VKLightInfo mLightInfoCPU{};
-    float mViewProjRel[16] = {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1};   // P * rotation-only view (rigged)
+    // P * rotation-only view (rigged), per VIEW (#1075, design §4.1; the old name = view 0, as
+    // mCurView below).
+    float mViewProjRelV[kMaxViews][16] = {{1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1}, {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1},
+                                          {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1}, {1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1}};
+    float (&mViewProjRel)[16] = mViewProjRelV[0];
+    static_assert(kMaxViews == 4, "mViewProjRelV's initializer lists kMaxViews identities");
 
     // Screen-space reflections (LL's approach: trace against the PREVIOUS frame's lit
     // scene + depth, reprojected through its view). Byte layout = clean_draw.frag SSRInfo.
+    // #1075 LAYERED STEREO (design §4.1): the frame info's PER-VIEW part, one entry per view
+    // (VKSSRInfo::views, clean_frame_info.glsl SSRView; readers index it by CLEAN_VIEW). Every
+    // matrix maps camera-relative positions (P - cam_origin): cam_origin is ONE origin for all
+    // views (the head in VR, the eye on the desktop), like the draw views' origin (design §2
+    // rows 10-11), so it and shadow_mat stay shared. Only views [0, mViewCount) are filled.
+    struct VKSSRView
+    {
+        float prev_view[16], prev_proj[16], prev_inv_proj[16];   // SSR: last frame's view / projection
+        float cur_view[16];                                      // world -> view (normal pre-pass, AO)
+        float taa_cur_vp[16], taa_prev_vp[16];                   // temporal: unjittered (P - origin) -> clip
+    };
+    static_assert(sizeof(VKSSRView) == 384, "VKSSRView = clean_frame_info.glsl SSRView (std140)");
     struct VKSSRInfo
     {
-        float prev_view[16], prev_proj[16], prev_inv_proj[16];
         float params0[4];   // iterations, ray step, distance bias, depth reject bias
         float params1[4];   // adaptive step multiplier, SSR enabled, debug view, AO enabled
         float atmos[64];    // atmosphere + post block (clean_atmos_common.glsl)
@@ -2653,7 +2850,6 @@ private:
         float shadow_clip[4], shadow_params[4], shadow_texel[4];
         float mirror_box[16], mirror_plane[4], mirror_params[4];   // planar mirror
         float ao_params[4];   // irradiance scale, irradiance max, effect diag, nondiag
-        float cur_view[16];   // current world -> view (normal pre-pass)
         float ao_params2[4];  // x specular occlusion on, y standard AO multiply, z highlight
                               // transparent, w opaque water (RenderTransparentWater off)
         float sky_fx[4];      // aurora intensity, aurora time, meteor count, rad/pixel
@@ -2661,10 +2857,9 @@ private:
         float meteors[192][4];   // 64 meteors x {head+width, tail, colour}
         float clouds[4][4];      // cloud layer (clean_clouds.glsl)
         float bodies[10][4];     // sun/moon billboards, stars, rainbow/halo (clean_sky_bodies.glsl)
-        // Temporal (#84, clean_frame_info.glsl): unjittered current / previous world ->
-        // clip, this frame's jitter (px xy, NDC zw), params (prev time, MV valid, reset,
-        // jitter on).
-        float taa_cur_vp[16], taa_prev_vp[16];
+        // Temporal (#84, clean_frame_info.glsl): this frame's jitter (px xy, NDC zw; ONE phase
+        // for every view, owner decision §10.4), params (prev time, MV valid, reset, jitter on).
+        // (The unjittered current / previous clip matrices are per view: views[v].)
         float taa_jitter[4], taa_params[4];
         // Render scale (#181): x material mip bias while jittered, y render / display;
         // z RT sun alpha-test distance, w RT soft sun terminator floor (disc radii).
@@ -2701,7 +2896,9 @@ private:
         // RenderVKClusterShadowLiftScale), the near clip (m), 1 = an avatar is switched.
         float cluster_rt[4];
         // AO RESOLUTION (clean_frame_info.glsl ao_up): 0 full res, 1 half res + bilinear,
-        // 2 half res + depth-aware upsample; the upsample's absolute plane tolerance (m).
+        // 2 half res + depth-aware upsample; the upsample's absolute plane tolerance (m);
+        // z the sky-view LUT (#819); w the RT shadow mask's thin-receiver fallback + plane
+        // tolerance floor in mm (#1086).
         float ao_up[4];
         // PER-FRAME HAZE CONSTANTS (#816, clean_frame_info.glsl atmos_k; clean_atmos_common.glsl
         // header has the formulas): fillAtmosK, from atmos[] once per frame.
@@ -2736,19 +2933,26 @@ private:
         float physky[8][4];
         // <GMDX> clean_frame_info.glsl gmdx_misc: the alpha-mask pull (x base m, y m per m, z graze cap).
         float gmdx_misc[4];
+        // #1075: the per-view block (VKSSRView above), [0] = the desktop's / the left eye's.
+        VKSSRView views[kMaxViews];
     };
     // #814: clean_frame_info.glsl declares this block std140 (a UNIFORM BUFFER, draw set 0 /
     // AO set binding 9). Every member is a vec4 / mat4 / array of them, so the std140 offsets
     // equal the std430 ones this struct was laid out for (verified on the SPIR-V: every
     // OpMemberDecorate Offset identical before / after); these pin the ends + a few anchors.
-    static_assert(sizeof(VKSSRInfo) == 5552, "VKSSRInfo = clean_frame_info.glsl SSRBuf (std140, 5552 B)");   // <GMDX> + physky[8], gmdx_misc after shadow_fit
+    // #1075: 6560 B with kMaxViews = 4 view blocks (5408 before the per-view split), well under
+    // the spec minimum maxUniformBufferRange (16 KB). <GMDX> + physky[8], gmdx_misc (144 B) between
+    // shadow_fit and views: 6704 B.
+    static_assert(sizeof(VKSSRInfo) == 6704, "VKSSRInfo = clean_frame_info.glsl SSRBuf (std140, 6704 B)");
     static_assert(sizeof(VKSSRInfo) % 16 == 0, "std140 block size");
-    static_assert(offsetof(VKSSRInfo, atmos) == 224 && offsetof(VKSSRInfo, shadow_mat) == 576
-                  && offsetof(VKSSRInfo, meteors) == 1104 && offsetof(VKSSRInfo, ao_up) == 4720
-                  && offsetof(VKSSRInfo, atmos_k) == 4736 && offsetof(VKSSRInfo, vol_vp) == 4832
-                  && offsetof(VKSSRInfo, vol_misc) == 5040 && offsetof(VKSSRInfo, vol_clouds) == 5056
-                  && offsetof(VKSSRInfo, weather) == 5120 && offsetof(VKSSRInfo, shadow_fit) == 5392
-                  && offsetof(VKSSRInfo, physky) == 5408 && offsetof(VKSSRInfo, gmdx_misc) == 5536,
+    static_assert(sizeof(VKSSRInfo) <= 16384, "VKSSRInfo must fit the minimum maxUniformBufferRange");
+    static_assert(offsetof(VKSSRInfo, atmos) == 32 && offsetof(VKSSRInfo, shadow_mat) == 384
+                  && offsetof(VKSSRInfo, meteors) == 848 && offsetof(VKSSRInfo, ao_up) == 4336
+                  && offsetof(VKSSRInfo, atmos_k) == 4352 && offsetof(VKSSRInfo, vol_vp) == 4448
+                  && offsetof(VKSSRInfo, vol_misc) == 4656 && offsetof(VKSSRInfo, vol_clouds) == 4672
+                  && offsetof(VKSSRInfo, weather) == 4736 && offsetof(VKSSRInfo, shadow_fit) == 5008
+                  && offsetof(VKSSRInfo, physky) == 5024 && offsetof(VKSSRInfo, gmdx_misc) == 5152
+                  && offsetof(VKSSRInfo, views) == 5168,
                   "VKSSRInfo member offsets = clean_frame_info.glsl SSRBuf (std140)");
     // Lightbox sky effects (upstream LLDrawPoolWLSky aurora/meteors, RenderStarCount).
     void fillSkyFx(VKSSRInfo& si, uint32_t height);
@@ -2965,8 +3169,8 @@ private:
     // Sky bodies block (clean_sky_bodies.glsl) + its six textures: sun A, sun B, moon,
     // bloom (stars), rainbow, halo (bindless indices, UNORM like LL's raw samples).
     float   mBodies[40] = {};
-    LLUUID  mSkyTexId[6];
-    int32_t mSkyTexIdx[6] = {-1, -1, -1, -1, -1, -1};
+    LLUUID  mSkyTexId[8];   // <GMDX> + 6 / 7: the night sky's (gmdxnightsky.h textureId)
+    int32_t mSkyTexIdx[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
     // Refraction source for water: the solid-scene HDR colour, copied after pass 1.
     GpuImage mRefract{};
     uint32_t mRefractW = 0, mRefractH = 0;
@@ -2994,8 +3198,33 @@ private:
     uint32_t  mPrevW = 0, mPrevH = 0;
     bool      mPrevValid = false;
     GpuBuffer mSSRInfoSSBO{};
-    float     mCurView[16]{}, mCurProj[16]{}, mCurInvProj[16]{};
-    float     mPrevView[16]{}, mPrevProj[16]{}, mPrevInvProj[16]{};
+    // #1075 LAYERED STEREO (design §4.1): the camera PER VIEW, [v] for v < mViewCount (the eyes;
+    // the desktop has view 0 only). Filled in setLights (current) and committed with the SSR copy
+    // (previous), once per frame for every view. The old names stay as VIEW 0 (references into
+    // [0]): every reader that has not been classified yet reads view 0, which at N = 1 is the
+    // camera itself -- per-pixel readers move to [v] as their pass goes layered, readers that
+    // need the head (LOD, alpha sort, selection) take the head pose (step 1 frame split).
+    float     mCurViewV[kMaxViews][16]{}, mCurProjV[kMaxViews][16]{}, mCurInvProjV[kMaxViews][16]{};
+    float     mPrevViewV[kMaxViews][16]{}, mPrevProjV[kMaxViews][16]{}, mPrevInvProjV[kMaxViews][16]{};
+    float     (&mCurView)[16] = mCurViewV[0];
+    float     (&mCurProj)[16] = mCurProjV[0];
+    float     (&mCurInvProj)[16] = mCurInvProjV[0];
+    float     (&mPrevView)[16] = mPrevViewV[0];
+    float     (&mPrevProj)[16] = mPrevProjV[0];
+    float     (&mPrevInvProj)[16] = mPrevInvProjV[0];
+    // #1075 STEREO: each view's world -> clip inverse (the draw views' inv_view_proj: water depth,
+    // sky), and the per-frame draw-view matrices of the main view's N entries (pushMainView):
+    // the camera-relative view_proj and the world inverse, jittered like view 0's. Filled only
+    // while N > 1 (setLights / recordWorld).
+    float     mCurInvVPV[kMaxViews][16]{};
+    float     mEyeVP[kMaxViews][16]{}, mEyeInvVP[kMaxViews][16]{};
+    // #1075 STEREO DEFERRED LIGHTING (design steps 6-7): each view's eye (world; LLVKViewFrame::eye,
+    // setLights, N > 1 only) and the lighting's N draw-view entries (deferEyeBlock: the main view's
+    // push with view v's eye as cam_time and the inverse of its jittered view-projection relative to
+    // that eye -- clean_deferred_light.comp deferInvVP), stored once per frame by the G-buffer scope.
+    float     mEyePosV[kMaxViews][4]{};
+    uint32_t  mDeferEyeBase = 0;
+    uint32_t  deferEyeBlock(const VKDrawPush& p);
     void ensureSSR(uint32_t width, uint32_t height);
 
     // ---- TEMPORAL, stage 1 (#84): motion vectors + projection jitter ----
@@ -3076,7 +3305,11 @@ private:
     uint32_t  mTaaFrame = 0;              // Halton phase counter (on-screen frames)
     uint32_t  mTaaShiftGen = 0;           // gVKOriginShiftGen at the last frame
     float     mTaaPrevVP[16] = {};        // previous frame's unjittered world -> clip
-    float     mTaaPrevVPRel[16] = {};     // ... as P * rotation-only V: maps (P - mTaaPrevEye) (#555)
+    // ... as P * rotation-only V: maps (P - mTaaPrevEye) (#555). Per VIEW (#1075: each eye's
+    // previous camera; the old name = view 0). mTaaPrevEye is the ONE origin of last frame's
+    // views (the head in VR), as the frame info's cam_origin.
+    float     mTaaPrevVPRelV[kMaxViews][16] = {};
+    float     (&mTaaPrevVPRel)[16] = mTaaPrevVPRelV[0];
     float     mTaaPrevEye[3] = {};
     float     mTaaPrevTime = 0.f;
     float     mTaaPrevBoost = 0.f;        // speed-FoV boost (rad) of the frame mTaaPrevVP* is from (#663)
@@ -3191,7 +3424,10 @@ private:
     bool      mTonemapLast = false;
     bool      mDitherInTonemap = false;
     bool      mTaaResolveReset = true;    // this frame's temporal reset (frame-info fill)
-    float     mTaaReproj[16] = {};        // this frame's unjittered clip -> last frame's clip
+    // This frame's unjittered clip -> last frame's clip, PER VIEW (#1075 step 10: each eye's own
+    // camera reprojection, both rebased onto the one head origin; the old name = view 0).
+    float     mTaaReprojV[kMaxViews][16] = {};
+    float     (&mTaaReproj)[16] = mTaaReprojV[0];
     // The same with last frame's eye moved onto this frame's (rotation / zoom only): the
     // motion blur's camera split (#118; mTaaReproj - this = the translation part).
     float     mMbReprojRot[16] = {};
@@ -3199,10 +3435,15 @@ private:
     // clip-xy scale that did it (the pre-pass motion target gets the same in the shader).
     float     mMbReprojCam[16] = {};
     float     mMbFovK = 1.f;
-    float     mTaaWaterPlane[4] = {};     // water plane in this frame's unjittered clip space (#204)
+    // Water plane in this frame's unjittered clip space (#204), per view (#1075: [0] = the old name).
+    float     mTaaWaterPlaneV[kMaxViews][4] = {};
+    float     (&mTaaWaterPlane)[4] = mTaaWaterPlaneV[0];
     VkDescriptorSetLayout mDslTaa = VK_NULL_HANDLE;   // see clean_taa.comp
     VkDescPool            mTaaPool;
-    VkDescriptorSet mDsetTaa[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};   // [i]: writes mTaaHist[i]
+    // [v][i]: view v's resolve writing mTaaHist[i] (layer v). #1075 step 10: the TAA runs once
+    // per view through each layer's 2D views (no arrayed shader: the desktop SPIR-V is
+    // unchanged); only [0, mViewCount) are allocated -- [0][*] alone on the desktop, as before.
+    VkDescriptorSet mDsetTaa[kMaxViews][2] = {};
     VkPipelineLayout mTaaLayout = VK_NULL_HANDLE;
     VkPipeline       mTaaPipe = VK_NULL_HANDLE;
     // Views the sets point at (rewritten when any changes).
@@ -3274,8 +3515,17 @@ private:
     // barriers) and replaces the resolve; the TAA dispatch still runs for its glow
     // resolve when a glow consumer wants it. Created on the first FSR frame, deleted
     // once FSR is off (VRAM discipline).
-    LLCleanFSR3VK* mFsr = nullptr;
-    bool      mFsrRanLast = false;        // the previous main-view frame upscaled with FSR
+    // #1075 step 10: ONE INSTANCE PER VIEW ([v] for v < mViewCount; [0] alone on the desktop):
+    // each owns its history, constants and sets, fed view v's layer of every input and written
+    // into view v's layer of mHdr, so the eyes' histories never mix. All views run or none.
+    LLCleanFSR3VK* mFsr[kMaxViews] = {};
+    void destroyFsr();                    // every view's instance (device wait inside)
+    bool      mFsrRanLast = false;        // the previous main-view frame upscaled with FSR (every view)
+    // #1075 step 10 (stereo only): ONE frame time for every view's FSR / DLSS instance, taken once
+    // per recording -- their own clocks would differ by the first eye's record time, so IPD 0
+    // (identical inputs) would not give identical eyes. Unused at N = 1 (each module's own clock).
+    double    mUpscaleClock = -1.0;
+    float     mUpscaleDt = 1.f / 60.f;    // seconds
     uint32_t  mTaaJitterPhases = 16;      // this frame's Halton cycle length (FSR's lock logic)
     bool fsrRequested() const;            // an FSR mode is selected and the device can run it
     // Fills the FSR frame and makes its pipelines / resources / sets (before any barrier
@@ -3295,7 +3545,17 @@ private:
     // instead). Whatever it needs is made / freed in rrPrestep (syncFromStoresPrestep) -- an
     // RR <-> SR switch included; a frame whose state it was not built for falls back to FSR 3.1
     // (or TAA) and requests the change.
-    LLCleanDlssRRVK* mRr = nullptr;
+    // #1075 step 10: ONE INSTANCE PER VIEW ([v] for v < mViewCount; [0] alone on the desktop), each
+    // with its own network feature (history), targets and sets, fed view v's layer of every input.
+    // The shim's image resource names no array layer, so a stereo frame's output is view v's own
+    // display-size staging image (mRrStage[v], made in rrPrestep), copied into layer v of mHdr after
+    // every view ran. One request (mRrReq) prepares every view. Stereo frames are forward-lit: Ray
+    // Reconstruction (G-buffer guides) does not run there -- Super Resolution does.
+    LLCleanDlssRRVK* mRr[kMaxViews] = {};
+    GpuImage  mRrStage[kMaxViews]{};
+    uint32_t  mRrStageW = 0, mRrStageH = 0;
+    bool ensureRrStages(uint32_t dw, uint32_t dh);   // rrPrestep (outside a recording); false = refused
+    void destroyRrStages();                          // (device wait when it holds any)
     struct RrReq
     {
         bool pending = false; bool release = false;
@@ -3350,8 +3610,9 @@ private:
     // This main-view frame's plan: DLSS wanted + available (+ the network, the exact render extent).
     bool rrPlan(uint32_t dw, uint32_t dh, uint32_t& rw, uint32_t& rh);
     void rrNote(const std::string& why);  // logs a changed reason once
+    // view: whose layer / camera / staging output (#1075 step 10; 0 on the desktop).
     LLCleanDlssRRVK::Want rrWant(LLVKNeuralRecon::FeatureKind kind, uint32_t rw, uint32_t rh, uint32_t dw,
-                                 uint32_t dh, uint32_t q) const;
+                                 uint32_t dh, uint32_t q, uint32_t view = 0) const;
     // In the resolve block: records the reconstruction (true) or requests the state it needs
     // and returns false (the caller runs FSR / TAA).
     bool rrTry(VkCommandBuffer cmd, uint32_t width, uint32_t height, uint32_t rw, uint32_t rh, bool mvNow, bool deferNow);
@@ -4347,7 +4608,7 @@ private:
         float    rs_em_params2[4];// (#91) range cutoff (reflected radiance), longest range (m), (#1006) cell budget, rest refresh
         uint32_t rs_em_stat[4];  // (#91) GPU: cells with an emitter, their emitters, texels, rays
         uint32_t rs_em_take_cfg[4]; // (#91 LIGHT TAKEOVER) the table's rows T (host), GPU: lights taken over,
-                                 // lights refused (a block dropped), 0
+                                 // lights refused (a block dropped), GPU: the rest's subset stride
         uint32_t rs_em_cache[4]; // (#986) GPU: records copied from the last build, records built, cell
                                  // candidate pairs, EM_C_* (1: the cell build gathered: pairs past the cap)
         uint32_t rs_em_take[8];  // (#91) GPU: the point lights taken over this frame (bit = light index)
@@ -4413,7 +4674,7 @@ private:
     static constexpr VkDeviceSize kRsEmCchStatOffset = kRsEmXOffset + 20u * 8u;     // (EM_CCH_STAT: 4 x 8 B)
     static constexpr VkDeviceSize kRsEmCchArgsOffset = kRsEmXOffset + 18u * 8u;     // (mode 7's indirect dispatch)
     static constexpr VkDeviceSize kRsEmCchClusterOffset = kRsEmXOffset + 41u * 8u;  // (#1009 EM_CCH_CLUSTER + the skip
-                                                                                    //  diagnostic [42..44]: 32 B, stats)
+                                                                                    //  diagnostic [42..44] + EM_CCH_OUT [45]: 40 B, stats)
     static constexpr VkDeviceSize kRsEmFwdOffset = kRsEmXOffset + 64u * 8u;
     static constexpr VkDeviceSize kRsEmFwdBytes = (VkDeviceSize)kRsEmCap * 4u;
     static constexpr VkDeviceSize kRsEmSigOffset = kRsEmFwdOffset + kRsEmFwdBytes
@@ -4526,6 +4787,22 @@ private:
     uint32_t              mRsStatSetN[3] = {0, 0, 0}, mRsStatPointN[3] = {0, 0, 0};
     uint32_t              mRsStatMovedN[3] = {0, 0, 0};   // (#869: mRsMovedN, the moving lights)
     uint32_t              mRsStatFlickN[3] = {0, 0, 0};   // (#869: mRsFlickN, the flickering lights)
+    // (#1108) the ring also runs without the GPU timers while the emissive build does (its GATHER note): a slot
+    // recorded with the timers on feeds mRsStatAcc; the long cells' flag of the slot's build (the note's text)
+    bool                  mRsStatTs[3] = {false, false, false};
+    bool                  mRsStatLong[3] = {false, false, false};
+    // (#1108) the emissive build's WHOLE-GRID GATHER note (rsStatsRecord): at most one line per
+    // kRsEmGatherLogSecs, with the gather builds counted since the last line; the setting's reason logged once
+    double                mRsEmGatherLogT = -1.0e30;
+    uint32_t              mRsEmGatherN = 0;
+    bool                  mRsEmGatherSetLogged = false;
+    static constexpr double kRsEmGatherLogSecs = 30.0;
+    // (clean_regir.glsl SUBSET STRIDE) the emissive build's stride STEP note (rsStatsRecord, rs_em_take_cfg.w): a
+    // step re-subsets every emitter at once; at most one line per kRsEmStrideLogSecs, the steps since the last
+    double                mRsEmStrideLogT = -1.0e30;
+    uint32_t              mRsEmStrideLast = 0;       // (0: none read yet)
+    uint32_t              mRsEmStrideSteps = 0;
+    static constexpr double kRsEmStrideLogSecs = 2.0;
     struct RsStatAcc { uint32_t frames = 0; double stat[8] = {}; double setN = 0, pointN = 0, movedN = 0, flickN = 0;
                        double em = 0, emDrop = 0, emPeak = 0, emInst = 0, emCap = 0; uint32_t emFrames = 0;
                        double emStat[4] = {};    // (#91 rs_em_stat: cells, their emitters, texels, rays)
@@ -4537,6 +4814,7 @@ private:
                        //  weak emitters per build; the stalest cell left dirty; full builds)
                        double emDirty = 0, emRegather = 0, emForced = 0, emMiss = 0, emKept = 0, emWeak = 0;
                        double emStaleMax = 0; uint32_t emFull = 0, emIncFrames = 0;
+                       double emOutInst = 0, emOutTri = 0;   // (EM_CCH_OUT: emitters outside the grid's reach, [45])
                        double emClInst = 0, emClTri = 0;   // (#1009 CLUSTER STATICS: CC_HDR [41] per lists build)
                        double emSkip[5] = {}; uint32_t emSkipFrames = 0;   // (#1009 SKIP DIAGNOSTIC: [42..44])
                        double occ[13] = {}; uint32_t occFrames = 0;   // (#869 OCCLUSION CULL: OCC_STAT words 0-12)
@@ -4598,15 +4876,27 @@ private:
                              // limit of the hits' point-light rays (RenderVKReSTIRFixtureSize, m)
         float    sph[64][4];
         float    chg_prev[128][4];   // (#980) mGiChgPrev: the flagged lights' old records, ascending light index
+        float    prm6[4];    // (#1087) x hot entries, y their candidates' M clamp, z the cache window inside them
+        float    hot[128][4];   // (#1087) mGiHot: 4 vec4 per recently changed light (clean_gi_common.glsl GI_HOT_MAX)
     };
-    static_assert(sizeof(GiHeader) == 3280, "GiHeader = clean_gi_common.glsl GiHeader");
+    static_assert(sizeof(GiHeader) == 5344, "GiHeader = clean_gi_common.glsl GiHeader");
+    // (#1087, RenderVKGILightMoveFix) RECENTLY MOVED LIGHTS (the GI header's hot list): every light the
+    // GI reference rule (mGiChg) flagged as MOVED within the last RenderVKGILightChangeHold frames (radiance-
+    // only changes stay #980's), sorted by key, at most kGiHotMax (a full list replaces the entry closest to
+    // expiry). opr / ocf: its reference before its latest move flag (opr[3] < 0: moved); npr: its current
+    // sphere; li: its index this frame (-1: not
+    // in the list); left: frames it stays (the hold, counted from its latest flag). Bounded by kGiHotMax.
+    struct GiHotLight { uint64_t key; float opr[4]; float ocf[4]; float npr[4]; int32_t li; uint32_t left; };
+    static constexpr size_t kGiHotMax = 32;   // = clean_gi_common.glsl GI_HOT_MAX
+    std::vector<GiHotLight> mGiHot;
     class LLCleanDenoiserVK* mGiDn = nullptr;       // the GI signal's own denoiser instance
     VkPipeline            mGiTracePipe = VK_NULL_HANDLE;   // pass 11 -DCLEAN_GI_TRACE
     VkPipeline            mGiResolvePipe = VK_NULL_HANDLE; // (GI-4) the radiance cache's resolve
     // (#1031, RenderVKGISplitKernels) the GI trace as stages (clean_deferred_light.comp THE GI KERNEL
     // SPLIT): TRACE, SHADE, REUSE (+ TAIL), RESHADE -- over mGiHit (set 3 binding 25: the list headers
-    // + list + 96 B of records per GI texel); without it (refused / off) the fused mGiTracePipe
-    enum GiStage : uint32_t { GIS_TRACE = 0, GIS_SHADE, GIS_REUSE, GIS_RESHADE, GIS_COUNT };
+    // + list + 96 B of records per GI texel + #1039 4 B of change tag); without it (refused / off) the fused
+    // mGiTracePipe. (#1039) CHG-TAG: the reservoirs' changed / hot-light tags before REUSE (mGiHdrChg frames)
+    enum GiStage : uint32_t { GIS_TRACE = 0, GIS_SHADE, GIS_REUSE, GIS_RESHADE, GIS_CHGTAG, GIS_COUNT };
     VkPipeline            mGiSplitPipe[GIS_COUNT] = {};
     GpuBuffer             mGiHit{};
     uint32_t              mGiHitW = 0, mGiHitH = 0;
@@ -4623,9 +4913,11 @@ private:
     static VkDeviceSize   giHitBytes(uint32_t w, uint32_t h)
     {
         const VkDeviceSize n = (VkDeviceSize)w * h;
-        // headers (the re-shade list, #1036 the hit / miss lists), list (4 B / texel), records
-        return 16u * (3u + (n + 3u) / 4u) + n * 96u;
+        // headers (the re-shade list, #1036 the hit / miss lists), list (4 B / texel), records, (#1039) the
+        // change tags (4 B / texel)
+        return 16u * (3u + (n + 3u) / 4u) + n * 96u + 16u * ((n + 3u) / 4u);
     }
+    bool                  mGiHdrChg = false;         // (#1039) this frame's header: GI_F_LIGHT_CHG + GI_F_RES (CHG-TAG runs)
     GpuBuffer             mGiState{};                // header + radiance cache (fixed at its size)
     uint32_t              mGiStateSlots = ~0u;       // the cache slots mGiState was made for
     GpuBuffer             mGiRes{};                  // (GI-2) reservoirs: 32 B x 2 parities per GI texel
@@ -4647,7 +4939,7 @@ private:
     bool                  mGiStatUsed[3] = {false, false, false};
     uint32_t              mGiStatSlot = 0;
     struct GiStatAcc { uint32_t frames = 0; double s[20] = {}; double livePeak = 0;
-                             double chgLights = 0, allLights = 0; uint32_t hdrFrames = 0; } mGiStatAcc;
+                             double chgLights = 0, allLights = 0, hotLights = 0; uint32_t hdrFrames = 0; } mGiStatAcc;
     void                  giInit(VkDevice dev);
     void                  giDestroy();
     void                  writeGiBindings();         // set 3 bindings 18-23 (no frame in flight)
@@ -4667,6 +4959,9 @@ private:
     bool                  giApply(uint32_t w, uint32_t h, uint32_t slots, bool wantRes, float scale, bool wantHit);
     void                  giWriteHeader(VkCommandBuffer cmd);   // light pass, with the uploads
     void                  recordGI(VkCommandBuffer cmd, const VKDeferPush& p, uint32_t viewOff, bool onAsync);
+    // (#1039 M6: recordGI from the split's REUSE stage on / after its trace stages, recordable after the frame walk)
+    void                  recordGISplitReuse(VkCommandBuffer cmd, const VKRtReflPush& rp, bool onAsync, bool vqGir);
+    void                  recordGITail(VkCommandBuffer cmd, const VKDeferPush& p, uint32_t viewOff, bool onAsync);
     bool                  giTraceReady() const;      // recordGI would record the trace (this frame's TLAS, the images)
     // (#978) GI EARLY TRACE (RenderVKGIEarlyTrace; the frame graph: llcleangivk.cpp GI EARLY TRACE):
     // the async lighting chain stops after the GI trace + its denoiser; the combine (BASE + LOCAL /
@@ -4831,7 +5126,12 @@ private:
     // (#1031) 27 the split shadow core's light-sample visibilities (storage buffer: mPdnVis, else mRsResDummy)
     static constexpr uint32_t kDsBindingPdnVis = kDsImgBindings + 20u;
     static_assert(kDsBindingPdnVis == 27u, "clean_deferred_light.comp set 3 binding 27 (pdn_vis)");
-    static constexpr uint32_t kDsBindings = kDsImgBindings + 21u;
+    // (#1038) 28 the pre-pass motion vectors for the reservoir reprojection of moving surfaces -- the GI
+    // trace's (GI_F_REUSE_MV) and pass 15's ReSTIR DI (RS_F_REUSE_MV) (combined image sampler: mMotion,
+    // else the projector / GI denoiser's 1 x 1 placeholder; writeGiMotion)
+    static constexpr uint32_t kDsBindingGiMotion = kDsImgBindings + 21u;
+    static_assert(kDsBindingGiMotion == 28u, "clean_deferred_light.comp set 3 binding 28 (uReuseMotion)");
+    static constexpr uint32_t kDsBindings = kDsImgBindings + 22u;
     VkDescriptorSetLayout mDslDeferSplit = VK_NULL_HANDLE;   // set 3: the storage images
     VkDescPool       mDeferSplitPool;
     VkDescriptorSet  mDsetDeferSplit = VK_NULL_HANDLE;
@@ -4940,21 +5240,69 @@ private:
     bool             mRtSplitNow = false;        // this recording traces through the split (rtSplitDecide)
     static constexpr uint32_t kRtRecBytes = 112u;   // (7 uvec4: clean_deferred_light.comp RTR_REC_WORDS)
     void             rtSplitDecide(uint32_t rw, uint32_t rh, double now);
+    // (#1128, RenderVKRTHangBeacon) THE HANG BEACON (clean_deferred_light.comp THE HANG BEACON): beacon twins of the
+    // ray-query kernels (regen_world_spv.py RT_BC_KERNELS; kernel k = index k - 1 of mRtBcPipe / rtBcTable), built
+    // in the background while the setting is on and bound in place of the normal kernel (rtBcPipe) once armed,
+    // write every ray query's inputs into mRtBc (HOST-VISIBLE: readable after a device loss) before the query
+    // starts; rtHangBeaconReport prints the lanes that never finished. The address reaches the kernels through
+    // the lit guard buffer (mOdCounter words kLgBcWord..+2, rtBcFrameBegin), never the push. mRtBcTag: the frame
+    // tag written into the header (24 bits, never 0). Armed kRtBcArmFrames recordings after the buffer exists
+    // (every queue has seen the address by then).
+    static constexpr uint32_t kRtBcHdrQ = 64u, kRtBcSlotQ = 3u, kRtBcSlots = 1u << 21, kRtBcKernels = 16u;
+    static constexpr uint32_t kRtBcMagic = 0x1128BEACu, kRtBcSelfTest = 0x1128DEADu, kLgBcWord = 60u, kRtBcArmFrames = 4u;
+    VkPipeline       mRtBcPipe[kRtBcKernels] = {};
+    PipelineJobSlot  mRtBcJob;
+    bool             mRtBcQueued = false;        // the twins were queued (once per session)
+    GpuBuffer        mRtBc{};
+    uint32_t         mRtBcTag = 0;
+    uint32_t         mRtBcArmed = 0;             // recordings that wrote the address since the buffer exists
+    bool             mRtBcNow = false;           // this recording binds the beacon twins
+    double           mRtBcRetryAt = 0.0;
+    void             rtHangBeaconDecide(uint32_t rw, uint32_t rh, double now);
+    void             rtHangBeaconDestroy();
+    void             rtHangBeaconReport() const;   // (device-lost report: asyncLostHook)
+    void             rtBcFrameBegin(VkCommandBuffer cmd);   // (recordLitGuardBegin: the address words + the header)
+    VkPipeline       rtBcPipe(VkPipeline p) const;          // p's beacon twin while mRtBcNow, else p
+    // (#1128) what the last recordings ran (the device-lost report: which RenderVKVisQueue bits / splits were live)
+    struct RtBcFrameNote
+    {
+        uint32_t frame = 0, tag = 0, vqMask = 0, vqSet = 0;
+        bool rtRefl = false, rtSplit = false, gi = false, giSplit = false, giShadeSplit = false, pdn = false;
+        bool vqRt = false, vqGi = false, vqGir = false, vqShSun = false, vqShVis = false, vqM6 = false, bcNow = false;
+    };
+    RtBcFrameNote    mRtBcNotes[4];
+    uint32_t         mRtBcNoteN = 0;
+    // (#1128) the RAY LIST header of the last 3 recordings (count, the list trace's dispatch x / y / z, the
+    // capacity, the tile count), copied right after the select pass: the device-lost report prints the
+    // indirect arguments of the frame in flight (host-visible; a hung frame's copy ran before its trace).
+    static constexpr uint32_t kRtArgsWords = 8u;
+    GpuBuffer        mRtArgsRb{};
+    uint32_t         mRtArgsSlot = 0;
+    uint32_t         mRtArgsTag[3] = {0, 0, 0};   // the tag each slot's last recording wrote (0: none)
+    uint32_t         mRtArgsSeq = 0;
     // (#1039 M1, RenderVKVisQueue; llcleanvisqueuevk.cpp) THE VISIBILITY QUEUE (clean_vis_queue.glsl): the
     // hit-shading splits' sun rays as requests -- the material stage queues (DeferRtSplitMatVq /
     // DeferGiSplitHitMatVq), ONE walk kernel traces them (DeferVisWalk), the lighting stage resolves
     // (DeferRtSplitLightVq / DeferGiSplitHitLightVq: no sun walk). One device-address buffer (no
     // descriptor), a region per consumer: a 256 B header + 64 B per entry (a 48 B request + a 16 B result),
     // entries = the consumer's (the RT records' capacity, the GI texels) within the cap
-    // (RenderVKVisQueueMB, 0 = the VRAM tier's: 192 / 64 / 32 MB); the entries past it take the fused
+    // (RenderVKVisQueueMB, 0 = the VRAM tier's: 896 / 192 / 64 / 32 MB); the entries past it take the fused
     // lighting stage as a TAIL (push rtr3.y = the first). Sized from the extent / settings only (no growth);
     // a new size allocates first and retires the old buffer. Refused (#697): the fused stages, retry in 30 s.
     // (#1039 M2, RenderVKVisQueue bit 2) the SET 2 variants (DeferRtSplitMatVq2 / DeferRtSplitLayersVq2 /
     // DeferRtSplitLightVq2, DeferGiSplitHitMatVq2 / DeferGiSplitHitLightVq2) also queue the hits' occlusion ray
     // and the hit shadow-ray budget's K light rays (the producer walks the local lights unshadowed) and give the
-    // RT split a LAYERS stage (the blend layers): no ray query left in the lighting stages. An entry then holds
+    // RT split a LAYERS stage (the blend layers): no ray query left in the lighting stages. Their producer is a
+    // REQ stage of its own (DeferRtSplitReqVq2 / DeferGiSplitHitReqVq2) between the material and the walk. An entry then holds
     // R requests (RT 2 + K, GI 1 + K: the most it can ask) and S 16 B result slots (RT 4 + K, GI 2 + K).
-    enum VisQueueRegionId : uint32_t { VQR_RT = 0, VQR_GI, VQR_COUNT };
+    // (#1039 M3, RenderVKVisQueue bit 4; pipeline SET 2) the GI split's REUSE stage queues its reused picks'
+    // visibility rays (DeferGiSplitReuseVq: REUSE-VQ, then DeferGiSplitVisTail after the walk): region VQR_GIR, one
+    // request + one slot per GI texel (64 B), every texel or none -- a frame it does not fit runs the fused REUSE.
+    // (#1039, RenderVKVisQueue bit 8; pipeline SET 3) pass 15's split shadow core: SUNVIS / VIS as GEN (the
+    // kernel up to its walk; the sample as a request) -> WALK (the sample's rays + the kernel's store) -- region
+    // VQR_SHSUN (one 64 B request per denoiser texel, whole or none: else the fused SUNVIS) and VQR_SHVIS (48 B
+    // per light-sample job, kVqShJobsPerTexel per texel within the cap; the jobs past it run VIS as the TAIL).
+    enum VisQueueRegionId : uint32_t { VQR_RT = 0, VQR_GI, VQR_GIR, VQR_SHSUN, VQR_SHVIS, VQR_COUNT };
     struct VisQueueRegion
     {
         VkDeviceSize offset = 0;    // in mVq
@@ -4967,21 +5315,45 @@ private:
     GpuBuffer        mVq{};
     VisQueueRegion   mVqRegion[VQR_COUNT];
     uint32_t         mVqCapBytes = 0;            // this recording's cap
+    uint64_t         mVqHeapBytes = 0;           // the device-local heap's SIZE (the tier default's input; 0 = not read yet)
     double           mVqRetryAt = 0.0;
     bool             mVqRtNow = false;           // this recording queues the RT reflections' hit rays
     bool             mVqGiNow = false;           // ... and the GI's
     uint32_t         mVqSet = 0;                 // ... through set 0 (M1: the sun) or set 1 (M2: every hit ray)
+    bool             mVqGirNow = false;          // (M3, set 2) ... and the GI reuse's visibility rays
+    bool             mVqGirFit = false;          // (M3) the last GI-reuse region decision (logged when it flips)
+    bool             mVqShSunNow = false;        // (bit 8, set 3) the shadow core's sun samples go through the queue
+    bool             mVqShVisNow = false;        // ... and its light samples
+    bool             mVqShSunFit = false;        // (bit 8) the last sun-region decision (logged when it flips)
+    // (bit 8, set 3) pass 15's queue kernels: GEN / WALK (footprint, iso LOD) per sample kind + VIS's TAIL
+    enum VqShadowPipe : uint32_t { VQSH_SUN_GEN = 0, VQSH_SUN_WALK, VQSH_SUN_WALK_ISO, VQSH_VIS_GEN, VQSH_VIS_WALK,
+                                   VQSH_VIS_WALK_ISO, VQSH_VIS_TAIL, VQSH_VIS_TAIL_ISO, VQSH_COUNT };
+    VkPipeline       mShVqPipe[VQSH_COUNT] = {};
+    static constexpr uint32_t kVqShSunBytes = 64u, kVqShVisBytes = 48u;   // (clean_vis_queue.glsl SHADOW CORE REQUESTS)
+    static constexpr uint32_t kVqShJobsPerTexel = 2u;   // the light-sample region's jobs per denoiser texel (the rest: TAIL)
     VkPipeline       mVisWalkPipe = VK_NULL_HANDLE;   // pass 11 -DCLEAN_RT_LIST -DCLEAN_VIS_WALK (mRtReflLayout)
-    enum VisQueueStage : uint32_t { VQS_MAT = 0, VQS_LIGHT, VQS_LAYERS, VQS_COUNT };   // (LAYERS: RT set 1 only)
-    VkPipeline       mRtVqPipe[2][VQS_COUNT] = {};  // the RT split's MAT / LIGHT (/ LAYERS) -DCLEAN_VIS_QUEUE [_M2]
-    VkPipeline       mGiVqPipe[2][VQS_COUNT] = {};  // the GI shade split's HIT-MAT / HIT-LIGHT -DCLEAN_VIS_QUEUE [_M2]
+    // (REQ, set 1 only: M2's producer as its own stage after the material -- DeferRtSplitReqVq2 /
+    // DeferGiSplitHitReqVq2 -- so neither kernel holds both working sets: 128 registers each)
+    enum VisQueueStage : uint32_t { VQS_MAT = 0, VQS_LIGHT, VQS_LAYERS, VQS_REQ, VQS_COUNT };   // (LAYERS: RT set 1 only)
+    VkPipeline       mRtVqPipe[2][VQS_COUNT] = {};  // the RT split's MAT / LIGHT (/ LAYERS / REQ) -DCLEAN_VIS_QUEUE [_M2]
+    VkPipeline       mGiVqPipe[2][VQS_COUNT] = {};  // the GI shade split's HIT-MAT / HIT-LIGHT (/ HIT-REQ) -DCLEAN_VIS_QUEUE [_M2]
+    VkPipeline       mGirVqPipe = VK_NULL_HANDLE;   // (M3, set 2) the GI split's REUSE -DCLEAN_VIS_QUEUE_GIR
+    VkPipeline       mGirVisTailPipe = VK_NULL_HANDLE;   // (set 2) its VIS TAIL -DCLEAN_GIR_VIS_TAIL (the stored picks)
     // the pipelines compile with the world batch at init only when their RenderVKVisQueue bit is on then;
     // switched on later, in the background (mVqJob): the consumers stay fused until they land
     PipelineJobSlot  mVqJob;
-    bool             mVqPipesQueued[2] = {};     // each set queued once (the world batch or mVqJob): never twice
+    bool             mVqPipesQueued[4] = {};     // each set queued once (the world batch or mVqJob): never twice
     bool             vqSetReady(uint32_t s) const
     {
-        return mVisWalkPipe && mRtVqPipe[s][VQS_MAT] && mRtVqPipe[s][VQS_LIGHT] && (s == 0u || mRtVqPipe[s][VQS_LAYERS])
+        if (s == 3u)
+        {
+            for (VkPipeline p : mShVqPipe)
+                if (!p) return false;
+            return true;
+        }
+        if (s == 2u) return mVisWalkPipe && mGirVqPipe && mGirVisTailPipe;
+        return mVisWalkPipe && mRtVqPipe[s][VQS_MAT] && mRtVqPipe[s][VQS_LIGHT]
+            && (s == 0u || (mRtVqPipe[s][VQS_LAYERS] && mRtVqPipe[s][VQS_REQ] && mGiVqPipe[s][VQS_REQ]))
             && mGiVqPipe[s][VQS_MAT] && mGiVqPipe[s][VQS_LIGHT];
     }
     static constexpr uint32_t kVqHdrBytes = 256u, kVqReqBytes = 48u, kVqSlotBytes = 16u;   // (clean_vis_queue.glsl)
@@ -5006,9 +5378,46 @@ private:
     // A region's header for this recording (the WAR barrier on last frame's readers, the write, the barrier
     // to the producer); recAddr / recCap: the RT records' (the RT region's resolve finds them there).
     void             visQueueBegin(VkCommandBuffer cmd, uint32_t r, VkDeviceAddress recAddr, uint32_t recCap);
+    void             visQueueBeginW(VkCommandBuffer cmd, uint32_t r, const uint32_t w2[4]);   // (header word 2 given)
+    void             visQueueHdrWrite(VkCommandBuffer cmd, uint32_t r, const uint32_t w2[4]);   // (the write alone)
     // The WALK over a region's requests (indirect; the RT layout's sets bound, base = the consumer's push).
     void             visQueueWalk(VkCommandBuffer cmd, uint32_t r, const VKRtReflPush& base);
     void             visQueueStats(VkCommandBuffer cmd, uint32_t r);   // the region's counters into the ring
+    // (bit 8) pass 15's sun / light-sample visibility through the queue, between SELECT and SHADE (recordProjStoch's
+    // split branch: the RT layout's sets bound, rp = pass 15's push): GEN -> WALK (+ VIS's TAIL); the part not
+    // queued this frame runs its fused kernel (fusedSun / fusedVis) in the same slots. Returns with rp pushed.
+    void             visQueueShadowCore(VkCommandBuffer cmd, const VKRtReflPush& rp, uint32_t dw, uint32_t dh, bool sun,
+                                        bool qSun, bool qVis, bool isoLod, bool merged, bool onAsync,
+                                        VkPipeline fusedSun, VkPipeline fusedVis);
+    // ... in its three parts (visQueueShadowCore = GEN, WALK with its leading barrier, FINISH): GEN (or the fused
+    // kernel of the part not queued), the walks + VIS's TAIL (lead: the GEN -> WALK barrier first; M6 records them in
+    // the frame walk without it), FINISH (the counters, rp pushed)
+    void             visQueueShadowGen(VkCommandBuffer cmd, const VKRtReflPush& rp, uint32_t dw, uint32_t dh, bool sun,
+                                       bool qSun, bool qVis, bool merged, bool onAsync, VkPipeline fusedSun, VkPipeline fusedVis);
+    void             visQueueShadowWalk(VkCommandBuffer cmd, const VKRtReflPush& rp, bool sun, bool qSun, bool qVis,
+                                        bool isoLod, bool merged, bool onAsync, bool lead);
+    void             visQueueShadowFinish(VkCommandBuffer cmd, const VKRtReflPush& rp, bool sun, bool qSun, bool qVis);
+    void             visQueueShadowBegin(VkCommandBuffer cmd, bool qSun, bool qVis);   // (before SELECT)
+    // ---- (#1039 M6, RenderVKVisQueue bit 16) THE FRAME-LEVEL WALK (llcleanvisqueuevk.cpp THE FRAME WALK): the
+    //      lighting chain records every queued consumer's PRODUCERS first (the shadow core's SELECT + GEN, the RT
+    //      reflections' TRACE + MAT + REQ, the GI's TRACE + MISS + HIT-MAT + HIT-REQ), then ONE walk wave over all
+    //      their requests (one barrier before, one after; the walks back to back, no barrier between them), then
+    //      each consumer's RESOLVE and the rest of its chain. While the chain collects (mVqM6Collect), a queued
+    //      consumer hands its walk and the rest of its recording over (visQueueM6Defer) instead of recording them.
+    enum VqConsumer : uint32_t { VQC_SHADOW = 0, VQC_RT, VQC_GI, VQC_COUNT };
+    bool             mVqM6Now = false;           // bit 16 this recording (decided with the regions)
+    bool             mVqM6Collect = false;       // the chain is recording producers: queued consumers defer
+    uint32_t         mVqHdrDone = 0u;            // regions whose header the frame begin wrote (bit r)
+    std::function<void(VkCommandBuffer)> mVqM6Walk[VQC_COUNT], mVqM6Post[VQC_COUNT];
+    // the active regions' headers in one go (one barrier pair; consumers skip their own visQueueBegin for these)
+    void             visQueueBeginFrame(VkCommandBuffer cmd, bool withGi, bool onAsync);
+    // consumer c's walk (recorded in the frame walk, without its own leading barrier) and the rest of its recording
+    // (after the frame walk's barrier, with the RT layout's sets re-bound): false = not collecting (record now)
+    bool             visQueueM6Defer(uint32_t c, std::function<void(VkCommandBuffer)> walk,
+                                     std::function<void(VkCommandBuffer)> post);
+    void             visQueueFrameWalk(VkCommandBuffer cmd, uint32_t viewOff, bool onAsync);   // barrier, walks, barrier
+    void             visQueueFramePost(VkCommandBuffer cmd, uint32_t c);   // consumer c's resolve + the rest (if deferred)
+    void             visQueueM6End();                                       // (the chain's M6 block done: nothing left)
     VkPipeline       mRtFwdPipe = VK_NULL_HANDLE;      // pass 14 (mRtReflLayout)
     VkPipeline       mRtResolvePipe = VK_NULL_HANDLE;  // pass 13 (mDeferSplitLayout: no RT set)
     VkPipelineLayout mRtUberLayout = VK_NULL_HANDLE;   // draw sets 0 / 1 + set 2 + RT set 3, 112 B push
@@ -5093,6 +5502,7 @@ private:
     bool  rtReflWanted() const;                  // the RT build gate (rtConsumerActive): setting + deferred + no stand-down
     void  rtReflSettings();                      // this frame's RT reflection settings + stand-down log
     void  recordRtReflect(VkCommandBuffer cmd, const VKDeferPush& p, uint32_t viewOff, bool onAsync);
+    void  recordRtReflectTail(VkCommandBuffer cmd, const VKDeferPush& p, uint32_t viewOff, bool onAsync);   // (#1039 M6)
     // ---- #85 phase 2: the DIFFUSE / SPECULAR DENOISER (llcleandenoisevk.h) and its first
     // producer, the PROJECTOR STOCHASTIC SAMPLER (RenderVKProjStochastic; llcleanprojstochvk.cpp,
     // clean_deferred_light.comp pass 15). Split frames with ray-traced projector records only:
@@ -5194,6 +5604,38 @@ private:
     void  writePdnMotion();                            // the denoiser's motion-vector binding (as the mask's)
     bool  pdnMaskSkipsProjectors() const { return mPdnNow; }
     void  recordProjStoch(VkCommandBuffer cmd, const VKDeferPush& p, uint32_t viewOff, bool onAsync);
+    // THE LIGHT PREP (llcleanprojstochvk.cpp): the lighting's G-buffer-independent head -- the sun
+    // exposure certificates (C), the ReSTIR emissive build (E), the occlusion resolve (O), the GI change
+    // tags of last frame's reservoirs (#1039 stage 9) -- planned and recorded once per frame AHEAD of the
+    // lighting: its own async segment q_light_prep forked before pass 1a (beside the pre-pass / G-buffer),
+    // or inline on graphics at that point. recordProjStoch reads the plan (pass 15's kernel, the split, the
+    // certificate table); it (C / E / O) and recordGI (the tags) record their part themselves only when the
+    // early point did not (lightPrepLate / giChgTagLate: never expected).
+    struct LightPrep
+    {
+        bool planned = false;               // lightPrepPlan ran this frame (recordWorld resets it)
+        bool pdn = false;                   // the shadow part is planned (recordProjStoch's gate held)
+        bool merged = false, sunSkip = false, split = false;
+        bool em = false, occ = false, sxc = false;
+        bool chg = false;                   // the GI change tags (mGiHdrChg on a split GI frame)
+        // THE CHAIN'S LIST HEADERS, reset here (no transfer drains in the lighting chain): the feature split's tile
+        // list (dsTiles), the GI shade split's HIT / MISS lists (giLists); pass 15's job list goes with the
+        // shadow part (split). Only at the early point: a chain that finds them not done takes the path without
+        // them (the plain split / SHADE).
+        bool dsTiles = false, giLists = false;
+        bool shadowDone = false, chgDone = false, headersDone = false;   // recorded
+        VkPipeline pipe = VK_NULL_HANDLE;   // pass 15's kernel (before the split's SHADE)
+        uint64_t sxcAddr = 0;               // the certificate table's address for the push (0: SXC off)
+    };
+    LightPrep mLightPrep;
+    bool  lightPrepPlan(uint32_t rw, uint32_t rh);     // the plan; false = nothing to record
+    void  lightPrepPlanShadow();                       // its shadow part (C / E / O + pass 15's kernel)
+    // early: the early point (q_light_prep / inline before pass 1a) -- the list headers only there
+    void  recordLightPrep(VkCommandBuffer cmd, uint32_t viewIdx, uint32_t viewOff, bool onAsync, bool early);
+    bool  deferFeatFrame(uint32_t rw, uint32_t rh) const;   // the feature split runs at this extent
+    // (its last kernel, the counters and the denoiser: recorded after the walks under #1039 M6)
+    void  recordProjStochTail(VkCommandBuffer cmd, const VKDeferPush& p, uint32_t viewOff, bool onAsync, VkPipeline pipe,
+                              bool merged, bool sunSkip, uint32_t bleed, uint32_t rsRes, uint32_t oneRay);
     void  recordRtMarkInit(VkCommandBuffer cmd);
     void  recordRtPreTrace(VkCommandBuffer cmd, const VKDeferPush& p, uint32_t viewOff);
     void  ensureRtPlaceholders();                // init: the 1 x 1 zero targets + their bindings
@@ -6354,18 +6796,24 @@ private:
     // overdraw counter's): zeroed before the dispatch, copied after it into a 3-deep host
     // ring, harvested 3 frames later (readLitGuardStats). Logged once per new kind of trip
     // (WARN) and as a ~10 s summary while anything is non-zero (tag VKLitGuard).
-    static constexpr uint32_t kOdCounterBytes = 256;   // 64 words: [0..3] overdraw, [4..37] lit guards
-    static constexpr uint32_t kLgFirstWord = 4, kLgWords = 34;
+    static constexpr uint32_t kOdCounterBytes = 256;   // 64 words: [0..3] overdraw, [4..41] lit guards, [60..62] #1128 beacon
+    static constexpr uint32_t kLgFirstWord = 4, kLgWords = 38;
     // PROBE TEXEL GUARD (clean_draw_common.glsl lgProbeTexel): lit-guard word indices.
     static constexpr uint32_t kLgPt = 13;                 // + LGPT_*: bad texels per store (4)
     static constexpr uint32_t kLgPtNonFinite = 17, kLgPtMax = 18, kLgPtMinInv = 19, kLgPtBadIn = 20;
     static constexpr uint32_t kLgPtSample = 21, kLgPtLive1 = 22, kLgPtSlots = 23;   // slots: 8 words
     // (#1049) RT REFLECTION HANG GUARD (clean_deferred_light.comp rtrStatsGuard, LG_RT_WORD): + 0 rays
-    // the per-ray query budget cut, + 1 rays rtRaySane refused, + 2 walks over the candidate budget.
-    static constexpr uint32_t kLgRt = 31;
+    // the per-ray query budget cut, + 1 rays rtRaySane refused, + 2 walks over the candidate budget, (#1128)
+    // + 3 rays the guard's float form passed and its bit pattern refused (clean_rt_common.glsl rt_ray_folded).
+    // (#1128) + the SHADOW CORE's (clean_shadow_core.glsl shStatsGuard, LG_RT_SH_WORD = kLgRtSh): + 0 samples the
+    // per-sample query budget cut, + 1 rays rtRaySane refused, + 2 of them the float form passed.
+    static constexpr uint32_t kLgRt = 31, kLgRtWords = 4, kLgRtSh = 35, kLgRtShWords = 3;
     static_assert(kLgPtSlots + kPrbSlotCap / 32 == kLgRt, "lit guard words = clean_draw_common.glsl LGPT_WORD");
-    static_assert(kLgRt + 3 == kLgWords, "the RT hang guard's words end the lit guard words");
+    static_assert(kLgRt + kLgRtWords == kLgRtSh && kLgRtSh + kLgRtShWords == kLgWords,
+                  "the RT hang guards' words end the lit guard words");
     static_assert((kLgFirstWord + kLgWords) * 4 <= kOdCounterBytes, "mOdCounter holds every lit guard word");
+    static_assert(kLgBcWord >= kLgFirstWord + kLgWords && (kLgBcWord + 3u) * 4u <= kOdCounterBytes,
+                  "(#1128) the hang beacon's words sit past the lit guard words, inside mOdCounter");
     GpuBuffer        mLgRb[3]{};
     bool             mLgRbValid[3] = {false, false, false};
     uint64_t         mLgRbFrame[3] = {0, 0, 0};  // mLgFrame of the dispatch each ring entry holds
@@ -6449,6 +6897,7 @@ private:
     // <SS:Skoomastream> The same three with the HUD glow attachment (kHudGlowFormat), drawn
     // only in frames where a HUD face glows (SSHudGlow).
     VkPipeline       mHudGlowDrawPipe = VK_NULL_HANDLE, mHudGlowMaskPipe = VK_NULL_HANDLE, mHudGlowAlphaPipe = VK_NULL_HANDLE;
+    VkPipeline       mHudDrawPipeVr = VK_NULL_HANDLE, mHudMaskPipeVr = VK_NULL_HANDLE;   // #1076 (mWantVrHudPipes)
 
     // Water depth-fog: its own FS samples the solid-scene depth (pass-1 output) so
     // ONLY water statically references the depth sampler. Drawn in pass 2 over the

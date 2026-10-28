@@ -162,6 +162,11 @@ private:
     bool            mCursorInside = false;
     S32             mCursorX = 0, mCursorY = 0;
     LLUUID          mPopupMark;                                 // the mark the menu was opened on
+    // Shared items (gmdxmapshare.h): others' zones over mine, their marks and pings over everything
+    void            drawSharedZones();
+    void            drawShared();
+    LLUUID          sharedAt(S32 x, S32 y, bool zones);         // a shared mark / ping (zones: a zone, its outline or inside it) under (x, y)
+    LLUUID          mPopupShared;                               // the shared item the menu was opened on
     // </GMDX>
     static bool     outsideSlop(S32 x, S32 y, S32 start_x, S32 start_y, S32 slop);
 
@@ -196,7 +201,7 @@ private:
     bool            mRadarSquare = false;   // the square radar (Camera at top, square): turned inside mFitMapRect
     bool            radarOn() const { return mRadarRadius > 0.f || mRadarSquare; }
     LLVector2       radarCenter() const;   // the disc's centre in view coordinates
-    LLVector2       toRadarRim(const LLVector2& p) const;   // p, pulled in to the rim when outside the disc / square
+    LLVector2       toRadarRim(const LLVector2& p) const;   // p, pulled in to the rim when outside the disc / square (Whole Region: its map's square)
     // </GMDX>
 
     bool            mPanning; // map is being dragged

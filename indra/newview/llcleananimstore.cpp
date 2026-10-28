@@ -171,7 +171,7 @@ void LLCleanAnimStore::beginAvatar(LLVOAvatar* av)
     // The compared avatars are ARMED kCmpArm frames ahead: their readback covers every
     // joint until then, so the CPU local pose the compare frame blends from (and seeds the
     // GPU with) is the GPU's own, as with a full readback.
-    static LLCachedControl<bool> s_cmp(gSavedSettings, "RenderVKAnimCompare", true);
+    static LLCachedControl<bool> s_cmp(gSavedSettings, "RenderVKAnimCompare", false);
     st.compare = false;
     const U32 phase = mFrame % 300u;
     if (phase == 300u - kCmpArm && mCmpArmFrame != mFrame) { mCmpArmFrame = mFrame; mCmpArmedCount = 0; }

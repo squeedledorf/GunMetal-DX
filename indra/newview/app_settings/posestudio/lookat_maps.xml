@@ -25,6 +25,8 @@
                              old maps that list them still load.
                  yaw_limit   degrees either way
                  pitch_up, pitch_down   degrees (pitch_down defaults to pitch_up)
+                 roll_limit  degrees either way: the head tilt a VR headset adds (#1121);
+                             defaults to 3/4 of the smaller pitch limit; eyes never tilt
                  eye         true: aims with what the chain could not reach, without using
                              it up (both eyes get the same). LL's own eye motion already aims
                              mEyeLeft / mEyeRight / mFaceEyeAltLeft / mFaceEyeAltRight at the

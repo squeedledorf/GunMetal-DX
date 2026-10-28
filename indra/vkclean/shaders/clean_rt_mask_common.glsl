@@ -56,6 +56,15 @@ layout(push_constant) uniform MaskPush {
                           // the ray-traced projectors are sampled by the stochastic sampler instead,
                           // #85 phase 2 -- the trace leaves their slots empty)
 } mp;
+// #1075 LAYERED STEREO: every mask image has a layer per view (2D_ARRAY views at every view count);
+// the projector images hold 4 slot layers per view. RT_MASK_L = this invocation's view's layer
+// (CLEAN_VIEW: the kernels define it as the dispatch's z), RT_MASK_PL(s) = projector slot s's.
+// One view: layer 0 / slot s, exactly the old layers. (The kernels define both next to CLEAN_VIEW,
+// ahead of their own helpers.)
+#ifndef RT_MASK_L
+#define RT_MASK_L int(CLEAN_VIEW)
+#define RT_MASK_PL(s) (int(CLEAN_VIEW) * 4 + (s))
+#endif
 // (#85 phase 2, RenderVKProjStochastic) the deferred lighting's stochastic projector sampler
 // (clean_deferred_light.comp pass 15) shadows the ray-traced projectors this frame: no slots.
 bool rtProjStochastic() { return mp.p1.w < 0.0; }
@@ -190,8 +199,8 @@ bool rtProjMover(float w, int s) { const uint b = uint(clamp(w, 0.0, 2047.0) + 0
 // receiver's view depth last / this frame.
 float rtZoomKeep(float vz, float pw)
 {
-    const float p11c = length(vec3(ssr.taa_cur_vp[0][1], ssr.taa_cur_vp[1][1], ssr.taa_cur_vp[2][1]));
-    const float p11p = length(vec3(ssr.taa_prev_vp[0][1], ssr.taa_prev_vp[1][1], ssr.taa_prev_vp[2][1]));
+    const float p11c = length(vec3(ssr.views[CLEAN_VIEW].taa_cur_vp[0][1], ssr.views[CLEAN_VIEW].taa_cur_vp[1][1], ssr.views[CLEAN_VIEW].taa_cur_vp[2][1]));
+    const float p11p = length(vec3(ssr.views[CLEAN_VIEW].taa_prev_vp[0][1], ssr.views[CLEAN_VIEW].taa_prev_vp[1][1], ssr.views[CLEAN_VIEW].taa_prev_vp[2][1]));
     if (!(p11c > 1e-6) || !(p11p > 1e-6) || !(vz > 1e-6) || !(pw > 1e-6)) return 1.0;
     const float q = (pw / p11p) / (vz / p11c);
     return q > 1.02 ? clamp(1.0 / (q * q), 0.0, 1.0) : 1.0;
@@ -219,11 +228,37 @@ vec2 rtExactHc(vec2 q, vec2 jp, vec2 Jp, vec2 s, vec2 hc0)
 vec2 rtMaskSamplePx(ivec2 m) { return (vec2(m) + 0.5 + rtMaskJitter()) / rtMaskScale(); }
 ivec2 rtMaskRenderPx(ivec2 m) { return clamp(ivec2(rtMaskSamplePx(m)), ivec2(0), ivec2(mp.dims.xy) - 1); }
 
+// #1075 THE VIEW'S CAMERA. One view: the push's unjittered camera-relative inverse (mp.cam_time is
+// the eye). A stereo pipeline (kViewCount > 1): the inverse of this view's unjittered
+// view-projection from the frame info (views[v].taa_cur_vp maps P - cam_origin, cam_origin =
+// mp.cam_time = the head: the base stays the push's), inverted once per invocation; and the eye
+// (view-dependent offsets, probe rays, footprints) from views[v].cur_view, the eye's world -> view
+// matrix (absolute, as the host's LLVKViewFrame::view): eye = -R^T t (float: sub-mm at km
+// coordinates -- only directions and offsets use it, never a depth reconstruction).
+mat4 g_rt_inv_vp;
+bool g_rt_inv_vp_ok = false;
+mat4 rtMaskInvVP()
+{
+    if (kViewCount <= 1) return mp.inv_view_proj;
+    if (!g_rt_inv_vp_ok)
+    {
+        g_rt_inv_vp = inverse(ssr.views[CLEAN_VIEW].taa_cur_vp);
+        g_rt_inv_vp_ok = true;
+    }
+    return g_rt_inv_vp;
+}
+vec3 rtMaskEye()
+{
+    if (kViewCount <= 1) return mp.cam_time.xyz;
+    const mat4 V = ssr.views[CLEAN_VIEW].cur_view;
+    return -(transpose(mat3(V)) * V[3].xyz);
+}
+
 vec3 worldAt(vec2 rpx, float d)
 {
     vec2 ndc = rpx / mp.dims.xy * 2.0 - 1.0;
     if (ssr.taa_params.w > 0.5) ndc -= ssr.taa_jitter.zw;   // jitter is in NDC (frame info)
-    vec4 w = mp.inv_view_proj * vec4(ndc, d, 1.0);
+    vec4 w = rtMaskInvVP() * vec4(ndc, d, 1.0);
     return mp.cam_time.xyz + w.xyz / w.w;   // camera-relative: precise at any altitude
 }
 
@@ -244,20 +279,20 @@ float rtDecR(float a) { return a < 0.5 / 255.0 ? -1.0 : max(a * 64.0 - 0.25, 0.0
 // (TAA off, no pre-pass): camera-only. pw = the receiver's view depth through last
 // frame's camera (the motion's depth component isn't stored; a few mm for the motions
 // that matter, well inside the history depth tolerance). false: behind last frame's eye.
-layout(set = 3, binding = 15) uniform sampler2D uMotion;
+layout(set = 3, binding = 15) uniform sampler2DArray uMotion;
 bool rtMaskPrevPx(vec3 P, ivec2 rp, out vec2 prpx, out float pw)
 {
-    const vec4 c = ssr.taa_prev_vp * vec4(P - ssr.cam_origin.xyz, 1.0);   // camera-relative (#555)
+    const vec4 c = ssr.views[CLEAN_VIEW].taa_prev_vp * vec4(P - ssr.cam_origin.xyz, 1.0);   // camera-relative (#555)
     pw = c.w;
     prpx = vec2(0.0);
     if (c.w <= 1e-4) return false;
     prpx = (c.xy / c.w * 0.5 + 0.5) * mp.dims.xy;
     if (ssr.taa_params.y > 0.5 && rtDenoise())
     {
-        const vec4 k = ssr.taa_cur_vp * vec4(P - ssr.cam_origin.xyz, 1.0);
+        const vec4 k = ssr.views[CLEAN_VIEW].taa_cur_vp * vec4(P - ssr.cam_origin.xyz, 1.0);
         if (k.w > 1e-4)
         {
-            const vec2 mv = texelFetch(uMotion, clamp(rp, ivec2(0), ivec2(mp.dims.xy) - 1), 0).xy;
+            const vec2 mv = texelFetch(uMotion, ivec3(clamp(rp, ivec2(0), ivec2(mp.dims.xy) - 1), RT_MASK_L), 0).xy;
             prpx = ((k.xy / k.w * 0.5 + 0.5) - mv) * mp.dims.xy;
         }
     }

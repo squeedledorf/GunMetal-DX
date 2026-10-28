@@ -113,7 +113,8 @@ vec2 texAnimUV(vec2 uv, mat4 pm, float u_anim_time)
     vec2 pcen = uv - vec2(0.5);
     vec2 prot = vec2(pcen.x * c + pcen.y * sn,
                     -pcen.x * sn + pcen.y * c);
-    return prot * vec2(ss, st) + vec2(os + 0.5, ot + 0.5);
+    precise vec2 r = prot * vec2(ss, st) + vec2(os + 0.5, ot + 0.5);   // (precise: see cleanFaceUV)
+    return r;
 }
 
 vec2 planarProjectionUV(vec3 n, vec3 vec)
@@ -129,8 +130,8 @@ vec2 planarProjectionUV(vec3 n, vec3 vec)
         binormal = (n.y > 0.0) ? vec3(-1.0, 0.0, 0.0) : vec3(1.0, 0.0, 0.0);
     }
     vec3 tangent = cross(binormal, n);
-    vec2 tc;
-    tc.y = -((dot(tangent,  vec) * 2.0) - 0.5);
+    precise vec2 tc;   // (precise: see cleanFaceUV)
+    tc.y =-((dot(tangent,  vec) * 2.0) - 0.5);
     tc.x = 1.0 + ((dot(binormal, vec) * 2.0) - 0.5);
     return tc;
 }
@@ -150,6 +151,11 @@ vec2 cleanFaceRawUV(uint flags, vec2 texcoord, vec3 local_normal, vec3 local_pos
 }
 
 // Final UV: texgen (planar or asset uv) first, then the anim or the TE transform.
+// PRECISE (#1088): the result is v_uv, which the mask pre-pass's alpha test and the EQUAL
+// lit / G-buffer FS's must sample identically -- from different VS modules. `invariant v_uv`
+// alone did not hold on an AMD Windows driver (holey alpha-masked text), so the UV chain
+// carries NoContraction too (here and in texAnimUV / planarProjectionUV: a call's body is
+// outside the reach of a caller's precise variable).
 vec2 cleanFaceUV(uint flags, mat4 uv_matrix, vec2 texcoord, vec3 local_normal, vec3 local_pos,
                  mat4 model, float time)
 {
@@ -161,7 +167,8 @@ vec2 cleanFaceUV(uint flags, mat4 uv_matrix, vec2 texcoord, vec3 local_normal, v
     }
     if ((flags & 1024u) != 0u)
         return texAnimUV(base_uv, uv_matrix, time);
-    return (uv_matrix * vec4(base_uv, 0.0, 1.0)).xy;
+    precise vec2 r = (uv_matrix * vec4(base_uv, 0.0, 1.0)).xy;
+    return r;
 }
 
 // Tangent for normal mapping in the TEXTURE's frame (LL tangent_space_transform):

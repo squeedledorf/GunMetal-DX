@@ -28,6 +28,8 @@
 #include "llappviewer.h"
 #include "llgl.h"             // gNonInteractive
 #include "llvoicewebrtc.h"
+#include "llvraudio.h"
+#include "llaudiodevices.h"
 #include "llviewernetwork.h"
 #include "llviewercontrol.h"
 #include "llcommandhandler.h"
@@ -385,14 +387,25 @@ void LLVoiceClient::refreshDeviceLists(bool clearCurrentList)
     LLWebRTCVoiceClient::getInstance()->refreshDeviceLists(clearCurrentList);
 }
 
+// The user's own pick (voice device preferences). #1122: it ends a VR headset override of that
+// device for the rest of the VR session.
+// (#1122: the voice-only "Default" entry means "same as the main device" of Sound preferences.)
 void LLVoiceClient::setCaptureDevice(const std::string& name)
 {
-    LLWebRTCVoiceClient::getInstance()->setCaptureDevice(name);
+    LLVRAudio::userPickedVoiceDevice(true);
+    LLWebRTCVoiceClient* voice = LLWebRTCVoiceClient::getInstance();
+    const std::string main_id = (name.empty() || name == "Default") ? LLAudioDevices::voiceDeviceFor(true, voice->getCaptureDevices())
+                                                                    : std::string();
+    voice->setCaptureDevice(main_id.empty() ? name : main_id);
 }
 
 void LLVoiceClient::setRenderDevice(const std::string& name)
 {
-    LLWebRTCVoiceClient::getInstance()->setRenderDevice(name);
+    LLVRAudio::userPickedVoiceDevice(false);
+    LLWebRTCVoiceClient* voice = LLWebRTCVoiceClient::getInstance();
+    const std::string main_id = (name.empty() || name == "Default") ? LLAudioDevices::voiceDeviceFor(false, voice->getRenderDevices())
+                                                                    : std::string();
+    voice->setRenderDevice(main_id.empty() ? name : main_id);
 }
 
 const LLVoiceDeviceList& LLVoiceClient::getCaptureDevices()

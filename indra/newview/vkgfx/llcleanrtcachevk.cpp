@@ -744,7 +744,8 @@ void LLCleanRendererVK::rtMaskCacheRecord(VkCommandBuffer cmd)
         }
     }
 
-    const bool ok = rtMaskCacheWanted() && mRtMaskDenoise && !mOffscreen && W > 1u && H > 1u
+    // (#1075: not in a stereo frame -- its block lists / carry are one view's; the plain trace runs)
+    const bool ok = rtMaskCacheWanted() && mRtMaskDenoise && !mOffscreen && !stereoActive() && W > 1u && H > 1u
                  && mRtCacheCap >= blocks && mRtCacheWork.buffer && mRtCacheParams[slot].mapped
                  && mDsetRtCache[slot] && mDsetRtMask[mRtMaskSet & 1u];
     // STATIC CARRY: this frame's camera vs the last mask frame's (bit-identical), and no ray-

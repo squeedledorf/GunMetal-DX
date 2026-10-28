@@ -41,6 +41,8 @@
 #include "llviewercamera.h"
 #include "llui.h"
 #include "lluictrlfactory.h"
+#include "gmdxmapshare.h" // <GMDX> pings over the world
+#include "gmdxpingwheel.h" // <GMDX> the ping wheel
 
 LLHUDView *gHUDView = NULL;
 
@@ -58,6 +60,8 @@ LLHUDView::~LLHUDView()
 void LLHUDView::draw()
 {
     LLTracker::drawHUDArrow();
+    GMDXMapShare::drawWorld();   // <GMDX>
+    GMDXPingWheel::draw();       // <GMDX>
     LLView::draw();
 }
 

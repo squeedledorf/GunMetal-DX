@@ -46,7 +46,12 @@ struct DrawView {
 // global read. The whole ring (1 MB: 2048 entries x 2 frame slots, absolute indices) can't
 // be a UBO (maxUniformBufferRange 64 KB on NVIDIA), so the per-draw graphics / particle
 // passes keep the SSBO below.
-layout(std140, set = 2, binding = 10) uniform DrawViewMain { DrawView draw_view_main; };
+// #1075 LAYERED STEREO: the N consecutive entries of a main-view pass (pushDrawViews), one per
+// view -- the binding's range is N entries (LLCleanRendererVK init: kViewCount = the session's
+// view count). A layered kernel reads [CLEAN_VIEW]; a single-view pipeline (kViewCount 1, every
+// desktop pipeline) has the one entry it always had.
+#include "clean_view.glsl"
+layout(std140, set = 2, binding = 10) uniform DrawViewMain { DrawView draw_view_main[kViewCount]; };
 #else
 layout(std430, set = 0, binding = 36) readonly buffer DrawViews { DrawView draw_views[]; };
 #endif
@@ -63,8 +68,17 @@ layout(push_constant) uniform DrawPush {
 } g_draw_push;     // 16 B
 #endif
 
+// LAYERED STEREO (#1075; clean_view.glsl): a main-view pass of N views pushes N CONSECUTIVE
+// entries (LLCleanRendererVK::pushDrawViews: the base, eye 0 .. N-1) and its multiview raster
+// stages read entry base + CLEAN_VIEW. A single-view pipeline (every desktop pipeline, every
+// auxiliary view: cascades, projector tiles, probe faces, pick, HUD) has kViewCount 1, so the
+// index folds to g_draw_push.view exactly as before. Compute includers read the pushed entry
+// itself (the deferred lighting's UBO: its view's entry, [0] at one view).
+#include "clean_view.glsl"
 #ifdef CLEAN_DRAW_VIEW_UBO
-#define pc draw_view_main
+#define pc draw_view_main[CLEAN_VIEW]
+#elif defined(CLEAN_VIEW)
+#define pc draw_views[g_draw_push.view + CLEAN_VIEW]
 #else
 #define pc draw_views[g_draw_push.view]
 #endif

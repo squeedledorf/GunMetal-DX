@@ -567,6 +567,9 @@ bool LLCleanDlssRRVK::record(VkCommandBuffer cmd, const Frame& f, std::string& e
     e.mvScale[1] = (float)w.rh;
     e.rw = w.rw; e.rh = w.rh;
     e.reset = f.reset || mFirstEval;
+    if (f.frameTimeMs >= 0.f)
+        e.frameTimeMs = std::clamp(f.frameTimeMs, 0.1f, 1000.f);   // (#1075: the views' shared clock)
+    else
     {
         const auto now = std::chrono::steady_clock::now();
         float dt = 16.6f;

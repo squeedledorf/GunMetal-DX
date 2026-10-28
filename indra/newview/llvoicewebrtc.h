@@ -134,6 +134,24 @@ public:
 
     LLVoiceDeviceList& getCaptureDevices() override;
     LLVoiceDeviceList& getRenderDevices() override;
+
+    // #1122 VR headset audio: a temporary device choice on top of VoiceInputAudioDevice /
+    // VoiceOutputAudioDevice (device ids, i.e. LLVoiceDevice::full_name; "" = no override, the
+    // saved setting applies). Never written to the settings; LLVRAudio sets it while a VR session
+    // runs and clears it when the session ends. Applied at once and on every device-list change.
+    void setDeviceOverride(const std::string& capture_id, const std::string& render_id);
+    const std::string& captureOverride() const { return mCaptureOverride; }
+    const std::string& renderOverride() const { return mRenderOverride; }
+    // The user's device without the VR override: the voice-only pick (VoiceInputAudioDevice /
+    // VoiceOutputAudioDevice) unless it is "Default", else the main device choice of Sound
+    // preferences (LLAudioDevices) when it is in the list, else the saved value ("Default").
+    std::string userCaptureDevice() const;
+    std::string userRenderDevice() const;
+    // What the voice engine is told to use: the override, else the user's device.
+    std::string effectiveCaptureDevice() const;
+    std::string effectiveRenderDevice() const;
+    // Tells the voice engine the effective devices (a device choice changed).
+    void applyDevices();
     //@}
 
     void getParticipantList(std::set<LLUUID> &participants) override;
@@ -487,6 +505,8 @@ private:
 
     LLVoiceDeviceList mCaptureDevices;
     LLVoiceDeviceList mRenderDevices;
+    std::string mCaptureOverride;   // #1122 (setDeviceOverride)
+    std::string mRenderOverride;
 
     bool startEstateSession();
     bool startParcelSession(const std::string& channelID, S32 parcelID);

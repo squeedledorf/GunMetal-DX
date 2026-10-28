@@ -194,8 +194,7 @@ public:
 
     static bool load();
 
-protected:
-    void addCommand(LLCommand * command);
+    void addCommand(LLCommand * command); // <GMDX> public: toolbar pins add commands at run time (gmdxtoolbarpins.cpp)
 
 private:
     typedef std::map<LLUUID, size_t>    CommandIndexMap;

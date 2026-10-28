@@ -434,7 +434,8 @@ std::string vkTakePreferenceNote()
     return s;
 }
 
-void vkEvaluateDevices(VkInstance instance, bool wantSwapchain, VkRequirementsReport& out)
+void vkEvaluateDevices(VkInstance instance, bool wantSwapchain, VkRequirementsReport& out,
+                       VkPhysicalDevice forced, std::string* forcedRefusal)
 {
     out.gpus.clear();
     out.best = -1;
@@ -493,6 +494,26 @@ void vkEvaluateDevices(VkInstance instance, bool wantSwapchain, VkRequirementsRe
     {
         if (!out.gpus[i].qualifies()) { ++skipped; continue; }
         if (out.best < 0 || rank(out.gpus[i]) < rank(out.gpus[out.best])) out.best = i;
+    }
+    // #1073 VR: the GPU the OpenXR runtime requires (matched by handle: it comes from the same
+    // instance) wins over everything when it qualifies; the user's choice is then not applied.
+    if (forced != VK_NULL_HANDLE)
+    {
+        int fi = -1;
+        for (int i = 0; i < (int)out.gpus.size(); ++i)
+            if (out.gpus[i].device == forced) { fi = i; break; }
+        if (fi >= 0 && out.gpus[fi].qualifies())
+        {
+            out.best = fi;
+            out.bestWhy = "device " + std::to_string(fi) + " '" + out.gpus[fi].name + "' (" +
+                          vkDeviceTypeName(out.gpus[fi].type) + " GPU): required by the OpenXR runtime (VR)";
+            return;
+        }
+        if (forcedRefusal)
+            *forcedRefusal = fi < 0 ? std::string("the GPU the OpenXR runtime requires is not one of this Vulkan instance's devices")
+                                    : "the GPU the OpenXR runtime requires (" + out.gpus[fi].name +
+                                      ") does not meet Slipstream's requirements (" +
+                                      (out.gpus[fi].missing.empty() ? std::string("unknown") : out.gpus[fi].missing.front()) + ")";
     }
     // #277: the GPU chosen in Preferences / login wins when it qualifies.
     if (!gPreferredDevice.empty() && !out.gpus.empty())

@@ -21,7 +21,7 @@
 //     the trace: only data and a few flags.
 //   * shadowSampleVis: the soft-disc loop (outermost Vogel samples first, the adaptive / hint
 //     early-outs, the terminator-safe floor), then the translucent split ray, then the #735
-//     foliage transmission ray -- every ray through ONE walk call (clean_vis_walk.glsl rtVisTrace), so the
+//     foliage transmission ray -- every ray through ONE walk call (clean_vis_walk.glsl rtVisWalkFP; the own-fixture re-trace in the sample loop), so the
 //     candidate alpha test, the self-shadow probe and the facing rules are inlined once.
 // Per-sample globals (clean_rt_common / clean_shadow_rt): the caller resets rt_block_t (and
 // rt_block_dyn) before a sample and reads them after; shadowRecvLight sets rt_term_* and
@@ -30,7 +30,7 @@
 #define CLEAN_SHADOW_CORE_GLSL
 
 // ---- THE WALK: clean_vis_walk.glsl (#1039 M0; included by clean_rt_common.glsl) -- rtVisWalk over every
-//      kind, the own-fixture rule (rt_fix_*, re-traced by rtVisTrace), the opaque-first pre-ray
+//      kind, the own-fixture rule (rt_fix_*, re-traced by shadowSampleRays / rtVisTrace), the opaque-first pre-ray
 //      (RT_WALK_OFIRST) and the kernel specialisation (SH_KIND_DIRECTIONAL / SH_KIND_POSITIONAL: the
 //      includer defines them before clean_rt_common.glsl; this file compiles its sample code by them). ----
 
@@ -168,6 +168,11 @@ ShRayGen shRayGenUnpark()
     q = s_shPark[l][10]; g.post = uintBitsToFloat(q.xyz);
     return g;
 }
+#elif defined(SH_PARK_VQ)
+// (#1039, RenderVKVisQueue bit 8) the visibility queue's shadow walk kernels: the inputs wait in the
+// sample's REQUEST (written by the producer kernel, clean_deferred_light.comp SHADOW CORE QUEUE), and each
+// ray reloads them from there -- the parking above, in VRAM instead of shared memory, across kernels.
+ShRayGen shRayGenUnpark();   // (the includer's)
 #endif
 // A ray's origin for a positional light toward point T (the receiver rules: lifted -> the lift's side,
 // back-face self-shadow -> the visible side, else the side facing T).
@@ -194,22 +199,31 @@ float shPosTmax(ShRayGen g, vec3 o, vec3 d, float len)
 // (shadowRecvLight), rt_block_t, rt_noise_shift; the sample's rays share ONE walk call site.
 // Exactly the former cores' arithmetic: sunShadowRayCore (directional) / projShadowRayCore
 // (positional) of clean_shadow_rt.glsl.
-vec3 shadowSampleVis(ShadowSample S, vec3 P, vec3 Nin, vec3 cam, float time)
+// In three steps (shadowSampleVis at the end runs them in a row): SETUP (the per-sample state: the walk
+// globals and the ray-generation inputs G), RAYS (the disc + the tails, every ray through ONE walk site; with
+// SH_PARK / SH_PARK_VQ each ray reloads G from where it was parked) and END (the walk globals reset). (#1039,
+// RenderVKVisQueue bit 8: the queue's producer runs SETUP and writes G + the walk state as a request, its walk
+// kernel runs RAYS + END -- clean_deferred_light.comp SHADOW CORE QUEUE.)
+// pos / fol / selfShadowed: the sample's kind (positional), its foliage rules and the back-face verdict (no ray).
+ShRayGen shadowSampleSetup(ShadowSample S, vec3 P, vec3 Nin, vec3 cam, float time,
+                           out bool pos, out bool fol, out bool selfShadowed)
 {
     // (#1031 KERNEL SPECIALISATION: a one-kind kernel folds the other kind's paths away)
 #if defined(SH_KIND_DIRECTIONAL)
-    const bool pos = false, sphere = false;
+    pos = false;
+    const bool sphere = false;
     const bool oo = (S.flags & SH_OPAQUE_ONLY) != 0u;
-    const bool fol = (S.flags & SH_FOLIAGE) != 0u;
+    fol = (S.flags & SH_FOLIAGE) != 0u;
     rt_fix_on = false;
 #elif defined(SH_KIND_POSITIONAL)
-    const bool pos = true, oo = false, fol = false;
+    pos = true; fol = false;
+    const bool oo = false;
     const bool sphere = (S.flags & SH_SPHERE) != 0u;
     rt_fix_on = (S.flags & SH_FIXTURE) != 0u;
 #else
-    const bool pos = (S.flags & SH_POSITIONAL) != 0u;
+    pos = (S.flags & SH_POSITIONAL) != 0u;
     const bool oo = (S.flags & SH_OPAQUE_ONLY) != 0u;
-    const bool fol = (S.flags & SH_FOLIAGE) != 0u;
+    fol = (S.flags & SH_FOLIAGE) != 0u;
     const bool sphere = (S.flags & SH_SPHERE) != 0u;
     rt_fix_on = (S.flags & SH_FIXTURE) != 0u;
 #endif
@@ -253,7 +267,7 @@ vec3 shadowSampleVis(ShadowSample S, vec3 P, vec3 Nin, vec3 cam, float time)
     // through single-plane walls: the next room's projector lit this side).
     const bool bfs = !lifted && rtBackfaceSelfShadow();
     G.Nv = rtVisibleSide(Nin, P, cam);
-    const bool selfShadowed = bfs && !(dot(G.Nv, pos ? toO : L) > 0.0);
+    selfShadowed = bfs && !(dot(G.Nv, pos ? toO : L) > 0.0);
     // the disc frame's normal (a point light: its disc faces the receiver)
     const vec3 A = pos ? (sphere ? (dO > 1e-4 ? toO / dO : vec3(0.0, 0.0, 1.0)) : S.axis) : L;
     const bool hard = !(S.radius > 0.0);
@@ -291,134 +305,270 @@ vec3 shadowSampleVis(ShadowSample S, vec3 P, vec3 Nin, vec3 cam, float time)
         G.oL = rtReceiverOrigin(G.Pb, Nr, camd, G.biasLift);
     }
     G.post = pos ? normalize(S.pos - P) : L;
-#ifdef SH_PARK
-    shRayGenPark(G);
-#endif
-
-    vec3 vis = vec3(0.0), first = vec3(0.0);
-    float rays = float(G.n);   // the normaliser: rays actually traced (early-outs below)
-    uint k = 0u;
-    uint phase = selfShadowed ? 3u : 0u;   // 0 the disc, 1 the translucent ray, 2 the foliage ray, 3 done
-                                           // (self-shadowed: vis 0, no ray)
-    const uint nRays = G.n;   // (the loop bound: one value across the walks)
-    [[dont_unroll]] for (uint it = 0u; it < nRays + 2u && phase < 3u; ++it)
+    return G;
+}
+// THE RAYS of a sample set up by shadowSampleSetup (nRays = G.n; G itself is read only without parking).
+// The raw visibility (before rtTerminatorPost). The walk globals: SETUP's (or the queue walk's copy of them).
+// (#1039 occupancy) ONE loop, one WALK per iteration: a ray's own-fixture re-traces (SH_FIXTURE: rtVisTraceK's
+// steps -- at most two more passes up to the fixture's box, the same call site) are iterations of this loop too
+// (fr), not a loop nested around the walk; the next ray is chosen only once its last pass is done. `it` counts
+// the RAYS taken (the disc's + the tails'), so the bound and every early-out are the nested form's; the walk
+// sees the same rays and clips. What the loop carries across a walk is only what it must: the accumulators
+// (vis, first), the ray being walked (o, d, its clip tmc) and ONE word of counters (k, phase, it, fr). The ray's
+// kind / mask / blend parity follow from its class (the phase it was chosen in) and the sample's bits, so they
+// are re-derived where used (shRayKindOf), and the disc normaliser from the early-out that ended the disc.
+// The ray CLASS: the phase value after the ray was chosen -- 0 a disc ray, 2 the translucent ray, 3 the foliage
+// ray -- and the walk kind / TLAS mask / blend parity it is walked with (the nested form's per-ray values).
+void shRayKindOf(uint cls, uint bits, out uint kind, out uint mask, out bool par)
+{
+    if (cls == 0u)
     {
-#ifdef SH_PARK
-        const ShRayGen g = shRayGenUnpark();   // (this ray's inputs: reloaded, not carried across the last walk)
+        kind = (bits >> SHG_KIND_SHIFT) & 7u;
+        mask = (bits & SHG_VISSET) != 0u ? (RT_MASK_SHADOW & ~RT_MASK_BLEND) : RT_MASK_SHADOW;
+        par = (bits & SHG_DPAR) != 0u;
+    }
+    else if (cls == 2u)
+    {
+        kind = specTransOn() ? RT_WALK_TRANS_RGB : RT_WALK_TRANS;
+        mask = RT_MASK_BLEND;
+        par = (bits & SHG_TPAR) != 0u;
+    }
+    else
+    {
+        kind = specTransOn() ? RT_WALK_FOL_RGB : RT_WALK_FOL;
+        mask = RT_MASK_ALPHAMASK;
+        par = false;
+    }
+}
+// the counter word: k bits 0-7 (disc rays done), phase 8-9, it 10-17 (rays taken), fr 18-19 (re-trace pass)
+#define SHR_K(S)     ((S) & 255u)
+#define SHR_PHASE(S) (((S) >> 8) & 3u)
+#define SHR_IT(S)    (((S) >> 10) & 255u)
+#if defined(SH_KIND_DIRECTIONAL) || !defined(RT_WALK_FIXTURE)
+// (no own-fixture rule in this kernel: clean_vis_walk.glsl SH_FIX_ON false -- rt_fix_t is never set, no ray is
+//  ever re-walked, and the ray is not carried from one iteration to the next)
+#define SHR_FR(S)    0u
+#define SHR_RETRACE  0
 #else
-        const ShRayGen g = G;
+#define SHR_FR(S)    (((S) >> 18) & 3u)
+#define SHR_RETRACE  1
 #endif
-        const uint n = g.n;
-        vec3 o = vec3(0.0), d = vec3(0.0);
-        float tm = 0.0;
-        uint kind = 0u, mask = 0u;
-        bool par = false, want = false;
-        if (phase == 0u)
+// (#1039 occupancy) THE SELF PROBE AT THE SAMPLE: the walks run with probeOut, so the no-self-shadow probe
+// (rtSelfProbe: a receiver whose owner is still UNKNOWN meets a throttled character's candidate) is not part of
+// any walk's code -- that walk ends at the candidate with rt_walk_probe set, the probe runs here between walks
+// (the sample's state reset first: nothing of it live across the probe either), and the sample starts over from
+// its first ray (the owner known). Exact: every candidate the rays met before that one had owner 0 and its
+// rules never read the owner, so the second run takes the same decisions on them (the same rays: they depend
+// only on the sample) and then decides the rest as the nested probe would have let the walk go on. rt_block_t
+// restarts from its value at the sample's start (rt_block_dyn only ever turns on, and the second run meets the
+// same casters again); the ray-query budget and its counters (rt_query_left, rt_ray_rejected, rt_query_refused)
+// too, so the probe's query and the rays' are counted once each, as before (pass 15 runs them unlimited). The
+// owner is resolved after one probe (never UNKNOWN again): the sample runs twice at most.
+// (#1128) THE SAMPLE'S RAY-QUERY BUDGET (the hang guard the RT reflection rays have, #1049): every query a sample
+// can start -- its disc rays (<= 16) + the translucent and foliage rays, each up to 3 fixture passes, the whole
+// sample twice after a self probe, + the probe -- stays under ~110; past RT_SH_QUERY_BUDGET the sample's remaining
+// queries are refused (blocked, the G-7 rule), so no sample can chain unbounded traversal work. Never binds on a
+// sane sample (images unchanged). Its counters go to the lit guard words LG_RT_SH_WORD (shStatsGuard: + 0 samples
+// the budget cut, + 1 rays rtRaySane refused, + 2 of them the float form passed -- clean_rt_common.glsl).
+#define RT_SH_QUERY_BUDGET 256u
+#define LG_RT_SH_WORD (LG_WORD0 + 35u)   // = LLCleanRendererVK::kLgRtSh
+void shStatsGuard()
+{
+    const bool any3 = rt_query_refused != 0u || rt_ray_rejected != 0u || rt_ray_folded != 0u;
+    if (subgroupOr(any3 ? 1u : 0u) != 0u)   // (one reduction while nothing tripped)
+    {
+        const uint a = subgroupAdd(rt_query_refused != 0u ? 1u : 0u);
+        const uint b = subgroupAdd(rt_ray_rejected);
+        const uint c = subgroupAdd(rt_ray_folded);
+        if (subgroupElect())
         {
-            bool done = k >= n;
-            if (!done && rtHintDone(k, vis)) { rays = 1.0; done = true; }
-            if (!done && k == 1u) first = vis;
-            if (!done && rtAdaptiveDone(k, n, vis, first)) { rays = 2.0; done = true; }
-            if (done)
+            if (a != 0u) atomicAdd(lg_words[LG_RT_SH_WORD], a);
+            if (b != 0u) atomicAdd(lg_words[LG_RT_SH_WORD + 1u], b);
+            if (c != 0u) atomicAdd(lg_words[LG_RT_SH_WORD + 2u], c);
+        }
+    }
+    rt_query_refused = 0u; rt_ray_rejected = 0u; rt_ray_folded = 0u;
+}
+vec3 shadowSampleRays(ShRayGen G, uint nRays, bool pos, bool selfShadowed)
+{
+    rt_query_left = RT_SH_QUERY_BUDGET;   // (#1128: this sample's queries)
+    const float bt0 = rt_block_t;
+    const uint ql0 = rt_query_left, rr0 = rt_ray_rejected, qr0 = rt_query_refused;
+    const uint st0 = (selfShadowed ? 3u : 0u) << 8;   // 0 the disc, 1 the translucent ray, 2 the foliage ray, 3 done
+                                                      // (self-shadowed: vis 0, no ray)
+    vec3 vis = vec3(0.0), first = vec3(0.0);
+    uint st = st0;
+    vec3 o = vec3(0.0), d = vec3(0.0);
+    float tmc = 0.0;
+    [[dont_unroll]] while (SHR_FR(st) != 0u || (SHR_IT(st) < nRays + 2u && SHR_PHASE(st) < 3u))
+    {
+        if (SHR_FR(st) == 0u)
+        {
+            st += 1u << 10;   // (a ray taken: the nested form's loop increment)
+#if defined(SH_PARK) || defined(SH_PARK_VQ)
+            const ShRayGen g = shRayGenUnpark();   // (this ray's inputs: reloaded, not carried across the last walk)
+#else
+            const ShRayGen g = G;
+#endif
+            const uint n = g.n;
+            uint k = SHR_K(st), phase = SHR_PHASE(st);
+            float tm = 0.0;
+            bool want = false;
+            o = vec3(0.0); d = vec3(0.0);
+            if (phase == 0u)
             {
-                vis /= rays;
-                phase = 1u;   // (falls through to the translucent ray in this iteration)
-            }
-            else
-            {
-                const uint i = n - 1u - k;   // outermost samples first (rtAdaptiveDone)
-                ++k;
-                vec3 off = vec3(0.0);
-                if ((g.bits & SHG_HARD) == 0u)
+                bool done = k >= n;
+                float rays = float(nRays);   // the normaliser: rays actually traced (early-outs below)
+                if (!done && rtHintDone(k, vis)) { rays = 1.0; done = true; }
+                if (!done && k == 1u) first = vis;
+                if (!done && rtAdaptiveDone(k, n, vis, first)) { rays = 2.0; done = true; }
+                if (done)
                 {
-                    const float r   = g.radius * sqrt((float(i) + g.noiseX) / float(n));
-                    const float phi = g.noiseY + 2.3999632 * float(i);
-                    off = (g.u * cos(phi) + g.v * sin(phi)) * r;
-                }
-                if (pos)
-                {
-                    const vec3 T = g.pos + off;
-                    o = shPosOrigin(g, T - g.Pb);
-                    const vec3 toL = T - o;
-                    const float len = length(toL);
-                    if (len <= 1e-4) { vis += vec3(1.0); continue; }
-                    d = toL / len;
-                    const float e = dot(g.Nf, d);
-                    if (e < g.efloor) d = normalize(d + g.Nf * (g.efloor - e));
-                    tm = shPosTmax(g, o, d, len);
-                    if (tm <= 0.0) { vis += vec3(1.0); continue; }
+                    vis /= rays;
+                    phase = 1u;   // (falls through to the translucent ray in this iteration)
                 }
                 else
                 {
-                    o = g.oL;
-                    d = g.pos;
+                    const uint i = n - 1u - k;   // outermost samples first (rtAdaptiveDone)
+                    ++k;
+                    vec3 off = vec3(0.0);
                     if ((g.bits & SHG_HARD) == 0u)
                     {
-                        d = normalize(g.pos + off);
-                        const float e = dot(g.Nf, d);
-                        if (e < g.efloor) d = normalize(d + g.Nf * (g.efloor - e));
+                        const float r   = g.radius * sqrt((float(i) + g.noiseX) / float(n));
+                        const float phi = g.noiseY + 2.3999632 * float(i);
+                        off = (g.u * cos(phi) + g.v * sin(phi)) * r;
                     }
-                    tm = g.tmax;
-                }
-                kind = (g.bits >> SHG_KIND_SHIFT) & 7u;
-                mask = (g.bits & SHG_VISSET) != 0u ? (RT_MASK_SHADOW & ~RT_MASK_BLEND) : RT_MASK_SHADOW;
-                par = (g.bits & SHG_DPAR) != 0u;
-                want = true;
-            }
-        }
-        if (phase == 1u && !want)
-        {
-            // TRANSLUCENT SPLIT: one ray toward the light's centre over the blend class (same
-            // origin rules and near-plane clip as a disc ray; no disc floor), where any light is left
-            phase = 2u;
-            if ((g.bits & SHG_SPLIT) != 0u && any(greaterThan(vis, vec3(0.0))))
-            {
-                if (pos)
-                {
-                    o = shPosOrigin(g, g.pos - g.Pb);
-                    const vec3 toL = g.pos - o;
-                    const float len = length(toL);
-                    if (len > 1e-4)
+                    if (pos)
                     {
-                        d = toL / len;
-                        tm = shPosTmax(g, o, d, len);
-                        want = tm > 0.0;
+                        const vec3 T = g.pos + off;
+                        o = shPosOrigin(g, T - g.Pb);
+                        const vec3 toL = T - o;
+                        const float len = length(toL);
+                        // (a degenerate ray -- the origin on the emitter, or no length left before the near
+                        //  plane -- counts as lit, no walk)
+                        if (len <= 1e-4) vis += vec3(1.0);
+                        else
+                        {
+                            d = toL / len;
+                            const float e = dot(g.Nf, d);
+                            if (e < g.efloor) d = normalize(d + g.Nf * (g.efloor - e));
+                            tm = shPosTmax(g, o, d, len);
+                            if (tm <= 0.0) vis += vec3(1.0);
+                            else want = true;
+                        }
                     }
+                    else
+                    {
+                        o = g.oL;
+                        d = g.pos;
+                        if ((g.bits & SHG_HARD) == 0u)
+                        {
+                            d = normalize(g.pos + off);
+                            const float e = dot(g.Nf, d);
+                            if (e < g.efloor) d = normalize(d + g.Nf * (g.efloor - e));
+                        }
+                        tm = g.tmax;
+                        want = true;
+                    }
+                    st = (st & ~1023u) | k | (phase << 8);
+                    if (!want) continue;
                 }
-                else { o = g.oL; d = g.pos; tm = g.tmax; want = true; }
-                kind = specTransOn() ? RT_WALK_TRANS_RGB : RT_WALK_TRANS;
-                mask = RT_MASK_BLEND;
-                par = (g.bits & SHG_TPAR) != 0u;
             }
+            if (phase == 1u && !want)
+            {
+                // TRANSLUCENT SPLIT: one ray toward the light's centre over the blend class (same
+                // origin rules and near-plane clip as a disc ray; no disc floor), where any light is left
+                phase = 2u;
+                if ((g.bits & SHG_SPLIT) != 0u && any(greaterThan(vis, vec3(0.0))))
+                {
+                    if (pos)
+                    {
+                        o = shPosOrigin(g, g.pos - g.Pb);
+                        const vec3 toL = g.pos - o;
+                        const float len = length(toL);
+                        if (len > 1e-4)
+                        {
+                            d = toL / len;
+                            tm = shPosTmax(g, o, d, len);
+                            want = tm > 0.0;
+                        }
+                    }
+                    else { o = g.oL; d = g.pos; tm = g.tmax; want = true; }
+                }
+            }
+            else if (phase == 2u && !want)
+            {
+                // FOLIAGE TRANSMISSION (#735 mode 2; the sun / moon's full trace only): one ray along
+                // the centre over the alpha-mask class, where the shadow rays left some light
+                phase = 3u;
+                if (!((g.bits & SHG_FOL) == 0u || pos || (g.bits & SHG_OO) != 0u || rtFolMode() != 2u
+                      || !(max(max(vis.r, vis.g), vis.b) > 0.0)))
+                {
+                    o = g.oL;   // (SH_FOLIAGE: the sun / moon's only -- directional)
+                    d = g.pos; tm = g.tmax;
+                    want = true;
+                }
+            }
+            st = (st & ~1023u) | k | (phase << 8);
             if (!want) continue;
+            tmc = tm;
         }
-        else if (phase == 2u && !want)
-        {
-            // FOLIAGE TRANSMISSION (#735 mode 2; the sun / moon's full trace only): one ray along
-            // the centre over the alpha-mask class, where the shadow rays left some light
-            phase = 3u;
-            if ((g.bits & SHG_FOL) == 0u || pos || (g.bits & SHG_OO) != 0u || rtFolMode() != 2u
-                || !(max(max(vis.r, vis.g), vis.b) > 0.0))
-                continue;
-            o = g.oL;   // (SH_FOLIAGE: the sun / moon's only -- directional)
-            d = g.pos; tm = g.tmax;
-            kind = specTransOn() ? RT_WALK_FOL_RGB : RT_WALK_FOL;
-            mask = RT_MASK_ALPHAMASK;
-            want = true;
-        }
-        if (!want) continue;
+        uint kind = 0u, mask = 0u;
+        bool par = false;
+#if defined(SH_PARK) || defined(SH_PARK_VQ)
+        shRayKindOf(SHR_PHASE(st), shRayGenUnpark().bits, kind, mask, par);
+#else
+        shRayKindOf(SHR_PHASE(st), G.bits, kind, mask, par);
+#endif
+        rt_fix_t = -1.0;
         rt_blend_parity = par;
-        // (SH_FIXTURE: a ray ended by the light's own fixture is traced again up to the fixture's box
-        //  -- at most twice, nested lamps; the same call site: rtVisTrace)
-        const vec3 w = rtVisTrace(o, d, tm, mask, kind);   // THE walk site
+        vec3 w = rtVisWalkFP(o, d, 0.0, tmc, mask, kind, RT_WALK_KS_ANY, true);   // THE walk site
         rt_blend_parity = false;
-        if (kind == RT_WALK_OPAQUE || kind == RT_WALK_VIS || kind == RT_WALK_GREY || kind == RT_WALK_RGB) vis += w;
-        else vis *= w;
+        if (rt_walk_probe)
+        {
+            // (the self probe, then the sample from its first ray: THE SELF PROBE AT THE SAMPLE above)
+            rt_walk_probe = false;
+            vis = vec3(0.0); first = vec3(0.0); st = st0;
+            rt_block_t = bt0;
+            rt_query_left = ql0; rt_ray_rejected = rr0; rt_query_refused = qr0;
+            rt_self_owner = rtSelfProbe();
+            continue;
+        }
+#if SHR_RETRACE
+        if (rt_fix_t >= 0.0)
+        {
+            // (SH_FIXTURE) ended by the light's own fixture: again up to where the ray enters its box (at most
+            // two more passes, nested lamps); lit when no clip is left or the passes are spent
+            tmc = min(rt_fix_t, tmc) - 0.002;
+            if (tmc > 0.0 && SHR_FR(st) < 2u) { st += 1u << 18; continue; }
+            w = vec3(1.0);
+        }
+        st &= ~(3u << 18);
+#endif
+        if (SHR_PHASE(st) == 0u) vis += w;   // (a disc ray: OPAQUE / VIS / GREY / RGB add up)
+        else vis *= w;                       // (the translucent / foliage ray multiplies in)
     }
-    if (phase == 0u) vis /= rays;   // (never: the loop bound covers the disc + both tails)
+    if (SHR_PHASE(st) == 0u) vis /= float(nRays);   // (never: the loop bound covers the disc + both tails)
+    rt_query_left = 0xFFFFFFFFu;   // (#1128: the budget is the sample's; the rest of the kernel unlimited as before)
+    shStatsGuard();
+    return vis;
+}
+// END: the walk globals SETUP set, reset.
+void shadowSampleEnd(bool fol)
+{
     rt_fix_on = false;
     if (fol) rtFolEnd();
     rt_foot_on = false;
+}
+vec3 shadowSampleVis(ShadowSample S, vec3 P, vec3 Nin, vec3 cam, float time)
+{
+    bool pos, fol, selfShadowed;
+    const ShRayGen G = shadowSampleSetup(S, P, Nin, cam, time, pos, fol, selfShadowed);
+#ifdef SH_PARK
+    shRayGenPark(G);
+#endif
+    const vec3 vis = shadowSampleRays(G, G.n, pos, selfShadowed);   // (the loop bound: one value across the walks)
+    shadowSampleEnd(fol);
 #ifdef SH_PARK
     const vec3 r = rtTerminatorPost(vis, shRayGenUnpark().post);
 #else

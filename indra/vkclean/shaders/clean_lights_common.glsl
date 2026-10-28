@@ -53,7 +53,7 @@ struct Light {
 
 struct LightInfo {
     vec4 cam_pos;        // .xyz camera world pos, .w light count
-    vec4 cam_fwd;        // .xyz camera forward (world)
+    vec4 cam_fwd;        // .xyz camera forward (world); .w 1: orthographic view (<GMDX>)
     vec4 zinfo;          // near, far (draw distance), GZ / log(far / near), projection far
     vec4 grid;           // tile px w, tile px h, tan(half fov x), tan(half fov y)
     mat4 view;           // world -> view (-Z forward)
@@ -74,6 +74,11 @@ struct LightInfo {
                          // .z options: bit 0 = alpha-blend receivers trace ray-traced projector
                          // shadows inline (RenderVKRTBlendProjShadows 1); .w 0
 };
+
+// <GMDX> ORTHOGRAPHIC main view (LightInfo cam_fwd.w 1, FSCameraOrtho): grid.zw are the view's
+// half extents in metres, not tangents, so a tile is the same width at every depth. Every
+// "tangent x depth" / "x / depth" of the cluster grid goes through CL_VIEW_Z (L: the block).
+#define CL_VIEW_Z(L, z) ((L).cam_fwd.w > 0.5 ? 1.0 : (z))
 
 // ---- FROXEL LIGHT MASKS (RenderVKLightCulling 2) ----
 // Cell (tile tx, ty of 2^fx_dims.w render px; depth slice s) = FROXEL_WORDS uints at

@@ -7,7 +7,7 @@
 //     width, height, 1 / width, 1 / height) as its first members;
 //   * uDepth (sampler2D, the pre-pass depth, NEAREST), uNormal (sampler2D, the pre-pass
 //     normal target or G1) and the spec constant kAoGbufNormals (constant_id 0);
-//   * the frame-info block (clean_frame_info.glsl: ssr.cur_view).
+//   * the frame-info block (clean_frame_info.glsl: ssr.views[CLEAN_VIEW].cur_view).
 #ifndef CLEAN_AO_COMMON_GLSL
 #define CLEAN_AO_COMMON_GLSL
 float depthAt(vec2 tc) { return textureLod(uDepth, tc, 0.0).r; }
@@ -35,7 +35,7 @@ vec3 octDecode(vec2 e)
 vec3 srcNormal(vec2 e)
 {
     const vec3 n = octDecode(e);
-    return kAoGbufNormals ? normalize(mat3(ssr.cur_view) * n) : n;
+    return kAoGbufNormals ? normalize(mat3(ssr.views[CLEAN_VIEW].cur_view) * n) : n;
 }
 vec3 viewNormal(vec2 tc) { return srcNormal(textureLod(uNormal, tc, 0.0).xy); }
 // (Only read where depth has a surface: (0, 0) is a valid encoding, +z / camera-facing.)
@@ -123,7 +123,7 @@ vec4 aoMeta(vec2 tc, float d)
     if (d <= 0.0) return vec4(0.0, -1.0, 0.0, 0.0);
     const vec3 pos = viewPos(tc, d);
     const vec3 nv = vertexNormal(tc);
-    const vec3 nw = normalize(transpose(mat3(ssr.cur_view)) * nv);
+    const vec3 nw = normalize(transpose(mat3(ssr.views[CLEAN_VIEW].cur_view)) * nv);
     const uvec2 qn = uvec2(clamp(octEncode(nw) * 0.5 + 0.5, vec2(0.0), vec2(1.0)) * 4095.0 + 0.5);
     return vec4(dot(nv, pos), float(qn.x * 4096u + qn.y), 0.0, 0.0);
 }

@@ -2893,6 +2893,9 @@ void FSFloaterPoser::writeBvhFragment(llofstream* fileStream, LLVOAvatar* avatar
     if (!joint)
         return;
 
+    if (joint->boneType() == COL_VOLUMES) // <GMDX> SoapStorm a32af6a274: collision volumes are physics shapes, not deforming bones
+        return;
+
     auto saveAxis = getBvhJointTranslation(joint->jointName());
 
     switch (joint->boneType())
@@ -2967,6 +2970,9 @@ void FSFloaterPoser::writeFirstFrameOfBvhMotion(llofstream* fileStream, const FS
     if (!joint)
         return;
 
+    if (joint->boneType() == COL_VOLUMES) // <GMDX> SoapStorm a32af6a274: collision volumes are physics shapes, not deforming bones
+        return;
+
     switch (joint->boneType())
     {
         case WHOLEAVATAR:
@@ -2989,6 +2995,9 @@ void FSFloaterPoser::writeFirstFrameOfBvhMotion(llofstream* fileStream, const FS
 void FSFloaterPoser::writeBvhMotion(llofstream* fileStream, LLVOAvatar* avatar, const FSPoserAnimator::FSPoserJoint* joint)
 {
     if (!joint)
+        return;
+
+    if (joint->boneType() == COL_VOLUMES) // <GMDX> SoapStorm a32af6a274: collision volumes are physics shapes, not deforming bones
         return;
 
     bool lockPelvisJoint = gSavedSettings.getBOOL(POSER_UNLOCKPELVISINBVH_SAVE_KEY);

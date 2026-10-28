@@ -1,9 +1,19 @@
 #version 450
 // <GMDX> upstream's clean_vol_cloud_weather.comp for the GunMetal-DX cloud model (gmdx_cloud_common.glsl).
-// Wicked's model raises the coverage straight up into the shell, so the 2D dome's fine detail
-// layer (the EEP noise at 16 x the tile) stood up as streaky vertical curtains under the clouds.
-// Here the detail layer is sampled at 4 x and blurred over a texel ring: lumpy coverage edges,
-// no streaks. Everything else is upstream's mapping.
+// Wicked's model raises the coverage straight up through the cloud type's height band (250 m to
+// 2.4 km of a 2500 m shell), so any coverage feature narrower than that stands up as a thin
+// vertical column. The EEP noise is drawn for a flat dome: Second Life's Midday sky
+// (dc6e4164..., a 1024^2 photo of small puffs, plus cloud density 2 of 0.89) puts coverage
+// features of ~60 m (median) in the map, sampled at mip 0 besides (8:1 minified for the detail
+// layer: aliased speckle). Each layer is now read at the mip whose texel is the weather map's
+// texel or the smallest footprint (vc.gmdx2.z, GMDXCloudMinWidth x the thickness), whichever is
+// larger. Smooth noise (LL's default cloud texture) barely changes. The detail layer is sampled
+// at 4 x the tile (the dome's 16 x is finer still). Everything else is upstream's mapping.
+// A cloud's height follows its width (seen from above, a puff of 100 m stood 800 m tall): the
+// cloud type, which sets the height band, comes from the coverage filtered over 4 x the smallest
+// footprint (500 m by default), so only a cloud that wide reaches the tall types and its sides
+// slope down to its edges; and a feature that does not survive a 2 x filter (narrower than
+// ~250 m) is squashed toward the base (a = the height scale, gmdx_cloud_common.glsl gcWeather).
 #extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_nonuniform_qualifier : require
 // vkclean -- VOLUMETRIC CLOUDS (#719): the 2D WEATHER MAP, from the region's EEP sky.
@@ -24,22 +34,43 @@
 // Cloud type (stratus 0 .. towering cumulus 1): heavier where the coverage is dense, varied by
 // a second noise channel and the EEP cloud variance. Local density: the detail layer, plus
 // overcast skies thickening.
-// Writes r = coverage, g = type, b = local density, a = 1.
+// Writes r = coverage, g = type, b = local density, a = height scale (<GMDX>; upstream 1).
 layout(local_size_x = 8, local_size_y = 8) in;
 
 #include "clean_frame_info.glsl"
 #include "clean_atmos_common.glsl"
 layout(set = 1, binding = 0) uniform sampler2D uTextures[];   // bindless (the EEP cloud noise)
 layout(set = 2, binding = 0, rgba8) uniform writeonly image2D uWeather;
+// <GMDX> the clouds' params (gmdx_cloud_common.glsl VolCloudParams): shape0.x the tile (m), y 1 / tile;
+// gmdx2.z the smallest cloud footprint (m)
+layout(std140, set = 2, binding = 1) uniform VolCloudParams
+{
+    vec4 shape0;
+    layout(offset = 336) vec4 gmdx2;
+} vc;
 
-vec4 wxNoise(vec2 uv)
+// texel = the filter width in texture repeats (metres / the layer's repeat length)
+vec4 wxTex(int i, vec2 uv, float texel)
+{
+    const float s = float(textureSize(uTextures[nonuniformEXT(uint(i))], 0).x);
+    return textureLod(uTextures[nonuniformEXT(uint(i))], uv, max(log2(texel * s), 0.0));
+}
+vec4 wxNoise(vec2 uv, float texel)
 {
     const int ia = int(ssr.clouds[3].x), ib = int(ssr.clouds[3].y);
     if (ia < 0) return vec4(0.5);
-    const vec4 a = textureLod(uTextures[nonuniformEXT(uint(ia))], uv, 0.0);
+    const vec4 a = wxTex(ia, uv, texel);
     if (ib == ia || ib < 0 || ssr.clouds[2].w <= 0.0) return a;
-    const vec4 b = textureLod(uTextures[nonuniformEXT(uint(ib))], uv, 0.0);
-    return mix(a, b, ssr.clouds[2].w);
+    return mix(a, wxTex(ib, uv, texel), ssr.clouds[2].w);
+}
+
+// The coverage with both layers filtered to fw tiles (n1 / n2 the layers read).
+float wxCoverage(vec2 u, float fw, float cloud_density, out vec4 n1, out vec4 n2)
+{
+    n1 = wxNoise(u + fract(ssr.clouds[1].xy), fw);
+    n2 = wxNoise(u * 4.0 + fract(ssr.clouds[2].xy), fw * 4.0);
+    const float raw = (n1.x - 0.5) + (n2.x - 0.5) * ssr.clouds[2].z + cloud_density;
+    return clamp(raw * 3.0 * max(ssr.clouds[1].z, 0.05), 0.0, 1.0);
 }
 
 void main()
@@ -49,23 +80,22 @@ void main()
     if (px.x >= sz.x || px.y >= sz.y) return;
     const vec2 u = (vec2(px) + 0.5) / vec2(sz);
 
-    const vec3 pd1 = ssr.clouds[1].xyz;     // scrolled (wind) large layer + density1
     const float variance = ssr.clouds[1].w;
-    const vec3 pd2 = ssr.clouds[2].xyz;     // detail layer + density2
     // #783 M2: the weather's cloud cover (ssr.weather[11].z, zero without weather) only ever
     // adds to the region's -- the weather never thins a region's own sky.
     const float coverage_eep = max(ssr.atmos[2].w, ssr.weather[11].z);
 
-    const vec4 n1 = wxNoise(u + fract(pd1.xy));
-    const vec2 uv2 = u * 4.0 + fract(pd2.xy);
-    const vec2 o = vec2(1.5 / 512.0);
-    const vec4 n2 = (wxNoise(uv2 + vec2(o.x, o.y)) + wxNoise(uv2 + vec2(-o.x, o.y))
-                   + wxNoise(uv2 + vec2(o.x, -o.y)) + wxNoise(uv2 - o)) * 0.25;
+    // The filter width in tiles: the map's texel or the smallest footprint (m); 2 m and 4 m for
+    // the cloud's width (GMDXCloudMinWidth 0: all three the map's texel, the unfiltered shape).
+    const float texel = 1.0 / float(sz.x), m = vc.gmdx2.z * vc.shape0.y;
     const float cloud_density = 2.0 * (coverage_eep - 0.25);
-    const float raw = (n1.x - 0.5) + (n2.x - 0.5) * pd2.z + cloud_density;
-    const float cov = clamp(raw * 3.0 * max(pd1.z, 0.05), 0.0, 1.0);
-    const float type = clamp(0.15 + 0.75 * smoothstep(0.2, 1.0, cov) * (0.6 + 0.4 * n1.y)
+    vec4 n1, n2, t1, t2;
+    const float cov = wxCoverage(u, max(texel, m), cloud_density, n1, n2);
+    const float covS = wxCoverage(u, max(texel, 2.0 * m), cloud_density, t1, t2);
+    const float covL = wxCoverage(u, max(texel, 4.0 * m), cloud_density, t1, t2);
+    const float type = clamp(0.15 + 0.75 * smoothstep(0.2, 1.0, min(cov, covL)) * (0.6 + 0.4 * n1.y)
                              + 0.3 * variance * (n2.y - 0.3), 0.0, 1.0);
+    const float hs = mix(0.35, 1.0, smoothstep(0.3, 0.9, covS / max(cov, 1e-3)));
     const float dens = clamp(0.55 + 0.45 * n2.x + 0.3 * max(coverage_eep - 0.5, 0.0), 0.0, 1.0);
-    imageStore(uWeather, px, vec4(cov, type, dens, 1.0));   // (upstream: sqrt(cov), for its own shape model)
+    imageStore(uWeather, px, vec4(cov, type, dens, hs));   // (upstream: sqrt(cov), for its own shape model)
 }

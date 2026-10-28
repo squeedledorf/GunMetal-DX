@@ -30,7 +30,7 @@ with the same filename but different name
   vector_file2 / vector_color2 / vector_box2, and vector_file3 / vector_color3 / vector_box3 (optional)
     - more layers drawn over the first at the same size, source-over, each with its own colour and box
       (a checkbox is frame + fill + check mark; a scroll button is tile + frame + caret).
-  use_mips="true" (currently unused)
+  use_mips="true" (optional: load with mipmaps, for images drawn much smaller than their size)
   scale.left="1"
   scale.bottom="1"
   scale.top="15"
@@ -124,13 +124,17 @@ with the same filename but different name
   <texture name="Cam_Orbit_Off" file_name="bottomtray/Cam_Orbit_Off.png" preload="false" vector_file="phosphor/cube-focus.svg" vector_color="IconColor@BF" vector_box="0.111,0.167,0.889,0.944" />
   <texture name="Cam_Pan_Off" file_name="bottomtray/Cam_Pan_Off.png" preload="false" vector_file="phosphor/hand-grabbing.svg" vector_color="IconColor@BF" vector_box="0.111,0.056,0.889,0.889" />
 
-  <texture name="Cam_Preset_Back_Off" file_name="bottomtray/Cam_Preset_Back_Off.png" preload="false" vector_file="phosphor/video-camera.svg" vector_color="IconColor" />
-  <texture name="Cam_Preset_Back_On" file_name="bottomtray/Cam_Preset_Back_On.png" preload="false" vector_file="phosphor/video-camera.svg" vector_color="IconColor" />
+  <!-- <GMDX> orthographic view toggle (SoapStorm 7179701d85) -->
+  <texture name="Cam_Ortho_Off" file_name="bottomtray/Cam_Ortho_Off.png" preload="false" vector_file="phosphor_authored/grid-focus.svg" vector_color="IconColor" vector_box="0.100,0.100,0.900,0.900" />
+  <texture name="Cam_Ortho_On" file_name="bottomtray/Cam_Ortho_On.png" preload="false" vector_file="phosphor_authored/grid-focus.svg" vector_color="#C8DEE9" vector_box="0.100,0.100,0.900,0.900" />
+
+  <texture name="Cam_Preset_Back_Off" file_name="bottomtray/Cam_Preset_Back_Off.png" preload="false" vector_file="phosphor/user-focus.svg" vector_color="IconColor" vector_box="0.100,0.100,0.900,0.900" />
+  <texture name="Cam_Preset_Back_On" file_name="bottomtray/Cam_Preset_Back_On.png" preload="false" vector_file="phosphor/user-focus.svg" vector_color="#C8DEE9" vector_box="0.100,0.100,0.900,0.900" />
   <texture name="Cam_Preset_Eye_Off" file_name="bottomtray/Cam_Preset_Eye_Off.png" preload="false" vector_file="phosphor/eye.svg" vector_color="IconColor" />
-  <texture name="Cam_Preset_Front_Off" file_name="bottomtray/Cam_Preset_Front_Off.png" preload="false" vector_file="phosphor/video-camera.svg" vector_color="IconColor" />
-  <texture name="Cam_Preset_Front_On" file_name="bottomtray/Cam_Preset_Front_On.png" preload="false" vector_file="phosphor/video-camera.svg" vector_color="IconColor" />
-  <texture name="Cam_Preset_Side_Off" file_name="bottomtray/Cam_Preset_Side_Off.png" preload="false" vector_file="phosphor/video-camera.svg" vector_color="IconColor" />
-  <texture name="Cam_Preset_Side_On" file_name="bottomtray/Cam_Preset_Side_On.png" preload="false" vector_file="phosphor/video-camera.svg" vector_color="IconColor" />
+  <texture name="Cam_Preset_Front_Off" file_name="bottomtray/Cam_Preset_Front_Off.png" preload="false" vector_file="phosphor/scan-smiley.svg" vector_color="IconColor" vector_box="0.100,0.100,0.900,0.900" />
+  <texture name="Cam_Preset_Front_On" file_name="bottomtray/Cam_Preset_Front_On.png" preload="false" vector_file="phosphor/scan-smiley.svg" vector_color="#C8DEE9" vector_box="0.100,0.100,0.900,0.900" />
+  <texture name="Cam_Preset_Side_Off" file_name="bottomtray/Cam_Preset_Side_Off.png" preload="false" vector_file="phosphor_authored/user-side-focus.svg" vector_color="IconColor" vector_box="0.100,0.100,0.900,0.900" />
+  <texture name="Cam_Preset_Side_On" file_name="bottomtray/Cam_Preset_Side_On.png" preload="false" vector_file="phosphor_authored/user-side-focus.svg" vector_color="#C8DEE9" vector_box="0.100,0.100,0.900,0.900" />
 
   <texture name="Cam_Rotate_In" file_name="bottomtray/Cam_Rotate_In.png" preload="false" vector_file="phosphor/arrow-up.svg" vector_color="IconAccentColor" vector_box="0.410,0.013,0.590,0.385" />
   <texture name="Cam_Rotate_Out" file_name="bottomtray/Cam_Rotate_Out.png" preload="false" vector_file="phosphor/crosshair.svg" vector_color="IconColor@D1" />
@@ -331,6 +335,9 @@ with the same filename but different name
   <texture name="Icon_Restore_Press" file_name="windows/Icon_Restore_Press.png" preload="false" vector_file="phosphor/corners-out.svg" vector_color="#3B3B3B" vector_box="0.312,0.125,0.875,0.750" />
 
   <texture name="Icon_Snapshot" file_name="icons/snapshot_icon.png" preload="true" vector_file="phosphor/camera.svg" vector_color="IconColor@CA" vector_box="0.167,0.233,0.833,0.767" />
+  <!-- <GMDX> snapshot orientation (SoapStorm) -->
+  <texture name="Icon_Orientation_Portrait" file_name="icons/icn_orientation_portrait.png" preload="true" />
+  <texture name="Icon_Orientation_Landscape" file_name="icons/icn_orientation_landscape.png" preload="true" />
   
   <texture name="Icon_Use_Texture" file_name="icons/texture_icon.png" preload="true" vector_file="phosphor/image.svg" vector_color="IconColor@CC" vector_box="0.267,0.267,0.733,0.733" />
 
@@ -426,6 +433,9 @@ with the same filename but different name
   <texture name="Lock2" file_name="navbar/Lock.png" preload="false" vector_file="phosphor/lock.svg" vector_color="#5F5F5F" vector_box="0.167,0.056,0.833,0.889" />
 
   <texture name="Locked_Icon" file_name="icons/Locked_Icon.png" preload="false" vector_file="phosphor/lock.svg" vector_color="#A9A9A9" />
+  <!-- <GMDX> the chat log's lock (gmdxchatlog.cpp), the height of its gear beside it -->
+  <texture name="GMDX_ChatLog_Locked" file_name="icons/Locked_Icon.png" preload="false" vector_file="phosphor/lock.svg" vector_color="IconColor@BF" vector_box="0.200,0.167,0.800,0.778" />
+  <texture name="GMDX_ChatLog_Unlocked" file_name="icons/Locked_Icon.png" preload="false" vector_file="phosphor/lock-open.svg" vector_color="IconColor@BF" vector_box="0.200,0.167,0.800,0.778" />
 
   <texture name="Map_Placeholder_Icon" file_name="icons/map_placeholder.png" preload="true" vector_file="phosphor/map-trifold.svg" vector_color="IconColor" vector_box="0.100,0.100,0.900,0.900" />
     
@@ -445,8 +455,8 @@ with the same filename but different name
   <texture name="ModelImport_Status_Warning" file_name="lag_status_warning.tga" preload="false" vector_file="phosphor/warning.svg" vector_color="IconWarningColor" />
   <texture name="ModelImport_Status_Error" file_name="red_x.png" preload="false" vector_file="phosphor/x-circle.svg" vector_color="IconErrorColor" vector_box="0.062,0.062,0.938,0.938" />
   
-  <texture name="MouseLook_View_Off" file_name="bottomtray/Mouselook_View_Off.png" preload="false" vector_file="phosphor/crosshair.svg" vector_color="IconColor" />
-  <texture name="MouseLook_View_On" file_name="bottomtray/Mouselook_View_On.png" preload="false" vector_file="phosphor/crosshair.svg" vector_color="IconColor" />
+  <texture name="MouseLook_View_Off" file_name="bottomtray/Mouselook_View_Off.png" preload="false" vector_file="phosphor/crosshair.svg" vector_color="IconColor" vector_box="0.100,0.100,0.900,0.900" />
+  <texture name="MouseLook_View_On" file_name="bottomtray/Mouselook_View_On.png" preload="false" vector_file="phosphor/crosshair.svg" vector_color="IconColor" vector_box="0.100,0.100,0.900,0.900" />
 
   <texture name="Move_Fly_Off" file_name="bottomtray/Move_Fly_Off.png" preload="false" vector_file="phosphor/airplane.svg" vector_color="IconColor@C7" vector_box="0.000,0.000,0.944,0.833" />
   <texture name="Move_Run_Off" file_name="bottomtray/Move_Run_Off.png" preload="false" vector_file="phosphor/person-simple-run.svg" vector_color="IconColor@BF" vector_box="0.056,0.056,0.889,0.889" />
@@ -475,6 +485,9 @@ with the same filename but different name
 
   <texture name="Nearby_chat_icon" file_name="icons/nearby_chat_icon.png" preload="false" vector_file="phosphor/chat.svg" vector_color="IconColor@B3" vector_box="0.050,0.100,0.900,0.850" />
 
+  <!-- <GMDX> the unread IM well (gmdximwell.cpp), beside Notices_Unread: its glyph, and a conference's -->
+  <texture name="GMDX_IM_Unread" file_name="icons/nearby_chat_icon.png" preload="true" vector_file="phosphor/chat-circle.svg" vector_color="IconColor" vector_box="0.150,0.150,0.850,0.850" />
+  <texture name="GMDX_IM_Conference" file_name="icons/Generic_Group.png" preload="true" vector_file="phosphor/users.svg" vector_color="IconColor" vector_box="0.150,0.150,0.850,0.850" />
   <texture name="Notices_Unread" file_name="bottomtray/Notices_Unread.png" preload="true" vector_file="phosphor/envelope.svg" vector_color="IconColor" vector_box="0.100,0.100,0.900,0.900" />
 
   <texture name="NoEntryLines" file_name="world/NoEntryLines.png" use_mips="true" preload="false" />
@@ -511,8 +524,8 @@ with the same filename but different name
   <texture name="Object_Tube" file_name="build/Object_Tube.png" preload="false" vector_file="phosphor_authored/tube.svg" vector_color="#9A9A9A" vector_box="0.100,0.000,0.900,1.000" />
   <texture name="Object_Tube_Selected" file_name="build/Object_Tube_Selected.png" preload="false" vector_file="phosphor_authored/tube.svg" vector_color="#82AF9E" vector_box="0.100,0.000,0.900,1.000" />
 
-  <texture name="Object_View_Off" file_name="bottomtray/Object_View_Off.png" preload="false" vector_file="phosphor/cube-focus.svg" vector_color="#BFBFBFE9" />
-  <texture name="Object_View_On" file_name="bottomtray/Object_View_On.png" preload="false" vector_file="phosphor/cube-focus.svg" vector_color="#C8DEE9" />
+  <texture name="Object_View_Off" file_name="bottomtray/Object_View_Off.png" preload="false" vector_file="phosphor/cube-focus.svg" vector_color="#BFBFBFE9" vector_box="0.100,0.100,0.900,0.900" />
+  <texture name="Object_View_On" file_name="bottomtray/Object_View_On.png" preload="false" vector_file="phosphor/cube-focus.svg" vector_color="#C8DEE9" vector_box="0.100,0.100,0.900,0.900" />
 
   <texture name="OptionsMenu_Disabled" file_name="icons/OptionsMenu_Disabled.png" preload="false" vector_file="phosphor/gear.svg" vector_color="IconColor@30" vector_box="0.056,0.222,1.000,0.778" />
   <texture name="OptionsMenu_Off" file_name="icons/OptionsMenu_Off.png" preload="false" vector_file="phosphor/gear.svg" vector_color="IconColor@BF" vector_box="0.056,0.167,1.000,0.778" />
@@ -1063,4 +1076,251 @@ with the same filename but different name
 <texture name="GameControl_Icon_nintendo_lefttrigger" file_name="gamecontrol/icon_nintendo_lefttrigger.png" use_mips="true" preload="false" />
 <texture name="GameControl_Icon_nintendo_righttrigger" file_name="gamecontrol/icon_nintendo_righttrigger.png" use_mips="true" preload="false" />
 <!-- </SS:GameControl> -->
+  <!-- <GMDX> toolbar pins: the icon library of "Change Icon..." (gmdxtoolbarpins.cpp kPinIcons). The bitmap only sets the 18 px toolbar icon size (and is what Classic icons shows). -->
+  <texture name="GMDX_PinIcon_sword" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/sword.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_pistol" file_name="toolbar_icons/inventory.png" preload="false" vector_file="icons_cc/pistol.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_rifle" file_name="toolbar_icons/inventory.png" preload="false" vector_file="icons_cc/rifle.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_flintlock" file_name="toolbar_icons/inventory.png" preload="false" vector_file="icons_cc/flintlock.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_ammo" file_name="toolbar_icons/inventory.png" preload="false" vector_file="icons_cc/ammo.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_letter-a" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor_authored/letter-a.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_letter-b" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor_authored/letter-b.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_letter-c" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor_authored/letter-c.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_letter-d" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor_authored/letter-d.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_letter-e" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor_authored/letter-e.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_letter-f" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor_authored/letter-f.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_letter-g" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor_authored/letter-g.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_letter-h" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor_authored/letter-h.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_letter-i" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor_authored/letter-i.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_letter-j" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor_authored/letter-j.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_letter-k" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor_authored/letter-k.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_letter-l" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor_authored/letter-l.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_letter-m" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor_authored/letter-m.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_letter-n" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor_authored/letter-n.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_letter-o" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor_authored/letter-o.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_letter-p" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor_authored/letter-p.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_letter-q" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor_authored/letter-q.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_letter-r" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor_authored/letter-r.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_letter-s" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor_authored/letter-s.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_letter-t" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor_authored/letter-t.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_letter-u" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor_authored/letter-u.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_letter-v" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor_authored/letter-v.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_letter-w" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor_authored/letter-w.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_letter-x" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor_authored/letter-x.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_letter-y" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor_authored/letter-y.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_letter-z" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor_authored/letter-z.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_number-0" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor_authored/number-0.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_number-1" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor_authored/number-1.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_number-2" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor_authored/number-2.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_number-3" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor_authored/number-3.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_number-4" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor_authored/number-4.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_number-5" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor_authored/number-5.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_number-6" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor_authored/number-6.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_number-7" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor_authored/number-7.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_number-8" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor_authored/number-8.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_number-9" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor_authored/number-9.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_knife" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/knife.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_axe" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/axe.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_hammer" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/hammer.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_gavel" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/gavel.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_crosshair" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/crosshair.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_crosshair-simple" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/crosshair-simple.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_target" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/target.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_shield" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/shield.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_shield-check" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/shield-check.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_shield-plus" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/shield-plus.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_shield-star" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/shield-star.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_shield-warning" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/shield-warning.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_bomb" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/bomb.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_fire" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/fire.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_fire-simple" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/fire-simple.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_skull" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/skull.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_ghost" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/ghost.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_biohazard" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/biohazard.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_radioactive" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/radioactive.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_lightning" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/lightning.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_magic-wand" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/magic-wand.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_sparkle" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/sparkle.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_star-four" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/star-four.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_hand-fist" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/hand-fist.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_boxing-glove" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/boxing-glove.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_detective" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/detective.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_binoculars" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/binoculars.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_crown" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/crown.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_crown-simple" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/crown-simple.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_trophy" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/trophy.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_medal" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/medal.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_medal-military" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/medal-military.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_flag" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/flag.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_flag-banner" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/flag-banner.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_flag-pennant" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/flag-pennant.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_flag-checkered" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/flag-checkered.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_castle-turret" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/castle-turret.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_heart" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/heart.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_heart-break" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/heart-break.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_heartbeat" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/heartbeat.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_first-aid" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/first-aid.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_first-aid-kit" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/first-aid-kit.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_bandaids" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/bandaids.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_pill" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/pill.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_syringe" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/syringe.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_drop" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/drop.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_drop-half" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/drop-half.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_flask" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/flask.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_atom" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/atom.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_person-simple-run" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/person-simple-run.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_person-simple-walk" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/person-simple-walk.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_person-simple-bike" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/person-simple-bike.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_person-simple-swim" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/person-simple-swim.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_person-simple-throw" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/person-simple-throw.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_person-arms-spread" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/person-arms-spread.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_footprints" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/footprints.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_airplane" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/airplane.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_parachute" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/parachute.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_rocket" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/rocket.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_car" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/car.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_motorcycle" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/motorcycle.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_bicycle" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/bicycle.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_boat" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/boat.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_sailboat" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/sailboat.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_anchor" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/anchor.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_horse" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/horse.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_flying-saucer" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/flying-saucer.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_compass" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/compass.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_compass-rose" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/compass-rose.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_map-trifold" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/map-trifold.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_map-pin" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/map-pin.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_globe-hemisphere-west" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/globe-hemisphere-west.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_signpost" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/signpost.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_path" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/path.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_mountains" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/mountains.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_tent" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/tent.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_campfire" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/campfire.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_house" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/house.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_door" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/door.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_backpack" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/backpack.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_t-shirt" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/t-shirt.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_coat-hanger" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/coat-hanger.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_dress" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/dress.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_sneaker" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/sneaker.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_boot" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/boot.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_high-heel" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/high-heel.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_pants" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/pants.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_hoodie" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/hoodie.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_shirt-folded" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/shirt-folded.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_baseball-cap" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/baseball-cap.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_goggles" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/goggles.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_mask-happy" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/mask-happy.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_gift" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/gift.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_diamond" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/diamond.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_watch" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/watch.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_bag" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/bag.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_music-note" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/music-note.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_music-notes" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/music-notes.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_headphones" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/headphones.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_speaker-high" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/speaker-high.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_megaphone" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/megaphone.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_microphone" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/microphone.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_microphone-stage" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/microphone-stage.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_guitar" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/guitar.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_piano-keys" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/piano-keys.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_vinyl-record" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/vinyl-record.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_video-camera" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/video-camera.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_camera" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/camera.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_image" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/image.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_chat" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/chat.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_chat-circle" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/chat-circle.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_chats" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/chats.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_envelope" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/envelope.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_phone" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/phone.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_star" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/star.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_bookmark" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/bookmark.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_bookmark-simple" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/bookmark-simple.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_folder" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/folder.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_folder-open" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/folder-open.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_package" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/package.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_archive" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/archive.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_cube" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/cube.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_wrench" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/wrench.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_gear" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/gear.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_toolbox" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/toolbox.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_lock" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/lock.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_lock-open" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/lock-open.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_key" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/key.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_eye" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/eye.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_eye-slash" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/eye-slash.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_sun" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/sun.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_moon" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/moon.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_moon-stars" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/moon-stars.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_cloud" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/cloud.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_snowflake" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/snowflake.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_wind" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/wind.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_leaf" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/leaf.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_tree" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/tree.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_tree-evergreen" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/tree-evergreen.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_plant" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/plant.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_flower" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/flower.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_flower-lotus" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/flower-lotus.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_paw-print" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/paw-print.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_cat" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/cat.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_dog" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/dog.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_bird" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/bird.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_butterfly" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/butterfly.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_fish" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/fish.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_rabbit" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/rabbit.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_bug" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/bug.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_smiley" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/smiley.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_smiley-wink" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/smiley-wink.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_smiley-sad" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/smiley-sad.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_smiley-angry" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/smiley-angry.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_smiley-x-eyes" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/smiley-x-eyes.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_hand" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/hand.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_hand-waving" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/hand-waving.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_hand-heart" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/hand-heart.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_hand-peace" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/hand-peace.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_hands-clapping" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/hands-clapping.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_handshake" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/handshake.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_users" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/users.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_user" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/user.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_users-three" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/users-three.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_coffee" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/coffee.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_beer-bottle" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/beer-bottle.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_beer-stein" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/beer-stein.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_wine" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/wine.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_martini" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/martini.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_pizza" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/pizza.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_hamburger" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/hamburger.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_fork-knife" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/fork-knife.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_cake" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/cake.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_champagne" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/champagne.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_confetti" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/confetti.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_balloon" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/balloon.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_coins" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/coins.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_coin" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/coin.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_money" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/money.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_shopping-bag" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/shopping-bag.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_tag" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/tag.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_ticket" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/ticket.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_scroll" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/scroll.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_book" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/book.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_book-open" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/book-open.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_books" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/books.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_note-pencil" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/note-pencil.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_paint-brush" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/paint-brush.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_palette" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/palette.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_hourglass" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/hourglass.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_timer" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/timer.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_alarm" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/alarm.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_clock" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/clock.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_bell" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/bell.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_lightbulb" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/lightbulb.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_flashlight" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/flashlight.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_game-controller" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/game-controller.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_joystick" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/joystick.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_dice-five" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/dice-five.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_puzzle-piece" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/puzzle-piece.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_alien" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/alien.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_robot" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/robot.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_planet" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/planet.svg" vector_color="IconColor" />
+  <texture name="GMDX_PinIcon_infinity" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/infinity.svg" vector_color="IconColor" />
+  <!-- </GMDX> -->
 </textures>

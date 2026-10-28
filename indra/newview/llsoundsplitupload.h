@@ -48,8 +48,13 @@ public:
     static double getSegmentSeconds();
     // Split plan the uploader would use for this clip (a single part when it fits).
     static std::vector<LLAudioSplitPart> planFor(const LLAudioClip& clip);
+    // Exact length of a planned part in seconds, "29.9" / "12.34" (1-2 decimals).
+    static std::string formatPartSeconds(const LLAudioSplitPart& part);
 
     size_t getPartCount() const { return mParts.size(); }
+    // Every part but the last has the first part's (fixed) length.
+    std::string getClipSeconds() const { return mParts.empty() ? std::string() : formatPartSeconds(mParts.front().mRange); }
+    std::string getLastClipSeconds() const { return mParts.empty() ? std::string() : formatPartSeconds(mParts.back().mRange); }
     S32    getTotalCost() const { return mParams.mCostPerClip * (S32)mParts.size(); }
     const std::string& getPartName(size_t i) const { return mParts[i].mName; }
 

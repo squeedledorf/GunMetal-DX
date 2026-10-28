@@ -21,7 +21,7 @@
 #
 # Runs on the self-hosted `builder` HOST runner (applejack, Ubuntu 24.04, runner
 # user `ci`): GCC 14 for Linux (libstdc++ floor GLIBCXX_3.4.33, glibc floor via the
-# glibc_compat.h pins, checked by `make glibc-check`), clang/LLD 22 + the xwin
+# glibc_compat.h pins, checked by `make check-package`), clang/LLD 22 + the xwin
 # sysroot in ~ci/.xwin for Windows. The source is checked out into persistent
 # directories (CI_ROOT, CI_ROOT_WIN) that also hold the venv and the 3p download
 # caches, so a release build is incremental. The build is plain CMake (presets in
@@ -146,17 +146,13 @@ jobs:
           cd "$CI_ROOT"
           bash scripts/ci/version.sh | tee -a "$GITHUB_OUTPUT"
 
-      - name: Check XUI files are well-formed
+      - name: Source checks
+        # Every source-tree regression guard (scripts/check/, stage "source"). New guards are
+        # modules there, not steps here.
         run: |
           set -euo pipefail
           cd "$CI_ROOT"
-          python3 scripts/ci/check_xui.py
-
-      - name: Check keyboard shortcuts are rebindable commands (#863)
-        run: |
-          set -euo pipefail
-          cd "$CI_ROOT"
-          python3 scripts/ci/check_key_commands.py
+          make check
 
       - name: Refresh the baseline CRLSet (certificate revocation)
         # A fresh install must have revocation data before its first runtime fetch. Replaces
@@ -171,7 +167,7 @@ jobs:
             || echo "::warning::CRLSet fetch failed; shipping the committed baseline"
           python3 -I scripts/revocation/fetch_crlset.py --info indra/newview/app_settings/revocation/crl-set
 
-      - name: Build + portability checks
+      - name: Build
         env:
           # Public key the viewer verifies update manifests with (#421); unset = the
           # auto-updater stays inert in this build.
@@ -184,8 +180,16 @@ jobs:
           rm -rf build-linux-x86_64/newview/packaged
           export CMAKE_BUILD_PARALLEL_LEVEL=$(sh scripts/ci/build_jobs.sh)
           echo "compile jobs: $CMAKE_BUILD_PARALLEL_LEVEL"
-          make build VIEWER_CHANNEL="${{ steps.ver.outputs.CHANNEL }}" BUILD_ID="${{ steps.ver.outputs.BUILD }}" GLIBCXX_STRICT=1 \
+          make build VIEWER_CHANNEL="${{ steps.ver.outputs.CHANNEL }}" BUILD_ID="${{ steps.ver.outputs.BUILD }}" RUN_CHECKS=0 \
             SL_3P_CACHE="$CI_ROOT/.autobuild-installables"
+
+      - name: Package checks
+        # Every packaged-tree regression guard (scripts/check/, stage "package"). CI enforces
+        # the libstdc++ ceiling (GLIBCXX_STRICT=1); a local build only warns.
+        run: |
+          set -euo pipefail
+          cd "$CI_ROOT"
+          make check-package GLIBCXX_STRICT=1
 
       - name: Package + verify
         id: pkg
@@ -255,6 +259,14 @@ jobs:
           cd "$CI_ROOT_WIN"
           bash scripts/ci/version.sh | tee -a "$GITHUB_OUTPUT"
 
+      - name: Source checks
+        # Same generic source-stage run as the Linux job (scripts/check/); it includes the
+        # Windows-macro lint that guards this job's compile.
+        run: |
+          set -euo pipefail
+          cd "$CI_ROOT_WIN"
+          make check
+
       - name: Refresh the baseline CRLSet (certificate revocation)
         # A fresh install must have revocation data before its first runtime fetch. Replaces
         # the committed (small-cohort) app_settings/revocation/crl-set with Google's current
@@ -277,7 +289,7 @@ jobs:
           cd "$CI_ROOT_WIN"
           export NINJA_JOBS=$(sh scripts/ci/build_jobs.sh); echo "compile jobs: $NINJA_JOBS"
           make windows VIEWER_CHANNEL="${{ steps.ver.outputs.CHANNEL }}" BUILD_ID="${{ steps.ver.outputs.BUILD }}" \
-            SL_3P_CACHE="$CI_ROOT_WIN/.autobuild-installables-win"
+            RUN_CHECKS=0 SL_3P_CACHE="$CI_ROOT_WIN/.autobuild-installables-win"
           SHORT=$(git rev-parse --short=10 HEAD)
           ZIP="build-windows-x86_64/package/${{ steps.ver.outputs.ARTIFACT_BASE }}_win64.zip"
           7z t "$ZIP" >/dev/null

@@ -94,7 +94,9 @@ layout(std430, set = 0, binding = 25) readonly buffer PrevAvatarJointsSSBO { Ava
 mat3 rigidRot(mat4 m)
 {
     vec3 c0 = m[0].xyz, c1 = m[1].xyz, c2 = m[2].xyz;
-    float l0 = length(c0), l1 = length(c1), l2 = length(c2);
+    // precise (#1088): feeds gl_Position, and `precise gl_Position` does not reach into
+    // called functions; sqrt(dot) rather than length() so the decoration covers the dot.
+    precise float l0 = sqrt(dot(c0, c0)), l1 = sqrt(dot(c1, c1)), l2 = sqrt(dot(c2, c2));
     if (!(l0 > 1e-8 && l1 > 1e-8 && l2 > 1e-8)) return mat3(1.0);
     return mat3(c0 / l0, c1 / l1, c2 / l2);
 }
@@ -162,7 +164,12 @@ layout(location = 14)      out vec4 v_pick_tangent;
 // depth-tests EQUAL. Without `invariant` the driver may compile gl_Position differently
 // per pipeline / module (varying DCE, FMA contraction) and an ULP of difference punches
 // z-fighting holes.
+// #1088: + `precise` (NoContraction on every operation feeding the position): `invariant`
+// alone did not hold on an AMD Windows driver (Vega iGPU) across the pre-pass and shading
+// pipelines -- thin unlit lines along triangle edges. With no FMA contraction left to the
+// backend, every module evaluates the same exact IEEE operations in the same order.
 invariant gl_Position;
+precise gl_Position;
 
 void main()
 {

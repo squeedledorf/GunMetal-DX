@@ -158,6 +158,8 @@ public:
     static LLCleanMeshAsset& instance();
 
     bool init();
+    // init() has run (capture() is a silent no-op before it).
+    bool ready() const { return mReady; }
     void stopDecodes();   // join the async decode pool (app cleanup)
     void shutdown();
 

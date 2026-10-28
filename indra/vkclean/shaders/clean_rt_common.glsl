@@ -19,6 +19,7 @@
 
 #extension GL_EXT_ray_query : require
 #extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_control_flow_attributes : require   // (rtCandidateAlphaCol's corner loop: [[dont_unroll]])
 
 #ifndef RT_SET
 #define RT_SET 2
@@ -90,23 +91,78 @@
 // ray's total traversal work is bounded whatever its walks / re-traces / hit shading add up to. The
 // counters (rt_ray_rejected, rt_query_refused) are read by the kernels that set the budget.
 #define RT_RAY_WORLD_MAX 1.0e7
+// (#1128) THE VERDICT ON THE BIT PATTERN. The float form below (isnan / isinf, ordered compares) is what
+// #1049 shipped; the viewer never declares SignedZeroInfNanPreserve, so a Vulkan driver may assume no NaN /
+// Inf in it -- fold isnan / isinf to false, and turn a NEGATED ordered compare (the !ok branch) into the
+// opposite one, which is false for NaN where the original was true. The max() of the origin bound returns
+// the non-NaN operand on NVIDIA. Under those assumptions a NaN origin passes, and whether they apply
+// depends on the surrounding code generation (a value-identical edit of rtHitLocalLights, 690930d47c,
+// hung the RT reflection LIGHT kernel on 615.78 and its revert stopped it). The verdict now comes from
+// integer tests on the bits, which no float assumption can change: |x| bits below those of the bound
+// (finite non-negative floats order as their bits, and Inf / NaN lie above every finite one), the
+// exponent of tmax not all ones unless it is +-Inf (NaN refused), -0 tmin accepted as it was. For every
+// input on which the float form is evaluated as written, both verdicts agree, so a valid ray is exactly
+// as before (images unchanged).
+// rt_ray_folded counts the rays the float form ACCEPTED and the bits refused: non-zero proves the compiled
+// float guard let a non-finite / out-of-world ray through (the folding above), i.e. that such rays reached
+// rayQueryInitializeEXT before this change.
+#define RT_RAY_WORLD_MAX_BITS 0x4B189680u   // floatBitsToUint(1.0e7)
+#define RT_DD_MIN_BITS        0x179ABE15u   // floatBitsToUint(1.0e-24)
+#define RT_DD_MAX_BITS        0x6753C21Cu   // floatBitsToUint(1.0e24)
 uint rt_query_left = 0xFFFFFFFFu;
 uint rt_query_refused = 0u;
 uint rt_ray_rejected = 0u;
+uint rt_ray_folded = 0u;
+#ifdef CLEAN_RT_HANG_BEACON
+// (#1128) THE HANG BEACON (RenderVKRTHangBeacon; the beacon variants of the RT reflection list trace and
+// the RT forward pass only): every ray query's inputs, as the caller passed them, into the lane's beacon
+// slot in host-visible memory, before the query starts -- defined by the kernel (clean_deferred_light.comp).
+// rt_bc_site: the walk about to start (RT_BC_SITE_*: set by the walk functions, cleared by each record).
+void rtBeaconQuery(vec3 o, float tmin, vec3 d, float tmax, bool ok, bool folded);
+uint rt_bc_site = 0u;
+#define RT_BC_SITE(s) rt_bc_site = (s)
+#else
+#define RT_BC_SITE(s)
+#endif
+#define RT_BC_SITE_CLOSEST 0x1000u   // | the ray mask: rtClosestWalk
+#define RT_BC_SITE_VIS     0x2000u   // | walk kind << 8 | mask: rtVisWalkFP
+#define RT_BC_SITE_LAYERS  0x3000u   // | mask: rtrBlendLayersT
 bool rtRaySane(inout vec3 o, inout float tmin, inout vec3 d, inout float tmax)
 {
     const vec3 ao = abs(o);
     const float dd = dot(d, d);
-    const bool ok = !any(isnan(o)) && !any(isinf(o)) && !any(isnan(d)) && !any(isinf(d))
-                 && max(max(ao.x, ao.y), ao.z) < RT_RAY_WORLD_MAX
-                 && dd > 1e-24 && dd < 1e24 && tmin >= 0.0 && tmin < RT_RAY_WORLD_MAX && !isnan(tmax);
+    const bool okFloat = !any(isnan(o)) && !any(isinf(o)) && !any(isnan(d)) && !any(isinf(d))
+                      && max(max(ao.x, ao.y), ao.z) < RT_RAY_WORLD_MAX
+                      && dd > 1e-24 && dd < 1e24 && tmin >= 0.0 && tmin < RT_RAY_WORLD_MAX && !isnan(tmax);
+    const uvec3 ob = floatBitsToUint(o) & 0x7FFFFFFFu;
+    const uvec3 db = floatBitsToUint(d) & 0x7FFFFFFFu;
+    const uint ddb = floatBitsToUint(dd);       // (d finite: dd >= +0, finite or +Inf)
+    const uint tnb = floatBitsToUint(tmin);
+    const bool ok = all(lessThan(ob, uvec3(RT_RAY_WORLD_MAX_BITS))) && all(lessThan(db, uvec3(0x7F800000u)))
+                 && ddb > RT_DD_MIN_BITS && ddb < RT_DD_MAX_BITS
+                 && (tnb < RT_RAY_WORLD_MAX_BITS || (tnb >= 0x80000000u && tnb < 0x80800000u))   // (-0 / a negative
+                    // denormal: >= 0 as the float form saw it -- denormals flush to zero)
+                 && (floatBitsToUint(tmax) & 0x7FFFFFFFu) <= 0x7F800000u;
+#ifdef CLEAN_RT_HANG_BEACON
+    rtBeaconQuery(o, tmin, d, tmax, ok, okFloat && !ok);
+#endif
+    if (okFloat && !ok) ++rt_ray_folded;
     if (!ok) ++rt_ray_rejected;
     else if (rt_query_left == 0u) ++rt_query_refused;
     if (!ok || rt_query_left == 0u) { o = vec3(0.0, 0.0, -1.0e6); d = vec3(0.0, 0.0, -1.0); tmin = 0.0; tmax = 0.0; return false; }
     if (rt_query_left != 0xFFFFFFFFu) --rt_query_left;
-    tmax = min(tmax, 2.0 * RT_RAY_WORLD_MAX);
-    if (!(tmax >= tmin)) tmax = tmin;   // (finite, empty: the legal empty query)
+    tmin = max(tmin, 0.0);   // (a negative denormal -> 0; every other accepted tmin as it is)
+    tmax = min(tmax, 2.0 * RT_RAY_WORLD_MAX);   // (not NaN here: exact)
+    tmax = max(tmax, tmin);   // (both finite, not NaN: the legal empty query where tmax < tmin, as before)
     return true;
+}
+// (#1039 occupancy) rtRaySane for a caller that does not trace a refused ray (the shadow walk: blocked at once):
+// the same verdict, counters and interval, with the ray itself untouched -- a sane ray leaves rtRaySane
+// unchanged, so the walk keeps using its caller's origin / direction instead of a sanitised copy of them (six
+// floats live across the traversal next to the originals).
+bool rtRaySaneT(vec3 o, inout float tmin, vec3 d, inout float tmax)
+{
+    return rtRaySane(o, tmin, d, tmax);
 }
 
 // THE ALPHA-TEST RULE (#1044, clean_alpha_rule.glsl): the cutoffs / thresholds every candidate test uses.
@@ -431,6 +487,18 @@ uint rtHitInstance(uint custom, uint geom)
 uint rt_self_owner = 0u;
 vec3 rt_self_P   = vec3(0.0);   // the receiver (absolute world, as the TLAS)
 vec3 rt_self_cam = vec3(0.0);   // the camera that sees it
+// (#1039 occupancy) WALK-STATE HOOKS: the walk reads a few per-ray values set by its caller -- the self
+// probe's receiver (RT_SELF_P), the alpha test's cone width (RT_CONE_WIDTH0) and receiver footprint
+// (RT_FOOT_AB), the own fixture's light centre and size cap (clean_vis_walk.glsl RT_FIX_P / RT_FIX_MAX).
+// Kept in globals they are live across the whole traversal (a register each, every candidate). An includer
+// whose walk state lives in memory -- the visibility queue's walk kernels: the REQUEST -- defines these to
+// read it where the walk uses it, before including this file. Defaults: the globals (no change).
+#ifndef RT_SELF_P
+#define RT_SELF_P rt_self_P
+#endif
+#ifndef RT_SELF_CAM
+#define RT_SELF_CAM rt_self_cam
+#endif
 // RECEIVER IDENTITY PROBE: a camera-ray segment through the receiver, +-RT_SELF_PROBE_W,
 // over the rigged + blend + own-avatar classes, every triangle a candidate (no commit). The candidate
 // nearest the receiver along the view ray names its character: the SBT owner of a
@@ -444,11 +512,12 @@ vec3 rt_self_cam = vec3(0.0);   // the camera that sees it
 #define RT_SELF_PROBE_W 0.2
 uint rtSelfProbe()
 {
-    vec3 V = rt_self_P - rt_self_cam;
+    const vec3 sP = RT_SELF_P;
+    vec3 V = sP - RT_SELF_CAM;
     const float d = length(V);
     if (!(d > 1e-4)) return 0u;
     V /= d;
-    vec3 po = rt_self_P - V * RT_SELF_PROBE_W;
+    vec3 po = sP - V * RT_SELF_PROBE_W;
     float pt0 = 0.0, pt1 = 2.0 * RT_SELF_PROBE_W;
     if (!rtRaySane(po, pt0, V, pt1)) return 0u;
     rayQueryEXT pq;
@@ -474,16 +543,21 @@ uint rtSelfProbe()
 // Candidate of a throttled character (owner != 0): 1 = the receiver's own (skip it),
 // 2 = another one's opaque face (confirm: the record is non-opaque only for this rule),
 // 0 = the ordinary candidate rules apply (its alpha-tested / blend faces).
+// (#1039 occupancy) The receiver's owner is KNOWN here: the walk (clean_vis_walk.glsl rtVisWalkF) resolves an
+// UNKNOWN one with rtSelfProbe outside its traversal -- it ends the walk at the first owner != 0 candidate,
+// probes, and walks again -- so no probe query is nested in a walk's.
 uint rtSelfCandidate(uint owner, uint id)
 {
     if (owner == 0u) return 0u;
-    if (rt_self_owner == RT_SELF_UNKNOWN) rt_self_owner = rtSelfProbe();
     if (owner == rt_self_owner) return 1u;
     if (!rtIdIn(id)) return 2u;   // (#874 guard: a bad id blocks)
     return (rt_instances[id].flags & 6u) == 0u ? 2u : 0u;
 }
 
 float rt_anim_time = 0.0;
+#ifndef RT_ANIM_TIME
+#define RT_ANIM_TIME rt_anim_time   // (WALK-STATE HOOKS above)
+#endif
 
 // BLOCKER IDENTITY HOOK (shadow denoiser, clean_rt_shadow_mask.comp only): with
 // RT_TRACK_BLOCKER defined, every place below that records a blocker distance also
@@ -590,6 +664,15 @@ vec3 rtReceiverOrigin(vec3 p, vec3 n, float camd, float extra)
 float rt_cone_spread = 0.0;
 float rt_cone_width0 = 0.0;
 float rt_cone_aniso  = 1.0;
+#ifndef RT_CONE_WIDTH0
+#define RT_CONE_WIDTH0 rt_cone_width0   // (WALK-STATE HOOKS above)
+#endif
+#ifndef RT_CONE_SPREAD
+#define RT_CONE_SPREAD rt_cone_spread
+#endif
+#ifndef RT_CONE_ANISO
+#define RT_CONE_ANISO rt_cone_aniso
+#endif
 
 // ALPHA-MASK TEST of a candidate (cutoff >= 0; not alpha-blend), as the RASTER decides it
 // (clean_draw.frag: maskTestAlpha(base.a, lod) < cutoff discards). The cone above is the
@@ -634,6 +717,9 @@ float rt_mask_boost    = 1.0;
 bool rt_foot_on = false;
 vec3 rt_foot_a = vec3(0.0);
 vec3 rt_foot_b = vec3(0.0);
+#ifndef RT_FOOT_AB
+#define RT_FOOT_AB(A, B) { A = rt_foot_a; B = rt_foot_b; }   // (WALK-STATE HOOKS above)
+#endif
 // (#1031, RenderVKShadowIsoLod) RT_NO_FOOT_LOD: the includer's shadow walks take an ISOTROPIC LOD --
 // the footprint's minor axis as the ray cone's constant width (clean_shadow_core.glsl shadowSampleVis)
 // -- and the alpha test compiles no footprint projection / textureGrad path (rt_foot_on never set
@@ -705,14 +791,19 @@ float rt_cand_ll_pass = 1.0;
 // (rtFolMode() ...): no six derived private values live across the walks. rt_fol_cull is the
 // per-thread "inside a sun / moon trace" state; mode and rig read 0 / false outside one.
 vec4  rt_fol_p    = vec4(0.0, 0.35, 0.5, 2.0);   // x mode (bits 0-1) | flip (2) | rig (3), y strength, z tint, w layers
+// (#1039 occupancy: WALK-STATE HOOKS) read only inside a sun / moon trace (rt_fol_cull: every reader below is
+// behind it); the visibility queue's shadow walks, whose every trace sets the frame info's values, read those
+#ifndef RT_FOL_P
+#define RT_FOL_P rt_fol_p
+#endif
 bool  rt_fol_cull = false;   // inside a sun / moon trace (rtFoliageSet .. rtFoliageEnd)
-uint  rtFolBits()     { return uint(rt_fol_p.x + 0.5); }
+uint  rtFolBits()     { return uint(RT_FOL_P.x + 0.5); }
 uint  rtFolMode()     { return rt_fol_cull ? min(rtFolBits() & 3u, 2u) : 0u; }
 bool  rtFolRig()      { return rt_fol_cull && (rtFolBits() & 8u) != 0u; }   // rigged / worn facing parity (RenderVKRTRiggedFacingParity)
 bool  rtFolFlip()     { return (rtFolBits() & 4u) != 0u; }
-float rtFolStrength() { return clamp(rt_fol_p.y, 0.0, 1.0); }
-float rtFolTint()     { return clamp(rt_fol_p.z, 0.0, 1.0); }
-uint  rtFolLayers()   { return clamp(uint(rt_fol_p.w + 0.5), 1u, 8u); }
+float rtFolStrength() { return clamp(RT_FOL_P.y, 0.0, 1.0); }
+float rtFolTint()     { return clamp(RT_FOL_P.z, 0.0, 1.0); }
+uint  rtFolLayers()   { return clamp(uint(RT_FOL_P.w + 0.5), 1u, 8u); }
 // A blend caster at or above this alpha is SOLID (LL's shadow-pass threshold; see
 // rt_blend_parity): the only blend hits the facing rule changes.
 #define RT_BLEND_SOLID ALPHA_BLEND_SOLID
@@ -915,10 +1006,49 @@ bool rtInstanceOpaque(uint iflags)
 
 // Face UV of vertex v exactly as clean_draw(_rigged).vert computes it (texgen, TE /
 // glTF transform, texture animation); the raster interpolates these per-vertex UVs.
+// (#1039 occupancy) cleanFaceUV's steps with the instance's matrices read where each step uses them -- passed as
+// arguments, both mat4 (32 floats) were loaded before the call and live at the alpha test, the walks' register
+// peak; the same arithmetic (the same precise TE transform, planarProjectionUV, texAnimUV). The guard-recording
+// build (the RT shadow mask) keeps the eager call: its vertex reads note violations in their old order.
 vec2 rtVertexFaceUV(uint id, uint f, QvHeader h, uint v)
 {
+#ifdef RT_GUARD_RECORD
     return cleanFaceUV(f, rt_instances[id].uv_matrix, rtVertUV(h, v), rtVertNormal(v), rtVertPos(h, v),
-                       rt_instances[id].model_matrix, rt_anim_time);
+                       rt_instances[id].model_matrix, RT_ANIM_TIME);
+#else
+    vec2 base_uv = rtVertUV(h, v);
+    if ((f & 64u) != 0u)
+    {
+        const vec3 obj_scale = vec3(length(rt_instances[id].model_matrix[0].xyz), length(rt_instances[id].model_matrix[1].xyz),
+                                    length(rt_instances[id].model_matrix[2].xyz));
+        base_uv = planarProjectionUV(normalize(rtVertNormal(v)), rtVertPos(h, v) * obj_scale);
+    }
+    if ((f & 1024u) != 0u)
+        return texAnimUV(base_uv, rt_instances[id].uv_matrix, RT_ANIM_TIME);
+    precise vec2 r = (rt_instances[id].uv_matrix * vec4(base_uv, 0.0, 1.0)).xy;
+    return r;
+#endif
+}
+// (#1039 occupancy) The same for the alpha test's corners, the slot's decode header (vb: its first real vertex)
+// read by the step that uses it -- its UV part for every corner, its position part only for planar texgen --
+// instead of all ten words before the call (rtVertexFaceUV's steps: keep in step).
+vec2 rtVertexFaceUVB(uint id, uint f, uint vb, uint v)
+{
+#ifdef RT_GUARD_RECORD
+    return rtVertexFaceUV(id, f, rtHdr(vb), v);
+#else
+    vec2 base_uv = rtVertUV(rtHdr(vb), v);
+    if ((f & 64u) != 0u)
+    {
+        const vec3 obj_scale = vec3(length(rt_instances[id].model_matrix[0].xyz), length(rt_instances[id].model_matrix[1].xyz),
+                                    length(rt_instances[id].model_matrix[2].xyz));
+        base_uv = planarProjectionUV(normalize(rtVertNormal(v)), rtVertPos(rtHdr(vb), v) * obj_scale);
+    }
+    if ((f & 1024u) != 0u)
+        return texAnimUV(base_uv, rt_instances[id].uv_matrix, RT_ANIM_TIME);
+    precise vec2 r = (rt_instances[id].uv_matrix * vec4(base_uv, 0.0, 1.0)).xy;
+    return r;
+#endif
 }
 
 // The raster's alpha-mask rule at a candidate hit (clean_draw.frag): base =
@@ -988,10 +1118,26 @@ float rtCandidateAlphaCol(uint id, uint prim, vec2 bary, float t, vec3 dir, rayQ
         uint  vb  = rt_geom[id].y;
         const bool rigged = (rt_geom[id].z & 0x80000000u) != 0u;
         uint f = rigged ? (iflags & ~64u) : iflags;   // rigged: no planar texgen (clean_draw_rigged.vert)
+        // (#1039 occupancy) the three corners' face UVs ONE AT A TIME (a loop, not unrolled): the decode header,
+        // the face's uv matrix and model matrix are loaded for the corner being mapped, not held for all three --
+        // the same arithmetic per corner (cleanFaceUV), ~16 fewer registers at the alpha test, the walks' peak
+#ifdef RT_GUARD_RECORD
+        // (the guard-recording build, the RT shadow mask: the decode header read once, the corners in their old
+        //  order -- a violation is noted as often and in the order it always was)
         const QvHeader qh = rtHdr(vb);
         vec2 t0 = rtVertexFaceUV(id, f, qh, vb + tri.x);
         vec2 t1 = rtVertexFaceUV(id, f, qh, vb + tri.y);
         vec2 t2 = rtVertexFaceUV(id, f, qh, vb + tri.z);
+#else
+        vec2 t0 = vec2(0.0), t1 = vec2(0.0), t2 = vec2(0.0);
+        [[dont_unroll]] for (uint k = 0u; k < 3u; ++k)
+        {
+            const vec2 tk = rtVertexFaceUVB(id, f, vb, vb + (k == 0u ? tri.x : (k == 1u ? tri.y : tri.z)));
+            if (k == 0u) t0 = tk;
+            else if (k == 1u) t1 = tk;
+            else t2 = tk;
+        }
+#endif
         vec2 uv = t0 * (1.0 - bary.x - bary.y) + t1 * bary.x + t2 * bary.y;
         uint tex = rt_materials[mid].base_color_handle.x;
         // The triangle's positions, fetched once for whichever LOD path needs them (one
@@ -999,7 +1145,7 @@ float rtCandidateAlphaCol(uint id, uint prim, vec2 bary, float t, vec3 dir, rayQ
         // (alpha-MASK test: the caller's pixel cone when it set one -- rt_mask_* above)
         const bool mtest = !blend;
         const float width = (mtest && rt_mask_width0 >= 0.0) ? rt_mask_width0 + rt_mask_spread * t
-                                                              : rt_cone_width0 + rt_cone_spread * t;
+                                                              : RT_CONE_WIDTH0 + RT_CONE_SPREAD * t;
         vec3 p0 = vec3(0.0), p1 = vec3(0.0), p2 = vec3(0.0);
         if (RT_FOOT_ON || width > 0.0) rtTriPositions(id, prim, p0, p1, p2);
 #ifndef RT_NO_FOOT_LOD   // (#1031: the shadow walks' isotropic variants carry no anisotropic footprint code)
@@ -1021,8 +1167,10 @@ float rtCandidateAlphaCol(uint id, uint prim, vec2 bary, float t, vec3 dir, rayQ
                 float dn = dot(dir, n);
                 const float dmin = nl / 64.0;
                 if (abs(dn) < dmin) dn = dn < 0.0 ? -dmin : dmin;
-                const vec3 fa = rt_foot_a - dir * (dot(rt_foot_a, n) / dn);
-                const vec3 fb = rt_foot_b - dir * (dot(rt_foot_b, n) / dn);
+                vec3 footA, footB;
+                RT_FOOT_AB(footA, footB);
+                const vec3 fa = footA - dir * (dot(footA, n) / dn);
+                const vec3 fb = footB - dir * (dot(footB, n) / dn);
                 const vec2 d1 = t1 - t0, d2 = t2 - t0;
                 const float ia = 1.0 / det;
                 ga = ((g22 * dot(fa, e1) - g12 * dot(fa, e2)) * d1 + (g11 * dot(fa, e2) - g12 * dot(fa, e1)) * d2) * ia;
@@ -1048,7 +1196,7 @@ float rtCandidateAlphaCol(uint id, uint prim, vec2 bary, float t, vec3 dir, rayQ
             {
                 float ndotd = max(abs(dot(n / pa, dir)), 1e-4);
                 float major = width / ndotd;
-                float foot = (rt_cone_aniso > 1.0) ? max(width, major / rt_cone_aniso) : major;
+                float foot = (RT_CONE_ANISO > 1.0) ? max(width, major / RT_CONE_ANISO) : major;
                 lod = 0.5 * log2(ta / pa) + log2(foot);
                 if (mtest) lod += rt_mask_lod_bias;
                 a_lod = lod;

@@ -298,9 +298,11 @@ LLCleanDenoiserVK::Push LLCleanDenoiserVK::makePush(uint32_t rw, uint32_t rh, co
     // valid, bit 10 hard sun, bit 11 exact reprojection; bit 12 the no-information rule (DN_F_INFO);
     // bits 13-15 the ReSTIR-converged diffuse's a-trous iterations (DN_CONV_SHIFT); bits 16-19 the
     // moving-light history (DN_MOVE_SHIFT, 0 = off); bits 27-29 the disocclusion history fix
-    // (DN_HFIX_SHIFT), bit 30 the reprojection search (DN_F_REPROJ_SEARCH).
+    // (DN_HFIX_SHIFT), bit 30 the reprojection search (DN_F_REPROJ_SEARCH); (#1038) bit 2 the young-texel
+    // boost (DN_F_YOUNG_BOOST), bit 31 the moving-surface depth tolerance (DN_F_MOVE_ZTOL).
     const bool sun = p.sun && hasSun();
-    q.ctl[0] = (mHistOk ? 1u : 0u) | (mParity ? 2u : 0u) | ((std::min(p.debug, 15u)) << 4u)
+    q.ctl[0] = (mHistOk ? 1u : 0u) | (mParity ? 2u : 0u) | (p.youngBoost ? 4u : 0u) | (p.moveZTol ? (1u << 31) : 0u)
+             | ((std::min(p.debug, 15u)) << 4u)
              | (sun ? 256u : 0u) | (sun && mSunHistOk && !p.sunCut ? 512u : 0u) | (sun && p.sunHard ? 1024u : 0u)
              | (sun && p.sunExact ? 2048u : 0u) | (p.info ? 4096u : 0u)
              | (std::min(p.convIters, 7u) << 13u)    // (#869 / #85: DN_CONV_SHIFT)

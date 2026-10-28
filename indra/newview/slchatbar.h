@@ -85,6 +85,12 @@ public:
     static void startChat(const char* line);
     static void stopChat();
 
+    // <GMDX> A name clicked in the chat log: the bar opens in IM mode ("To <name>", an x to cancel) and
+    // Enter sends an IM to them (their P2P session, Conversations not opened). It stays in IM mode
+    // after sending, until Esc, the x or the bar closing.
+    static void startIM(const LLUUID& id, const std::string& name);
+    // </GMDX>
+
     static void updateChatFont();
 
 protected:
@@ -95,6 +101,9 @@ protected:
     void applyShiftEnterNewline(); // #681: honour ChatShiftEnterNewline in the chat bar editor
     void changeChannelLabel(S32 channel);
     void updateChannelSelector(); // <FS> channel spinner
+    void cancelIM();                        // <GMDX> back to nearby chat
+    void sendIM(const LLWString& text);     // <GMDX> to mIMTarget
+    void resetChatLogPosition();  // <GMDX> the gear menu: the chat log and this bar back to where they start
 
     LLChatEntry* mInputEditor;
 
@@ -113,4 +122,12 @@ protected:
     boost::signals2::connection mShowChatChannelConnection;
     boost::signals2::connection mLogStyleConnection;   // <GMDX> the chat log takes the gear (updateChannelSelector)
     boost::signals2::connection mChatFontSizeConnection;
+
+    // <GMDX> part of the chat log (GMDXChatLog::dockedBarRect): its own drag and resize are off
+    // while the log is on, so they never fight the panel
+    LLUUID mIMTarget;       // IM mode: who Enter sends to (null: nearby chat)
+    std::string mIMName;
+    LLRect mDefaultRect;
+    bool mDocked = false;   // (owned by the log)
+    // </GMDX>
 };

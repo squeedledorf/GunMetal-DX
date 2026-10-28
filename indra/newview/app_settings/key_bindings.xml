@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8" standalone="yes" ?>
-<keys xml_version="2">
+<keys xml_version="3">
   <first_person>
     <binding key="A" mask="NONE" command="slide_left"/>
     <binding key="D" mask="NONE" command="slide_right"/>
@@ -30,6 +30,11 @@
     <binding key="" mask="NONE" mouse="MMB" command="voice_follow_key"/>
 
     <binding key="" mask="NONE" mouse="LMB" command="script_trigger_lbutton"/>
+    <!-- <GMDX> pings (gmdxmapshare.h): B ping, Shift+B the ping wheel (tap: ping, hold: choose; G is a build
+         menu key); enemy and rally have no key of their own until one is set -->
+    <binding key="B" mask="NONE" command="map_ping"/>
+    <binding key="B" mask="SHIFT" command="map_ping_wheel"/>
+    <!-- </GMDX> -->
   </first_person>
   <third_person>
     <binding key="A" mask="NONE" command="turn_left"/>
@@ -99,6 +104,12 @@
     <binding key="E" mask="SHIFT" command="roll_right"/>
     <binding key="Q" mask="CTL_SHIFT" command="roll_reset"/>
     <binding key="E" mask="CTL_SHIFT" command="roll_reset"/>
+    <binding key="PAD_CENTER" mask="NONE" command="toggle_ortho"/><!-- <GMDX> -->
+    <!-- <GMDX> pings (gmdxmapshare.h): B ping, Shift+B the ping wheel (tap: ping, hold: choose; G is a build
+         menu key); enemy and rally have no key of their own until one is set -->
+    <binding key="B" mask="NONE" command="map_ping"/>
+    <binding key="B" mask="SHIFT" command="map_ping_wheel"/>
+    <!-- </GMDX> -->
   </third_person>
   <sitting>
     <binding key="A" mask="ALT" command="spin_around_cw"/>
@@ -176,6 +187,12 @@
     <binding key="E" mask="SHIFT" command="roll_right"/>
     <binding key="Q" mask="CTL_SHIFT" command="roll_reset"/>
     <binding key="E" mask="CTL_SHIFT" command="roll_reset"/>
+    <binding key="PAD_CENTER" mask="NONE" command="toggle_ortho"/><!-- <GMDX> -->
+    <!-- <GMDX> pings (gmdxmapshare.h): B ping, Shift+B the ping wheel (tap: ping, hold: choose; G is a build
+         menu key); enemy and rally have no key of their own until one is set -->
+    <binding key="B" mask="NONE" command="map_ping"/>
+    <binding key="B" mask="SHIFT" command="map_ping_wheel"/>
+    <!-- </GMDX> -->
   </sitting>
   <edit_avatar>
     <!--Avatar editing camera controls-->

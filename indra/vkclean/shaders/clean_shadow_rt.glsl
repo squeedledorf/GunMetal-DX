@@ -140,13 +140,15 @@ bool rtAdaptiveDone(uint k, uint n, vec3 vis, vec3 first)
 // upper shells' dots: a dark, speckled self-shadow BAND at mid distance, following the
 // camera (near: both at mip 0; far: both averaged away). Supersampled snapshots (finer
 // raster mips) did not show it.
-void rtSetShadowFootprint(vec3 P, vec3 Ng, vec3 cam)
+// (#1039 occupancy) The footprint as a value (false: none -- the cone fallback, fa / fb untouched): the visibility
+// queue's walks recompute it from the request where the alpha test reads it instead of carrying six floats
+// across the walk.
+bool rtShadowFootprint(vec3 P, vec3 Ng, vec3 cam, inout vec3 fa, inout vec3 fb)
 {
-    rt_foot_on = false;
     const vec3 toC = cam - P;
     const float camd = length(toC);
-    const float p11 = length(vec3(ssr.taa_cur_vp[0][1], ssr.taa_cur_vp[1][1], ssr.taa_cur_vp[2][1]));
-    if (camd < 1e-4 || p11 < 1e-6 || ssr.mirror_params.z <= 0.0) return;   // (the cone fallback)
+    const float p11 = length(vec3(ssr.views[CLEAN_VIEW].taa_cur_vp[0][1], ssr.views[CLEAN_VIEW].taa_cur_vp[1][1], ssr.views[CLEAN_VIEW].taa_cur_vp[2][1]));
+    if (camd < 1e-4 || p11 < 1e-6 || ssr.mirror_params.z <= 0.0) return false;   // (the cone fallback)
     const vec3 V = toC / camd;
     vec3 N = Ng;
     if (dot(N, N) < 0.5) N = V;
@@ -158,9 +160,13 @@ void rtSetShadowFootprint(vec3 P, vec3 Ng, vec3 cam)
     if (dot(t1, t1) < 1e-8) t1 = cross(N, abs(N.z) < 0.9 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0));
     t1 = normalize(t1);
     const vec3 t2 = cross(t1, N);   // in the plane, along the view's projection
-    rt_foot_a = t1 * w;
-    rt_foot_b = t2 * (w / nv);
-    rt_foot_on = true;
+    fa = t1 * w;
+    fb = t2 * (w / nv);
+    return true;
+}
+void rtSetShadowFootprint(vec3 P, vec3 Ng, vec3 cam)
+{
+    rt_foot_on = rtShadowFootprint(P, Ng, cam, rt_foot_a, rt_foot_b);
 }
 
 // SHADOW TERMINATOR (Hanika 2021, "Hacking the Shadow Terminator", Ray Tracing Gems II
@@ -313,6 +319,15 @@ vec3 rtTerminatorPost(vec3 vis, vec3 l)
     // under w there).
     t = max(t, smoothstep(0.1, 0.2, dot(rt_term_ng, l)));
     return mix(vec3(1.0), vis, t);
+}
+// (#1039, RenderVKVisQueue bit 8) rtTerminatorPost's weight t of a probed receiver (rt_term_on) toward l --
+// post = mix(1, vis, t) -- for the visibility queue's shadow-core producer, which computes it before the walk
+// (clean_deferred_light.comp vqShPostOf). The same lines as above: keep the two in step.
+float rtTerminatorPostT(vec3 l)
+{
+    float t = rtTerminatorFadeT(dot(rt_term_ns, l), rtTerminatorFadeW(rtGrazingFadeK(), rt_term_dev));
+    t = max(t, smoothstep(0.1, 0.2, dot(rt_term_ng, l)));
+    return t;
 }
 
 // HANIKA LIFT of a known triangle (#664): the raw (not escape-checked) lift at

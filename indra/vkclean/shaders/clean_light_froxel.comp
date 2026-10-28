@@ -56,6 +56,15 @@ vec3 cornerRay(vec3 a, vec3 b, vec3 f)
     return dot(r, f) < 0.0 ? -r : r;
 }
 
+// <GMDX> Orthographic view (LightInfo cam_fwd.w 1): the tile planes are parallel to f and do not
+// pass through the eye, so a corner is where the two edge planes meet the depth plane f.x = z.
+vec3 cornerAt(vec4 a, vec4 b, vec3 f, float z)
+{
+    const vec3 bf = cross(b.xyz, f), fa = cross(f, a.xyz), ab = cross(a.xyz, b.xyz);
+    const float det = dot(a.xyz, bf);
+    return (-a.w * bf - b.w * fa + z * ab) / (abs(det) > 1e-20 ? det : 1e-20);
+}
+
 // Can light li (eye-relative centre c, test radius R, view depth cz, depth reach Rz = R |f|)
 // reach a pixel of cell (tx, ty, s)? pl[5]: its projector half-spaces (eye-relative), proj:
 // it is a projector; sl: the slack inside R.
@@ -91,10 +100,13 @@ bool froxelCellTest(uint tx, uint ty, uint s, vec3 c, float R, float cz, float R
     const mat3 Rv = mat3(info.view);
     vec3 bmin = vec3(1e30), bmax = vec3(-1e30);
     vec3 C[8];
+    const bool orthoV = info.cam_fwd.w > 0.5;   // <GMDX>
+    const vec4 pa[4] = vec4[4](pL, pR, pR, pL), pb[4] = vec4[4](pT, pT, pB, pB);
     [[unroll]] for (int k = 0; k < 8; ++k)
     {
         const vec3 ry = ray[k & 3];
-        C[k] = ry * ((k < 4 ? z0 : z1) / max(dot(ry, f), 1e-12));
+        C[k] = orthoV ? cornerAt(pa[k & 3], pb[k & 3], f, k < 4 ? z0 : z1)   // <GMDX>
+                      : ry * ((k < 4 ? z0 : z1) / max(dot(ry, f), 1e-12));
         const vec3 v = Rv * C[k];
         bmin = min(bmin, v); bmax = max(bmax, v);
     }

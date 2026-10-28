@@ -37,6 +37,7 @@ extern bool gDisplaySwapBuffers;
 extern bool gDepthDirty;
 extern bool gTeleportDisplay;
 extern LLFrameTimer gTeleportDisplayTimer;
+extern LLFrameTimer gTeleportCompletionTimer; // <GMDX> SoapStorm bb9b10d59f: reset when a teleport completes
 extern bool         gForceRenderLandFence;
 extern bool gResizeScreenTexture;
 extern bool gResizeShadowTexture;

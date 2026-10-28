@@ -82,35 +82,41 @@
 //     projector length, as before.
 // Legacy mode (RenderVKRTShadowDenoise off): the fixed 0.75 blend with the nearest
 // reprojected texel and a flat 3 % depth test, as before the denoiser.
+// #1075 LAYERED STEREO: a stereo frame's mask is one layer per view, traced in one dispatch with z = N
+// (clean_view.glsl CLEAN_VIEW_Z; folded to view 0 on the desktop pipeline). clean_rt_mask_common.glsl
+// RT_MASK_L / RT_MASK_PL: the layer of this view (projector slot s: view x 4 + s).
+#define CLEAN_VIEW CLEAN_VIEW_Z
+#define RT_MASK_L int(CLEAN_VIEW)
+#define RT_MASK_PL(s) (int(CLEAN_VIEW) * 4 + (s))
 layout(local_size_x = 8, local_size_y = 8) in;
 
 #include "clean_frame_info.glsl"
 
-layout(set = 3, binding = 0) uniform sampler2D uDepth;
-layout(set = 3, binding = 3, rgba16ui) readonly uniform uimage2D uIds;
+layout(set = 3, binding = 0) uniform sampler2DArray uDepth;
+layout(set = 3, binding = 3, rgba16ui) readonly uniform uimage2DArray uIds;
 // (Read-write, #674: w gets the moving-caster persistence countdown -- rtMoverPersist.)
-layout(set = 3, binding = 4, r32f) uniform image2D uMDepthZ;       // view depth (32-bit: reprojection / plane tests)
-layout(set = 3, binding = 21, rgba16f) uniform image2D uMDepthG;   // d(vz)/dx, d(vz)/dy, flags (exact integer < 2048)
-layout(set = 3, binding = 5) uniform sampler2D uHistSun;
+layout(set = 3, binding = 4, r32f) uniform image2DArray uMDepthZ;       // view depth (32-bit: reprojection / plane tests)
+layout(set = 3, binding = 21, rgba16f) uniform image2DArray uMDepthG;   // d(vz)/dx, d(vz)/dy, flags (exact integer < 2048)
+layout(set = 3, binding = 5) uniform sampler2DArray uHistSun;
 layout(set = 3, binding = 6) uniform sampler2DArray uHistProj;
-layout(set = 3, binding = 7) uniform usampler2D uHistIds;
-layout(set = 3, binding = 8) uniform sampler2D uHistDepth;         // r32f view depth
-layout(set = 3, binding = 22) uniform sampler2D uHistDepthG;       // rgba16f gradient + flags
+layout(set = 3, binding = 7) uniform usampler2DArray uHistIds;
+layout(set = 3, binding = 8) uniform sampler2DArray uHistDepth;         // r32f view depth
+layout(set = 3, binding = 22) uniform sampler2DArray uHistDepthG;       // rgba16f gradient + flags
 // The old rgba32f layout: (view depth, d/dx, d/dy, flags).
-vec4 loadMD(ivec2 t) { return vec4(imageLoad(uMDepthZ, t).x, imageLoad(uMDepthG, t).xyz); }
-vec4 fetchHistMD(ivec2 t) { return vec4(texelFetch(uHistDepth, t, 0).x, texelFetch(uHistDepthG, t, 0).xyz); }
-layout(set = 3, binding = 9) uniform sampler2D uHistMeta;
-layout(set = 3, binding = 10, rgba8) readonly uniform image2D uRawSun;
+vec4 loadMD(ivec2 t) { return vec4(imageLoad(uMDepthZ, ivec3(t, RT_MASK_L)).x, imageLoad(uMDepthG, ivec3(t, RT_MASK_L)).xyz); }
+vec4 fetchHistMD(ivec2 t) { return vec4(texelFetch(uHistDepth, ivec3(t, RT_MASK_L), 0).x, texelFetch(uHistDepthG, ivec3(t, RT_MASK_L), 0).xyz); }
+layout(set = 3, binding = 9) uniform sampler2DArray uHistMeta;
+layout(set = 3, binding = 10, rgba8) readonly uniform image2DArray uRawSun;
 layout(set = 3, binding = 11, rgba8) readonly uniform image2DArray uRawProj;
-layout(set = 3, binding = 12, rgba16f) writeonly uniform image2D uAccSun;
+layout(set = 3, binding = 12, rgba16f) writeonly uniform image2DArray uAccSun;
 layout(set = 3, binding = 13, rgba16f) writeonly uniform image2DArray uAccProj;
-layout(set = 3, binding = 14, rgba16f) writeonly uniform image2D uMeta;
+layout(set = 3, binding = 14, rgba16f) writeonly uniform image2DArray uMeta;
 // Final sun mask (C's output): only its alpha matters here -- the shading change for the
 // TAA / FSR reactive mask, which C passes through (clean_rt_mask_spatial.comp).
-layout(set = 3, binding = 1, rgba8) writeonly uniform image2D uSunFinal;
+layout(set = 3, binding = 1, rgba8) writeonly uniform image2DArray uSunFinal;
 // #666 projector slot history (clean_rt_mask_common.glsl rtPackPM): this slot's / the read slot's.
-layout(set = 3, binding = 19, rgba16ui) writeonly uniform uimage2D uProjPMOut;
-layout(set = 3, binding = 20, rgba16ui) readonly uniform uimage2D uHistProjPM;
+layout(set = 3, binding = 19, rgba16ui) writeonly uniform uimage2DArray uProjPMOut;
+layout(set = 3, binding = 20, rgba16ui) readonly uniform uimage2DArray uHistProjPM;
 // The light list and projector records (draw set 0): the light-motion cap reads the
 // apex step the host stored per ray-traced projector (texel.w).
 #include "clean_lights_common.glsl"
@@ -218,15 +224,15 @@ void main()
     const ivec2 m = ivec2(gl_GlobalInvocationID.xy);
     if (m.x >= int(mp.dims.z) || m.y >= int(mp.dims.w)) return;
     const vec4 dc = loadMD(m);
-    const vec4 rs = imageLoad(uRawSun, m);
+    const vec4 rs = imageLoad(uRawSun, ivec3(m, RT_MASK_L));
     if (dc.x < 0.0)   // sky
     {
-        imageStore(uAccSun, m, vec4(1.0, 1.0, 1.0, -1.0));
-        imageStore(uMeta, m, vec4(0.0));
-        imageStore(uSunFinal, m, vec4(1.0, 1.0, 1.0, 0.0));   // (C overwrites rgb)
+        imageStore(uAccSun, ivec3(m, RT_MASK_L), vec4(1.0, 1.0, 1.0, -1.0));
+        imageStore(uMeta, ivec3(m, RT_MASK_L), vec4(0.0));
+        imageStore(uSunFinal, ivec3(m, RT_MASK_L), vec4(1.0, 1.0, 1.0, 0.0));   // (C overwrites rgb)
         return;
     }
-    const uvec4 ids = imageLoad(uIds, m);
+    const uvec4 ids = imageLoad(uIds, ivec3(m, RT_MASK_L));
     const ivec2 mx = ivec2(mp.dims.zw) - 1;
 
     // ---- reprojection into last frame's mask ----
@@ -243,7 +249,7 @@ void main()
     if (rtMaskTemporal())
     {
         const ivec2 rp = rtMaskRenderPx(m);
-        const float d = texelFetch(uDepth, rp, 0).r;
+        const float d = texelFetch(uDepth, ivec3(rp, RT_MASK_L), 0).r;
         const vec3 P = worldAt(vec2(rp) + 0.5, d);
         vec2 prpx;   // last frame's unjittered render px (object motion included)
         float pw;    // ... and view depth
@@ -296,7 +302,7 @@ void main()
                         const float zp = hd.x + clamp(dot(hd.yz, off), -0.25 * hd.x, 0.25 * hd.x);
                         if (abs(zp - pw) >= tol || slopeMatch(dc, hd) < 0.5) continue;
                         ring |= 1u << uint(i);
-                        const float fm = texelFetch(uHistMeta, t, 0).z;
+                        const float fm = texelFetch(uHistMeta, ivec3(t, RT_MASK_L), 0).z;
                         if (isnan(fm) || isinf(fm)) continue;
                         fbox = vec2(min(fbox.x, fm), max(fbox.y, fm));
                     }
@@ -307,7 +313,7 @@ void main()
                 const ivec2 t = ivec2(floor(prpx * s));
                 if (all(greaterThanEqual(t, ivec2(0))) && all(lessThanEqual(t, mx)))
                 {
-                    const float hd = texelFetch(uHistDepth, t, 0).r;
+                    const float hd = texelFetch(uHistDepth, ivec3(t, RT_MASK_L), 0).r;
                     if (hd > 0.0 && abs(hd - pw) < max(pw * 0.03, 0.05)) { tp[0] = t; tw[0] = 1.0; wsum = 1.0; }
                 }
             }
@@ -321,18 +327,18 @@ void main()
     {
         const bool h = wsum > 0.0;
         vec3 sun = rs.rgb;
-        if (h) sun = mix(sun, rtFiniteVis(texelFetch(uHistSun, tp[0], 0).rgb), 0.75);
-        imageStore(uAccSun, m, vec4(rtFiniteVis(sun), -1.0));
-        imageStore(uMeta, m, vec4(0.0));
-        imageStore(uSunFinal, m, vec4(1.0, 1.0, 1.0, 0.0));   // no reactive in legacy mode
-        const uvec4 hids = h ? texelFetch(uHistIds, tp[0], 0) : uvec4(0u);
+        if (h) sun = mix(sun, rtFiniteVis(texelFetch(uHistSun, ivec3(tp[0], RT_MASK_L), 0).rgb), 0.75);
+        imageStore(uAccSun, ivec3(m, RT_MASK_L), vec4(rtFiniteVis(sun), -1.0));
+        imageStore(uMeta, ivec3(m, RT_MASK_L), vec4(0.0));
+        imageStore(uSunFinal, ivec3(m, RT_MASK_L), vec4(1.0, 1.0, 1.0, 0.0));   // no reactive in legacy mode
+        const uvec4 hids = h ? texelFetch(uHistIds, ivec3(tp[0], RT_MASK_L), 0) : uvec4(0u);
         for (int k = 0; k < 4; ++k)
         {
             if (ids[k] == 0u) continue;
-            vec3 v = imageLoad(uRawProj, ivec3(m, k)).rgb;
+            vec3 v = imageLoad(uRawProj, ivec3(m, RT_MASK_PL(k))).rgb;
             const int hs = h ? idSlot(hids, ids[k]) : -1;
-            if (hs >= 0) v = mix(v, rtFiniteVis(texelFetch(uHistProj, ivec3(tp[0], hs), 0).rgb), 0.75);
-            imageStore(uAccProj, ivec3(m, k), vec4(rtFiniteVis(v), -1.0));
+            if (hs >= 0) v = mix(v, rtFiniteVis(texelFetch(uHistProj, ivec3(tp[0], RT_MASK_PL(hs)), 0).rgb), 0.75);
+            imageStore(uAccProj, ivec3(m, RT_MASK_PL(k)), vec4(rtFiniteVis(v), -1.0));
         }
         return;
     }
@@ -347,11 +353,11 @@ void main()
     {
         hids[i] = uvec4(0u);
         if (tw[i] <= 0.0) continue;
-        const vec4 h = texelFetch(uHistSun, tp[i], 0);
+        const vec4 h = texelFetch(uHistSun, ivec3(tp[i], RT_MASK_L), 0);
         hsun += tw[i] * h.rgb;
-        hmeta += tw[i] * texelFetch(uHistMeta, tp[i], 0).xy;
+        hmeta += tw[i] * texelFetch(uHistMeta, ivec3(tp[i], RT_MASK_L), 0).xy;
         if (h.a >= 0.0) { hr += tw[i] * h.a; hrw += tw[i]; }
-        hids[i] = texelFetch(uHistIds, tp[i], 0);
+        hids[i] = texelFetch(uHistIds, ivec3(tp[i], RT_MASK_L), 0);
     }
     const bool hist = wsum > 0.0;
     if (hist) { hsun /= wsum; hmeta /= wsum; }
@@ -379,9 +385,9 @@ void main()
         nd[i] = loadMD(t);
         const float zp = dc.x + clamp(dot(dc.yz, vec2(o) / sm), -0.25 * dc.x, 0.25 * dc.x);
         const bool same = nd[i].x > 0.0 && abs(nd[i].x - zp) < tolN;
-        nids[i] = same ? imageLoad(uIds, t) : uvec4(0u);
+        nids[i] = same ? imageLoad(uIds, ivec3(t, RT_MASK_L)) : uvec4(0u);
         if (!same) { nd[i].x = -1.0; continue; }
-        const vec3 v = imageLoad(uRawSun, t).rgb;
+        const vec3 v = imageLoad(uRawSun, ivec3(t, RT_MASK_L)).rgb;
         m1 += v; m2 += v * v; nn += 1.0;
     }
     // (The centre always qualifies.)
@@ -431,7 +437,7 @@ void main()
         for (int i = 0; i < 4; ++i)
         {
             if (tw[i] <= 0.0) continue;
-            const vec2 hz = texelFetch(uHistMeta, tp[i], 0).zw;
+            const vec2 hz = texelFetch(uHistMeta, ivec3(tp[i], RT_MASK_L), 0).zw;
             hm += tw[i] * hz;
             // SVGF mode: every accepted tap's fast mean is in the box (the ring above uses
             // hard tests; a softly accepted tap must never leave the box empty / at fn).
@@ -490,7 +496,7 @@ void main()
     vec2 mom = hist ? mix(hm, vec2(rl, rl * rl), sdyn ? 0.33 : max(1.0 / slen, 0.33)) : vec2(rl, rl * rl);
     const float reseed = (sdyn && slen < 1.5 && scap_n > 1.5) ? 1.0 : sa;
     mom = mix(mom, vec2(ml, ml * ml + sl * sl), reseed);
-    imageStore(uAccSun, m, vec4(rtFiniteVis(sun), srad));
+    imageStore(uAccSun, ivec3(m, RT_MASK_L), vec4(rtFiniteVis(sun), srad));
     // Shading change for the TAA / FSR reactive mask: where the detector fired, how far
     // the mask moved (luminance) this frame. Never from noise / jitter (sa = 0 there).
     float react = sa * abs(dot(rtFiniteVis(sun) - hsun, vec3(1.0 / 3.0)));
@@ -503,12 +509,12 @@ void main()
     uvec4 rids[9];                  // the ring's history ids (pf; fetched once for every slot)
     for (int i = 0; i < 9; ++i)
         rids[i] = (pf && (ring & (1u << uint(i))) != 0u)
-                ? texelFetch(uHistIds, clamp(ringc + ivec2(i % 3 - 1, i / 3 - 1), ivec2(0), mx), 0) : uvec4(0u);
+                ? texelFetch(uHistIds, ivec3(clamp(ringc + ivec2(i % 3 - 1, i / 3 - 1), ivec2(0), mx), RT_MASK_L), 0) : uvec4(0u);
     for (int k = 0; k < 4; ++k)
     {
         const uint id = ids[k];
         if (id == 0u) continue;
-        const vec4 raw = imageLoad(uRawProj, ivec3(m, k));
+        const vec4 raw = imageLoad(uRawProj, ivec3(m, RT_MASK_PL(k)));
         vec3 hv = vec3(0.0);
         float hw = 0.0, pr = 0.0, prw = 0.0;
         bool phd = false;   // last frame's rays of THIS light met a moving caster
@@ -517,7 +523,7 @@ void main()
             if (tw[i] <= 0.0) continue;
             const int hs = idSlot(hids[i], id);
             if (hs < 0) continue;
-            const vec4 h = texelFetch(uHistProj, ivec3(tp[i], hs), 0);
+            const vec4 h = texelFetch(uHistProj, ivec3(tp[i], RT_MASK_PL(hs)), 0);
             hv += tw[i] * h.rgb;
             hw += tw[i];
             if (h.a >= 0.0) { pr += tw[i] * h.a; prw += tw[i]; }
@@ -535,7 +541,7 @@ void main()
             const int s = idSlot(nids[i], id);
             if (s < 0) continue;
             const ivec2 t = clamp(m + ivec2(i % 3 - 1, i / 3 - 1), ivec2(0), mx);
-            const vec3 v = imageLoad(uRawProj, ivec3(t, s)).rgb;
+            const vec3 v = imageLoad(uRawProj, ivec3(t, RT_MASK_PL(s))).rgb;
             p1 += v; p2 += v * v; pn += 1.0;
         }
         const vec3 pm = p1 / max(pn, 1.0);
@@ -576,7 +582,7 @@ void main()
                 if (tw[i] <= 0.0) continue;
                 const int hs = idSlot(hids[i], id);
                 if (hs < 0) continue;
-                const uint pmv = imageLoad(uHistProjPM, tp[i])[hs];
+                const uint pmv = imageLoad(uHistProjPM, ivec3(tp[i], RT_MASK_L))[hs];
                 const float f = rtPMFast(pmv);
                 hl += tw[i] * rtPMLen(pmv);
                 hf += tw[i] * f;
@@ -591,7 +597,7 @@ void main()
                 const int s = idSlot(rids[i], id);
                 if (s < 0) continue;
                 const ivec2 t = clamp(ringc + ivec2(i % 3 - 1, i / 3 - 1), ivec2(0), mx);
-                const float f = rtPMFast(imageLoad(uHistProjPM, t)[s]);
+                const float f = rtPMFast(imageLoad(uHistProjPM, ivec3(t, RT_MASK_L))[s]);
                 fb = vec2(min(fb.x, f), max(fb.y, f));
             }
             const vec3 third = vec3(1.0 / 3.0);
@@ -631,15 +637,15 @@ void main()
             if (pf) pmo[k] = rtPackPM(1.0, dot(raw.rgb, vec3(1.0 / 3.0)));
         }
         pmin = min(pmin, plen);
-        imageStore(uAccProj, ivec3(m, k), vec4(rtFiniteVis(v), accRadius(prr, phr, plen)));
+        imageStore(uAccProj, ivec3(m, RT_MASK_PL(k)), vec4(rtFiniteVis(v), accRadius(prr, phr, plen)));
         react = max(react, pa * abs(dot(rtFiniteVis(v) - hv, vec3(1.0 / 3.0))));
     }
     // #674: the persistence countdown into this slot's depth plane w (xyz unchanged, so a
     // neighbour's concurrent .xyz read sees the same bits either way).
-    if (persist > 0u) imageStore(uMDepthG, m, vec4(dc.yz, float(dfl | (scnt << 5u) | (pcnt << 8u)), 0.0));
-    imageStore(uMeta, m, (any(isnan(mom)) || any(isinf(mom))) ? vec4(1.0, 1.0, 0.0, 0.0)
+    if (persist > 0u) imageStore(uMDepthG, ivec3(m, RT_MASK_L), vec4(dc.yz, float(dfl | (scnt << 5u) | (pcnt << 8u)), 0.0));
+    imageStore(uMeta, ivec3(m, RT_MASK_L), (any(isnan(mom)) || any(isinf(mom))) ? vec4(1.0, 1.0, 0.0, 0.0)
                                                               : vec4(slen, pmin, mom));
-    if (pf) imageStore(uProjPMOut, m, pmo);
+    if (pf) imageStore(uProjPMOut, ivec3(m, RT_MASK_L), pmo);
     react = rtReactOn() ? clamp(react * rtReactGain(), 0.0, 1.0) : 0.0;
     // (C overwrites rgb -- except in the temporal-events debug view, header)
     vec3 diag = vec3(1.0);
@@ -652,5 +658,5 @@ void main()
                     sdyn ? 1.0 : 0.0, scert ? 1.0 : 0.0);
     if (rtDiagUsed())
         diag = vec3(clamp(slen / rtHistMax(), 0.0, 1.0), sdyn ? 1.0 : 0.0, clamp(sa, 0.0, 1.0));
-    imageStore(uSunFinal, m, vec4(diag, react));
+    imageStore(uSunFinal, ivec3(m, RT_MASK_L), vec4(diag, react));
 }

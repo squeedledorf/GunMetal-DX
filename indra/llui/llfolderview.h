@@ -198,6 +198,10 @@ public:
 
     // Public rename functionality - can only start the process
     void startRenamingSelectedItem( void );
+    // <GMDX> SoapStorm 984a07fa80: drop a pending rename without committing it (teardown paths)
+    void cancelRenaming( void );
+    LLFolderViewItem* getRenameItem() const { return mRenameItem; }
+    // </GMDX>
 
     // LLView functionality
     ///*virtual*/ bool handleKey( KEY key, MASK mask, bool called_from_parent );

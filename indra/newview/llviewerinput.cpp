@@ -28,6 +28,8 @@
 
 #include "llviewerinput.h"
 
+#include <set> // <GMDX> key bindings fixup
+
 #include "slchatbar.h"
 #include "sltpscamera.h"
 
@@ -58,6 +60,8 @@
 #include "slfxpresets.h"
 #include "slkeycommands.h"
 #include "llviewercamera.h"
+#include "gmdxmapshare.h" // <GMDX> pings
+#include "gmdxpingwheel.h" // <GMDX> the ping wheel
 
 //
 // Constants
@@ -563,6 +567,17 @@ bool camera_roll_reset(const LLKeyPressState& s)
     gAgentCamera.resetCameraRoll();
     return true;
 }
+
+// <GMDX> orthographic view toggle (SoapStorm 7179701d85, numpad 5)
+bool camera_toggle_ortho(const LLKeyPressState& s)
+{
+    if (KEYSTATE_DOWN == s.mState)
+    {
+        LLViewerCamera::getInstance()->toggleOrtho();
+    }
+    return true;
+}
+// </GMDX>
 
 bool camera_move_forward( const LLKeyPressState& s )
 {
@@ -1164,6 +1179,24 @@ bool ots_toggle_view(const LLKeyPressState& s)
 }
 // </SS:Skoomastream>
 
+// <GMDX> pings (gmdxmapshare.h): under the cursor, or at the crosshair in mouselook / OTS; 0 ping,
+// 1 enemy, 2 rally
+template <S32 KIND>
+bool map_ping(const LLKeyPressState& s)
+{
+    // (a binding matches with extra modifiers held: Alt+B / Ctrl+B are not pings)
+    if (KEYSTATE_DOWN == s.mState && !(gKeyboard->currentMask(false) & (MASK_ALT | MASK_CONTROL))) GMDXMapShare::pingAtCursor(KIND);
+    return true;
+}
+
+// tap: a Ping; hold: the wheel (gmdxpingwheel.h)
+bool map_ping_wheel(const LLKeyPressState& s)
+{
+    GMDXPingWheel::onKey(s);
+    return true;
+}
+// </GMDX>
+
 // Used by scripts, for overriding/handling left mouse button
 // see mControlsTakenCount
 // Engage/release the third-person shooter (TPS) camera
@@ -1318,12 +1351,19 @@ REGISTER_KEYBOARD_ACTION(script_mouse_handler_name, script_trigger_lbutton);
 REGISTER_KEYBOARD_ACTION("roll_left", camera_roll_left);
 REGISTER_KEYBOARD_ACTION("roll_right", camera_roll_right);
 REGISTER_KEYBOARD_ACTION("roll_reset", camera_roll_reset);
+REGISTER_KEYBOARD_ACTION("toggle_ortho", camera_toggle_ortho);   // <GMDX>
 REGISTER_KEYBOARD_ACTION("toggle_tps_camera", toggle_tps_camera);
 REGISTER_KEYBOARD_ACTION("toggle_effects", toggle_effects);
 // <SS:Skoomastream>
 REGISTER_KEYBOARD_ACTION("ots_swap_shoulder", ots_swap_shoulder); // OTS shoulder swap
 REGISTER_KEYBOARD_ACTION("ots_toggle_view", ots_toggle_view);     // OTS <-> first person mouselook
 // </SS:Skoomastream>
+// <GMDX> pings
+REGISTER_KEYBOARD_ACTION("map_ping", map_ping<0>);
+REGISTER_KEYBOARD_ACTION("map_ping_enemy", map_ping<1>);
+REGISTER_KEYBOARD_ACTION("map_ping_rally", map_ping<2>);
+REGISTER_KEYBOARD_ACTION("map_ping_wheel", map_ping_wheel);
+// </GMDX>
 REGISTER_KEYBOARD_ACTION("toggle_flycam", agent_toggle_flycam);
 REGISTER_KEYBOARD_ACTION("flycam_move_forward", (flycam_axis_key<LLGameControl::FLYCAM_DOLLY, 1>));
 REGISTER_KEYBOARD_ACTION("flycam_move_backward", (flycam_axis_key<LLGameControl::FLYCAM_DOLLY, -1>));
@@ -1916,6 +1956,34 @@ S32 LLViewerInput::loadBindingsXML(const std::string& filename)
     if (parser.readXUI(filename, keys)
         && keys.validateBlock())
     {
+        // <GMDX> Shift+B was Ping Enemy and opens the ping wheel now (gmdxpingwheel.h): a user file
+        // still on that old default moves over, once (GMDXPingWheelKeysMoved), mode by mode; a Shift+B
+        // set to anything else stays, and the wheel then gets its key only where Shift+B is free (below)
+        bool move_wheel = false;
+        if (gSavedSettings.controlExists("GMDXPingWheelKeysMoved") && !gSavedSettings.getBOOL("GMDXPingWheelKeysMoved"))
+        {
+            move_wheel = filename != gDirUtilp->getExpandedFilename(LL_PATH_APP_SETTINGS, "key_bindings.xml");
+            if (!move_wheel) gSavedSettings.setBOOL("GMDXPingWheelKeysMoved", true);   // (the defaults have it)
+        }
+        if (move_wheel)
+        {
+            auto move = [](auto& mode)
+            {
+                if (!mode.isProvided()) return;
+                for (auto it = mode.bindings.begin(); it != mode.bindings.end(); ++it)
+                {
+                    KEY key;
+                    MASK mask;
+                    if (it->command.getValue() == "map_ping_enemy" && LLKeyboard::keyFromString(it->key.getValue(), &key) && key == 'B'
+                        && LLKeyboard::maskFromString(it->mask.getValue(), &mask) && mask == MASK_SHIFT)
+                        it->command.set("map_ping_wheel");
+                }
+            };
+            move(keys.first_person);
+            move(keys.third_person);
+            move(keys.sitting);
+        }
+        // </GMDX>
         binding_count += loadBindingMode(keys.first_person, MODE_FIRST_PERSON);
         binding_count += loadBindingMode(keys.third_person, MODE_THIRD_PERSON);
         binding_count += loadBindingMode(keys.sitting, MODE_SITTING);
@@ -1997,6 +2065,60 @@ S32 LLViewerInput::loadBindingsXML(const std::string& filename)
                 }
             }
         }
+
+        // <GMDX> version 3: commands added after a user's own file was saved get their default keys,
+        // once, mode by mode, where the file has no binding for the command and the key is free in
+        // that mode: the ping keys (gmdxmapshare.h) and the orthographic view toggle; and once, the ping
+        // wheel (see move_wheel above)
+        if (keys.xml_version < 3 || move_wheel)
+        {
+            std::set<std::string> added_commands;
+            if (keys.xml_version < 3) added_commands = { "map_ping", "map_ping_enemy", "map_ping_rally", "toggle_ortho" };
+            if (move_wheel) added_commands.insert("map_ping_wheel");
+            std::string default_filename = gDirUtilp->getExpandedFilename(LL_PATH_APP_SETTINGS, "key_bindings.xml");
+            Keys default_keys;
+            LLSimpleXUIParser default_parser;
+            if (default_filename != filename && default_parser.readXUI(default_filename, default_keys) && default_keys.validateBlock())
+            {
+                auto merge = [&](auto& user, const auto& defaults, S32 mode, const char* mode_name)
+                {
+                    if (!user.isProvided() || !defaults.isProvided()) return;
+                    std::vector<KeyBinding> add;
+                    for (auto it = defaults.bindings.begin(); it != defaults.bindings.end(); ++it)
+                    {
+                        KEY key;
+                        MASK mask;
+                        if (!added_commands.count(it->command.getValue()) || !LLKeyboard::keyFromString(it->key.getValue(), &key)
+                            || key == KEY_NONE || !LLKeyboard::maskFromString(it->mask.getValue(), &mask))
+                            continue;
+                        bool taken = false;
+                        for (auto u = user.bindings.begin(); u != user.bindings.end() && !taken; ++u)
+                        {
+                            KEY user_key;
+                            MASK user_mask;
+                            taken = u->command.getValue() == it->command.getValue()
+                                || (LLKeyboard::keyFromString(u->key.getValue(), &user_key) && LLKeyboard::maskFromString(u->mask.getValue(), &user_mask)
+                                    && user_key == key && user_mask == mask);
+                        }
+                        if (taken) continue;
+                        add.push_back(*it);
+                        bindKey(mode, key, mask, it->command.getValue());
+                        ++binding_count;
+                        LL_INFOS("ViewerInput") << "Key bindings: added the default " << it->mask.getValue() << " " << it->key.getValue()
+                                                << " for " << it->command.getValue() << " in " << mode_name << LL_ENDL;
+                    }
+                    for (const KeyBinding& b : add) user.bindings.add(b);
+                };
+                merge(keys.first_person, default_keys.first_person, MODE_FIRST_PERSON, "first_person");
+                merge(keys.third_person, default_keys.third_person, MODE_THIRD_PERSON, "third_person");
+                merge(keys.sitting, default_keys.sitting, MODE_SITTING, "sitting");
+                merge(keys.edit_avatar, default_keys.edit_avatar, MODE_EDIT_AVATAR, "edit_avatar");
+                merge(keys.flycam, default_keys.flycam, MODE_FLYCAM, "flycam");
+            }
+            needs_rewrite = true;
+            if (move_wheel) gSavedSettings.setBOOL("GMDXPingWheelKeysMoved", true);
+        }
+        // </GMDX>
 
         if (needs_rewrite)
         {

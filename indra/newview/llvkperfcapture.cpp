@@ -668,6 +668,8 @@ std::string LLVKPerfCapture::headerText() const
         os << item;
         col += item.size();
     }
+    const std::string non_default = nonDefaultRenderSettings(24);
+    os << "\nNon-default render settings: " << (non_default.empty() ? "none" : non_default);
     return os.str();
 }
 

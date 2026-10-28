@@ -247,7 +247,7 @@ static S32 anim_data_slot(std::string_view name)
 {
     static constexpr std::string_view kNames[LLCharacter::ANIM_DATA_COUNT] = {
         "Hand Pose", "Hand Pose Priority", "LookAtPoint", "PointAtPoint",
-        "Walk Speed", "Speed", "Down Foot" };
+        "Walk Speed", "Speed", "Down Foot", "LookAtRoll" };
     for (S32 i = 0; i < LLCharacter::ANIM_DATA_COUNT; ++i)
     {
         if (name == kNames[i])

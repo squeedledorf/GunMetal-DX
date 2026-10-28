@@ -309,14 +309,15 @@ RtSurface rtSurfaceEval(RtHit h, vec3 dir)
     }
 
     float texel_a = 1.0;   // <GMDX> the base texel's alpha (the emissive mask)
-    bool tpbr = false;
-    vec3 t_orm = vec3(1.0), t_emis = vec3(0.0), t_N = s.N;
     const uint trec = rt_instances[id].skin_id;
     const bool t_rec_ok = s.terrain && trec < uint(terrain_records.length());
     if (s.terrain && t_rec_ok && terrain_records[trec].misc.y == 1u)
     {
         // PBR TERRAIN (clean_draw.frag terrainPBR, plain tiling): four glTF materials,
         // each at its own transform of the region-local XY, blended by the composition.
+        // Finished and returned here (#1039 register pass): the non-terrain tail below (the
+        // normal-map frame inputs, the per-map UVs, the material's own maps) never applies to it,
+        // so none of the values only that tail reads stay live across this loop's texture fetches.
         const TerrainRecord tr = terrain_records[trec];
         const vec4 w = (tr.misc.w == 1u) ? vec4(1.0, 0.0, 0.0, 0.0) : rtTerrainWeights(uv.x);
         const int detail = int(tr.misc.z);
@@ -361,10 +362,14 @@ RtSurface rtSurfaceEval(RtHit h, vec3 dir)
             emis += wi * e;
             Nmix += wi * n;
         }
-        t_N = (dot(Nmix, Nmix) > 1e-12) ? normalize(Nmix) : s.N;
-        t_orm = orm; t_emis = emis;
+        s.model = RT_SURF_PBR;
         s.base = vec4(col, 1.0);
-        tpbr = true;
+        s.N = (dot(Nmix, Nmix) > 1e-12) ? normalize(Nmix) : s.N;
+        s.rough = clamp(orm.g, 0.0, 1.0);
+        s.metal = clamp(orm.b, 0.0, 1.0);
+        s.ao = orm.r;
+        s.emissive = atmosDropEmissive(s.flags) ? vec3(0.0) : emis;   // vintage mode
+        return s;
     }
     else if (s.terrain)
     {
@@ -432,19 +437,18 @@ RtSurface rtSurfaceEval(RtHit h, vec3 dir)
     }
 
     const bool gltf = (m.flags & 64u) != 0u;
-    if (tpbr || (!s.terrain && gltf))
+    if (!s.terrain && gltf)
     {
         s.model = RT_SURF_PBR;
-        if (tpbr) s.N = t_N;
-        else if ((m.flags & 2u) != 0u)
+        if ((m.flags & 2u) != 0u)
         {
             const vec3 tn = cleanNormalTex(rtSurfTex(m.normal_handle.x, nuv, n_area).xyz);
             s.N = rtSurfApplyNormalMap(s.front, nv_raw, Tw, e1, e2, nm0, nm1, nm2, tn);
         }
-        s.rough = tpbr ? t_orm.g : m.roughness_factor;
-        s.metal = tpbr ? t_orm.b : m.metallic_factor;
-        s.ao    = tpbr ? t_orm.r : 1.0;
-        if (!tpbr && (m.flags & 4u) != 0u)
+        s.rough = m.roughness_factor;
+        s.metal = m.metallic_factor;
+        s.ao    = 1.0;
+        if ((m.flags & 4u) != 0u)
         {
             float a2;
             const vec2 muv = rtSurfMapUV(mid, s.flags, MAP_MR, uv_raw, uv, raw_a2, base_a2, a2);
@@ -453,9 +457,9 @@ RtSurface rtSurfaceEval(RtHit h, vec3 dir)
         }
         s.rough = clamp(s.rough, 0.0, 1.0);
         s.metal = clamp(s.metal, 0.0, 1.0);
-        s.emissive = tpbr ? t_emis : m.emissive_factor.rgb;
+        s.emissive = m.emissive_factor.rgb;
         if (atmosDropEmissive(s.flags)) s.emissive = vec3(0.0);   // vintage mode
-        else if (!tpbr && (m.flags & 8u) != 0u)
+        else if ((m.flags & 8u) != 0u)
         {
             float a2;
             const vec2 euv = rtSurfMapUV(mid, s.flags, MAP_EMISSIVE, uv_raw, uv, raw_a2, base_a2, a2);

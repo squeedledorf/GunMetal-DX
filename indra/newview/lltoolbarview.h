@@ -100,6 +100,7 @@ public:
     LLView* getBottomToolbar() { return mBottomToolbarPanel; }
     LLToolBar* getToolbar(LLToolBarEnums::EToolBarLocation toolbar) { return mToolbars[toolbar]; }
     bool isModified() const;
+    void    saveToolbars() const; // <GMDX> public: toolbar pins save when pinned (gmdxtoolbarpins.cpp)
 
 protected:
     friend class LLUICtrlFactory;
@@ -108,7 +109,6 @@ protected:
     void initFromParams(const Params&);
 
 private:
-    void    saveToolbars() const;
     bool    addCommandInternal(const LLCommandId& commandId, LLToolBar* toolbar);
     void    addToToolset(command_id_list_t& command_list, Toolbar& toolbar) const;
 

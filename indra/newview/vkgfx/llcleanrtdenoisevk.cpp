@@ -70,9 +70,11 @@ void LLCleanRendererVK::writeRtMaskAtrousDescriptors()
     const GpuImage* proj[2] = {&mRtMaskHist[1], &mRtMaskAccProj};
     for (int p = 0; p < 2; ++p)
     {
-        if (!sun[p]->view || !meta[p]->view || !proj[p]->view) continue;
-        const VkDescriptorImageInfo ii[3] = {{VK_NULL_HANDLE, sun[p]->view, VK_IMAGE_LAYOUT_GENERAL},
-                                             {VK_NULL_HANDLE, meta[p]->view, VK_IMAGE_LAYOUT_GENERAL},
+        // (#1075: the 2D_ARRAY views, a layer per view -- the projector image's default view is the
+        //  array over every view's 4 slots already)
+        if (!sun[p]->arrayView || !meta[p]->arrayView || !proj[p]->view) continue;
+        const VkDescriptorImageInfo ii[3] = {{VK_NULL_HANDLE, sun[p]->arrayView, VK_IMAGE_LAYOUT_GENERAL},
+                                             {VK_NULL_HANDLE, meta[p]->arrayView, VK_IMAGE_LAYOUT_GENERAL},
                                              {VK_NULL_HANDLE, proj[p]->view, VK_IMAGE_LAYOUT_GENERAL}};
         VkWriteDescriptorSet w[3]{};
         for (int i = 0; i < 3; ++i)
@@ -206,7 +208,7 @@ bool LLCleanRendererVK::rtMaskSpatialDispatch(VkCommandBuffer cmd)
         if (mRtCacheNow) push.p0[1] = (float)((uint32_t)std::lround(mRtMaskPush.p0[1]) | (1u << 18));   // #771 carry
         VK_PUSH_BUDGET_CHECK(push);
         vkCmdPushConstants(cmd, mRtMaskLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
-        vkCmdDispatch(cmd, gx, gy, 1);
+        vkCmdDispatch(cmd, gx, gy, viewCount());   // (#1075: every view's layer, z = N)
     }
     gpuSubMark(cmd, "c_rtmask_sp");
     return true;

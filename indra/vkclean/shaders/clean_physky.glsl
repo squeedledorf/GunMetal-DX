@@ -27,6 +27,8 @@
 //                                                              exposure applied), viewer height
 //   [4] light direction (world, unit), on                  [5] ambient rgb (linear), Rayleigh
 //                                                              exp scale (1/km, negative)
+//       (<GMDX> physical night: [3] / [4] are the sun's; [4].w 2 = the moon is a second light,
+//       3 = the sky-view pass of the moon's half; gmdxphysskyvk.cpp)
 //   [6] Mie exp scale (1/km, negative), ground albedo, highlight roll-off (0 none), aerial
 //       perspective distance scale (0 = WindLight's haze only)
 //   [7] Rayleigh in-scatter tint rgb (EEP blue_horizon), Mie in-scatter tint (haze_horizon):

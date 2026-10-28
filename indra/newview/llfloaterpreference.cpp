@@ -445,6 +445,13 @@ LLFloaterPreference::LLFloaterPreference(const LLSD& key)
     mCommitCallbackRegistrar.add("Pref.ApplySkin", boost::bind(&LLFloaterPreference::onApplySkin, this));
     mCommitCallbackRegistrar.add("Pref.SelectSkin", boost::bind(&LLFloaterPreference::onSelectSkin, this, _2));
 
+    // #1076 Safety tab: turning the VR frame-rate protection off warns about motion sickness
+    // (from the checkbox itself: a Cancel that reverts the control does not warn again).
+    mCommitCallbackRegistrar.add("Pref.VRSafetyGovernor", [](LLUICtrl* ctrl, const LLSD&)
+        {
+            if (ctrl && !ctrl->getValue().asBoolean()) LLNotificationsUtil::add("VRSafetyGovernorOff");
+        });
+
     mCommitCallbackRegistrar.add("Pref.ResetControlDefault", [](LLUICtrl* ctrl, const LLSD& userdata)
         {
             const std::string& control_name = userdata.asString();
@@ -454,6 +461,21 @@ LLFloaterPreference::LLFloaterPreference(const LLSD& key)
                 controlp->resetToDefault(true);
             }
         });
+
+    // <GMDX> Graphics > Sky "Reset sky settings to defaults": every setting bound to a control on
+    // the button's ancestor panel named by the parameter goes back to its default (Cancel undoes it).
+    mCommitCallbackRegistrar.add("Pref.ResetTabControls", [](LLUICtrl* ctrl, const LLSD& userdata)
+        {
+            LLView* tab = ctrl;
+            while (tab && tab->getName() != userdata.asString()) tab = tab->getParent();
+            if (!tab) return;
+            for (auto it = tab->beginTreeDFS(); it != tab->endTreeDFS(); ++it)
+            {
+                LLUICtrl* c = dynamic_cast<LLUICtrl*>(*it);
+                if (LLControlVariable* var = c ? c->getControlVariable() : nullptr) var->resetToDefault(true);
+            }
+        });
+    // </GMDX>
 
     // <GMDX> Combat > Hit Marker: preview the hit and kill sounds
     mCommitCallbackRegistrar.add("Pref.TestHitSound", [](LLUICtrl*, const LLSD&) { FSCombatHitMarker::playHitSoundPreview(); });

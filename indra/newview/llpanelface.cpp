@@ -391,6 +391,7 @@ bool LLPanelFace::postBuild()
 
     getChildSetClickedCallback(mBtnAlign, "button align", [&](LLUICtrl*, const LLSD&) { onClickAutoFix(); });
     getChildSetClickedCallback(mBtnAlignTex, "button align textures", [&](LLUICtrl*, const LLSD&) { onAlignTexture(); });
+    getChildSetClickedCallback(mBtnSyncMaterials, "button_sync_materials", [&](LLUICtrl*, const LLSD&) { onClickSyncMaterials(); }); // <GMDX>
     getChildSetClickedCallback(mBtnPbrFromInv, "pbr_from_inventory", [&](LLUICtrl*, const LLSD&) { onClickBtnLoadInvPBR(); });
     getChildSetClickedCallback(mBtnEditBbr, "edit_selected_pbr", [&](LLUICtrl*, const LLSD&) { onClickBtnEditPBR(); });
     getChildSetClickedCallback(mBtnSaveBbr, "save_selected_pbr", [&](LLUICtrl*, const LLSD&) { onClickBtnSavePBR(); });
@@ -1160,6 +1161,7 @@ void LLPanelFace::updateUI(bool force_set_values /*false*/)
 
         mCheckSyncSettings->setEnabled(editable);
         mCheckSyncSettings->setValue(gSavedSettings.getBOOL("SyncMaterialSettings"));
+        mBtnSyncMaterials->setEnabled(editable); // <GMDX>
 
         updateVisibility(objectp);
 
@@ -1235,6 +1237,7 @@ void LLPanelFace::updateUI(bool force_set_values /*false*/)
             mRadioMaterialType->setEnabled(editable);
             mRadioPbrType->setEnabled(editable);
             mCheckSyncSettings->setEnabled(editable);
+            mBtnSyncMaterials->setEnabled(editable); // <GMDX>
         }
 
         // Color swatch
@@ -2969,6 +2972,7 @@ void LLPanelFace::updateVisibility(LLViewerObject* objectp /* = nullptr */)
     mLabelTexGen->setVisible(show_material || show_media || show_pbr_asset);
     mComboTexGen->setVisible(show_material || show_media || show_pbr_asset);
     mBtnAlignTex->setVisible(show_material || show_media);
+    mBtnSyncMaterials->setVisible(show_material); // <GMDX> media has no normal/specular maps
 
     // Media controls
     mTitleMediaText->setVisible(show_media);
@@ -3861,6 +3865,46 @@ void LLPanelFace::onAlignTexture()
 {
     alignTextureLayer();
 }
+
+// <GMDX> Sync button (from SoapStorm): copy each selected face's own diffuse offset, repeats and rotation
+// to its normal and specular maps, so every face lines up in one click
+void LLPanelFace::onClickSyncMaterials()
+{
+    struct SyncMaps : public LLSelectedTEMaterialFunctor
+    {
+        LLMaterialPtr apply(LLViewerObject* object, S32 face, LLTextureEntry* tep, LLMaterialPtr& current_material) override
+        {
+            if (current_material.isNull())
+            {
+                return nullptr; // no normal or specular map on this face, nothing to line up
+            }
+            // Same range as the spinners: offsets 0..1, rotation 0..2pi
+            const F32 offset_s = tep->getOffsetS() < 0.f ? 1.f + tep->getOffsetS() : tep->getOffsetS();
+            const F32 offset_t = tep->getOffsetT() < 0.f ? 1.f + tep->getOffsetT() : tep->getOffsetT();
+            const F32 rotation = tep->getRotation() < 0.f ? F_TWO_PI + tep->getRotation() : tep->getRotation();
+
+            LLMaterialPtr material = new LLMaterial(current_material->asLLSD());
+            material->setNormalOffsetX(offset_s);
+            material->setNormalOffsetY(offset_t);
+            material->setNormalRepeatX(tep->getScaleS());
+            material->setNormalRepeatY(tep->getScaleT());
+            material->setNormalRotation(rotation);
+            material->setSpecularOffsetX(offset_s);
+            material->setSpecularOffsetY(offset_t);
+            material->setSpecularRepeatX(tep->getScaleS());
+            material->setSpecularRepeatY(tep->getScaleT());
+            material->setSpecularRotation(rotation);
+
+            LLMaterialMgr::getInstance()->put(object->getID(), face, *material);
+            object->setTEMaterialParams(face, material);
+            return material;
+        }
+    } sync_maps;
+    // Only faces the user may modify; sends the TE updates afterwards
+    LLSelectMgr::getInstance()->selectionSetMaterialParams(&sync_maps);
+    updateUI(true);
+}
+// </GMDX>
 
 void LLPanelFace::onClickBtnLoadInvPBR()
 {

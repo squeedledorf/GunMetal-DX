@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<panel
+ border="true"
+ follows="all"
+ height="408"
+ label="Safety"
+ layout="topleft"
+ left="102"
+ name="safety"
+ top="1"
+ width="517">
+  <text
+   type="string"
+   length="1"
+   follows="left|top"
+   height="16"
+   layout="topleft"
+   left="33"
+   name="vr_title"
+   font.style="BOLD"
+   top_pad="10"
+   width="450">
+    VR safety and comfort
+  </text>
+  <text
+   type="string"
+   length="1"
+   follows="left|top"
+   height="28"
+   layout="topleft"
+   left="33"
+   name="vr_note"
+   top_pad="4"
+   wrap="true"
+   width="450">
+    These settings apply while Slipstream runs in a VR headset.
+  </text>
+  <check_box
+   control_name="SlipstreamVRSafetyGovernor"
+   follows="left|top"
+   height="16"
+   label="Protect against low frame rate (recommended)"
+   layout="topleft"
+   left="33"
+   name="vr_safety_governor"
+   top_pad="6"
+   width="450">
+    <check_box.commit_callback
+     function="Pref.VRSafetyGovernor" />
+  </check_box>
+  <text
+   type="string"
+   length="1"
+   follows="left|top"
+   height="56"
+   layout="topleft"
+   left="54"
+   name="vr_safety_governor_help"
+   top_pad="4"
+   wrap="true"
+   width="430">
+    A frame rate below the headset's refresh rate, or uneven frame pacing, can cause motion sickness. When frames are missed, Slipstream lowers draw distance and other costly settings until the frame rate recovers, then restores them. Your settings are not changed.
+  </text>
+  <check_box
+   control_name="SlipstreamVRSmoothTurn"
+   follows="left|top"
+   height="16"
+   label="Smooth turning"
+   layout="topleft"
+   left="33"
+   name="vr_smooth_turn"
+   top_pad="10"
+   width="450" />
+  <text
+   type="string"
+   length="1"
+   follows="left|top"
+   height="28"
+   layout="topleft"
+   left="54"
+   name="vr_smooth_turn_help"
+   top_pad="4"
+   wrap="true"
+   width="430">
+    The right thumbstick turns you continuously instead of in steps. Smooth turning makes many people feel sick; turning in steps is the default.
+  </text>
+</panel>

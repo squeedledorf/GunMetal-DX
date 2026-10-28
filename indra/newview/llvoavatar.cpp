@@ -50,6 +50,7 @@
 #include "llagent.h" //  Get state values from here
 #include "llagentbenefits.h"
 #include "llagentcamera.h"
+#include "llvrcamera.h"   // #1074 VR camera: own avatar hidden as in mouselook
 #include "llagentwearables.h"
 #include "llanimationstates.h"
 #include "llavatarnamecache.h"
@@ -108,6 +109,7 @@
 #include "llviewerwearable.h"
 #include "llvoavatarself.h"
 #include "llderenderlist.h"     // #202
+#include "gmdxattachprobe.h" // <GMDX>
 #include "llvovolume.h"
 #include "llvolumemgr.h"
 #include "llworld.h"
@@ -637,7 +639,9 @@ bool LLVOAvatar::selfHiddenInMainView()
     // LL's pipeline did; the system body alone is handled by needsRenderAvatar.
     // Game control: a flycam started in mouselook stops hiding the avatar once it is
     // out of the flycam's view (LLAgentCamera::isHidingAvatarForFirstPerson()).
-    return (!sVisibleInFirstPerson && gAgentCamera.isHidingAvatarForFirstPerson() && !gAgentCamera.cameraOTS()) ||
+    // #1074: the VR camera (eye at the head, like mouselook) follows "Show me in Mouselook" too:
+    // from inside, a mesh head / hair would block the view. False on the desktop.
+    return (!sVisibleInFirstPerson && ((gAgentCamera.isHidingAvatarForFirstPerson() && !gAgentCamera.cameraOTS()) || LLVRCamera::firstPerson())) ||
            (RlvActions::isRlvEnabled() && RlvActions::hasBehaviour(RLV_BHVR_SHOWSELF));
 }
 
@@ -3669,6 +3673,12 @@ void LLVOAvatar::idleUpdateNameTagText(bool new_name)
         LLColor4 new_chat = LGGContactSets::getInstance()->getAvatarColor(getID(), isSelf() ? user_chat_color : agent_chat_color, ContactSetType::CHAT);
         LLColor4 normal_chat = lerp(new_chat, LLColor4(0.8f, 0.8f, 0.8f, 1.f), 0.7f);
         LLColor4 old_chat = lerp(normal_chat, LLColor4(0.6f, 0.6f, 0.6f, 1.f), 0.7f);
+        if (gmdx_bubbles)   // <GMDX> chat lines stay near-white at full alpha until they expire (no greying with age)
+        {
+            new_chat = lerp(new_chat, LLColor4::white, 0.75f);
+            new_chat.mV[VALPHA] = 1.f;
+            normal_chat = old_chat = new_chat;
+        }
         if (mTyping && mChats.size() >= MAX_BUBBLE_CHAT_UTTERANCES)
         {
             ++chat_iter;
@@ -8120,6 +8130,10 @@ void LLVOAvatar::addChild(LLViewerObject *childp)
     // #202: a re-worn attachment of a derendered (item-keyed) entry; killed on the next idle
     if ( (!isSelf()) && (LLDerenderList::instanceExists()) )
         LLDerenderList::instance().onAttachmentAdded(this, childp);
+    // <GMDX> Attachments get a new UUID on every re-rez and relog: a permanent derender or sound
+    // emitter blacklist entry that only wearer + object name can find again asks the sim for the
+    // new object's properties (throttled), and the reply re-points the entry.
+    GMDXAttachProbe::onAttachmentAdded(this, childp);
     if (childp->mDrawable)
     {
         if (!attachObject(childp))

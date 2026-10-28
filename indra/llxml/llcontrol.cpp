@@ -220,6 +220,18 @@ LLSD LLControlVariable::getComparableValue(const LLSD& value)
             storable_value = value;
         }
     }
+    // <GMDX> SoapStorm 4881441e8f: keep integer and float controls in their own LLSD type. A float
+    // UI control (slider, spinner) setting a U32/S32 stored a Real, which settings.xml then saves as
+    // <real> with six significant digits, so large values came back rounded.
+    else if (TYPE_U32 == type() || TYPE_S32 == type())
+    {
+        storable_value = (LLSD::Integer)value.asInteger();
+    }
+    else if (TYPE_F32 == type())
+    {
+        storable_value = (LLSD::Real)value.asReal();
+    }
+    // </GMDX>
     else
     {
         storable_value = value;

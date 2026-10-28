@@ -673,7 +673,9 @@ layout(location = 2) out vec4 outReact;
 // coverage index under a fragment shading rate). A device without
 // fragmentShadingRateWithShaderSampleMask clamps these draws to 1x1 (spec), which is
 // equally correct.
-layout(set = 0, binding = 40) uniform sampler2D uBlendSceneDepth;
+// (#1075 LAYERED STEREO: the main depth has a layer per view -- this view's is CLEAN_VIEW; a
+//  2D_ARRAY view at every view count, draw set 0 binding 40 in every shader that names it)
+layout(set = 0, binding = 40) uniform sampler2DArray uBlendSceneDepth;
 
 // Discards the fragment when every covered pixel is hidden beyond the tolerance, else
 // masks the hidden pixels. Returns true when the tolerance kept a pixel the strict test
@@ -691,7 +693,7 @@ bool blendDepthTolerance()
     const vec2  dz  = vec2(dFdx(gl_FragCoord.z), dFdy(gl_FragCoord.z)) / fsz;
     const ivec2 fw  = ivec2(fsz);
     const ivec2 org = ivec2(floor(gl_FragCoord.xy / fsz)) * fw;   // fragments align to their size
-    const ivec2 res = textureSize(uBlendSceneDepth, 0);
+    const ivec2 res = textureSize(uBlendSceneDepth, 0).xy;
     // Opaque 1 / view depth: along one pixel's ray 1 / w is affine in the depth, with slope
     // I[2][3] of the inverse view-projection (its w row is translation-free), and the
     // fragment's own (z, 1 / w) lies on that line -- so iwO = iwF + I[2][3] (zO - zF). Its
@@ -736,7 +738,7 @@ bool blendDepthTolerance()
             const vec2  off = c - gl_FragCoord.xy;
             const float iwF = iw + dot(diw, off);
             const float zF  = gl_FragCoord.z + dot(dz, off);
-            const float zO  = texelFetch(uBlendSceneDepth, clamp(pix, ivec2(0), res - 1), 0).r;
+            const float zO  = texelFetch(uBlendSceneDepth, ivec3(clamp(pix, ivec2(0), res - 1), int(CLEAN_VIEW)), 0).r;
             bool keep = true;
             if (ortho)   // <GMDX> (see above): reversed-Z, nearer = larger
             {

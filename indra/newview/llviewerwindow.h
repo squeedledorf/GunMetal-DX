@@ -347,6 +347,14 @@ public:
     const LLPickInfo&   getLastPick() const { return mLastPick; }
     U32                 getPickSerial() const { return mPickSerial; }
     bool                getMouseInWindow() const { return mMouseInWindow; }
+    // #1076 VR: the controller pointer is on the UI wall and drives the mouse point, wherever
+    // the OS cursor is (updateMouseDelta then keeps the mouse "in the window"). Never set on
+    // the desktop.
+    void                setVRPointerInWindow(bool on) { mVRPointerInWindow = on; }
+    // #1076 VR world pointer: its left click goes straight to the tool (not through
+    // handleAnyMouseClick, the only other writer), and LLToolGrab / LLToolComposite read the
+    // button state to keep a grab alive. Never called on the desktop.
+    void                setVRLeftMouseDown(bool down) { mLeftMouseDown = down; }
     // The last hover went to the world (a tool), not the UI (#724).
     bool                getPointerOverWorld() const { return mPointerOverWorld; }
 
@@ -598,6 +606,7 @@ private:
     LLRect          mToolTipStickyRect;         // Once a tool tip is shown, it will stay visible until the mouse leaves this rect.
 
     bool            mMouseInWindow;             // True if the mouse is over our window or if we have captured the mouse.
+    bool            mVRPointerInWindow = false; // #1076 VR: the controller pointer drives the mouse point
     bool            mPointerOverWorld = false;  // The last hover went to the world (a tool), not the UI (#724).
     bool            mFocusCycleMode;
     bool            mAllowMouseDragging;

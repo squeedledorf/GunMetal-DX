@@ -32,6 +32,7 @@
 // Viewer includes
 #include "llagent.h"
 #include "llagentcamera.h"
+#include "llfloatercamera.h"    // <GMDX> ortho toggle state on the camera floater
 #include "llmeshrepository.h"   // #585 released-read tripwire
 #include "llmatrix4a.h"
 #include "llviewercontrol.h"
@@ -87,7 +88,116 @@ LLViewerCamera::LLViewerCamera() : LLCamera()
             LLViewerCamera::getInstance()->setDefaultFOV((F32)value.asReal());
         });
     }
+
+    // <GMDX> FSCameraOrtho (not persisted) drives the orthographic view.
+    LLPointer<LLControlVariable> ortho_ptr = gSavedSettings.getControl("FSCameraOrtho");
+    if (ortho_ptr.notNull())
+    {
+        ortho_ptr->getCommitSignal()->connect([](LLControlVariable* control, const LLSD& value, const LLSD& previous)
+        {
+            LLViewerCamera::getInstance()->setOrtho(value.asBoolean());
+        });
+    }
+    // </GMDX>
 }
+
+// <GMDX> Orthographic view (SoapStorm 7179701d85 / de57904143).
+void LLViewerCamera::setOrtho(bool ortho)
+{
+    // Not from the eyes: mouselook and the OTS combat camera (cameraMouselook covers both)
+    // stay perspective.
+    if (ortho && gAgentCamera.cameraMouselook())
+    {
+        ortho = false;
+    }
+    if (mIsOrtho != ortho)
+    {
+        mIsOrtho = ortho;
+        if (mIsOrtho)
+        {
+            F32 focus_dist = (mLastPointOfInterest - getOrigin()).length();
+            if (focus_dist < 0.1f || !std::isfinite(focus_dist))
+            {
+                LLVector3 focus_agent = gAgent.getPosAgentFromGlobal(gAgentCamera.getFocusGlobal());
+                focus_dist = (focus_agent - getOrigin()).length();
+                if (focus_dist < 0.1f || !std::isfinite(focus_dist))
+                {
+                    focus_dist = 3.5f;
+                }
+            }
+            mOrthoFocusDist = llclamp(focus_dist, 0.5f, 5000.f);
+            // Camera damping still settling from whatever came before is not a move.
+            mOrthoFrameCountdown = 6;
+        }
+        LLFloaterCamera::updateAllItemsSelection();
+    }
+    if (gSavedSettings.getBOOL("FSCameraOrtho") != mIsOrtho)
+    {
+        gSavedSettings.setBOOL("FSCameraOrtho", mIsOrtho);
+    }
+}
+
+void LLViewerCamera::toggleOrtho()
+{
+    setOrtho(!mIsOrtho);
+}
+
+F32 LLViewerCamera::getOrthoHalfHeight() const
+{
+    if (!mIsOrtho)
+    {
+        return 0.f;
+    }
+    const F32 focus_dist = (mOrthoFocusDist > 0.1f && std::isfinite(mOrthoFocusDist)) ? mOrthoFocusDist : 3.5f;
+    const F32 half_height = focus_dist * tanf(getView() * 0.5f);
+    return (half_height >= 0.001f && std::isfinite(half_height)) ? half_height : 0.001f;
+}
+
+bool LLViewerCamera::orthoMouseRay(S32 x, S32 y, LLVector3& origin, LLVector3& dir) const
+{
+    if (!mIsOrtho || !gViewerWindow)
+    {
+        return false;
+    }
+    // Scaled UI pixels, as LLViewerWindow::mouseDirectionGlobal.
+    const LLRect rect = gViewerWindow->getWorldViewRectScaled();
+    const F32 m_per_px = getOrthoHalfHeight() / llmax((F32)rect.getHeight() * 0.5f, 1.f);
+    const F32 click_x = ((F32)x - (F32)rect.getCenterX()) * m_per_px;
+    const F32 click_y = ((F32)y - (F32)rect.getCenterY()) * m_per_px;
+    origin = getOrigin() + getAtAxis() * getNear() - getLeftAxis() * click_x + getUpAxis() * click_y;
+    dir = getAtAxis();
+    return true;
+}
+
+// SoapStorm 3b3d9f0154 (its display()): the near clip from FSRenderNearClip, ramped down while
+// the third person camera is focused closer than 3 m so alt-cam can get right up to a surface
+// without the plane slicing into it. Display() does not run under Vulkan, so the frame loop
+// calls this. The setting may only pull the near plane in: it is capped at the viewer's old fixed
+// 0.1 m (the source allows 1 m). A deeper near plane lets the camera see through a wall the face
+// or the camera is pressed against, which is not a local visual choice (fairness rule), and the
+// reversed-Z float depth gains no precision from it anyway.
+void LLViewerCamera::updateNearClip()
+{
+    if (gAgentCamera.cameraCustomizeAvatar())
+    {
+        return;   // LLMorphView sets its own
+    }
+    constexpr F32 NEAR_CLIP_MAX = 0.1f;   // the fixed near plane before FSRenderNearClip (LLAgentCamera::init)
+    static LLCachedControl<F32> near_clip(gSavedSettings, "FSRenderNearClip", NEAR_CLIP_MAX);
+    F32 near_plane = llclamp((F32)near_clip, MIN_NEAR_PLANE, NEAR_CLIP_MAX);
+    if (gAgentCamera.cameraThirdPerson())
+    {
+        const F32 NEAR_CLIP_FOCUS_FAR = 3.f;    // at and beyond this the setting is used as-is
+        const F32 NEAR_CLIP_FOCUS_NEAR = 0.5f;  // at and inside this the near plane is on the floor
+        const F32 focus_dist = (F32)dist_vec(gAgentCamera.getCameraPositionGlobal(), gAgentCamera.getFocusGlobal());
+        if (focus_dist < NEAR_CLIP_FOCUS_FAR)
+        {
+            near_plane = clamp_rescale(focus_dist, NEAR_CLIP_FOCUS_NEAR, NEAR_CLIP_FOCUS_FAR, MIN_NEAR_PLANE, near_plane);
+        }
+    }
+    setNear(near_plane);
+}
+// </GMDX>
 
 bool LLViewerCamera::updateCameraLocation(const LLVector3 &center, const LLVector3 &up_direction, const LLVector3 &point_of_interest)
 {
@@ -160,6 +270,28 @@ bool LLViewerCamera::updateCameraLocation(const LLVector3 &center, const LLVecto
     mAverageAngularSpeed = (F32)LLTrace::get_frame_recording().getPeriodMeanPerSec(sAngularVelocityStat);
     mCosHalfCameraFOV = cosf(0.5f * getView() * llmax(1.0f, getAspect()));
 
+    // <GMDX> Ortho auto-perspective: back to perspective once the camera really moves.
+    if (mIsOrtho)
+    {
+        if (gAgentCamera.cameraMouselook())
+        {
+            setOrtho(false);
+        }
+        else if (mOrthoFrameCountdown > 0)
+        {
+            --mOrthoFrameCountdown;
+        }
+        else
+        {
+            static LLCachedControl<bool> auto_perspective(gSavedSettings, "FSAutoPerspectiveOnCameraMove", true);
+            if (auto_perspective() && ((std::isfinite(dpos) && dpos > 0.005f) || (std::isfinite(drot) && drot > 0.002f)))
+            {
+                setOrtho(false);
+            }
+        }
+    }
+    // </GMDX>
+
     // update pixel meter ratio using default fov, not modified one
     mPixelMeterRatio = (F32)(getViewHeightInPixels()/ (2.f*tanf(mCameraFOVDefault*0.5f)));
     // update screen pixel area
@@ -188,6 +320,30 @@ void LLViewerCamera::calcProjection(const F32 far_distance) const
     F32 z_far = far_distance;
     F32 z_near = getNear();
     F32 aspect = getAspect();
+
+    // <GMDX> orthographic (GL convention, as the perspective below): manipulators read it
+    if (mIsOrtho)
+    {
+        const F32 half_height = getOrthoHalfHeight();
+        F32 half_width = half_height * aspect;
+        if (half_width < 0.001f || !std::isfinite(half_width))
+        {
+            half_width = 0.001f;
+        }
+        F32 depth_range = z_far - z_near;
+        if (depth_range < 0.1f || !std::isfinite(depth_range))
+        {
+            depth_range = 0.1f;
+        }
+        mProjectionMatrix.setZero();
+        mProjectionMatrix.mMatrix[0][0] = 1.0f / half_width;
+        mProjectionMatrix.mMatrix[1][1] = 1.0f / half_height;
+        mProjectionMatrix.mMatrix[2][2] = -2.0f / depth_range;
+        mProjectionMatrix.mMatrix[3][2] = -(z_far + z_near) / depth_range;
+        mProjectionMatrix.mMatrix[3][3] = 1.0f;
+        return;
+    }
+    // </GMDX>
 
     F32 f = 1 / tan(fov_y * 0.5f);
 

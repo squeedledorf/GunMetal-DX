@@ -64,6 +64,7 @@
 #include "sscombatray.h"
 // </SS:Skoomastream>
 #include "fscombatads.h" // <GMDX> ADS mouse sensitivity
+#include "lltoolcomp.h" // <GMDX> zoomed mouse sensitivity
 
 LLToolGun::LLToolGun( LLToolComposite* composite )
 :   LLTool( std::string("gun"), composite ),
@@ -110,9 +111,13 @@ bool LLToolGun::handleHover(S32 x, S32 y, MASK mask)
         const F32 NOMINAL_MOUSE_SENSITIVITY = 0.0025f;
 
         static LLCachedControl<F32> mouse_sensitivity_setting(gSavedSettings, "MouseSensitivity");
-        // <GMDX> Aiming down sights has its own sensitivity, on the same scale
+        // <GMDX> Aiming down sights and the plain right-click zoom each have their own sensitivity, on the
+        // same scale. ADS is checked first: its press also holds the right button.
         static LLCachedControl<F32> ads_sensitivity_setting(gSavedSettings, "FSADSMouseSensitivity", 3.f);
-        const F32 sensitivity = FSCombatADS::isHeld() ? (F32)ads_sensitivity_setting : (F32)mouse_sensitivity_setting;
+        static LLCachedControl<F32> zoomed_sensitivity_setting(gSavedSettings, "MouseSensitivityZoomed", 3.f);
+        const F32 sensitivity = FSCombatADS::isHeld() ? (F32)ads_sensitivity_setting
+            : LLToolCompGun::getInstance()->isZoomed() ? (F32)zoomed_sensitivity_setting
+            : (F32)mouse_sensitivity_setting;
         F32 mouse_sensitivity = clamp_rescale(sensitivity, 0.f, 15.f, 0.5f, 2.75f) * NOMINAL_MOUSE_SENSITIVITY;
         // </GMDX>
 

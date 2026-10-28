@@ -101,7 +101,7 @@ float aoSample(vec3 P, vec3 Ng)
     const float vz = max(dot(rel, linfo.cam_fwd.xyz), 1e-3);
     // Render-pixel footprint at this depth (grid.w = tan(half fov y)); a tap's representative
     // is <= ~2 px from this pixel on screen, more along a surface seen at a grazing angle.
-    const float foot = vz * 2.0 * linfo.grid.w / float(2 * hsz.y);
+    const float foot = CL_VIEW_Z(linfo, vz) * 2.0 * linfo.grid.w / float(2 * hsz.y);   // <GMDX>
     const float cosv = max(abs(dot(Ng, normalize(rel))), 0.05);
     const float tol = max(ssr.ao_up.y, 1e-3) + 5e-4 * vz + 0.0175 * 2.0 * foot / cosv;
     vec4 e, nw;

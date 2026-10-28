@@ -208,6 +208,19 @@
          tool_tip="Reset camera roll"
          value="Roll Reset" />
     </rows>
+    <!-- <GMDX> -->
+    <rows
+     name="toggle_ortho"
+     value="toggle_ortho">
+        <columns
+         column="lst_action"
+         font="SansSerif"
+         halign="left"
+         name="lst_action"
+         tool_tip="Toggle orthographic view (back to perspective when the camera moves)"
+         value="Toggle Orthographic View" />
+    </rows>
+    <!-- </GMDX> -->
     <rows
      name="toggle_effects"
      value="toggle_effects">

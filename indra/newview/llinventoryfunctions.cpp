@@ -79,6 +79,7 @@
 #include "llpreviewsound.h"
 #include "llpreviewtexture.h"
 #include "llresmgr.h"
+#include "slwearablefavorites.h"
 #include "llscrollbar.h"
 #include "llscrollcontainer.h"
 #include "llselectmgr.h"
@@ -100,6 +101,7 @@
 #include "rlvactions.h"
 #include "rlvlocks.h"
 // [/RLVa:KB]
+#include "gmdxtoolbarpins.h" // <GMDX> Pin to Toolbar
 
 bool LLInventoryState::sWearNewClothing = false;
 LLUUID LLInventoryState::sWearNewClothingTransactionID;
@@ -3731,7 +3733,24 @@ void LLInventoryAction::doToSelected(LLInventoryModel* model, LLFolderView* root
         LLFloater::setFloaterHost(multi_itempropertiesp);
     }
 
-    std::set<LLUUID> selected_uuid_set = LLAvatarActions::getInventorySelectedUUIDs();
+    // The panel the command comes from owns the selection. Asking "the active inventory panel"
+    // (the main inventory) is only right when that is the same panel; any other panel (the
+    // Favorite Wearables window, #1132) would otherwise wear / remove the main inventory's
+    // selection. With nothing selected here (menu closed, wear/remove only) keep the old lookup.
+    std::set<LLUUID> selected_uuid_set;
+    for (LLFolderViewItem* selected_item : selected_items)
+    {
+        const LLFolderViewModelItemInventory* selected_model = selected_item
+            ? dynamic_cast<const LLFolderViewModelItemInventory*>(selected_item->getViewModelItem()) : nullptr;
+        if (selected_model)
+        {
+            selected_uuid_set.insert(selected_model->getUUID());
+        }
+    }
+    if (selected_uuid_set.empty())
+    {
+        selected_uuid_set = LLAvatarActions::getInventorySelectedUUIDs();
+    }
 
     // copy list of applicable items into a vector for bulk handling
     uuid_vec_t ids;
@@ -3868,6 +3887,22 @@ void LLInventoryAction::doToSelected(LLInventoryModel* model, LLFolderView* root
         {
             set_favorite(id, false);
         }
+    }
+    // <GMDX>
+    else if ("gmdx_pin_toolbar" == action)
+    {
+        GMDXToolbarPins::pin(ids);
+    }
+    // </GMDX>
+    else if ("add_to_favorite_wearables" == action)
+    {
+        // links to the originals in the favorites folder; nothing is moved or copied (#1132)
+        SLWearableFavorites::add(ids);
+    }
+    else if ("remove_from_favorite_wearables" == action)
+    {
+        // removes the favorite LINKS only (#1132)
+        SLWearableFavorites::remove(ids);
     }
     else if ("thumbnail" == action)
     {

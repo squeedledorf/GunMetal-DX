@@ -22,7 +22,9 @@ layout(location = 2) out vec4 o_react;   // (write-masked)
 #define WX_OWN_SET 1        // (draw set 0 first, the weather's own set at 1)
 #include "clean_weather_common.glsl"
 
-layout(set = 0, binding = 40) uniform sampler2D uSceneDepth;
+// (#1075: the main depth has a layer per view -- a 2D_ARRAY view at every view count; this
+//  fullscreen pass is off in stereo for now: CLEAN_VIEW 0)
+layout(set = 0, binding = 40) uniform sampler2DArray uSceneDepth;
 
 // The far end of a sky pixel's path (m) when the ray stays under the ceiling (near the horizon).
 const float kVeilFar = 3000.0;
@@ -35,7 +37,7 @@ void main()
     const float sigma = ssr.weather[15].w;
     if (!(sigma > 0.0)) return;
     const ivec2 p = ivec2(gl_FragCoord.xy);
-    const float dz = texelFetch(uSceneDepth, p, 0).r;
+    const float dz = texelFetch(uSceneDepth, ivec3(p, int(CLEAN_VIEW)), 0).r;
     // (view_proj is the JITTERED camera-relative matrix the scene was drawn with: no jitter to undo)
     const vec2 ndc = (vec2(p) + 0.5) * wp.screen.zw * 2.0 - 1.0;
     const bool rev = wp.misc.w > 0.5;

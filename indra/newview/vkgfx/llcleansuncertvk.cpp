@@ -348,7 +348,8 @@ void LLCleanRendererVK::sunCertNoteSpheres()
     }
 }
 
-// recordProjStoch, merged frames on the core kernel, before pass 15 on the same queue: the stats
+// recordLightPrep (the light prep: its own async segment ahead of the lighting, or inline), merged frames
+// on the core kernel, between the prep's opening and closing barriers, before pass 15: the stats
 // readback, the per-frame header + change spheres, the maintenance kernel. Returns the table's
 // device address for the push (0: SXC off this frame -- pass 15 traces every sun ray).
 uint64_t LLCleanRendererVK::sunCertRecord(VkCommandBuffer cmd, bool onAsync, bool coreKernel)
@@ -579,9 +580,8 @@ uint64_t LLCleanRendererVK::sunCertRecord(VkCommandBuffer cmd, bool onAsync, boo
     // the change spheres' sweep: every bin a cell holds or certifies around the range's middle
     fw(H_SPREAD, st.cone ? 0.15 * kDeg + 2.0 * disc : 0.5 * nb * beta + beta + mu + disc);
     // (40 / 41: the per-frame round-start and live counters start at 0)
-    sxcBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
-               VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_TRANSFER_READ_BIT,
-               VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_TRANSFER_READ_BIT);
+    // (WAR -- last frame's pass 15 / maintenance / copies -> the copies + header update below: the light prep's
+    //  opening barrier, recordLightPrep)
     // ---- stats readback (~5 s; harvested when this frame slot comes round again) ----
     const uint32_t slot = mFrameSlot & 1u;
     {
@@ -638,8 +638,7 @@ uint64_t LLCleanRendererVK::sunCertRecord(VkCommandBuffer cmd, bool onAsync, boo
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, st.pipe);
     vkCmdPushConstants(cmd, st.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
     vkCmdDispatch(cmd, (cap + 255u) / 256u, 1, 1);
-    sxcBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-               VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+    // (-> pass 15: the light prep's closing barrier)
     gpuSubMark(cmd, onAsync ? "c_sxc" : "g_sxc");
     return st.buf.address;
 }

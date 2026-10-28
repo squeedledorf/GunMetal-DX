@@ -816,6 +816,8 @@ public:
     void sendSelect();
 
     void requestObjectPropertiesFamily(LLViewerObject* object); // asks sim for creator, permissions, resources, etc.
+    void requestObjectPropertiesViaSelect(LLViewerObject* object); // <GMDX> select+deselect: a full ObjectProperties, answered for worn attachments too
+    void requestObjectPropertiesViaSelect(LLViewerRegion* regionp, U32 local_id); // <GMDX> the same by local id (an object killed here, still in the sim)
     static void processObjectProperties(LLMessageSystem *mesgsys, void **user_data);
     static void processObjectPropertiesFamily(LLMessageSystem *mesgsys, void **user_data);
     static void processForceObjectSelect(LLMessageSystem* msg, void**);

@@ -647,6 +647,7 @@ std::string SLBridge::loadScriptSource() const
     LLStringUtil::replaceString(source, "[POSE_CHANNEL]", llformat("%d", POSE_CHANNEL));
     LLStringUtil::replaceString(source, "[CONSENT_CHANNEL]", llformat("%d", CONSENT_CHANNEL));
     LLStringUtil::replaceString(source, "[CONFIRM_CHANNEL]", llformat("%d", CONFIRM_CHANNEL));
+    LLStringUtil::replaceString(source, "[HELPER_NAME]", HELPER_NAME);   // <GMDX> map shares rename it for a moment
     return source;
 }
 

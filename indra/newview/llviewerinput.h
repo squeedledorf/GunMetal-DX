@@ -31,7 +31,7 @@
 #include "llgamecontrol.h" // For LLGameControl::ActionType
 
 const S32 MAX_KEY_BINDINGS = 128; // was 60
-const S32 keybindings_xml_version = 2;
+const S32 keybindings_xml_version = 3; // <GMDX> 3: the ping keys and the orthographic toggle merged into older user files
 const std::string script_mouse_handler_name = "script_trigger_lbutton";
 
 class LLWindow;

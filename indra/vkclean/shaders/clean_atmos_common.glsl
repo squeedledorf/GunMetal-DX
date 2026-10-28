@@ -18,13 +18,16 @@
 //   [1]  blue_density.rgb, haze_density
 //   [2]  sun-or-moon light colour.rgb (haze sunlight), cloud_shadow
 //   [3]  ambient.rgb (LL "ambient_color"), max_y
-//   [4]  clamped light norm (world, z up), density_multiplier
+//   [4]  clamped light norm (world, z up), density_multiplier (<GMDX> physical night: the
+//        WindLight sky's own light, gmdxSkyLight; the scene light's norm is atmosLightNorm())
 //   [5]  glow.xyz, distance_multiplier
 //   [6]  sun_moon_glow_factor, sky_hdr_scale, enabled, no emissive buffer (1 = vintage
-//        mode, RenderEnableEmissiveBuffer off: atmosDropEmissive)
+//        mode, RenderEnableEmissiveBuffer off: atmosDropEmissive) (<GMDX> enabled = 2 - physical
+//        night's ambient factor, 1 = stock: gmdxNightAmbient)
 //   [7]  light direction (world, normalized; sun or moon), distance-fade fraction
 //   [8]  sunlight_color.rgb, classic_mode
-//   [9]  moonlight_color.rgb, sun_up (1/0)
+//   [9]  moonlight_color.rgb, sun_up (1/0)   (<GMDX> the EEP colour: with GMDXPhysicalNight the
+//        moon's real strength is in [2], not here)
 //   [10] TRUE sun dir (world), sun disc size
 //   [11] TRUE moon dir (world), moon disc size
 //   [12] moon_brightness, star_brightness, sky_sunlight_scale, sky_ambient_scale
@@ -85,6 +88,42 @@ float atmosHdrScale() { return ssr.atmos[6].y; }
 // (forward) and HUDs keep theirs. `flags` = the instance flags (2u blend, 8u HUD).
 bool  atmosDropEmissive(uint flags) { return ssr.atmos[6].w > 0.5 && (flags & (2u | 8u)) == 0u; }
 vec3  atmosLightDir() { return ssr.atmos[7].xyz; }
+// <GMDX> PHYSICAL NIGHT (GMDXPhysicalNight; newview/gmdxnightlight.h): ssr.gmdx_misc.w is 0 when
+// off (the old Second Life night), non-zero when on. The scene light (atmos[2] / [7]) already
+// carries the moon's real strength then; the sky below follows it.
+bool  gmdxNightOn()   { return ssr.gmdx_misc.w != 0.0; }
+// The moon's light as a fraction of the sun's, for the physical sky's second light (0: none).
+float gmdxMoonSky()   { return max(ssr.gmdx_misc.w, 0.0); }
+// The WindLight sky's own light (gmdxnightlight.h): the dome, its table, the reflection probes'
+// sky and the classic 2D clouds. Its direction is atmos[4]; vol_clouds[3].w its strength q, >= 0
+// the sun's colour x q, < 0 the moon's (the sun's colour x -q in linear light). Night on only.
+// moonGain scales the moon's part in linear light (the classic 2D clouds: gmdxCloudMoonGain).
+vec3 gmdxSkyLight(float moonGain)
+{
+    const float q = ssr.vol_clouds[3].w;
+    if (q >= 0.0) return ssr.atmos[8].rgb * q;
+    const vec3 c = max(atmosSrgbToLinear(ssr.atmos[8].rgb) * -q * moonGain, vec3(0.0));
+    return mix(c * 12.92, 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055, step(vec3(0.0031308), c));
+}
+vec3 gmdxSkyLight() { return gmdxSkyLight(1.0); }
+// THE CLOUDS' MOONLIGHT (GMDXNightCloudLight, vol_clouds[2].w; gmdxnightlight.h): the moon's light
+// where it lights the clouds is x this -- 1 by day, the setting once the moon gives the scene's
+// light (by its share at dusk). The disc, the sky and the ground keep GMDXMoonlightScale.
+float gmdxCloudMoonGain() { return gmdxNightOn() ? max(ssr.vol_clouds[2].w, 0.0) : 1.0; }
+// THE NIGHT'S AMBIENT (GMDXNightAmbient; gmdxnightlight.h): EEP's ambient light at night follows the
+// moon, x this (linear; 1 by day, with physical night off and with the atmosphere off). Classic
+// lighting and the WindLight sky work in LL's sRGB-ish space: x its 1 / 2.4 power there.
+float gmdxNightAmbient() { return clamp(2.0 - ssr.atmos[6].z, 0.0, 1.0); }
+float gmdxNightAmbientSrgb() { return pow(gmdxNightAmbient(), 1.0 / 2.4); }
+// Its haze glow factor (getSunMoonGlowFactor's: 1 for the sun; the moon's is below 1, no glow).
+float gmdxSkyGlowFactor() { return ssr.vol_clouds[3].w > 0.0 ? 1.0 : 0.0; }
+// The SCENE light's clamped norm (fillAtmosK's extinction, the haze glow on geometry): atmos[4],
+// or with physical night (which gives atmos[4] to the sky's light) atmos[7]'s, z >= -0.1.
+vec3 atmosLightNorm()
+{
+    if (!gmdxNightOn()) return ssr.atmos[4].xyz;
+    return vec3(ssr.atmos[7].xy, max(ssr.atmos[7].z, -0.1));
+}
 
 // World (Z up) -> WindLight (Y up) frame, LLEnvironment::toLightNorm's permutation.
 vec3 atmosToYUp(vec3 w) { return vec3(w.y, w.z, w.x); }
@@ -103,23 +142,111 @@ layout(set = 0, binding = 57) uniform sampler2D uPkSkyView;   // <GMDX> (46 / 47
 layout(set = 0, binding = 58) uniform sampler2D uPkTrans;
 
 bool physkyOn() { return ssr.physky[4].w > 0.5; }
+// <GMDX> SPACE AT ALTITUDE (GMDXSpaceAltitude; newview/gmdxspacealt.h): 0 .. 1 as the camera climbs
+// from GMDXSpaceStart to GMDXSpaceFull (frame info cluster_rt.w, unused upstream). 0: no change.
+float gmdxSpace() { return ssr.cluster_rt.w; }
+// The camera's own height (km) for what lies around it (cloud lighting): the physical sky's viewer
+// height is lifted by the space amount (physSkyFill), the clouds below keep their real air.
+float gmdxCamHeightKm() { return gmdxSpace() > 0.0 ? clamp(ssr.cam_origin.z * 0.001, 0.0, 60.0) : max(pkViewHeight(), 0.0); }
+// The planet's limb at the horizon: a viewer lifted into near space sees the bright band of the air
+// below the horizontal (the planet's dip); the elevations are stretched so it sits on the horizon
+// (the horizon sea's edge) instead of under it. Zenith and nadir stay.
+vec3 gmdxSpaceLimb(vec3 d, float h)
+{
+    const float s = gmdxSpace();
+    if (s <= 0.0) return d;
+    const float dip = acos(clamp(pkBottom() / h, -1.0, 1.0)) * s;
+    const float e = asin(clamp(d.z, -1.0, 1.0));
+    const float e2 = -dip + e * (1.0 + sign(e) * dip / 1.5707963);
+    const float l = length(d.xy);
+    const vec2 hz = l > 1e-6 ? d.xy / l : vec2(1.0, 0.0);
+    return vec3(hz * cos(e2), sin(e2));
+}
+// <GMDX> Physical night (gmdxphysskyvk.cpp): the light above is the sun and the moon is a second
+// one, in the sky-view table's lower half, while physky[4].w = 2; its direction is atmos[11].
+bool physkyMoonOn()  { return ssr.physky[4].w > 1.5; }
+vec3 physkyMoonDir() { return normalize(ssr.atmos[11].xyz); }
+
+// One half of the sky-view table (0 the light, 1 the moon) along d, for a light from Ldir. The
+// table is two 108-row halves: v stays on its own half's texel centres (clamp to edge per half).
+vec3 physkyViewHalf(vec3 d, vec3 fwd, vec3 side, bool ground, float h, vec3 Ldir, float half_)
+{
+    vec2 lop = vec2(dot(Ldir, fwd), dot(Ldir, side));
+    float ll = length(lop);
+    float lightViewCos = ll > 1e-4 ? lop.x / ll : 1.0;
+    vec2 uv = pkSkyViewUv(ground, d.z, lightViewCos, h);
+    uv.y = (clamp(uv.y * PK_SV_H, 0.5, PK_SV_H - 0.5) + half_ * PK_SV_H) * (0.5 / PK_SV_H);
+    return textureLod(uPkSkyView, uv, 0.0).rgb;
+}
+
+// <GMDX> THE MOON'S DISC AS A LIGHT (GMDXMoonDisc, frame info shadow_fit.w; 0 = LL's disc): the linear
+// radiance of a white texel of the EEP moon texture, a plain multiple (kGmdxMoonDisc x the setting) of
+// the moon's illuminance in the sky's own units (the physical sky's moon light, or the WindLight sky's
+// at night), so it keeps one ratio to the clouds the moon lights through every phase, moon_brightness
+// and exposure: far over white on screen, where the bloom takes it. 0 by day, with physical night
+// off and for a creator's own moon texture (shadow_fit.w < 0) (the caller then draws LL's disc as before).
+const float kGmdxMoonDisc = 50.0;
+float gmdxMoonDiscGain()
+{
+    const float k = ssr.shadow_fit.w;
+    if (k <= 0.0 || !gmdxNightOn()) return 0.0;
+    const vec3 luma = vec3(0.2126, 0.7152, 0.0722);
+    const float E = physkyOn() ? (physkyMoonOn() ? dot(max(pkLight(), vec3(0.0)), luma) * gmdxMoonSky() : 0.0)
+                               : dot(atmosSrgbToLinear(max(ssr.atmos[8].rgb, vec3(0.0))), luma)
+                                 * max(-ssr.vol_clouds[3].w, 0.0) * atmosHdrScale();
+    return k * kGmdxMoonDisc * E;
+}
+
+// <GMDX> TWILIGHT GLOW (physical night): a floor under the sky-view table's twilight while the sun
+// is below the horizon. The table keeps the sun's twilight (its light stays the sun below the
+// horizon), but the light reaches the upper air along a grazing path: in a dense or red-heavy EEP
+// medium (Midnight: density x1.7, a grey blue_density = 3x the red Rayleigh) that path's
+// transmittance all but vanishes, and with the sky's own light EEP's (dim on a night sky) the glow
+// went black by -3 degrees. The floor, toward the sun's azimuth and hugging the horizon (a faint
+// band all round above it), in units of the sun light's luminance: kGmdxTwilight at the horizon
+// toward the sun with the sun just down, kGmdxTwilightFall stops less per degree below that (-3:
+// clear, -8: faint, gone by -12). Strength: about a day sky's zenith (~0.03-0.05 of the light) in
+// the glow's red at -3, so it reads through the auto exposure's 2 stops (0.015 was ~1/10 of that,
+// physically about right, and under the table everywhere on screen). Its colour is a warm glow tinted by the EEP sun colour's hue
+// (a night sky's bluish sun makes it rose / violet). Game look, plain constants to tune by eye.
+// Only raises the sky where the table gives less, so a sky whose twilight shows keeps its own.
+const float kGmdxTwilight = 0.12;
+const float kGmdxTwilightFall = 0.7;
+vec3 gmdxTwilightFloor(vec3 d)
+{
+    const vec3 s = pkLightDir();
+    const float e = degrees(asin(clamp(s.z, -1.0, 1.0)));
+    if (!gmdxNightOn() || e > 0.5 || e < -12.0 || d.z < -0.05) return vec3(0.0);
+    const float amp = kGmdxTwilight * exp2(kGmdxTwilightFall * min(e, 0.0))
+                    * smoothstep(0.5, -1.5, e) * smoothstep(-12.0, -9.0, e) * smoothstep(-0.05, 0.0, d.z);
+    const float sl = length(s.xy), dl = length(d.xy);
+    const float az = (sl > 1e-4 && dl > 1e-4) ? 0.5 + 0.5 * dot(s.xy / sl, d.xy / dl) : 0.5;
+    const float h = max(d.z, 0.0);
+    const float toward = az * az * exp(-h / (0.10 + 0.012 * -e));   // ~6 deg high, widening as the sun sinks
+    const float band = 0.15 * exp(-h / 0.35);
+    const vec3 L = max(pkLight(), vec3(0.0));
+    const float lum = dot(L, vec3(0.2126, 0.7152, 0.0722));
+    const vec3 hue = L / max(lum, 1e-6);
+    return amp * lum * (toward * mix(vec3(1.6, 0.85, 0.45), hue, 0.3)
+                      + band * mix(vec3(0.74, 0.98, 1.96), hue, 0.3));
+}
 
 // Sky radiance along a world direction from the viewer: the sky-view LUT (single + multiple
 // scattering of the sun / moon) plus the ambient colour scattered toward the viewer.
 vec3 physkySkyRaw(vec3 dir_world)
 {
-    vec3 d = normalize(dir_world);
     float h = pkBottom() + max(pkViewHeight(), 0.001);
+    vec3 d = gmdxSpaceLimb(normalize(dir_world), h);   // <GMDX> space at altitude
     vec3 pos = vec3(0.0, 0.0, h);
     vec3 side = cross(vec3(0.0, 0.0, 1.0), d);
     float sl = length(side);
     side = sl > 1e-4 ? side / sl : vec3(0.0, 1.0, 0.0);
     vec3 fwd = cross(side, vec3(0.0, 0.0, 1.0));
-    vec2 lop = vec2(dot(pkLightDir(), fwd), dot(pkLightDir(), side));
-    float ll = length(lop);
-    float lightViewCos = ll > 1e-4 ? lop.x / ll : 1.0;
     bool ground = pkRaySphere(pos, d, pkBottom()) >= 0.0;
-    vec3 L = textureLod(uPkSkyView, pkSkyViewUv(ground, d.z, lightViewCos, h), 0.0).rgb;
+    vec3 L = physkyViewHalf(d, fwd, side, ground, h, pkLightDir(), 0.0);
+    L = max(L, gmdxTwilightFloor(d));   // <GMDX>
+    // (the moon's half is lit at the sun's illuminance: fp16-safe)
+    if (physkyMoonOn()) L += gmdxMoonSky() * physkyViewHalf(d, fwd, side, ground, h, physkyMoonDir(), 1.0);
     vec3 T = textureLod(uPkTrans, pkTransUv(h, max(d.z, 0.0)), 0.0).rgb;
     return L + pkAmbient() * pkRayleighTint() * (vec3(1.0) - T);
 }
@@ -176,7 +303,7 @@ void atmosScatterHaze(vec3 rel_pos, out vec3 additive, out vec3 atten)
     // it on every surface in the sun's direction: a sun disc on ceilings and walls (skybox
     // interiors) under skies with a tight, strong glow. The main view's rotation stands in
     // for LL's per-view eye space (probe / mirror captures differ slightly).
-    float haze_glow = dot(mat3(ssr.cur_view) * rel_pos_norm, atmosToYUp(ssr.atmos[4].xyz));   // lightnorm
+    float haze_glow = dot(mat3(ssr.views[CLEAN_VIEW].cur_view) * rel_pos_norm, atmosToYUp(atmosLightNorm()));   // lightnorm
     haze_glow *= max(0.0, dot(ssr.atmos[7].xyz, rel_pos_norm));   // light_dir
     haze_glow = 1.0 - haze_glow;
     haze_glow = max(haze_glow, 0.001);
@@ -262,7 +389,8 @@ vec3 atmosAmbientTerm(vec3 norm)
         amblit = atmosSrgbToLinear(amblit);
         amblit = vec3(dot(amblit, vec3(0.2126, 0.7152, 0.0722)));
     }
-    return amblit * ssr.atmos[12].w;   // sky_ambient_scale
+    return amblit * ssr.atmos[12].w   // sky_ambient_scale
+         * (atmosClassic() ? gmdxNightAmbientSrgb() : gmdxNightAmbient());   // <GMDX> the night's ambient
 }
 
 void atmosLightTerms(vec3 rel_pos, vec3 norm, out vec3 sunlit, out vec3 amblit,
@@ -334,6 +462,15 @@ vec3 skyHazeCore(float ny, float nl)
     vec3  rel_pos_norm = vec3(0.0, ny, 0.0);   // (only .y is read below)
 
     vec3 sunlight = sun_up ? ssr.atmos[8].rgb : ssr.atmos[9].rgb * 0.7;
+    // <GMDX> Physical night: the dome (and the reflection probes, which see this sky) has its own
+    // light, the sun's colour while it lights the dome, then the moon at its real strength
+    // (gmdxSkyLight; lightnorm above is its direction).
+    if (gmdxNightOn())
+    {
+        sunlight = gmdxSkyLight();
+        sun_moon_glow_factor = gmdxSkyGlowFactor();
+        sun_up = true;   // (the glow's moon dimming below: no glow in the moon's part anyway)
+    }
 
     vec3 light_atten = (blue_density + vec3(haze_density * 0.25)) * (density_multiplier * max_y);
 
@@ -356,11 +493,13 @@ vec3 skyHazeCore(float ny, float nl)
     // Unchanged from the default 0.5 up; below it the glow falls off linearly to nothing.
     if (!sun_up) haze_glow *= clamp(ssr.atmos[12].x * 2.0, 0.0, 1.0);
 
-    vec3 color = (blue_horizon * blue_weight * (sunlight + ambient_color)
-               + (haze_horizon * haze_weight) * (sunlight * haze_glow + ambient_color));
+    // <GMDX> the night's ambient (gmdxNightAmbient; 1 by day): the dome's fill light follows the moon
+    const float night_amb = gmdxNightAmbientSrgb();
+    vec3 color = (blue_horizon * blue_weight * (sunlight + ambient_color * night_amb)
+               + (haze_horizon * haze_weight) * (sunlight * haze_glow + ambient_color * night_amb));
     color *= (1. - combined_haze);
 
-    vec3 ambient = ambient_color + max(vec3(0), (1. - ambient_color)) * cloud_shadow * 0.5;
+    vec3 ambient = (ambient_color + max(vec3(0), (1. - ambient_color)) * cloud_shadow * 0.5) * night_amb;
     vec3 sunlight_under_cloud = sunlight * max(0.0, (1. - cloud_shadow));
     vec3 add_below_cloud = (blue_horizon * blue_weight * (sunlight_under_cloud + ambient)
                          + (haze_horizon * haze_weight) * (sunlight_under_cloud * haze_glow + ambient));
@@ -378,6 +517,22 @@ vec3 skyDomeDir(vec3 dir_world)
     return normalize(d * ATMOS_DOME_RADIUS + vec3(0.0, 50.0, 0.0));
 }
 
+// <GMDX> SPACE AT ALTITUDE, the classic (WindLight) sky: what the dome keeps of its haze colour at dome
+// height ny (pre space; 1 = all), darker toward the zenith, a band kept along the horizon (the air
+// seen edge on). Not in the reflection-probe captures: surface lighting stays WindLight's.
+const float kGmdxSpaceZenith = 0.06;    // the zenith's share at the full amount (pre space: near black)
+const float kGmdxSpaceLimb   = 0.06;    // the horizon band's height (dome n.y, ~3.5 degrees)
+float gmdxSpaceClassicKeep(float ny)
+{
+#ifdef PHYSKY_NOT_IN_PROBES
+    return 1.0;
+#else
+    const float s = gmdxSpace();
+    if (s <= 0.0) return 1.0;
+    return mix(1.0, mix(kGmdxSpaceZenith, 1.0, exp(-max(ny, 0.0) / kGmdxSpaceLimb)), s);
+#endif
+}
+
 vec3 skyHazePre(vec3 dir_world, out float optic_d)
 {
     const vec3 n = skyDomeDir(dir_world);
@@ -389,7 +544,7 @@ vec3 skyHazePre(vec3 dir_world, out float optic_d)
 #ifndef PHYSKY_NOT_IN_PROBES
     if (physkyOn()) return 0.5 * physkyPre(physkySky(dir_world));
 #endif
-    return skyHazeCore(n.y, optic_d);
+    return skyHazeCore(n.y, optic_d) * gmdxSpaceClassicKeep(n.y);   // <GMDX> space at altitude
 }
 
 // LL's sky gbuffer value without the textured parts (clamp(color*2, 0, 5), pre-
@@ -432,7 +587,11 @@ vec3 skyColor(vec3 dir_world)
 #else
     if (ssr.ao_up.z > 0.5)
 #endif
-        return textureLod(uSkyViewLut, skyLutUV(skyDomeDir(dir_world), atmosToYUp(ssr.atmos[4].xyz)), 0.0).rgb;
+    {
+        const vec3 n = skyDomeDir(dir_world);   // <GMDX> space at altitude (as skyHazePre; ~linear)
+        return textureLod(uSkyViewLut, skyLutUV(n, atmosToYUp(ssr.atmos[4].xyz)), 0.0).rgb
+             * pow(gmdxSpaceClassicKeep(n.y), 2.2);
+    }
 #endif
     return skyResolve(skyColorPre(dir_world));
 }

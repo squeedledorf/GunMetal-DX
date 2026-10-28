@@ -42,6 +42,10 @@ extern void (*gVkFaultLogSink)(const char* line);
 void vkBreadcrumb(VkCommandBuffer cmd, const char* name);
 // Set before device creation (RenderVKGpuBreadcrumbs); false keeps both extensions off.
 extern bool gVkBreadcrumbsWanted;
+// (#1128, RenderVKFaultVendorBinary; read before device creation) ask VK_EXT_device_fault for the driver's
+// vendor binary crash dump (deviceFaultVendorBinary) and write it into gVkFaultDumpDir on a device loss.
+extern bool gVkFaultVendorBinaryWanted;
+extern std::string gVkFaultDumpDir;
 // #973 DEBUG LABELS (RenderVKDebugLabels, set before instance creation): every vkBreadcrumb
 // also records a VK_EXT_debug_utils command-buffer label (vkCmdInsertDebugUtilsLabelEXT) with
 // the same static name, and objects named with setObjectName carry their debug names -- what

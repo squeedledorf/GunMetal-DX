@@ -68,7 +68,9 @@ namespace LLCullCamera
     // Build agent-space frustum planes for cam from its own origin / axes / view / aspect /
     // near (no GL): the 8 corners as LLViewerCamera::updateFrustumPlanes' non-ortho branch
     // makes them, far corners along the near-corner rays at far_dist.
-    void calcAgentFrustum(LLCamera& cam, F32 far_dist);
+    // <GMDX> ortho_half_height > 0: an orthographic box of that half height (LLViewerCamera::
+    // getOrthoHalfHeight) instead of the perspective frustum.
+    void calcAgentFrustum(LLCamera& cam, F32 far_dist, F32 ortho_half_height = 0.f);
 }
 
 #endif // LL_LLCULLCAMERA_H

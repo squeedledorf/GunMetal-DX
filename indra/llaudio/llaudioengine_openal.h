@@ -114,6 +114,14 @@ class LLAudioEngine_OpenAL : public LLAudioEngine
         /*virtual*/ StreamStats streamStats() const;
         /*virtual*/ void streamSetSyncTolerance(F32 ms) { mStreamSyncTolMs = ms; }
 
+        // #1122 output device (ALC_ENUMERATE_ALL_EXT + ALC_SOFT_reopen_device).
+        /*virtual*/ std::vector<std::string> listOutputDevices();
+        /*virtual*/ std::vector<std::string> listInputDevices();
+        /*virtual*/ std::string defaultOutputDevice();
+        /*virtual*/ std::string defaultInputDevice();
+        /*virtual*/ std::string currentOutputDevice() const { return mOutputName; }
+        /*virtual*/ bool switchOutputDevice(const std::string& name, bool limiter = false);
+
     private:
         // ---- #892 stream speakers ----
         struct StreamChunk
@@ -268,6 +276,9 @@ class LLAudioEngine_OpenAL : public LLAudioEngine
 
         ALCdevice*  mDevice = nullptr;
         ALCcontext* mContext = nullptr;
+        std::vector<ALCint> mDeviceAttrs;   // the context attributes init chose (reused by a reopen)
+        std::string mOutputName;            // #1122: "" = the system default (the device opened with NULL)
+        bool mOutputLimiter = false;        // #1122: the last reopen asked for ALC_OUTPUT_LIMITER_SOFT
 };
 
 class LLAudioChannelOpenAL : public LLAudioChannel

@@ -988,6 +988,32 @@
      function="Inventory.DoToSelected"
      parameter="remove_from_favorites" />
   </menu_item_call>
+  <!-- <GMDX> -->
+  <menu_item_call
+   label="Pin to Toolbar"
+   layout="topleft"
+   name="Pin to Toolbar">
+    <menu_item_call.on_click
+     function="Inventory.DoToSelected"
+     parameter="gmdx_pin_toolbar" />
+  </menu_item_call>
+  <!-- </GMDX> -->
+  <menu_item_call
+   label="Add to Favorite Wearables"
+   layout="topleft"
+   name="Add to Favorite Wearables">
+    <menu_item_call.on_click
+     function="Inventory.DoToSelected"
+     parameter="add_to_favorite_wearables" />
+  </menu_item_call>
+  <menu_item_call
+   label="Remove from Favorite Wearables"
+   layout="topleft"
+   name="Remove from Favorite Wearables">
+    <menu_item_call.on_click
+     function="Inventory.DoToSelected"
+     parameter="remove_from_favorite_wearables" />
+  </menu_item_call>
   <menu
    label="Upload to folder"
    layout="topleft"

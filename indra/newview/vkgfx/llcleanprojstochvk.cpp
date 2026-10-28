@@ -72,6 +72,7 @@
 #include "llcleanrtvk.h"
 
 #include "llviewercontrol.h"
+#include "../llvkhitch.h"
 #include "vk_common.h"
 #include "vk_pipeline.h"
 #include "vk_world_shaders_spv.h"
@@ -263,10 +264,12 @@ void LLCleanRendererVK::writePdnBindings()
 // same callers, same "no frame in flight" guarantee).
 void LLCleanRendererVK::writePdnMotion()
 {
-    if (!mPdn) return;
-    if (mMotion.view) mPdn->setMotion(mMotion.view, mDepthSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    else              mPdn->setMotion(VK_NULL_HANDLE, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL);
-    writeGiMotion();   // (#87: the GI denoiser reprojects with the same motion vectors)
+    if (mPdn)
+    {
+        if (mMotion.view) mPdn->setMotion(mMotion.view, mDepthSampler, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        else              mPdn->setMotion(VK_NULL_HANDLE, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL);
+    }
+    writeGiMotion();   // (#87: the GI denoiser reprojects with the same motion vectors; #1038 + the GI trace)
 }
 
 // Once per split frame (deferSplitFrame, after the split targets): the settings, the denoiser's
@@ -280,7 +283,7 @@ void LLCleanRendererVK::pdnFrame(uint32_t rw, uint32_t rh, bool sample)
     U32 mode = 0, k = 1, dbg = 0, atrous = 3, splitK = 2;
     F32 scale = 0.5f;
 #if defined(LL_HAS_CLEAN_PIPELINE)
-    static LLCachedControl<U32> s_mode(gSavedSettings, "RenderVKProjStochastic", 0U);
+    static LLCachedControl<U32> s_mode(gSavedSettings, "RenderVKProjStochastic", 1U);
     static LLCachedControl<U32> s_k(gSavedSettings, "RenderVKProjStochasticSamples", 1U);
     static LLCachedControl<F32> s_scale(gSavedSettings, "RenderVKDenoiseScale", 0.5f);
     static LLCachedControl<U32> s_dbg(gSavedSettings, "RenderVKDenoiseDebug", 0U);
@@ -533,113 +536,147 @@ void LLCleanRendererVK::pdnPrestep()
     }
 }
 
-// After the reflect passes (+ RT reflections), before the AO join / BASE / COMBINE; the split
-// layout's sets + push are bound again when it returns (as recordRtReflect).
-void LLCleanRendererVK::recordProjStoch(VkCommandBuffer cmd, const VKDeferPush& p, uint32_t viewOff, bool onAsync)
+// ======================= THE LIGHT PREP =======================
+// The lighting's head that reads nothing the lighting's other inputs are made of: the SUN EXPOSURE CERTIFICATES
+// (C: the CPU's sun state + its own table, a push-only kernel), the ReSTIR EMISSIVE BUILD (E: the instance store,
+// the RT geometry rows of this frame's RT build, the materials / bindless textures, the light table and the grid
+// header of the front end -- no G-buffer, no depth, no screen-space data; the draw view only for its time), the
+// OCCLUSION RESOLVE (O: last frame's notes + this frame's light remap in the grid header) and (#1039) the GI
+// CHANGE TAGS' bits 0-2 (stage 9: last frame's reservoirs + this frame's GI header and light table). recordWorld
+// plans + records it BEFORE pass 1a: its own async segment q_light_prep (after the RT build on the async queue,
+// beside the pre-pass / G-buffer / shadow views on graphics), or inline on graphics there. The lighting chain
+// later on the same queue reads it through the closing barrier below (queue order), a graphics lighting through
+// its join (asyncJoinUpTo before recordDeferLight). Pass 15, the lit kernels and the GI read the results;
+// recordProjStoch reads the plan.
+bool LLCleanRendererVK::lightPrepPlan(uint32_t rw, uint32_t rh)
 {
-    if (!mPdnNow || !mPdn || !mPdnSamplePipe || !mRtReflLayout || !mRT) return;
-    const VkDescriptorSet rtSet = mRT->consumerSet();
-    if (rtSet == VK_NULL_HANDLE) return;
+    LightPrep& lp = mLightPrep;
+    lp = LightPrep{};
+    lp.planned = true;
+    lightPrepPlanShadow();
+    // the GI split this frame (recordGI's own test; giTraceReady: this frame's TLAS)
+    const bool giSplit = mGiSplitNow && giTraceReady() && giSplitReady(mGiDn->width(), mGiDn->height());
+    // (#1039) the GI CHANGE TAGS: on the frames whose header has changed lights + reservoirs (mGiHdrChg) and whose
+    // GI runs the split (REUSE reads the tags)
+    lp.chg = giSplit && mGiHdrChg && mGiSplitPipe[GIS_CHGTAG];
+    // (#1036) the GI shade split's HIT / MISS list headers (recordGI's shadeSplit) and (#827) the feature split's
+    // tile list header (recordDeferredLighting's feat)
+    lp.giLists = giSplit && mGiShadeSplitNow && giShadeSplitReady();
+    lp.dsTiles = deferFeatFrame(rw, rh);
+    return lp.sxc || lp.em || lp.occ || lp.split || lp.chg || lp.giLists || lp.dsTiles;
+}
+
+void LLCleanRendererVK::lightPrepPlanShadow()
+{
+    LightPrep& lp = mLightPrep;
+    lp.pdn = lp.merged = lp.sunSkip = lp.split = lp.sxc = lp.em = lp.occ = false;
+    lp.pipe = VK_NULL_HANDLE;
+    if (!mPdnNow || !mPdn || !mPdnSamplePipe || !mRtReflLayout || !mRT || mRT->consumerSet() == VK_NULL_HANDLE)
+        return;
+    lp.pdn = true;
+    U32 core = 0;
+#if defined(LL_HAS_CLEAN_PIPELINE)
+    static LLCachedControl<U32> s_core(gSavedSettings, "RenderVKShadowGenericCore", 1U);
+    core = s_core;
+#endif
     // (#195 + #85) merged RT shadows: the same pass + the sun / moon trace (recordWorld's settle
     // checked the pipeline and the denoiser's sun images).
-    const bool merged = mShadowMergeNow && mPdnMergePipe && mPdn->hasSun();
-    // WAR on the denoiser's images (last frame's lighting read the final image, its temporal
-    // pass the history) + nothing else: pass 15 reads only the G-buffer / depth (complete before
-    // the lighting segment) and the light tables.
-    {
-        VkMemoryBarrier2 m{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
-        m.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT; m.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
-        m.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-        m.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
-        VkDependencyInfo d{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
-        d.memoryBarrierCount = 1; d.pMemoryBarriers = &m;
-        vkCmdPipelineBarrier2(cmd, &d);
-    }
-    const uint32_t dw = mPdn->width(), dh = mPdn->height();
-    VKRtReflPush rp{};
-    rp.d = p;
-    rp.rtr[0] = (float)dw;
-    rp.rtr[1] = (float)dh;
-    rp.rtr[2] = (float)(mPdnFrame & 0xFFFFFu);                   // (exact in a float)
-    rp.rtr[3] = (float)(mPdnK | (mPdn->parity() << 4));          // K | the GEOM parity << 4
-    // (#869 SPLIT, clean_deferred_light.comp pdnSplitSelect) rtr3.z: bits 0-2 the split lights per
-    // texel (only into images that carry the split layers), bit 3 last frame's split ids are valid
-    // here (the hysteresis reads them)
-    const uint32_t splitK = mPdn->hasSplit() ? mPdnSplitK : 0u;
-    rp.rtr3[2] = splitK | (splitK != 0u && mPdn->historyValid() ? 8u : 0u);
-    U32 slope = 2, core = 0, bleed = 1, facing = 1, oneRay = 0, awayTrace = 1;
-#if defined(LL_HAS_CLEAN_PIPELINE)
-    static LLCachedControl<U32> s_slope(gSavedSettings, "RenderVKRTShadowSlopeBias", 2U);
-    static LLCachedControl<U32> s_core(gSavedSettings, "RenderVKShadowGenericCore", 0U);
-    static LLCachedControl<U32> s_bleed(gSavedSettings, "RenderVKProjStochBleedFix", 1U);
-    static LLCachedControl<U32> s_facing(gSavedSettings, "RenderVKProjStochFacingGate", 1U);
-    static LLCachedControl<U32> s_one(gSavedSettings, "RenderVKShadowSunOneRay", 0U);
-    static LLCachedControl<U32> s_away(gSavedSettings, "RenderVKRTShadowMergeAwayTrace", 1U);
-    slope = std::min<U32>(s_slope, 3u);
-    core = s_core; bleed = s_bleed; facing = s_facing; oneRay = s_one; awayTrace = s_away;
-#endif
+    lp.merged = mShadowMergeNow && mPdnMergePipe && mPdn->hasSun();
     // SUN-CHANNEL SKIP: the weak-sun gate traces no sun / moon ray this frame (weight 0: every
     // texel's raw sun is exactly lit), so the denoiser skips the sun channel's temporal + a-trous
     // work and the SHADOW kernel reads lit without it (frame info rt_mask.x = -2, rtMaskFrameInfo).
     // Its history is not written: the next traced frame restarts it (DN_F_SUN_HIST off) while
     // the weight ramps in from 0 (the shadow fades in with the light, never pops).
-    const bool sunSkip = merged && !(mShadowMergeSunW > 0.f);
-    // clean_deferred_light.comp pass 15: rtr2.x the weak-sun weight (0 = no sun ray), rtr2.y the
-    // view-slope origin offset (RenderVKRTShadowSlopeBias: 0, 1/8, 1/4, 1/2 of the render-pixel
-    // footprint -- the RT shadow mask's rtSlopeBiasPx; the generic core gives it to the projectors
-    // too), rtr2.z the PDN_OPT_* bits (exact integer).
-    if (merged) rp.rtr2[0] = mShadowMergeSunW;
-    rp.rtr2[1] = slope == 0u ? 0.f : 0.0625f * (float)(1u << slope);
-    // (PDN_OPT_BLEED: the no-information flag, RenderVKProjStochBleedFix; PDN_OPT_FACING: the
-    // turned-away receiver gate, RenderVKProjStochFacingGate -- clean_deferred_light.comp)
-    // (#1031 PDN_OPT_OFIRST, RenderVKShadowOpaqueFirst: the generic core's walks try the opaque geometry
-    //  alone first -- clean_shadow_core.glsl OPAQUE FIRST)
-    bool ofirst = true;
-#if defined(LL_HAS_CLEAN_PIPELINE)
-    static LLCachedControl<bool> s_ofirst(gSavedSettings, "RenderVKShadowOpaqueFirst", false);
-    ofirst = s_ofirst;
-#endif
-    rp.rtr2[2] = (float)((bleed != 0u ? 1u : 0u) | (merged && oneRay != 0u ? 2u : 0u) | (sunSkip ? 4u : 0u)
-                         | (facing != 0u ? 8u : 0u) | (mPdnDebug == 7u ? 16u : 0u)
-                         | (merged && awayTrace != 0u ? 32u : 0u)   // (PDN_OPT_SUN_AWAY)
-                         | (ofirst ? 64u : 0u));                    // (PDN_OPT_OFIRST)
-    // (#869 Phase 5b / 5c) rtr2.w: RS_RES_ON = the reservoirs are bound at this extent (pass 15 writes
-    // this parity's), RS_RES_PREV = last frame's pass 15 wrote the other parity's at this extent
-    uint32_t rsRes = 0u;
-    if (mRsNow && mRsMode >= 2u && mRsRes.buffer && mRsResW == dw && mRsResH == dh)
-        rsRes = 1u | (mRsResPrevOk ? 2u : 0u);
-    rp.rtr2[3] = (float)rsRes;
-    mRsResPrevOk = rsRes != 0u;
-    VkPipeline pipe = merged ? mPdnMergePipe : mPdnSamplePipe;
+    lp.sunSkip = lp.merged && !(mShadowMergeSunW > 0.f);
+    const uint32_t dw = mPdn->width(), dh = mPdn->height();
+    const uint32_t splitK = mPdn->hasSplit() ? mPdnSplitK : 0u;
+    lp.pipe = lp.merged ? mPdnMergePipe : mPdnSamplePipe;
     // (#869 Phase 5) a ReSTIR frame runs the generic core (its candidates, reservoirs and light
     // samples live there; rsWanted made sure both core kernels exist)
     // (#869 SPLIT: only the generic core splits -- the per-light-type kernel writes empty slots)
     // (#1031) ... as SELECT -> SUNVIS + VIS -> SHADE (RenderVKShadowSplitKernels) while the descriptors and
     // the visibility slots fit this extent and the settings' longest sample list
-    bool split = false;
+    // (one decision per frame: the certificates below and pass 15 take the same kernel even if a core
+    //  pipeline finishes compiling in between)
     if (core != 0u || mRsNow || splitK != 0u)
     {
-        VkPipeline cp = merged ? mPdnMergeCorePipe : mPdnSampleCorePipe;
-        if (cp != VK_NULL_HANDLE) pipe = cp;   // (still compiling: the per-light-type kernel this frame)
-        split = pdnSplitWanted() && mPdnSel.buffer && mPdnVis.buffer && mPdnSelW == dw && mPdnSelH == dh
-             && mPdnVisSlots >= pdnVisSlotsWanted();
+        const VkPipeline cp = lp.merged ? mPdnMergeCorePipe : mPdnSampleCorePipe;
+        if (cp != VK_NULL_HANDLE) lp.pipe = cp;   // (still compiling: the per-light-type kernel this frame)
+        lp.split = pdnSplitWanted() && mPdnSel.buffer && mPdnVis.buffer && mPdnSelW == dw && mPdnSelH == dh
+                && mPdnVisSlots >= pdnVisSlotsWanted();
     }
-    if (split) rp.rtr3[3] = mPdnVisSlots;   // (clean_deferred_light.comp pdnVisSlots)
-    // (#771 Phase 2) SUN EXPOSURE CERTIFICATES: the table's header + maintenance before the pass
-    // (its own pipeline: recorded before pass 15's binds below); the pass finds the table through
-    // the push (rtr3.xy) and skips the sun sample where a certificate proves it blocked.
-    // (#1031: the split core's TRACE reads it -- the generic core's rules)
-    if (merged && !sunSkip)
+    lp.sxc = lp.merged && !lp.sunSkip;
+    lp.em = mRsEmNow && mRsNow && mRsEmPipe && mRegir.buffer;
+    lp.occ = mRsOccNow && mRsNow && mRegir.buffer;
+}
+
+// The planned work not recorded yet, on cmd (once per frame). viewIdx / viewOff: the main view's draw-view entry
+// (the emissive build reads its time: texture animation).
+void LLCleanRendererVK::recordLightPrep(VkCommandBuffer cmd, uint32_t viewIdx, uint32_t viewOff, bool onAsync, bool early)
+{
+    LightPrep& lp = mLightPrep;
+    const bool shadow = lp.pdn && !lp.shadowDone && (lp.sxc || lp.em || lp.occ || lp.split);
+    const bool chg = lp.chg && !lp.chgDone;
+    const bool hdrs = early && !lp.headersDone && (lp.dsTiles || lp.giLists);
+    if (!shadow && !chg && !hdrs) return;
+    lp.shadowDone = lp.shadowDone || shadow;
+    lp.chgDone = lp.chgDone || chg;
+    lp.headersDone = lp.headersDone || hdrs;
+    const bool sxc = shadow && lp.sxc, em = shadow && lp.em, occ = shadow && lp.occ;
+    auto memBarrier = [cmd](VkPipelineStageFlags2 ss, VkAccessFlags2 sa, VkPipelineStageFlags2 ds, VkAccessFlags2 da)
     {
-        const uint64_t sxc = sunCertRecord(cmd, onAsync, split || pipe == mPdnMergeCorePipe);
-        rp.rtr3[0] = (uint32_t)(sxc & 0xFFFFFFFFull);
-        rp.rtr3[1] = (uint32_t)(sxc >> 32);
+        VkMemoryBarrier2 b{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+        b.srcStageMask = ss; b.srcAccessMask = sa; b.dstStageMask = ds; b.dstAccessMask = da;
+        VkDependencyInfo di{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        di.memoryBarrierCount = 1; di.pMemoryBarriers = &b;
+        vkCmdPipelineBarrier2(cmd, &di);
+    };
+    constexpr VkAccessFlags2 kRW = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+    // OPENING BARRIER (one for C, E, O and the tags -- each had its own WAR barrier): RAW from this frame's RT build
+    // (the geometry rows E reads; on the async queue before this segment, or on graphics before the fork: the
+    // semaphore) and the front end's header uploads, and WAR against every earlier reader of their regions on this
+    // queue (last frame's pass 15, lit kernels, GI trace / REUSE, indirect reads, stats copies; last frame's
+    // q_gi_lag). Last frame's graphics-side readers (the #978 combine) are behind the fork's semaphore.
+    memBarrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+               VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT,
+               VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+               VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT
+               | VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    // THE CHAIN'S LIST HEADERS (each was a COMPUTE -> TRANSFER -> COMPUTE drain pair inside the lighting chain):
+    // reset here, after the opening barrier (WAR: last frame's appends + indirect reads) and published by the
+    // closing barrier (the appends' atomics + the indirect dispatches). Nothing between here and the chain
+    // touches them.
+    if (shadow && lp.split)
+    {   // pass 15's VIS job list: count 0, (0, 1, 1) workgroups -- SELECT appends, VIS dispatches indirect over it
+        static const uint32_t kHdr[4] = {0u, 0u, 1u, 1u};
+        vkCmdUpdateBuffer(cmd, mPdnVis.buffer, 0, sizeof(kHdr), kHdr);
     }
-    const VkDescriptorSet sets[5] = {mDsetDraw0, mDsetDraw1, mDsetDefer, mDsetDeferSplit, rtSet};
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mRtReflLayout, 0, 5, sets, 1, &viewOff);
-    VK_PUSH_BUDGET_CHECK(rp);
-    vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(rp), &rp);
-    if (mRsEmNow && mRsNow && mRsEmPipe && mRegir.buffer)
+    if (hdrs && lp.dsTiles)
+    {   // (#827) the feature split's tile list: VkDispatchIndirectCommand (0, 1, 1) + pad -- CLASSIFY counts x up,
+        // BASE / LOCAL dispatch indirect over it
+        static const uint32_t kHdr[4] = {0u, 1u, 1u, 0u};
+        vkCmdUpdateBuffer(cmd, mDsTileList.buffer, 0, sizeof(kHdr), kHdr);
+    }
+    if (hdrs && lp.giLists)
+    {   // (#1036) the GI shade split's HIT / MISS lists: count 0, dispatch (0, 0, 1) each -- TRACE appends, MISS /
+        // HIT-MAT / HIT-LIGHT dispatch indirect over them
+        static const uint32_t kHdr[8] = {0u, 0u, 0u, 1u, 0u, 0u, 0u, 1u};
+        vkCmdUpdateBuffer(cmd, mGiHit.buffer, 16u, sizeof(kHdr), kHdr);
+    }
+    // (#771 Phase 2) SUN EXPOSURE CERTIFICATES: the table's header + maintenance (its own pipeline); pass 15
+    // finds the table through the push (rtr3.xy, mLightPrep.sxcAddr) and skips the sun sample where a
+    // certificate proves it blocked. (#1031: the split core's TRACE reads it -- the generic core's rules)
+    if (sxc) lp.sxcAddr = sunCertRecord(cmd, onAsync, lp.split || lp.pipe == mPdnMergeCorePipe);
+    if (em || occ || chg)
+    {
+        // (pass 15's / the GI's layout and sets: set 2 is never read by these kernels -- the plain one)
+        const VkDescriptorSet sets[5] = {mDsetDraw0, mDsetDraw1, mDsetDefer, mDsetDeferSplit, mRT->consumerSet()};
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mRtReflLayout, 0, 5, sets, 1, &viewOff);
+    }
+    // the build kernel's push: the draw view (its time) + rtr3.zw = the mode / the record parity
+    VKRtReflPush rp{};
+    rp.d.view = viewIdx;
+    if (em)
     {
         // (#91, clean_regir.glsl EMISSIVE LIGHTS) this parity's instance hash cleared, then the EMITTERS
         // (mode 0: a grid-stride loop over the instance store; push rtr3.w = this build's record parity),
@@ -648,7 +685,7 @@ void LLCleanRendererVK::recordProjStoch(VkCommandBuffer cmd, const VKDeferPush& 
         // emitter's copied from the last build -- the other parity), the #986 CELL LISTS (modes 3-6: count,
         // scan, sums, fill; their counts cleared first), then POPULATION 2 (mode 7: one invocation per grid
         // cell) -- pass 15 samples them, the lit kernels and the GI trace read them later this frame. Fixed
-        // regions of mRegir (no resource / descriptor change); the push is restored for pass 15.
+        // regions of mRegir (no resource / descriptor change).
         // (#1006 INCREMENTAL CELLS, with the lists) + mode 12 (the ORIGIN SHIFT: the cells moved with the
         // clipmap, from a scratch copy) after the records, the dirty state in mode 4, the budget in mode 5, mode
         // 11 (SELECT: the cells to re-gather this build, the kept ones' slots carried to this build's records)
@@ -660,23 +697,9 @@ void LLCleanRendererVK::recordProjStoch(VkCommandBuffer cmd, const VKDeferPush& 
         const uint32_t par = mRsEmParity;
         mRsEmParity ^= 1u;
         mRsEmBuiltOnce = true;   // (the next header's EM_F_REUSE: this build fills parity par)
-        auto memBarrier = [cmd](VkPipelineStageFlags2 ss, VkAccessFlags2 sa, VkPipelineStageFlags2 ds, VkAccessFlags2 da)
-        {
-            VkMemoryBarrier2 b{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
-            b.srcStageMask = ss; b.srcAccessMask = sa; b.dstStageMask = ds; b.dstAccessMask = da;
-            VkDependencyInfo di{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
-            di.memoryBarrierCount = 1; di.pMemoryBarriers = &b;
-            vkCmdPipelineBarrier2(cmd, &di);
-        };
-        constexpr VkAccessFlags2 kRW = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
-        constexpr VkAccessFlags2 kXfer = VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT;
-        // WAR: the hash's earlier readers (last build's GI trace / pass 15 / lit kernels) -> the clear; (#1006)
-        // + last build's indirect read of mode 7's dispatch words, the stats copy of the cache header's per-build
-        // words and the last shift's scratch copy; the cells' last writers -> the shift's copy
-        memBarrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT
-                   | VK_PIPELINE_STAGE_2_COPY_BIT,
-                   kRW | VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT | kXfer,
-                   VK_PIPELINE_STAGE_2_CLEAR_BIT | VK_PIPELINE_STAGE_2_COPY_BIT, kXfer);
+        // (WAR -- the hash's earlier readers: last build's GI trace / pass 15 / lit kernels; #1006 + last build's
+        //  indirect read of mode 7's dispatch words, the stats copy of the cache header's per-build words and the
+        //  last shift's scratch copy; the cells' last writers -> the shift's copy: the prep's opening barrier)
         vkCmdFillBuffer(cmd, mRegir.buffer, kRsEmHashOffset + (VkDeviceSize)par * kRsEmHashN * 8u,
                         (VkDeviceSize)kRsEmHashN * 8u, 0u);
         // (LIGHT TAKEOVER) the emitter entries reserved for the table's rows start empty (a row whose face
@@ -760,41 +783,28 @@ void LLCleanRendererVK::recordProjStoch(VkCommandBuffer cmd, const VKDeferPush& 
         else vkCmdDispatch(cmd, std::max(mRegirLevels, 1u) * (kRegirCellsPerLevel / 64u), 1u, 1u);
         if (mRsEmLongNow)
         {   // (#986) mode 9: the LONG CELLS, one workgroup each (grid-stride over mode 11's list; the cells are
-            // disjoint from mode 7's, so no barrier between the two; mode 8 is the #869 occlusion resolve)
+            // disjoint from mode 7's, so no barrier between the two; mode 8 is the #869 occlusion resolve).
+            // (#1108) On a GATHER build (mode 5: the pairs passed the cap) mode 9 builds every cell of the grid and
+            // mode 7's indirect dispatch is 0 groups -- c_rs_em_long then carries the gather's cost.
             gpuSubMark(cmd, onAsync ? "c_rs_emissive" : "g_rs_emissive");   // (mode 7, the short cells)
             ep.rtr3[2] = 9u;
             vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ep), &ep);
             vkCmdDispatch(cmd, kRegirLevelsMax * kRegirCellsPerLevel / 64u, 1u, 1u);
-            memBarrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, kRW, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, kRW);
-            vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(rp), &rp);
             gpuSubMark(cmd, onAsync ? "c_rs_em_long" : "g_rs_em_long");
         }
         else
-        {
-            memBarrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, kRW, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, kRW);
-            vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(rp), &rp);
             gpuSubMark(cmd, onAsync ? "c_rs_emissive" : "g_rs_emissive");   // (now: mode 7, population 2, alone)
-        }
+        // (-> pass 15, the lit kernels, the GI: the prep's closing barrier)
     }
-    if (mRsOccNow && mRsNow && mRegir.buffer)
+    if (occ)
     {
         // (#869 OCCLUSION CULL, clean_deferred_light.comp) the cache: zeroed when new / re-enabled / the
         // last light list's frame did not resolve it (its counts are carried by rs_remap, one list to the
         // next), its stats every frame, then THE RESOLVE (mode 8 of the emissive build kernel: one
         // invocation per patch) turns last frame's notes into this frame's counts -- before pass 15, so
-        // pass 15 and the lit kernels read the same counts. Fixed region of mRegir (6.25 MiB); the push is
-        // restored for pass 15.
-        auto memBarrier = [cmd](VkPipelineStageFlags2 ss, VkAccessFlags2 sa, VkPipelineStageFlags2 ds, VkAccessFlags2 da)
-        {
-            VkMemoryBarrier2 b{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
-            b.srcStageMask = ss; b.srcAccessMask = sa; b.dstStageMask = ds; b.dstAccessMask = da;
-            VkDependencyInfo di{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
-            di.memoryBarrierCount = 1; di.pMemoryBarriers = &b;
-            vkCmdPipelineBarrier2(cmd, &di);
-        };
-        constexpr VkAccessFlags2 kRW = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+        // pass 15 and the lit kernels read the same counts. Fixed region of mRegir (6.25 MiB).
         if (!mRsOccRemapOk) mRsOccClear = true;
-        memBarrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, kRW, VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+        // (WAR -- last frame's resolve / pass 15 / lit kernels -> the fill: the prep's opening barrier)
         vkCmdFillBuffer(cmd, mRegir.buffer, kRegirOccOffset, mRsOccClear ? kRsOccBytes : kRsOccStatBytes, 0u);
         memBarrier(VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, kRW);
         mRsOccClear = false;
@@ -805,41 +815,148 @@ void LLCleanRendererVK::recordProjStoch(VkCommandBuffer cmd, const VKDeferPush& 
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mRsEmPipe);
             vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(op), &op);
             vkCmdDispatch(cmd, kRsOccCells / 64u, 1u, 1u);
-            memBarrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, kRW, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, kRW);
-            vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(rp), &rp);
-            gpuSubMark(cmd, onAsync ? "c_rs_occ" : "g_rs_occ");
+            gpuSubMark(cmd, onAsync ? "c_rs_occ" : "g_rs_occ");   // (-> pass 15 / the lit kernels: the closing barrier)
         }
     }
+    if (chg)
+    {
+        // (#1039) the GI CHANGE TAGS' bits 0-2 (stage 9, clean_deferred_light.comp CHG-TAG): one lane per GI texel --
+        // last frame's reservoir there (layer parity ^ 1: nothing writes it this frame) against this frame's changed
+        // / hot lights (the GI header + the light table, front end) -> the texel's tag word (bit 3 clear; HIT-LIGHT /
+        // SHADE set it for the fresh hit). REUSE reads them. Push: rtr2.xy = the GI extent, rtr2.w = its parity.
+        const uint32_t gw = mGiDn->width(), gh = mGiDn->height();
+        VKRtReflPush tp{};
+        tp.d.view = viewIdx;
+        tp.rtr2[0] = (float)gw;
+        tp.rtr2[1] = (float)gh;
+        tp.rtr2[3] = (float)mGiDn->parity();
+        vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(tp), &tp);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mGiSplitPipe[GIS_CHGTAG]);
+        vkCmdDispatch(cmd, (gw + 7u) / 8u, (gh + 7u) / 8u, 1);
+        gpuSubMark(cmd, onAsync ? "c_gi_chgtag" : "g_gi_chgtag");
+    }
+    // CLOSING BARRIER (one for C, E, O and the tags -- each had its own): their results -> pass 15 (SELECT /
+    // SUNVIS: the counts, the cells, the certificates), the lit kernels, the GI hit lighting (+ HIT-LIGHT's /
+    // SHADE's bit 3 onto the tag words) and REUSE, later on this queue.
+    memBarrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+               VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT,
+               VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
+               kRW | VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT);
+}
+
+// After the reflect passes (+ RT reflections), before the AO join / BASE / COMBINE; the split
+// layout's sets + push are bound again when it returns (as recordRtReflect).
+void LLCleanRendererVK::recordProjStoch(VkCommandBuffer cmd, const VKDeferPush& p, uint32_t viewOff, bool onAsync)
+{
+    if (!mPdnNow || !mPdn || !mPdnSamplePipe || !mRtReflLayout || !mRT) return;
+    const VkDescriptorSet rtSet = mRT->consumerSet();
+    if (rtSet == VK_NULL_HANDLE) return;
+    // THE LIGHT PREP (C / E / O, the plan): recordWorld records it ahead of the lighting. Here only when that
+    // point did not plan it (never expected: the same gate) -- inline, where it ran before the move.
+    if (!mLightPrep.pdn)
+    {
+        LLVKHitch::count("lightPrepLate", 1u);
+        lightPrepPlanShadow();
+        if (!mLightPrep.pdn) return;   // (the same gate as above: cannot fail -- never a null pass-15 kernel)
+        recordLightPrep(cmd, p.view, viewOff, onAsync, false);
+    }
+    const bool merged = mLightPrep.merged;
+    // (No barrier of its own. Its only job was WAR on the denoiser's images -- last frame's lighting read the final
+    //  image, its temporal pass the history: an execution dependency, which recordDeferLight's opening barrier
+    //  (src COMPUTE, dst COMPUTE, ahead of every path into here) already gives against every earlier compute on
+    //  this queue, and the fork's semaphore against last frame's graphics readers. Pass 15 reads the G-buffer /
+    //  depth (graphics: the semaphore / that barrier), the light tables (front end) and the light prep's results
+    //  (its closing barrier); nothing recorded before it in the chain -- RT mirror, lit-guard scan, SHADOW /
+    //  CLASSIFY, REFLECT, the RT reflections -- reads what it writes (the selection, GEOM, the reservoirs, the job
+    //  list) or writes what it reads (llcleanvisqueuevk.cpp THE FRAME WALK's dependency audit).)
+    const uint32_t dw = mPdn->width(), dh = mPdn->height();
+    VKRtReflPush rp{};
+    rp.d = p;
+    rp.rtr[0] = (float)dw;
+    rp.rtr[1] = (float)dh;
+    rp.rtr[2] = (float)(mPdnFrame & 0xFFFFFu);                   // (exact in a float)
+    rp.rtr[3] = (float)(mPdnK | (mPdn->parity() << 4));          // K | the GEOM parity << 4
+    // (#869 SPLIT, clean_deferred_light.comp pdnSplitSelect) rtr3.z: bits 0-2 the split lights per
+    // texel (only into images that carry the split layers), bit 3 last frame's split ids are valid
+    // here (the hysteresis reads them)
+    const uint32_t splitK = mPdn->hasSplit() ? mPdnSplitK : 0u;
+    rp.rtr3[2] = splitK | (splitK != 0u && mPdn->historyValid() ? 8u : 0u);
+    U32 slope = 2, bleed = 1, facing = 1, oneRay = 0, awayTrace = 1;
+#if defined(LL_HAS_CLEAN_PIPELINE)
+    static LLCachedControl<U32> s_slope(gSavedSettings, "RenderVKRTShadowSlopeBias", 2U);
+    static LLCachedControl<U32> s_bleed(gSavedSettings, "RenderVKProjStochBleedFix", 1U);
+    static LLCachedControl<U32> s_facing(gSavedSettings, "RenderVKProjStochFacingGate", 1U);
+    static LLCachedControl<U32> s_one(gSavedSettings, "RenderVKShadowSunOneRay", 0U);
+    static LLCachedControl<U32> s_away(gSavedSettings, "RenderVKRTShadowMergeAwayTrace", 1U);
+    slope = std::min<U32>(s_slope, 3u);
+    bleed = s_bleed; facing = s_facing; oneRay = s_one; awayTrace = s_away;
+#endif
+    const bool sunSkip = mLightPrep.sunSkip;   // (SUN-CHANNEL SKIP: lightPrepPlan)
+    // clean_deferred_light.comp pass 15: rtr2.x the weak-sun weight (0 = no sun ray), rtr2.y the
+    // view-slope origin offset (RenderVKRTShadowSlopeBias: 0, 1/8, 1/4, 1/2 of the render-pixel
+    // footprint -- the RT shadow mask's rtSlopeBiasPx; the generic core gives it to the projectors
+    // too), rtr2.z the PDN_OPT_* bits (exact integer).
+    if (merged) rp.rtr2[0] = mShadowMergeSunW;
+    rp.rtr2[1] = slope == 0u ? 0.f : 0.0625f * (float)(1u << slope);
+    // (PDN_OPT_BLEED: the no-information flag, RenderVKProjStochBleedFix; PDN_OPT_FACING: the
+    // turned-away receiver gate, RenderVKProjStochFacingGate -- clean_deferred_light.comp)
+    // (#1031 PDN_OPT_OFIRST, RenderVKShadowOpaqueFirst: the generic core's walks try the opaque geometry
+    //  alone first -- clean_shadow_core.glsl OPAQUE FIRST)
+    bool ofirst = true;
+#if defined(LL_HAS_CLEAN_PIPELINE)
+    static LLCachedControl<bool> s_ofirst(gSavedSettings, "RenderVKShadowOpaqueFirst", false);
+    ofirst = s_ofirst;
+#endif
+    rp.rtr2[2] = (float)((bleed != 0u ? 1u : 0u) | (merged && oneRay != 0u ? 2u : 0u) | (sunSkip ? 4u : 0u)
+                         | (facing != 0u ? 8u : 0u) | (mPdnDebug == 7u ? 16u : 0u)
+                         | (merged && awayTrace != 0u ? 32u : 0u)   // (PDN_OPT_SUN_AWAY)
+                         | (ofirst ? 64u : 0u));                    // (PDN_OPT_OFIRST)
+    // (#869 Phase 5b / 5c) rtr2.w: RS_RES_ON = the reservoirs are bound at this extent (pass 15 writes
+    // this parity's), RS_RES_PREV = last frame's pass 15 wrote the other parity's at this extent
+    uint32_t rsRes = 0u;
+    if (mRsNow && mRsMode >= 2u && mRsRes.buffer && mRsResW == dw && mRsResH == dh)
+        rsRes = 1u | (mRsResPrevOk ? 2u : 0u);
+    rp.rtr2[3] = (float)rsRes;
+    mRsResPrevOk = rsRes != 0u;
+    // pass 15's kernel and the split (lightPrepPlan: the generic core on a ReSTIR / split frame)
+    VkPipeline pipe = mLightPrep.pipe;
+    const bool split = mLightPrep.split;
+    if (split) rp.rtr3[3] = mPdnVisSlots;   // (clean_deferred_light.comp pdnVisSlots)
+    // (#771 Phase 2) the SUN EXPOSURE CERTIFICATES' table (the light prep's maintenance; 0 = SXC off): pass 15
+    // skips the sun sample where a certificate proves it blocked
+    rp.rtr3[0] = (uint32_t)(mLightPrep.sxcAddr & 0xFFFFFFFFull);
+    rp.rtr3[1] = (uint32_t)(mLightPrep.sxcAddr >> 32);
+    const VkDescriptorSet sets[5] = {mDsetDraw0, mDsetDraw1, mDsetDefer, mDsetDeferSplit, rtSet};
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mRtReflLayout, 0, 5, sets, 1, &viewOff);
+    VK_PUSH_BUDGET_CHECK(rp);
+    vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(rp), &rp);
     if (split)
     {
         // (#1031) SELECT (the candidates, the reservoirs, the sample list + its gate -> the descriptors + GEOM);
         // SUNVIS (merged: the sun channel, whole) and VIS (the gated light samples' walks -> mPdnVis), both
         // reading the descriptors, independent of each other; then SHADE (the terms x the visibilities +
         // every other store). Compute -> compute RAW between the steps. VIS runs one thread per gated light
-        // sample: SELECT appends them to mPdnVis's job list, whose header (reset here) is VIS's indirect
+        // sample: SELECT appends them to mPdnVis's job list, whose header (count 0, (0, 1, 1) workgroups) THE LIGHT
+        // PREP reset ahead of the lighting (recordLightPrep: no transfer drain pair here) is VIS's indirect
         // dispatch.
-        auto barrier = [cmd](VkPipelineStageFlags2 ss, VkAccessFlags2 sa, VkPipelineStageFlags2 ds, VkAccessFlags2 da)
+        constexpr VkAccessFlags2 kRW = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+        auto raw = [cmd]()
         {
             VkMemoryBarrier2 m{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
-            m.srcStageMask = ss; m.srcAccessMask = sa; m.dstStageMask = ds; m.dstAccessMask = da;
+            m.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT; m.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+            m.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
+            m.dstAccessMask = kRW | VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT;
             VkDependencyInfo d{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
             d.memoryBarrierCount = 1; d.pMemoryBarriers = &m;
             vkCmdPipelineBarrier2(cmd, &d);
         };
-        constexpr VkAccessFlags2 kRW = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
-        auto raw = [&barrier]()
-        {
-            barrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                    VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
-                    kRW | VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT);
-        };
-        {   // the job list empty: count 0, (0, 1, 1) workgroups (WAR: last frame's VIS read it, SELECT appended)
-            static const uint32_t kHdr[4] = {0u, 0u, 1u, 1u};
-            barrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                    VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
-            vkCmdUpdateBuffer(cmd, mPdnVis.buffer, 0, sizeof(kHdr), kHdr);
-            barrier(VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, kRW);
-        }
+        // (#1039, RenderVKVisQueue bit 8) the sun / light-sample visibility through the visibility queue
+        // (llcleanvisqueuevk.cpp THE SHADOW CORE): GEN -> WALK (+ VIS's TAIL) in place of SUNVIS + VIS, where
+        // visQueueDecide gave this recording the regions (the sun's only with every denoiser texel). Bit 8 off:
+        // exactly the commands below.
+        const bool qSun = mVqShSunNow && merged && !sunSkip && (uint64_t)mVqRegion[VQR_SHSUN].entries >= (uint64_t)dw * dh;
+        const bool qVis = mVqShVisNow;
+        if (qSun || qVis) visQueueShadowBegin(cmd, qSun, qVis);
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mPdnSelectPipe[merged ? 1 : 0]);
         vkCmdDispatch(cmd, (dw + 7u) / 8u, (dh + 7u) / 8u, 1);
         if (merged) gpuSubMark(cmd, onAsync ? "c_defer_shadowsel" : "g_defer_shadowsel");
@@ -852,21 +969,58 @@ void LLCleanRendererVK::recordProjStoch(VkCommandBuffer cmd, const VKDeferPush& 
         static LLCachedControl<bool> s_iso(gSavedSettings, "RenderVKShadowIsoLod", false);
         isoLod = s_iso;
 #endif
-        const VkPipeline sunVis = isoLod && mPdnSunVisIsoPipe ? mPdnSunVisIsoPipe : mPdnSunVisPipe;
-        const VkPipeline vis = isoLod && mPdnVisIsoPipe ? mPdnVisIsoPipe : mPdnVisPipe;
-        if (merged && !sunSkip)
+        // (#1128: the hang beacon's twins while RenderVKRTHangBeacon is on)
+        const VkPipeline sunVis = rtBcPipe(isoLod && mPdnSunVisIsoPipe ? mPdnSunVisIsoPipe : mPdnSunVisPipe);
+        const VkPipeline vis = rtBcPipe(isoLod && mPdnVisIsoPipe ? mPdnVisIsoPipe : mPdnVisPipe);
+        // (#1039 M6, RenderVKVisQueue bit 16) the lighting chain collects producers: GEN here, the walks in the
+        // frame walk, SHADE + the denoiser after it (llcleanvisqueuevk.cpp THE FRAME WALK)
+        const bool m6 = (qSun || qVis) && mVqM6Collect && !mVqM6Walk[VQC_SHADOW] && !mVqM6Post[VQC_SHADOW];
+        if (m6)
         {
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, sunVis);
-            vkCmdDispatch(cmd, (dw + 7u) / 8u, (dh + 7u) / 8u, 1);
-            gpuSubMark(cmd, onAsync ? "c_defer_shadowsun" : "g_defer_shadowsun");
+            const bool sunQ = merged && !sunSkip;
+            visQueueShadowGen(cmd, rp, dw, dh, sunQ, qSun, qVis, merged, onAsync, sunVis, vis);
+            const VkPipeline shade = mPdnShadePipe;
+            visQueueM6Defer(VQC_SHADOW,
+                [this, rp, sunQ, qSun, qVis, isoLod, merged, onAsync](VkCommandBuffer c)
+                { visQueueShadowWalk(c, rp, sunQ, qSun, qVis, isoLod, merged, onAsync, false); },
+                [this, rp, p, viewOff, rtSet, sunQ, qSun, qVis, onAsync, shade, merged, sunSkip, bleed, rsRes, oneRay](VkCommandBuffer c)
+                {
+                    // (after the frame walk's barrier: the RT layout's sets again -- other consumers ran between)
+                    const VkDescriptorSet s5[5] = {mDsetDraw0, mDsetDraw1, mDsetDefer, mDsetDeferSplit, rtSet};
+                    vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_COMPUTE, mRtReflLayout, 0, 5, s5, 1, &viewOff);
+                    visQueueShadowFinish(c, rp, sunQ, qSun, qVis);   // (the counters; SHADE's push)
+                    recordProjStochTail(c, p, viewOff, onAsync, shade, merged, sunSkip, bleed, rsRes, oneRay);
+                });
+            return;
         }
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, vis);
-        vkCmdDispatchIndirect(cmd, mPdnVis.buffer, 4u);   // (one thread per gated light sample, 64 per workgroup)
-        if (merged) gpuSubMark(cmd, onAsync ? "c_defer_shadowvis" : "g_defer_shadowvis");
-        else        gpuSubMark(cmd, onAsync ? "c_defer_pstochvis" : "g_defer_pstochvis");
+        if (qSun || qVis)
+            visQueueShadowCore(cmd, rp, dw, dh, merged && !sunSkip, qSun, qVis, isoLod, merged, onAsync, sunVis, vis);
+        else
+        {
+            if (merged && !sunSkip)
+            {
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, sunVis);
+                vkCmdDispatch(cmd, (dw + 7u) / 8u, (dh + 7u) / 8u, 1);
+                gpuSubMark(cmd, onAsync ? "c_defer_shadowsun" : "g_defer_shadowsun");
+            }
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, vis);
+            vkCmdDispatchIndirect(cmd, mPdnVis.buffer, 4u);   // (one thread per gated light sample, 64 per workgroup)
+            if (merged) gpuSubMark(cmd, onAsync ? "c_defer_shadowvis" : "g_defer_shadowvis");
+            else        gpuSubMark(cmd, onAsync ? "c_defer_pstochvis" : "g_defer_pstochvis");
+        }
         raw();
         pipe = mPdnShadePipe;
     }
+    recordProjStochTail(cmd, p, viewOff, onAsync, pipe, merged, sunSkip, bleed, rsRes, oneRay);
+}
+
+// recordProjStoch from its last kernel on (SHADE / the fused pass, the ReSTIR counters, the denoiser, the split
+// layout re-bound) -- a function of its own so the M6 frame walk can record it after the walks.
+void LLCleanRendererVK::recordProjStochTail(VkCommandBuffer cmd, const VKDeferPush& p, uint32_t viewOff, bool onAsync,
+                                            VkPipeline pipe, bool merged, bool sunSkip, uint32_t bleed, uint32_t rsRes,
+                                            uint32_t oneRay)
+{
+    const uint32_t dw = mPdn->width(), dh = mPdn->height();
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
     vkCmdDispatch(cmd, (dw + 7u) / 8u, (dh + 7u) / 8u, 1);
     if (merged) gpuSubMark(cmd, onAsync ? "c_defer_shadowmerge" : "g_defer_shadowmerge");
@@ -899,6 +1053,23 @@ void LLCleanRendererVK::recordProjStoch(VkCommandBuffer cmd, const VKDeferPush& 
     dp.raw = rrRawSignal(kRrRawProj, mPdn->width(), mPdn->height());
     dp.rawSun = rrRawSignal(kRrRawMergedSun, mPdn->width(), mPdn->height());
     dp.info = bleed != 0u;   // (the producer flags no-information texels with PDN_OPT_BLEED)
+    // (#1038) DISOCCLUSION: the GI denoiser's young-history rules for the local-light shadows too (an
+    // avatar walking out from behind a wall restarted its ReSTIR DI / projector shadow ratio from one
+    // ray, with only the plain a-trous): the history fix (RenderVKDenoiseDisoccFix frames), the young-
+    // texel boost and the moving-surface depth tolerance. The split lights' own channel keeps its rules.
+    {
+        U32 dfix = 4;
+        bool yboost = true, mztol = true;
+#if defined(LL_HAS_CLEAN_PIPELINE)
+        static LLCachedControl<U32>  s_dfix(gSavedSettings, "RenderVKDenoiseDisoccFix", 4U);
+        static LLCachedControl<bool> s_yboost(gSavedSettings, "RenderVKDenoiseYoungBoost", true);
+        static LLCachedControl<bool> s_mztol(gSavedSettings, "RenderVKDenoiseMovingDepthTol", true);
+        dfix = s_dfix; yboost = s_yboost; mztol = s_mztol;
+#endif
+        dp.histFix = std::min<U32>(dfix, 7u);
+        dp.youngBoost = yboost;
+        dp.moveZTol = mztol;
+    }
     // (#869 / #85) a ReSTIR-converged diffuse takes RenderVKReSTIRDenoiseIters a-trous iterations
     {
         U32 convIt = 1;
@@ -1221,12 +1392,18 @@ void LLCleanRendererVK::pointShadowMapSelect(const LLVKWorldFrame& wf)
 
 // ======================= ReSTIR DI STATS (#869 Phase 5) =======================
 // After pass 15 (a ReSTIR frame): harvest this ring slot's copy from 3 frames ago, then copy this
-// frame's counters (the grid header's rs_stat: the build's + pass 15's) into it. GPU timers on only
-// (the line is logged with them); bounded: 3 x 32 B.
+// frame's counters (the grid header's rs_stat: the build's + pass 15's) into it. GPU timers on (the line
+// is logged with them), or (#1108) the emissive build on: its WHOLE-GRID GATHER note reads the same words
+// (never a wait: the copy is 3 frames old). Bounded: 3 slots of a few hundred bytes.
 void LLCleanRendererVK::rsStatsRecord(VkCommandBuffer cmd)
 {
     VkMemScope memcat(VKMEM_READBACK);   // #407
-    if (!mTsOn || !mRegir.buffer || !mCtx) return;
+    if (!mRegir.buffer || !mCtx) return;
+    if (!mTsOn && !mRsEmNow)
+    {   // (nothing to read: the slots' copies would be stale when the ring restarts)
+        mRsStatUsed[0] = mRsStatUsed[1] = mRsStatUsed[2] = false;
+        return;
+    }
     const uint32_t slot = mRsStatSlot;
     mRsStatSlot = (mRsStatSlot + 1u) % 3u;
     // (rs_stat + rs_em: contiguous in the header; + #91 rs_em_stat and rs_em_take_cfg and #986 rs_em_cache,
@@ -1237,7 +1414,7 @@ void LLCleanRendererVK::rsStatsRecord(VkCommandBuffer cmd)
     constexpr VkDeviceSize kBytesC = 8u;   // (#986 LONG CELLS: their count, the longest list -- kRsEmLongOffset)
     constexpr VkDeviceSize kBytesD = kRsOccStatBytes;   // (#869 OCCLUSION CULL: OCC_STAT_WORDS -- kRegirOccOffset)
     constexpr VkDeviceSize kBytesE = 32u;   // (#1006 INCREMENTAL CELLS: EM_CCH_STAT, 4 x 8 B -- kRsEmCchStatOffset)
-    constexpr VkDeviceSize kBytesF = 32u;   // (#1009 CLUSTER STATICS + SKIP DIAGNOSTIC: CC_HDR [41..44] -- kRsEmCchClusterOffset)
+    constexpr VkDeviceSize kBytesF = 40u;   // (#1009 CLUSTER STATICS + SKIP DIAGNOSTIC + EM_CCH_OUT: CC_HDR [41..45] -- kRsEmCchClusterOffset)
     constexpr VkDeviceSize kBytes = kBytesA + kBytesB + kBytesC + kBytesD + kBytesE + kBytesF;
     static_assert(offsetof(RegirHeader, rs_em) == offsetof(RegirHeader, rs_stat) + sizeof(RegirHeader::rs_stat),
                   "rs_stat / rs_em contiguous");
@@ -1246,6 +1423,60 @@ void LLCleanRendererVK::rsStatsRecord(VkCommandBuffer cmd)
     static_assert(offsetof(RegirHeader, rs_em_cache) == offsetof(RegirHeader, rs_em_take_cfg) + sizeof(RegirHeader::rs_em_take_cfg),
                   "rs_em_take_cfg / rs_em_cache contiguous");
     if (mRsStatUsed[slot] && mRsStatRb.mapped)
+    {   // (#1108) THE WHOLE-GRID GATHER NOTE (clean_regir.glsl GATHER): that build's cells were built without the
+        // cell lists -- the pairs passed the cap (rs_em_cache.w EM_C_GATHER), or the lists were off by setting
+        const uint32_t* s = reinterpret_cast<const uint32_t*>(static_cast<const uint8_t*>(mRsStatRb.mapped)
+                                                               + (size_t)slot * kBytes);
+        const bool emBuilt = s[8 + 2] != 0u;   // (rs_em.z: the triangle cap, written while the build runs)
+        const bool overflow = emBuilt && mRsStatLists[slot] && (s[20 + 3] & 1u) != 0u;
+        const bool bySetting = emBuilt && !mRsStatLists[slot];
+        if (overflow || (bySetting && !mRsEmGatherSetLogged))
+        {
+            ++mRsEmGatherN;
+            const double now = pdnClock();
+            if (bySetting || now - mRsEmGatherLogT >= kRsEmGatherLogSecs)
+            {
+                LL_INFOS("Vulkan") << "emissive light grid: WHOLE-GRID GATHER build ("
+                                   << (overflow ? "the cell candidate pairs passed the cap"
+                                                : "RenderVKReSTIREmissiveCellLists 0")
+                                   << "): " << mRsEmGatherN << " such build(s) since the last note; this one: emitters "
+                                   << (s[8 + 3] >> 1) << ", triangle records " << std::min(s[8], s[8 + 2]) << " / cap "
+                                   << s[8 + 2] << " (skipped or dropped " << s[8 + 1] << "), cell candidate pairs "
+                                   << s[20 + 2] << " / cap " << kRsEmPairCap << "; cells built "
+                                   << (overflow && mRsStatLong[slot]
+                                           ? "a workgroup per cell (mode 9)"
+                                           : "a lane per cell (mode 7; RenderVKReSTIREmissiveLongCells 0 or the lists off)")
+                                   << LL_ENDL;
+                if (bySetting) mRsEmGatherSetLogged = true;
+                else mRsEmGatherLogT = now;
+                mRsEmGatherN = 0;
+            }
+        }
+        if (mRsEmListsNow) mRsEmGatherSetLogged = false;   // (the setting back on: a later switch-off is noted again)
+        // (clean_regir.glsl SUBSET STRIDE) the rest's stride (rs_em_take_cfg.w): a STEP re-subsets every emitter at
+        // once (records rebuilt, emissive reservoirs rejected, cells forced) -- noted, at most a line per
+        // kRsEmStrideLogSecs with the steps since the last one
+        const uint32_t stride = emBuilt ? s[16 + 3] : 0u;
+        if (stride != 0u)
+        {
+            if (mRsEmStrideLast != 0u && stride != mRsEmStrideLast)
+            {
+                ++mRsEmStrideSteps;
+                const double now = pdnClock();
+                if (now - mRsEmStrideLogT >= kRsEmStrideLogSecs)
+                {
+                    LL_INFOS("Vulkan") << "emissive light build: subset stride " << mRsEmStrideLast << " -> " << stride
+                                       << " (" << mRsEmStrideSteps << " step(s) since the last note): triangle records "
+                                       << std::min(s[8], s[8 + 2]) << " / cap " << s[8 + 2] << ", skipped or dropped "
+                                       << s[8 + 1] << ", emitters " << (s[8 + 3] >> 1) << LL_ENDL;
+                    mRsEmStrideLogT = now;
+                    mRsEmStrideSteps = 0;
+                }
+            }
+            mRsEmStrideLast = stride;
+        }
+    }
+    if (mRsStatUsed[slot] && mRsStatRb.mapped && mRsStatTs[slot] && mTsOn)
     {
         const uint32_t* s = reinterpret_cast<const uint32_t*>(static_cast<const uint8_t*>(mRsStatRb.mapped)
                                                                + (size_t)slot * kBytes);
@@ -1288,6 +1519,8 @@ void LLCleanRendererVK::rsStatsRecord(VkCommandBuffer cmd)
                 mRsStatAcc.emFull += x[7];
                 mRsStatAcc.emClInst += x[8];   // (#1009: CC_HDR [41..44], right after EM_CCH_STAT -- kBytesF)
                 mRsStatAcc.emClTri += x[9];
+                mRsStatAcc.emOutInst += x[16];   // (CC_HDR [45], after the skip words [42..44])
+                mRsStatAcc.emOutTri += x[17];
                 if (mRsStatSkip[slot])
                 {
                     for (int k = 0; k < 5; ++k) mRsStatAcc.emSkip[k] += x[10 + k];
@@ -1339,6 +1572,8 @@ void LLCleanRendererVK::rsStatsRecord(VkCommandBuffer cmd)
     if (mRsEmListsNow) cc[nc++] = c[5];
     vkCmdCopyBuffer(cmd, mRegir.buffer, mRsStatRb.buffer, nc, cc);
     mRsStatLists[slot] = mRsEmListsNow;
+    mRsStatLong[slot] = mRsEmLongNow;
+    mRsStatTs[slot] = mTsOn;
     mRsStatInc[slot] = mRsEmListsNow;
     mRsStatSkip[slot] = mRsEmListsNow && mRsEmSkipNow;
     mRsStatOcc[slot] = mRsOccNow;
@@ -1402,7 +1637,10 @@ std::string LLCleanRendererVK::rsStatsText()
                // (#1009 CLUSTER STATICS, clean_regir.glsl: statics traced on their cluster RT cut, emitting through
                //  their legacy row -- of the emitters above, and their triangles before the cap)
                << "; cluster-LOD statics among them (RenderVKReSTIREmissiveClusterStatic): emitters "
-               << a.emClInst * xf << ", their triangles " << std::setprecision(0) << a.emClTri * xf;
+               << a.emClInst * xf << ", their triangles " << std::setprecision(0) << a.emClTri * xf
+               // (mode 0: emitters whose reach misses the grid's outermost level -- not listed, not in the cap)
+               << "; emitters outside the grid (not listed, not in the triangle cap)/frame " << std::setprecision(1)
+               << a.emOutInst * xf << ", their triangles " << std::setprecision(0) << a.emOutTri * xf;
             if (a.emSkipFrames)
             {   // (#1009 SKIP DIAGNOSTIC, RenderVKReSTIREmissiveSkipStats: emitting instances left out, by why)
                 const double sf = 1.0 / a.emSkipFrames;
@@ -1518,12 +1756,13 @@ bool LLCleanRendererVK::shadowMergeWanted(bool needImages) const
     bool defer = true;
 #if defined(LL_HAS_CLEAN_PIPELINE)
     static LLCachedControl<U32>  s_merge(gSavedSettings, "RenderVKRTShadowMerge", 1U);
-    static LLCachedControl<U32>  s_stoch(gSavedSettings, "RenderVKProjStochastic", 0U);
+    static LLCachedControl<U32>  s_stoch(gSavedSettings, "RenderVKProjStochastic", 1U);
     static LLCachedControl<bool> s_defer(gSavedSettings, "RenderVKDeferredLighting", true);
     merge = s_merge; stoch = s_stoch; defer = s_defer;
 #endif
     split = deferSplitMode();   // (#824: RenderVKDeferredSplit 2 = auto per GPU class)
-    if (merge == 0u || stoch == 0u || split == 0u || !defer || mOffscreen) return false;
+    // (#1075: stereo frames light forward -- the merged pass is deferred-only)
+    if (merge == 0u || stoch == 0u || split == 0u || !defer || mOffscreen || stereoActive()) return false;
     if (!mSunRtNow || mProjMode != 2u || (mProjRecords == 0u && !(mRsMode != 0u && mRsSetN > 0u) && !rsEmLightWanted()))
         return false;
     if (!mPdn || !mPdnMergePipe || !mPdnSamplePipe || !mRtReflLayout || !mPdn->pipelinesReady() || !mDeferSplitOk
@@ -1553,7 +1792,13 @@ void LLCleanRendererVK::shadowMergeSunState()
     tmin = s_min; soft = s_soft;
 #endif
     const float* lc = &mAtmos[2 * 4];
-    const float lum = (0.2126f * lc[0] + 0.7152f * lc[1] + 0.0722f * lc[2]) * std::max(mAtmos[12 * 4 + 2], 0.f);
+    float lum = (0.2126f * lc[0] + 0.7152f * lc[1] + 0.0722f * lc[2]) * std::max(mAtmos[12 * 4 + 2], 0.f);
+    // <GMDX> Physical night (gmdxnightlight.h THE NIGHT'S AMBIENT): the moon is dimmed, and so is the
+    // ambient it is seen against (atmos[6].z = 2 - amb; the exposure lifts both). Its shadow shows
+    // by that ratio, so the light is measured against the ambient: as bright as it would be with
+    // Second Life's ambient (sRGB-ish space, as the colour). 1 by day and with physical night off.
+    const float night_amb = std::clamp(2.f - mAtmos[6 * 4 + 2], 1e-4f, 1.f);
+    if (night_amb < 1.f) lum *= std::pow(1.f / night_amb, 1.f / 2.4f);
     float w = 1.f;
     if (tmin > 0.f)
     {
@@ -1653,11 +1898,22 @@ void LLCleanRendererVK::shadowPathLog()
 void LLCleanRendererVK::recordShadowMergeFirst(VkCommandBuffer cmd, const VKDeferPush& p, uint32_t viewOff, bool onAsync)
 {
     recordProjStoch(cmd, p, viewOff, onAsync);
-    VkMemoryBarrier2 m{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
-    m.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT; m.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
-    m.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-    m.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
-    VkDependencyInfo d{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
-    d.memoryBarrierCount = 1; d.pMemoryBarriers = &m;
-    vkCmdPipelineBarrier2(cmd, &d);
+    auto barrier = [](VkCommandBuffer c)
+    {
+        VkMemoryBarrier2 m{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+        m.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT; m.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+        m.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        m.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+        VkDependencyInfo d{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        d.memoryBarrierCount = 1; d.pMemoryBarriers = &m;
+        vkCmdPipelineBarrier2(c, &d);
+    };
+    if (mVqM6Post[VQC_SHADOW])
+    {
+        // (#1039 M6: the pass's SHADE + denoiser were deferred past the frame walk -- the barrier follows them)
+        std::function<void(VkCommandBuffer)> inner = std::move(mVqM6Post[VQC_SHADOW]);
+        mVqM6Post[VQC_SHADOW] = [inner, barrier](VkCommandBuffer c) { inner(c); barrier(c); };
+        return;
+    }
+    barrier(cmd);
 }

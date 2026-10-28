@@ -203,6 +203,7 @@ public:
         ANIM_DATA_WALK_SPEED,           // "Walk Speed"
         ANIM_DATA_SPEED,                // "Speed"
         ANIM_DATA_DOWN_FOOT,            // "Down Foot"
+        ANIM_DATA_LOOK_AT_ROLL,         // "LookAtRoll" (#1121): F32 radians, the head's tilt about its look axis
         ANIM_DATA_COUNT
     };
     void setAnimationData(EAnimData slot, void* data) { mAnimDataSlots[slot] = data; }

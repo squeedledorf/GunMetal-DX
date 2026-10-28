@@ -18,6 +18,12 @@
 // from the blocker distance, + the receiver's depth plane); clean_rt_mask_temporal.comp
 // accumulates it and clean_rt_mask_spatial.comp blurs the penumbrae into the final mask
 // (layout: clean_rt_mask_common.glsl).
+// #1075 LAYERED STEREO: a stereo frame's mask is one layer per view, traced in one dispatch with z = N
+// (clean_view.glsl CLEAN_VIEW_Z; folded to view 0 on the desktop pipeline). clean_rt_mask_common.glsl
+// RT_MASK_L / RT_MASK_PL: the layer of this view (projector slot s: view x 4 + s).
+#define CLEAN_VIEW CLEAN_VIEW_Z
+#define RT_MASK_L int(CLEAN_VIEW)
+#define RT_MASK_PL(s) (int(CLEAN_VIEW) * 4 + (s))
 layout(local_size_x = 8, local_size_y = 8) in;
 
 #include "clean_lights_common.glsl"
@@ -38,23 +44,23 @@ layout(set = 1, binding = 0) uniform sampler2D uTextures[];
 #include "clean_projshadow.glsl"
 #include "clean_shadow_rt.glsl"
 
-layout(set = 3, binding = 0) uniform sampler2D uDepth;                       // pre-pass depth (NEAREST)
-layout(set = 3, binding = 3, rgba16ui) writeonly uniform uimage2D uIdsOut;
-layout(set = 3, binding = 4, r32f) writeonly uniform image2D uDepthOut;      // view depth (32-bit)
-layout(set = 3, binding = 21, rgba16f) writeonly uniform image2D uGradOut;   // d(vz)/dx, d(vz)/dy, flags
+layout(set = 3, binding = 0) uniform sampler2DArray uDepth;                       // pre-pass depth (NEAREST)
+layout(set = 3, binding = 3, rgba16ui) writeonly uniform uimage2DArray uIdsOut;
+layout(set = 3, binding = 4, r32f) writeonly uniform image2DArray uDepthOut;      // view depth (32-bit)
+layout(set = 3, binding = 21, rgba16f) writeonly uniform image2DArray uGradOut;   // d(vz)/dx, d(vz)/dy, flags
 // Last frame's accumulated mask: only the (optional) ray-skipping hint reads it here.
-layout(set = 3, binding = 5) uniform sampler2D uHistSun;
+layout(set = 3, binding = 5) uniform sampler2DArray uHistSun;
 layout(set = 3, binding = 6) uniform sampler2DArray uHistProj;
-layout(set = 3, binding = 7) uniform usampler2D uHistIds;
-layout(set = 3, binding = 8) uniform sampler2D uHistDepth;
-layout(set = 3, binding = 9) uniform sampler2D uHistMeta;      // (#771: clean_rt_mask_cache.glsl)
-layout(set = 3, binding = 22) uniform sampler2D uHistDepthG;   // history depth gradient + flags
+layout(set = 3, binding = 7) uniform usampler2DArray uHistIds;
+layout(set = 3, binding = 8) uniform sampler2DArray uHistDepth;
+layout(set = 3, binding = 9) uniform sampler2DArray uHistMeta;      // (#771: clean_rt_mask_cache.glsl)
+layout(set = 3, binding = 22) uniform sampler2DArray uHistDepthG;   // history depth gradient + flags
 // #771 STATIC CARRY: a carried block copies the history slot's accumulation / meta into
 // this frame's slot (the temporal pass skips it; clean_rt_mask_cache.glsl rcCarried).
-layout(set = 3, binding = 12, rgba16f) writeonly uniform image2D uCarryAccSun;
-layout(set = 3, binding = 14, rgba16f) writeonly uniform image2D uCarryMeta;
-layout(set = 3, binding = 1, rgba8) uniform image2D uCarryFinal;   // (its alpha: the TAA reactive)
-layout(set = 3, binding = 10, rgba8) writeonly uniform image2D uRawSun;
+layout(set = 3, binding = 12, rgba16f) writeonly uniform image2DArray uCarryAccSun;
+layout(set = 3, binding = 14, rgba16f) writeonly uniform image2DArray uCarryMeta;
+layout(set = 3, binding = 1, rgba8) uniform image2DArray uCarryFinal;   // (its alpha: the TAA reactive)
+layout(set = 3, binding = 10, rgba8) writeonly uniform image2DArray uRawSun;
 layout(set = 3, binding = 11, rgba8) writeonly uniform image2DArray uRawProj;
 
 #include "clean_rt_mask_common.glsl"
@@ -79,7 +85,7 @@ bool rtMaskHistory(vec3 P, ivec2 rp, out ivec2 hp)
     if (!rtMaskPrevPx(P, rp, prpx, pw)) return false;
     hp = ivec2(floor(prpx * rtMaskScale()));
     if (any(lessThan(hp, ivec2(0))) || any(greaterThanEqual(hp, ivec2(mp.dims.zw)))) return false;
-    const float hd = texelFetch(uHistDepth, hp, 0).r;
+    const float hd = texelFetch(uHistDepth, ivec3(hp, RT_MASK_L), 0).r;
     return hd > 0.0 && abs(hd - pw) < max(pw * 0.03, 0.05);
 }
 
@@ -124,10 +130,10 @@ float rtMaskHint(vec3 h)
 // interiors and a probe miss stay as before); false = neither side is on the plane.
 bool maskTangent(ivec2 rp, ivec2 o, vec2 cpx, float d, vec3 P, float dtol, ivec2 mx, out vec3 t)
 {
-    const float dn1 = texelFetch(uDepth, clamp(rp - o, ivec2(0), mx), 0).r;
-    const float dp1 = texelFetch(uDepth, clamp(rp + o, ivec2(0), mx), 0).r;
-    const float dn2 = texelFetch(uDepth, clamp(rp - 2 * o, ivec2(0), mx), 0).r;
-    const float dp2 = texelFetch(uDepth, clamp(rp + 2 * o, ivec2(0), mx), 0).r;
+    const float dn1 = texelFetch(uDepth, ivec3(clamp(rp - o, ivec2(0), mx), RT_MASK_L), 0).r;
+    const float dp1 = texelFetch(uDepth, ivec3(clamp(rp + o, ivec2(0), mx), RT_MASK_L), 0).r;
+    const float dn2 = texelFetch(uDepth, ivec3(clamp(rp - 2 * o, ivec2(0), mx), RT_MASK_L), 0).r;
+    const float dp2 = texelFetch(uDepth, ivec3(clamp(rp + 2 * o, ivec2(0), mx), RT_MASK_L), 0).r;
     const float sp = abs(dp1 - d), sn = abs(d - dn1);
     const float tol = dtol + 0.125 * min(sp, sn);
     const float ep = abs(d - 2.0 * dp1 + dp2), en = abs(d - 2.0 * dn1 + dn2);
@@ -224,14 +230,14 @@ float maskTerrainExit(vec3 P, vec3 cam, vec3 Ng)
 // #747 interim CLUSTER LOD RECEIVER LIFT: clean_rt_receiver.glsl rtClusterRigLift (#1048: the one copy).
 #include "clean_rt_receiver.glsl"
 
-void storeIds(ivec2 mpx, uvec4 ids) { imageStore(uIdsOut, mpx, ids); }
+void storeIds(ivec2 mpx, uvec4 ids) { imageStore(uIdsOut, ivec3(mpx, RT_MASK_L), ids); }
 // d = (view depth, d/dx, d/dy, flags): depth stays 32-bit; the gradients clamp inside
 // fp16 range (a grazing receiver's step can exceed 65504 m / px) and the flags are an
 // exact integer < 2048 (fp16 holds those exactly).
 void storeDepth(ivec2 mpx, vec4 d)
 {
-    imageStore(uDepthOut, mpx, vec4(d.x));
-    imageStore(uGradOut, mpx, vec4(clamp(d.yz, vec2(-60000.0), vec2(60000.0)), d.w, 0.0));
+    imageStore(uDepthOut, ivec3(mpx, RT_MASK_L), vec4(d.x));
+    imageStore(uGradOut, ivec3(mpx, RT_MASK_L), vec4(clamp(d.yz, vec2(-60000.0), vec2(60000.0)), d.w, 0.0));
 }
 
 // Radical inverse of i in base b (Halton; #841 footprint jitter, i in 1..16).
@@ -274,34 +280,36 @@ void main()
         // #771 STATIC CARRY (the camera did not move, no ray-traced projector): last frame's
         // outputs ARE this frame's -- copied into this frame's history slot; raw = the
         // class value (the 3x3 of traced neighbours reads it, as in the reuse path).
-        const vec4 ha = texelFetch(uHistSun, mpx, 0);
-        imageStore(uCarryAccSun, mpx, ha);
-        imageStore(uCarryMeta, mpx, texelFetch(uHistMeta, mpx, 0));
-        storeIds(mpx, texelFetch(uHistIds, mpx, 0));
-        imageStore(uDepthOut, mpx, vec4(texelFetch(uHistDepth, mpx, 0).x));
-        imageStore(uGradOut, mpx, texelFetch(uHistDepthG, mpx, 0));
+        const vec4 ha = texelFetch(uHistSun, ivec3(mpx, RT_MASK_L), 0);
+        imageStore(uCarryAccSun, ivec3(mpx, RT_MASK_L), ha);
+        imageStore(uCarryMeta, ivec3(mpx, RT_MASK_L), texelFetch(uHistMeta, ivec3(mpx, RT_MASK_L), 0));
+        storeIds(mpx, texelFetch(uHistIds, ivec3(mpx, RT_MASK_L), 0));
+        imageStore(uDepthOut, ivec3(mpx, RT_MASK_L), vec4(texelFetch(uHistDepth, ivec3(mpx, RT_MASK_L), 0).x));
+        imageStore(uGradOut, ivec3(mpx, RT_MASK_L), texelFetch(uHistDepthG, ivec3(mpx, RT_MASK_L), 0));
         const uint c = rcClass(ha.rgb, rc_f0.x);
-        imageStore(uRawSun, mpx, vec4(c == 1u ? vec3(1.0) : (c == 2u ? vec3(0.0) : rtFiniteVis(ha.rgb)),
+        imageStore(uRawSun, ivec3(mpx, RT_MASK_L), vec4(c == 1u ? vec3(1.0) : (c == 2u ? vec3(0.0) : rtFiniteVis(ha.rgb)),
                                       rtEncR((isnan(ha.a) || isinf(ha.a)) ? -1.0 : ha.a)));
         // last frame's final stays; its shading-change (reactive) alpha does not carry over
-        imageStore(uCarryFinal, mpx, vec4(imageLoad(uCarryFinal, mpx).rgb, 0.0));
+        imageStore(uCarryFinal, ivec3(mpx, RT_MASK_L), vec4(imageLoad(uCarryFinal, ivec3(mpx, RT_MASK_L)).rgb, 0.0));
         return;
     }
     // Render pixel this mask texel stands for. Below full resolution the sample point
     // moves around the texel's footprint with the TAA jitter (rtMaskJitter), so TAA
     // integrates a different real sample per pixel each frame instead of a static block.
     const ivec2 rp = rtMaskRenderPx(mpx);
-    const float d = texelFetch(uDepth, rp, 0).r;
-    if (d <= 0.0)   // sky (reversed-Z: far = 0)
+    const float d = texelFetch(uDepth, ivec3(rp, RT_MASK_L), 0).r;
+    // sky (reversed-Z: far = 0); #1075 stereo: the lens' hidden area (the XR visibility mask holds the
+    // near plane, 1.0, there: nothing visible -- no rays; folded away on one view)
+    if (d <= 0.0 || (kViewCount > 1 && d >= 1.0))
     {
-        imageStore(uRawSun, mpx, vec4(1.0, 1.0, 1.0, 0.0));
+        imageStore(uRawSun, ivec3(mpx, RT_MASK_L), vec4(1.0, 1.0, 1.0, 0.0));
         storeIds(mpx, uvec4(0u));
         storeDepth(mpx, vec4(-1.0, 0.0, 0.0, 0.0));   // (w: no moving caster)
         return;
     }
     const vec2 cpx = vec2(rp) + 0.5;
     const vec3 P = worldAt(cpx, d);
-    const vec3 cam = mp.cam_time.xyz;
+    const vec3 cam = rtMaskEye();   // (#1075: this view's eye; mp.cam_time on one view)
     const float time = mp.cam_time.w;
     const vec3 fwd = linfo.cam_fwd.xyz;
     const float vz = dot(P - linfo.cam_pos.xyz, fwd);
@@ -315,7 +323,7 @@ void main()
     ivec2 rc_hn = ivec2(0);
     uint rc_cls = 0u;
     if (reuse_mode && ssr.shadow_params.w > 1.5 && vz < ssr.shadow_clip.w && rcHistTap(P, rp, rc_hn))
-        rc_cls = rcClass(texelFetch(uHistSun, rc_hn, 0).rgb, rc_f0.x);
+        rc_cls = rcClass(texelFetch(uHistSun, ivec3(rc_hn, RT_MASK_L), 0).rgb, rc_f0.x);
     const bool sun_reuse = rc_cls != 0u;   // (a non-uniform tap: traced as usual)
     // GEOMETRIC NORMAL of the receiver (maskTangent / maskProbeNormal above): per axis the
     // depth neighbour that lies on the receiver's own plane; where neither does (a stack
@@ -397,7 +405,7 @@ void main()
         bool on = true;
         if (q != rp)
         {
-            const float dq = texelFetch(uDepth, q, 0).r;
+            const float dq = texelFetch(uDepth, ivec3(q, RT_MASK_L), 0).r;
             const vec3 Pq = dq > 0.0 ? worldAt(vec2(q) + 0.5, dq) : P + Ng * 1e30;
             on = abs(dot(Pq - P, Ng)) <= 0.05 * (length(dx) + length(dy)) + 1e-4 * length(P - cam);
         }
@@ -406,8 +414,8 @@ void main()
 
     ivec2 hp = ivec2(0);
     const bool hist = rtHintOn() && rtMaskHistory(P, rp, hp);
-    const uvec4 hids = hist ? texelFetch(uHistIds, hp, 0) : uvec4(0u);
-    const vec3 hsun = hist ? texelFetch(uHistSun, hp, 0).rgb : vec3(-1.0);
+    const uvec4 hids = hist ? texelFetch(uHistIds, ivec3(hp, RT_MASK_L), 0) : uvec4(0u);
+    const vec3 hsun = hist ? texelFetch(uHistSun, ivec3(hp, RT_MASK_L), 0).rgb : vec3(-1.0);
 
     // NO-SELF-SHADOW CHARACTERS (clean_rt_common.glsl rtSelfCandidate): the receiver's
     // character is unknown from depth alone -- resolved by a probe ray only if one of its
@@ -432,7 +440,7 @@ void main()
     {
         // #771: the class value (above) and the penumbra radius the history holds (a, -1
         // none: only the spatial filter's radius, flat over a uniform region).
-        const float ha = texelFetch(uHistSun, rc_hn, 0).a;
+        const float ha = texelFetch(uHistSun, ivec3(rc_hn, RT_MASK_L), 0).a;
         sun = rc_cls == 1u ? vec3(1.0) : vec3(0.0);
         srad = (isnan(ha) || isinf(ha)) ? -1.0 : ha;
     }
@@ -504,7 +512,7 @@ void main()
         sun = gn > 1e-3 ? vec3(clamp(gn / 0.02, 0.0, 1.0), clamp((gn - 0.02) / 0.08, 0.0, 1.0), 0.0)
                         : vec3(0.25 * dot(sun, vec3(1.0 / 3.0)));
     }
-    imageStore(uRawSun, mpx, vec4(sun, rtEncR(srad)));
+    imageStore(uRawSun, ivec3(mpx, RT_MASK_L), vec4(sun, rtEncR(srad)));
 
     // ---- ray-traced projectors (cluster order, lit FS gates) ----
     // OWN SLOTS + THE REST SLOT (clean_lights_common.glsl PROJ_MASK_REST_ID): the first 4 traced
@@ -535,6 +543,17 @@ void main()
         uint cx = min(uint(cpx.x / linfo.grid.x), GX - 1u);
         uint cy = min(uint(cpx.y / linfo.grid.y), GY - 1u);
         uint cz = (vz <= linfo.zinfo.x) ? 0u : min(uint(log(vz / linfo.zinfo.x) * linfo.zinfo.z), GZ - 1u);
+        if (kViewCount > 1)
+        {
+            // #1075 STEREO: the cluster grid is the head camera's superset of both eyes -- an eye's
+            // pixel is not its tile: project P into it (clean_draw_common.glsl mainClusterProject)
+            const vec4 hv = linfo.view * vec4(P, 1.0);
+            const float hz = max(-hv.z, 1e-3);
+            const float sx = (hv.x / hz) / max(linfo.grid.z, 1e-4), sy = (hv.y / hz) / max(linfo.grid.w, 1e-4);
+            cx = uint(clamp((sx * 0.5 + 0.5) * float(GX), 0.0, float(GX) - 1.0));
+            cy = uint(clamp((0.5 - sy * 0.5) * float(GY), 0.0, float(GY) - 1.0));
+            cz = (hz <= linfo.zinfo.x) ? 0u : min(uint(log(hz / linfo.zinfo.x) * linfo.zinfo.z), GZ - 1u);
+        }
         const uint c = (cz * GY + cy) * GX + cx;
         // Only the list's leading SHADOWED projectors (clean_lights.comp lists them first,
         // so the cluster cap never drops one while they fit; clusterShadowedLen).
@@ -594,7 +613,7 @@ void main()
             if (own)
                 for (int h = 0; h < 4; ++h)
                     if (hids[h] == li + 1u) { hslot = h; break; }
-            const vec3 hvis = hslot >= 0 ? texelFetch(uHistProj, ivec3(hp, hslot), 0).rgb : vec3(-1.0);
+            const vec3 hvis = hslot >= 0 ? texelFetch(uHistProj, ivec3(hp, RT_MASK_PL(hslot)), 0).rgb : vec3(-1.0);
             rt_vis_hint = rtMaskHint(hvis);
             rt_block_t = 1e30;
             rt_block_dyn = false;
@@ -660,7 +679,7 @@ void main()
             ++k;
         }
         for (uint j = 0u; j < k; ++j)
-            imageStore(uRawProj, ivec3(mpx, int(j)), vec4(slotV[j].rgb, rtEncR(slotV[j].a)));
+            imageStore(uRawProj, ivec3(mpx, RT_MASK_PL(int(j))), vec4(slotV[j].rgb, rtEncR(slotV[j].a)));
     }
     storeIds(mpx, ids);
     storeDepth(mpx, vec4(vz, dz, float(dyn)));

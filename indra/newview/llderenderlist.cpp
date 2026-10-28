@@ -152,6 +152,7 @@ void LLDerenderList::load()
         if ( (pEntry->isValid()) && (!findEntry(pEntry->getID())) )
             addEntry(std::move(pEntry));
     }
+    reindexNames(); // <GMDX>
 }
 
 void LLDerenderList::save() const
@@ -189,6 +190,37 @@ const LLDerenderEntry* LLDerenderList::getEntry(const LLUUID& idEntry) const
     return findEntry(idEntry);
 }
 
+// <GMDX>
+// static
+bool LLDerenderList::hasKnownName(const LLDerenderEntry* pEntry)
+{
+    static const std::string s_strUnknown = LLTrans::getString("Unknown");
+    return (!pEntry->m_strEntryName.empty()) && (s_strUnknown != pEntry->m_strEntryName);
+}
+
+void LLDerenderList::reindexNames()
+{
+    m_AttachNames.clear();
+    for (const auto& pEntry : m_Entries)
+    {
+        if ( (LLDerenderEntry::TYPE_ATTACHMENT == pEntry->getType()) && (pEntry->isPersistent()) && (pEntry->idOwner.notNull()) && (hasKnownName(pEntry.get())) )
+            m_AttachNames[pEntry->idOwner][pEntry->m_strEntryName].push_back(pEntry.get());
+    }
+}
+
+// Kill a just-matched attachment once the update or reply that brought it in has been processed.
+// Idle callbacks run after the network pump and before the frame is drawn, so it never shows.
+static void kill_derendered_on_idle(const LLUUID& idObject)
+{
+    doOnIdleOneTime([idObject]()
+        {
+            LLViewerObject* pObj = gObjectList.findObject(idObject);
+            if ( (pObj) && (!pObj->isDead()) && (LLDerenderList::instanceExists()) && (LLDerenderList::instance().isDerendered(idObject)) )
+                LLDerenderList::killObject(pObj);
+        });
+}
+// </GMDX>
+
 void LLDerenderList::addEntry(std::unique_ptr<LLDerenderEntry> pUniqueEntry)
 {
     LLDerenderEntry* pEntry = pUniqueEntry.get();
@@ -215,6 +247,9 @@ void LLDerenderList::setBlockedObject(LLDerenderEntry* pEntry, const LLUUID& idO
 
 void LLDerenderList::setRoot(LLDerenderEntry* pEntry, U64 idRegion, U32 idRootLocal)
 {
+    // <GMDX> An item-keyed attachment seen in the sim: that item id is the one (see canRematch)
+    if ( (idRootLocal) && (pEntry->isKeyedOnItem()) )
+        pEntry->m_fItemSeen = true;
     if ( (pEntry->idRegion == idRegion) && (pEntry->idRootLocal == idRootLocal) )
         return;
 
@@ -315,6 +350,8 @@ void LLDerenderList::removeEntries(const uuid_vec_t& idsEntry)
         pRegion->requestCacheMisses();
     }
 
+    if (fChanged)
+        reindexNames(); // <GMDX>
     if (fSave)
         save();
     if (fChanged)
@@ -337,6 +374,7 @@ void LLDerenderList::setPersistent(const uuid_vec_t& idsEntry, bool fPersist)
     }
     if (fChanged)
     {
+        reindexNames(); // <GMDX>
         save();
         s_ChangeSignal();
     }
@@ -442,6 +480,12 @@ bool LLDerenderList::addObjectImpl(LLViewerObject* pObj, bool fPersist, const st
         setRoot(pRawEntry, pRegion->getHandle(), pObj->getLocalID());
         collectLocals(pRawEntry, pObj);
     }
+    // <GMDX> An attachment derendered before its properties came in: ask for them (the sim still
+    // answers after the local kill) so the entry learns the name a re-rez is matched on.
+    if ( (LLDerenderEntry::TYPE_ATTACHMENT == pRawEntry->getType()) && (!hasKnownName(pRawEntry)) )
+        LLSelectMgr::getInstance()->requestObjectPropertiesViaSelect(pObj);
+    reindexNames();
+    // </GMDX>
 
     killObject(pObj);
     return true;
@@ -671,13 +715,110 @@ void LLDerenderList::onAttachmentAdded(LLVOAvatar* pAvatar, LLViewerObject* pAtt
         save();
 
     // ...and kill it once the update that created it has been fully processed
-    const LLUUID idObject = pAttachObj->getID();
-    doOnIdleOneTime([idObject]()
-        {
-            LLViewerObject* pObj = gObjectList.findObject(idObject);
-            if ( (pObj) && (!pObj->isDead()) && (LLDerenderList::instanceExists()) && (LLDerenderList::instance().isDerendered(idObject)) )
-                LLDerenderList::killObject(pObj);
-        });
+    kill_derendered_on_idle(pAttachObj->getID()); // <GMDX> shared with the name match
 }
+
+// <GMDX>
+bool LLDerenderList::wantsProperties(const LLUUID& idWearer, const LLUUID& idObject) const
+{
+    if (m_Entries.empty())
+        return false;
+
+    // Blocked: only an entry made before its name was known learns it from the reply
+    auto itId = m_BlockIds.find(idObject);
+    if (m_BlockIds.end() != itId)
+        return (LLDerenderEntry::TYPE_ATTACHMENT == itId->second->getType()) && (!hasKnownName(itId->second));
+
+    auto itOwner = m_AttachNames.find(idWearer);
+    if (m_AttachNames.end() == itOwner)
+        return false;
+    for (const auto& [strName, entries] : itOwner->second)
+    {
+        if (entries.end() != std::find_if(entries.begin(), entries.end(), &LLDerenderList::canRematch))
+            return true;
+    }
+    return false;
+}
+
+void LLDerenderList::onObjectProperties(const LLUUID& idObject, const LLUUID& idOwner, const std::string& strName)
+{
+    if ( (m_Entries.empty()) || (idObject.isNull()) || (idOwner.isNull()) || (strName.empty()) )
+        return;
+
+    // An attachment we block whose name was not known yet (derendered before its properties
+    // arrived, or an entry from before names were recorded): remember it from now on
+    auto itId = m_BlockIds.find(idObject);
+    if (m_BlockIds.end() != itId)
+    {
+        LLDerenderEntry* pEntry = itId->second;
+        if ( (LLDerenderEntry::TYPE_ATTACHMENT == pEntry->getType()) && (!hasKnownName(pEntry)) )
+        {
+            pEntry->m_strEntryName = strName;
+            if (pEntry->idOwner.isNull())
+                pEntry->idOwner = idOwner;
+            reindexNames();
+            if (pEntry->isPersistent())
+                save();
+            s_ChangeSignal();
+        }
+        return;
+    }
+
+    if (m_AttachNames.empty())
+        return;
+    auto itOwner = m_AttachNames.find(idOwner);
+    if (m_AttachNames.end() == itOwner)
+        return;
+    auto itName = itOwner->second.find(strName);
+    if (itOwner->second.end() == itName)
+        return;
+    // Several attachments of one wearer can share a name: take one whose own object is gone
+    auto itEntry = std::find_if(itName->second.begin(), itName->second.end(), &LLDerenderList::canRematch);
+    if (itName->second.end() == itEntry)
+        return;
+    LLDerenderEntry* pEntry = *itEntry;
+
+    // Only the root of an attachment the entry's owner is wearing right now (any reply lands
+    // here: a child prim or an in-world object of theirs with the same name must not match)
+    LLViewerObject* pObj = gObjectList.findObject(idObject);
+    if ( (!pObj) || (pObj->isDead()) || (!pObj->isAttachment()) || (pObj->getRootEdit() != pObj) )
+        return;
+    LLVOAvatar* pAvatar = pObj->getAvatarAncestor();
+    if ( (!pAvatar) || (pAvatar->isSelf()) || (pAvatar->getID() != idOwner) )
+        return;
+
+    // Same attachment, new identity: key the entry on what identifies it now, so the next
+    // re-wear of this item is caught by its item id on arrival, before it is ever drawn
+    const LLUUID& idItem = pObj->getAttachmentItemID();
+    const LLUUID idNewEntry = (idItem.notNull()) ? idItem : idObject;
+    if (idNewEntry != pEntry->getID())
+    {
+        if (findEntry(idNewEntry))
+            return;
+        if (pEntry->isKeyedOnItem())
+        {
+            auto itItem = m_AttachItems.find(pEntry->getID());
+            if ( (m_AttachItems.end() != itItem) && (itItem->second == pEntry) )
+                m_AttachItems.erase(itItem);
+        }
+        pEntry->m_idEntry = idNewEntry;
+        pEntry->m_fItemKey = idItem.notNull();
+        if (pEntry->m_fItemKey)
+            m_AttachItems[idItem] = pEntry;
+    }
+    setBlockedObject(pEntry, idObject);
+    if (const LLViewerJointAttachment* pAttachPt = pAvatar->getTargetAttachmentPoint(pObj))
+        pEntry->strAttachPt = pAttachPt->getName();
+    if (const LLViewerRegion* pRegion = pObj->getRegion())
+    {
+        setRoot(pEntry, pRegion->getHandle(), pObj->getLocalID());
+        collectLocals(pEntry, pObj);
+    }
+    save();
+    s_ChangeSignal();
+
+    kill_derendered_on_idle(idObject);
+}
+// </GMDX>
 
 // ============================================================================

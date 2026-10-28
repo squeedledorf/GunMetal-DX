@@ -403,15 +403,15 @@ void LLFloaterExperienceProfile::refreshExperience( const LLSD& experience )
         child = getChild<LLTextBox>(TF_PRIVILEGED);
         child->setVisible(true);
     }
-    else
+    // <GMDX> SoapStorm 45a8027a98: fetch the permission for privileged experiences too, so they
+    // can be left or blocked like any other; the privileged label still shows.
+    LLViewerRegion* region = gAgent.getRegion();
+    if (region)
     {
-        LLViewerRegion* region = gAgent.getRegion();
-        if (region)
-        {
-            LLExperienceCache::instance().getExperiencePermission(mExperienceId, boost::bind(
-                &LLFloaterExperienceProfile::experiencePermissionResults, mExperienceId, _1));
-        }
+        LLExperienceCache::instance().getExperiencePermission(mExperienceId, boost::bind(
+            &LLFloaterExperienceProfile::experiencePermissionResults, mExperienceId, _1));
     }
+    // </GMDX>
 
     value=experience[LLExperienceCache::METADATA].asString();
     if(value.empty())
@@ -475,12 +475,8 @@ void LLFloaterExperienceProfile::refreshExperience( const LLSD& experience )
 
 void LLFloaterExperienceProfile::setPreferences( const LLSD& content )
 {
-    S32 properties = mExperienceDetails[LLExperienceCache::PROPERTIES].asInteger();
-    if(properties & LLExperienceCache::PROPERTY_PRIVILEGED)
-    {
-        return;
-    }
-
+    // <GMDX> SoapStorm 45a8027a98: no early return for privileged experiences, so they show
+    // allow/block/leave like any other.
     const LLSD& experiences = content["experiences"];
     const LLSD& blocked = content["blocked"];
 

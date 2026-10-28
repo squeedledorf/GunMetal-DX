@@ -973,6 +973,18 @@
       <key>Value</key>
       <integer>0</integer>
     </map>
+    <!-- <GMDX> toolbar button clusters (gmdxtoolbarcluster.h) -->
+    <key>GMDXToolbarClusterOffsets</key>
+    <map>
+      <key>Comment</key>
+      <string>Where each centred toolbar's buttons sit along their strip, moved with the grips at the ends of the buttons: a map with "left", "right", "bottom", "top" keys, the pixels from the middle of the strip toward the top / right. A missing key: in the middle. Double-click a grip to reset it.</string>
+      <key>Persist</key>
+      <integer>1</integer>
+      <key>Type</key>
+      <string>LLSD</string>
+      <key>Value</key>
+      <map />
+    </map>
     <!-- <GMDX> loadouts (gmdxloadouts.cpp) -->
     <key>GMDXLoadoutCategories</key>
     <map>
@@ -995,6 +1007,50 @@
       <string>String</string>
       <key>Value</key>
       <string />
+    </map>
+    <key>GMDXMapShareMyGroup</key>
+    <map>
+      <key>Comment</key>
+      <string>This account's map shares and pings go to the members in its region of the group whose tag it wears (gmdxmapshare.h), and their shares are drawn on its map. With no tag worn and nobody else in Send To, sending asks for a group. Set in Preferences &gt; Combat &gt; Map Share or the mini-map's Ping &gt; Send To.</string>
+      <key>Persist</key>
+      <integer>1</integer>
+      <key>Type</key>
+      <string>Boolean</string>
+      <key>Value</key>
+      <integer>1</integer>
+    </map>
+    <key>GMDXMapShareTargetGroups</key>
+    <map>
+      <key>Comment</key>
+      <string>Groups this account keeps in its map share Send To list across logins (gmdxmapshare.h), as an array of { id, on } (on: ticked, gets shares and pings, and its members' shares are drawn). Groups added without Keep last the session. Only members in its region get anything. Set with the mini-map's Ping &gt; Send To.</string>
+      <key>Persist</key>
+      <integer>1</integer>
+      <key>Type</key>
+      <string>LLSD</string>
+      <key>Value</key>
+      <array />
+    </map>
+    <key>GMDXMapShareTargetPeople</key>
+    <map>
+      <key>Comment</key>
+      <string>People this account keeps in its map share Send To list across logins (gmdxmapshare.h), as an array of { id, on }. Their shares are drawn on its map, ticked or not; ticked, they get its shares and pings while in its region. People added without Keep last the session and are dropped once they leave the region; Always on a stranger's mark or zone adds them kept and not ticked. Set with the mini-map's Ping &gt; Send To.</string>
+      <key>Persist</key>
+      <integer>1</integer>
+      <key>Type</key>
+      <string>LLSD</string>
+      <key>Value</key>
+      <array />
+    </map>
+    <key>GMDXMapShareBlocked</key>
+    <map>
+      <key>Comment</key>
+      <string>People whose shared marks, zones and pings this account never draws (gmdxmapshare.h), as an array of avatar ids, even when they are in its Send To list or a group it sends to: their share lines stay plain chat text. Added with a shared item's right-click &quot;Block Map Shares From&quot; or Mute on a stranger's mark or zone; cleared with the mini-map's Show &gt; Unblock All Map Shares.</string>
+      <key>Persist</key>
+      <integer>1</integer>
+      <key>Type</key>
+      <string>LLSD</string>
+      <key>Value</key>
+      <array />
     </map>
     <key>GMDXFolderEquipment</key>
     <map>

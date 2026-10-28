@@ -417,6 +417,8 @@ enum : uint32_t
                                 // RT keep its cut) but not drawn / picked (mouselook)
     CLV_NO_RIGGED  = 1u << 9,   // <GMDX> main view: the avatars render type is off -- no rigged instance
                                 // is selected, so neither the rig lists nor the RT cut carry one
+    CLV_AVATARS_ONLY = 1u << 10,// <GMDX> main view: avatar matte snapshot -- statics are selected but not
+                                // drawn (as CLV_HIDE_SELF), only rigged instances are
 };
 
 // Resident cluster reference: pool slot << kClusterIndexBits | index in page.

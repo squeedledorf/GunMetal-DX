@@ -136,6 +136,18 @@ std::vector<LLAudioSplitPart> LLSoundSplitUpload::planFor(const LLAudioClip& cli
 }
 
 // static
+std::string LLSoundSplitUpload::formatPartSeconds(const LLAudioSplitPart& part)
+{
+    // Two decimals, with a trailing zero dropped: 1318590 frames -> "29.9", 544194 -> "12.34".
+    std::string out = llformat("%.2f", (double)part.mCount / (double)LLAUDIO_UPLOAD_SAMPLE_RATE);
+    if (out.size() > 3 && out.back() == '0' && out[out.size() - 3] == '.')
+    {
+        out.pop_back();
+    }
+    return out;
+}
+
+// static
 std::shared_ptr<LLSoundSplitUpload> LLSoundSplitUpload::create(const Params& params)
 {
     return std::shared_ptr<LLSoundSplitUpload>(new LLSoundSplitUpload(params));
@@ -289,7 +301,10 @@ void LLSoundSplitUpload::retryRemaining()
 std::string LLSoundSplitUpload::buildUuidList() const
 {
     // A ready-made LSL list, in clip order, for scripts that play the clips back to back.
-    std::string out = "list sounds = [\n";
+    // Every clip is clip_seconds long except the last one.
+    std::string out = "float clip_seconds = " + getClipSeconds() + ";\n";
+    out += "float last_clip_seconds = " + getLastClipSeconds() + ";\n";
+    out += "list sounds = [\n";
     for (size_t i = 0; i < mParts.size(); ++i)
     {
         out += "    \"" + mParts[i].mAssetId.asString() + "\"";
@@ -305,6 +320,8 @@ void LLSoundSplitUpload::reportDone()
     args["FILE"] = mParams.mBaseName;
     args["COUNT"] = llformat("%d", (S32)mParts.size());
     args["TOTAL"] = llformat("%d", getTotalCost());
+    args["SECONDS"] = getClipSeconds();
+    args["LAST_SECONDS"] = getLastClipSeconds();
 
     auto self = shared_from_this();
     LLNotificationsUtil::add("SoundSplitDone", args, LLSD(),

@@ -28,6 +28,7 @@
 
 #include "llappviewer.h"
 #include "llstartup.h"
+#include "fssoundemitterblacklist.h" // <GMDX>
 #include "gmdxcrashreport.h" // <GMDX>
 #include "slassetblocklist.h"
 #include "slupdatechecker.h"
@@ -40,7 +41,9 @@
 #include "slposesync.h"
 #include "fscombathitmarker.h" // <GMDX>
 #include "fsfloaterkillfeed.h" // <GMDX>
+#include "gmdxmapshare.h" // <GMDX>
 #include "gmdxweaponsorter.h" // <GMDX>
+#include "gmdxskytest.h" // <GMDX>
 #include "slgesturesets.h"
 #include "fsfavoritegroups.h"
 #include "fsgrouptitleregionmgr.h"
@@ -172,6 +175,7 @@
 #include "llurlhistory.h"
 #include "llurlwhitelist.h"
 #include "llvieweraudio.h"
+#include "llaudiodevices.h"   // #1122
 #include "llviewerassetstorage.h"
 #include "llviewercamera.h"
 #include "llviewerdisplay.h"
@@ -848,6 +852,9 @@ bool idle_startup()
                     }
 
                     gAudiop->setMuted(true);
+                    // #1122: the output device chosen in Sound preferences (nothing with the
+                    // default, "System default").
+                    LLAudioDevices::init();
                 }
                 else
                 {
@@ -1494,6 +1501,7 @@ bool idle_startup()
 
         // Finish agent initialization.  (Requires gSavedSettings, builds camera)
         gAgent.init();
+        FSSoundEmitterBlacklist::getInstance()->init(); // <GMDX> per-account permanent sound emitter blacklist
         do_startup_frame();
         gAgentCamera.init();
         do_startup_frame();
@@ -2124,6 +2132,7 @@ bool idle_startup()
         SLPoseSync::instance().init();
         FSFloaterKillFeed::init(); // <GMDX> kill feed: wears the helper only while enabled
         FSCombatHitMarker::init(); // <GMDX> hit marker: wears the helper only while enabled
+        GMDXMapShare::init(); // <GMDX> map shares: wears the helper while sending is on
         // Look-at sync (#902): rides the pose sync; sends only if enabled
         SLPoseLookAt::instance().init();
         GMDXWeaponSorter::getInstance(); // <GMDX> watches for new weapons from now on
@@ -2718,6 +2727,7 @@ bool idle_startup()
         LLAppViewer::instance()->handleLoginComplete();
 
         LLAgentPicksInfo::getInstance()->requestNumberOfPicks();
+        GMDXSkyTest::init(); // <GMDX> Sky Test: hooks its settings; --set GMDXSkyTest 1 applies here
 
         do_startup_frame();
 
