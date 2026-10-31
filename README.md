@@ -109,7 +109,7 @@ Windows toolchain setup.
 ## Credits and license
 
 GunMetal-DX is a fork of the [**Slipstream Viewer**](https://git.slipstreamviewer.org/sky_line/Slipstream) by
-backspace119 and the Slipstream contributors ([website](https://slipstreamviewer.org)). Its renderer, and most
+Sky Line and the Slipstream contributors ([website](https://slipstreamviewer.org)). Its renderer, and most
 of what is here, is their work. Each GunMetal-DX source release says which Slipstream commit it is based on.
 
 Slipstream is built on [Linden Lab's Second Life viewer](https://github.com/secondlife/viewer) and the
