@@ -128,7 +128,7 @@ bool LLImageDimensionsInfo::getImageDimensionsTga()
 bool LLImageDimensionsInfo::getImageDimensionsTiff()
 {
     // A TIFF's size lives in a directory that can sit anywhere in the file,
-    // so let the decoder read the header.
+    // so let the decoder read the header. (Ported from GunMetal-DX, squeedledorf, LGPL 2.1, v0.3.0 cf5f1f4.)
     LLPointer<LLImageTIFF> tiff = new LLImageTIFF();
     if (!tiff->load(mSrcFilename))
     {

@@ -40,17 +40,19 @@ bool view_visible(LLView* viewp)
 }
 
 
-LLPopupView::LLPopupView(const LLPopupView::Params& p)
-: LLPanel(p)
+LLPopupView::LLPopupView(const LLPopupView::Params& p, bool install_popup_funcs)
+: LLPanel(p), mInstallPopupFuncs(install_popup_funcs)
 {
     // register ourself as handler of UI popups
-    LLUI::getInstance()->setPopupFuncs(boost::bind(&LLPopupView::addPopup, this, _1), boost::bind(&LLPopupView::removePopup, this, _1), boost::bind(&LLPopupView::clearPopups, this));
+    if (mInstallPopupFuncs)
+        LLUI::getInstance()->setPopupFuncs(boost::bind(&LLPopupView::addPopup, this, _1), boost::bind(&LLPopupView::removePopup, this, _1), boost::bind(&LLPopupView::clearPopups, this));
 }
 
 LLPopupView::~LLPopupView()
 {
     // set empty callback function so we can't handle popups anymore
-    LLUI::getInstance()->setPopupFuncs(LLUI::add_popup_t(), LLUI::remove_popup_t(), LLUI::clear_popups_t());
+    if (mInstallPopupFuncs)
+        LLUI::getInstance()->setPopupFuncs(LLUI::add_popup_t(), LLUI::remove_popup_t(), LLUI::clear_popups_t());
 }
 
 void LLPopupView::draw()

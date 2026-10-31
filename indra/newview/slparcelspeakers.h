@@ -30,7 +30,7 @@
  * when its owner is the parcel owner, or it is deeded to the parcel's group, or its group is set
  * to the parcel's group (deeded or not). It must also stand on the agent's parcel or on another
  * parcel of the same owner in the same region (one ParcelPropertiesRequest per 4 m cell, with
- * our own sequence ids, tapped in LLViewerParcelMgr::processParcelProperties). Attachments never
+ * the shared LLViewerParcelMgr read-only identity service). Attachments never
  * count. A neighbour can copy the tag text but not the owner or group: those come from the sim.
  *
  * PARCEL POLICY. The parcel description may hold [slspk outside=silent|ambient]: what listeners
@@ -142,11 +142,6 @@ public:
 
     // LLSelectMgr::processObjectPropertiesFamily. true: the registry had asked for this object.
     static bool onPropertiesFamily(const LLUUID& object_id, const LLUUID& owner_id, const LLUUID& group_id);
-
-    // LLViewerParcelMgr::processParcelProperties: our parcel-by-position sequence ids.
-    static bool isSpeakerParcelSeq(S32 sequence_id);
-    static void onParcelProperties(S32 sequence_id, const LLViewerRegion* region, S32 local_id,
-                                   const LLUUID& owner_id, const LLUUID& group_id, bool group_owned);
 
     // The hover-text tag (first "[slspk" in any case, followed by a space or ']', up to the next ']').
     // false: no tag. `errors`: tokens not understood (the rest still applies).

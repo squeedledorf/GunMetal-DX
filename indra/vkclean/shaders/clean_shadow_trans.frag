@@ -41,6 +41,8 @@ layout(location = 0) out vec4 outT;
 
 void main()
 {
+    // Match the opaque shadow caster pass for retained cluster blend rows.
+    if ((v_flags & 0x00400000u) != 0u) discard;
     // Single-sided casters drop their back faces, as the opaque shadow pass does.
     if (!gl_FrontFacing && (v_flags & 256u) == 0u) discard;
     Material m = materials[v_material_id];

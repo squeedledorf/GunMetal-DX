@@ -14,6 +14,7 @@ floater (credited).
  follows="all"
  background_visible="false"
  name="panel_photo_studio_scopes">
+	<panel.string name="world_paused">Main view minimized — showing the last frame</panel.string>
 	<panel.string
 	 name="waiting">
 		Measuring...

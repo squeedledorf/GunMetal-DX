@@ -376,11 +376,13 @@ struct CullParams {
                              // probe capture (2): bit14 shared six-face pre-cull (phases 3 / 4)
                              // shadow passes (3), #567: bit15 static casters only, bit16
                              // dynamic casters only (SHADOW_SPLIT_*)
-                             // <GMDX> bit17 orthographic main view (CULL_ORTHO): u_lod_cam_pos.w
-                             // is px per metre at any depth; every LOD at its finest. Every pass
-                             // for the region map capture, the main view (and mirror / HUD) only
-                             // for the live orthographic view
-                             // <GMDX> main view (0): bit18 avatars only (avatar matte snapshot)
+                             // bit17 orthographic main view (CULL_ORTHO, the live orthographic
+                             // view; GunMetal-DX port): u_lod_cam_pos.w is px per metre at any
+                             // depth; every LOD at its finest (main view, mirror and HUD only;
+                             // every pass for the region map capture)
+                             // main view (0): bit18 avatars only (avatar matte snapshot;
+                             // GunMetal-DX port)
+                             // bit19: suppress qualified emissive world shadow casters
                              // bit31: diagnostic reject histogram on (dbgAdd; RenderVKCullDiag)
     uint  u_cache_base;      // reduced-tier skin cache arena: first vertex (pass 0)
     uint  u_cache_cap;       // its capacity in vertices (0 = cache off)
@@ -527,7 +529,7 @@ uint detailFromTan(float tan_angle)
 #define DYN_CASTER_FLAG      2097152u
 #define SHADOW_SPLIT_STATIC  32768u
 #define SHADOW_SPLIT_DYNAMIC 65536u
-#define CULL_ORTHO           131072u   // <GMDX> (C++ kCullOrtho; gmdxregioncapture.h)
+#define CULL_ORTHO           131072u   // (C++ kCullOrtho)
 bool vegIsGrass(uint id) { return instances[id].uv_matrix[3][3] < 0.0; }
 // LL's LLVOTree::idleUpdate trunk LOD (0 best) as a group level (3 best): the apparent
 // angle term (origin distance under dist_lt[j] -> trunk LOD j, else 3), capped by the
@@ -784,7 +786,7 @@ void demandAt(uint id, float dist, float diam, float scale)
     vec2 q = texDemandParams();
     float wpu = uvDensityWorld(id, q.y);
     float size = wpu > 0.0 ? wpu : diam / uvSpan(id);
-    // <GMDX> orthographic (CULL_ORTHO): the same px per metre at every depth
+    // orthographic (CULL_ORTHO): the same px per metre at every depth
     float texels = size * pc.u_lod_cam_pos.w / ((pc.u_flags & CULL_ORTHO) != 0u ? 1.0 : dist) * scale * q.x;
     demandWrite(id, uint(clamp(texels, 0.0, float(DEMAND_FULL))));
 }
@@ -1139,6 +1141,10 @@ uint cullOne(uint id, out DrawCmd c)
     // cull's pre-skinned buckets -- and no water surface (bit 11); worn rigid
     // attachments do cast.
     if (pc.u_hud_pass == 3u && ((_flags & 1u) != 0u || (_flags & 2048u) != 0u)) return 0xFFu;
+    // Per-face world emitter policy (stored bit14; no avatar rows are tagged).
+    if (pc.u_hud_pass == 3u && (pc.u_flags & 524288u) != 0u && (_flags & 16384u) != 0u
+        && (_flags & (1u | 8u | 32u | 512u | 2048u | 8192u | 65536u | 131072u | 262144u | 524288u)) == 0u)
+        return 0xFFu;
     // #567 STATIC / DYNAMIC CASTER SPLIT (cached shadow views): the static layer takes no
     // dynamic caster -- moving objects / GPU spinners (instance bit21, the ingest's mover
     // tracker) and worn rigid attachments (bit9, placed by the joint table) -- and the
@@ -1167,10 +1173,11 @@ uint cullOne(uint id, out DrawCmd c)
     // pre-skinned buckets -- the main-view rigged VS discards it instead.
     if (pc.u_hud_pass == 0u && (pc.u_flags & 1u) != 0u && (_flags & 8192u) != 0u && (_flags & 1u) == 0u)
         return 0xFFu;
-    // <GMDX> AVATAR MATTE SNAPSHOT (u_flags bit18, C++ kCullAvatarsOnly; gmdxsnapmattevk.cpp): the
-    // main view keeps avatars only -- rigged (body, mesh, animesh), worn rigid attachments, and of the
-    // flexi chains only your own (a world flexi is rigged-routed too). Shadows, probes and the mirror
-    // keep the world: it still shadows and lights the avatars.
+    // AVATAR MATTE SNAPSHOT (u_flags bit18, C++ kCullAvatarsOnly; llcleansnapmattevk.cpp): the
+    // main view keeps avatars only -- rigged (body, mesh, animesh), worn rigid attachments, and of
+    // the flexi chains only your own (a world flexi is rigged-routed too). Shadows, probes and the
+    // mirror keep the world: it still shadows and lights the avatars.
+    // Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
     if (pc.u_hud_pass == 0u && (pc.u_flags & 262144u) != 0u)
     {
         const bool flexi = (_flags & FLEXI_FLAG) != 0u;
@@ -1377,7 +1384,7 @@ uint cullOne(uint id, out DrawCmd c)
             if (_rigged)
             {
                 // The skin palette places (and scales) rigged geometry: no density.
-                // <GMDX> orthographic (CULL_ORTHO): the same px per metre at every depth
+                // orthographic (CULL_ORTHO): the same px per metre at every depth
                 const float texels = adiam * pc.u_lod_cam_pos.w / ((pc.u_flags & CULL_ORTHO) != 0u ? 1.0 : adist) / uvSpan(id) * scale
                                    * texDemandParams().x;
                 demandWrite(id, uint(clamp(texels, 0.0, float(DEMAND_FULL))));
@@ -1484,7 +1491,7 @@ uint cullOne(uint id, out DrawCmd c)
         // morphs by the main camera: level 0 has no morph). Absent level -> coarser
         // first, then finer.
         const uint _want = pc.u_hud_pass == 2u ? 0u
-            : (pc.u_flags & CULL_ORTHO) != 0u ? 3u   // <GMDX> orthographic: the finest level
+            : (pc.u_flags & CULL_ORTHO) != 0u ? 3u   // orthographic: the finest level
             : terrainLevel(terrainBoxDist(instances[id].model_matrix, instances[id].aabb_min.xyz,
                                           instances[id].aabb_max.xyz, pc.u_lod_cam_pos.xyz));
         slot_id = LOD_SENTINEL;
@@ -1505,7 +1512,7 @@ uint cullOne(uint id, out DrawCmd c)
         // (meshes get the same through the scaled lod_factor).
         const float _vdist = (pc.u_hud_pass == 2u && pc.u_probe_lod_scale > 0.0)
                            ? _dist / pc.u_probe_lod_scale : _dist;
-        uint  _level  = (pc.u_flags & CULL_ORTHO) != 0u ? 3u   // <GMDX> orthographic: the finest level
+        uint  _level  = (pc.u_flags & CULL_ORTHO) != 0u ? 3u   // orthographic: the finest level
                       : (_flags & VEG_FLAG) != 0u ? vegDetail(id, _vdist)
                                                    : detailFromTan((_lodf * _radius) / _dist);
         slot_id = lod_groups[group_id].slot[_level];

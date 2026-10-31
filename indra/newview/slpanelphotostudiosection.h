@@ -165,6 +165,10 @@ private:
     void refreshCamReadouts();
     void refreshDayCycleRow();
     void refreshSectionSwitches();
+    void setupHaze();
+    void refreshHaze();
+    void commitHazeAutomatic(size_t index);
+    void commitHazeValue(size_t index);
     void fitSections();
 
     LLHandle<LLFloater> mStudio;
@@ -184,6 +188,22 @@ private:
     std::vector<TonemapperRow> mTonemapperRows;
     boost::signals2::scoped_connection mTonemapConnection;
     boost::signals2::scoped_connection mHDRConnection;
+
+    struct HazeRow
+    {
+        const char* mSetting = nullptr;
+        LLUICtrl* mAutomatic = nullptr;
+        LLUICtrl* mValue = nullptr;
+        LLUICtrl* mReset = nullptr;
+        LLTextBox* mResolved = nullptr;
+        F32 mScale = 1.f;
+        F32 mLimit = 0.f;
+    };
+    std::array<HazeRow, 2> mHazeRows;
+    std::vector<boost::signals2::scoped_connection> mHazeConnections;
+    LLTextBox* mHazeInactive = nullptr;
+    std::vector<LLUICtrl*> mLegacyFogLightControls;
+    LLUICtrl* mMistEnable = nullptr;
 
     /// Spinner (or slider) triplets named "vec3_<Setting>_<0|1|2>".
     std::map<std::string, std::array<LLUICtrl*, 3>> mVec3Rows;

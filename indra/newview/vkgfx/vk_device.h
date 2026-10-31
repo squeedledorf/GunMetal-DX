@@ -236,6 +236,7 @@ public:
     bool savePipelineCache(const char* why);
 
     // ---- accessors ----
+    bool swapchainMaintenance() const { return mSwapchainMaintenance; }
     VkInstance instance() const { return mInstance; }
     // Debug name for validation / GPU-crash messages (VK_EXT_debug_utils; no-op
     // unless the instance enabled it, i.e. SLIPSTREAM_VK_VALIDATION).
@@ -427,7 +428,7 @@ public:
     const std::string& debugRobustnessStatus() const { return mDebugRobustStatus; }
     bool asyncComputeAvailable() const { return mComputeQueue != VK_NULL_HANDLE; }
     VkQueue computeQueue() const { return mComputeQueue; }
-    // <GMDX> instant replay: the video encode queue (null when the device has none)
+    // Instant replay: the video encode queue (null when the device has none; GunMetal-DX port)
     VkQueue encodeQueue() const { return mEncodeQueue; }
     uint32_t encodeFamily() const { return mEncodeFamily; }
     uint32_t computeFamily() const { return mComputeFamily; }
@@ -864,6 +865,8 @@ private:
     bool createLogicalDevice(bool wantSwapchain);
     VkRequirementsReport mReqReport;
     bool mApi12 = false;     // #675 (see usesApi12)
+    bool mSurfaceMaintenance = false;
+    bool mSwapchainMaintenance = false;
     bool mMaint4 = false;    // #675: VK_KHR_maintenance4 enabled on the 1.2 path
     void createPipelineCache();
     void destroyPipelineCache();
@@ -889,8 +892,8 @@ private:
     bool mComputeOnly = false;
     uint32_t mComputeTsBits = 0;
     VkQueue mComputeQueue = VK_NULL_HANDLE;
-    uint32_t mEncodeFamily = ~0u;              // <GMDX> instant replay
-    VkQueue mEncodeQueue = VK_NULL_HANDLE;     // <GMDX>
+    uint32_t mEncodeFamily = ~0u;              // instant replay (GunMetal-DX port)
+    VkQueue mEncodeQueue = VK_NULL_HANDLE;
     std::string mAsyncStatus = "off";
     std::string mAsyncDecision = "not decided";
     // RenderVKAsyncCompute -1 (auto): the per-architecture default; `reason` is the log text.

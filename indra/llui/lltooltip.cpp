@@ -543,7 +543,8 @@ void LLToolTipMgr::show(const LLToolTip::Params& params)
     if (!mToolTipsBlocked                                   // we haven't hit a key, moved the mouse, etc.
         && LLUI::getInstance()->getMouseIdleTime() > params_with_defaults.delay_time)   // the mouse has been still long enough
     {
-        bool tooltip_changed = mLastToolTipParams.message() != params_with_defaults.message()
+        bool tooltip_changed = (mToolTip && mToolTip->getParent() != gToolTipView)
+                                || mLastToolTipParams.message() != params_with_defaults.message()
                                 || mLastToolTipParams.pos() != params_with_defaults.pos()
                                 || mLastToolTipParams.time_based_media() != params_with_defaults.time_based_media()
                                 || mLastToolTipParams.web_based_media() != params_with_defaults.web_based_media();
@@ -616,6 +617,8 @@ void LLToolTipMgr::updateToolTipVisibility()
 
         return;
     }
+
+    if (mToolTip && mToolTip->getParent() != gToolTipView) return;
 
     // hide tooltips when mouse cursor is hidden
     if (LLUI::getInstance()->getWindow()->isCursorHidden())

@@ -469,7 +469,7 @@ private:
     Rate mReqRate, mReqUniqRate, mUpRate, mUpPageRate;
     uint64_t mEvictions = 0, mUploadsTotal = 0, mUploadBytesTotal = 0;
     uint64_t mStalls = 0, mReqOverflow = 0, mLoadFails = 0, mBadPages = 0;
-    uint32_t mResidentPages = 0, mResidentRoots = 0, mLiveMeshes = 0;
+    uint32_t mResidentPages = 0, mResidentRoots = 0, mActiveMeshCount = 0;
     float mUploadGpuMs = 0.f, mUploadGpuMsMax = 0.f;
     // Stall diagnostics (last frame's plan): wanted ABSENT pages not started, by reason.
     uint32_t mWantNoSource = 0, mWantBusy = 0, mWantCap = 0;

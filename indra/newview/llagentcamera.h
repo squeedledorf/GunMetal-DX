@@ -34,7 +34,6 @@
 #include "llgamecontrol.h"          // LLGameControl::FLYCAM_NUM_CHANNELS
 #include "llhudeffectlookat.h"      // EPointAtType
 #include "llhudeffectpointat.h"     // ELookAtType
-#include <boost/signals2/connection.hpp> // <SS:Skoomastream/> OTSEnabled listener
 
 class LLPickInfo;
 class LLVOAvatarSelf;
@@ -49,9 +48,6 @@ enum ECameraMode
     CAMERA_MODE_MOUSELOOK,
     CAMERA_MODE_CUSTOMIZE_AVATAR,
     CAMERA_MODE_FOLLOW,
-    // <SS:Skoomastream>
-    CAMERA_MODE_OTS          // Over-the-shoulder: mouselook input + third-person camera
-    // </SS:Skoomastream>
 };
 
 /** Camera Presets for CAMERA_MODE_THIRD_PERSON */
@@ -106,33 +102,10 @@ public:
     void            changeCameraToThirdPerson(bool animate = true);
     void            changeCameraToCustomizeAvatar(); // Trigger transition animation
     void            changeCameraToFollow(bool animate = true);  // Ventrella
-    // <SS:Skoomastream>
-    void            changeCameraToOTS(bool animate = true); // Over-the-shoulder aim mode (animate=false snaps)
-    void            changeCameraFromOTS();           // Exit OTS back to third person
-    bool            canUseOTS();                     // seat (sit camera) and RLVa camera distance rules allow OTS
-private:
-    bool            getOTSRlvMaxDistance(F32& max_dist) const; // RLVa camera distance cap that applies in OTS
-    bool            rlvAllowsOTS() const;            // the RLVa cap leaves room for a usable shoulder camera
-    LLQuaternion    getOTSFrameRotation() const;     // agent frame, plus the seat's rotation when seated
-    void            onOTSEnabledChanged(const LLSD& new_value);
-    boost::signals2::connection mOTSEnabledConnection;
-public:
-    // </SS:Skoomastream>
     bool            cameraThirdPerson() const       { return (mCameraMode == CAMERA_MODE_THIRD_PERSON && mLastCameraMode == CAMERA_MODE_THIRD_PERSON); }
-    // <SS:Skoomastream>
-    // Also true for OTS -- reuses mouselook input and UI behaviour; camera position handled separately.
-    // The mLastCameraMode guard filters the third-person->mouselook entry animation, but it must NOT
-    // exclude the OTS<->mouselook swap: during that swap mCameraMode is MOUSELOOK while
-    // mLastCameraMode is still OTS, and reporting third-person there flips the held movement keys from
-    // slide to turn (key_bindings.xml first_person=slide vs third_person=turn) -- yawing the avatar mid-swap.
-    // Treat "came from OTS" as still mouselook so the swap stays first-person input throughout.
-    bool            cameraMouselook() const         { return (mCameraMode == CAMERA_MODE_MOUSELOOK && (mLastCameraMode == CAMERA_MODE_MOUSELOOK || mLastCameraMode == CAMERA_MODE_OTS)) || mCameraMode == CAMERA_MODE_OTS; }
-    // </SS:Skoomastream>
+    bool            cameraMouselook() const         { return mCameraMode == CAMERA_MODE_MOUSELOOK && mLastCameraMode == CAMERA_MODE_MOUSELOOK; }
     bool            cameraCustomizeAvatar() const   { return (mCameraMode == CAMERA_MODE_CUSTOMIZE_AVATAR /*&& !mCameraAnimating*/); }
     bool            cameraFollow() const            { return (mCameraMode == CAMERA_MODE_FOLLOW && mLastCameraMode == CAMERA_MODE_FOLLOW); }
-    // <SS:Skoomastream>
-    bool            cameraOTS() const               { return mCameraMode == CAMERA_MODE_OTS; }
-    // </SS:Skoomastream>
     ECameraMode     getCameraMode() const           { return mCameraMode; }
     ECameraMode     getLastCameraMode() const       { return mLastCameraMode; }
     void            updateCamera();                 // Call once per frame to update camera location/orientation
@@ -183,22 +156,21 @@ public:
     const LLVector3& getCameraPositionAgent() const;
     LLVector3d      calcCameraPositionTargetGlobal(bool *hit_limit = NULL); // Calculate the camera position target
     F32             getCameraMinOffGround();        // Minimum height off ground for this mode, meters
-    void            setCameraCollidePlane(const LLVector4 &plane) { mCameraCollidePlane = plane; }
+    void            setCameraCollidePlane(const LLVector4 &plane);
     bool            calcCameraMinDistance(F32 &obj_min_distance);
     F32             getCurrentCameraBuildOffset() const { return (F32)mCameraFocusOffset.length(); }
     void            clearCameraLag() { mCameraLag.clearVec(); }
     const LLVector3& getCameraUpVector() const { return mCameraUpVector; }
+    LLVector3       getAvatarRootPosition(); // shared TPS pivot
 private:
-    LLVector3       getAvatarRootPosition();
 
     F32             mCurrentCameraDistance;         // Current camera offset from avatar
     F32             mTargetCameraDistance;          // Target camera offset from avatar
-    // <SS:Skoomastream>
-    F32             mOTSCollisionDistance;          // Smoothed OTS camera collision pull-in distance (<0 = unset)
-    // </SS:Skoomastream>
-    F32             mCameraFOVZoomFactor;           // Amount of fov zoom applied to camera when zeroing in on an object
+    F32             mCameraFOVZoomFactor;          // Amount of fov zoom applied to camera when zeroing in on an object
     F32             mCameraCurrentFOVZoomFactor;    // Interpolated fov zoom
     LLVector4       mCameraCollidePlane;            // Colliding plane for camera
+    LLVector4       mCameraCollidePlaneLatest;      // Newest plane from the sim (held back while the world is frozen)
+    U64             mCameraCollidePlaneRegion;      // Handle of the agent region mCameraCollidePlane was taken in
     F32             mCameraZoomFraction;            // Mousewheel driven fraction of zoom
     LLVector3       mCameraVirtualPositionAgent;    // Camera virtual position (target) before performing FOV zoom
     LLVector3d      mCameraSmoothingLastPositionGlobal;
@@ -214,9 +186,6 @@ public:
     bool            isfollowCamLocked();
 private:
     LLFollowCam     mFollowCam;             // Ventrella
-    // Fractional scrollCamera() clicks not yet applied to mFollowCam, whose
-    // zoom() only takes whole clicks.
-    F32             mFollowCamScrollClicks { 0.f };
 
     //--------------------------------------------------------------------
     // Flycam
@@ -365,6 +334,7 @@ public:
     void            setObjectTracking(bool track)   { mTrackFocusObject = track; }
     const LLVector3d &getFocusGlobal() const        { return mFocusGlobal; }
     const LLVector3d &getFocusTargetGlobal() const  { return mFocusTargetGlobal; }
+    const LLVector3d &getCameraFocusOffsetTarget() const { return mCameraFocusOffsetTarget; }
 private:
     LLVector3d      mCameraFocusOffset;             // Offset from focus point in build mode
     LLVector3d      mCameraFocusOffsetTarget;       // Target towards which we are lerping the camera's focus offset
@@ -423,6 +393,7 @@ public:
     F32             getTPSPitch() const { return mTPSPitch; }
     LLQuaternion    getTPSRotation() const;                     // pitch then yaw, world frame
     LLQuaternion    getTPSYawRotation() const;                  // yaw only, world frame
+    LLVector3       getTPSCameraOrigin();                     // RLVa origin reference for TPS rear framing
     LLVector3       getTPSShoulderOffset() const;               // world-space sideways offset (SlipstreamTPSShoulderOffset)
 private:
     bool            mTPSCameraEngaged = false;
@@ -440,8 +411,8 @@ public:
     void            resetCameraOrbit();
     void            resetOrbitDiff();
     void            resetCameraRoll();
-    F32             getRollAngle() const { return mRollAngle; }         // <GMDX> (camera floater 90 degree portrait)
-    void            setRollAngle(F32 radians) { mRollAngle = radians; } // <GMDX>
+    F32             getRollAngle() const { return mRollAngle; }         // (camera floater 90 degree portrait)
+    void            setRollAngle(F32 radians) { mRollAngle = radians; }
     //--------------------------------------------------------------------
     // Zoom
     //--------------------------------------------------------------------

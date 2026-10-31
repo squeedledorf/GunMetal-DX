@@ -38,7 +38,7 @@
 #include "vk_device.h"
 #include "vk_descpool.h"
 #include "vk_pipeline.h"   // PipelineJobSlot
-#include "gmdxcloudshapesvk.h"   // <GMDX>
+#include "llcleancloudshapesvk.h"   // the sculpted cloud bodies
 
 #include <cstdint>
 
@@ -63,6 +63,7 @@ public:
         bool underwater = false;                           // camera under water: no main-view composite
         bool offscreen = false;                            // snapshot: every texel, no history
         uint32_t snapSample = 0;                           // #932: a supersampled shot's recording 1..N (0 = none)
+        bool physical = false;                           // coherent camera-medium mode
         bool cameraCut = false;                            // the renderer's temporal reset this frame
     };
 
@@ -83,6 +84,7 @@ public:
     VkSampler   exportSampler() const { return mSampExport; }
     VkImageView shadowView() const    { return mShadow.view; }
     VkImageView panoView() const      { return mPano.view; }
+    VkImageView panoMeanView() const  { return mPanoMean.view; }
     // The pipelines the renderer's layouts were built for changed (a set layout re-created):
     // the caller destroys + re-creates the module.
     bool layoutsMatch(VkDescriptorSetLayout dslDraw0, VkDescriptorSetLayout dslDraw1, VkFormat hdrFormat) const
@@ -93,6 +95,7 @@ public:
 
     // CPU, every recording, before the frame-info upload. true = live this recording.
     bool prepare(const Frame& f);
+    void invalidateHistory() { mHistValid=false; }
     bool live() const { return mLive; }
     // ssr.vol_clouds (clean_frame_info.glsl): zeros unless live().
     void fillFrameInfo(float out[4][4]) const;
@@ -123,9 +126,14 @@ public:
         float inv_vp[16], reproj[16];
         float dims[4], pat[4], temporal[4];
         float flash[4];   // #783 M2: xyz unit direction to a lightning strike, w its sky radiance (0 = none)
-        float gmdx[8];    // <GMDX> gmdx_cloud_common.glsl vc.gmdx / vc.gmdx2
+        // Sculpted cloud bodies (RenderVKCloudShapes; GunMetal-DX port): x shapes loaded (0 = none),
+        // y their amount (0 = off), zw 0.
+        float bodies[4];
+        float weather_map[4];   // agent corner xy, inverse world extent, extent
+        float weather_noise[4]; // advected global corner / macro scale, inverse macro scale, reserved
+        float weather_eep[4];   // global agent-origin tile phase xy, rotated world corner phase zw
     };
-    static_assert(sizeof(Params) == 352, "Params = gmdx_cloud_common.glsl VolCloudParams (std140)");   // <GMDX> (upstream's 320 + gmdx)
+    static_assert(sizeof(Params) == 384, "Params = clean_vol_cloud_ubo.glsl VolCloudParams (std140)");
 
 private:
     bool ensurePipelines();
@@ -141,10 +149,11 @@ private:
 
     // Layouts. mDsl (compute set 1, with draw set 0 as set 0): 0 params, 1 base, 2 detail,
     // 3 weather, 4 depth, 5 / 6 march A / B, 7 / 8 history A / B (read), 9 / 10 history A / B
-    // (write), 11 shadow map, 12 panorama. mNoiseDsl: 0 the noise volume (storage). mWxDsl
+    // (write), 11 shadow map, 12 panorama, 13 the sculpted cloud bodies (mShapes). mNoiseDsl: 0
+    // the noise volume (storage). mWxDsl
     // (set 2 after draw sets 0 / 1): 0 the weather map (storage). mCompDsl (fragment): 0 params,
     // 1 depth, 2 A, 3 B.
-    GMDXCloudShapesVK mShapes;   // <GMDX> the sculpted cloud bodies (mDsl binding 13)
+    LLCleanCloudShapesVK mShapes;   // the sculpted cloud bodies (mDsl binding 13; GunMetal-DX port)
     VkDescriptorSetLayout mDsl = VK_NULL_HANDLE, mNoiseDsl = VK_NULL_HANDLE;
     VkDescriptorSetLayout mWxDsl = VK_NULL_HANDLE, mCompDsl = VK_NULL_HANDLE;
     VkDescPool       mPool;
@@ -166,7 +175,7 @@ private:
     bool             mPipeReady = false, mPipeFailed = false;
 
     // Fixed images (GENERAL for good).
-    GpuImage  mNoiseBase, mNoiseDetail, mWeather, mShadow, mPano;
+    GpuImage  mNoiseBase, mNoiseDetail, mWeather, mShadow, mPano, mPanoMean;
     GpuBuffer mParamBuf;
     bool      mNoiseDone = false;
     // Main-view targets (march resolution) + the history pair (A / B per parity).
@@ -179,19 +188,14 @@ private:
 
     // This recording (prepare -> record*).
     Params    mP{};
-    bool      mLive = false, mMainNow = false, mOffscreen = false;
+    bool      mLive = false, mMainNow = false, mOffscreen = false, mPhysical = false;
     bool      mShadowNow = false, mPanoNow = false, mTemporalNow = false, mMarchRan = false;
     VkDescriptorSet mDsetDraw0 = VK_NULL_HANDLE, mDsetDraw1 = VK_NULL_HANDLE;
     uint32_t  mGroupsX = 0, mGroupsY = 0;   // the march dispatch
     float     mVc[4][4] = {};               // ssr.vol_clouds
-    // Shadow map latch: centre, light, scroll at the refresh; frames since.
+    // Shadow map latch: centre, light, unwrapped wind metres at refresh; frames since.
     double    mShCentre[2] = {}, mShScroll[2] = {};
     float     mShLight[3] = {};
-    double    mShOrigin[2] = {};   // <GMDX> the agent frame's global origin at the refresh
-    // <GMDX> GMDXCloudWindSpeed: the extra drift (m) on top of the EEP scroll, its last scroll
-    // reading, and the drift at the shadow map's refresh.
-    double    mWindExtra[2] = {}, mWindPrevPd[2] = {}, mShWind[2] = {};
-    bool      mWindPrimed = false;
     uint32_t  mShAge = ~0u;
     bool      mShValid = false;
     // Panorama: next band, rows written since creation (valid once a full pass is in).
@@ -200,6 +204,10 @@ private:
     uint32_t  mFrame = 0;
     float     mPrevViewProjRel[16] = {};
     double    mPrevCam[3] = {};
+    double    mWindShift[2] = {}, mPreviousScroll[2] = {};
+    bool      mWindValid = false;
+    double    mPreviousTile = 0.;
+    float     mPreviousLayer[2] = {};
     uint32_t  mPrevQuality = 0;
     uint32_t  mLogQuality = ~0u, mLogW = 0, mLogH = 0;
 };

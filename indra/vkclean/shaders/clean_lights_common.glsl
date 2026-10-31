@@ -10,6 +10,11 @@
 // walks only the nearest this many lights of its probe's list; clean_probe_gpu.comp phaseLights
 // sorts a list by distance to the probe origin whenever it holds more.
 #define CAPTURE_LIGHT_CAP 16u
+// A point light's shadow rays stop short of its centre by its prim's bounding radius (proj_axis.x) at
+// most this much (metres): a sign's or panel's half-diagonal otherwise let the wall right behind its
+// light pass rays from the next room (light leaking through the wall). The lamp's own shade / bulb /
+// lantern is the own-fixture rule's (RenderVKReSTIRFixtureSize), not this clip's.
+#define RS_POINT_NEAR_MAX 0.02
 
 // cluster_count[c] packing (clean_lights.comp; clean_probe_gpu.comp's capture lists set the
 // list length only):
@@ -53,7 +58,7 @@ struct Light {
 
 struct LightInfo {
     vec4 cam_pos;        // .xyz camera world pos, .w light count
-    vec4 cam_fwd;        // .xyz camera forward (world); .w 1: orthographic view (<GMDX>)
+    vec4 cam_fwd;        // .xyz camera forward (world); .w 1: orthographic view
     vec4 zinfo;          // near, far (draw distance), GZ / log(far / near), projection far
     vec4 grid;           // tile px w, tile px h, tan(half fov x), tan(half fov y)
     mat4 view;           // world -> view (-Z forward)
@@ -72,13 +77,17 @@ struct LightInfo {
                          // walk reads it this frame (RenderVKForwardFroxels + RenderVKLightCulling
                          // 2 + the masks built for this extent), 0 = walk the cluster lists;
                          // .z options: bit 0 = alpha-blend receivers trace ray-traced projector
-                         // shadows inline (RenderVKRTBlendProjShadows 1); .w 0
+                         // shadows inline (RenderVKRTBlendProjShadows 1); bit 1 = the stochastic
+                         // light shadows' RADIANCE MODE (RenderVKReSTIRRadiance: clean_deferred_light
+                         // .comp pdnRadOn / deferPdnRadOn); .w 0
 };
 
-// <GMDX> ORTHOGRAPHIC main view (LightInfo cam_fwd.w 1, FSCameraOrtho): grid.zw are the view's
-// half extents in metres, not tangents, so a tile is the same width at every depth. Every
-// "tangent x depth" / "x / depth" of the cluster grid goes through CL_VIEW_Z (L: the block).
+// ORTHOGRAPHIC main view (LightInfo cam_fwd.w 1, FSCameraOrtho; ported from GunMetal-DX,
+// squeedledorf, LGPL 2.1, v0.3.0 cf5f1f4): grid.zw are the view's half extents in metres,
+// not tangents, so a tile is the same width at every depth. Every "tangent x depth" /
+// "x / depth" of the cluster grid goes through CL_VIEW_Z (L: the block).
 #define CL_VIEW_Z(L, z) ((L).cam_fwd.w > 0.5 ? 1.0 : (z))
+#define CL_VIEW_EYE(L, P, eye) ((L).cam_fwd.w > 0.5 ? (P) - (L).cam_fwd.xyz * dot((P) - (L).cam_pos.xyz, (L).cam_fwd.xyz) : (eye))
 
 // ---- FROXEL LIGHT MASKS (RenderVKLightCulling 2) ----
 // Cell (tile tx, ty of 2^fx_dims.w render px; depth slice s) = FROXEL_WORDS uints at

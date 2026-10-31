@@ -37,9 +37,9 @@
  * temporal pass follows each light's history by its id, the a-trous filters each light over the
  * taps that carry it; layers 0 / 1 then hold the REST's ratio. Present <=> GEOM has 5 layers.
  *
- * VRAM (VKMEM_DENOISE, the RT group of the breakdown): 112 B per denoiser texel (160 with the
- * sun channel; + 64 B with the split channel, + 80 B without the sun's) -- ~103 MB at 2560x1440
- * half extent, ~412 MB full; 4K: ~232 / ~930 MB. Soft
+ * VRAM (VKMEM_DENOISE, the RT group of the breakdown): 144 B per denoiser texel (192 with the
+ * sun channel; + 96 B with the split channel, + 112 B without the sun's) -- ~127 MB at 2560x1440
+ * half extent, ~506 MB full; 4K: ~285 / ~1139 MB. Soft
  * allocations (#697): a refusal leaves the 1x1 placeholders and the caller falls back to the
  * exact path. Every image is bounded by the extent; nothing grows.
  * GPU: the caller's sub-marks (c_dn_tmp / c_dn_sp).
@@ -60,13 +60,15 @@
 class LLCleanDenoiserVK
 {
 public:
-    // The per-frame knobs (the shaders' push block, clean_dn_common.glsl DnPush).
+    // The per-frame knobs (clean_dn_common.glsl DnPush). History/young/mover settings
+    // retain 60 Hz reference-duration units; authoritative GPU ages are milliseconds.
+    // Ray counts, iteration counts, and the sampling frame index remain actual counts.
     struct Params
     {
         uint32_t atrous = 3;          // a-trous iterations (1..5)
-        float maxHistDiffuse = 32.f;  // frames
-        float maxHistSpecular = 24.f; // frames, rough lobes
-        float minHistSpecular = 4.f;  // frames, a mirror
+        float maxHistDiffuse = 32.f; // reference duration (32 * 1000/60 ms)
+        float maxHistSpecular = 24.f; // reference duration, rough lobes
+        float minHistSpecular = 4.f;  // reference duration, a mirror
         float clampGamma = 1.5f;      // neighbourhood clamp width (sigmas)
         float lumPhi = 4.f;           // a-trous luminance edge-stop (sigmas)
         float depthPhi = 1.f;         // a-trous depth edge-stop
@@ -82,6 +84,10 @@ public:
         // clean_dn_common.glsl DN_F_INFO): a frame whose picks carried no light is a weight-0
         // sample -- the history holds (or the informative 3x3 seeds it); taps stay in every filter.
         bool  info = false;
+        // (RenderVKReSTIRRadiance) a RESERVOIR-REUSING RADIANCE signal (the pass-15 instance in radiance mode;
+        // clean_dn_common.glsl DN_F_RADIANCE): the temporal clamp's sigma is floored at the history's own
+        // per-sample spread -- the raw 3x3 shares one reused pick and is no measure of the noise.
+        bool  radiance = false;
         // (#869 / #85) ReSTIR-CONVERGED DIFFUSE: a-trous iterations for texels whose reused
         // reservoir and history are both long (clean_dn_common.glsl DN_CONV_SHIFT); 0 = all of them.
         uint32_t convIters = 0;

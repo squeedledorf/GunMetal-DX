@@ -149,9 +149,10 @@ public:
     // Alpha-tested variant of the fragment shader (offscreen segments with
     // setMinimumAlpha > 0). Optional: without it the alpha test is skipped.
     void initAlphaTestFragSpv(const uint32_t* fragSpv, size_t fragBytes);
-    // In-world label occlusion variant of the vertex shader (#487, ui_occl.vert).
-    // Optional: without it the pre-HUD text layer stays depth-free.
-    void initOcclVertSpv(const uint32_t* vertSpv, size_t vertBytes);
+    // In-world label occlusion variant of the vertex + fragment shaders (#487, #1126,
+    // ui_occl.vert/.frag). Optional: without both the pre-HUD text layer stays depth-free.
+    void initOcclSpv(const uint32_t* vertSpv, size_t vertBytes,
+                     const uint32_t* fragSpv, size_t fragBytes);
     void shutdown();
     bool isInitialized() const { return mCtx != nullptr; }
 
@@ -287,7 +288,17 @@ public:
     // ring slot `frameSlot` (0..framesInFlight-1). The caller guarantees that slot
     // is retired (its in-flight fence was waited) before calling, so the previous
     // frame that shared the SAME swapchain image is done reading that buffer.
-    void recordFrame(VkCommandBuffer cmd, uint32_t frameSlot);
+    void recordFrame(VkCommandBuffer cmd, uint32_t frameSlot, bool advanceFrame = true);
+    // Caller has retired all uses of these auxiliary-window ring slots.
+    void releaseFrameSlots(uint32_t first, uint32_t count);
+    void discardBufferedFrame() { mRecordingFrame = false; mInFrame = false; }
+    // Auxiliary path: finish CPU allocations before acquiring a WSI image.
+    bool prepareBufferedFrame(uint32_t frameSlot);
+    // Multiple WSI clocks cannot prove one another's GPU completion. While
+    // auxiliary windows exist, the owner supplies a graphics-queue completion
+    // marker in addition to the ordinary frame-distance retirement check.
+    void setExternalRetirement(bool enabled, uint64_t completedFrame = 0)
+    { mExternalRetirement = enabled; mExternalRetiredFrame = completedFrame; }
 
     // ---- world-overlay segment (swapchain frames) ---------------------------
     // LL's 3D overlays (property lines, ban lines, parcel highlight, tracking
@@ -317,13 +328,14 @@ public:
     bool beginPreHudLayer(const float* proj = nullptr, const float* view = nullptr);
     void endPreHudLayer();
     // ---- in-world label occlusion (#487) -------------------------------------
-    // LL depth-tests name tags / hover text against the scene. Here a label is tested
-    // ONCE, at its anchor (the agent-space point it is attached to), against the
-    // resolved world depth: batches issued in the pre-HUD layer with the depth test
-    // ON while an anchor is set fade / hide as a whole (ui_occl.vert). No anchor, the
-    // depth test off, or outside the layer: plain depth-free 2D, as before. The
-    // anchor is projected here with the layer's viewProj; one behind the camera or
-    // off screen is never occluded. Setting a different anchor closes the open batch.
+    // LL depth-tests name tags / hover text against the scene. Here a label's depth is
+    // its anchor's (the agent-space point it is attached to): batches issued in the
+    // pre-HUD layer with the depth test ON while an anchor is set test each pixel
+    // against the resolved world depth at that pixel (ui_occl.vert/.frag, #1126), so
+    // geometry in front hides the part of the label it covers. No anchor, the depth
+    // test off, or outside the layer: plain depth-free 2D, as before. The anchor is
+    // projected here with the layer's viewProj; one behind the camera is never
+    // occluded. Setting a different anchor closes the open batch.
     void setLabelAnchor(bool on, float x = 0.f, float y = 0.f, float z = 0.f, float bias = 0.15f);
     // Called from inside the world renderer's command recording: uploads this
     // frame's vertices (once) and records the overlay segment over colorView with
@@ -544,6 +556,7 @@ private:
     VkShaderModule mVert = VK_NULL_HANDLE;
     VkShaderModule mFrag = VK_NULL_HANDLE;
     VkShaderModule mVertOccl = VK_NULL_HANDLE;   // ui_occl.vert (#487)
+    VkShaderModule mFragOccl = VK_NULL_HANDLE;   // ui_occl.frag (#1126)
     VkPipelineLayout mLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout mSetLayout = VK_NULL_HANDLE;
     VkDescPool mDescPool;   // layout-sized + accounted, FREE_DESCRIPTOR_SET_BIT
@@ -596,6 +609,8 @@ private:
     // are freed once N + kDeferFrames frames have been recorded, so no in-flight
     // frame can still sample them (frames in flight <= 2; +1 margin).
     static constexpr uint64_t kDeferFrames = 3;
+    bool mExternalRetirement = false;
+    uint64_t mExternalRetiredFrame = 0;
     // One queued copy: staging (a one-off buffer `owned`, or a range of the ring at
     // `buf`/`off`) -> the rectangle (x, y, w, h) of `image`. preserve: the image already
     // holds pixels outside the rectangle (SHADER_READ_ONLY -> keep), else its old

@@ -62,15 +62,6 @@ VkCompareOp toVkCompare(eCompareFunc f) {
     return VK_COMPARE_OP_LESS_OR_EQUAL;
 }
 
-VkSamplerAddressMode toVkAddress(eTextureAddressMode a) {
-    switch (a) {
-        case TAM_WRAP:   return VK_SAMPLER_ADDRESS_MODE_REPEAT;
-        case TAM_MIRROR: return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
-        case TAM_CLAMP:  return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    }
-    return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-}
-
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -108,9 +99,14 @@ void LLRenderVK::initAlphaTestFragSpv(const uint32_t* fragSpv, size_t fragBytes)
     VK_CHECK(vkCreateShaderModule(mCtx->device(), &ci, nullptr, &mFragATest));
 }
 
-void LLRenderVK::initOcclVertSpv(const uint32_t* vertSpv, size_t vertBytes) {
-    if (!mCtx || mVertOccl || !vertSpv || !vertBytes) return;
+void LLRenderVK::initOcclSpv(const uint32_t* vertSpv, size_t vertBytes,
+                             const uint32_t* fragSpv, size_t fragBytes) {
+    // Both or neither: the occlusion pipelines (mVertOccl set) pair the two.
+    if (!mCtx || mVertOccl || !vertSpv || !vertBytes || !fragSpv || !fragBytes) return;
     VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+    ci.codeSize = fragBytes;
+    ci.pCode = fragSpv;
+    VK_CHECK(vkCreateShaderModule(mCtx->device(), &ci, nullptr, &mFragOccl));
     ci.codeSize = vertBytes;
     ci.pCode = vertSpv;
     VK_CHECK(vkCreateShaderModule(mCtx->device(), &ci, nullptr, &mVertOccl));
@@ -119,8 +115,8 @@ void LLRenderVK::initOcclVertSpv(const uint32_t* vertSpv, size_t vertBytes) {
 // Shared init body (everything after the two shader modules are created).
 bool LLRenderVK::initCommon(VkDeviceContext& ctx) {
     // One combined image sampler at binding 0. Set 0: the batch texture (fragment).
-    // Set 1, same layout: the scene depth an in-world label's vertices test their
-    // anchor against (#487, ui_occl.vert) -- hence the vertex stage too.
+    // Set 1, same layout: the scene depth an in-world label's pixels test against
+    // (#487, #1126, ui_occl.frag). Vertex stage visible too (layout shared with set 0).
     VkDescriptorSetLayoutBinding b0{};
     b0.binding = 0;
     b0.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -232,6 +228,8 @@ void LLRenderVK::shutdown() {
     mFragATest = VK_NULL_HANDLE;
     if (mVertOccl) vkDestroyShaderModule(dev, mVertOccl, nullptr);
     mVertOccl = VK_NULL_HANDLE;
+    if (mFragOccl) vkDestroyShaderModule(dev, mFragOccl, nullptr);
+    mFragOccl = VK_NULL_HANDLE;
     mLabelDepthSets.clear();   // freed with the pool
     mCtx = nullptr;
 }
@@ -578,7 +576,9 @@ void LLRenderVK::processDeferred(bool all)
     // Ring ranges of frames that have completed (#458): advance the tail (marks are in
     // frame order).
     size_t done = 0;
-    while (done < mStageMarks.size() && (all || mFrameCounter >= mStageMarks[done].frame + kDeferFrames))
+    while (done < mStageMarks.size() &&
+           (all || (mFrameCounter >= mStageMarks[done].frame + kDeferFrames &&
+                    (!mExternalRetirement || mStageMarks[done].frame < mExternalRetiredFrame))))
         mStageRing.tail_v = std::max(mStageRing.tail_v, std::min(mStageMarks[done++].head, mStageRing.head_v));
     if (done) mStageMarks.erase(mStageMarks.begin(), mStageMarks.begin() + (std::ptrdiff_t)done);
     if (mDeferred.empty()) return;
@@ -586,7 +586,8 @@ void LLRenderVK::processDeferred(bool all)
     for (size_t i = 0; i < mDeferred.size(); ++i)
     {
         DeferredFree& d = mDeferred[i];
-        if (!all && mFrameCounter < d.frame + kDeferFrames)
+        if (!all && (mFrameCounter < d.frame + kDeferFrames ||
+                     (mExternalRetirement && d.frame >= mExternalRetiredFrame)))
         {
             if (keep != i) mDeferred[keep] = std::move(d);
             ++keep;
@@ -646,7 +647,8 @@ VkPipeline LLRenderVK::pipelineFor(const BatchKey& key) {
 
     UiPipelineDesc d;
     d.vert = (key.labelOccl && mVertOccl) ? mVertOccl : mVert;
-    d.frag = (key.alphaTest && mFragATest) ? mFragATest : mFrag;
+    d.frag = (key.labelOccl && mFragOccl) ? mFragOccl
+           : (key.alphaTest && mFragATest) ? mFragATest : mFrag;
     d.layout = mLayout;
     d.colorFormat = key.colorFmt;
     d.glAlphaBlend = key.glAlpha;
@@ -819,9 +821,9 @@ LLRenderVK::BatchKey LLRenderVK::liveKey(VkPrimitiveTopology topo) const {
         }
         else
         {
-            // In-world labels (#487): an anchored batch issued with LL's depth test on
-            // tests its anchor against the scene depth in the vertex shader; still no
-            // depth attachment (the layer is colour-only).
+            // In-world labels (#487, #1126): an anchored batch issued with LL's depth
+            // test on tests each pixel, at the anchor's depth, against the scene depth
+            // in the fragment shader; still no depth attachment (the layer is colour-only).
             k.labelOccl = mInPreHud && mPreHudOccl && mAnchorOn && k.depthTest &&
                           mVertOccl != VK_NULL_HANDLE;
             k.depthFmt = VK_FORMAT_UNDEFINED;
@@ -988,6 +990,11 @@ VkBuffer LLRenderVK::uploadFrameVerts(uint32_t slot) {
                 VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
         cap = alloc;
     }
+    if (!vbo.buffer || !vbo.mapped)
+    {
+        cap = 0; // retry at the next recorded frame; draw a clear-only UI meanwhile
+        return VK_NULL_HANDLE;
+    }
     if (!mVerts.empty())
         std::memcpy(vbo.mapped, mVerts.data(), mVerts.size() * sizeof(Vertex));
     return vbo.buffer;
@@ -999,6 +1006,7 @@ VkBuffer LLRenderVK::uploadFrameVerts(uint32_t slot) {
 void LLRenderVK::recordDraws(VkCommandBuffer cmd, uint32_t w, uint32_t h,
                             VkBuffer vbo, size_t begin, size_t end,
                             VkDescriptorSet labelDepth) {
+    if (!vbo) return;
     VkViewport vp{0.0f, 0.0f, (float)w, (float)h, 0.0f, 1.0f};
     VkRect2D fullSc{{0, 0}, {w, h}};
     vkCmdSetViewport(cmd, 0, 1, &vp);
@@ -1020,7 +1028,7 @@ void LLRenderVK::recordDraws(VkCommandBuffer cmd, uint32_t w, uint32_t h,
     for (size_t i = begin; i < end; ++i) {
         const PendingDraw& pd = mPending[i];
         if (pd.offscreen != mRecordingOffscreen) continue;   // other target's batch
-        // An anchored label tests its anchor only where the scene depth is bound
+        // An anchored label is depth-tested only where the scene depth is bound
         // (the world-recorded pre-HUD layer); elsewhere it draws depth-free.
         const bool occl = pd.labelOccl && labelDepth != VK_NULL_HANDLE;
         const VkPipeline pipe = (pd.labelOccl && !occl) ? pd.pipePlain : pd.pipe;
@@ -1132,9 +1140,8 @@ void LLRenderVK::endPreHudLayer() {
 void LLRenderVK::setLabelAnchor(bool on, float x, float y, float z, float bias) {
     // Bias / fade (metres along the view ray, toward the camera): geometry within
     // kBias of the anchor never hides the label (the anchor sits on or just above the
-    // object it labels); geometry more than kBias + kFade in front of it hides it
-    // fully; in between the label fades. Five taps (ui_occl.vert) fade it spatially
-    // as the anchor slides behind an edge.
+    // object it labels); geometry more than kBias + kFade in front of it hides the
+    // pixels of the label it covers; in between they fade (ui_occl.frag, per pixel).
     const float kBias = bias;
     constexpr float kFade = 0.35f;
     constexpr float kMinDist = 0.05f;
@@ -1155,7 +1162,9 @@ void LLRenderVK::setLabelAnchor(bool on, float x, float y, float z, float bias) 
             const float hideDist = std::min(kBias + kFade, dist - kMinDist);
             const glm::vec4 cs = mPreHudViewProj * glm::vec4(p + dir * showDist, 1.0f);
             const glm::vec4 ch = mPreHudViewProj * glm::vec4(p + dir * hideDist, 1.0f);
-            if (u >= 0.0f && u <= 1.0f && v >= 0.0f && v <= 1.0f && cs.w > 0.0f && ch.w > 0.0f)
+            // The anchor itself may be off screen (#1126): each pixel samples its own
+            // depth, only the anchor's depth is needed.
+            if (cs.w > 0.0f && ch.w > 0.0f)
             {
                 // Depths in the world's own convention (reversed-Z or not): the
                 // shader's clamp((hide - d) / (hide - show)) needs no sign flag.
@@ -1169,7 +1178,7 @@ void LLRenderVK::setLabelAnchor(bool on, float x, float y, float z, float bias) 
             }
         }
     }
-    // Off screen / behind the camera / no world camera: never occluded.
+    // Behind the camera / no world camera: never occluded.
     if (valid == mAnchorOn && (!valid || std::memcmp(a, mAnchor, sizeof(a)) == 0))
         return;
     flush();   // the open batch keeps the anchor it was opened with
@@ -1274,8 +1283,8 @@ void LLRenderVK::recordWorldOverlay(VkCommandBuffer cmd, uint32_t frameSlot,
     // PRE-HUD TEXT LAYER (#468): in-world name tags / hover text / bubbles over the
     // world + its overlays, before the caller's HUD pass draws the HUD attachments
     // over them. Color only: these are the UI pass's own (depth-less) pipelines.
-    // Anchored labels (#487) sample the world depth in their vertex shader: it is
-    // read-only (DEPTH_READ_ONLY_OPTIMAL) for this scope, then back to the
+    // Anchored labels (#487, #1126) sample the world depth in their fragment shader:
+    // it is read-only (DEPTH_READ_ONLY_OPTIMAL) for this scope, then back to the
     // attachment layout the hook was handed.
     if (doPreHud)
     {
@@ -1288,7 +1297,7 @@ void LLRenderVK::recordWorldOverlay(VkCommandBuffer cmd, uint32_t frameSlot,
         toRead.srcStageMask = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
                               VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
         toRead.srcAccessMask = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-        toRead.dstStageMask = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT;
+        toRead.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
         toRead.dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
         toRead.oldLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
         toRead.newLayout = VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL;
@@ -1318,7 +1327,7 @@ void LLRenderVK::recordWorldOverlay(VkCommandBuffer cmd, uint32_t frameSlot,
         if (labelDepth)
         {
             VkImageMemoryBarrier2 back = toRead;
-            back.srcStageMask = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT;
+            back.srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
             back.srcAccessMask = 0;   // reads: execution dependency only
             back.dstStageMask = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
                                 VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
@@ -1368,7 +1377,7 @@ void LLRenderVK::replayTo(VkCommandBuffer cmd, uint32_t frameSlot, VkImageView c
     vkCmdEndRendering(cmd);
 }
 
-void LLRenderVK::recordFrame(VkCommandBuffer cmd, uint32_t frameSlot) {
+void LLRenderVK::recordFrame(VkCommandBuffer cmd, uint32_t frameSlot, bool advanceFrame) {
     if (mInOverlay) endWorldOverlay();
     if (mInPreHud) endPreHudLayer();
     flush();
@@ -1425,8 +1434,36 @@ void LLRenderVK::recordFrame(VkCommandBuffer cmd, uint32_t frameSlot) {
     mAnchorOn = false;
     mFrameVbo = VK_NULL_HANDLE;
     mRecordingFrame = false;
-    ++mFrameCounter;
-    processDeferred(/*all=*/false);
+    // Multiple windows share textures and their deferred-release clock. Advancing
+    // it once per WINDOW could free images still used by the main frame.
+    if (advanceFrame)
+    {
+        ++mFrameCounter;
+        processDeferred(/*all=*/false);
+    }
+}
+
+void LLRenderVK::releaseFrameSlots(uint32_t first, uint32_t count)
+{
+    for (uint32_t i = first; i < first + count && i < mVBO.size(); ++i)
+    {
+        if (mVBO[i].buffer) mCtx->destroyBuffer(mVBO[i]);
+        mVBO[i] = {};
+        mVBOCapacityBytes[i] = 0;
+    }
+}
+
+bool LLRenderVK::prepareBufferedFrame(uint32_t frameSlot)
+{
+    // Auxiliary rings have a fixed per-window byte ceiling; an oversized UI
+    // returns to its main host rather than growing sixteen independent rings.
+    if (mVerts.size() > (16ull << 20) / sizeof(Vertex)) return false;
+    while (!mOffStack.empty()) endOffscreen();
+    flush();
+    mFrameVbo = uploadFrameVerts(frameSlot);
+    mDeferred.reserve(mDeferred.size() + mStageRetired.size() + mPendingUploads.size() + 1);
+    mStageMarks.reserve(mStageMarks.size() + 1);
+    return mFrameVbo != VK_NULL_HANDLE;
 }
 
 // ---------------------------------------------------------------------------

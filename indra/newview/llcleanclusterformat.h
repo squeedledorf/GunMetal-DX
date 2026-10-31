@@ -415,10 +415,10 @@ enum : uint32_t
     CLV_NO_CONE    = 1u << 7,   // skip backface-cone culling (double-sided / shadows)
     CLV_HIDE_SELF  = 1u << 8,   // main view: our own avatar (CLI_SELF) is selected (the rig lists /
                                 // RT keep its cut) but not drawn / picked (mouselook)
-    CLV_NO_RIGGED  = 1u << 9,   // <GMDX> main view: the avatars render type is off -- no rigged instance
-                                // is selected, so neither the rig lists nor the RT cut carry one
-    CLV_AVATARS_ONLY = 1u << 10,// <GMDX> main view: avatar matte snapshot -- statics are selected but not
-                                // drawn (as CLV_HIDE_SELF), only rigged instances are
+    CLV_NO_RIGGED  = 1u << 9,   // main view: the avatars render type is off -- no rigged instance
+                                // is selected in any view (GunMetal-DX port: the region map capture)
+    CLV_AVATARS_ONLY = 1u << 10,// main view: avatar matte snapshot -- statics are selected but not
+                                // drawn (GunMetal-DX port)
 };
 
 // Resident cluster reference: pool slot << kClusterIndexBits | index in page.

@@ -3866,8 +3866,8 @@ void LLPanelFace::onAlignTexture()
     alignTextureLayer();
 }
 
-// <GMDX> Sync button (from SoapStorm): copy each selected face's own diffuse offset, repeats and rotation
-// to its normal and specular maps, so every face lines up in one click
+// <GMDX> Sync button, from SoapStorm (Soap Frenzy, 57e26e3d2d), LGPL 2.1: copy each selected face's own
+// diffuse offset, repeats and rotation to its normal and specular maps, so every face lines up in one click
 void LLPanelFace::onClickSyncMaterials()
 {
     struct SyncMaps : public LLSelectedTEMaterialFunctor

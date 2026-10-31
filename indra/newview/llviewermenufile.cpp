@@ -27,7 +27,8 @@
 #include "llviewerprecompiledheaders.h"
 
 #include "llviewermenufile.h"
-#include "llsoundnotecardupload.h" // <GMDX> <OTS> bulk sound -> notecard upload
+#include "llfloaterpopout.h"
+#include "llsoundnotecardupload.h"
 
 // project includes
 #include "llagent.h"
@@ -1016,7 +1017,8 @@ class LLFileUploadBulk : public view_listener_t
     }
 };
 
-// <GMDX> <OTS> Bulk-upload sounds and emit a music-player notecard
+// Bulk-upload sounds and emit a music-player notecard (llsoundnotecardupload.cpp; ported from
+// GunMetal-DX, squeedledorf, LGPL 2.1, v0.3.0 cf5f1f4, SoapStorm lineage)
 class LLFileUploadSoundNotecard : public view_listener_t
 {
     bool handleEvent(const LLSD& userdata)
@@ -1029,7 +1031,6 @@ class LLFileUploadSoundNotecard : public view_listener_t
         return true;
     }
 };
-// </OTS> </GMDX>
 
 void upload_error(const std::string& error_message, const std::string& label, const std::string& filename, const LLSD& args)
 {
@@ -1083,7 +1084,7 @@ class LLFileEnableCloseAllWindows : public view_listener_t
     {
         LLFloaterSnapshot* floater_snapshot = LLFloaterSnapshot::findInstance();
         bool is_floaters_snapshot_opened = (floater_snapshot && floater_snapshot->isInVisibleChain());
-        bool open_children = gFloaterView->allChildrenClosed() && !is_floaters_snapshot_opened;
+        bool open_children = gFloaterView->allChildrenClosed() && !is_floaters_snapshot_opened && !LLFloaterPopout::hasWork();
         return !open_children && !LLNotificationsUI::LLToast::isAlertToastShown();
     }
 };
@@ -1093,6 +1094,7 @@ class LLFileCloseAllWindows : public view_listener_t
     bool handleEvent(const LLSD& userdata)
     {
         bool app_quitting = false;
+        LLFloaterPopout::closeAll();
         gFloaterView->closeAllChildren(app_quitting);
         LLFloaterSnapshot* floater_snapshot = LLFloaterSnapshot::findInstance();
         if (floater_snapshot)
@@ -1524,7 +1526,7 @@ void init_menu_file()
     view_listener_t::addCommit(new LLFileUploadModelBulk(), "File.UploadModelBulk");
     view_listener_t::addCommit(new LLFileUploadMaterial(), "File.UploadMaterial");
     view_listener_t::addCommit(new LLFileUploadBulk(), "File.UploadBulk");
-    view_listener_t::addCommit(new LLFileUploadSoundNotecard(), "File.UploadSoundNotecard"); // <GMDX> <OTS>
+    view_listener_t::addCommit(new LLFileUploadSoundNotecard(), "File.UploadSoundNotecard");
     view_listener_t::addCommit(new LLFileCloseWindow(), "File.CloseWindow");
     view_listener_t::addCommit(new LLFileCloseAllWindows(), "File.CloseAllWindows");
     view_listener_t::addEnable(new LLFileEnableCloseWindow(), "File.EnableCloseWindow");

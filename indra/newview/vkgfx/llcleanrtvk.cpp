@@ -473,18 +473,33 @@ bool LLCleanRTVK::init()
         qi.queryCount = 3 * kMaxBuildsPerFrame;
         VK_CHECK(vkCreateQueryPool(dev, &qi, nullptr, &mQueryPool));
     }
-    mDummy = mCtx->createBuffer(256, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    // Debug view 15 statistics (tiny; bound in every RT set, written only by view 15).
-    mDbgStats = mCtx->createBuffer(kDbgStatsWords * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
-                                   | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                                   VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    // #874 READ GUARD: one tiny host-visible buffer per frame slot (RT set binding 15).
-    for (GpuBuffer& g : mGuard)
     {
-        g = mCtx->createBuffer(kGuardWords * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                               VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        if (g.buffer && !g.mapped) { mCtx->destroyBuffer(g); g = GpuBuffer{}; }
-        if (g.buffer) { vkAddrName(g.buffer, "rt.guard"); std::memset(g.mapped, 0, kGuardWords * 4); }
+        VkDeviceContext::SoftAllocScope input_soft(mCtx); // tiny fallback/guard allocation must return failure
+        // Inactive optional tables still have a nonzero descriptor length. Their
+        // readers use zero entries as the sentinel (including cluster BLAS addresses),
+        // so undefined allocation contents must never reach the TLAS producer.
+        // Initialize before any submission; coherent memory needs no flush or GPU fill.
+        mDummy = mCtx->createBuffer(256, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (mDummy.buffer && !mDummy.mapped) { mCtx->destroyBuffer(mDummy); mDummy = GpuBuffer{}; }
+        if (mDummy.buffer) std::memset(mDummy.mapped, 0, 256);
+        // Debug view 15 statistics (tiny; bound in every RT set, written only by view 15).
+        mDbgStats = mCtx->createBuffer(kDbgStatsWords * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                                       | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        // #874 READ GUARD: one tiny host-visible buffer per frame slot (RT set binding 15).
+        for (GpuBuffer& g : mGuard)
+        {
+            g = mCtx->createBuffer(kGuardWords * 4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            if (g.buffer && !g.mapped) { mCtx->destroyBuffer(g); g = GpuBuffer{}; }
+            if (g.buffer) { vkAddrName(g.buffer, "rt.guard"); std::memset(g.mapped, 0, kGuardWords * 4); }
+        }
+    }
+    if (!mDummy.buffer || !mGuard[0].buffer || !mGuard[1].buffer || !mGuard[2].buffer)
+    {
+        LL_WARNS("VKRT") << "RT optional-table sentinel/guard resources unavailable; disabling ray tracing" << LL_ENDL;
+        return false;
     }
     mOmmOk = mCtx->opacityMicromapEnabled() && ommSelfTest(*mCtx);
     if (mOmmOk && !ommInit())
@@ -496,7 +511,10 @@ bool LLCleanRTVK::init()
                        << mCtx->asScratchAlignment() << "; opacity micromaps "
                        << (mOmmOk ? "on" : mCtx->opacityMicromapEnabled() ? "off (self-test / bake pipeline)" : "off (no device support)")
                        << ")" << LL_ENDL;
-    const bool ready = mCompPipe && mDebugPipe && mDummy.buffer;
+    // The guard is writable: it must not alias the read-only zero sentinel on
+    // allocation failure, or a reported violation could become a BLAS address.
+    const bool guardsReady = mGuard[0].buffer && mGuard[1].buffer && mGuard[2].buffer;
+    const bool ready = mCompPipe && mDebugPipe && mDummy.buffer && guardsReady;
     if (ready) auditRegister(true);   // #874: the DEVICE_LOST RT scene audit
     return ready;
 }
@@ -894,9 +912,11 @@ bool LLCleanRTVK::ensureBuf(GpuBuffer& b, VkDeviceSize need, VkBufferUsageFlags 
 // ===========================================================================
 void LLCleanRTVK::setSlotAddr(uint32_t sl, VkDeviceAddress a)
 {
-    if ((size_t)sl * 2 + 1 >= mSlotAddrCpu.size()) return;
-    mSlotAddrCpu[sl * 2] = (uint32_t)(a & 0xFFFFFFFFull);
-    mSlotAddrCpu[sl * 2 + 1] = (uint32_t)(a >> 32);
+    if ((size_t)sl * 4 + 3 >= mSlotAddrCpu.size()) return;
+    mSlotAddrCpu[sl * 4] = (uint32_t)(a & 0xFFFFFFFFull);
+    mSlotAddrCpu[sl * 4 + 1] = (uint32_t)(a >> 32);
+    mSlotAddrCpu[sl * 4 + 2] = sl < mSlotEmGen.size() ? mSlotEmGen[sl] : 0u;
+    mSlotAddrCpu[sl * 4 + 3] = sl;
     mAddrDirtyLo = std::min(mAddrDirtyLo, sl);
     mAddrDirtyHi = std::max(mAddrDirtyHi, sl + 1);
 }
@@ -970,7 +990,15 @@ void LLCleanRTVK::dropTerrMorph(uint32_t sl)
 void LLCleanRTVK::slotChanged(uint32_t sl, bool from_repack)
 {
     if (sl >= mSlotGen.size()) mSlotGen.resize((size_t)sl + 1, 0);
-    ++mSlotGen[sl];
+    ++mSlotGen[sl]; // ordinary RT cache behavior is unchanged
+    if (sl >= mSlotEmGen.size()) mSlotEmGen.resize((size_t)sl + 1u, 0u);
+    mSlotEmGen[sl] = ebNextIdentity(mNextSlotEmGen);
+    if ((size_t)sl * 4u + 3u < mSlotAddrCpu.size())
+    {
+        mSlotAddrCpu[sl * 4u + 2u] = mSlotEmGen[sl];
+        mSlotAddrCpu[sl * 4u + 3u] = sl;
+        mAddrDirtyLo = std::min(mAddrDirtyLo, sl); mAddrDirtyHi = std::max(mAddrDirtyHi, sl + 1u);
+    }
     // C3: the rigged plan read this slot's contents -> rebuild it. (Only plan slots: flexi
     // and other static slots change every frame and must not defeat the plan reuse.)
     if (sl < mRigPlanSlot.size() && mRigPlanSlot[sl]) ++mSlotGenTotal;
@@ -1717,8 +1745,73 @@ void LLCleanRTVK::classifyNoSelf()
     }
 }
 
+void LLCleanRTVK::geometryUploadRetry(uint32_t sl)
+{
+    mInputRetrySlots.fetch_add(1, std::memory_order_relaxed);
+    slotChanged(sl, false);
+}
+
+void LLCleanRTVK::refuseInputBuild(uint32_t reasons, bool aborted)
+{
+    mInputGated.fetch_add(1, std::memory_order_relaxed);
+    if (aborted) mInputAborted.fetch_add(1, std::memory_order_relaxed);
+    mInputLastReasons.store(reasons, std::memory_order_relaxed);
+    mInputLastGateFrame.store(vkAddrCurrentFrame(), std::memory_order_relaxed);
+    mInputRecoveryPending.store(true, std::memory_order_relaxed);
+    mIdleSinceBuild = true; // a later attempt must BUILD, never UPDATE an old source TLAS
+    if (mClusterRT) mClusterRT->ptlasForceBuild();
+    const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (now >= mInputGateNextLog)
+    {
+        mInputGateNextLog = now + 5.0;
+        LL_WARNS("VKRT") << "#1128 AS input build refused: reasons=" << reasons
+            << " gated=" << mInputGated.load(std::memory_order_relaxed)
+            << " aborted=" << mInputAborted.load(std::memory_order_relaxed)
+            << " recovery_builds=" << mInputRecovered.load(std::memory_order_relaxed)
+            << " retry_slots=" << mInputRetrySlots.load(std::memory_order_relaxed) << LL_ENDL;
+    }
+}
+
+void LLCleanRTVK::inputRecoveryRecorded()
+{
+    if (!mInputRecoveryPending.exchange(false, std::memory_order_relaxed)) return;
+    mInputRecovered.fetch_add(1, std::memory_order_relaxed);
+    mInputLastRecoveryFrame.store(vkAddrCurrentFrame(), std::memory_order_relaxed);
+    const double now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    if (now >= mInputRecoveryNextLog)
+    {
+        mInputRecoveryNextLog = now + 5.0;
+        LL_INFOS("VKRT") << "#1128 AS input recovery BUILD recorded: recovery_builds="
+            << mInputRecovered.load(std::memory_order_relaxed)
+            << " gated=" << mInputGated.load(std::memory_order_relaxed)
+            << " retry_slots=" << mInputRetrySlots.load(std::memory_order_relaxed)
+            << " last_reasons=" << mInputLastReasons.load(std::memory_order_relaxed) << LL_ENDL;
+    }
+}
+
+void LLCleanRTVK::inputLostReport() const
+{
+    char line[512];
+    std::snprintf(line, sizeof(line), "[vktest] #1128 AS publication: gated=%llu aborted=%llu recovery_builds=%llu retry_slots=%llu "
+                   "pending=%u last_reasons=%u last_gate_frame=%u last_recovery_frame=%u (CPU recorded, not GPU completion)",
+        (unsigned long long)mInputGated.load(std::memory_order_relaxed),
+        (unsigned long long)mInputAborted.load(std::memory_order_relaxed),
+        (unsigned long long)mInputRecovered.load(std::memory_order_relaxed),
+        (unsigned long long)mInputRetrySlots.load(std::memory_order_relaxed),
+        (unsigned)mInputRecoveryPending.load(std::memory_order_relaxed),
+        mInputLastReasons.load(std::memory_order_relaxed), mInputLastGateFrame.load(std::memory_order_relaxed),
+        mInputLastRecoveryFrame.load(std::memory_order_relaxed));
+    vkFaultLogLine(line);
+}
+
 void LLCleanRTVK::recordBuild(VkCommandBuffer cmd, const VKCullPush& cull, const VKDrawPush& draw, bool do_rigged)
 {
+    if (mR.mRtInputReasons != 0u)
+    {
+        refuseInputBuild(mR.mRtInputReasons);
+        idleFrame(); // advance safe retirement, invalidate all current-frame consumers
+        return;
+    }
     // #889 sync A/B: full barriers around every AS build of this frame (fullBarrier).
     bool full_barriers = false;
 #if defined(LL_HAS_CLEAN_PIPELINE)
@@ -1919,9 +2012,18 @@ void LLCleanRTVK::recordBuild(VkCommandBuffer cmd, const VKCullPush& cull, const
     mSlot.resize(slot_n);
     mTerrOwned.resize(slot_n, 0);
     if (mSlotGen.size() < slot_n) mSlotGen.resize(slot_n, 0);
-    if (mSlotAddrCpu.size() != (size_t)slot_n * 2)
+    if (mSlotEmGen.size() < slot_n) mSlotEmGen.resize(slot_n, 0);
+    if (mSlotAddrCpu.size() != (size_t)slot_n * 4)
     {
-        mSlotAddrCpu.resize((size_t)slot_n * 2, 0);
+        const size_t oldRows = mSlotAddrCpu.size() / 4u;
+        mSlotAddrCpu.resize((size_t)slot_n * 4, 0);
+        for (size_t i = oldRows; i < slot_n; ++i)
+        {
+            // First RT publication can follow geometry placement; seed an exact token once.
+            // An exhausted allocator never reissues 1 after returning zero.
+            if (mSlotEmGen[i] == 0u) mSlotEmGen[i] = ebNextIdentity(mNextSlotEmGen);
+            mSlotAddrCpu[i*4u+2u] = mSlotEmGen[i]; mSlotAddrCpu[i*4u+3u] = (uint32_t)i;
+        }
         mAddrDirtyLo = 0; mAddrDirtyHi = slot_n;
     }
     const uint32_t vbo_verts = R.mGeomVertEnd;   // quantized (#573); the arena's high-water (#584)
@@ -3247,6 +3349,7 @@ void LLCleanRTVK::recordBuild(VkCommandBuffer cmd, const VKCullPush& cull, const
     bool dummy_build = false;   // the TLAS-refit placeholder BLAS is created this frame
     auto abortFrame = [&]()
     {
+        refuseInputBuild(512u, true); // allocation/planning abort also forbids recovery UPDATE
         if (mClusterRT) mClusterRT->abortPlan();   // TODO(2b) #748: this frame's plan is never recorded
         if (dummy_build)
         {
@@ -3486,10 +3589,10 @@ void LLCleanRTVK::recordBuild(VkCommandBuffer cmd, const VKCullPush& cull, const
                         | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, false, true);   // (+ SRC: llcleanrtaudit copies it)
     ok = ok && ensureBuf(mRtGeom, (VkDeviceSize)mTlasCap * 16, kSt | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);   // (+ SRC: audit)
     // #874 (bound: the TLAS capacity) -- 4 words per instance (#1009: + a cluster-traced static's legacy row)
-    ok = ok && ensureBuf(mRtGeomVc, (VkDeviceSize)mTlasCap * 16, kSt);
+    ok = ok && ensureBuf(mRtGeomVc, (VkDeviceSize)mTlasCap * 32, kSt);
     {
         const VkBuffer old = mSlotAddr.buffer;
-        ok = ok && ensureBuf(mSlotAddr, (VkDeviceSize)std::max<uint32_t>(slot_n, 1) * 8, kSt | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        ok = ok && ensureBuf(mSlotAddr, (VkDeviceSize)std::max<uint32_t>(slot_n, 1) * 16, kSt | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
         if (mSlotAddr.buffer != old && slot_n) { mAddrDirtyLo = 0; mAddrDirtyHi = slot_n; }   // fresh buffer: all
         mAddrDirtyHi = std::min(mAddrDirtyHi, slot_n);
     }
@@ -3508,7 +3611,7 @@ void LLCleanRTVK::recordBuild(VkCommandBuffer cmd, const VKCullPush& cull, const
     if (!mTerrPos.buffer) ok = ok && ensureBuf(mTerrPos, 256, kSt | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR, false, true);
     // Staging (this frame slot; its previous user is done): address range + rig entries.
     const bool addr_dirty = mAddrDirtyLo < mAddrDirtyHi;
-    const VkDeviceSize addr_bytes = addr_dirty ? (VkDeviceSize)(mAddrDirtyHi - mAddrDirtyLo) * 8 : 0;
+    const VkDeviceSize addr_bytes = addr_dirty ? (VkDeviceSize)(mAddrDirtyHi - mAddrDirtyLo) * 16 : 0;
     const VkDeviceSize rig_bytes = (VkDeviceSize)mRigEntries.size() * sizeof(RigEntryCPU);
     const VkDeviceSize terr_bytes = (VkDeviceSize)mTerrEntries.size() * sizeof(TerrEntryCPU);
     ok = ok && ensureBuf(mStage[mSlotIdx], addr_bytes + rig_bytes + terr_bytes + 16, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, true);
@@ -3580,7 +3683,8 @@ void LLCleanRTVK::recordBuild(VkCommandBuffer cmd, const VKCullPush& cull, const
 
     // ---- WAR / WAW with the previous frame (same queue) + this frame's geometry
     // stream copies -> BLAS build input reads ----
-    memBarrier(cmd, kFS | kCS | kAS | kXfer, kASW | kSW | VK_ACCESS_2_TRANSFER_WRITE_BIT,
+    // Include the cluster rig-skin grid's previous indirect read before counter reset.
+    memBarrier(cmd, kFS | kCS | kAS | kXfer | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT, kASW | kSW | VK_ACCESS_2_TRANSFER_WRITE_BIT,
                kAS | kCS | kXfer, kASR | kASW | kSR | kSW | VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_TRANSFER_READ_BIT);
 
     // ---- uploads ----
@@ -3589,8 +3693,8 @@ void LLCleanRTVK::recordBuild(VkCommandBuffer cmd, const VKCullPush& cull, const
         std::vector<VkBufferCopy> addrCopy;
         if (addr_dirty && st)
         {
-            std::memcpy(st, mSlotAddrCpu.data() + (size_t)mAddrDirtyLo * 2, addr_bytes);
-            VkBufferCopy c{0, (VkDeviceSize)mAddrDirtyLo * 8, addr_bytes};
+            std::memcpy(st, mSlotAddrCpu.data() + (size_t)mAddrDirtyLo * 4, addr_bytes);
+            VkBufferCopy c{0, (VkDeviceSize)mAddrDirtyLo * 16, addr_bytes};
             vkCmdCopyBuffer(cmd, mStage[mSlotIdx].buffer, mSlotAddr.buffer, 1, &c);
             mAddrDirtyLo = ~0u; mAddrDirtyHi = 0;
         }
@@ -3738,6 +3842,10 @@ void LLCleanRTVK::recordBuild(VkCommandBuffer cmd, const VKCullPush& cull, const
         mask_opaque = s_mask_opaque;
 #endif
         if (mask_opaque) pp.dbg_on |= 16u;
+#if defined(LL_HAS_CLEAN_PIPELINE)
+        static LLCachedControl<bool> s_emissive_shadow(gSavedSettings, "RenderVKEmissiveNoShadows", true);
+        if (s_emissive_shadow) pp.dbg_on |= 32u;
+#endif
         // SIZE CLASS (clean_rt_common.glsl / clean_rt_instances.comp maskClassSized): static opaque
         // instances below this bound take the RT_MASK_SMALL bit, which only the reflection rays'
         // far segment leaves out (RenderVKRTReflectionsSizeClasses); every other ray takes it.
@@ -3766,6 +3874,7 @@ void LLCleanRTVK::recordBuild(VkCommandBuffer cmd, const VKCullPush& cull, const
     float cam_d2 = 0.f;
     for (int k = 0; k < 3; ++k) { const float d = cull.lod_cam_pos[k] - mTlasBuildCam[k]; cam_d2 += d * d; }
     const bool tlas_update = tlas_refit && mTlas && mTlasHasBuild
+        && !mInputRecoveryPending.load(std::memory_order_relaxed)
         && mTlasBuildFlags == tlas_flags
         && mTlasBuildCount == pp.instance_count
         && mTlasBuildInstAddr == mTlasInst.address
@@ -3777,6 +3886,18 @@ void LLCleanRTVK::recordBuild(VkCommandBuffer cmd, const VKCullPush& cull, const
         && mFrame - mTlasBuildFrame < tlas_rebuild_n
         && cam_d2 < kTlasCamJump * kTlasCamJump
         && !(mTlasDeferred >= kTlasDeferRebuild && mFrame - mTlasBuildFrame >= 3u);
+    // Primary churn causes, sampled before BUILD overwrites its history. Reasons may overlap;
+    // these are not additional builds. PTLAS has its own update policy and is excluded.
+    const bool tlas_rebuild = !tlas_update && !(mClusterRT && mClusterRT->ptlasLayout());
+    const bool tlas_had_build = tlas_rebuild && mTlasHasBuild;
+    LLVKHitch::count("rt_tlasCauseInitial", tlas_rebuild && !mTlasHasBuild ? 1u : 0u);
+    LLVKHitch::count("rt_tlasCauseDisabled", tlas_rebuild && !tlas_refit ? 1u : 0u);
+    LLVKHitch::count("rt_tlasCausePeriod", tlas_had_build && mFrame - mTlasBuildFrame >= tlas_rebuild_n ? 1u : 0u);
+    LLVKHitch::count("rt_tlasCauseCount", tlas_had_build && mTlasBuildCount != pp.instance_count ? 1u : 0u);
+    LLVKHitch::count("rt_tlasCauseRigPlan", tlas_had_build && mTlasBuildRigKey != tlas_rig_key ? 1u : 0u);
+    LLVKHitch::count("rt_tlasCauseRepack", tlas_had_build && mTlasBuildPackGen != R.mGeomPackGen ? 1u : 0u);
+    LLVKHitch::count("rt_tlasCauseDeferred", tlas_had_build && mTlasDeferred >= kTlasDeferRebuild
+                    && mFrame - mTlasBuildFrame >= 3u ? 1u : 0u);
     pp.tlas_update = tlas_update ? 1u : 0u;
     pp.dummy_lo = tlas_update ? (uint32_t)(mDummyAddr & 0xFFFFFFFFull) : 0u;
     pp.dummy_hi = tlas_update ? (uint32_t)(mDummyAddr >> 32) : 0u;
@@ -3788,6 +3909,7 @@ void LLCleanRTVK::recordBuild(VkCommandBuffer cmd, const VKCullPush& cull, const
     VK_PUSH_BUDGET_CHECK(pp);
     vkCmdPushConstants(cmd, mCompLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pp), &pp);
     vkCmdDispatch(cmd, (pp.instance_count + 63) / 64, 1, 1);
+    R.gpuSubMark(cmd, "c_rt_instances");   // pass A, separated from terrain / rig copy
 
     // ---- smooth terrain: morph copy (mode 3) -> morph BLAS builds / refits ----
     if (!mTerrBuilds.empty())
@@ -3899,6 +4021,7 @@ void LLCleanRTVK::recordBuild(VkCommandBuffer cmd, const VKCullPush& cull, const
             ranges.push_back(&mRigRanges[b.e0]);   // one range per geometry, contiguous
             if (b.update) ++mRefits; else ++mRigBuilds;
         }
+        R.gpuSubMark(cmd, "c_rig_copy");   // pose motion + rig copy + build-input barrier
         fullB(cmd);   // (#889 A/B)
         if (!infos.empty())
             rt.vkCmdBuildAccelerationStructuresKHR(cmd, (uint32_t)infos.size(), infos.data(), ranges.data());
@@ -3935,8 +4058,10 @@ void LLCleanRTVK::recordBuild(VkCommandBuffer cmd, const VKCullPush& cull, const
         }
     }
 
+    R.gpuSubMark(cmd, "c_tlas_passb");   // <GMDX> (perf attribution: the c_tlas window split)
     // ---- TLAS build: instance records (compute) + BLAS (builds/refits/compaction) ----
     memBarrier(cmd, kCS | kAS, kSW | kASW, kAS, kASR | kSR);
+    R.gpuSubMark(cmd, "c_tlas_prepare");   // pass B / group coverage, before the TLAS build
     fullB(cmd);   // (#889 A/B)
     if (mClusterRT && mClusterRT->ptlasLayout())
     {
@@ -3979,10 +4104,12 @@ void LLCleanRTVK::recordBuild(VkCommandBuffer cmd, const VKCullPush& cull, const
             for (int k = 0; k < 3; ++k) mTlasBuildCam[k] = cull.lod_cam_pos[k];
         }
     }
+    R.gpuSubMark(cmd, "c_tlas_build");   // <GMDX>
     // #874 RT scene audit: this frame's records + rt_geom -> the host ring (before c_tlas, so a
     // loss in a later pass of this frame finds them stamped).
     auditRecordCopy(cmd, pp.instance_count, slot_n, tlas_update, mClusterRT && mClusterRT->ptlasLayout(),
                     addr_bytes, rig_bytes != 0 && mStage[mSlotIdx].mapped != nullptr);
+    R.gpuSubMark(cmd, "c_tlas_audit");   // <GMDX>
     // TLAS + rt_geom + rig positions -> every consumer (ray queries in FS / CS).
     // Deferred (setDeferRelease, RenderVKOverlapTlas): releaseToConsumers records it
     // at the first consumer with src = AS build only, so compute recorded in between
@@ -4013,6 +4140,7 @@ void LLCleanRTVK::recordBuild(VkCommandBuffer cmd, const VKCullPush& cull, const
     R.gpuSubMark(cmd, "c_tlas");
     mTlasBuilt = true;
     mIdleSinceBuild = false;
+    inputRecoveryRecorded();
 
     phase("vk_rtP_record");
     // ---- counters (per frame; RenderVKSectionLog averages them) ----
@@ -4025,6 +4153,7 @@ void LLCleanRTVK::recordBuild(VkCommandBuffer cmd, const VKCullPush& cull, const
     LLVKHitch::count("rt_rigRefits", mRefits);
     LLVKHitch::count("rt_rigBuilds", mRigBuilds);
     LLVKHitch::count("rt_tlasInstances", mTlasActive);   // active, from 2 frames ago
+    LLVKHitch::count("rt_tlasRecords", pp.instance_count);   // current primitive count, including inactive rows
     LLVKHitch::count("rt_tlasRefit", mTlasRefitThis ? 1u : 0u);
     LLVKHitch::count("rt_tlasRebuild", mTlasRefitThis ? 0u : 1u);
     LLVKHitch::count("rt_tlasDeferred", mTlasDeferred);  // waiting to enter, from 2 frames ago
@@ -4207,6 +4336,9 @@ void LLCleanRTVK::recordDebug(VkCommandBuffer cmd, VkImageView colorView, uint32
     ca.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE; ca.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
     ri.renderArea = {{0, 0}, {w, h}}; ri.layerCount = 1; ri.colorAttachmentCount = 1; ri.pColorAttachments = &ca;
+    if (view == 30u)
+        memBarrier(cmd, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                   VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
     vkCmdBeginRendering(cmd, &ri);
     VkViewport vp{0, 0, (float)w, (float)h, 0, 1};
     VkRect2D sc{{0, 0}, {w, h}};
@@ -4228,6 +4360,22 @@ void LLCleanRTVK::recordDebug(VkCommandBuffer cmd, VkImageView colorView, uint32
         p.params2[1] = focus.axis[0]; p.params2[2] = focus.axis[1]; p.params2[3] = focus.axis[2];
         p.params3[0] = focus.apex[0]; p.params3[1] = focus.apex[1]; p.params3[2] = focus.apex[2];
         p.params3[3] = focus.near_d;
+    }
+    else if (view == 30u)
+    {
+        // Reuse the debug overlay's ray/RT sets. Read the actual GPU build's hash/entries
+        // through read-only addresses: no host material classifier, new set or readback.
+        const bool ready = mR.mRegir.buffer && mR.mRsEmNow && mR.mRsEmDiagNow;
+        const uint32_t par = mR.mRsEmParity ^ 1u;
+        const VkDeviceAddress hash = ready ? mR.mRegir.address + mR.kRsEmHashOffset
+            + (VkDeviceSize)par * mR.kRsEmHashN * 8u : 0u;
+        const VkDeviceAddress ent = ready ? mR.mRegir.address + mR.kRsEmEntOffset
+            + (VkDeviceSize)par * mR.kRsEmInstCap * mR.kRsEmEntBytes : 0u;
+        const uint32_t addresses[4] = {(uint32_t)hash, (uint32_t)(hash >> 32u), (uint32_t)ent, (uint32_t)(ent >> 32u)};
+        std::memcpy(&p.params2[1], addresses, 2u * sizeof(uint32_t));
+        std::memcpy(&p.params3[0], addresses + 2u, 2u * sizeof(uint32_t));
+        p.params2[3] = ready ? 1.f : 0.f;
+        std::memcpy(&p.params3[2], &mR.mRsStatFrameNow, sizeof(uint32_t));
     }
     else if (view == 18u)
     {

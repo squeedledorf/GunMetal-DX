@@ -140,7 +140,7 @@
              <mouse_held_callback
                 function="Camera.roll_left" />
            </button>
-           <!-- <GMDX> roll reset / 90 degree portrait (SoapStorm ed0f69bd0e) -->
+           <!-- roll reset / 90 degree portrait (ported from GunMetal-DX, v0.3.0 cf5f1f4) -->
            <button
               follows="top|left"
               height="14"
@@ -169,7 +169,6 @@
              <commit_callback
                 function="Camera.roll_portrait" />
            </button>
-           <!-- </GMDX> -->
            <button
               follows="top|left"
               height="18"
@@ -318,7 +317,7 @@
         <panel_camera_item.selected_picture
           image_name="MouseLook_View_On" />
       </panel_camera_item>
-      <!-- <GMDX> orthographic view (SoapStorm 7179701d85) -->
+      <!-- orthographic view (ported from GunMetal-DX, v0.3.0 cf5f1f4; Firestorm FSCameraOrtho) -->
       <panel_camera_item
         name="ortho_view"
         tool_tip="Orthographic View (Blender style: back to perspective when the camera moves)"
@@ -332,7 +331,6 @@
         <panel_camera_item.selected_picture
           image_name="Cam_Ortho_On" />
       </panel_camera_item>
-      <!-- </GMDX> -->
       <combo_box
         follows="top|left"
         layout="topleft"

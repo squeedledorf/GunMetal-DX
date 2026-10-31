@@ -11,6 +11,10 @@
 #include "lldate.h"   // <OCOL> the mist's wall-clock drift
 #include "llerror.h"
 #include "llviewercontrol.h"
+#include "llhazeenv.h"
+#include "llhazesky.h"
+#include <deque>
+#include "llenvironment.h"
 #include "llvkhitch.h"   // volumetric particle counters (#721)
 #include "slweather.h"   // weather drives the height fog (#783)
 #include "v3math.h"
@@ -26,11 +30,11 @@ namespace
 struct Tier { uint32_t w, h, d; };
 constexpr Tier kTiers[3] = {{128u, 72u, 48u}, {160u, 90u, 64u}, {192u, 108u, 96u}};
 
-// Haze sun scatter gain over the physical haze sigma_s: the god rays' kScatterGain
+// Physical-off haze sun scatter gain: the god rays' kScatterGain
 // (llcleangodraysvk.cpp; the physical haze makes invisible shafts), so fog-on shafts read
 // like god-rays-on shafts at RenderVKVolumetricFogSunScatter 1.
 constexpr float kScatterGain = 8.f;
-// EEP-derived ("auto") height fog: sigma0 = this x the haze's Mie extinction (haze_density
+// Physical-off EEP-derived ("auto") height fog: sigma0 = this x the haze's Mie extinction (haze_density
 // x density_multiplier x distance_multiplier) at the base height -- a hazier sky has a
 // thicker ground fog, a clear one (haze ~0) next to none. ~4.3e-4 /m on the default sky:
 // a subtle ground haze (T ~ 0.92 over 200 m at the base).
@@ -116,8 +120,10 @@ bool LLCleanVolFogVK::ensurePipelines(const Frame& f)
         if (!mJob.poll()) return false;   // still compiling
         mInjectPipe = mStage[0]; mLightPipe = mStage[1]; mTemporalPipe = mStage[2];
         mIntegratePipe = mStage[3]; mApplyPipe = mStage[4]; mPartPipe = mStage[5];
+        mMediumApplyPipe = mMediumApplyStage;
+        mMediumApplyStage = VK_NULL_HANDLE;
         for (VkPipeline& p : mStage) p = VK_NULL_HANDLE;
-        if (!mInjectPipe || !mLightPipe || !mTemporalPipe || !mIntegratePipe || !mApplyPipe || !mPartPipe)
+        if (!mInjectPipe || !mLightPipe || !mTemporalPipe || !mIntegratePipe || !mApplyPipe || !mPartPipe || !mMediumApplyPipe)
         {
             LL_WARNS("VKVolFog") << "volumetric fog pipelines failed to build; effect disabled" << LL_ENDL;
             const VkDescriptorSetLayout d0 = mPipeDsl[0], d1 = mPipeDsl[1];
@@ -155,18 +161,25 @@ bool LLCleanVolFogVK::ensurePipelines(const Frame& f)
     // 5 the particle pool (SSBO), 6 the particle volume buffer (SSBO), 7 the emission grid
     // (storage). While the particles are off 5 / 6 name the volume list and 7 the current
     // cells (never accessed then: the passes' push flags gate them).
-    VkDescriptorSetLayoutBinding b[8]{};
-    const VkDescriptorType types[8] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+    VkDescriptorSetLayoutBinding b[15]{};
+    const VkDescriptorType types[15] = {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                                        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
                                        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                                       VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE};
-    for (uint32_t i = 0; i < 8; ++i)
+                                       VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                                       VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                                       VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                                       VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER};
+    for (uint32_t i = 0; i < 15; ++i)
     {
         b[i].binding = i; b[i].descriptorType = types[i];
         b[i].descriptorCount = 1; b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     }
     VkDescriptorSetLayoutCreateInfo lci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    lci.bindingCount = 8; lci.pBindings = b;
+    lci.bindingCount = 15; lci.pBindings = b;
+    VkDescriptorBindingFlags optionalBindings[15]{};
+    for(uint32_t i=8;i<15;++i) optionalBindings[i]=VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
+    VkDescriptorSetLayoutBindingFlagsCreateInfo flags{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO};
+    flags.bindingCount=15; flags.pBindingFlags=optionalBindings; lci.pNext=&flags;
     VK_CHECK(vkdCreateSetLayout(dev, &lci, &mDsl, "mDslVolFog"));
     VK_CHECK(mPool.create(dev, "volfog", {{mDsl, 4}}));
     for (int p = 0; p < 2; ++p)
@@ -191,9 +204,18 @@ bool LLCleanVolFogVK::ensurePipelines(const Frame& f)
         for (auto& c : cs)
         {
             VkShaderModule m = vfModule(dev, c.code, c.bytes, c.name);
-            createComputePipelineInto(dev, m, mPassLayout, 0, nullptr, c.out, c.name);
+            const VkSpecializationMapEntry entry{21, 0, sizeof(f.eyeIndex)};
+            const VkSpecializationInfo spec{1, &entry, sizeof(f.eyeIndex), &f.eyeIndex};
+            createComputePipelineInto(dev, m, mPassLayout, 0, &spec, c.out, c.name);
             destroyShaderModuleDeferred(dev, m, nullptr);
         }
+    }
+    {
+        VkShaderModule module = vfModule(dev, kWorldMediumApplySpv, kWorldMediumApplySpv_bytes, "kWorldMediumApplySpv");
+        const VkSpecializationMapEntry entry{21, 0, sizeof(f.eyeIndex)};
+        const VkSpecializationInfo spec{1, &entry, sizeof(f.eyeIndex), &f.eyeIndex};
+        createComputePipelineInto(dev, module, mPassLayout, 0, &spec, &mMediumApplyStage, "camera medium composite");
+        destroyShaderModuleDeferred(dev, module, nullptr);
     }
     // Apply: {draw set 0}, fragment push; render pass 2's attachments, C' = src + dst x src.a
     // on the scene (its alpha preserved), glow / reactive write-masked, no depth test.
@@ -267,7 +289,9 @@ bool LLCleanVolFogVK::ensureRtPipeline(const Frame& f)
     pli.pushConstantRangeCount = 1; pli.pPushConstantRanges = &pr;
     VK_CHECK(vkdCreatePipelineLayout(dev, &pli, &mPassRtLayout, "mVolFogPassRtLayout"));
     VkShaderModule m = vfModule(dev, kWorldVolLightRtSpv, kWorldVolLightRtSpv_bytes, "kWorldVolLightRtSpv");
-    createComputePipelineInto(dev, m, mPassRtLayout, 0, nullptr, &mRtStage, "volumetric fog light (ray traced)");
+    const VkSpecializationMapEntry entry{21, 0, sizeof(f.eyeIndex)};
+    const VkSpecializationInfo spec{1, &entry, sizeof(f.eyeIndex), &f.eyeIndex};
+    createComputePipelineInto(dev, m, mPassRtLayout, 0, &spec, &mRtStage, "volumetric fog light (ray traced)");
     destroyShaderModuleDeferred(dev, m, nullptr);
     PipelineJobOpts o;
     o.what = "volumetric fog (ray traced)";
@@ -291,7 +315,7 @@ void LLCleanVolFogVK::destroyRtPipeline(VkDevice dev)
 
 void LLCleanVolFogVK::destroyImages()
 {
-    for (GpuImage* im : {&mCur, &mHist[0], &mHist[1], &mInteg, &mEmit})
+    for (GpuImage* im : {&mCur, &mHist[0], &mHist[1], &mInteg, &mEmit, &mTrans, &mAir[0], &mAir[1], &mHeightHist[0], &mHeightHist[1]})
     {
         if (im->image && mCtx) mCtx->destroyImage(*im);
         *im = GpuImage{};
@@ -310,45 +334,36 @@ bool LLCleanVolFogVK::ensureImages(VkCommandBuffer cmd, uint32_t w, uint32_t h, 
     destroyImages();
     mBindingDirty = mBindingDirty || had;
     const VkImageUsageFlags u = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-    GpuImage* imgs[4] = {&mCur, &mHist[0], &mHist[1], &mInteg};
-    bool ok = true;
-    for (GpuImage* im : imgs)
+    // Baseline owns only L/T + two tiny air endpoints. Volumetric mode replaces
+    // it: cur + local history pair + L/T + height current/history pair = eight.
+    std::vector<GpuImage*> volumes{&mInteg};
+    if (!mBaseline) volumes.insert(volumes.end(), {&mCur, &mHist[0], &mHist[1]});
+    if (mPhysical)
     {
-        *im = mCtx->createImage3D(w, h, d, VK_FORMAT_R16G16B16A16_SFLOAT, u);
+        volumes.push_back(&mTrans);
+        if (!mBaseline) volumes.insert(volumes.end(), {&mEmit, &mHeightHist[0], &mHeightHist[1]});
+    }
+    bool ok = true;
+    for (GpuImage* im : volumes)
+    {
+        *im = mCtx->createImage3D(w,h,d,VK_FORMAT_R16G16B16A16_SFLOAT,u);
         ok = ok && im->image;
     }
+    std::vector<GpuImage*> images = volumes;
+    if (mPhysical)
+        for (auto& im : mAir)
+        {
+            im = mCtx->createImage2D(w,h,VK_FORMAT_R16G16B16A16_SFLOAT,u,VK_IMAGE_ASPECT_COLOR_BIT);
+            ok = ok && im.image;
+            images.push_back(&im);
+        }
     if (!ok)
     {
-        // #697 allocation policy: no crash -- the fog skips (retried on the next tier / toggle).
-        LL_WARNS("VKVolFog") << "volumetric fog grid " << w << "x" << h << "x" << d
-                             << " failed to allocate; effect skipped" << LL_ENDL;
+        LL_WARNS("VKVolFog") << "camera medium allocation refused at " << w << "x" << h << "x" << d << LL_ENDL;
         destroyImages();
         return false;
     }
-    mW = w; mH = h; mD = d;
-    mBindingDirty = true;
-    // GENERAL for good; cleared (no NaN ever sits in a history; the integrated volume to the
-    // identity: no in-scatter, T = 1), then visible to the compute / fragment readers.
-    VkImageMemoryBarrier2 ib[4]{};
-    for (int i = 0; i < 4; ++i)
-    {
-        ib[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-        ib[i].dstStageMask = VK_PIPELINE_STAGE_2_CLEAR_BIT;
-        ib[i].dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-        ib[i].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED; ib[i].newLayout = VK_IMAGE_LAYOUT_GENERAL;
-        ib[i].image = imgs[i]->image; ib[i].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    }
-    VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; dep.imageMemoryBarrierCount = 4; dep.pImageMemoryBarriers = ib;
-    vkCmdPipelineBarrier2(cmd, &dep);
-    const VkImageSubresourceRange rng{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    const VkClearColorValue zero{};
-    VkClearColorValue ident{};
-    ident.float32[3] = 1.f;
-    for (int i = 0; i < 4; ++i)
-        vkCmdClearColorImage(cmd, imgs[i]->image, VK_IMAGE_LAYOUT_GENERAL, i == 3 ? &ident : &zero, 1, &rng);
-    memBarrier(cmd, VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
-               VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
-               VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+    // Finish every fallible allocation before recording commands that name images.
     // The volume list ring (host-visible, written every running frame).
     for (GpuBuffer& lb : mList)
         if (!lb.buffer)
@@ -360,6 +375,42 @@ bool LLCleanVolFogVK::ensureImages(VkCommandBuffer cmd, uint32_t w, uint32_t h, 
         destroyImages();
         return false;
     }
+    if(mPhysical && !mBaseline)
+    {
+        if(!mMediumStats.buffer) mMediumStats=mCtx->createBuffer(16,VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        for(auto& rb:mMediumStatsReadback)
+            if(!rb.buffer) rb=mCtx->createBuffer(16,VK_BUFFER_USAGE_TRANSFER_DST_BIT,VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if(!mMediumStats.buffer || !mMediumStatsReadback[0].mapped || !mMediumStatsReadback[1].mapped)
+        {
+            destroyImages();return false;
+        }
+    }
+    mW=w; mH=h; mD=d; mBindingDirty=true;
+    std::vector<VkImageMemoryBarrier2> barriers(images.size());
+    for (size_t i=0;i<images.size();++i)
+    {
+        auto& ib=barriers[i];
+        ib.sType=VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        ib.dstStageMask=VK_PIPELINE_STAGE_2_CLEAR_BIT; ib.dstAccessMask=VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        ib.oldLayout=VK_IMAGE_LAYOUT_UNDEFINED; ib.newLayout=VK_IMAGE_LAYOUT_GENERAL;
+        ib.image=images[i]->image; ib.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+    }
+    VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    dep.imageMemoryBarrierCount=static_cast<uint32_t>(barriers.size()); dep.pImageMemoryBarriers=barriers.data();
+    vkCmdPipelineBarrier2(cmd,&dep);
+    const VkImageSubresourceRange rng{VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,1};
+    const VkClearColorValue zero{};
+    VkClearColorValue identity{}; identity.float32[3]=1.f;
+    VkClearColorValue rgbIdentity{}; for (float& c : rgbIdentity.float32) c=1.f;
+    VkClearColorValue transportIdentity=rgbIdentity;transportIdentity.float32[3]=0.f;
+    for(auto* im: images)
+    {
+        const auto* clear=im==&mTrans ? &transportIdentity : im==&mAir[1] ? &rgbIdentity : im==&mInteg ? &identity : &zero;
+        vkCmdClearColorImage(cmd,im->image,VK_IMAGE_LAYOUT_GENERAL,clear,1,&rng);
+    }
+    memBarrier(cmd,VK_PIPELINE_STAGE_2_CLEAR_BIT,VK_ACCESS_2_TRANSFER_WRITE_BIT,
+               VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+               VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
     writeSets();
     return true;
 }
@@ -372,16 +423,16 @@ void LLCleanVolFogVK::writeSets()
         for (uint32_t s = 0; s < 2; ++s)
         {
             // Parity p: this frame's history is mHist[p], last frame's mHist[p ^ 1].
-            VkDescriptorImageInfo ii[4] = {{VK_NULL_HANDLE, mCur.view, VK_IMAGE_LAYOUT_GENERAL},
-                                           {mSampler, mHist[p ^ 1u].view, VK_IMAGE_LAYOUT_GENERAL},
-                                           {VK_NULL_HANDLE, mHist[p].view, VK_IMAGE_LAYOUT_GENERAL},
+            VkDescriptorImageInfo ii[4] = {{VK_NULL_HANDLE, mCur.view ? mCur.view : mInteg.view, VK_IMAGE_LAYOUT_GENERAL},
+                                           {mSampler, mHist[p ^ 1u].view ? mHist[p ^ 1u].view : mInteg.view, VK_IMAGE_LAYOUT_GENERAL},
+                                           {VK_NULL_HANDLE, mHist[p].view ? mHist[p].view : mInteg.view, VK_IMAGE_LAYOUT_GENERAL},
                                            {VK_NULL_HANDLE, mInteg.view, VK_IMAGE_LAYOUT_GENERAL}};
             VkDescriptorBufferInfo bi{mList[s].buffer, 0, VK_WHOLE_SIZE};
             // #721: the particle bindings (stand-ins while the particles are off).
             const bool part = mPartPool && mPV.buffer && mEmit.view;
             VkDescriptorBufferInfo bp{part ? mPartPool : mList[s].buffer, 0, VK_WHOLE_SIZE};
             VkDescriptorBufferInfo bv{part ? mPV.buffer : mList[s].buffer, 0, VK_WHOLE_SIZE};
-            VkDescriptorImageInfo ie{VK_NULL_HANDLE, part ? mEmit.view : mCur.view, VK_IMAGE_LAYOUT_GENERAL};
+            VkDescriptorImageInfo ie{VK_NULL_HANDLE, mEmit.view ? mEmit.view : mInteg.view, VK_IMAGE_LAYOUT_GENERAL};
             VkWriteDescriptorSet wr[8]{};
             for (uint32_t i = 0; i < 8; ++i)
             {
@@ -397,6 +448,33 @@ void LLCleanVolFogVK::writeSets()
             wr[6].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;         wr[6].pBufferInfo = &bv;
             wr[7].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;          wr[7].pImageInfo = &ie;
             vkUpdateDescriptorSets(dev, 8, wr, 0, nullptr);
+            if (mPhysical)
+            {
+                VkDescriptorImageInfo extra[6] = {
+                    {VK_NULL_HANDLE,mTrans.view,VK_IMAGE_LAYOUT_GENERAL},
+                    {VK_NULL_HANDLE,mAir[0].view,VK_IMAGE_LAYOUT_GENERAL},
+                    {VK_NULL_HANDLE,mAir[1].view,VK_IMAGE_LAYOUT_GENERAL},
+                    {VK_NULL_HANDLE,mHeightHist[p].view ? mHeightHist[p].view : mInteg.view,VK_IMAGE_LAYOUT_GENERAL},
+                    {mSampler,mHeightHist[p^1u].view ? mHeightHist[p^1u].view : mInteg.view,VK_IMAGE_LAYOUT_GENERAL},
+                    {VK_NULL_HANDLE,mHdrView,VK_IMAGE_LAYOUT_GENERAL}};
+                VkWriteDescriptorSet ew[6]{};
+                for(uint32_t i=0;i<6;++i)
+                {
+                    ew[i].sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; ew[i].dstSet=mDset[p][s];
+                    ew[i].dstBinding=8+i; ew[i].descriptorCount=1;
+                    ew[i].descriptorType=i==4 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+                    ew[i].pImageInfo=&extra[i];
+                }
+                vkUpdateDescriptorSets(dev,6,ew,0,nullptr);
+                if(mMediumStats.buffer)
+                {
+                    const VkDescriptorBufferInfo stats{mMediumStats.buffer,0,16};
+                    VkWriteDescriptorSet sw{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+                    sw.dstSet=mDset[p][s];sw.dstBinding=14;sw.descriptorCount=1;
+                    sw.descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;sw.pBufferInfo=&stats;
+                    vkUpdateDescriptorSets(dev,1,&sw,0,nullptr);
+                }
+            }
         }
     const bool part = mPartPool && mPV.buffer && mEmit.view;
     mSetPool = part ? mPartPool : VK_NULL_HANDLE;
@@ -455,7 +533,7 @@ bool LLCleanVolFogVK::ensureParticles(VkCommandBuffer cmd, bool want, VkBuffer p
     if (!mCtx || !mDsl || !mInteg.image) return false;
     if (!want)
     {
-        if (mPV.buffer || mEmit.image || mPVRb[0].buffer || mPVRb[1].buffer)
+        if (mPV.buffer || (!mPhysical && mEmit.image) || mPVRb[0].buffer || mPVRb[1].buffer)
         {
             vkDeviceWaitIdle(mCtx->device());
             destroyParticles();
@@ -479,7 +557,7 @@ bool LLCleanVolFogVK::ensureParticles(VkCommandBuffer cmd, bool want, VkBuffer p
         for (GpuBuffer& rb : mPVRb)
             rb = mCtx->createBuffer(16, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        mEmit = mCtx->createImage3D(mW, mH, mD, VK_FORMAT_R16G16B16A16_SFLOAT,
+        if (!mEmit.image) mEmit = mCtx->createImage3D(mW, mH, mD, VK_FORMAT_R16G16B16A16_SFLOAT,
                                     VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
         if (!mPV.buffer || !mEmit.image || !mPVRb[0].mapped || !mPVRb[1].mapped)
         {
@@ -523,8 +601,13 @@ bool LLCleanVolFogVK::ensureParticles(VkCommandBuffer cmd, bool want, VkBuffer p
 void LLCleanVolFogVK::destroyParticles()
 {
     if (!mCtx) return;
-    if (mEmit.image) mCtx->destroyImage(mEmit);
-    mEmit = GpuImage{};
+    if(mBorrowParticles)
+    {
+        mPV=GpuBuffer{}; mPartPool=VK_NULL_HANDLE; mPartOn=false; mBorrowParticles=false;
+        return;
+    }
+    ++mParticleGeneration;
+    if (!mPhysical) { if (mEmit.image) mCtx->destroyImage(mEmit); mEmit = GpuImage{}; }
     if (mPV.buffer) mCtx->destroyBuffer(mPV);
     mPV = GpuBuffer{};
     for (GpuBuffer& rb : mPVRb)
@@ -561,6 +644,11 @@ void LLCleanVolFogVK::readParticleStats()
 }
 
 double LLCleanVolFogVK::sOriginGlobal[2] = {0.0, 0.0};   // <OCOL>
+// <GMDX> THE WEATHER LAYER (set by the renderer's ensureVolFog, vkgfx/llcleanrenderervk.cpp): GunMetal-DX's
+// own aerial perspective runs no camera medium, so while mist, precipitation or a weather fog needs
+// it, this fog runs in its classic (physical-off) mode with only those media, on top of GunMetal-DX's
+// haze: no height fog of its own and no haze shafts (the god rays keep those).
+bool gGMDXWeatherLayer = false;
 
 bool LLCleanVolFogVK::prepare(VkCommandBuffer cmd, const Frame& f)
 {
@@ -590,20 +678,27 @@ bool LLCleanVolFogVK::prepare(VkCommandBuffer cmd, const Frame& f)
     static LLCachedControl<F32>  s_vpMin(gSavedSettings, "RenderVKVolumetricParticleMinSize", 0.5f);
     static LLCachedControl<F32>  s_vpEmit(gSavedSettings, "RenderVKVolumetricParticleEmission", 1.f);
     static LLCachedControl<F32>  s_vpNoise(gSavedSettings, "RenderVKVolumetricParticleNoise", 0.35f);
-    // <OCOL> OCOL mist: the OCOL viewer's rolling ground mist as a mode of this fog.
-    static LLCachedControl<bool> s_ocol(gSavedSettings, "OCOLHeightFog", false);
-    static LLCachedControl<F32>  s_ocolDensity(gSavedSettings, "OCOLHeightFogDensity", 0.015f);
-    static LLCachedControl<F32>  s_ocolBase(gSavedSettings, "OCOLHeightFogBaseHeight", 2.f);
-    static LLCachedControl<F32>  s_ocolHeight(gSavedSettings, "OCOLHeightFogFalloff", 8.f);
-    static LLCachedControl<F32>  s_ocolBreakup(gSavedSettings, "OCOLHeightFogBreakup", 1.f);
-    static LLCachedControl<F32>  s_ocolSize(gSavedSettings, "OCOLHeightFogBankSize", 158.f);
-    static LLCachedControl<F32>  s_ocolRoll(gSavedSettings, "OCOLHeightFogRollHeight", 33.5f);
-    static LLCachedControl<F32>  s_ocolWind(gSavedSettings, "OCOLHeightFogWindSpeed", 2.f);
-    static LLCachedControl<F32>  s_ocolWindDir(gSavedSettings, "OCOLHeightFogWindDirection", 68.f);
+    // <OCOL> Height mist (RenderVKMist), a mode of this fog. Ported from GunMetal-DX (squeedledorf, LGPL 2.1),
+    // v0.3.0 cf5f1f4; the origin there is labelled OCOL with no stated author.
+    static LLCachedControl<bool> s_ocol(gSavedSettings, "RenderVKMist", false);
+    static LLCachedControl<F32>  s_ocolDensity(gSavedSettings, "RenderVKMistDensity", 0.015f);
+    static LLCachedControl<F32>  s_ocolBase(gSavedSettings, "RenderVKMistBaseHeight", 2.f);
+    static LLCachedControl<F32>  s_ocolHeight(gSavedSettings, "RenderVKMistFalloff", 8.f);
+    static LLCachedControl<F32>  s_ocolBreakup(gSavedSettings, "RenderVKMistBreakup", 1.f);
+    static LLCachedControl<F32>  s_ocolSize(gSavedSettings, "RenderVKMistBankSize", 158.f);
+    static LLCachedControl<F32>  s_ocolRoll(gSavedSettings, "RenderVKMistRollHeight", 33.5f);
+    static LLCachedControl<F32>  s_ocolWind(gSavedSettings, "RenderVKMistWindSpeed", 2.f);
+    static LLCachedControl<F32>  s_ocolWindDir(gSavedSettings, "RenderVKMistWindDirection", 68.f);
 
     const bool wasRunning = mRunning;
     mRunning = false;
-    if (s_on == 0 || !f.ctx)
+    const bool modeChanged = mPhysical != f.physical || mBaseline != f.baseline;
+    if (modeChanged && f.ctx && !idle()) destroy(f.ctx->device());
+    mPhysical=f.physical; mBaseline=f.baseline; mEyeIndex=f.eyeIndex;
+    const bool hdrChanged=mHdrView!=f.hdrView;
+    if (hdrChanged && f.ctx) vkDeviceWaitIdle(f.ctx->device());
+    mHdrView=f.hdrView;
+    if ((s_on == 0 && !f.physical && !gGMDXWeatherLayer) || !f.ctx)   // <GMDX> (the weather layer)
     {
         if (!idle() && f.ctx) destroy(f.ctx->device());
         return false;
@@ -645,16 +740,42 @@ bool LLCleanVolFogVK::prepare(VkCommandBuffer cmd, const Frame& f)
     if (f.rtLayout && mDsl
         && ((mLocalShadows && f.rtWanted) || rtTermsWanted || mLightRtPipe || mRtJob.pending()))
         ensureRtPipeline(f);
-    const Tier& t = kTiers[std::min<U32>(s_quality, 2u)];
-    if (!ensureImages(cmd, t.w, t.h, t.d)) return false;
+    if (mFrame < mRetryFrame) { ++mFrame; return false; }
+    VkDeviceContext::SoftAllocScope soft(mCtx);
+    Tier t = mBaseline ? Tier{64u,36u,32u} : kTiers[std::min<U32>(s_quality, mRetryTier)];
+    if (!ensureImages(cmd,t.w,t.h,t.d))
+    {
+        if (!mBaseline && mRetryTier>0) --mRetryTier;
+        mRetryFrame=mFrame+120u; ++mFrame;
+        return false;
+    }
+    if (hdrChanged) writeSets();
     // Volumetric particles (#721): their resources follow the setting (freed when off).
     static_assert(((192u + kPVTile - 1u) / kPVTile) * ((108u + kPVTile - 1u) / kPVTile) <= kPVMaxTiles,
                   "the high tier's screen tiles fit VP_MAX_TILES");
-    mPartOn = ensureParticles(cmd, s_vp != 0 && f.partPool && f.partMax > 0, f.partPool) && mPartPipe != VK_NULL_HANDLE;
+    if(f.particleOwner && mPhysical && !mBaseline)
+    {
+        const auto& owner=*f.particleOwner;
+        const bool changed=mPV.buffer!=owner.mPV.buffer || mPartPool!=owner.mPartPool || mBorrowGeneration!=owner.mParticleGeneration;
+        if(changed)
+        {
+            vkDeviceWaitIdle(mCtx->device());
+            destroyParticles();
+            mBorrowParticles=true;mBorrowGeneration=owner.mParticleGeneration;
+            mPV=owner.mPV; mPartPool=owner.mPartPool;
+            writeSets();
+        }
+        mPartOn=owner.mPartOn && mEmit.image;
+    }
+    else
+    {
+        if(mBorrowParticles) { destroyParticles(); writeSets(); }
+        mPartOn = !mBaseline && ensureParticles(cmd, s_vp != 0 && f.partPool && f.partMax > 0, f.partPool) && mPartPipe != VK_NULL_HANDLE;
+    }
     mPartMax = mPartOn ? f.partMax : 0u;
     // Camera under water: the water fog owns the view (as the god rays). No passes; the
     // history restarts when the camera comes back up.
-    if (f.underwater)
+    if (f.underwater && !mPhysical)
     {
         mHistValid = false;
         return false;
@@ -665,36 +786,46 @@ bool LLCleanVolFogVK::prepare(VkCommandBuffer cmd, const Frame& f)
     const bool atmosOn = A[6 * 4 + 2] > 0.5f;
     const float hazeMie = std::max(A[1 * 4 + 3], 0.f) * std::max(A[4 * 4 + 3], 0.f) * std::max(A[5 * 4 + 3], 0.f);
     const float maxY = A[3 * 4 + 3];
-    const float fogFar = llclamp((F32)s_range, 32.f, 512.f);
+    const float fogFar = mPhysical ? llclamp(f.drawDistance,32.f,512.f) : llclamp((F32)s_range, 32.f, 512.f);
     const float n = fogFar / 64.f;
     float sigma0 = s_density < 0.f ? kAutoFog * hazeMie : (F32)s_density;
     sigma0 = llclamp(sigma0 + SLWeather::instance().state().fog * kWeatherFog, 0.f, 1.f);
-    const float falloff = s_falloff < 0.f ? 1.f / llclamp(maxY * kAutoScaleHeight, 10.f, 200.f)
+    if (gGMDXWeatherLayer) sigma0 = llclamp(SLWeather::instance().state().fog * kWeatherFog, 0.f, 1.f);   // <GMDX> (only the weather's fog)
+    float falloff = s_falloff < 0.f ? 1.f / llclamp(maxY * kAutoScaleHeight, 10.f, 200.f)
                                           : llclamp((F32)s_falloff, 0.f, 10.f);
-    const float g = s_aniso < 0.f ? kAutoAniso : llclamp((F32)s_aniso, -0.9f, 0.95f);
+    const float g = mPhysical ? 0.6f : s_aniso < 0.f ? kAutoAniso : llclamp((F32)s_aniso, -0.9f, 0.95f);
     // <OCOL> OCOL mist: its own layer (density at the base, base above the water, scale height)
     // in place of the sky-derived one, and the noise that breaks it into rolling banks.
     float baseZ = f.waterHeight + (F32)s_base;
+    if (mPhysical)
+    {
+        const auto sky=LLEnvironment::instance().getCurrentSky();
+        const auto density=LLHaze::derive(sky ? llHazeEndpoint(*sky).inputs : LLHaze::Inputs{});
+        sigma0=static_cast<float>(density.sigma0+LLHaze::bounded(SLWeather::instance().state().fog,0.,0.,1.)*kWeatherFog);
+        falloff=static_cast<float>(1./density.scaleHeight);
+        baseZ=f.waterHeight;
+    }
     float fogFalloff = falloff;
     mOcolMist[0] = mOcolMist[1] = mOcolMist[2] = mOcolMist[3] = 0.f;
     if (s_ocol)
     {
         sigma0 = llclamp((F32)s_ocolDensity, 0.f, 1.f);
-        baseZ = f.waterHeight + llclamp((F32)s_ocolBase, -20.f, 200.f);
-        fogFalloff = 1.f / llclamp((F32)s_ocolHeight, 0.5f, 500.f);
-        const float size = llclamp((F32)s_ocolSize, 1.f, 2000.f);
-        mOcolMist[1] = llclamp((F32)s_ocolBreakup, 0.f, 1.f);
+        if(mPhysical || gGMDXWeatherLayer) sigma0=static_cast<float>(LLHaze::bounded(s_ocolDensity,.015,0.,.1)+LLHaze::bounded(SLWeather::instance().state().fog,0.,0.,1.)*kWeatherFog);   // <GMDX> (the weather layer: as the camera medium)
+        baseZ = f.waterHeight + static_cast<float>(LLHaze::bounded(s_ocolBase,2.,-20.,200.));
+        fogFalloff = 1.f / static_cast<float>(LLHaze::bounded(s_ocolHeight,8.,.5,500.));
+        const float size = static_cast<float>(LLHaze::bounded(s_ocolSize,158.,1.,2000.));
+        mOcolMist[1] = static_cast<float>(LLHaze::bounded(s_ocolBreakup,1.,0.,1.));
         if (mOcolMist[1] <= 0.f) mOcolMist[1] = 1e-6f;   // (0 = the layer without noise, still the OCOL layer)
         mOcolMist[2] = size;
-        mOcolMist[3] = llclamp((F32)s_ocolRoll, 0.f, 500.f);
+        mOcolMist[3] = static_cast<float>(LLHaze::bounded(s_ocolRoll,33.5,0.,500.));
         // The noise is global (continuous across regions) and drifts on the wall clock (the same
         // for everyone), wrapped to the 64-cell tile in double so the shader sees small numbers.
         const double tile = 64.0 * (double)size;
         auto wrap = [tile](double v) { const double r = std::fmod(v, tile); return (float)(r < 0.0 ? r + tile : r); };
         const double* origin = sOriginGlobal;
         const double now = LLDate::now().secondsSinceEpoch();
-        const double rad = (double)s_ocolWindDir * DEG_TO_RAD;   // compass heading it drifts toward: 0 north, 90 east
-        const double wx = std::sin(rad) * (double)s_ocolWind, wy = std::cos(rad) * (double)s_ocolWind;
+        const double rad = LLHaze::bounded(s_ocolWindDir,68.,-1.e6,1.e6)*DEG_TO_RAD;   // compass heading it drifts toward: 0 north, 90 east
+        const double wx = std::sin(rad) * LLHaze::bounded(s_ocolWind,2.,-1000.,1000.), wy = std::cos(rad) * LLHaze::bounded(s_ocolWind,2.,-1000.,1000.);
         mOcolOffsets[0] = wrap(origin[0] - wx * now);
         mOcolOffsets[1] = wrap(origin[1] - wy * now);
         mOcolOffsets[2] = wrap(origin[0] - wx * now * 1.7);   // the wisps drift faster
@@ -707,15 +838,23 @@ bool LLCleanVolFogVK::prepare(VkCommandBuffer cmd, const Frame& f)
     I = FrameInfo{};
     std::memcpy(I.vp, f.viewProjRel, sizeof(I.vp));
     invert4(f.viewProjRel, I.inv_vp);
+    bool invertible=false;
+    for(float value:I.inv_vp)
+    {
+        if(!std::isfinite(value)) { mHistValid=false;return false; }
+        invertible=invertible || value!=0.f;
+    }
+    if(!invertible) { mHistValid=false;return false; }
     I.eye[0] = f.camTime[0]; I.eye[1] = f.camTime[1]; I.eye[2] = f.camTime[2]; I.eye[3] = 1.f;
     I.grid[0] = (float)t.w; I.grid[1] = (float)t.h; I.grid[2] = (float)t.d; I.grid[3] = fogFar;
     I.slice[0] = n; I.slice[1] = std::log(1.f + fogFar / n);
-    I.slice[2] = atmosOn ? hazeMie * kScatterGain * llclamp((F32)s_sun, 0.f, 4.f) : 0.f;
+    I.slice[2] = !mPhysical && atmosOn && !gGMDXWeatherLayer ? hazeMie * kScatterGain * llclamp((F32)s_sun, 0.f, 4.f) : 0.f;   // <GMDX> (the weather layer: the god rays)
     I.slice[3] = g;
     I.fog[0] = sigma0; I.fog[1] = fogFalloff; I.fog[2] = baseZ;   // <OCOL> (OCOL mist's layer when on)
-    I.fog[3] = llclamp((F32)s_amb, 0.f, 4.f);
+    I.fog[3] = mPhysical ? 1.f : llclamp((F32)s_amb, 0.f, 4.f);
     I.albedo[0] = llclamp(col.mV[0], 0.f, 1.f); I.albedo[1] = llclamp(col.mV[1], 0.f, 1.f);
-    I.albedo[2] = llclamp(col.mV[2], 0.f, 1.f); I.albedo[3] = s_far ? 1.f : 0.f;
+    I.albedo[2] = llclamp(col.mV[2], 0.f, 1.f); I.albedo[3] = s_far && (!gGMDXWeatherLayer || sigma0 > 0.f) ? 1.f : 0.f;   // <GMDX> (the weather layer: no far height fog without one)
+    if(mPhysical) { I.albedo[0]=I.albedo[1]=I.albedo[2]=.9f; I.albedo[3]=1.f; }
     mLocalLights = llclamp((F32)s_ll, 0.f, 8.f);
     I.misc[0] = mLocalLights;
     I.misc[1] = std::max(f.drawDistance, fogFar);
@@ -724,6 +863,14 @@ bool LLCleanVolFogVK::prepare(VkCommandBuffer cmd, const Frame& f)
     mLocalVolumes = s_lv;
     mHistWeight = llclamp((F32)s_hist, 0.f, 0.98f);
     mSlot = f.frameSlot & 1u;
+    if(mMediumStatsValid[mSlot] && mMediumStatsReadback[mSlot].mapped)
+    {
+        uint32_t counters[4]{};
+        std::memcpy(counters,mMediumStatsReadback[mSlot].mapped,sizeof(counters));
+        LLVKHitch::count("vk_mediumLightOverflow",counters[0]);
+        LLVKHitch::count("vk_mediumVolumeOverflow",counters[1]);
+        mMediumStatsValid[mSlot]=false;
+    }
     mOffscreen = f.offscreen;
     readParticleStats();   // (#721: this slot's last copy; before mPartPush is refilled below)
 
@@ -739,7 +886,22 @@ bool LLCleanVolFogVK::prepare(VkCommandBuffer cmd, const Frame& f)
             if (l > 1e-12f) { fwd[0] = v[0] / l; fwd[1] = v[1] / l; fwd[2] = v[2] / l; }
         }
     }
-    updateTestVolumes(f, fwd);
+    if(f.forward) for(int c=0;c<3;++c) fwd[c]=f.forward[c];
+    const float forwardLength=std::sqrt(fwd[0]*fwd[0]+fwd[1]*fwd[1]+fwd[2]*fwd[2]);
+    if(!(forwardLength>1.e-6f) || !std::isfinite(forwardLength)) { mHistValid=false;return false; }
+    for(float& c:fwd) c/=forwardLength;
+    for(int c=0;c<3;++c) mForward[c]=fwd[c];
+    mForward[3]=f.orthographic ? 1.f : 0.f;
+    if(mPhysical && f.particleOwner)
+    {
+        mTestVols=f.particleOwner->mTestVols;mTestCount=f.particleOwner->mTestCount;
+    }
+    else updateTestVolumes(f, fwd);
+    if(mPhysical)
+    {
+        const auto& weather=SLWeather::instance().state();
+        I.misc[3]=(mPartOn || (mLocalVolumes && !mTestVols.empty()) || weather.precipExt>0.f) ? 1.f : 0.f;
+    }
 
     // Volumetric particles (#721): this recording's selection / binning parameters.
     float spriteKeep = 1.f;
@@ -779,10 +941,13 @@ bool LLCleanVolFogVK::prepare(VkCommandBuffer cmd, const Frame& f)
             P.q[2][3] = 2.f * llclamp(tanH, 0.05f, 4.f) / (float)t.h;
         }
         P.q[3][0] = fwd[0]; P.q[3][1] = fwd[1]; P.q[3][2] = fwd[2];
+        if(mPhysical && f.particleForward) for(int c=0;c<3;++c) P.q[3][c]=f.particleForward[c];
+        P.q[3][3]=f.orthographic ? 1.f : 0.f;
+        if(f.orthographic) P.q[2][3]=2.f/std::max(std::abs(f.projection[5])*static_cast<float>(t.h),1.e-6f);
         mPartNoise = llclamp((F32)s_vpNoise, 0.f, 1.f);
     }
     // vol_eye.w 2 = the lit particle VS fades injected sprites by their glow.z this frame.
-    if (mPartOn && f.partSpriteFade && spriteKeep < 1.f) I.eye[3] = 2.f;
+    if (mPartOn && (f.partSpriteFade || mPhysical) && spriteKeep < 1.f) I.eye[3] = 2.f;
 
     // History: reset on the first / re-created grid, a camera cut, a jump, a range change,
     // and every snapshot (no history: it then also leaves the live one invalid).
@@ -790,7 +955,21 @@ bool LLCleanVolFogVK::prepare(VkCommandBuffer cmd, const Frame& f)
     const double dy = (double)f.camTime[1] - mPrevEye[1];
     const double dz = (double)f.camTime[2] - mPrevEye[2];
     const bool jump = dx * dx + dy * dy + dz * dz > kCamJump * kCamJump;
-    mReset = !mHistValid || !wasRunning || f.cameraCut || jump || f.offscreen || fogFar != mPrevFar;
+    bool projectionChanged=f.projection && std::memcmp(f.projection,mPreviousProjection,sizeof(mPreviousProjection))!=0;
+    if(f.projection) std::memcpy(mPreviousProjection,f.projection,sizeof(mPreviousProjection));
+    const auto guard=llGetHazeDisplay();
+    mMapping[1]=mMapping[0]; mMapping[2]=mPrevFar; mMapping[3]=mPrevFar/64.f;
+    mMapping[0]=guard.startDistance;
+    const float signature[4]={sigma0,fogFalloff,guard.startDistance,guard.maxOpacity};
+    bool mediumChanged=false;
+    for(int c=0;c<4;++c)
+    {
+        mediumChanged=mediumChanged || std::abs(signature[c]-mPreviousMedium[c])>.1f*std::max(std::abs(signature[c]),.001f);
+        mPreviousMedium[c]=signature[c];
+    }
+    mReset = !mHistValid || !wasRunning || f.cameraCut || jump || f.offscreen || fogFar != mPrevFar ||
+             (mPhysical && (projectionChanged || mediumChanged || f.underwater!=mPreviousUnderwater));
+    mPreviousUnderwater=f.underwater;
     mPrevFar = fogFar;
     mHistCur ^= 1u;
 
@@ -830,8 +1009,8 @@ bool LLCleanVolFogVK::prepare(VkCommandBuffer cmd, const Frame& f)
     mApplyPush.dims[0] = (float)f.rw; mApplyPush.dims[1] = (float)f.rh;
     mApplyPush.dims[2] = 1.f / (float)f.rw; mApplyPush.dims[3] = 1.f / (float)f.rh;
 
-    // Volume list for this slot: the CPU-side volumes (test volumes now; #720 marked prims
-    // later). GPU appenders add after this (clean_vol_inject.comp header).
+    // Immutable CPU-uploaded volume list for this retired frame slot. GPU coefficient
+    // producers own separate device-local resources; shaders only read this list.
     {
         uint8_t* dst = (uint8_t*)mList[mSlot].mapped;
         const uint32_t cnt = mLocalVolumes ? std::min<uint32_t>((uint32_t)mTestVols.size(), kVolCap) : 0u;
@@ -874,6 +1053,7 @@ void LLCleanVolFogVK::recordComputeImpl(VkCommandBuffer cmd, float shadowMode, u
     const VkPipelineStageFlags2 C = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
     const VkAccessFlags2 RW = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
 
+    mark("c_medium_begin");
     // Inputs -> these passes: the frame-info / light / cluster uploads and computes, the
     // cascades' depth writes (already in their read layout), last frame's history writes;
     // and WAR against last frame's readers of the grid images (temporal / integration /
@@ -895,6 +1075,24 @@ void LLCleanVolFogVK::recordComputeImpl(VkCommandBuffer cmd, float shadowMode, u
         vkCmdPushConstants(cmd, mPassLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(VolPush), &mPush);
     };
 
+    if (mBaseline)
+    {
+        vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,mIntegratePipe);
+        push(1.f,0.f,0.f,0.f);
+        vkCmdDispatch(cmd,(mW+7u)/8u,(mH+7u)/8u,1);
+        const char* timers[4]={"c_medium_ap_eye0","c_medium_ap_eye1","c_medium_ap_eye2","c_medium_ap_eye3"};
+        mark(timers[mEyeIndex]);
+        memBarrier(cmd,C,VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                   C | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+        mHistValid=false;
+        return;
+    }
+    if(mPhysical && mMediumStats.buffer)
+    {
+        memBarrier(cmd,C | VK_PIPELINE_STAGE_2_COPY_BIT,0,VK_PIPELINE_STAGE_2_CLEAR_BIT,VK_ACCESS_2_TRANSFER_WRITE_BIT);
+        vkCmdFillBuffer(cmd,mMediumStats.buffer,0,16,0u);
+        memBarrier(cmd,VK_PIPELINE_STAGE_2_CLEAR_BIT,VK_ACCESS_2_TRANSFER_WRITE_BIT,C,RW);
+    }
     // 0. Volumetric particles (#721): clear the per-frame prefix (header, histogram, tile
     //    counts; WAR against last frame's inject / copy), classify, bin, copy the header for
     //    the stats. Skipped when the pool is not current this frame (particle compute off /
@@ -902,7 +1100,7 @@ void LLCleanVolFogVK::recordComputeImpl(VkCommandBuffer cmd, float shadowMode, u
     //    names the replacement, but no particle sprite is drawn then either).
     const bool partNow = mPartOn && partLive && mPartPipe != VK_NULL_HANDLE && mPV.buffer && mEmit.view && mPartMax > 0
                       && mSetPool == mPartPool && mSetPV == mPV.buffer;
-    if (partNow)
+    if (partNow && !mBorrowParticles)
     {
         memBarrier(cmd, C | VK_PIPELINE_STAGE_2_COPY_BIT, 0, VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
         vkCmdFillBuffer(cmd, mPV.buffer, 0, kPVClearBytes, 0u);
@@ -1043,8 +1241,29 @@ void LLCleanVolFogVK::recordComputeImpl(VkCommandBuffer cmd, float shadowMode, u
                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | C,
                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT
                    | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
+    if(mPhysical && mMediumStats.buffer && mMediumStatsReadback[mSlot].buffer)
+    {
+        memBarrier(cmd,C,VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,VK_PIPELINE_STAGE_2_COPY_BIT,VK_ACCESS_2_TRANSFER_READ_BIT);
+        const VkBufferCopy copy{0,0,16};
+        vkCmdCopyBuffer(cmd,mMediumStats.buffer,mMediumStatsReadback[mSlot].buffer,1,&copy);
+        memBarrier(cmd,VK_PIPELINE_STAGE_2_COPY_BIT,VK_ACCESS_2_TRANSFER_WRITE_BIT,VK_PIPELINE_STAGE_2_HOST_BIT,VK_ACCESS_2_HOST_READ_BIT);
+        mMediumStatsValid[mSlot]=true;
+    }
     // A snapshot leaves no usable history for the live view.
     mHistValid = !mOffscreen;
+}
+
+void LLCleanVolFogVK::recordMediumApply(VkCommandBuffer cmd, const VkDescriptorSet draw01[2])
+{
+    if(!mRunning || !mPhysical || !mMediumApplyPipe) return;
+    const VkDescriptorSet sets[3]={draw01[0],draw01[1],mDset[mHistCur][mSlot]};
+    vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,mMediumApplyPipe);
+    vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,mPassLayout,0,3,sets,0,nullptr);
+    VolPush push{};
+    push.p0[0]=mApplyPush.dims[0]; push.p0[1]=mApplyPush.dims[1];
+    push.jitter[0]=mApplyPush.jitter[0]; push.jitter[1]=mApplyPush.jitter[1];
+    vkCmdPushConstants(cmd,mPassLayout,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof(push),&push);
+    vkCmdDispatch(cmd,(static_cast<uint32_t>(push.p0[0])+7u)/8u,(static_cast<uint32_t>(push.p0[1])+7u)/8u,1);
 }
 
 void LLCleanVolFogVK::recordApply(VkCommandBuffer cmd, VkDescriptorSet dsetDraw0)
@@ -1061,6 +1280,8 @@ void LLCleanVolFogVK::destroy(VkDevice dev)
 {
     if (!dev) return;
     mJob.wait();
+    if(mMediumApplyStage) { vkDestroyPipeline(dev,mMediumApplyStage,nullptr); mMediumApplyStage=VK_NULL_HANDLE; }
+    if(mMediumApplyPipe) { vkDeviceWaitIdle(dev); vkDestroyPipeline(dev,mMediumApplyPipe,nullptr); mMediumApplyPipe=VK_NULL_HANDLE; }
     for (VkPipeline& p : mStage) if (p) { vkDestroyPipeline(dev, p, nullptr); p = VK_NULL_HANDLE; }
     destroyRtPipeline(dev);   // (references mDsl: before it goes)
     mLastRt = false;
@@ -1069,6 +1290,10 @@ void LLCleanVolFogVK::destroy(VkDevice dev)
     destroyImages();
     mBindingDirty = mBindingDirty || had;
     for (GpuBuffer& b : mList) if (b.buffer && mCtx) mCtx->destroyBuffer(b);
+    if(mMediumStats.buffer && mCtx) mCtx->destroyBuffer(mMediumStats);
+    mMediumStats=GpuBuffer{};
+    for(auto& rb:mMediumStatsReadback) { if(rb.buffer && mCtx) mCtx->destroyBuffer(rb);rb=GpuBuffer{}; }
+    mMediumStatsValid[0]=mMediumStatsValid[1]=false;
     destroyParticles();
     mPartPool = mSetPool = mSetPV = VK_NULL_HANDLE;
     mSetEmit = VK_NULL_HANDLE;

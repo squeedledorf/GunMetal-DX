@@ -1,0 +1,9 @@
+# UBSan runtime suppressions for the fuzz build (loaded by scripts/fuzz/run.sh through
+# UBSAN_OPTIONS=suppressions=...). The build already compiles with -fno-sanitize=alignment,vptr
+# (indra/cmake/LLFuzz.cmake); add an entry here only for a reviewed, benign report, with a
+# comment saying why, so the main session can tune without rebuilding.
+#
+# Format:  <check>:<source-file-or-function glob>
+#   e.g.   signed-integer-overflow:*/llsd.cpp
+#
+# (none yet)

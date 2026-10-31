@@ -651,7 +651,8 @@ namespace
         {
             fatal_write("\n*** SLIPSTREAM_FATAL_HANDLER_TEST=hang: spinning in the fatal handler "
                         "until the watchdog fires ***\n");
-            for (volatile int spin = 0; ; spin = spin + 1) {}
+            volatile int spin = 0;
+            for (;;) { spin = spin + 1; }   // a statement, not an expression (GCC 14 -Wvolatile)
         }
         return true;
     }

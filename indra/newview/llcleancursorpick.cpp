@@ -292,7 +292,7 @@ bool cursorRay(S32 x, S32 y, RayQ& q)
     q.s = eye;
     line_plane(eye, dir, eye + at * cam->getNear(), at, q.s);
     q.d = dir;
-    cam->orthoMouseRay(x, y, q.s, q.d);   // <GMDX> orthographic view: parallel rays
+    cam->orthoMouseRay(x, y, q.s, q.d);   // orthographic view: parallel rays (GunMetal-DX port)
     q.len = kRayLength;
     return q.d.normVec() >= 1e-6f;
 }

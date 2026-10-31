@@ -2373,8 +2373,12 @@ PipelineJob* pipelineBatchTakeDeferred(VkDevice device)
     job->queue.swap(b.deferred);
     job->modules.swap(b.deferredModules);
     job->opts.what = "async, deferred";
-    job->gateCounted = true;   // (the RT lit variants: part of the login gate)
-    ++s_gateJobs;
+    // (#1029) Not a gate job: the world draws without the deferred group (the ray-query lit
+    // variant + the ray-traced effects' kernels), and on a cold cache it is the bulk of the
+    // compile. The login hold gives it its own, shorter wait (llstartup.cpp,
+    // RenderVKShaderWaitRTMaxSec); past that its progress shows in-world.
+    job->opts.gate = false;
+    job->opts.prio = VKPIPE_PRIO_DEFERRED;   // (behind the first-use batches the login waits for)
     return job;   // not started: pipelineJobStart
 }
 

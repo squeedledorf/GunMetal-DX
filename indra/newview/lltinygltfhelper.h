@@ -30,12 +30,14 @@
 #include "llgltfmateriallist.h"
 #include "llpointer.h"
 #include "tinygltf/tiny_gltf.h"
+#include <functional>
 
 class LLImageRaw;
 class LLViewerFetchedTexture;
 
 namespace LLTinyGLTFHelper
 {
+    using TextureResolver = std::function<LLPointer<LLViewerFetchedTexture>(LLImageRaw*)>;
     LLColor4 getColor(const std::vector<double>& in);
     const tinygltf::Image* getImageFromTextureIndex(const tinygltf::Model& model, S32 texture_index);
     LLImageRaw* getTexture(const std::string& folder, const tinygltf::Model& model, S32 texture_index, std::string& name, bool flip = true);
@@ -50,7 +52,7 @@ namespace LLTinyGLTFHelper
         S32 mat_index,
         LLFetchedGLTFMaterial* material,
         std::string& material_name,
-        bool flip = true);
+        bool flip = true, const TextureResolver& resolver = {});
 
     void initFetchedTextures(tinygltf::Material& material,
         LLPointer<LLImageRaw>& base_color_img,
@@ -61,6 +63,6 @@ namespace LLTinyGLTFHelper
         LLPointer<LLViewerFetchedTexture>& base_color_tex,
         LLPointer<LLViewerFetchedTexture>& normal_tex,
         LLPointer<LLViewerFetchedTexture>& mr_tex,
-        LLPointer<LLViewerFetchedTexture>& emissive_tex);
+        LLPointer<LLViewerFetchedTexture>& emissive_tex, const TextureResolver& resolver = {});
 }
 

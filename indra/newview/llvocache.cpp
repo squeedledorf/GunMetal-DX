@@ -35,7 +35,7 @@
 #include "llsdserialize.h"
 #include "llworld.h" // For LLWorld::getInstance()
 #include "llcullcamera.h"
-#include "gmdxregioncapture.h"   // <GMDX> region map capture: the region being mapped comes out of the cache
+#include "llregionmapcapture.h"   // region map capture: the region being mapped comes out of the cache (GunMetal-DX port)
 #include "threadpool.h"
 
 #include <bitset>
@@ -821,12 +821,13 @@ S32 LLVOCachePartition::cull(LLCamera &camera)
         mGrid.selectSphere(LLVOCacheLookAhead::getPointAgent() - region_agent, LLVOCacheLookAhead::getRadius(),
                            pixel_threshold, LLVOCacheEntry::sNearRadius, mRegionp);
     }
-    // <GMDX> REGION MAP CAPTURE (gmdxregioncapture.h): the whole region being mapped comes out of
-    // the cache, whatever the camera looks at (the front threshold is 0 meanwhile).
+    // REGION MAP CAPTURE (llregionmapcapture.h): the whole region being mapped comes out of the
+    // cache, whatever the camera looks at (the front threshold is 0 meanwhile).
+    // Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
     {
         LLVector3 map_center;
         F32 map_radius = 0.f;
-        if (GMDXRegionCapture::cacheSphere(mRegionp, map_center, map_radius))
+        if (LLRegionMapCapture::cacheSphere(mRegionp, map_center, map_radius))
             mGrid.selectSphere(map_center - region_agent, map_radius, pixel_threshold, LLVOCacheEntry::sNearRadius, mRegionp);
     }
 

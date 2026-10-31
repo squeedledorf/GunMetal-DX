@@ -18,7 +18,7 @@ has been listened to and soak-tested):
 | `ParcelAudioSpeakersOutside` | Out of range of every speaker: 0 = the parcel's `outside=` (default), 1 = always the quiet stereo bed, 2 = always silence. Also in Preferences. |
 | `ParcelAudioMaxSpeakers` | Speakers playing at once, 1..32 (default 16): the loudest at your position. Speakers in range beyond it are skipped; the log says so once per change ("N speakers in range, M playing (cap C)"). |
 | `ParcelAudioBufferSeconds` | Audio queued in OpenAL, 1.0..2.5 s (default 1.2): rides out frame hitches; the stream starts this much later. A jitter buffer in front of it (the 8 s capture ring) holds the deepest delivery stall seen in the last 2 minutes + 0.25 s (at least 0.15 s). |
-| `ParcelAudioDiffuseReverb` | With room acoustics: the speakers' reverb keeps its level over distance (diffuse field). Off (default): it decays with distance like any in-world sound's. Also in Preferences. |
+| `ParcelAudioDiffuseReverb` | With room acoustics: no extra reverb distance decay beyond the speaker gain envelope (diffuse field). Off (default): additional decay with distance like any in-world sound's. Also in Preferences. |
 | `ParcelAudioSyncToleranceMs` | Sync guard (default 10): about once a second every speaker's stream position is measured against the timeline (the stereo bed, which OpenAL never doppler-shifts); a speaker further off is re-joined at the next 50 ms chunk boundary. While you move faster than 1 m/s only offsets over 50 ms are fixed (doppler shifts speakers legitimately). 0 = measure and log only. A speaker that leaves the playing set keeps running silently for 20 s, so it returns in step. |
 | `AudioInverseDistanceRolloff` | All in-world sounds: a script sound radius (`llSetSoundRadius`) becomes a soft maximum (the last 15 % fades out) instead of a hard cut. Sounds already fall off as real inverse distance. Off (default): as before. Also in Preferences. |
 
@@ -48,7 +48,7 @@ to keep running in the speaker.
 | `grp` | 1-24 of `a-z 0-9 _ . -` | speaker group. Groups can have different levels and ranges (a stage and a quieter bar). All groups play the same parcel stream. | `main` |
 | `ch` | `M`, `L`, `R`, `S` | role: mono `(L+R)/2`, left channel, right channel, sub (low-passed mono). Place `L` and `R` speakers for a stereo stage. | `M` |
 | `vol` | 0..2 | speaker level, times each listener's music volume (2 = +6 dB over the stream) | 1 |
-| `r` | metres, 5..100 | audible range | 30 |
+| `r` | metres, 5..100 | maximum audible range; sound tapers within this range | 30 |
 | `dir` | degrees, 1..360 | optional cone (full angle) around the prim's +X axis, for directional PA boxes; 360 or absent = all round | none |
 | `t0` | UTC unix seconds | optional start time of a fixed clip (a non-live URL), so listeners on different viewers hear it within about a second of each other | none |
 | `off` | (bare word) | keep the tag but silence this speaker | |
@@ -130,8 +130,9 @@ one reused "Slipstream speaker setup" item in your Scripts folder and rezzed int
 
 - **Registry**: `indra/newview/slparcelspeakers.{h,cpp}`. Hover-text changes come from
   `LLViewerObject::processUpdateMessage` (both update paths); owner / group replies are tapped in
-  `LLSelectMgr::processObjectPropertiesFamily`; parcel-by-position replies use sequence ids
-  -45000..-45063 and are handled at the top of `LLViewerParcelMgr::processParcelProperties`.
+  `LLSelectMgr::processObjectPropertiesFamily`; parcel-by-position identities use the shared
+  read-only `LLViewerParcelMgr::requestParcelIdentity` service. It owns request sequences,
+  sender validation and timeouts without changing land selection, hover or agent parcel state.
   At most 256 tagged objects are tracked; an entry is freed when its object dies or loses the tag.
   `SLParcelSpeakers::speakers()` is the validated set; `generation()` changes with it.
 - **Capture**: the parcel stream's media plugin writes 48 kHz stereo S16 PCM into a shared-memory
@@ -149,9 +150,13 @@ one reused "Slipstream speaker setup" item in your Scripts folder and rezzed int
   buffer on every source of a role, starts the group together (`alSourcePlayAtTimevSOFT`, else one
   `alSourcePlayv`), joins a late speaker at the next chunk boundary at the exact device time
   (`AL_SAMPLE_OFFSET_CLOCK_SOFT` + `alSourcePlayAtTimeSOFT`; without them the group restarts) and
-  restarts every source together when any one stops. Falloff: full level out to `r`/4, then real inverse distance
-  (−6 dB per doubling: `r` = 100 is −6 dB at 50 m, −10.6 dB at 85 m), `r` a soft maximum: the last 15 % of `r` fades
-  to silence; `dir=` is an OpenAL cone (outer cone 90° wider,
+  restarts every source together when any one stops. Parcel speaker falloff is windowed inverse
+  distance: `ref = max(r / 8, 1 m)`, `gain = min(1, ref / d) * (1 - (d / r)^4)^2` inside `r`;
+  gain is 1 at zero distance and 0 at and beyond `r`. The window tapers throughout the range
+  and reaches zero with zero slope. Ranking and source gain share this curve, with OpenAL
+  distance rolloff disabled on these sources to avoid applying inverse distance twice.
+  For `r` = 32 m: about −6.1 dB at 8 m, −13.2 dB at 16 m, −22.2 dB at 24 m.
+  `dir=` is an OpenAL cone (outer cone 90° wider,
   −20 dB behind). Speakers are traced as acoustics extra sources (the ray budget is 64: all 30
   channels + 34 such sources, enough for 32 speakers) and get occlusion, room send, reverb zone and diffraction pan; the
   stereo bed stays dry. Gains: music level, music mute and the teleport fade on every source; master

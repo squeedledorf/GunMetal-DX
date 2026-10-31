@@ -345,7 +345,14 @@ void LLFloaterGesture::addGesture(const LLUUID& item_id , LLMultiGesture* gestur
         std::string key_string;
         std::string buffer;
 
-        if (gesture->mKey == KEY_NONE)
+        // a mouse side button shortcut (#1189) is kept by the viewer, not in the gesture
+        const std::string mouse_shortcut = LLGestureMgr::instance().getMouseTriggerLabel(item_id);
+        if (!mouse_shortcut.empty())
+        {
+            key_string = mouse_shortcut;
+            buffer = mouse_shortcut;
+        }
+        else if (gesture->mKey == KEY_NONE)
         {
             buffer = "---";
             key_string = "~~~"; // alphabetize to end

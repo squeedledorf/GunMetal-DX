@@ -41,9 +41,9 @@
 #include "llpatchvertexarray.h"
 #include "llviewertexture.h"
 
-#include <memory> // <GMDX>
+#include <memory> // (GunMetal-DX port)
 
-class GMDXMinimapTerrain; // <GMDX>
+class LLMinimapTerrain; // (GunMetal-DX port)
 class LLTimer;
 class LLUUID;
 class LLAgent;
@@ -142,7 +142,7 @@ public:
     F32 getWaterHeight() const;
 
     LLViewerTexture *getSTexture();
-    GMDXMinimapTerrain& getMinimapTerrain(); // <GMDX> the mini-map background (gmdxminimapterrain.h)
+    LLMinimapTerrain& getMinimapTerrain(); // (GunMetal-DX port) the mini-map background (llminimapterrain.h)
 
     bool hasZData() const                           { return mHasZData; }
 
@@ -211,7 +211,7 @@ protected:
     LLPointer<LLViewerTexture> mSTexturep;      // Texture for surface
     F64 mSTextureRetryAt = 0.0;                 // #436: when to re-request a map tile marked missing (0 = not scheduled)
     F32 mSTextureRetryDelay = 15.f;             // #436: retry backoff, doubles per attempt up to 5 minutes
-    std::unique_ptr<GMDXMinimapTerrain> mMinimapTerrain; // <GMDX>
+    std::unique_ptr<LLMinimapTerrain> mMinimapTerrain; // (GunMetal-DX port)
 
     LLPointer<LLVOWater>    mWaterObjp;
 

@@ -18,6 +18,7 @@
  */
 
 #include "llviewerprecompiledheaders.h"
+#include "llavatarpresence.h"
 
 #include "lggcontactsets.h"
 
@@ -477,8 +478,6 @@ LLColor4 LGGContactSets::colorize(const LLUUID& uuid, LLColor4 color, ContactSet
 {
     // Category colours (formerly ALAvatarGroups::getAvatarColor). Colour names are ours
     // (FriendChatColor, not FS's FriendsChatColor); the Firestorm-team agent colours are not ported.
-    static LLCachedControl<bool> legacy_radar_friend(gSavedSettings, "FSLegacyRadarFriendColoring");
-    static LLCachedControl<bool> legacy_radar_linden(gSavedSettings, "FSLegacyRadarLindenColoring");
     static LLCachedControl<bool> color_friends(gSavedSettings, "NameTagShowFriends");
     const bool rlv_shownames = !RlvActions::canShowName(RlvActions::SNC_DEFAULT, uuid);
     LLUIColorTable& color_table = LLUIColorTable::instance();
@@ -506,6 +505,10 @@ LLColor4 LGGContactSets::colorize(const LLUUID& uuid, LLColor4 color, ContactSet
     else if (rlv_shownames)
     {
         // Don't bother with the rest if we're rlv_shownames restricted (no identity leaks via colour).
+        if ((type == ContactSetType::RADAR || type == ContactSetType::FRIENDS) && !LLAvatarPresence::useClassicNameColors())
+        {
+            color = color_table.getColor("LabelTextColor").get();
+        }
     }
     else if (LLAvatarTracker::instance().getBuddyInfo(uuid))
     {
@@ -526,8 +529,6 @@ LLColor4 LGGContactSets::colorize(const LLUUID& uuid, LLColor4 color, ContactSet
                 color = color_table.getColor("MapAvatarFriendColor", LLColor4::white).get();
                 break;
             case ContactSetType::RADAR:
-                if (legacy_radar_friend)
-                    color = color_table.getColor("MapAvatarFriendColor", LLColor4::white).get();
                 break;
             case ContactSetType::FRIENDS:
                 break;
@@ -568,15 +569,13 @@ LLColor4 LGGContactSets::colorize(const LLUUID& uuid, LLColor4 color, ContactSet
                 color = color_table.getColor("MapAvatarLindenColor", LLColor4::cyan).get();
                 break;
             case ContactSetType::RADAR:
-                if (legacy_radar_linden)
-                    color = color_table.getColor("MapAvatarLindenColor", LLColor4::cyan).get();
                 break;
             case ContactSetType::FRIENDS:
                 break;
         }
     }
 
-    if (!rlv_shownames && isNonFriend(uuid))
+    if (!rlv_shownames && type != ContactSetType::RADAR && type != ContactSetType::FRIENDS && isNonFriend(uuid))
     {
         toneDownColor(color);
     }

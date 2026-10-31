@@ -19,9 +19,14 @@
  * $/LicenseInfo$
  */
 
+// <GMDX> Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4. Slipstream (CombatFX,
+// inventory safety): every move here follows a click in the sort / import windows; the importer
+// sets the other versions aside in Outdated or leaves them (no Trash option).
+
 #include "llviewerprecompiledheaders.h"
 
 #include "gmdxweaponsorter.h"
+#include "slcombatfx.h"
 
 #include "llbutton.h"
 #include "llcallbacklist.h"
@@ -171,7 +176,7 @@ GMDXWeaponSorter::~GMDXWeaponSorter()
 std::vector<std::string> GMDXWeaponSorter::tags()
 {
     std::vector<std::string> list;
-    std::string all = gSavedPerAccountSettings.getString("GMDXLoadoutWatchTags");
+    std::string all = gSavedPerAccountSettings.getString("SLLoadoutWatchTags");
     LLStringUtil::toLower(all);
     size_t start = 0;
     while (start <= all.size())
@@ -287,7 +292,7 @@ void GMDXWeaponSorter::splitName(const std::string& name, std::string& title, st
 
 void GMDXWeaponSorter::onAdded(const std::set<LLUUID>& ids)
 {
-    if (tags().empty())
+    if (!SLCombatFX::enabled() || tags().empty())   // (Slipstream: nothing offered while CombatFX is off)
     {
         return;
     }
@@ -579,17 +584,11 @@ void GMDXWeaponSorter::applyImport(const std::vector<ImportRow>& rows, EOthers o
                 // (one already in Outdated stays there, whatever was chosen)
                 if (others == OTHERS_LEAVE || v.outdated || version_worn(v.id, v.folder)) continue;
                 const LLUUID id = v.id;
-                if (others == OTHERS_TRASH)
+                // (Slipstream: no Trash here -- GunMetal-DX's OTHERS_TRASH sets them aside too)
+                lo.withFolder(GMDXLoadouts::OUTDATED, [id](const LLUUID& outdated)
                 {
-                    gInventory.removeObject(id);   // to the Trash
-                }
-                else
-                {
-                    lo.withFolder(GMDXLoadouts::OUTDATED, [id](const LLUUID& outdated)
-                    {
-                        if (outdated.notNull()) GMDXLoadouts::moveTo(id, outdated);
-                    });
-                }
+                    if (outdated.notNull()) GMDXLoadouts::moveTo(id, outdated);
+                });
             }
         };
 
@@ -1112,8 +1111,13 @@ bool GMDXFloaterWeaponImport::postBuild()
 
 void GMDXFloaterWeaponImport::onOpen(const LLSD& key)
 {
-    GMDXLoadouts::instance().ensureFolders();
-    mPrefix->setText(gSavedPerAccountSettings.getString("GMDXLoadoutWatchTags"));
+    if (!SLCombatFX::enabled())   // Slipstream: no combat UI while CombatFX is off
+    {
+        closeFloater();
+        return;
+    }
+    GMDXLoadouts::instance().ensureFolders();   // (Slipstream: asks before making anything)
+    mPrefix->setText(gSavedPerAccountSettings.getString("SLLoadoutWatchTags"));
     mCatCombo->removeall();
     for (const std::string& cat : GMDXLoadouts::instance().categories())
     {
@@ -1129,7 +1133,7 @@ void GMDXFloaterWeaponImport::scan()
     // The selection follows the weapons (keys), not the row numbers of the old list.
     std::set<std::string> selected;
     for (int i : selectedRows()) selected.insert(mRows[i].key);
-    gSavedPerAccountSettings.setString("GMDXLoadoutWatchTags", mPrefix->getText());
+    gSavedPerAccountSettings.setString("SLLoadoutWatchTags", mPrefix->getText());
     mRows = GMDXWeaponSorter::instance().buildImport(GMDXWeaponSorter::tags());
     mSortPending = false;
     fillList(&selected);
@@ -1284,11 +1288,14 @@ void GMDXFloaterWeaponImport::onPickVersion()
 
 void GMDXFloaterWeaponImport::onSort()
 {
-    const GMDXWeaponSorter::EOthers others = (GMDXWeaponSorter::EOthers)std::clamp(mOthersCombo->getCurrentIndex(), 0, 2);
-    size_t extra = 0;
+    // Slipstream: the combo has no Trash entry (0 Outdated, 1 leave them).
+    const GMDXWeaponSorter::EOthers others = mOthersCombo->getCurrentIndex() == 1 ? GMDXWeaponSorter::OTHERS_LEAVE
+                                                                                  : GMDXWeaponSorter::OTHERS_OUTDATED;
+    size_t extra = 0, rows = 0;
     for (const auto& r : mRows)
     {
         if (r.cat.empty()) continue;
+        ++rows;
         for (int i = 0; i < (int)r.versions.size(); ++i)
         {
             if (i != r.keep && !r.versions[i].outdated) ++extra;   // (those in Outdated stay)
@@ -1308,16 +1315,17 @@ void GMDXFloaterWeaponImport::onSort()
             if (GMDXFloaterWeaponImport* g = static_cast<GMDXFloaterWeaponImport*>(self.get())) g->scan();
         }, 1.5f);
     };
-    if (others == GMDXWeaponSorter::OTHERS_TRASH && extra > 0)
+    // Slipstream (inventory safety): every Sort is confirmed with what it will move.
+    if (rows == 0)
     {
-        LLSD args;
-        args["COUNT"] = llformat("%d", (S32)extra);
-        LLNotificationsUtil::add("GMDXImportTrash", args, LLSD(), [run](const LLSD& n, const LLSD& r)
-        {
-            if (LLNotificationsUtil::getSelectedOption(n, r) == 0) run();
-            return false;
-        });
         return;
     }
-    run();
+    LLSD args;
+    args["COUNT"] = llformat("%d", (S32)rows);
+    args["OTHERS"] = others == GMDXWeaponSorter::OTHERS_LEAVE ? std::string("0") : llformat("%d", (S32)extra);
+    LLNotificationsUtil::add("SLLoadoutImportConfirm", args, LLSD(), [run](const LLSD& n, const LLSD& r)
+    {
+        if (LLNotificationsUtil::getSelectedOption(n, r) == 0) run();
+        return false;
+    });
 }

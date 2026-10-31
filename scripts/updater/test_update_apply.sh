@@ -58,7 +58,7 @@ PY
 fresh() {   # new install at $T/inst/app (1.0.0.1) and empty state dir
   rm -rf "$T/inst" "$T/state"; mkdir -p "$T/inst" "$T/state"
   make_tree "$T/inst/app" 1.0.0.1
-  echo "$T/staged.json" > "$T/state/pending-update"
+  echo "$T/staged.json" > "$T/state/approved-update"
   cp "$T/orig.tar.xz" "$T/$NAME"
 }
 run() { "$T/apply" "$T/inst/app" "$T/state" "$T/staged.json" "${1-$pub}"; }
@@ -69,7 +69,7 @@ out=$(run); echo "$out"
 [ "${out%% *}" = 0 ] || fail "apply: $out"
 grep -q 1.0.0.2 "$T/inst/app/build_data.json" || fail "new version not in place"
 grep -q 1.0.0.1 "$T/inst/app.prev/build_data.json" || fail "previous install not kept"
-[ -f "$T/state/update-unconfirmed" ] && [ ! -e "$T/state/pending-update" ] || fail "state files"
+[ -f "$T/state/update-unconfirmed" ] && [ ! -e "$T/state/approved-update" ] || fail "state files"
 [ "$(head -1 "$T/state/update-unconfirmed")" = 1.0.0.2 ] || fail "unconfirmed marker"
 [ ! -e "$T/$NAME" ] || fail "artifact not removed"
 ls -A "$T/inst" | grep -q slipstream-update && fail "work dir left behind"
@@ -79,7 +79,7 @@ fresh; cp "$T/orig.tar.xz" "$T/tampered.tar.xz"
 printf 'x' >> "$T/tampered.tar.xz"; stage "$T/staged.json" "$T/tampered.tar.xz"
 out=$(run); [ "${out%% *}" = 10 ] || fail "tampered file accepted: $out"
 grep -q 1.0.0.1 "$T/inst/app/build_data.json" && [ ! -e "$T/inst/app.prev" ] || fail "tampered: tree changed"
-[ ! -e "$T/state/pending-update" ] || fail "tampered: pending not dropped"
+[ ! -e "$T/state/approved-update" ] || fail "tampered: pending not dropped"
 
 # 3. wrong public key (manifest signed by someone else)
 fresh; stage "$T/staged.json" "$T/$NAME"

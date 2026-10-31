@@ -68,7 +68,9 @@ static const boost::array<script_perm_t, NUM_SCRIPT_PERMISSIONS> SCRIPT_PERMISSI
     _script_perm("ScriptReturnObjects", (0x1 << 16), false),
     _script_perm("ForceSitAvatar",      (0x1 << 17), false),
     _script_perm("ChangeEnvSettings",   (0x1 << 18), false),
+    // SL "caution" permission (upstream 17e72f98ab / LL #4628)
     _script_perm("PrivilegedLandAccess",(0x1 << 19), true),
+    // PERMISSION_GAME_CONTROL (LL viewer PR #6202)
     _script_perm("UseGameControlInputs",(0x1 << 20), false)
     } };
 

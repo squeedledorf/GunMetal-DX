@@ -144,6 +144,11 @@ protected:
      */
     void fillAgeData(const LLAvatarData* avatar_data);
 
+    /**
+     * Fills the born date, with the year and age unless hidden.
+     */
+    void fillBirthDate(bool hide_age);
+
     void onImageLoaded(bool success, LLViewerFetchedTexture *imagep);
 
     /**
@@ -174,6 +179,7 @@ private:
     void onHideAgeCallback();
     void onSaveDescriptionChanges();
     void onDiscardDescriptionChanges();
+    void setPreviewing(bool previewing);
     void onShowAgentPermissionsDialog();
     void onShowAgentProfileTexture();
     void onShowTexturePicker();
@@ -190,9 +196,11 @@ private:
     LLProfileImageCtrl* mSecondLifePic;
     LLPanel*            mSecondLifePicLayout;
     LLTextEditor*       mDescriptionEdit;
+    LLTextEditor*       mDescriptionPreview;
     LLMenuButton*       mAgentActionMenuButton;
     LLButton*           mSaveDescriptionChanges;
     LLButton*           mDiscardDescriptionChanges;
+    LLButton*           mPreviewButton;
     LLIconCtrl*         mCanSeeOnlineIcon;
     LLIconCtrl*         mCantSeeOnlineIcon;
     LLIconCtrl*         mCanSeeOnMapIcon;
@@ -209,7 +217,9 @@ private:
     bool                mWaitingForImageUpload;
     bool                mAllowPublish;
     bool                mHideAge;
+    bool                mPreviewing;
     std::string         mDescriptionText;
+    LLDate              mBornOn;
     boost::signals2::connection mAvatarNameCacheConnection;
 };
 
@@ -290,21 +300,25 @@ protected:
     void onSetDescriptionDirty();
     void onSaveDescriptionChanges();
     void onDiscardDescriptionChanges();
+    void setPreviewing(bool previewing);
     void onShowAgentFirstlifeTexture();
 
     LLTextEditor*   mDescriptionEdit;
+    LLTextEditor*   mDescriptionPreview;
     LLProfileImageCtrl* mPicture;
     LLButton* mUploadPhoto;
     LLButton* mChangePhoto;
     LLButton* mRemovePhoto;
     LLButton* mSaveChanges;
     LLButton* mDiscardChanges;
+    LLButton* mPreviewButton;
 
     LLHandle<LLFloater> mFloaterProfileTextureHandle;
     LLHandle<LLFloater> mFloaterTexturePickerHandle;
 
     std::string     mCurrentDescription;
     bool            mHasUnsavedChanges;
+    bool            mPreviewing;
 };
 
 /**

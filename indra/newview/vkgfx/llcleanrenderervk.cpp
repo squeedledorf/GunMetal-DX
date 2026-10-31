@@ -10,17 +10,17 @@
  * (5) source instance/mesh/material data from the live clean stores when present.
  */
 #include "linden_common.h"
+#include "llframetimer.h" // lighting history clock, including builds without the clean pipeline
 #include "llthread.h"   // ll_set_current_thread_name (#736)
 #include "slenv.h"
 #include "../llvkhitch.h"
 #include "../llcrossingtrace.h"
 #include "../llvkbench.h"
 #include "../llmutelist.h"
-#include "../fscombatads.h"   // <GMDX> ADS vignette (final pass)
-#include "../gmdxrezfx.h"   // <GMDX> rez effects (table binding 45, per-frame update)
-#include "../gmdxnightsky.h"   // <GMDX> night sky (its textures, sky pass parameters)
-#include "../gmdxregioncapture.h"   // <GMDX> region map capture (the VRAM hard step stops it)
-#include "../gmdxsnapshotavatars.h"   // <GMDX> snapshot avatar scope (avatarHiddenByPolicy)
+#include "../llregionmapcapture.h"   // region map capture (the VRAM hard step stops it; GunMetal-DX port)
+#include "../llsnapshotavatars.h"    // snapshot avatar scope (avatarHiddenByPolicy; GunMetal-DX port)
+#include "../fscombatads.h"   // <GMDX> ADS vignette (final pass; CombatFX)
+#include "../gmdxrezfx.h"     // <GMDX> rez effects (table binding 58, per-frame update; CombatFX)
 #include "llfocusmgr.h"   // app focus (texture bias recovery after alt-tab)
 #include "llapp.h"        // LLApp::getPid (VRAM sharing peer files, #403)
 #include "lldir.h"        // gDirUtilp (VRAM sharing peer files, #403)
@@ -33,8 +33,14 @@
 #include "llcleanvolfogvk.h"
 #include "llcleanpartfogvk.h"   // particle fog (#1003)
 #include "llcleanvolcloudsvk.h"
+#include "gmdxvolcloudsvk.h"       // <GMDX> GunMetal-DX's cloud model (mVolClouds)
+#include "gmdxskytune.h"           // <GMDX> the Sky Debugger's knobs on the night constants
+#include "gmdxcombatlockout.h"      // <GMDX> combat render lockout
 #include "llcleanweathervk.h"   // weather (#783)
 #include "slweather.h"
+#include "slnightlight.h"   // physical night (frame info night[], the night eye; GunMetal-DX port)
+#include "slspacealt.h"     // space at altitude (the night eye's day hold-back; GunMetal-DX port)
+#include "slnightsky.h"     // the night sky (its textures, sky pass parameters, meteor rate; GunMetal-DX port)
 #include "llcleanpartlowresvk.h"
 #include "llcleanmotionblurvk.h"
 #include "llcleansnapshotvk.h"
@@ -51,8 +57,6 @@
 #include "llcleanrigdecimate.h"   // #561 decimated rigged steps (cull binding 29)
 #include "llcleanrigshadowlod.h"  // #564 shadow-caster LOD (shadow rig cull)
 #include "../llcleanqvertex.h"    // #573 quantized static vertex + slot header
-#include "../gmdxnightlight.h"     // <GMDX> physical night (frame info gmdx_misc.w)
-#include "../gmdxspacealt.h"       // <GMDX> space at altitude (exposure)
 
 #include "vk_pipeline.h"
 #include "vk_world_shaders_spv.h"
@@ -63,6 +67,7 @@
 #include "llmemory.h"           // LLMemory::getCurrentRSS
 #include "llimage.h"
 
+#include <new>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -83,6 +88,7 @@
 #if defined(LL_HAS_CLEAN_PIPELINE)
 #  include "llcleaninstancestore.h"
 #  include "llcleanmeshasset.h"
+#  include "llcleaningest.h"
 #  include "llcleanmaterialstore.h"
 #  include "llagent.h"               // #737 teleport state (CleanRelease summary)
 #  include "llcleanskinstore.h"    // bone palettes for the rigged pre-skin compute
@@ -98,7 +104,6 @@
 #  include "llcleanparticlestore.h" // GPU particles: CPU emitter table (VK side owns the GPU)
 #  include "llappviewer.h"          // gFrameCount / gFrameIntervalSeconds (particle sim)
 #  include "llworldclock.h"         // world pause: particle / aurora / meteor dt
-#  include "llframetimer.h"         // texture residency demand hold
 #  include "llvoavatar.h"           // avatar visibility for the rigged cull
 #  include "llcontrolavatar.h"
 #  include "llviewerobjectlist.h"
@@ -121,10 +126,10 @@
 #  include "llworld.h"               // F11: region water heights (refraction-copy skip)
 #  include "llviewerregion.h"
 #  include "llvkdyntex.h"          // #83: GPU appearance composites (BOM while editing)
+#  include "slnighteyevk.h"        // physical night's night eye (exposure curve, night grade; GunMetal-DX port)
 #  include "llgputexcache.h"       // GPU-ready texture disk cache (tier 2, #274)
 #  include "llcachemetrics.h"      // #715 read-use metrics (what a tier-2 read was needed for)
 #  include "llfeaturemanager.h"     // #824 GPU class (RenderVKDeferredSplit auto)
-#  include "gmdxnighteyevk.h"       // <GMDX> night eye (exposure curve, night vision)
 #endif
 
 namespace
@@ -373,9 +378,10 @@ constexpr uint32_t kSkinBlockBytes = 110u * 48u + 64u;
 
 // `name`: the embedded SPIR-V symbol (kWorldFragSpv -> "Frag"), for the pipeline batch
 // report and the learned compile costs (#471, vkNoteShaderModule).
-VkShaderModule moduleFromSpv(VkDevice dev, const uint32_t* code, size_t bytes, const char* name = nullptr)
+VkShaderModule moduleFromSpv(VkDevice dev, const uint32_t* code, size_t bytes, const char* name = nullptr,
+                            bool wire = GMDXRezFx::wireframe())
 {
-    GMDXRezFx::wireModule(name, code, bytes);   // <GMDX> a lit FS's Tron-wireframe twin (barycentrics)
+    GMDXRezFx::wireModule(name, code, bytes, wire);
     VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
     ci.codeSize = bytes;
     ci.pCode = code;
@@ -1654,7 +1660,15 @@ void LLCleanRendererVK::copyInstancesFromStore()
     // on the fill worker: syncFromStores (main thread, after the join) applies the shift.
     LLCleanInstanceStore::VKFrameSync fs;
     const size_t runs_before = mInstRuns.size();
-    LLCleanInstanceStore::instance().copyDirtyVK(mCpuInstances, mInstRuns, mSelfHealMode, &mInstLiveCount, &fs);
+    const bool needGenerationInput = mRsEmInputWanted; // main-thread prestep snapshot, no worker settings read
+    // Disabled dirty rows are consumed without metadata: discard the CPU snapshot too.
+    // Re-enable then takes a fresh same-lock snapshot even at unchanged instance capacity.
+    if (!needGenerationInput) mRsEmInputGenerations.clear();
+    const size_t oldGenerationSize = mRsEmInputGenerations.size();
+    LLCleanInstanceStore::instance().copyDirtyVK(mCpuInstances, mInstRuns, mSelfHealMode, &mInstLiveCount, &fs,
+                                               needGenerationInput ? &mRsEmInputGenerations : nullptr);
+    // Resized/recovered CPU snapshots need a full GPU publication, including a failed optional resize.
+    if (!needGenerationInput || oldGenerationSize != mRsEmInputGenerations.size()) mRsEmInputFull = true;
     updateInstClassCounts(runs_before);
     for (int k = 0; k < 3; ++k)
     {
@@ -3716,12 +3730,32 @@ bool LLCleanRendererVK::updateMaterialRefs(uint32_t n_mat, uint32_t n_trec, bool
     {
         mInstMatRef.assign(n_inst, InstMatRef{});
         mMatRef.assign(n_mat, 0u); mMatPrioRef.assign(n_mat, 0u); mTrecRef.assign(n_trec, 0u);
+        try { mMatGiFullbrightRef.assign(n_mat, 0u); }
+        catch (const std::bad_alloc&)
+        {
+            // Missing source classification takes the conservative residency fallback.
+            mMatGiFullbrightRef.clear();
+            LL_WARNS_ONCE("VKShadow") << "GI material-source counters unavailable; texture residency changes invalidate GI globally" << LL_ENDL;
+        }
     }
-    if (mMatRef.size() < n_mat) { mMatRef.resize(n_mat, 0u); mMatPrioRef.resize(n_mat, 0u); }
+    if (mMatRef.size() < n_mat)
+    {
+        mMatRef.resize(n_mat, 0u); mMatPrioRef.resize(n_mat, 0u);
+        // Retry only on table growth/recount, not an allocation loop every frame.
+        if (!mMatGiFullbrightRef.empty())
+            try { mMatGiFullbrightRef.resize(n_mat, 0u); }
+            catch (const std::bad_alloc&)
+            {
+                mMatGiFullbrightRef.clear();
+                LL_WARNS_ONCE("VKShadow") << "GI material-source counters could not grow; texture residency changes invalidate GI globally" << LL_ENDL;
+            }
+    }
     if (mTrecRef.size() < n_trec) mTrecRef.resize(n_trec, 0u);
     auto drop = [&](const InstMatRef& r) {
         if (r.mat < mMatRef.size() && mMatRef[r.mat]) --mMatRef[r.mat];
         if (r.prio && r.mat < mMatPrioRef.size() && mMatPrioRef[r.mat]) --mMatPrioRef[r.mat];
+        if (r.giFullbright && r.mat < mMatGiFullbrightRef.size() && mMatGiFullbrightRef[r.mat])
+            --mMatGiFullbrightRef[r.mat];
         if (r.trec < mTrecRef.size() && mTrecRef[r.trec]) --mTrecRef[r.trec];
     };
     // Rows past the instance count (the array shrank): released.
@@ -3737,11 +3771,16 @@ bool LLCleanRendererVK::updateMaterialRefs(uint32_t n_mat, uint32_t n_trec, bool
         const Instance& in = inst[k];
         if (in.lod_group_id != 0xFFFFFFFFu)
         {
-            if (in.material_id < n_mat) { cur.mat = in.material_id; cur.prio = (in.flags & 8192u) ? 1 : 0; }
+            if (in.material_id < n_mat)
+            {
+                cur.mat = in.material_id; cur.prio = (in.flags & 8192u) ? 1 : 0;
+                cur.giFullbright = (in.flags & (4096u | 8u | 32u | 2048u)) == 4096u ? 1 : 0;
+            }
             if ((in.flags & 32u) && in.skin_id < n_trec) cur.trec = in.skin_id;
         }
         InstMatRef& old = mInstMatRef[k];
-        if (old.mat == cur.mat && old.trec == cur.trec && old.prio == cur.prio) return;
+        if (old.mat == cur.mat && old.trec == cur.trec && old.prio == cur.prio
+            && old.giFullbright == cur.giFullbright) return;
         // WHITE-BASE DIAG: a live row switching material (a rigged face re-upserted every
         // sweep visit with a descriptor that differs between visits flips A <-> B).
         if (old.mat != cur.mat && old.mat != 0xFFFFFFFFu && cur.mat != 0xFFFFFFFFu && !recount)
@@ -3763,7 +3802,11 @@ bool LLCleanRendererVK::updateMaterialRefs(uint32_t n_mat, uint32_t n_trec, bool
             if (cur.mat != 0xFFFFFFFFu && cur.mat != old.mat) mMatRefTouched.push_back(cur.mat);
         }
         drop(old);
-        if (cur.mat != 0xFFFFFFFFu) { ++mMatRef[cur.mat]; if (cur.prio) ++mMatPrioRef[cur.mat]; }
+        if (cur.mat != 0xFFFFFFFFu)
+        {
+            ++mMatRef[cur.mat]; if (cur.prio) ++mMatPrioRef[cur.mat];
+            if (cur.giFullbright && cur.mat < mMatGiFullbrightRef.size()) ++mMatGiFullbrightRef[cur.mat];
+        }
         if (cur.trec != 0xFFFFFFFFu) ++mTrecRef[cur.trec];
         old = cur;
     };
@@ -3816,8 +3859,8 @@ LLCleanRendererVK::TexEncPick LLCleanRendererVK::pickTexEnc(const TexEncIn& in) 
     // otherwise retry a refused encode for ever).
     if (in.pinned)
     {
-        // <GMDX> the night sky's star grid holds data, not colour: never block-compressed
-        const LLUUID& star_grid = GMDXNightSky::starGridId();
+        // The night sky's star grid holds data, not colour: never block-compressed (GunMetal-DX port)
+        const LLUUID& star_grid = SLNightSky::starGridId();
         if (star_grid.notNull() && in.key == (texUuidKey(star_grid.mData) | 1ull)) return p;
         if (std::max(in.w, in.h) >= mTexEnc->minDim()) p.enc = TEXENC_BC7HQ;
         return p;
@@ -5399,7 +5442,27 @@ uint32_t LLCleanRendererVK::uploadRealMaterialTextures(bool full)
             before[4] != (mats[i].flags & 15u) ||
             std::memcmp(emis_before, mats[i].emissive_factor, sizeof(emis_before)) != 0 ||
             std::memcmp(base_before, mats[i].base_color_factor, sizeof(base_before)) != 0)
+        {
             mTexHandlesChanged = true;
+            // Texture arrival/eviction may change source radiance with identical instance
+            // bytes. Consume the resolver's existing delta, no material-to-scene scan.
+            // No per-material world bounds are available here. Count and skip that
+            // delta rather than restarting all GI when a busy scene streams textures.
+            // Ordinary world emitter motion/colour/death keeps its local spheres.
+            const bool fullbright = i >= mMatGiFullbrightRef.size() || mMatGiFullbrightRef[i] != 0u;
+            const bool pbrEmitter = (mats[i].flags & 64u) != 0u
+                && (emis_rgb[0] > 0.f || emis_rgb[1] > 0.f || emis_rgb[2] > 0.f);
+            const bool baseChanged = before[0] != mats[i].base_color_tex[0]
+                || ((before[4] ^ mats[i].flags) & 1u) != 0u
+                || std::memcmp(base_before, mats[i].base_color_factor, sizeof(base_before)) != 0;
+            const bool emissionChanged = before[3] != mats[i].emissive_tex[0]
+                || ((before[4] ^ mats[i].flags) & 8u) != 0u
+                || std::memcmp(emis_before, mats[i].emissive_factor, sizeof(emis_before)) != 0;
+            if ((fullbright && baseChanged) || (pbrEmitter && emissionChanged))
+            {
+                ++mGiMaterialSkipped;
+            }
+        }
     };
 
     // SELF/HUD PRIORITY PASS: materials of priority instances resolve FIRST every call,
@@ -5600,7 +5663,7 @@ uint32_t LLCleanRendererVK::uploadRealMaterialTextures(bool full)
             mCloudNoiseIdx[i] = mCloudNoiseId[i].notNull() ? resolve_tex(mCloudNoiseId[i], false) : -1;
         // Sky bodies (sun/moon/bloom/rainbow/halo): LL samples them raw into the sky's
         // pre-resolve space, so UNORM.
-        for (int i = 0; i < 8; ++i)   // <GMDX> 8: + the night sky's
+        for (int i = 0; i < 8; ++i)   // (+ the night sky's, GunMetal-DX port)
             mSkyTexIdx[i] = mSkyTexId[i].notNull() ? resolve_tex(mSkyTexId[i], false) : -1;
         force_img = false;
         mLightTexDirty = false;
@@ -6800,7 +6863,7 @@ void LLCleanRendererVK::fillDbgMipCodes()
 // #684 TEXTURE CONSOLE columns: one short line of Vulkan residency for a texture id (resident
 // size / mip below full, requested mip, bias source, storage format). "" = not a shared
 // world image (not resident, or an own-slot image).
-// <GMDX>
+// <GMDX> Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4: rez effects wait on it.
 bool LLCleanRendererVK::texOnGpu(const LLUUID& id) const
 {
     const uint64_t k = texUuidKey(id.mData) | 1ull;   // (resolve_tex's asset key)
@@ -7466,14 +7529,21 @@ bool LLCleanRendererVK::streamPieces(VkCommandBuffer cmd, GpuBuffer& dst, GpuBuf
                                      const std::vector<GeomPiece>& pieces, VkPipelineStageFlags2 stage,
                                      VkAccessFlags2 access)
 {
-    if (!dst.buffer || pieces.empty()) return true;
+    if (pieces.empty()) return true;
+    if (!dst.buffer) { mRtInputStreamRefused = true; return false; }
+    cap_bytes = std::min(cap_bytes, dst.size);
     VkDeviceSize total = 0;
     for (const GeomPiece& p : pieces)
-        if (p.dst < cap_bytes) total += std::min(p.len, cap_bytes - p.dst);
+    {
+        // Geometry publication is all-or-retry, never a successful clipped copy.
+        if (p.dst > cap_bytes || p.len > cap_bytes - p.dst)
+        { mRtInputStreamRefused = true; return false; }
+        total += p.len;
+    }
     if (total == 0) return true;
     GpuBuffer tmp{};
     GpuBuffer* sp = stageFor(stg[mFrameSlot & 1u], total, tmp, true);   // (#595: soft; the caller re-queues)
-    if (!sp) return false;
+    if (!sp) { mRtInputStreamRefused = true; return false; }
     GpuBuffer& s = *sp;
     std::vector<VkBufferCopy> regions;
     regions.reserve(pieces.size());
@@ -7547,7 +7617,8 @@ void LLCleanRendererVK::recordGeomUploads(VkCommandBuffer cmd, VkPipelineStageFl
 {
     const bool all = mGeomStreamAll;
     if (!all && mGeomUpSlots.empty()) return;
-    if (!mVbo.buffer || !mIbo.buffer || !mWeightSSBO.buffer) return;   // (kept queued: buildBuffers creates them)
+    if (!mVbo.buffer || !mIbo.buffer || !mWeightSSBO.buffer)
+    { mRsEmInputReady = false; return; } // queued input is not a coherent emissive snapshot
     VK_HITCH_SCOPE("vk_geomStreamSlots");
     mGeomStreamAll = false;
     const uint32_t rows = (uint32_t)(mCpuSlots.size() / sizeof(SlotInfo));
@@ -7583,6 +7654,7 @@ void LLCleanRendererVK::recordGeomUploads(VkCommandBuffer cmd, VkPipelineStageFl
         if (sl >= rows) continue;
         const SlotInfo& si = reinterpret_cast<const SlotInfo*>(mCpuSlots.data())[sl];
         if (!si.index_count) continue;
+        if (mRtGeometryRetry && mRT) mRT->geometryUploadRetry(sl);
         if (si.base_vertex >= (int32_t)kQvHdr && (uint32_t)si.base_vertex - kQvHdr < mGeomOwnedVertFrom)
             continue;   // proto row: streamed with the prefix above
         const uint8_t* v = nullptr;
@@ -7613,8 +7685,10 @@ void LLCleanRendererVK::recordGeomUploads(VkCommandBuffer cmd, VkPipelineStageFl
     staged = streamPieces(cmd, mWeightSSBO, mWeightStg, mWeightCap, pw,
                           VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT) && staged;
     staged = streamPieces(cmd, mIbo, mIboStg, mIboCap, pi, iStage, iAccess) && staged;
+    mRtGeometryRetry = !staged;
     if (!staged)
     {
+        mRsEmInputReady = false; // a successful VBO copy with refused IBO is not publishable
         // #595: no staging memory for this upload: nothing is lost -- the same rows go out
         // again next frame (all of them after a full stream).
         if (all) mGeomStreamAll = true;
@@ -7934,10 +8008,15 @@ bool LLCleanRendererVK::streamBuf(VkCommandBuffer cmd, GpuBuffer& dst, GpuBuffer
                                   VkPipelineStageFlags2 stage, VkAccessFlags2 access,
                                   StreamRowFix fix, const void* fix_ctx)
 {
-    if (!dst.buffer || bytes == 0) return true;
+    if (!dst.buffer || bytes == 0)
+    {
+        if (bytes != 0) { mRtInputStreamRefused = true; return false; }
+        return true;
+    }
+    if (bytes > dst.size) { mRtInputStreamRefused = true; return false; }
     GpuBuffer tmp{};
     GpuBuffer* sp = stageFor(stg[mFrameSlot & 1u], bytes, tmp);
-    if (!sp) return false;   // #697: out of memory (counted in stageFor); the caller retries
+    if (!sp) { mRtInputStreamRefused = true; return false; } // #1128: AS cannot consume a partial publication
     GpuBuffer& s = *sp;
     std::memcpy(s.mapped, src, bytes);
     if (fix) fix((uint8_t*)s.mapped, (const uint8_t*)src, bytes, fix_ctx);
@@ -7966,7 +8045,12 @@ bool LLCleanRendererVK::streamRuns(VkCommandBuffer cmd, GpuBuffer& dst, GpuBuffe
                                    VkDeviceSize elem, VkPipelineStageFlags2 stage, VkAccessFlags2 access,
                                    StreamRowFix fix, const void* fix_ctx)
 {
-    if (!dst.buffer || in_runs.empty()) return true;
+    if (!dst.buffer || in_runs.empty())
+    {
+        if (!in_runs.empty()) { mRtInputStreamRefused = true; return false; }
+        return true;
+    }
+    if (cap_bytes > dst.size) { mRtInputStreamRefused = true; return false; }
     // VUID-vkCmdCopyBuffer-pRegions-12482 (B6 validation): one vkCmdCopyBuffer must not
     // write a byte through two regions. Callers hand in run lists that can repeat or
     // overlap (the instance dirty runs + the rolling self-heal slice; the animation arena's
@@ -8010,7 +8094,7 @@ bool LLCleanRendererVK::streamRuns(VkCommandBuffer cmd, GpuBuffer& dst, GpuBuffe
     if (total == 0) return true;
     GpuBuffer tmp{};
     GpuBuffer* sp = stageFor(stg[mFrameSlot & 1u], total, tmp);
-    if (!sp) return false;   // #697: out of memory (counted in stageFor); the caller retries
+    if (!sp) { mRtInputStreamRefused = true; return false; } // #1128: AS cannot consume a partial publication
     GpuBuffer& s = *sp;
     std::vector<VkBufferCopy> regions;
     regions.reserve(runs.size());
@@ -8898,8 +8982,8 @@ void LLCleanRendererVK::writeDescriptors()
             wb.descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; wb.pBufferInfo=&bb;
             vkUpdateDescriptorSets(dev, 1, &wb, 0, nullptr);
         }
-        // <GMDX> 45 the rez effect table: fixed size, made once here; zeroed by the first
-        // rezFxRecord before any draw reads it.
+        // <GMDX> 58 the rez effect table (CombatFX): fixed size, made once here; zeroed by the
+        // first rezFxRecord before any draw reads it.
         if (!mRezFxTable.buffer)
         {
             VkMemScope mem_rz(VKMEM_SCENE);
@@ -8912,11 +8996,10 @@ void LLCleanRendererVK::writeDescriptors()
         {
             VkDescriptorBufferInfo rb{mRezFxTable.buffer, 0, VK_WHOLE_SIZE};
             VkWriteDescriptorSet wr{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-            wr.dstSet=mDsetDraw0; wr.dstBinding=56; wr.descriptorCount=1;   // <GMDX> 56
+            wr.dstSet=mDsetDraw0; wr.dstBinding=58; wr.descriptorCount=1;
             wr.descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER; wr.pBufferInfo=&rb;
             vkUpdateDescriptorSets(dev, 1, &wr, 0, nullptr);
         }
-        physSkyInit();   // 46 / 47 the physical sky LUTs (made once; written every time)
         // </GMDX>
         if (mTerrainSSBO.buffer)   // 22 terrain records (FS terrain branch)
         {
@@ -9171,7 +9254,7 @@ void LLCleanRendererVK::writeCullAvatarDescriptors()
 // pre-skin work is skipped. Nametags are LL's and unaffected.
 static bool avatarHiddenByPolicy(LLVOAvatar* av)
 {
-    if (gmdxSnapshotHidesAvatar(av)) return true;   // <GMDX> snapshot avatar scope (gmdxsnapshotavatars.h)
+    if (snapshotHidesAvatar(av)) return true;   // snapshot avatar scope (llsnapshotavatars.h; GunMetal-DX port)
     if (!av || av->isSelf() || av->isUIAvatar()) return false;
     static LLCachedControl<bool> friends_only(gSavedSettings, "RenderAvatarFriendsOnly", false);
     if (friends_only && !av->isControlAvatar() && !av->isBuddy()) return true;
@@ -11298,6 +11381,9 @@ void LLCleanRendererVK::recordAnim(VkCommandBuffer cmd)
 {
 #if defined(LL_HAS_CLEAN_PIPELINE)
     LLCleanAnimStore& as = LLCleanAnimStore::instance();
+    // Later snapshot samples hold the first pose. A failed first producer must
+    // remain invalid across those samples; a valid held pose needs no new dispatch.
+    if (mAnimEntryCount != 0) mRtPosePublicationInvalid = true;
     if (!mAnimPipe || !mDsetAnim || mAnimEntryCount == 0 || !mAnimLocalOut.buffer)
     {
         if (!mAnimCmpSlots.empty() && !mAnimCmpInFlight) as.checkCompare(nullptr, 0);   // release the request
@@ -11319,6 +11405,9 @@ void LLCleanRendererVK::recordAnim(VkCommandBuffer cmd)
 
     // Inputs.
     const std::vector<U32>& words = as.frameWords();
+    if ((VkDeviceSize)words.size() * sizeof(U32) > mAnimWordsCap
+        || (VkDeviceSize)as.topology().size() * sizeof(U32) > mAnimTopoCap)
+        mRtInputStreamRefused = true; // a successful clipped upload is not publication
     streamBuf(cmd, mAnimWords, mAnimWordsStg, words.data(),
               std::min<VkDeviceSize>((VkDeviceSize)words.size() * sizeof(U32), mAnimWordsCap), kRd, kRa);
     if (mAnimTopoUpload)
@@ -11344,6 +11433,7 @@ void LLCleanRendererVK::recordAnim(VkCommandBuffer cmd)
                                << (mAnimDescCap >> 10) << " KB, key t " << (kt.size() * sizeof(F32) >> 10) << "/"
                                << (mAnimKeyTCap >> 10) << " KB, key v " << (kv.size() * sizeof(F32) >> 10) << "/"
                                << (mAnimKeyVCap >> 10) << " KB (motions past the tables lose their GPU data)" << LL_ENDL;
+        mRtInputStreamRefused = true; // #1128: never build from truncated animation inputs
         mAnimArenaFull = true;   // (re-stream the whole arena once it fits)
     }
     if (mAnimArenaFull)
@@ -11373,6 +11463,9 @@ void LLCleanRendererVK::recordAnim(VkCommandBuffer cmd)
         if (!ok) mAnimArenaFull = true;
     }
     mAnimDescRuns.clear(); mAnimKeyRuns.clear();
+    // Do not let a partial/truncated animation upload produce a pose that a later
+    // AS refit could cache. CPU joint/arena retries remain pending for recovery.
+    if (mRtInputStreamRefused || mAnimTopoUpload || mAnimArenaFull) return;
 
     // WAR: prior reads of the outputs (previous frames' draws / palette / copies) and
     // the one-time fill -> this frame's compute writes.
@@ -11433,6 +11526,9 @@ void LLCleanRendererVK::recordAnim(VkCommandBuffer cmd)
         vkCmdPipelineBarrier2(cmd, &d);
     }
 
+    // All required pose dispatches and their visibility barrier are now recorded.
+    mRtPosePublicationInvalid = false;
+    mRtPosePublishedSerial = mAnimJointsOut.serial;
     bool host_copy = false;
     GpuBuffer& rb = mAnimLocalRb[mAnimRing];
     if (mAnimRbCount > 0 && rb.buffer && mAnimLocalRbCap[mAnimRing] >= mAnimRbCount)
@@ -14006,7 +14102,10 @@ void LLCleanRendererVK::setLights(const LLVKWorldFrame& wf)
         hotOn = s_hotOn;
         hotHold = s_hold;
 #endif
-        const uint32_t hotLeft = std::min<U32>(hotHold, 600u) + 1u;   // (this frame + the hold)
+        const double hotLeft = (std::min<U32>(hotHold, 600u) + 1u) * (1000.0 / 60.0);
+        const double hotNow = LLFrameTimer::getElapsedSeconds();
+        const double hotDt = mGiHotClock >= 0.0 ? std::clamp((hotNow - mGiHotClock) * 1000.0, 0.1, 100.0) : 1000.0 / 60.0;
+        mGiHotClock = hotNow;   // (this frame + the hold)
         std::vector<GiHotLight> hotNew;   // (flagged lights not in the list yet: inserted after the walk, sorted)
         if (!hotOn) mGiHot.clear();
         else
@@ -14014,9 +14113,9 @@ void LLCleanRendererVK::setLights(const LLVKWorldFrame& wf)
             for (GiHotLight& h : mGiHot)
             {
                 h.li = -1;
-                if (h.left) --h.left;
+                h.left = std::max(h.left - hotDt, 0.0);
             }
-            mGiHot.erase(std::remove_if(mGiHot.begin(), mGiHot.end(), [](const GiHotLight& h) { return h.left == 0u; }),
+            mGiHot.erase(std::remove_if(mGiHot.begin(), mGiHot.end(), [](const GiHotLight& h) { return h.left <= 0.0; }),
                          mGiHot.end());
         }
         // (the debug log: GPU timers on, one frame's list every 5 s + the window's per-frame means)
@@ -14192,8 +14291,7 @@ void LLCleanRendererVK::setLights(const LLVKWorldFrame& wf)
     VKLightInfo& li = mLightInfoCPU;
     li.cam_pos[0] = wf.cam_pos[0]; li.cam_pos[1] = wf.cam_pos[1]; li.cam_pos[2] = wf.cam_pos[2];
     li.cam_pos[3] = (float)mLightsCPU.size();
-    li.cam_fwd[0] = wf.cam_fwd[0]; li.cam_fwd[1] = wf.cam_fwd[1]; li.cam_fwd[2] = wf.cam_fwd[2];
-    li.cam_fwd[3] = wf.ortho_view ? 1.f : 0.f;   // <GMDX> grid.zw are half extents (m): CL_VIEW_Z
+    li.cam_fwd[0] = wf.cam_fwd[0]; li.cam_fwd[1] = wf.cam_fwd[1]; li.cam_fwd[2] = wf.cam_fwd[2]; li.cam_fwd[3] = wf.ortho_view ? 1.f : 0.f;   // 1: orthographic, grid.zw are half extents in metres (CL_VIEW_Z; GunMetal-DX port)
     const float zn = std::max(wf.cluster_near, 0.01f), zf = std::max(wf.cluster_far, zn + 1.f);
     li.zinfo[0] = zn; li.zinfo[1] = zf; li.zinfo[2] = (float)CLUSTER_GZ / std::log(zf / zn);
     // Projection far (P[14] / P[10] of the reversed-Z projection wf.proj; >= the cluster far, which
@@ -14754,12 +14852,13 @@ void LLCleanRendererVK::recordSelRigFixup(VkCommandBuffer cmd)
 
 void LLCleanRendererVK::recordSelection(VkCommandBuffer cmd, const VKDrawPush& push, bool hud)
 {
-    // <GMDX> GMDXSelectionStyle: 1 = the screen-space outline (recordSelOutline, after this
-    // pass); 0 = Firestorm's mesh wireframe (own pipelines and colours); 2 = the lines below.
+    // RenderVKSelectionStyle (vkgfx/llcleanseloutlinevk.cpp): 1 = the screen-space outline
+    // (recordSelOutline, after this pass); 0 = Classic, Firestorm's mesh wireframe (own pipelines
+    // and colours) for what has no LL silhouette; 2 = the lines below. Ported from GunMetal-DX
+    // (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
     const int sel_style = selectionStyle();
     if (sel_style == 1) return;
     const VkPipeline* classic = sel_style == 0 ? selClassicPipes() : nullptr;
-    // </GMDX>
     // Occluded edges (pass 0, dimmed) draw when LL's "show hidden selection" is on; the
     // hover preview (#252) always shows them, so a link buried inside the build reads.
     auto drawPass = [&](uint32_t kind, int pass) { return pass == 1 || mSelHidden || kind == 2u; };
@@ -14784,7 +14883,7 @@ void LLCleanRendererVK::recordSelection(VkCommandBuffer cmd, const VKDrawPush& p
         for (int pass = 0; pass < 2; ++pass)
         {
             if (!passUsed(rig, pass)) continue;
-            bindGraphicsPipeline(cmd, classic ? classic[4 + pass] : (pass == 0 ? mSelRigHidPipe : mSelRigVisPipe)); // <GMDX>
+            bindGraphicsPipeline(cmd, classic ? classic[4 + pass] : (pass == 0 ? mSelRigHidPipe : mSelRigVisPipe));
             VkDeviceSize off = first;
             for (uint32_t l = rig; l < SEL_LISTS; ++l)
             {
@@ -14794,7 +14893,7 @@ void LLCleanRendererVK::recordSelection(VkCommandBuffer cmd, const VKDrawPush& p
                     VKDrawPush p = push;
                     std::memcpy(p.view_proj, mViewProjRel, sizeof(p.view_proj));
                     p.ambient_color[3] = selfHideW();
-                    selPassColor(l - rig, pass, classic != nullptr, p.water_fog);   // <GMDX> (was: colour, x 0.35 alpha hidden)
+                    selPassColor(l - rig, pass, classic != nullptr, p.water_fog);   // (colour; occluded x 0.35)
                     pushDrawView(cmd, mDrawLayout, p);
                     vkCmdDrawIndexedIndirect(cmd, buf, off * sizeof(DrawCmd), n, sizeof(DrawCmd));
                 }
@@ -14813,7 +14912,7 @@ void LLCleanRendererVK::recordSelection(VkCommandBuffer cmd, const VKDrawPush& p
     for (int pass = 0; pass < 2; ++pass)
     {
         if (!passUsed(base, pass)) continue;
-        bindGraphicsPipeline(cmd, classic ? classic[(hud ? 2 : 0) + pass]   // <GMDX>
+        bindGraphicsPipeline(cmd, classic ? classic[(hud ? 2 : 0) + pass]
                                   : hud ? (pass == 0 ? mSelHudHidPipe : mSelHudVisPipe)
                                         : (pass == 0 ? mSelHidPipe : mSelVisPipe));
         VkDeviceSize off = first;
@@ -14826,7 +14925,7 @@ void LLCleanRendererVK::recordSelection(VkCommandBuffer cmd, const VKDrawPush& p
                 // World view: camera-relative like the main view's draws (#555), so the
                 // outline lands on the same depths; HUD keeps its own (HUD-space) matrix.
                 if (!hud) vkSetDrawOrigin(p, mViewProjRel, push.cam_time);
-                selPassColor(l - base, pass, classic != nullptr, p.water_fog);   // <GMDX> (was: colour, occluded x 0.35)
+                selPassColor(l - base, pass, classic != nullptr, p.water_fog);   // (colour; occluded edges dimmed)
                 pushDrawView(cmd, mDrawLayout, p);
                 vkCmdDrawIndexedIndirect(cmd, buf, off * sizeof(DrawCmd), n, sizeof(DrawCmd));
             }
@@ -16005,9 +16104,23 @@ void LLCleanRendererVK::setProbes(const LLVKWorldFrame& wf)
     mPrbEnvReset = false;
     mPrbEnvDrift = false;
     {
-        const float* a = wf.atmos;
+        // Physical night (slnightlight.h; GunMetal-DX port): the probes' WindLight sky follows the
+        // night's ambient and the sky's own light, which live outside atmos[] -- compared through
+        // a local copy whose [6].z (enabled, always 1) carries the ambient and [4].xyz the sky
+        // light's direction (the scene's clamped norm without physical night).
+        float a_env[64];
+        std::memcpy(a_env, wf.atmos, sizeof(a_env));
+        {
+            const SLNightLight& nl = slNightLight();
+            if (nl.on)
+            {
+                a_env[6 * 4 + 2] = llclamp(nl.amb, 0.f, 1.f);
+                for (int c = 0; c < 3; ++c) a_env[4 * 4 + c] = nl.sky_dir[c];
+            }
+        }
+        const float* a = a_env;
         const int lanes[] = { 2*4, 2*4+1, 2*4+2, 3*4, 3*4+1, 3*4+2, 7*4, 7*4+1, 7*4+2, 8*4, 8*4+1, 8*4+2,
-                              6*4+2 };   // <GMDX> + physical night's ambient (gmdxnightlight.h, 2 - amb)
+                              6*4+2, 4*4, 4*4+1, 4*4+2 };
         float diff = 0.f, frame_diff = 0.f;
         for (int l : lanes) diff = std::max(diff, std::fabs(a[l] - mProbeEnvSnap[l]));
         for (int l : lanes) frame_diff = std::max(frame_diff, std::fabs(a[l] - mProbeEnvFrame[l]));
@@ -16687,7 +16800,7 @@ void LLCleanRendererVK::prbStatsCopy(VkCommandBuffer cmd)
 // ---- #772 RECAPTURE ON CHANGE: the CPU half ----
 extern std::vector<float> gVKChangedSpheres;   // (llcleaningest.cpp; invalidateProjShadows owns + clears)
 extern std::vector<float> gVKDynSpheres;
-extern std::vector<uint8_t> gVKDynSphereMoving;   // <GMDX> 3 = still, texture-animated (llcleaningest.cpp)
+extern std::vector<uint8_t> gVKDynSphereMoving;   // 3 = still, texture-animated (llcleaningest.cpp)
 extern bool gVKChangedOverflow;
 extern std::vector<uint8_t> gVKChangedSphereTags;   // (producer per sphere, #567)
 extern std::vector<uint8_t> gVKProbeSphereTags;     // (#772: appearance sphere class)
@@ -16846,7 +16959,7 @@ void LLCleanRendererVK::prbGatherChanges()
         {
             const float* c = &gVKDynSpheres[i * 4];
             if (!finite4(c) || !inReach(c, c[3])) continue;
-            if (i < gVKDynSphereMoving.size() && gVKDynSphereMoving[i] == 3u) continue;   // <GMDX> still, texture-animated
+            if (i < gVKDynSphereMoving.size() && gVKDynSphereMoving[i] == 3u) continue;   // still, texture-animated (GunMetal-DX port)
             PrbDynGPU e{};
             std::memcpy(e.s, c, sizeof(e.s));
             e.f[0] = kPrbDynMoving | (inAnimesh(c) ? kPrbDynAvatar : 0u);   // (animesh: avatar content)
@@ -16929,7 +17042,7 @@ void LLCleanRendererVK::prbGatherChanges()
             if (!change) change = sphereInPlanes(mMirrorPlanes, r.data(), r[3]);
         const size_t nm = gVKDynSpheres.size() / 4;
         for (size_t i = 0; i < nm && !change; ++i)
-            change = !(i < gVKDynSphereMoving.size() && gVKDynSphereMoving[i] == 3u)   // <GMDX> still, texture-animated
+            change = !(i < gVKDynSphereMoving.size() && gVKDynSphereMoving[i] == 3u)   // still, texture-animated (GunMetal-DX port)
                   && sphereInPlanes(mMirrorPlanes, &gVKDynSpheres[i * 4], gVKDynSpheres[i * 4 + 3]);
         // avatars: moving or not (animation shows in a mirror)
         for (const PrbDynGPU& e : mPrbAvDyn)
@@ -17615,16 +17728,18 @@ void LLCleanRendererVK::recordProbeFace(VkCommandBuffer cmd, const VKDrawPush& d
 
     struct { float inv[16]; float hz[4]; float zn[4]; } sp{};
     vkInvert4(Mrel, sp.inv);
-    std::memcpy(sp.hz, drawPush.sky_horizon, sizeof(sp.hz));
+    for(int c=0;c<3;++c) sp.hz[c]=drawPush.cam_time[c];
     std::memcpy(sp.zn, drawPush.sky_zenith, sizeof(sp.zn));
     bindGraphicsPipeline(cmd, mProbeSkyPipe);
     { const VkDescriptorSet skyDs[2] = {mDsetDraw0, mDsetDraw1};
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, mProbeSkyLayout, 0, 2, skyDs, 0, nullptr); }
     VK_PUSH_BUDGET_CHECK(sp);
     vkCmdPushConstants(cmd, mProbeSkyLayout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(sp), &sp);
+    gpuSubMark(cmd,"pr_sky_begin");
     qBegin(0);
     vkCmdDraw(cmd, 3, 1, 0, 0);
     qEnd(0);
+    gpuSubMark(cmd,"pr_sky_boundary");
 
     if (!job.skyOnly)
     {
@@ -19653,7 +19768,8 @@ bool LLCleanRendererVK::rtMirrorModeWanted()
     if (s_rtm)
     {
         if (!mRT) why = "ray tracing unavailable";
-        else if (!mRtMirrorPipe || !mDsetRtMirror || !mRtMirrorLayout) why = "RT mirror kernel unavailable";
+        else if (!mRtMirrorPipe || !mDsetRtMirror || !mRtMirrorLayout)
+            why = rtPipelinesPending() ? "RT mirror kernel still compiling" : "RT mirror kernel unavailable";   // (#1029)
         else if (!(bool)s_defer || !mDeferPipe || !mDsetDefer) why = "deferred lighting off";
         else if (const char* sd = optionalRtStandDownReason()) why = sd;
         else want = true;
@@ -19866,7 +19982,7 @@ void LLCleanRendererVK::recordMirror(VkCommandBuffer cmd, const VKCullPush& cull
         VKSkyPush sp = skyPush;
         vkInvert4(mMirrorVPSky, sp.inv_view_proj);
         sp.cam[0] = mMirrorCam[0]; sp.cam[1] = mMirrorCam[1]; sp.cam[2] = mMirrorCam[2];
-        sp.cam[3] = 2.f;   // camera-relative inverse (#555): clean_sky.frag subtracts nothing
+        sp.cam[3] = 3.f;   // camera-relative mirror: cached sky plus own finite prefix
         sp.horizon[3] = 0.f;   // #719: the volumetric clouds' panorama (the main view composites its march)
         bindGraphicsPipeline(cmd, mMirrorSkyPipe);
         { const VkDescriptorSet skyDs[2] = {mDsetDraw0, mDsetDraw1};
@@ -19996,14 +20112,11 @@ static uint32_t vkWantedShadowRes()
     return std::clamp<uint32_t>(res, 256u, 8192u);
 }
 
-// Rays per pixel for ray-traced shadows (sun, moon and projectors): Shadow quality
-// (RenderVKShadowResolution) sets it, since the map resolution means nothing to a
-// traced shadow -- Low 1, Medium 2, High 3, Ultra 4. More rays = smoother soft
-// penumbrae (Shadow softness); a hard shadow (softness 0) always takes one.
+// Ray-traced sun, moon and projector shadows use one disc sample per pixel. Shadow
+// quality remains the cascade resolution setting when raster shadow maps are active.
 static uint32_t vkRTShadowRays()
 {
-    const uint32_t res = vkWantedShadowRes();
-    return res <= 256u ? 1u : res <= 512u ? 2u : res <= 1024u ? 3u : 4u;
+    return 1u;
 }
 
 bool LLCleanRendererVK::initShadows()
@@ -21080,13 +21193,14 @@ bool LLCleanRendererVK::budgetHardStep()
     const std::string why = "Your graphics card ran out of video memory even after every temporary reduction, "
                             "so this setting was lowered to keep the viewer from crashing:";
 #if defined(LL_HAS_CLEAN_PIPELINE)
-    // <GMDX> A region map capture holds settings raised (draw distance, shadow map size) that it
+    // A region map capture holds settings raised (draw distance, shadow map size) that it
     // restores: a saved lowering written over them now would stay. The capture stops instead
     // (next frame, restoring), and this step counts as taken (the next one >= 15 s later).
-    if (GMDXRegionCapture::isRunning())
+    // Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
+    if (LLRegionMapCapture::isRunning())
     {
         LL_WARNS("VKMem") << "VRAM HARD STEP held: a region map capture is running; stopping it instead" << LL_ENDL;
-        GMDXRegionCapture::requestStop("the graphics card ran out of video memory");
+        LLRegionMapCapture::requestStop("the graphics card ran out of video memory");
         return true;
     }
     while (mHardStage < 4u)
@@ -21375,6 +21489,15 @@ void LLCleanRendererVK::setShadows(const LLVKWorldFrame& wf)
     // interval instead), or the origin shifted. A cascade that isn't re-rendered is
     // SAMPLED with the matrix + texel it was rendered with.
     ++mShadowFrame;
+#if defined(LL_HAS_CLEAN_PIPELINE)
+    static LLCachedControl<bool> s_emissive_shadow(gSavedSettings, "RenderVKEmissiveNoShadows", true);
+    if (mEmissiveNoShadows != bool(s_emissive_shadow))
+    {
+        mEmissiveNoShadows = s_emissive_shadow;
+        invalidateShadowCache();
+        for (ProjSlot& ps : mProjSlots) ps.dirty = true;
+    }
+#endif
     // Translucent casters tint the light (#212, RenderVKTranslucentShadows). Toggling
     // drops the cache: cached cascades would keep the other mode's casters (stippled
     // alpha-blend depth vs. the translucency layer).
@@ -23036,24 +23159,26 @@ void LLCleanRendererVK::bindProjAtlasDummies()
 // projector stand-in (never read then: clean_cloud_shadow_map.glsl / clean_vol_cloud_sky.glsl
 // gate on ssr.vol_clouds). Device idle / before recording (set 0 is not update-after-bind);
 // the projector stand-ins' precedent for the copy-on-write tracking of draw set 0.
-void LLCleanRendererVK::bindVolCloudImages(VkSampler sampler, VkImageView shadow, VkImageView pano)
+void LLCleanRendererVK::bindVolCloudImages(VkSampler sampler, VkImageView shadow, VkImageView pano, VkImageView mean)
 {
     if (!mDsetDraw0 || !mCtx) return;
-    const bool real = sampler && shadow && pano;
+    const bool real = sampler && shadow && pano && mean;
     if (!real && (!mProjDummyColor.view || !mShadowSampler)) return;
     const VkSampler ds = mShadowTransColorSampler ? mShadowTransColorSampler : mShadowSampler;
-    VkDescriptorImageInfo ii[2] = {
+    VkDescriptorImageInfo ii[3] = {
         real ? VkDescriptorImageInfo{sampler, shadow, VK_IMAGE_LAYOUT_GENERAL}
              : VkDescriptorImageInfo{ds, mProjDummyColor.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
         real ? VkDescriptorImageInfo{sampler, pano, VK_IMAGE_LAYOUT_GENERAL}
-             : VkDescriptorImageInfo{ds, mProjDummyColor.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
-    VkWriteDescriptorSet w[2]{};
-    for (int i = 0; i < 2; ++i)
+             : VkDescriptorImageInfo{ds, mProjDummyColor.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+        real ? VkDescriptorImageInfo{sampler,mean,VK_IMAGE_LAYOUT_GENERAL}
+             : VkDescriptorImageInfo{ds,mProjDummyColor.view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
+    VkWriteDescriptorSet w[3]{};
+    for (int i = 0; i < 3; ++i)
     {
-        w[i].sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w[i].dstSet=mDsetDraw0; w[i].dstBinding=46u + (uint32_t)i;
+        w[i].sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w[i].dstSet=mDsetDraw0; w[i].dstBinding=i==2 ? 64u : 46u + (uint32_t)i;
         w[i].descriptorCount=1; w[i].descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; w[i].pImageInfo=&ii[i];
     }
-    vkUpdateDescriptorSets(mCtx->device(), 2, w, 0, nullptr);
+    vkUpdateDescriptorSets(mCtx->device(), 3, w, 0, nullptr);
 }
 
 // #783 WEATHER: draw set 0 binding 49 [0..3] -> the weather module's occlusion maps ([0] / [1]
@@ -23154,7 +23279,7 @@ void LLCleanRendererVK::volCloudsTick()
     if (now < mVolCloudsRetryAt) return;
     VK_HITCH_SCOPE("vk_volCloudsCreate");
     vkDeviceWaitIdle(dev);   // bindings 45 / 46 are rewritten below (set 0 is not update-after-bind)
-    mVolClouds = new LLCleanVolCloudsVK();
+    mVolClouds = new GMDXVolCloudsVK();   // <GMDX> GunMetal-DX's cloud model (Slipstream's: LLCleanVolCloudsVK)
     if (!mVolClouds->create(mCtx, mDslDraw0, mDslDraw1, mHdrFormat))
     {
         delete mVolClouds;
@@ -23162,7 +23287,7 @@ void LLCleanRendererVK::volCloudsTick()
         mVolCloudsRetryAt = now + 10.0;
         return;
     }
-    bindVolCloudImages(mVolClouds->exportSampler(), mVolClouds->shadowView(), mVolClouds->panoView());
+    bindVolCloudImages(mVolClouds->exportSampler(), mVolClouds->shadowView(), mVolClouds->panoView(),mVolClouds->panoMeanView());
 }
 
 uint64_t LLCleanRendererVK::projAtlasHeldBytes() const
@@ -25971,11 +26096,11 @@ void LLCleanRendererVK::setAtmosphere(const LLVKWorldFrame& wf)
     }
     if (mCloudNoiseId[0].notNull() && (mCloudNoiseIdx[0] < 0 || mCloudNoiseIdx[1] < 0)) mLightTexDirty = true;
     std::memcpy(mBodies, wf.bodies, sizeof(mBodies));
-    for (int i = 0; i < 8; ++i)   // <GMDX> 6, 7: the night sky's (made on first use)
+    for (int i = 0; i < 8; ++i)   // (6, 7: the night sky's, made on first use; GunMetal-DX port)
     {
         LLUUID id;
         if (i < 6) std::memcpy(id.mData, wf.sky_tex[i], 16);
-        else id = GMDXNightSky::textureId(i - 6);   // <GMDX>
+        else id = SLNightSky::textureId(i - 6);
         if (id != mSkyTexId[i]) { mSkyTexId[i] = id; mSkyTexIdx[i] = -1; mLightTexDirty = true; }
         if (id.notNull() && mSkyTexIdx[i] < 0) mLightTexDirty = true;
     }
@@ -27932,7 +28057,9 @@ bool LLCleanRendererVK::dlssNoisyRtOn() const
     static LLCachedControl<U32>  s_gi(gSavedSettings, "RenderVKGI", 0);
     static LLCachedControl<U32>  s_rs(gSavedSettings, "RenderVKReSTIRDI", 0);
     static LLCachedControl<U32>  s_stoch(gSavedSettings, "RenderVKProjStochastic", 1U);
-    if ((U32)s_refl == 1u && (bool)s_defer && mRtTracePipe && mDeferSplitOk) return true;   // RT reflections
+    // (#1029: a trace still compiling in the deferred group counts -- Auto settles once, not SR then RR)
+    if ((U32)s_refl == 1u && (bool)s_defer && (mRtTracePipe || rtPipelinesPending()) && mDeferSplitOk)
+        return true;                                                                         // RT reflections
     if ((U32)s_gi != 0u && !(LLXrSession::active() && LLXrSession::instance().sessionRunning()))
         return true;                                                                         // ray-traced GI (#1076: off in VR)
     if ((U32)s_rs != 0u && (U32)s_stoch != 0u && mProjMode == 2u) return true;              // ReSTIR DI
@@ -28045,7 +28172,7 @@ bool LLCleanRendererVK::rrPlan(uint32_t dw, uint32_t dh, uint32_t& rw, uint32_t&
 #if defined(LL_HAS_CLEAN_PIPELINE)
     static LLCachedControl<U32> s_view(gSavedSettings, "RenderVKDebugView", 0);
     const U32 dv = s_view;
-    if (dv == 13u || dv == 14u || dv == 15u || dv == 18u) { rrNote("an RT overlay debug view is on"); return false; }
+    if (dv == 13u || dv == 14u || dv == 15u || dv == 18u || dv == 30u) { rrNote("an RT overlay debug view is on"); return false; }
 #endif
     rw = s_rw; rh = s_rh;
     mRrQuality = q;
@@ -28990,7 +29117,7 @@ float LLCleanRendererVK::renderScaleWanted()
     if (mode == 6u) s = (F32)s_scale;
     else if (mode >= 1u && mode <= 5u) s = kPreset[mode - 1u];
     const U32 dv = s_view;
-    if (dv == 13u || dv == 14u || dv == 15u || dv == 18u) return 1.f;
+    if (dv == 13u || dv == 14u || dv == 15u || dv == 18u || dv == 30u) return 1.f;
 #endif
     // VRAM ladder step 10 (#405): internal resolution capped (the setting is untouched;
     // with the upscaler off this renders through the same scaled path as Custom).
@@ -29053,7 +29180,7 @@ void LLCleanRendererVK::ensureScaleTargets(uint32_t w, uint32_t h, uint32_t rw, 
         //  through mainAtt; 1 layer = createImage2D exactly)
         mSceneHdr = mCtx->createScreenImage(rw, rh, mViewCount, mHdrFormat,
             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
-            | VK_IMAGE_USAGE_TRANSFER_DST_BIT | (mDeferPipe ? VK_IMAGE_USAGE_STORAGE_BIT : 0u),
+            | VK_IMAGE_USAGE_TRANSFER_DST_BIT | ((mDeferPipe || cameraMediumStorageSupported()) ? VK_IMAGE_USAGE_STORAGE_BIT : 0u),
             VK_IMAGE_ASPECT_COLOR_BIT);
         // (#1075: the deferred lighting's 2D_ARRAY view -- sceneHdr() is this image on scaled frames)
         if (mSceneHdr.image) mCtx->addArrayView(mSceneHdr, VK_IMAGE_ASPECT_COLOR_BIT);
@@ -29273,6 +29400,14 @@ void LLCleanRendererVK::recordDepthUpscale(VkCommandBuffer cmd)
 // ===========================================================================
 // Glow
 // ===========================================================================
+bool LLCleanRendererVK::cameraMediumStorageSupported() const
+{
+    if(!mCtx || mHdrFormat!=VK_FORMAT_R16G16B16A16_SFLOAT) return false;
+    VkFormatProperties properties{};
+    vkGetPhysicalDeviceFormatProperties(mCtx->physicalDevice(),mHdrFormat,&properties);
+    return (properties.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)!=0;
+}
+
 void LLCleanRendererVK::ensureHdr(uint32_t w, uint32_t h)
 {
     VkMemScope memcat(VKMEM_TARGET);   // #407
@@ -29285,7 +29420,7 @@ void LLCleanRendererVK::ensureHdr(uint32_t w, uint32_t h)
     VkImageUsageFlags hu = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
         | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     // STORAGE also for the deferred lighting compute (native: it writes mHdr directly).
-    if (mRcasPipe || mDeferPipe) hu |= VK_IMAGE_USAGE_STORAGE_BIT;
+    if (mRcasPipe || mDeferPipe || cameraMediumStorageSupported()) hu |= VK_IMAGE_USAGE_STORAGE_BIT;
     mHdr = mCtx->createScreenImage(w, h, mViewCount, mHdrFormat, hu,   // (#1075: a layer per view)
         VK_IMAGE_ASPECT_COLOR_BIT);
     // (#1075: the tonemap / exposure / LDR glow read it as a 2D_ARRAY -- binding 0 below)
@@ -29847,7 +29982,7 @@ void LLCleanRendererVK::recordGradeUBO(VkCommandBuffer cmd)
         static LLCachedControl<F32> ca_bx(gSavedSettings, "RenderChromaticAberrationOffsetBX", 1.f);
         static LLCachedControl<F32> ca_by(gSavedSettings, "RenderChromaticAberrationOffsetBY", 0.f);
         static LLCachedControl<F32> ca_aniso(gSavedSettings, "RenderChromaticAberrationAnisotropy", 0.f);
-        const F32 st = (mOrtho || mSnapMatte) ? 0.f : llclamp((F32)ca_strength, 0.f, 1.f);   // <GMDX> (region map: per tile; avatar matte)
+        const F32 st = (mOrtho || mSnapMatte) ? 0.f : llclamp((F32)ca_strength, 0.f, 1.f);   // (region map: per tile; avatar matte; GunMetal-DX port)
         const F32 ang = llclamp((F32)ca_angle, 0.f, 360.f) * 0.01745329252f;
         u.ca0[0] = st * st * 0.02f;
         u.ca0[1] = 1.f / llclamp((F32)ca_falloff, 0.5f, 4.f);
@@ -29961,17 +30096,18 @@ void LLCleanRendererVK::recordTonemap(VkCommandBuffer cmd, VkImageView colorView
                          diffuse_scale, sky_test ? 1.f : 0.f, bloom_w, 0.f,
                          0.f, 0.f, 0.f, 0.f };
 #if defined(LL_HAS_CLEAN_PIPELINE)
-        {   // <GMDX> night eye: the night exposure curve (params4; zero = LL's curve)
-            const GMDXNightEye ne = gmdxNightEye(p14[0], p14[1], p14[2]);
+        {   // Physical night's night eye (slnighteyevk.h; GunMetal-DX port): the night exposure curve
+            // (params4; zero = LL's curve).
+            const SLNightEye ne = slNightEye(p14[0], p14[1], p14[2]);
             std::memcpy(&ep[12], ne.curve, sizeof(ne.curve));
-            // params3.w (spare): at night (physical night, the sun past half GMDXDuskSunLow) no
-            // metered tap counts above the coefficient, so the moon's HDR disc (GMDXMoonDisc) and
-            // its bloom do not pump the exposure as they cross the sample grid. 0 by day: no cap.
-            const GMDXNightLight& nl = gmdxNightLight();
+            // params3.w: at night (physical night, the sun past half kDuskSunLow) no metered tap
+            // counts above the coefficient, so the moon's HDR disc and its bloom do not pump the
+            // exposure as they cross the sample grid. 0 by day: no cap.
+            const SLNightLight& nl = slNightLight();
             if (nl.on && nl.night > 0.f && !nl.custom_moon) ep[11] = llmax(p14[0], 1e-4f);   // (a creator's moon: LL's disc)
-            // <GMDX> space at altitude (gmdxspacealt.h): a black sky by day is not night; no night lift
-            // for it, so it stays black (and the stars in it) instead of being pumped up to grey.
-            const float day_space = gmdxSpaceAmount() * (1.f - llclamp(nl.night, 0.f, 1.f));
+            // Space at altitude (slspacealt.h): a black sky by day is not night; no night lift for
+            // it, so it stays black (and the stars in it) instead of being pumped up to grey.
+            const float day_space = slSpaceAmount() * (1.f - llclamp(nl.night, 0.f, 1.f));
             ep[12] *= 1.f - day_space;
             ep[14] *= 1.f - day_space;
         }
@@ -30010,16 +30146,17 @@ void LLCleanRendererVK::recordTonemap(VkCommandBuffer cmd, VkImageView colorView
     float tp[24] = { p13[0], p13[1], p13[2], p13[3], snap_no_post ? 1.f : p15[3], 0.f, dyn ? 1.f : 0.f, 0.f,
                      0.f, 0.f, 0.f, 0.f,
                      0.f, 0.f, 0.f, 0.f,
-                     0.f, 0.f, 0.f, 0.f,     // <GMDX> p3, p4: night vision (clean_tonemap.frag)
+                     0.f, 0.f, 0.f, 0.f,     // p3, p4: physical night's night vision (clean_tonemap.frag)
                      0.f, 0.f, 0.f, 0.f };
     static_assert(sizeof(tp) == 96, "clean_tonemap.frag Push (6 x vec4; range in the layout)");
 #if defined(LL_HAS_CLEAN_PIPELINE)
-    {   // <GMDX> night eye: Purkinje band + low-light noise (zero = off)
-        const GMDXNightEye ne = gmdxNightEye(p14[0], p14[1], p14[2]);
+    {   // Physical night's night eye (slnighteyevk.h; GunMetal-DX port): Purkinje band, low-light
+        // noise, the photographic night's cold grade (zero = off)
+        const SLNightEye ne = slNightEye(p14[0], p14[1], p14[2]);
         std::memcpy(&tp[16], ne.vision, sizeof(ne.vision));
         tp[20] = ne.noise;
         tp[21] = (float)(postNoiseFrame() & 1023u);
-        tp[22] = ne.grade;   // p4.z (spare before): the photographic night's cold grade (GMDXNightLook)
+        tp[22] = ne.grade;
     }
 #endif
 #if defined(LL_HAS_CLEAN_PIPELINE)
@@ -30545,7 +30682,7 @@ void LLCleanRendererVK::updateLensDirt(VkCommandBuffer cmd, uint32_t width, uint
 {
     VkMemScope memcat(VKMEM_TARGET);   // #407
     mDirtActive = false;
-    if (!mDirtPipe || mOrtho || mSnapMatte) return;   // <GMDX> (region map: the dirt's pattern is per tile; avatar matte)
+    if (!mDirtPipe || mOrtho || mSnapMatte) return;   // (region map: the dirt pattern is per tile; avatar matte; GunMetal-DX port)
     float key[10] = {};
 #if defined(LL_HAS_CLEAN_PIPELINE)
     static LLCachedControl<F32> s_strength(gSavedSettings, "RenderLensDirtStrength", 0.f);
@@ -30615,9 +30752,9 @@ void LLCleanRendererVK::recordFlareState(VkCommandBuffer cmd, uint32_t width, ui
     if (sun_up != mFlareSunUp) { mFlareSunUp = sun_up; mFlareStateInit = false; }
     // Light direction (world) -> clip with this frame's view/projection (VK NDC, y down).
     const float* L = &mAtmos[7 * 4];
-    // <GMDX> Physical night's dusk turns the scene light between the sun and the moon: the flare
-    // stays on the disc (atmos[10] / [11], the true directions).
-    if (gmdxNightLight().on && gmdxNightLight().blended) L = &mAtmos[(sun_up ? 10 : 11) * 4];
+    // Physical night's dusk turns the scene light between the sun and the moon: the flare stays on
+    // the disc (atmos[10] / [11], the true directions). (GunMetal-DX port)
+    if (slNightLight().on && slNightLight().blended) L = &mAtmos[(sun_up ? 10 : 11) * 4];
     float v[4] = {0.f, 0.f, 0.f, 0.f}, cl[4] = {0.f, 0.f, 0.f, 0.f};
     for (int r = 0; r < 4; ++r)
         for (int k = 0; k < 3; ++k) v[r] += mCurView[k * 4 + r] * L[k];
@@ -30936,21 +31073,37 @@ void LLCleanRendererVK::recordBloom(VkCommandBuffer cmd)
     p[4] = threshold >= 8.f ? -1.f : llmax(threshold, 0.f); p[5] = llmax(knee, 0.f); p[6] = 24.f; p[7] = llmax(boost, 0.f);
     p[8] = warm.mV[0]; p[9] = warm.mV[1]; p[10] = warm.mV[2]; p[11] = halation ? 1.f : 0.f;
 #if defined(LL_HAS_CLEAN_PIPELINE)
-    // <GMDX> NIGHT BLOOM (GMDXPhysicalNight; GMDXMoonGlow the strength, 0 = none). At night the whole
-    // HDR scene goes into the pyramid (threshold 0, an energy bloom like a lens's), weighed so the
-    // bloom adds about kNightBloom of the light, spread over every mip: the moon's disc
-    // (GMDXMoonDisc, far brighter than anything it lights) gets a wide soft halo, the rest of the
-    // night barely a softening. It reads the composited scene, so cloud in front of the moon blocks
-    // it and thin edges glow. Faded in with the night (GMDXNightLight::night: the sun from half
-    // GMDXDuskSunLow down to it); by day, with physical night off and with a user threshold
-    // (RenderBloomThreshold < 8) the bloom is as before. The extract's weight goes in p0.w, which
-    // only the upsample (scatter) reads otherwise.
+    // NIGHT BLOOM (physical night, kMoonGlow the strength; ported from GunMetal-DX (squeedledorf,
+    // LGPL 2.1), v0.3.0 cf5f1f4). At night the whole HDR scene goes into the pyramid (threshold 0,
+    // an energy bloom like a lens's), weighed so the bloom adds about kNightBloom of the light,
+    // spread over every mip: the moon's disc (the HDR disc, far brighter than anything it lights)
+    // gets a wide soft halo, the rest of the night barely a softening. It reads the composited
+    // scene, so cloud in front of the moon blocks it and thin edges glow. Faded in with the night
+    // (SLNightLight::night: the sun from half kDuskSunLow down to it); by day and with physical
+    // night off the bloom is as before. (GunMetal-DX gated it on their threshold-off default; ours
+    // keeps the threshold bloom by day, so the night weight replaces it while it lasts.) The
+    // extract's weight goes in p0.w, which only the upsample (scatter) reads otherwise.
     {
-        static LLCachedControl<F32> s_moon_glow(gSavedSettings, "GMDXMoonGlow", 1.f);
         static LLCachedControl<F32> s_strength(gSavedSettings, "RenderBloomStrength", 0.325f);
         constexpr F32 kNightBloom = 0.08f;
-        const GMDXNightLight& nl = gmdxNightLight();
-        const F32 w = (nl.on && p[4] < 0.f) ? nl.night * llclamp((F32)s_moon_glow, 0.f, 8.f) : 0.f;
+        const SLNightLight& nl = slNightLight();
+        // <GMDX> The moon glow (GMDXMoonGlow, Sky tab) on every sky: physical night's own night
+        // weight, else (a creator's or personal sky, physical night off) the same band from the
+        // sun's height (slBlendNightLight: 0 above half kDuskSunLow, 1 at it).
+        static LLCachedControl<F32> s_moon_glow(gSavedSettings, "GMDXMoonGlow", kMoonGlow);
+        F32 night_w = nl.on ? nl.night : 0.f;
+        if (!nl.on)
+        {
+            if (LLSettingsSky::ptr_t gsky = LLEnvironment::instance().getCurrentSky())
+            {
+                const F32 e = std::asin(llclamp(gsky->getSunDirection().mV[VZ], -1.f, 1.f)) * RAD_TO_DEG;
+                const F32 mid = 0.5f * llmin(gmdxSkyTune().dusk_low(kDuskSunLow), -1.f);
+                const F32 t = e >= mid ? 0.f : llclamp((mid - e) / -mid, 0.f, 1.f);
+                night_w = t * t * (3.f - 2.f * t);
+            }
+        }
+        const F32 w = llclamp(night_w, 0.f, 1.f) * llclamp((F32)s_moon_glow, 0.f, 4.f);
+        // </GMDX>
         if (w > 0.f)
         {
             p[4] = 0.f; p[5] = 1e-3f;
@@ -31040,7 +31193,7 @@ struct VKFinalUBO
     float res_frame[4], vig0[4], vig_color[4], vig_mid_color[4], vig_center_aspect[4];
     float grain0[4], grain_tint[4], cvd[4], dither[4], lens0[4], lens1[4], lens2[4];
     float ref[4];
-    float ads[4];   // <GMDX> ADS vignette strength, 0, 0, 0
+    float ads[4];   // <GMDX> ADS vignette strength (CombatFX; 0 = off)
 };
 } // namespace
 
@@ -31138,10 +31291,9 @@ bool LLCleanRendererVK::prepareFinal(VkCommandBuffer cmd, uint32_t width, uint32
     bool active = force;
     mDitherInTonemap = false;
 #if defined(LL_HAS_CLEAN_PIPELINE)
-    // snapshots keep the look (upstream: gSnapshotNoPost only)
-    // <GMDX> a region map (orthographic) drops the screen-position effects: lens distortion,
-    // vignette, grain, CVD / effect previews would differ from one tile to the next
-    const bool clean_plate = (mOffscreen && false) || mOrtho || mSnapMatte;   // <GMDX> (+ avatar matte: vignette, grain, distortion off)
+    // snapshots keep the look (upstream: gSnapshotNoPost only); a region map (orthographic) drops the
+    // screen-position effects, which would differ from one tile to the next (GunMetal-DX port)
+    const bool clean_plate = (mOffscreen && false) || mOrtho || mSnapMatte;   // (+ avatar matte: vignette, grain, distortion off)
     u.res_frame[0] = (float)width; u.res_frame[1] = (float)height;
     u.res_frame[2] = (float)postNoiseFrame();
 
@@ -31252,8 +31404,9 @@ bool LLCleanRendererVK::prepareFinal(VkCommandBuffer cmd, uint32_t width, uint32
     }
     active = active || u.vig0[0] > 0.f;
 
-    // <GMDX> Aim-down-sights vignette (fscombatads.cpp, eased once per frame); left out
-    // of offscreen renders (snapshots, 360).
+    // <GMDX> Aim-down-sights vignette (fscombatads.cpp, eased once per frame; CombatFX); left
+    // out of offscreen renders (snapshots, 360). Ported from GunMetal-DX (squeedledorf,
+    // LGPL 2.1), v0.3.0 cf5f1f4.
     u.ads[0] = mOffscreen ? 0.f : FSCombatADS::getVignetteAmount();
     active = active || u.ads[0] > 0.f;
     // </GMDX>
@@ -31572,8 +31725,7 @@ struct VKMeteor
     LLColor3 color;                // sRGB
     F32 peak, width_scale;
 };
-constexpr U32 kVKMeteorHardMax = 56;   // <GMDX> was 64: the night sky takes meteors[168..191] (gmdxnightsky.h kSpaceSlots)
-static_assert(kVKMeteorHardMax * 3 + GMDXNightSky::kSpaceSlots <= 192, "meteors[] shared with the night sky");   // <GMDX>
+constexpr U32 kVKMeteorHardMax = 64;
 std::vector<VKMeteor> sVKMeteors;
 F32 sVKAuroraTime = 0.f;
 
@@ -31626,14 +31778,14 @@ void vkTickMeteors(F32 dt)
     const U32 max_count  = (U32)llclamp((S32)max_count_setting, 0, (S32)kVKMeteorHardMax);
     const F32 spawn_secs = llmax(0.05f, (F32)spawn_secs_setting);
     // Poisson-ish spawn: per-frame probability dt / mean interval.
-    // <GMDX> physical night (gmdxnightsky.cpp): the rate by darkness x GMDXMeteors x a shower
-    const F32 gmdx_rate = GMDXNightSky::meteorRateScale();
-    if (sVKMeteors.size() >= max_count || ll_frand() >= dt / spawn_secs * (gmdx_rate < 0.f ? 1.f : gmdx_rate)) return;
+    // Physical night (slnightsky.cpp; GunMetal-DX port): the rate by darkness (x a shower)
+    const F32 night_rate = SLNightSky::meteorRateScale();
+    if (sVKMeteors.size() >= max_count || ll_frand() >= dt / spawn_secs * (night_rate < 0.f ? 1.f : night_rate)) return;
 
     LLVector3 start_dir = vkUpperHemisphere();
     if (start_dir.mV[2] < 0.1f) { start_dir.mV[2] = 0.1f; start_dir.normVec(); }
-    LLVector3 travel_dir = vkRandomTangent(start_dir);   // <GMDX> (not const: a shower's radiant turns it)
-    GMDXNightSky::meteorShowerPath(start_dir, travel_dir);   // <GMDX>
+    LLVector3 travel_dir = vkRandomTangent(start_dir);   // (not const: a shower's radiant turns it)
+    SLNightSky::meteorShowerPath(start_dir, travel_dir);
 
     // Visual archetypes (upstream weights): common / standard / fast / fireball.
     const F32 roll = ll_frand();
@@ -31701,16 +31853,13 @@ void LLCleanRendererVK::fillAtmosK(VKSSRInfo& si)
     const float* a = si.atmos;
     auto v = [&](int row, int c) { return a[row * 4 + c]; };
     const float haze_horizon = v(0, 3), haze_density = v(1, 3), cloud_shadow = v(2, 3), max_y = v(3, 3);
-    // <GMDX> (Physical night: atmos[4] is the WindLight sky's own light; the ground's clamped norm
-    // is atmos[7]'s, gmdxnightlight.h.)
-    const float density_mul = v(4, 3), distance_mul = v(5, 3),
-                lightnorm_z = gmdxNightLight().on ? std::max(v(7, 2), -0.1f) : v(4, 2);
+    const float density_mul = v(4, 3), distance_mul = v(5, 3), lightnorm_z = v(4, 2);
     const bool classic = v(8, 3) > 0.5f;
     const float sun_scale = v(12, 2);
-    // <GMDX> the night's ambient in the haze's sRGB-ish space (gmdxnightlight.h; atmos[6].z = 2 - amb,
-    // clean_atmos_common.glsl gmdxNightAmbient): the haze's fill light follows the moon as the surfaces'
-    // does. (amblit's base below stays EEP's: the shader scales it in linear light.)
-    const float night_amb = std::pow(std::clamp(2.f - v(6, 2), 0.f, 1.f), 1.f / 2.4f);
+    // Physical night (slnightlight.h; GunMetal-DX port): the night's ambient in the haze's sRGB-ish
+    // space (clean_atmos_common.glsl nightAmbientSrgb): the haze's fill light follows the moon as the
+    // surfaces' does. (amblit's base below stays EEP's: the shader scales it in linear light.)
+    const float night_amb = slNightLight().on ? std::pow(std::clamp(slNightLight().amb, 0.f, 1.f), 1.f / 2.4f) : 1.f;
     // above_horizon_factor = 1 / max(1e-6, lightnorm.z)
     const float ahf = 1.0f / std::max(1e-6f, lightnorm_z);
     auto srgbToLinear = [](float cs)   // atmosSrgbToLinear, per channel
@@ -31735,7 +31884,7 @@ void LLCleanRendererVK::fillAtmosK(VKSSRInfo& si)
         si.atmos_k[0][c] = sunlight;                                        // sunlit_out (sRGB space)
         si.atmos_k[1][c] = combined * density_mul * distance_mul;           // extinction per metre
         si.atmos_k[2][c] = (blue_horizon * blue_weight) * (cs + tmpAmbient * night_amb)
-                         + (haze_horizon * haze_weight) * tmpAmbient * night_amb;   // in-scatter, glow-free part (<GMDX> night_amb)
+                         + (haze_horizon * haze_weight) * tmpAmbient * night_amb;   // in-scatter, glow-free part (x the night's ambient)
         si.atmos_k[3][c] = (haze_horizon * haze_weight) * cs;               // ... x haze_glow
         si.atmos_k[4][c] = std::pow(tmpAmbient, 0.9f) * 0.57f;              // amblit base
         si.atmos_k[5][c] = (classic ? sunlight : srgbToLinear(sunlight)) * sun_scale;   // atmosLightTerms sunlit
@@ -32744,11 +32893,11 @@ const struct { VkFormat f; bool layers; } kRtMaskFmt[] = {
     {VK_FORMAT_R16G16B16A16_UINT, false}, {VK_FORMAT_R32_SFLOAT, false},
     {VK_FORMAT_R8G8B8A8_UNORM, false},
     {VK_FORMAT_R16G16B16A16_SFLOAT, false}, {VK_FORMAT_R16G16B16A16_SFLOAT, true},
-    {VK_FORMAT_R16G16B16A16_SFLOAT, false}, {VK_FORMAT_R16G16B16A16_SFLOAT, false},
+    {VK_FORMAT_R32G32B32A32_SFLOAT, false}, {VK_FORMAT_R16G16B16A16_SFLOAT, false},
     {VK_FORMAT_R16G16B16A16_SFLOAT, true}, {VK_FORMAT_R16G16B16A16_UINT, false},
-    {VK_FORMAT_R32_SFLOAT, false}, {VK_FORMAT_R16G16B16A16_SFLOAT, false},
-    {VK_FORMAT_R16G16B16A16_UINT, false}, {VK_FORMAT_R16G16B16A16_UINT, false},   // #666 projector history x2
-    {VK_FORMAT_R16G16B16A16_SFLOAT, false}, {VK_FORMAT_R16G16B16A16_SFLOAT, false}};   // depth gradient + flags (slot 0 / 1)
+    {VK_FORMAT_R32_SFLOAT, false}, {VK_FORMAT_R32G32B32A32_SFLOAT, false},
+    {VK_FORMAT_R32G32B32A32_UINT, false}, {VK_FORMAT_R32G32B32A32_UINT, false},   // #666 projector history x2
+    {VK_FORMAT_R32G32B32A32_SFLOAT, false}, {VK_FORMAT_R32G32B32A32_SFLOAT, false}};   // depth gradient + flags (slot 0 / 1)
 }
 
 uint64_t LLCleanRendererVK::rtMaskBytesAt(uint32_t w, uint32_t h) const
@@ -32818,6 +32967,9 @@ void LLCleanRendererVK::ensureRtMask(VkCommandBuffer cmd, uint32_t rw, uint32_t 
     // A toggle drops the history (legacy and denoiser accumulate differently).
     if (mRtMaskDenoise != (bool)s_dn) mRtMaskHistOk = false;
     mRtMaskDenoise = s_dn;
+    static LLCachedControl<bool> s_emissive_shadow(gSavedSettings, "RenderVKEmissiveNoShadows", true);
+    if (mRtMaskEmissiveNoShadows != bool(s_emissive_shadow)) mRtMaskHistOk = false;
+    mRtMaskEmissiveNoShadows = s_emissive_shadow;
 #endif
     // EFFECTIVE scale (#405 / #226): the setting, the VRAM ladder's RT mask rungs, then the
     // fit cap answering exactly this request (the setting is never written).
@@ -32913,20 +33065,20 @@ void LLCleanRendererVK::ensureRtMask(VkCommandBuffer cmd, uint32_t rw, uint32_t 
             {&mRtMaskRawSun,  VK_FORMAT_R8G8B8A8_UNORM,      false},   // raw (A)
             {&mRtMaskAccSun,  VK_FORMAT_R16G16B16A16_SFLOAT, false},   // accumulated (B)
             {&mRtMaskAccProj, VK_FORMAT_R16G16B16A16_SFLOAT, true },
-            {&mRtMaskMeta,    VK_FORMAT_R16G16B16A16_SFLOAT, false},
+            {&mRtMaskMeta,    VK_FORMAT_R32G32B32A32_SFLOAT, false},
             {&mRtMaskHist[0], VK_FORMAT_R16G16B16A16_SFLOAT, false},   // history = B's output
             {&mRtMaskHist[1], VK_FORMAT_R16G16B16A16_SFLOAT, true },
             {&mRtMaskHist[2], VK_FORMAT_R16G16B16A16_UINT,   false},
             {&mRtMaskHist[3], VK_FORMAT_R32_SFLOAT,          false},
-            {&mRtMaskHist[4], VK_FORMAT_R16G16B16A16_SFLOAT, false},
+            {&mRtMaskHist[4], VK_FORMAT_R32G32B32A32_SFLOAT, false},
             // #666: per projector slot (component k) history length + fast mean, packed
             // (clean_rt_mask_common.glsl rtPackPM); one per history slot.
-            {&mRtMaskProjMeta[0], VK_FORMAT_R16G16B16A16_UINT, false},
-            {&mRtMaskProjMeta[1], VK_FORMAT_R16G16B16A16_UINT, false},
+            {&mRtMaskProjMeta[0], VK_FORMAT_R32G32B32A32_UINT, false},
+            {&mRtMaskProjMeta[1], VK_FORMAT_R32G32B32A32_UINT, false},
             // The view depth's d/dx, d/dy + the moving-caster flags (exact integer < 2048):
             // fp16 (both guaranteed storage formats; was one rgba32f with the depth).
-            {&mRtMaskGrad,    VK_FORMAT_R16G16B16A16_SFLOAT, false},
-            {&mRtMaskHistGrad,VK_FORMAT_R16G16B16A16_SFLOAT, false}};
+            {&mRtMaskGrad,    VK_FORMAT_R32G32B32A32_SFLOAT, false},
+            {&mRtMaskHistGrad,VK_FORMAT_R32G32B32A32_SFLOAT, false}};
         constexpr int N = (int)(sizeof(imgs) / sizeof(imgs[0]));
         static_assert(N == (int)(sizeof(kRtMaskFmt) / sizeof(kRtMaskFmt[0])), "kRtMaskFmt must list every mask image");
         // Soft (#226) while a real mask is wanted: out of memory frees the partial set and
@@ -33563,7 +33715,7 @@ namespace
 {
 constexpr uint32_t kDiagGrid = 8, kDiagPts = kDiagGrid * kDiagGrid;
 constexpr uint32_t kDiagImgs = 7;
-constexpr uint32_t kDiagTexel[kDiagImgs] = {4, 8, 8, 4, 4, 4, 8};   // raw sun, acc sun, meta, final sun,
+constexpr uint32_t kDiagTexel[kDiagImgs] = {4, 8, 16, 4, 4, 4, 8};   // raw sun, acc sun, meta, final sun,
                                                                     // depth plane, final proj slot 0, ids
 constexpr VkDeviceSize diagOffset(uint32_t img)
 {
@@ -33652,6 +33804,11 @@ void LLCleanRendererVK::rtMaskDiagHarvest()
         uint16_t v; std::memcpy(&v, p + diagOffset(img) + (VkDeviceSize)k * kDiagTexel[img] + 2u * c, 2);
         return halfToFloat(v);
     };
+    auto metaFloat = [&](uint32_t k, uint32_t c)
+    {
+        float value; std::memcpy(&value, p + diagOffset(2) + (VkDeviceSize)k * kDiagTexel[2] + 4u * c, 4);
+        return value;
+    };
     uint32_t surf = 0, raw_dark = 0, acc_dark = 0, fin_dark = 0, nonfinite = 0, proj_ids = 0, proj_dark = 0;
     float len_sum = 0.f, fast_sum = 0.f;
     for (uint32_t k = 0; k < kDiagPts; ++k)
@@ -33665,7 +33822,7 @@ void LLCleanRendererVK::rtMaskDiagHarvest()
             ++proj_ids;   // slot 0 traced a projector here; its final visibility:
             if (u8(5, k) < 0.5f) ++proj_dark;
         }
-        const float acc = f16(1, k, 0), len = f16(2, k, 0), fast = f16(2, k, 2);
+        const float acc = f16(1, k, 0), len = metaFloat(k, 0), fast = metaFloat(k, 2);
         if (!std::isfinite(acc) || !std::isfinite(len) || !std::isfinite(fast)) { ++nonfinite; continue; }
         if (u8(0, k) < 0.5f) ++raw_dark;
         if (acc < 0.5f) ++acc_dark;
@@ -33677,7 +33834,7 @@ void LLCleanRendererVK::rtMaskDiagHarvest()
                              << raw_dark << " accumulated " << acc_dark << " final " << fin_dark
                              << (nonfinite ? " non-finite " + std::to_string(nonfinite) : std::string())
                              << " | projector slot 0: traced " << proj_ids << " shadowed " << proj_dark
-                             << " | history len " << len_sum / n << " fast mean " << fast_sum / n
+                             << " | history age ms " << len_sum / n << " fast mean " << fast_sum / n
                              << " | GPU frame info shadow_params.w " << fi[3] << " rt_mask " << fi[4] << "/" << fi[5]
                              << " | host: sun traced " << h.sunRtNow << " shadow_params.w " << h.shadowParamW
                              << " lit RT " << h.litRt << " deferred " << h.deferNow << " set " << h.set
@@ -35708,7 +35865,8 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
 {
     mCtx = &ctx;
     mColorFormat = colorFormat;
-    GMDXRezFx::setWireframe(ctx.fragmentShaderBarycentricEnabled());   // <GMDX> before any lit FS module
+    mRezFxWire = ctx.fragmentShaderBarycentricEnabled() && GMDXRezFx::wantsWireframe();
+    GMDXRezFx::setWireframe(mRezFxWire);
     // #563: large allocations over the live heap budget first get what finished frames
     // retired back (render thread only; VkDeviceContext::heapBudgetPreflight).
     ctx.setPressureRelief([this]() -> uint64_t { return vramRelief(); });
@@ -35723,7 +35881,7 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
     {
         // #615: phase 0 = the G-buffer + the split lighting's intermediates, phase 1 = the
         // bloom pyramid + cross filter.
-        static_assert(AS_COUNT == AS_DSPLIT0 + DS_ALIASED, "one alias slot per split intermediate");
+        static_assert(AS_COUNT == static_cast<uint32_t>(AS_DSPLIT0) + static_cast<uint32_t>(DS_ALIASED), "one alias slot per split intermediate");
         static_assert(AS_COUNT <= VkAliasArena::kMaxSlots, "alias slots");
         uint8_t phase[AS_COUNT] = {};
         for (uint32_t s = AS_BLOOM0; s < AS_DSPLIT0; ++s) phase[s] = 1;
@@ -35811,7 +35969,7 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
     cl.bindingCount=31; cl.pBindings=cb;
     VK_CHECK(vkdCreateSetLayout(dev, &cl, &mDslCull, "mDslCull"));
 
-    VkDescriptorSetLayoutBinding db0[59]{};   // <GMDX> 59: + the rez effect table (56), the physical sky LUTs (57, 58)
+    VkDescriptorSetLayoutBinding db0[65]{};   // (GunMetal-DX port: + the physical sky LUTs 56 / 57; <GMDX> + the rez effect table 58)
     db0[0].binding=0; db0[0].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     // (#783 M2: + FRAGMENT -- a moving object's snow is drawn in its own frame, read from its
     // model matrix: clean_weather_surface.glsl weatherSnow)
@@ -35939,7 +36097,7 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
     // ONLY by the -DCLEAN_BLEND_TOL lit FS (LIT_ALPHA, render pass 2, where
     // the depth is DEPTH_READ_ONLY_OPTIMAL). Written by ensureDepth.
     db0[40].binding=40; db0[40].descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    db0[40].descriptorCount=1; db0[40].stageFlags=VK_SHADER_STAGE_FRAGMENT_BIT;
+    db0[40].descriptorCount=1; db0[40].stageFlags=VK_SHADER_STAGE_FRAGMENT_BIT|VK_SHADER_STAGE_COMPUTE_BIT;
     // 41 / 42 / 43 the split deferred lighting's sun visibility, projector slots and
     // visibility depth (storage, GENERAL; RenderVKDeferVisReuse): statically used ONLY by the
     // -DCLEAN_BLEND_TOL lit FS, read only when its push pad0 says so (mVisReuseFlags).
@@ -36025,20 +36183,35 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
         db0[i].binding=(uint32_t)i; db0[i].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         db0[i].descriptorCount=1; db0[i].stageFlags=VK_SHADER_STAGE_VERTEX_BIT;
     }
-    // <GMDX> 56 the rez effect table (gmdx_rezfx.glsl; mRezFxTable): the world VS (de-rez vertex
-    // effects, the effect outputs) and FS (the de-rez cut, the paint). (Was 45, then 49, then 54:
-    // upstream took each, the last for its VS instance records.)
-    db0[56].binding=56; db0[56].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    db0[56].descriptorCount=1; db0[56].stageFlags=VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT;
-    // <GMDX> 57 / 58 the physical sky's sky-view and transmittance LUTs (gmdxphysskyvk.cpp;
-    // clean_atmos_common.glsl): every FS and compute that runs the atmosphere. (Were 46 / 47, then
-    // 55 / 56: upstream's volumetric clouds and VS instance records took them.)
-    for (int i = 57; i < 59; ++i)
+    // 56 / 57 the physical sky's sky-view and transmittance LUTs (llcleanphysskyvk.cpp;
+    // clean_atmos_common.glsl uPkSkyView / uPkTrans; GENERAL, linear / clamp): every sky / haze
+    // reader, fragment and compute. Written once at init (physSkyInit); read only while
+    // ssr.physky[4].w says the mode is on. Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
+    for (int i = 56; i < 58; ++i)
     {
-        db0[i].binding=i; db0[i].descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        db0[i].binding=(uint32_t)i; db0[i].descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         db0[i].descriptorCount=1; db0[i].stageFlags=VK_SHADER_STAGE_FRAGMENT_BIT|VK_SHADER_STAGE_COMPUTE_BIT;
     }
-    VkDescriptorBindingFlags db0f[59] = {};   // <GMDX> 59
+    // <GMDX> 58 the rez effect table (gmdx_rezfx.glsl; mRezFxTable; CombatFX): the world VS (de-rez
+    // vertex effects, the effect outputs) and FS (the de-rez cut, the paint).
+    db0[58].binding=58; db0[58].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    db0[58].descriptorCount=1; db0[58].stageFlags=VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT;
+#ifdef VK_EXT_mesh_shader
+    // The existing cluster mesh tier emits the same fade inputs as its MDI vertex shaders.
+    if (mCtx->clusterFeatures().meshShader) db0[58].stageFlags |= VK_SHADER_STAGE_MESH_BIT_EXT;
+#endif
+    for (uint32_t i = 59; i < 65; ++i)
+    {
+        db0[i].binding = i;
+        db0[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        db0[i].descriptorCount = i >= 63 ? 1u : kMaxViews;
+        db0[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
+    }
+    VkDescriptorBindingFlags db0f[65] = {};
+    for (uint32_t i = 59; i < 65; ++i) db0f[i] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;   // <GMDX> 59
+    db0f[56] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;   // (written at init; unwritten when the tables were refused)
+    db0f[57] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
+    db0f[58] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;   // <GMDX> (written in writeDescriptors, before any draw)
     db0f[54] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;   // (#1033: written once the buffers exist, before any draw)
     db0f[55] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
     for (int i = 41; i < 44; ++i) db0f[i] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
@@ -36049,11 +36222,9 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
     db0f[51] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
     db0f[52] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;   // (#819: written at init; tidy for validation)
     db0f[53] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;   // (#87: written with the GI bindings)
-    db0f[57] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;   // <GMDX> physical sky LUTs: read only while the physical sky is on
-    db0f[58] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
-    db0fi.bindingCount=59; db0fi.pBindingFlags=db0f;
+    db0fi.bindingCount=65; db0fi.pBindingFlags=db0f;   // <GMDX> 59
     VkDescriptorSetLayoutCreateInfo dl0{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    dl0.pNext=&db0fi; dl0.bindingCount=59; dl0.pBindings=db0;
+    dl0.pNext=&db0fi; dl0.bindingCount=65; dl0.pBindings=db0;
 
     // Local-light cluster cull set: 0 lights, 1 counts, 2 indices, 3 info.
     {
@@ -36078,14 +36249,14 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
         // vkdCreatePipelineLayout check proves it at each of those layouts. (draw0 now
         // carries 21 -- array elements counted -- with the #731 depth at binding 40.)
         vkdInitDeviceLimits(mCtx->physicalDevice());
-        constexpr uint32_t kBindlessReserve = 67;   // <GMDX> + the rez effect table 56, the physical sky LUTs 57 / 58, upstream's VS instance records 54 / 55   // (#87: + the GI state buffer 53)   // (draw0 gained 2 array slots at binding 34; + 3 storage images 41-43; + the terrain bake table 44, #811;
+        constexpr uint32_t kBindlessReserve = 65;   // <GMDX> + the rez effect table 58   // (GunMetal-DX port: + the physical sky LUTs 56 / 57)   // (#87: + the GI state buffer 53)   // (draw0 gained 2 array slots at binding 34; + 3 storage images 41-43; + the terrain bake table 44, #811;
                                                     //  + #819 the sky-view LUT 52;
                                                     //  + the volumetric fog volume 45 and the fog passes' own history sampler, #718;
                                                     //  + the cloud shadow map 46 / panorama 47, #719; + the RT forward reflections 48, #859;
                                                     //  + the weather occlusion maps 49 (4 slots: 2 cascades x 2), #783;
                                                     //  + its M2 snow slots: 2 cover grids + the per-instance image;
                                                     //  + M4 the run-off flow map; + #901 the 2 avatar shelter atlas images;
-                                                    //  + #901 the rest-pose accumulation grids 51; <GMDX> + the rez effect table 56)
+                                                    //  + #901 the rest-pose accumulation grids 51)
         static_assert(kWeatherOcclSlots == 10, "kBindlessReserve counts binding 49's array elements");
         static_assert(kWeatherOcclSlots <= kVkCowMaxArrayElems,
                       "draw set 0 binding 49 must fit the copy-on-write record (vkCowCopySet, #926)");
@@ -36409,6 +36580,7 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
     // while it runs).
     createVolFogStub();
     initSkyLut();   // (#819) binding 52: the sky-view LUT, for good
+    physSkyInit();  // bindings 56 / 57: the physical sky's tables, for good (GunMetal-DX port)
 
     // Local-light buffers: fixed size, device-local, streamed with vkCmdUpdateBuffer.
     {
@@ -36963,15 +37135,11 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
     gd.colorFormat=mColorFormat;         // HUDs draw AFTER the tonemap, onto the swapchain
     gd.reverseZ = false;                 // HUD: own depth clear + conventional HUD projection
     gd.depthTest=true; gd.depthWrite=true;  gd.blend=false; createGraphicsPipelineInto(dev, gd, &mHudDrawPipe, "mHudDrawPipe");
+    rememberRezFxPipeline(gd, &mHudDrawPipe, RezFxVertex::WORLD, RezFxFrag::LIT, "mHudDrawPipe");
     gd.depthTest=true; gd.depthWrite=true;  gd.blend=false; createGraphicsPipelineInto(dev, gd, &mHudMaskPipe, "mHudMaskPipe");
+    rememberRezFxPipeline(gd, &mHudMaskPipe, RezFxVertex::WORLD, RezFxFrag::LIT, "mHudMaskPipe");
     gd.depthTest=true; gd.depthWrite=false; gd.blend=true;  createGraphicsPipelineInto(dev, gd, &mHudAlphaPipe, "mHudAlphaPipe");
-    // <SS:Skoomastream> HUD glow twins (SSHudGlow): + the HUD glow attachment, which blends
-    // like the colour (opaque faces overwrite the glow behind them, alpha faces blend).
-    gd.glowFormat=kHudGlowFormat;
-    gd.depthTest=true; gd.depthWrite=true;  gd.blend=false; createGraphicsPipelineInto(dev, gd, &mHudGlowDrawPipe, "mHudGlowDrawPipe");
-    gd.depthTest=true; gd.depthWrite=true;  gd.blend=false; createGraphicsPipelineInto(dev, gd, &mHudGlowMaskPipe, "mHudGlowMaskPipe");
-    gd.depthTest=true; gd.depthWrite=false; gd.blend=true;  createGraphicsPipelineInto(dev, gd, &mHudGlowAlphaPipe, "mHudGlowAlphaPipe");
-    // </SS:Skoomastream>
+    rememberRezFxPipeline(gd, &mHudAlphaPipe, RezFxVertex::WORLD, RezFxFrag::LIT, "mHudAlphaPipe");
     // #1076 VR: the HUDs on the UI wall image (premultiplied alpha): opaque / mask faces
     // write alpha 1 whatever their texture alpha (an emissive-mask or "none" alpha mode face
     // would leave holes). VR sessions only (mWantVrHudPipes, set before init).
@@ -36979,9 +37147,23 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
     {
         gd.alphaOne = true;
         gd.depthTest=true; gd.depthWrite=true;  gd.blend=false; createGraphicsPipelineInto(dev, gd, &mHudDrawPipeVr, "mHudDrawPipeVr");
+        rememberRezFxPipeline(gd, &mHudDrawPipeVr, RezFxVertex::WORLD, RezFxFrag::LIT, "mHudDrawPipeVr");
         gd.depthTest=true; gd.depthWrite=true;  gd.blend=false; createGraphicsPipelineInto(dev, gd, &mHudMaskPipeVr, "mHudMaskPipeVr");
+        rememberRezFxPipeline(gd, &mHudMaskPipeVr, RezFxVertex::WORLD, RezFxFrag::LIT, "mHudMaskPipeVr");
         gd.alphaOne = false;
     }
+    // <SS:Skoomastream> HUD glow twins (SSHudGlow): + the HUD glow attachment, which blends
+    // like the colour (opaque faces overwrite the glow behind them, alpha faces blend).
+    // (<GMDX> after the VR pipes, which draw colour only; the rez effect wire switch swaps
+    // their modules as the plain HUD pipes'.)
+    gd.glowFormat=kHudGlowFormat;
+    gd.depthTest=true; gd.depthWrite=true;  gd.blend=false; createGraphicsPipelineInto(dev, gd, &mHudGlowDrawPipe, "mHudGlowDrawPipe");
+    rememberRezFxPipeline(gd, &mHudGlowDrawPipe, RezFxVertex::WORLD, RezFxFrag::LIT, "mHudGlowDrawPipe");
+    gd.depthTest=true; gd.depthWrite=true;  gd.blend=false; createGraphicsPipelineInto(dev, gd, &mHudGlowMaskPipe, "mHudGlowMaskPipe");
+    rememberRezFxPipeline(gd, &mHudGlowMaskPipe, RezFxVertex::WORLD, RezFxFrag::LIT, "mHudGlowMaskPipe");
+    gd.depthTest=true; gd.depthWrite=false; gd.blend=true;  createGraphicsPipelineInto(dev, gd, &mHudGlowAlphaPipe, "mHudGlowAlphaPipe");
+    rememberRezFxPipeline(gd, &mHudGlowAlphaPipe, RezFxVertex::WORLD, RezFxFrag::LIT, "mHudGlowAlphaPipe");
+    // </SS:Skoomastream>
     gd.reverseZ = kReverseZ;
     gd.cullMode=VK_CULL_MODE_NONE;
     gd.glowFormat=mGlowFormat;
@@ -37328,14 +37510,22 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
             VkShaderModule gvs  = moduleFromSpv(dev, kWorldVertGbufSpv, kWorldVertGbufSpv_bytes, "kWorldVertGbufSpv");
             VkShaderModule grvs = moduleFromSpv(dev, kWorldRiggedVertGbufSpv, kWorldRiggedVertGbufSpv_bytes, "kWorldRiggedVertGbufSpv");
             gb.cullMode = cm[0]; gb.vert = gvs; vkWorldStaticVI(gb);   createGraphicsPipelineInto(dev, gb, &mGbufPipe[0], "mGbufPipe[0]");
+            rememberRezFxPipeline(gb, &mGbufPipe[0], RezFxVertex::GBUFFER, RezFxFrag::GBUFFER, "mGbufPipe[0]");
             gb.cullMode = cm[1]; gb.vert = gvs; vkWorldStaticVI(gb);   createGraphicsPipelineInto(dev, gb, &mGbufPipe[1], "mGbufPipe[1]");
+            rememberRezFxPipeline(gb, &mGbufPipe[1], RezFxVertex::GBUFFER, RezFxFrag::GBUFFER, "mGbufPipe[1]");
             gb.cullMode = cm[0]; gb.vert = vs;  vkWorldStaticVI(gb);   createGraphicsPipelineInto(dev, gb, &mGbufFullVsPipe[0], "mGbufFullVsPipe[0]");
+            rememberRezFxPipeline(gb, &mGbufFullVsPipe[0], RezFxVertex::WORLD, RezFxFrag::GBUFFER, "mGbufFullVsPipe[0]");
             gb.cullMode = cm[1]; gb.vert = vs;  vkWorldStaticVI(gb);   createGraphicsPipelineInto(dev, gb, &mGbufFullVsPipe[1], "mGbufFullVsPipe[1]");
+            rememberRezFxPipeline(gb, &mGbufFullVsPipe[1], RezFxVertex::WORLD, RezFxFrag::GBUFFER, "mGbufFullVsPipe[1]");
             gb.dynamicShadingRate = false;
             gb.cullMode = cm[0]; gb.vert = grvs; vkWorldRiggedVI(gb); createGraphicsPipelineInto(dev, gb, &mGbufPipe[2], "mGbufPipe[2]");
+            rememberRezFxPipeline(gb, &mGbufPipe[2], RezFxVertex::GBUFFER_RIGGED, RezFxFrag::GBUFFER, "mGbufPipe[2]");
             gb.cullMode = cm[1]; gb.vert = grvs; vkWorldRiggedVI(gb); createGraphicsPipelineInto(dev, gb, &mGbufPipe[3], "mGbufPipe[3]");
+            rememberRezFxPipeline(gb, &mGbufPipe[3], RezFxVertex::GBUFFER_RIGGED, RezFxFrag::GBUFFER, "mGbufPipe[3]");
             gb.cullMode = cm[0]; gb.vert = prvs; vkWorldRiggedVI(gb); createGraphicsPipelineInto(dev, gb, &mGbufFullVsPipe[2], "mGbufFullVsPipe[2]");
+            rememberRezFxPipeline(gb, &mGbufFullVsPipe[2], RezFxVertex::RIGGED, RezFxFrag::GBUFFER, "mGbufFullVsPipe[2]");
             gb.cullMode = cm[1]; gb.vert = prvs; vkWorldRiggedVI(gb); createGraphicsPipelineInto(dev, gb, &mGbufFullVsPipe[3], "mGbufFullVsPipe[3]");
+            rememberRezFxPipeline(gb, &mGbufFullVsPipe[3], RezFxVertex::RIGGED, RezFxFrag::GBUFFER, "mGbufFullVsPipe[3]");
             // G-BUFFER TERRAIN SPLIT (RenderVKGbufTerrainSplit, picked per frame in
             // recordGbufferScope): the static twins with the terrain branch compiled out (the
             // slim VS collapses terrain draws, so they never reach it), and the terrain-only FS
@@ -37355,7 +37545,9 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
                 nt.frag = ntf; nt.fragSpec = nullptr;   // (the G-buffer FS has no specialization constants)
                 nt.dynamicShadingRate = mCtx->shadingRateImageEnabled();
                 nt.cullMode = cm[0]; nt.vert = skvs; vkWorldStaticVI(nt); createGraphicsPipelineInto(dev, nt, &mGbufNtPipe[0], "mGbufNtPipe[0]");
+                rememberRezFxPipeline(nt, &mGbufNtPipe[0], RezFxVertex::GBUFFER_SKIP_TERRAIN, RezFxFrag::GBUFFER_NO_TERRAIN, "mGbufNtPipe[0]");
                 nt.cullMode = cm[1]; nt.vert = skvs; vkWorldStaticVI(nt); createGraphicsPipelineInto(dev, nt, &mGbufNtPipe[1], "mGbufNtPipe[1]");
+                rememberRezFxPipeline(nt, &mGbufNtPipe[1], RezFxVertex::GBUFFER_SKIP_TERRAIN, RezFxFrag::GBUFFER_NO_TERRAIN, "mGbufNtPipe[1]");
                 static const VkSpecializationMapEntry kHexEntry{2u, 0u, sizeof(int32_t)};
                 for (int32_t hex = 0; hex < 2; ++hex)
                 {
@@ -37446,13 +37638,17 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
         md.vert = vs; vkWorldStaticVI(md);
         md.depthTest = true; md.depthWrite = false; md.blend = true; md.cullMode = VK_CULL_MODE_NONE;
         createGraphicsPipelineInto(dev, md, &mMirrorAlphaPipe, "mMirrorAlphaPipe");
+        rememberRezFxPipeline(md, &mMirrorAlphaPipe, RezFxVertex::WORLD, RezFxFrag::LIT, "mMirrorAlphaPipe");
         VkShaderModule mrv = moduleFromSpv(dev, kWorldRiggedVertSpv, kWorldRiggedVertSpv_bytes, "kWorldRiggedVertSpv");
         md.vert = mrv; vkWorldRiggedVI(md);
         md.depthTest = true; md.depthWrite = true; md.blend = false;
         md.cullMode = VK_CULL_MODE_BACK_BIT; createGraphicsPipelineInto(dev, md, &mMirrorRigPipe, "mMirrorRigPipe");
+        rememberRezFxPipeline(md, &mMirrorRigPipe, RezFxVertex::RIGGED, RezFxFrag::LIT, "mMirrorRigPipe");
         md.cullMode = VK_CULL_MODE_NONE;     createGraphicsPipelineInto(dev, md, &mMirrorRigDsPipe, "mMirrorRigDsPipe");
+        rememberRezFxPipeline(md, &mMirrorRigDsPipe, RezFxVertex::RIGGED, RezFxFrag::LIT, "mMirrorRigDsPipe");
         md.depthWrite = false; md.blend = true;
         createGraphicsPipelineInto(dev, md, &mMirrorRigAlphaPipe, "mMirrorRigAlphaPipe");
+        rememberRezFxPipeline(md, &mMirrorRigAlphaPipe, RezFxVertex::RIGGED, RezFxFrag::LIT, "mMirrorRigAlphaPipe");
         // Cluster LOD, rigged alpha-blend: the captures' (mirror / probe faces) alpha template.
         mCaptureAlphaDescCl = md;
         mCaptureAlphaDescCl.vert = VK_NULL_HANDLE; mCaptureAlphaDescCl.frag = VK_NULL_HANDLE;
@@ -37572,6 +37768,27 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
         sd.cullMode = VK_CULL_MODE_NONE;
         sd.vert = vs; vkWorldStaticVI(sd);  sd.frag = VK_NULL_HANDLE; cdv(sd, &mProjDsPipe, "mProjDsPipe");
         sd.vert = vs; vkWorldStaticVI(sd);  sd.frag = sms;            cdv(sd, &mProjMaskDsPipe, "mProjMaskDsPipe");
+        {
+            // #1159 the weather occlusion map's alpha-blend bucket: mProjMaskDsPipe with the alpha-test
+            // FS's weather twin (constant 0 TRUE: a blend caster's cutoff is the pushed
+            // RenderVKWeatherGlassAlphaCutoff, not 0.5). Only recordWeatherOcclusion binds it.
+            static const VkBool32 kOn = VK_TRUE;
+            static const VkSpecializationMapEntry kEnt{0u, 0u, sizeof(VkBool32)};
+            static const VkSpecializationInfo kWxSi{1u, &kEnt, sizeof(VkBool32), &kOn};
+            // The weather occlusion map stores the REAL roof height: its three pipelines (opaque, mask,
+            // blend; every bucket is two-sided, so the single-sided and double-sided buckets share
+            // them) are the projector depth pipelines with NO depth bias. The slope-scaled bias lowered
+            // steep faces by up to ~1 m (rafters, side walls: rain fell between them and the map's
+            // surface); no receiver of this map needs acne bias, each keeps its own small tolerance.
+            GraphicsPipelineDesc wd = sd;
+            wd.depthBiasConstant = 0.f; wd.depthBiasSlope = 0.f;
+            wd.frag = VK_NULL_HANDLE;
+            cdv(wd, &mWeatherDepthPipe, "mWeatherDepthPipe");
+            wd.frag = sms;
+            cdv(wd, &mWeatherMaskPipe, "mWeatherMaskPipe");
+            wd.fragSpec = &kWxSi;
+            cdv(wd, &mWeatherBlendPipe, "mWeatherBlendPipe");
+        }
         sd.vert = srv; vkWorldRiggedVI(sd); sd.frag = VK_NULL_HANDLE; cdv(sd, &mProjRigDsPipe, "mProjRigDsPipe");
         sd.vert = srv; vkWorldRiggedVI(sd); sd.frag = sms;            cdv(sd, &mProjRigMaskDsPipe, "mProjRigMaskDsPipe");
         sd.vert = vs; vkWorldStaticVI(sd);  sd.frag = sss;            createGraphicsPipelineInto(dev, sd, &mProjBlendSolidPipe, "mProjBlendSolidPipe");   // <SS:Skoomastream>
@@ -37841,6 +38058,8 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
             mli.setLayoutCount=5; mli.pSetLayouts=msets;
             mli.pushConstantRangeCount=1; mli.pPushConstantRanges=&mpc;
             VK_CHECK(vkdCreatePipelineLayout(dev, &mli, &mRtMaskLayout, "mRtMaskLayout"));
+            // (#1029) the trace + its denoiser: the deferred ray-query group (compiled after the world
+            // pipelines; ensureRtMask keeps the mask off until all three landed -- sun cascades meanwhile)
             VkShaderModule mm = moduleFromSpv(dev, kWorldRtShadowMaskSpv, kWorldRtShadowMaskSpv_bytes, "kWorldRtShadowMaskSpv");
             {
                 // #874 READ GUARD A/B (RenderVKRTGuard, restart): clean_rt_common.glsl kRtGuardOn
@@ -37862,18 +38081,18 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
                 static VkSpecializationInfo sGVSi{2u, kGVEnt, sizeof(GuardViews), &sGV};
                 sGV.guard = guard ? VK_TRUE : VK_FALSE;
                 sGV.views = (int32_t)mViewCount;
-                createComputePipelineInto(dev, mm, mRtMaskLayout, 0,
-                                          mViewCount > 1u ? &sGVSi : (guard ? &kGSiOn : &kGSiOff), &mRtMaskPipe, "mRtMaskPipe");
+                rtDeferredCompute(dev, mm, mRtMaskLayout, 0, mViewCount > 1u ? &sGVSi : (guard ? &kGSiOn : &kGSiOff),
+                                  &mRtMaskPipe, "mRtMaskPipe");
                 if (!guard) LL_WARNS("VKRT") << "RT read guard (#874) OFF (RenderVKRTGuard 0): the RT shadow mask reads unchecked" << LL_ENDL;
             }
             destroyShaderModuleDeferred(dev, mm, nullptr);
             // Shadow denoiser: temporal (B) and spatial (C) passes, same layout.
             VkShaderModule mt = moduleFromSpv(dev, kWorldRtMaskTemporalSpv, kWorldRtMaskTemporalSpv_bytes, "kWorldRtMaskTemporalSpv");
             // (#1075: both layered like the trace -- kViewCount = N in a stereo session; nullptr at N = 1)
-            createComputePipelineInto(dev, mt, mRtMaskLayout, 0, viewCountSpec(mViewCount), &mRtMaskTmpPipe, "mRtMaskTmpPipe");
+            rtDeferredCompute(dev, mt, mRtMaskLayout, 0, viewCountSpec(mViewCount), &mRtMaskTmpPipe, "mRtMaskTmpPipe");
             destroyShaderModuleDeferred(dev, mt, nullptr);
             VkShaderModule msp = moduleFromSpv(dev, kWorldRtMaskSpatialSpv, kWorldRtMaskSpatialSpv_bytes, "kWorldRtMaskSpatialSpv");
-            createComputePipelineInto(dev, msp, mRtMaskLayout, 0, viewCountSpec(mViewCount), &mRtMaskSpPipe, "mRtMaskSpPipe");
+            rtDeferredCompute(dev, msp, mRtMaskLayout, 0, viewCountSpec(mViewCount), &mRtMaskSpPipe, "mRtMaskSpPipe");
             destroyShaderModuleDeferred(dev, msp, nullptr);
             // #771 RT sun shadow cache: tile classifier + indirect-args finalize, same layout.
             VkShaderModule mcl = moduleFromSpv(dev, kWorldRtMaskCacheSpv, kWorldRtMaskCacheSpv_bytes, "kWorldRtMaskCacheSpv");
@@ -37976,11 +38195,10 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
         if (mRT && mRT->consumerLayout())
         {
             // (with the other ray-query pipelines: compiled after the world pipelines)
-            PipelineBatchDeferScope deferRt;
             pli.setLayoutCount = 4;
             VK_CHECK(vkdCreatePipelineLayout(dev, &pli, &mProbeDeferLayoutRt, "mProbeDeferLayoutRt"));
             VkShaderModule rm = moduleFromSpv(dev, kWorldProbeDeferRtSpv, kWorldProbeDeferRtSpv_bytes, "kWorldProbeDeferRtSpv");
-            createComputePipelineInto(dev, rm, mProbeDeferLayoutRt, 0, nullptr, &mProbeDeferRtPipe, "mProbeDeferRtPipe");
+            rtDeferredCompute(dev, rm, mProbeDeferLayoutRt, 0, nullptr, &mProbeDeferRtPipe, "mProbeDeferRtPipe");
             destroyShaderModuleDeferred(dev, rm, nullptr);
         }
     }
@@ -38366,7 +38584,6 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
         VkPushConstantRange gpcr{VK_SHADER_STAGE_COMPUTE_BIT, 0, 64};
         const VkDescriptorSetLayout glow_sets[2] = {mDslPost, mDslPost};
         VkPipelineLayoutCreateInfo gli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-        // <SS:Skoomastream> set 1 = the final LDR image for the extract (mDsetGlowScene).
         gli.setLayoutCount=2; gli.pSetLayouts=glow_sets;
         gli.pushConstantRangeCount=1; gli.pPushConstantRanges=&gpcr;
         VK_CHECK(vkdCreatePipelineLayout(dev, &gli, &mGlowLayout, "mGlowLayout"));
@@ -38391,7 +38608,7 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
         // TONEMAP: fullscreen HDR scene -> swapchain (LL postDeferredTonemap), same
         // post set layout (b0 = HDR scene, b1 = 1x1 exposure image).
         {
-            VkPushConstantRange tpcr{VK_SHADER_STAGE_FRAGMENT_BIT, 0, 96};   // <GMDX> 64 -> 96: night vision
+            VkPushConstantRange tpcr{VK_SHADER_STAGE_FRAGMENT_BIT, 0, 96};   // (64 -> 96: physical night's night vision p3 / p4)
             initGrade();
             const VkDescriptorSetLayout tsl[2] = {mDslPost, mDslGrade};
             VkPipelineLayoutCreateInfo tli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
@@ -38437,7 +38654,7 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
             VK_CHECK(mExposureAuxPool.allocate(mDslExposureAux, &mDsetExposureAux));
             mExpAuxDepthView = mExpAuxBloomView = VK_NULL_HANDLE;
             const VkDescriptorSetLayout esl[2] = {mDslPost, mDslExposureAux};
-            VkPushConstantRange epcr{VK_SHADER_STAGE_COMPUTE_BIT, 0, 64};   // <GMDX> 48 -> 64: params4 (night eye)
+            VkPushConstantRange epcr{VK_SHADER_STAGE_COMPUTE_BIT, 0, 64};   // (48 -> 64: params4, physical night's night eye)
             VkPipelineLayoutCreateInfo eli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
             eli.setLayoutCount=2; eli.pSetLayouts=esl;
             eli.pushConstantRangeCount=1; eli.pPushConstantRanges=&epcr;
@@ -38487,9 +38704,12 @@ bool LLCleanRendererVK::init(VkDeviceContext& ctx, VkFormat colorFormat)
     // The world pipelines compile on background threads (vk_pipeline.h): the renderer
     // turns ready in pollPipelines() once they are done, so init() can run at the
     // login screen and the compile overlaps the login instead of following it.
-    // The ray-query lit variant: its own job, started once these are in (pollPipelines).
+    // The ray-query lit variant + the ray-traced effects' kernels (#1029): their own job,
+    // started once these are in (pollPipelines).
     mRtPipelineJob = pipelineBatchTakeDeferred(dev);
+    mRtDeferTaken = true;
     mRtPipelineStarted = false;
+    if (!mRtPipelineJob) installRtStaged();   // (nothing deferred: no staged slot waits on a job)
     mPipelineJob = pipelineBatchFlushAsync(dev);
     if (!mPipelineJob) { finalizePipelines(); pollRtPipelines(false); }
     // #595: every allocation from here on is a runtime one (SLVkInjectAllocFail).
@@ -38527,7 +38747,9 @@ std::array<VkPipeline*, LLCleanRendererVK::kDepthVsSlots> LLCleanRendererVK::dep
             &mPreMvPipe[0], &mPreMvPipe[1], &mPreMvMaskPipe[0], &mPreMvMaskPipe[1],
             &mPreMvRigPipe[0], &mPreMvRigPipe[1], &mPreMvRigMaskPipe[0], &mPreMvRigMaskPipe[1],
             &mPreMoPipe[0], &mPreMoPipe[1], &mPreMoMaskPipe[0], &mPreMoMaskPipe[1],
-            &mPreMoRigPipe[0], &mPreMoRigPipe[1], &mPreMoRigMaskPipe[0], &mPreMoRigMaskPipe[1]};
+            &mPreMoRigPipe[0], &mPreMoRigPipe[1], &mPreMoRigMaskPipe[0], &mPreMoRigMaskPipe[1],
+            &mWeatherBlendPipe,    // (#1159)
+            &mWeatherDepthPipe, &mWeatherMaskPipe};   // (the weather map's unbiased pair)
 }
 
 // Install the depth-only pipeline set RenderVKDepthOnlyVS asks for (live): swap each member
@@ -38548,6 +38770,161 @@ void LLCleanRendererVK::applyDepthOnlyVS()
         std::swap(*slots[k], mDepthVsAlt[k]);
         mDepthVsLive[k] = want;
     }
+}
+
+void LLCleanRendererVK::rememberRezFxPipeline(const GraphicsPipelineDesc& d, VkPipeline* dest,
+                                             RezFxVertex vertex, RezFxFrag fragment, const char* name)
+{
+    mRezFxRecipes.push_back({d, dest, vertex, fragment, name});
+    GraphicsPipelineDesc& saved = mRezFxRecipes.back().desc;
+    saved.vert = VK_NULL_HANDLE;
+    saved.frag = VK_NULL_HANDLE;
+    saved.fragSpec = nullptr;
+}
+
+bool LLCleanRendererVK::rezFxFrameTick()
+{
+    assert_main_thread();
+    if (!mCtx || mPipelineJob || mRtPipelineJob) return false;
+    const bool want = mCtx->fragmentShaderBarycentricEnabled() && GMDXRezFx::wantsWireframe();
+    if (want == mRezFxWire) mRezFxFailedWire = -1;
+    if (!mRezFxStage.empty())
+    {
+        if (mRezFxJob && !pipelineJobDone(mRezFxJob)) return false;
+        if (mRezFxJob) { pipelineJobFinish(mRezFxJob); mRezFxJob = nullptr; }
+        const bool complete = std::all_of(mRezFxStage.begin(), mRezFxStage.end(),
+                                         [](const auto& p) { return p.second != VK_NULL_HANDLE; });
+        const bool install = complete && want == mRezFxBuildWire;
+        for (auto& p : mRezFxStage)
+        {
+            if (install)
+            {
+                retirePipeline(*p.first);
+                *p.first = p.second;
+            }
+            else retirePipeline(p.second);
+        }
+        mRezFxStage.clear();
+        if (install)
+        {
+            mRezFxWire = mRezFxBuildWire;
+            GMDXRezFx::setWireframe(mRezFxWire);
+            LL_INFOS("Vulkan") << "RezFX: installed " << (mRezFxWire ? "wire twins" : "stock modules")
+                               << " at frame boundary" << LL_ENDL;
+            return true;
+        }
+        if (!complete && want == mRezFxBuildWire)
+        {
+            mRezFxFailedWire = want ? 1 : 0;
+            LL_WARNS("Vulkan") << "RezFX: pipeline batch failed; keeping the installed world pipelines" << LL_ENDL;
+        }
+    }
+    if (want == mRezFxWire || mRezFxFailedWire == (want ? 1 : 0)) return false;
+    if (mLitDbgJob[0] || mLitDbgJob[1]) return false;
+    const VkDevice dev = mCtx->device();
+    mRezFxBuildWire = want;
+    PipelineBatchScope scope(dev);
+    std::vector<VkShaderModule> modules;
+    auto module = [&](const uint32_t* code, size_t bytes, const char* name)
+    {
+        GMDXRezFx::wireModule(name, code, bytes, want);
+        VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+        ci.codeSize = bytes;
+        ci.pCode = code;
+        VkShaderModule m = VK_NULL_HANDLE;
+        if (vkCreateShaderModule(dev, &ci, nullptr, &m) != VK_SUCCESS) m = VK_NULL_HANDLE;
+        if (m) vkNoteShaderModule(m, code, bytes, name);
+        modules.push_back(m);
+        return m;
+    };
+    const VkShaderModule verts[] = {
+        module(kWorldVertSpv, kWorldVertSpv_bytes, "kWorldVertSpv"),
+        module(kWorldRiggedVertSpv, kWorldRiggedVertSpv_bytes, "kWorldRiggedVertSpv"),
+        module(kWorldVertGbufSpv, kWorldVertGbufSpv_bytes, "kWorldVertGbufSpv"),
+        module(kWorldRiggedVertGbufSpv, kWorldRiggedVertGbufSpv_bytes, "kWorldRiggedVertGbufSpv"),
+        module(kWorldVertGbufSkipTerrSpv, kWorldVertGbufSkipTerrSpv_bytes, "kWorldVertGbufSkipTerrSpv")};
+    const VkShaderModule frags[] = {
+        module(kWorldFragSpv, kWorldFragSpv_bytes, "kWorldFragSpv"),
+        module(kWorldFragGbufSpv, kWorldFragGbufSpv_bytes, "kWorldFragGbufSpv"),
+        module(kWorldFragGbufNtSpv, kWorldFragGbufNtSpv_bytes, "kWorldFragGbufNtSpv")};
+    const VkShaderModule litFrags[2][3] = {
+        {frags[0], module(kWorldFragBlendSpv, kWorldFragBlendSpv_bytes, "kWorldFragBlendSpv"),
+                   module(kWorldFragEzSpv, kWorldFragEzSpv_bytes, "kWorldFragEzSpv")},
+        {mDrawLayoutRt ? module(kWorldFragRtSpv, kWorldFragRtSpv_bytes, "kWorldFragRtSpv") : VK_NULL_HANDLE,
+         mDrawLayoutRt ? module(kWorldFragBlendRtSpv, kWorldFragBlendRtSpv_bytes, "kWorldFragBlendRtSpv") : VK_NULL_HANDLE,
+         mDrawLayoutRt ? module(kWorldFragRtEzSpv, kWorldFragRtEzSpv_bytes, "kWorldFragRtEzSpv") : VK_NULL_HANDLE}};
+    if (std::any_of(modules.begin(), modules.end(), [](VkShaderModule m) { return !m; }))
+    {
+        for (VkShaderModule m : modules) if (m) vkDestroyShaderModule(dev, m, nullptr);
+        mRezFxFailedWire = want ? 1 : 0;
+        LL_WARNS("Vulkan") << "RezFX: shader module allocation failed; keeping the installed world pipelines" << LL_ENDL;
+        return false;
+    }
+    auto queue = [&](GraphicsPipelineDesc d, VkPipeline* dest, const char* name)
+    {
+        if (!*dest) return;
+        mRezFxStage.emplace_back(dest, VK_NULL_HANDLE);
+        createGraphicsPipelineInto(dev, d, &mRezFxStage.back().second, name);
+    };
+    for (const RezFxRecipe& r : mRezFxRecipes)
+    {
+        GraphicsPipelineDesc d = r.desc;
+        d.vert = verts[(uint8_t)r.vertex];
+        d.frag = frags[(uint8_t)r.fragment];
+        queue(d, r.dest, r.name.c_str());
+    }
+    for (int v = 0; v < 2; ++v)
+        for (int i = 0; i < LIT_COUNT; ++i)
+        {
+            const LitDbgDesc& r = mLitDbgDesc[v][i];
+            if (!r.valid || r.frag >= LITF_CAP) continue;
+            GraphicsPipelineDesc d = r.desc;
+            d.vert = verts[r.rigged ? 1 : 0];
+            d.frag = litFrags[v][r.frag];
+            d.fragSpec = litDebugSpec(false);
+            queue(d, &mLitVar[v][i], "rezfx lit");
+            d.fragSpec = litDebugSpec(true);
+            queue(d, &mLitDbg[v][i], "rezfx lit debug");
+        }
+    if (mOdPipesBuilt)
+    {
+        const VkBool32 on = VK_TRUE;
+        const VkSpecializationMapEntry entry{0, 0, sizeof(on)};
+        const VkSpecializationInfo info{1, &entry, sizeof(on), &on};
+        for (int mode = 0; mode < 2; ++mode)
+            for (int i = 0; i < 4; ++i)
+            {
+                GraphicsPipelineDesc d = mLitDesc;
+                d.fragSpec = &info;
+                d.frag = litFrags[0][mode ? LITF_EZ : LITF_LIT];
+                d.vert = verts[i < 2 ? 0 : 1];
+                if (i < 2) vkWorldStaticVI(d); else vkWorldRiggedVI(d);
+                d.cullMode = (i % 2) ? VK_CULL_MODE_NONE : VK_CULL_MODE_BACK_BIT;
+                d.depthWrite = mode == 0;
+                d.depthCompare = mode ? VK_COMPARE_OP_EQUAL : VK_COMPARE_OP_LESS_OR_EQUAL;
+                d.relaxedDepthCompare = VK_COMPARE_OP_LESS_OR_EQUAL;
+                queue(d, &mOdPipe[mode][i], "rezfx overdraw");
+            }
+    }
+    for (VkShaderModule m : modules) destroyShaderModuleDeferred(dev, m, nullptr);
+    PipelineJobOpts opts;
+    opts.prio = VKPIPE_PRIO_USER;
+    opts.gate = false;
+    opts.what = "rezfx wire mode";
+    mRezFxJob = pipelineBatchFlushAsync(dev, opts);
+    LL_INFOS("Vulkan") << "RezFX: compiling " << mRezFxStage.size() << " pipelines for "
+                       << (want ? "wire twins" : "stock modules") << "; installed pipelines keep drawing" << LL_ENDL;
+    return false;
+}
+
+void LLCleanRendererVK::rezFxShutdown()
+{
+    if (mRezFxJob) { pipelineJobFinish(mRezFxJob); mRezFxJob = nullptr; }
+    for (auto& p : mRezFxStage)
+        if (p.second) { vkForgetPipeline(p.second); vkDestroyPipeline(mCtx->device(), p.second, nullptr); }
+    mRezFxStage.clear();
+    mRezFxRecipes.clear();
+    mRezFxFailedWire = -1;
 }
 
 // ---- FIRST-USE PIPELINES (task: no world frame compiles a pipeline) ----
@@ -38744,27 +39121,70 @@ void LLCleanRendererVK::pollPipelines(bool wait)
     if (!wait) pollRtPipelines(false);
 }
 
-// The deferred ray-query lit variant (mRtPipelineJob): started once the world pipelines
-// are in (it shares their vertex modules, vk_pipeline.h PipelineBatchDeferScope), polled
-// every frame, installed into mLitVar[1] when done. Until then selectLitVariant finds no
-// mLitVar[1][LIT_DRAW] and every pass draws the plain variant (sun cascades, shadow-mapped
-// projectors: selectProjShadows). wait = shutdown: a running job is waited for, an
-// unstarted one dropped.
+// (#1029) A pipeline of the deferred group: pass this as createComputePipelineInto's `out`
+// inside a PipelineBatchDeferScope. The job writes the slot; installRtStaged moves it into
+// `member` (in the renderer's lifetime: the deque keeps the slot's address).
+VkPipeline* LLCleanRendererVK::rtDeferredOut(VkPipeline* member)
+{
+    mRtStaged.emplace_back(member, VK_NULL_HANDLE);
+    return &mRtStaged.back().second;
+}
+
+void LLCleanRendererVK::rtDeferredCompute(VkDevice dev, VkShaderModule comp, VkPipelineLayout layout,
+                                          VkPipelineShaderStageCreateFlags stageFlags, const VkSpecializationInfo* spec,
+                                          VkPipeline* member, const char* name)
+{
+    // After init the group is gone: a staged slot would never be installed (and a queued entry
+    // would strand in the batch's deferred list), so a late caller creates as it would otherwise.
+    llassert(!mRtDeferTaken);
+    if (mRtDeferTaken) { createComputePipelineInto(dev, comp, layout, stageFlags, spec, member, name); return; }
+    PipelineBatchDeferScope deferRt;
+    createComputePipelineInto(dev, comp, layout, stageFlags, spec, rtDeferredOut(member), name);
+}
+
+// The staged handles into their members (the job finished, was dropped, or nothing was
+// deferred: then a slot is what the synchronous create wrote, or VK_NULL_HANDLE).
+void LLCleanRendererVK::installRtStaged()
+{
+    for (auto& s : mRtStaged) *s.first = s.second;
+    mRtStaged.clear();
+}
+
+// The deferred ray-query group (mRtPipelineJob): started once the world pipelines are in
+// (it shares their vertex modules, vk_pipeline.h PipelineBatchDeferScope), polled every
+// frame, installed when done -- the lit variant into mLitVar[1], the ray-traced effects'
+// kernels (#1029) from mRtStaged. Until then selectLitVariant finds no mLitVar[1][LIT_DRAW]
+// and every pass draws the plain variant (sun cascades, shadow-mapped projectors:
+// selectProjShadows), and the RT reflections / mirrors / shadow mask stay off (their
+// handles are VK_NULL_HANDLE). wait = shutdown: a running job is waited for, an unstarted
+// one dropped.
 void LLCleanRendererVK::pollRtPipelines(bool wait)
 {
     if (!mRtPipelineJob) return;
     if (!mRtPipelineStarted)
     {
-        if (wait || mPipelineJob) { if (wait) { pipelineJobFinish(mRtPipelineJob); mRtPipelineJob = nullptr; } return; }
+        if (wait || mPipelineJob)
+        {
+            if (wait) { pipelineJobFinish(mRtPipelineJob); mRtPipelineJob = nullptr; installRtStaged(); }
+            return;
+        }
+        // (#1029) Also after the first-use batches (warmFirstUse's gate jobs, queued as the world
+        // batch landed): the login waits for those, and a running compile is never preempted --
+        // with one compile thread a 20 s RT kernel taking the slot first held the login ~45 s.
+        unsigned gateDone = 0, gateQueued = 0, gateLive = 0;
+        vkPipelineGateProgress(gateDone, gateQueued, gateLive);
+        if (gateLive > 0) return;
         pipelineJobStart(mRtPipelineJob);
         mRtPipelineStarted = true;
         mRtPipesSince = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
-        LL_INFOS("Vulkan") << "RT: ray-query lit pipelines compiling in the background (plain variant until then)" << LL_ENDL;
+        LL_INFOS("Vulkan") << "RT: ray-query pipelines compiling in the background (plain variant, no ray-traced"
+                              " effects until then)" << LL_ENDL;
         return;
     }
     if (!wait && !pipelineJobDone(mRtPipelineJob)) return;
     pipelineJobFinish(mRtPipelineJob);
     mRtPipelineJob = nullptr;
+    installRtStaged();
     int missing = 0;
     for (int i = 0; i < LIT_COUNT; ++i)
     {
@@ -38777,8 +39197,8 @@ void LLCleanRendererVK::pollRtPipelines(bool wait)
     const std::string miss = (missing && vkPipelineFailedCount())
         ? " (" + std::to_string(missing) + " of " + std::to_string((int)LIT_COUNT) + " missing: those surfaces keep the plain variant)"
         : std::string();
-    LL_INFOS("Vulkan") << "RT: ray-query lit pipelines ready after " << (S32)(sec * 1000.0) << " ms" << miss << LL_ENDL;
-    if (mCtx && !wait) mCtx->savePipelineCache("ray-query lit pipelines ready");
+    LL_INFOS("Vulkan") << "RT: ray-query pipelines ready after " << (S32)(sec * 1000.0) << " ms" << miss << LL_ENDL;
+    if (mCtx && !wait) mCtx->savePipelineCache("ray-query pipelines ready");
 }
 
 void LLCleanRendererVK::shutdown()
@@ -38801,6 +39221,7 @@ void LLCleanRendererVK::shutdown()
     // jobs (their pipelines join mLitDbg / mDeferPipeDbg, destroyed below), frees every set --
     // before the particle modules / layouts the builds reference go.
     specShutdown();
+    rezFxShutdown();
     destroyAsync();
     // Acoustics probe (#683): its pipeline layout names the RT consumer layout -- before mRT.
     if (mAudioRT) { mAudioRT->destroy(dev); delete mAudioRT; mAudioRT = nullptr; }
@@ -38808,7 +39229,10 @@ void LLCleanRendererVK::shutdown()
     // God rays (#208): its march layout references the draw set 0 layout, freed below.
     if (mGodRays) { mGodRays->destroy(dev); delete mGodRays; mGodRays = nullptr; }
     // Volumetric fog (#718): its layouts reference the draw set layouts, freed below.
+    for(uint32_t eye=1;eye<kMaxViews;++eye)
+        if(mMediumEyes[eye]) { mMediumEyes[eye]->destroy(dev); delete mMediumEyes[eye]; mMediumEyes[eye]=nullptr; }
     if (mVolFog) { mVolFog->destroy(dev); delete mVolFog; mVolFog = nullptr; }
+    mMediumEyes[0]=nullptr; mCameraMediumReady=false;
     // Particle fog (#1003): likewise.
     if (mPartFog) { mPartFog->destroy(dev); delete mPartFog; mPartFog = nullptr; }
     mPartFogNow = false;
@@ -38833,7 +39257,7 @@ void LLCleanRendererVK::shutdown()
     // Rigged cursor pick (#255): its layouts reference the draw set layouts, freed below.
     if (mPick) { mPick->destroy(dev); delete mPick; mPick = nullptr; }
     destroyCel();   // avatar mask + cel (#549 / #550): its buffers back draw set 0 bindings 37 / 38
-    destroySelOutline();   // <GMDX> selection styles: its mask layout references the draw set layouts
+    destroySelOutline();   // selection styles: its mask layout references the draw set layouts (GunMetal-DX port)
     LLFxRuntimeVK::instance().detachDevice();   // FX (#544): every effect GPU object
     for (LLCleanFSR3VK*& fsr : mFsr)   // (#1075: every view's instance)
         if (fsr) { fsr->destroy(dev); delete fsr; fsr = nullptr; }
@@ -38933,10 +39357,12 @@ void LLCleanRendererVK::shutdown()
     mShadowTransDepthPipe = mShadowTransColorPipe = mShadowTransDepthRigPipe = mShadowTransColorRigPipe = VK_NULL_HANDLE;
     if (mShadowTransColorSampler) { vkDestroySampler(dev, mShadowTransColorSampler, nullptr); mShadowTransColorSampler = VK_NULL_HANDLE; }
     for (VkPipeline p : {mProjPipe, mProjMaskPipe, mProjRigPipe, mProjRigMaskPipe,
-                         mProjDsPipe, mProjMaskDsPipe, mProjRigDsPipe, mProjRigMaskDsPipe})
+                         mProjDsPipe, mProjMaskDsPipe, mProjRigDsPipe, mProjRigMaskDsPipe, mWeatherBlendPipe,
+                         mWeatherDepthPipe, mWeatherMaskPipe})
         if (p) vkDestroyPipeline(dev, p, nullptr);
     mProjPipe = mProjMaskPipe = mProjRigPipe = mProjRigMaskPipe = VK_NULL_HANDLE;
-    mProjDsPipe = mProjMaskDsPipe = mProjRigDsPipe = mProjRigMaskDsPipe = VK_NULL_HANDLE;
+    mProjDsPipe = mProjMaskDsPipe = mProjRigDsPipe = mProjRigMaskDsPipe = mWeatherBlendPipe
+        = mWeatherDepthPipe = mWeatherMaskPipe = VK_NULL_HANDLE;
     if (mProjAtlas.image) mCtx->destroyImage(mProjAtlas);
     if (mProjCache.image) mCtx->destroyImage(mProjCache);
     if (mProjTransDepth.image) mCtx->destroyImage(mProjTransDepth);
@@ -38981,6 +39407,12 @@ void LLCleanRendererVK::shutdown()
     if (mRegir.buffer) { mCtx->destroyBuffer(mRegir); mRegir = GpuBuffer{}; }
     if (mRegirStatRb.buffer) { mCtx->destroyBuffer(mRegirStatRb); mRegirStatRb = GpuBuffer{}; }
     if (mRsStatRb.buffer) { mCtx->destroyBuffer(mRsStatRb); mRsStatRb = GpuBuffer{}; }
+    if (mRsEmInputGen.buffer) { mCtx->destroyBuffer(mRsEmInputGen); mRsEmInputGen = GpuBuffer{}; }
+    for (GpuBuffer& g : mRsEmInputGenStaging) { if (g.buffer) mCtx->destroyBuffer(g); g = GpuBuffer{}; }
+    mRsEmInputReady = false; mRsEmInputFull = true;
+    if (mRsEmDiagRb.buffer) { mCtx->destroyBuffer(mRsEmDiagRb); mRsEmDiagRb = GpuBuffer{}; }
+    std::fill(std::begin(mRsEmDiagUsed), std::end(mRsEmDiagUsed), false);
+    mRsEmDiagNow = mRsEmDiagLog = false;
     if (mRsRes.buffer) { mCtx->destroyBuffer(mRsRes); mRsRes = GpuBuffer{}; }
     mRsEmNow = false;
     mRsEmListsNow = false;
@@ -39033,6 +39465,7 @@ void LLCleanRendererVK::shutdown()
     if (mSkyLut.image) mCtx->destroyImage(mSkyLut);
     mSkyLut = GpuImage{};
     if (mSkyLutSampler) { vkDestroySampler(dev, mSkyLutSampler, nullptr); mSkyLutSampler = VK_NULL_HANDLE; }
+    physSkyDestroy();   // the physical sky's tables (GunMetal-DX port)
     if (mTonemapPipe) vkDestroyPipeline(dev, mTonemapPipe, nullptr);
     if (mTonemapPipe1) { vkDestroyPipeline(dev, mTonemapPipe1, nullptr); mTonemapPipe1 = VK_NULL_HANDLE; }
     if (mTonemapLayout) vkDestroyPipelineLayout(dev, mTonemapLayout, nullptr);
@@ -39408,7 +39841,6 @@ void LLCleanRendererVK::shutdown()
     if (mDepthSampler) vkDestroySampler(dev, mDepthSampler, nullptr);
     terrBakeDestroy();   // #811: its slots / images / buffers retired (freed just below), its objects destroyed
     if (mRezFxTable.buffer) { mCtx->destroyBuffer(mRezFxTable); mRezFxTable = GpuBuffer{}; mRezFxValid = false; }   // <GMDX>
-    physSkyDestroy();   // <GMDX>
     for (uint32_t t = 0; t < (uint32_t)mTextures.size(); ++t) releaseTexSlot(t);
     mTextures.clear(); mVkTexShared.clear();
     for (auto& kv : mSharedTex)   // defensive: nothing should remain
@@ -39520,6 +39952,9 @@ void LLCleanRendererVK::syncFromStoresPrestep()
     {
         static LLCachedControl<U32> s_heal(gSavedSettings, "RenderVKSelfHealRate", 1);
         mSelfHealMode = std::min<U32>(s_heal, 2u);
+        static LLCachedControl<U32> s_emInput(gSavedSettings, "RenderVKReSTIREmissive", 1U);
+        static LLCachedControl<U32> s_rsInput(gSavedSettings, "RenderVKReSTIRDI", 0U);
+        mRsEmInputWanted = (U32)s_emInput != 0u && (U32)s_rsInput != 0u;
     }
     mSyncPrepped = true;
 }
@@ -39903,6 +40338,8 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
                                     const VKSkyPush& skyPushIn, const float* hud_view_proj,
                                     const int* hud_viewport)
 {
+    mRtInputStreamRefused = false;
+    mRtInputReasons = 0;
     // FRAME PIPELINING (phase 3b): the previous recording's P is this one's front-end wait.
     // Consumed here, before any early out, so a P never outlives the recording after it
     // (an offscreen / non-async recording in between reads the front end's buffers on the
@@ -40234,6 +40671,15 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
                              << (held ? "kept (camera held still)" : "reset (the camera moved during the shot)") << LL_ENDL;
     }
     if (!mOffscreen) mLiveCapWas = mLiveCapNow;
+    // The material bias beyond the render/display scale, shared by sampling and
+    // texture demand. DLSS asks for at least one mip finer than display detail.
+    F32 material_mip_bias = -0.5f;
+#if defined(LL_HAS_CLEAN_PIPELINE)
+    static LLCachedControl<F32> s_mip(gSavedSettings, "RenderVKTAAMipBias", -0.5f);
+    material_mip_bias = llclamp((F32)s_mip, -2.f, 1.f);
+#endif
+    if (mDlssFrame) material_mip_bias = std::min(material_mip_bias, -1.f);
+    if (mLiveCapNow && mLiveSnap) material_mip_bias += mLiveSnap->mipBiasOffset();
     const bool vrsReady = ensureVrs(cmd, rw, rh);
     mTaaResolveReset = true;   // until the frame-info fill below says otherwise
     mMainW = width; mMainH = height;
@@ -40370,6 +40816,10 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     VKCullPush push = cullIn;
     push.flags = mHideSelf ? 1u : 0u;   // pass 0 only (other passes ignore it)
 #if defined(LL_HAS_CLEAN_PIPELINE)
+    static LLCachedControl<bool> s_emissive_shadow(gSavedSettings, "RenderVKEmissiveNoShadows", true);
+    if (s_emissive_shadow) push.flags |= 524288u;
+#endif
+#if defined(LL_HAS_CLEAN_PIPELINE)
     // Render-type toggles (Ctrl+Alt+Shift+n, Develop > Render Types): the cull drops
     // the matching instances in every world view (main, probes, shadows, mirror);
     // the HUD pass ignores these bits. clean_cull.comp documents the bits.
@@ -40403,20 +40853,24 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     // DISPLAY height, not the render one: the resolve reconstructs display detail, so
     // streaming must keep fetching the mips it shows.
     push.lod_cam_pos[3] = std::fabs(mCurProj[5]) * (float)height * 0.5f;
-    // <GMDX> REGION MAP CAPTURE (gmdxregioncapture.h): an orthographic view. |P[1][1]| H / 2 above
-    // is then px per metre at every depth; the cull divides by no distance and takes every LOD
-    // at its finest (CULL_ORTHO). ortho_ppm: the capture's final px per metre, so a small
-    // preparation render asks for the textures the map will need.
-    if (mOrtho || mOrthoView)   // <GMDX> (the live orthographic view: the projection's own px per metre)
+    // The live orthographic view: |P[1][1]| H / 2 above is then px per metre at every depth;
+    // the cull divides by no distance and takes every LOD at its finest (CULL_ORTHO).
+    // The region map capture (mOrtho) too, with ortho_ppm: the capture's final px per metre, so
+    // a small preparation render asks for the textures the map will need (GunMetal-DX port).
+    if (mOrtho || mOrthoView)
     {
         push.flags |= kCullOrtho;
         if (mOrtho && mOrthoPpm > 0.f) push.lod_cam_pos[3] = mOrthoPpm;
     }
-    if (mSnapMatte) push.flags |= kCullAvatarsOnly;   // <GMDX> avatar matte snapshot: the main view keeps avatars only
+    if (mSnapMatte) push.flags |= kCullAvatarsOnly;   // avatar matte snapshot: the main view keeps avatars only (GunMetal-DX port)
     {
         // Texel demand quality (clean_cull.comp demandAt): bias x the sampler's anisotropy.
         static LLCachedControl<F32> s_dem_bias(gSavedSettings, "RenderVKTexDemandBias", 1.f);
-        const F32 bias = llclamp((F32)s_dem_bias, 0.25f, 4.f);
+        F32 bias = llclamp((F32)s_dem_bias, 0.25f, 4.f);
+        // Demand already uses display height, so only the extra material bias is
+        // missing. Keep the sharper mips resident for the samples DLSS will use.
+        if (mDlssFrame && mTaaJitterOn)
+            bias *= std::exp2(-std::min(material_mip_bias, 0.f));
         push.tex_demand = (uint32_t)glm::packHalf1x16(bias) | ((uint32_t)glm::packHalf1x16(mSamplerAniso) << 16);
     }
     push.skin_count    = do_rigged ? std::min(mSkinCount, mSkinPaletteCap) : 0u;   // (a palette grow past the budget can lag)   // 0 => the cull drops every rigged
@@ -40531,6 +40985,61 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
             LLCrossingTrace::addChunk(LLCrossingTrace::CH_UPLOAD, LLCrossingTrace::nowMs() - crossing_t0, crossing_runs,
                                       (U32)std::min<U64>(crossing_bytes, 0xFFFFFFFFull));
     }
+#if defined(LL_HAS_CLEAN_PIPELINE)
+    // Diagnostic runs on the main thread after store fill joined, before the dirty
+    // spans are consumed. "recorded" is command recording, not GPU readback.
+    LLCleanIngest::tempMotionDiagUpload(mCpuInstances, mInstRuns, mInstD,
+                                       std::min(mInstanceCount, mInstanceBufCap), instFullUpload, mInstFullUpload);
+#endif
+    // Optional emissive identity INPUT, CPU-owned and shader-read-only. Same dirty spans and
+    // snapshot as the instance stream; never writes the GPU-owned producer cache.
+    mRsEmInputReady = false;
+    bool wantEmissiveInput = false;
+#if defined(LL_HAS_CLEAN_PIPELINE)
+    wantEmissiveInput = mRsEmInputWanted;
+#endif
+    if (wantEmissiveInput) gpuSubMark(cmd, "c_rs_em_input_begin");
+    if (!wantEmissiveInput && mRsEmInputGen.buffer)
+    {
+        retireBuffer(mRsEmInputGen); mRsEmInputGen = GpuBuffer{}; mRsEmInputFull = true;
+        for (GpuBuffer& g : mRsEmInputGenStaging) { retireBuffer(g); g = GpuBuffer{}; }
+    }
+    const VkDeviceSize generationBytes = (VkDeviceSize)mInstanceCount * sizeof(uint32_t);
+    if (wantEmissiveInput && mInstanceCount && mRsEmInputGenerations.size() >= mInstanceCount)
+    {
+        const double genNow = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (mRsEmInputGen.size < generationBytes && genNow >= mRsEmInputRetry)
+        {
+            VkDeviceContext::SoftAllocScope soft(mCtx);
+            GpuBuffer fresh = mCtx->createBuffer((VkDeviceSize)mInstanceBufCap * sizeof(uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                                 VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, true);
+            if (fresh.buffer)
+            {
+                retireBuffer(mRsEmInputGen); mRsEmInputGen = fresh; mRsEmInputFull = true;
+            }
+            else
+            {
+                mRsEmInputRetry = genNow + 30.0;
+                LL_WARNS("VKEmissive") << "identity input allocation refused: " << generationBytes
+                                      << " bytes, retry in 30s; emissive unavailable, no gather fallback" << LL_ENDL;
+            }
+        }
+        if (mRsEmInputGen.buffer && mRsEmInputGen.size >= generationBytes)
+        {
+            bool ok = true;
+            if (mRsEmInputFull || instFullUpload)
+                ok = streamBuf(cmd, mRsEmInputGen, mRsEmInputGenStaging, mRsEmInputGenerations.data(), generationBytes,
+                               VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+            else if (!mInstRuns.empty())
+                ok = streamRuns(cmd, mRsEmInputGen, mRsEmInputGenStaging,
+                                reinterpret_cast<const uint8_t*>(mRsEmInputGenerations.data()), generationBytes,
+                                mInstRuns, sizeof(uint32_t), VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT);
+            mRsEmInputFull = !ok || mInstFullUpload;
+            mRsEmInputReady = !mRsEmInputFull;
+        }
+    }
+    if (!mRsEmInputReady) mRsEmInputFull = true; // never recover by publishing only later dirty spans
+    if (wantEmissiveInput) gpuSubMark(cmd, "c_rs_em_input");
     // RT keeps its rigged-instance set from these runs (LLCleanRTVK::refreshRigSet).
     if (mRT) mRT->noteInstanceRuns(mInstRuns, instFullUpload);
     // F7: the HUD instance list follows the same rows.
@@ -40697,6 +41206,13 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
             mTerrainDirty = true;   // #697: refused -> streamed again next frame
         else if (none) mPrevTerrain.assign(1, 0u); else mPrevTerrain = mCpuTerrain;
     }
+    // Publish the optional emissive input only after ALL geometry/table/material inputs.
+    // Allocation/staging failure is an emergency unavailable frame, never ordinary churn
+    // invalidation. A retry must resnapshot the complete identity sidecar too.
+    mRsEmInputReady = mRsEmInputReady && !mStageRetrySlots && !mStageRetryGroups && !mStageRetryMat
+                      && !mMatUVDirty && mVbo.buffer && mIbo.buffer && mSlotSSBO.buffer
+                      && mLodGroupSSBO.buffer && mMaterialSSBO.buffer && mMatUVSSBO.buffer;
+    if (!mRsEmInputReady) mRsEmInputFull = true;
     // (the terrain bake records on graphics after the front-end join below: its mip chain blits)
 
     // Avatar visibility for the rigged / worn-attachment cull (binding 22).
@@ -40900,6 +41416,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         // (mTaaResolveReset is only decided with the frame info below; mTemporalReset is this
         //  frame's cut / teleport / origin shift -- maintained while the temporal state is on.
         //  Off: the module's own camera-jump test covers teleports and region crossings.)
+        vf.physical=mCameraMediumReady;
         vf.cameraCut = mTemporalOn && mTemporalReset;
         mVolClouds->prepare(vf);
         // (#1075: the march / composite are per view, design step 13: off in stereo -- the shared
@@ -40935,20 +41452,26 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         // pass, and the end-of-block barrier has the fragment stage; 0 = the cluster lists);
         // .z bit 0 = alpha-blend receivers trace ray-traced projector shadows inline
         // (RenderVKRTBlendProjShadows 1; 0, the default: lit unshadowed -- no ray query per
-        // projector per blended fragment).
+        // projector per blended fragment); bit 1 = RADIANCE MODE (RenderVKReSTIRRadiance, A/B: pass 15
+        // estimates the shadowed direct radiance, the deferred lit kernels read it -- clean_deferred_light
+        // .comp RADIANCE MODE; latched here for the whole frame: the ReSTIR header below, pass 15, the
+        // denoiser and the lit kernels all follow mPdnRadiance).
         {
             U32 blendProj = 0;
-            bool fwdFroxel = true;
+            bool fwdFroxel = true, radiance = false;
 #if defined(LL_HAS_CLEAN_PIPELINE)
             static LLCachedControl<U32> s_blendProj(gSavedSettings, "RenderVKRTBlendProjShadows", 0U);
             static LLCachedControl<bool> s_fwdFroxel(gSavedSettings, "RenderVKForwardFroxels", true);
+            static LLCachedControl<bool> s_radiance(gSavedSettings, "RenderVKReSTIRRadiance", false);
             blendProj = s_blendProj;
             fwdFroxel = s_fwdFroxel;
+            radiance = s_radiance;
 #endif
+            mPdnRadiance = radiance;
             const VkDeviceAddress fa = (froxelGo && fwdFroxel) ? mFroxel.address : 0;
             mLightInfoCPU.fwd[0] = (uint32_t)(fa & 0xFFFFFFFFull);
             mLightInfoCPU.fwd[1] = (uint32_t)(fa >> 32);
-            mLightInfoCPU.fwd[2] = blendProj != 0u ? 1u : 0u;
+            mLightInfoCPU.fwd[2] = (blendProj != 0u ? 1u : 0u) | (radiance ? 2u : 0u);
             mLightInfoCPU.fwd[3] = 0u;
         }
         // (#869) LIGHT RESERVOIR GRID (RenderVKLightGrid): this frame's header with the uploads
@@ -41053,6 +41576,19 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         // SSR info for this frame (previous frame's matrices + LL's SSR settings).
         {
             VKSSRInfo si{};
+            // One update for the whole live multiview recording, before its view loop.
+            // Snapshot renderOffscreen reuses this renderer: its frozen-scene samples
+            // use the reference interval without consuming the live view's clock.
+            // taa_params.x is animation time with AA off, not a frame delta.
+            si.history_time[0] = 1000.f / 60.f;
+            if (!mOffscreen)
+            {
+                const double historyNow = LLFrameTimer::getElapsedSeconds();
+                const double historyDt = mLightingHistoryClock >= 0.0 ? historyNow - mLightingHistoryClock : 1.0 / 60.0;
+                mLightingHistoryClock = historyNow;
+                si.history_time[0] = std::isfinite(historyDt) && historyDt > 0.0
+                                  ? (float)std::clamp(historyDt * 1000.0, 0.1, 100.0) : 1000.f / 60.f;
+            }
             if (gVKPrevViewShift[0] != 0.f || gVKPrevViewShift[1] != 0.f || gVKPrevViewShift[2] != 0.f)
             {
                 // Region crossing: x_old = x_new - off, so V' = V * T(-off) keeps the
@@ -41100,7 +41636,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
             // 22: the avatar mask overlay (#549, llcelshadevk.cpp) over the normally lit scene.
             // 28: the RT reflection ray density (the deferred split's combine draws it).
             si.params1[2] = (((U32)s_dbgview >= 13u && (U32)s_dbgview <= 15u) || (U32)s_dbgview == 18u
-                             || (U32)s_dbgview == 22u || (U32)s_dbgview == 28u) ? 0.f : (F32)(U32)s_dbgview;
+                             || (U32)s_dbgview == 22u || (U32)s_dbgview == 28u || (U32)s_dbgview == 30u) ? 0.f : (F32)(U32)s_dbgview;
             // Lit-pass cost switches (RenderVKLitDebugMask; clean_draw_common.glsl LDBG_*):
             // live A/B of each fragment-shading term against the g_lit_static timer.
 #if defined(LL_HAS_CLEAN_PIPELINE)
@@ -41180,7 +41716,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
                 si.terrain_lod[1] = cullIn.lod_cam_pos[1];
                 si.terrain_lod[2] = cullIn.lod_cam_pos[2];
                 si.terrain_lod[3] = smooth ? (float)(1u + (tsnap ? 1u : 0u) + (tdiag ? 2u : 0u)) : 0.f;
-                if (mOrtho || mOrthoView) si.terrain_lod[3] = 0.f;   // <GMDX> orthographic: the finest level, unmorphed
+                if (mOrthoView || mOrtho) si.terrain_lod[3] = 0.f;   // orthographic: the finest level, unmorphed (GunMetal-DX port)
             }
             // Ambient occlusion (RenderDeferredSSAO): computed between the depth pre-pass
             // and the lit pass, so it needs the pre-pass. LL softenLightF adjustIrradiance
@@ -41263,7 +41799,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
 #if defined(LL_HAS_CLEAN_PIPELINE)
                 // Highlight Transparent (Build > Options; RLV may forbid it -- the menu
                 // handler already clears the flag then).
-                si.ao_params2[2] = LLPipeline::sShowDebugAlpha ? 1.f : 0.f;
+                si.ao_params2[2] = (LLPipeline::sShowDebugAlpha && !GMDXCombatLockout::active()) ? 1.f : 0.f; // <GMDX> combat render lockout
                 // RenderTransparentWater off: the main-view water FS takes LL's opaque
                 // (non-TRANSPARENT_WATER) branch (#36).
                 si.ao_params2[3] = LLPipeline::sRenderTransparentWater ? 0.f : 1.f;
@@ -41288,33 +41824,15 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
             si.clouds[3][0] = (float)mCloudNoiseIdx[0];
             si.clouds[3][1] = (float)(mCloudNoiseIdx[1] >= 0 ? mCloudNoiseIdx[1] : mCloudNoiseIdx[0]);
             std::memcpy(si.bodies, mBodies, sizeof(si.bodies));
-            for (int i = 0; i < 8; ++i) si.bodies[8 + i / 4][i % 4] = (float)mSkyTexIdx[i];   // <GMDX> 8: [9].zw the night sky's
+            for (int i = 0; i < 6; ++i) si.bodies[8 + i / 4][i % 4] = (float)mSkyTexIdx[i];
+            // NIGHT SKY (slnightsky.h; clean_night_sky.glsl; ported from GunMetal-DX (squeedledorf,
+            // LGPL 2.1), v0.3.0 cf5f1f4): its parameters and space objects (zeros: LL's stars), and
+            // its two textures' bindless indices (-1 until uploaded).
+            SLNightSky::fillFrame(si.night_sky, si.night_space);
+            si.night_sky[2][0] = (float)mSkyTexIdx[6];
+            si.night_sky[2][1] = (float)mSkyTexIdx[7];
             // #719: the volumetric cloud layer's switch + shadow map / panorama frame (zeros: off).
             if (mVolClouds) mVolClouds->fillFrameInfo(si.vol_clouds);
-            {
-                // <GMDX> CLOUD CORONA (gmdx_cloud_corona.glsl): vol_clouds[3] (reserved upstream) =
-                // strength, droplet diameter (um), 22-degree halo strength, 0; every frame, the volumetric
-                // layer live or not (the physical 2D layer reads it too). Strengths 0: the clouds as before.
-                static LLCachedControl<F32> s_corona(gSavedSettings, "GMDXCloudCorona", 1.f);
-                static LLCachedControl<F32> s_droplet(gSavedSettings, "GMDXCloudCoronaDroplet", 15.f);
-                // Part of physical night: GMDXPhysicalNight off, all zeros (the old clouds). (The setting,
-                // not night.on: a creator's sky keeps the corona around Second Life's own light.)
-                static LLCachedControl<bool> s_phys_night(gSavedSettings, "GMDXPhysicalNight", true);
-                const bool night_on = gmdxNightLight().on;
-                const bool corona_on = s_phys_night;
-                si.vol_clouds[3][0] = corona_on ? llclamp((F32)s_corona, 0.f, 4.f) : 0.f;
-                si.vol_clouds[3][1] = corona_on ? llclamp((F32)s_droplet, 5.f, 50.f) : 0.f;
-                static LLCachedControl<F32> s_halo(gSavedSettings, "GMDXCloudHalo22", 0.f);
-                si.vol_clouds[3][2] = corona_on ? llclamp((F32)s_halo, 0.f, 4.f) : 0.f;
-                // <GMDX> w: physical night's WindLight sky light strength (gmdxnightlight.h sky_q).
-                si.vol_clouds[3][3] = night_on ? gmdxNightLight().sky_q : 0.f;
-                // <GMDX> vol_clouds[2].w (unused upstream; .xyz is the cloud shadow map's light): the
-                // clouds' moonlight gain (GMDXNightCloudLight, clean_atmos_common.glsl gmdxCloudMoonGain),
-                // by the moon's share of the scene light; 1 by day and with physical night off.
-                static LLCachedControl<F32> s_cloud_moon(gSavedSettings, "GMDXNightCloudLight", 4.5f);
-                si.vol_clouds[2][3] = night_on ? 1.f + (llclamp((F32)s_cloud_moon, 0.f, 20.f) - 1.f)
-                                                     * gmdxNightLight().moon_share : 1.f;
-            }
             // #783: wetness, ripples and the published occlusion map's frame (zeros: no weather --
             // the lit / G-buffer FS's wet branch is one uniform test).
             if (mWeather && mWeatherNow) mWeather->fillFrameInfo(si.weather);
@@ -41327,24 +41845,6 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
             si.cam_origin[1] = drawPushIn.cam_time[1];
             si.cam_origin[2] = drawPushIn.cam_time[2];
             mRtaoTime = drawPushIn.cam_time[3];   // #86 RTAO: the alpha test's texture animation
-            physSkyFill(si);   // <GMDX> the physical sky's parameters (needs atmos + the eye)
-            GMDXNightSky::fillFrame(si.bodies, si.sky_fx2, si.meteors + 192 - GMDXNightSky::kSpaceSlots);   // <GMDX> night sky (bodies' spare .w, sky_fx2.yzw, the meteors' top slots)
-            {
-                // <GMDX> ALPHA-MASK PULL (clean_draw.vert): alpha-masked world surfaces move this far toward
-                // the camera, so a path / decal mesh built a millimetre over the ground stays on top despite the
-                // 16-bit vertex lattice (#573) rounding both by up to ~1-4 mm.
-                static LLCachedControl<F32> s_mm(gSavedSettings, "GMDXAlphaMaskPullMM", 4.f);
-                static LLCachedControl<F32> s_per_m(gSavedSettings, "GMDXAlphaMaskPullPerMetreMM", 0.1f);
-                static LLCachedControl<F32> s_graze(gSavedSettings, "GMDXAlphaMaskPullGrazeMax", 8.f);
-                si.gmdx_misc[0] = llclamp((F32)s_mm, 0.f, 50.f) * 0.001f;
-                si.gmdx_misc[1] = llclamp((F32)s_per_m, 0.f, 10.f) * 0.001f;
-                si.gmdx_misc[2] = llclamp((F32)s_graze, 1.f, 32.f);
-                // <GMDX> PHYSICAL NIGHT (gmdxnightlight.h; clean_atmos_common.glsl gmdxNightOn): 0 = off,
-                // > 0 the moon's light (a fraction of the sun's) while the physical sky draws its half
-                // (physSkyFill: physky[4].w = 2), else -1.
-                const GMDXNightLight& night = gmdxNightLight();
-                si.gmdx_misc[3] = !night.on ? 0.f : (si.physky[4][3] > 1.5f ? std::max(night.moon, 1e-30f) : -1.f);
-            }
             // w: temporal-exclusion bits (#605, clean_frame_info.glsl noTemporalFace) --
             // live media / animated-texture faces keep no TAA / FSR history. Only while
             // the main view is jittered (nothing resolves otherwise; the mip bias is off).
@@ -41356,6 +41856,67 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
                 if (mTaaJitterOn) nt = (s_nt_media ? 1u : 0u) | (s_nt_anim ? 2u : 0u);
 #endif
                 si.cam_origin[3] = (float)nt;
+            }
+            for(uint32_t eye=0;eye<mViewCount && mCameraMediumReady;++eye)
+            {
+                LLCleanVolFogVK::FrameInfo info{};
+                mMediumEyes[eye]->fillFrameInfo(info);
+                static_assert(sizeof(info)==offsetof(VKSSRInfo::MediumView,forward),"medium frame layout");
+                std::memcpy(&si.medium[eye],&info,sizeof(info));
+                std::memcpy(si.medium[eye].forward,mMediumEyes[eye]->forward(),sizeof(si.medium[eye].forward));
+                std::memcpy(si.medium[eye].mapping,mMediumEyes[eye]->mapping(),sizeof(si.medium[eye].mapping));
+            }
+            if(mCameraMediumReady) mMediumEyes[0]->fillMist(si.haze_mist);
+            std::memcpy(si.medium_union_vp,mViewProjRel,sizeof(si.medium_union_vp));
+            physSkyFill(si);
+            {
+                // <GMDX> ALPHA-MASK PULL (clean_draw.vert; frame info gmdx_alpha_pull, the block's last
+                // member): alpha-masked world surfaces move this far toward the camera, so a path / decal
+                // mesh built a millimetre over the ground stays on top despite the 16-bit vertex lattice
+                // (#573) rounding both by up to ~1-4 mm.
+                F32 mm = 4.f, per_m = 0.1f, graze = 8.f;
+#if defined(LL_HAS_CLEAN_PIPELINE)
+                static LLCachedControl<F32> s_mm(gSavedSettings, "GMDXAlphaMaskPullMM", 4.f);
+                static LLCachedControl<F32> s_per_m(gSavedSettings, "GMDXAlphaMaskPullPerMetreMM", 0.1f);
+                static LLCachedControl<F32> s_graze(gSavedSettings, "GMDXAlphaMaskPullGrazeMax", 8.f);
+                mm = s_mm; per_m = s_per_m; graze = s_graze;
+#endif
+                si.gmdx_alpha_pull[0] = llclamp(mm, 0.f, 50.f) * 0.001f;
+                si.gmdx_alpha_pull[1] = llclamp(per_m, 0.f, 10.f) * 0.001f;
+                si.gmdx_alpha_pull[2] = llclamp(graze, 1.f, 32.f);
+                si.gmdx_alpha_pull[3] = 0.f;
+            }
+            // PHYSICAL NIGHT (slnightlight.h; clean_frame_info.glsl night[]; ported from GunMetal-DX
+            // (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4): zeros = off (the old night).
+            {
+                const SLNightLight& nl = slNightLight();
+                if (nl.on)
+                {
+                    // [0].x: the moon's light for the physical sky's second light (physSkyFill:
+                    // physky[4].w = 2), else -1 (on without it)
+                    si.night[0][0] = si.physky[4][3] > 1.5f ? std::max(nl.moon, 1e-30f) : -1.f;
+                    si.night[0][1] = nl.sky_q;
+                    si.night[0][2] = 1.f + (gmdxSkyTune().night_cloud_light(kNightCloudLight) - 1.f) * llclamp(nl.moon_share, 0.f, 1.f);   // <GMDX> (knob)
+                    si.night[0][3] = llclamp(nl.amb, 0.f, 1.f);
+                    for (int c = 0; c < 3; ++c) si.night[1][c] = nl.sky_dir[c];
+                    // [2].x the moon's disc as a light; -1 a creator's own moon texture (LL's disc, no phase)
+                    si.night[2][0] = nl.custom_moon ? -1.f : gmdxSkyTune().moon_disc(kMoonDiscLight);   // <GMDX> (knob)
+                }
+                // CLOUD CORONA (clean_cloud_corona.glsl): night[2].yzw = strength, droplet diameter
+                // (um), 22-degree halo strength; read by the volumetric march and the physical 2D
+                // layer. Part of physical night -- the setting, not nl.on: a creator's sky keeps the
+                // corona around Second Life's own light -- with its own Persist 0 A/B switch.
+                // Strengths 0: the clouds as before. (GunMetal-DX's GMDXCloudCorona 1 / Droplet 15 /
+                // Halo22 0 defaults, as constants.)
+                static LLCachedControl<bool> s_phys_night(gSavedSettings, "RenderVKPhysicalNight", true);
+                static LLCachedControl<bool> s_corona(gSavedSettings, "RenderVKCloudCorona", true);
+                if (s_phys_night && s_corona)
+                {
+                    GMDXSkyTune& tune = gmdxSkyTune();   // <GMDX> (the Sky Debugger's knobs on these)
+                    si.night[2][1] = tune.corona(1.f);            // strength
+                    si.night[2][2] = tune.corona_droplet(15.f);   // droplet diameter (um)
+                    si.night[2][3] = tune.halo22(0.f);            // 22-degree halo (off: SL skies do not say whether a cloud is ice)
+                }
             }
             // ALPHA-BLEND DEPTH TOLERANCE (#731; clean_draw.frag -DCLEAN_BLEND_TOL, main-view
             // LIT_ALPHA only, static world geometry -- not rigged / worn, #742): a blended fragment up to
@@ -41444,6 +42005,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
             // flags only switched faces traced on their LEGACY geometry). Where it still CASTS
             // from its legacy rigged BLAS (RenderVKClusterRTRigged 0, RT data not ready). Its
             // receiver surface is the cluster cut, up to eps = tol_px x distance / px_scale
+            // (orthographic main view: tol_px / px_scale, flat metres)
             // from LOD0: where it lies inside the legacy hull its own shadow rays hit that
             // hull (hard-edged self-shadow patches moving with the pose). Such receivers
             // (pixels within eps of a flagged legacy surface) leave by eps x the scale along
@@ -41456,12 +42018,14 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
                 lift_scale = llclamp((F32)s_lift, 0.f, 4.f);
 #endif
                 float m_per_m = 0.f, zn = 0.1f;
+                bool ortho = false;
                 // (no avatar in RT at all -- the budget dropped the rigged class -- nothing to lift off)
-                if (mCluster && lift_scale > 0.f && !(mRT && mRT->rigDropped()) && mCluster->shadowLiftBound(m_per_m, zn))
+                if (mCluster && lift_scale > 0.f && !(mRT && mRT->rigDropped()) && mCluster->shadowLiftBound(m_per_m, zn, ortho))
                 {
                     si.cluster_rt[0] = llclamp(m_per_m * lift_scale, 0.f, 1.f);
                     si.cluster_rt[1] = zn;
                     si.cluster_rt[2] = 1.f;
+                    if (ortho) si.cluster_rt[3] = 1.f;   // x is a flat bound in metres
                 }
             }
             for (int c = 0; c < NUM_CASCADES; ++c)
@@ -41483,12 +42047,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
                 si.shadow_fit[0] = fit ? 1.f : 0.f;
                 si.shadow_fit[1] = llclamp(tol, 0.f, 4.f);
                 si.shadow_fit[2] = llmax(pcss_max, 0.f);
-                // <GMDX> w: the moon disc's brightness as a light (GMDXMoonDisc; clean_atmos_common.glsl
-                // gmdxMoonDiscGain), part of physical night: off, 0 (LL's disc). -1: a creator's own
-                // moon texture (gmdxnightlight.h custom_moon), LL's disc without the phase shading.
-                static LLCachedControl<F32> s_moon_disc(gSavedSettings, "GMDXMoonDisc", 1.f);
-                si.shadow_fit[3] = !gmdxNightLight().on ? 0.f
-                                 : gmdxNightLight().custom_moon ? -1.f : llclamp((F32)s_moon_disc, 0.f, 100.f);
+                si.shadow_fit[3] = 0.f;
             }
             // Planar mirror: box + plane + (valid, 1/main size) for tapMirror.
             std::memcpy(si.mirror_box, mMirrorBox, sizeof(si.mirror_box));
@@ -41546,17 +42105,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
                 // #204: A/B against texture shimmer), plus the render scale's log2
                 // (textures keep the display resolution's detail).
                 {
-                    F32 mip_bias = -0.5f;
-#if defined(LL_HAS_CLEAN_PIPELINE)
-                    static LLCachedControl<F32> s_mip(gSavedSettings, "RenderVKTAAMipBias", -0.5f);
-                    mip_bias = llclamp((F32)s_mip, -2.f, 1.f);
-#endif
-                    // #870 / #962: DLSS, both networks (Programming Guide 3.5): native bias + log2(render / display) - 1
-                    if (mDlssFrame) mip_bias = std::min(mip_bias, -1.f);
-                    // #1093: a shot accumulated at up x the live pixels has up x the texels per world
-                    // area: log2(1 / up) sharper while its samples render (0 outside a shot).
-                    if (mLiveCapNow && mLiveSnap) mip_bias += mLiveSnap->mipBiasOffset();
-                    si.taa_scale[0] = mip_bias + (float)std::log2((double)rh / (double)std::max(height, 1u));
+                    si.taa_scale[0] = material_mip_bias + (float)std::log2((double)rh / (double)std::max(height, 1u));
                 }
                 si.taa_scale[1] = (float)rh / (float)std::max(height, 1u);
                 // Ray-traced sun / moon (#185): used when shadow_params.w == 2.
@@ -41682,11 +42231,12 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
             vkCmdUpdateBuffer(cmd, mSSRInfoSSBO.buffer, 0, sizeof(si), &si);
             VkMemoryBarrier2 sb{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
             sb.srcStageMask=VK_PIPELINE_STAGE_2_COPY_BIT|VK_PIPELINE_STAGE_2_CLEAR_BIT; sb.srcAccessMask=VK_ACCESS_2_TRANSFER_WRITE_BIT;
-            sb.dstStageMask=VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT|VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+            sb.dstStageMask=VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT|VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT|VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
             sb.dstAccessMask=VK_ACCESS_2_SHADER_STORAGE_READ_BIT|VK_ACCESS_2_UNIFORM_READ_BIT;   // (UBO since #814)
             VkDependencyInfo sd{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; sd.memoryBarrierCount=1; sd.pMemoryBarriers=&sb;
             vkCmdPipelineBarrier2(cmd,&sd);
             recordSkyLut(cmd);   // (#819: reads this upload; before every skyColor() consumer)
+            physSkyRecord(cmd);  // the physical sky's tables, when their inputs changed (GunMetal-DX port)
         }
 
         VkMemoryBarrier2 cb2{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
@@ -42023,7 +42573,6 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     // the async front-end segment under RenderVKFramePipelining it was a device loss, Xid 13).
     { VK_HITCH_SCOPE("vk_terrBakeRecord"); terrBakeRecord(cmd); }
     rezFxRecord(cmd);   // <GMDX> the rez effect table (only while effects run)
-    physSkyRecord(cmd);   // <GMDX> the physical sky LUTs (only while RenderVKPhysicalSky is on)
 
     // ---- RAY TRACING: BLAS builds/refits + TLAS from this frame's cull / pre-skin ----
     // (cand / cand_meta are still the MAIN cull's here; shadow/mirror culls reuse them.)
@@ -42036,6 +42585,28 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     // TLAS / mTlasInst it refits in place) and joined before the first other cull (the
     // shadow / probe / mirror culls rewrite the cand / cand_meta it reads). Its own
     // barriers cover earlier async work (the previous frame's build, mask, god rays).
+    // #1128: checked after all scene producers, before any AS planning/build. A
+    // refused piece can coexist with successful copies in this recording.
+    mRtInputReasons = (mGeomStreamAll || !mGeomUpSlots.empty() || mRtGeometryRetry ? 1u : 0u)
+        | (mInstFullUpload ? 2u : 0u)
+        | (mStageRetrySlots || mStageRetryGroups ? 4u : 0u)
+        | (mStageRetryMat || (mMatUVDirty && !mCpuMatUV.empty())
+            || (mTerrainDirty && !mCpuTerrain.empty()) ? 8u : 0u)
+        | (mRtInputStreamRefused ? 16u : 0u)
+        | ((!mVbo.address || !mIbo.address || !mInstanceSSBO.buffer || !mSlotSSBO.buffer
+             || !mLodGroupSSBO.buffer || !mMaterialSSBO.buffer
+             || (!mCpuAvatarJoints.empty() && !mAvatarJointsSSBO.buffer)
+             || (!mCpuSkinMeta.empty() && !mSkinMetaSSBO.buffer)
+             || (!mCpuMatUV.empty() && !mMatUVSSBO.buffer)
+             || (!mCpuTerrain.empty() && !mTerrainSSBO.buffer)) ? 32u : 0u)
+        | ((mJointRowsMode && mJointRowsFull && !mCpuAvatarJoints.empty()) ? 64u : 0u)
+        | ((mSkinMetaFull && !mCpuSkinMeta.empty()) ? 128u : 0u);
+    if (do_rigged && (!mSkinPalPipe || !mDsetSkinPal || !mSkinPaletteSSBO.buffer
+        || !mAvatarJointsSSBO.buffer || !mSkinMetaSSBO.buffer || !mPreskinPipe || !mDsetPreskin))
+        mRtInputReasons |= 256u;
+    if (mAnimPipe && mAnimJointsOut.buffer && (mAvatarJointCount != 0u || do_rigged)
+        && (mRtPosePublicationInvalid || mRtPosePublishedSerial != mAnimJointsOut.serial))
+        mRtInputReasons |= 1024u; // invalid producer, including deliberately held snapshot poses
     bool asyncRtForked = false;
     if (mRT)
     {
@@ -42641,6 +43212,11 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     const bool split1a = split1aBase || deferNow;
     auto beginPass1 = [&](bool clearDepth, bool vrsAttach, bool loadColor = false)
     {
+        if(mCameraMediumReady)
+        {
+            recordVolFogCompute(cmd,false);
+            if(mVolFogAsyncValue) { asyncJoinUpTo(cmd,mVolFogAsyncValue); mVolFogAsyncValue=0; }
+        }
         // (#1075: mainAtt / beginMain -- every view's layer in stereo; N = 1 the 2D views, as before)
         VkRenderingAttachmentInfo ca{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
         ca.imageView=mainAtt(sceneHdr()); ca.imageLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -43706,26 +44282,25 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     // The projector tiles' work is decided first (which tiles draw avatars), then one
     // dispatch builds every cascade's and tile's own rigged caster lists.
     invalidateProjShadows();
-    // <GMDX> The live orthographic view's CULL_ORTHO (every LOD at its finest) is the main view's
-    // alone: the shadow cascades, projector tiles, weather map and probe faces keep their own LOD
-    // rules. The region map capture (mOrtho) keeps it in every pass: its one shadow map is fitted
-    // to the map box and drawn from the finest casters, like the map.
+    // The live orthographic view's CULL_ORTHO (every LOD at its finest) is the main view's
+    // alone: the shadow cascades, projector tiles, weather map and probe faces keep their own
+    // LOD rules (ported from GunMetal-DX, v0.3.0 cf5f1f4). The region map capture (mOrtho) keeps
+    // it in every pass: its one shadow map is fitted to the map box and drawn from the finest casters.
     auto secondaryCull = [&]()
     {
         VKCullPush p = push;
         if (mOrthoView && !mOrtho) p.flags &= ~kCullOrtho;
         return p;
     };
-    // </GMDX>
-    recordShadowRigCull(cmd, secondaryCull(), do_rigged);   // <GMDX> (secondaryCull)
+    recordShadowRigCull(cmd, secondaryCull(), do_rigged);
     gpuSubMark(cmd, "c_shadow_rigcull");
 
     // ---- SUN/MOON SHADOW CASCADES (depth-only, sampled by every world FS) ----
-    recordShadows(cmd, secondaryCull(), drawPushIn, do_rigged);   // <GMDX> (secondaryCull)
+    recordShadows(cmd, secondaryCull(), drawPushIn, do_rigged);
     gpuSubMark(cmd, "c_shadows");
 
     // ---- PROJECTOR SHADOW tiles (cached; only invalidated ones re-render) ----
-    recordProjShadows(cmd, secondaryCull(), drawPushIn, do_rigged);   // <GMDX> (secondaryCull)
+    recordProjShadows(cmd, secondaryCull(), drawPushIn, do_rigged);
     gpuSubMark(cmd, "c_projshadow");
 
     // ---- WEATHER (#783): the occlusion map (when due) + the precipitation simulation ----
@@ -43736,7 +44311,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     {
         if (mWeather->occlusionDue())
         {
-            recordWeatherOcclusion(cmd, secondaryCull(), drawPushIn);   // <GMDX> (secondaryCull)
+            recordWeatherOcclusion(cmd, secondaryCull(), drawPushIn);
             gpuSubMark(cmd, "c_weather_occl");
         }
         if (mWeather->precipNow())
@@ -43905,7 +44480,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         // Ray-traced faces (detail 3) wait for pass 1b, where they run on the async queue
         // beside the lit pass (flushProbeTraces); their filters are deferred anyway.
         mProbeTraceDefer = true;
-        recordProbeCapture(cmd, drawPushIn, secondaryCull(), do_rigged);   // <GMDX> (secondaryCull)
+        recordProbeCapture(cmd, drawPushIn, secondaryCull(), do_rigged);
         mProbeDeferFilter = false;   // (queued filters stay in mProbeFilterPending)
         mProbeTraceDefer = false;    // (queued traces stay in mProbeTracePending)
         probeDoneEarly = true;
@@ -44334,9 +44909,11 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         // through the haze with the cascades' shadows (the god rays' term, the same gain), so
         // the god rays pass is not dispatched on a frame the fog runs -- one sun single-scatter,
         // never two. (Their object and history stay; the history restarts when they resume.)
-        if (mVolFogNow && mGodRays) mGodRays->invalidateHistory();
+        extern bool gGMDXWeatherLayer;   // <GMDX> GunMetal-DX's weather layer leaves the haze's shafts to the god rays
+        const bool fogShafts = mVolFogNow && !gGMDXWeatherLayer;   // <GMDX>
+        if (fogShafts && mGodRays) mGodRays->invalidateHistory();   // <GMDX> (fogShafts)
         // (#1075: off in stereo -- design §2 row 32 / step 13)
-        if ((s_godrays > 0 || mGodRays) && mDsetDraw0 && !mVolFogNow && !mOrthoView && !stereoActive())   // <GMDX> (!mOrthoView: eye-ray march)
+        if ((s_godrays > 0 || mGodRays) && mDsetDraw0 && !fogShafts && !mCameraMediumReady && !mOrthoView && !stereoActive())   // (!mOrthoView: eye-ray march; GunMetal-DX port)
         {
             releaseTlas(cmd, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);   // (no-op by now)
             if (!mGodRays) mGodRays = new LLCleanGodRaysVK();
@@ -44699,6 +45276,43 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         recordParticleDraw(cmd, drawPush, side, PART_SET_FULLRES);
     };
 
+    if(mCameraMediumReady && mVolFogRecorded)
+    {
+        if(mVolFogAsyncValue) { asyncJoinUpTo(cmd,mVolFogAsyncValue); mVolFogAsyncValue=0; }
+        gpuSubMark(cmd,"c_medium_apply_begin");
+        const GpuImage& hdr=sceneHdr();
+        VkImageMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+        barrier.srcStageMask=VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        barrier.srcAccessMask=VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+        barrier.dstStageMask=VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        barrier.dstAccessMask=VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+        barrier.oldLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL; barrier.newLayout=VK_IMAGE_LAYOUT_GENERAL;
+        barrier.image=hdr.image; barrier.subresourceRange={VK_IMAGE_ASPECT_COLOR_BIT,0,1,0,mViewCount};
+        VkMemoryBarrier2 depthBarrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+        depthBarrier.srcStageMask=VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
+        depthBarrier.srcAccessMask=VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        depthBarrier.dstStageMask=VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        depthBarrier.dstAccessMask=VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+        VkDependencyInfo dependency{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        dependency.imageMemoryBarrierCount=1; dependency.pImageMemoryBarriers=&barrier;
+        dependency.memoryBarrierCount=1; dependency.pMemoryBarriers=&depthBarrier;
+        vkCmdPipelineBarrier2(cmd,&dependency);
+        const VkDescriptorSet draw01[2]={mDsetDraw0,mDsetDraw1};
+        for(uint32_t eye=0;eye<mViewCount;++eye)
+        {
+            mMediumEyes[eye]->setApplyJitter(mTaaJitterOn ? &mTaaJitter[2] : nullptr);
+            mMediumEyes[eye]->recordMediumApply(cmd,draw01);
+            const char* timers[4]={"c_medium_apply_eye0","c_medium_apply_eye1","c_medium_apply_eye2","c_medium_apply_eye3"};
+            gpuSubMark(cmd,timers[eye]);
+        }
+        barrier.srcStageMask=VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        barrier.srcAccessMask=VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+        barrier.dstStageMask=VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_COPY_BIT;
+        barrier.dstAccessMask=VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_TRANSFER_READ_BIT;
+        barrier.oldLayout=VK_IMAGE_LAYOUT_GENERAL; barrier.newLayout=VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        dependency.memoryBarrierCount=0;
+        vkCmdPipelineBarrier2(cmd,&dependency);
+    }
     // ---- VOLUMETRIC CLOUD COMPOSITE (#719) ----
     // Over the opaque world + sky, under every transparent / the water (they draw over the
     // clouds; the refraction copy and next frame's SSR see them). Its own short scope on the
@@ -44733,7 +45347,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     // The opaque + sky apply (clean_vol_apply.frag): the FIRST draw of pass 2, so every
     // transparent below draws over the fogged scene and applies the fog itself (alpha FS /
     // water / particles: draw set 0 binding 45). The refraction copy after 2a holds it too.
-    if (volApplyNow)
+    if (volApplyNow && !mCameraMediumReady)
     {
         mVolFog->setApplyJitter(mTaaJitterOn ? &mTaaJitter[2] : nullptr);
         mVolFog->recordApply(cmd, mDsetDraw0);
@@ -44750,7 +45364,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     // extinction over the open opaque scene + sky, before any transparent (they veil themselves:
     // clean_weather_veil.glsl). With the volumetric fog running its froxels carry the precipitation
     // and this is not drawn. Binds its own sets; drawAlphaSet rebinds the draw sets.
-    if (mWeather && mWeatherNow && mWeather->veilNow())
+    if (!mCameraMediumReady && mWeather && mWeatherNow && mWeather->veilNow())
     {
         mWeather->recordVeil(cmd, mDsetDraw0);
         gpuSubMark(cmd, "g_weather_veil");
@@ -44948,7 +45562,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
 #if defined(LL_HAS_CLEAN_PIPELINE)
     // F2: the invisiprims left the alpha lists; Highlight Transparent still shows them
     // (green, clean_draw.frag) -- drawn over the post-water alpha from their own list.
-    if (mWaterListsNow && LLPipeline::sShowDebugAlpha)
+    if (mWaterListsNow && LLPipeline::sShowDebugAlpha && !GMDXCombatLockout::active()) // <GMDX> combat render lockout
     {
         pushMainView(cmd, mDrawLayout, drawPush);
         vkCmdBindVertexBuffers(cmd,0,1,&mVbo.buffer,&off);
@@ -45182,7 +45796,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     // (Nor on a live snapshot's accumulation sample, #873: the raw jittered frame is the sample.)
     // (#1075: FXAA / SMAA are not layered: off in stereo)
     const bool aa_on = (aa_type == 1 || aa_type == 2) && !mTaaNow && !mSnapAccNow && !mLiveCapNow && !stereoActive()
-                    && !mSnapMatte   // <GMDX> avatar matte: FXAA / SMAA would blur the edge against the black
+                    && !mSnapMatte   // avatar matte: FXAA / SMAA would blur the edge against the black (GunMetal-DX port)
                     && ensureAA(width, height);
     if (!aa_on && !mOffscreen && !mLiveCapNow) freeAATargets();   // (a snapshot keeps the main view's)
     // Final display-space effects (Lightbox): the chain ends in mFinalColor instead
@@ -45197,8 +45811,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         static LLCachedControl<bool> s_glow_on(gSavedSettings, "RenderGlow", true);
         want = s_hdr_on && s_glow_on && (F32)s_bloom_strength > 0.f;
 #endif
-        want = want && !mOrtho;   // <GMDX> region map: bloom spreads past the tiles' guard band
-        want = want && !mSnapMatte;   // <GMDX> avatar matte: no glow past the avatars
+        want = want && !mOrtho && !mSnapMatte;   // region map: bloom spreads past the tiles' guard band; avatar matte: no glow past the avatars (GunMetal-DX port)
         // (#1075: the bloom chain, flare state, lens dirt and the eyedropper are not layered:
         //  off in stereo -- the post chain's family, design step 4)
         mBloomActive = want && !stereoActive() && ensureBloom(width, height);
@@ -45250,7 +45863,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     }
     // (After the bloom set-up: whether the LDR glow follows the tonemap decides where
     // the dither goes, see prepareFinal.)
-    bool ldr_glow = true;
+    bool ldr_glow = true;   // <SS:Skoomastream> (read again by prepareFinal's call below)
     {
 #if defined(LL_HAS_CLEAN_PIPELINE)
         static LLCachedControl<bool> s_glow_ldr(gSavedSettings, "RenderGlow", true);
@@ -45271,7 +45884,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     // ---- FX (#544): display-point effects force the final pass, like the sphere ----
     // Keep the avatar mask produced while an active effect samples it or runs avatars-only
     // (one frame behind the effect plan; the first frame reads a zero mask).
-    requestAvatarMask(!stereoActive() && (LLFxRuntimeVK::instance().wantsAvatarMask() || mSnapMatteSeq));   // <GMDX> (+ avatar matte snapshots)
+    requestAvatarMask(!stereoActive() && (LLFxRuntimeVK::instance().wantsAvatarMask() || mSnapMatteSeq));   // (+ avatar matte snapshots; GunMetal-DX port)
     LLFxRuntimeVK::Frame fxf = fxFrame();
     LLFxRuntimeVK& fx = LLFxRuntimeVK::instance();
     const bool fx_want = !stereoActive() && fx.wantsDisplay(fxf);
@@ -45322,7 +45935,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         static LLCachedControl<bool> s_glow(gSavedSettings, "RenderGlow", true);
         glow_on = s_glow;
 #endif
-        glow_on = glow_on && !mOrtho && !mSnapMatte;   // <GMDX> region map / avatar matte: the LDR glow neither (as bloom)
+        glow_on = glow_on && !mOrtho && !mSnapMatte;   // region map / avatar matte: the LDR glow neither, as bloom (GunMetal-DX port)
         if (glow_on && !mBloomActive && !stereoActive())   // (#1075: not layered yet)
             recordGlow(cmd, toneView, width, height);
     }
@@ -45353,10 +45966,12 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         // 15: RenderVKRTDebugFlicker's focus projector visibility (+ blocker stats);
         // 18: the RT sun's blocking instance per surface point.
         static LLCachedControl<U32> s_rtview(gSavedSettings, "RenderVKDebugView", 0);
-        if ((U32)s_rtview == 13u || (U32)s_rtview == 14u || (U32)s_rtview == 15u || (U32)s_rtview == 18u)
+        if ((U32)s_rtview == 13u || (U32)s_rtview == 14u || (U32)s_rtview == 15u || (U32)s_rtview == 18u || (U32)s_rtview == 30u)
         {
+            if ((U32)s_rtview == 30u) gpuSubMark(cmd, "g_rs_em_debug_begin");
             releaseTlas(cmd, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT);
             mRT->recordDebug(cmd, colorView, width, height, drawPush, (U32)s_rtview);
+            if ((U32)s_rtview == 30u) gpuSubMark(cmd, "g_rs_em_debug");
         }
     }
 #endif
@@ -45391,7 +46006,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
 #if defined(LL_HAS_CLEAN_PIPELINE)
     {
         extern bool gUseWireframe;
-        wireframe = gUseWireframe;
+        wireframe = gUseWireframe && !GMDXCombatLockout::active(); // <GMDX> combat render lockout
     }
 #endif
     // (#1075: the selection outline / wireframe are not multiview yet: off in stereo)
@@ -45418,8 +46033,8 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
         if (sel_world_n > 0) recordSelection(cmd, drawPushIn, false);
         endRenderingViews(cmd);
     }
-    // <GMDX> Outline selection style: mask + edge pass over the world (no-op otherwise)
-    if (sel_world_n > 0) recordSelOutline(cmd, dsets, drawPushIn, false, colorView, dispDepth, width, height, vpD, scD);
+    // Outline selection style: mask + edge pass over the world (no-op otherwise; GunMetal-DX port)
+    if (sel_world_n > 0 && !stereoActive()) recordSelOutline(cmd, dsets, drawPushIn, false, colorView, dispDepth, width, height, vpD, scD);
 
     // LL's 3D overlays against the world depth (still the world's here: the HUD pass
     // below clears it), then the in-world text layer (name tags / hover text, #468):
@@ -45744,7 +46359,7 @@ void LLCleanRendererVK::recordWorld(VkCommandBuffer cmd, VkImageView colorView,
     }
     else
     {
-        recordProbeCapture(cmd, drawPushIn, secondaryCull(), do_rigged);   // <GMDX> (secondaryCull)
+        recordProbeCapture(cmd, drawPushIn, secondaryCull(), do_rigged);
         pipeSignal(cmd);
     }
     gpuTimerMark(cmd, 8);   // probe capture (faces early: only the deferred filters)
@@ -45790,15 +46405,16 @@ void LLCleanRendererVK::setPick(const LLVKWorldFrame& wf)
     if (!mPick) mPick = new LLCleanPickVK(*this);
     mPick->setRequest(wf.pick);
     mPick->setPartRequest(wf.part_pick);   // particle pick (#481): only frames that asked
-    mPick->setAuxRequests(wf.aux_pick);    // <SS:Skoomastream> OTS / aim rays
+    mPick->setAuxRequests(wf.aux_pick);    // <SS:Skoomastream> OTS / aim rays (CombatFX only)
 }
 
-// <SS:Skoomastream>
+// <SS:Skoomastream> Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
 void LLCleanRendererVK::takeAuxPicks(std::vector<LLVKPickResult>& out)
 {
     if (mPick) mPick->takeAux(out);
 }
 // </SS:Skoomastream>
+
 // ---- Acoustics probe (#683; llcleanaudiortvk.h) ----
 void LLCleanRendererVK::setAcoustics(const LLVKWorldFrame& wf)
 {
@@ -46503,9 +47119,36 @@ void LLCleanRendererVK::ensureVolFog(VkCommandBuffer cmd, const float* camTime, 
     mVolFogAsyncValue = 0;
 #if defined(LL_HAS_CLEAN_PIPELINE)
     static LLCachedControl<U32> s_vf(gSavedSettings, "RenderVKVolumetricFog", 0);
-    if ((s_vf == 0 && !mVolFog) || !mDsetDraw0 || !mDslDraw1) return;
-    if (mOrthoView) return;   // <GMDX> the froxels' depth is clip.w, 1 everywhere in an orthographic view
-    if (stereoActive()) return;   // #1075: the froxel march + history are per view (design step 13): off in stereo
+    static LLCachedControl<bool> s_physical(gSavedSettings,"RenderVKPhysicalSky",true);
+    const bool physical=s_physical && mAtmos[26]>0.5f && cameraMediumStorageSupported() &&
+        sceneHdr().image && sceneHdr().arrayView && mDepth.arrayView &&
+        mPkTrans.image && mPkMs.image && mPkView.image && !mPkPipeFailed
+        && gmdxSkyAerial() <= 0.f;   // <GMDX> (GunMetal-DX's own aerial perspective: no camera medium; gmdxskytune.h)
+    // <GMDX> ... but the WEATHER LAYER while mist, precipitation or the weather's fog needs it: this fog
+    // in its classic mode with only those media (llcleanvolfogvk.cpp gGMDXWeatherLayer).
+    extern bool gGMDXWeatherLayer;
+    {
+        static LLCachedControl<bool> s_mist(gSavedSettings, "RenderVKMist", false);
+        const SLWeather::State& wx = SLWeather::instance().state();
+        gGMDXWeatherLayer = s_vf == 0 && s_physical && mAtmos[26] > 0.5f && gmdxSkyAerial() > 0.f
+            && mPkTrans.image && mPkMs.image && mPkView.image && !mPkPipeFailed && mPkPipe[0] && mPkPipe[1] && mPkPipe[2]   // (physSkyFill's sky)
+            && (s_mist || wx.precipExt > 0.f || wx.fog > SLWeather::kEpsilon);
+    }
+    // </GMDX>
+    mCameraMediumReady=false;
+    if ((s_vf == 0 && !physical && !mVolFog && !gGMDXWeatherLayer) || !mDsetDraw0 || !mDslDraw1) return;   // <GMDX> (the weather layer)
+    // <GMDX> a region map capture (mOrtho; it is not mOrthoView) keeps the weather layer without running it:
+    // no rain haze or mist on the map, and no teardown and rebuild (the layer implies !physical)
+    if (mOrtho && gGMDXWeatherLayer) return;
+    if (!physical && (mOrthoView || stereoActive()))
+    {
+        if (gGMDXWeatherLayer) return;   // <GMDX> (kept, not run: the ortho view and stereo do not tear down and rebuild the weather layer)
+        for(uint32_t eye=1;eye<kMaxViews;++eye)
+            if(mMediumEyes[eye]) { mMediumEyes[eye]->destroy(mCtx->device()); delete mMediumEyes[eye];mMediumEyes[eye]=nullptr; }
+        if(mVolFog) { mVolFog->destroy(mCtx->device());delete mVolFog;mVolFog=nullptr;mMediumEyes[0]=nullptr;
+                      writeVolFogBinding(mVolFogStub.view); }   // <GMDX> (binding 45 off the freed volume; the device is idle)
+        return;
+    }
     if (!mVolFog) mVolFog = new LLCleanVolFogVK();
     LLCleanVolFogVK::Frame f;
     f.ctx = mCtx; f.dslDraw0 = mDslDraw0; f.dslDraw1 = mDslDraw1;
@@ -46538,9 +47181,66 @@ void LLCleanRendererVK::ensureVolFog(VkCommandBuffer cmd, const float* camTime, 
         f.partMax = f.partPool ? mPartMax : 0u;
         f.partSpriteFade = s_plit != 0;
     }
-    mVolFogNow = mVolFog->prepare(cmd, f);
+    if(physical && mPartCap==0u) { f.partPool=VK_NULL_HANDLE;f.partMax=0u; }
+    f.physical=physical; f.baseline=physical && s_vf==0;
+    f.orthographic=mOrthoView; f.forward=mLightInfoCPU.cam_fwd;
+    f.hdrView=sceneHdr().arrayView;
+    bool allReady=true;
+    mMediumEyes[0]=mVolFog;
+    const uint32_t count=physical ? mViewCount : 1u;
+    for(uint32_t eye=0;eye<count;++eye)
+    {
+        if(!mMediumEyes[eye]) mMediumEyes[eye]=new LLCleanVolFogVK();
+        f.eyeIndex=eye;
+        float eyeTime[4],eyeVP[16],eyeForward[3];
+        std::memcpy(eyeTime,camTime,sizeof(eyeTime));
+        std::memcpy(eyeVP,mViewProjRelV[eye],sizeof(eyeVP));
+        if(mViewCount>1u)
+        {
+            for(int c=0;c<3;++c) eyeTime[c]=mEyePosV[eye][c];
+            const double dx=static_cast<double>(eyeTime[0])-camTime[0];
+            const double dy=static_cast<double>(eyeTime[1])-camTime[1];
+            const double dz=static_cast<double>(eyeTime[2])-camTime[2];
+            for(int row=0;row<4;++row)
+                eyeVP[12+row]+=static_cast<float>(eyeVP[row]*dx+eyeVP[4+row]*dy+eyeVP[8+row]*dz);
+        }
+        for(int c=0;c<3;++c) eyeForward[c]=-mCurViewV[eye][2+4*c];
+        f.camTime=eyeTime; f.viewProjRel=eyeVP; f.forward=eyeForward; f.projection=mCurProjV[eye];
+        f.particleOwner=physical && eye>0 ? mMediumEyes[0] : nullptr;
+        f.particleForward=mLightInfoCPU.cam_fwd;
+        allReady=mMediumEyes[eye]->prepare(cmd,f) && allReady;
+        if(physical && mMediumEyes[eye]->volumeView() && mMediumEyes[eye]->transmittanceView())
+        {
+            const VkImageView views[4]={mMediumEyes[eye]->volumeView(),mMediumEyes[eye]->transmittanceView(),
+                                       mMediumEyes[eye]->airRadianceView(),mMediumEyes[eye]->airTransmittanceView()};
+            // Descriptors remain immutable while queued readers exist. Resource changes
+            // are rare; the normal frame never rewrites these shared bindings.
+            if(mMediumEyes[eye]->takeBindingDirty())
+            {
+                vkDeviceWaitIdle(mCtx->device());
+                VkDescriptorImageInfo images[4]{};
+                VkWriteDescriptorSet writes[4]{};
+                for(uint32_t i=0;i<4;++i)
+                {
+                    images[i]={mVolFogSampler,views[i],VK_IMAGE_LAYOUT_GENERAL};
+                    writes[i].sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                    writes[i].dstSet=mDsetDraw0; writes[i].dstBinding=59+i; writes[i].dstArrayElement=eye;
+                    writes[i].descriptorCount=1; writes[i].descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                    writes[i].pImageInfo=&images[i];
+                }
+                vkUpdateDescriptorSets(mCtx->device(),4,writes,0,nullptr);
+            }
+        }
+    }
+    for(uint32_t eye=count;eye<kMaxViews;++eye)
+        if(mMediumEyes[eye])
+        {
+            mMediumEyes[eye]->destroy(mCtx->device()); delete mMediumEyes[eye]; mMediumEyes[eye]=nullptr;
+        }
+    mCameraMediumReady=physical && allReady && mPkPipe[0] && mPkPipe[1] && mPkPipe[2];
+    mVolFogNow=physical ? mCameraMediumReady : allReady;
     const bool dirty = mVolFog->takeBindingDirty();
-    if (!mVolFogNow && s_vf == 0 && mVolFog->idle()) { delete mVolFog; mVolFog = nullptr; }
+    if (!mVolFogNow && s_vf == 0 && mVolFog->idle()) { delete mVolFog; mVolFog = nullptr; mMediumEyes[0]=nullptr; }
     // Binding 45: the integrated volume while it exists, else the identity stub. A change
     // happens only right after the fog re-created / freed its images behind a device wait,
     // before anything in this recording bound draw set 0 (the target-ensure step).
@@ -46560,7 +47260,7 @@ void LLCleanRendererVK::ensurePartFog(VkCommandBuffer cmd, const float* camTime,
 #if defined(LL_HAS_CLEAN_PIPELINE)
     static LLCachedControl<U32> s_pf(gSavedSettings, "RenderVKParticleFog", 0);
     if ((s_pf == 0 && !mPartFog) || !mDsetDraw0 || !mDslDraw1) return;
-    if (mOrthoView) return;   // <GMDX> (eye-ray march over perspective froxels)
+    if (mOrthoView) return;   // (eye-ray march over perspective froxels; GunMetal-DX port)
     if (stereoActive()) return;   // #1075: per view (design step 13): off in stereo
     if (!mPartFog) mPartFog = new LLCleanPartFogVK();
     static LLCachedControl<U32> s_plit(gSavedSettings, "RenderVKParticleLighting", 1);
@@ -46575,7 +47275,7 @@ void LLCleanRendererVK::ensurePartFog(VkCommandBuffer cmd, const float* camTime,
     f.partLight = mPartLight.buffer;
     f.partMax = f.partPool ? mPartMax : 0u;
     f.volFogNow = mVolFogNow;
-    f.particlesOn = mPartOn && gPipeline.hasRenderType(LLPipeline::RENDER_TYPE_PARTICLES);
+    f.particlesOn = mPartOn && mPartCap>0u && gPipeline.hasRenderType(LLPipeline::RENDER_TYPE_PARTICLES);
     f.partLighting = s_plit != 0;
     f.underwater = mWater[23] > 0.5f;
     f.offscreen = mOffscreen;
@@ -46631,8 +47331,10 @@ void LLCleanRendererVK::recordVolFogCompute(VkCommandBuffer& cmd, bool allowAsyn
 #endif
     // (mGiNow: the light pass's giDecide ran earlier in this recording -- the fog's ambient then
     //  takes the per-cell sky visibility, RenderVKVolumetricFogAmbientOcclusion)
-    mVolFog->recordCompute(rc, mShadowParams[3], (uint32_t)mLightsCPU.size(), sets, mProjMode, rtSet, partLive, mGiNow,
-                           [this](VkCommandBuffer c, const char* n) { gpuSubMark(c, n); });
+    const uint32_t mediumCount=mCameraMediumReady ? mViewCount : 1u;
+    for(uint32_t eye=0;eye<mediumCount;++eye)
+        mMediumEyes[eye]->recordCompute(rc,mShadowParams[3],static_cast<uint32_t>(mLightsCPU.size()),sets,mProjMode,rtSet,partLive,mGiNow,
+            [this](VkCommandBuffer c,const char* n) { gpuSubMark(c,n); });
     if (vc)
     {
         asyncEndCompute(vc, "q_volumetrics");
@@ -46715,6 +47417,7 @@ void LLCleanRendererVK::ensureWeather(VkCommandBuffer cmd, const VKDrawPush& dp,
     f.vramMode = mBudget.mode(); f.vramRung = mBudget.engaged();   // (#901: the shelter atlas's tiers)
     f.vramCapacity = mBudget.capacity();                             // (#946: the weather's VRAM tier)
     f.volFogOn = mVolFogNow;                                         // (#954: the fog carries the precipitation medium)
+    f.occlBiasSlope = 0.f;   // (#1145: the roof maps' casters carry no depth bias any more: nothing to put back)
     // M3 snow mesh: the main view (world-space view-projection: dp's origin is zero), the world
     // draw layout and the deferred G-buffer / sun cascade pipeline templates.
     f.viewProj = dp.view_proj;
@@ -46776,16 +47479,18 @@ void LLCleanRendererVK::ensureWeather(VkCommandBuffer cmd, const VKDrawPush& dp,
 // The weather occlusion map (#783): the projector tiles' static path (recordProjShadows) for
 // one orthographic view straight down -- reset the shared shadow buckets, cull the statics
 // into them against the map's box (cascade 4: no sun caster planes; no sub-texel caster cull),
-// draw them depth-only, two-sided, with the projector depth pipelines. Alpha-blend casters are
-// alpha-tested exactly as the projector tiles draw them: fully transparent prims (phantom
-// barriers, invisible platforms, security prims) must not become roofs; a glass roof below
-// the shadow alpha cutoff lets the rain through (M2: a weather-specific low-cutoff test).
+// draw them depth-only, two-sided, with the projector depth pipelines. Alpha-MASK casters keep
+// their own cutoff (foliage gaps stay open). Alpha-BLEND casters take the weather's own low
+// cutoff (#1159, RenderVKWeatherGlassAlphaCutoff, mWeatherBlendPipe) instead of the shadow
+// test's 0.5: tinted / clear glass (alpha ~0.1-0.5, PBR base colour alpha or legacy
+// transparency, x the texel's alpha) is a roof, while fully transparent prims (phantom
+// barriers, invisible platforms, security prims) and near-invisible ones stay open sky.
 // Rigged / avatars, worn attachments and moving objects: not drawn (M2: static casters only).
 void LLCleanRendererVK::recordWeatherOcclusion(VkCommandBuffer cmd, const VKCullPush& cullBase, const VKDrawPush& dp)
 {
     if (!mWeather || !mWeather->occlusionDue()) return;
     if (!mDsetCullShadow || !mShadowCmd[0].buffer || !mShadowCounters.buffer
-        || !mProjPipe || !mProjMaskPipe || !mProjDsPipe || !mProjMaskDsPipe)
+        || !mWeatherDepthPipe || !mWeatherMaskPipe || !mWeatherBlendPipe)   // (the unbiased trio: still compiling -> retried)
         return;   // (not ready: the map stays unpublished; retried next recording)
     VK_HITCH_SCOPE("vk_weatherOccl");
     const VkImage img = mWeather->occlusionImage();
@@ -46815,6 +47520,7 @@ void LLCleanRendererVK::recordWeatherOcclusion(VkCommandBuffer cmd, const VKCull
     }
     VKCullPush cp = cullBase;
     cp.hud_pass = 3; cp.skin_count = 0;
+    cp.flags &= ~524288u;   // weather roofs keep their existing occlusion policy
     cp.cascade = 4;   // projector-style view: its own frustum is the cull, no sun caster planes
     // M2: STATIC casters only (clean_cull.comp SHADOW_SPLIT_STATIC): a moving object (the
     // ingest's mover tracker, instance bit21 -- kept running while the weather is, see
@@ -46880,7 +47586,21 @@ void LLCleanRendererVK::recordWeatherOcclusion(VkCommandBuffer cmd, const VKCull
     const VkDescriptorSet dsets[2] = {mDsetDraw0, mDsetDraw1};
     const VkDeviceSize off = 0;
     bindDrawSets(cmd, dsets);
-    pushDrawView(cmd, mDrawLayout, pp);
+    {
+        // #1159: the view + the blend casters' cutoff (pad1, float bits; read only by
+        // mWeatherBlendPipe). Floored at 1/255: an alpha-0 prim is never a roof.
+        float glassCut = 0.05f;
+#if defined(LL_HAS_CLEAN_PIPELINE)
+        static LLCachedControl<F32> s_glassCut(gSavedSettings, "RenderVKWeatherGlassAlphaCutoff", 0.05f);
+        glassCut = s_glassCut;
+#endif
+        glassCut = std::clamp(glassCut, 1.f / 255.f, 1.f);
+        VKDrawViewPush wp{};
+        wp.view = pushDrawView(cmd, mDrawLayout, pp);
+        std::memcpy(&wp.pad1, &glassCut, sizeof(wp.pad1));
+        vkCmdPushConstants(cmd, mDrawLayout, VK_SHADER_STAGE_VERTEX_BIT|VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(VKDrawViewPush), &wp);
+    }
     vkCmdBindVertexBuffers(cmd,0,1,&mVbo.buffer,&off);
     vkCmdBindIndexBuffer(cmd, mIbo.buffer, 0, VK_INDEX_TYPE_UINT16);
     auto draw = [&](VkPipeline pipe, const GpuBuffer& buf, uint32_t b) {
@@ -46888,16 +47608,14 @@ void LLCleanRendererVK::recordWeatherOcclusion(VkCommandBuffer cmd, const VKCull
         bucketDraw(cmd, buf.buffer, 0, mShadowCounters.buffer, counterSlot(b)*sizeof(uint32_t),
                    mdiMaxSlot(counterSlot(b)), sizeof(DrawCmd));
     };
-    // <GMDX> cull-none pipelines (the Ds ones) for the single-sided buckets too: the projector pipes
-    // cull back faces since 246a510a75 (LL's spot shadows), and this map's matrix has no y-flip, so
-    // its winding is reversed -- every upward single-sided face (terrain, prim tops) was culled, the
-    // near cascade's cover read the undersides as tops, and the ground under the camera stayed bare.
-    draw(mProjDsPipe,     mShadowCmd[0], 0);   // opaque
-    draw(mProjMaskDsPipe, mShadowCmd[1], 1);   // alpha-mask (foliage: the alpha test keeps its gaps)
-    // </GMDX>
-    draw(mProjMaskDsPipe, mShadowCmd[2], 2);   // alpha-blend, alpha-tested as the projector tiles (invisible prims stay open)
-    draw(mProjDsPipe,     mShadowCmd[3], 6);   // double-sided opaque
-    draw(mProjMaskDsPipe, mShadowCmd[4], 7);   // double-sided mask
+    // The weather map's OWN pipelines: the projector depth state without the depth bias (every
+    // projector pipeline is two-sided, so the single- and double-sided buckets share one).
+    draw(mWeatherDepthPipe, mShadowCmd[0], 0);   // opaque
+    draw(mWeatherMaskPipe,  mShadowCmd[1], 1);   // alpha-mask (foliage: the alpha test keeps its gaps)
+    // alpha-blend at the weather's glass cutoff (invisible prims stay open)
+    draw(mWeatherBlendPipe, mShadowCmd[2], 2);
+    draw(mWeatherDepthPipe, mShadowCmd[3], 6);   // double-sided opaque
+    draw(mWeatherMaskPipe,  mShadowCmd[4], 7);   // double-sided mask
     vkCmdEndRendering(cmd);
     // -> the lit FS / deferred compute / the simulation (from the next recording on: it is
     // published then).
@@ -47191,6 +47909,7 @@ void LLCleanRendererVK::onFrameDropped()
     // Everything the lost recording streamed / copied is re-sent from the CPU mirrors.
     mInstFullUpload = true;
     mStageRetrySlots = mStageRetryGroups = mStageRetryMat = true;
+    mRtPosePublicationInvalid = true;
     mJointRowsFull = true;
     mSkinMetaFull = true;
     mAnimArenaFull = true;
@@ -47201,6 +47920,14 @@ void LLCleanRendererVK::onFrameDropped()
     mPrevTerrain.clear();
     mTemporalReset = true;
     mGiLagLast.have = false;   // (#978 phase 2: the lost recording's GI trace never ran)
+    // recordGITail may have acknowledged scene deltas in command buffers that
+    // never executed. A temporal reset alone cannot clear stale radiance cells.
+    // Rearm global cache/reservoir/history rejection for the next actual GI trace.
+    mGiSphOverflow = true;
+    ++mGiDroppedResets;
+    ++mGiGlobalSerial;
+    ++mGiSceneSerial;
+    mGiResPrevOk = false;
     if (mRT) mRT->dropAfterLostFrame();
     static double s_last = -1.0e9;
     const double now = LLFrameTimer::getElapsedSeconds();
@@ -47408,7 +48135,7 @@ bool LLCleanRendererVK::deferredWanted(bool prepass, bool od, const char** why) 
     static LLCachedControl<U32> s_dbgview(gSavedSettings, "RenderVKDebugView", 0);
     static LLCachedControl<U32> s_litdbg(gSavedSettings, "RenderVKLitDebugMask", 0);
     on = s_on; dbg = s_dbgview; litdbg = s_litdbg;
-    hl = LLPipeline::sShowDebugAlpha;
+    hl = LLPipeline::sShowDebugAlpha && !GMDXCombatLockout::active(); // <GMDX> combat render lockout
 #endif
     if (!on) return no("RenderVKDeferredLighting off");
     if (!mDeferPipe || !mDsetDefer || !mGbufPipe[0] || !mGbufPipe[1] || !mGbufPipe[2] || !mGbufPipe[3])
@@ -47428,7 +48155,7 @@ bool LLCleanRendererVK::deferredWanted(bool prepass, bool od, const char** why) 
     if (mLitRt && !mRtMaskOn && !mShadowMergeTry) return no("ray-query lit pass (RT shadows without the RT mask)");
     // 13-15, 18: RT overlays, not a lit-FS term (as the frame-info fill maps it); 28: the RT
     // reflection ray density, drawn by the split's combine (it needs the split).
-    if (dbg != 0u && !((dbg >= 13u && dbg <= 15u) || dbg == 18u || dbg == 28u)) return no("debug view");
+    if (dbg != 0u && !((dbg >= 13u && dbg <= 15u) || dbg == 18u || dbg == 28u || dbg == 30u)) return no("debug view");
     if (hl) return no("Highlight Transparent");
     if ((litdbg & 4096u) != 0u) return no("shading-rate overlay (RenderVKLitDebugMask 4096)");
     if (!kReverseZ || !mSkyDepthPipe) return no("no depth-tested sky");
@@ -47726,7 +48453,7 @@ bool LLCleanRendererVK::ensureRegirBuffer()
         //  INCREMENTAL CELLS)
         nb = mCtx->createBuffer(kRegirBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT
                                              | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
-                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+                                VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, true);
     }
     if (!nb.buffer)
     {
@@ -47868,7 +48595,10 @@ void LLCleanRendererVK::regirHeaderFill(RegirHeader& h)
 #endif
         // (the resolve -- mode 8 of the emissive build kernel -- carries the counts to this frame's light
         //  indices: without it the counts would name other lights, so no cache)
-        mRsOccNow = mRsNow && occ != 0u && mRsEmPipe != VK_NULL_HANDLE;
+        // (RenderVKReSTIRRadiance: off -- the cull only props up the shared ratio's denominator; a hidden
+        //  light's radiance sample is simply 0. Nothing consulted, traced or resolved; switching back
+        //  clears the cache, mRsOccClear below)
+        mRsOccNow = mRsNow && occ != 0u && mRsEmPipe != VK_NULL_HANDLE && !mPdnRadiance;
         if (mRsOccNow && !mRsOccPrev) mRsOccClear = true;   // (re-enabled: no verdict from before)
         mRsOccPrev = mRsOccNow;
         if (mRsOccNow) h.rs_cfg[2] |= 512u;
@@ -47903,6 +48633,17 @@ void LLCleanRendererVK::regirHeaderFill(RegirHeader& h)
 #endif
         if (reuseMv && mMotion.view) h.rs_cfg[2] |= 4096u;
     }
+    {   // (RS_F_VIS_REUSE, RenderVKReSTIRRadianceVisReuse: A/B, radiance mode only) VISIBILITY REUSE: pass 15 re-stores
+        // a reservoir whose pick its own ray found blocked with W = 0 (M kept), so an occluded light -- a projector
+        // of the next room in the same grid cell -- stops propagating through the temporal / spatial reuse
+        // (clean_deferred_light.comp rsTap and the store after the sample loop). The ratio estimator never sets it.
+        bool visReuse = true;
+#if defined(LL_HAS_CLEAN_PIPELINE)
+        static LLCachedControl<bool> s_visReuse(gSavedSettings, "RenderVKReSTIRRadianceVisReuse", true);
+        visReuse = s_visReuse;
+#endif
+        if (visReuse && mPdnRadiance && mRsNow && mRsMode >= 2u) h.rs_cfg[2] |= 16384u;
+    }
     h.rs_cfg2[0] = std::clamp<U32>(mcap, 1u, 64u);
     h.rs_cfg2[1] = std::min<U32>(taps, 5u);
     h.rs_cfg2[2] = std::clamp<U32>(radius, 1u, 64u);
@@ -47923,6 +48664,9 @@ void LLCleanRendererVK::regirHeaderFill(RegirHeader& h)
         static LLCachedControl<U32> s_mlights(gSavedSettings, "RenderVKReSTIRMoveLights", 4U);
         moveCut = s_mcut; moveRays = s_mrays; moveLights = s_mlights;
 #endif
+        // Radiance needs the change metadata too, but retains its fixed ray budget:
+        // one ray per selected sample, no dense evaluation. The denoiser alone caps age.
+        if (mPdnRadiance) { moveRays = 1u; moveLights = 0u; }
         if (moveCut != 0u)
         {
             h.rs_cfg[3] = 1u | (std::clamp<U32>(moveRays, 1u, 15u) << 4u)
@@ -47959,27 +48703,42 @@ void LLCleanRendererVK::regirHeaderFill(RegirHeader& h)
         emReuse = s_emReuse; emLists = s_emLists; emLong = s_emLong;
 #endif
         mRsEmMode = std::min<U32>(em, 2u);
-        mRsEmNow = mRsNow && mRsEmMode != 0u && mRsEmPipe != VK_NULL_HANDLE;
+        mRsEmNow = mRsNow && mRsEmMode != 0u && mRsEmPipe != VK_NULL_HANDLE && mRsEmInputReady;
         h.rs_em[2] = mRsEmNow ? std::clamp<U32>(emTris, 256u, kRsEmCap) : 0u;
         h.rs_em_params[0] = std::max(emMin, 1e-4f);
         h.rs_em_params[1] = std::max(emGlow, 0.f);
         h.rs_em_params[2] = std::isfinite(emPbr) ? std::clamp(emPbr, 0.f, 1000.f) : 1.f;
         h.rs_em_cfg[0] = std::clamp<U32>(emSlots, 1u, kRsEmSlotsMax);
         h.rs_em_cfg[2] = (mRsEmNow && mRsEmMode == 1u) ? (1u | (emGiSplit ? 2u : 0u)) : 0u;
-        // (#986) RECORD REUSE once a build has filled the other parity (EM_F_REUSE), the CELL LISTS unless
-        // RenderVKReSTIREmissiveCellLists 0 asks for the gather (EM_F_GATHER; recordProjStoch then skips them)
-        mRsEmListsNow = mRsEmNow && emLists;
-        if (mRsEmNow && emReuse && mRsEmBuiltOnce) h.rs_em_cfg[2] |= 8u;   // EM_F_REUSE
-        if (mRsEmNow && !emLists) h.rs_em_cfg[2] |= 16u;                   // EM_F_GATHER
-        // (#986 LONG CELLS) a cell with a long list gets a workgroup (mode 9; with the lists only)
-        mRsEmLongNow = mRsEmListsNow && emLong;
-        if (mRsEmLongNow) h.rs_em_cfg[2] |= 32u;                           // EM_F_LONG
+        // All current descriptors/geometry are read within the record cap. Historical list,
+        // record-copy and long-cell toggles cannot restore an unbounded gather escape.
+        mRsEmListsNow = mRsEmNow;
+        mRsEmLongNow = false;
+        (void)emReuse; (void)emLists; (void)emLong;
         // (#1009 CLUSTER STATICS, clean_regir.glsl) a static traced on its cluster RT cut emits through the legacy
         // row clean_rt_instances.comp records beside it (RenderVKReSTIREmissiveClusterStatic 0: the A/B -- such
         // statics stay out, as before)
         if (mRsEmNow && emCluster) h.rs_em_cfg[2] |= 2048u;                // EM_F_CLUSTER
         // (#1009 SKIP DIAGNOSTIC) the emitting instances mode 0 leaves out, by why (with the lists: the counters
         // are per-build words of the cell cache header, zeroed and read back with them)
+        // Diagnostics use the SAME material result as mode 0, not a CPU material/face walk.
+        mRsEmDiagNow = mRsEmDiagLog = false;
+#if defined(LL_HAS_CLEAN_PIPELINE)
+        static LLCachedControl<bool> s_emDiag(gSavedSettings, "RenderVKReSTIREmissiveDiagnostics", false);
+        static LLCachedControl<U32> s_emDiagView(gSavedSettings, "RenderVKDebugView", 0U);
+        mRsEmDiagLog = mRsEmNow && s_emDiag;
+        mRsEmDiagNow = mRsEmNow && (mRsEmDiagLog || (U32)s_emDiagView == 30u);
+#endif
+        if (!mRsEmDiagLog && mRsEmDiagRb.buffer)
+        {
+            retireBuffer(mRsEmDiagRb); // after all in-flight snapshot copies; no device wait
+            mRsEmDiagRb = GpuBuffer{};
+            std::fill(std::begin(mRsEmDiagUsed), std::end(mRsEmDiagUsed), false);
+        }
+        if (mRsEmDiagNow) h.rs_em_cfg[2] |= 8192u; // EM_F_DIAG
+        if (mRsEmDiagNow && mRsEmBuiltOnce && mRsEmDiagPrevFrame == h.cfg[3] - 1u) h.rs_em_cfg[2] |= 16384u; // EM_F_DIAG_LAST
+        mRsEmDiagPrevFrame = mRsEmDiagNow ? h.cfg[3] : 0u;
+        mRsStatFrameNow = h.cfg[3]; // exact GPU header frame, saved with the existing async copy
         mRsEmSkipNow = mRsEmListsNow && emSkip;
         if (mRsEmSkipNow) h.rs_em_cfg[2] |= 4096u;                         // EM_F_SKIPSTAT
         h.rs_em_params2[0] = std::isfinite(emCut) ? std::clamp(emCut, 1e-5f, 1.f) : 0.004f;
@@ -47987,72 +48746,40 @@ void LLCleanRendererVK::regirHeaderFill(RegirHeader& h)
         h.rs_em_params2[2] = 0.f;     // (#1006 below: the cell budget; was the own-box pad -- unused)
         // (LIGHT TAKEOVER, clean_regir.glsl) the table's rows reserve the first emitter entries: the entry
         // counter starts past them (recordProjStoch clears them with the hash); only while the emitters light
-        mRsEmTakeNow = (mRsEmNow && mRsEmMode == 1u && emTake != 0u)
-                     ? std::min<U32>(mRsEmTakeRows, kRsEmTakeN) : 0u;
+        // Conservative candidate policy: no complete footprint certificate exists yet.
+        // Even complete stride-1 records do not prove all cells carry those emitters.
+        // Keep original point lights for partial/capacity/input-failure cases alike.
+        const bool takeFallback = mRsEmNow && mRsEmMode == 1u && emTake != 0u && mRsEmTakeRows != 0u;
+        static bool lastTakeFallback = false;
+        if (takeFallback != lastTakeFallback)
+        {
+            LL_INFOS("VKEmissive") << "bounded takeover point fallback=" << takeFallback
+                                  << " reason=NO_COMPLETE_FOOTPRINT_CERTIFICATE; original point lights retained" << LL_ENDL;
+            lastTakeFallback = takeFallback;
+        }
+        mRsEmTakeNow = 0u;
         if (mRsEmTakeNow != 0u)
         {
             h.rs_em_cfg[2] |= 4u;   // EM_F_TAKE
             h.rs_em_cfg[3] = mRsEmTakeNow;
             h.rs_em_take_cfg[0] = mRsEmTakeNow;
         }
-        // (#1006, clean_regir.glsl INCREMENTAL CELLS + WEAK OVERLAY; with the cell lists only -- a gather build
-        // re-gathers everything and lists every emitter at level 0)
-        U32 emInc = 1, emBudget = 2048, emRestRefresh = 1;
+        // Every bounded pair list/cell is rebuilt from this frame's records. Historical
+        // incremental/long/list settings cannot bypass the attempted-pair operation limit.
         F32 emWeak = 0.05f;
-        bool wcutOn = false;
 #if defined(LL_HAS_CLEAN_PIPELINE)
-        static LLCachedControl<U32> s_emInc(gSavedSettings, "RenderVKReSTIREmissiveIncremental", 1U);
-        static LLCachedControl<U32> s_emBudget(gSavedSettings, "RenderVKReSTIREmissiveCellBudget", 2048U);
-        static LLCachedControl<U32> s_emRest(gSavedSettings, "RenderVKReSTIREmissiveRestRefresh", 1U);
         static LLCachedControl<F32> s_emWeak(gSavedSettings, "RenderVKReSTIREmissiveWeakPower", 0.05f);
-        static LLCachedControl<bool> s_wcutOn(gSavedSettings, "RenderVKReSTIRLightCut", false);
-        emInc = s_emInc; emBudget = s_emBudget; emRestRefresh = s_emRest; emWeak = s_emWeak; wcutOn = s_wcutOn;
+        emWeak = s_emWeak;
 #endif
         mRsEmShiftNow = false;
-        if (mRsEmListsNow)
+        if (mRsEmNow)
         {
             const float weakThr = std::isfinite(emWeak) ? std::clamp(emWeak, 0.f, 1.0e6f) : 0.f;
-            if (weakThr > 0.f)
-            {
-                h.rs_em_cfg[2] |= 256u;                                        // EM_F_WEAK
-                h.rs_em_params[3] = weakThr;
-            }
-            if (mRsEmBuiltOnce) h.rs_em_cfg[2] |= 1024u;                       // EM_F_LAST
-            h.rs_em_params2[2] = (float)std::min<U32>(emBudget, kRsEmNCellsAll);   // (0: no cap)
-            h.rs_em_params2[3] = (float)std::clamp<U32>(emRestRefresh, 1u, 4096u);
-            // everything the cells' content is made of besides the records: a change re-gathers every cell
-            auto floatBitsU = [](float f) { uint32_t u; std::memcpy(&u, &f, sizeof(u)); return u; };
-            const uint32_t key[12] = {
-                mRegirLevels, h.rs_em_cfg[0], (uint32_t)(h.rs_em_cfg[2] & (1u | 4u | 32u | 256u | 2048u)), h.rs_em[2],
-                floatBitsU(h.rs_em_params[0]), floatBitsU(h.rs_em_params[1]), floatBitsU(h.rs_em_params[2]),
-                floatBitsU(h.rs_em_params[3]), floatBitsU(h.rs_em_params2[0]), floatBitsU(h.rs_em_params2[1]),
-                floatBitsU(h.origin[0][3]), mRsEmMode};
-            bool full = emInc == 0u || !mRsEmCellsValid || wcutOn || std::memcmp(key, mRsEmCellKey, sizeof(key)) != 0;
-            // the ORIGIN SHIFT: every level moved by whole cells (same edges) and not too far (a teleport, a region
-            // crossing: everything at once instead) -> mode 12 moves the cells; else FULL
-            if (!full)
-            {
-                bool moved = false;
-                for (uint32_t l = 0; l < kRegirLevelsMax && !full; ++l)
-                {
-                    if (h.origin[l][3] != mRsEmCellOrigin[l][3]) { full = true; break; }
-                    for (int a = 0; a < 3; ++a)
-                    {
-                        if (h.origin[l][a] == mRsEmCellOrigin[l][a]) continue;
-                        moved = true;
-                        const double d = ((double)h.origin[l][a] - (double)mRsEmCellOrigin[l][a]) / (double)h.origin[l][3];
-                        if (!(std::fabs(d) <= 8.0)) full = true;
-                    }
-                }
-                mRsEmShiftNow = moved && !full;
-            }
-            if (full) h.rs_em_cfg[2] |= 128u;                                   // EM_F_FULL
-            if (mRsEmShiftNow) h.rs_em_cfg[2] |= 512u;                          // EM_F_SHIFT
-            std::memcpy(mRsEmCellKey, key, sizeof(key));
-            std::memcpy(mRsEmCellOrigin, h.origin, sizeof(mRsEmCellOrigin));
-            mRsEmCellsValid = true;   // (this build fills the cache -- a gather build makes the GPU's VALID 0)
+            if (weakThr > 0.f) { h.rs_em_cfg[2] |= 256u; h.rs_em_params[3] = weakThr; }
+            if (mRsEmBuiltOnce) h.rs_em_cfg[2] |= 1024u; // exact previous-build remapping only
         }
-        else mRsEmCellsValid = false;   // (no lists build this frame: the next one starts over)
+        mRsEmCellsValid = mRsEmNow;
+
     }
 }
 
@@ -49323,7 +50050,7 @@ bool LLCleanRendererVK::rtConsumerActive() const
 #if defined(LL_HAS_CLEAN_PIPELINE)
     static LLCachedControl<U32> s_rtview(gSavedSettings, "RenderVKDebugView", 0);
     const U32 v = s_rtview;
-    if (v == 13u || v == 14u || v == 15u || v == 18u) return true;
+    if (v == 13u || v == 14u || v == 15u || v == 18u || v == 30u) return true;
 #endif
     return false;
 }
@@ -49557,9 +50284,9 @@ bool LLCleanRendererVK::litDebugWanted() const
     static LLCachedControl<bool> s_tol_on(gSavedSettings, "RenderVKBlendDepthTol", true);
     static LLCachedControl<bool> s_tol_dbg(gSavedSettings, "RenderVKBlendDepthTolDebug", false);
     const U32 dv = s_dbgview;
-    const bool viewFs = dv != 0u && !((dv >= 13u && dv <= 15u) || dv == 18u || dv == 22u || dv == 28u);
+    const bool viewFs = dv != 0u && !((dv >= 13u && dv <= 15u) || dv == 18u || dv == 22u || dv == 28u || dv == 30u);
     return viewFs || ((U32)s_litdbg & 0xFFFFu) != 0u || (U32)s_rtsdbg == 8u
-        || LLPipeline::sShowDebugAlpha || (s_tol_on && s_tol_dbg);
+        || (LLPipeline::sShowDebugAlpha && !GMDXCombatLockout::active()) || (s_tol_on && s_tol_dbg); // <GMDX> combat render lockout
 #else
     return false;
 #endif
@@ -49573,7 +50300,7 @@ bool LLCleanRendererVK::litDebugWanted() const
 // setting constants (they read the frame-info fields, which follow the bound spec key).
 void LLCleanRendererVK::ensureLitDebug(int v)
 {
-    if (v < 0 || v > 1 || mLitDbgBuilt[v] || !mCtx) return;
+    if (v < 0 || v > 1 || mLitDbgBuilt[v] || !mCtx || mRezFxJob) return;
     if (!mLitVar[v][LIT_DRAW]) return;   // (the variant itself is not in yet: try again later)
     if (v == 1 && !(mRT && mDrawLayoutRt)) return;
     mLitDbgBuilt[v] = true;
@@ -49784,16 +50511,19 @@ void LLCleanRendererVK::initDeferSplit()
         VkPipelineLayoutCreateInfo uli = rli;
         uli.setLayoutCount = 4; uli.pSetLayouts = usl;
         VK_CHECK(vkdCreatePipelineLayout(dev, &uli, &mRtUberLayout, "mRtUberLayout"));
+        // (#1029) the trace / forward / pre-trace / mirror kernels: the deferred ray-query group (compiled
+        // after the world pipelines, installed together; rtReflWanted / mRtUberNow / the mirror keep them off
+        // until then). The visibility queue below stays in the world batch (visQueueInit's own guards).
         VkShaderModule tm = moduleFromSpv(dev, kWorldDeferRtTraceSpv, kWorldDeferRtTraceSpv_bytes, "kWorldDeferRtTraceSpv");
-        createComputePipelineInto(dev, tm, mRtReflLayout, 0u, litDebugSpec(false), &mRtTracePipe, "mRtTracePipe (DeferRtTrace)");
+        rtDeferredCompute(dev, tm, mRtReflLayout, 0u, litDebugSpec(false), &mRtTracePipe, "mRtTracePipe (DeferRtTrace)");
         destroyShaderModuleDeferred(dev, tm, nullptr);
         // RAY LIST (RenderVKRTReflectionsRayList): the per-tile selection (16) + the per-ray trace
         VkShaderModule sm = moduleFromSpv(dev, kWorldDeferRtSelectSpv, kWorldDeferRtSelectSpv_bytes, "kWorldDeferRtSelectSpv");
-        createComputePipelineInto(dev, sm, mRtReflLayout, 0u, litDebugSpec(false), &mRtSelectPipe, "mRtSelectPipe (DeferRtSelect)");
+        rtDeferredCompute(dev, sm, mRtReflLayout, 0u, litDebugSpec(false), &mRtSelectPipe, "mRtSelectPipe (DeferRtSelect)");
         destroyShaderModuleDeferred(dev, sm, nullptr);
         VkShaderModule lm = moduleFromSpv(dev, kWorldDeferRtTraceListSpv, kWorldDeferRtTraceListSpv_bytes, "kWorldDeferRtTraceListSpv");
-        createComputePipelineInto(dev, lm, mRtReflLayout, 0u, litDebugSpec(false), &mRtTraceListPipe,
-                                  "mRtTraceListPipe (DeferRtTraceList)");
+        rtDeferredCompute(dev, lm, mRtReflLayout, 0u, litDebugSpec(false), &mRtTraceListPipe,
+                          "mRtTraceListPipe (DeferRtTraceList)");
         destroyShaderModuleDeferred(dev, lm, nullptr);
         // (#1036, RenderVKRTReflectionsShadeSplit) the list trace's split stages (distinct module names:
         // RenderVKPipelineStats logs each one's registers)
@@ -49806,17 +50536,17 @@ void LLCleanRendererVK::initDeferSplit()
             for (uint32_t i = 0; i < RTS_COUNT; ++i)
             {
                 VkShaderModule xm = moduleFromSpv(dev, st[i].code, st[i].bytes, st[i].mod);
-                createComputePipelineInto(dev, xm, mRtReflLayout, 0u, litDebugSpec(false), &mRtSplitPipe[i], st[i].name);
+                rtDeferredCompute(dev, xm, mRtReflLayout, 0u, litDebugSpec(false), &mRtSplitPipe[i], st[i].name);
                 destroyShaderModuleDeferred(dev, xm, nullptr);
             }
         }
         visQueueInit(dev, 0u);   // (#1039: the visibility queue's walk + the splits' producer / resolve variants)
         VkShaderModule fm = moduleFromSpv(dev, kWorldDeferRtFwdSpv, kWorldDeferRtFwdSpv_bytes, "kWorldDeferRtFwdSpv");
-        createComputePipelineInto(dev, fm, mRtReflLayout, 0u, litDebugSpec(false), &mRtFwdPipe, "mRtFwdPipe (DeferRtFwd)");
+        rtDeferredCompute(dev, fm, mRtReflLayout, 0u, litDebugSpec(false), &mRtFwdPipe, "mRtFwdPipe (DeferRtFwd)");
         destroyShaderModuleDeferred(dev, fm, nullptr);
         VkShaderModule pm = moduleFromSpv(dev, kWorldDeferRtPreTraceSpv, kWorldDeferRtPreTraceSpv_bytes, "kWorldDeferRtPreTraceSpv");
-        createComputePipelineInto(dev, pm, mRtUberLayout, 0u, litDebugSpec(false), &mRtPreTracePipe,
-                                  "mRtPreTracePipe (DeferRtPreTrace)");
+        rtDeferredCompute(dev, pm, mRtUberLayout, 0u, litDebugSpec(false), &mRtPreTracePipe,
+                          "mRtPreTracePipe (DeferRtPreTrace)");
         destroyShaderModuleDeferred(dev, pm, nullptr);
         // (#860) RT MIRRORS: pass 12 -DCLEAN_RT_MIRROR on the pre-trace's sets + set 4 (the mirror
         // image, one storage binding: its own pool, rewritten with the target behind ensureMirror's
@@ -49837,8 +50567,8 @@ void LLCleanRendererVK::initDeferSplit()
         mli.setLayoutCount = 5; mli.pSetLayouts = msl;
         VK_CHECK(vkdCreatePipelineLayout(dev, &mli, &mRtMirrorLayout, "mRtMirrorLayout"));
         VkShaderModule mm = moduleFromSpv(dev, kWorldDeferRtMirrorSpv, kWorldDeferRtMirrorSpv_bytes, "kWorldDeferRtMirrorSpv");
-        createComputePipelineInto(dev, mm, mRtMirrorLayout, 0u, litDebugSpec(false), &mRtMirrorPipe,
-                                  "mRtMirrorPipe (DeferRtMirror)");
+        rtDeferredCompute(dev, mm, mRtMirrorLayout, 0u, litDebugSpec(false), &mRtMirrorPipe,
+                          "mRtMirrorPipe (DeferRtMirror)");
         destroyShaderModuleDeferred(dev, mm, nullptr);
         writeRtMirrorDescriptor();   // (an RT target that already exists: the fresh set names it)
     }
@@ -50878,6 +51608,7 @@ void LLCleanRendererVK::rtHangBeaconDecide(uint32_t rw, uint32_t rh, double now)
             PipelineJobOpts o;
             o.what = "RT hang beacon";
             o.gate = false;   // (optional: never holds the login screen)
+            o.prio = VKPIPE_PRIO_DEFERRED;   // (#1029: never ahead of the kernels they stand in for)
             mRtBcJob.start(pipelineBatchFlushAsync(dev, o));
         }
         LL_INFOS("Vulkan") << "RT hang beacon (#1128): " << kRtBcKernels << " beacon kernels compiling in the background "
@@ -52192,6 +52923,7 @@ void LLCleanRendererVK::gpuTimersBegin(VkCommandBuffer cmd)
             // projector-shadow A/B tag (state at log time): technique + shadowed projectors
             << " projshadow=" << (mProjMode == 2u ? "rt" : (mProjMode == 1u ? "map" : "off"))
             << " proj_n=" << mProjActive
+            << " rezfx_wire=" << (mRezFxWire ? 1 : 0)
             << " | worst=" << mTsWorst[0] << " (compute=" << mTsWorst[1] << " pass1=" << mTsWorst[2]
             << " pass2=" << mTsWorst[3] << " probe=" << mTsWorst[8] << ")"
             << overdrawStatsText()   // empty unless RenderVKOverdrawStats
@@ -52994,6 +53726,7 @@ bool LLCleanRendererVK::buildOverdrawPipes()
 {
     VkMemScope memcat(VKMEM_READBACK);   // #407
     if (mOdPipesBuilt) return true;
+    if (!mRezFxStage.empty()) return false;
     if ((!mOdAtomicOk && !mOdQueryOk) || !mDrawLayout || !mOdCounter.buffer) return false;
     VkDevice dev = mCtx->device();
     for (GpuBuffer& rb : mOdRb)
@@ -53562,14 +54295,14 @@ uint32_t LLCleanRendererVK::clusterCullMain(VkCommandBuffer cmd, const VKCullPus
     using namespace LLClusterFmt;
     LLClusterViewIn v;
     v.flags = CLV_MAIN | CLV_REQUESTS;
+    if (mOrthoView || mOrtho) v.flags |= CLV_ORTHO;   // orthographic view / region map: px_scale is px per metre (GunMetal-DX port)
+    // The avatars render type (Develop > Render Types, the region map capture) also covers the
+    // avatars on the cluster path: the legacy cull's bit 4 never reaches them (GunMetal-DX port).
+    if (!gPipeline.hasRenderType(LLPipeline::RENDER_TYPE_AVATAR)) v.flags |= CLV_NO_RIGGED;
+    if (mSnapMatte) v.flags |= CLV_AVATARS_ONLY;   // avatar matte snapshot (as the legacy cull's kCullAvatarsOnly)
     // Mouselook: our own avatar stays admitted (shadows, captures, RT) and only the main view
     // hides it (clean_cluster_select.comp / clean_cluster_pick.comp, CLI_SELF).
     if (mHideSelf) v.flags |= CLV_HIDE_SELF;
-    // <GMDX> The avatars render type (Develop > Render Types, the region map capture) also covers
-    // the avatars on the cluster path: the legacy cull's bit 4 never reaches them.
-    if (!gPipeline.hasRenderType(LLPipeline::RENDER_TYPE_AVATAR)) v.flags |= CLV_NO_RIGGED;
-    if (mOrtho || mOrthoView) v.flags |= CLV_ORTHO;   // <GMDX> region map capture / orthographic view: px_scale is px per metre
-    if (mSnapMatte) v.flags |= CLV_AVATARS_ONLY;      // <GMDX> avatar matte snapshot (as the legacy cull's kCullAvatarsOnly)
     v.role = CLROLE_MAIN;
     std::memcpy(v.view_proj, dp.view_proj, sizeof(v.view_proj));
     std::memcpy(v.planes, push.frustum_planes, sizeof(v.planes));
@@ -53581,7 +54314,9 @@ uint32_t LLCleanRendererVK::clusterCullMain(VkCommandBuffer cmd, const VKCullPus
     v.tol_px = 1.f;                        // (#749: the core fills it from the controller)
     v.viewport_px[0] = (float)rw;
     v.viewport_px[1] = (float)rh;
-    return mCluster->recordCull(cmd, v);
+    // Region maps retain their orthographic selection and requests, but stay excluded from
+    // the main RT/lift view. Live ortho cameras (mOrthoView without mOrtho) participate.
+    return mCluster->recordCull(cmd, v, !mOrtho);
 #else
     (void)cmd; (void)push; (void)dp; (void)rw; (void)rh;
     return LLClusterFmt::kNone;

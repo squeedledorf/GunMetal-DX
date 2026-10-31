@@ -172,6 +172,31 @@ bool probeCapture() { return pc.u_sun_color.w > 0.5 && pc.u_sun_color.w < 1.5; }
 bool mirrorPass() { return pc.u_sun_color.w > 1.5; }
 #endif
 
+vec3 captureParallelDirection()
+{
+    const vec3 x=vec3(pc.u_view_proj[0].x,pc.u_view_proj[1].x,pc.u_view_proj[2].x);
+    const vec3 y=vec3(pc.u_view_proj[0].y,pc.u_view_proj[1].y,pc.u_view_proj[2].y);
+    const vec3 z=vec3(pc.u_view_proj[0].z,pc.u_view_proj[1].z,pc.u_view_proj[2].z);
+    vec3 direction=normalize(cross(x,y));
+    return dot(direction,z)>0.0 ? -direction : direction;
+}
+vec3 mainReceiverEye(vec3 P, vec3 eye)
+{
+    if(cmOn() && mirrorPass() && linfo.cam_fwd.w>0.5)
+    {
+        const vec3 forward=captureParallelDirection();
+        return P-forward*dot(P-eye,forward);
+    }
+    return (!probeCapture() && !mirrorPass()) ? CL_VIEW_EYE(linfo, P, eye) : eye;
+}
+
+vec3 mainViewDirection(vec3 P, vec3 eye)
+{
+    if(cmOn() && mirrorPass() && linfo.cam_fwd.w>0.5) return -captureParallelDirection();
+    return (!probeCapture() && !mirrorPass() && linfo.cam_fwd.w > 0.5)
+        ? -linfo.cam_fwd.xyz : normalize(eye - P);
+}
+
 // ---- LIT-PASS COST SWITCHES (RenderVKLitDebugMask -> ssr.lit_dbg.x; live A/B with the
 // GPU timers). Each bit drops or reduces one fragment-shading term of the world lit FS so
 // its share of g_lit_static (and the alpha / water passes, which share this code) can be
@@ -297,9 +322,9 @@ layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer Fwd
 uint mainClusterProject(vec3 P)
 {
     vec4 v = linfo.view * vec4(P, 1.0);        // -Z forward
-    float z = CL_VIEW_Z(linfo, max(-v.z, 1e-3));   // <GMDX>
-    float sx = (v.x / z) / max(linfo.grid.z, 1e-4);   // [-1,1] across the view
-    float sy = (v.y / z) / max(linfo.grid.w, 1e-4);
+    float z = max(-v.z, 1e-3);
+    float sx = (v.x / CL_VIEW_Z(linfo, z)) / max(linfo.grid.z, 1e-4);   // [-1,1] across the view
+    float sy = (v.y / CL_VIEW_Z(linfo, z)) / max(linfo.grid.w, 1e-4);
     uint cx = uint(clamp((sx * 0.5 + 0.5) * float(GX), 0.0, float(GX) - 1.0));
     uint cy = uint(clamp((0.5 - sy * 0.5) * float(GY), 0.0, float(GY) - 1.0));   // top-down tiles
     float vz = -v.z;
@@ -616,6 +641,7 @@ uint rtReceiverRays()
     return (v_flags & 2u) != 0u ? 1u : 16u;
 #endif
 }
+#define RT_SHADOW_ORTHO (!probeCapture() && !mirrorPass() && rtViewOrtho())
 #include "clean_shadow_rt.glsl"
 // GEOMETRIC normal for the ray origin (clean_rt_common.glsl offsetRayOrigin): the
 // fragment's TRIANGLE plane, cross(dFdx(P), dFdy(P)) -- exact within a primitive
@@ -649,7 +675,7 @@ void rtSelfBegin(vec3 P)
     rt_self_owner = (v_flags & 1u) != 0u ? RT_SELF_UNKNOWN : 0u;   // instance flags bit 0: rigged
 #endif
     rt_self_P = P;
-    rt_self_cam = pc.u_cam_time.xyz;
+    rt_self_cam = mainReceiverEye(P, pc.u_cam_time.xyz);
 }
 // TRANSPARENT RECEIVERS (alpha-blend, v_flags bit 1) within this distance (m;
 // RenderVKRTTransReceiverAlphaDist, frame info lit_dbg.w bits [16,24); 0 = never) keep
@@ -678,6 +704,7 @@ vec2 projNoisePx()
 vec3 projShadowRay(Light L, ProjShadow s, vec3 P, vec3 N)
 {
     rtSelfBegin(P);
+    const vec3 cam = mainReceiverEye(P, pc.u_cam_time.xyz);
 #ifdef CLEAN_NO_TANGENT_IN
     vec3 Ng = N;                               // particles: the billboard normal
 #else
@@ -692,7 +719,6 @@ vec3 projShadowRay(Light L, ProjShadow s, vec3 P, vec3 N)
     // in this projector's band (Ng on the visible side) the Hanika origin lift from the
     // triangle's vertex normals. One probe per fragment, shared with the sun and the
     // other projectors (rtTerminatorCached).
-    const vec3 cam = pc.u_cam_time.xyz;
     const float ngl = dot(Ng, normalize(L.proj_origin.xyz - P)) * (dot(Ng, cam - P) < 0.0 ? -1.0 : 1.0);
     if (rtTerminatorOn() && rtTerminatorBand(ngl))
     {
@@ -700,7 +726,7 @@ vec3 projShadowRay(Light L, ProjShadow s, vec3 P, vec3 N)
         rt_term_on = rtTerminatorCached(P, cam, Ng, RT_TERM_FACE_COS, rtTermTriPx(), rt_term_lift, rt_term_ns, tng);
     }
 #endif
-    const vec3 v = projShadowRayCore(L, s, P, Ng, pc.u_cam_time.xyz, pc.u_cam_time.w, projNoisePx(), rtReceiverRays());
+    const vec3 v = projShadowRayCore(L, s, P, Ng, cam, pc.u_cam_time.w, projNoisePx(), rtReceiverRays());
     rt_term_on = false;
     return v;
 }
@@ -941,6 +967,9 @@ vec3 localLight(uint li, vec3 P, vec3 N, vec3 V, bool pbr, vec3 base, vec3 diffu
         // (#869 SPLIT: the hook takes the light -- a split light gets its own visibility, the others
         // the rest's ratio; clean_pdn_common.glsl SPLIT CHANNEL)
         const bool pst = CLEAN_PROJ_STOCH_ON() && CLEAN_RS_STOCH(li, P);
+        // (RenderVKReSTIRRadiance, CLEAN_PROJ_STOCH_RAD) RADIANCE MODE: pass 15's denoised radiance carries
+        // this light's whole term (projDirectTerms' point branch is all of it) -- skipped here
+        if (pst && CLEAN_PROJ_STOCH_RAD()) return vec3(0.0);
         vec3 pvd = vec3(1.0), pvs = vec3(1.0);
         if (pst) CLEAN_PROJ_STOCH_VIS(li, P, N, pvd, pvs);
 #else
@@ -1001,6 +1030,13 @@ vec3 localLight(uint li, vec3 P, vec3 N, vec3 V, bool pbr, vec3 base, vec3 diffu
     // (#869 ReSTIR DI) + a projector without a ray-traced record in pass 15's extended light set
     const bool stochExt = CLEAN_PROJ_STOCH_ON() && !projStochEligible(L) && CLEAN_RS_STOCH(li, P);
     const bool stoch = (CLEAN_PROJ_STOCH_ON() && projStochEligible(L)) || stochExt;
+    // (RenderVKReSTIRRadiance, CLEAN_PROJ_STOCH_RAD) RADIANCE MODE: pass 15's denoised radiance carries this
+    // projector's shadowed terms (direct diffuse + specular; with RenderVKProjAmbianceShadowedMode the PBR
+    // ambiance too) and the visibility hook gives the rest 0 -- so with the shadowed ambiance nothing is left
+    // here (the legacy back-face ambiance and the legacy image reflection took a visibility this mode has no
+    // value for: left out) and the light is skipped before its gobo fetch. Without it the walk goes on for the
+    // UNSHADOWED ambiance alone (ambVis 1), every visibility-weighted term x 0.
+    if (stoch && CLEAN_PROJ_STOCH_RAD() && projAmbShadowed()) return vec3(0.0);
 #else
     const bool stoch = false;
     const bool stochExt = false;
@@ -2131,6 +2167,7 @@ float shadowTap(int c, vec3 P, vec3 N)
 vec3 sunShadowRayRGB(vec3 P, vec3 N, vec3 L)
 {
     rtSelfBegin(P);
+    const vec3 cam = mainReceiverEye(P, pc.u_cam_time.xyz);
     // Transparent receivers trace opaque-only (see sunShadowRayCore); within
     // RenderVKRTTransReceiverAlphaDist they keep the cut-outs' alpha test.
 #ifdef CLEAN_NO_TANGENT_IN
@@ -2149,15 +2186,15 @@ vec3 sunShadowRayRGB(vec3 P, vec3 N, vec3 L)
     // smooth-shaded facet can self-shadow, the Hanika origin lift from the triangle's
     // vertex normals (the camera probe finds the RT copy of this very triangle).
     // Band as the mask's (-0.5 < Ng.L < 0.2, Ng on the visible side).
-    const float ngl = dot(Ng, L) * (dot(Ng, pc.u_cam_time.xyz - P) < 0.0 ? -1.0 : 1.0);
+    const float ngl = dot(Ng, L) * (dot(Ng, cam - P) < 0.0 ? -1.0 : 1.0);
     if (rtTerminatorOn() && rtTerminatorBand(ngl))
     {
         vec3 tng;
-        rt_term_on = rtTerminatorCached(P, pc.u_cam_time.xyz, Ng, RT_TERM_FACE_COS, rtTermTriPx(), rt_term_lift, rt_term_ns, tng);
+        rt_term_on = rtTerminatorCached(P, cam, Ng, RT_TERM_FACE_COS, rtTermTriPx(), rt_term_lift, rt_term_ns, tng);
     }
 #endif
 #endif
-    const vec3 v = sunShadowRayCore(P, Ng, L, pc.u_cam_time.xyz, pc.u_cam_time.w, projNoisePx(), opaque_only, rtReceiverRays());
+    const vec3 v = sunShadowRayCore(P, Ng, L, cam, pc.u_cam_time.w, projNoisePx(), opaque_only, rtReceiverRays());
     rt_opaque_cutouts = false;
     rt_term_on = false;
     return v;

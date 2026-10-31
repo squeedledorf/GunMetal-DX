@@ -28,6 +28,7 @@
 #include "lltool.h"
 #include "llframetimer.h"
 #include "llquaternion.h"
+#include "llfloater.h"
 
 // Third-person shooter camera.
 //
@@ -37,10 +38,10 @@
 // turns toward the direction it is walking. Left click sends the mouselook
 // "ML_LBUTTON" control to scripts, right click / Esc releases the mouse (with
 // SlipstreamTPSRightDragSteers a right press keeps it: a drag steers, a still click
-// releases it and opens the context menu).
+// only releases it; the next distinct right click can open a context menu).
 //
-// Camera math lives in LLAgentCamera (tpsCameraActive / getTPSRotation); this
-// class owns input capture, engagement state and movement.
+// LLAgentCamera supplies the shared orbit rotation. TPS owns framing, limits,
+// input capture, engagement state and movement for both camera choices.
 class SLTPSCamera final : public LLSingleton<SLTPSCamera>
 {
     LLSINGLETON(SLTPSCamera);
@@ -53,6 +54,18 @@ public:
         DISENGAGE_MODE_CHANGE,  // sit, teleport, appearance, build, follow cam, ...: hand the camera back to LL
         DISENGAGE_MOUSELOOK,    // mouselook takes over: keep the cursor hidden
     };
+
+    enum EFraming { BEHIND_AVATAR = 0, OVER_SHOULDER = 1 };
+    static bool isShoulderMode();                 // persisted TPS framing, even while released
+    static bool isShoulderActive();               // framing currently owns the render camera
+    static bool isADSReturning();                 // temporary mouselook dive from TPS
+    static LLVector3 constrainPosition(const LLVector3& position);
+    LLVector3 getShoulderPosition();
+    LLVector3 getShoulderFocus() const;
+    void zoomShoulder(F32 meters);
+    void scrollShoulder(F32 notches);
+    bool swapShoulder();
+    bool returnFromADS(bool animate);
 
     static bool isEnabled();                     // SlipstreamTPSCamera setting
     static bool isEngagedNow();                  // safe to call before the singleton exists
@@ -70,13 +83,19 @@ public:
     // at-axis (the crosshair); body yaw stays the avatar's real heading (it turns
     // to the aim while shooting, see setLeftButton). Called from send_agent_update.
     static void applyAimToAgentUpdate(LLQuaternion& body_rotation, LLQuaternion& head_rotation);
+    // Reconcile the owned fire button at every packet snapshot, including forced
+    // sends between frames. Returns true while a held control needs updates.
+    static bool applyFireToAgentUpdate(U32& control_flags);
+    static void fireAgentUpdateSent(U32 control_flags);
 
     bool isEngaged() const { return mEngaged; }
+    bool isInputSuspended() const { return mInputSuspended; }
     bool canEngage() const;
     bool engage();
     void disengage(EDisengageReason reason);
     void requestEngage() { mPendingEngage = true; } // engaged on the next update()
     void toggleEngaged();                        // keybinding
+    bool suspendForPreferences();
 
     // Per frame, from LLAppViewer::idle before send_agent_update().
     void update();
@@ -96,18 +115,40 @@ public:
 
 private:
     bool canStayEngaged() const;
+    bool canUseCamera() const;
+    bool parkedPreviewValid() const;
     void updateMouse();
     void updateMovement();
     void resetMoveInput();
+    void queueFireEdge(U32 flags);
+    void cancelFire();
     void onSettingChanged(const LLSD& new_value);
 
+    F32 mCollisionDistance = -1.f;
     bool mEngaged = false;
+    bool mInputSuspended = false;
+    bool mPreviewParked = false;
+    LLHandle<LLFloater> mPreviewFloater;
+    LLVector3d mPreviewFocus;
+    LLVector3d mPreviewOffset;
+    F32 mPreviewYaw = 0.f;
+    F32 mPreviewPitch = 0.f;
     bool mPendingEngage = false;
     bool mLeftDown = false;
+    U32 mLeftControlDown = 0; // script control families selected on press
+    struct FireEdge { U32 flags = 0; U64 serial = 0; };
+    static constexpr U32 kFireQueueCapacity = 64;
+    FireEdge mFireEdges[kFireQueueCapacity];
+    U32 mFireHead = 0, mFireCount = 0;
+    U32 mWireFireDown = 0, mFireOwnedDown = 0;
+    U64 mNextFireEdge = 0, mPackedFireEdge = 0;
+    bool mDeferredNativeDown = false, mDeferredNativeUp = false;
+    U32 mPackedNativeEdge = 0;
     bool mLeftFacesAim = false;
     bool mRightHeld = false;
     S32  mRightTravelX = 0;
     S32  mRightTravelY = 0;
+    F64  mRightDownTime = 0.0; // a quick right click releases the camera however far the mouse moved
 
     S32  mInputAt = 0;
     S32  mInputLeft = 0;
@@ -115,6 +156,7 @@ private:
 
     LLFrameTimer mHintTimer;
     boost::signals2::scoped_connection mSettingConnection;
+    boost::signals2::scoped_connection mFramingConnection;
 };
 
 // Mouse captor while the TPS camera is engaged. Not part of any toolset: it

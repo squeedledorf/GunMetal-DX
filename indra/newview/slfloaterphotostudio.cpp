@@ -55,6 +55,7 @@
 #include "lltextbox.h"
 #include "lltimer.h"
 #include "lltoolmgr.h"
+#include "llfloaterpopout.h"
 #include "llviewercontrol.h"
 #include "pipeline.h"
 #include "rlvactions.h"
@@ -842,6 +843,9 @@ void SLFloaterPhotoStudio::refreshBypassTitle()
 
 void SLFloaterPhotoStudio::pickWhiteBalance()
 {
+    // Picking belongs to main's world view. Native events never route through
+    // LLToolMgr; the next click in main supplies the scene coordinates.
+    LLFloaterPopout::showWorldView();
     SLToolScenePicker* picker = SLToolScenePicker::getInstance();
 
     // A handle, not `this`: the tool stays armed until something is clicked,

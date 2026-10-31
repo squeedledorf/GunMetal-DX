@@ -422,7 +422,7 @@ void LLCleanClusterStreamVK::resetResidency(const char* why)
     for (uint32_t s = mPoolPages; s-- > 0;) mFreeSlots.push_back(s);
     mUsedSlots = 0;
     mRootsPendingSlots = 0;
-    mResidentPages = mResidentRoots = mLiveMeshes = 0;
+    mResidentPages = mResidentRoots = mActiveMeshCount = 0;
     mTableWrites.clear();
     mMeshWrites.clear();
     mGroupWrites.clear();
@@ -1227,7 +1227,7 @@ void LLCleanClusterStreamVK::unregister(uint32_t idx, bool keep_entry)
         m.generation = m.generation + 1 ? m.generation + 1 : 1;
         writeMeshRecord(idx, false);
     }
-    if (m.state == MS::Live && mLiveMeshes) --mLiveMeshes;
+    if (m.state == MS::Live && mActiveMeshCount) --mActiveMeshCount;
     m.pages.clear();
     m.pages.shrink_to_fit();
     m.roots_resident = 0;
@@ -1791,7 +1791,7 @@ void LLCleanClusterStreamVK::advanceMeshes(const LLClusterFrameIn& in)
                 if (m.state == MS::Free) break;
                 m.state = MS::Live;
                 m.state_time = mNow;
-                ++mLiveMeshes;
+                ++mActiveMeshCount;
                 // TIME TO DRAWABLE (2026-10-14): first acquire -> Live (roots resident), once per
                 // directory entry (a re-registration after a rebuild is not a first draw).
                 if (!m.ttfd_done && m.first_time > 0.0)
@@ -2774,7 +2774,7 @@ void LLCleanClusterStreamVK::statsLine(std::string& out) const
          + " + roots " + std::to_string(mWsRoots) + " + slack, pool want " + std::to_string(mPoolWant)
          + (mShrinkTo ? ", SHRINKING to " + std::to_string(mShrinkTo) : std::string()) + ", shrinks " + std::to_string(mShrinks)
          + (mShrinkBlocked ? ", root-capped by " + std::to_string(mShrinkBlocked) : std::string())
-         + ", cold trimmed " + std::to_string(mDemandEvicts) + ") meshes " + std::to_string(mLiveMeshes) + " live / "
+         + ", cold trimmed " + std::to_string(mDemandEvicts) + ") meshes " + std::to_string(mActiveMeshCount) + " live / "
          + std::to_string(mByKey.size()) + " known (" + std::to_string(mPending) + " pending)"
          // #798: the live meshes by the creator LOD their DAG was built from (3 = high; a rigged
          // mesh on a lower one has its creator seams unwelded -- RenderVKClusterRiggedSourceLOD),

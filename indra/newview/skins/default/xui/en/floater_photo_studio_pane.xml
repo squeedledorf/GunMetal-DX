@@ -3,7 +3,7 @@
      (panel_photo_studio_slot.xml) is created in C++ and fills "pane_body".
      Closing the window puts the panel back in Photo Studio. The title follows
      the panel's section. -->
-<floater
+<floater can_pop_out="true"
  width="440"
  height="520"
  min_width="424"

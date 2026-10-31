@@ -56,12 +56,17 @@ set(llwindow_LINK_LIBRARIES
 
 list(APPEND viewer_SOURCE_FILES
      llsdl.cpp
+
      llkeyboardsdl.cpp
+     llnativewindow.cpp
      llwindowsdl.cpp
      )
 list(APPEND viewer_HEADER_FILES
      llsdl.h
+
      llkeyboardsdl.h
+     llnativewindow.h
+     llnativewindowgeometry.h
      llwindowsdl.h
      )
 

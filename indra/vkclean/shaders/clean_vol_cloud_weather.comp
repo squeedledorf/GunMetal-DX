@@ -3,10 +3,10 @@
 #extension GL_EXT_nonuniform_qualifier : require
 // vkclean -- VOLUMETRIC CLOUDS (#719): the 2D WEATHER MAP, from the region's EEP sky.
 //
-// One texel per 1/512 of the weather tile (periodic: the clouds module samples it with a
-// REPEAT sampler at world xy / tile, tile = 24 km x EEP cloud scale x RenderVKVolCloudScale).
-// Rebuilt every frame (512^2 texels, a few bilinear fetches each: ~0.02 ms) so the EEP scroll
-// (wind) and the day-cycle blend of two noise textures arrive continuously.
+// RGB retains the periodic EEP detail tile; A is a camera-window world field.
+// Both are rebuilt in the same fixed 512^2 dispatch and sampled with separate UVs.
+// Large-scale coverage uses world fBm/domain warp and a rotated EEP sample;
+// repeating this local-detail tile no longer repeats the complete cloud field.
 //
 // The coverage is the 2D dome's own (clean_clouds.glsl cloudsF, LL's alpha1) on the same
 // inputs, so a region's sky keeps its character -- where the dome showed cloud, the shell
@@ -19,22 +19,57 @@
 // Cloud type (stratus 0 .. towering cumulus 1): heavier where the coverage is dense, varied by
 // a second noise channel and the EEP cloud variance. Local density: the detail layer, plus
 // overcast skies thickening.
-// Writes r = coverage, g = type, b = local density, a = 1.
+// Writes r = local coverage, g = type, b = local density, a = world coverage.
 layout(local_size_x = 8, local_size_y = 8) in;
 
 #include "clean_frame_info.glsl"
 #include "clean_atmos_common.glsl"
 layout(set = 1, binding = 0) uniform sampler2D uTextures[];   // bindless (the EEP cloud noise)
+#define VC_SET 2
+#define VC_BINDING 1
+#include "clean_vol_cloud_ubo.glsl"
 layout(set = 2, binding = 0, rgba8) uniform writeonly image2D uWeather;
 
-vec4 wxNoise(vec2 uv)
+vec4 wxNoise(vec2 uv,float lod)
 {
     const int ia = int(ssr.clouds[3].x), ib = int(ssr.clouds[3].y);
     if (ia < 0) return vec4(0.5);
-    const vec4 a = textureLod(uTextures[nonuniformEXT(uint(ia))], uv, 0.0);
+    const vec4 a = textureLod(uTextures[nonuniformEXT(uint(ia))], uv, lod);
     if (ib == ia || ib < 0 || ssr.clouds[2].w <= 0.0) return a;
-    const vec4 b = textureLod(uTextures[nonuniformEXT(uint(ib))], uv, 0.0);
+    const vec4 b = textureLod(uTextures[nonuniformEXT(uint(ib))], uv, lod);
     return mix(a, b, ssr.clouds[2].w);
+}
+
+uint wxHash(ivec2 cell)
+{
+    uint h=uint(cell.x)*1597334677u+uint(cell.y)*3812015801u;
+    h=(h^(h>>16u))*2246822519u;
+    h=(h^(h>>13u))*3266489917u;
+    return h^(h>>16u);
+}
+float wxValue(vec2 p)
+{
+    const ivec2 cell=ivec2(floor(p));
+    const vec2 f=fract(p),w=f*f*(3.0-2.0*f);
+    return mix(mix(float(wxHash(cell)),float(wxHash(cell+ivec2(1,0))),w.x),
+               mix(float(wxHash(cell+ivec2(0,1))),float(wxHash(cell+ivec2(1,1))),w.x),w.y)*(1.0/4294967295.0);
+}
+float wxCoverage(vec2 u,vec2 size)
+{
+    const vec2 p=vc.weather_noise.xy+u*vc.weather_map.w*vc.weather_noise.z;
+    const vec2 warp=vec2(wxValue(p*.7+vec2(17.3,41.7)),wxValue(p*.7+vec2(-63.1,9.2)))-0.5;
+    const vec2 q=p+warp*.75;
+    const float fbm=(wxValue(q)+.5*wxValue(q*2.03+7.1)+.25*wxValue(q*4.13-13.7))/1.75;
+    const vec2 detail=u*(vc.weather_map.w*vc.shape0.y);
+    const vec2 rotated=mat2(.8,.6,-.6,.8)*(detail*1.41421356237)+vc.weather_eep.zw;
+    const int textureIndex=int(ssr.clouds[3].x);
+    const int blendIndex=int(ssr.clouds[3].y);
+    vec2 textureExtent=vec2(1.0);
+    if(textureIndex>=0) textureExtent=vec2(textureSize(uTextures[nonuniformEXT(uint(textureIndex))],0));
+    if(blendIndex>=0) textureExtent=max(textureExtent,vec2(textureSize(uTextures[nonuniformEXT(uint(blendIndex))],0)));
+    const float footprint=max(textureExtent.x,textureExtent.y)*vc.weather_map.w*vc.shape0.y*1.41421356237/min(size.x,size.y);
+    const float lod=max(log2(max(footprint,1.0)),0.0);
+    return clamp(.7*fbm+.3*wxNoise(rotated,lod).x,0.0,1.0);
 }
 
 void main()
@@ -51,13 +86,13 @@ void main()
     // adds to the region's -- the weather never thins a region's own sky.
     const float coverage_eep = max(ssr.atmos[2].w, ssr.weather[11].z);
 
-    const vec4 n1 = wxNoise(u + fract(pd1.xy));
-    const vec4 n2 = wxNoise(u * 16.0 + fract(pd2.xy));
+    const vec4 n1 = wxNoise(u + fract(pd1.xy),0.0);
+    const vec4 n2 = wxNoise(u * 16.0 + fract(pd2.xy),0.0);
     const float cloud_density = 2.0 * (coverage_eep - 0.25);
     const float raw = (n1.x - 0.5) + (n2.x - 0.5) * pd2.z + cloud_density;
     const float cov = clamp(raw * 3.0 * max(pd1.z, 0.05), 0.0, 1.0);
     const float type = clamp(0.15 + 0.75 * smoothstep(0.2, 1.0, cov) * (0.6 + 0.4 * n1.y)
                              + 0.3 * variance * (n2.y - 0.3), 0.0, 1.0);
     const float dens = clamp(0.55 + 0.45 * n2.x + 0.3 * max(coverage_eep - 0.5, 0.0), 0.0, 1.0);
-    imageStore(uWeather, px, vec4(sqrt(cov), type, dens, 1.0));
+    imageStore(uWeather, px, vec4(sqrt(cov), type, dens, wxCoverage(u,vec2(sz))));
 }

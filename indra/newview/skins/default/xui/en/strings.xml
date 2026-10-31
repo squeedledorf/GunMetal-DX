@@ -332,6 +332,8 @@ If you feel this is an error, please contact support@secondlife.com</string>
 	<string name="BUTTON_TEAR_OFF">Tear Off</string>
 	<string name="BUTTON_DOCK">Dock</string>
 	<string name="BUTTON_HELP">Show Help</string>
+	<string name="BUTTON_POPOUT">Pop Out into a Window</string>
+	<string name="BUTTON_POPOUT_DOCK">Dock Back into Viewer</string>
 
 	<!-- ToolTips for notecards -->
 	<string name="TooltipNotecardNotAllowedTypeDrop">
@@ -438,6 +440,8 @@ http://secondlife.com/support for help fixing this problem.
 	<!-- llvoavatar. Displayed in the avatar chat bubble -->
 	<string name="WorldFrozen">World Frozen  ([KEY] to resume)</string>
 	<string name="WorldFrozenNoKey">World Frozen</string>
+	<string name="PreparingShaders">Preparing shaders...</string>
+	<string name="PreparingShadersCount">Preparing shaders... [DONE] of [TOTAL]</string>
 	<string name="AvatarEditingAppearance">(Editing Appearance)</string>
 	<string name="AvatarAway">Away</string>
 	<string name="AvatarDoNotDisturb">Do Not Disturb</string>
@@ -571,7 +575,7 @@ http://secondlife.com/support for help fixing this problem.
 	<string name="ForceSitAvatar">Force your avatar to sit</string>
 	<string name="ChangeEnvSettings">Change your environment settings</string>
     <string name="PrivilegedLandAccess">Sell land on your behalf.</string>
-    <string name="UseGameControlInputs">Use gamepad inputs.</string>
+	<string name="UseGameControlInputs">Use gamepad inputs.</string>
 	
 	<string name="NotConnected">Not Connected</string>
 	<string name="AgentNameSubst">(You)</string> <!-- Substitution for agent name -->
@@ -2468,10 +2472,8 @@ Source: [RATE] Hz, [CHANNELS]</string>
 	<string name="SoundSplitNoCap">This region does not support sound uploads.</string>
 	<string name="SoundSplitDisconnected">Disconnected from the grid.</string>
 	<string name="SoundSplitUnknownReason">The upload failed.</string>
-	<!-- <GMDX> <OTS> sound -> notecard upload -->
 	<string name="SoundNotecardSplitInfo">[FILES] file(s) are longer than 30 seconds and will be split into consecutive clips of up to [SECONDS] s.</string>
 	<string name="SoundNotecardSkippedInfo">[SKIPPED] selected file(s) could not be read as sounds and will be skipped.</string>
-	<!-- </GMDX> -->
 
 	<string name="Open landmarks">Open landmarks</string>
   <string name="Unconstrained">Unconstrained</string>
@@ -4327,6 +4329,9 @@ name="Command_360_Capture_Label">360 snapshot</string>
   <string name="Command_Gestures_Label">Gestures</string>
   <string name="Command_AO_Label">AO</string>
   <string name="Command_FavoriteWearables_Label">Favorite wearables</string>
+  <string name="Command_AreaSearch_Label">Area search</string>
+  <string name="Command_Radar_Label">Radar</string>
+  <string name="Command_GroupTitles_Label">Group Titles</string>
   <string name="Command_Weather_Label">Weather</string>
   <string name="Command_Grid_Status_Label">Grid status</string>
   <string name="Command_HowTo_Label">Guidebook</string>
@@ -4365,8 +4370,7 @@ name="Command_360_Capture_Label">360 snapshot</string>
   <string name="Command_360_Capture_Tooltip">Capture a 360 equirectangular image</string>
   <string name="Command_AboutLand_Tooltip">Information about the land you're visiting</string>
   <string name="Command_Appearance_Tooltip">Change your avatar</string>
-  <string name="Command_GMDXLoadouts_Tooltip">Swap weapons and loadouts (L)</string> <!-- <GMDX> -->
-  <string name="GMDXPinnedItem">Pinned</string> <!-- <GMDX> toolbar pins: label of an inventory item pinned on a toolbar -->
+  <string name="Command_GMDXLoadouts_Tooltip">Swap weapons and loadouts (L; with combat features on)</string> <!-- <GMDX> -->
   <string name="Command_Avatar_Tooltip">Choose a complete avatar</string>
   <string name="Command_Build_Tooltip">Building objects and reshaping terrain</string>
   <string name="Command_Chat_Tooltip">Chat with people nearby using text</string>
@@ -4378,6 +4382,9 @@ name="Command_360_Capture_Label">360 snapshot</string>
   <string name="Command_Gestures_Tooltip">Gestures for your avatar</string>
   <string name="Command_AO_Tooltip">Animation overrider: replace your avatar's stand, walk, sit and other animations (lit while on)</string>
   <string name="Command_FavoriteWearables_Tooltip">Favorite wearables: your own short list of clothing, body parts and attachments to wear in one click</string>
+  <string name="Command_AreaSearch_Tooltip">Area search: find and list the objects around you</string>
+  <string name="Command_Radar_Tooltip">Radar: the people near you</string>
+  <string name="Command_GroupTitles_Tooltip">Group titles: wear any title from any of your groups</string>
   <string name="Command_Weather_Tooltip">Weather: rain or snow, wind, wet surfaces</string>
   <string name="Command_Grid_Status_Tooltip">Show current Grid status</string>
   <string name="Command_HowTo_Tooltip">How to do common tasks</string>
@@ -4958,4 +4965,5 @@ Sections not recognised (skipped): [SECTIONS]</string>
   <string name="GLTFExportFailWrite">the file could not be written ([ERROR]).</string>
   <string name="GLTFExportNoteReduced">These textures were only delivered below full resolution: [TEXTURES]</string>
   <string name="GLTFExportNoteEmbedded">The side files could not be written next to it, so textures and geometry are embedded in the .gltf.</string>
+  <string name="GMDXPinnedItem">Pinned</string> <!-- <GMDX> toolbar pins: label of an inventory item pinned on a toolbar -->
 </strings>

@@ -38,7 +38,7 @@
 		Atalho:
 	</text>
 	<combo_box label="Nenhum" name="modifier_combo" width="68"/>
-	<combo_box label="Nenhum" name="key_combo" width="48"/>
+	<combo_box label="Nenhum" name="key_combo" width="58"/>
 	<text name="library_label">
 		Biblioteca:
 	</text>

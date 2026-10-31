@@ -5,20 +5,33 @@
 // normalized beam visibility -- clean_godrays.comp's denoiser output).
 // Changing anything here changes the RT shadow mask: keep its output bit-identical.
 
+#ifdef DENOISE_TIME_HISTORY
+#include "clean_history_time.glsl"
+#define DN_NEW_LENGTH(prev, cap) htAdvance(prev, cap)
+#define DN_BLEND(len) htAlpha(1.0 / max(len, 1.0))
+#define DN_FIRST_LENGTH(cap) min(htStep(), cap)
+#define DN_NO_HISTORY(len) (len <= 0.0)
+#else
+#define DN_NEW_LENGTH(prev, cap) min(prev + 1.0, cap)
+#define DN_BLEND(len) (1.0 / len)
+#define DN_FIRST_LENGTH(cap) 1.0
+#define DN_NO_HISTORY(len) (len < 0.5)
+#endif
+
 // Clamp to [lo, hi] + adaptive blend. len_prev: frames already accumulated (0 = no
 // history); cap: this texel's longest history (historyCap).
 vec3 accumulate(vec3 raw, vec3 lo, vec3 hi, vec3 hist, float len_prev, float cap, out float len_new)
 {
-    len_new = 1.0;
-    if (len_prev < 0.5) return raw;
+    len_new = DN_FIRST_LENGTH(cap);
+    if (DN_NO_HISTORY(len_prev)) return raw;
     const vec3 hc = clamp(hist, lo, hi);
     const vec3 dv = abs(hc - hist);
     const float diff = max(max(dv.r, dv.g), dv.b);
-    len_new = min(len_prev + 1.0, cap);
+    len_new = DN_NEW_LENGTH(len_prev, cap);
     // ANTI-LAG: the more the clamp had to move the history, the shorter it gets, so the
     // following frames converge on the new state instead of crawling there.
     if (diff > 0.02) len_new = min(len_new, mix(8.0, 1.0, clamp((diff - 0.02) * 4.0, 0.0, 1.0)));
-    return mix(hc, raw, 1.0 / len_new);
+    return mix(hc, raw, DN_BLEND(len_new));
 }
 
 float lum3(vec3 v) { return dot(v, vec3(1.0 / 3.0)); }
@@ -29,16 +42,16 @@ float lum3(vec3 v) { return dot(v, vec3(1.0 / 3.0)); }
 vec3 accumulateLum(vec3 raw, float lo, float hi, vec3 hist, float len_prev, float cap,
                    out float len_new, out float cut)
 {
-    len_new = 1.0;
+    len_new = DN_FIRST_LENGTH(cap);
     cut = 0.0;
-    if (len_prev < 0.5) return raw;
+    if (DN_NO_HISTORY(len_prev)) return raw;
     const float hl = lum3(hist);
     const float d = clamp(hl, lo, hi) - hl;
     const vec3 hc = clamp(hist + d, vec3(0.0), vec3(1.0));
     cut = abs(d);
-    len_new = min(len_prev + 1.0, cap);
+    len_new = DN_NEW_LENGTH(len_prev, cap);
     if (cut > 0.02) len_new = min(len_new, mix(8.0, 1.0, clamp((cut - 0.02) * 4.0, 0.0, 1.0)));
-    return mix(hc, raw, 1.0 / len_new);
+    return mix(hc, raw, DN_BLEND(len_new));
 }
 
 // MOVING-CASTER CHANGE DETECTOR: 0 = nothing beyond the noise, 1 = the signal moved here.

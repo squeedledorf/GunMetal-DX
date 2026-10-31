@@ -1459,7 +1459,8 @@ void LLViewerFetchedTexture::scheduleCreateTexture()
 void LLViewerFetchedTexture::setKnownDrawSize(S32 width, S32 height)
 {
     LL_PROFILE_ZONE_SCOPED_CATEGORY_TEXTURE;
-    // OCOL (Mirror): icons and thumbnails are scaled to this size after decoding, and GL only takes
+    // Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4 (their OCOL note): icons and
+    // thumbnails are scaled to this size after decoding, and a texture is only created at
     // power-of-two sizes, so a size like 80 (64 px at 125% UI) would fail to create the texture
     width = (S32)get_next_power_two((U32)width, MAX_IMAGE_SIZE_DEFAULT);
     height = (S32)get_next_power_two((U32)height, MAX_IMAGE_SIZE_DEFAULT);
@@ -2530,9 +2531,10 @@ S32 LLViewerFetchedTexture::getCurrentDiscardLevelForFetching()
         }
     }
 
-    // OCOL (Mirror): icons and thumbnails are scaled down to their known draw size when decoded, so "discard 0"
-    // can be a 32 px copy made for a list icon. When a bigger control (the 64 px group notice insignia) later
-    // raises the known size, count that copy as one level short so the image is fetched again at the new size.
+    // Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4: icons and thumbnails are
+    // scaled down to their known draw size when decoded, so "discard 0" can be a 32 px copy made
+    // for a list icon. When a bigger control (the 64 px group notice insignia) later raises the
+    // known size, count that copy as one level short so the image is fetched again at the new size.
     if (current_discard >= 0
         && (mBoostLevel == LLGLTexture::BOOST_ICON || mBoostLevel == LLGLTexture::BOOST_THUMBNAIL))
     {

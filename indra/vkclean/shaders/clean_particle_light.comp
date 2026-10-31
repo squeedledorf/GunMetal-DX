@@ -66,11 +66,12 @@ layout(std430, set = 2, binding = 10) buffer PartCover { uint pcover[]; };
 // WindLight haze then the far distance fade. Affine in lin with a scalar slope.
 vec3 partHaze(vec3 lin, vec3 P, vec3 cam)
 {
+    if(cmOn()) return lin; // per-eye transport belongs to the fragment, never this cache
     if (waterFogged(P)) return applyWaterFog(lin, P - cam, cam.z - waterHeight());
     vec3 additive, atten;   // (#816: one scatter of the ray for the haze and the fade)
     atmosScatterHaze(P - cam, additive, atten);
     lin = atmosApplyRay(lin, additive, atten);
-    return atmosDistanceFade(lin, P, cam, linfo.cam_fwd.xyz, linfo.zinfo.y, additive, atten);
+    return atmosDistanceFade(lin, P, cam, linfo.cam_fwd, linfo.zinfo.y, additive, atten);
 }
 
 void main()
@@ -98,7 +99,7 @@ void main()
     if ((p.misc.x & 0x100u) == 0u)   // not EMISSIVE (fullbright needs no light)
     {
         const vec3 N   = -fwd;
-        const vec3 V   = normalize(cam - P);
+        const vec3 V   = linfo.cam_fwd.w > 0.5 ? -linfo.cam_fwd.xyz : normalize(cam - P);
         const vec3 L   = atmosLightDir();
         vec3 sunlit, amblit, additive, atten;
         atmosLightTerms(P - cam, N, sunlit, amblit, additive, atten);
@@ -157,7 +158,7 @@ void main()
 
     // Near fade + coverage (billboards; ribbons keep 1 and are not counted).
     const float vz = dot(P - cam, fwd);
-    // tan(fovy / 2) (mainClusterProject); <GMDX> orthographic: the half height over the depth
+    // tan(fovy / 2) (mainClusterProject); orthographic: the half height over the depth
     const float tanH = linfo.cam_fwd.w > 0.5 ? linfo.grid.w / max(vz, 1e-3) : linfo.grid.w;
     float fade = 1.0;
     const bool ribbon = (p.misc.x & F_RIBBON) != 0u;

@@ -15,6 +15,7 @@ layout(set = 1, binding = 0) uniform sampler2D uTextures[];   // bindless (cloud
 
 layout(location = 0) in vec2 v_ndc;
 layout(location = 1) noperspective in vec4 v_eye_p;   // (#1075 stereo: this view's eye-relative point, clean_sky.vert)
+layout(location = 2) noperspective in vec4 v_ortho_water;
 
 layout(location = 0) out vec4 outColor;
 
@@ -258,6 +259,7 @@ vec3 meteorColor(vec3 d)
 void main()
 {
     vec3 dir = vec3(1.0, 0.0, 0.0);
+    float ray_origin_z = pc.u_cam.z;
     if (pc.u_cam.w > 0.5)
     {
         // #555: the main / mirror views push a CAMERA-RELATIVE inverse (w = 2), so no eye
@@ -265,12 +267,36 @@ void main()
         // planes from the eye) and subtracting a km-sized eye cost 2-7 px of direction at
         // Z 3000-8000 -- stars jumping from frame to frame.
         vec4 p = pc.u_inv_view_proj * vec4(v_ndc, 0.5, 1.0);
-        dir = normalize(p.xyz / p.w - (pc.u_cam.w > 1.5 ? vec3(0.0) : pc.u_cam.xyz));
+        vec3 eye_rel = p.xyz / p.w - (pc.u_cam.w > 1.5 ? vec3(0.0) : pc.u_cam.xyz);
+        dir = normalize(eye_rel);
+        // Map captures push a real orthographic inverse (the live camera keeps its
+        // perspective sky). Avoid inventing a curved sky from point-minus-eye rays.
+        if (pc.u_inv_view_proj[2].w == 0.0)
+        {
+            dir = normalize(-pc.u_inv_view_proj[2].xyz);
+        }
         // #1075 STEREO: each view's own ray from its eye (the push's inverse is the head's).
-        if (kViewCount > 1) dir = normalize(v_eye_p.xyz / v_eye_p.w);
+        if (kViewCount > 1)
+        {
+            dir = normalize(v_eye_p.xyz / v_eye_p.w);
+            const mat4 V = ssr.views[CLEAN_VIEW].cur_view;
+            ray_origin_z = (-(transpose(mat3(V)) * V[3].xyz)).z;
+        }
+    }
+    vec3 water_dir = dir;
+    if (dot(v_ortho_water.xyz, v_ortho_water.xyz) > 0.5)
+    {
+        water_dir = normalize(v_ortho_water.xyz);
+        ray_origin_z += v_ortho_water.w;
     }
     // LL's sky gbuffer order: haze + rainbow/halo, then the sun, moon and stars, then
     // the cloud dome over them; then resolve to linear HDR.
+    if(cmOn())
+    {
+        g_cm_secondary_sky=pc.u_cam.w>2.5; // mirror: cached boundary, own finite prefix
+        if(g_cm_secondary_sky) g_cm_sky_origin=pc.u_cam.xyz;
+        else { g_cm_sky_prefix=true; vec3 ray; cmRay(v_ndc*0.5+0.5,CLEAN_VIEW,g_cm_sky_origin,ray); }
+    }
     vec3 c = skyResolve(cloudComposite(skyBodiesComposite(skySceneryPre(dir), dir), dir));
     // WEATHER (#783 M2, LLCleanWeatherVK; zeros without weather): cloud and rain darken the sky a
     // little (ssr.weather[9].w); a lightning flash brightens it, most toward the strike.
@@ -292,16 +318,20 @@ void main()
         if (ssr.sky_fx.x > 0.0) c += auroraColor(atmosToYUp(dir)) * atmosHdrScale();
         if (ssr.sky_fx.z > 0.5) c += meteorColor(dir) * atmosHdrScale();
     }
-    // <GMDX> Above the water, below the horizon: open sea to the horizon (horizonWater).
-    if (!camUnderwater() && pc.u_cam.w > 0.5 && pc.u_cam.z > waterHeight())
+    // Above the water, below the horizon: open sea to the horizon (clean_atmos_common.glsl
+    // horizonWater; ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4).
+    if (pc.u_cam.w > 0.5 && ray_origin_z > waterHeight())
     {
-        float w = horizonWaterAmount(dir);
-        if (w > 0.0) c = mix(c, horizonWater(dir, pc.u_cam.z - waterHeight()), w);
+        float w = horizonWaterAmount(water_dir);
+        if (w > 0.0) c = mix(c, horizonWater(water_dir, ray_origin_z - waterHeight()), w);
     }
     // Underwater: open-water directions with no geometry are water, not sky -- LL's
     // water-haze pass fogs these far pixels fully. (Upward directions are covered by
     // the water surface's underside draw.)
-    if (camUnderwater() && pc.u_cam.w > 0.5)
-        c = applyWaterFog(c, dir * 4096.0, pc.u_cam.z - waterHeight());
+    if (ray_origin_z < waterHeight() && pc.u_cam.w > 0.5)
+    {
+        const float waterDistance=cmOn() && water_dir.z>0.0 ? (waterHeight()-ray_origin_z)/water_dir.z : 4096.0;
+        c = applyWaterFog(c, water_dir * waterDistance, ray_origin_z - waterHeight());
+    }
     outColor = vec4(c, 1.0);
 }

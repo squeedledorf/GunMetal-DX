@@ -28,11 +28,18 @@
 // camera's default FOV without touching CameraAngle, so ADS does the same. The
 // vignette was a GL post-process (LLPipeline::renderVignette, exoVignetteF); here it
 // is a term in the Vulkan final pass (clean_final.frag).
+//
+// Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4. Slipstream: CombatFX
+// only (a right press never aims down sights and the vignette stays 0 with it off).
+// <GMDX> GunMetal-DX 0.3.0's tunables are settings again (FSADSSwapTransitionSpeed, FSADSDoubleTapTime,
+// FSADSZoomSensitivity, FSADSZoomTransitionSpeed, the per-view vignette and FSADSVignetteScaleWithZoom).
 
 #include "llviewerprecompiledheaders.h"
 
 #include "fscombatads.h"
+#include "slcombatfx.h"
 
+#include "gmdxots.h" // <GMDX> the over-the-shoulder aim camera
 #include "llagentcamera.h"
 #include "llcriticaldamp.h"
 #include "llframetimer.h"
@@ -43,6 +50,14 @@
 
 namespace
 {
+// <GMDX> The double-tap window (FSADSDoubleTapTime), as GunMetal-DX 0.3.0 read it.
+F32 double_tap_seconds()
+{
+    static LLCachedControl<F32> ads_window(gSavedSettings, "FSADSDoubleTapTime", 0.25f);
+    return (F32)ads_window;
+}
+
+bool    sCameraSwap = false;
 bool    sHeld = false;          // holding ADS
 bool    sEasing = false;        // the FOV is easing into or out of ADS
 bool    sFromOTS = false;       // entered from OTS: return there on release
@@ -58,22 +73,25 @@ F32     sProportion = 1.f;      // how far a release starts into the zoom (short
 F32     sVignette = 0.f;        // displayed vignette darkness
 U32     sVignetteFrame = 0;
 
-// The OTS <-> first person swap, at FSADSSwapTransitionSpeed (0 = a snap).
+// The OTS <-> first person swap, at FSADSSwapTransitionSpeed (0 = a snap). <GMDX> Both are mouselook
+// (gmdxots.h): a camera glide, no mode change.
 void swapCamera(bool to_first_person)
 {
-    static LLCachedControl<F32> swap_ms(gSavedSettings, "FSADSSwapTransitionSpeed", 150.f);
+    sCameraSwap = true;
+    static LLCachedControl<F32> swap_ms(gSavedSettings, "FSADSSwapTransitionSpeed", 150.f); // <GMDX>
     const F32 secs = llclamp((F32)swap_ms, 0.f, 2000.f) / 1000.f;
     const bool animate = secs > 0.f;
     gAgentCamera.setNextCameraAnimationDuration(animate ? secs : -1.f);
     if (to_first_person)
     {
-        gAgentCamera.changeCameraToMouselook(animate);
+        GMDXOTS::toFirstPerson(animate);
     }
-    else
+    else if (GMDXOTS::canUse())   // (not when sat on a seat without a sit camera meanwhile, or CombatFX went off)
     {
-        gAgentCamera.changeCameraToOTS(animate);
+        GMDXOTS::enter(animate);
     }
     gAgentCamera.setNextCameraAnimationDuration(-1.f); // unused if no animation started
+    sCameraSwap = false;
 }
 
 void startEase(F32 to_fov)
@@ -97,14 +115,18 @@ void stop()
 bool FSCombatADS::onRightMouseDown(F32 base_fov)
 {
     sDownTimer.reset();
+    if (!SLCombatFX::enabled())
+    {
+        sEasing = false;
+        return false;
+    }
 
     // The held second tap of two quick taps inside the window; the first press must
     // have been a tap, not a hold-zoom, so a hold-then-click or two spaced-out clicks
     // never fire ADS. With FSADSDefaultZoom every press aims down sights.
     static LLCachedControl<bool> ads_enable(gSavedSettings, "FSDoubleTapADS", true);
-    static LLCachedControl<F32> ads_window(gSavedSettings, "FSADSDoubleTapTime", 0.25f);
     static LLCachedControl<bool> ads_default(gSavedSettings, "FSADSDefaultZoom", false);
-    if (!ads_default && !(ads_enable && sLastTapQuick && sUpTimer.getElapsedTimeF32() < (F32)ads_window))
+    if (!ads_default && !(ads_enable && sLastTapQuick && sUpTimer.getElapsedTimeF32() < double_tap_seconds())) // <GMDX>
     {
         // A normal zoom; if it cuts into an ADS release, it takes the FOV from here
         // (the vignette still fades out on its own clock).
@@ -115,7 +137,7 @@ bool FSCombatADS::onRightMouseDown(F32 base_fov)
 
     // From OTS, ADS dives into first person and comes back out on release; in first
     // person it only zooms.
-    sFromOTS = gAgentCamera.cameraOTS();
+    sFromOTS = GMDXOTS::active();
     if (sFromOTS)
     {
         swapCamera(true);
@@ -133,8 +155,7 @@ bool FSCombatADS::onRightMouseDown(F32 base_fov)
 // static
 bool FSCombatADS::onRightMouseUp()
 {
-    static LLCachedControl<F32> ads_window(gSavedSettings, "FSADSDoubleTapTime", 0.25f);
-    sLastTapQuick = sDownTimer.getElapsedTimeF32() < (F32)ads_window;
+    sLastTapQuick = sDownTimer.getElapsedTimeF32() < double_tap_seconds(); // <GMDX>
     sUpTimer.reset();
 
     if (!sHeld)
@@ -161,7 +182,7 @@ bool FSCombatADS::onScrollWheel(S32 clicks)
     {
         return false;
     }
-    static LLCachedControl<F32> ads_sens(gSavedSettings, "FSADSZoomSensitivity", 0.1f);
+    static LLCachedControl<F32> ads_sens(gSavedSettings, "FSADSZoomSensitivity", 0.1f); // <GMDX>
     LLViewerCamera* camera = LLViewerCamera::getInstance();
     const F32 fov = llclamp(camera->getDefaultFOV() + (F32)clicks * (F32)ads_sens,
                             camera->getMinView(), camera->getMaxView());
@@ -175,6 +196,11 @@ bool FSCombatADS::onScrollWheel(S32 clicks)
 // static
 void FSCombatADS::update()
 {
+    if (!SLCombatFX::enabled())
+    {
+        cancel();
+        return;
+    }
     if (!sEasing)
     {
         return;
@@ -187,7 +213,7 @@ void FSCombatADS::update()
     }
     // Milliseconds, 0 = instant; a release that starts part way into the zoom
     // finishes proportionally sooner.
-    static LLCachedControl<F32> ads_ms(gSavedSettings, "FSADSZoomTransitionSpeed", 100.f);
+    static LLCachedControl<F32> ads_ms(gSavedSettings, "FSADSZoomTransitionSpeed", 100.f); // <GMDX>
     const F32 duration = llclamp((F32)ads_ms, 0.f, 5000.f) / 1000.f;
     F32 effective = duration * sProportion;
     if (effective <= 0.f)
@@ -205,8 +231,23 @@ void FSCombatADS::update()
 // static
 void FSCombatADS::reset()
 {
-    stop();
+    if (!sCameraSwap) stop();
 }
+
+// static
+void FSCombatADS::cancel()
+{
+    if (sCameraSwap) return;
+    if (ownsFOV()) LLViewerCamera::getInstance()->loadDefaultFOV();
+    stop();
+    sVignette = 0.f;
+}
+
+// static
+bool FSCombatADS::isCameraSwap() { return sCameraSwap; }
+
+// static
+bool FSCombatADS::returnsToTPS() { return false; }   // <GMDX> the dive returns to the OTS camera, not TPS: first person head tracking runs in it, as in 0.3.0
 
 // static
 bool FSCombatADS::isHeld()
@@ -223,6 +264,7 @@ bool FSCombatADS::ownsFOV()
 // static
 F32 FSCombatADS::getVignetteAmount()
 {
+    if (!SLCombatFX::enabled()) return 0.f;
     // Safety net: the camera left the aim modes without the gun tool's deselect
     // (which normally restores the FOV and resets ADS). Put the base FOV back.
     if (ownsFOV() && !gAgentCamera.cameraMouselook())
@@ -230,18 +272,23 @@ F32 FSCombatADS::getVignetteAmount()
         LLViewerCamera::getInstance()->loadDefaultFOV();
         stop();
     }
+    if (!ownsFOV() && sVignette == 0.f)
+    {
+        return 0.f;   // Slipstream: nothing to ease (always so with CombatFX off)
+    }
 
     // Live darkness: while held or easing out, scaled by how far the FOV has gone
     // toward the ADS level, so it creeps in and fades out with the zoom.
     F32 live = 0.f;
     if (ownsFOV())
     {
+        // <GMDX> GunMetal-DX 0.3.0's per-view vignette switches and FSADSVignetteScaleWithZoom
         static LLCachedControl<bool> vig_fp(gSavedSettings, "FSADSVignetteFirstPerson", true);
         static LLCachedControl<bool> vig_ots(gSavedSettings, "FSADSVignetteOTS", true);
         // ADS from OTS is drawn in first person; it counts as OTS ADS here, so the OTS
         // toggle covers it. (SoapStorm tested the camera mode alone, so its OTS toggle
         // only reached the release fade.)
-        const bool ots = sFromOTS || gAgentCamera.cameraOTS();
+        const bool ots = sFromOTS || GMDXOTS::active();
         if (ots ? (bool)vig_ots : (bool)vig_fp)
         {
             // 0 at the base FOV, 1 at the ADS FOV. FSADSVignetteScaleWithZoom measures

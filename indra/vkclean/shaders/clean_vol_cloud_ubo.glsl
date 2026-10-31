@@ -6,7 +6,10 @@
 #ifndef VC_SET
 #define VC_SET 1
 #endif
-layout(std140, set = VC_SET, binding = 0) uniform VolCloudParams {
+#ifndef VC_BINDING
+#define VC_BINDING 0
+#endif
+layout(std140, set = VC_SET, binding = VC_BINDING) uniform VolCloudParams {
     vec4 shape0;   // x weather tile (m), y 1 / tile, z 1 / base noise period (m), w 1 / detail period (m)
     vec4 shape1;   // xy wind offset of the 3D noises (m), z extinction per m at density 1, w detail erosion
     vec4 shape2;   // x ambient scale, y max distance (m), z multi-scatter strength, w powder strength
@@ -22,5 +25,10 @@ layout(std140, set = VC_SET, binding = 0) uniform VolCloudParams {
     vec4 pat;      // x pattern (0 all, 1 checkerboard, 2 one per 2x2), y frame phase, z steps, w light steps
     vec4 temporal; // x max history (frames), y 1 = history reset, z clamp widening, w (unused)
     vec4 flash;    // #783 M2 lightning: xyz unit direction to the strike (world), w its radiance (0 = none)
+    vec4 bodies;   // sculpted cloud bodies (RenderVKCloudShapes; GunMetal-DX port): x shapes loaded
+                   // (0 = none), y their amount (0 = off), zw 0
+    vec4 weather_map;   // agent corner xy, inverse world extent, extent
+    vec4 weather_noise; // advected global corner / macro scale, inverse macro scale, reserved
+    vec4 weather_eep;   // global agent-origin tile phase xy, rotated world corner phase zw
 } vc;
 #endif

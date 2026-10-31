@@ -52,12 +52,6 @@ LLUIImage::LLUIImage(const std::string& name, LLPointer<LLTexture> image)
     getTextureHeight();
 }
 
-LLUIImage::~LLUIImage()
-{
-    delete mImageLoaded;
-    delete mVector;
-}
-
 // ---- #1056 vector icons ------------------------------------------------------------------
 
 namespace
@@ -113,6 +107,14 @@ struct LLUIImage::VectorData
     U32         mGeneration = 0;
     std::vector<Entry> mEntries;   // most recently used first
 };
+
+// Defined after VectorData is complete: deleting the incomplete type skipped its destructor
+// (leaked the cached entries and their textures) and is undefined behaviour.
+LLUIImage::~LLUIImage()
+{
+    delete mImageLoaded;
+    delete mVector;
+}
 
 bool LLUIImage::sClassicIcons = false;
 

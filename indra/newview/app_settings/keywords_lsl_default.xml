@@ -2182,6 +2182,87 @@
             <key>value</key>
             <string>5</string>
          </map>
+         <key>GAME_CONTROL_MODE_AVATAR</key>
+         <map>
+            <key>tooltip</key>
+            <string>Normal third-person avatar control.</string>
+            <key>type</key>
+            <string>integer</string>
+            <key>value</key>
+            <string>0</string>
+         </map>
+         <key>GAME_CONTROL_MODE_CAPTIVE</key>
+         <map>
+            <key>tooltip</key>
+            <string>Avatar is sitting, or controls have been taken.</string>
+            <key>type</key>
+            <string>integer</string>
+            <key>value</key>
+            <string>3</string>
+         </map>
+         <key>GAME_CONTROL_MODE_CURSOR</key>
+         <map>
+            <key>tooltip</key>
+            <string>The left stick drives the on-screen mouse cursor.</string>
+            <key>type</key>
+            <string>integer</string>
+            <key>value</key>
+            <string>4</string>
+         </map>
+         <key>GAME_CONTROL_MODE_FLYCAM</key>
+         <map>
+            <key>tooltip</key>
+            <string>Flycam (camera) control.</string>
+            <key>type</key>
+            <string>integer</string>
+            <key>value</key>
+            <string>2</string>
+         </map>
+         <key>GAME_CONTROL_MODE_MOUSELOOK</key>
+         <map>
+            <key>tooltip</key>
+            <string>Avatar is in mouselook.</string>
+            <key>type</key>
+            <string>integer</string>
+            <key>value</key>
+            <string>1</string>
+         </map>
+         <key>GAME_CONTROL_BUTTON_SOUTH</key>
+         <map>
+            <key>tooltip</key>
+            <string />
+            <key>type</key>
+            <string>integer</string>
+            <key>value</key>
+            <string>0x1</string>
+         </map>
+         <key>GAME_CONTROL_BUTTON_EAST</key>
+         <map>
+            <key>tooltip</key>
+            <string />
+            <key>type</key>
+            <string>integer</string>
+            <key>value</key>
+            <string>0x2</string>
+         </map>
+         <key>GAME_CONTROL_BUTTON_WEST</key>
+         <map>
+            <key>tooltip</key>
+            <string />
+            <key>type</key>
+            <string>integer</string>
+            <key>value</key>
+            <string>0x4</string>
+         </map>
+         <key>GAME_CONTROL_BUTTON_NORTH</key>
+         <map>
+            <key>tooltip</key>
+            <string />
+            <key>type</key>
+            <string>integer</string>
+            <key>value</key>
+            <string>0x8</string>
+         </map>
          <key>GAME_CONTROL_BUTTON_A</key>
          <map>
             <key>tooltip</key>
@@ -4500,6 +4581,15 @@
             <string>integer</string>
             <key>value</key>
             <string>0x2</string>
+         </map>
+         <key>PERMISSION_GAME_CONTROL</key>
+         <map>
+            <key>tooltip</key>
+            <string>Permission to receive game_control events (gamepad and keyboard input). Granted automatically to attached or sat-upon scripts.</string>
+            <key>type</key>
+            <string>integer</string>
+            <key>value</key>
+            <string>0x100000</string>
          </map>
          <key>PERMISSION_OVERRIDE_ANIMATIONS</key>
          <map>
@@ -9402,10 +9492,10 @@
                   </map>
                </map>
                <map>
-                  <key>buttons</key>
+                  <key>button_levels</key>
                   <map>
                      <key>tooltip</key>
-                     <string>32-bit mask of buttons pressed</string>
+                     <string>32-bit mask of buttons held down</string>
                      <key>type</key>
                      <string>integer</string>
                   </map>
@@ -12992,6 +13082,75 @@
             <real>0</real>
             <key>tooltip</key>
             <string>Returns the time in seconds since midnight GMT.\nGets the time in seconds since midnight in GMT/UTC.</string>
+         </map>
+         <key>llGetGameControlMode</key>
+         <map>
+            <key>arguments</key>
+            <array>
+               <map>
+                  <key>id</key>
+                  <map>
+                     <key>tooltip</key>
+                     <string>UUID of the avatar supplying input</string>
+                     <key>type</key>
+                     <string>key</string>
+                  </map>
+               </map>
+            </array>
+            <key>energy</key>
+            <real>10</real>
+            <key>return</key>
+            <string>integer</string>
+            <key>sleep</key>
+            <real>0</real>
+            <key>tooltip</key>
+            <string>Returns the game control mode (GAME_CONTROL_MODE_*) the viewer of id was in when the current game_control input was generated, or -1 if there is no game control data for id.\nThe script must have PERMISSION_GAME_CONTROL from the avatar.</string>
+         </map>
+         <key>llGetGameControlModeAxes</key>
+         <map>
+            <key>arguments</key>
+            <array>
+               <map>
+                  <key>id</key>
+                  <map>
+                     <key>tooltip</key>
+                     <string>UUID of the avatar supplying input</string>
+                     <key>type</key>
+                     <string>key</string>
+                  </map>
+               </map>
+            </array>
+            <key>energy</key>
+            <real>10</real>
+            <key>return</key>
+            <string>list</string>
+            <key>sleep</key>
+            <real>0</real>
+            <key>tooltip</key>
+            <string>Returns the semantic (mode dependent) axis values of id for the current game_control input, or an empty list if there is none.\nThe script must have PERMISSION_GAME_CONTROL from the avatar.</string>
+         </map>
+         <key>llGetGameControlModeButtons</key>
+         <map>
+            <key>arguments</key>
+            <array>
+               <map>
+                  <key>id</key>
+                  <map>
+                     <key>tooltip</key>
+                     <string>UUID of the avatar supplying input</string>
+                     <key>type</key>
+                     <string>key</string>
+                  </map>
+               </map>
+            </array>
+            <key>energy</key>
+            <real>10</real>
+            <key>return</key>
+            <string>integer</string>
+            <key>sleep</key>
+            <real>0</real>
+            <key>tooltip</key>
+            <string>Returns a bitfield of the actions the viewer derived from the held buttons of id for the current game_control input; the meaning of each bit depends on the mode (llGetGameControlMode). Returns 0 if there is none.\nThe script must have PERMISSION_GAME_CONTROL from the avatar.</string>
          </map>
          <key>llGetGeometricCenter</key>
          <map>

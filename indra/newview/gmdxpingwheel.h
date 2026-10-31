@@ -19,9 +19,12 @@
  * $/LicenseInfo$
  */
 
-// <GMDX> The ping wheel (keyboard action map_ping_wheel, default Shift+B). The spot is taken when the
+// Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4. Slipstream: CombatFX only, and no
+// default key (set one in Preferences > Combat > Pings or Controls).
+//
+// <GMDX> The ping wheel (keyboard action map_ping_wheel; GunMetal-DX default Shift+B). The spot is taken when the
 // key goes down (under the pointer, or the crosshair in mouselook / OTS: GMDXMapShare::pingTarget).
-// Let go before GMDXPingWheelHoldMs: a plain Ping there. Held longer: a wheel of Ping / Enemy / Rally
+// Let go within 250 ms: a plain Ping there. Held longer: a wheel of Ping / Enemy / Rally
 // opens, in the middle of the screen in mouselook (the mouse is freed for it, as Quick Swap does, and
 // taken back after) or at the pointer; moving the mouse toward a slice picks it, and letting go sends
 // that kind (in the middle: nothing). The key counts as let go when its own key-up comes, or when it
@@ -34,6 +37,6 @@
 class GMDXPingWheel
 {
 public:
-    static void onKey(const LLKeyPressState& state);   // map_ping_wheel (llviewerinput.cpp)
+    static bool onKey(EKeystate state);   // map_ping_wheel (llviewerinput.cpp); false: not taken (CombatFX off)
     static void draw();                                  // over the world (LLHUDView::draw)
 };

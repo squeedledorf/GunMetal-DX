@@ -103,6 +103,7 @@ LLSnapshotLivePreview::LLSnapshotLivePreview (const LLSnapshotLivePreview::Param
     setSnapshotQuality(gSavedSettings.getS32("SnapshotQuality"));
     mSnapshotDelayTimer.setTimerExpirySec(0.0f);
     mSnapshotDelayTimer.start();
+    mSelfTimer.stop();
     //  gIdleCallbacks.addFunction( &LLSnapshotLivePreview::onIdle, (void*)this );
     sList.insert(this);
     setFollowsAll();
@@ -216,6 +217,36 @@ void LLSnapshotLivePreview::updateSnapshot(bool new_snapshot, bool new_thumbnail
         mThumbnailUpToDate = false ;
         mBigThumbnailUpToDate = false;
     }
+}
+
+void LLSnapshotLivePreview::startSelfTimer(S32 seconds)
+{
+    if (seconds != 3 && seconds != 5 && seconds != 10)
+    {
+        return;
+    }
+    mForceUpdateSnapshot = false;
+    mSelfTimer.start();
+    mSelfTimer.resetWithExpiry(static_cast<F32>(seconds));
+    LL_INFOS("Snapshot") << "Self-timer started: " << seconds << " s" << LL_ENDL;
+}
+
+void LLSnapshotLivePreview::cancelSelfTimer()
+{
+    if (!isSelfTimerActive())
+    {
+        return;
+    }
+    mSelfTimer.stop();
+    mForceUpdateSnapshot = false;
+    mCameraPos = LLViewerCamera::getInstance()->getOrigin();
+    mCameraRot = LLViewerCamera::getInstance()->getQuaternion();
+    LL_INFOS("Snapshot") << "Self-timer cancelled" << LL_ENDL;
+}
+
+S32 LLSnapshotLivePreview::getSelfTimerRemaining() const
+{
+    return isSelfTimerActive() ? llmax(1, static_cast<S32>(ceilf(mSelfTimer.getTimeToExpireF32()))) : 0;
 }
 
 // Return true if the quality has been changed, false otherwise
@@ -687,13 +718,23 @@ LLViewerTexture* LLSnapshotLivePreview::getBigThumbnailImage()
 bool LLSnapshotLivePreview::onIdle( void* snapshot_preview )
 {
     LLSnapshotLivePreview* previewp = (LLSnapshotLivePreview*)snapshot_preview;
+    if (previewp->isDead()) return false;
+    bool self_timer_expired = false;
+    if (previewp->isSelfTimerActive())
+    {
+        if (!previewp->mSelfTimer.hasExpired())
+        {
+            return false;
+        }
+        self_timer_expired = true;
+    }
     if (previewp->getWidth() == 0 || previewp->getHeight() == 0)
     {
         LL_WARNS("Snapshot") << "Incorrect dimensions: " << previewp->getWidth() << "x" << previewp->getHeight() << LL_ENDL;
         return false;
     }
 
-    if (previewp->mSnapshotDelayTimer.getStarted()) // Wait for a snapshot delay timer
+    if (!self_timer_expired && previewp->mSnapshotDelayTimer.getStarted()) // Wait for a snapshot delay timer
     {
         if (!previewp->mSnapshotDelayTimer.hasExpired())
         {
@@ -708,6 +749,15 @@ bool LLSnapshotLivePreview::onIdle( void* snapshot_preview )
         return false;
     }
 
+    if (self_timer_expired)
+    {
+        previewp->mSelfTimer.stop();
+        previewp->mForceUpdateSnapshot = false;
+        LL_INFOS("Snapshot") << "Self-timer expired; capturing snapshot" << LL_ENDL;
+        previewp->updateSnapshot(true, true);
+        previewp->mSnapshotDelayTimer.stop();
+    }
+
     static LLCachedControl<bool> auto_snapshot(gSavedSettings, "AutoSnapshot", false);
     static LLCachedControl<bool> freeze_time(gSavedSettings, "FreezeTime", false);
     static LLCachedControl<bool> use_freeze_frame(gSavedSettings, "UseFreezeFrame", false);
@@ -719,10 +769,10 @@ bool LLSnapshotLivePreview::onIdle( void* snapshot_preview )
     // If we're in freeze-frame and/or auto update mode and camera has moved, update snapshot.
     LLVector3 new_camera_pos = LLViewerCamera::getInstance()->getOrigin();
     LLQuaternion new_camera_rot = LLViewerCamera::getInstance()->getQuaternion();
-    if (previewp->mForceUpdateSnapshot ||
+    if (!self_timer_expired && (previewp->mForceUpdateSnapshot ||
         (((auto_snapshot && LLView::isAvailable(previewp->mViewContainer)) ||
         (freeze_time && previewp->mAllowFullScreenPreview)) &&
-        (new_camera_pos != previewp->mCameraPos || dot(new_camera_rot, previewp->mCameraRot) < 0.995f)))
+        (new_camera_pos != previewp->mCameraPos || dot(new_camera_rot, previewp->mCameraRot) < 0.995f))))
     {
         previewp->mCameraPos = new_camera_pos;
         previewp->mCameraRot = new_camera_rot;
@@ -734,6 +784,12 @@ bool LLSnapshotLivePreview::onIdle( void* snapshot_preview )
             false, // or if 1st arg is false, whether to produce a new thumbnail image.
             new_snapshot ? AUTO_SNAPSHOT_TIME_DELAY : 0.f); // shutter delay if 1st arg is true.
         previewp->mForceUpdateSnapshot = false;
+    }
+
+    if (self_timer_expired)
+    {
+        previewp->mCameraPos = new_camera_pos;
+        previewp->mCameraRot = new_camera_rot;
     }
 
     if (previewp->getSnapshotUpToDate() && previewp->getThumbnailUpToDate())
@@ -819,6 +875,10 @@ bool LLSnapshotLivePreview::onIdle( void* snapshot_preview )
         previewp->mViewContainer->notify(LLSD().with("snapshot-updated", true));
     }
 
+    if (self_timer_expired && previewp->mViewContainer)
+    {
+        previewp->mViewContainer->notify(LLSD().with("self-timer-captured", previewp->getSnapshotUpToDate()));
+    }
     return true;
 }
 
@@ -1012,7 +1072,7 @@ LLPointer<LLImageFormatted> LLSnapshotLivePreview::getFormattedImage()
 
         // Create the new formatted image of the appropriate format.
         LLSnapshotModel::ESnapshotFormat format = getSnapshotFormat();
-        // <GMDX> the transparent avatar layer is RGBA: PNG keeps the alpha (JPEG / BMP cannot)
+        // the transparent avatar layer is RGBA: PNG keeps the alpha (JPEG / BMP cannot)
         if (mSnapshotBufferType == LLSnapshotModel::SNAPSHOT_TYPE_AVATAR_TRANSPARENT || mPreviewImage->getComponents() == 4)
             format = LLSnapshotModel::SNAPSHOT_FORMAT_PNG;
         LL_DEBUGS("Snapshot") << "Encoding new image of format " << format << LL_ENDL;

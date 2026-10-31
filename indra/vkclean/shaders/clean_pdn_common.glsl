@@ -47,6 +47,22 @@
 #ifndef CLEAN_PDN_COMMON_GLSL
 #define CLEAN_PDN_COMMON_GLSL
 
+// Invert the actual truncated render-pixel sample centres (including odd extents).
+vec2 pdnExactHc(vec2 q, vec2 r, vec2 hc0)
+{
+    vec2 hc;
+    for (int a = 0; a < 2; ++a)
+    {
+        float b = floor(hc0[a]);
+        float c0 = floor((b + 0.5) * r[a]) + 0.5;
+        float c1 = floor((b + 1.5) * r[a]) + 0.5;
+        if (q[a] < c0)       { b -= 1.0; c1 = c0; c0 = floor((b + 0.5) * r[a]) + 0.5; }
+        else if (q[a] >= c1) { b += 1.0; c0 = c1; c1 = floor((b + 1.5) * r[a]) + 0.5; }
+        hc[a] = b + clamp((q[a] - c0) / max(c1 - c0, 1e-3), 0.0, 1.0);
+    }
+    return hc;
+}
+
 // Demodulation floor: a black albedo / F0 divides by this (its signal is ~0 there anyway).
 #define PDN_DEMOD_MIN 0.02
 vec3 pdnDiffFactor(vec3 albedo) { return max(albedo, vec3(PDN_DEMOD_MIN)); }
@@ -83,6 +99,9 @@ vec3 pdnUnpackN(uint v)
 }
 float pdnUnpackR(uint v) { return float(v >> 24u) * (1.0 / 255.0); }
 
+// GEOM length bits are a rounded 60 Hz duration projection for producer compatibility.
+// Exact millisecond ages are in HIST's final age layers (clean_dn_common.glsl); they
+// alone feed temporal accumulation and spatial young-history rules.
 // ---- GEOM w: history lengths (6 bits each, 0..63 frames), the specular a-trous depth
 //      (3 bits: iterations the specular takes, 0..7) and W (fp16, high half) ----
 uint  pdnPackMeta(float lenD, float lenS, uint specIt, float W)
@@ -93,6 +112,8 @@ uint  pdnPackMeta(float lenD, float lenS, uint specIt, float W)
 }
 // bit 15 (the temporal pass): the texel's diffuse is CONVERGED under ReSTIR DI (#869 / #85: a reused
 // reservoir of high M and a long history) -- the a-trous gives it fewer iterations (DN_CONV_SHIFT)
+// Radiance mode disables convergence trimming and uses this bit for the current
+// moved-light tag instead (temporal reset on departure, no moving spatial feedback).
 bool  pdnMetaConv(uint w)   { return (w & 0x8000u) != 0u; }
 float pdnMetaLenD(uint w)   { return float(w & 63u); }
 float pdnMetaLenS(uint w)   { return float((w >> 6u) & 63u); }
@@ -167,13 +188,13 @@ void  pdnSunDecA(float a, out float r, out bool dyn)
     dyn = a < -1.5;
     r = a > -0.5 ? a : (dyn ? -a - 2.0 : -1.0);
 }
-uvec4 pdnPackSunHist(vec3 acc, float var, float len, uint cnt, float fm, float fm2, float r)
+uvec4 pdnPackSunHist(vec3 acc, float var, float len, float cnt, float fm, float fm2, float r)
 {
-    const float lc = clamp(floor(len + 0.5), 0.0, 63.0) + 64.0 * float(min(cnt, 7u));
+    const float lc = clamp(floor(len + 0.5), 0.0, 63.0) + 64.0 * floor(clamp(cnt, 0.0, 7.0) + 0.5);
     return uvec4(packHalf2x16(acc.rg), packHalf2x16(vec2(acc.b, clamp(var, 0.0, 60000.0))),
                  packHalf2x16(vec2(lc, clamp(fm, 0.0, 1.0))), packHalf2x16(vec2(clamp(r, -1.0, 60000.0), clamp(fm2, 0.0, 1.0))));
 }
-struct PdnSunHist { vec3 acc; float var; float len; uint cnt; float fm; float fm2; float r; };
+struct PdnSunHist { vec3 acc; float var; float len; float cnt; float fm; float fm2; float r; };
 PdnSunHist pdnUnpackSunHist(uvec4 h)
 {
     PdnSunHist o;
@@ -181,7 +202,7 @@ PdnSunHist pdnUnpackSunHist(uvec4 h)
     o.acc = vec3(a, b.x);
     o.var = b.y;
     const float lc = max(c.x, 0.0);
-    o.cnt = uint(floor(lc / 64.0));
+    o.cnt = floor(lc / 64.0);
     o.len = lc - 64.0 * float(o.cnt);
     o.fm = c.y;
     o.fm2 = d.y;
@@ -223,8 +244,11 @@ vec3 pdnSunVis(vec3 v) { return (any(isnan(v)) || any(isinf(v))) ? vec3(1.0) : c
 //     (pdnSplitRawPack: value x 32766, 0x7FFF = no information -- the light has no term here --,
 //     bit 15 = the light MOVED this frame: the moving-light history cap), then the temporal
 //     pass's HISTORY (pdnSplitHistPack: the accumulated visibility, 11 bits, + its length, 5 bits).
-//   GEOM layer 4 (the FINAL, written by the last a-trous iteration; parity-free, so the consumer
-//     needs no parity): x, y the ids, z, w the denoised visibilities (unorm16; pdnSplitFinalVal).
+//   GEOM layer 4: immutable current RAW snapshot during the temporal dispatch
+//     (host copy from 2 + parity), then FINAL written by the last a-trous iteration.
+//     FINAL is parity-free: x, y the ids, z, w denoised visibility (unorm16).
+//     Temporal reads RAW only here, writes HISTORY to 2 + parity, and reads old
+//     HISTORY at 2 + (parity ^ 1). No final consumer runs during the snapshot lifetime.
 //   IN / OUT the LAST layer (rgba16f): the slots' visibilities (temporal output, a-trous
 //     ping-pong; empty slots 1). The a-trous luminance stop's sigma is the Bernoulli bound
 //     sqrt(v (1 - v) / length) of the one-ray-per-frame estimate (no stored variance).

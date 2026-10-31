@@ -34,7 +34,7 @@ public:
     void destroy(VkDeviceContext& ctx);
 
     // Tear down and rebuild the swapchain (window resize / OUT_OF_DATE). Keeps
-    // the surface. Waits device-idle first.
+    // the surface. Main waits device-idle; auxiliary callers poll retired() first.
     bool recreate(VkDeviceContext& ctx, uint32_t width, uint32_t height);
 
     // RenderVSyncEnable. true: FIFO (vsync). false: MAILBOX (uncapped, no tearing)
@@ -44,6 +44,11 @@ public:
     // then IMMEDIATE, then FIFO), 1 = IMMEDIATE first (then MAILBOX, then FIFO). A
     // diagnostic: some Windows compositors pace MAILBOX unevenly. Read at (re)creation.
     static uint32_t sNoVsyncMode;
+
+    // Auxiliary UI windows have their own pacing and need only a color attachment.
+    // Set before init; never changes the main window's presentation policy.
+    void setUIOnly(bool presentFences = false) { mUIOnly = true; mAcquireTimeout = 0; mMaintenance = presentFences; }
+    bool failed() const { return mUIFailed; }
 
     // FRAME PACING: waits the current frame-in-flight slot's fence only (no reset, no
     // acquire), so the main loop can block at the TOP of its frame -- before input and
@@ -73,6 +78,14 @@ public:
     // #1074 VR only: acquire()'s timeout (default: none, as on the desktop). A timed-out
     // acquire returns false without a recreate: the mirror never blocks the headset.
     void setAcquireTimeout(uint64_t ns) { mAcquireTimeout = ns; }
+
+    // #1013: separate proof for GPU submissions, acquire and presentation.
+    // Poll only. Reset-but-never-submitted fences do not count as pending work.
+    bool retired(VkDevice device) const;
+    bool needsPresentDrain() const { return !mMaintenance && mPresentPending; }
+    void presentingQueueIdle() { mPresentPending = false; if (!mMaintenance) mUnresolvedPresent = false; }
+
+    void submitted() { if (mFrame < mSubmissionArmed.size()) mSubmissionArmed[mFrame] = true; }
 
     // ---- per-frame accessors (indexed by the current frame-in-flight slot) ----
     // imageAvailable + the in-flight fence are per-frame-in-flight: acquire signals
@@ -131,6 +144,7 @@ public:
 private:
     bool createSwapchainObjects(VkDeviceContext& ctx, uint32_t width,
                                 uint32_t height);
+    bool checkResult(VkResult result) const;
     void destroySwapchainObjects(VkDeviceContext& ctx);
 
     VkSurfaceKHR       mSurface   = VK_NULL_HANDLE; // owned by window layer
@@ -143,6 +157,8 @@ private:
     std::function<bool(std::vector<VkPresentModeKHR>&)> mPresentModeQuery;   // #919
     bool               mExclusiveLost = false;   // #919
     bool               mChainRejected = false;   // #919
+    bool               mUIOnly = false;
+    bool               mUIFailed = false;
     uint64_t           mAcquireTimeout = UINT64_MAX;   // #1074 (VR sets a short one)
 
     std::vector<VkImage>     mImages;
@@ -153,4 +169,12 @@ private:
     std::vector<VkSemaphore> mImageAvailable; // size == framesInFlight
     std::vector<VkSemaphore> mRenderFinished;
     std::vector<VkFence>     mInFlight;
+    std::vector<VkFence>     mAcquireFences;
+    std::vector<VkFence>     mPresentFences; // bounded pool; reuse only after the PE proof completes
+    std::vector<bool>        mAcquireArmed, mPresentArmed, mSubmissionArmed;
+    bool mMaintenance = false;
+    bool mPresentPending = false;
+    bool mUnresolvedPresent = false;
+    size_t mNextPresentFence = 0;
+
 };

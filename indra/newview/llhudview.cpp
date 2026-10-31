@@ -43,6 +43,7 @@
 #include "lluictrlfactory.h"
 #include "gmdxmapshare.h" // <GMDX> pings over the world
 #include "gmdxpingwheel.h" // <GMDX> the ping wheel
+#include "gmdxtpfx.h" // <GMDX> teleport effects
 
 LLHUDView *gHUDView = NULL;
 
@@ -62,12 +63,14 @@ void LLHUDView::draw()
     LLTracker::drawHUDArrow();
     GMDXMapShare::drawWorld();   // <GMDX>
     GMDXPingWheel::draw();       // <GMDX>
+    GMDXTPFX::draw();            // <GMDX> teleport effects: cover the world (and the above) while one plays
     LLView::draw();
 }
 
 /*virtual*/
 bool LLHUDView::handleMouseDown(S32 x, S32 y, MASK mask)
 {
+    if (GMDXTPFX::handleMouseDown(x, y)) return true; // <GMDX> the teleport hold's Cancel
     if (LLTracker::handleMouseDown(x, y))
     {
         return true;

@@ -111,6 +111,7 @@ public:
     // convergence and line-of-sight rays): up to kAux extra world-only rays per frame,
     // each drawn like the cursor ray after it and harvested when its slot comes round
     // (~2 frames late, never blocking). Entries kSlots + 1 + slot * kAux + k.
+    // Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
     static constexpr uint32_t kAux = LLVKWorldFrame::kAuxPicks;
     static constexpr uint32_t kEntries = kSlots + 1 + kSlots * kAux;
     void setAuxRequests(const LLVKPickRequest* reqs);
@@ -164,7 +165,7 @@ private:
     // picked from their clusters: the module's filter + draw. True = it runs for this request.
     bool clusterPickOn(const LLVKPickRequest& req);
     // per entry: the cluster pick ran (draw it, drop RC_CLUSTER). <GMDX> Sized for every entry,
-    // aux rays included (they index past kSlots and read/wrote out of bounds -> OTS crash).
+    // aux rays included (they index past kSlots).
     bool mClPick[kEntries] = {};
     // The select for req into the lists, its candidate counts into entry's header.
     bool recordSelectInto(VkCommandBuffer cmd, const LLVKPickRequest& req, uint32_t entry);

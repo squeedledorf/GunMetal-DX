@@ -2,14 +2,14 @@
 // when they appear (rez-in) and when they are removed (de-rez).
 //
 // An object in an effect carries instance flag bits 23..31 = its slot in the effect table + 1
-// (binding 45, rewritten by the CPU every frame while effects run), and bit 22 while it is
+// (draw set 0 binding 58, rewritten by the CPU every frame while effects run), and bit 22 while it is
 // DYING: a killed object drawn only for its de-rez -- the cull keeps it out of shadow views and
-// probe captures, ray tracing and the GPU pick skip it. Objects that start an effect on the
+// raster probe captures and the GPU pick skip it. RT geometry pops out when its retained rows are
+// released at the end; shadow-map casters leave at the start. Objects that start an effect on the
 // same frame share a slot.
 //
-// FAIRNESS (a combat viewer): rez-in effects never move a vertex, and never discard -- the
-// object is whole, solid and in place from its first frame; they only paint its surface. The one
-// exception is the HIDDEN MODE of the two build effects (3D printer, transporter): they may hide
+// Most rez-in effects paint the whole solid object. Fade-in uses coverage for solid surfaces;
+// the HIDDEN MODE of the two build effects (3D printer, transporter) may hide
 // what is not built yet, which is their real look. Their objects take a slot from the upper half
 // of the table (slot >= 256: instance bit 31, REZFX_HIDE_POOL), which the main view's cull routes
 // into the mask buckets, so the depth pre-pass runs the same cut (rezfxHidden). On damage-enabled
@@ -39,6 +39,7 @@
 #define REZFX_VOXEL        4u
 #define REZFX_PRINTER      5u
 #define REZFX_TRANSPORTER  6u
+#define REZFX_FADE_IN      7u
 #define REZFX_EMBER        8u
 #define REZFX_DISINTEGRATE 9u
 #define REZFX_ASH         10u
@@ -46,6 +47,7 @@
 #define REZFX_IMPLODE     12u
 #define REZFX_TRON_OUT    13u
 #define REZFX_SHATTER     14u
+#define REZFX_FADE_OUT    15u
 #define REZFX_DEREZ_FIRST  8u
 
 // One table row (gmdxrezfx.h GMDXRezFx::Slot, 80 B).
@@ -65,7 +67,7 @@ struct RezFxSlot {
                       // the impact (toward the camera when it died)
     vec4  aux1;       // printer: that box's half extents (m), w the infill rows per layer
 };
-layout(std430, set = 0, binding = 56) readonly buffer RezFxTable { RezFxSlot rezfx_slots[]; };
+layout(std430, set = 0, binding = 58) readonly buffer RezFxTable { RezFxSlot rezfx_slots[]; };
 
 // The slot of an instance's flags (0 = none) and whether the table holds it.
 uint rezfxSlotOf(uint flags) { return flags >> REZFX_SLOT_SHIFT; }
@@ -235,6 +237,18 @@ float rzAshValue(vec3 lp, float sweep) { precise float r = 0.55 * sweep + 0.45 *
 float rzAshCut(float p) { precise float r = mix(-0.05, 1.05, p); return r; }
 
 #ifdef GMDX_REZFX_VS
+// Cluster draws need only the uniform fade's enable marker, independent of source / posed
+// coordinates. Keep other effects disabled there: their displacement and pattern inputs differ.
+void rezfxFadeOutputs(uint flags, out vec4 rez, out vec4 box)
+{
+    rez = vec4(0.0);
+    box = vec4(0.0);
+    const uint s = rezfxSlotOf(flags);
+    if (!rezfxSlotOk(s)) return;
+    const uint fx = rezfx_slots[s - 1u].effect;
+    if (fx == REZFX_FADE_IN || fx == REZFX_FADE_OUT) box.w = 1.0;
+}
+
 // ---- vertex side ----
 // The de-rez vertex effects, in object space (lpos: before the model matrix M; volumes live in
 // the unit cube). Every VS variant runs this on the same source lines, so the depth pre-pass
@@ -530,6 +544,19 @@ uint rzBayer(uvec2 c)
     return ((x & 1u) << 3) | ((c.y & 1u) << 2) | (x & 2u) | ((c.y & 2u) >> 1);
 }
 
+// Blend faces keep their material alpha; solid faces use the same opacity as coverage.
+// Captures stay whole so a cached probe does not retain a partial object.
+float rezfxFadeOpacity(uint flags)
+{
+    if (v_rez_box.w < 0.5) return 1.0;
+    const uint s = rezfxSlotOf(flags);
+    if (!rezfxSlotOk(s) || rzCapture()) return 1.0;
+    const RezFxSlot z = rezfx_slots[s - 1u];
+    if (z.effect == REZFX_FADE_IN) return clamp(z.progress, 0.0, 1.0);
+    if (z.effect == REZFX_FADE_OUT) return 1.0 - clamp(z.progress, 0.0, 1.0);
+    return 1.0;
+}
+
 // 3D PRINTER. The object prints in discrete layers, bottom up: the slot's layer count (wind.y,
 // from the build's height on the CPU: 5 to 16) and infill rows per layer (aux1.w: 3 to 6, or 4).
 // In each layer the nozzle zig-zags across the footprint row by row, the rows turning 90 degrees
@@ -703,6 +730,17 @@ bool rezfxBack(uint flags)
 void rezfxDiscard(uint flags)
 {
     if (rezfxSlotOf(flags) == 0u || v_rez_box.w < 0.5) return;
+    if ((flags & 2u) == 0u)
+    {
+        // 64 ordered coverage levels, identical in the depth and lit passes.
+        const float opacity = rezfxFadeOpacity(flags);
+        if (opacity < 1.0)
+        {
+            const uvec2 pixel = uvec2(gl_FragCoord.xy);
+            const float threshold = (float(4u * rzBayer(pixel) + rzBayer(pixel >> 2u) / 4u) + 0.5) / 64.0;
+            if (opacity <= threshold) discard;
+        }
+    }
     if ((flags & REZFX_DYING) == 0u)
     {
         if (rezfxHidden(flags, false)) discard;
@@ -940,7 +978,7 @@ float rezfxPaint(uint flags, vec3 P, vec3 N, out vec3 col, out float mixk, out v
         const vec3 lines = 0.5 + 0.5 * cos(vec3(ph + 0.9, ph, ph - 0.9));   // r / g / b a little apart
         const float fl = 0.8 + 0.2 * step(0.35, rzHash13(vec3(floor(t * 18.0), 3.0, 7.0)));
         const float sweep = 1.0 - smoothstep(0.0, 0.05, abs(fract(t * 0.8) - h));
-        const vec3 V = normalize(pc.u_cam_time.xyz - P);
+        const vec3 V = mainViewDirection(P, pc.u_cam_time.xyz);
         const float rim = pow(1.0 - clamp(abs(dot(normalize(N), V)), 0.0, 1.0), 2.0);
         mixk = 0.75 * k;
         col = c * (0.25 + 0.75 * lines) * fl * (1.0 + 1.5 * sweep);
@@ -1005,7 +1043,7 @@ float rezfxPaint(uint flags, vec3 P, vec3 N, out vec3 col, out float mixk, out v
             // ray crosses the top of the layer being printed where it is laid at that point, else
             // the top of the layer below; that point is shaded as a flat top.
             const vec3 B = lp;
-            const vec3 dir = pc.u_cam_time.xyz - P;
+            const vec3 dir = mainReceiverEye(P, pc.u_cam_time.xyz) - P;
             float k = L;
             vec3 C = B;
             const bool above = dir.z > 1e-5;
@@ -1074,7 +1112,7 @@ float rezfxPaint(uint flags, vec3 P, vec3 N, out vec3 col, out float mixk, out v
         {
             // Not printed yet: the ghost, a cool tint of the glow colour, warm just above the line.
             const vec3 gc = mix(c, vec3(0.5, 0.72, 1.0), 0.65);
-            const vec3 V = normalize(pc.u_cam_time.xyz - P);
+            const vec3 V = mainViewDirection(P, pc.u_cam_time.xyz);
             const float rim = pow(1.0 - clamp(abs(dot(normalize(N), V)), 0.0, 1.0), 2.5);
             const float next = exp(-max(y - p * H, 0.0) / lh * 0.6);
             const float slice = (1.0 - smoothstep(0.0, 0.12, abs(fract(y / lh + 0.5) - 0.5))) * aa;
@@ -1110,7 +1148,7 @@ float rezfxPaint(uint flags, vec3 P, vec3 N, out vec3 col, out float mixk, out v
         const float band = rzTransBands(lp, h, H, t);
         const float spark = rzTransSpark(lp, h, H, p, t, cs) * pre;
         const float glint = rzTransGlint(floor(lp / cs), p, t) * pre;
-        const vec3 V = normalize(pc.u_cam_time.xyz - P);
+        const vec3 V = mainViewDirection(P, pc.u_cam_time.xyz);
         const float rim = pow(1.0 - clamp(abs(dot(normalize(N), V)), 0.0, 1.0), 2.0);
         const float fl = exp(-pow((p - RZ_TRANS_SOLID) / 0.035, 2.0));       // the flash
         const float ag = p > RZ_TRANS_SOLID ? 1.0 - smoothstep(RZ_TRANS_SOLID, 1.0, p) : 0.0;   // afterglow
@@ -1210,7 +1248,7 @@ float rezfxPaint(uint flags, vec3 P, vec3 N, out vec3 col, out float mixk, out v
         const float ringR = norm * p / RZ_RING_END;
         const float ringW = 0.03 * norm + 0.01;
         const float ring = p < RZ_RING_END ? exp(-pow((dimp - ringR) / ringW, 2.0)) * (1.0 - p / RZ_RING_END) : 0.0;
-        const vec3 V = normalize(pc.u_cam_time.xyz - P);
+        const vec3 V = mainViewDirection(P, pc.u_cam_time.xyz);
         const float rim = pow(1.0 - clamp(abs(dot(normalize(N), V)), 0.0, 1.0), 2.0);
         const float glass = max(0.45 * smoothstep(0.0, 2.0 * RZ_CRACK_END, p), 0.6 * loose);
         const float fade = 1.0 - 0.6 * loose * smoothstep(tc, 1.0, p);

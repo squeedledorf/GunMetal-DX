@@ -37,6 +37,7 @@
 #include "lldatapacker.h"
 #include "llfloaterreg.h"
 #include "llinventory.h"
+#include "llkeyboard.h"
 #include "llkeyframemotion.h"
 #include "llmultigesture.h"
 #include "llnotificationsutil.h"
@@ -58,6 +59,7 @@
 #include "slchatcommand.h"
 #include "llgamecontrol.h"
 #include "llviewercontrol.h"
+#include "llviewerinput.h"
 
 
 // [RLVa:KB] - Checked: RLVa-2.0.0
@@ -917,6 +919,122 @@ std::string LLGestureMgr::getKeyTriggerName(KEY key, MASK mask) const
 }
 
 
+// Mouse side button shortcuts (#1189): gesture item id -> { button: "MB4" | "MB5", mask }
+static const char* const MOUSE_TRIGGER_SETTING = "SlipstreamGestureMouseButtons";
+
+static EMouseClickType mouse_trigger_button(const LLSD& binding)
+{
+    EMouseClickType button = CLICK_NONE;
+    LLViewerInput::mouseFromString(binding["button"].asString(), &button);
+    return (button == CLICK_BUTTON4 || button == CLICK_BUTTON5) ? button : CLICK_NONE;
+}
+
+static MASK mouse_trigger_mask(const LLSD& binding)
+{
+    return (MASK)binding["mask"].asInteger() & MASK_NORMALKEYS;
+}
+
+EMouseClickType LLGestureMgr::getMouseTrigger(const LLUUID& item_id, MASK* mask) const
+{
+    const LLSD bindings = gSavedPerAccountSettings.getLLSD(MOUSE_TRIGGER_SETTING);
+    const LLSD& binding = bindings[item_id.asString()];
+    const EMouseClickType button = mouse_trigger_button(binding);
+    if (mask)
+    {
+        *mask = (button == CLICK_NONE) ? MASK_NONE : mouse_trigger_mask(binding);
+    }
+    return button;
+}
+
+std::string LLGestureMgr::getMouseTriggerLabel(const LLUUID& item_id) const
+{
+    MASK mask = MASK_NONE;
+    const EMouseClickType button = getMouseTrigger(item_id, &mask);
+    return (button == CLICK_NONE) ? std::string() : LLKeyboard::stringFromAccelerator(mask, button);
+}
+
+void LLGestureMgr::setMouseTrigger(const LLUUID& item_id, EMouseClickType button, MASK mask)
+{
+    mask &= MASK_NORMALKEYS;
+    MASK old_mask = MASK_NONE;
+    if (getMouseTrigger(item_id, &old_mask) == button && (button == CLICK_NONE || old_mask == mask))
+    {
+        return;
+    }
+
+    const LLSD bindings = gSavedPerAccountSettings.getLLSD(MOUSE_TRIGGER_SETTING);
+    LLSD kept = LLSD::emptyMap();
+    for (LLSD::map_const_iterator it = bindings.beginMap(); it != bindings.endMap(); ++it)
+    {
+        const bool same_trigger = button != CLICK_NONE
+            && mouse_trigger_button(it->second) == button && mouse_trigger_mask(it->second) == mask;
+        if (it->first != item_id.asString() && !same_trigger)
+        {
+            kept[it->first] = it->second;
+        }
+    }
+    if (button != CLICK_NONE)
+    {
+        LLSD binding;
+        binding["button"] = LLKeyboard::stringFromMouse(button, false);
+        binding["mask"] = (S32)mask;
+        kept[item_id.asString()] = binding;
+    }
+    gSavedPerAccountSettings.setLLSD(MOUSE_TRIGGER_SETTING, kept);
+
+    // the gesture lists show the shortcut
+    notifyObservers();
+}
+
+bool LLGestureMgr::triggerMouseGesture(EMouseClickType button, MASK mask)
+{
+    mask &= MASK_NORMALKEYS;
+    const LLSD bindings = gSavedPerAccountSettings.getLLSD(MOUSE_TRIGGER_SETTING);
+    for (LLSD::map_const_iterator it = bindings.beginMap(); it != bindings.endMap(); ++it)
+    {
+        if (mouse_trigger_button(it->second) != button || mouse_trigger_mask(it->second) != mask)
+        {
+            continue;
+        }
+        // one gesture per button+mask; it plays only while active and loaded
+        item_map_t::iterator active_it = mActive.find(LLUUID(it->first));
+        LLMultiGesture* gesture = (active_it != mActive.end()) ? active_it->second : nullptr;
+        if (!gesture)
+        {
+            return false;
+        }
+        // as with a key, a press while the gesture waits for the release doesn't restart it
+        if (!gesture->mWaitingKeyRelease)
+        {
+            playGesture(gesture, true);
+        }
+        return true;
+    }
+    return false;
+}
+
+bool LLGestureMgr::triggerMouseGestureRelease(EMouseClickType button)
+{
+    // any modifier: it may have been let go before the button
+    bool bound = false;
+    const LLSD bindings = gSavedPerAccountSettings.getLLSD(MOUSE_TRIGGER_SETTING);
+    for (LLSD::map_const_iterator it = bindings.beginMap(); it != bindings.endMap(); ++it)
+    {
+        if (mouse_trigger_button(it->second) != button)
+        {
+            continue;
+        }
+        item_map_t::iterator active_it = mActive.find(LLUUID(it->first));
+        if (active_it != mActive.end() && active_it->second)
+        {
+            active_it->second->mKeyReleased = true;
+            bound = true;
+        }
+    }
+    return bound;
+}
+
+
 // Linden's starter gestures: items named dance1..dance8, bound to a bare function key.
 // The library asset UUIDs are not in this repo (nothing references them), and accounts
 // get per-account inventory copies with their own item UUIDs, so the match is by item
@@ -1024,7 +1142,7 @@ bool LLGestureMgr::triggerGestureRelease(KEY key, MASK mask)
 
 
 // OCOL: per-account gesture -> controller button map
-static const std::string GESTURE_CONTROLLER_BUTTONS("OCOLGestureControllerButtons");
+static const std::string GESTURE_CONTROLLER_BUTTONS("SLGestureControllerButtons");
 
 S32 LLGestureMgr::getControllerButton(const LLUUID& item_id) const
 {

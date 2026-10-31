@@ -104,10 +104,12 @@ layout(push_constant) uniform AcPush
     uvec4 a;   // x the atlas's per-slot rows' first row, y flags (1 avatar snow on (the setting), 2 wetness on, 4 motion state, 8 skin meta bound,
                // 16 skinned vertices bound), z the update counter (the sampled corner), w the scratch slots in use
     vec4  b;   // xyz the palettes' eye (world), w the world's surface wetness 0..1 (the guess)
-    vec4  c;   // snow: x the world's depth (m), y the snowfall (m / s, while it falls), z the world's melt (m / s),
-               // w the melt under a roof (m / s; #903)
+    vec4  c;   // snow: x the world's depth (m: a first sample's guess), y the snowfall (m / s, while it falls; #1130
+               // the fresh snow landing, whatever drives the ground's level), z the world's melt (m / s), w the
+               // melt under a roof (m / s; #903)
     vec4  d;   // wetness: x the rain 0..1, y wetting (/ s at full rain, fully exposed), z drying (/ s), w the fall shear x
-    vec4  e;   // x the fall shear y, y / z the shed speeds (horizontal / vertical, m / s), w unused
+    vec4  e;   // x the fall shear y, y / z the shed speeds (horizontal / vertical, m / s), w #1130 the fill's cap (m,
+               // <= kAcSnowFull: the deepest snow the settings let lie; 0 with the snow coating off)
 } sp;
 
 const uint kAcFlagSnow = 1u, kAcFlagWet = 2u, kAcFlagMotion = 4u, kAcFlagSkinMeta = 8u, kAcFlagSkinV = 16u;
@@ -683,11 +685,13 @@ void main()
                 float D = snowN * kAcSnowFull;
                 if (snowOn)
                 {
-                    // (the snowfall fills a cell up to the world's depth; snow already lying is not
-                    // cut down to it -- #895: a teleport out of region weather zeroes the world's
-                    // amounts, the avatar's snow then melts at its own pace)
+                    // (#1130: the snow landing on a cell fills it toward the full coat, within the
+                    // deepest snow the settings let lie -- it no longer waits for the world's depth,
+                    // which with local weather starts from bare ground. Nothing falls, nothing fills:
+                    // #895, a teleport out of region weather zeroes the world's amounts; snow already
+                    // lying is not cut down, it melts at its own pace)
                     const float D0 = D;
-                    D = min(D + max(sAvg, 0.0) * sp.c.y * dt, max(min(max(sp.c.x, 0.0), kAcSnowFull), D0));
+                    D = min(D + max(sAvg, 0.0) * sp.c.y * dt, max(clamp(sp.e.w, 0.0, kAcSnowFull), D0));
                     D -= max(-sAvg, 0.0) * D * 1.5 * dt;
                     D -= sp.c.z * dt;
                     // (#903 PER CELL: under ANY cover -- a roof or the avatar's own umbrella / brim --

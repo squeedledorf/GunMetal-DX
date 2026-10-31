@@ -49,11 +49,11 @@ public:
     {
         SNAPSHOT_TYPE_COLOR,
         SNAPSHOT_TYPE_DEPTH,
-        // <GMDX> avatar layers (gmdxsnapshotavatars.h)
+        // avatar layers (llsnapshotavatars.h; GunMetal-DX port)
         SNAPSHOT_TYPE_AVATAR_TRANSPARENT,
         SNAPSHOT_TYPE_AVATAR_MASK_BLACK,
         SNAPSHOT_TYPE_AVATAR_MASK_WHITE
-        // </GMDX>
+
     } ESnapshotLayerType;
 };
 

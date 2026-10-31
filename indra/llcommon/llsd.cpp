@@ -293,8 +293,18 @@ namespace
     LLSD::Boolean ImplReal::asBoolean() const
         { return !llisnan(mValue)  &&  mValue != 0.0; }
 
+    // Real -> Integer for values that came off the wire: NaN is 0, out-of-range values
+    // saturate (a plain cast of an out-of-range double is undefined behaviour).
+    LLSD::Integer real_to_integer(LLSD::Real v)
+    {
+        if (llisnan(v)) return 0;
+        if (v >= (LLSD::Real)std::numeric_limits<LLSD::Integer>::max()) return std::numeric_limits<LLSD::Integer>::max();
+        if (v <= (LLSD::Real)std::numeric_limits<LLSD::Integer>::min()) return std::numeric_limits<LLSD::Integer>::min();
+        return (LLSD::Integer)v;
+    }
+
     LLSD::Integer ImplReal::asInteger() const
-        { return !llisnan(mValue) ? (LLSD::Integer)mValue : 0; }
+        { return real_to_integer(mValue); }
 
     LLSD::String ImplReal::asString() const
         { return llformat("%lg", mValue); }
@@ -388,7 +398,7 @@ namespace
 
         virtual LLSD::Integer asInteger() const
         {
-            return (LLSD::Integer)(mValue.secondsSinceEpoch());
+            return real_to_integer(mValue.secondsSinceEpoch());
         }
         virtual LLSD::Real asReal() const
         {

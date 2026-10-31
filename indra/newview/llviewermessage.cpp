@@ -28,7 +28,7 @@
 #include "llcrossingtrace.h"
 #include "llcrossingkeep.h"
 #include "llderenderlist.h"     // #202
-#include "fssoundemitterblacklist.h" // <GMDX>
+#include "fssoundemitterblacklist.h" // GunMetal-DX
 #include "llviewermessage.h"
 #include "slsoundlog.h"
 #include "fskeywords.h"
@@ -61,6 +61,7 @@
 #include "llagentbenefits.h"
 #include "llagentcamera.h"
 #include "sltpscamera.h"        // #881: TPS aim in AgentUpdate
+#include "slcombatfx.h"
 #include "llcallingcard.h"
 #include "llbuycurrencyhtml.h"
 #include "llcontrolavatar.h"
@@ -74,7 +75,6 @@
 #include "llfloatersidepanelcontainer.h"
 #include "llfloatersnapshot.h"
 #include "llfloatertransactionlog.h"
-#include "llgamecontrol.h"
 #include "llhudeffecttrail.h"
 #include "llhudmanager.h"
 #include "llimprocessing.h"
@@ -92,6 +92,7 @@
 #include "llscriptruntimeperms.h"
 #include "llselectmgr.h"
 #include "llstartup.h"
+#include "llcleaningest.h"
 #include "llsky.h"
 #include "llslurl.h"
 #include "llstatenums.h"
@@ -110,6 +111,7 @@
 #include "llviewerobjectlist.h"
 #include "llviewerparcelmgr.h"
 #include "llviewerstats.h"
+#include "llgamecontrol.h"
 #include "llviewerstatsrecorder.h"
 #include "llviewertexteditor.h"
 #include "llviewerthrottle.h"
@@ -136,11 +138,12 @@
 #include "rlvui.h"
 #include "slaoengine.h"
 #include "slbridge.h"
+#include "fscombataim.h" // <SS:Skoomastream/> OTS aim convergence (CombatFX)
+#include "fsrezqueue.h" // <GMDX> Rez queue watch (CombatFX)
+#include "gmdxmapshare.h" // <GMDX> pings said by helpers (CombatFX)
+#include "gmdxots.h" // <GMDX> the over-the-shoulder aim camera (eye camera, sit camera)
 #include "slposesync.h"
 // [/RLVa:KB]
-#include "fscombataim.h" // <SS:Skoomastream/>
-#include "fsrezqueue.h" // <GMDX> Rez queue watch
-#include "gmdxmapshare.h" // <GMDX> map shares said by helpers
 
 #include "llnotificationmanager.h" //
 #include "llexperiencecache.h"
@@ -1069,9 +1072,10 @@ void set_dad_inbox_object(const LLUUID& object_id)
     gInventory.addObserver(move_observer);
 }
 
-// <GMDX> <OTS> Folders whose freshly-created items should not auto-open a preview.
-// Used by the bulk sound->notecard upload so its generated notecard does not
-// pop a notecard editor window when it lands in inventory.
+// Folders whose freshly-created items should not auto-open a preview. Used by the bulk
+// sound->notecard upload so its generated notecard does not pop a notecard editor window when
+// it lands in inventory. Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4
+// (SoapStorm lineage).
 static std::set<LLUUID> sSuppressAutoOpenFolders;
 void suppress_inventory_auto_open_for_folder(const LLUUID& folder_id, bool suppress)
 {
@@ -1089,7 +1093,6 @@ static bool is_auto_open_suppressed_for_item(const LLInventoryItem* item)
     return item && !sSuppressAutoOpenFolders.empty()
         && sSuppressAutoOpenFolders.count(item->getParentUUID()) > 0;
 }
-// </OTS> </GMDX>
 
 //unlike the FetchObserver for AgentOffer, we only make one
 //instance of the AddedObserver for TaskOffers
@@ -1123,7 +1126,7 @@ protected:
                         LL_DEBUGS("Inventory_Move") << "Found asset UUID: " << asset_uuid << LL_ENDL;
                         was_moved = true;
                     }
-                    was_moved = was_moved || is_auto_open_suppressed_for_item(added_item); // <GMDX> <OTS> sound->notecard upload
+                    was_moved = was_moved || is_auto_open_suppressed_for_item(added_item);   // sound->notecard upload
                 }
             }
 
@@ -2895,7 +2898,8 @@ void process_chat_from_simulator(LLMessageSystem *msg, void **user_data)
             case CHAT_TYPE_NORMAL:
                 break;
             case CHAT_TYPE_DIRECT:
-                // <GMDX> a map share or ping said to me by someone's helper (gmdxmapshare.h): drawn, not shown
+                // <GMDX> a ping said to me by someone's helper (gmdxmapshare.h; CombatFX only --
+                // otherwise it stays this ordinary line): drawn, not shown
                 if ((CHAT_SOURCE_OBJECT == chat.mSourceType) && GMDXMapShare::consumeObjectChat(from_id, owner_id, from_name, mesg))
                 {
                     return;
@@ -3051,8 +3055,8 @@ void process_teleport_start(LLMessageSystem *msg, void**)
 
     if( gAgent.getTeleportState() == LLAgent::TELEPORT_NONE )
     {
-        // <GMDX> SoapStorm bb9b10d59f + baf3208b2d: the server sends two TeleportStart packets for
-        // some teleports (landmarks, some llTeleportAgent calls, TeleportLocal racing its Start).
+        // <GMDX> SoapStorm bb9b10d59f + baf3208b2d (Soap Frenzy): the server sends two TeleportStart
+        // packets for some teleports (landmarks, some llTeleportAgent calls, TeleportLocal racing its Start).
         // One arriving within a few seconds of a completed teleport is a stale duplicate: taking it
         // re-opened the progress screen with no TeleportFinish to close it, until the timeout.
         // A real teleport that does lose its Start here still completes through TeleportFinish's
@@ -3641,8 +3645,8 @@ void process_crossed_region(LLMessageSystem* msg, void**)
 }
 
 
-// sends an AgentUpdate message to the server... or not
-// e.g. only when force_send is 'true' OR
+// sends an AgentUpdate message to the server... or not:
+// only when force_send is 'true' OR
 // something changed AND the update is not being throttled
 void send_agent_update(bool force_send, bool send_reliable)
 {
@@ -3691,6 +3695,8 @@ void send_agent_update(bool force_send, bool send_reliable)
     // LBUTTON and ML_LBUTTON so that using the camera (alt-key) doesn't
     // trigger a control event.
     U32 control_flags = gAgent.getControlFlags();
+    const U32 raw_control_flags = control_flags;
+    const bool tps_fire_held = SLTPSCamera::applyFireToAgentUpdate(control_flags);
     LLCrossingTrace::noteSentControlFlags(control_flags);   // #568
     MASK key_mask = gKeyboard->currentMask(true);
     if (key_mask & MASK_ALT || key_mask & MASK_CONTROL)
@@ -3710,9 +3716,11 @@ void send_agent_update(bool force_send, bool send_reliable)
         return;
     }
 
+    bool send_update = force_send || sec_since_last_send > MAX_AGENT_UPDATE_PERIOD;
+
     LLVector3 camera_pos_agent = gAgentCamera.getCameraPositionAgent(); // local to avatar's region
     LLVector3 camera_at = LLViewerCamera::getInstance()->getAtAxis();
-    // <SS:Skoomastream>
+    // <SS:Skoomastream> (CombatFX; ported from GunMetal-DX, LGPL 2.1, v0.3.0 cf5f1f4)
     LLVector3 camera_left = LLViewerCamera::getInstance()->getLeftAxis();
     LLVector3 camera_up = LLViewerCamera::getInstance()->getUpAxis();
     // <GMDX> before the OTS block, which may override the head rotation (SoapStorm 557eddcac5)
@@ -3731,10 +3739,15 @@ void send_agent_update(bool force_send, bool send_reliable)
     // Seated avatars bypass this: vehicle turrets and weapons fire from the
     // vehicle's prims, not the avatar's eyeballs. Vehicle scripts expect the
     // pure camera look direction and position to calculate turret aim.
+    // (<GMDX> developed by squeedledorf with Soap Frenzy, SoapStorm a95f261109)
     // <GMDX> Always on, not a setting (it was FSOTSReportEyeCamera): fixed on purpose,
     // it decides what the sim is told (fair fire).
     const bool is_sitting = isAgentAvatarValid() && gAgentAvatarp->isSitting();
-    if (!is_sitting && gAgentCamera.cameraOTS() && isAgentAvatarValid() && gAgentAvatarp->mHeadp
+    // <GMDX> In every TPS framing (behind the avatar too) and with CombatFX off as well: TPS fires the
+    // mouselook button, so the sim is told the eye, never the orbit camera (GunMetal-DX: fairness is
+    // not a setting). With CombatFX off the convergence has no world rays and aims along the camera.
+    // <GMDX> Over the shoulder (or gliding off it into first person, aim down sights) the OTS camera, gmdxots.h.
+    if (!is_sitting && (GMDXOTS::shoulderCamera() || SLTPSCamera::isEngagedOnFoot()) && isAgentAvatarValid() && gAgentAvatarp->mHeadp
         && tp_state == LLAgent::TELEPORT_NONE) // never raycast a world that is mid-teleport teardown
     {
         const LLVector3 eye = gAgentAvatarp->mHeadp->getWorldPosition();
@@ -3756,7 +3769,7 @@ void send_agent_update(bool force_send, bool send_reliable)
             camera_left = frame.getLeftAxis();
             camera_up = frame.getUpAxis();
 
-            // <GMDX> SoapStorm 557eddcac5: HeadRotation follows the converged look
+            // <GMDX> Developed by squeedledorf with Soap Frenzy (SoapStorm 557eddcac5): HeadRotation follows the converged look
             // direction too, so attached weapons and head tracking aim at the crosshair.
             head_rotation = frame.getQuaternion();
             if (gAgentAvatarp->getParent())
@@ -3780,7 +3793,6 @@ void send_agent_update(bool force_send, bool send_reliable)
         flags |= AU_FLAGS_CLIENT_AUTOPILOT;
     }
 
-    bool send_update = force_send || sec_since_last_send > MAX_AGENT_UPDATE_PERIOD;
     if (!send_update)
     {
         // check to see if anything changed
@@ -3891,12 +3903,8 @@ void send_agent_update(bool force_send, bool send_reliable)
 
     msg->addVector3Fast(_PREHASH_CameraCenter, camera_pos_agent);
     msg->addVector3Fast(_PREHASH_CameraAtAxis, camera_at);
-    // <SS:Skoomastream>
-    //msg->addVector3Fast(_PREHASH_CameraLeftAxis, LLViewerCamera::getInstance()->getLeftAxis());
-    //msg->addVector3Fast(_PREHASH_CameraUpAxis, LLViewerCamera::getInstance()->getUpAxis());
-    msg->addVector3Fast(_PREHASH_CameraLeftAxis, camera_left);
+    msg->addVector3Fast(_PREHASH_CameraLeftAxis, camera_left);   // <SS:Skoomastream> (OTS: the eye camera)
     msg->addVector3Fast(_PREHASH_CameraUpAxis, camera_up);
-    // </SS:Skoomastream>
 
     static F32 last_draw_disatance_step = 1024;
     // NETWORK draw distance, not the render one (see LLAgentCamera::getNetworkDrawDistance):
@@ -3995,6 +4003,14 @@ void send_agent_update(bool force_send, bool send_reliable)
 
     if (gDebugClicks)
     {
+        static U64 debug_packet = 0;
+        LL_INFOS("TPSFire") << "AgentUpdate n=" << ++debug_packet
+            << " t=" << llformat("%.6f", now)
+            << " held=" << tps_fire_held
+            << " raw=" << llformat("%08x", raw_control_flags)
+            << " flags=" << llformat("%08x", control_flags)
+            << " modifiers=" << (U32)key_mask
+            << " reliable=" << send_reliable << LL_ENDL;
         if (control_flags & AGENT_CONTROL_LBUTTON_DOWN)
         {
             LL_INFOS("Messaging") << "AgentUpdate left button down" << LL_ENDL;
@@ -4014,6 +4030,7 @@ void send_agent_update(bool force_send, bool send_reliable)
     {
         gAgent.sendMessage();
     }
+    SLTPSCamera::fireAgentUpdateSent(control_flags);
 
     // remember last update data
     last_send_time = now;
@@ -4235,9 +4252,12 @@ void process_kill_object(LLMessageSystem *mesgsys, void **user_data)
         U32 local_id;
         mesgsys->getU32Fast(_PREHASH_ObjectData, _PREHASH_ID, local_id, i);
 
-        // #883: the object is gone from this sim -- so are its GLTF overrides (kept per
-        // local id; objects without a cache entry never had them erased otherwise).
-        if (regionp)
+        // #883: drop the GLTF overrides of a killed id that has no object cache entry
+        // (attachments, temp-on-rez, full-update-only objects), which nothing else erases.
+        // A cached object keeps them: the sim also kills objects leaving the interest
+        // range, and when one comes back from the cache the sim does not resend its
+        // overrides (killCacheEntry erases them when the cache entry itself goes).
+        if (regionp && !regionp->getCacheEntry(local_id, false))
         {
             regionp->forgetGLTFOverride(local_id);
         }
@@ -4266,6 +4286,7 @@ void process_kill_object(LLMessageSystem *mesgsys, void **user_data)
         LLViewerObject *objectp = gObjectList.findObject(id);
         if (objectp)
         {
+            LLCleanIngest::tempMotionDiagKill(objectp, 1, false);
 // [SL:KB] - Patch: Appearance-TeleportAttachKill | Checked: Catznip-4.0
                 if ( (objectp->isAttachment()) && (!objectp->isTempAttachment()) && (LLAgent::TELEPORT_NONE != gAgent.getTeleportState()) &&
                      (gAgentAvatarp) && (objectp->permYouOwner()) && (gSavedSettings.getBOOL("BlockAttachmentKillsOnTeleport")) )
@@ -4286,8 +4307,15 @@ void process_kill_object(LLMessageSystem *mesgsys, void **user_data)
             // #607: the losing side of a crossing's re-key race (the old sim's kill before
             // the new sim's update) is deferred, not applied: the new sim's update re-keys
             // the object and nothing is torn down / re-fetched. Applied later if it is not.
-            if (LLCrossingKeep::deferKill(objectp, regionp, local_id, ip, port))
+            // #1172: otherwise Freeze World holds the picture: another avatar the sim removes
+            // (one leaving a private parcel we are in), what it wears and the seat it is on
+            // stay until the thaw applies the kill (void if the sim sends the object again
+            // after it: the packet id orders the two).
+            const U32 packet_id = mesgsys->getCurrentRecvPacketID();
+            if (LLCrossingKeep::deferKill(objectp, regionp, local_id, ip, port, packet_id)
+                || LLCrossingKeep::holdForFreeze(objectp, local_id, ip, port, packet_id))
             {
+                LLCleanIngest::tempMotionDiagKill(objectp, 2, false);
                 LLCrossingTrace::onKillDeferred(objectp);   // #568
                 if (delete_object && regionp)
                 {
@@ -4404,7 +4432,7 @@ void process_sound_trigger(LLMessageSystem *msg, void **)
         return;
     }
 
-    // <GMDX> Sound emitter blacklist: the emitter, the root ParentID names, or its linkset root
+    // Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4: sound emitter blacklist (the emitter, the root ParentID names, or its linkset root)
     if (FSSoundEmitterBlacklist::instance().isEmitterBlacklisted(object_id, parent_id)) return;
 
     // Don't play sounds from a region with maturity above current agent maturity
@@ -4464,7 +4492,7 @@ void process_preload_sound(LLMessageSystem *msg, void **user_data)
 
     if (LLMuteList::getInstance()->isMuted(object_id)) return;
     if (LLMuteList::getInstance()->isMuted(owner_id, LLMute::flagObjectSounds)) return;
-    if (FSSoundEmitterBlacklist::instance().isEmitterBlacklisted(objectp)) return; // <GMDX> sound emitter blacklist
+    if (FSSoundEmitterBlacklist::instance().isEmitterBlacklisted(objectp)) return; // GunMetal-DX: sound emitter blacklist
 
     LLAudioSource *sourcep = objectp->getAudioSource(owner_id);
     if (!sourcep) return;
@@ -4565,7 +4593,7 @@ void process_sim_stats(LLMessageSystem *msg, void **user_data)
         F32 stat_value;
         msg->getU32("Stat", "StatID", stat_id, i);
         msg->getF32("Stat", "StatValue", stat_value, i);
-        FSRezQueue::onSimStat(stat_id, stat_value); // <GMDX> Rez queue watch: the region's pending asset queue
+        FSRezQueue::onSimStat(stat_id, stat_value); // <GMDX> Rez queue watch (CombatFX): the region's pending asset queue
         auto measurementp = LLStatViewer::SimMeasurementSampler::getInstance((ESimStatID)stat_id);
 
         if (measurementp )
@@ -4573,7 +4601,7 @@ void process_sim_stats(LLMessageSystem *msg, void **user_data)
             measurementp->sample(stat_value);
             if (stat_id == LL_SIM_STAT_FPS)
             {
-                // let GameControlData's outgoing throttle track the sim's actual rate
+                // GameControlData's send rate follows the sim's (per LL viewer PR #6202)
                 LLGameControl::setServerFrameRate(stat_value);
             }
         }
@@ -4875,6 +4903,7 @@ void process_avatar_sit_response(LLMessageSystem *mesgsys, void **user_data)
     if (isAgentAvatarValid() && dist_vec_squared(camera_eye, camera_at) > CAMERA_POSITION_THRESHOLD_SQUARED)
     {
         gAgentCamera.setSitCamera(sitObjectID, camera_eye, camera_at);
+        GMDXOTS::setSitCameraEye(camera_eye); // <GMDX> the shoulder camera on this seat uses the creator's sit camera
     }
 
     gAgentCamera.setForceMouselook(force_mouselook);
@@ -6511,7 +6540,6 @@ void process_script_question(LLMessageSystem *msg, void **user_data)
         args["OBJECTNAME"] = object_name;
         args["NAME"] = clean_owner_name;
         S32 known_questions = 0;
-        bool has_not_only_debit = questions ^ SCRIPT_PERMISSIONS[SCRIPT_PERMISSION_DEBIT].permbit;
         bool caution_enabled    = gSavedSettings.getBOOL("PermissionsCautionEnabled");
         // check the received permission flags against each permission
         std::string warning_msg;
@@ -6901,7 +6929,7 @@ void process_teleport_local(LLMessageSystem *msg,void**)
 
     // <FS> FSResetCameraOnTP: optionally leave the camera where it was
     static LLCachedControl<bool> reset_camera_on_tp(gSavedSettings, "FSResetCameraOnTP", true);
-    if ( !(gAgent.getTeleportKeepsLookAt() && gAgent.isCameraExternallyDriven()) && reset_camera_on_tp )
+    if ( !(gAgent.getTeleportKeepsLookAt() && LLViewerJoystick::getInstance()->getOverrideCamera()) && reset_camera_on_tp )
     // </FS>
     {
         gAgentCamera.resetView(true, true);

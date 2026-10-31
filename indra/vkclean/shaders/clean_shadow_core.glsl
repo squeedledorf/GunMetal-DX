@@ -29,6 +29,15 @@
 #ifndef CLEAN_SHADOW_CORE_GLSL
 #define CLEAN_SHADOW_CORE_GLSL
 
+// (RenderVKReSTIRRadiance) THE BLEND CASTERS' LIGHT CONE (clean_rt_common.glsl rt_blend_cone): the includer turns it
+// on (a uniform expression: pass 15 in radiance mode) and gives the render pixels per denoiser texel.
+#ifndef SH_BLEND_CONE_ON
+#define SH_BLEND_CONE_ON false
+#endif
+#ifndef SH_BLEND_TEXEL_PX
+#define SH_BLEND_TEXEL_PX 1.0
+#endif
+
 // ---- THE WALK: clean_vis_walk.glsl (#1039 M0; included by clean_rt_common.glsl) -- rtVisWalk over every
 //      kind, the own-fixture rule (rt_fix_*, re-traced by shadowSampleRays / rtVisTrace), the opaque-first pre-ray
 //      (RT_WALK_OFIRST) and the kernel specialisation (SH_KIND_DIRECTIONAL / SH_KIND_POSITIONAL: the
@@ -208,6 +217,7 @@ float shPosTmax(ShRayGen g, vec3 o, vec3 d, float len)
 ShRayGen shadowSampleSetup(ShadowSample S, vec3 P, vec3 Nin, vec3 cam, float time,
                            out bool pos, out bool fol, out bool selfShadowed)
 {
+    cam = CL_VIEW_EYE(linfo, P, cam);
     // (#1031 KERNEL SPECIALISATION: a one-kind kernel folds the other kind's paths away)
 #if defined(SH_KIND_DIRECTIONAL)
     pos = false;
@@ -234,8 +244,19 @@ ShRayGen shadowSampleSetup(ShadowSample S, vec3 P, vec3 Nin, vec3 cam, float tim
     const float camd = length(P - cam);
     rt_anim_time   = time;
     rt_cone_spread = 0.0;
-    rt_cone_width0 = camd * 0.001;   // (fallback only: rtSetShadowFootprint's rt_foot_* override it)
+    rt_cone_width0 = rtShadowConeWidth(camd);
     rt_cone_aniso  = 1.0;
+    // (RenderVKReSTIRRadiance, clean_rt_common.glsl rt_blend_cone) a positional light sample's blend casters at the
+    // light cone's LOD: from the denoiser texel's footprint at the receiver (the pixel footprint x the render
+    // pixels per texel -- the jittered receiver point sweeps the texel over the frames) to the emitter disc's
+    // diameter at the light. Only where the includer turns it on (pass 15 in radiance mode); (0, 0) else.
+    rt_blend_cone = vec2(0.0);
+    if (SH_BLEND_CONE_ON && pos)
+    {
+        const float wr = (rt_foot_on ? length(rt_foot_a) : rtShadowConeWidth(camd)) * SH_BLEND_TEXEL_PX;
+        const float lL = length(S.pos - P);
+        if (wr > 0.0 && lL > 1e-3) rt_blend_cone = vec2(wr, (2.0 * max(S.radius, 0.0) - wr) / lL);
+    }
 #ifdef RT_NO_FOOT_LOD
     // (#1031) ISOTROPIC SHADOW LOD (RenderVKShadowIsoLod): the receiver pixel's footprint (minor axis:
     // the pixel across the view, already x the raster's material mip bias) as the ray cone's CONSTANT
@@ -559,6 +580,7 @@ void shadowSampleEnd(bool fol)
     rt_fix_on = false;
     if (fol) rtFolEnd();
     rt_foot_on = false;
+    rt_blend_cone = vec2(0.0);
 }
 vec3 shadowSampleVis(ShadowSample S, vec3 P, vec3 Nin, vec3 cam, float time)
 {

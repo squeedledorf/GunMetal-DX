@@ -116,7 +116,7 @@ layout(std430, binding = 1)  readonly buffer Slots     { SlotInfo slots[]; };
 layout(std430, binding = 2)  readonly buffer LodGroups { LodGroup lod_groups[]; };
 layout(std430, binding = 3)  readonly buffer Joints    { AvatarJoints avatar_joints[]; };
 layout(std430, binding = 4)  readonly buffer AvatarVis { uint av_vis[]; };
-layout(std430, binding = 5)  readonly buffer SlotAddr  { uvec2 slot_addr[]; };   // 0 = no BLAS
+layout(std430, binding = 5)  readonly buffer SlotAddr  { uvec4 slot_addr[]; };   // 0 = no BLAS
 layout(std430, binding = 6)  coherent buffer UsedBits  { uint used_bits[]; };
 layout(std430, binding = 7)  buffer Tlas               { TlasInstance tlas[]; };   // read: TLAS refit (above)
 layout(std430, binding = 8)  writeonly buffer RtGeom   { uvec4 rt_geom[]; };
@@ -174,7 +174,7 @@ layout(std430, binding = 23) coherent buffer ClRtRig     { uint cl_rtrig[]; };
 // RTG_VTX); (#1009) [1..3] a CLUSTER-TRACED STATIC's legacy row (first index, base vertex,
 // index count; 0 elsewhere) -- the emissive light build lists its triangles from it
 // (clean_rt_common.glsl rtGeomEmRow).
-#define RT_GEOM_VC_WORDS 4u
+#define RT_GEOM_VC_WORDS 8u
 layout(std430, binding = 24) writeonly buffer RtGeomVc   { uint rt_geom_vc[]; };
 void setGeomVc(uint id, uint vc)
 {
@@ -182,6 +182,7 @@ void setGeomVc(uint id, uint vc)
     const uint b = id * RT_GEOM_VC_WORDS;
     rt_geom_vc[b] = vc;
     rt_geom_vc[b + 1u] = 0u; rt_geom_vc[b + 2u] = 0u; rt_geom_vc[b + 3u] = 0u;
+    for (uint k = 4u; k < 8u; ++k) rt_geom_vc[b + k] = 0u;
 }
 // (#1009, after setGeomVc) a cluster-traced static's legacy row: words 1..3
 void setGeomEmRow(uint id, uint first, int base, uint count)
@@ -488,6 +489,29 @@ uint geomFlags(uint id, uint f, mat3 m)
          | (opaque ? GI_FORCE_OPAQUE : GI_FORCE_NO_OPAQUE);
 }
 
+// Per-face world policy. The tag is authored only by volume ingest; defend all
+// avatar/rigged/special routes here too. Mask classes remain reflection/GI compatible.
+bool emissiveNoShadow(uint f)
+{
+    return (pc.dbg_on & 32u) != 0u && (f & 16384u) != 0u
+        && (f & (1u | 8u | 32u | 512u | 2048u | 8192u | 65536u | 131072u | 262144u | 524288u)) == 0u;
+}
+// Static rt_geom.z uses these otherwise spare bits. Never on rigged position rows.
+// Remember the original hardware opacity so closest hits can keep their exact rules.
+#define RT_GEOM_EMISSIVE_NOSHADOW 0x08000000u
+#define RT_GEOM_EMISSIVE_OPAQUE   0x04000000u
+uint emissiveGeomMeta(uint id, uint f, mat3 m)
+{
+    if (!emissiveNoShadow(f)) return 0u;
+    return RT_GEOM_EMISSIVE_NOSHADOW
+         | ((geomFlags(id, f, m) & GI_FORCE_OPAQUE) != 0u ? RT_GEOM_EMISSIVE_OPAQUE : 0u);
+}
+uint shadowGeomFlags(uint id, uint f, mat3 m)
+{
+    const uint gf = geomFlags(id, f, m);
+    return emissiveNoShadow(f) ? ((gf & ~GI_FORCE_OPAQUE) | GI_FORCE_NO_OPAQUE) : gf;
+}
+
 bool badTransform(mat4 mm, vec3 amn, vec3 amx)
 {
     for (int c = 0; c < 4; ++c)
@@ -532,6 +556,9 @@ void clusterStaticEmRow(uint id, uint gid, uint f, mat4 mm)
     const SlotInfo si = slots[s];
     if (si.index_count == 0u || si.index_count > pc.idx_valid || si.first_index > pc.idx_valid - si.index_count) return;
     setGeomEmRow(id, si.first_index, si.base_vertex, si.index_count & 0x7FFFFFFFu);
+    rt_geom_vc[id * RT_GEOM_VC_WORDS + 4u] = s;
+    rt_geom_vc[id * RT_GEOM_VC_WORDS + 5u] = slot_addr[s].z;
+    rt_geom_vc[id * RT_GEOM_VC_WORDS + 6u] = si.vert_count;
 }
 
 void passA(uint id)
@@ -614,12 +641,13 @@ void passA(uint id)
             t.row1 = vec4(M[0][1], M[1][1], M[2][1], M[3][1]);
             t.row2 = vec4(M[0][2], M[1][2], M[2][2], M[3][2]);
             t.custom_mask = (id & 0xFFFFFFu) | (maskClassSized(id, f, M, LOD_SENTINEL) << 24);
-            t.sbt_flags = geomFlags(id, f, mat3(M)) << 24;
+            t.sbt_flags = shadowGeomFlags(id, f, mat3(M)) << 24;
             t.ref_lo = co.x; t.ref_hi = co.y;
             tlas[id] = t;
             atomicAdd(used_bits[pc.counter_word], 1u);
             rt_geom[id] = uvec4(co.z, 0x80000000u | (co.w & 0x7FFFFFFFu),
-                                0x40000000u | ((co.w & 0x80000000u) != 0u ? 0x20000000u : 0u), 0u);
+                                0x40000000u | ((co.w & 0x80000000u) != 0u ? 0x20000000u : 0u)
+                                | emissiveGeomMeta(id, f, mat3(M)), 0u);
             setGeomVc(id, 0u);
             clusterStaticEmRow(id, gid, f, mm);   // (#1009: the emissive light build's triangles)
             if ((pc.dbg_on & 1u) != 0u) dbgNote(id, maskClassSized(id, f, M, LOD_SENTINEL), M[3].xyz, radius, co.x, M);
@@ -652,7 +680,7 @@ void passA(uint id)
                 first = s; first_lvl = L;
                 atomicOr(used_bits[s >> 5], 1u << (s & 31u));
             }
-            const uvec2 a = slot_addr[s];
+            const uvec2 a = slot_addr[s].xy;
             if ((a.x | a.y) != 0u) { slot_id = s; lvl_used = L; }
         }
         if (slot_id == LOD_SENTINEL) { slot_id = first; lvl_used = first_lvl; }   // none built yet
@@ -676,7 +704,7 @@ void passA(uint id)
     if (si.index_count == 0u || si.index_count > pc.idx_valid || si.first_index > pc.idx_valid - si.index_count) { writeInactive(id); return; }   // (#238: no uint wrap)
 
     atomicOr(used_bits[slot_id >> 5], 1u << (slot_id & 31u));
-    uvec2 addr = slot_addr[slot_id];
+    uvec2 addr = slot_addr[slot_id].xy;
     if ((addr.x | addr.y) == 0u && (f & 32u) == 0u)
     {
         // LAZY BLAS, LEVEL STAND-IN (as terrain above): the drawn level is marked used so
@@ -694,7 +722,7 @@ void passA(uint id)
             if (s == LOD_SENTINEL || s >= pc.slot_count || s == slot_id) continue;
             const SlotInfo ss = slots[s];
             if (ss.index_count == 0u || ss.index_count > pc.idx_valid || ss.first_index > pc.idx_valid - ss.index_count) continue;
-            const uvec2 a = slot_addr[s];
+            const uvec2 a = slot_addr[s].xy;
             if ((a.x | a.y) != 0u) { slot_id = s; si = ss; lvl_used = L; addr = a; break; }
         }
     }
@@ -706,11 +734,11 @@ void passA(uint id)
     t.row1 = vec4(M[0][1], M[1][1], M[2][1], M[3][1]);
     t.row2 = vec4(M[0][2], M[1][2], M[2][2], M[3][2]);
     t.custom_mask = (id & 0xFFFFFFu) | (maskClassSized(id, f, M, slot_id) << 24);
-    t.sbt_flags = geomFlags(id, f, mat3(M)) << 24;
+    t.sbt_flags = shadowGeomFlags(id, f, mat3(M)) << 24;
     t.ref_lo = addr.x; t.ref_hi = addr.y;
     // (#1032) a known-opaque mask instance keeps the plain BLAS + FORCE_OPAQUE: a micromap
     // adds nothing over it (a stale row could still name one while the planner catches up).
-    if (id < uint(omm_inst.length()) && !maskKnownOpaque(id, f))
+    if (id < uint(omm_inst.length()) && !maskKnownOpaque(id, f) && !emissiveNoShadow(f))
     {
         // Row = OMM id + 1, top bits = DEBUG instance flags (RenderVKRTOmmDebugStage 4/5:
         // force 2-state / disable micromaps).
@@ -734,8 +762,11 @@ void passA(uint id)
     }
     tlas[id] = t;
     atomicAdd(used_bits[pc.counter_word], 1u);
-    rt_geom[id] = uvec4(si.first_index, uint(si.base_vertex), 0u, si.index_count);
+    rt_geom[id] = uvec4(si.first_index, uint(si.base_vertex), emissiveGeomMeta(id, f, mat3(M)), si.index_count);
     setGeomVc(id, si.vert_count);
+    rt_geom_vc[id * RT_GEOM_VC_WORDS + 4u] = slot_id;
+    rt_geom_vc[id * RT_GEOM_VC_WORDS + 5u] = slot_addr[slot_id].z;
+    rt_geom_vc[id * RT_GEOM_VC_WORDS + 6u] = si.vert_count;
     if ((pc.dbg_on & 1u) != 0u) dbgNote(id, maskClassSized(id, f, M, slot_id), M[3].xyz, radius, addr.x, M);
 }
 

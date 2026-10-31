@@ -32,6 +32,7 @@
 #include "llcachename.h"
 #include "llcheckboxctrl.h"
 #include "llgroupcolormap.h"
+#include "gmdxslmcfactions.h" // <GMDX>
 #include "llclipboard.h"
 #include "llgroupactions.h"
 #include "llscrolllistitem.h"
@@ -200,6 +201,13 @@ void FSFloaterGroupViewer::refreshList()
             // Request the name; a later refresh tick picks it up from cache.
             gCacheName->getGroup(entry.first, boost::bind(&no_op_name_callback, _1, _2, _3));
         }
+        // <GMDX> The SLMC faction a group belongs to (the faction table from Alchemy: Skooma (Nexii Malthus),
+        // gmdxslmcfactions.cpp), so a faction's main, militia and land groups read as one side.
+        if (const GMDXSLMCFactions::Faction* faction = GMDXSLMCFactions::factionOf(entry.first))
+        {
+            group_name = "[" + faction->mShort + "] " + group_name;
+        }
+        // </GMDX>
 
         LLSD row;
         row["value"] = entry.first;

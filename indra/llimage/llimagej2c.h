@@ -70,7 +70,7 @@ public:
 
     // Encode accessors
     void setReversible(const bool reversible); // Use non-lossy?
-    void setRate(F32 rate) { mRate = rate; }   // <GMDX> lossy compression ratio (default 1/8), OpenJPEG encoder
+    void setRate(F32 rate) { mRate = rate; }   // lossy compression ratio (default 1/8), OpenJPEG encoder (GunMetal-DX port, region map capture)
     void setMaxBytes(S32 max_bytes);
     S32 getMaxBytes() const { return mMaxBytes; }
 

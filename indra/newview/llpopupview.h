@@ -32,7 +32,7 @@
 class LLPopupView : public LLPanel
 {
 public:
-    LLPopupView(const Params& p = LLPanel::Params());
+    LLPopupView(const Params& p = LLPanel::Params(), bool install_popup_funcs = true);
     ~LLPopupView();
 
     /*virtual*/ void draw();
@@ -55,6 +55,7 @@ public:
     popup_list_t getCurrentPopups() { return mPopups; }
 
 private:
+    bool mInstallPopupFuncs = true;
     bool handleMouseEvent(boost::function<bool(LLView*, S32, S32)>, boost::function<bool(LLView*)>, S32 x, S32 y, bool close_popups);
     popup_list_t mPopups;
 };

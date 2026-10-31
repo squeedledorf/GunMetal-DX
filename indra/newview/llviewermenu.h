@@ -41,7 +41,6 @@ class LLSelectNode;
 class LLViewerObject;
 class LLVOAvatar;
 class LLControlAvatar;
-class LLVector3;
 
 // [RLVa:KB] - Checked: RLVa-2.0.0
 void set_use_wireframe(bool useWireframe);
@@ -118,6 +117,7 @@ void handle_toggle_flycam();
 void handle_object_sit_or_stand();
 void handle_object_sit(LLViewerObject* object, const LLVector3& offset);
 void handle_object_sit(const LLUUID& object_id);
+class LLViewerObject;
 LLViewerObject* find_nearby_seat(); // nearest CLICK_ACTION_SIT prim, for the controller's toggle sit
 void handle_give_money_dialog();
 bool enable_pay_object();

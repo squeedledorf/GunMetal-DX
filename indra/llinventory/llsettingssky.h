@@ -29,6 +29,8 @@
 #define LL_SETTINGS_SKY_H
 
 #include "llsettingsbase.h"
+#include "llhaze.h"
+#include <optional>
 #include "v4coloru.h"
 
 const F32 EARTH_RADIUS  =      6.370e6f;
@@ -50,6 +52,8 @@ public:
     static const std::string SETTING_DISTANCE_MULTIPLIER;
     static const std::string SETTING_HAZE_DENSITY;
     static const std::string SETTING_HAZE_HORIZON;
+    static const std::string SETTING_SL_HAZE_START_DISTANCE;
+    static const std::string SETTING_SL_HAZE_MAX_OPACITY;
     static const std::string SETTING_CLOUD_COLOR;
     static const std::string SETTING_CLOUD_POS_DENSITY1;
     static const std::string SETTING_CLOUD_POS_DENSITY2;
@@ -125,6 +129,17 @@ public:
     virtual void replaceSettings(const LLSettingsBase::ptr_t& other_sky) override;
 
     void replaceWithSky(const LLSettingsSky::ptr_t& pother);
+    bool validate() override;
+    static void normalizeHazeGuardrails(LLSD &settings);
+    static LLSD validateSkySettings(LLSD &settings, bool partial = false);
+    using LLSettingsBase::getSettings;
+    const LLSD &getSettings() const { return const_cast<LLSettingsSky *>(this)->LLSettingsBase::getSettings(); }
+    const LLHaze::Transition *getHazeTransition() const;
+    void copyHazeTransitionFrom(const LLSettingsSky &other);
+    using LLSettingsBase::setValue;
+    void setValue(const std::string &name, const LLSD &value);
+    void setValue(const std::string &name, F32 value) { setValue(name, LLSD::Real(value)); }
+    void clearHazeGuardrail(const std::string &key);
     static LLSD defaults(const LLSettingsBase::TrackPosition& position = 0.0f);
 
     void loadValuesFromLLSD() override;
@@ -350,6 +365,7 @@ public:
     bool canAutoAdjust() const;
 
 protected:
+    std::optional<LLHaze::Transition> mHazeTransition;
     static const std::string SETTING_LEGACY_EAST_ANGLE;
     static const std::string SETTING_LEGACY_ENABLE_CLOUD_SCROLL;
     static const std::string SETTING_LEGACY_SUN_ANGLE;

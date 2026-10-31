@@ -61,6 +61,7 @@ public:
     virtual LLSnapshotModel::ESnapshotType getSnapshotType();
     virtual void updateControls(const LLSD& info) = 0; ///< Update controls from saved settings
     void enableControls(bool enable);
+    virtual void performTimedAction(const LLSD&) {}
 
 protected:
     LLSideTrayPanelContainer* getParentContainer();

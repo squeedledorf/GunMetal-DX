@@ -2,6 +2,9 @@
  * @file gmdxchatlog.cpp
  * @brief GunMetal-DX: the MMO-style chat log in the bottom-left corner (see gmdxchatlog.h).
  *
+ * Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4. An option beside the
+ * console and cards styles of the nearby chat overlay (NearbyChatOverlayStyle "gmdx"), never the default.
+ *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -28,7 +31,7 @@
 #include "llmenubutton.h"
 #include "lltoggleablemenu.h"
 
-#include "fscombatads.h"
+#include "fscombatads.h"   // <GMDX> aiming down sights counts as combat
 #include "fscommon.h"
 #include "llagent.h"
 #include "llagentcamera.h"
@@ -81,6 +84,14 @@ constexpr F64 kMergeWithin = 30.0;        // s: a speaker's next line merges und
 constexpr F64 kRepeatWithin = 60.0;       // s: an object's same line counts up
 constexpr F32 kFadeOut = 3.f;             // s: the last part of a line's time at rest
 constexpr S32 kCombatLines = 3;
+// Fixed looks, not settings (minimal config space): the GunMetal-DX defaults.
+constexpr S32 kTextSize = 1;              // 0 Medium, 1 Large, 2 Huge
+const char* const kSizes[] = { "Medium", "Large", "Huge" };
+constexpr S32 kTypingLines = 10;          // lines the panel shows while typing
+constexpr S32 kRestLines = 7;             // lines shown at rest
+constexpr F32 kPersist = 20.f;            // s a line stays at rest
+constexpr S32 kWidth = 560;               // px, at rest
+constexpr F32 kShade = 0.4f;              // the band under the lines at rest
 constexpr F64 kCombatFlash = 3.0;         // s a new line is at full strength in combat
 constexpr F32 kCombatAlpha = 0.35f;
 constexpr S32 kPad = 10, kTabH = 24, kGap = 3;
@@ -252,7 +263,7 @@ GMDXChatLog* GMDXChatLog::create()
 // static
 bool GMDXChatLog::active()
 {
-    static LLCachedControl<std::string> style(gSavedSettings, "NearbyChatOverlayStyle", "gmdx");
+    static LLCachedControl<std::string> style(gSavedSettings, "NearbyChatOverlayStyle", "text");
     return style() == "gmdx";
 }
 
@@ -302,9 +313,7 @@ GMDXChatLog::Entry GMDXChatLog::fromChat(const LLChat& chat)
 const LLFontGL* GMDXChatLog::chatBarFont()
 {
     if (!active()) return nullptr;
-    static LLCachedControl<S32> size(gSavedSettings, "GMDXChatLogTextSize", 1);
-    static const char* const kSizes[] = { "Medium", "Large", "Huge" };
-    return LLFontGL::getFont(LLFontDescriptor("Barlow", kSizes[llclamp((S32)size, 0, 2)], 0));
+    return LLFontGL::getFont(LLFontDescriptor("Barlow", kSizes[kTextSize], 0));
 }
 
 // static
@@ -328,6 +337,7 @@ void GMDXChatLog::addCombat(std::function<std::vector<Segment>()> segments)
 
 void GMDXChatLog::onIM(const LLSD& msg)
 {
+    if (!active()) return;
     if (msg["is_friend_status"].asBoolean()) return;   // (the online / offline notices)
     const LLUUID session_id = msg["session_id"].asUUID();
     const LLIMModel::LLIMSession* session = LLIMModel::getInstance()->findIMSession(session_id);
@@ -359,6 +369,7 @@ void GMDXChatLog::onIM(const LLSD& msg)
 
 void GMDXChatLog::add(Entry e)
 {
+    if (!active()) return;   // style off: nothing is collected
     e.time = LLFrameTimer::getTotalSeconds();
     e.clock = std::time(nullptr);
     e.seq = ++mSeq;
@@ -518,8 +529,7 @@ bool GMDXChatLog::inTab(const Entry& e, S32 tab) const
 
 void GMDXChatLog::loadFonts()
 {
-    static LLCachedControl<S32> size(gSavedSettings, "GMDXChatLogTextSize", 1);
-    static const char* const kSizes[] = { "Medium", "Large", "Huge" };
+    const S32 size = kTextSize;
     static const char* const kTagSizes[] = { "Medium", "Large", "Huge" };
     const S32 s = llclamp((S32)size, 0, 2);
     auto get = [](const char* family, const char* sz, U8 style, const LLFontGL* fallback)
@@ -650,15 +660,14 @@ LLRect GMDXChatLog::lockRect() const
 
 LLRect GMDXChatLog::defaultPanelRect(const LLRect& bar, S32 line_h) const
 {
-    static LLCachedControl<U32> typing_lines(gSavedSettings, "GMDXChatLogTypingLines", 10);
-    const S32 body_h = (S32)llclamp((U32)typing_lines, 3u, 40u) * line_h;
+    const S32 body_h = kTypingLines * line_h;
     const S32 left = llmax(bar.mLeft, 4);
     return LLRect(left, bar.mTop + kTabH + body_h + 2 * kPad, left + llmax(bar.getWidth(), 200), bar.mTop);
 }
 
 LLRect GMDXChatLog::savedRect() const
 {
-    static LLCachedControl<LLRect> saved(gSavedSettings, "GMDXChatLogRect", LLRect());
+    static LLCachedControl<LLRect> saved(gSavedSettings, "SLChatLogRect", LLRect());
     const LLRect r = saved;
     return r.isEmpty() ? LLRect() : keepInView(r);
 }
@@ -775,16 +784,13 @@ void GMDXChatLog::draw()
     if (!active()) mUnitPlace = LLRect();
     if (!active() || !LLViewerChat::isNearbyChatOverlayVisible()) { lock(); mPanelRect = LLRect(); mOnBar = false; mHits.clear(); return; }
     loadFonts();
-    static LLCachedControl<U32> rest_lines(gSavedSettings, "GMDXChatLogLines", 7);
-    static LLCachedControl<F32> persist(gSavedSettings, "GMDXChatLogPersist", 20.f);
-    static LLCachedControl<S32> log_width(gSavedSettings, "GMDXChatLogWidth", 560);
 
     const F64 now = LLFrameTimer::getTotalSeconds();
     const LLRect bar = barRect();
     if (gAgentCamera.cameraMouselook()) lock();   // (mouselook has the mouse)
     const bool is_typing = typing();
     const bool show_panel = is_typing || mUnlocked;
-    const bool combat = !show_panel && (gAgentCamera.cameraMouselook() || FSCombatADS::isHeld());
+    const bool combat = !show_panel && (gAgentCamera.cameraMouselook() || FSCombatADS::isHeld());   // <GMDX> ADS too
     const S32 line_h = (S32)mText->getLineHeight() + kGap;
     mLineH = line_h;
     // the panel's place: being dragged, saved, or over the chat bar
@@ -805,11 +811,11 @@ void GMDXChatLog::draw()
         mPanelShown = false;
         mHits.clear();
         // newest first, until the line budget or a line that has faded out
-        S32 budget = combat ? kCombatLines : (S32)llclamp((U32)rest_lines, 1u, 30u);
-        const F32 hold = llmax((F32)persist, 1.f);
+        S32 budget = combat ? kCombatLines : kRestLines;
+        const F32 hold = kPersist;
         // over the chat bar, or in the moved panel's place (its lines, at most as many as it shows)
         S32 left = llmax(bar.mLeft, 4);
-        S32 width = llclamp((S32)log_width, 200, llmax(getRect().getWidth() - left - 8, 200));
+        S32 width = llclamp(kWidth, 200, llmax(getRect().getWidth() - left - 8, 200));
         S32 y = bar.mTop + 6;   // the bottom row's baseline area starts just above the chat bar's place
         if (!saved.isEmpty())
         {
@@ -861,8 +867,7 @@ void GMDXChatLog::draw()
         }
         // Legibility over a bright world: a soft dark band under each row's text (its edges fade out,
         // stacked rows blend into one), all of them before any text so no band dims a row above.
-        static LLCachedControl<F32> shade(gSavedSettings, "GMDXChatLogShade", 0.4f);
-        const F32 band = llclamp((F32)shade, 0.f, 1.f);
+        const F32 band = kShade;
         if (band > 0.f)
         {
             for (const DrawnRow& d : drawn)
@@ -1254,7 +1259,7 @@ void GMDXChatLog::onMouseCaptureLost()
 {
     if (!mDragging) return;
     mDragging = false;
-    if (mDragRect != mDragFrom) gSavedSettings.setRect("GMDXChatLogRect", mDragRect);   // (a click leaves it where it is)
+    if (mDragRect != mDragFrom) gSavedSettings.setRect("SLChatLogRect", mDragRect);   // (a click leaves it where it is)
 }
 
 bool GMDXChatLog::handleScrollWheel(S32 x, S32 y, S32 clicks)
@@ -1266,6 +1271,7 @@ bool GMDXChatLog::handleScrollWheel(S32 x, S32 y, S32 clicks)
 
 bool GMDXChatLog::handleHover(S32 x, S32 y, MASK mask)
 {
+    if (!active()) return false;
     if (!mDragging && onBarControl(x, y)) return false;
     if (!mDragging && hitAt(x, y))
     {

@@ -638,10 +638,7 @@ bool FSPoserAnimator::getFreeRotationAtAandB(const LLVector3& posA, const LLVect
                                              LLQuaternion& changeAtA, LLQuaternion& changeAtB)
 {
     LLVector3 vectorAC   = posC - posA;
-    LLVector3 vectorAB   = posB - posA;
     F32       lengthAC   = vectorAC.length();
-    F32       lengthAB   = vectorAB.length();
-    F32       lengthBC   = (posC - posB).length();
     F32       lengthMove = changeAtC.length();
 
     LLVector3 rotationAxis = vectorAC % changeAtC;
@@ -662,7 +659,6 @@ bool FSPoserAnimator::getPlanarRotationAtAandB(const LLVector3& posA, const LLVe
 {
     LLVector3 vectorAC = posC - posA;
     LLVector3 vectorAB = posB - posA;
-    F32       lengthAC = vectorAC.length();
     F32       lengthAB = vectorAB.length();
     F32       lengthBC = (posC - posB).length();
 

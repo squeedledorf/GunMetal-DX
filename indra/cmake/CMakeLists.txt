@@ -33,6 +33,7 @@ set(cmake_SOURCE_FILES
         LLAudio.cmake
         LLBuildFlags.cmake
         LLCommon.cmake
+        LLFuzz.cmake
         LLImage.cmake
         LLPhysicsExtensions.cmake
         LLPrimitive.cmake

@@ -19,24 +19,25 @@
  * $/LicenseInfo$
  */
 
-// <GMDX> Rez effects (Preferences > Rez Effects). The Tron rez-in and the ember de-rez come
+// <GMDX> Rez effects (Preferences > Graphics > Advanced > Rez Effects). The Tron rez-in and the ember de-rez come
 // from Vulkanstorm (SoapStorm's retired native-Vulkan fork); the rest are GunMetal-DX's.
+// Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
 //
 // How it fits the Vulkan renderer: an object in an effect carries instance flag bits 23..31
 // (its slot in a small effect table + 1) on every row of LLCleanInstanceStore, and bit 22
-// while it is dying. The table (draw set 0 binding 45) says per slot which effect, which stage
+// while it is dying. The table (draw set 0 binding 58) says per slot which effect, which stage
 // and how far along; this file rewrites it every frame while effects run, and nothing at all
 // runs or uploads while none do. Objects that start the same frame with the same effect share
 // a slot, so a whole region rezzing in at login needs a few dozen slots, not thousands.
 //
 // Fairness (Orion's rule for a combat viewer: nothing may hide information or give an
-// advantage): rez-in effects never move a vertex, and never discard a fragment -- the object is
-// drawn whole and solid from its first frame, the effect only paints its surface. The exception
-// is the 3D printer and the transporter (Orion's call): they may hide what is not built yet, and
+// advantage): most rez-in effects draw the object whole and solid, painting only its surface.
+// Fade-in uses coverage, while the 3D printer and the transporter may hide what is not built yet, and
 // that part cannot be clicked; with combat-safe on, on damage-enabled land, they too stay whole
 // and solid throughout, paint only. A killed object
-// keeps drawing for the de-rez alone: it casts no shadow, leaves reflection probes, ray
-// tracing and the GPU pick, and is not in the object list (no clicks). Temp-on-rez objects
+// keeps drawing for the de-rez alone: shadow-map casters and raster probe captures leave at the start,
+// while RT geometry pops out when the retained rows are released at completion. The GPU pick
+// skips dying rows, and they are not in the object list (no clicks). Temp-on-rez objects
 // (bullets, projectiles) never play any effect.
 
 #pragma once
@@ -61,8 +62,9 @@ namespace GMDXRezFx
     // Shader effect ids (gmdx_rezfx.glsl). Rez-in below DEREZ_FIRST, de-rez from it.
     enum Effect : U32
     {
-        FX_NONE = 0, FX_TRON = 1, FX_FIRE = 2, FX_HOLOGRAM = 3, FX_VOXEL = 4, FX_PRINTER = 5, FX_TRANSPORTER = 6,
+        FX_NONE = 0, FX_TRON = 1, FX_FIRE = 2, FX_HOLOGRAM = 3, FX_VOXEL = 4, FX_PRINTER = 5, FX_TRANSPORTER = 6, FX_FADE_IN = 7,
         FX_EMBER = 8, FX_DISINTEGRATE = 9, FX_ASH = 10, FX_GLITCH = 11, FX_IMPLODE = 12, FX_TRON_OUT = 13, FX_SHATTER = 14,
+        FX_FADE_OUT = 15,
         DEREZ_FIRST = FX_EMBER
     };
 
@@ -101,11 +103,11 @@ namespace GMDXRezFx
     bool hiding();
     // The table for upload (rows [0, count)); gen changes whenever its content does.
     const Slot* table(U32& count, U32& gen);
-    // Fragment-shader barycentrics (the Tron wireframe lines): set by the renderer at init.
+    bool wantsWireframe();
     void setWireframe(bool on);
     bool wireframe();
     // The renderer's lit FS modules (by embedded symbol name, "kWorldFragSpv" or "Frag"): on a
     // device with barycentrics, swaps code / bytes for the module's Tron-wireframe twin
     // (vkgfx/gmdxrezfxvk.cpp, which alone holds those twins). Any thread.
-    void wireModule(const char* name, const uint32_t*& code, size_t& bytes);
+    void wireModule(const char* name, const uint32_t*& code, size_t& bytes, bool wire);
 }

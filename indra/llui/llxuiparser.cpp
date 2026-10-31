@@ -148,6 +148,13 @@ struct Choice : public LLInitParam::ChoiceBlock<Choice, Occurs>
 
 };
 
+// The XSD schema blocks below are mutually recursive (Element/Group/Sequence/Choice), so the
+// IsBlock<> SFINAE probe necessarily sees them incomplete before they are defined. That cannot
+// be reordered away; GCC 11+ reports it as -Wsfinae-incomplete at each definition.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wsfinae-incomplete"
+#endif
 struct Sequence : public LLInitParam::ChoiceBlock<Sequence, Occurs>
 {
     Alternative< Lazy<Element, IS_A_BLOCK> >    element;
@@ -156,6 +163,9 @@ struct Sequence : public LLInitParam::ChoiceBlock<Sequence, Occurs>
     Alternative< Lazy<Sequence, IS_A_BLOCK> >   sequence;
     Alternative< Lazy<Any> >                    any;
 };
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
 struct GroupContents : public LLInitParam::ChoiceBlock<GroupContents, Occurs>
 {
@@ -170,6 +180,10 @@ struct GroupContents : public LLInitParam::ChoiceBlock<GroupContents, Occurs>
     {}
 };
 
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wsfinae-incomplete" // recursive schema block, see Sequence above
+#endif
 struct Group : public LLInitParam::Block<Group, GroupContents>
 {
     Optional<std::string>   name,
@@ -180,6 +194,9 @@ struct Group : public LLInitParam::Block<Group, GroupContents>
         ref("ref")
     {}
 };
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
 struct Restriction : public LLInitParam::Block<Restriction>
 {
@@ -261,6 +278,10 @@ struct ElementContents : public LLInitParam::ChoiceBlock<ElementContents, Occurs
     {}
 };
 
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wsfinae-incomplete" // recursive schema block, see Sequence above
+#endif
 struct Element : public LLInitParam::Block<Element, ElementContents>
 {
     Optional<std::string>   name,
@@ -273,6 +294,9 @@ struct Element : public LLInitParam::Block<Element, ElementContents>
         type("xs:type")
     {}
 };
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
 struct Schema : public LLInitParam::Block<Schema>
 {

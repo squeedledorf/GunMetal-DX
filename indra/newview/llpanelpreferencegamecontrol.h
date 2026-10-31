@@ -34,7 +34,7 @@
 
 #include <array>
 
-class ALCurveEditorCtrl;
+class SLCurveEditorCtrl;
 class LLButton;
 class LLCheckBoxCtrl;
 class LLComboBox;
@@ -190,7 +190,7 @@ private:
     LLSliderCtrl* mTuneOuter { nullptr };
     LLSliderCtrl* mTuneBoost { nullptr };
     SSGameControlStickView* mStickView { nullptr };
-    ALCurveEditorCtrl* mCurveView { nullptr };
+    SLCurveEditorCtrl* mCurveView { nullptr };
     U32 mPrevLiveButtons { 0 };
     std::array<F32, 4> mPrevStickMagnitude {};  // for select-by-flick: LX, LY, RX, RY
 

@@ -287,7 +287,7 @@ public:
         NET_WHY_NO_REGION,          // no region for the worker's host (or no agent region)
         NET_WHY_NO_URL,             // the region has no ViewerAsset capability (yet)
         NET_WHY_CAP_RETRY,          // waiting out CAP_MISSING_EXPIRATION_DELAY before asking again
-        NET_WHY_NO_HTTP,            // ImagePipelineUseHTTP off / HTTP not allowed for this request
+        NET_WHY_NO_HTTP,            // HTTP not allowed for this request (the worker aborts on its next pass)
         NET_WHY_COUNT
     };
     // #951: worker kinds for the per-stage ages (WorkerStats::mOldest / mStuck)

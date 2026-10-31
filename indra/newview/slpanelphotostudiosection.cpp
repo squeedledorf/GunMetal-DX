@@ -50,6 +50,8 @@
 #include "llenvironment.h"
 #include "llfile.h"
 #include "llfocusmgr.h"
+#include "llfloaterpopout.h"
+#include "llhazeenv.h"
 #include "llsliderctrl.h"
 #include "lltextbox.h"
 #include "llviewercontrol.h"
@@ -59,6 +61,7 @@
 #include "slcurvemodel.h"
 #include "slfloaterphotostudio.h"
 #include "slpanelphotostudioeffects.h"
+#include "slphotostudiohaze.h"
 #include "slphotostudioscopes.h"
 
 #include <algorithm>
@@ -70,6 +73,13 @@
 
 namespace
 {
+constexpr const char* HAZE_START = "RenderVKHazeStartDistance";
+constexpr const char* HAZE_OPACITY = "RenderVKHazeMaxOpacity";
+
+LLHazeDisplay currentResolvedHaze()
+{
+    return llGetHazeDisplay();
+}
 const std::vector<SLPhotoStudioSectionDef>& sectionTable()
 {
     // Dropdown order, which panel_photo_studio_slot.xml repeats with labels.
@@ -220,6 +230,7 @@ SLPanelPhotoStudioSection::SLPanelPhotoStudioSection(SLFloaterPhotoStudio* studi
         // The grab is serviced on the next frame's blit, so what gets frozen
         // is what the user is looking at as they click. Switching the wipe on
         // is the feedback that the grab happened.
+        LLFloaterPopout::showWorldView();
         gPipeline.requestReferenceStill();
         if (gSavedSettings.getS32("RenderReferenceWipeMode") == 0)
         {
@@ -393,6 +404,7 @@ bool SLPanelPhotoStudioSection::postBuild()
 
     setupToneCurve();
     setupSplitToneGraph();
+    setupHaze();
 
     // Which sections this panel shows, and which the renderer's mode hides.
     applySectionFilter();
@@ -401,6 +413,7 @@ bool SLPanelPhotoStudioSection::postBuild()
     refreshReferenceRow();
     refreshCamReadouts();
     refreshSectionSwitches();
+    refreshHaze();
 
     return LLPanel::postBuild();
 }
@@ -415,6 +428,7 @@ void SLPanelPhotoStudioSection::draw()
     refreshCamReadouts();
     refreshDayCycleRow();
     refreshSectionSwitches();
+    refreshHaze();
 
     if (LLView* lit = mLitCaption.get())
     {
@@ -429,6 +443,138 @@ void SLPanelPhotoStudioSection::draw()
     }
 
     LLPanel::draw();
+}
+
+void SLPanelPhotoStudioSection::setupHaze()
+{
+    if (!findChild<LLView>("sec_haze"))
+    {
+        return;
+    }
+    mHazeRows = {{
+        { HAZE_START, findChild<LLUICtrl>("haze_start_auto"),
+          findChild<LLUICtrl>("haze_RenderVKHazeStartDistance"), findChild<LLUICtrl>("haze_start_rst"),
+          findChild<LLTextBox>("haze_start_resolved"), 1.f, 512.f },
+        { HAZE_OPACITY, findChild<LLUICtrl>("haze_opacity_auto"),
+          findChild<LLUICtrl>("haze_RenderVKHazeMaxOpacity"), findChild<LLUICtrl>("haze_opacity_rst"),
+          findChild<LLTextBox>("haze_opacity_resolved"), 100.f, .95f }
+    }};
+    mHazeInactive = findChild<LLTextBox>("haze_inactive");
+    for (const char* name : { "fog_ambient", "fog_ambient_rst", "fog_sun", "fog_sun_rst" })
+    {
+        if (LLUICtrl* control = findChild<LLUICtrl>(name))
+        {
+            mLegacyFogLightControls.push_back(control);
+        }
+    }
+    mMistEnable = findChild<LLUICtrl>("mist_on");
+    for (size_t index = 0; index < mHazeRows.size(); ++index)
+    {
+        HazeRow& row = mHazeRows[index];
+        if (row.mAutomatic)
+        {
+            row.mAutomatic->setCommitCallback([this, index](LLUICtrl*, const LLSD&) { commitHazeAutomatic(index); });
+        }
+        if (row.mValue)
+        {
+            row.mValue->setCommitCallback([this, index](LLUICtrl*, const LLSD&) { commitHazeValue(index); });
+        }
+        if (LLControlVariable* control = gSavedSettings.getControl(row.mSetting))
+        {
+            mHazeConnections.emplace_back(control->getSignal()->connect(
+                [this](LLControlVariable*, const LLSD&, const LLSD&) { refreshHaze(); }));
+        }
+    }
+    if (LLControlVariable* control = gSavedSettings.getControl("RenderVKPhysicalSky"))
+    {
+        mHazeConnections.emplace_back(control->getSignal()->connect(
+            [this](LLControlVariable*, const LLSD&, const LLSD&) { refreshHaze(); }));
+    }
+    if (LLControlVariable* control = gSavedSettings.getControl("RenderVKVolumetricFog"))
+    {
+        mHazeConnections.emplace_back(control->getSignal()->connect(
+            [this](LLControlVariable*, const LLSD&, const LLSD&) { refreshHaze(); }));
+    }
+}
+
+void SLPanelPhotoStudioSection::refreshHaze()
+{
+    if (!mHazeInactive)
+    {
+        return;
+    }
+    const LLHazeDisplay resolved = currentResolvedHaze();
+    const bool physical = resolved.physicalActive;
+    const bool volumetric = gSavedSettings.getU32("RenderVKVolumetricFog") != 0;
+    for (LLUICtrl* control : mLegacyFogLightControls)
+    {
+        control->setEnabled(!physical && volumetric);
+    }
+    if (mMistEnable)
+    {
+        mMistEnable->setEnabled(physical || volumetric);
+    }
+    mHazeInactive->setText(std::string(physical ? "" : "Physical sky is inactive; these settings are retained."));
+    const F32 values[] = { resolved.startDistance, resolved.maxOpacity };
+    const LLHaze::Source sources[] = { resolved.startSource, resolved.opacitySource };
+    for (size_t index = 0; index < mHazeRows.size(); ++index)
+    {
+        HazeRow& row = mHazeRows[index];
+        const bool manual = SLPhotoStudioHaze::isManual(gSavedSettings.getF32(row.mSetting));
+        if (row.mAutomatic)
+        {
+            row.mAutomatic->setValue(!manual);
+            row.mAutomatic->setEnabled(physical);
+        }
+        if (row.mValue)
+        {
+            row.mValue->setEnabled(physical && manual);
+            if (!row.mValue->hasFocus())
+            {
+                row.mValue->setValue(values[index] * row.mScale);
+            }
+        }
+        if (row.mReset)
+        {
+            row.mReset->setEnabled(physical);
+        }
+        if (row.mResolved)
+        {
+            row.mResolved->setText(llformat("Resolved: %.1f %s (%s)",
+                values[index] * row.mScale, index == 0 ? "m" : "%", LLHaze::sourceName(sources[index])));
+        }
+    }
+}
+
+void SLPanelPhotoStudioSection::commitHazeAutomatic(size_t index)
+{
+    HazeRow& row = mHazeRows[index];
+    if (row.mAutomatic->getValue().asBoolean())
+    {
+        gSavedSettings.setF32(row.mSetting, -1.f);
+    }
+    else
+    {
+        const LLHazeDisplay resolved = currentResolvedHaze();
+        const double value = index == 0 ? resolved.startDistance : resolved.maxOpacity;
+        F32 preference;
+        if (SLPhotoStudioHaze::preferenceFromDisplay(value, 1.0, row.mLimit, preference))
+        {
+            gSavedSettings.setF32(row.mSetting, preference);
+        }
+    }
+    refreshHaze();
+}
+
+void SLPanelPhotoStudioSection::commitHazeValue(size_t index)
+{
+    HazeRow& row = mHazeRows[index];
+    F32 preference;
+    if (SLPhotoStudioHaze::preferenceFromDisplay(row.mValue->getValue().asReal(), row.mScale, row.mLimit, preference))
+    {
+        gSavedSettings.setF32(row.mSetting, preference);
+    }
+    refreshHaze();
 }
 
 // static

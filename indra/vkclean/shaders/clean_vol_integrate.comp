@@ -17,6 +17,7 @@
 // stored: LL's haze already put atten.r on every surface (clean_vol_apply.glsl contract).
 layout(local_size_x = 8, local_size_y = 8) in;
 
+#define CLEAN_MEDIUM_PASS
 #include "clean_frame_info.glsl"
 #include "clean_atmos_common.glsl"
 #include "clean_vol_common.glsl"
@@ -25,11 +26,67 @@ layout(local_size_x = 8, local_size_y = 8) in;
 layout(set = VOL_SET, binding = 3, rgba16f) readonly uniform image3D uHistCur;
 layout(set = VOL_SET, binding = 4, rgba16f) writeonly uniform image3D uInteg;
 
+layout(set=VOL_SET,binding=8,rgba16f) writeonly uniform image3D uTransportT;
+layout(set=VOL_SET,binding=9,rgba16f) writeonly uniform image2D uAirL;
+layout(set=VOL_SET,binding=10,rgba16f) writeonly uniform image2D uAirT;
+layout(set=VOL_SET,binding=11,rgba16f) readonly uniform image3D uHeightHistory;
+
+// Half storage must not round the consumed height budget DOWN: a finite tail
+// would otherwise regain that fraction of the cap. Prefix RGB keeps normal
+// rounding; the budget is conservatively rounded by at most one half ULP.
+float heightBudgetStorage(float used)
+{
+    uint bits=packHalf2x16(vec2(used,0.0));
+    if(unpackHalf2x16(bits).x<used) ++bits;
+    return unpackHalf2x16(bits).x;
+}
+
 void main()
 {
     const uvec2 xy = gl_GlobalInvocationID.xy;
     const uvec3 dims = volDims();
     if (any(greaterThanEqual(xy, dims.xy))) return;
+    if(cmOn())
+    {
+        const vec2 uv=(vec2(xy)+0.5)/vec2(dims.xy);
+        vec3 O,V; cmRay(uv,MEDIUM_EYE,O,V);
+        const CameraMediumView view=ssr.medium[MEDIUM_EYE];
+        const float factor=view.forward.w>0.5 ? 1.0 : max(dot(V,view.forward.xyz),1e-5);
+        CameraTransport combined=cmIdentity(),air=cmIdentity();
+        float usedHeight=0.0,begin=0.0;
+        for(uint z=0u;z<dims.z;++z)
+        {
+            float end=cmDepth(float(z+1u)/float(dims.z),view,factor)/factor;
+            if(z+1u<=dims.z/4u) end=min(end,view.mapping.x);
+            vec3 ext,source,height;
+            float a=begin,b=end;
+            if(V.z!=0.0)
+            {
+                const float cut=(ssr.haze_mode.z-O.z)/V.z;
+                if(V.z>0.0) a=max(a,cut); else b=min(b,cut);
+            }
+            cmLight(O+V*((a+b)*0.5),V,vec3(1.0),1.0,ext,source,height);
+            vec4 local=vec4(0.0);
+            if(vp.p0.x>0.5)
+            {
+                vec3 scattering=vec3(0.0); float extinction=0.0;
+                weatherPrecipMedium(O+V*((a+b)*0.5),vec2(0.0),0.0,0.0,0.0,scattering,extinction);
+                local=vec4(scattering*(height/0.9),extinction);
+            }
+            if(vp.p0.x<0.5)
+            {
+                local=imageLoad(uHistCur,ivec3(xy,z));
+                height=imageLoad(uHeightHistory,ivec3(xy,z)).rgb;
+            }
+            cmStep(combined,air,O,V,begin,end,usedHeight,local.rgb,max(local.a,0.0),height,source,ext);
+            imageStore(uInteg,ivec3(xy,z),vec4(atmosClampHDR(combined.L),1.0));
+            imageStore(uTransportT,ivec3(xy,z),vec4(clamp(combined.T,0.0,1.0),heightBudgetStorage(usedHeight)));
+            begin=end;
+        }
+        imageStore(uAirL,ivec2(xy),vec4(atmosClampHDR(air.L),1.0));
+        imageStore(uAirT,ivec2(xy),vec4(clamp(air.T,0.0,1.0),1.0));
+        return;
+    }
     // Ray length per metre of view depth for this column (its centre ray).
     const vec3 rel = volRelPos(vec3(vec2(xy) + 0.5, float(dims.z)));
     const float k = length(rel) / max(dot(rel, vp.fwd.xyz), 1e-6);

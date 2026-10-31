@@ -765,6 +765,14 @@ void settings_setup_listeners()
     {
         LLGpuTexCache::setEnabled(newvalue.asBoolean());
     });
+    // #1110: outlined text cursor vs the OS one; swaps live.
+    setting_setup_signal_listener(gSavedSettings, "SlipstreamSystemTextCursor", [](const LLSD& newvalue)
+    {
+        if (gViewerWindow && gViewerWindow->getWindow())
+        {
+            gViewerWindow->getWindow()->setUseSystemTextCursor(newvalue.asBoolean());
+        }
+    });
     gSavedSettings.getControl("RenderAnisotropicLevel")->getValidateSignal()->connect(boost::bind(&validateAnisotropicFiltering, _2));
     setting_setup_signal_listener(gSavedSettings, "RenderDisableVintageMode", handleDisableVintageMode);
     setting_setup_signal_listener(gSavedSettings, "RenderVolumeLODFactor", handleVolumeLODChanged);

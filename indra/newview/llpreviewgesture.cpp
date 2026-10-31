@@ -523,6 +523,9 @@ void LLPreviewGesture::addKeys()
     LLComboBox* combo = mKeyCombo;
 
     combo->add( NONE_LABEL );
+    // the mouse side buttons (#1189), kept by the viewer rather than in the gesture
+    combo->add( LLKeyboard::stringFromMouse(CLICK_BUTTON4) );
+    combo->add( LLKeyboard::stringFromMouse(CLICK_BUTTON5) );
     for (KEY key = ' '; key < KEY_NONE; key++)
     {
         char buffer[] = { (char)key, '\0' };
@@ -952,7 +955,11 @@ void LLPreviewGesture::loadUIFromGesture(LLMultiGesture* gesture)
 
     mReplaceEditor->setText(gesture->mReplaceText);
 
-    switch (gesture->mMask)
+    // A mouse side button shortcut (#1189) is kept by the viewer, with its own modifier
+    MASK mouse_mask = MASK_NONE;
+    const EMouseClickType mouse_button = LLGestureMgr::instance().getMouseTrigger(mItemUUID, &mouse_mask);
+
+    switch (mouse_button != CLICK_NONE ? mouse_mask : gesture->mMask)
     {
     default:
       case MASK_NONE:
@@ -966,15 +973,23 @@ void LLPreviewGesture::loadUIFromGesture(LLMultiGesture* gesture)
         break;
     }
 
-    mModifierCombo->setEnabledByValue(CTRL_LABEL, gesture->mKey != KEY_F10);
-
     mKeyCombo->setCurrentByIndex(0);
-    if (gesture->mKey != KEY_NONE)
+    if (mouse_button != CLICK_NONE)
+    {
+        mKeyCombo->setSimple(LLKeyboard::stringFromMouse(mouse_button));
+    }
+    else if (gesture->mKey != KEY_NONE)
     {
         mKeyCombo->setSimple(LLKeyboard::stringFromKey(gesture->mKey));
     }
 
-    mKeyCombo->setEnabledByValue(LLKeyboard::stringFromKey(KEY_F10), gesture->mMask != MASK_CONTROL);
+    // SL-14139: no ctrl-F10 (see onCommitKeyorModifier)
+    mModifierCombo->setEnabledByValue(CTRL_LABEL, mKeyCombo->getSimple() != LLKeyboard::stringFromKey(KEY_F10));
+    mKeyCombo->setEnabledByValue(LLKeyboard::stringFromKey(KEY_F10), mModifierCombo->getSimple() != CTRL_LABEL);
+
+    // Only your own gestures can be played (and so bound) from the mouse, not one inside an object
+    mKeyCombo->setEnabledByValue(LLKeyboard::stringFromMouse(CLICK_BUTTON4), mObjectUUID.isNull());
+    mKeyCombo->setEnabledByValue(LLKeyboard::stringFromMouse(CLICK_BUTTON5), mObjectUUID.isNull());
 
     mControllerCombo->setValue(LLSD(LLGestureMgr::instance().getControllerButton(mItemUUID)));
 
@@ -1113,6 +1128,12 @@ void LLPreviewGesture::saveIfNeeded()
         delete gesture;
         gesture = NULL;
         return;
+    }
+
+    // A mouse side button shortcut (#1189) isn't in the gesture (createGesture), the viewer keeps it
+    if (mObjectUUID.isNull())
+    {
+        LLGestureMgr::instance().setMouseTrigger(mItemUUID, getShortcutMouseButton(), getShortcutMask());
     }
 
     LLAssetID assetId;
@@ -1295,23 +1316,18 @@ LLMultiGesture* LLPreviewGesture::createGesture()
     gesture->mTrigger = mTriggerEditor->getText();
     gesture->mReplaceText = mReplaceEditor->getText();
 
-    const std::string& modifier = mModifierCombo->getSimple();
-    if (modifier == CTRL_LABEL)
-    {
-        gesture->mMask = MASK_CONTROL;
-    }
-    else if (modifier == SHIFT_LABEL)
-    {
-        gesture->mMask = MASK_SHIFT;
-    }
-    else
-    {
-        gesture->mMask = MASK_NONE;
-    }
+    gesture->mMask = getShortcutMask();
 
     if (mKeyCombo->getCurrentIndex() == 0)
     {
         gesture->mKey = KEY_NONE;
+    }
+    else if (getShortcutMouseButton() != CLICK_NONE)
+    {
+        // Other viewers can't read a mouse button in the gesture: it gets no shortcut, the
+        // viewer keeps the button (saveIfNeeded)
+        gesture->mKey = KEY_NONE;
+        gesture->mMask = MASK_NONE;
     }
     else
     {
@@ -1379,6 +1395,66 @@ void LLPreviewGesture::onCommitControllerButton()
 {
     LLGestureMgr::instance().setControllerButton(mItemUUID, mControllerCombo->getValue().asInteger());
 }
+
+MASK LLPreviewGesture::getShortcutMask() const
+{
+    const std::string& modifier = mModifierCombo->getSimple();
+    if (modifier == CTRL_LABEL)
+    {
+        return MASK_CONTROL;
+    }
+    if (modifier == SHIFT_LABEL)
+    {
+        return MASK_SHIFT;
+    }
+    return MASK_NONE;
+}
+
+
+// static
+bool LLPreviewGesture::pickSideButton(EMouseClickType button, bool down)
+{
+    // the editors' group ("preview") holds every kind of preview floater
+    const LLFloaterReg::instance_list_t* previews = LLFloaterReg::findInstanceList("preview_gesture");
+    if (!previews)
+    {
+        return false;
+    }
+    for (LLFloater* floater : *previews)
+    {
+        LLPreviewGesture* self = dynamic_cast<LLPreviewGesture*>(floater);
+        // only your own gestures take a mouse button (see loadUIFromGesture)
+        if (!self || !self->mKeyCombo || !self->mKeyCombo->hasFocus() || self->mObjectUUID.notNull())
+        {
+            continue;
+        }
+        if (down)
+        {
+            // as if picked from the list
+            self->mKeyCombo->setSimple(LLKeyboard::stringFromMouse(button));
+            self->mKeyCombo->hideList();
+            self->mKeyCombo->onCommit();
+        }
+        return true;
+    }
+    return false;
+}
+
+
+EMouseClickType LLPreviewGesture::getShortcutMouseButton() const
+{
+    const std::string& key_string = mKeyCombo->getSimple();
+    if (key_string == LLKeyboard::stringFromMouse(CLICK_BUTTON4))
+    {
+        return CLICK_BUTTON4;
+    }
+    if (key_string == LLKeyboard::stringFromMouse(CLICK_BUTTON5))
+    {
+        return CLICK_BUTTON5;
+    }
+    return CLICK_NONE;
+}
+
 
 void LLPreviewGesture::onCommitKeyorModifier()
 {

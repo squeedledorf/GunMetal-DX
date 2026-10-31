@@ -2,6 +2,10 @@
  * @file llgamecontroltranslator.cpp
  * @brief LLGameControlTranslator class implementation
  *
+ * Linden Lab's LLGameControl (viewer PR #6202), with the extensions of SoapStorm
+ * (<SS:GameControl>), OCOL (origin unstated upstream) and GunMetal-DX (<GMDX>).
+ * Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
+ *
  * $LicenseInfo:firstyear=2023&license=viewerlgpl$
  * Second Life Viewer Source Code
  * Copyright (C) 2023, Linden Research, Inc.

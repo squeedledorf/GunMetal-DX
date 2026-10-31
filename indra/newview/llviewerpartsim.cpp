@@ -43,6 +43,7 @@
 #include "pipeline.h"
 #include "llvoavatarself.h"
 #include "llvovolume.h"
+#include "gmdxtpfx.h"   // <GMDX> teleport effects' local particles
 
 const F32 PART_SIM_BOX_SIDE = 16.f;
 
@@ -731,6 +732,7 @@ void LLViewerPartSim::updateSimulation()
         sGPUParticleCount = (S32)ps.readLiveParticleCount();
         updateAdaptiveRate(sGPUParticleCount);
         updatePartBurstRate(sGPUParticleCount);
+        GMDXTPFX::feedParticles();   // <GMDX> teleport effects' local particles (after beginFrame cleared the spawns)
     }
 
     // Start at a random particle system so the same

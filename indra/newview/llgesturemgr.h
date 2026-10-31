@@ -111,6 +111,25 @@ public:
     // Name of the first active gesture bound to key+mask, empty if none
     std::string getKeyTriggerName(KEY key, MASK mask) const;
 
+    // Mouse side button shortcuts (MB4 / MB5 plus a modifier, #1189). The gesture asset only has
+    // room for a key, so these are kept in per-account settings against the gesture's item.
+    // CLICK_NONE when the item has none.
+    EMouseClickType getMouseTrigger(const LLUUID& item_id, MASK* mask = nullptr) const;
+
+    // "Ctrl+MB4", empty when the item has no mouse shortcut
+    std::string getMouseTriggerLabel(const LLUUID& item_id) const;
+
+    // Binds the item to button+mask, or unbinds it with CLICK_NONE. A button+mask belongs to
+    // one gesture: any other gesture holding it loses it.
+    void setMouseTrigger(const LLUUID& item_id, EMouseClickType button, MASK mask);
+
+    // Plays the active gesture bound to this side button+mask; true if there is one
+    bool triggerMouseGesture(EMouseClickType button, MASK mask);
+
+    // Ends the "wait for key release" step of the active gestures bound to this side button
+    // (whatever their modifier); true if there are any
+    bool triggerMouseGestureRelease(EMouseClickType button);
+
     // One-time per-account: after the login gestures have loaded, deactivate Linden's
     // starter dance gestures (see migrateStarterGestures)
     void scheduleStarterGestureMigration();

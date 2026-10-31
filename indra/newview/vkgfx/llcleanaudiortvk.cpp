@@ -559,7 +559,9 @@ void LLCleanAudioRTVK::record(VkCommandBuffer cmd, VkDescriptorSetLayout rtLayou
     const bool room = (mFrame % interval) == 0u;
     const uint32_t nq = std::min(mReq.query_count, kMaxQueries);
     if (!room && n == 0u && nq == 0u) return;
-    std::memset(rec, 0, offsetof(AcSlot, q));   // (inputs + header; query answers are all written)
+    // (inputs + header; query answers are all written). rec is raw mapped GPU memory mirroring
+    // the std430 record, not a live C++ object, so the byte clear is intended (void* cast).
+    std::memset(static_cast<void*>(rec), 0, offsetof(AcSlot, q));
     std::memcpy(rec->src, mReq.sources, n * 4 * sizeof(float));
     // #858 diffraction sources (room frames only: the shadow rays start at the room hits);
     // #857 / #858 path queries (extra workgroups, only as many as listed).

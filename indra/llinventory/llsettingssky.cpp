@@ -28,8 +28,10 @@
 #include "linden_common.h"
 
 #include "llsettingssky.h"
+#include "llhazesky.h"
 #include "indra_constants.h"
 #include <algorithm>
+#include <cmath>
 #include "lltrace.h"
 #include "llfasttimer.h"
 #include "v3colorutil.h"
@@ -78,6 +80,8 @@ const std::string LLSettingsSky::SETTING_DENSITY_MULTIPLIER("density_multiplier"
 const std::string LLSettingsSky::SETTING_DISTANCE_MULTIPLIER("distance_multiplier");
 const std::string LLSettingsSky::SETTING_HAZE_DENSITY("haze_density");
 const std::string LLSettingsSky::SETTING_HAZE_HORIZON("haze_horizon");
+const std::string LLSettingsSky::SETTING_SL_HAZE_START_DISTANCE("sl_haze_start_distance");
+const std::string LLSettingsSky::SETTING_SL_HAZE_MAX_OPACITY("sl_haze_max_opacity");
 
 const std::string LLSettingsSky::SETTING_BLOOM_TEXTUREID("bloom_id");
 const std::string LLSettingsSky::SETTING_RAINBOW_TEXTUREID("rainbow_id");
@@ -425,6 +429,66 @@ LLSettingsSky::LLSettingsSky():
     replaceSettings(defaults());
 }
 
+void LLSettingsSky::normalizeHazeGuardrails(LLSD &settings)
+{
+    const std::pair<const std::string *, F64> fields[] = {
+        { &SETTING_SL_HAZE_START_DISTANCE, 512.0 },
+        { &SETTING_SL_HAZE_MAX_OPACITY, 0.95 }
+    };
+    for (const auto &field : fields)
+    {
+        if (!settings.has(*field.first)) continue;
+        const LLSD value = settings[*field.first];
+        if ((value.type() != LLSD::TypeInteger && value.type() != LLSD::TypeReal) ||
+            !std::isfinite(value.asReal()))
+        {
+            LL_WARNS("SETTINGS") << "Discarding invalid haze guardrail '" << *field.first << "'" << LL_ENDL;
+            settings.erase(*field.first);
+            continue;
+        }
+        settings[*field.first] = LLSD::Real(std::clamp(value.asReal(), 0.0, field.second));
+    }
+}
+
+LLSD LLSettingsSky::validateSkySettings(LLSD &settings, bool partial)
+{
+    normalizeHazeGuardrails(settings);
+    validation_list_t validations = validationList();
+    return LLSettingsBase::settingValidation(settings, validations, partial);
+}
+
+const LLHaze::Transition *LLSettingsSky::getHazeTransition() const
+{
+    return mHazeTransition ? &*mHazeTransition : nullptr;
+}
+
+void LLSettingsSky::copyHazeTransitionFrom(const LLSettingsSky &other)
+{
+    mHazeTransition = other.mHazeTransition;
+}
+
+void LLSettingsSky::setValue(const std::string &name, const LLSD &value)
+{
+    if (name == SETTING_SL_HAZE_START_DISTANCE || name == SETTING_SL_HAZE_MAX_OPACITY)
+        mHazeTransition.reset();
+    LLSettingsBase::setValue(name, value);
+}
+
+bool LLSettingsSky::validate()
+{
+    normalizeHazeGuardrails(getSettings());
+    return LLSettingsBase::validate();
+}
+
+void LLSettingsSky::clearHazeGuardrail(const std::string &key)
+{
+    if (key != SETTING_SL_HAZE_START_DISTANCE && key != SETTING_SL_HAZE_MAX_OPACITY) return;
+    mHazeTransition.reset();
+    saveValuesIfNeeded();
+    getSettings().erase(key);
+    setDirtyFlag(true);
+}
+
 void LLSettingsSky::replaceSettings(LLSD settings)
 {
     LLSettingsBase::replaceSettings(settings);
@@ -438,11 +502,12 @@ void LLSettingsSky::replaceSettings(LLSD settings)
 
 void LLSettingsSky::replaceSettings(const LLSettingsBase::ptr_t& other_sky)
 {
+    LLSD source = other_sky->getSettings();
     LLSettingsBase::replaceSettings(other_sky);
-
     llassert(getSettingsType() == other_sky->getSettingsType());
 
     LLSettingsSky::ptr_t other = PTR_NAMESPACE::dynamic_pointer_cast<LLSettingsSky>(other_sky);
+    copyHazeTransitionFrom(*other);
 
     mCanAutoAdjust = other->mCanAutoAdjust;
     mReflectionProbeAmbiance = other->mReflectionProbeAmbiance;
@@ -507,6 +572,13 @@ void LLSettingsSky::replaceSettings(const LLSettingsBase::ptr_t& other_sky)
     mNextBloomTextureId.setNull();
     mNextRainbowTextureId.setNull();
     mNextHaloTextureId.setNull();
+
+    LLSD &target = getSettings();
+    for (const auto *key : { &SETTING_SL_HAZE_START_DISTANCE, &SETTING_SL_HAZE_MAX_OPACITY })
+    {
+        if (source.has(*key)) target[*key] = source[*key];
+        else target.erase(*key);
+    }
 }
 
 void LLSettingsSky::replaceWithSky(const LLSettingsSky::ptr_t& pother)
@@ -580,6 +652,22 @@ void LLSettingsSky::blend(LLSettingsBase::ptr_t &end, F64 blendf)
     LLSettingsSky::ptr_t other = PTR_NAMESPACE::dynamic_pointer_cast<LLSettingsSky>(end);
     if (other)
     {
+        const auto endpoint = [](const LLSettingsSky &sky)
+        {
+            const LLHaze::Transition *existing = sky.getHazeTransition();
+            if (!existing) return llHazeEndpoint(sky);
+            // Match the currently displayed policy before freezing an interruption.
+            // Refresh a copy so existing and already-frozen snapshots remain intact.
+            LLHaze::Transition refreshed = *existing;
+            llHazeRefreshTransition(refreshed);
+            return LLHaze::freeze(refreshed);
+        };
+        LLHaze::Transition transition;
+        transition.from = endpoint(*this);
+        transition.to = endpoint(*other);
+        transition.weight = std::isfinite(blendf) ? std::clamp(blendf, 0.0, 1.0) : 0.0;
+        mHazeTransition = transition;
+
         LLUUID cloud_noise_id = getCloudNoiseTextureId();
         LLUUID cloud_noise_id_next = other->getCloudNoiseTextureId();
         if (!cloud_noise_id.isNull() && cloud_noise_id_next.isNull())
@@ -641,7 +729,8 @@ void LLSettingsSky::blend(LLSettingsBase::ptr_t &end, F64 blendf)
             {
                 // Special case since SETTING_AMBIENT is both in outer and legacy maps,
                 // we prioritize legacy one
-                setAmbientColor(other->getAmbientColor());
+                // This is part of the blend, not a creator edit. Keep its haze endpoints.
+                mAmbientColor = other->getAmbientColor();
                 mLegacyAmbientColor = true;
                 mHasLegacyHaze = true;
             }
@@ -816,6 +905,10 @@ LLSettingsSky::validation_list_t LLSettingsSky::validationList()
         validation.push_back(Validator(SETTING_ABSORPTION_CONFIG, true, LLSD::TypeArray, &validateAbsorptionLayers));
         validation.push_back(Validator(SETTING_MIE_CONFIG, true, LLSD::TypeArray, &validateMieLayers));
         validation.push_back(Validator(SETTING_LEGACY_HAZE, false, LLSD::TypeMap, &validateLegacyHaze));
+        validation.push_back(Validator(SETTING_SL_HAZE_START_DISTANCE, false, LLSD::TypeReal,
+            boost::bind(&Validator::verifyFloatRange, _1, _2, llsd::array(0.0, 512.0))));
+        validation.push_back(Validator(SETTING_SL_HAZE_MAX_OPACITY, false, LLSD::TypeReal,
+            boost::bind(&Validator::verifyFloatRange, _1, _2, llsd::array(0.0, 0.95))));
     }
     return validation;
 }
@@ -1166,11 +1259,13 @@ LLColor3 get_color(bool& use_legacy, LLSD& settings, const std::string& key, con
 
 void LLSettingsSky::loadValuesFromLLSD()
 {
+    mHazeTransition.reset();
     LL_PROFILE_ZONE_SCOPED_CATEGORY_ENVIRONMENT;
 
     LLSettingsBase::loadValuesFromLLSD();
 
     LLSD& settings = getSettings();
+    normalizeHazeGuardrails(settings);
     mCanAutoAdjust = !settings.has(SETTING_REFLECTION_PROBE_AMBIANCE);
     if (mCanAutoAdjust)
     {
@@ -1343,11 +1438,12 @@ void LLSettingsSky::calculateHeavenlyBodyPositions()  const
     mSunDirection.normalize();
     mMoonDirection.normalize();
 
-    // <GMDX> SoapStorm 0640cc8829 (#73): answer a degenerate body rotation instead of only
-    // complaining about it. normalize() clears a too-short vector to (0,0,0), getIsSunUp() reads
-    // z >= 0 as up, and the renderer got a zero-length light direction (NaN view matrices
-    // downstream). z_axis_neg reads as "down", so getLightDirection() falls through to the moon
-    // or its own default, as on any night. Logged once, it can repeat every frame.
+    // Answer a degenerate body rotation instead of only complaining about it (SoapStorm
+    // 0640cc8829 (#73), via GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4): normalize()
+    // clears a too-short vector to (0,0,0), getIsSunUp() reads z >= 0 as up, and the renderer got
+    // a zero-length light direction (NaN view matrices downstream; physical night's sun-moon
+    // angle). z_axis_neg reads as "down", so getLightDirection() falls through to the moon or its
+    // own default, as on any night. Logged once, it can repeat every frame.
     if (mSunDirection.lengthSquared() < 0.01f)
     {
         LL_WARNS_ONCE("SETTINGS") << "Zero length sun direction from a degenerate sun rotation in sky '"
@@ -1360,7 +1456,6 @@ void LLSettingsSky::calculateHeavenlyBodyPositions()  const
                                   << getName() << "' (" << getAssetId() << "); treating the moon as down." << LL_ENDL;
         mMoonDirection = LLVector3::z_axis_neg;
     }
-    // </GMDX>
 }
 
 LLVector3 LLSettingsSky::getLightDirection() const
@@ -1533,6 +1628,7 @@ void LLSettingsSky::setReflectionProbeAmbiance(F32 ambiance)
 
 void LLSettingsSky::setAmbientColor(const LLColor3 &val)
 {
+    mHazeTransition.reset();
     mAmbientColor = val;
     mLegacyAmbientColor = true;
     setDirtyFlag(true);
@@ -1541,6 +1637,7 @@ void LLSettingsSky::setAmbientColor(const LLColor3 &val)
 
 void LLSettingsSky::setBlueDensity(const LLColor3 &val)
 {
+    mHazeTransition.reset();
     mBlueDensity = val;
     mLegacyBlueDensity = true;
     setDirtyFlag(true);
@@ -1557,6 +1654,7 @@ void LLSettingsSky::setBlueHorizon(const LLColor3 &val)
 
 void LLSettingsSky::setDensityMultiplier(F32 val)
 {
+    mHazeTransition.reset();
     mDensityMultiplier = val;
     mLegacyDensityMultiplier = true;
     setDirtyFlag(true);
@@ -1565,6 +1663,7 @@ void LLSettingsSky::setDensityMultiplier(F32 val)
 
 void LLSettingsSky::setDistanceMultiplier(F32 val)
 {
+    mHazeTransition.reset();
     mDistanceMultiplier = val;
     mLegacyDistanceMultiplier = true;
     setDirtyFlag(true);
@@ -1573,6 +1672,7 @@ void LLSettingsSky::setDistanceMultiplier(F32 val)
 
 void LLSettingsSky::setHazeDensity(F32 val)
 {
+    mHazeTransition.reset();
     mHazeDensity = val;
     mLegacyHazeDensity = true;
     setDirtyFlag(true);
@@ -2116,6 +2216,7 @@ F32 LLSettingsSky::getMaxY() const
 
 void LLSettingsSky::setMaxY(F32 val)
 {
+    mHazeTransition.reset();
     mMaxY = val;
     setDirtyFlag(true);
     setLLSDDirty();
@@ -2128,6 +2229,7 @@ LLQuaternion LLSettingsSky::getMoonRotation() const
 
 void LLSettingsSky::setMoonRotation(const LLQuaternion &val)
 {
+    mHazeTransition.reset();
     mMoonRotation = val;
     setDirtyFlag(true);
     setLLSDDirty();
@@ -2164,6 +2266,7 @@ F32 LLSettingsSky::getMoonBrightness() const
 
 void LLSettingsSky::setMoonBrightness(F32 brightness_factor)
 {
+    mHazeTransition.reset();
     mMoonBrightness = brightness_factor;
     setDirtyFlag(true);
     setLLSDDirty();
@@ -2201,6 +2304,7 @@ LLColor3 LLSettingsSky::getSunlightColorClamped() const
 
 void LLSettingsSky::setSunlightColor(const LLColor3 &val)
 {
+    mHazeTransition.reset();
     mSunlightColor = val;
     setDirtyFlag(true);
     setLLSDDirty();
@@ -2213,6 +2317,7 @@ LLQuaternion LLSettingsSky::getSunRotation() const
 
 void LLSettingsSky::setSunRotation(const LLQuaternion &val)
 {
+    mHazeTransition.reset();
     mSunRotation = val;
     setDirtyFlag(true);
     setLLSDDirty();

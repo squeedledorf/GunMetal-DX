@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<panel name="blender_connect_tab" follows="all" layout="topleft" height="400" width="530">
+  <text name="instructions" left="12" top="12" right="-12" height="100" follows="top|left|right" layout="topleft" word_wrap="true">
+    Start the Blender Connect add-on in Blender, then connect to its preview.glb.
+    Geometry, PBR materials and SL-compatible skin weights update locally.
+    Only you see the preview. No assets are uploaded or added to inventory.
+    Use Select / Move to place it, or attach it to your own avatar.
+  </text>
+  <button name="connect" label="Connect..." tool_tip="Opt in to watching one GLB published by the Blender Blender Connect add-on. This connection lasts only for this login session." left="12" top="120" width="140" height="23" layout="topleft"/>
+  <button name="disconnect" label="Disconnect / Remove" tool_tip="Stop watching and remove the local preview and its materials." left="162" top="120" width="140" height="23" layout="topleft"/>
+  <button name="place" label="Place in World" left="12" top="158" width="140" height="23" layout="topleft"/>
+  <button name="attach" label="Attach to My Avatar" tool_tip="Wear the local preview at your chest attachment point. Compatible rigs follow your avatar's skeleton." left="162" top="158" width="180" height="23" layout="topleft"/>
+  <button name="select" label="Select / Move" left="352" top="158" width="140" height="23" layout="topleft"/>
+  <check_box name="joints" label="Include joint position overrides" tool_tip="Reload with authored joint positions, for fitted bodies that require them. Off uses the normal upload preview default." left="12" top="196" width="350" height="23" layout="topleft"/>
+  <text name="status" left="12" top="236" right="-12" height="105" follows="top|left|right" layout="topleft" word_wrap="true"/>
+  <text name="limits" left="12" top="345" right="-12" height="48" follows="top|left|right" layout="topleft" word_wrap="true">
+    Self-contained GLB, up to 32 MiB. Normal mesh / cluster LOD rendering.
+    Custom upload LODs, physics and morph targets are not previewed.
+  </text>
+</panel>

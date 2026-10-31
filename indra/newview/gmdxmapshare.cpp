@@ -19,7 +19,8 @@
  * $/LicenseInfo$
  */
 
-// <GMDX> whole file: see gmdxmapshare.h.
+// <GMDX> whole file: see gmdxmapshare.h. Slipstream ported this file from GunMetal-DX v0.3.0 (pings
+// only, behind CombatFX); its CombatFX gate, settings names and helper message names are used here.
 
 #include "llviewerprecompiledheaders.h"
 
@@ -58,6 +59,7 @@
 #include "rlvactions.h"
 #include "rlvcommon.h"
 #include "slbridge.h"
+#include "slcombatfx.h"
 
 #include <deque>
 #include <map>
@@ -74,15 +76,15 @@ constexpr size_t MAX_PER_SENDER = 40;
 constexpr size_t MAX_PENDING = 20;
 constexpr size_t MAX_PENDING_PER_SENDER = 3;   // (one sender cannot fill the queue or keep the map busy with lookups)
 constexpr size_t MAX_RECIPIENTS = 50;      // the helper's own cap too (MAX_TO)
-constexpr size_t MAX_BRIDGE_LINE = 980;    // "msay|<seq>|" and the line within the helper's 1000-byte command
-constexpr size_t KEYS_PER_COMMAND = 24;    // "mto|<seq>|" and 24 keys with commas: under 1000 bytes
+constexpr size_t MAX_BRIDGE_LINE = 970;    // "combat/mapsay/1|<seq>|" and the line within the helper's 1000-byte command
+constexpr size_t KEYS_PER_COMMAND = 24;    // "combat/mapto/1|<seq>|" and 24 keys with commas: under 1000 bytes
 constexpr size_t MAX_QUEUED = 4;           // helper commands already waiting: more, and a send is refused (0.8 s late)
 constexpr F64 RESOLVE_SECONDS = 10.0;      // a link to a region not known yet waits this long for the map
 constexpr F64 GONE_SECONDS = 3.0;          // a sender out of my region this long: their items go
 constexpr F64 TARGET_GONE_SECONDS = 10.0;  // an added (not kept) person out of my region this long: dropped
 constexpr F64 MEMBERS_FRESH = 900.0;       // a group's member list is fetched again after this
 constexpr F64 MEMBERS_RETRY = 30.0;        // ... or, while it has none, after this
-constexpr S32 PING_COLORS[3] = { 2, 0, 3 };   // ping yellow, enemy red, rally green (GMDXMinimapMarks::color)
+constexpr S32 PING_COLORS[3] = { 2, 0, 3 };   // ping yellow, enemy red, rally green (LLMinimapMarks::color)
 
 std::vector<GMDXSharedItem> sItems;
 
@@ -129,7 +131,7 @@ bool allow(std::deque<F64>& times, F64 gap, size_t in_30s)
     return true;
 }
 
-// A per-account list of ids (an LLSD array): GMDXMapShareBlocked
+// A per-account list of ids (an LLSD array): SLMapShareBlocked
 bool listed(const char* setting, const LLUUID& id)
 {
     const LLSD list = gSavedPerAccountSettings.getLLSD(setting);
@@ -165,7 +167,8 @@ bool here(const LLUUID& id)
 }
 
 // A member of the group as far as this viewer knows: its member list once fetched (it alone decides then), else the
-// group's tag worn (when the group colours resolve tags) while the list loads.
+// group's tag worn (when the group colours resolve tags) while the list loads. Deliberately not widened to the
+// group's SLMC faction (gmdxslmcfactions.cpp): a militia or land group can be open to anyone, so its tag proves nothing.
 bool member(const LLUUID& group_id, const LLUUID& avatar_id)
 {
     if (group_id.isNull()) return false;   // (no group: an untagged avatar's "active group" is null too)
@@ -196,7 +199,7 @@ void want_members(const LLUUID& group_id)
 
 LLUUID my_group()
 {
-    static LLCachedControl<bool> my(gSavedPerAccountSettings, "GMDXMapShareMyGroup", true);
+    static LLCachedControl<bool> my(gSavedPerAccountSettings, "SLMapShareMyGroup", true);
     return my ? gAgent.getGroupID() : LLUUID::null;
 }
 
@@ -210,7 +213,7 @@ std::vector<LLUUID> send_groups()
     return out;
 }
 
-// Kept targets: GMDXMapShareTargetGroups / GMDXMapShareTargetPeople, arrays of { id, on }
+// Kept targets: SLMapShareTargetGroups / SLMapShareTargetPeople, arrays of { id, on }
 void save_kept()
 {
     LLSD groups = LLSD::emptyArray(), people = LLSD::emptyArray();
@@ -219,15 +222,15 @@ void save_kept()
         if (!t.kept) continue;
         (t.kind == Target::GROUP ? groups : people).append(LLSD().with("id", t.id).with("on", t.on));
     }
-    gSavedPerAccountSettings.setLLSD("GMDXMapShareTargetGroups", groups);
-    gSavedPerAccountSettings.setLLSD("GMDXMapShareTargetPeople", people);
+    gSavedPerAccountSettings.setLLSD("SLMapShareTargetGroups", groups);
+    gSavedPerAccountSettings.setLLSD("SLMapShareTargetPeople", people);
 }
 
 void load_kept()
 {
     sTargets.clear();
-    static const std::pair<const char*, Target::Kind> kLists[] = { { "GMDXMapShareTargetGroups", Target::GROUP },
-                                                                   { "GMDXMapShareTargetPeople", Target::PERSON } };
+    static const std::pair<const char*, Target::Kind> kLists[] = { { "SLMapShareTargetGroups", Target::GROUP },
+                                                                   { "SLMapShareTargetPeople", Target::PERSON } };
     for (const auto& [setting, kind] : kLists)
     {
         for (const LLSD& v : llsd::inArray(gSavedPerAccountSettings.getLLSD(setting)))
@@ -290,31 +293,31 @@ void add_item(const Item& t, const LLUUID& sender, const std::string& name, cons
     const LLVector3d at = origin + LLVector3d(t.x, t.y, t.z);
     if (t.type == Type::Zone)
     {
-        GMDXMapZone& z = s.zone;
+        LLMapZone& z = s.zone;
         z.id = s.id;
         z.name = t.label;
-        z.color = llclamp(t.color, 0, GMDXMinimapMarks::COLORS - 1);
-        z.fill = llclamp(t.fill, (S32)GMDXMapZone::FILL_NONE, (S32)GMDXMapZone::FILL_CAUTION);
+        z.color = llclamp(t.color, 0, LLMinimapMarks::COLORS - 1);
+        z.fill = llclamp(t.fill, (S32)LLMapZone::FILL_NONE, (S32)LLMapZone::FILL_CAUTION);
         z.dotted = t.dotted;
         const LLVector3d c(at.mdV[VX], at.mdV[VY], 0.0);
         if (t.shape == GMDXShareText::Shape::Circle)
         {
-            z.kind = GMDXMapZone::CIRCLE;
+            z.kind = LLMapZone::CIRCLE;
             z.points = { c, c + LLVector3d(t.r, 0.0, 0.0) };
         }
         else if (t.shape == GMDXShareText::Shape::Poly)
         {
-            z.kind = GMDXMapZone::POLYGON;
+            z.kind = LLMapZone::POLYGON;
             for (const auto& [dx, dy] : t.corners) z.points.push_back(c + LLVector3d(dx, dy, 0.0));
         }
         else if (fabs(t.rot) < 0.25)
         {
-            z.kind = GMDXMapZone::RECT;
+            z.kind = LLMapZone::RECT;
             z.points = { c - LLVector3d(t.w * 0.5, t.h * 0.5, 0.0), c + LLVector3d(t.w * 0.5, t.h * 0.5, 0.0) };
         }
         else   // a turned rectangle: its four corners
         {
-            z.kind = GMDXMapZone::POLYGON;
+            z.kind = LLMapZone::POLYGON;
             const F64 a = t.rot * DEG_TO_RAD, ca = cos(a), sa = sin(a);
             static const std::pair<F64, F64> kCorners[4] = { { -1.0, -1.0 }, { 1.0, -1.0 }, { 1.0, 1.0 }, { -1.0, 1.0 } };
             for (const auto& [sx, sy] : kCorners)
@@ -326,12 +329,12 @@ void add_item(const Item& t, const LLUUID& sender, const std::string& name, cons
     }
     else
     {
-        GMDXMapMark& m = s.mark;
+        LLMapMark& m = s.mark;
         m.id = s.id;
         m.name = t.label;
         m.region = t.region;
         m.pos_global = at;
-        m.color = llclamp(t.color, 0, GMDXMinimapMarks::COLORS - 1);
+        m.color = llclamp(t.color, 0, LLMinimapMarks::COLORS - 1);
         if (t.type == Type::Ping)
         {
             // on an object or avatar: where this viewer has it now (see follow_anchors), else the sent place
@@ -342,7 +345,7 @@ void add_item(const Item& t, const LLUUID& sender, const std::string& name, cons
                 if (const LLViewerObject* o = gObjectList.findObject(s.anchor); o && !o->isDead())
                     m.pos_global = o->getPositionGlobal() + LLVector3d(s.anchor_off * o->getRotationRegion());
             }
-            static LLCachedControl<F32> seconds(gSavedSettings, "GMDXPingSeconds", 10.f);
+            static LLCachedControl<F32> seconds(gSavedSettings, "SLPingSeconds", 10.f);
             s.ping = llclamp(t.ping, 0, 2);
             s.map_only = t.map_only;
             m.color = PING_COLORS[s.ping];
@@ -368,7 +371,7 @@ void add_item(const Item& t, const LLUUID& sender, const std::string& name, cons
     sItems.push_back(std::move(s));
     ensure_idle();
 
-    static LLCachedControl<bool> sound(gSavedSettings, "GMDXPingSound", true);
+    static LLCachedControl<bool> sound(gSavedSettings, "SLPingSound", true);
     if (t.type == Type::Ping && sender != gAgentID && sound && now() - sLastSound >= 1.0)
     {
         sLastSound = now();
@@ -437,6 +440,13 @@ void follow_anchors()
 // people who left my region, the member lists of the groups I send to (and take shares from).
 void tick(void*)
 {
+    // CombatFX off: drop what was shared and do nothing else (the callback is only registered once
+    // CombatFX was on this session)
+    if (!SLCombatFX::enabled())
+    {
+        if (!sItems.empty() || !sPending.empty()) GMDXMapShare::clear();
+        return;
+    }
     follow_anchors();
     static F64 s_last = 0.0;
     const F64 t = now();
@@ -510,7 +520,8 @@ std::vector<LLUUID> recipients(bool& loading, const LLUUID& only_group)
     return out;
 }
 
-// The line through my helper to each recipient (see slipstream_helper.lsl: mto, msay).
+// The line through my helper to each recipient (see slipstream_helper.lsl: combat/mapto/1,
+// combat/mapsay/1).
 bool bridge_send(const std::vector<LLUUID>& to, const std::string& line)
 {
     SLBridge& bridge = SLBridge::instance();
@@ -520,18 +531,22 @@ bool bridge_send(const std::vector<LLUUID>& to, const std::string& line)
     {
         std::string keys;
         for (size_t k = i; k < llmin(to.size(), i + KEYS_PER_COMMAND); ++k) keys += (keys.empty() ? "" : ",") + to[k].asString();
-        ok &= bridge.sendCommand("mto|" + seq + "|" + keys);
+        ok &= bridge.sendCommand(SLCombatFX::Bridge::command(SLCombatFX::Bridge::CMD_MAP_TO, seq + "|" + keys));
     }
-    // (an msay without its list says nothing: the helper matches the seq)
-    return ok && bridge.sendCommand("msay|" + seq + "|" + line);
+    // (a mapsay without its list says nothing: the helper matches the seq)
+    return ok && bridge.sendCommand(SLCombatFX::Bridge::command(SLCombatFX::Bridge::CMD_MAP_SAY, seq + "|" + line));
 }
 
-// Can anything go out now? The helper must be worn and answering.
+// Can anything go out now? CombatFX and sending on, and the helper worn and answering.
 bool can_send()
 {
-    if (!gSavedSettings.getBOOL("GMDXMapShareSend"))
+    if (!SLCombatFX::enabled())
     {
-        tip("Sending map shares and pings is off: Preferences > Combat > Map Share.");
+        return false;   // (the share items and ping keys are inert with CombatFX off)
+    }
+    if (!gSavedSettings.getBOOL("SLMapShareSend"))
+    {
+        tip("Sending map shares and pings is off: Preferences > Combat > Pings.");
         return false;
     }
     if (!SLBridge::instanceExists() || !SLBridge::instance().isReady())
@@ -588,7 +603,7 @@ void deliver(const Item& t, bool is_ping, bool group_only, std::function<void()>
     }
     if (!group_only && send_groups().empty() && std::none_of(sTargets.begin(), sTargets.end(), [](const Target& x) { return x.on; }))
     {
-        if (gSavedPerAccountSettings.getBOOL("GMDXMapShareMyGroup") && gAgent.getGroupID().isNull())
+        if (gSavedPerAccountSettings.getBOOL("SLMapShareMyGroup") && gAgent.getGroupID().isNull())
         {
             tip("You wear no group tag: choose the group to send to (it is added to Send To for this session).");
             pick_group_then([t, is_ping, sent]() { deliver(t, is_ping, false, sent); });
@@ -660,7 +675,7 @@ bool place(const LLVector3d& pos_global, Item& t, LLVector3d* at = nullptr)
 enum class Verdict { Text, Ask, Hide, Draw };
 
 // Who may draw on my map: the people in my list (Send To: ticked or not, kept or for this session)
-// and the members of the groups I send to (my group while GMDXMapShareMyGroup, the ticked ones).
+// and the members of the groups I send to (my group while SLMapShareMyGroup, the ticked ones).
 // Nobody else, friends neither: their lines stay chat text and ask.
 bool trusted(const LLUUID& from_id)
 {
@@ -678,7 +693,7 @@ Verdict decide(const LLUUID& from_id)
     // [RLVa] @recvim: dropped, as their IM would be
     if (!RlvActions::canReceiveIM(from_id)) return Verdict::Hide;
     // blocked (over my list and groups): stays the readable text it is (any viewer could have sent it)
-    if (listed("GMDXMapShareBlocked", from_id)) return Verdict::Text;
+    if (listed("SLMapShareBlocked", from_id)) return Verdict::Text;
     return trusted(from_id) ? Verdict::Draw : Verdict::Ask;
 }
 
@@ -699,7 +714,7 @@ void keep_listed(const LLUUID& id)
 
 // A stranger's mark or zone (its line hidden, the popup stands for it): "You've received map information from
 // <name>": Accept (draw this one) / Always (add them to my list, kept, then draw it) / Deny (nothing,
-// and not asked about them again for ASK_SECONDS) / Mute (GMDXMapShareBlocked, not the mute list).
+// and not asked about them again for ASK_SECONDS) / Mute (SLMapShareBlocked, not the mute list).
 // One ask per sender at a time, one every 2 s and 3 in 30 s in all; a line past that is dropped.
 // Pings never ask: a stranger's ping is dropped (consumeObjectChat).
 constexpr F64 ASK_SECONDS = 120.0;   // (the notification's duration: then it is gone unanswered)
@@ -748,7 +763,7 @@ void ask(const LLUUID& from_id, const std::string& from, const std::string& text
             if (option == 3) GMDXMapShare::block(sender);
             if (option != 0 && option != 1) return;
             if (option == 1) keep_listed(sender);
-            if (listed("GMDXMapShareBlocked", sender) || LLMuteList::getInstance()->isMuted(sender)) return;
+            if (listed("SLMapShareBlocked", sender) || LLMuteList::getInstance()->isMuted(sender)) return;
             if (!here(sender))
             {
                 tip("They have left this region: what they shared is gone.");
@@ -801,8 +816,8 @@ void fill_send_to(LLMenuGL* sub)
     LLGroupData data;
     const LLUUID active = gAgent.getGroupID();
     add_check(sub, active.notNull() && gAgent.getGroupData(active, data) ? "My Group (" + menu_label(data.mName) + ")" : std::string("My Group (no tag worn)"),
-              []() { return gSavedPerAccountSettings.getBOOL("GMDXMapShareMyGroup"); },
-              []() { gSavedPerAccountSettings.setBOOL("GMDXMapShareMyGroup", !gSavedPerAccountSettings.getBOOL("GMDXMapShareMyGroup")); });
+              []() { return gSavedPerAccountSettings.getBOOL("SLMapShareMyGroup"); },
+              []() { gSavedPerAccountSettings.setBOOL("SLMapShareMyGroup", !gSavedPerAccountSettings.getBOOL("SLMapShareMyGroup")); });
     if (!sTargets.empty()) sub->addSeparator();
     for (const Target& t : sTargets)
     {
@@ -840,6 +855,8 @@ void fill_send_to(LLMenuGL* sub)
     }
     if (names.empty()) add_call(people, "(nobody else in this region)", false, nullptr);
     else if (names.size() > MAX_LISTED) add_call(people, llformat("(%d more not listed)", (S32)(names.size() - MAX_LISTED)), false, nullptr);
+    sub->addSeparator();
+    add_call(sub, "Manage Sharing...", true, []() { LLFloaterReg::showInstance("gmdx_map_sharing"); });
 }
 } // namespace
 
@@ -851,22 +868,25 @@ void GMDXMapShare::init()
     if (initialized) return;
     initialized = true;
     load_kept();
-    ensure_idle();
     gAgent.addRegionChangedCallback([]() { on_region_changed(); });
+    // the helper (and the idle tick) only while CombatFX and sending are on
     auto use_bridge = []()
     {
-        if (gSavedSettings.getBOOL("GMDXMapShareSend")) SLBridge::instance().addUser(BRIDGE_USER);
+        if (SLCombatFX::enabled()) ensure_idle();
+        if (SLCombatFX::enabled() && gSavedSettings.getBOOL("SLMapShareSend")) SLBridge::instance().addUser(BRIDGE_USER);
         else SLBridge::instance().removeUser(BRIDGE_USER);
     };
-    gSavedSettings.getControl("GMDXMapShareSend")->getSignal()->connect([use_bridge](LLControlVariable*, const LLSD&, const LLSD&) { use_bridge(); });
+    gSavedSettings.getControl("SLMapShareSend")->getSignal()->connect([use_bridge](LLControlVariable*, const LLSD&, const LLSD&) { use_bridge(); });
+    gSavedSettings.getControl("CombatFX")->getSignal()->connect([use_bridge](LLControlVariable*, const LLSD&, const LLSD&) { use_bridge(); });
     use_bridge();
     // the helper ran short of script memory or linkset data ("script|<free>" / "lsd|<free>"): it
     // stops map shares (and says so once) until it has room
-    SLBridge::instance().registerHandler("mem", [](const std::string& what)
+    SLBridge::instance().registerHandler(SLCombatFX::Bridge::EVT_MEM, [](const std::string& what)
         {
             LL_WARNS("GMDXMapShare") << "Helper low on memory (" << what << " bytes free): map shares paused" << LL_ENDL;
-            tip("Your helper is low on memory: map shares and pings are paused until it has room again"
-                " (take the #GunMetal-DX Helper off and on if this stays).");
+            if (SLCombatFX::enabled())
+                tip("Your helper is low on memory: map shares and pings are paused until it has room again"
+                    " (take the #GunMetal-DX Helper off and on if this stays).");
         });
 }
 
@@ -930,11 +950,35 @@ std::string GMDXMapShare::targetName(const Target& t)
     return RlvActions::canShowName(RlvActions::SNC_DEFAULT, t.id) ? name.getCompleteName() : RlvStrings::getAnonym(name);
 }
 
+bool GMDXMapShare::isHere(const LLUUID& avatar_id)
+{
+    return here(avatar_id);
+}
+
+S32 GMDXMapShare::membersHere(const LLUUID& group_id)
+{
+    const std::vector<LLUUID>& ids = here_list();
+    return (S32)std::count_if(ids.begin(), ids.end(), [&group_id](const LLUUID& id) { return member(group_id, id); });
+}
+
+std::vector<LLUUID> GMDXMapShare::peopleHere()
+{
+    std::vector<LLUUID> out;
+    for (const LLUUID& id : here_list())
+        if (id != gAgentID) out.push_back(id);
+    LLWorld::pos_map_t where;   // (the region's coarse positions, or the avatar's own when in view)
+    LLWorld::getInstance()->getAvatars(&where);
+    const LLVector3d me = gAgent.getPositionGlobal();
+    auto dist = [&](const LLUUID& id) { const auto it = where.find(id); return it == where.end() ? 1e9 : dist_vec_squared(it->second, me); };
+    std::stable_sort(out.begin(), out.end(), [&](const LLUUID& a, const LLUUID& b) { return dist(a) < dist(b); });
+    return out;
+}
+
 // ---- sending ----------------------------------------------------------------------------------
 
 void GMDXMapShare::shareMark(const LLUUID& mark_id, bool group_only)
 {
-    const GMDXMapMark* m = GMDXMinimapMarks::find(mark_id);
+    const LLMapMark* m = LLMinimapMarks::find(mark_id);
     if (!m) return;
     Item t;
     t.type = Type::Mark;
@@ -945,7 +989,7 @@ void GMDXMapShare::shareMark(const LLUUID& mark_id, bool group_only)
 
 void GMDXMapShare::shareZone(const LLUUID& zone_id, bool group_only)
 {
-    const GMDXMapZone* z = GMDXMinimapMarks::findZone(zone_id);
+    const LLMapZone* z = LLMinimapMarks::findZone(zone_id);
     if (!z || z->points.size() < 2) return;
     Item t;
     t.type = Type::Zone;
@@ -955,7 +999,7 @@ void GMDXMapShare::shareZone(const LLUUID& zone_id, bool group_only)
     t.dotted = z->dotted;
     const std::vector<LLVector3d>& p = z->points;
     LLVector3d centre;
-    if (z->kind == GMDXMapZone::RECT)
+    if (z->kind == LLMapZone::RECT)
     {
         t.shape = GMDXShareText::Shape::Rect;
         centre = (p[0] + p[1]) * 0.5;
@@ -963,7 +1007,7 @@ void GMDXMapShare::shareZone(const LLUUID& zone_id, bool group_only)
         t.h = fabs(p[1].mdV[VY] - p[0].mdV[VY]);
         if (t.w < 0.5 || t.h < 0.5) { tip("That zone is too small to share."); return; }
     }
-    else if (z->kind == GMDXMapZone::CIRCLE)
+    else if (z->kind == LLMapZone::CIRCLE)
     {
         t.shape = GMDXShareText::Shape::Circle;
         centre = p[0];
@@ -982,7 +1026,7 @@ void GMDXMapShare::shareZone(const LLUUID& zone_id, bool group_only)
         centre = (lo + hi) * 0.5;
     }
     LLVector3d at;
-    if (!place(GMDXMinimapMarks::onGround(LLVector3d(centre.mdV[VX], centre.mdV[VY], 0.0)), t, &at)) return;
+    if (!place(LLMinimapMarks::onGround(LLVector3d(centre.mdV[VX], centre.mdV[VY], 0.0)), t, &at)) return;
     if (t.shape == GMDXShareText::Shape::Poly)
     {
         // the corners from the link's point (whole metres), as the receiver places them
@@ -1131,7 +1175,7 @@ void GMDXMapShare::pingAtCursor(S32 kind)
 
 LLColor4 GMDXMapShare::pingColor(S32 kind)
 {
-    return GMDXMinimapMarks::color(PING_COLORS[llclamp(kind, 0, 2)]);
+    return LLMinimapMarks::color(PING_COLORS[llclamp(kind, 0, 2)]);
 }
 
 // ---- receiving --------------------------------------------------------------------------------
@@ -1139,9 +1183,11 @@ LLColor4 GMDXMapShare::pingColor(S32 kind)
 bool GMDXMapShare::consumeObjectChat(const LLUUID& object_id, const LLUUID& owner_id, const std::string& object_name,
                                      const std::string& text)
 {
-    static LLCachedControl<bool> enabled(gSavedSettings, "GMDXMapShareShow", true);
-    static LLCachedControl<bool> as_text(gSavedSettings, "GMDXMapShareShowAsText", false);
-    if (!enabled || text.empty() || text[0] != '[' || owner_id.isNull() || owner_id == object_id) return false;
+    // CombatFX off, or SLMapShareShow (the off switch) off: every line stays plain chat. (Slipstream's
+    // port drops GMDXMapShareShowAsText, a checking aid; GunMetal-DX follows.)
+    static LLCachedControl<bool> enabled(gSavedSettings, "SLMapShareShow", true);
+    constexpr bool as_text = false;
+    if (!SLCombatFX::enabled() || !enabled || text.empty() || text[0] != '[' || owner_id.isNull() || owner_id == object_id) return false;
     // named for a share by its helper ("Ping from <username>", slipstream_helper.lsl)
     static const std::pair<const char*, Type> kNames[] = { { "Ping from ", Type::Ping }, { "Mark from ", Type::Mark }, { "Zone from ", Type::Zone } };
     const auto named = std::find_if(std::begin(kNames), std::end(kNames), [&object_name](const auto& n) { return object_name.rfind(n.first, 0) == 0; });
@@ -1232,13 +1278,13 @@ void GMDXMapShare::keep(const LLUUID& id)
     if (!s) return;
     if (s->type == Type::Zone)
     {
-        GMDXMapZone z = s->zone;
+        LLMapZone z = s->zone;
         z.id.setNull();
-        GMDXMinimapMarks::addZone(z);
+        LLMinimapMarks::addZone(z);
     }
     else
     {
-        GMDXMinimapMarks::add(s->mark.pos_global, s->mark.name.empty() ? std::string("Mark") : s->mark.name, s->mark.color);
+        LLMinimapMarks::add(s->mark.pos_global, s->mark.name.empty() ? std::string("Mark") : s->mark.name, s->mark.color);
     }
 }
 
@@ -1258,15 +1304,32 @@ void GMDXMapShare::block(LLUUID sender)
     GMDXSharedItem who;
     who.sender = sender;
     const std::string name = senderName(who);
-    set_listed("GMDXMapShareBlocked", sender, true);
+    set_listed("SLMapShareBlocked", sender, true);
     removeFrom(sender);
     sPending.erase(std::remove_if(sPending.begin(), sPending.end(), [&sender](const Pending& p) { return p.sender == sender; }), sPending.end());
-    tip(name + "'s map shares are blocked: none are drawn now. Undo: mini-map > Show > Unblock All Map Shares.");
+    tip(name + "'s map shares are blocked: none are drawn now. Undo: Map Sharing > Receive > Blocked.");
+}
+
+std::vector<LLUUID> GMDXMapShare::blocked()
+{
+    std::vector<LLUUID> out;
+    for (const LLSD& v : llsd::inArray(gSavedPerAccountSettings.getLLSD("SLMapShareBlocked"))) out.push_back(v.asUUID());
+    return out;
+}
+
+void GMDXMapShare::unblock(const LLUUID& sender)
+{
+    set_listed("SLMapShareBlocked", sender, false);
+}
+
+S32 GMDXMapShare::blockedCount()
+{
+    return (S32)gSavedPerAccountSettings.getLLSD("SLMapShareBlocked").size();
 }
 
 void GMDXMapShare::unblockAll()
 {
-    gSavedPerAccountSettings.setLLSD("GMDXMapShareBlocked", LLSD::emptyArray());
+    gSavedPerAccountSettings.setLLSD("SLMapShareBlocked", LLSD::emptyArray());
 }
 
 void GMDXMapShare::clear()
@@ -1292,20 +1355,14 @@ void GMDXMapShare::fillShareMenus(LLMenuGL* menu)
         if (LLMenuItemGL* item = share->getItem("Share Group"))
             item->setToolTip(tag ? std::string("Only its members in this region get it.") : std::string("Wear a group tag to share with that group."));
     }
-    if (LLMenuGL* show = menu->findChildMenuByName("Show", true))
-    {
-        const S32 blocked = gSavedPerAccountSettings.getLLSD("GMDXMapShareBlocked").size();
-        show->setItemLabel("Unblock Map Shares", blocked ? llformat("Unblock All Map Shares (%d)", blocked) : std::string("Unblock All Map Shares"));
-        show->setItemEnabled("Unblock Map Shares", blocked > 0);
-    }
 }
 
 // ---- pings over the world -----------------------------------------------------------------------
 
 void GMDXMapShare::drawWorld()
 {
-    static LLCachedControl<bool> enabled(gSavedSettings, "GMDXMapShareShow", true);
-    if (!enabled || !gHUDView || sItems.empty()) return;
+    static LLCachedControl<bool> enabled(gSavedSettings, "SLMapShareShow", true);
+    if (sItems.empty() || !SLCombatFX::enabled() || !enabled || !gHUDView) return;
     const LLViewerCamera* camera = LLViewerCamera::getInstance();
     const LLRect rect = gHUDView->getRect();
     const LLFontGL* font = LLFontGL::getFontSansSerifSmallBold();
@@ -1322,7 +1379,7 @@ void GMDXMapShare::drawWorld()
         x = llclamp(x, 16, llmax(16, rect.getWidth() - 16));
         y = llclamp(y, 16, llmax(16, rect.getHeight() - 30));
         const F32 alpha = pingAlpha(s, false);   // (readable until its last 1.5 s)
-        LLColor4 c = GMDXMinimapMarks::color(s.mark.color);
+        LLColor4 c = LLMinimapMarks::color(s.mark.color);
         c.mV[VALPHA] = alpha;
         const LLColor4 dark(0.05f, 0.06f, 0.07f, 0.85f * alpha);
         const F32 fx = (F32)x, fy = (F32)y;
@@ -1348,9 +1405,12 @@ void GMDXMapShare::drawWorld()
 
 // ---- ping blips -------------------------------------------------------------------------------
 
+// (the radar blip is always on, as in Slipstream's port; GMDXPingBlip off drew a plain pulse)
+constexpr bool PING_BLIP = true;
+
 F32 GMDXMapShare::pingAlpha(const GMDXSharedItem& item, bool on_map)
 {
-    static LLCachedControl<bool> blip(gSavedSettings, "GMDXPingBlip", true);
+    constexpr bool blip = PING_BLIP;
     const F64 t = now();
     if (on_map && blip && item.expires > item.arrived)
     {
@@ -1363,9 +1423,9 @@ F32 GMDXMapShare::pingAlpha(const GMDXSharedItem& item, bool on_map)
 
 void GMDXMapShare::drawBlip(F32 x, F32 y, const GMDXSharedItem& item, F32 max_radius)
 {
-    static LLCachedControl<bool> blip(gSavedSettings, "GMDXPingBlip", true);
+    constexpr bool blip = PING_BLIP;
     const F32 age = (F32)(now() - item.arrived);
-    const LLColor4 c = GMDXMinimapMarks::color(item.mark.color);
+    const LLColor4 c = LLMinimapMarks::color(item.mark.color);
     gGL.getTexUnit(0)->unbind(LLTexUnit::TT_TEXTURE);
     if (!blip)
     {
@@ -1399,8 +1459,8 @@ void GMDXMapShare::drawBlip(F32 x, F32 y, const GMDXSharedItem& item, F32 max_ra
 // on the mini-map, with what it is and who sent it.
 void GMDXMapShare::drawWorldMap(LLWorldMapView* view)
 {
-    static LLCachedControl<bool> enabled(gSavedSettings, "GMDXMapShareShow", true);
-    if (!enabled || !view || sItems.empty()) return;
+    static LLCachedControl<bool> enabled(gSavedSettings, "SLMapShareShow", true);
+    if (sItems.empty() || !SLCombatFX::enabled() || !enabled || !view) return;
     const LLFontGL* font = LLFontGL::getFontSansSerifSmallBold();
     const LLRect rect = view->getLocalRect();
     for (const GMDXSharedItem& s : sItems)
@@ -1410,7 +1470,7 @@ void GMDXMapShare::drawWorldMap(LLWorldMapView* view)
         const F32 x = (F32)ll_round(p.mV[VX]), y = (F32)ll_round(p.mV[VY]);
         if (!rect.pointInRect((S32)x, (S32)y)) continue;
         const F32 alpha = pingAlpha(s, true);
-        LLColor4 c = GMDXMinimapMarks::color(s.mark.color);
+        LLColor4 c = LLMinimapMarks::color(s.mark.color);
         c.mV[VALPHA] = alpha;
         drawBlip(x, y, s, 30.f);
         for (int pass = 0; pass < 2; ++pass)   // outline, then the colour

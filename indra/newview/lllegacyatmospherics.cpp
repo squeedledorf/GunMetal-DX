@@ -110,7 +110,7 @@ static LLFastLn gFastLn;
 
 // Functions used a lot.
 
-inline F32 LLHaze::calcPhase(const F32 cos_theta) const
+inline F32 LLLegacyHaze::calcPhase(const F32 cos_theta) const
 {
     const F32 g2 = mG * mG;
     const F32 den = 1 + g2 - 2 * mG * cos_theta;
@@ -165,9 +165,9 @@ static LLColor3 calc_air_sca_sea_level()
 }
 
 // static constants.
-LLColor3 const LLHaze::sAirScaSeaLevel = calc_air_sca_sea_level();
-F32 const LLHaze::sAirScaIntense = color_intens(LLHaze::sAirScaSeaLevel);
-F32 const LLHaze::sAirScaAvg = LLHaze::sAirScaIntense / 3.f;
+LLColor3 const LLLegacyHaze::sAirScaSeaLevel = calc_air_sca_sea_level();
+F32 const LLLegacyHaze::sAirScaIntense = color_intens(LLLegacyHaze::sAirScaSeaLevel);
+F32 const LLLegacyHaze::sAirScaAvg = LLLegacyHaze::sAirScaIntense / 3.f;
 
 /***************************************
         Atmospherics
@@ -394,7 +394,6 @@ void LLAtmospherics::updateFog(const F32 distance, const LLVector3& tosun_in)
     F32 near_clip_height = LLViewerCamera::getInstance()->getAtAxis().mV[VZ] * LLViewerCamera::getInstance()->getNear();
     camera_height += near_clip_height;
 
-    F32 fog_distance = 0.f;
     LLColor3 res_color[3];
 
     LLColor3 sky_fog_color = LLColor3::white;
@@ -469,8 +468,6 @@ void LLAtmospherics::updateFog(const F32 distance, const LLVector3& tosun_in)
     color_gamma_correct(sky_fog_color);
 
     render_fog_color = sky_fog_color;
-
-    fog_distance = mFogRatio * distance;
 
     if (camera_height > water_height)
     {

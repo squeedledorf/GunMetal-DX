@@ -27,7 +27,7 @@
 #include "fsfloaterkillfeed.h"
 
 #include "fscombathitmarker.h"
-#include "gmdxchatlog.h" // <GMDX>
+#include "gmdxchatlog.h" // <GMDX> the chat log's Combat tab
 #include "llagent.h"
 #include "llavatarnamecache.h"
 #include "llfloaterreg.h"
@@ -35,13 +35,47 @@
 #include "llviewercontrol.h"
 #include "llviewerwindow.h"
 #include "lggcontactsets.h"
-#include "llgroupcolormap.h"
+#include "llgroupcolormap.h" // <GMDX> group colour step
 #include "llviewerobjectlist.h"
 #include "llvoavatar.h"
 #include "slbridge.h"
+#include "slcombatfx.h"
+
+// Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4 (SoapStorm's kill feed).
+// Slipstream: CombatFX only -- with it off the helper is never asked for the combat log and
+// drawOverlay() returns at once. Not taken: the chat log's Combat tab (GunMetal-DX's chat log is
+// not ported) and the group colours (LLGroupColorMap, a separate feature); fewer settings
+// (font, colours, bold, direction, short names and symbols are fixed at the defaults).
+// <GMDX> all are back: kills go to the chat log's Combat tab, names take the group colour, and
+// GunMetal-DX 0.3.0's options are settings again (FSKillFeedShortNames, ShowEmoji, FontName,
+// TextColor, BoldText, GrowUp, ColorOwnName, OwnNameColor, ColorOtherNames).
 
 static const size_t MAX_ENTRIES = 200;
 static const char BRIDGE_USER[] = "killfeed";
+
+static bool killfeed_on()
+{
+    static LLCachedControl<bool> enabled(gSavedSettings, "FSKillFeedEnabled", false);
+    return enabled && SLCombatFX::enabled();
+}
+
+// Slipstream: the combat log was asked for this session (so an "off" is owed).
+static bool sFeedAsked = false;
+
+static void send_feed_state()
+{
+    SLBridge& bridge = SLBridge::instance();
+    if (killfeed_on())
+    {
+        bridge.sendControl(SLCombatFX::Bridge::command(SLCombatFX::Bridge::CMD_FEED, "1"));
+        sFeedAsked = true;
+    }
+    else if (sFeedAsked)
+    {
+        bridge.sendControl(SLCombatFX::Bridge::command(SLCombatFX::Bridge::CMD_FEED, "0"));
+        sFeedAsked = false;
+    }
+}
 
 FSFloaterKillFeed::entries_t FSFloaterKillFeed::sEntries;
 
@@ -61,23 +95,25 @@ void FSFloaterKillFeed::init()
     initialized = true;
 
     SLBridge& bridge = SLBridge::instance();
-    bridge.registerHandler("combat", &FSFloaterKillFeed::handleBridgeEvent);
+    bridge.registerHandler(SLCombatFX::Bridge::EVT_DEATH, &FSFloaterKillFeed::handleBridgeEvent);
     // A fresh helper script (login, reattach, reinstall) starts with the combat log off.
     bridge.setStateCallback([](SLBridge::EState state)
         {
-            // The current state either way: a lost combat|0 must not leave the feed on.
+            // The current state either way: a lost "|0" must not leave the feed on.
             if (state == SLBridge::STATE_READY)
             {
-                SLBridge::instance().sendControl(gSavedSettings.getBOOL("FSKillFeedEnabled") ? "combat|1" : "combat|0");
+                send_feed_state();
             }
         });
     // Again after a teleport or crossing (harmless if it is still on): the helper drops the
     // combat log when the viewer's pings stop for a minute, which a long teleport can cause.
     bridge.setReadyInRegionCallback([]()
         {
-            SLBridge::instance().sendControl(gSavedSettings.getBOOL("FSKillFeedEnabled") ? "combat|1" : "combat|0");
+            send_feed_state();
         });
     gSavedSettings.getControl("FSKillFeedEnabled")->getSignal()->connect(
+        [](LLControlVariable*, const LLSD&, const LLSD&) { updateBridgeUse(); });
+    gSavedSettings.getControl("CombatFX")->getSignal()->connect(
         [](LLControlVariable*, const LLSD&, const LLSD&) { updateBridgeUse(); });
     updateBridgeUse();
 }
@@ -86,21 +122,26 @@ void FSFloaterKillFeed::init()
 void FSFloaterKillFeed::updateBridgeUse()
 {
     SLBridge& bridge = SLBridge::instance();
-    if (gSavedSettings.getBOOL("FSKillFeedEnabled"))
+    if (killfeed_on())
     {
         bridge.addUser(BRIDGE_USER);
         if (bridge.isReady())
         {
-            bridge.sendControl("combat|1"); // otherwise sent when it becomes ready
+            send_feed_state(); // otherwise sent when it becomes ready
         }
     }
     else
     {
-        // The helper may stay on for another feature: stop its combat log listen first.
-        // Always queued (sent once the helper is ready, in order, so a later "combat|1"
-        // still wins): a helper mid-handshake may still have the old script listening.
-        bridge.sendControl("combat|0");
         bridge.removeUser(BRIDGE_USER);
+        // The helper may stay on for another feature: stop its combat log listen.
+        // Queued (sent once the helper is ready, in order, so a later "|1" still wins):
+        // a helper mid-handshake may still have the old script listening. Nobody wearing
+        // it: it comes off, and the next wear starts a fresh script with the log off.
+        if (bridge.isWanted())
+        {
+            send_feed_state();
+        }
+        sFeedAsked = false;
     }
 }
 
@@ -114,7 +155,7 @@ void FSFloaterKillFeed::clearEntries()
 // "Orion S.". Used for real names and the settings-panel example alike.
 static std::string killfeed_maybe_shorten(std::string name)
 {
-    static LLCachedControl<bool> short_names(gSavedSettings, "FSKillFeedShortNames", true);
+    static LLCachedControl<bool> short_names(gSavedSettings, "FSKillFeedShortNames", true); // <GMDX>
     if (short_names)
     {
         size_t last_space = name.find_last_of(' ');
@@ -179,9 +220,8 @@ static void killfeed_to_chat_log(const FSFloaterKillFeed::KillEntry& entry);   /
 // static
 void FSFloaterKillFeed::handleBridgeEvent(const std::string& line)
 {
-    // Lines in flight when the feed was turned off (or after a lost combat|0) are dropped.
-    static LLCachedControl<bool> enabled(gSavedSettings, "FSKillFeedEnabled", false);
-    if (!enabled)
+    // Lines in flight when the feed was turned off (or after a lost "|0") are dropped.
+    if (!killfeed_on())
     {
         return;
     }
@@ -248,7 +288,9 @@ struct KFSegment
 
 // Resolve a kill-feed name color. Your own name uses your chosen color when
 // FSKillFeedColorOwnName is on (kill feed only); everyone else - and you when
-// that toggle is off - follows the contact set color, else the default.
+// that toggle is off - follows the contact set color, else the group color, else the default.
+// <GMDX> GunMetal-DX 0.3.0's own-name and other-names options are back, and the group colour step
+// (LLGroupColorMap, SLGroupColors).
 static LLColor4 killfeed_name_color(const LLUUID& id, const LLColor4& default_color)
 {
     if (id.isNull())
@@ -272,13 +314,13 @@ static LLColor4 killfeed_name_color(const LLUUID& id, const LLColor4& default_co
         return default_color;
     }
 
-    // SoapStorm's order minus the minimap mark (Slipstream has no marks): contact set, then group.
+    // SoapStorm's order minus the minimap mark: contact set, then group.
     LLColor4 c;
     if (LGGContactSets::instance().hasFriendColorThatShouldShow(id, ContactSetType::MINIMAP, c))
     {
         return c; // contact set
     }
-    return LLGroupColorMap::getInstance()->tint(id, default_color); // group
+    return LLGroupColorMap::getInstance()->tint(id, default_color); // <GMDX> group (no-op unless SLGroupColors)
 }
 
 // "Killer killed Victim with [symbol] Weapon (100dmg, 50m)" split into colored
@@ -301,7 +343,7 @@ static std::vector<KFSegment> killfeed_segments(const FSFloaterKillFeed::KillEnt
     std::string tail;
 
     // Damage type symbol from the shared hit marker symbol table.
-    static LLCachedControl<bool> show_emoji(gSavedSettings, "FSKillFeedShowEmoji", true);
+    static LLCachedControl<bool> show_emoji(gSavedSettings, "FSKillFeedShowEmoji", true); // <GMDX>
     std::string symbol;
     if (show_emoji && entry.mType > -1000)
     {
@@ -351,7 +393,7 @@ static void killfeed_to_chat_log(const FSFloaterKillFeed::KillEntry& entry)
 {
     GMDXChatLog::addCombat([entry]()
         {
-            static LLCachedControl<LLColor4> text_color(gSavedSettings, "FSKillFeedTextColor", LLColor4::white);
+            static LLCachedControl<LLColor4> text_color(gSavedSettings, "FSKillFeedTextColor", LLColor4::white); // <GMDX>
             std::vector<GMDXChatLog::Segment> out;
             for (const KFSegment& seg : killfeed_segments(entry, text_color)) out.push_back({ seg.text, seg.color });
             return out;
@@ -362,7 +404,11 @@ static void killfeed_to_chat_log(const FSFloaterKillFeed::KillEntry& entry)
 // static
 void FSFloaterKillFeed::drawOverlay()
 {
-    static LLCachedControl<bool> enabled(gSavedSettings, "FSKillFeedEnabled", false);
+    if (!SLCombatFX::enabled())
+    {
+        return;   // Slipstream: no combat per-frame work with CombatFX off
+    }
+    const bool enabled = killfeed_on();
 
     // The settings panel shows a live example so position, font and color
     // can be customized without waiting for someone to die.
@@ -377,6 +423,7 @@ void FSFloaterKillFeed::drawOverlay()
     static LLCachedControl<F32> screen_y(gSavedSettings, "FSKillFeedScreenY", 0.9f);
     static LLCachedControl<U32> max_lines(gSavedSettings, "FSKillFeedMaxLines", 5);
     static LLCachedControl<F32> hold_time(gSavedSettings, "FSKillFeedHoldTime", 20.f);
+    // <GMDX> GunMetal-DX 0.3.0's style options
     static LLCachedControl<std::string> font_name(gSavedSettings, "FSKillFeedFontName", "SansSerif");
     static LLCachedControl<LLColor4> text_color(gSavedSettings, "FSKillFeedTextColor", LLColor4::white);
     static LLCachedControl<bool> bold_text(gSavedSettings, "FSKillFeedBoldText", false);
@@ -411,7 +458,7 @@ void FSFloaterKillFeed::drawOverlay()
         }
         // Placeholder preview while the settings panel is open; runs
         // through the same name shortening and symbol option as real lines.
-        static LLCachedControl<bool> example_emoji(gSavedSettings, "FSKillFeedShowEmoji", true);
+        static LLCachedControl<bool> example_emoji(gSavedSettings, "FSKillFeedShowEmoji", true); // <GMDX>
         std::string example_symbol;
         if (example_emoji)
         {
@@ -428,6 +475,7 @@ void FSFloaterKillFeed::drawOverlay()
     }
 
     const LLFontGL* font = LLFontGL::getFontSansSerif();
+    // <GMDX> FSKillFeedFontName
     if (font_name() == "SansSerifSmall")
     {
         font = LLFontGL::getFontSansSerifSmall();
@@ -444,6 +492,7 @@ void FSFloaterKillFeed::drawOverlay()
     {
         font = LLFontGL::getFontMonospace();
     }
+    // </GMDX>
 
     const U8 font_style = bold_text ? LLFontGL::BOLD : LLFontGL::NORMAL;
 

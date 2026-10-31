@@ -127,7 +127,7 @@
          layout="topleft"
          help_topic="preferences_move_tab"
          name="move" />
-        <!-- <SS:Skoomastream> -->
+        <!-- CombatFX: ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4 (<SS:Skoomastream>) -->
         <panel
          class="panel_preference"
          filename="panel_preferences_combat.xml"
@@ -139,11 +139,11 @@
         <!-- <GMDX> -->
         <panel
          class="panel_preference"
-         filename="panel_preferences_rezfx.xml"
-         label="Rez Effects"
+         filename="panel_preferences_tpfx.xml"
+         label="Teleport Effects"
          layout="topleft"
-         help_topic="preferences_rezfx_tab"
-         name="rezfx" />
+         help_topic="preferences_tpfx_tab"
+         name="tpfx" />
         <!-- </GMDX> -->
         <panel
          class="panel_preference_building"
@@ -197,7 +197,7 @@
         <panel
          class="panel_preference_game_control"
          filename="panel_preferences_game_control.xml"
-         label="Game Controls"
+         label="Game Controllers"
          layout="topleft"
          help_topic="preferences_game_control_tab"
          name="game_control" />

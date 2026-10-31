@@ -37,6 +37,7 @@
 //#include "llnotificationsutil.h"
 #include <set>
 #include <memory>
+#include <functional>
 #include <boost/signals2.hpp>
 
 class LLDragHandle;
@@ -123,6 +124,7 @@ struct LLCoordFloater : LLCoord<LL_COORD_FLOATER>
 class LLFloater : public LLPanel, public LLInstanceTracker<LLFloater>
 {
     friend class LLFloaterView;
+    friend class LLFloaterPopout;
     friend class LLFloaterReg;
     friend class LLMultiFloater;
 
@@ -151,6 +153,7 @@ public:
         BUTTON_TEAR_OFF,
         BUTTON_DOCK,
         BUTTON_HELP,
+        BUTTON_POPOUT,
         BUTTON_COUNT
     };
 
@@ -170,6 +173,7 @@ public:
                                 can_close,
                                 can_drag_on_left,
                                 can_tear_off,
+                                can_pop_out,
                                 save_rect,
                                 save_visibility,
                                 save_dock_state,
@@ -246,6 +250,16 @@ public:
     void            initFloater(const Params& p);
 
     void            openFloater(const LLSD& key = LLSD());
+
+    // Window-system bridge installed by the viewer. Requests are deferred until
+    // event dispatch / drawing has finished; the floater instance is never copied.
+    static std::function<void(LLFloater*, bool)> sNativeWindowRequest;
+    static std::function<void(LLFloater*)> sNativeWindowOpened;
+    static void onClickPopout(LLFloater* floater);
+    bool canPopOut() const
+    { return mCanPopOut && !mDragOnLeft && !getIsChrome() && mHostHandle.isDead() && mDependeeHandle.isDead(); }
+    bool isNativePopout() const { return mNativePopout; }
+    void setNativePopout(bool value) { mNativePopout = value; onRetainedDirty(); updateTitleButtons(); }
 
     // If allowed, close the floater cleanly, releasing focus.
     virtual void    closeFloater(bool app_quitting = false);
@@ -324,7 +338,9 @@ public:
     virtual bool    handleMouseUp(S32 x, S32 y, MASK mask);
     virtual bool    handleRightMouseDown(S32 x, S32 y, MASK mask);
     virtual bool    handleDoubleClick(S32 x, S32 y, MASK mask);
+    // A middle click never passes through a floater to the world (#1144).
     virtual bool    handleMiddleMouseDown(S32 x, S32 y, MASK mask);
+    virtual bool    handleMiddleMouseUp(S32 x, S32 y, MASK mask);
 
     virtual bool    handleScrollWheel(S32 x, S32 y, S32 mask);
 
@@ -528,6 +544,9 @@ private:
     std::string     mInstanceName;        // Store the instance name so we can remove ourselves from the list
 
     bool            mCanTearOff;
+    bool            mCanPopOut = false;
+    bool            mNativePopout = false;
+    LLHandle<LLView> mNativeMenu;
     bool            mCanMinimize;
 // [SL:KB] - Patch: UI-FloaterCollapse | Checked: Catznip-5.2
     bool            mCanCollapse;

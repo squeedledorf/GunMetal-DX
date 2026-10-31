@@ -65,14 +65,10 @@ constexpr F32 kKeepBonus = 1.5f;         // a playing speaker keeps its place un
 constexpr F64 kKeepAliveSecs = 20.0;
 constexpr U32 kKeepAliveExtra = 8;
 constexpr U32 kMaxSpeakers = 32;         // ParcelAudioMaxSpeakers' ceiling (acoustics budget: kMaxExtra)
-// Full level out to r / 4, then real inverse distance: ref / d (-6 dB per doubling; OpenAL inverse
-// distance clamped, reference r / 4, rolloff 1 like every channel). r= is a soft maximum: the last
-// 15 % of it fades to silence (LLAudioEngine::softEdge). (r / 25 was physical for a small box but
-// far too quiet for a stage: a whole wall of speakers to reach normal volume.)
-// r = 100 (ref 25 m): 0 dB to 25 m, -1.6 dB at 30, -7.6 at 60, -10.6 at 85, fading out to 100 m.
-// r = 30 (ref 7.5 m): 0 dB to 7.5 m, -2.5 dB at 10, -10.6 at 25.5, fading out to 30 m.
-constexpr F32 kRefPerRange = 0.25f;
-F32 refDistance(F32 range) { return std::max(range * kRefPerRange, 1.f); }
+// Parcel speakers use windowed inverse distance, reference max(r / 8, 1 m). The window
+// (1 - (d / r)^4)^2 tapers throughout the range and reaches zero with zero slope at r.
+// Applied once in the source gain, with OpenAL distance rolloff disabled for these speakers.
+constexpr F32 kRefPerRange = 0.125f;
 constexpr F32 kConeOuterGain = 0.1f;     // behind a directional box: -20 dB
 constexpr F32 kConeOuterExtra = 90.f;    // the outer cone is this much wider than dir=
 constexpr F64 kLogInterval = 10.0;
@@ -353,12 +349,16 @@ LLAudioEngine::EStreamRole roleOf(SLParcelSpeakers::ERole r)
     }
 }
 
-// The level at the listener the ranking uses (OpenAL's inverse distance clamped + the soft edge).
+// The same distance gain drives both ranking and playback (before volume, ramps and acoustics).
 F32 levelAt(F32 d, F32 range)
 {
-    const F32 ref = refDistance(range);
-    const F32 dc = llclamp(d, ref, std::max(range, ref));
-    return (ref / dc) * LLAudioEngine::softEdge(d, range);
+    if (!(range > 0.f) || !std::isfinite(range) || !std::isfinite(d) || d >= range)
+        return 0.f;
+    const F32 ref = std::max(range * kRefPerRange, 1.f);
+    const F32 x = std::max(d, 0.f) / range;
+    const F32 x2 = x * x;
+    const F32 window = 1.f - x2 * x2;
+    return (ref / std::max(d, ref)) * window * window;
 }
 
 LLVector3d earGlobal()
@@ -472,7 +472,7 @@ void place(State& s, F32 dt, LLStreamingAudio_MediaPlugins* sa)
     const LLVector3d ear = earGlobal();
 
     // Rank the audible ones.
-    struct Cand { const SLParcelSpeakers::Speaker* sp; F32 score; F32 dist; };
+    struct Cand { const SLParcelSpeakers::Speaker* sp; F32 score; F32 level; };
     std::vector<Cand> cands;
     if (use)
     {
@@ -484,7 +484,7 @@ void place(State& s, F32 dt, LLStreamingAudio_MediaPlugins* sa)
             F32 score = std::max(sp.tag.vol, 0.01f) * lvl;
             auto it = s.speakers.find(sp.id);
             if (it != s.speakers.end() && !it->second.leaving) score *= kKeepBonus;
-            cands.push_back({ &sp, score, d });
+            cands.push_back({ &sp, score, lvl });
         }
         std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) { return a.score > b.score; });
         const size_t cap = std::min<size_t>(llclamp((U32)s_max, 1u, kMaxSpeakers), kMaxSpeakers);
@@ -529,7 +529,20 @@ void place(State& s, F32 dt, LLStreamingAudio_MediaPlugins* sa)
     {
         bool keep = false;
         for (const Cand& c : cands) keep |= c.sp->id == kv.first;
-        if (!keep) kv.second.leaving = true;
+        if (!keep)
+        {
+            Active& a = kv.second;
+            a.leaving = true;
+            // A fading source still follows the current distance curve, including zero at r.
+            // A speaker removed from the registry keeps its last gain for the normal leave ramp.
+            auto sp = std::find_if(list.begin(), list.end(), [&kv](const SLParcelSpeakers::Speaker& speaker)
+                                   { return speaker.id == kv.first; });
+            if (sp != list.end())
+            {
+                const F32 d = (F32)(sp->posGlobal - ear).length();
+                a.params.gain = base * llclamp(sp->tag.vol, 0.f, SLParcelSpeakers::kMaxVol) * levelAt(d, sp->tag.range);
+            }
+        }
     }
 
     const bool ac = gAudiop->acousticsActive();
@@ -562,14 +575,12 @@ void place(State& s, F32 dt, LLStreamingAudio_MediaPlugins* sa)
 
         LLAudioEngine::StreamSourceParams& p = a.params;
         p = LLAudioEngine::StreamSourceParams();
-        const F32 range = sp.tag.range;
-        const F32 edge = LLAudioEngine::softEdge(c.dist, range);
         p.relative = false;
         p.doppler = s_doppler;   // (off: no detuning / drift while you walk; position etc. unchanged)
         p.pos.setVec(sp.posGlobal);
-        p.refDist = refDistance(range);
-        p.maxDist = std::max(range, p.refDist);
-        p.rolloff = gAudiop->getRolloffFactor();   // 1 (x5 under water, like the channels)
+        p.refDist = 1.f;
+        p.maxDist = sp.tag.range;
+        p.rolloff = 0.f;   // c.level already includes all parcel speaker distance attenuation
         if (sp.tag.hasDir && role != LLAudioEngine::STREAM_SUB)
         {
             p.cone = true;
@@ -579,7 +590,7 @@ void place(State& s, F32 dt, LLStreamingAudio_MediaPlugins* sa)
             p.coneOuter = std::min(360.f, sp.tag.dirDeg + kConeOuterExtra);
             p.coneOuterGain = kConeOuterGain;
         }
-        p.gain = base * llclamp(sp.tag.vol, 0.f, SLParcelSpeakers::kMaxVol) * edge;   // (x the join ramp below)
+        p.gain = base * llclamp(sp.tag.vol, 0.f, SLParcelSpeakers::kMaxVol) * c.level;   // (x the join ramp below)
 
         // Room acoustics: traced as an extra source under its own key.
         if (ac && gAgent.getRegion())

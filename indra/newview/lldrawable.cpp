@@ -53,10 +53,38 @@
 #include "llvocache.h"
 #include "llcontrolavatar.h"
 #include "llcleaningest.h"
+#include "llviewercontrol.h"
 
 const F32 MIN_INTERPOLATE_DISTANCE_SQUARED = 0.001f * 0.001f;
 const F32 MAX_INTERPOLATE_DISTANCE_SQUARED = 10.f * 10.f;
 const F32 OBJECT_DAMPING_TIME_CONSTANT = 0.06f;
+
+// EASE AT TARGET (RenderVKEaseSnapAtTarget): the eased xform is within float rounding of the
+// object's pose -- nothing is left to ease. LL's end test (dist_squared below
+// MIN_INTERPOLATE_DISTANCE_SQUARED x the camera distance squared) cannot see that when the
+// camera distance is tiny: vkStampMoveVisibility stamps max(0.01, distance - radius), so
+// every big prim whose bounds hold the camera (a building's walls and floors, seen from
+// inside) gets 0.01 m, and nlerp's rounding of a REACHED rotation keeps (1 - dot) * 10 near
+// 1e-6, far above it. Such a drawable stayed on the move list for seconds or for good (a
+// float simulation of this loop: ~20% of settled rotations never leave it), its eased
+// rotation flipping ULPs, and an active root re-queued its whole linkset for a pose refresh
+// every frame (static prims flagged as movers by the clean ingest). Tolerance: 1e-6 of the
+// magnitude (~8-16 ULPs; 0.26 mm at 256 m), 1e-6 per quaternion component (~2e-6 rad).
+static bool vkEaseAtTarget(const LLVector3& a, const LLVector3& b)
+{
+    for (int k = 0; k < 3; ++k)
+    {
+        const F32 mag = llmax(1.f, llmax(fabsf(a.mV[k]), fabsf(b.mV[k])));
+        if (!(fabsf(a.mV[k] - b.mV[k]) <= mag * 1e-6f)) return false;
+    }
+    return true;
+}
+static bool vkEaseAtTarget(const LLQuaternion& a, const LLQuaternion& b)
+{
+    for (int k = 0; k < 4; ++k)
+        if (!(fabsf(a.mQ[k] - b.mQ[k]) <= 1e-6f)) return false;
+    return true;
+}
 
 extern bool gShiftFrame;
 
@@ -615,7 +643,11 @@ F32 LLDrawable::updateXform(bool undamped)
         LLVector3 new_scale = lerp(old_scale, target_scale, lerp_amt);
         dist_squared += dist_vec_squared(new_scale, target_scale);
 
-        if ((dist_squared >= MIN_INTERPOLATE_DISTANCE_SQUARED * camdist2) &&
+        static LLCachedControl<bool> s_snap_at_target(gSavedSettings, "RenderVKEaseSnapAtTarget", true);
+        const bool at_target = s_snap_at_target && vkEaseAtTarget(old_pos, target_pos)
+                               && vkEaseAtTarget(old_rot, target_rot) && vkEaseAtTarget(old_scale, target_scale);
+        if (!at_target &&
+            (dist_squared >= MIN_INTERPOLATE_DISTANCE_SQUARED * camdist2) &&
             (dist_squared <= MAX_INTERPOLATE_DISTANCE_SQUARED))
         {
             // interpolate

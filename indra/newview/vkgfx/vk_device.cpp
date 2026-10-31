@@ -4,7 +4,7 @@
 #include "vk_pipeline.h"   // vkSetPipelineStatsCapture (RenderVKPipelineStats)
 #include "vk_vma.h"
 #include "slenv.h"
-#include "gmdxreplayvk.h"   // <GMDX> instant replay: the encode queue + video extensions
+#include "llcleanreplayvk.h"   // instant replay: the encode queue + video extensions (GunMetal-DX port)
 
 #include <algorithm>
 #include <atomic>
@@ -1812,6 +1812,27 @@ bool VkDeviceContext::createInstance(bool enableValidation,
         if (!dup) exts.push_back(e);
     }
 
+    // #1013: present fences permit auxiliary WSI retirement without device idle.
+    // Optional: lacking this capability leaves native UI in its main-window host.
+    {
+        uint32_t count = 0;
+        vkEnumerateInstanceExtensionProperties(nullptr, &count, nullptr);
+        std::vector<VkExtensionProperties> available(count);
+        vkEnumerateInstanceExtensionProperties(nullptr, &count, available.data());
+        auto has = [&](const char* name) {
+            return std::any_of(available.begin(), available.end(), [&](const auto& e) {
+                return std::strcmp(e.extensionName, name) == 0;
+            });
+        };
+        mSurfaceMaintenance = has(VK_EXT_SURFACE_MAINTENANCE_1_EXTENSION_NAME) &&
+                              has(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME);
+        if (mSurfaceMaintenance)
+            for (const char* name : {VK_EXT_SURFACE_MAINTENANCE_1_EXTENSION_NAME,
+                                     VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME})
+                if (std::none_of(exts.begin(), exts.end(), [&](const char* e) { return std::strcmp(e, name) == 0; }))
+                    exts.push_back(name);
+    }
+
     // Ask the validation layer to also run synchronization validation via
     // VK_EXT_layer_settings (core-adjacent, supported by the Khronos layer).
     const char* layerName = "VK_LAYER_KHRONOS_validation";
@@ -1996,6 +2017,8 @@ bool VkDeviceContext::createInstance(bool enableValidation,
 //       untested (GPU_COMPAT_845 proposed off until verified).
 //     RDNA2 (Navi 21-24, 0x73A0-0x743F) on AMD's PAL drivers (proprietary, AMDVLK) -> OFF
 //       (#845: device loss even with any single async workload disabled).
+//     <GMDX> RDNA3 (Navi 31-33, 0x7440-0x74FF) on RADV -> OFF: measured 0.4 ms slower with it
+//       (RX 7900 XTX, Mesa 26.2; asyncAutoDecide).
 //     other discrete (GCN, RDNA1/3/4 on any driver, RDNA2 on RADV) -> ON: GPUOpen documents
 //       the async compute queue as the overlap path on GCN and RDNA.
 //   Intel (Gen9 / Gen11 / Xe-LP iGPUs, Arc Alchemist, Battlemage) -> OFF: Intel's guides only
@@ -2051,6 +2074,15 @@ bool VkDeviceContext::asyncAutoDecide(const VkPhysicalDeviceProperties& p, std::
         const bool pal = drv.driverID == VK_DRIVER_ID_AMD_PROPRIETARY || drv.driverID == VK_DRIVER_ID_AMD_OPEN_SOURCE;
         if (pal && p.deviceID >= 0x73A0 && p.deviceID <= 0x743F) {
             std::snprintf(buf, sizeof(buf), "#845: AMD RDNA2 (0x%04x) on AMD's own driver: device losses", p.deviceID);
+            reason = buf;
+            return false;
+        }
+        // <GMDX> RDNA3 (Navi 31-33, 0x7440-0x74FF) on RADV -> OFF: measured slower, not faster. An
+        // RX 7900 XTX on Mesa 26.2 (2026-10-28, interleaved RenderVKBench A/B, 8 rounds, a heavy
+        // indoor scene): 8.27 ms GPU with the async queue, 7.86 ms without -- nothing renders
+        // differently. RenderVKAsyncCompute 1 still forces it on.
+        if (drv.driverID == VK_DRIVER_ID_MESA_RADV && p.deviceID >= 0x7440 && p.deviceID <= 0x74FF) {
+            std::snprintf(buf, sizeof(buf), "AMD RDNA3 (0x%04x) on RADV: measured slower with the async queue", p.deviceID);
             reason = buf;
             return false;
         }
@@ -2529,12 +2561,14 @@ bool VkDeviceContext::createLogicalDevice(bool wantSwapchain) {
         qcis[1].pQueuePriorities = prio;
         nqci = 2;
     }
-    // <GMDX> INSTANT REPLAY: a queue of the video encode family (gmdxreplayvk.cpp), when the device
-    // encodes H.264 in a family of its own. Dropped again if the device refuses it.
+    // INSTANT REPLAY: a queue of the video encode family (llcleanreplayvk.cpp), when the device
+    // encodes H.264 in a family of its own; devices without it (no VK_KHR_video_encode_h264, e.g.
+    // Pascal, most Mesa drivers) enable nothing. Dropped again if the device refuses it.
+    // Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
     mEncodeFamily = ~0u;
     mEncodeQueue = VK_NULL_HANDLE;
     uint32_t encFam = ~0u;
-    const bool wantEncode = GMDXReplayEncoder::deviceSupport(mPhysical, encFam)
+    const bool wantEncode = LLReplayEncoder::deviceSupport(mPhysical, encFam)
                          && encFam != mQueueFamily && encFam != mComputeFamily;
     if (wantEncode)
     {
@@ -2544,7 +2578,6 @@ bool VkDeviceContext::createLogicalDevice(bool wantSwapchain) {
         qcis[nqci].pQueuePriorities = prio;
         ++nqci;
     }
-    // </GMDX>
 
     // Chain of feature structs. We enable the pieces a GPU-driven path needs so
     // the RHI foundation is proven capable, even though stages 1-4 use a subset.
@@ -2757,8 +2790,8 @@ bool VkDeviceContext::createLogicalDevice(bool wantSwapchain) {
     // The always-enabled extensions are part of the requirements check (#526): one list.
     std::vector<const char*> devExts = vkRequiredDeviceExtensions(wantSwapchain, mApi12);
     for (const char* e : devExtsApi12) devExts.push_back(e);
-    if (wantEncode)
-        for (const char* e : GMDXReplayEncoder::deviceExtensions()) devExts.push_back(e);
+    if (wantEncode)   // instant replay (GunMetal-DX port)
+        for (const char* e : LLReplayEncoder::deviceExtensions()) devExts.push_back(e);
     {   // VRAM accounting: real per-heap budget/usage when the driver exposes it.
         uint32_t en = 0;
         vkEnumerateDeviceExtensionProperties(mPhysical, nullptr, &en, nullptr);
@@ -3212,11 +3245,38 @@ bool VkDeviceContext::createLogicalDevice(bool wantSwapchain) {
         }
     }
 
+    VkPhysicalDeviceSwapchainMaintenance1FeaturesEXT fSwapMaintenance{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_EXT};
+    void* const preSwapHead = f2.pNext;
+    mSwapchainMaintenance = false;
+    if (mSurfaceMaintenance)
+    {
+        uint32_t count = 0;
+        vkEnumerateDeviceExtensionProperties(mPhysical, nullptr, &count, nullptr);
+        std::vector<VkExtensionProperties> available(count);
+        vkEnumerateDeviceExtensionProperties(mPhysical, nullptr, &count, available.data());
+        if (std::any_of(available.begin(), available.end(), [](const auto& e) {
+            return std::strcmp(e.extensionName, VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME) == 0;
+        }))
+        {
+            VkPhysicalDeviceFeatures2 query{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+            query.pNext = &fSwapMaintenance;
+            vkGetPhysicalDeviceFeatures2(mPhysical, &query);
+            if (fSwapMaintenance.swapchainMaintenance1)
+            {
+                fSwapMaintenance.pNext = f2.pNext;
+                f2.pNext = &fSwapMaintenance;
+                devExts.push_back(VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME);
+                mSwapchainMaintenance = true;
+            }
+        }
+    }
+
     // CLUSTER LOD (#743): optional; spliced last (at the head of f2's chain) so a refusal
     // can be retried without them.
     ClusterFeatureChain clusterChain;
     void* const preClusterHead = f2.pNext;
-    size_t preClusterExts = devExts.size();   // (<GMDX> lowered when the encode retry drops the video names)
+    size_t preClusterExts = devExts.size();   // (lowered when the encode retry drops the video names)
     const VkBool32 preInt64 = f2.features.shaderInt64, preInt64Atomics = f12.shaderBufferInt64Atomics;
     // RenderVKClusterLOD on at startup: every one; off: the inert ones unless
     // RenderVKClusterDeviceFeatures is 0 (then the device is created exactly as before #743).
@@ -3247,14 +3307,14 @@ bool VkDeviceContext::createLogicalDevice(bool wantSwapchain) {
         };
         VkResult dr = doCreateDevice();
         if (dr != VK_SUCCESS && wantEncode)
-        {   // <GMDX> never fail the device over the instant replay encoder: retry without it
+        {   // never fail the device over the instant replay encoder: retry without it (GunMetal-DX port)
             std::fprintf(stderr, "[vkgfx] vkCreateDevice with the video encode queue failed (%s); retrying without\n",
                          vkResultString(dr));
             std::vector<const char*> noEnc;
             for (size_t i = 0; i < devExts.size(); ++i)
             {
                 bool video = false;
-                for (const char* e : GMDXReplayEncoder::deviceExtensions()) video = video || std::strcmp(devExts[i], e) == 0;
+                for (const char* e : LLReplayEncoder::deviceExtensions()) video = video || std::strcmp(devExts[i], e) == 0;
                 if (!video) noEnc.push_back(devExts[i]);
             }
             preClusterExts -= devExts.size() - noEnc.size();   // (the video names all precede the cluster ones)
@@ -3301,6 +3361,19 @@ bool VkDeviceContext::createLogicalDevice(bool wantSwapchain) {
             mDevice = VK_NULL_HANDLE;
             dr = doCreateDevice();
         }
+        if (dr != VK_SUCCESS && mSwapchainMaintenance)
+        {
+            // Never fail the main device over an optional native-window capability.
+            f2.pNext = preSwapHead;
+            devExts.erase(std::remove_if(devExts.begin(), devExts.end(), [](const char* name) {
+                return std::strcmp(name, VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME) == 0;
+            }), devExts.end());
+            mSwapchainMaintenance = false;
+            dci.enabledExtensionCount = static_cast<uint32_t>(devExts.size());
+            dci.ppEnabledExtensionNames = devExts.data();
+            mDevice = VK_NULL_HANDLE;
+            dr = doCreateDevice();
+        }
         mXrDeviceCreated = xrDevice && dr == VK_SUCCESS;
         if (dr != VK_SUCCESS) {
             mDevice = VK_NULL_HANDLE;
@@ -3324,7 +3397,7 @@ bool VkDeviceContext::createLogicalDevice(bool wantSwapchain) {
     }
     measureAllocGranularity();   // #407: before the first tracked allocation
     vkGetDeviceQueue(mDevice, mQueueFamily, 0, &mQueue);
-    if (wantEncode && encFam != ~0u)   // <GMDX>
+    if (wantEncode && encFam != ~0u)   // instant replay (GunMetal-DX port)
     {
         vkGetDeviceQueue(mDevice, encFam, 0, &mEncodeQueue);
         if (mEncodeQueue) mEncodeFamily = encFam;
@@ -4507,7 +4580,7 @@ std::string VkDeviceContext::memLayoutText() const
     std::string o = "device ";
     o += (uint32_t)mDeviceType < 5u ? kType[(uint32_t)mDeviceType] : "?";
     o += m.budgetExt ? ", heaps (size/budget/usage MB):" : ", heaps (size MB; no VK_EXT_memory_budget):";
-    char buf[160];
+    char buf[384];   // the UMA budget line below is ~200 chars with its optional tags
     for (uint32_t h = 0; h < m.heapCount && h < VK_MAX_MEMORY_HEAPS; ++h)
     {
         const VkMemoryHeap& hp = mMemProps.memoryHeaps[h];

@@ -71,6 +71,7 @@
 #include <boost/algorithm/string/replace.hpp>
 #include "boost/lexical_cast.hpp"
 #include "fskeywords.h"
+#include "gmdxtpfx.h" // <GMDX> teleport effects
 
 // Resurrect the Autorespond from the archive
 // -- Fallen
@@ -1761,6 +1762,7 @@ void LLIMProcessing::processNewMessage(LLUUID from_id,
                         if (is_do_not_disturb)
                             send_do_not_disturb_message(gMessageSystem, from_id);
                         LLNotifications::instance().forceResponse(LLNotification::Params(params.name).payload(payload), 0);
+                        GMDXTPFX::disarm(); // <GMDX> RLV auto-accepted lure: no teleport effect
                     }
                     else
                     {
@@ -1862,6 +1864,7 @@ void LLIMProcessing::processNewMessage(LLUUID from_id,
                 // do not show a message box, because you're about to be
                 // teleported.
                 LLNotifications::instance().forceResponse(LLNotification::Params("TeleportOffered").payload(payload), 0);
+                GMDXTPFX::disarm(); // <GMDX> a god summons: no teleport effect
             }
         }
         break;

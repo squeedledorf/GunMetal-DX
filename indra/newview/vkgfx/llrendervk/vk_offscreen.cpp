@@ -5,7 +5,16 @@
 // define the same globals otherwise -> multiple-definition link error).
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #define STB_IMAGE_WRITE_STATIC
+// Static means every stbi_write_* we do not call (bmp, tga, hdr, jpg) is reported unused;
+// that is inherent to the single-header library, so silence it for the vendored include only.
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+#endif
 #include "third_party/stb_image_write.h"
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
 
 #include <vector>
 

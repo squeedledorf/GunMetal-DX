@@ -207,8 +207,8 @@ layout(std430, set = RT_SET, binding = 1) readonly buffer RtInstances { RtInstan
 layout(std430, set = RT_SET, binding = 2) readonly buffer RtMaterials { RtMaterial rt_materials[]; };
 // Per TLAS instance (= instance id), written by clean_rt_instances.comp this frame:
 //   x = first_index, y = static base_vertex (UV / normal / object-space position),
-//   z = rigged: 0x80000000 | base of its skinned positions in rt_rigpos; else 0
-//       (cluster hits: RT_GEOM_CLUSTER* below),
+//   z = rigged: 0x80000000 | base of its skinned positions in rt_rigpos;
+//       static: RT_GEOM_EMISSIVE_* policy bits (otherwise 0), plus RT_GEOM_CLUSTER* below,
 //   w = index_count (bits 0..30) | RT_GEOM_W_CLUSTER_RIG.
 layout(std430, set = RT_SET, binding = 3) readonly buffer RtGeom { uvec4 rt_geom[]; };
 // rt_geom.w bit 31: a rigged face the CLUSTER LOD path draws in the main view (#747; the
@@ -287,7 +287,7 @@ layout(std430, set = RT_SET, binding = 12) readonly buffer RtClCut  { uvec4 rt_c
 #define RT_BAD_ID    0xFFFFFFFFu
 // Per geometry (= instance id, as rt_geom), RT_GEOM_VC_WORDS words: [0] its vertex count (0 = unknown:
 // cluster rows); (#1009) [1..3] a cluster-traced static's legacy row (rtGeomEmRow; clean_rt_instances.comp).
-#define RT_GEOM_VC_WORDS 4u
+#define RT_GEOM_VC_WORDS 8u
 layout(std430, set = RT_SET, binding = 16) readonly buffer RtGeomVc { uint rt_geom_vc[]; };
 #ifdef RT_GUARD_RECORD
 layout(std430, set = RT_SET, binding = 15) coherent buffer RtGuard { uint rt_guard[]; };
@@ -361,6 +361,20 @@ bool rtGuardFail(uint site, uint value, uint bound)
 bool rtIdIn(uint id) { return !rtGuardOn() || (id < uint(rt_instances.length()) && id < uint(rt_geom.length())); }
 void rtGuardCtx(uint id, uint prim) { rt_g_id = id; rt_g_prim = prim; }
 
+// Visibility policy only: closest-hit GI/reflection consumers must still see emission.
+// Set by pass A only, from this frame's A/B setting; no shared instance RezFX bits.
+#define RT_GEOM_EMISSIVE_NOSHADOW 0x08000000u
+#define RT_GEOM_EMISSIVE_OPAQUE   0x04000000u
+bool rtEmissiveNoShadow(uint id)
+{
+    return id < uint(rt_geom.length()) && id < uint(rt_instances.length())
+        && (rt_geom[id].z & (0x80000000u | RT_GEOM_EMISSIVE_NOSHADOW)) == RT_GEOM_EMISSIVE_NOSHADOW;
+}
+bool rtEmissiveWasOpaque(uint id)
+{
+    return rtEmissiveNoShadow(id) && (rt_geom[id].z & RT_GEOM_EMISSIVE_OPAQUE) != 0u;
+}
+
 bool rtIsCluster(uint id) { return rtIdIn(id) && (rt_geom[id].z & RT_GEOM_CLUSTER) != 0u; }
 // RIGGED CLUSTER HITS (#747 / #748 integration, llcleanclusterrtvk.h RIGGED): a face of an avatar
 // the cluster raster draws, traced on its RT cut skinned this frame. rt_geom.z = 0x80000000
@@ -380,6 +394,12 @@ uint rtLdPool(uint i)  { return RTG_OK(i < uint(rt_cl_pool.length()), RTG_CL_POO
 uint rtLdClRig(uint i) { return RTG_OK(i < uint(rt_cl_rig.length()), RTG_CL_RIG, i, uint(rt_cl_rig.length())) ? rt_cl_rig[i] : 0u; }
 uint rtLdClSkin(uint i){ return RTG_OK(i < uint(rt_cl_skin.length()), RTG_CL_RIG, i | 0x80000000u, uint(rt_cl_skin.length())) ? rt_cl_skin[i] : 0u; }
 uint rtLdClCut(uint i) { return RTG_OK(i < uint(rt_cl_cut.length()), RTG_CL_CUT, i, uint(rt_cl_cut.length())) ? rt_cl_cut[i].x : 0u; }
+uvec2 rtGeomEmRevision(uint id)
+{
+    if (id >= uint(rt_geom_vc.length()) / RT_GEOM_VC_WORDS) return uvec2(0xFFFFFFFFu);
+    const uint b = id * RT_GEOM_VC_WORDS;
+    return uvec2(rt_geom_vc[b + 4u], rt_geom_vc[b + 5u]);
+}
 uint rtGeomVc(uint id) { return id < uint(rt_geom_vc.length()) / RT_GEOM_VC_WORDS ? rt_geom_vc[id * RT_GEOM_VC_WORDS] : 0u; }
 // (#1009) Instance id's LEGACY geometry row as rt_geom lays one out (first index, base vertex, 0, index
 // count; w = 0: none): a legacy static's own row, or -- for a static traced on its CLUSTER cut (its rt_geom
@@ -647,9 +667,10 @@ vec3 offsetRayOrigin(vec3 p, vec3 n)
 }
 // A receiver rebuilt from the depth buffer / rasterized at camera distance camd, plus
 // the user's extra offset (RenderVKRTShadowBias, m; default 0).
+float rtDepthErrDist(float camd);
 vec3 rtReceiverOrigin(vec3 p, vec3 n, float camd, float extra)
 {
-    return offsetRayOrigin(p + n * (camd * RT_DEPTH_REL_ERR + extra), n);
+    return offsetRayOrigin(p + n * (rtDepthErrDist(camd) * RT_DEPTH_REL_ERR + extra), n);
 }
 
 // RAY CONE texture LOD for the alpha test (Akenine-Moller et al., "Improved Shader
@@ -664,6 +685,15 @@ vec3 rtReceiverOrigin(vec3 p, vec3 n, float camd, float extra)
 float rt_cone_spread = 0.0;
 float rt_cone_width0 = 0.0;
 float rt_cone_aniso  = 1.0;
+// (RenderVKReSTIRRadiance) THE BLEND CASTERS' LIGHT CONE (clean_shadow_core.glsl shadowSampleSetup sets it for
+// the radiance mode's positional light samples; (0, 0) = off, every other ray): x the cone's width at the
+// receiver (the DENOISER texel's footprint, m), y its change per metre toward the light (to the emitter disc's
+// diameter at the light). An ALPHA-BLEND caster's alpha / colour (rtCandidateAlphaCol) is then fetched at
+// that cone's LOD -- the mean transmission over the region the texel's rays sweep (the TAA-jittered receiver
+// point across the texel, the soft disc) -- instead of one texel of the lettering: a translucent sign's
+// text no longer turns each ray's visibility into a per-frame 0 / 1 that the one-ray radiance estimate and
+// the visibility reuse take at face value. Alpha-MASK casters keep their cone (their cutout's shape).
+vec2 rt_blend_cone = vec2(0.0);
 #ifndef RT_CONE_WIDTH0
 #define RT_CONE_WIDTH0 rt_cone_width0   // (WALK-STATE HOOKS above)
 #endif
@@ -1144,12 +1174,15 @@ float rtCandidateAlphaCol(uint id, uint prim, vec2 bary, float t, vec3 dir, rayQ
         // inlined fetch instead of two: compile cost, see RT_WALK_*).
         // (alpha-MASK test: the caller's pixel cone when it set one -- rt_mask_* above)
         const bool mtest = !blend;
+        // (rt_blend_cone, radiance mode's light samples) a blend caster at the light cone's LOD (the cone path)
+        const bool bcone = blend && rt_blend_cone.x > 0.0;
         const float width = (mtest && rt_mask_width0 >= 0.0) ? rt_mask_width0 + rt_mask_spread * t
-                                                              : RT_CONE_WIDTH0 + RT_CONE_SPREAD * t;
+                          : (bcone ? max(rt_blend_cone.x + rt_blend_cone.y * t, 1e-5)
+                                   : RT_CONE_WIDTH0 + RT_CONE_SPREAD * t);
         vec3 p0 = vec3(0.0), p1 = vec3(0.0), p2 = vec3(0.0);
         if (RT_FOOT_ON || width > 0.0) rtTriPositions(id, prim, p0, p1, p2);
 #ifndef RT_NO_FOOT_LOD   // (#1031: the shadow walks' isotropic variants carry no anisotropic footprint code)
-        if (rt_foot_on)
+        if (rt_foot_on && !bcone)
         {
             // Receiver footprint (rt_foot_a / _b) carried along the ray onto this
             // triangle's plane, then world -> UV through the triangle's own mapping.
@@ -1210,7 +1243,8 @@ float rtCandidateAlphaCol(uint id, uint prim, vec2 bary, float t, vec3 dir, rayQ
         col *= texel.rgb;
         tex_a = texel.a;
         // maskTestAlpha (the raster's per-mip coverage rule): only the tested alpha is scaled.
-        if (mtest && rt_mask_cov_k > 0.0 && cutoff <= 0.9706)   // <GMDX> not above the ceiling (a dissolve: maskTestAlpha)
+        // (GunMetal-DX v0.3.0 cf5f1f4: not above the ceiling, a dissolve -- maskTestAlpha)
+        if (mtest && rt_mask_cov_k > 0.0 && cutoff <= 0.9706)
         {
             rt_mask_boost = alphaCoverage(1.0, a_lod, rt_mask_cov_k);   // (#1044: THE rule's coverage scale)
             a *= rt_mask_boost;
@@ -1334,6 +1368,11 @@ RtHit traceClosestHit(vec3 origin, vec3 dir, float tmin, float tmax, uint mask, 
             }
             uint id   = rtHitInstance(uint(rayQueryGetIntersectionInstanceCustomIndexEXT(rq, false)),
                                       uint(rayQueryGetIntersectionGeometryIndexEXT(rq, false)));
+            if (!cull_back && rtEmissiveWasOpaque(id))
+            {
+                rayQueryConfirmIntersectionEXT(rq);   // its original hardware opaque hit
+                continue;
+            }
             uint prim = RT_HIT_PRIM(rq, false, id);
             vec2 bc   = rayQueryGetIntersectionBarycentricsEXT(rq, false);
             float t   = rayQueryGetIntersectionTEXT(rq, false);

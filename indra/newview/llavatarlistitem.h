@@ -58,7 +58,10 @@ public:
                                     voice_call_joined_style,
                                     voice_call_left_style,
                                     online_style,
-                                    offline_style;
+                                    offline_style,
+                                    classic_default_style,
+                                    classic_online_style,
+                                    classic_offline_style;
 
         Optional<S32>               name_right_pad;
 
@@ -190,6 +193,9 @@ private:
     } EAvatarListItemChildIndex;
 
     void setNameInternal(const std::string& name, const std::string& highlight);
+    void refreshNameStyle();
+    EItemState mItemState = IS_DEFAULT;
+    boost::signals2::scoped_connection mClassicNameColorsConnection;
     void onAvatarNameCache(const LLAvatarName& av_name);
 
     std::string formatSeconds(U32 secs);

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<llsd>
+<map>
+  <key>name</key><string>seed</string>
+  <key>count</key><integer>7</integer>
+  <key>ratio</key><real>3.25</real>
+  <key>flag</key><boolean>true</boolean>
+  <key>nothing</key><undef/>
+  <key>id</key><uuid>11111111-2222-3333-4444-555555555555</uuid>
+  <key>when</key><date>2020-01-02T03:04:05.67Z</date>
+  <key>link</key><uri>https://example.invalid/a?b=c</uri>
+  <key>blob</key><binary encoding="base64">AQIDBAU=</binary>
+  <key>list</key>
+  <array>
+    <integer>1</integer>
+    <real>2.5e-3</real>
+    <string>three &amp; &lt;four&gt;</string>
+    <array><integer>5</integer></array>
+    <map><key>six</key><integer>6</integer></map>
+  </array>
+</map>
+</llsd>

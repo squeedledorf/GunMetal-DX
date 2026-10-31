@@ -52,6 +52,8 @@
 // [/RLVa:KB]
 #include <boost/tokenizer.hpp>
 
+#include "gmdxcombatlockout.h" // <GMDX>
+
 const F32 HORIZONTAL_PADDING = 15.f;
 const F32 VERTICAL_PADDING = 12.f;
 const F32 BUFFER_SIZE = 2.f;
@@ -117,13 +119,20 @@ LLHUDText::~LLHUDText()
 
 void LLHUDText::render()
 {
+    // <GMDX> Combat render lockout: no object debug text (render metadata, z-compare off, drawn
+    // through walls) while aiming. A tracking beacon's label has no source object and stays.
+    if (!mZCompare && mSourceObject.notNull() && GMDXCombatLockout::active())
+    {
+        return;
+    }
+    // </GMDX>
     if (!mOnHUDAttachment && sDisplayText)
     {
         // z-compare off (debug text, tracking beacon labels): always on top, LL's
         // stated intent for setZCompare(false).
         LLRender::DepthScope gls_depth(mZCompare ? true : false, false);
-        // Occlusion (#487): the whole text is hidden / faded by the scene at ONE point,
-        // its anchor, not per glyph. HUD-attached text never gets here (renderAllHUD).
+        // Occlusion (#487, #1126): the text sits at its anchor's depth, each pixel
+        // tested against the scene. HUD-attached text never gets here (renderAllHUD).
         if (mZCompare)
         {
             gGL.setLabelAnchor(mPositionAgent.mV[VX], mPositionAgent.mV[VY], mPositionAgent.mV[VZ]);
@@ -527,7 +536,9 @@ LLVector2 LLHUDText::updateScreenPos(LLVector2 &offset)
 
     screen_pos_vec.setVec((F32)screen_pos.mX, (F32)screen_pos.mY);
 
-    LLRect world_rect = gViewerWindow->getWorldViewRectScaled();
+    // #1115: kept inside the area the top bars leave free (the HUD rect, LL's world view
+    // rect); the world view is the whole window under Vulkan, its top behind the bars
+    LLRect world_rect = gViewerWindow->getHudRectScaled();
     S32 bottom = world_rect.mBottom + STATUS_BAR_HEIGHT;
 
     LLVector2 screen_center;

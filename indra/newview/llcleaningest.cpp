@@ -62,6 +62,10 @@
 #include "llviewerjointattachment.h"
 #include "llviewerwindow.h"
 #include "llcontrolavatar.h"
+#include "llframetimer.h"
+#include "llworldclock.h"
+#include <array>
+#include <new>
 #include <cstring>
 #include <cmath>
 #include <unordered_map>
@@ -71,7 +75,7 @@
 #include <vector>
 #include <set>
 
-#include "gmdxregioncapture.h"   // <GMDX> region map capture: the LOD epoch in the pre-signature
+#include "llregionmapcapture.h"   // region map capture: the LOD epoch in the pre-signature (GunMetal-DX port)
 
 LLCleanIngest& LLCleanIngest::instance()
 {
@@ -778,12 +782,12 @@ void LLCleanIngest::noteObjectMoved(LLViewerObject* obj, bool easing, bool via_p
     {
         LLViewerObject* root = obj->getRootEdit();
         const bool selected = obj->isSelected() || (root && root->isSelected());
-        // <GMDX> HUDs: every frame, as selection does. A HUD child's row is composed from its own
-        // local pose, the ROOT's drawn pose and the attach point's matrix; only the first was
-        // watched, so a root / attach-point change after the child's last refresh (a HUD script
-        // moving the root just after attaching, an aspect change, a drawable catching up) left the
-        // children drawn at the old pose until a right-click. HUDs are a few dozen prims, and
-        // refreshObjectPose dirties a row only when its matrix actually changed.
+        // Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4: HUDs refresh every
+        // frame, as selection does. A HUD child's row is composed from its own local pose, the
+        // ROOT's drawn pose and the attach point's matrix; only the first was watched, so a root /
+        // attach-point change after the child's last refresh left the children at the old pose
+        // until a right-click. HUDs are a few dozen prims, and refreshObjectPose dirties a row
+        // only when its matrix actually changed.
         if (!selected && !local_changed && !obj->isHUDAttachment()) return;
         if (vkHudDiag() && obj->isHUDAttachment() && vkHudDiagBudget())
         {
@@ -955,6 +959,47 @@ static F32 vkDynCasterSettleSecs()
     static LLCachedControl<F32> s_secs(gSavedSettings, "RenderVKShadowMoverSettleSecs", 2.f);
     return llmax((F32)s_secs, 0.f);
 }
+// RenderVKShadowMoverPoseThreshold (m within kPoseRefMeters of the camera, growing linearly
+// beyond): how far an object must move from its reference pose (LLCleanIngest::poseMoved)
+// before a pose refresh counts as motion. 0 = any bit change counts.
+static F32 vkMoverPoseThreshold()
+{
+    static LLCachedControl<F32> s_m(gSavedSettings, "RenderVKShadowMoverPoseThreshold", 0.002f);
+    return llmax((F32)s_m, 0.f);
+}
+// NEAR-UNCHANGED POSE, the #1007 notion (llcleanrtvk.cpp, the rigged refit's pose skip,
+// RenderVKRigRefitPoseThreshold): displacement = translation (m) + the largest rotation change x
+// a lever, against a threshold that holds within kPoseRefMeters of the camera and grows linearly
+// beyond, accumulated since the last action (here measured exactly against the reference pose).
+// The lever is the object's own: the matrix axes are SCALED, so half the largest axis-end change
+// is how far a corner of its box turned (or grew) -- a 1 m axis turning 0.1 deg moves it 0.9 mm.
+// FLOAT NOISE stays far under 2 mm: a settled pose recomposed through LL's eased drawable xform
+// (LLDrawable::updateXform's nlerp rounding a reached rotation) differs by 1-2 ULPs -- 3e-5 m at
+// 256 m, 2.4e-4 m at the ~4 km the store frame allows near the camera (llcleaninstancestore.h;
+// the threshold never drops below ~8 ULPs of the coordinates, 1e-6 relative); an axis end's
+// rounding is < 1e-5 m even on a 64 m prim. The target-omega spin record (rad/s) is compared on
+// its own.
+static constexpr F32 kPoseRefMeters = 10.f;
+static bool vkPoseBeyond(const LLCleanInstanceStore::PoseSample& a, const LLCleanInstanceStore::PoseSample& b,
+                         F32 thr)
+{
+    const F32 dx = b.m[12] - a.m[12], dy = b.m[13] - a.m[13], dz = b.m[14] - a.m[14];
+    F32 dr2 = 0.f;
+    for (int c = 0; c < 3; ++c)
+    {
+        const F32 ex = b.m[c * 4] - a.m[c * 4], ey = b.m[c * 4 + 1] - a.m[c * 4 + 1],
+                  ez = b.m[c * 4 + 2] - a.m[c * 4 + 2];
+        dr2 = llmax(dr2, ex * ex + ey * ey + ez * ez);
+    }
+    const F32 mag = llmax(fabsf(b.m[12]), llmax(fabsf(b.m[13]), fabsf(b.m[14])));
+    const F32 d = sqrtf(dx * dx + dy * dy + dz * dz) + 0.5f * sqrtf(dr2);
+    if (!(d <= llmax(thr, mag * 1e-6f))) return true;   // (NaN: moved)
+    const F32 wmag = llmax(fabsf(b.spin[0]), llmax(fabsf(b.spin[1]), fabsf(b.spin[2])));
+    const F32 tol_w = llmax(1e-4f, wmag * 1e-5f);
+    for (int k = 0; k < 3; ++k)
+        if (!(fabsf(b.spin[k] - a.spin[k]) <= tol_w)) return true;
+    return false;
+}
 static void noteChangedSphere(LLViewerObject* obj, uint8_t tag)
 {
     if (gVKChangedOverflow || !gVKProjShadowsUsed) return;
@@ -1121,7 +1166,7 @@ void LLCleanIngest::noteSpinner(LLViewerObject* obj)
     noteDynCaster(obj, true);
 }
 
-// <GMDX>
+// Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
 void LLCleanIngest::noteTexAnimCaster(LLViewerObject* obj)
 {
     if (obj && !obj->isDead() && !obj->isAttachment()) mTexAnimCasters.insert(obj->getID());
@@ -1154,8 +1199,8 @@ void LLCleanIngest::tickDynCasters()
 {
     gVKDynSpheres.clear();
     gVKDynSphereMoving.clear();
-    // <GMDX> Texture-animated mask / blend casters move their shadow every frame: re-note
-    // them each tick so they never settle into a cached static layer. Dropped once the
+    // Texture-animated mask / blend casters move their shadow every frame: re-note them each
+    // tick so they never settle into a cached static layer (GunMetal-DX port). Dropped once the
     // object is gone or its animation stops (then it settles like any mover).
     if (gVKProjShadowsUsed && vkDynCasterSettleSecs() > 0.f)
     {
@@ -1203,14 +1248,17 @@ void LLCleanIngest::tickDynCasters()
         if (!obj || obj->isDead())
         {
             clearBits(nullptr);   // (its instances go with it; a kept row must not stay dynamic)
+            mPoseRef.erase(it->first);
             it = mDynCasters.erase(it);
             continue;
         }
         if (!on || now - it->second.last > (F64)settle)
         {
-            // SETTLED: back into the static layer -- the tiles around it bake it in.
+            // SETTLED: back into the static layer -- the tiles around it bake it in (at its
+            // current pose: the next change measures from there, poseMoved).
             clearBits(obj);
             if (on) { noteChangedSphere(obj, kSphMover); ++n_settled; }
+            mPoseRef.erase(it->first);
             it = mDynCasters.erase(it);
             continue;
         }
@@ -1225,7 +1273,7 @@ void LLCleanIngest::tickDynCasters()
         vkDynSphere(obj, spinner, s);
         gVKDynSpheres.insert(gVKDynSpheres.end(), { s[0], s[1], s[2], s[3] });
         // (#771: 2 = a GPU spinner -- its sphere covers every rotation; 1 = moved within 2 frames;
-        // <GMDX> 3 = still, texture-animated: its shadow changes, its looks don't need probes / mirrors)
+        // 3 = still, texture-animated: its shadow changes, its looks don't need probes / mirrors)
         gVKDynSphereMoving.push_back(spinner ? 2u : (it->second.frame + 2u >= (U32)gFrameCount ? 1u
                                                      : it->second.texanim ? 3u : 0u));
         ++n_live;
@@ -1233,6 +1281,37 @@ void LLCleanIngest::tickDynCasters()
     }
     LLVKHitch::count("dynCasters", n_live);
     LLVKHitch::count("dynCasterSettled", n_settled);
+}
+
+// A refresh that changed the object's rows (refreshObjectPose true): motion, or float noise?
+// Measured from the reference pose (the header), so a slow mover's sub-threshold frames
+// accumulate; at a noted motion the reference slides to the new pose -- a mover stays in the
+// class while it keeps moving and settles once only rounding is left (a door that swung shut
+// with LL still easing its last ULPs).
+bool LLCleanIngest::poseMoved(LLViewerObject* obj, const LLCleanInstanceStore::PoseSample& before,
+                              const LLCleanInstanceStore::PoseSample& after)
+{
+    const F32 thr = vkMoverPoseThreshold();
+    if (thr <= 0.f) return true;   // RenderVKShadowMoverPoseThreshold 0: any bit change, as before
+    if (mPoseRef.size() >= 131072) mPoseRef.clear();   // (runaway: each re-takes its baseline)
+    auto ins = mPoseRef.try_emplace(obj->getID(), before);   // first change since static: the baked pose
+    const F32 dist = (obj->getPositionAgent() - LLViewerCamera::getInstance()->getOrigin()).magVec();
+    if (!vkPoseBeyond(ins.first->second, after, thr * llmax(1.f, dist / kPoseRefMeters))) return false;
+    ins.first->second = after;
+    return true;
+}
+
+// Drop the references of objects that are gone (every ~600 frames: a lookup per entry).
+void LLCleanIngest::prunePoseRefs()
+{
+    static U32 s_tick = 0;
+    if (++s_tick < 600u) return;
+    s_tick = 0;
+    for (auto it = mPoseRef.begin(); it != mPoseRef.end(); )
+    {
+        LLViewerObject* o = gObjectList.findObject(it->first);
+        it = (!o || o->isDead()) ? mPoseRef.erase(it) : std::next(it);
+    }
 }
 
 // #567: a moved-queue refresh that changed no instance row (refreshObjectPose false)
@@ -1448,16 +1527,18 @@ static bool vkMoverDiagOn()
 }
 namespace
 {
-    struct MoverStat { U32 changes = 0; F32 speed = 0.f; bool active = false; LLVector3 last; bool have_last = false; std::vector<F32> deltas_mm; F32 dist = 0.f; U32 net = 0; LLVector3 last_obj; bool have_obj = false; };
+    struct MoverStat { U32 changes = 0, motion = 0; F32 speed = 0.f; bool active = false; LLVector3 last; bool have_last = false; std::vector<F32> deltas_mm; F32 dist = 0.f; U32 net = 0; LLVector3 last_obj; bool have_obj = false; };
     std::unordered_map<LLUUID, MoverStat> sMoverStats;
     U64 sMoverFrames = 0, sMoverQueueSum = 0, sMoverDrainSum = 0, sMoverQueueMax = 0;
     F64 sMoverWindowStart = 0.0;
 }
-static void vkMoverDiagNote(LLViewerObject* obj)
+// moved: the change counted as motion (LLCleanIngest::poseMoved), not float noise.
+static void vkMoverDiagNote(LLViewerObject* obj, bool moved)
 {
     if ((obj->getPositionAgent() - LLViewerCamera::getInstance()->getOrigin()).magVecSquared() > 32.f * 32.f) return;
     MoverStat& m = sMoverStats[obj->getID()];
     ++m.changes;
+    if (moved) ++m.motion;
     // Per-frame drawn movement (the pose we upload: the eased render pose) and the
     // object-state position the network last set -- to tell smooth motion from
     // step-and-ease.
@@ -1502,7 +1583,7 @@ static void vkMoverDiagFrame(size_t at_drain, size_t drained)
         const MoverStat& m = sMoverStats[top[i].second];
         LLViewerObject* o = gObjectList.findObject(top[i].second);
         os << " | " << top[i].second.asString().substr(0, 8) << " moved " << m.dist << "m, pose " << (F32)(m.changes / span)
-           << "/s, obj-state " << (F32)(m.net / span) << "/s v="
+           << "/s (motion " << (F32)(m.motion / span) << "/s), obj-state " << (F32)(m.net / span) << "/s v="
            << m.speed << (m.active ? " active" : " static") << (o && o->isTempAttachment() ? " temp" : "")
            << (o && o->flagTemporaryOnRez() ? " temp-rez" : "");
     }
@@ -1524,6 +1605,682 @@ static bool vkVehicleDiagOn()
 {
     static LLCachedControl<bool> s_on(gSavedSettings, "RenderVKVehicleDiag", false);
     return s_on;
+}
+
+namespace
+{
+    constexpr U32 kTempWatches = 1024, kTempIndex = 2048, kTempProbes = 32;
+    constexpr U32 kTempScan = 128, kTempCandidates = 16, kTempInvalid = 0xFFFFFFFFu;
+    struct TempDecoded
+    {
+        LLVector3 pos, vel, accel;
+        U64 order = 0;
+        U32 frame = 0, flags = 0, fields = 0, result = 0;
+        S32 family = OUT_UNKNOWN;
+        bool drawable = false, result_drawable = false, cached = false, compressed = false;
+    };
+    struct TempMotionSample
+    {
+        LLUUID id;
+        U64 serial = 0, current_order = 0, parent_serial = 0, root_serial = 0;
+        U64 first_parent_serial = 0, first_root_serial = 0;
+        F64 start = 0.0, store_change = 0.0, mirror_change = 0.0, pending_since = 0.0;
+        U32 first_frame = 0, update_frame = 0, move_frame = 0, register_frame = 0;
+        S32 first_type = 0, last_type = 0;
+        std::array<U32, 4> updates{};
+        U32 pos_updates = 0, refreshes = 0, changed = 0, registrations = 0;
+        U32 row = kTempInvalid, row_gen = 0, mirror_seq = 0, recorded_seq = 0;
+        U32 kill_frame = 0, kill_phases = 0, index = kTempInvalid;
+        U32 first_register_frame = 0, applied = 0, rejected = 0, core_result = 0;
+        U32 first_after_flags = 0, after_flags = 0, applied_no_drawable = 0, terse_no_drawable = 0;
+        U32 reason = 0, rank = 0, stationary_mask = 0, store_moves = 0, mirror_moves = 0;
+        U32 evidence_seen = 0, rearm_mask = 0, reports = 0, rearms = 0;
+        bool kept = false, row_after_kill = false, alive = true;
+        bool created = false, cached = false, have_mirror = false;
+        bool temp = false, root_temp = false, attached = false, parented = false;
+        bool first_parented = false;
+        bool first_after_drawable = false, after_drawable = false, reported = false, has_update = false;
+        bool have_store_pos = false, have_mirror_pos = false;
+        LLVector3 first_pos, net_pos, net_vel, registered_pos, first_registered_pos;
+        LLVector3 store_pos, mirror_pos;
+        LLCleanIngest::TempMotionUpdate first_before, last_before;
+        TempDecoded first_full, first_terse, first_packed, first_moving, decoded;
+        std::array<F32, 16> last_mirror{};
+    };
+    static_assert(sizeof(TempMotionSample) <= 1024, "temporary watch memory must stay bounded");
+    struct TempIndexEntry { LLUUID id; U64 serial = 0; U32 slot = 0; U8 state = 0; };
+    struct TempReport { U32 slot = kTempInvalid; U64 serial = 0; F64 start = 0.0; };
+    struct TempCandidate { U32 slot = kTempInvalid; U64 serial = 0; };
+    struct TempCounters
+    {
+        U64 admitted = 0, evicted = 0, live_evicted = 0, unreported_evicted = 0, temp_evicted = 0;
+        U64 index_overflow = 0, killed_unreported = 0, scanned = 0, eligible = 0;
+        U64 queue_overrun = 0, suspects = 0, promoted = 0, full_blocked = 0;
+        U64 log_throttle = 0, log_alloc_dropped = 0, kill_log_dropped = 0, report_evicted = 0, applied_before_drawable = 0, rearms = 0;
+    };
+    std::array<TempMotionSample, kTempWatches> sTempMotion;
+    std::array<TempIndexEntry, kTempIndex> sTempIndex;
+    std::array<TempReport, 4> sTempReports;
+    std::array<TempCandidate, kTempCandidates> sTempCandidates;
+    static_assert(sizeof(sTempMotion) + sizeof(sTempIndex) + sizeof(sTempReports)
+                  + sizeof(sTempCandidates) <= 1024 * 1024, "temporary diagnostics must stay under 1 MiB");
+    TempCounters sTempCounts;
+    U64 sTempMotionSerial = 0, sTempOrder = 0, sTempEpoch = 0;
+    U32 sTempRing = 0, sTempScan = 0, sTempOccupied = 0;
+    U32 sTempScanFrame = kTempInvalid;
+    F64 sTempMotionNext = 0.0, sTempSummaryNext = 0.0;
+    F64 sTempKillNext = 0.0;
+    U32 sTempKillLines = 0;
+    bool sTempActive = false;
+
+    bool tempMotionDiagOn()
+    {
+        static LLCachedControl<bool> on(gSavedSettings, "RenderVKTempMotionDiag", false);
+        if (!on) { sTempActive = false; return false; }
+        if (!sTempActive)
+        {
+            // Reset only on enable. Off hooks do not copy or scan the dormant ring.
+            // Element-wise reset avoids a ring-sized stack temporary on Windows.
+            for (auto& sample : sTempMotion) sample = TempMotionSample{};
+            for (auto& entry : sTempIndex) entry = TempIndexEntry{};
+            sTempReports = {}; sTempCandidates = {};
+            sTempCounts = {}; sTempRing = sTempScan = sTempOccupied = 0;
+            sTempScanFrame = kTempInvalid;
+            sTempMotionNext = sTempSummaryNext = 0.0;
+            sTempKillNext = 0.0; sTempKillLines = 0;
+            sTempActive = true; ++sTempEpoch;
+        }
+        return true;
+    }
+    U32 tempIndexStart(const LLUUID& id) { return (U32)(std::hash<LLUUID>()(id) % kTempIndex); }
+    TempMotionSample* tempMotionSample(const LLViewerObject* obj)
+    {
+        const U32 base = tempIndexStart(obj->getID());
+        for (U32 probe = 0; probe < kTempProbes; ++probe)
+        {
+            const auto& entry = sTempIndex[(base + probe) % kTempIndex];
+            if (entry.state == 0) break;
+            if (entry.state == 1 && entry.id == obj->getID())
+            {
+                auto& sample = sTempMotion[entry.slot];
+                if (sample.serial == entry.serial) return &sample;
+            }
+        }
+        return nullptr;
+    }
+    bool tempWorld(LLViewerObject* obj)
+    {
+        LLViewerObject* root = obj->getRootEdit();
+        return (obj->flagTemporaryOnRez() || (root && root->flagTemporaryOnRez()))
+            && !obj->getAvatarAncestor();
+    }
+    TempMotionSample* tempAdmit(LLViewerObject* obj, const LLCleanIngest::TempMotionUpdate& before)
+    {
+        const U32 base = tempIndexStart(obj->getID());
+        U32 target = kTempInvalid;
+        for (U32 probe = 0; probe < kTempProbes; ++probe)
+        {
+            const U32 at = (base + probe) % kTempIndex;
+            if (sTempIndex[at].state != 1) { target = at; break; }
+        }
+        if (target == kTempInvalid) { ++sTempCounts.index_overflow; return nullptr; }
+        const U32 slot = sTempRing++ % kTempWatches;
+        auto& sample = sTempMotion[slot];
+        if (sample.serial)
+        {
+            ++sTempCounts.evicted;
+            if (sample.alive) ++sTempCounts.live_evicted;
+            if (!sample.reported) ++sTempCounts.unreported_evicted;
+            if (sample.temp && !sample.reported) ++sTempCounts.temp_evicted;
+            if (sample.index < kTempIndex) sTempIndex[sample.index].state = 2;
+        }
+        else ++sTempOccupied;
+        sample = TempMotionSample{};
+        sample.id = obj->getID(); sample.serial = ++sTempMotionSerial; sample.index = target;
+        sample.start = LLFrameTimer::getElapsedSeconds().value();
+        sample.first_frame = before.frame; sample.first_type = before.type;
+        sample.created = before.created; sample.first_before = before;
+        sample.first_pos = before.pos;
+        sTempIndex[target] = TempIndexEntry{sample.id, sample.serial, slot, 1};
+        ++sTempCounts.admitted;
+        return &sample;
+    }
+    bool tempCandidateValid(const TempCandidate& candidate)
+    {
+        return candidate.slot < kTempWatches && sTempMotion[candidate.slot].serial == candidate.serial
+            && sTempMotion[candidate.slot].alive && sTempMotion[candidate.slot].reason
+            && !sTempMotion[candidate.slot].reported;
+    }
+    void tempQueue(U32 slot)
+    {
+        auto& sample = sTempMotion[slot];
+        U32 weakest = 0;
+        for (U32 i = 0; i < kTempCandidates; ++i)
+        {
+            if (sTempCandidates[i].slot == slot && sTempCandidates[i].serial == sample.serial) return;
+            if (!tempCandidateValid(sTempCandidates[i]))
+            { sTempCandidates[i] = TempCandidate{slot, sample.serial}; return; }
+            const auto& other = sTempMotion[sTempCandidates[i].slot];
+            const auto& weak = sTempMotion[sTempCandidates[weakest].slot];
+            if (other.rank < weak.rank || (other.rank == weak.rank && other.pending_since > weak.pending_since)) weakest = i;
+        }
+        ++sTempCounts.queue_overrun;
+        const auto& weak = sTempMotion[sTempCandidates[weakest].slot];
+        if (sample.rank > weak.rank || (sample.rank == weak.rank && sample.pending_since < weak.pending_since))
+            sTempCandidates[weakest] = TempCandidate{slot, sample.serial};
+    }
+    void tempMotionDiagRefresh(LLViewerObject* obj, bool changed)
+    {
+        if (!tempMotionDiagOn()) return;
+        if (auto* sample = tempMotionSample(obj))
+        {
+            ++sample->refreshes; if (changed) ++sample->changed;
+            sample->move_frame = (U32)gFrameCount;
+        }
+    }
+    void tempClassify(LLViewerObject* obj, TempMotionSample& sample)
+    {
+        LLViewerObject* root = obj->getRootEdit();
+        LLViewerObject* parent = (LLViewerObject*)obj->getParent();
+        sample.attached = obj->getAvatarAncestor() != nullptr;
+        sample.temp = tempWorld(obj);
+        sample.root_temp = root && root->flagTemporaryOnRez();
+        sample.parented = parent != nullptr;
+        sample.after_flags = obj->getObjectFlags();
+        auto* root_watch = root ? tempMotionSample(root) : nullptr;
+        auto* parent_watch = parent ? tempMotionSample(parent) : nullptr;
+        sample.root_serial = root_watch ? root_watch->serial : 0;
+        sample.parent_serial = parent_watch ? parent_watch->serial : 0;
+    }
+    void tempNewEvidence(TempMotionSample& sample, U32 phases)
+    {
+        const U32 fresh = phases & ~sample.evidence_seen;
+        sample.evidence_seen |= phases;
+        if (!fresh || !sample.reports) return;
+        sample.rearm_mask |= fresh;
+        if (sample.reported)
+        {
+            // Five first-evidence phase bits: at most five rearms for this watch,
+            // coalesced while awaiting the existing bounded candidate/log budgets.
+            sample.reported = false; sample.reason = 0; sample.pending_since = 0.0;
+            ++sample.rearms; ++sTempCounts.rearms;
+        }
+    }
+    void tempWireLog(std::ostream& os, const TempDecoded& wire)
+    {
+        os << wire.order << ':' << wire.frame << ':' << wire.family << ':' << wire.fields
+           << ':' << wire.flags << ':' << wire.drawable << ':' << wire.result << ':' << wire.result_drawable
+           << ':' << wire.cached << ':' << wire.compressed
+           << ':' << wire.pos << ':' << wire.vel << ':' << wire.accel;
+    }
+}
+
+bool LLCleanIngest::tempMotionDiagEnabled() { return tempMotionDiagOn(); }
+
+LLCleanIngest::TempMotionUpdate LLCleanIngest::tempMotionDiagBefore(LLViewerObject* obj, S32 type,
+                                                                  bool created, bool cached, bool compressed)
+{
+    TempMotionUpdate before;
+    if (!obj || obj->getPCode() != LL_PCODE_VOLUME) return before;
+    auto* sample = tempMotionSample(obj);
+    if (!sample && !created && !tempWorld(obj)) return before;
+    before.order = ++sTempOrder; before.frame = (U32)gFrameCount;
+    before.type = type; before.created = created; before.cached = cached; before.compressed = compressed;
+    before.pos = obj->getPositionAgent(); before.vel = obj->getVelocity(); before.accel = obj->getAcceleration();
+    before.flags = obj->getObjectFlags(); before.drawable = obj->mDrawable.notNull();
+    // Admission before parse preserves the first full/terse even while temp flags are unknown.
+    if (!sample) sample = tempAdmit(obj, before);
+    if (sample) { sample->current_order = before.order; sample->last_before = before; }
+    return before;
+}
+
+void LLCleanIngest::tempMotionDiagAfter(LLViewerObject* obj, const TempMotionUpdate& before, U32 result)
+{
+    if (!tempMotionDiagOn() || !before.order) return;
+    auto* sample = tempMotionSample(obj);
+    if (!sample) return;
+    const LLVector3 pos = obj->getPositionAgent();
+    if (!sample->has_update)
+    {
+        if (sample->created) sample->first_pos = pos;
+        sample->net_pos = pos; sample->first_after_drawable = obj->mDrawable.notNull();
+    }
+    sample->has_update = true;
+    if (sample->net_pos != pos) ++sample->pos_updates;
+    sample->net_pos = pos; sample->net_vel = obj->getVelocity();
+    sample->cached = before.cached; sample->last_type = before.type;
+    sample->update_frame = before.frame; sample->after_drawable = obj->mDrawable.notNull();
+    sample->core_result = result; sample->alive = !obj->isDead();
+    switch (before.type)
+    {
+    case OUT_FULL: ++sample->updates[0]; break;
+    case OUT_FULL_COMPRESSED: ++sample->updates[1]; break;
+    case OUT_FULL_CACHED: ++sample->updates[2]; break;
+    case OUT_TERSE_IMPROVED: ++sample->updates[3]; break;
+    default: break;
+    }
+    tempClassify(obj, *sample);
+    if (before.order == sample->first_before.order)
+    {
+        sample->first_parented = sample->parented;
+        sample->first_parent_serial = sample->parent_serial; sample->first_root_serial = sample->root_serial;
+        sample->first_after_flags = obj->getObjectFlags();
+    }
+}
+
+void LLCleanIngest::tempMotionDiagClassify(LLViewerObject* obj)
+{
+    if (!tempMotionDiagOn() || !obj) return;
+    if (auto* sample = tempMotionSample(obj)) tempClassify(obj, *sample);
+}
+
+void LLCleanIngest::tempMotionDiagDecoded(LLViewerObject* obj, S32 type, const LLVector3& pos, U32 fields)
+{
+    if (!tempMotionDiagOn()) return;
+    auto* sample = tempMotionSample(obj);
+    if (!sample) return;
+    TempDecoded wire;
+    wire.order = sample->current_order; wire.frame = (U32)gFrameCount; wire.family = type; wire.fields = fields;
+    wire.pos = pos; wire.vel = obj->getVelocity(); wire.accel = obj->getAcceleration();
+    wire.flags = obj->getObjectFlags(); wire.drawable = obj->mDrawable.notNull();
+    wire.cached = sample->last_before.cached; wire.compressed = sample->last_before.compressed;
+    sample->decoded = wire;
+    U32 evidence = 0;
+    if (type == OUT_FULL && !sample->first_full.order) { sample->first_full = wire; evidence |= 1u; }
+    if (type == OUT_TERSE_IMPROVED && !sample->first_terse.order) { sample->first_terse = wire; evidence |= 2u; }
+    if ((fields & 2u) && !wire.vel.isExactlyZero() && !sample->first_moving.order)
+    { sample->first_moving = wire; evidence |= 4u; }
+    if ((type == OUT_FULL_COMPRESSED || type == OUT_FULL_CACHED) && !sample->first_packed.order)
+    { sample->first_packed = wire; evidence |= 16u; }
+    tempNewEvidence(*sample, evidence);
+}
+
+void LLCleanIngest::tempMotionDiagResult(LLViewerObject* obj, U32 result)
+{
+    if (!tempMotionDiagOn()) return;
+    auto* sample = tempMotionSample(obj);
+    if (!sample) return;
+    for (auto* wire : {&sample->decoded, &sample->first_full, &sample->first_terse, &sample->first_packed, &sample->first_moving})
+        if (wire->order == sample->current_order)
+        { wire->result = result; wire->result_drawable = obj->mDrawable.notNull(); }
+    if (result == 1)
+    {
+        ++sample->applied;
+        if (!obj->mDrawable)
+        {
+            ++sTempCounts.applied_before_drawable; ++sample->applied_no_drawable;
+            if (sample->decoded.family == OUT_TERSE_IMPROVED) ++sample->terse_no_drawable;
+        }
+    }
+    if (result == 2)
+    {
+        if (!sample->rejected) tempNewEvidence(*sample, 8u);
+        ++sample->rejected;
+    }
+}
+
+void LLCleanIngest::tempMotionDiagRegistered(LLViewerObject* obj, S32 face, U32 iid, const F32 pose[16])
+{
+    if (!tempMotionDiagOn()) return;
+    auto* sample = tempMotionSample(obj);
+    if (!sample && tempWorld(obj))
+    {
+        // Existing objects encountered by ordinary ingest after enabling: the
+        // OUT_UNKNOWN baseline is explicitly not a reconstructed network update.
+        tempMotionDiagBefore(obj, (S32)OUT_UNKNOWN, false, false, false);
+        sample = tempMotionSample(obj);
+        if (sample) tempClassify(obj, *sample);
+    }
+    if (sample)
+    {
+        ++sample->registrations;
+        if (face != 0) return;
+        sample->row = iid;
+        sample->register_frame = (U32)gFrameCount;
+        sample->registered_pos.set(pose[12], pose[13], pose[14]);
+        if (iid != kTempInvalid && (!sample->have_store_pos
+            || (sample->registered_pos - sample->store_pos).lengthSquared() > 0.000001f))
+        {
+            if (sample->have_store_pos) ++sample->store_moves;
+            sample->have_store_pos = true; sample->store_pos = sample->registered_pos;
+            sample->store_change = LLFrameTimer::getElapsedSeconds().value();
+        }
+        if (!sample->first_register_frame)
+        { sample->first_register_frame = (U32)gFrameCount; sample->first_registered_pos = sample->registered_pos; }
+    }
+}
+
+void LLCleanIngest::tempMotionDiagKill(LLViewerObject* obj, U32 phase, bool kept)
+{
+    if (!tempMotionDiagOn() || !obj || phase < 1 || phase > 4) return;
+    if (auto* sample = tempMotionSample(obj))
+    {
+        sample->kill_frame = (U32)gFrameCount; sample->kill_phases |= 1u << phase;
+        if (phase >= 3) sample->kept = kept;
+        if (phase == 4)
+        {
+            sample->alive = false;
+            if (!sample->reports) ++sTempCounts.killed_unreported;
+            LLCleanInstanceStore::Instance row{};
+            sample->row_after_kill = LLCleanInstanceStore::instance().debugGet(sample->id, 0, row);
+            if (sample->reports)
+            {
+                const F64 now = LLFrameTimer::getElapsedSeconds().value();
+                if (now >= sTempKillNext) { sTempKillNext = now + 0.25; sTempKillLines = 0; }
+                if (sTempKillLines++ < 2)
+                    LL_INFOS("VKTempMotion") << "KILL epoch=" << sTempEpoch << " sample=" << sample->serial
+                        << " frame=" << gFrameCount << " phases=" << sample->kill_phases << " kept=" << kept
+                        << " row_after=" << sample->row_after_kill << " slot=" << sample->row << LL_ENDL;
+                else ++sTempCounts.kill_log_dropped;
+            }
+        }
+    }
+}
+
+namespace
+{
+    void tempMotionCheck(U32 slot, const std::vector<U8>& mirror, const F32 offset[3], F64 now)
+    {
+        auto& store = LLCleanInstanceStore::instance();
+        auto& sample = sTempMotion[slot];
+        if (!sample.serial || !sample.alive || sample.reported) return;
+        ++sTempCounts.scanned;
+        LLViewerObject* obj = gObjectList.findObject(sample.id);
+        if (!obj || obj->isDead()) { sample.alive = false; sample.reason = 0; return; }
+        tempClassify(obj, sample);
+        sample.reason = 0; sample.stationary_mask = 0;
+        if (!sample.temp || sample.attached || now - sample.start <= 0.3) return;
+        LLCleanInstanceStore::Instance row{};
+        U32 iid = kTempInvalid;
+        if (!store.debugGet(sample.id, 0, row, &iid)) sample.reason = 3; // registration pending, not frozen
+        else
+        {
+            sample.row = iid;
+            const LLVector3 pos(row.model_matrix + 12);
+            if (!sample.have_store_pos || (pos - sample.store_pos).lengthSquared() > 0.000001f)
+            {
+                if (sample.have_store_pos) ++sample.store_moves;
+                sample.store_pos = pos; sample.store_change = now; sample.have_store_pos = true;
+            }
+            const bool store_still = now - sample.store_change > 0.3;
+            bool mirror_still = false;
+            if (iid >= mirror.size() / sizeof(row)) sample.reason = 4;
+            else
+            {
+                LLCleanInstanceStore::Instance mirrored{};
+                std::memcpy(&mirrored, mirror.data() + (size_t)iid * sizeof(row), sizeof(row));
+                if (mirrored.lod_group_id == kTempInvalid || mirrored.lod_group_id != row.lod_group_id) sample.reason = 4;
+                else
+                {
+                    LLVector3 mpos(mirrored.model_matrix + 12);
+                    if (LLCleanInstanceStore::rowAgentSpace(mirrored.flags, mirrored.lod_group_id))
+                        for (U32 k = 0; k < 3; ++k) mpos.mV[k] -= offset[k];
+                    if (!sample.have_mirror_pos || (mpos - sample.mirror_pos).lengthSquared() > 0.000001f)
+                    {
+                        if (sample.have_mirror_pos) ++sample.mirror_moves;
+                        sample.mirror_pos = mpos; sample.mirror_change = now; sample.have_mirror_pos = true;
+                    }
+                    mirror_still = now - sample.mirror_change > 0.3;
+                }
+            }
+            sample.stationary_mask = (store_still ? 1u : 0u) | (mirror_still ? 2u : 0u);
+            if (store_still || mirror_still)
+            {
+                // Only plain roots have an unambiguous comparison with the
+                // first agent-space object position; node/child origins differ.
+                const bool comparable = !sample.parented && !obj->isMesh()
+                    && !LLCleanGLTFIngest::isGLTFScene(obj) && (row.flags & (1u | 8u | 512u)) == 0u;
+                const bool at_first = (store_still && sample.store_moves == 0
+                    && (sample.store_pos - sample.first_pos).lengthSquared() <= 0.000001f)
+                    || (mirror_still && sample.mirror_moves == 0
+                    && (sample.mirror_pos - sample.first_pos).lengthSquared() <= 0.000001f);
+                sample.reason = !comparable ? 5 : at_first ? 1 : 2;
+            }
+        }
+        if (!sample.reason) { sample.pending_since = 0.0; return; }
+        ++sTempCounts.eligible;
+        if (sample.pending_since == 0.0) sample.pending_since = now;
+        const bool wire_motion = sample.first_moving.order != 0;
+        sample.rank = (wire_motion ? 100u : 0u) + (wire_motion && sample.pos_updates == 0 ? 40u : 0u)
+                    + (sample.reason == 1 ? 20u : 0u) + (U32)llmin(20.0, now - sample.pending_since);
+        tempQueue(slot);
+    }
+    void tempMotionScan(const std::vector<U8>& mirror, const F32 offset[3], F64 now)
+    {
+        for (U32 n = 0; n < kTempScan; ++n)
+            tempMotionCheck(sTempScan++ % kTempWatches, mirror, offset, now);
+    }
+
+    bool tempSuspectLog(TempMotionSample& sample, F64 now)
+    {
+        try
+        {
+            std::ostringstream line;
+            line << "SUSPECT decoded_state=1 epoch=" << sTempEpoch << " sample=" << sample.serial << " frame=" << gFrameCount
+                 << " reason=" << sample.reason << " rank=" << sample.rank << " age=" << now - sample.start
+                 << " evidence=" << sample.evidence_seen << " rearm=" << sample.rearm_mask << ',' << sample.rearms << " reports=" << sample.reports
+                 << " pending_age=" << now - sample.pending_since << " model_still=" << (sample.have_store_pos ? now - sample.store_change : -1.0)
+                 << ',' << (sample.have_mirror_pos ? now - sample.mirror_change : -1.0)
+                 << " model_moves=" << sample.store_moves << ',' << sample.mirror_moves
+                 << " stable_sources=" << sample.stationary_mask
+                 << " seen_created=" << sample.created << " relation=" << sample.parented << ',' << sample.parent_serial << ',' << sample.root_serial << ',' << sample.root_temp
+                 << " first_relation=" << sample.first_parented << ',' << sample.first_parent_serial << ',' << sample.first_root_serial
+                 << " first_before=" << sample.first_before.order << ':' << sample.first_before.frame << ':' << sample.first_before.type
+                 << ':' << sample.first_before.flags << ':' << sample.first_before.drawable << ':' << sample.first_before.cached << ':' << sample.first_before.compressed
+                 << ':' << sample.first_before.pos << ':' << sample.first_before.vel << ':' << sample.first_before.accel
+                 << " first_after_dr=" << sample.first_after_drawable << " first_flags=" << sample.first_after_flags << " first_pos=" << sample.first_pos
+                 << " first_full="; tempWireLog(line, sample.first_full);
+            line << " first_terse="; tempWireLog(line, sample.first_terse);
+            line << " first_packed="; tempWireLog(line, sample.first_packed);
+            line << " first_moving="; tempWireLog(line, sample.first_moving);
+            line << " last_decoded="; tempWireLog(line, sample.decoded);
+            line << " last_before=" << sample.last_before.order << ':' << sample.last_before.flags << ':' << sample.last_before.drawable
+                 << ':' << sample.last_before.vel << ':' << sample.last_before.accel
+                 << " last_after_dr=" << sample.after_drawable << " flags=" << sample.after_flags << " core_result=" << sample.core_result
+                 << " applied_skipped=" << sample.applied << ',' << sample.rejected
+                 << " applied_terse_no_dr=" << sample.applied_no_drawable << ',' << sample.terse_no_drawable
+                 << " families=" << sample.updates[0] << ',' << sample.updates[1] << ',' << sample.updates[2] << ',' << sample.updates[3]
+                 << " pos_updates=" << sample.pos_updates << " net=" << sample.net_pos << " vel=" << sample.net_vel
+                 << " first_reg=" << sample.first_register_frame << ':' << sample.first_registered_pos;
+            LL_INFOS("VKTempMotion") << line.str() << LL_ENDL;
+            return true;
+        }
+        catch (const std::bad_alloc&) { ++sTempCounts.log_alloc_dropped; return false; }
+    }
+
+    void tempMotionPromote(F64 now, const std::vector<U8>& mirror, const F32 offset[3])
+    {
+        // Two independent one-shot records per log tick. Continuation saturation
+        // cannot prevent the preserved first-update evidence from being logged.
+        for (U32 shot = 0; shot < 2; ++shot)
+        {
+            U32 best = kTempInvalid;
+            for (U32 i = 0; i < kTempCandidates; ++i)
+            {
+                if (!tempCandidateValid(sTempCandidates[i])) continue;
+                const auto& candidate = sTempMotion[sTempCandidates[i].slot];
+                if (best == kTempInvalid) { best = i; continue; }
+                const auto& prior = sTempMotion[sTempCandidates[best].slot];
+                if (candidate.rank > prior.rank || (candidate.rank == prior.rank && candidate.pending_since < prior.pending_since)) best = i;
+            }
+            if (best == kTempInvalid) break;
+            const U32 slot = sTempCandidates[best].slot;
+            tempMotionCheck(slot, mirror, offset, now);
+            if (!tempCandidateValid(sTempCandidates[best])) continue;
+            auto& sample = sTempMotion[slot];
+            LLViewerObject* obj = gObjectList.findObject(sample.id);
+            if (!obj || obj->isDead())
+            { sample.alive = false; sample.reason = 0; sTempCandidates[best] = {}; continue; }
+            tempClassify(obj, sample);
+            if (!sample.temp || sample.attached)
+            { sample.reason = 0; sTempCandidates[best] = {}; continue; }
+            if (!tempSuspectLog(sample, now)) continue;
+            sample.reported = true; ++sample.reports; ++sTempCounts.suspects;
+            sTempCandidates[best] = {};
+            TempReport* report = nullptr;
+            TempReport* weakest = nullptr;
+            for (auto& entry : sTempReports)
+            {
+                if (entry.slot >= kTempWatches || sTempMotion[entry.slot].serial != entry.serial || now - entry.start >= 1.0)
+                { report = &entry; break; }
+                if (!weakest || sTempMotion[entry.slot].rank < sTempMotion[weakest->slot].rank) weakest = &entry;
+            }
+            if (!report && weakest && sample.rank > sTempMotion[weakest->slot].rank) report = weakest;
+            if (report) { *report = TempReport{slot, sample.serial, now}; ++sTempCounts.promoted; }
+            else ++sTempCounts.full_blocked;
+        }
+        for (const auto& candidate : sTempCandidates)
+            if (tempCandidateValid(candidate)) ++sTempCounts.log_throttle;
+    }
+
+    void tempMotionSummary(F64 now)
+    {
+        if (now < sTempSummaryNext) return;
+        sTempSummaryNext = now + 1.0;
+        U32 pending = 0;
+        F64 oldest = 0.0;
+        for (const auto& candidate : sTempCandidates)
+            if (tempCandidateValid(candidate))
+            { ++pending; oldest = llmax(oldest, now - sTempMotion[candidate.slot].pending_since); }
+        LL_INFOS("VKTempMotion") << "SUMMARY epoch=" << sTempEpoch << " frame=" << gFrameCount
+            << " slots=" << sTempOccupied << "/1024 admitted=" << sTempCounts.admitted
+            << " evicted=" << sTempCounts.evicted << ',' << sTempCounts.live_evicted << ',' << sTempCounts.unreported_evicted << ',' << sTempCounts.temp_evicted
+            << " index_overflow=" << sTempCounts.index_overflow << " killed_unreported=" << sTempCounts.killed_unreported
+            << " scanned=" << sTempCounts.scanned << " eligible_visits=" << sTempCounts.eligible
+            << " scan_cursor=" << sTempScan % kTempWatches << " slice=128 cycle_frames=8 epsilon_m=0.001"
+            << " queue=" << pending << "/16 pending_age=" << oldest << " queue_overrun=" << sTempCounts.queue_overrun
+            << " suspect=" << sTempCounts.suspects << " full=" << sTempCounts.promoted << " full_blocked=" << sTempCounts.full_blocked
+            << " rearms=" << sTempCounts.rearms
+            << " log_throttle=" << sTempCounts.log_throttle << " log_alloc_dropped=" << sTempCounts.log_alloc_dropped
+            << " kill_log_dropped=" << sTempCounts.kill_log_dropped
+            << " report_evicted=" << sTempCounts.report_evicted << " applied_before_dr=" << sTempCounts.applied_before_drawable
+            << " watch_bytes=" << sizeof(sTempMotion) + sizeof(sTempIndex) + sizeof(sTempReports) + sizeof(sTempCandidates)
+            << LL_ENDL;
+    }
+}
+
+void LLCleanIngest::tempMotionDiagUpload(const std::vector<U8>& mirror,
+                                      const std::vector<std::pair<U32, U32>>& runs,
+                                      const F32 offset[3], U32 upload_rows, bool full, bool pending)
+{
+    if (!tempMotionDiagOn()) return;
+    const F64 now = LLFrameTimer::getElapsedSeconds().value();
+    const bool report = now >= sTempMotionNext;
+    if (report) sTempMotionNext = now + 0.25; // <= two SUSPECT + four DETAIL lines per tick
+    static LLCachedControl<bool> interpolate(gSavedSettings, "VelocityInterpolate", true);
+    auto& store = LLCleanInstanceStore::instance();
+    if (sTempScanFrame != (U32)gFrameCount)
+    {
+        sTempScanFrame = (U32)gFrameCount;
+        tempMotionScan(mirror, offset, now);
+    }
+    if (report) tempMotionPromote(now, mirror, offset);
+    for (auto& report_slot : sTempReports)
+    {
+        if (report_slot.slot >= kTempWatches) continue;
+        auto& sample = sTempMotion[report_slot.slot];
+        if (sample.serial != report_slot.serial)
+        { ++sTempCounts.report_evicted; report_slot = {}; continue; }
+        if (now - report_slot.start >= 1.0) { report_slot = {}; continue; }
+        LLViewerObject* obj = gObjectList.findObject(sample.id);
+        const bool live = obj && !obj->isDead();
+        LLDrawable* dr = live ? obj->mDrawable.get() : nullptr;
+        LLCleanInstanceStore::Instance row{}, mirrored{};
+        U32 iid = 0xFFFFFFFFu;
+        const bool have_row = store.debugGet(sample.id, 0, row, &iid);
+        if (!have_row) iid = sample.row; // inspect the last sampled slot after release
+        const bool have_mirror = iid < mirror.size() / sizeof(row);
+        LLUUID row_owner;
+        S32 row_face = -1;
+        const bool keyed = have_mirror && store.keyForId(iid, row_owner, row_face);
+        const U32 key_state = !keyed ? 0u : row_owner == sample.id && row_face == 0 ? 1u : 2u;
+        U32 current_gen = 0;
+        bool covered = false, span_limit = false;
+        if (have_mirror)
+        {
+            std::memcpy(&mirrored, mirror.data() + (size_t)iid * sizeof(row), sizeof(row));
+            // Main thread, after fill joined: no store mutation races this token read.
+            const U32* generations = store.rowGenerations();
+            const U32 gen = generations && iid < store.capacity() ? generations[iid] : 0;
+            current_gen = gen;
+            if (have_row && (iid != sample.row || gen != sample.row_gen))
+            {
+                sample.have_mirror = false;
+                sample.row = iid; sample.row_gen = gen;
+            }
+            if (!sample.have_mirror || std::memcmp(sample.last_mirror.data(), mirrored.model_matrix,
+                                                    sizeof(mirrored.model_matrix)) != 0)
+            {
+                ++sample.mirror_seq;
+                std::memcpy(sample.last_mirror.data(), mirrored.model_matrix, sizeof(mirrored.model_matrix));
+                sample.have_mirror = true;
+            }
+            covered = iid < upload_rows && full;
+            // Only the diagnostic's four rows. Runs append across fills and may
+            // include a rolling-heal span, so they need not be sorted.
+            if (!covered && iid < upload_rows)
+            {
+                U32 checked = 0;
+                for (const auto& span : runs)
+                {
+                    if (checked++ == 256u) { span_limit = true; break; }
+                    if (iid >= span.first && iid < span.second) { covered = true; break; }
+                }
+            }
+            if (covered && !pending) ++sample.recorded_seq;
+            if (LLCleanInstanceStore::rowAgentSpace(mirrored.flags, mirrored.lod_group_id))
+                for (int k = 0; k < 3; ++k) mirrored.model_matrix[12 + k] -= offset[k];
+        }
+        if (!report) continue;
+        LLVolume* volume = live ? obj->getVolume() : nullptr;
+        LLFace* face = dr && dr->getNumFaces() > 0 ? dr->getFace(0) : nullptr;
+        F32 owned[16]{}, axis[4]{}, pivot[4]{};
+        if (live) store.composeOwnedPose(obj, owned, axis, pivot);
+        F32 pose_error = 0.f, mirror_error = 0.f;
+        if (have_row && live)
+            for (int k = 0; k < 16; ++k)
+            {
+                pose_error = llmax(pose_error, fabsf(owned[k] - row.model_matrix[k]));
+                if (have_mirror) mirror_error = llmax(mirror_error, fabsf(row.model_matrix[k] - mirrored.model_matrix[k]));
+            }
+        LL_INFOS("VKTempMotion") << "DETAIL epoch=" << sTempEpoch << " sample=" << sample.serial << " frame=" << gFrameCount
+            << " age=" << now - sample.start << " first=" << sample.first_frame << ',' << sample.first_type
+            << " created=" << sample.created << " update=" << sample.update_frame << ',' << sample.last_type
+            << " families=" << sample.updates[0] << ',' << sample.updates[1] << ',' << sample.updates[2] << ',' << sample.updates[3]
+            << " cached=" << sample.cached << " pos_updates=" << sample.pos_updates
+            << " first_pos=" << sample.first_pos << " net=" << sample.net_pos << " net_vel=" << sample.net_vel
+            << " live=" << live << " phys=" << (live && obj->flagUsePhysics())
+            << " active=" << (live && obj->isActive()) << ',' << (live && obj->onActiveList())
+            << " selected=" << (live && obj->isSelected()) << " parent=" << (live && obj->getParent())
+            << " obj=" << (live ? obj->getPositionAgent() : LLVector3::zero)
+            << " vel=" << (live ? obj->getVelocity() : LLVector3::zero)
+            << " accel=" << (live ? obj->getAcceleration() : LLVector3::zero)
+            << " dr=" << (dr != nullptr) << ',' << (dr && dr->isActive())
+            << ',' << (dr && dr->isState(LLDrawable::ON_MOVE_LIST))
+            << ',' << (dr && dr->isState(LLDrawable::MOVE_UNDAMPED))
+            << " dr_gen=" << (dr ? dr->getGeneration() : -1)
+            << " dr_local=" << (dr ? dr->mXform.getPosition() : LLVector3::zero)
+            << " geometry=" << (volume != nullptr) << ',' << (volume && volume->isMeshAssetLoaded())
+            << ',' << (dr ? dr->getNumFaces() : 0) << ',' << (face ? (S32)face->mVKIngest : -1)
+            << ',' << (face ? face->mVKIngestFrame : 0)
+            << " owned=" << LLVector3(owned + 12)
+            << " refresh=" << sample.move_frame << ',' << sample.refreshes << ',' << sample.changed
+            << " reg=" << sample.register_frame << ',' << sample.registrations << ',' << sample.registered_pos
+            << " row=" << have_row << ',' << iid << ',' << sample.row_gen << ',' << row.flags
+            << " key=" << key_state << " slot_gen=" << current_gen
+            << " group=" << row.lod_group_id << ',' << mirrored.lod_group_id
+            << " store=" << LLVector3(row.model_matrix + 12)
+            << " mirror=" << have_mirror << ',' << LLVector3(mirrored.model_matrix + 12)
+            << " error=" << pose_error << ',' << mirror_error
+            << " cap=" << upload_rows << " covered=" << covered << " span_limit=" << span_limit << " pending=" << pending
+            << " seq=" << sample.mirror_seq << ',' << sample.recorded_seq
+            << " kill=" << sample.kill_frame << ',' << sample.kill_phases << ',' << sample.kept << ',' << sample.row_after_kill
+            << " frozen=" << LLWorldClock::isFrozen() << " interp=" << (bool)interpolate << LL_ENDL;
+        const bool released = !have_row && (!have_mirror
+            || (mirrored.lod_group_id == 0xFFFFFFFFu && covered && !pending));
+        if (!live && released) report_slot = {};
+    }
+    tempMotionSummary(now);
 }
 namespace
 {
@@ -1667,20 +2424,33 @@ void LLCleanIngest::drainMovedQueue()
         s_reg.clear();
     }
     const bool dyn_on = gVKProjShadowsUsed && vkDynCasterSettleSecs() > 0.f;
-    auto notePose = [&](LLViewerObject* o, bool ch, uint8_t tag)
+    prunePoseRefs();
+    U32 n_noise = 0;   // rows changed, nothing moved (poseMoved)
+    // Returns whether the refresh counted as motion (a changed row past the float noise).
+    auto notePose = [&](LLViewerObject* o, bool ch, const LLCleanInstanceStore::PoseSample& before,
+                        const LLCleanInstanceStore::PoseSample& after, uint8_t tag) -> bool
     {
-        if (!ch && vkSphereOnPoseChangeOnly())
+        // Worn attachments are overlay casters already (instance bit9): nothing static moved
+        // (not classified: any change reports as motion).
+        if (dyn_on && ch && o->isAttachment()) return true;
+        // A settled pose re-read through LL's eased drawable xform can differ by float
+        // rounding alone (LLDrawable::updateXform): a static building kept flipping into the
+        // dynamic class -- out of the weather roof map (rain and snow indoors) and the
+        // static shadow layer -- for RenderVKShadowMoverSettleSecs at a time.
+        const bool moved = ch && poseMoved(o, before, after);
+        if (ch && !moved) ++n_noise;
+        if (!moved && vkSphereOnPoseChangeOnly())
         {
             if (gVKProjShadowsUsed) LLVKHitch::count("projSphSkipped");
-            return;
+            return false;
         }
-        if (dyn_on && ch)
+        if (dyn_on && moved)
         {
-            // Worn attachments are overlay casters already (instance bit9): nothing static moved.
-            if (!o->isAttachment()) noteDynCaster(o, false);
-            return;
+            noteDynCaster(o, false);
+            return true;
         }
         noteChangedSphere(o, tag);
+        return moved;
     };
 
     // SEAT FIRST (#96): the linkset the agent sits on is refreshed EVERY frame, ahead
@@ -1694,16 +2464,22 @@ void LLCleanIngest::drainMovedQueue()
         auto refresh = [&](LLViewerObject* o)
         {
             if (!o || o->isDead() || o->getPCode() != LL_PCODE_VOLUME) return;
-            const bool ch = LLCleanInstanceStore::instance().refreshObjectPose(o);
+            LLCleanInstanceStore::PoseSample pb, pa;
+            const bool ch = LLCleanInstanceStore::instance().refreshObjectPose(o, &pb, &pa);
             if (ch) ++mDiag.seat_changed;
             vkVehicleDiagNoteRefresh(o, ch);
             ++mDiag.seat_prims;
-            notePose(o, ch, kSphSeat);
+            notePose(o, ch, pb, pa, kSphSeat);
         };
         refresh(seat_root);
         for (LLViewerObject* child : seat_root->getChildren()) refresh(child);
     }
-    if (mMovedQueue.empty()) { vkMoverDiagFrame(0, 0); return; }
+    if (mMovedQueue.empty())
+    {
+        LLVKHitch::count("movedPoseNoise", n_noise);
+        vkMoverDiagFrame(0, 0);
+        return;
+    }
 
     // Bounded per frame so a region full of scripted movers can't spike the frame;
     // leftovers stay queued (FIFO) for the next frame. At the cap, the linkset in
@@ -1727,12 +2503,14 @@ void LLCleanIngest::drainMovedQueue()
         // registration here (capture / mesh decode / tangents for any face whose slot
         // wasn't built yet) for every moving object every frame cost ~40% of the main
         // thread. Not-yet-registered objects are picked up by the ingest sweep.
-        const bool changed = LLCleanInstanceStore::instance().refreshObjectPose(obj);
+        LLCleanInstanceStore::PoseSample pb, pa;
+        const bool changed = LLCleanInstanceStore::instance().refreshObjectPose(obj, &pb, &pa);
+        tempMotionDiagRefresh(obj, changed);
         ++n_refreshed;
         if (changed) ++n_changed;
         vkVehicleDiagNoteRefresh(obj, changed);
-        if (!obj->isHUDAttachment()) notePose(obj, changed, kSphMoved);
-        if (vkMoverDiagOn() && changed) vkMoverDiagNote(obj);
+        const bool moved = obj->isHUDAttachment() ? changed : notePose(obj, changed, pb, pa, kSphMoved);
+        if (vkMoverDiagOn() && changed) vkMoverDiagNote(obj, moved);
         if (vkVehicleDiagOn())
         {
             if (obj->isAttachment()) ++mDiag.attach;
@@ -1745,6 +2523,7 @@ void LLCleanIngest::drainMovedQueue()
     mDiag.drained = i;
     LLVKHitch::count("movedRefreshed", n_refreshed);
     LLVKHitch::count("movedChanged", n_changed);
+    LLVKHitch::count("movedPoseNoise", n_noise);
     vkMoverDiagFrame(mDiag.at_drain, i);
     mMovedQueue.erase(mMovedQueue.begin(), mMovedQueue.begin() + i);
 }
@@ -1892,6 +2671,9 @@ void LLCleanIngest::shiftOrigin(const LLVector3& offset)
     CROSSING_SCOPE(LLCrossingTrace::CH_INGEST_SHIFT, "Crossing ingest shiftOrigin");
     const F32 off[3] = { offset.mV[VX], offset.mV[VY], offset.mV[VZ] };
     LLCleanInstanceStore& is = LLCleanInstanceStore::instance();
+    // The motion references are store-frame rows, which a re-anchor (or the legacy path)
+    // moves: each object re-takes its baseline at its next change (poseMoved).
+    mPoseRef.clear();
     // #568 RENDER-WORLD FRAME (RenderVKStableWorldFrame, default on): the instance store
     // keeps a stable frame (store = agent + d), so a crossing only changes d -- no row is
     // rewritten, dirtied, re-boxed, re-copied or re-streamed; the renderer moves its GPU rows
@@ -2532,7 +3314,7 @@ static U64 vkIngestPreSignature(LLViewerObject* obj, LLDrawable* dr, LLVOVolume*
         | ((U64)(U32)vv->getNumFaces() << 40));
     mix((U64)(uintptr_t)obj->getParent());
     mixf(LLVOVolume::sLODFactor); mixf(LLVOVolume::sDistanceFactor);
-    mix(GMDXRegionCapture::lodEpoch());   // <GMDX> the region map capture forced / released max LOD
+    mix(LLRegionMapCapture::lodEpoch());   // the region map capture forced / released max LOD (GunMetal-DX port)
     band = vkGpuLodBand(obj, v);
     mix(band);
     // LL's own LOD (calcLOD) runs on distance * sDistanceFactor with a near ramp, not the

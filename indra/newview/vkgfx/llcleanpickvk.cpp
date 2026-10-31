@@ -524,7 +524,8 @@ void LLCleanPickVK::beginFrame()
         if (pr.valid && (!mPartLatest.valid || (int32_t)(pr.serial - mPartLatest.serial) > 0)) mPartLatest = pr;
     }
     harvest(s);
-    // <SS:Skoomastream> this slot's aux answers
+    // <SS:Skoomastream> this slot's aux answers. Ported from GunMetal-DX (squeedledorf,
+    // LGPL 2.1), v0.3.0 cf5f1f4.
     for (uint32_t k = 0; k < kAux; ++k)
     {
         SlotState& st = mAuxSlot[s][k];
@@ -552,7 +553,8 @@ void LLCleanPickVK::takeAux(std::vector<LLVKPickResult>& out)
 }
 
 // After the cursor ray's draw: each aux ray's select + 1x1 draws into its slot entry,
-// through a projection about its own origin (the request's world_vp / apex).
+// through a projection about its own origin (the request's world_vp / apex). No valid
+// request (CombatFX off, or no ray asked this frame): returns at once.
 void LLCleanPickVK::recordAux(VkCommandBuffer cmd)
 {
     bool any = false;
@@ -571,12 +573,12 @@ void LLCleanPickVK::recordAux(VkCommandBuffer cmd)
         const uint32_t entry = kSlots + 1 + s * kAux + k;
         st.req = rq;
         // <GMDX> Aux rays don't run the cluster pick: its filter has one output list per frame,
-        // which the main pick owns. (An unset entry read garbage and called it on a null cluster.)
+        // which the main pick owns.
         mClPick[entry] = false;
         writeHeader(entry, rq);
         if (!recordSelectInto(cmd, rq, entry)) continue;
         VKDrawPush wv, hv;
-        drawViews(rq, mSnapCam, mSnapHide, wv, hv);
+        drawViews(rq, mSnapCam, mSnapHide, wv, hv, false);
         const uint32_t view_w = mR.ringAlloc(mR.mViewRgn, &wv, (uint32_t)sizeof(VKDrawPush));
         recordDrawInto(cmd, rq, entry, view_w, 0u);
         st.pending = true;

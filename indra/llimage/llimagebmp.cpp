@@ -117,6 +117,11 @@ bool LLImageBMP::updateData()
     // 4 bytes: reserved (always 0)
     // 4 bytes: bitmap offset (starting position of image data in bytes)
     const S32 FILE_HEADER_SIZE = 14;
+    if (getDataSize() < FILE_HEADER_SIZE + 40) // file header + BITMAPINFOHEADER
+    {
+        setLastError("BMP file is truncated");
+        return false;
+    }
     if ((mdata[0] != 'B') || (mdata[1] != 'M'))
     {
         if ((mdata[0] != 'B') || (mdata[1] != 'A'))
@@ -204,6 +209,11 @@ bool LLImageBMP::updateData()
 
     S32 width = header.mWidth;
     S32 height = header.mHeight;
+    if (height == S32_MIN || width <= 0)
+    {
+        setLastError("BMP has invalid dimensions");
+        return false;
+    }
     if (height < 0)
     {
         mOriginAtTop = true;
@@ -280,15 +290,32 @@ bool LLImageBMP::updateData()
 
 
         extension_size = 4 * 3;
+        if (FILE_HEADER_SIZE + BITMAP_HEADER_SIZE + extension_size > getDataSize())
+        {
+            setLastError("BMP file is truncated");
+            return false;
+        }
         memcpy( mBitfieldMask, mdata + FILE_HEADER_SIZE + BITMAP_HEADER_SIZE, extension_size);  /* Flawfinder: ignore */
     }
     else
     if( windows_95_version )
     {
         Win95BmpHeaderExtension win_95_extension;
-        extension_size = sizeof( win_95_extension );
-
-        llassert( sizeof( win_95_extension ) + BITMAP_HEADER_SIZE == 108 );
+        // V4 (108 bytes) and V5+ (124+) headers extend the 40-byte info header; header.mSize says by
+        // how much. The struct above only models the leading fields (its CIE endpoints are too short),
+        // so it is smaller than the on-disk extension; the colour table starts after the whole header.
+        if (header.mSize > getDataSize() - FILE_HEADER_SIZE)
+        {
+            setLastError("BMP file is truncated");
+            return false;
+        }
+        extension_size = (S32)header.mSize - BITMAP_HEADER_SIZE;
+        static_assert(sizeof(Win95BmpHeaderExtension) <= 108 - 40, "extension struct overruns the V4 header");
+        if (FILE_HEADER_SIZE + BITMAP_HEADER_SIZE + extension_size > getDataSize())
+        {
+            setLastError("BMP file is truncated");
+            return false;
+        }
         memcpy( &win_95_extension, mdata + FILE_HEADER_SIZE + BITMAP_HEADER_SIZE, sizeof( win_95_extension ) ); /* Flawfinder: ignore */
 
         if( 3 == header.mCompression )
@@ -316,15 +343,28 @@ bool LLImageBMP::updateData()
             mColorPaletteColors = header.mNumColors;
         }
     }
+    // A palette has at most 2^bits entries and must lie inside the file.
+    if (mColorPaletteColors < 0 || (header.mBitsPerPixel < 16 && mColorPaletteColors > (1 << header.mBitsPerPixel)))
+    {
+        setLastError("BMP color table is larger than its bit depth allows");
+        return false;
+    }
     color_palette_size = mColorPaletteColors * 4;
+    if (FILE_HEADER_SIZE + BITMAP_HEADER_SIZE + extension_size + color_palette_size > getDataSize())
+    {
+        setLastError("BMP file is truncated");
+        return false;
+    }
 
     if( 0 != mColorPaletteColors )
     {
-        mColorPalette = new(std::nothrow) U8[color_palette_size];
+        delete[] mColorPalette;
+        // at least 256 zeroed entries: decodeColorTable8 indexes it with any 8-bit pixel value
+        mColorPalette = new(std::nothrow) U8[llmax(color_palette_size, 256 * 4)]();
         if (!mColorPalette)
         {
-            LLError::LLUserWarningMsg::showOutOfMemory();
-            LL_ERRS() << "Out of memory in LLImageBMP::updateData()" << LL_ENDL;
+            LL_WARNS() << "Out of memory allocating a " << color_palette_size << " byte BMP palette" << LL_ENDL;
+            setLastError("Out of memory");
             return false;
         }
         memcpy( mColorPalette, mdata + FILE_HEADER_SIZE + BITMAP_HEADER_SIZE + extension_size, color_palette_size );    /* Flawfinder: ignore */
@@ -353,6 +393,16 @@ bool LLImageBMP::decode(LLImageRaw* raw_image, F32 decode_time)
     if (!raw_image->resize(getWidth(), getHeight(), 3))
     {
         setLastError("llimagebmp failed to resize image!");
+        return false;
+    }
+
+    // The pixel array must lie inside the file: offset and size come from the header, so check
+    // them in 64 bits once here (the per-format checks below are 32-bit and assume a sane offset).
+    const S64 row_bytes = (((S64)getWidth() * mBitsPerPixel + 31) / 32) * 4;
+    if (mBitmapOffset < 0 || mBitmapOffset > getDataSize()
+        || row_bytes * getHeight() > (S64)getDataSize() - (S64)mBitmapOffset)
+    {
+        setLastError("BMP pixel data is truncated");
         return false;
     }
 
@@ -393,6 +443,10 @@ bool LLImageBMP::decode(LLImageRaw* raw_image, F32 decode_time)
 
 U32 LLImageBMP::countTrailingZeros( U32 m )
 {
+    if (m == 0)
+    {
+        return 0;   // an empty colour mask from the file: the loop below would never end
+    }
     U32 shift_count = 0;
     while( !(m & 1) )
     {

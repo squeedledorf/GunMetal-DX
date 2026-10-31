@@ -53,6 +53,7 @@ set(llui_SOURCE_FILES
     lllocalcliprect.cpp
     llmenubutton.cpp
     llmenugl.cpp
+    llmiddleautoscroll.cpp
     llmodaldialog.cpp
     llmultifloater.cpp 
     llmultislider.cpp
@@ -170,6 +171,7 @@ set(llui_HEADER_FILES
     lllocalcliprect.h
     llmenubutton.h
     llmenugl.h
+    llmiddleautoscroll.h
     llmodaldialog.h
     llmultifloater.h 
     llmultisliderctrl.h

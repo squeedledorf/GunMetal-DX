@@ -3289,7 +3289,6 @@ void LLIMMgr::addMessage(
         name_is_setted = true;
     }
 
-    bool is_group_chat = false;
     bool skip_message = false;
     bool from_linden = LLMuteList::isLinden(from);
     if (gSavedPerAccountSettings.getBOOL("VoiceCallsFriendsOnly") && !from_linden)
@@ -3302,6 +3301,11 @@ void LLIMMgr::addMessage(
     bool new_session = !hasSession(new_session_id);
     if (new_session)
     {
+        if (dialog == IM_SESSION_INVITE && rejectAdHocSession(new_session_id, other_participant_id, from, false))
+        {
+            return;
+        }
+
         // Group chat session was initiated by muted resident, do not start this session viewerside
         // do not send leave msg either, so we are able to get group messages from other participants
         if ((IM_SESSION_INVITE == dialog) && gAgent.isInGroup(new_session_id) &&
@@ -3365,32 +3369,6 @@ void LLIMMgr::addMessage(
                 if (!chat_url.empty())
                 {
                     LLCoros::instance().launch("chatterBoxHistoryCoro", boost::bind(&chatterBoxHistoryCoro, chat_url, session_id, from, msg, timestamp));
-                }
-            }
-
-            S32 is_rejecting_conferences = gSavedPerAccountSettings.getS32("SlipstreamIgnoreAdHocSessions");
-            bool is_allowing_friend_conferences = (is_rejecting_conferences == 1);
-            bool is_friend = LLAvatarTracker::instance().isBuddy(other_participant_id);
-            is_group_chat = session->isGroupSessionType();
-
-            if (IM_NOTHING_SPECIAL != dialog && !is_group_chat && is_rejecting_conferences && !from_linden)
-            {
-                if (!is_allowing_friend_conferences || (is_allowing_friend_conferences && !is_friend))
-                {
-                    bool report_ignored_conferences = gSavedPerAccountSettings.getBOOL("SlipstreamReportIgnoredAdHocSession");
-                    LLSD args;
-                    args["AVATAR_NAME"] = LLSLURL("agent", other_participant_id, "about").getSLURLString();
-                    LL_INFOS() << "Ignoring conference (ad-hoc) chat from " << args["AVATAR_NAME"] << LL_ENDL;
-                    if (!gIMMgr->leaveSession(new_session_id))
-                    {
-                        LL_WARNS() << "Ad-hoc session " << new_session_id << " doesn't exist" << LL_ENDL;
-                    }
-                    else if (report_ignored_conferences)
-                    {
-                        LLNotificationsUtil::add("IgnoredAdHocSession", args);
-                    }
-
-                    return;
                 }
             }
 
@@ -3772,6 +3750,47 @@ void LLIMMgr::removeSession(const LLUUID& session_id)
     update_window_title_unread_count(); // <FS:Ansariel> FSShowMessageCountInWindowTitle
 }
 
+bool LLIMMgr::rejectAdHocSession(const LLUUID& session_id, const LLUUID& caller_id,
+                               const std::string& caller_name, bool pending_invitation)
+{
+    const S32 mode = gSavedPerAccountSettings.getS32("SlipstreamIgnoreAdHocSessions");
+    if (mode == 0 || session_id.isNull() || caller_id.isNull() || caller_id == gAgentID ||
+        hasSession(session_id) || gAgent.isInGroup(session_id, true) || LLMuteList::isLinden(caller_name) ||
+        (mode == 1 && LLAvatarTracker::instance().isBuddy(caller_id)))
+    {
+        return false;
+    }
+
+    const std::string url = pending_invitation ? gAgent.getRegionCapability("ChatSessionRequest") : std::string();
+    if (!url.empty())
+    {
+        LLSD data;
+        data["method"] = "decline invitation";
+        data["session-id"] = session_id;
+        LLCoreHttpUtil::HttpCoroutineAdapter::messageHttpPost(url, data, "Conference invitation declined", "Conference decline failed");
+    }
+    else
+    {
+        LLIMModel::sendLeaveSession(session_id, caller_id);
+    }
+    clearPendingAgentListUpdates(session_id);
+    clearPendingInvitation(session_id);
+    LL_INFOS("IMVIEW") << "Ignored incoming conference chat by account preference" << LL_ENDL;
+
+    if (gSavedPerAccountSettings.getBOOL("SlipstreamReportIgnoredAdHocSession"))
+    {
+        LLStringUtil::format_map_t args;
+        args["AVATAR_NAME"] = LLSLURL("agent", caller_id, "rlvanonym").getSLURLString();
+        LLChat chat(LLTrans::getString("IgnoredAdHocSession", args));
+        chat.mSourceType = CHAT_SOURCE_SYSTEM;
+        if (auto* nearby = LLFloaterReg::getTypedInstance<LLFloaterIMNearbyChat>("nearby_chat"))
+        {
+            nearby->addMessage(chat);
+        }
+    }
+    return true;
+}
+
 void LLIMMgr::inviteToSession(
     const LLUUID& session_id,
     const std::string& session_name,
@@ -3785,6 +3804,11 @@ void LLIMMgr::inviteToSession(
     if (caller_id == gAgentID)
     {
         // ignore invites from ourself.
+        return;
+    }
+
+    if (type == IM_SESSION_INVITE && rejectAdHocSession(session_id, caller_id, caller_name, true))
+    {
         return;
     }
 
@@ -4516,6 +4540,11 @@ public:
             time_t timestamp =
                 (time_t) message_params["timestamp"].asInteger();
 
+            if (gIMMgr->rejectAdHocSession(session_id, from_id, name, true))
+            {
+                return;
+            }
+
             bool is_do_not_disturb = gAgent.isDoNotDisturb();
 
             //don't return if user is muted b/c proper way to ignore a muted user who
@@ -4627,13 +4656,21 @@ public:
         } //end if invitation has instant message
         else if ( input["body"].has("voice") )
         {
+            bool session_type_p2p = input["body"]["voice"].get("invitation_type").asInteger() == EMultiAgentChatSessionType::P2P_CHAT_SESSION;
+            if (!session_type_p2p && gIMMgr->rejectAdHocSession(
+                    input["body"]["session_id"].asUUID(),
+                    input["body"]["from_id"].asUUID(),
+                    input["body"]["from_name"].asString(), true))
+            {
+                return;
+            }
+
             if(!LLVoiceClient::getInstance()->voiceEnabled() || !LLVoiceClient::getInstance()->isVoiceWorking())
             {
                 // Don't display voice invites unless the user has voice enabled.
                 return;
             }
 
-            bool session_type_p2p = input["body"]["voice"].get("invitation_type").asInteger() == EMultiAgentChatSessionType::P2P_CHAT_SESSION;
             LL_DEBUGS("Voice") << "Received voice information from the server: " << input["body"]<< LL_ENDL;
             gIMMgr->inviteToSession(
                 input["body"]["session_id"].asUUID(),

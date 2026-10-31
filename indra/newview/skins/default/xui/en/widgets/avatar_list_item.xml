@@ -11,7 +11,7 @@
   <default_style
    font="SansSerifSmall"
    font.style="NORMAL"
-   color="DkGray"/>
+   color="LabelTextColor"/>
 
   <!-- styles for avatar item INVITED to voice call -->
   <voice_call_invited_style
@@ -34,11 +34,23 @@
   <!-- styles for ONLINE avatar item -->
   <online_style
    font="SansSerifSmall"
-   font.style="NORMAL"
-   color="AvatarListItemOnlineColor"/>
+   font.style="BOLD"
+   color="FriendOnlineColor"/>
 
   <!-- styles for OFFLINE avatar item -->
   <offline_style
+   font="SansSerifSmall"
+   font.style="NORMAL"
+   color="FriendOfflineColor"/>
+  <classic_default_style
+   font="SansSerifSmall"
+   font.style="NORMAL"
+   color="DkGray"/>
+  <classic_online_style
+   font="SansSerifSmall"
+   font.style="NORMAL"
+   color="AvatarListItemOnlineColor"/>
+  <classic_offline_style
    font="SansSerifSmall"
    font.style="NORMAL"
    color="Gray"/>

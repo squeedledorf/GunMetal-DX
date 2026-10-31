@@ -42,6 +42,7 @@
 #include "rlvlocks.h"
 
 #include <boost/algorithm/string.hpp>
+#include "gmdxtpfx.h" // <GMDX> teleport effects
 #include <boost/regex.hpp>
 
 
@@ -574,6 +575,7 @@ void RlvUtil::forceTp(const LLVector3d& posDest)
 {
     m_fForceTp = true;
     gAgent.teleportViaLocationLookAt(posDest);
+    GMDXTPFX::disarm(); // <GMDX> script-driven (@standtp): no teleport effect
     m_fForceTp = false;
 }
 

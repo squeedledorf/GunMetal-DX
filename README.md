@@ -117,8 +117,12 @@ Slipstream is built on [Linden Lab's Second Life viewer](https://github.com/seco
 - [Firestorm](https://www.firestormviewer.org/);
 - [Black Dragon](https://github.com/NiranV/Black-Dragon-Viewer).
 
-GunMetal-DX's own combat features build on work from SoapStorm and Firestorm, including the kill feed, hit
-markers and group viewer, and on the Exodus viewer's combat identification.
+GunMetal-DX's own combat features, including the kill feed, hit markers and Group Viewer, are squeedledorf's
+work, built on Firestorm and on the Exodus viewer's combat identification.
+
+GunMetal-DX also includes work from [SoapStorm](https://github.com/soapyf/soapstorm) (Soap Frenzy, and Nexii
+Malthus), [Alchemy: Skooma](https://github.com/Martin-Pitt/Alchemy-Skooma) (Nexii Malthus) and [Megapahit](https://github.com/megapahit/viewer); see
+About > Credits.
 
 Original copyright headers are kept in the ported files. The source is licensed under the LGPL 2.1; see
 `doc/LICENSE-source.txt` and `doc/LGPL-license.txt`. The viewer artwork notice is in `doc/LICENSE-logos.txt`.

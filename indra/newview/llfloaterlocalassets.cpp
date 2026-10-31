@@ -38,6 +38,7 @@
 #include "llscrolllistctrl.h"
 #include "llscrolllistitem.h"
 #include "lltabcontainer.h"
+#include "lltextbox.h"
 #include "lluictrlfactory.h"
 #include "llviewermenufile.h"   // LLFilePickerReplyThread, upload_single_file
 #include "llfloaterreg.h"       // LLFloaterReg::showInstance (mesh Upload)
@@ -884,6 +885,91 @@ void LLPanelLocalMesh::doSelect(const LLUUID& tracking_id)
 }
 
 // ============================================================================
+// One Blender connection, session-only. Uses the existing mesh registry, build
+// tools and own-avatar attachment path; offers no inventory/upload action.
+class LLPanelBlenderConnect final : public LLPanel
+{
+public:
+    bool postBuild() override
+    {
+        mStatus = getChild<LLTextBox>("status");
+        mDisconnect = getChild<LLButton>("disconnect");
+        mPlace = getChild<LLButton>("place");
+        mAttach = getChild<LLButton>("attach");
+        mSelect = getChild<LLButton>("select");
+        mJoints = getChild<LLCheckBoxCtrl>("joints");
+        getChild<LLButton>("connect")->setCommitCallback([](LLUICtrl*, const LLSD&)
+        {
+            LLFilePickerReplyThread::startPicker(
+                [](const std::vector<std::string>& files, LLFilePicker::ELoadFilter, LLFilePicker::ESaveFilter)
+                {
+                    if (!files.empty()) LLLocalMeshMgr::getInstance()->startBlenderConnect(files.front());
+                }, LLFilePicker::FFLOAD_MODEL, false);
+        });
+        mDisconnect->setCommitCallback([](LLUICtrl*, const LLSD&)
+        {
+            LLLocalMeshMgr::getInstance()->stopBlenderConnect();
+        });
+        mPlace->setCommitCallback([](LLUICtrl*, const LLSD&)
+        {
+            auto* mgr = LLLocalMeshMgr::getInstance();
+            auto* root = mgr->getSpawnedRoot(mgr->getBlenderConnectID());
+            if (root && root->isAttachment()) mgr->detachPreviewFromAvatar(root);
+            if (!root) mgr->spawnInWorld(mgr->getBlenderConnectID());
+        });
+        mAttach->setCommitCallback([](LLUICtrl*, const LLSD&)
+        {
+            auto* mgr = LLLocalMeshMgr::getInstance();
+            auto* root = mgr->getSpawnedRoot(mgr->getBlenderConnectID());
+            if (!root) root = mgr->spawnInWorld(mgr->getBlenderConnectID());
+            if (root) mgr->attachPreviewToAvatar(root);
+        });
+        mSelect->setCommitCallback([](LLUICtrl*, const LLSD&)
+        {
+            auto* mgr = LLLocalMeshMgr::getInstance();
+            if (auto* root = mgr->getSpawnedRoot(mgr->getBlenderConnectID()))
+            {
+                LLSelectMgr::getInstance()->deselectAll();
+                LLSelectMgr::getInstance()->selectObjectAndFamily(root);
+                handle_object_edit();
+            }
+        });
+        mJoints->setCommitCallback([this](LLUICtrl*, const LLSD&)
+        {
+            auto* mgr = LLLocalMeshMgr::getInstance();
+            mgr->setIncludeJointPositions(mgr->getBlenderConnectID(), mJoints->get());
+        });
+        mChanged = LLLocalMeshMgr::instance().setUnitsChangedCallback([this]() { refresh(); });
+        refresh();
+        return true;
+    }
+
+private:
+    void refresh()
+    {
+        auto* mgr = LLLocalMeshMgr::getInstance();
+        const auto* unit = mgr->getUnit(mgr->getBlenderConnectID());
+        std::string status = mgr->blenderConnectStatus();
+        if (unit && unit->getValid())
+        {
+            status += llformat("\n%d parts, %d triangles; %s", unit->getNumParts(), unit->getNumTriangles(),
+                               unit->isRigged() ? "rigged" : "static");
+            if (auto* root = mgr->getSpawnedRoot(mgr->getBlenderConnectID())) status += "\n" + mgr->statusText(root);
+        }
+        if (status != mLastStatus) { mStatus->setText(status); mLastStatus = status; }
+        mDisconnect->setEnabled(unit != nullptr);
+        for (auto* button : {mPlace, mAttach, mSelect}) button->setEnabled(unit && unit->getValid());
+        mJoints->setEnabled(unit && unit->getValid());
+        mJoints->set(mgr->getIncludeJointPositions(mgr->getBlenderConnectID()));
+
+    }
+    LLTextBox* mStatus = nullptr;
+    LLButton *mDisconnect = nullptr, *mPlace = nullptr, *mAttach = nullptr, *mSelect = nullptr;
+    LLCheckBoxCtrl* mJoints = nullptr;
+    std::string mLastStatus;
+    boost::signals2::scoped_connection mChanged;
+};
+
 //  Animations tab -- Play/Stop on the user's avatar or the selected animesh.
 // ============================================================================
 class LLPanelLocalAnim final : public LLPanelLocalAssetBase
@@ -1556,6 +1642,12 @@ bool LLFloaterLocalAssets::postBuild()
 
     add_asset_tab(mTabs, new LLPanelLocalMesh(),     "mesh_tab", getString("tab_mesh"),
                   "panel_local_asset_list.xml", true);
+    {
+        auto* live = new LLPanelBlenderConnect();
+        live->buildFromFile("panel_blender_connect.xml");
+        mTabs->addTabPanel(LLTabContainer::TabPanelParams().panel(live)
+                          .label(getString("tab_blender_connect")).select_tab(false));
+    }
     add_asset_tab(mTabs, new LLPanelLocalAnim(),     "anim_tab", getString("tab_anim"),
                   "panel_local_asset_list.xml", false);
     add_asset_tab(mTabs, new LLPanelLocalTexture(),  "tex_tab",  getString("tab_textures"),

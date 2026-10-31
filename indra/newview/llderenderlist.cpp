@@ -23,6 +23,7 @@
 #include "llagent.h"
 #include "llcallbacklist.h"
 #include "llderenderlist.h"
+#include "fssoundemitterblacklist.h"
 #include "llsdserialize.h"
 #include "llselectmgr.h"
 #include "lltool.h"
@@ -482,7 +483,7 @@ bool LLDerenderList::addObjectImpl(LLViewerObject* pObj, bool fPersist, const st
     }
     // <GMDX> An attachment derendered before its properties came in: ask for them (the sim still
     // answers after the local kill) so the entry learns the name a re-rez is matched on.
-    if ( (LLDerenderEntry::TYPE_ATTACHMENT == pRawEntry->getType()) && (!hasKnownName(pRawEntry)) )
+    if ( (FSSoundEmitterBlacklist::enabled()) && (LLDerenderEntry::TYPE_ATTACHMENT == pRawEntry->getType()) && (!hasKnownName(pRawEntry)) )
         LLSelectMgr::getInstance()->requestObjectPropertiesViaSelect(pObj);
     reindexNames();
     // </GMDX>
@@ -721,7 +722,7 @@ void LLDerenderList::onAttachmentAdded(LLVOAvatar* pAvatar, LLViewerObject* pAtt
 // <GMDX>
 bool LLDerenderList::wantsProperties(const LLUUID& idWearer, const LLUUID& idObject) const
 {
-    if (m_Entries.empty())
+    if ( (m_Entries.empty()) || (!FSSoundEmitterBlacklist::enabled()) )
         return false;
 
     // Blocked: only an entry made before its name was known learns it from the reply
@@ -742,7 +743,7 @@ bool LLDerenderList::wantsProperties(const LLUUID& idWearer, const LLUUID& idObj
 
 void LLDerenderList::onObjectProperties(const LLUUID& idObject, const LLUUID& idOwner, const std::string& strName)
 {
-    if ( (m_Entries.empty()) || (idObject.isNull()) || (idOwner.isNull()) || (strName.empty()) )
+    if ( (m_Entries.empty()) || (idObject.isNull()) || (idOwner.isNull()) || (strName.empty()) || (!FSSoundEmitterBlacklist::enabled()) )
         return;
 
     // An attachment we block whose name was not known yet (derendered before its properties

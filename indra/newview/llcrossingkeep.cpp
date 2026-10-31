@@ -16,6 +16,7 @@
 
 #include "llagent.h"
 #include "llagentcamera.h"
+#include "llcircuit.h"
 #include "llcontrolavatar.h"
 #include "llcrossingtrace.h"
 #include "llframetimer.h"
@@ -27,6 +28,8 @@
 #include "llviewerregion.h"
 #include "llvoavatarself.h"
 #include "llworld.h"
+#include "llworldclock.h"
+#include "slheldkills.h"
 #include "vkgfx/llvulkancontext.h"
 
 namespace
@@ -48,6 +51,11 @@ namespace
     constexpr size_t kGraceObsMax   = 32;
     constexpr F64    kGraceObsAgeS  = 600.0;
     constexpr F64    kGraceHeadroom = 1.25;
+    // #1172 kills held while the world is frozen: an entry per killed object (a prim each,
+    // so a few hundred per avatar at worst). Overflow applies the kill at once. A worn
+    // object's kill not joined by its wearer's within kWornWaitS was a plain detach.
+    constexpr size_t kMaxHeld       = 4096;
+    constexpr F64    kWornWaitS     = 1.0;
 
     enum Kind : U8 { K_SELF_ATTACH = 0, K_SELF_VEHICLE, K_AVATAR, K_ATTACH, K_ANIMESH, K_VEHICLE, K_COUNT };
     const char* kKindName[K_COUNT] = { "self_attach", "self_vehicle", "avatar", "attach", "animesh", "vehicle" };
@@ -67,10 +75,23 @@ namespace
     };
     static_assert(S_COUNT <= 24, "LLCrossingKeep::Snapshot holds 24 counters");
 
+    // The killing sim (host), the object's local id there and (#1172) the kill's packet id.
+    // A deferred or held kill is applied only to an object still under (host, local id): one
+    // the sim re-keyed meanwhile (another region or local id) is not that kill's object any more.
+    using KillKey = SLKillKey;
+    static_assert(SLHeldKills::PACKET_ID_RANGE == LL_MAX_OUT_PACKET_ID, "packet ids wrap at LL_MAX_OUT_PACKET_ID");
+
+    bool keyMatches(const KillKey& key, const LLViewerObject* objectp)
+    {
+        const LLViewerRegion* r = objectp->getRegion();
+        return r && objectp->mLocalID == key.local_id
+               && r->getHost().getAddress() == key.ip && r->getHost().getPort() == key.port;
+    }
+
     struct Pending
     {
-        U32  local_id = 0, ip = 0, port = 0;
-        F64  t0 = 0.0, deadline = 0.0;
+        KillKey key;
+        F64  t0 = 0.0, deadline = 0.0;  // t0 = the kill
         LLUUID anchor;          // the avatar / linkset root this kill rides on
         Cls  cls = C_NONE;
         Kind kind = K_AVATAR;
@@ -79,10 +100,10 @@ namespace
     // edge = an expired near-edge deferral (its re-create times a handoff, #850).
     struct Recent { F64 t; bool avatar; F64 t_first; bool edge; };
     struct RezWatch { F64 t_kill, t_create; };
-
     struct State
     {
         std::unordered_map<LLUUID, Pending>  pending;
+        SLHeldKills                          held;      // #1172 until the thaw
         std::unordered_map<LLUUID, Recent>   recent;    // killed (applied) avatar-class objects
         std::unordered_map<LLUUID, RezWatch> rez;       // re-created avatars waiting to rez
         U64 ctr[S_COUNT] = {};
@@ -107,6 +128,27 @@ namespace
         return on;
     }
 
+    // An avatar seated on the linkset under root that accept(const LLVOAvatar*) takes.
+    // Avatars are children of their seat prim: the root or one of its child prims.
+    template <typename Accept>
+    bool linksetSeats(LLViewerObject* root, Accept accept)
+    {
+        for (LLViewerObject* c : root->getChildren())
+        {
+            if (LLVOAvatar* av = c->asAvatar())
+            {
+                if (accept(av)) return true;
+                continue;
+            }
+            for (LLViewerObject* g : c->getChildren())
+            {
+                LLVOAvatar* av = g->asAvatar();
+                if (av && accept(av)) return true;
+            }
+        }
+        return false;
+    }
+
     bool linksetCarriesAvatar(LLViewerObject* root, bool& self)
     {
         self = false;
@@ -115,16 +157,10 @@ namespace
             self = true;
             return true;
         }
-        // Another avatar seated on this linkset: avatars are children of the seat prim
-        // (root or a child prim). Only moving linksets cross; a parked one never needs this.
+        // Another avatar seated on this linkset. Only moving linksets cross; a parked one
+        // never needs this.
         if (root->getVelocity().magVecSquared() < 0.25f) return false;
-        for (LLViewerObject* c : root->getChildren())
-        {
-            if (c->asAvatar()) return true;
-            for (LLViewerObject* g : c->getChildren())
-                if (g->asAvatar()) return true;
-        }
-        return false;
+        return linksetSeats(root, [](const LLVOAvatar*) { return true; });
     }
 
     // The object the keep decision is made on (avatar or linkset root) and its kind.
@@ -156,6 +192,19 @@ namespace
             return root;
         }
         return nullptr;
+    }
+
+    // #1172: what the frozen picture keeps when the sim kills it: another avatar, anything it
+    // wears (only along with its wearer's kill: expireDetaches), a linkset another avatar
+    // sits on (parked too). Not plain objects: one the user derezzes or that expires leaves
+    // the picture as usual (and arrivals still appear).
+    bool keptByFreeze(LLViewerObject* o)
+    {
+        auto other_avatar = [](const LLVOAvatar* av) { return !av->isSelf() && !av->isControlAvatar(); };
+        if (LLVOAvatar* av = o->asAvatar()) return other_avatar(av);
+        if (LLVOAvatar* av = o->getAvatarAncestor()) return other_avatar(av);
+        LLViewerObject* root = o->getRootEdit();
+        return root && linksetSeats(root, other_avatar);
     }
 
     // Near an edge of `region` with a CONNECTED region across it (the one that would send
@@ -283,6 +332,67 @@ namespace
             it = (t - it->second.t > kChurnWindowS) ? s.recent.erase(it) : std::next(it);
         for (auto it = s.rez.begin(); it != s.rez.end();)
             it = (t - it->second.t_create > kRezWatchS) ? s.rez.erase(it) : std::next(it);
+        // #1172: held kills of objects already gone (their region dropped, their avatar or
+        // root killed with them) -- a long freeze through teleports must not fill the cap.
+        s.held.eraseIf([](const LLUUID& id)
+            {
+                LLViewerObject* o = gObjectList.findObject(id);
+                return !o || o->isDead();
+            });
+    }
+
+    // #1172: a held kill applies as process_kill_object would have, to an object still under
+    // the killing key.
+    bool applyHeldKill(const LLUUID& id, const SLHeldKills::Held& h)
+    {
+        LLViewerObject* objectp = gObjectList.findObject(id);
+        if (!objectp || objectp->isDead()) return false;   // gone, or died with its avatar / root
+        if (!keyMatches(h.key, objectp)) return false;      // re-keyed meanwhile
+        applyKill(objectp, h.t_first, false);
+        return true;
+    }
+
+    // #1172, while frozen: a worn object's kill stays held only along with its wearer's (the
+    // sim kills both when the wearer leaves). One whose wearer's kill does not join it within
+    // kWornWaitS was a plain detach: it applies now.
+    void expireDetaches(State& s)
+    {
+        for (const auto& d : s.held.takeDetaches(now(), kWornWaitS))
+        {
+            applyHeldKill(d.first, d.second);
+        }
+    }
+
+    // #1172: every held kill applies once the world thaws, or at once under RAM / VRAM
+    // pressure while frozen (the picture gives way before memory does).
+    void applyAllHeld(State& s, const char* why)
+    {
+        const SLHeldKills::list_t due = s.held.takeAll();
+        size_t applied = 0;
+        for (const auto& d : due)
+        {
+            if (applyHeldKill(d.first, d.second)) ++applied;
+        }
+        LL_INFOS("WorldClock") << why << ": applied " << applied << " of " << due.size() << " held kill(s)" << LL_ENDL;
+    }
+
+    // #1172: hold objectp's kill (key; t_first = the original kill) until the thaw. False = not
+    // held, the caller applies it: the world runs, the frozen picture does not keep objectp
+    // (keptByFreeze), or the cap / RAM / VRAM pressure refuses a new hold.
+    bool holdKill(State& s, LLViewerObject* objectp, const KillKey& key, F64 t_first)
+    {
+        if (!objectp || objectp->isDead() || !LLWorldClock::isFrozen() || !keptByFreeze(objectp)) return false;
+        const LLUUID& id = objectp->getID();
+        // killed again while held: the hold stays, with the kill the sim sent last
+        const bool fresh = !s.held.contains(id);
+        if (fresh && underPressure()) return false;
+        LLVOAvatar* wearer = objectp->asAvatar() ? nullptr : objectp->getAvatarAncestor();
+        if (!s.held.hold(id, key, t_first, wearer ? wearer->getID() : LLUUID::null, kMaxHeld)) return false;
+        if (fresh && objectp->asAvatar())
+        {
+            LL_INFOS("WorldClock") << "frozen: holding the kill of avatar " << id << " until the thaw" << LL_ENDL;
+        }
+        return true;
     }
 
     void maybeLog(State& s, F64 t)
@@ -298,7 +408,8 @@ namespace
 namespace LLCrossingKeep
 {
 
-bool deferKill(LLViewerObject* objectp, LLViewerRegion* sender_region, U32 local_id, U32 sender_ip, U32 sender_port)
+bool deferKill(LLViewerObject* objectp, LLViewerRegion* sender_region, U32 local_id, U32 sender_ip, U32 sender_port,
+               U32 packet_id)
 {
     if (!objectp || objectp->isDead() || !sender_region || !enabled()) return false;
     State& s = S();
@@ -368,7 +479,7 @@ bool deferKill(LLViewerObject* objectp, LLViewerRegion* sender_region, U32 local
 
     const F64 t = now();
     Pending& p = s.pending[objectp->getID()];
-    p.local_id = local_id; p.ip = sender_ip; p.port = sender_port;
+    p.key = KillKey{ local_id, sender_ip, sender_port, packet_id };
     p.t0 = t; p.deadline = t + graceFor(s, cls, t);
     p.anchor = anchor->getID(); p.cls = cls; p.kind = kind;
     s.peak = llmax(s.peak, s.pending.size());
@@ -469,6 +580,12 @@ void tick()
         prune(s, t);
     }
     maybeLog(s, t);
+    if (!s.held.empty())   // #1172
+    {
+        if (!LLWorldClock::isFrozen()) applyAllHeld(s, "thawed");
+        else if (underPressure()) applyAllHeld(s, "memory pressure while frozen");
+        else expireDetaches(s);
+    }
     if (s.pending.empty()) return;
 
     bool any_other = false;
@@ -495,12 +612,14 @@ void tick()
             ++s.ctr[S_GONE];   // its region went, or its avatar / root was killed with it
             continue;
         }
-        LLViewerRegion* r = objectp->getRegion();
-        const bool same_key = r && objectp->mLocalID == p.local_id
-                              && r->getHost().getAddress() == p.ip && r->getHost().getPort() == p.port;
-        if (!same_key)
+        if (!keyMatches(p.key, objectp))
         {
             ++s.ctr[S_REKEYED];   // re-keyed by a path that did not report it
+            continue;
+        }
+        // #1172: frozen, a deferral that ran out waits for the thaw like any other kill
+        if (holdKill(s, objectp, p.key, p.t0))
+        {
             continue;
         }
         ++s.ctr[(t >= p.deadline) ? S_EXPIRED : S_PRESSURE];
@@ -551,10 +670,48 @@ std::string ownVehicleKillBefore(F64 window_s)
     return b;
 }
 
+bool holdForFreeze(LLViewerObject* objectp, U32 local_id, U32 sender_ip, U32 sender_port, U32 packet_id)
+{
+    return holdKill(S(), objectp, KillKey{ local_id, sender_ip, sender_port, packet_id }, now());
+}
+
+void onFullUpdate(LLViewerObject* objectp, LLMessageSystem* msg)
+{
+    State& s = S();
+    if (s.held.empty() || !objectp || !s.held.contains(objectp->getID())) return;
+    // What voids the held kill: a live update the object accepted (processUpdateMessage drops
+    // an older packet before it records the packet id), sent by the killing sim after the
+    // kill (slheldkills.h). A cache load (no msg) never does.
+    SLObjectUpdateStamp update;
+    update.from_cache = !msg;
+    if (msg)
+    {
+        update.ip = msg->getSenderIP();
+        update.port = msg->getSenderPort();
+        update.packet = msg->getCurrentRecvPacketID();
+        update.accepted = !objectp->isDead() && objectp->getLatestRecvPacketID() == update.packet;
+    }
+    // Voided for an avatar, what it wore waits for it again: what the sim sends again comes
+    // back (its own update), and what it does not (re-rezzed under new ids, as after a
+    // teleport) applies as a detach once kWornWaitS has passed (expireDetaches).
+    if (!s.held.onUpdate(objectp->getID(), update, now()))
+    {
+        LL_DEBUGS("WorldClock") << "frozen: update of " << objectp->getID() << " keeps its held kill ("
+                                << (update.from_cache ? "from the cache" : (!update.accepted ? "dropped as older"
+                                    : "not sent after the kill by the killing sim")) << ")" << LL_ENDL;
+        return;
+    }
+    if (objectp->asAvatar())
+    {
+        LL_INFOS("WorldClock") << "frozen: avatar " << objectp->getID() << " sent again after its kill, the held kill is dropped" << LL_ENDL;
+    }
+}
+
 void clear()
 {
     State& s = S();
     s.pending.clear();
+    s.held.clear();
     s.recent.clear();
     s.rez.clear();
 }

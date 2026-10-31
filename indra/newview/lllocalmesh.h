@@ -48,6 +48,7 @@
 #include <filesystem>
 #include <list>
 #include <map>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -60,6 +61,7 @@ class LLViewerRegion;
 class LLVOAvatar;
 class LLVOVolume;
 class LLVolume;
+struct SLBlenderConnectSnapshot;
 struct LLLocalMeshPreSwapSnapshot; // hot-swap diff-restore state (lllocalmesh.cpp)
 
 // One uploadable sub-mesh of a local mesh file: a single LLModel's geometry,
@@ -98,7 +100,7 @@ struct LLLocalMeshPart
 class LLLocalMesh
 {
 public:
-    LLLocalMesh(std::string filename, bool include_joints = false);
+    LLLocalMesh(std::string filename, bool include_joints = false, bool live = false);
     ~LLLocalMesh();
 
     std::string getFilename() const   { return mFilename; }
@@ -108,6 +110,7 @@ public:
     bool getValid() const   { return mState == ST_LOADED; }
     bool isLoading() const  { return mState == ST_LOADING; }
     bool isFailed() const   { return mState == ST_FAILED; }
+    bool isBlenderConnect() const { return mBlenderConnect; }
 
     // Decoded parts -- consumed by the spawn path and repository injection.
     const std::vector<LLLocalMeshPart>& getParts() const { return mParts; }
@@ -187,6 +190,18 @@ private:
     S32  mNumJoints;
     bool mHasUVs = true; // false if the source mesh had no UV coordinates (untexturable)
 
+    bool mBlenderConnect = false;
+    uint64_t mConnectRevision = 0, mConnectPendingRevision = 0;
+    std::string mConnectSession, mConnectPendingSession;
+    bool mConnectNeedsRetry = false;
+    bool mConnectPaused = false;
+    LLTimer mConnectRetryTimer;
+    F32 mConnectRetryDelay = 0.f;
+    std::string mBlenderConnectError;
+    std::shared_ptr<SLBlenderConnectSnapshot> mBlenderConnectSnapshot;
+    std::shared_ptr<SLBlenderConnectSnapshot> mBlenderConnectPendingSnapshot;
+    const std::string& importFilename() const;
+
     // Live-reload bookkeeping.
     bool                            mReloading;       // an async re-parse is in flight
     std::filesystem::file_time_type mPendingModified; // mtime of the in-flight reload
@@ -202,6 +217,7 @@ public:
     void stopTimer();
     bool isRunning();
     bool tick() override;
+    void setConnectPolling(bool enabled) { mPeriod = enabled ? 0.5f : 3.f; }
 };
 
 // Owns all loaded local meshes and resolves between tracking IDs, world IDs and
@@ -212,6 +228,13 @@ class LLLocalMeshMgr : public LLSingleton<LLLocalMeshMgr>
     ~LLLocalMeshMgr();
 
 public:
+    // One explicitly opted-in Blender session, never persisted or uploaded.
+    void startBlenderConnect(const std::string& filename);
+    void stopBlenderConnect(const std::string& status = {});
+    LLUUID getBlenderConnectID() const { return mBlenderConnectID; }
+    std::string blenderConnectStatus() const;
+    bool isBlenderConnectWorldID(const LLUUID& id) const;
+
     LLUUID addUnit(const std::string& filename, bool include_joints = false);
     bool   addUnit(const std::vector<std::string>& filenames);
     void   delUnit(LLUUID tracking_id);
@@ -315,7 +338,8 @@ public:
     boost::signals2::connection setUnitsChangedCallback(const std::function<void()>& cb);
 
     // Called by the load callback when an async (re)parse finishes (main thread).
-    void onLoadResult(const LLUUID& tracking_id, LLModelLoader::scene& scene, U32 load_state);
+    void onLoadResult(const LLUUID& tracking_id, LLModelLoader::scene& scene, U32 load_state,
+                      std::shared_ptr<SLBlenderConnectSnapshot> snapshot = {}, const std::string& error = {}, bool retry = false);
 
     // Timer tick: poll every loaded unit's source file for changes.
     void doUpdates();
@@ -365,7 +389,8 @@ private:
                         LLLocalMeshPreSwapSnapshot& out) const;
     // Re-rez every existing copy of a unit at its current transform/attachment, used
     // when a reload changes the prim count so hot-swap can't swap 1:1.
-    void respawnInstancesInPlace(const LLUUID& tracking_id);
+    void respawnInstancesInPlace(const LLUUID& tracking_id, const LLQuaternion& old_rotation,
+                                 const LLVector3& old_offset);
     // Build one copy's linkset for (tracking_id, instance_id) rooted at `base` with
     // `root_rot`, optionally worn at attach_point. Returns the root.
     LLViewerObject* spawnLinkset(const LLUUID& tracking_id, const LLUUID& instance_id,
@@ -406,6 +431,9 @@ private:
 
     LLLocalMeshTimer       mTimer;         // drives live-reload polling
     LLPointer<LLVOAvatar>  mPreviewAvatar; // skeleton for joint resolution (never the agent)
+    LLUUID mBlenderConnectID;
+    LLTimer mOrdinaryPoll;
+    std::string mBlenderConnectStatus = "Disconnected. Start the Blender add-on, then choose its GLB.";
 };
 
 #endif // LL_LLLOCALMESH_H

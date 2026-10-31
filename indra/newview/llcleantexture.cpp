@@ -39,6 +39,10 @@ S32 LLCleanTexture::alphaGradientClass(const LLViewerTexture* tex) const
 {
     const U32 pct = alphaGradientPct(tex);
     if (pct == 255u) return -1;
+    // RenderVKGltfBlendNoAutoMask (Advanced Graphics, default off; #1206 (d)): no gradient demotion -- an analysed texture is
+    // never class 1 (soft-alpha glass / light shafts stay blended).
+    static LLCachedControl<bool> s_no_auto(gSavedSettings, "RenderVKGltfBlendNoAutoMask", false);
+    if (s_no_auto) return 0;
     // <SS:Skoomastream> Default 0 = off (LL parity: only canRenderAsMask's strict
     // mIsMask test demotes). pct is a rounded integer percent, so "pct <= 0" would still
     // pass textures with up to ~0.5% partial texels that LL's test may reject; at <= 0 an

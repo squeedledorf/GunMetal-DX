@@ -14,6 +14,7 @@ SHADERS = [
     ("ui.frag",       "kUiFragSpv"),
     ("ui_atest.frag", "kUiFragATestSpv"),   # alpha-tested variant (#83 offscreen targets)
     ("ui_occl.vert",  "kUiVertOcclSpv"),    # in-world label occlusion variant (#487)
+    ("ui_occl.frag",  "kUiFragOcclSpv"),    # its per-pixel depth test (#1126)
 ]
 
 
@@ -24,7 +25,7 @@ def main():
     # #238: every push block <= 128 B (the Vulkan minimum maxPushConstantsSize).
     push_budget.check([(p, st, fl, sym) for (p, st, fl), (_, sym) in zip(jobs, SHADERS)], a.cache_dir)
     lines = [
-        "// AUTO-GENERATED at build time from indra/newview/vkgfx/llrendervk/shaders/{ui.vert,ui.frag,ui_atest.frag,ui_occl.vert}",
+        "// AUTO-GENERATED at build time from indra/newview/vkgfx/llrendervk/shaders/{ui.vert,ui.frag,ui_atest.frag,ui_occl.vert,ui_occl.frag}",
         "// via glslc --target-env=vulkan1.3 -O (llrendervk/regen_ui_spv.py). Not in git.",
         "// Embedded so the viewer VK path needs no runtime shader files/packaging.",
         "#pragma once",

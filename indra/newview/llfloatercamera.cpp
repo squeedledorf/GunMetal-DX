@@ -90,7 +90,7 @@ protected:
     F32     getOrbitRate(F32 time);
     void    onRollLeftHeldDown();
     void    onRollRightHeldDown();
-    void    onRollReset();      // <GMDX> (SoapStorm ed0f69bd0e)
+    void    onRollReset();      // <GMDX> (from SoapStorm (Soap Frenzy, ed0f69bd0e), LGPL 2.1)
     void    onRollPortrait();   // <GMDX>
 
 private:
@@ -239,7 +239,7 @@ void LLPanelCameraZoom::onRollRightHeldDown()
     gAgentCamera.setRollRightKey(getOrbitRate(time));
 }
 
-// <GMDX> (SoapStorm ed0f69bd0e) roll reset, and a 90 degree portrait roll that toggles back
+// <GMDX> From SoapStorm (Soap Frenzy, ed0f69bd0e), LGPL 2.1: roll reset, and a 90 degree portrait roll that toggles back
 void LLPanelCameraZoom::onRollReset()
 {
     gAgentCamera.resetCameraRoll();
@@ -256,7 +256,6 @@ void LLPanelCameraZoom::onRollPortrait()
         gAgentCamera.setRollAngle(F_PI_BY_TWO);
     }
 }
-// </GMDX>
 
 void LLPanelCameraZoom::onCameraTrack()
 {
@@ -672,16 +671,16 @@ void LLFloaterCamera::updateItemsSelection()
     getChild<LLPanelCameraItem>("mouselook_view")->setValue(argument);
     argument["selected"] = mCurrMode == CAMERA_CTRL_MODE_FREE_CAMERA;
     getChild<LLPanelCameraItem>("object_view")->setValue(argument);
-    // <GMDX> orthographic view toggle
+    // orthographic view toggle
     if (LLPanelCameraItem* ortho_item = findChild<LLPanelCameraItem>("ortho_view"))
     {
         argument["selected"] = LLViewerCamera::getInstance()->getOrtho();
         ortho_item->setValue(argument);
     }
-    // </GMDX>
 }
 
-// <GMDX> static: the ortho toggle changed outside the floater (key, menu, auto-perspective)
+// static: the ortho toggle changed outside the floater (key, menu, auto-perspective)
+// Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
 void LLFloaterCamera::updateAllItemsSelection()
 {
     if (LLFloaterCamera* camera_floater = LLFloaterCamera::findInstance())
@@ -689,7 +688,6 @@ void LLFloaterCamera::updateAllItemsSelection()
         camera_floater->updateItemsSelection();
     }
 }
-// </GMDX>
 
 // static
 void LLFloaterCamera::onClickCameraItem(const LLSD& param)
@@ -700,7 +698,7 @@ void LLFloaterCamera::onClickCameraItem(const LLSD& param)
     {
         gAgentCamera.changeCameraToMouselook();
     }
-    else if ("ortho_view" == name)   // <GMDX>
+    else if ("ortho_view" == name)
     {
         LLViewerCamera::getInstance()->toggleOrtho();
     }

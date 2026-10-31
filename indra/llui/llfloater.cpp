@@ -178,7 +178,8 @@ std::string LLFloater::sButtonNames[BUTTON_COUNT] =
     "llfloater_minimize_btn",   //BUTTON_MINIMIZE
     "llfloater_tear_off_btn",   //BUTTON_TEAR_OFF
     "llfloater_dock_btn",       //BUTTON_DOCK
-    "llfloater_help_btn"        //BUTTON_HELP
+    "llfloater_help_btn",       //BUTTON_HELP
+    "llfloater_popout_btn"
 };
 
 std::string LLFloater::sButtonToolTips[BUTTON_COUNT];
@@ -197,7 +198,8 @@ std::string LLFloater::sButtonToolTipsIndex[BUTTON_COUNT]=
     "BUTTON_MINIMIZE",      //"Minimize",   //BUTTON_MINIMIZE
     "BUTTON_TEAR_OFF",      //"Tear Off",   //BUTTON_TEAR_OFF
     "BUTTON_DOCK",
-    "BUTTON_HELP"
+    "BUTTON_HELP",
+    "BUTTON_POPOUT"
 };
 
 LLFloater::click_callback LLFloater::sButtonCallbacks[BUTTON_COUNT] =
@@ -210,7 +212,8 @@ LLFloater::click_callback LLFloater::sButtonCallbacks[BUTTON_COUNT] =
     LLFloater::onClickMinimize, //BUTTON_MINIMIZE
     LLFloater::onClickTearOff,  //BUTTON_TEAR_OFF
     LLFloater::onClickDock,     //BUTTON_DOCK
-    LLFloater::onClickHelp      //BUTTON_HELP
+    LLFloater::onClickHelp,     //BUTTON_HELP
+    LLFloater::onClickPopout
 };
 
 // [SL:KB] - Patch: UI-FloaterCollapse | Checked: Catznip-3.2
@@ -218,6 +221,8 @@ bool LLFloater::sShowCollapseButton = false;
 // [/SL:KB]
 
 LLMultiFloater* LLFloater::sHostp = NULL;
+std::function<void(LLFloater*, bool)> LLFloater::sNativeWindowRequest;
+std::function<void(LLFloater*)> LLFloater::sNativeWindowOpened;
 bool            LLFloater::sQuitting = false; // Flag to prevent storing visibility controls while quitting
 U32             LLFloater::sVisibilityGeneration = 0;
 
@@ -282,6 +287,7 @@ LLFloater::Params::Params()
     can_close("can_close", true),
     can_drag_on_left("can_drag_on_left", false),
     can_tear_off("can_tear_off", true),
+    can_pop_out("can_pop_out", false),
     save_dock_state("save_dock_state", false),
     save_rect("save_rect", false),
     save_visibility("save_visibility", false),
@@ -655,6 +661,7 @@ void LLFloater::destroy()
 // virtual
 LLFloater::~LLFloater()
 {
+    delete mNativeMenu.get();
     if (!isDead())
     {
         // If it's dead, instance is supposed to be already removed, and
@@ -688,6 +695,9 @@ LLFloater::~LLFloater()
 
 void LLFloater::storeRectControl()
 {
+    // Native coordinates are persisted by the native-window owner. Do not
+    // overwrite the docked rectangle with the external root's (0,0) rectangle.
+    if (mNativePopout) return;
     if (!mRectControl.empty())
     {
         getControlGroup()->setRect( mRectControl, getRect() );
@@ -817,7 +827,7 @@ void LLFloater::openFloater(const LLSD& key)
 
     //RN: for now, we don't allow rehosting from one multifloater to another
     // just need to fix the bugs
-    if (getFloaterHost() != NULL && getHost() == NULL)
+    if (!mNativePopout && getFloaterHost() != NULL && getHost() == NULL)
     {
         // needs a host
         // only select tabs if window they are hosted in is visible
@@ -837,7 +847,7 @@ void LLFloater::openFloater(const LLSD& key)
         {
             floater_to_stack = LLFloaterReg::getLastFloaterCascading();
         }
-        applyControlsAndPosition(floater_to_stack);
+        if (!mNativePopout) applyControlsAndPosition(floater_to_stack);
         setMinimized(false);
         setVisibleAndFrontmost(mAutoFocus && !getIsChrome());
         // <GMDX> Opened while mouselook hides the floaters (a shortcut, or an always-showable one):
@@ -852,6 +862,7 @@ void LLFloater::openFloater(const LLSD& key)
     onOpen(key);
 
     dirtyRect();
+    if (canPopOut() && sNativeWindowOpened) sNativeWindowOpened(this);
 }
 
 void LLFloater::closeFloater(bool app_quitting)
@@ -1921,6 +1932,31 @@ bool LLFloater::handleMouseDown(S32 x, S32 y, MASK mask)
 // virtual
 bool LLFloater::handleRightMouseDown(S32 x, S32 y, MASK mask)
 {
+    if (canPopOut() && sNativeWindowRequest && mHeaderHeight > 0 && y >= getRect().getHeight() - mHeaderHeight)
+    {
+        LLMenuGL* menu = dynamic_cast<LLMenuGL*>(mNativeMenu.get());
+        if (!menu)
+        {
+            LLMenuGL::Params mp;
+            mp.name = "native_floater_menu";
+            menu = LLUICtrlFactory::create<LLMenuGL>(mp);
+            LLMenuItemCallGL::Params item;
+            item.name = "popout";
+            item.label = LLTrans::getString("BUTTON_POPOUT");
+            const LLHandle<LLFloater> handle = getHandle();
+            item.on_click.function([handle](LLUICtrl*, const LLSD&)
+            {
+                if (auto* floater = handle.get()) onClickPopout(floater);
+            });
+            menu->addChild(LLUICtrlFactory::create<LLMenuItemCallGL>(item));
+            LLMenuGL::sMenuContainer->addChild(menu);
+            mNativeMenu = menu->getHandle();
+        }
+        if (menu->getParent() != LLMenuGL::sMenuContainer) LLMenuGL::sMenuContainer->addChild(menu);
+        menu->setItemLabel("popout", LLTrans::getString(mNativePopout ? "BUTTON_POPOUT_DOCK" : "BUTTON_POPOUT"));
+        LLMenuGL::showPopup(this, menu, x, y);
+        return true;
+    }
     bool was_minimized = mMinimized;
     bringToFront( x, y );
     return was_minimized || LLPanel::handleRightMouseDown( x, y, mask );
@@ -1929,7 +1965,15 @@ bool LLFloater::handleRightMouseDown(S32 x, S32 y, MASK mask)
 bool LLFloater::handleMiddleMouseDown(S32 x, S32 y, MASK mask)
 {
     bringToFront( x, y );
-    return LLPanel::handleMiddleMouseDown( x, y, mask );
+    LLPanel::handleMiddleMouseDown( x, y, mask );
+    return true;//always: whether or not a child used it, it never reaches the world
+}
+
+// virtual
+bool LLFloater::handleMiddleMouseUp(S32 x, S32 y, MASK mask)
+{
+    LLPanel::handleMiddleMouseUp( x, y, mask );
+    return true;//always, as the press
 }
 
 
@@ -2081,6 +2125,12 @@ void LLFloater::onClickCollapse(LLFloater* self)
     self->setCollapsed(!self->isMinimized());
 }
 // [/SL:KB]
+
+void LLFloater::onClickPopout(LLFloater* self)
+{
+    if (self && self->canPopOut() && sNativeWindowRequest)
+        sNativeWindowRequest(self, !self->isNativePopout());
+}
 
 void LLFloater::onClickTearOff(LLFloater* self)
 {
@@ -2425,6 +2475,9 @@ bool LLFloater::getCanDrag() const
 
 void LLFloater::updateTitleButtons()
 {
+    mButtonsEnabled[BUTTON_POPOUT] = canPopOut() && bool(sNativeWindowRequest) && !getHost();
+    if (mButtons[BUTTON_POPOUT])
+        mButtons[BUTTON_POPOUT]->setToolTip(LLTrans::getString(mNativePopout ? "BUTTON_POPOUT_DOCK" : "BUTTON_POPOUT"));
     static LLUICachedControl<S32> floater_close_box_size ("UIFloaterCloseBoxSize", 0);
     static LLUICachedControl<S32> close_box_from_top ("UICloseBoxFromTop", 0);
     LLRect buttons_rect;
@@ -2437,6 +2490,8 @@ void LLFloater::updateTitleButtons()
         }
 
         bool enabled = mButtonsEnabled[i];
+        if (mNativePopout && (i == BUTTON_TEAR_OFF || i == BUTTON_DOCK || i == BUTTON_COLLAPSE || i == BUTTON_RESTORE))
+            enabled = false;
         if (i == BUTTON_HELP)
         {
             // don't show the help button if the floater is minimized
@@ -2637,6 +2692,8 @@ LLUIImage* LLFloater::getButtonImage(const Params& p, EFloaterButton e)
 // [/SL:KB]
         case BUTTON_TEAR_OFF:
             return p.tear_off_image;
+        case BUTTON_POPOUT:
+            return LLUI::getUIImage("NativeFloaterPopout");
         case BUTTON_DOCK:
             return p.dock_image;
         case BUTTON_HELP:
@@ -2662,6 +2719,8 @@ LLUIImage* LLFloater::getButtonPressedImage(const Params& p, EFloaterButton e)
 // [/SL:KB]
         case BUTTON_TEAR_OFF:
             return p.tear_off_pressed_image;
+        case BUTTON_POPOUT:
+            return LLUI::getUIImage("NativeFloaterPopout");
         case BUTTON_DOCK:
             return p.dock_pressed_image;
         case BUTTON_HELP:
@@ -3855,6 +3914,7 @@ void LLFloater::initFromParams(const LLFloater::Params& p)
     applyTitle();
 
     setCanTearOff(p.can_tear_off);
+    mCanPopOut = p.can_pop_out;
     setCanMinimize(p.can_minimize);
 // [SL:KB] - Patch: UI-FloaterCollapse | Checked: Catznip-5.2
     setCanCollapse( (p.can_collapse.isProvided()) ? p.can_collapse : p.can_minimize );

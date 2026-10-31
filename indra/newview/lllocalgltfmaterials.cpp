@@ -49,6 +49,8 @@
 #include "lltextureentry.h"
 #include "lltrans.h"           // "(model)" tag for mesh-owned rows
 #include "lltinygltfhelper.h"
+#include "slblenderconnectfile.h"
+#include "llviewertexturelist.h"
 #include "llviewertexture.h"
 
 /*=======================================*/
@@ -124,6 +126,7 @@ S32 LLLocalGLTFMaterial::getIndexInFile() const
 /* update functions */
 bool LLLocalGLTFMaterial::updateSelf()
 {
+    if (mImmutableSnapshot) return false;
     bool updated = false;
 
     if (mLinkStatus == LS_ON)
@@ -235,6 +238,42 @@ bool LLLocalGLTFMaterial::updateSelf()
     }
 
     return updated;
+}
+
+namespace
+{
+    LLPointer<LLViewerFetchedTexture> connectTexture(LLImageRaw* image)
+    {
+        // Weak identities only: this table does not keep old images alive.
+        // The normal texture list owns lifetime; stale IDs miss and get replaced.
+        static std::map<std::string, LLUUID> weak;
+        const std::string shape = std::to_string(image->getWidth()) + ":" + std::to_string(image->getHeight())
+            + ":" + std::to_string(image->getComponents());
+        const auto hash = SLBlenderConnect::contentHash(shape + SLBlenderConnect::contentHash(std::string_view(
+            reinterpret_cast<const char*>(image->getData()), image->getDataSize())));
+        auto it = weak.find(hash);
+        if (it != weak.end())
+            if (auto* texture = gTextureList.findImage(it->second, TEX_LIST_STANDARD)) return texture;
+        auto texture = LLViewerTextureManager::getFetchedTexture(image, FTType::FTT_LOCAL_FILE, true);
+        if (weak.size() >= 128) weak.erase(weak.begin()); // fixed metadata budget, no image residency
+        if (texture) weak[hash] = texture->getID();
+        return texture;
+    }
+}
+
+bool LLLocalGLTFMaterial::loadSnapshot(const tinygltf::Model& model)
+{
+    materialBegin();
+    if (!LLTinyGLTFHelper::getMaterialFromModel(mFilename, model, mMaterialIndex, this, mMaterialName, true, connectTexture))
+    {
+        materialComplete(false);
+        return false;
+    }
+    mImmutableSnapshot = true;
+    mWorldID.generate();
+    gGLTFMaterialList.addMaterial(mWorldID, this);
+    materialComplete(true);
+    return true;
 }
 
 bool LLLocalGLTFMaterial::loadMaterial()
@@ -424,6 +463,33 @@ static std::string gltfMaterialSignature(const tinygltf::Model& model, S32 idx)
     return s;
 }
 
+void LLLocalGLTFMaterialMgr::addBlenderConnectSnapshot(const SLBlenderConnectSnapshot& snapshot,
+    std::map<std::string, LLUUID>& bindings, std::vector<LLUUID>& owned)
+{
+    for (size_t index = 0; index < snapshot.materialBindings.size(); ++index)
+    {
+        LLPointer<LLLocalGLTFMaterial> material;
+        for (const auto& unit : mMaterialList)
+            if (unit->isImmutableSnapshot() && unit->snapshotKey() == snapshot.materialKeys[index])
+            { material = unit; break; }
+        if (!material)
+        {
+            material = new LLLocalGLTFMaterial(snapshot.filename, static_cast<S32>(index));
+            if (!snapshot.materialModel || !material->loadSnapshot(*snapshot.materialModel))
+            {
+                LL_WARNS("BlenderConnect") << "Snapshot material initialization failed" << LL_ENDL;
+                continue;
+            }
+            material->setMeshOwned(true);
+            material->setSnapshotKey(snapshot.materialKeys[index]);
+            mMaterialList.push_back(material);
+        }
+        bindings[snapshot.materialBindings[index]] = material->getWorldID();
+        if (std::find(owned.begin(), owned.end(), material->getTrackingID()) == owned.end())
+            owned.push_back(material->getTrackingID());
+    }
+}
+
 S32 LLLocalGLTFMaterialMgr::addUnitInternal(const std::string& filename, LLUUID& outID, bool mesh_owned)
 {
     // No double-add: if this file's materials are already loaded (same ownership
@@ -526,6 +592,30 @@ void LLLocalGLTFMaterialMgr::delUnit(LLUUID tracking_id)
             del_iter != to_delete.end(); del_iter++)
         {   /* iterating over a temporary list, hence preserving the iterator validity while deleting. */
             LLLocalGLTFMaterial* unit = *del_iter;
+            if (unit->isImmutableSnapshot())
+            {
+                // Retire owned local image-list entries as soon as their final
+                // material owner disappears, rather than the ordinary 30s flush.
+                // LLPointer/GPU liveness still protects in-flight readers.
+                const LLPointer<LLViewerFetchedTexture> textures[] = {unit->mBaseColorTexture,
+                    unit->mNormalTexture, unit->mMetallicRoughnessTexture, unit->mEmissiveTexture};
+                std::set<LLViewerFetchedTexture*> seen;
+                for (const auto& texture : textures)
+                {
+                    if (!texture || !seen.insert(texture.get()).second) continue;
+                    bool shared = false;
+                    for (const auto& other : mMaterialList)
+                    {
+                        if (other.get() == unit) continue;
+                        if (other->mBaseColorTexture == texture || other->mNormalTexture == texture
+                            || other->mMetallicRoughnessTexture == texture || other->mEmissiveTexture == texture)
+                        { shared = true; break; }
+                    }
+                    if (!shared && gTextureList.findImage(texture->getID(), TEX_LIST_STANDARD) == texture.get())
+                        gTextureList.deleteImage(texture);
+                }
+                gGLTFMaterialList.removeMaterial(unit->getWorldID());
+            }
             mMaterialList.remove(unit);
 
             unit = NULL;

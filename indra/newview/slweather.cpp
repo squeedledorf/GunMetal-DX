@@ -500,6 +500,7 @@ void SLWeather::update()
         // The rates (m/s): #954 the snowfall rate falling now (its bands included) x (1 - the
         // settling); a tag's rate= overrides it for the depth (the snowfall still drives the falling
         // flakes); a tag depth= without a usable rate holds.
+        const F32 fresh = falling ? std::max(mState.snowFall, 0.f) * (1.f - kSnowSettle) / (100.f * 3600.f) : 0.f;
         F32 build = 0.f, melt = 0.f;
         if (sharedLevel >= 0.f)
         {
@@ -511,8 +512,7 @@ void SLWeather::update()
         {
             const bool tagRate = source == SOURCE_REGION && t.active && t.haveRate;
             if (falling)
-                build = tagRate ? std::max(t.snowRate, 0.f) / 3600.f
-                                : std::max(mState.snowFall, 0.f) * (1.f - kSnowSettle) / (100.f * 3600.f);
+                build = tagRate ? std::max(t.snowRate, 0.f) / 3600.f : fresh;
             if (tagRate && t.snowRate < 0.f) melt = -t.snowRate / 3600.f;
             else if (!falling) melt = maxD / std::max((F32)s_melt, 1.f) * (1.f + kRainMelt * std::min(mState.rain * 2.f, 1.f));
         }
@@ -535,12 +535,21 @@ void SLWeather::update()
                                     << ") -- the local accumulation carries on from " << mState.snowDepth << " m" << LL_ENDL;
             }
             mState.snowDepth += (F32)dt * (build - melt);
+            // #1130: while it snows the cover keeps pace with the depth (its cap): the cover's own clock
+            // (WeatherSnowBuildSeconds, blind to the rate past ~1.5 cm/h) held a fast snowfall back -- at
+            // 360 cm/h the depth grew WeatherSnowMaxDepth per WeatherSnowBuildSeconds (3.5 cm a minute at
+            // the default 0.35 m, 2 at 0.2 m) instead of the 4.2 the snowfall lays
+            if (falling && build > 0.f) mState.snowCover = std::max(mState.snowCover, std::min(mState.snowDepth / maxD, 1.f));
             mState.snowDepth = llclamp(mState.snowDepth, 0.f, maxD * mState.snowCover);
             if (mState.snowDepth < 1e-4f) mState.snowDepth = 0.f;
         }
         mState.snowDepthBuild = build;
         mState.snowDepthMelt = melt;
         mState.snowDepthShared = mSyncActive;
+        // #1130 FRESH SNOW (slweather.h State): the snow landing now, whatever drives the level
+        const bool coat = s_coat && maxD > 0.f;
+        mState.snowFallBuild = coat ? fresh : 0.f;
+        mState.snowDepthMax = coat ? maxD : 0.f;
         // Which source drives the snow and how fast it builds: on a change of source, else every 10 s
         // while there is snow falling or lying.
         static ESource s_lastSource = SOURCE_NONE;

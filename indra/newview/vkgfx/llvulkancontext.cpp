@@ -4,13 +4,14 @@
  */
 #include "linden_common.h"
 #include "../llvkhitch.h"
-#include "../gmdxreplay.h"           // <GMDX> instant replay
+#include "../llinstantreplay.h"      // instant replay (GunMetal-DX port)
 
 #include "llvulkancontext.h"
 
 #include "vk_device.h"
 #include "vk_requirements.h"                 // #526 device requirements + user message
 #include "vk_swapchain.h"
+#include "vk_retirement_retry.h"
 #include "llrendervk/llrendervk.h"       // the facade: gVK
 #include "llrendervkbackend.h"           // concrete LLRenderBackend
 #include "vk_ui_shaders_spv.h"           // embedded UI SPIR-V
@@ -64,6 +65,73 @@ struct LLVulkanContext::Impl
     VkSurfaceKHR    mSurface = VK_NULL_HANDLE;
     VkDeviceContext mDevice;
     VkSwapchain     mSwapchain;
+
+    struct UIWindow
+    {
+        SDL_Window* window = nullptr; // owner destroys after destroyUIWindow
+        NativeSurfaceId surfaceID = 0;
+        std::unique_ptr<LLNativeWindow> retiringHost;
+        bool closing = false;
+        VkSurfaceKHR surface = VK_NULL_HANDLE;
+        VkSwapchain swapchain;
+        VkCommandPool pool = VK_NULL_HANDLE;
+        VkCommandBuffer cmds[2] = {};
+        int requestedWidth = 0, requestedHeight = 0;
+        bool resize = false;
+        bool failed = false;
+        U32 recreateFailures = 0;
+        std::chrono::steady_clock::time_point retryAfter{};
+    };
+    // Empty on the single-window path. Entries/vertex slots are reused on close.
+    std::vector<std::unique_ptr<UIWindow>> mUIWindows;
+    VkSemaphore mUIRetirement = VK_NULL_HANDLE;
+    uint64_t mUIRetirementSignaled = 0;
+    uint64_t mUICompleted = 0;
+    bool mUIPathLogged = false;
+    VkRetirementRetry mUIRetireRetry;
+    unsigned mUIWindowPeak = 0;
+    VkUISurfaceRecorder mMainUIRecorder;
+    std::function<void(U64)> mUIRecorderShutdown;
+    const VkUISurfaceRecorder* mAuxUIRecorder = nullptr;
+    // Exact renderer-neutral GPU serials, independent of the facade's UI frame clock.
+    VkSemaphore mSurfaceCompletion = VK_NULL_HANDLE;
+    uint64_t mSurfaceSerial = 0, mSurfaceCompleted = 0;
+    bool ensureSurfaceCompletion()
+    {
+        if (mSurfaceCompletion) return true;
+        VkSemaphoreTypeCreateInfo type{VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
+        type.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+        VkSemaphoreCreateInfo info{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+        info.pNext = &type;
+        return vkCreateSemaphore(mDevice.device(), &info, nullptr, &mSurfaceCompletion) == VK_SUCCESS;
+    }
+    uint64_t reserveSurfaceSerial()
+    {
+        uint64_t completed = 0;
+        const VkResult result = vkGetSemaphoreCounterValue(mDevice.device(), mSurfaceCompletion, &completed);
+        if (result == VK_SUCCESS) mSurfaceCompleted = completed;
+        else if (result == VK_ERROR_DEVICE_LOST)
+            vkDeviceLostRaise("UI target completion query", result, "graphics", __FILE__, __LINE__);
+        return ++mSurfaceSerial;
+    }
+    void signalSurfaceSerial(uint64_t serial)
+    {
+        if (!serial || vkDeviceIsLost()) return;
+        VkSemaphoreSubmitInfo signal{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
+        signal.semaphore = mSurfaceCompletion;
+        signal.value = serial;
+        signal.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        VkSubmitInfo2 submit{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
+        submit.signalSemaphoreInfoCount = 1;
+        submit.pSignalSemaphoreInfos = &signal;
+        const VkResult result = vkQueueSubmit2(mDevice.queue(), 1, &submit, VK_NULL_HANDLE);
+        // Refused markers pin resources until a later accepted higher marker.
+        if (result == VK_ERROR_DEVICE_LOST)
+            vkDeviceLostRaise("UI target completion signal", result, "graphics", __FILE__, __LINE__);
+        else if (result != VK_SUCCESS)
+            LL_WARNS("NativeUI") << "UI target completion signal refused: " << result << LL_ENDL;
+    }
+
 
     // One primary command buffer PER frame-in-flight slot. A single shared command
     // buffer was the flashing bug: with 2 frames in flight and pre-signaled fences,
@@ -1343,7 +1411,7 @@ std::string LLVulkanContext::deviceLostDiagnostics() const
     p2.pNext = &drv;
     vkGetPhysicalDeviceProperties2(phys, &p2);
     const VkPhysicalDeviceProperties& p = p2.properties;
-    char buf[512];
+    char buf[1024];   // driverName + driverInfo are each up to 256 bytes
     std::string out;
     const uint32_t v = p.driverVersion;
     const std::string ver = decode_driver_version(p);
@@ -1438,8 +1506,8 @@ LLRenderBackend* LLVulkanContext::initRenderBackend()
     }
     // Alpha-tested fragment variant for offscreen render targets (#83).
     gVK.initAlphaTestFragSpv(kUiFragATestSpv, kUiFragATestSpv_bytes);
-    // In-world label occlusion vertex variant (pre-HUD text layer, #487).
-    gVK.initOcclVertSpv(kUiVertOcclSpv, kUiVertOcclSpv_bytes);
+    // In-world label occlusion variant (pre-HUD text layer, #487; per pixel, #1126).
+    gVK.initOcclSpv(kUiVertOcclSpv, kUiVertOcclSpv_bytes, kUiFragOcclSpv, kUiFragOcclSpv_bytes);
     mImpl->mFacadeReady = true;
 
     mImpl->mRenderBackend = new LLRenderVKBackend();
@@ -1492,6 +1560,12 @@ bool LLVulkanContext::worldPipelinesPending() const
     unsigned done = 0, queued = 0, live = 0;
     vkPipelineGateProgress(done, queued, live);
     return live > 0;
+}
+
+bool LLVulkanContext::startupPipelinesPending() const
+{
+    if (worldPipelinesPending()) return true;
+    return mInitialized && mImpl && mImpl->mWorld && mImpl->mWorld->rtPipelinesPending();
 }
 
 void LLVulkanContext::shaderGateProgress(U32& done, U32& queued) const
@@ -1710,14 +1784,14 @@ bool LLVulkanContext::renderOffscreen(const LLVKWorldFrame& world, uint32_t w, u
     // `frames` unjittered recordings (warm-up for the history-based passes) as before.
     const uint32_t aa = W->beginOffscreen(w, h, depth ? 0u : aaFrames);
     frames = aa ? aa + 1u : std::max(frames, 1u);
-    W->snapMatteBegin(world.avatar_matte && !depth, w, h);   // <GMDX> avatar matte snapshot
+    W->snapMatteBegin(world.avatar_matte && !depth, w, h);   // avatar matte snapshot (GunMetal-DX port)
     if (aa)
         LL_DEBUGS("Vulkan") << "offscreen snapshot " << w << "x" << h << ": supersampled, " << aa
                            << " jittered frames" << LL_ENDL;
     for (uint32_t f = 0; f < frames; ++f)
     {
         W->mOffscreenFrame = f;
-        W->snapMatteFrame(f);   // <GMDX>
+        W->snapMatteFrame(f);
         const bool last = (f + 1 == frames);
         if (last) W->requestCapture(world.hud_enabled ? 2u : 1u);
         VK_CHECK(vkResetCommandBuffer(cmd, 0));
@@ -1744,9 +1818,9 @@ bool LLVulkanContext::renderOffscreen(const LLVKWorldFrame& world, uint32_t w, u
         W->setTemporal(world);
         W->mHideSelf = world.hide_self;
         W->mHideSelfHead = world.hide_self_head;
-        W->mOrtho = world.ortho;            // <GMDX> region map capture
-        W->mOrthoPpm = world.ortho_ppm;     // <GMDX>
-        W->mOrthoView = world.ortho_view;   // <GMDX> snapshot of the orthographic view
+        W->mOrthoView = world.ortho_view;   // snapshot of the orthographic view (GunMetal-DX port)
+        W->mOrtho = world.ortho;            // region map capture (GunMetal-DX port)
+        W->mOrthoPpm = world.ortho_ppm;
         W->setSelection(world);
         W->setAtmosphere(world);
         W->setSwapImage(img.image);
@@ -1755,7 +1829,7 @@ bool LLVulkanContext::renderOffscreen(const LLVKWorldFrame& world, uint32_t w, u
                        world.hud_enabled ? world.hud_view_proj : nullptr, world.hud_viewport);
         W->recordCaptureAt(cmd, 2, w, h);
         if (last && depth) W->recordDepthCapture(cmd, w, h);
-        W->snapMatteRecord(cmd, w, h);   // <GMDX>
+        W->snapMatteRecord(cmd, w, h);
         VK_CHECK(vkEndCommandBuffer(cmd));
 
         VkCommandBufferSubmitInfo ci{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
@@ -1765,10 +1839,10 @@ bool LLVulkanContext::renderOffscreen(const LLVKWorldFrame& world, uint32_t w, u
         VK_CHECK(vkQueueSubmit2(mImpl->mDevice.queue(), 1, &si, fence));
         VK_CHECK(vkWaitForFences(dev, 1, &fence, VK_TRUE, UINT64_MAX));
         if (vkDeviceIsLost()) break;   // #135: the readback below would be garbage
-        W->snapMatteCollect();   // <GMDX>
+        W->snapMatteCollect();
         VK_CHECK(vkResetFences(dev, 1, &fence));
     }
-    W->snapMatteEnd();   // <GMDX>
+    W->snapMatteEnd();
     uint32_t cw = 0, ch = 0;
     bool ok = !vkDeviceIsLost() && W->readCaptureRGB(rgb, cw, ch) && cw == w && ch == h;
     if (ok && depth)
@@ -1776,9 +1850,9 @@ bool LLVulkanContext::renderOffscreen(const LLVKWorldFrame& world, uint32_t w, u
         uint32_t dw = 0, dh = 0;
         ok = W->readDepthCapture(*depth, dw, dh) && dw == w && dh == h;
     }
-    W->mOrtho = false;      // <GMDX> (live frames are never a map capture)
-    W->mOrthoPpm = 0.f;     // <GMDX>
-    W->mOrthoView = false;  // <GMDX> (the next live frame sets its own)
+    W->mOrthoView = false;   // (the next live frame sets its own)
+    W->mOrtho = false;       // (live frames are never a map capture)
+    W->mOrthoPpm = 0.f;
     W->endOffscreen();   // the next on-screen frame resets like a window resize
     W->setSwapImage(VK_NULL_HANDLE);   // the next presented frame sets its own
     vkFreeCommandBuffers(dev, mImpl->mDevice.commandPool(), 1, &cmd);
@@ -1787,7 +1861,7 @@ bool LLVulkanContext::renderOffscreen(const LLVKWorldFrame& world, uint32_t w, u
     return ok;
 }
 
-// <GMDX> avatar matte snapshots (gmdxsnapshotavatars.h)
+// Avatar matte snapshots (llsnapshotavatars.h; GunMetal-DX port)
 bool LLVulkanContext::takeSnapshotMatte(std::vector<uint8_t>& alpha, uint32_t& w, uint32_t& h)
 {
     return mImpl && mImpl->mWorld && mImpl->mWorld->snapMatteTake(alpha, w, h);
@@ -2039,7 +2113,7 @@ std::string LLVulkanContext::texResidencyBrief(const LLUUID& id) const
     return mImpl->mWorld->texResidencyBrief(id);
 }
 
-// <GMDX>
+// <GMDX> Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4 (rez effects).
 bool LLVulkanContext::texOnGpu(const LLUUID& id) const
 {
     if (!mImpl || !mImpl->mWorld) return true;
@@ -2152,7 +2226,8 @@ bool LLVulkanContext::latestPick(LLVKPickResult& out) const
     return mImpl && mImpl->mWorld && mImpl->mWorld->pickLatest(out);
 }
 
-// <SS:Skoomastream> aux rays (sscombatray.cpp)
+// <SS:Skoomastream> aux rays (sscombatray.cpp). Ported from GunMetal-DX (squeedledorf,
+// LGPL 2.1), v0.3.0 cf5f1f4.
 void LLVulkanContext::takeAuxPicks(std::vector<LLVKPickResult>& out)
 {
     if (mImpl && mImpl->mWorld) mImpl->mWorld->takeAuxPicks(out);
@@ -2385,6 +2460,437 @@ void LLVulkanContext::Impl::vrRecordMirror(VkCommandBuffer cmd, VkImage windowIm
                  mVrTarget.layers);
 }
 
+NativeSurfaceId LLVulkanContext::createUIWindow(SDL_Window* window, NativeSurfaceId surfaceID)
+{
+    if (!surfaceID || surfaceID >= NativeSurfaceVRUI || !mInitialized || !mImpl ||
+        !mImpl->mFacadeReady || vkDeviceIsLost()) return 0;
+    for (const auto& existing : mImpl->mUIWindows)
+        if (existing && existing->surfaceID == surfaceID) return 0;
+    size_t index = 0;
+    while (index < mImpl->mUIWindows.size() && mImpl->mUIWindows[index]) ++index;
+    if (index == 16) return 0;
+    int pixelWidth = 0, pixelHeight = 0;
+    SDL_GetWindowSizeInPixels(window, &pixelWidth, &pixelHeight);
+    uint64_t estimate = uint64_t(std::max(0, pixelWidth)) * std::max(0, pixelHeight) * 16;
+    for (const auto& existing : mImpl->mUIWindows) if (existing) estimate += existing->swapchain.memoryBytes();
+    if (estimate > 256ull * 1024 * 1024) return 0; // includes draining windows; WSI estimate, not driver residency
+    try { mImpl->mUIWindows.reserve(16); }
+    catch (const std::bad_alloc&) { return 0; }
+    auto entry = std::unique_ptr<Impl::UIWindow>(new (std::nothrow) Impl::UIWindow);
+    if (!entry) return 0;
+    entry->window = window;
+    entry->surfaceID = surfaceID;
+    auto& device = mImpl->mDevice;
+    if (!SDL_Vulkan_CreateSurface(window, device.instance(), nullptr, &entry->surface)) return 0;
+    if (!mImpl->mUIPathLogged)
+    {
+        LL_INFOS("NativeUI") << "Auxiliary presentation retirement: "
+            << (device.swapchainMaintenance() ? "present fences" : "presenting-queue idle fallback") << LL_ENDL;
+        mImpl->mUIPathLogged = true;
+    }
+    // Install before any fallible GPU allocation so partial initialization uses
+    // the same teardown as a normal close.
+    if (index == mImpl->mUIWindows.size()) mImpl->mUIWindows.emplace_back();
+    mImpl->mUIWindows[index] = std::move(entry);
+    auto& w = *mImpl->mUIWindows[index];
+    if (!mImpl->mUIRetirement)
+    {
+        VkSemaphoreTypeCreateInfo type{VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO};
+        type.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+        VkSemaphoreCreateInfo ci{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+        ci.pNext = &type;
+        if (vkCreateSemaphore(device.device(), &ci, nullptr, &mImpl->mUIRetirement) != VK_SUCCESS)
+        {
+            destroyUIWindow(surfaceID);
+            return 0;
+        }
+        mImpl->mUIRetirementSignaled = 0;
+        gVK.setExternalRetirement(true);
+    }
+    int width = 0, height = 0;
+    SDL_GetWindowSizeInPixels(window, &width, &height);
+    w.swapchain.setUIOnly();
+    VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+    pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    pci.queueFamilyIndex = device.queueFamily();
+    bool ready = false;
+    try
+    {
+        ready = width > 0 && height > 0 &&
+            w.swapchain.init(device, w.surface, width, height, 2) &&
+            vkCreateCommandPool(device.device(), &pci, nullptr, &w.pool) == VK_SUCCESS;
+    }
+    catch (const std::bad_alloc&) { ready = false; }
+    if (ready)
+    {
+        VkCommandBufferAllocateInfo ai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        ai.commandPool = w.pool;
+        ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        ai.commandBufferCount = 2;
+        ready = vkAllocateCommandBuffers(device.device(), &ai, w.cmds) == VK_SUCCESS;
+    }
+    if (!ready)
+    {
+        LL_WARNS("Popout") << "Could not allocate native UI presentation resources" << LL_ENDL;
+        destroyUIWindow(surfaceID);
+        return 0;
+    }
+    w.requestedWidth = width;
+    w.requestedHeight = height;
+    unsigned live = 0;
+    uint64_t bytes = 0;
+    for (const auto& item : mImpl->mUIWindows)
+        if (item) { ++live; bytes += item->swapchain.memoryBytes(); }
+    mImpl->mUIWindowPeak = std::max(mImpl->mUIWindowPeak, live);
+    LL_INFOS("NativeUI") << "Native presentation live=" << live << " capacity=16 peak=" << mImpl->mUIWindowPeak
+        << " estimatedWSIBytes=" << bytes << LL_ENDL;
+    return surfaceID;
+}
+
+U64 LLVulkanContext::uiFrameCounter() const
+{
+    return mImpl && mImpl->mFacadeReady ? gVK.frameCounter() : 0;
+}
+
+bool LLVulkanContext::uiWindowFailed(NativeSurfaceId handle) const
+{
+    if (!mImpl || !handle) return true;
+    for (const auto& w : mImpl->mUIWindows)
+        if (w && w->surfaceID == handle) return w->closing || w->failed || w->swapchain.failed();
+    return true;
+}
+
+void LLVulkanContext::invalidateUIWindow(NativeSurfaceId handle)
+{
+    if (mImpl) for (auto& window : mImpl->mUIWindows)
+        if (window && window->surfaceID == handle) window->resize = true;
+}
+
+void LLVulkanContext::destroyUIWindow(NativeSurfaceId handle, std::unique_ptr<LLNativeWindow> host)
+{
+    if (!mImpl || !handle) return;
+    size_t index = 0;
+    while (index < mImpl->mUIWindows.size() &&
+           (!mImpl->mUIWindows[index] || mImpl->mUIWindows[index]->surfaceID != handle)) ++index;
+    if (index == mImpl->mUIWindows.size()) return;
+    auto& entry = mImpl->mUIWindows[index];
+    entry->closing = true;
+    if (host)
+    {
+        host->attach(nullptr);
+        SDL_HideWindow(host->handle());
+        entry->retiringHost = std::move(host);
+    }
+    // Partial init has no pending work, so can be released immediately. Active
+    // windows retain their native host/surface and slot until both proofs retire.
+    auto& device = mImpl->mDevice;
+    if (!vkDeviceIsLost() && entry->swapchain.retired(device.device()))
+    {
+        entry->swapchain.destroy(device);
+        if (entry->pool) vkDestroyCommandPool(device.device(), entry->pool, nullptr);
+        if (mImpl->mFacadeReady) gVK.releaseFrameSlots(2 + static_cast<U32>(index) * 2, 2);
+        SDL_Vulkan_DestroySurface(device.instance(), entry->surface, nullptr);
+        entry.reset(); // native window LAST
+    }
+}
+
+void LLVulkanContext::pollUIWindowRetirement()
+{
+    if (!mImpl || vkDeviceIsLost()) return;
+    auto& device = mImpl->mDevice;
+    // Approved compatibility policy: queue-idle is the conventional WSI release
+    // assumption on drivers without present fences, not a PE scanout proof.
+    // The approved compatibility path batches rare retirement events. Never on
+    // a steady frame; never waits the device or any other queue.
+    unsigned drain = 0;
+    for (const auto& window : mImpl->mUIWindows)
+        if (window && (window->closing || window->resize) && window->swapchain.needsPresentDrain()) ++drain;
+    const auto retryNow = std::chrono::steady_clock::now();
+    if (drain && mImpl->mUIRetireRetry.ready(retryNow))
+    {
+        const auto start = std::chrono::steady_clock::now();
+        const VkResult result = vkQueueWaitIdle(device.queue());
+        const auto elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+        LL_INFOS("NativeUI") << "Auxiliary retirement queue=" << device.queue() << " batch=" << drain
+            << " reason=close/resize/out-of-date wait=" << elapsed << " ms result=" << result << LL_ENDL;
+        if (result == VK_SUCCESS)
+        {
+            mImpl->mUIRetireRetry.succeeded();
+            for (auto& window : mImpl->mUIWindows) if (window) window->swapchain.presentingQueueIdle();
+        }
+        else if (result == VK_ERROR_DEVICE_LOST)
+            vkDeviceLostRaise("auxiliary retirement queue wait", result, "graphics", __FILE__, __LINE__);
+        else
+        {
+            mImpl->mUIRetireRetry.refused(retryNow);
+            if (mImpl->mUIRetireRetry.exhausted())
+                LL_WARNS("NativeUI") << "Auxiliary queue retirement refused three times; retaining bounded windows until exit" << LL_ENDL;
+        }
+    }
+    for (U32 i = 0; i < mImpl->mUIWindows.size(); ++i)
+        if (mImpl->mUIWindows[i] && mImpl->mUIWindows[i]->closing) destroyUIWindow(mImpl->mUIWindows[i]->surfaceID);
+    if (!mImpl->mUIRetirement) return;
+    uint64_t completed = 0;
+    const VkResult result = vkGetSemaphoreCounterValue(device.device(), mImpl->mUIRetirement, &completed);
+    if (result == VK_SUCCESS)
+    {
+        mImpl->mUICompleted = completed;
+        gVK.setExternalRetirement(true, completed);
+        if (completed >= mImpl->mUIRetirementSignaled &&
+            std::none_of(mImpl->mUIWindows.begin(), mImpl->mUIWindows.end(), [](const auto& w) { return bool(w); }))
+        {
+            vkDestroySemaphore(device.device(), mImpl->mUIRetirement, nullptr);
+            mImpl->mUIRetirement = VK_NULL_HANDLE;
+            gVK.setExternalRetirement(false);
+        }
+    }
+    else if (result == VK_ERROR_DEVICE_LOST)
+        vkDeviceLostRaise("pop-out retirement poll", result, "graphics", __FILE__, __LINE__);
+}
+
+void LLVulkanContext::finishUIWindowsFrame()
+{
+    if (!mImpl || !mImpl->mUIRetirement || vkDeviceIsLost()) return;
+    if (std::none_of(mImpl->mUIWindows.begin(), mImpl->mUIWindows.end(), [](const auto& w) { return bool(w); })) return;
+    const uint64_t frame = gVK.frameCounter();
+    if (frame <= mImpl->mUIRetirementSignaled) return;
+    VkSemaphoreSubmitInfo signal{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
+    signal.semaphore = mImpl->mUIRetirement;
+    signal.value = frame;
+    signal.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    VkSubmitInfo2 submit{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
+    submit.signalSemaphoreInfoCount = 1;
+    submit.pSignalSemaphoreInfos = &signal;
+    const VkResult result = vkQueueSubmit2(mImpl->mDevice.queue(), 1, &submit, VK_NULL_HANDLE);
+    if (result == VK_SUCCESS) mImpl->mUIRetirementSignaled = frame;
+    else if (result == VK_ERROR_DEVICE_LOST)
+        vkDeviceLostRaise("pop-out retirement submit", result, "graphics", __FILE__, __LINE__);
+    else
+    {
+        // Do not let a refused completion marker pin an ever-growing deferred
+        // texture queue. Dock at the next UI boundary; retain completion markers
+        // until the GPU proves retirement before restoring the single-window policy.
+        LL_WARNS("Popout") << "UI completion marker refused: " << vkResultString(result)
+                           << "; docking native windows" << LL_ENDL;
+        for (auto& window : mImpl->mUIWindows) if (window) window->failed = true;
+    }
+}
+
+bool LLVulkanContext::renderUIWindow(NativeSurfaceId handle, const std::function<void()>& draw, bool advanceFrame)
+{
+    if (!mImpl || !mImpl->mFacadeReady || vkDeviceIsLost() || !handle) return false;
+    size_t index = 0;
+    while (index < mImpl->mUIWindows.size() &&
+           (!mImpl->mUIWindows[index] || mImpl->mUIWindows[index]->surfaceID != handle)) ++index;
+    if (index == mImpl->mUIWindows.size()) return false;
+    auto& w = *mImpl->mUIWindows[index];
+    auto& device = mImpl->mDevice;
+    auto& sc = w.swapchain;
+    if (w.closing || w.failed || sc.failed()) return false;
+    int width = 0, height = 0;
+    SDL_GetWindowSizeInPixels(w.window, &width, &height);
+    if (width <= 0 || height <= 0 || (SDL_GetWindowFlags(w.window) & SDL_WINDOW_MINIMIZED)) return false;
+    if (w.resize || w.requestedWidth != width || w.requestedHeight != height)
+    {
+        w.resize = true;
+        uint64_t estimate = uint64_t(width) * height * 16;
+        for (const auto& existing : mImpl->mUIWindows)
+            if (existing && existing.get() != &w) estimate += existing->swapchain.memoryBytes();
+        if (estimate > 256ull * 1024 * 1024) { w.failed = true; return false; }
+        if (!sc.retired(device.device())) return false;
+        const auto now = std::chrono::steady_clock::now();
+        if (now < w.retryAfter) return false;
+        try { w.resize = !sc.recreate(device, width, height); }
+        catch (const std::bad_alloc&) { w.failed = true; return false; }
+        if (w.resize)
+        {
+            w.retryAfter = now + std::chrono::milliseconds(500);
+            w.failed = ++w.recreateFailures >= 3;
+            return false;
+        }
+        w.recreateFailures = 0;
+        w.requestedWidth = width;
+        w.requestedHeight = height;
+    }
+    width = static_cast<int>(sc.extent().width);
+    height = static_cast<int>(sc.extent().height);
+    // Never wait for an idle/background window's compositor or GPU slot.
+    if (!sc.slotDone(device.device(), sc.frameSlot())) return false;
+    const U32 slot = sc.frameSlot();
+    const U32 vertexSlot = 2 + static_cast<U32>(index) * 2 + slot;
+    try
+    {
+        if (!mImpl->mAuxUIRecorder)
+        {
+            gVK.beginFrameToView(VK_NULL_HANDLE, sc.format(), width, height);
+            gVK.setWorldOverlayDepthFormat(VK_FORMAT_UNDEFINED);
+            draw();
+            if (!gVK.prepareBufferedFrame(vertexSlot)) w.failed = true;
+        }
+    }
+    catch (const std::bad_alloc&) { w.failed = true; }
+    if (w.failed)
+    {
+        gVK.discardBufferedFrame();
+        return false;
+    }
+    const uint64_t targetSerial = mImpl->mAuxUIRecorder ? mImpl->reserveSurfaceSerial() : 0;
+    U32 imageIndex = 0;
+    bool recreate = false;
+    if (!sc.acquire(device, &imageIndex, &recreate))
+    {
+        w.resize |= recreate;
+        return false;
+    }
+    w.resize |= recreate;
+    if (!mImpl->mAuxUIRecorder) gVK.setFrameColorView(sc.imageView(imageIndex));
+    VkCommandBuffer cmd = w.cmds[slot];
+    VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    VkResult result = vkBeginCommandBuffer(cmd, &bi);
+    if (result == VK_SUCCESS)
+    try
+    {
+        if (!mImpl->mAuxUIRecorder)
+        {
+            gVK.recordUploads(cmd);
+            gVK.recordOffscreen(cmd, vertexSlot);
+        }
+        VkImageMemoryBarrier2 barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+        barrier.srcStageMask = VK_PIPELINE_STAGE_2_NONE;
+        barrier.dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+        barrier.dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+        barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        barrier.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        barrier.srcQueueFamilyIndex = barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = sc.image(imageIndex);
+        barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        dep.imageMemoryBarrierCount = 1;
+        dep.pImageMemoryBarriers = &barrier;
+        vkCmdPipelineBarrier2(cmd, &dep);
+        VkRenderingAttachmentInfo color{VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+        color.imageView = sc.imageView(imageIndex);
+        color.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        color.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        color.clearValue.color = {{0.12f, 0.12f, 0.12f, 1.f}};
+        VkRenderingInfo ri{VK_STRUCTURE_TYPE_RENDERING_INFO};
+        ri.renderArea.extent = sc.extent();
+        ri.layerCount = 1;
+        ri.colorAttachmentCount = 1;
+        ri.pColorAttachments = &color;
+        vkCmdBeginRendering(cmd, &ri);
+        vkCmdEndRendering(cmd);
+        barrier.srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+        barrier.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+        barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        vkCmdPipelineBarrier2(cmd, &dep);
+        if (mImpl->mAuxUIRecorder)
+        {
+            VkUISurfaceTarget target;
+            target.surfaceID = w.surfaceID;
+            target.cmd = cmd;
+            target.colorImage = sc.image(imageIndex);
+            target.colorView = sc.imageView(imageIndex);
+            target.colorFormat = sc.format();
+            target.extent = sc.extent();
+            target.dpiScaleX = target.dpiScaleY = SDL_GetWindowDisplayScale(w.window);
+            target.frameSerial = targetSerial;
+            target.completedSerial = mImpl->mSurfaceCompleted;
+            (*mImpl->mAuxUIRecorder)(target);
+        }
+        else gVK.recordFrame(cmd, vertexSlot, advanceFrame);
+        barrier.srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+        barrier.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+        barrier.dstStageMask = VK_PIPELINE_STAGE_2_NONE;
+        barrier.dstAccessMask = 0;
+        barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        vkCmdPipelineBarrier2(cmd, &dep);
+        result = vkEndCommandBuffer(cmd);
+    }
+    catch (const std::bad_alloc&)
+    {
+        gVK.discardBufferedFrame();
+        result = VK_ERROR_OUT_OF_HOST_MEMORY;
+    }
+    VkSemaphoreSubmitInfo wait{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
+    wait.semaphore = sc.imageAvailableSemaphore();
+    wait.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    VkSemaphoreSubmitInfo signal{VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO};
+    signal.semaphore = sc.renderFinishedSemaphore(imageIndex);
+    signal.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    VkCommandBufferSubmitInfo cb{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
+    cb.commandBuffer = cmd;
+    VkSubmitInfo2 submit{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
+    submit.waitSemaphoreInfoCount = submit.signalSemaphoreInfoCount = 1;
+    submit.pWaitSemaphoreInfos = &wait;
+    submit.pSignalSemaphoreInfos = &signal;
+    if (result != VK_SUCCESS)
+    {
+        w.failed = true; // acquire fence retires the unconsumed acquire semaphore
+        if (result == VK_ERROR_DEVICE_LOST) vkDeviceLostRaise("native UI command recording", result, "graphics", __FILE__, __LINE__);
+        return false;
+    }
+    submit.commandBufferInfoCount = 1;
+    submit.pCommandBufferInfos = &cb;
+    result = vkQueueSubmit2(device.queue(), 1, &submit, sc.inFlightFence());
+    if (result != VK_SUCCESS)
+    {
+        w.failed = true;
+        if (result == VK_ERROR_DEVICE_LOST) vkDeviceLostRaise("native UI submit", result, "graphics", __FILE__, __LINE__);
+        return false;
+    }
+    sc.submitted();
+    mImpl->signalSurfaceSerial(targetSerial);
+    sc.present(device, imageIndex, &recreate);
+    w.resize |= recreate;
+    return true;
+}
+
+bool LLVulkanContext::setMainUIRecorder(VkUISurfaceRecorder recorder)
+{
+    if (!mImpl || (recorder && !mImpl->ensureSurfaceCompletion())) return false;
+    mImpl->mMainUIRecorder = std::move(recorder);
+    return true;
+}
+
+U64 LLVulkanContext::completedUISurfaceSerial()
+{
+    if (!mImpl || !mImpl->mSurfaceCompletion || vkDeviceIsLost()) return 0;
+    uint64_t value = 0;
+    const VkResult result = vkGetSemaphoreCounterValue(mImpl->mDevice.device(), mImpl->mSurfaceCompletion, &value);
+    if (result == VK_SUCCESS) mImpl->mSurfaceCompleted = value;
+    else if (result == VK_ERROR_DEVICE_LOST)
+        vkDeviceLostRaise("UI target completion query", result, "graphics", __FILE__, __LINE__);
+    return mImpl->mSurfaceCompleted;
+}
+
+VkDeviceContext* LLVulkanContext::uiDeviceContext()
+{
+    return mInitialized && mImpl && !vkDeviceIsLost() ? &mImpl->mDevice : nullptr;
+}
+
+LLCleanRendererVK* LLVulkanContext::uiWorldRenderer()
+{
+    return mInitialized && mImpl && !vkDeviceIsLost() ? mImpl->mWorld : nullptr;
+}
+
+void LLVulkanContext::setUIRecorderShutdown(std::function<void(U64)> callback)
+{
+    if (mImpl) mImpl->mUIRecorderShutdown = std::move(callback);
+}
+
+bool LLVulkanContext::renderUIWindow(NativeSurfaceId handle, const VkUISurfaceRecorder& recorder, bool advanceFrame)
+{
+    if (!mImpl || !recorder || mImpl->mAuxUIRecorder || !mImpl->ensureSurfaceCompletion()) return false;
+    struct Reset { const VkUISurfaceRecorder*& value; ~Reset() { value = nullptr; } } reset{mImpl->mAuxUIRecorder};
+    mImpl->mAuxUIRecorder = &recorder;
+    return renderUIWindow(handle, std::function<void()>(), advanceFrame);
+}
+
 bool LLVulkanContext::renderFrame(const std::function<void()>& uiRender,
                                   const LLVKWorldFrame* world)
 {
@@ -2479,6 +2985,7 @@ bool LLVulkanContext::renderFrame(const std::function<void()>& uiRender,
     // If a UI render is supplied and the facade is ready, buffer the whole UI pass
     // now (CPU-side: gGL calls dispatch into gVK, filling batches). This must run
     // BEFORE command recording; gVK.recordFrame(cmd) lays the batches down below.
+    uint64_t targetSerial = 0;
     const bool doUI = uiRender && mImpl->mFacadeReady;
     if (doUI)
     {
@@ -2705,7 +3212,7 @@ bool LLVulkanContext::renderFrame(const std::function<void()>& uiRender,
             { VK_HITCH_SCOPE("ws_temporal"); mImpl->mWorld->setTemporal(*world); }
             mImpl->mWorld->mHideSelf = world->hide_self;
             mImpl->mWorld->mHideSelfHead = world->hide_self_head;
-            mImpl->mWorld->mOrthoView = world->ortho_view;   // <GMDX> orthographic view
+            mImpl->mWorld->mOrthoView = world->ortho_view;   // orthographic view (GunMetal-DX port)
             { VK_HITCH_SCOPE("ws_selection"); mImpl->mWorld->setSelection(*world); }
             { VK_HITCH_SCOPE("ws_pick"); mImpl->mWorld->setPick(*world); }   // raster (#702) + particle (#481) cursor pick rays
             { VK_HITCH_SCOPE("ws_acoustics"); mImpl->mWorld->setAcoustics(*world); }   // acoustics probe (#683)
@@ -2769,10 +3276,30 @@ bool LLVulkanContext::renderFrame(const std::function<void()>& uiRender,
         // #1074 VR: the eye-size world, aspect-fit onto the window (the mirror), before the UI.
         if (vrWorld) mImpl->vrRecordMirror(cmd, img, ext);
 
+        if (uiRecords && mImpl->mMainUIRecorder && !headless)
+        {
+            VkUISurfaceTarget target;
+            target.cmd = cmd;
+            target.colorImage = img;
+            target.colorView = view;
+            target.colorFormat = mImpl->mSwapchain.format();
+            target.extent = ext;
+            target.dpiScaleX = target.dpiScaleY = SDL_GetWindowDisplayScale(mImpl->mWindow);
+            target.frameSerial = targetSerial = mImpl->reserveSurfaceSerial();
+            target.completedSerial = mImpl->mSurfaceCompleted;
+            target.sceneImage = img;
+            target.sceneView = view;
+            target.sceneFormat = target.colorFormat;
+            target.sceneExtent = ext;
+            target.sceneLayout = target.colorLayout;
+            target.sceneUsage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+            mImpl->mMainUIRecorder(target);
+        }
         // UI ON TOP: replay the buffered UI batches over the (cleared + world)
         // color. Its own dynamic-rendering scope also LOADs, so it composites.
         if (uiRecords)
         {
+            if (mImpl->mMainUIRecorder && !targetSerial) targetSerial = mImpl->reserveSurfaceSerial();
             VK_HITCH_SCOPE("vk_uiRecord");
             vkBreadcrumb(cmd, "f_ui");
             // #1076 VR: the same UI into the wall's image first (the batches stay for the
@@ -2780,6 +3307,20 @@ bool LLVulkanContext::renderFrame(const std::function<void()>& uiRender,
             if (vrUi)
             {
                 gVK.replayTo(cmd, slot, mImpl->mVrUiTarget.view);
+                if (mImpl->mMainUIRecorder)
+                {
+                    VkUISurfaceTarget target;
+                    target.surfaceID = NativeSurfaceVRUI;
+                    target.cmd = cmd;
+                    target.colorImage = mImpl->mVrUiTarget.image;
+                    target.colorView = mImpl->mVrUiTarget.view;
+                    target.colorFormat = mImpl->mVrUiTarget.format;
+                    target.extent = ext;
+                    target.dpiScaleX = target.dpiScaleY = SDL_GetWindowDisplayScale(mImpl->mWindow);
+                    target.frameSerial = targetSerial;
+                    target.completedSerial = mImpl->mSurfaceCompleted;
+                    mImpl->mMainUIRecorder(target);
+                }
                 imageBarrier(cmd, mImpl->mVrUiTarget.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                              VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                              VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
@@ -2823,9 +3364,10 @@ bool LLVulkanContext::renderFrame(const std::function<void()>& uiRender,
                                                 vrUi ? mImpl->mVrUiTarget.image : VK_NULL_HANDLE, worldLayers,
                                                 haveDepth ? &xrDepth : nullptr);
         }
-        // <GMDX> instant replay: the finished frame, UI included (in world only)
+        // Instant replay: the finished frame, UI included (in world only; GunMetal-DX port).
+        // Off: one cached-setting test (llinstantreplay.cpp).
         if (doWorld && !headless && !vkDeviceIsLost())   // (#1074 headless VR frames have no window image)
-            GMDXReplay::captureFrame(cmd, img, mImpl->mSwapchain.format(), ext.width, ext.height, mImpl->mDevice);
+            LLInstantReplay::captureFrame(cmd, img, mImpl->mSwapchain.format(), ext.width, ext.height, mImpl->mDevice);
         vkBreadcrumb(cmd, "f_present");
 
         if (!headless)
@@ -2856,7 +3398,7 @@ bool LLVulkanContext::renderFrame(const std::function<void()>& uiRender,
     wsi.renderFinished = headless ? VK_NULL_HANDLE : mImpl->mSwapchain.renderFinishedSemaphore(imageIndex);
     wsi.fence = mImpl->mSwapchain.inFlightFence();
     LLCleanRendererVK* dropW = doWorld ? mImpl->mWorld : nullptr;   // (re-streams after a drop)
-    const uint32_t dropsBefore = dropW ? dropW->framesDropped() : 0;   // <GMDX> instant replay
+    const uint32_t dropsBefore = dropW ? dropW->framesDropped() : 0;   // instant replay
     bool endOom = false;
     if (asyncW) endOom = !asyncW->vkEndOrNoteOom(cmd);   // (asyncSubmitFrame drops the frame)
     else
@@ -2925,12 +3467,13 @@ bool LLVulkanContext::renderFrame(const std::function<void()>& uiRender,
     // #873 live snapshot: a shot whose last frame was recorded this frame waits on this
     // frame's fence (never a device idle). (A dropped frame already failed the shot.)
     if (doWorld) mImpl->mWorld->liveSnapSubmitted(wsi.fence);
-    // <GMDX> instant replay: queue the encode, or forget the capture of a dropped frame (#697 paths)
-    if (!vkDeviceIsLost()) GMDXReplay::afterSubmit(!dropW || dropW->framesDropped() == dropsBefore);
+    // Instant replay: queue the encode, or forget the capture of a dropped frame (#697 paths)
+    if (!vkDeviceIsLost()) LLInstantReplay::afterSubmit(!dropW || dropW->framesDropped() == dropsBefore);
     LLVKHitch::timelineSubmitted();   // (frame timeline: frame start -> submit)
     // #1073 VR: release the XR images and xrEndFrame after the frame's submit (the runtime's
     // reads follow our work on the same queue), before the mirror present. Desktop: skipped.
     if (mXrSession) LLXrSession::instance().endFrame();
+    mImpl->signalSurfaceSerial(targetSerial);
     bool presentNeedsRecreate = false;
     if (headless)
     {
@@ -3002,13 +3545,37 @@ void LLVulkanContext::shutdown()
         // #135: never tear down on a lost device (some drivers crash or hang in vkDestroy*
         // after a TDR); everything is released at process exit.
         LL_WARNS("Vulkan") << "shutdown skipped: the graphics device was lost" << LL_ENDL;
-        GMDXReplay::shutdown(true);   // <GMDX> join the save thread only
+        LLInstantReplay::shutdown(true);   // instant replay: join the save thread only
         return;
     }
     if (mImpl->mDevice.device())
     {
         vkDeviceWaitIdle(mImpl->mDevice.device());
     }
+    for (auto& window : mImpl->mUIWindows) if (window) destroyUIWindow(window->surfaceID);
+    pollUIWindowRetirement();
+    if (std::any_of(mImpl->mUIWindows.begin(), mImpl->mUIWindows.end(), [](const auto& w) { return bool(w); }))
+    {
+        // Normal frame polling was stopped for shutdown. A pending presentation
+        // is never freed on a deadline; bounded resources go with process exit.
+        LL_WARNS("NativeUI") << "Pending auxiliary presentation retained until process exit" << LL_ENDL;
+        mInitialized = false;
+        return;
+    }
+    mImpl->mMainUIRecorder = {};
+    if (mImpl->mUIRecorderShutdown)
+    {
+        // Device idle above is an exact GPU proof even for a refused final marker.
+        mImpl->mSurfaceCompleted = mImpl->mSurfaceSerial;
+        mImpl->mUIRecorderShutdown(mImpl->mSurfaceCompleted);
+        mImpl->mUIRecorderShutdown = {};
+    }
+    if (mImpl->mSurfaceCompletion)
+    {
+        vkDestroySemaphore(mImpl->mDevice.device(), mImpl->mSurfaceCompletion, nullptr);
+        mImpl->mSurfaceCompletion = VK_NULL_HANDLE;
+    }
+    LLInstantReplay::shutdown(false);   // instant replay: its encoder objects go before the device
     // #1073 VR: the session, its swapchains and image views go before the device.
     if (mXrSession)
     {
@@ -3016,7 +3583,6 @@ void LLVulkanContext::shutdown()
         mXrSession = false;
         mXrPresentOverride = false;
     }
-    GMDXReplay::shutdown(false);   // <GMDX> instant replay: its encoder objects go before the device
     mImpl->vrReleaseTarget(false);   // #1074 (device idle above; none outside VR)
     // EXPERIMENTAL Vulkan world: tear down the GPU-driven world renderer first.
     if (mImpl->mWorld)

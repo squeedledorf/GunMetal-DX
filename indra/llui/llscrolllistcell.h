@@ -115,6 +115,8 @@ public:
     LLScrollListCell(const LLScrollListCell::Params&);
     virtual ~LLScrollListCell() {};
 
+    void setUseDefaultColor(bool use_default_color) { mUseDefaultColor = use_default_color; }
+
     virtual void            draw(const LLColor4& color, const LLColor4& highlight_color) {};      // truncate to given width, if possible
     virtual S32             getWidth() const {return mWidth;}
     virtual S32             getContentWidth() const { return 0; }
@@ -139,6 +141,9 @@ public:
 
     virtual bool            handleClick() { return false; }
     virtual void            setEnabled(bool enable) { }
+
+protected:
+    bool mUseDefaultColor = false;
 
 private:
     S32 mWidth;

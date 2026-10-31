@@ -26,10 +26,11 @@
 
 #include "llviewerprecompiledheaders.h"
 #include "llinventorybridge.h"
+#include "llregionmapcapture.h"   // Use as Region Map (GunMetal-DX port)
 
-#include "gmdxloadouts.h" // <GMDX> Equipment / Loadouts / Outdated shown as system folders
-#include "gmdxregioncapture.h" // <GMDX> Use as Region Map
+#include "gmdxloadouts.h" // <GMDX> Equipment / Loadouts / Outdated shown as system folders (CombatFX)
 #include "gmdxtoolbarpins.h" // <GMDX> Pin to Toolbar
+#include "slcombatfx.h"
 
 // external projects
 #include "lltransfersourceasset.h"
@@ -423,7 +424,7 @@ bool LLInvFVBridge::canCopyToClipboard() const
     {
         return true;
     }
-    // A link copies as its target. That is allowed even when the target is worn or no-copy:
+    // A link copies as its target. That is allowed even when the target is no-copy:
     // only "Paste As Link" can then use it (isClipboardPasteable() re-checks the TARGET with
     // isItemCopyable(false), so a plain "Paste" is never offered for such a target).
     static LLCachedControl<bool> inventory_linking(gSavedSettings, "InventoryLinking", true);
@@ -2426,13 +2427,8 @@ bool LLItemBridge::isItemCopyable(bool can_copy_as_link) const
         return false;
     }
 
-    // Can't copy worn objects.
-    // Worn objects are tied to their inworld conterparts
-    // Copy of modified worn object will return object with obsolete asset and inventory
-    if (get_is_item_worn(mUUID))
-    {
-        return false;
-    }
+    // Worn items copy too (#1112, as in Firestorm). The copy is made from the asset the server
+    // has, so an attachment changed since it was attached copies as it was last saved.
 
     static LLCachedControl<bool> inventory_linking(gSavedSettings, "InventoryLinking", true);
     return (can_copy_as_link && inventory_linking)
@@ -3017,7 +3013,7 @@ bool LLFolderBridge::dragCategoryIntoFolder(LLInventoryCategory* inv_cat,
         {
             is_movable = false;
         }
-        if (is_movable && move_is_into_trash)
+        if (is_movable && move_is_into_trash && SLCombatFX::enabled())   // (CombatFX off: ordinary folders)
         {
             for (int f = 0; f < GMDXLoadouts::FOLDER_COUNT; ++f)
             {
@@ -6677,9 +6673,10 @@ void LLTextureBridge::buildContextMenu(LLMenuGL& menu, U32 flags)
             {
                 disabled_items.push_back(std::string("Save As"));
             }
-            // <GMDX> a region map someone uploaded (gmdxregioncapture.h); saved to disk like Save As
+            // A region map someone uploaded (llregionmapcapture.h); saved to disk like Save As.
+            // Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
             const LLViewerInventoryItem* item = getItem();
-            if (item && GMDXRegionCapture::isMapTexture(item->getDescription()))
+            if (item && LLRegionMapCapture::isMapTexture(item->getDescription()))
             {
                 items.push_back(std::string("Use as Region Map"));
                 if (!canSaveTexture())
@@ -6687,7 +6684,6 @@ void LLTextureBridge::buildContextMenu(LLMenuGL& menu, U32 flags)
                     disabled_items.push_back(std::string("Use as Region Map"));
                 }
             }
-            // </GMDX>
         }
 
     }
@@ -6707,16 +6703,14 @@ void LLTextureBridge::performAction(LLInventoryModel* model, std::string action)
             preview_texture->saveAs();
         }
     }
-    // <GMDX>
-    else if ("use_region_map" == action)
+    else if ("use_region_map" == action)   // (GunMetal-DX port)
     {
         const LLViewerInventoryItem* item = getItem();
         if (item && canSaveTexture())
         {
-            GMDXRegionCapture::useMapTexture(item->getAssetUUID(), item->getName(), item->getDescription());
+            LLRegionMapCapture::useMapTexture(item->getAssetUUID(), item->getName(), item->getDescription());
         }
     }
-    // </GMDX>
     else if ("save_selected_as" == action)
     {
         openItem();

@@ -7,6 +7,12 @@
     <panel.string name="folder_unset">
         (will ask on first save)
     </panel.string>
+    <panel.string name="next_file_tooltip">
+        Next snapshot, for example: [PATH]
+    </panel.string>
+    <panel.string name="name_combo_tooltip">
+        How snapshots saved to disk are named. The row below shows an example; a file is never overwritten. Pattern:
+    </panel.string>
     <icon
      follows="top|left"
      height="18"
@@ -53,7 +59,7 @@
          label="Current Window"
          name="CurrentWindow"
          value="[i0,i0]" />
-        <!-- <GMDX> categorized presets (SoapStorm) merged with the GMDX sizes; headers are not selectable -->
+        <!-- categorized presets (SoapStorm, merged with GunMetal-DX sizes; ported from GunMetal-DX v0.3.0 cf5f1f4); headers are not selectable -->
         <combo_box.item
          label="── 16:9 Widescreen ──"
          name="header_16_9"
@@ -251,7 +257,7 @@
      layout="topleft"
      left="10"
      name="local_keep_aspect_check" />
-    <!-- <GMDX> landscape / portrait swap (SoapStorm) -->
+    <!-- landscape / portrait swap (SoapStorm, via GunMetal-DX v0.3.0 cf5f1f4) -->
     <button
      follows="right|top"
      height="20"
@@ -311,10 +317,48 @@
      name="image_quality_slider"
      top_pad="6"
      width="203" />
-    <!-- Output folder row. Absolute top so it does not move when the
-         JPEG-only quality slider (ends at ~158) is hidden; the panel is
-         reshaped to the 252-high container (GMDX: + the mattes row at 186),
-         putting Save/Cancel at 209. -->
+    <!-- File name and output folder rows. Absolute tops so they do not move when
+         the JPEG-only quality slider (ends at ~158) is hidden; the panel is
+         reshaped to the 276-high container (+ the mattes row at 210),
+         putting Save/Cancel at 233. -->
+    <text
+      type="string"
+      length="1"
+      follows="left|top"
+      height="13"
+      layout="topleft"
+      left="10"
+      name="local_name_label"
+      top="167"
+      width="50">
+         Name:
+     </text>
+    <!-- #788: SnapshotFileNamePattern presets; the folder row shows the next file's name -->
+    <combo_box
+     follows="left|top|right"
+     height="20"
+     layout="topleft"
+     left="65"
+     right="-5"
+     name="local_name_combo"
+     top="164">
+        <combo_box.item
+         label="Name, date and time"
+         name="name_date_time"
+         value="{name}_{date}_{time}{n:2}" />
+        <combo_box.item
+         label="Name and number"
+         name="name_number"
+         value="{name}_{n}" />
+        <combo_box.item
+         label="Name and date"
+         name="name_date"
+         value="{name}_{date}" />
+        <combo_box.item
+         label="Custom pattern..."
+         name="custom"
+         value="custom" />
+    </combo_box>
     <icon
      follows="top|left"
      height="16"
@@ -324,7 +368,7 @@
      mouse_opaque="true"
      name="local_folder_icon"
      tool_tip="Folder snapshots are saved to"
-     top="164"
+     top="188"
      width="16" />
     <text
      follows="left|top|right"
@@ -337,7 +381,7 @@
      name="local_folder_path"
      parse_urls="false"
      right="-53"
-     top="166"
+     top="190"
      type="string"
      use_ellipses="false">
         (will ask on first save)
@@ -350,7 +394,7 @@
      name="local_folder_browse_btn"
      right="-29"
      tool_tip="Choose the folder snapshots are saved to"
-     top="162"
+     top="186"
      width="22">
       <button.commit_callback
        function="Local.BrowseFolder" />
@@ -364,12 +408,12 @@
      name="local_folder_open_btn"
      right="-5"
      tool_tip="Open the snapshot folder"
-     top="162"
+     top="186"
      width="22">
       <button.commit_callback
        function="Local.OpenFolder" />
     </button>
-    <!-- <GMDX> holdout mattes beside a saved snapshot (FSSaveAvatarMasksWithSnapshot, SoapStorm) -->
+    <!-- holdout mattes beside a saved snapshot (SLSnapshotSaveAvatarMattes; SoapStorm, via GunMetal-DX v0.3.0 cf5f1f4) -->
     <check_box
      follows="left|top"
      height="16"
@@ -378,9 +422,9 @@
      left="10"
      name="local_save_holdout_mattes"
      tool_tip="Also save the avatars' alpha mattes beside the snapshot: name_matte (black on white) and name_matte_inv (white on black). While on, world snapshots render offscreen so they line up with the mattes."
-     top="186"
+     top="210"
      width="200"
-     control_name="FSSaveAvatarMasksWithSnapshot" />
+     control_name="SLSnapshotSaveAvatarMattes" />
     <button
      follows="right|bottom"
      height="23"

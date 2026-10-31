@@ -32,6 +32,8 @@
 
 #include "llpanelpeoplemenus.h"
 
+#include <memory>
+
 // newview
 #include "slavataractions.h"
 #include "llagent.h"
@@ -67,11 +69,16 @@ LLContextMenu* PeopleContextMenu::createMenu()
     LLUICtrl::EnableCallbackRegistry::ScopedRegistrar enable_registrar;
     LLContextMenu* menu;
 
+    const auto selection = std::make_shared<const uuid_vec_t>(mUUIDs);
+    const bool nearby = dynamic_cast<NearbyPeopleContextMenu*>(this) != nullptr;
+    enable_registrar.add("Avatar.CanParcelModerate", [selection, nearby](LLUICtrl*, const LLSD&) { return nearby && SLAvatarActions::canFreezeEject(*selection); });
+    enable_registrar.add("Avatar.CanEstateModerate", [selection, nearby](LLUICtrl*, const LLSD&) { return nearby && SLAvatarActions::canManageAvatarsEstate(*selection); });
+
     if ( mUUIDs.size() == 1 )
     {
         // Set up for one person selected menu
 
-        const LLUUID& id = mUUIDs.front();
+        const LLUUID id = mUUIDs.front();
         registrar.add("Avatar.Profile",         boost::bind(&LLAvatarActions::showProfile,              id));
         registrar.add("Avatar.AddFriend",       boost::bind(&LLAvatarActions::requestFriendshipDialog,  id));
         registrar.add("Avatar.RemoveFriend",    boost::bind(&LLAvatarActions::removeFriendDialog,       id));
@@ -86,25 +93,35 @@ LLContextMenu* PeopleContextMenu::createMenu()
         registrar.add("Avatar.InviteToGroup",   boost::bind(&LLAvatarActions::inviteToGroup,            id));
         registrar.add("Avatar.TeleportRequest", boost::bind(&PeopleContextMenu::requestTeleport,        this));
         registrar.add("Avatar.Calllog",         boost::bind(&LLAvatarActions::viewChatHistory,          id));
-        registrar.add("Avatar.Freeze",          [&](LLUICtrl*, const LLSD& param) { SLAvatarActions::parcelFreeze(id);});
-        registrar.add("Avatar.Eject",           [&](LLUICtrl*, const LLSD&) { SLAvatarActions::parcelEject(id); });
-        registrar.add("Avatar.CopyData",        [&](LLUICtrl*, const LLSD& param) { SLAvatarActions::copyData(id, param);});
-        registrar.add("Avatar.ManageEstate", [&](LLUICtrl*, const LLSD& param) {
+        registrar.add("Avatar.Freeze",          [id](LLUICtrl*, const LLSD&) { SLAvatarActions::parcelFreeze(id); });
+        registrar.add("Avatar.Eject",           [id](LLUICtrl*, const LLSD&) { SLAvatarActions::parcelEject(id); });
+        registrar.add("Avatar.CopyData",        [id](LLUICtrl*, const LLSD& param) { SLAvatarActions::copyData(id, param); });
+        registrar.add("Avatar.ManageEstate", [id](LLUICtrl*, const LLSD& param) {
             switch (param.asInteger())
             {
             case 0: SLAvatarActions::estateTeleportHome(id); break;
             case 1: SLAvatarActions::estateKick(id); break;
             case 2: SLAvatarActions::estateBan(id); break;
             } });
-        registrar.add("Avatar.TeleportTo", [&](LLUICtrl*, const LLSD&) { SLAvatarActions::teleportTo(id); });
-        registrar.add("Avatar.ReportAbuse", [&](LLUICtrl*, const LLSD&) { SLAvatarActions::reportAbuse(id); });
-        registrar.add("Avatar.AddToContactSet", [&](LLUICtrl*, const LLSD&) { LLAvatarActions::addToContactSet(id); }); // <FS:CR>
+        registrar.add("Avatar.TeleportTo", [id](LLUICtrl*, const LLSD&) { SLAvatarActions::teleportTo(id); });
+        registrar.add("Avatar.ReportAbuse", [id](LLUICtrl*, const LLSD&) { SLAvatarActions::reportAbuse(id); });
+        registrar.add("Avatar.AddToContactSet", [id](LLUICtrl*, const LLSD&) { LLAvatarActions::addToContactSet(id); }); // <FS:CR>
 
         enable_registrar.add("Avatar.EnableItem", boost::bind(&PeopleContextMenu::enableContextMenuItem, this, _2));
         enable_registrar.add("Avatar.CheckItem",  boost::bind(&PeopleContextMenu::checkContextMenuItem, this, _2));
 
         // create the context menu from the XUI
         menu = createFromFile("menu_people_nearby.xml");
+        if (!nearby)
+        {
+            // Ordinary People lists retain Block/Report at the root, with no
+            // moderation branch or hidden callbacks issuing parcel lookups.
+            if (LLView* manage = menu->findChildView("manage_menu", false))
+            {
+                menu->removeChild(manage);
+                manage->die();
+            }
+        }
         buildContextMenu(*menu, 0x0);
     }
     else
@@ -120,23 +137,33 @@ LLContextMenu* PeopleContextMenu::createMenu()
         // registrar.add("Avatar.Pay",          boost::bind(&LLAvatarActions::pay,                      mUUIDs)); // *TODO: unimplemented
         registrar.add("Avatar.CopyData",        [&](LLUICtrl*, const LLSD& param) { SLAvatarActions::copyData(mUUIDs, param); });
         registrar.add("Avatar.AddToContactSet", [&](LLUICtrl*, const LLSD&) { LLAvatarActions::addToContactSet(mUUIDs); }); // <FS:CR>
-        registrar.add("Avatar.Freeze",          [&](LLUICtrl*, const LLSD&) { SLAvatarActions::parcelFreeze(mUUIDs); });
-        registrar.add("Avatar.Eject",           [&](LLUICtrl*, const LLSD&) { SLAvatarActions::parcelEject(mUUIDs); });
-        registrar.add("Avatar.ManageEstate", [&](LLUICtrl*, const LLSD& param) {
+        registrar.add("Avatar.Freeze",          [selection](LLUICtrl*, const LLSD&) { SLAvatarActions::parcelFreeze(*selection); });
+        registrar.add("Avatar.Eject",           [selection](LLUICtrl*, const LLSD&) { SLAvatarActions::parcelEject(*selection); });
+        registrar.add("Avatar.ManageEstate", [selection](LLUICtrl*, const LLSD& param) {
             switch (param.asInteger())
             {
-            case 0: SLAvatarActions::estateTeleportHome(mUUIDs); break;
-            case 1: SLAvatarActions::estateKick(mUUIDs); break;
-            case 2: SLAvatarActions::estateBan(mUUIDs); break;
+            case 0: SLAvatarActions::estateTeleportHome(*selection); break;
+            case 1: SLAvatarActions::estateKick(*selection); break;
+            case 2: SLAvatarActions::estateBan(*selection); break;
             } });
 
         enable_registrar.add("Avatar.EnableItem",   boost::bind(&PeopleContextMenu::enableContextMenuItem, this, _2));
 
         // create the context menu from the XUI
         menu = createFromFile("menu_people_nearby_multiselect.xml");
+        if (!nearby)
+        {
+            if (LLView* manage = menu->findChildView("manage_menu", false))
+            {
+                menu->removeChild(manage);
+                manage->die();
+            }
+        }
         buildContextMenu(*menu, ITEM_IN_MULTI_SELECTION);
     }
 
+    if (nearby)
+        SLAvatarActions::watchModerationMenu(menu, *selection);
     return menu;
 }
 
@@ -181,7 +208,6 @@ void PeopleContextMenu::buildContextMenu(class LLMenuGL& menu, U32 flags)
         items.push_back(std::string("share"));
         items.push_back(std::string("pay"));
         items.push_back(std::string("separator_utils"));
-        items.push_back(std::string("manage_menu"));
         items.push_back(std::string("block_unblock"));
         items.push_back(std::string("report_abuse"));
         items.push_back(std::string("utils_menu"));
@@ -198,6 +224,8 @@ void PeopleContextMenu::buildContextMenu(class LLMenuGL& menu, U32 flags)
 bool PeopleContextMenu::enableContextMenuItem(const LLSD& userdata)
 {
     std::string item = userdata.asString();
+    if (mUUIDs.empty())
+        return false;
     if(gAgent.getID() == mUUIDs.front())
     {
         if (item == std::string("can_zoom_in"))
@@ -316,14 +344,6 @@ bool PeopleContextMenu::enableContextMenuItem(const LLSD& userdata)
     {
         return SLAvatarActions::canTeleportTo(mUUIDs.front());
     }
-    else if (item == std::string("can_freeze_eject"))
-    {
-        return SLAvatarActions::canFreezeEject(mUUIDs);
-    }
-    else if (item == std::string("can_manage_estate"))
-    {
-        return SLAvatarActions::canManageAvatarsEstate(mUUIDs);
-    }
     return false;
 }
 
@@ -424,23 +444,12 @@ void NearbyPeopleContextMenu::buildContextMenu(class LLMenuGL& menu, U32 flags)
         items.push_back(std::string("pay"));
         items.push_back(std::string("offer_teleport"));
         items.push_back(std::string("separator_utils"));
-        bool can_freeze = SLAvatarActions::canFreezeEject(mUUIDs);
-        bool can_em = SLAvatarActions::canManageAvatarsEstate(mUUIDs);
-        if (can_freeze || can_em)
-        {
-            items.push_back(std::string("manage_menu"));
-            if (can_freeze)
-            {
-                items.push_back(std::string("freeze"));
-                items.push_back(std::string("eject"));
-            }
-            if (can_em)
-            {
-                items.push_back(std::string("teleporthome"));
-                items.push_back(std::string("estatekick"));
-                items.push_back(std::string("estateban"));
-            }
-        }
+        items.push_back("manage_menu");
+        items.push_back("freeze");
+        items.push_back("eject");
+        items.push_back("teleporthome");
+        items.push_back("estatekick");
+        items.push_back("estateban");
         items.push_back(std::string("utils_menu"));
         items.push_back(std::string("copy_full_name"));
         items.push_back(std::string("copy_display_name"));
@@ -470,22 +479,11 @@ void NearbyPeopleContextMenu::buildContextMenu(class LLMenuGL& menu, U32 flags)
         items.push_back(std::string("manage_menu"));
         items.push_back(std::string("block_unblock"));
         items.push_back(std::string("report_abuse"));
-        bool can_freeze = SLAvatarActions::canFreezeEject(mUUIDs);
-        bool can_em = SLAvatarActions::canManageAvatarsEstate(mUUIDs);
-        if (can_freeze || can_em)
-        {
-            if (can_freeze)
-            {
-                items.push_back(std::string("freeze"));
-                items.push_back(std::string("eject"));
-            }
-            if (can_em)
-            {
-                items.push_back(std::string("teleporthome"));
-                items.push_back(std::string("estatekick"));
-                items.push_back(std::string("estateban"));
-            }
-        }
+        items.push_back("freeze");
+        items.push_back("eject");
+        items.push_back("teleporthome");
+        items.push_back("estatekick");
+        items.push_back("estateban");
         items.push_back(std::string("utils_menu"));
         items.push_back(std::string("copy_full_name"));
         items.push_back(std::string("copy_display_name"));

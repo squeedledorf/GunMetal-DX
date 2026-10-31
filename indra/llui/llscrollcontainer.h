@@ -114,6 +114,8 @@ public:
     // Smooth scrolling (UISmoothScroll): scroll by a fractional wheel / touchpad delta in
     // notches without giving the event to the scrolled contents. True if it scrolled (or ate it).
     bool            handleScrollWheelFraction(F32 notches, bool horizontal);
+    // Middle-button autoscroll (LLMiddleAutoScroll) unless a child uses the press.
+    virtual bool    handleMiddleMouseDown(S32 x, S32 y, MASK mask);
     virtual bool    handleDragAndDrop(S32 x, S32 y, MASK mask, bool drop,
                                    EDragAndDropType cargo_type,
                                    void* cargo_data,

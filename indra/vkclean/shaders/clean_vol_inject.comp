@@ -20,15 +20,11 @@
 // The haze is NOT injected: LL's analytic haze stays on the surfaces (clean_vol_apply.glsl),
 // the light pass adds only its shadowed sun scatter.
 //
-// LOCAL VOLUME LIST -- THE GPU APPEND INTERFACE. VolList = a 16 B header (x count, y
-// capacity) + `capacity` VolPrim records of 96 B. The C++ side (LLCleanVolFogVK) uploads the
-// CPU-side volumes (debug test volumes now; marked prims #720 later) and sets the header
-// every frame BEFORE this dispatch (transfer -> compute barrier). Later GPU producers
-// (weather, particles #721) append between that upload and this pass:
-//     uint i = atomicAdd(vol_hdr.x, 1u); if (i < vol_hdr.y) vol_prims[i] = rec;
-// with a compute -> compute barrier before this dispatch; this pass reads min(count,
-// capacity). Every cell walks the whole list (bounding-sphere early-out): fine for the tens
-// of volumes P1 targets -- a per-tile binning pass is the follow-up for hundreds.
+// Local volume snapshots are CPU-uploaded and GPU-read-only. Candidate selection
+// preserves list order, with a physical-mode cap of 16 and an overflow counter.
+// GPU producers must own separate device-local storage rather than append here.
+// Physical height extinction is NOT injected or filtered: integration recomputes
+// its current analytic optical depth and cap after source-history filtering.
 //
 // push p0: x 1 = local volumes on, y 1 = volumetric particles on (the bin pass ran; uEmit is
 //          written every cell), z particle noise amount [0, 1], w #954 the precipitation's motion
@@ -40,6 +36,7 @@
 //      reads no reprojection).
 layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
 
+#define CLEAN_MEDIUM_PASS
 #include "clean_frame_info.glsl"
 #include "clean_atmos_common.glsl"
 #include "clean_vol_common.glsl"
@@ -54,6 +51,7 @@ layout(set = VOL_SET, binding = 0, rgba16f) writeonly uniform image3D uCur;
 // particles are off (never touched then: p0.y gates every access).
 layout(set = VOL_SET, binding = 7, rgba16f) writeonly uniform image3D uEmit;
 
+layout(std430,set=VOL_SET,binding=14) buffer MediumStats { uvec4 mediumOverflow; };
 struct VolPrim {
     vec4 pos_shape;   // xyz centre (world), w shape: 0 box, 1 ellipsoid
     vec4 axis_x;      // xyz unit local X (world), w half extent along X (m)
@@ -121,16 +119,16 @@ float ocolTileNoise(vec3 p, int period)
 const int OCOL_TILE_CELLS = 64;   // = LLCleanVolFogVK's (the offsets wrap at 64 x bank size)
 float ocolMistDensity(vec3 P)
 {
-    if (P.z < ssr.vol_misc.z) return 0.0;   // no mist under the water
+    if (P.z < volMisc().z) return 0.0;   // no mist under the water
     const float size = max(vp.reproj[1].x, 1.0);
     const vec3 p = P / size;
     const float banks = ocolTileNoise((p + vec3(vp.reproj[0].xy, 0.0) / size) * vec3(1.0, 1.0, 2.0), OCOL_TILE_CELLS);
     const float wisps = ocolTileNoise((p + vec3(vp.reproj[0].zw, 0.0) / size) * 3.0, OCOL_TILE_CELLS * 3);
     const float n = banks * 0.7 + wisps * 0.3;
     const float z = P.z - (banks - 0.5) * vp.reproj[1].y;   // the layer's top rolls with the banks
-    const float base = ssr.vol_fog.x * exp(-ssr.vol_fog.y * max(z - ssr.vol_fog.z, 0.0));
+    const float base = volFog().x * exp(-volFog().y * max(z - volFog().z, 0.0));
     const float breakup = mix(1.0, smoothstep(0.25, 0.75, n) * 1.5, clamp(vp.reproj[1].z, 0.0, 1.0));
-    return base * breakup * smoothstep(ssr.vol_misc.z - 0.5, ssr.vol_misc.z + 0.5, P.z);
+    return base * breakup * smoothstep(volMisc().z - 0.5, volMisc().z + 0.5, P.z);
 }
 // </OCOL>
 
@@ -159,17 +157,20 @@ void main()
 {
     const uvec3 c = gl_GlobalInvocationID;
     if (any(greaterThanEqual(c, volDims()))) return;
-    const vec3 P = ssr.vol_eye.xyz + volRelPos(volSampleCoord(c));
+    const vec3 P = volEye().xyz + volRelPos(volSampleCoord(c));
 
     // 1. Height fog.
-    const float fog = vp.reproj[1].z > 0.0 ? ocolMistDensity(P) : volFogDensity(P);   // <OCOL>
-    vec3  sigma_s = fog * ssr.vol_albedo.rgb;
+    const float fog = cmOn() ? 0.0 : (vp.reproj[1].z > 0.0 ? ocolMistDensity(P) : volFogDensity(P))   // <OCOL>
+                    * gmdxHazeGuard(volEye().xyz, P);   // <GMDX> (the haze controls; clean_vol_common.glsl)
+    vec3  sigma_s = fog * volAlbedo().rgb;
     float sigma_t = fog;
 
     // 2. Local volumes.
     if (vp.p0.x > 0.5)
     {
-        const uint n = min(vol_hdr.x, vol_hdr.y);
+        const uint rawCount=min(vol_hdr.x,vol_hdr.y);
+        const uint n = min(rawCount,cmOn() ? 16u : vol_hdr.y);
+        if(cmOn() && rawCount>n) atomicAdd(mediumOverflow.y,rawCount-n);
         for (uint i = 0u; i < n; ++i)
         {
             const VolPrim v = vol_prims[i];
@@ -186,8 +187,15 @@ void main()
     //    uniform across the 4x4x4 workgroup (VP_TILE is a multiple of 4): coherent loads.
     if (vp.p0.y > 0.5)
     {
-        const uint tilesX = (volDims().x + VP_TILE - 1u) / VP_TILE;
-        const uint tl = (c.y / VP_TILE) * tilesX + c.x / VP_TILE;
+        const uvec2 sourceDims=cmOn() ? uvec2(ssr.medium[0].grid.xy+0.5) : volDims().xy;
+        const uint tilesX=(sourceDims.x+VP_TILE-1u)/VP_TILE;
+        uvec2 sourceCell=c.xy;
+        if(cmOn())
+        {
+            const vec4 clip=ssr.medium_union_vp*vec4(P-ssr.cam_origin.xyz,1.0);
+            sourceCell=uvec2(clamp((clip.xy/max(clip.w,1e-6)*0.5+0.5)*vec2(sourceDims),vec2(0.0),vec2(sourceDims)-1.0));
+        }
+        const uint tl=(sourceCell.y/VP_TILE)*tilesX+sourceCell.x/VP_TILE;
         const uint n = min(pv_tile_n[tl], VP_TILE_CAP);
         const float noiseAmt = clamp(vp.p0.z, 0.0, 1.0);
         // (noise mean ~0.5 of smoothstep(0.2, 0.8, n): the shaped density is renormalized)

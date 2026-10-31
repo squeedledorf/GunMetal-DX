@@ -35,6 +35,7 @@
 
 #include <boost/function.hpp>
 #include <boost/signals2.hpp>
+#include <map>
 
 class LLUUID;
 class LLMessageSystem;
@@ -162,6 +163,10 @@ public:
     LLParcel *getAgentOrSelectedParcel() const;
 
     bool    inAgentParcel(const LLVector3d &pos_global) const;
+
+    // Read-only parcel identity lookup. Does not alter land selection, hover or agent parcel.
+    // The callback receives owner_id, group_owned and local_id, or undefined on failure/timeout.
+    void requestParcelIdentity(const LLVector3d& pos_global, boost::function<void(const LLSD&)> callback);
 
     // Returns a pointer only when it has valid data.
     LLParcel*   getHoverParcel() const;
@@ -344,7 +349,17 @@ private:
     LLViewerTexture* getPassImage() const;
 
 private:
+    S32 nextParcelSequenceID();
     S32 nextSelectionSequenceID();
+
+    struct ParcelIdentityRequest
+    {
+        LLUUID region_id;
+        LLUUID session_id;
+        boost::function<void(const LLSD&)> callback;
+    };
+    std::map<S32, ParcelIdentityRequest> mParcelIdentityRequests;
+    S32                         mNextParcelSequenceID;
 
     bool                        mSelected;
     S32                         mSelectionSequenceID;

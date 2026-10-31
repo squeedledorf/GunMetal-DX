@@ -73,7 +73,7 @@
                      function="File.UploadBulk"
                      parameter="" />
                 </menu_item_call>
-                <!-- <GMDX> <OTS> Bulk sound upload that also writes a music-player notecard -->
+                <!-- Bulk sound upload that also writes a music-player notecard (ported from GunMetal-DX, v0.3.0 cf5f1f4) -->
                 <menu_item_call
                  label="Sounds to Notecard..."
                  layout="topleft"
@@ -84,7 +84,6 @@
                     <menu_item_call.on_enable
                      function="File.EnableUpload" />
                 </menu_item_call>
-                <!-- </OTS> </GMDX> -->
             </menu>
 
             <menu_item_call

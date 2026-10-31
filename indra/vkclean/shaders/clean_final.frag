@@ -24,7 +24,7 @@ layout(std140, set = 0, binding = 1) uniform FinalBlock {
     vec4 lens1;           // squeeze.xy, center.xy
     vec4 lens2;           // tangential.xy, CAS sharpness (0 = off), 0
     vec4 ref;             // wipe mode (0 off, 1 wipe, 2 side by side), seam position, 0, 0
-    vec4 ads;             // <GMDX> ADS vignette strength (0 = off), 0, 0, 0
+    vec4 ads;             // <GMDX> ADS vignette strength (0 = off; CombatFX), 0, 0, 0
 } fx;
 #define uRefWipeMode           int(fx.ref.x + 0.5)
 #define uRefWipePos            fx.ref.y
@@ -528,7 +528,8 @@ vec4 sampleWithReference(vec2 uv)
 
 // <GMDX> Aim-down-sights vignette (fscombatads.cpp): SoapStorm's exoVignetteF.glsl as its
 // ADS path drives it (vignette = (1, 2 * strength, 1)): a radial darkening over the whole
-// frame, from the centre out, that deepens toward the corners.
+// frame, from the centre out, that deepens toward the corners. Ported from GunMetal-DX
+// (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
 vec3 applyADSVignette(vec3 color, vec2 uv)
 {
     if (fx.ads.x <= 0.0)

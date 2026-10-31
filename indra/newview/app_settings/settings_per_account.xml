@@ -169,6 +169,17 @@
         <key>Value</key>
             <integer>0</integer>
     </map>
+    <key>SlipstreamGestureMouseButtons</key>
+        <map>
+        <key>Comment</key>
+            <string>Gestures bound to a mouse side button in the gesture editor: gesture item id -> button (MB4 / MB5) and modifier mask. Kept here because the gesture asset only stores a key.</string>
+        <key>Persist</key>
+            <integer>1</integer>
+        <key>Type</key>
+            <string>LLSD</string>
+        <key>Value</key>
+            <map />
+    </map>
     <key>SlipstreamLegacyChatMerged</key>
         <map>
         <key>Comment</key>
@@ -973,6 +984,17 @@
       <key>Value</key>
       <integer>0</integer>
     </map>
+    <key>GMDXSettingsRenamed</key>
+    <map>
+      <key>Comment</key>
+      <string>GunMetal-DX (internal): the version of the settings rename table (settings_renames_gmdx.xml: GunMetal-DX names Slipstream renamed when it ported them) this settings file has been migrated with.</string>
+      <key>Persist</key>
+      <integer>1</integer>
+      <key>Type</key>
+      <string>U32</string>
+      <key>Value</key>
+      <integer>0</integer>
+    </map>
     <!-- <GMDX> toolbar button clusters (gmdxtoolbarcluster.h) -->
     <key>GMDXToolbarClusterOffsets</key>
     <map>
@@ -985,9 +1007,63 @@
       <key>Value</key>
       <map />
     </map>
-    <!-- <GMDX> loadouts (gmdxloadouts.cpp) -->
-    <key>GMDXLoadoutCategories</key>
+    <key>SLGestureControllerButtons</key>
     <map>
+      <key>Comment</key>
+      <string>Game controller button that plays each gesture: map of gesture inventory item id to button index (see LLGameControl::Button).</string>
+      <key>Persist</key>
+      <integer>1</integer>
+      <key>Type</key>
+      <string>LLSD</string>
+      <key>Value</key>
+      <map/>
+    </map>
+  <key>SLMapShareMyGroup</key>
+  <map>
+      <key>Comment</key>
+      <string>CombatFX pings go to the members in this account's region of the group whose tag it wears (gmdxmapshare.h), and their pings are drawn. With no tag worn and nobody else to send to, sending asks for a group.</string>
+      <key>Persist</key>
+      <integer>1</integer>
+      <key>Type</key>
+      <string>Boolean</string>
+      <key>Value</key>
+      <integer>1</integer>
+  </map>
+  <key>SLMapShareTargetGroups</key>
+  <map>
+      <key>Comment</key>
+      <string>Internal (gmdxmapshare.h): groups this account keeps sending CombatFX pings to across logins, as an array of { id, on }. Only members in its region get anything.</string>
+      <key>Persist</key>
+      <integer>1</integer>
+      <key>Type</key>
+      <string>LLSD</string>
+      <key>Value</key>
+      <array />
+  </map>
+  <key>SLMapShareTargetPeople</key>
+  <map>
+      <key>Comment</key>
+      <string>Internal (gmdxmapshare.h): people this account keeps sending CombatFX pings to across logins, as an array of { id, on }; their pings are drawn too.</string>
+      <key>Persist</key>
+      <integer>1</integer>
+      <key>Type</key>
+      <string>LLSD</string>
+      <key>Value</key>
+      <array />
+  </map>
+  <key>SLMapShareBlocked</key>
+  <map>
+      <key>Comment</key>
+      <string>People whose CombatFX pings this account never draws (the per-sender mute; gmdxmapshare.h), as an array of avatar ids: their lines stay plain chat text. Set in Preferences &gt; Combat &gt; Pings.</string>
+      <key>Persist</key>
+      <integer>1</integer>
+      <key>Type</key>
+      <string>LLSD</string>
+      <key>Value</key>
+      <array />
+  </map>
+  <key>SLLoadoutCategories</key>
+  <map>
       <key>Comment</key>
       <string>Loadout categories in slot order, separated by |. Each is a folder in Equipment; quick swap Alt+1..4 opens slots 1 to 4.</string>
       <key>Persist</key>
@@ -996,9 +1072,9 @@
       <string>String</string>
       <key>Value</key>
       <string>Layer 1|Layer 2|Layer 3|Utility</string>
-    </map>
-    <key>GMDXLoadoutWatchTags</key>
-    <map>
+  </map>
+  <key>SLLoadoutWatchTags</key>
+  <map>
       <key>Comment</key>
       <string>Weapon sorter: tags (comma separated, any case, e.g. [Ash]) a group puts on its weapons. An object or folder that arrives with one is offered for Equipment, or to replace an older version there. Empty: off.</string>
       <key>Persist</key>
@@ -1007,55 +1083,11 @@
       <string>String</string>
       <key>Value</key>
       <string />
-    </map>
-    <key>GMDXMapShareMyGroup</key>
-    <map>
+  </map>
+  <key>SLLoadoutFolderEquipment</key>
+  <map>
       <key>Comment</key>
-      <string>This account's map shares and pings go to the members in its region of the group whose tag it wears (gmdxmapshare.h), and their shares are drawn on its map. With no tag worn and nobody else in Send To, sending asks for a group. Set in Preferences &gt; Combat &gt; Map Share or the mini-map's Ping &gt; Send To.</string>
-      <key>Persist</key>
-      <integer>1</integer>
-      <key>Type</key>
-      <string>Boolean</string>
-      <key>Value</key>
-      <integer>1</integer>
-    </map>
-    <key>GMDXMapShareTargetGroups</key>
-    <map>
-      <key>Comment</key>
-      <string>Groups this account keeps in its map share Send To list across logins (gmdxmapshare.h), as an array of { id, on } (on: ticked, gets shares and pings, and its members' shares are drawn). Groups added without Keep last the session. Only members in its region get anything. Set with the mini-map's Ping &gt; Send To.</string>
-      <key>Persist</key>
-      <integer>1</integer>
-      <key>Type</key>
-      <string>LLSD</string>
-      <key>Value</key>
-      <array />
-    </map>
-    <key>GMDXMapShareTargetPeople</key>
-    <map>
-      <key>Comment</key>
-      <string>People this account keeps in its map share Send To list across logins (gmdxmapshare.h), as an array of { id, on }. Their shares are drawn on its map, ticked or not; ticked, they get its shares and pings while in its region. People added without Keep last the session and are dropped once they leave the region; Always on a stranger's mark or zone adds them kept and not ticked. Set with the mini-map's Ping &gt; Send To.</string>
-      <key>Persist</key>
-      <integer>1</integer>
-      <key>Type</key>
-      <string>LLSD</string>
-      <key>Value</key>
-      <array />
-    </map>
-    <key>GMDXMapShareBlocked</key>
-    <map>
-      <key>Comment</key>
-      <string>People whose shared marks, zones and pings this account never draws (gmdxmapshare.h), as an array of avatar ids, even when they are in its Send To list or a group it sends to: their share lines stay plain chat text. Added with a shared item's right-click &quot;Block Map Shares From&quot; or Mute on a stranger's mark or zone; cleared with the mini-map's Show &gt; Unblock All Map Shares.</string>
-      <key>Persist</key>
-      <integer>1</integer>
-      <key>Type</key>
-      <string>LLSD</string>
-      <key>Value</key>
-      <array />
-    </map>
-    <key>GMDXFolderEquipment</key>
-    <map>
-      <key>Comment</key>
-      <string>Id of the inventory folder GunMetal-DX uses as Equipment (shown like a system folder). Empty: found by name, or made, on first use.</string>
+      <string>CombatFX loadouts: id of the inventory folder used as Equipment (shown like a system folder while CombatFX is on). Empty: found by name, or made after you confirm.</string>
       <key>HideFromEditor</key>
       <integer>1</integer>
       <key>Persist</key>
@@ -1064,11 +1096,11 @@
       <string>String</string>
       <key>Value</key>
       <string />
-    </map>
-    <key>GMDXFolderLoadouts</key>
-    <map>
+  </map>
+  <key>SLLoadoutFolderLoadouts</key>
+  <map>
       <key>Comment</key>
-      <string>Id of the inventory folder GunMetal-DX uses as Loadouts (shown like a system folder). Empty: found by name, or made, on first use.</string>
+      <string>CombatFX loadouts: id of the inventory folder used as Loadouts (shown like a system folder while CombatFX is on). Empty: found by name, or made after you confirm.</string>
       <key>HideFromEditor</key>
       <integer>1</integer>
       <key>Persist</key>
@@ -1077,11 +1109,11 @@
       <string>String</string>
       <key>Value</key>
       <string />
-    </map>
-    <key>GMDXFolderOutdated</key>
-    <map>
+  </map>
+  <key>SLLoadoutFolderOutdated</key>
+  <map>
       <key>Comment</key>
-      <string>Id of the inventory folder GunMetal-DX uses as Outdated (shown like a system folder). Empty: found by name, or made, on first use.</string>
+      <string>CombatFX loadouts: id of the inventory folder used as Outdated (shown like a system folder while CombatFX is on). Empty: found by name, or made after you confirm.</string>
       <key>HideFromEditor</key>
       <integer>1</integer>
       <key>Persist</key>
@@ -1090,9 +1122,9 @@
       <string>String</string>
       <key>Value</key>
       <string />
-    </map>
-    <key>GMDXLoadoutWorn</key>
-    <map>
+  </map>
+  <key>SLLoadoutWorn</key>
+  <map>
       <key>Comment</key>
       <string>Folder id of the loadout last equipped (or saved from what is worn), in Loadouts.</string>
       <key>HideFromEditor</key>
@@ -1103,18 +1135,6 @@
       <string>String</string>
       <key>Value</key>
       <string />
-    </map>
-    <!-- </GMDX> -->
-    <key>OCOLGestureControllerButtons</key>
-        <map>
-        <key>Comment</key>
-            <string>Game controller button that plays each gesture: map of gesture inventory item id to button index (see LLGameControl::Button).</string>
-        <key>Persist</key>
-            <integer>1</integer>
-        <key>Type</key>
-            <string>LLSD</string>
-        <key>Value</key>
-            <map/>
-        </map>
+  </map>
 </map>
 </llsd>

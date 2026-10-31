@@ -47,6 +47,7 @@
 #include "llhudrender.h"
 #include "llviewercontrol.h"
 #include "slposelookat.h"
+#include "gmdxcombatlockout.h" // <GMDX>
 
 #include <cmath>
 
@@ -624,7 +625,7 @@ void LLHUDEffectLookAt::setSourceObject(LLViewerObject* objectp)
 void LLHUDEffectLookAt::render()
 {
     static LLCachedControl<bool> show_lookat(gSavedSettings, "SlipstreamLookAtShow", false);
-    if (show_lookat && mSourceObject.notNull())
+    if (show_lookat && !GMDXCombatLockout::active() && mSourceObject.notNull()) // <GMDX> combat render lockout
     {
         static LLCachedControl<bool> isOwnHidden(gSavedSettings, "SlipstreamLookAtHideSelf", true);
         static LLCachedControl<bool> isPrivate(gSavedSettings, "EnableLookAtTarget", false);

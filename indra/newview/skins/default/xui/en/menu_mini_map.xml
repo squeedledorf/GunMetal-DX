@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8" standalone="yes"?>
-<!-- <GMDX> Mini-map menu, grouped: View / Compass Style / Background / Show / Region Map. Items
-     that do not apply are hidden (on_visible), not greyed. -->
+<!-- <GMDX> Mini-map right-click menu: only what fits the spot clicked (LLNetMap::handleRightMouseDown
+     shows / hides the groups): an avatar's dot, my mark, my zone, someone's shared item, or the map
+     itself. Colours are one row of swatches (gmdxmenuswatchrow.h). The display settings and the
+     Region Map tools are in Map Settings (gmdxfloaterminimapsettings.h). -->
 <menu
  height="101"
  layout="topleft"
@@ -10,79 +12,19 @@
  top="724"
  visible="false"
  width="128">
-    <!-- <GMDX> on an avatar's dot (the closest under the cursor): its profile, its dot's colour -->
+    <!-- what the menu is for: the avatar's name, the mark's, the zone's, who shared it (set on right-click) -->
+    <menu_item_call
+     enabled="false"
+     label="Header"
+     name="Context Header" />
+
+    <!-- an avatar's dot (the closest under the cursor) -->
     <menu_item_call
      label="View Profile"
      name="Avatar Profile">
         <menu_item_call.on_click
          function="Minimap.Avatar.Profile" />
     </menu_item_call>
-    <menu
-     label="Dot Colour"
-     name="Avatar Dot Colour"
-     tear_off="false">
-        <menu_item_call
-         label="Red"
-         name="Avatar Dot Colour Red">
-            <menu_item_call.on_click
-             function="Minimap.Avatar.Color"
-             parameter="0" />
-        </menu_item_call>
-        <menu_item_call
-         label="Orange"
-         name="Avatar Dot Colour Orange">
-            <menu_item_call.on_click
-             function="Minimap.Avatar.Color"
-             parameter="1" />
-        </menu_item_call>
-        <menu_item_call
-         label="Yellow"
-         name="Avatar Dot Colour Yellow">
-            <menu_item_call.on_click
-             function="Minimap.Avatar.Color"
-             parameter="2" />
-        </menu_item_call>
-        <menu_item_call
-         label="Green"
-         name="Avatar Dot Colour Green">
-            <menu_item_call.on_click
-             function="Minimap.Avatar.Color"
-             parameter="3" />
-        </menu_item_call>
-        <menu_item_call
-         label="Cyan"
-         name="Avatar Dot Colour Cyan">
-            <menu_item_call.on_click
-             function="Minimap.Avatar.Color"
-             parameter="4" />
-        </menu_item_call>
-        <menu_item_call
-         label="Purple"
-         name="Avatar Dot Colour Purple">
-            <menu_item_call.on_click
-             function="Minimap.Avatar.Color"
-             parameter="5" />
-        </menu_item_call>
-        <menu_item_separator />
-        <menu_item_call
-         label="Custom..."
-         name="Avatar Dot Colour Custom">
-            <menu_item_call.on_click
-             function="Minimap.Avatar.Color"
-             parameter="custom" />
-        </menu_item_call>
-        <menu_item_call
-         label="Default"
-         name="Avatar Dot Colour Default">
-            <menu_item_call.on_click
-             function="Minimap.Avatar.Color"
-             parameter="clear" />
-            <menu_item_call.on_enable
-             function="Minimap.Avatar.HasColor" />
-        </menu_item_call>
-    </menu>
-    <menu_item_separator
-     name="Avatar Separator" />
     <menu_item_call
      label="Camera to Avatar"
      name="Cam To Avatar">
@@ -93,10 +35,176 @@
      label="Camera to Avatar"
      name="Cam To Avatars"
      tear_off="false" />
-    <menu_item_separator
-     name="Cam To Avatar Separator" />
+    <gmdx_swatch_row
+     label="Dot Colour"
+     name="Avatar Dot Colour">
+        <gmdx_swatch_row.on_click
+         function="Minimap.Avatar.Color" />
+    </gmdx_swatch_row>
+    <menu_item_call
+     label="Custom Colour..."
+     name="Avatar Dot Colour Custom">
+        <menu_item_call.on_click
+         function="Minimap.Avatar.Color"
+         parameter="custom" />
+    </menu_item_call>
+    <menu_item_call
+     label="Default Colour"
+     name="Avatar Dot Colour Default">
+        <menu_item_call.on_click
+         function="Minimap.Avatar.Color"
+         parameter="clear" />
+        <menu_item_call.on_enable
+         function="Minimap.Avatar.HasColor" />
+    </menu_item_call>
 
-    <!-- <GMDX> the spot the menu was opened on (gmdxminimapmarks.h): copy it, mark it; on a mark, the mark's items -->
+    <!-- my mark / my zone (llminimapmarks.h) -->
+    <menu_item_call
+     label="Track"
+     name="Track Mark">
+        <menu_item_call.on_click
+         function="Minimap.Mark.Track" />
+    </menu_item_call>
+    <menu_item_call
+     label="Rename..."
+     name="Rename Mark">
+        <menu_item_call.on_click
+         function="Minimap.Mark.Rename" />
+    </menu_item_call>
+    <gmdx_swatch_row
+     label="Colour"
+     name="Mark Colour">
+        <gmdx_swatch_row.on_click
+         function="Minimap.Mark.Color" />
+    </gmdx_swatch_row>
+    <menu
+     label="Line"
+     name="Zone Line"
+     tear_off="false">
+        <menu_item_call
+         label="Solid"
+         name="Zone Line Solid">
+            <menu_item_call.on_click
+             function="Minimap.Zone.Line"
+             parameter="solid" />
+        </menu_item_call>
+        <menu_item_call
+         label="Dotted"
+         name="Zone Line Dotted">
+            <menu_item_call.on_click
+             function="Minimap.Zone.Line"
+             parameter="dotted" />
+        </menu_item_call>
+    </menu>
+    <menu
+     label="Fill"
+     name="Zone Fill"
+     tear_off="false">
+        <menu_item_call
+         label="None"
+         name="Zone Fill None">
+            <menu_item_call.on_click
+             function="Minimap.Zone.Fill"
+             parameter="0" />
+        </menu_item_call>
+        <menu_item_call
+         label="Colour"
+         name="Zone Fill Colour">
+            <menu_item_call.on_click
+             function="Minimap.Zone.Fill"
+             parameter="1" />
+        </menu_item_call>
+        <menu_item_call
+         label="Caution Stripes"
+         name="Zone Fill Caution Stripes">
+            <menu_item_call.on_click
+             function="Minimap.Zone.Fill"
+             parameter="2" />
+        </menu_item_call>
+    </menu>
+    <gmdx_swatch_row
+     label="Colour"
+     name="Zone Colour">
+        <gmdx_swatch_row.on_click
+         function="Minimap.Zone.Color" />
+    </gmdx_swatch_row>
+    <menu_item_call
+     label="Rename..."
+     name="Rename Zone">
+        <menu_item_call.on_click
+         function="Minimap.Zone.Rename" />
+    </menu_item_call>
+    <!-- sharing (gmdxmapshare.h, GMDXMapShare::fillShareMenus fills these by name on right-click):
+         my mark / zone goes out as a readable line, through my helper, to the members in this region
+         of the group whose tag I wear (Share Group), or to my Send To list. Nothing ever goes to
+         everyone in the region. -->
+    <menu
+     label="Share"
+     name="Share With"
+     tear_off="false">
+        <menu_item_call
+         label="Share to Group"
+         name="Share Group">
+            <menu_item_call.on_click
+             function="Minimap.Share"
+             parameter="group" />
+        </menu_item_call>
+        <menu_item_call
+         label="Share to My List"
+         name="Share List"
+         tool_tip="Your group (when ticked in Send To) and the groups and people ticked in Send To, those of them in this region.">
+            <menu_item_call.on_click
+             function="Minimap.Share"
+             parameter="list" />
+        </menu_item_call>
+        <menu_item_separator />
+        <menu
+         label="Send To"
+         name="Share Send To"
+         tear_off="false" />
+    </menu>
+    <menu_item_call
+     label="Remove"
+     name="Remove Mark">
+        <menu_item_call.on_click
+         function="Minimap.Mark.Remove" />
+    </menu_item_call>
+    <menu_item_call
+     label="Remove"
+     name="Remove Zone">
+        <menu_item_call.on_click
+         function="Minimap.Zone.Remove" />
+    </menu_item_call>
+
+    <!-- someone's shared mark, zone or ping: kept as mine or removed (the sender's name set on right-click) -->
+    <menu_item_call
+     label="Keep as Mine"
+     name="Keep Shared">
+        <menu_item_call.on_click
+         function="Minimap.Shared.Keep" />
+    </menu_item_call>
+    <menu_item_call
+     label="Remove"
+     name="Remove Shared">
+        <menu_item_call.on_click
+         function="Minimap.Shared.Remove" />
+    </menu_item_call>
+    <menu_item_call
+     label="Remove All From Sender"
+     name="Remove Shared Sender">
+        <menu_item_call.on_click
+         function="Minimap.Shared.RemoveSender" />
+    </menu_item_call>
+    <menu_item_call
+     label="Block Map Shares From Sender"
+     name="Block Shared Sender">
+        <menu_item_call.on_click
+         function="Minimap.Shared.BlockSender" />
+    </menu_item_call>
+    <menu_item_separator
+     name="Item Separator" />
+
+    <!-- the spot (a mark: its own position) -->
     <menu_item_call
      label="Copy Coordinates"
      name="Copy Coordinates">
@@ -113,118 +221,14 @@
         <menu_item_call.on_enable
          function="Minimap.CanShowLocation" />
     </menu_item_call>
-    <menu
-     label="Add Mark Here"
-     name="Add Mark Here"
-     tear_off="false">
-        <menu_item_call
-         label="Red"
-         name="Add Mark Here Red">
-            <menu_item_call.on_click
-             function="Minimap.Mark.Add"
-             parameter="0" />
-        </menu_item_call>
-        <menu_item_call
-         label="Orange"
-         name="Add Mark Here Orange">
-            <menu_item_call.on_click
-             function="Minimap.Mark.Add"
-             parameter="1" />
-        </menu_item_call>
-        <menu_item_call
-         label="Yellow"
-         name="Add Mark Here Yellow">
-            <menu_item_call.on_click
-             function="Minimap.Mark.Add"
-             parameter="2" />
-        </menu_item_call>
-        <menu_item_call
-         label="Green"
-         name="Add Mark Here Green">
-            <menu_item_call.on_click
-             function="Minimap.Mark.Add"
-             parameter="3" />
-        </menu_item_call>
-        <menu_item_call
-         label="Cyan"
-         name="Add Mark Here Cyan">
-            <menu_item_call.on_click
-             function="Minimap.Mark.Add"
-             parameter="4" />
-        </menu_item_call>
-        <menu_item_call
-         label="Purple"
-         name="Add Mark Here Purple">
-            <menu_item_call.on_click
-             function="Minimap.Mark.Add"
-             parameter="5" />
-        </menu_item_call>
-    </menu>
-    <menu_item_call
-     label="Track Mark"
-     name="Track Mark">
-        <menu_item_call.on_click
-         function="Minimap.Mark.Track" />
-    </menu_item_call>
-    <menu_item_call
-     label="Rename Mark..."
-     name="Rename Mark">
-        <menu_item_call.on_click
-         function="Minimap.Mark.Rename" />
-    </menu_item_call>
-    <menu
-     label="Mark Colour"
-     name="Mark Colour"
-     tear_off="false">
-        <menu_item_call
-         label="Red"
-         name="Mark Colour Red">
-            <menu_item_call.on_click
-             function="Minimap.Mark.Color"
-             parameter="0" />
-        </menu_item_call>
-        <menu_item_call
-         label="Orange"
-         name="Mark Colour Orange">
-            <menu_item_call.on_click
-             function="Minimap.Mark.Color"
-             parameter="1" />
-        </menu_item_call>
-        <menu_item_call
-         label="Yellow"
-         name="Mark Colour Yellow">
-            <menu_item_call.on_click
-             function="Minimap.Mark.Color"
-             parameter="2" />
-        </menu_item_call>
-        <menu_item_call
-         label="Green"
-         name="Mark Colour Green">
-            <menu_item_call.on_click
-             function="Minimap.Mark.Color"
-             parameter="3" />
-        </menu_item_call>
-        <menu_item_call
-         label="Cyan"
-         name="Mark Colour Cyan">
-            <menu_item_call.on_click
-             function="Minimap.Mark.Color"
-             parameter="4" />
-        </menu_item_call>
-        <menu_item_call
-         label="Purple"
-         name="Mark Colour Purple">
-            <menu_item_call.on_click
-             function="Minimap.Mark.Color"
-             parameter="5" />
-        </menu_item_call>
-    </menu>
-    <menu_item_call
-     label="Remove Mark"
-     name="Remove Mark">
-        <menu_item_call.on_click
-         function="Minimap.Mark.Remove" />
-    </menu_item_call>
+    <menu_item_separator
+     name="Spot Separator" />
+    <gmdx_swatch_row
+     label="Add Mark"
+     name="Add Mark Here">
+        <gmdx_swatch_row.on_click
+         function="Minimap.Mark.Add" />
+    </gmdx_swatch_row>
     <menu
      label="Draw Zone"
      name="Draw Zone"
@@ -255,170 +259,13 @@
          label="Dotted Lines"
          name="Draw Zone Dotted">
             <menu_item_check.on_check
-             control="GMDXMiniMapZoneDotted" />
+             control="SLMiniMapZoneDotted" />
             <menu_item_check.on_click
              function="ToggleControl"
-             parameter="GMDXMiniMapZoneDotted" />
+             parameter="SLMiniMapZoneDotted" />
         </menu_item_check>
     </menu>
-    <menu
-     label="Zone Line"
-     name="Zone Line"
-     tear_off="false">
-        <menu_item_call
-         label="Solid"
-         name="Zone Line Solid">
-            <menu_item_call.on_click
-             function="Minimap.Zone.Line"
-             parameter="solid" />
-        </menu_item_call>
-        <menu_item_call
-         label="Dotted"
-         name="Zone Line Dotted">
-            <menu_item_call.on_click
-             function="Minimap.Zone.Line"
-             parameter="dotted" />
-        </menu_item_call>
-    </menu>
-    <menu
-     label="Zone Fill"
-     name="Zone Fill"
-     tear_off="false">
-        <menu_item_call
-         label="None"
-         name="Zone Fill None">
-            <menu_item_call.on_click
-             function="Minimap.Zone.Fill"
-             parameter="0" />
-        </menu_item_call>
-        <menu_item_call
-         label="Colour"
-         name="Zone Fill Colour">
-            <menu_item_call.on_click
-             function="Minimap.Zone.Fill"
-             parameter="1" />
-        </menu_item_call>
-        <menu_item_call
-         label="Caution Stripes"
-         name="Zone Fill Caution Stripes">
-            <menu_item_call.on_click
-             function="Minimap.Zone.Fill"
-             parameter="2" />
-        </menu_item_call>
-    </menu>
-    <menu
-     label="Zone Colour"
-     name="Zone Colour"
-     tear_off="false">
-        <menu_item_call
-         label="Red"
-         name="Zone Colour Red">
-            <menu_item_call.on_click
-             function="Minimap.Zone.Color"
-             parameter="0" />
-        </menu_item_call>
-        <menu_item_call
-         label="Orange"
-         name="Zone Colour Orange">
-            <menu_item_call.on_click
-             function="Minimap.Zone.Color"
-             parameter="1" />
-        </menu_item_call>
-        <menu_item_call
-         label="Yellow"
-         name="Zone Colour Yellow">
-            <menu_item_call.on_click
-             function="Minimap.Zone.Color"
-             parameter="2" />
-        </menu_item_call>
-        <menu_item_call
-         label="Green"
-         name="Zone Colour Green">
-            <menu_item_call.on_click
-             function="Minimap.Zone.Color"
-             parameter="3" />
-        </menu_item_call>
-        <menu_item_call
-         label="Cyan"
-         name="Zone Colour Cyan">
-            <menu_item_call.on_click
-             function="Minimap.Zone.Color"
-             parameter="4" />
-        </menu_item_call>
-        <menu_item_call
-         label="Purple"
-         name="Zone Colour Purple">
-            <menu_item_call.on_click
-             function="Minimap.Zone.Color"
-             parameter="5" />
-        </menu_item_call>
-    </menu>
-    <menu_item_call
-     label="Rename Zone..."
-     name="Rename Zone">
-        <menu_item_call.on_click
-         function="Minimap.Zone.Rename" />
-    </menu_item_call>
-    <menu_item_call
-     label="Remove Zone"
-     name="Remove Zone">
-        <menu_item_call.on_click
-         function="Minimap.Zone.Remove" />
-    </menu_item_call>
-    <!-- <GMDX> sharing (gmdxmapshare.h): my mark / zone under the menu goes out as a readable line,
-         through my helper, to the members in this region of the group whose tag I wear (Share to Group,
-         its name filled in on right-click), or to my Send To list; a shared one (someone else's) is kept
-         as mine or removed; a ping on an empty spot goes to my Send To list. Both Send To menus are
-         filled in on right-click. Nothing ever goes to everyone in the region. -->
-    <menu
-     label="Share"
-     name="Share With"
-     tear_off="false">
-        <menu_item_call
-         label="Share to Group"
-         name="Share Group">
-            <menu_item_call.on_click
-             function="Minimap.Share"
-             parameter="group" />
-        </menu_item_call>
-        <menu_item_call
-         label="Share to My List"
-         name="Share List"
-         tool_tip="Your group (when ticked in Send To) and the groups and people ticked in Send To, those of them in this region.">
-            <menu_item_call.on_click
-             function="Minimap.Share"
-             parameter="list" />
-        </menu_item_call>
-        <menu_item_separator />
-        <menu
-         label="Send To"
-         name="Share Send To"
-         tear_off="false" />
-    </menu>
-    <menu_item_call
-     label="Keep as Mine"
-     name="Keep Shared">
-        <menu_item_call.on_click
-         function="Minimap.Shared.Keep" />
-    </menu_item_call>
-    <menu_item_call
-     label="Remove"
-     name="Remove Shared">
-        <menu_item_call.on_click
-         function="Minimap.Shared.Remove" />
-    </menu_item_call>
-    <menu_item_call
-     label="Remove All From Sender"
-     name="Remove Shared Sender">
-        <menu_item_call.on_click
-         function="Minimap.Shared.RemoveSender" />
-    </menu_item_call>
-    <menu_item_call
-     label="Block Map Shares From Sender"
-     name="Block Shared Sender">
-        <menu_item_call.on_click
-         function="Minimap.Shared.BlockSender" />
-    </menu_item_call>
+    <!-- a ping here (on an avatar's dot too) to my Send To list (filled in on right-click) -->
     <menu
      label="Ping"
      name="Ping"
@@ -450,542 +297,16 @@
          name="Ping Send To"
          tear_off="false" />
     </menu>
-    <!-- </GMDX> -->
+
+    <!-- the land and the world map (the map itself only) -->
     <menu_item_separator
-     name="Marks Separator" />
-
-    <menu
-     label="View"
-     name="View"
-     tear_off="false">
-        <menu_item_check
-         label="Follow Me"
-         name="View Follow Me">
-            <menu_item_check.on_check
-             function="Minimap.ViewMode.Check"
-             parameter="follow" />
-            <menu_item_check.on_click
-             function="Minimap.ViewMode.Set"
-             parameter="follow" />
-        </menu_item_check>
-        <menu_item_check
-         label="Whole Region"
-         name="View Whole Region">
-            <menu_item_check.on_check
-             function="Minimap.ViewMode.Check"
-             parameter="region" />
-            <menu_item_check.on_click
-             function="Minimap.ViewMode.Set"
-             parameter="region" />
-        </menu_item_check>
-        <menu_item_separator>
-            <menu_item_separator.on_visible
-             function="Minimap.ViewMode.Check"
-             parameter="follow" />
-        </menu_item_separator>
-        <menu
-         label="Zoom"
-         name="Zoom"
-         tear_off="false">
-            <menu_item_check
-             label="Very close"
-             name="Zoom very close">
-                <menu_item_check.on_check
-                 function="Minimap.Zoom.Check"
-                 parameter="very close" />
-                <menu_item_check.on_click
-                 function="Minimap.Zoom.Set"
-                 parameter="very close" />
-            </menu_item_check>
-            <menu_item_check
-             label="Close"
-             name="Zoom close">
-                <menu_item_check.on_check
-                 function="Minimap.Zoom.Check"
-                 parameter="close" />
-                <menu_item_check.on_click
-                 function="Minimap.Zoom.Set"
-                 parameter="close" />
-            </menu_item_check>
-            <menu_item_check
-             label="Medium"
-             name="Zoom medium">
-                <menu_item_check.on_check
-                 function="Minimap.Zoom.Check"
-                 parameter="medium" />
-                <menu_item_check.on_click
-                 function="Minimap.Zoom.Set"
-                 parameter="medium" />
-            </menu_item_check>
-            <menu_item_check
-             label="Far"
-             name="Zoom far">
-                <menu_item_check.on_check
-                 function="Minimap.Zoom.Check"
-                 parameter="far" />
-                <menu_item_check.on_click
-                 function="Minimap.Zoom.Set"
-                 parameter="far" />
-            </menu_item_check>
-        </menu>
-        <menu_item_check
-         label="Auto-center"
-         name="Auto-center map">
-            <menu_item_check.on_check
-             control="MiniMapAutoCenter" />
-            <menu_item_check.on_click
-             function="ToggleControl"
-             parameter="MiniMapAutoCenter" />
-            <menu_item_check.on_visible
-             function="Minimap.ViewMode.Check"
-             parameter="follow" />
-        </menu_item_check>
-        <menu_item_check
-         label="Hide window buttons"
-         name="Hide Window Buttons">
-            <menu_item_check.on_check
-             control="GMDXMiniMapHideButtons" />
-            <menu_item_check.on_click
-             function="ToggleControl"
-             parameter="GMDXMiniMapHideButtons" />
-        </menu_item_check>
-        <menu_item_call
-         label="Re-center now"
-         name="Re-center map">
-            <menu_item_call.on_click
-             function="Minimap.Center.Activate" />
-            <menu_item_call.on_enable
-             function="Minimap.CanRecenter" />
-            <menu_item_call.on_visible
-             function="Minimap.ViewMode.Check"
-             parameter="follow" />
-        </menu_item_call>
-    </menu>
-
-    <!-- <GMDX> Rotation: Follow Me turns with the camera; Whole Region turns around the agent
-         (round / square radar) or turns the whole region (GMDXMiniMapRotateView). The items that
-         do not apply to the view are hidden in LLNetMap::handleRightMouseDown. -->
-    <menu
-     label="Rotation"
-     name="Rotation"
-     tear_off="false">
-        <menu_item_check
-         label="North at top"
-         name="North at top">
-            <menu_item_check.on_check
-             function="Minimap.MapOrientation.Check"
-             parameter="north_at_top" />
-            <menu_item_check.on_click
-             function="Minimap.MapOrientation.Set"
-             parameter="north_at_top" />
-        </menu_item_check>
-        <menu_item_check
-         label="Camera at top"
-         name="Camera at top">
-            <menu_item_check.on_check
-             function="Minimap.MapOrientation.Check"
-             parameter="camera_at_top" />
-            <menu_item_check.on_click
-             function="Minimap.MapOrientation.Set"
-             parameter="camera_at_top" />
-        </menu_item_check>
-        <menu_item_check
-         label="Turn around me (round)"
-         name="Turn round">
-            <menu_item_check.on_check
-             function="Minimap.MapOrientation.Check"
-             parameter="rotate_round" />
-            <menu_item_check.on_click
-             function="Minimap.MapOrientation.Set"
-             parameter="rotate_round" />
-        </menu_item_check>
-        <menu_item_check
-         label="Turn around me (square)"
-         name="Turn square">
-            <menu_item_check.on_check
-             function="Minimap.MapOrientation.Check"
-             parameter="rotate_square" />
-            <menu_item_check.on_click
-             function="Minimap.MapOrientation.Set"
-             parameter="rotate_square" />
-        </menu_item_check>
-        <menu_item_check
-         label="Turn the whole region"
-         name="Turn whole">
-            <menu_item_check.on_check
-             function="Minimap.MapOrientation.Check"
-             parameter="rotate_whole" />
-            <menu_item_check.on_click
-             function="Minimap.MapOrientation.Set"
-             parameter="rotate_whole" />
-        </menu_item_check>
-    </menu>
-
-    <menu
-     label="Compass Style"
-     name="Compass Style"
-     tear_off="false">
-        <menu_item_check
-         label="Gunmetal Frame"
-         name="Compass Gunmetal Frame">
-            <menu_item_check.on_check
-             function="Minimap.CompassStyle.Check"
-             parameter="0" />
-            <menu_item_check.on_click
-             function="Minimap.CompassStyle.Set"
-             parameter="0" />
-        </menu_item_check>
-        <menu_item_check
-         label="Edge Pills"
-         name="Compass Edge Pills">
-            <menu_item_check.on_check
-             function="Minimap.CompassStyle.Check"
-             parameter="1" />
-            <menu_item_check.on_click
-             function="Minimap.CompassStyle.Set"
-             parameter="1" />
-        </menu_item_check>
-        <menu_item_check
-         label="Heading Tape"
-         name="Compass Heading Tape">
-            <menu_item_check.on_check
-             function="Minimap.CompassStyle.Check"
-             parameter="2" />
-            <menu_item_check.on_click
-             function="Minimap.CompassStyle.Set"
-             parameter="2" />
-        </menu_item_check>
-    </menu>
-
-    <menu
-     label="Background"
-     name="Background"
-     tear_off="false">
-        <menu_item_check
-         label="Painted terrain"
-         name="Background Painted">
-            <menu_item_check.on_check
-             function="Minimap.Background.Check"
-             parameter="painted" />
-            <menu_item_check.on_click
-             function="Minimap.Background.Set"
-             parameter="painted" />
-        </menu_item_check>
-        <menu_item_check
-         label="Region Terrain Map"
-         name="Background Region Terrain">
-            <menu_item_check.on_check
-             function="Minimap.Background.Check"
-             parameter="terrain" />
-            <menu_item_check.on_click
-             function="Minimap.Background.Set"
-             parameter="terrain" />
-        </menu_item_check>
-        <menu_item_check
-         label="World map tile"
-         name="Background Map Tile">
-            <menu_item_check.on_check
-             function="Minimap.Background.Check"
-             parameter="tile" />
-            <menu_item_check.on_click
-             function="Minimap.Background.Set"
-             parameter="tile" />
-        </menu_item_check>
-        <menu_item_separator />
-        <menu_item_check
-         label="Prefer captured map when there is one"
-         name="Use Captured Region Maps">
-            <menu_item_check.on_check
-             control="GMDXMinimapUseCapturedMaps" />
-            <menu_item_check.on_click
-             function="ToggleControl"
-             parameter="GMDXMinimapUseCapturedMaps" />
-        </menu_item_check>
-    </menu>
-
-    <menu
-     label="Opacity"
-     name="Opacity"
-     tear_off="false">
-        <menu_item_check
-         label="100%"
-         name="Opacity 100">
-            <menu_item_check.on_check
-             function="Minimap.Opacity.Check"
-             parameter="1.0" />
-            <menu_item_check.on_click
-             function="Minimap.Opacity.Set"
-             parameter="1.0" />
-        </menu_item_check>
-        <menu_item_check
-         label="75%"
-         name="Opacity 75">
-            <menu_item_check.on_check
-             function="Minimap.Opacity.Check"
-             parameter="0.75" />
-            <menu_item_check.on_click
-             function="Minimap.Opacity.Set"
-             parameter="0.75" />
-        </menu_item_check>
-        <menu_item_check
-         label="50%"
-         name="Opacity 50">
-            <menu_item_check.on_check
-             function="Minimap.Opacity.Check"
-             parameter="0.5" />
-            <menu_item_check.on_click
-             function="Minimap.Opacity.Set"
-             parameter="0.5" />
-        </menu_item_check>
-        <menu_item_check
-         label="25%"
-         name="Opacity 25">
-            <menu_item_check.on_check
-             function="Minimap.Opacity.Check"
-             parameter="0.25" />
-            <menu_item_check.on_click
-             function="Minimap.Opacity.Set"
-             parameter="0.25" />
-        </menu_item_check>
-    </menu>
-
-    <menu
-     label="Show"
-     name="Show"
-     tear_off="false">
-        <menu_item_check
-         label="Marks"
-         name="Show Marks">
-            <menu_item_check.on_check
-             control="GMDXMiniMapShowMarks" />
-            <menu_item_check.on_click
-             function="ToggleControl"
-             parameter="GMDXMiniMapShowMarks" />
-        </menu_item_check>
-        <menu_item_check
-         label="Zones"
-         name="Show Zones">
-            <menu_item_check.on_check
-             control="GMDXMiniMapShowZones" />
-            <menu_item_check.on_click
-             function="ToggleControl"
-             parameter="GMDXMiniMapShowZones" />
-        </menu_item_check>
-        <!-- <GMDX> what others shared (gmdxmapshare.h) -->
-        <menu_item_check
-         label="Shared Marks, Zones and Pings"
-         name="Show Shared">
-            <menu_item_check.on_check
-             control="GMDXMapShareShow" />
-            <menu_item_check.on_click
-             function="ToggleControl"
-             parameter="GMDXMapShareShow" />
-        </menu_item_check>
-        <menu_item_call
-         label="Clear Shared Items"
-         name="Clear Shared">
-            <menu_item_call.on_click
-             function="Minimap.Shared.Clear" />
-        </menu_item_call>
-        <!-- shares are drawn only from my Send To list and the groups I send to; the blocked count
-             is filled in on right-click -->
-        <menu_item_call
-         label="Unblock All Map Shares"
-         name="Unblock Map Shares">
-            <menu_item_call.on_click
-             function="Minimap.Shared.UnblockAll" />
-        </menu_item_call>
-        <menu_item_check
-         label="Cursor Coordinates"
-         name="Show Cursor Coordinates">
-            <menu_item_check.on_check
-             control="GMDXMiniMapCursorCoords" />
-            <menu_item_check.on_click
-             function="ToggleControl"
-             parameter="GMDXMiniMapCursorCoords" />
-        </menu_item_check>
-        <menu_item_check
-         label="Objects"
-         name="Render Objects">
-            <menu_item_check.on_check
-             control="SlipstreamMinimapRenderObjects" />
-            <menu_item_check.on_click
-             function="ToggleControl"
-             parameter="SlipstreamMinimapRenderObjects" />
-        </menu_item_check>
-        <menu_item_check
-         enabled_control="SlipstreamMinimapRenderObjects"
-         label="Physical objects only (bullets)"
-         name="Only Render Physical Objects">
-            <menu_item_check.on_check
-             control="GMDXMiniMapPhysicalOnly" />
-            <menu_item_check.on_click
-             function="ToggleControl"
-             parameter="GMDXMiniMapPhysicalOnly" />
-        </menu_item_check>
-        <menu_item_check
-         label="Guide line"
-         name="Show Guide Line">
-            <menu_item_check.on_check
-             control="SlipstreamMinimapGuideLine" />
-            <menu_item_check.on_click
-             function="ToggleControl"
-             parameter="SlipstreamMinimapGuideLine" />
-        </menu_item_check>
-        <menu_item_check
-         label="Chat rings"
-         name="Show Chat Rings">
-            <menu_item_check.on_check
-             control="SlipstreamMinimapChatRings" />
-            <menu_item_check.on_click
-             function="ToggleControl"
-             parameter="SlipstreamMinimapChatRings" />
-        </menu_item_check>
-        <!-- <GMDX> avatars high above me (llnetmap.cpp, gmdx_hidden_above); the height in a small floater -->
-        <menu_item_check
-         label="Hide avatars high above me"
-         name="Hide Avatars Above">
-            <menu_item_check.on_check
-             control="GMDXMiniMapHideAbove" />
-            <menu_item_check.on_click
-             function="ToggleControl"
-             parameter="GMDXMiniMapHideAbove" />
-        </menu_item_check>
-        <menu_item_call
-         label="Hide height..."
-         name="Hide Avatars Above Height">
-            <menu_item_call.on_click
-             function="Floater.Show"
-             parameter="gmdx_minimap_hide_above" />
-        </menu_item_call>
-        <!-- </GMDX> -->
-        <menu_item_separator />
-        <menu_item_check
-         label="Parcel boundaries"
-         name="Parcel Boundaries">
-            <menu_item_check.on_check
-             control="MiniMapShowPropertyLines" />
-            <menu_item_check.on_click
-             function="ToggleControl"
-             parameter="MiniMapShowPropertyLines" />
-        </menu_item_check>
-        <menu_item_check
-         enabled_control="MiniMapShowPropertyLines"
-         label="Parcels for sale"
-         name="Parcels For Sale">
-            <menu_item_check.on_check
-             control="SlipstreamMiniMapForSaleParcels" />
-            <menu_item_check.on_click
-             function="ToggleControl"
-             parameter="SlipstreamMiniMapForSaleParcels" />
-        </menu_item_check>
-        <menu_item_check
-         enabled_control="MiniMapShowPropertyLines"
-         label="Parcel access"
-         name="Parcel Access">
-            <menu_item_check.on_check
-             control="SlipstreamMiniMapCollisionParcels" />
-            <menu_item_check.on_click
-             function="ToggleControl"
-             parameter="SlipstreamMiniMapCollisionParcels" />
-        </menu_item_check>
-    </menu>
-
-    <menu_item_separator />
-    <!-- region map capture (gmdxregioncapture.cpp) -->
-    <menu
-     label="Region Map"
-     name="Region Map"
-     tear_off="false">
-        <!-- <GMDX> captured maps over the World Map's tiles -->
-        <menu_item_check
-         label="Show Captured Maps on the World Map"
-         name="World Map Captured">
-            <menu_item_check.on_check
-             control="GMDXWorldMapUseCapturedMaps" />
-            <menu_item_check.on_click
-             function="ToggleControl"
-             parameter="GMDXWorldMapUseCapturedMaps" />
-        </menu_item_check>
-        <menu_item_separator />
-        <menu_item_call
-         label="Capture Region Map..."
-         name="Capture Region Map">
-            <menu_item_call.on_click
-             function="Minimap.RegionMap.Capture" />
-            <menu_item_call.on_enable
-             function="Minimap.RegionMap.CanCapture" />
-        </menu_item_call>
-        <menu_item_call
-         label="Cancel Capture"
-         name="Cancel Region Map Capture">
-            <menu_item_call.on_click
-             function="Minimap.RegionMap.Cancel" />
-            <menu_item_call.on_visible
-             function="Minimap.RegionMap.Running" />
-        </menu_item_call>
-        <menu_item_separator />
-        <menu_item_call
-         label="Copy Map Image"
-         name="Copy Map Image">
-            <menu_item_call.on_click
-             function="Minimap.CopyImage" />
-        </menu_item_call>
-        <menu_item_call
-         label="Save Map Image As..."
-         name="Save Map Image As">
-            <menu_item_call.on_click
-             function="Minimap.SaveImage" />
-        </menu_item_call>
-        <menu_item_separator />
-        <menu_item_call
-         label="Export Map File..."
-         name="Export Region Map">
-            <menu_item_call.on_click
-             function="Minimap.RegionMap.Export" />
-            <menu_item_call.on_enable
-             function="Minimap.RegionMap.HasCapture" />
-        </menu_item_call>
-        <menu_item_call
-         label="Upload Map to Inventory..."
-         name="Upload Region Map">
-            <menu_item_call.on_click
-             function="Minimap.RegionMap.Upload" />
-            <menu_item_call.on_enable
-             function="Minimap.RegionMap.HasCapture" />
-        </menu_item_call>
-        <menu_item_call
-         label="Import Map File..."
-         name="Import Region Map">
-            <menu_item_call.on_click
-             function="Minimap.RegionMap.Import" />
-        </menu_item_call>
-        <menu_item_separator />
-        <menu_item_call
-         label="Delete This Region's Map"
-         name="Delete Region Map">
-            <menu_item_call.on_click
-             function="Minimap.RegionMap.Delete" />
-            <menu_item_call.on_enable
-             function="Minimap.RegionMap.HasCapture" />
-        </menu_item_call>
-        <menu_item_call
-         label="Open Region Maps Folder"
-         name="Open Region Maps Folder">
-            <menu_item_call.on_click
-             function="Minimap.RegionMap.OpenFolder" />
-        </menu_item_call>
-    </menu>
-
-    <menu_item_separator />
+     name="Land Separator" />
     <menu_item_call
      label="Stop Tracking"
      name="Stop tracking">
         <menu_item_call.on_click
          function="Minimap.Tracker"
          parameter="task_properties" />
-        <menu_item_call.on_visible
-         function="Minimap.IsTracking" />
     </menu_item_call>
     <menu_item_call
      label="About Land"
@@ -999,5 +320,22 @@
         <menu_item_call.on_click
          function="Floater.Show"
          parameter="world_map" />
+    </menu_item_call>
+
+    <!-- always -->
+    <menu_item_separator
+     name="Tools Separator" />
+    <menu_item_call
+     label="Sharing..."
+     name="Map Sharing">
+        <menu_item_call.on_click
+         function="Floater.Show"
+         parameter="gmdx_map_sharing" />
+    </menu_item_call>
+    <menu_item_call
+     label="Map Settings..."
+     name="Map Settings">
+        <menu_item_call.on_click
+         function="Minimap.Settings" />
     </menu_item_call>
 </menu>

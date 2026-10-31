@@ -1775,7 +1775,7 @@ namespace LLInitParam
         // explicit conversion
         const container_t& operator()() const { return mValues; }
         container_t& operator()() { return mValues; }
-        // direct Nth item access
+        // direct Nth item access (LL viewer, Game Control PR #6202)
         const typename NAME_VALUE_LOOKUP::type_value_t& operator()(size_t index) const { return mValues[index]; }
         typename NAME_VALUE_LOOKUP::type_value_t& operator()(size_t index) { return mValues[index]; }
 
@@ -2107,13 +2107,13 @@ namespace LLInitParam
         class Multiple : public TypedParam<T, NAME_VALUE_LOOKUP, true>
         {
             typedef TypedParam<T, NAME_VALUE_LOOKUP, true>  super_t;
-            typedef Multiple<T, RANGE, NAME_VALUE_LOOKUP>   self_t;
-            typedef typename super_t::container_t           container_t;
+            typedef Multiple<T, RANGE, NAME_VALUE_LOOKUP>                           self_t;
+            typedef typename super_t::container_t                                   container_t;
             typedef typename super_t::value_t               value_t;
 
         public:
-            typedef typename super_t::iterator              iterator;
-            typedef typename super_t::const_iterator        const_iterator;
+            typedef typename super_t::iterator                                      iterator;
+            typedef typename super_t::const_iterator                                const_iterator;
 
             using super_t::operator();
             using super_t::operator const container_t&;
@@ -2841,4 +2841,3 @@ namespace LLInitParam
 
 
 #endif // LL_LLPARAM_H
-

@@ -19,9 +19,9 @@
  * $/LicenseInfo$
  */
 
-// <GMDX> WEAPON SORTER. GMDXLoadoutWatchTags (Loadouts > Categories, e.g. "[Ash]") names the tags a
+// <GMDX> WEAPON SORTER. SLLoadoutWatchTags (Loadouts > Categories, e.g. "[Ash]") names the tags a
 // group puts on its weapons. When an object or folder whose name holds one arrives in inventory outside
-// the GunMetal-DX folders, a small window offers to move it into Equipment. When it matches
+// the loadout folders (CombatFX on), a small window offers to move it into Equipment. When it matches
 // a weapon already there once versions and words like "update" are set aside, it offers to replace that
 // one: the new version takes the old one's place (and its place in every loadout), and the old one goes
 // to Outdated, which nothing reads. "Scan now" offers everything already in inventory.
@@ -98,10 +98,10 @@ public:
         int keep = 0;
         std::string cat, group;     // where the kept version goes; cat empty: leave this row
     };
-    enum EOthers { OTHERS_OUTDATED = 0, OTHERS_TRASH, OTHERS_LEAVE };
+    enum EOthers { OTHERS_OUTDATED = 0, OTHERS_LEAVE };   // (Slipstream: GunMetal-DX's OTHERS_TRASH is gone)
     std::vector<ImportRow> buildImport(const std::vector<std::string>& tags);
     // Moves each row's kept version into its category / group (unless it is there already) and the
-    // other versions to Outdated or the Trash; loadouts holding a replaced sorted version get the
+    // other versions to Outdated (or leaves them); loadouts holding a replaced sorted version get the
     // kept one. Rows without a category are left alone.
     void applyImport(const std::vector<ImportRow>& rows, EOthers others);
     static std::vector<std::string> parseVersion(const std::string& name);
@@ -126,7 +126,7 @@ private:
     bool mScheduled = false;
     std::deque<Arrival> mQueue;
     std::set<LLUUID> mSeen;         // asked about this session already
-    const time_t mSessionStart = time(nullptr);   // (made at login: llstartup.cpp)
+    const time_t mSessionStart = time(nullptr);   // (made at login, or when CombatFX is turned on: llstartup.cpp)
 };
 
 class LLLineEditor;

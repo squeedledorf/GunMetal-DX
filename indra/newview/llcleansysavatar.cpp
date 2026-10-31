@@ -24,24 +24,32 @@
  * a visible bake is discarded by the 0.2 cutoff exactly as in LL), the skirt only while
  * one is worn, and nothing until the avatar is fully loaded (LL draws the loading cloud).
  *
- * <GMDX> DRAWN WHILE LOADING (GMDXDrawLoadingAvatars, on by default; llvoavatar.cpp then makes
- * no cloud). The fully-loaded rule was LL's (LLDrawPoolAvatar returned early for a loading
- * avatar and the particle cloud stood in), not a data guard: every part here already waits
- * for what it needs -- a built avatar, its mesh and LOD geometry, its morph stream, a skeleton
- * the skin store can resolve (buildSkin refuses a pose it cannot) -- and attachments draw mesh
- * by mesh as they arrive (llcleanclusterskinvk.cpp). So with the setting on, the whole-avatar
+ * DRAWN WHILE LOADING (RenderVKDrawLoadingAvatars, on by default (Advanced Graphics "Show avatars while they load"); llvoavatar.cpp then makes
+ * no cloud). Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4. The
+ * fully-loaded rule was LL's (LLDrawPoolAvatar returned early for a loading avatar and the
+ * particle cloud stood in), not a data guard: every part here already waits for what it
+ * needs -- a built avatar, its mesh and LOD geometry, its morph stream, a skeleton the skin
+ * store can resolve (buildSkin refuses a pose it cannot) -- and attachments draw mesh by
+ * mesh as they arrive (llcleanclusterskinvk.cpp). So with the setting on, the whole-avatar
  * gate goes and a part's texture is decided per part:
  *  - its bake decoded: drawn with it, at whatever level has arrived (it sharpens in place);
  *  - its bake not here yet (the TE is still LL's default, or fetched with nothing decoded):
  *    while the avatar is not fully loaded, an opaque part (head, upper, lower, eyes) stands in
  *    plain grey (no texture, kStandInGrey tint) -- the "Ruth" grey older viewers showed;
  *    hair, eyelashes and skirt (alpha-blended) wait for their real bakes, a white or grey
- *    sheet of hair or lash quads would be worse than nothing;
- *  - a part already drawn with a real bake whose replacement has not decoded (an outfit
- *    change) keeps the old bake until the new one has pixels: no blink, no grey flash.
+ *    sheet of hair or lash quads would be worse than nothing.
  * The stand-in turns into the bake on the frame the bake has its first pixels (same rows, a
  * material change, no hide in between). A part LL hides (IMG_INVISIBLE, a BOM attachment,
  * no skirt worn) hides as before, even while loading.
+ *
+ * Setting on or off, as LL's avatar code did (#1131):
+ *  - a part already drawn with a real bake whose replacement has not decoded (an outfit
+ *    change) keeps the old bake until the new one has pixels: no blink, no grey flash (LL
+ *    kept the last good bake on the body mesh);
+ *  - once the avatar is fully loaded, an opaque part with no bake pixels at all (its first
+ *    bake failed or never arrived) stands in grey too, where LL bound its default texture:
+ *    at once for a failed fetch or a part already standing in (no hide between loading and
+ *    loaded), else after kGreySec, so a bake that is merely late doesn't flash.
  */
 
 #include "llviewerprecompiledheaders.h"
@@ -57,6 +65,7 @@
 #include "llcleanmeshasset.h"
 #include "llcleanskinstore.h"
 #include "lldrawable.h"
+#include "llframetimer.h"
 #include "llpolymesh.h"
 #include "llviewercamera.h"
 #include "llviewercontrol.h"
@@ -70,6 +79,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <sstream>
 
 using namespace LLAvatarAppearanceDefines;
 
@@ -85,7 +95,27 @@ constexpr F32 kLodTweakRange = 0.7f;          // llvoavatar.cpp AVATAR_LOD_TWEAK
 constexpr U32 kMorphBudgetVerts = 48u * 1024u;
 constexpr U32 kMorphFirstBudgetVerts = 48u * 1024u;
 constexpr U32 kSkinRefreshFrames = 16;         // per-avatar skin meta re-verify cadence
-constexpr F32 kStandInGrey = 0.5f;             // <GMDX> tint of a bake that has not arrived (header)
+constexpr F32 kStandInGrey = 0.5f;             // tint of a bake that has not arrived (header)
+constexpr F64 kGreySec = 10.0;                 // a loaded avatar's bake this late stands in grey (header)
+
+// #461 / #1131: why a system body part is not drawn (AvState::why). 1-3 follow from the
+// avatar's own data (alpha bakes, BOM attachments, no skirt); the rest are what noteStuck logs
+// (11 is drawn, as the grey stand-in: no bake pixels yet).
+const char* const kWhy[] = {"drawn", "bake invisible", "no skirt worn", "joint hidden by BOM attachment",
+                            "bake not ready", "no LOD mesh", "shared geometry not captured",
+                            "no reference mesh", "morph stream not uploaded", "no skin", "bake undefined",
+                            "grey stand-in (no bake pixels)"};
+constexpr U8 kWhyCount = (U8)(sizeof(kWhy) / sizeof(kWhy[0]));
+const char* whyText(U8 w) { return w < kWhyCount ? kWhy[w] : "?"; }
+// #1131 no-body forensics (noteStuck): how long a state must hold before it is logged, how
+// often lines go out and how many per round, and the per-session memory's bound.
+constexpr F64 kStuckSec = 30.0;               // a new outfit's bakes normally land in a few seconds
+constexpr F64 kUnloadedSec = 120.0;           // LL itself waits up to 60 s for textures + 60 s for attachments
+constexpr F64 kStuckLogSec = 10.0;
+constexpr U32 kStuckLogMax = 8;
+constexpr size_t kStuckSeenMax = 4096;
+constexpr U32 kLoadingSig = 0xF0000000u;       // not fully loaded, not drawn (a per-part sig's top nibble is <= 11)
+constexpr U32 kLoadingHidden = 1u;             // ... and out of view: tracked, never logged
 
 struct PartInfo { ETextureIndex tex; EBakedTextureIndex bake; bool blend; bool two_sided; bool head; };
 // Indexed by EMeshIndex (MESH_ID_HAIR .. MESH_ID_SKIRT).
@@ -100,6 +130,7 @@ const PartInfo kPartInfo[LLCleanSysAvatar::kParts] = {
     { TEX_SKIRT_BAKED, BAKED_SKIRT, true,  true,  false },   // MESH_ID_SKIRT
 };
 static_assert(MESH_ID_NUM_INDICES == LLCleanSysAvatar::kParts, "system body part table");
+const char* const kPartName[LLCleanSysAvatar::kParts] = {"hair", "head", "eyelash", "upper", "lower", "eyeL", "eyeR", "skirt"};
 
 LLAvatarJointMesh* meshPart(LLViewerJoint* lod_joint, S32 k)
 {
@@ -468,16 +499,93 @@ bool LLCleanSysAvatar::buildSkin(LLVOAvatar* av, AvState& st)
 
 // #461 forensics: log (self only, on change) why each system body part is or is not drawn,
 // so an intermittent "body shows through the alpha" can be read off the log afterwards.
-void LLCleanSysAvatar::noteWhy(LLVOAvatar* av, AvState& st, S32 part, U8 why)
+// Other avatars' reasons are kept for noteStuck's rate-limited summary (#1131).
+void LLCleanSysAvatar::noteWhy(LLVOAvatar* av, AvState& st, S32 part, U8 why, S32 lod)
 {
+    st.why_lod[part] = (S8)lod;
     if (st.why[part] == why) return;
     st.why[part] = why;
     if (!av->isSelf()) return;
-    static const char* kWhy[] = {"drawn", "bake invisible/undefined", "no skirt worn",
-                                 "joint hidden by BOM attachment", "bake not ready"};
-    LL_INFOS("VKSysAvatar") << "#461 self system part " << part << ": " << kWhy[why < 5 ? why : 4]
+    LL_INFOS("VKSysAvatar") << "#461 self system part " << part << ": " << whyText(why)
         << " (bake tex " << (av->getTEImage(kPartInfo[part].tex) ? av->getTEImage(kPartInfo[part].tex)->getID() : LLUUID::null) << ", fullyLoaded "
         << av->isFullyLoaded() << ", usingLocal " << av->isUsingLocalAppearance() << ")" << LL_ENDL;
+}
+
+// #1131 forensics: another avatar whose system body is (partly) missing or grey for a reason
+// its own data doesn't explain (a part reason >= 4), or that stays in view without ever
+// becoming fully loaded while RenderVKDrawLoadingAvatars is off (its attachments draw
+// regardless; the body waits for isFullyLoaded), is logged once per state: each part's reason
+// and, for a bake without pixels, the bake's fetch state. Bounded: a state must hold kStuckSec
+// (kUnloadedSec while the avatar loads), lines go out at most every kStuckLogSec and
+// kStuckLogMax per round (the rest wait for the next round), and an avatar / state pair is
+// logged once per session. RenderVKBakeDiag also lists avatars whose every part is hidden by
+// their own alpha bakes / BOM attachments.
+void LLCleanSysAvatar::noteStuck(LLVOAvatar* av, AvState& st, U32 sig, F64 now, bool due, U32& listed, U32& deferred)
+{
+    const LLUUID& id = av->getID();
+    if (sig != st.stuck_sig)
+    {
+        if (sig == 0 && st.stuck_logged >= 0.0)
+        {
+            LL_INFOS("VKSysAvatar") << "#1131 avatar " << id << ": system body back to normal after "
+                << (S32)(now - st.stuck_logged) << " s" << LL_ENDL;
+            st.stuck_logged = -1.0;
+            mStuckSeen.erase(id);
+        }
+        st.stuck_sig = sig;
+        st.stuck_since = now;
+    }
+    const bool loading = (sig & kLoadingSig) == kLoadingSig;
+    if (!sig || !due || (loading && (sig & kLoadingHidden))) return;
+    if (now - st.stuck_since < (av->isFullyLoaded() ? kStuckSec : kUnloadedSec)) return;
+    auto seen = mStuckSeen.find(id);
+    if (seen != mStuckSeen.end() && seen->second == sig) return;
+    if (listed >= kStuckLogMax) { ++deferred; return; }
+    ++listed;
+    if (mStuckSeen.size() >= kStuckSeenMax) mStuckSeen.clear();
+    mStuckSeen[id] = sig;
+    if (st.stuck_logged < 0.0) st.stuck_logged = st.stuck_since;
+
+    std::ostringstream os;
+    os << "#1131 avatar " << id;
+    if (loading)
+    {
+        os << " in view but not fully loaded for " << (S32)(now - st.stuck_since) << " s (rez status "
+           << av->getRezzedStatus() << ", fully baked " << av->isFullyBaked()
+           << "): its system body waits for that, its attachments draw already";
+    }
+    else
+    {
+        os << " (fully loaded " << av->isFullyLoaded() << ", visible " << av->isVisible() << ", rez status " << av->getRezzedStatus()
+           << ", skin " << (st.skin_id != INV ? "ok" : "none") << ") system body parts, unchanged for "
+           << (S32)(now - st.stuck_since) << " s:";
+        for (S32 p = 0; p < kParts; ++p)
+        {
+            const U8 w = st.why[p];
+            os << ' ' << kPartName[p] << '=' << whyText(w);
+            if (w >= 5 && w <= 8 && st.why_lod[p] >= 0)
+            {
+                os << " (lod " << (S32)st.why_lod[p];
+                if (w == 6 && mShared[p][st.why_lod[p]].failed) os << ", capture failed";
+                os << ')';
+            }
+            os << ';';
+        }
+        // Each bake that isn't ready: its fetch state (the RenderVKBakeDiag string).
+        bool bake_done[BAKED_NUM_INDICES] = {};
+        for (S32 p = 0; p < kParts; ++p)
+        {
+            const EBakedTextureIndex b = kPartInfo[p].bake;
+            if ((st.why[p] != 4 && st.why[p] != 11) || bake_done[b]) continue;
+            bake_done[b] = true;
+            LLViewerTexture* tex = av->getBakedTexture((U8)b);
+            os << " | " << kPartName[p] << " bake: ";
+            if (!tex) os << "none";
+            else if (LLViewerFetchedTexture* ft = dynamic_cast<LLViewerFetchedTexture*>(tex)) os << ft->fetchDiagString();
+            else os << "composite id=" << tex->getID() << " disc=" << tex->getDiscardLevel();
+        }
+    }
+    LL_INFOS("VKSysAvatar") << os.str() << LL_ENDL;
 }
 
 void LLCleanSysAvatar::hidePart(const LLUUID& id, AvState& st, S32 part)
@@ -514,7 +622,7 @@ void LLCleanSysAvatar::tick()
     }
     static LLCachedControl<bool> s_enabled(gSavedSettings, "RenderVKSystemAvatarBody", true);
     static LLCachedControl<bool> s_autoskip(gSavedSettings, "RenderVKSystemAvatarAutoSkip", true);
-    static LLCachedControl<bool> s_draw_loading(gSavedSettings, "GMDXDrawLoadingAvatars", true);   // <GMDX>
+    static LLCachedControl<bool> s_draw_loading(gSavedSettings, "RenderVKDrawLoadingAvatars", true);
     ++mFrame;
     U32 drawn = 0, skipped = 0, uploads = 0, drawn_avatars = 0;
     if (!s_enabled)
@@ -533,6 +641,13 @@ void LLCleanSysAvatar::tick()
     LLCleanInstanceStore& is = LLCleanInstanceStore::instance();
     LLCleanMaterialStore& mm = LLCleanMaterialStore::instance();
     U32 budget = kMorphBudgetVerts, budget_first = kMorphFirstBudgetVerts;
+
+    // #1131: other avatars' no-body summary (noteStuck) goes out at most every kStuckLogSec.
+    static LLCachedControl<bool> s_bake_diag(gSavedSettings, "RenderVKBakeDiag", false);
+    const F64 now = LLFrameTimer::getElapsedSeconds();
+    const bool stuck_due = now >= mNextStuckLog;
+    if (stuck_due) mNextStuckLog = now + kStuckLogSec;
+    U32 stuck_listed = 0, stuck_deferred = 0, odd_avatars = 0, stand_ins = 0;
 
     // LL's avatar LOD inputs (LLVOAvatar::updateJointLODs).
     const F32 lod_factor = LLVOAvatar::sLODFactor * kLodTweakRange + (1.f - kLodTweakRange);
@@ -561,7 +676,7 @@ void LLCleanSysAvatar::tick()
         // Whole-avatar rules: not before it is fully loaded (LL draws the loading cloud),
         // self hidden by RLVa showself outside mouselook (mouselook hiding is the main-
         // view rigged VS's, so shadows / mirrors keep the body as for rigged mesh).
-        // <GMDX> GMDXDrawLoadingAvatars: drawn while it loads (header).
+        // (RenderVKDrawLoadingAvatars: drawn while it loads, see the header.)
         const bool loading = !av->isFullyLoaded();
         bool show = !loading || s_draw_loading;
         if (show && av->isSelf() && !gAgent.needsRenderAvatar() && !gAgentCamera.cameraMouselook())
@@ -570,6 +685,9 @@ void LLCleanSysAvatar::tick()
         {
             for (S32 p = 0; p < kParts; ++p) if (st.parts[p].live) hidePart(id, st, p);
             skipped += kParts;
+            if (!av->isSelf())
+                noteStuck(av, st, kLoadingSig | (av->isVisible() ? 0u : kLoadingHidden), now, stuck_due,
+                          stuck_listed, stuck_deferred);
             continue;
         }
 
@@ -593,25 +711,29 @@ void LLCleanSysAvatar::tick()
         }
 
         // Parts: visibility, texture, LOD, shared geometry, morph stream.
-        struct Want { bool on = false; S32 lod = 0; U32 morph = INV; LLUUID tid; bool stand_in = false; };   // <GMDX> tid / stand_in
+        struct Want { bool on = false; S32 lod = 0; U32 morph = INV; LLUUID tid; bool stand_in = false; };
         Want want[kParts];
         const bool skirt_worn = av->isWearingWearableType(LLWearableType::WT_SKIRT);
         for (S32 p = 0; p < kParts; ++p)
         {
             const PartInfo& pi = kPartInfo[p];
-            // #461: why a part is not drawn (0 = drawn, 1 bake invisible/undefined, 2 no skirt
-            // worn, 3 LL joint hidden by a BOM attachment, 4 bake not ready, 5 geometry).
+            // #461 / #1131: why a part is not drawn (kWhy; "drawn" is noted below, once the
+            // avatar's skin is known).
             bool vis = !s_autoskip || av->isTextureVisible(pi.tex);
-            // <GMDX> a bake that has not arrived yet (the TE still LL's default) may be stood in
-            // for below; IMG_INVISIBLE is defined, so a hidden part stays hidden.
-            if (s_draw_loading && !vis && !av->isTextureDefined(pi.tex)) vis = true;
             U8 why = 1;
+            // A bake that has not arrived yet (the TE still LL's default) may be stood in for
+            // below; IMG_INVISIBLE is defined, so a hidden part stays hidden.
+            if (!vis && !av->isTextureDefined(pi.tex))
+            {
+                if (s_draw_loading) vis = true;
+                else why = 10;   // default texture, not an alpha bake
+            }
             if (p == MESH_ID_SKIRT && !skirt_worn) { vis = false; why = 2; }
             // LL's drawShape() skipped any mesh whose joint updateMeshVisibility() hid (an
             // attachment textured with an IMG_USE_BAKED_* sentinel replaces that body part).
             // The GL joint draw this gate lived in is gone, so honour it here.
             if (vis && av->getViewerJoint(p) && !av->getViewerJoint(p)->getVisible()) { vis = false; why = 3; }
-            if (!vis) { noteWhy(av, st, p, why); continue; }
+            if (!vis) { st.bake_wait[p] = -1.0; noteWhy(av, st, p, why); continue; }
             LLViewerTexture* tex = av->getBakedTexture((U8)pi.bake);
             // Not baked yet / a fetched bake with no decoded level yet (it would draw the
             // material's white fallback): wait for its first pixels (appearance-edit composites
@@ -621,15 +743,29 @@ void LLCleanSysAvatar::tick()
                 ready = false;
             LLUUID tid;
             bool stand_in = false;
-            if (ready) tid = tex->getID();
-            // <GMDX> GMDXDrawLoadingAvatars (header): keep the bake a part already shows, else a
-            // grey stand-in for an opaque part while the avatar loads.
-            else if (s_draw_loading && st.parts[p].live && st.parts[p].tex.notNull()) tid = st.parts[p].tex;
-            else if (s_draw_loading && loading && !pi.blend) stand_in = true;
-            // </GMDX>
-            else { noteWhy(av, st, p, 4); continue; }
+            if (ready)
+            {
+                tid = tex->getID();
+                st.bake_wait[p] = -1.0;
+            }
+            else
+            {
+                // Keep the bake a part already shows, else a grey stand-in for an opaque part
+                // while the avatar loads (only reached with RenderVKDrawLoadingAvatars on) or,
+                // loaded, with no bake pixels at all (see the header).
+                if (st.bake_wait[p] < 0.0) st.bake_wait[p] = now;
+                const Part& pt = st.parts[p];
+                if (pt.live && pt.tex.notNull()) tid = pt.tex;
+                else if (!pi.blend
+                         && (loading
+                             || (!av->isUsingLocalAppearance()
+                                 && ((pt.live && pt.tex.isNull()) || (tex && tex->isMissingAsset())
+                                     || now - st.bake_wait[p] >= kGreySec))))
+                    stand_in = true;
+                else { noteWhy(av, st, p, 4); continue; }
+            }
             LLViewerJoint* lj = av->getViewerJoint(p);
-            if (!lj || lj->mMeshParts.empty()) continue;
+            if (!lj || lj->mMeshParts.empty()) { noteWhy(av, st, p, 5); continue; }
             const S32 nparts = llmin((S32)lj->mMeshParts.size(), kMaxLod);
             S32 lod = nparts - 1;
             for (S32 k = 0; k < nparts; ++k)
@@ -637,13 +773,12 @@ void LLCleanSysAvatar::tick()
                 LLAvatarJointMesh* jm = lj->mMeshParts[(size_t)k];
                 if (jm && (LLAvatarJoint::sDisableLOD || area >= jm->getLOD())) { lod = k; break; }
             }
-            if (!ensureShared(av, p, lod)) continue;
+            if (!ensureShared(av, p, lod)) { noteWhy(av, st, p, 6, lod); continue; }
             const S32 r = refLod(lj, lod);
-            if (r < 0) continue;
+            if (r < 0) { noteWhy(av, st, p, 7, lod); continue; }
             const U32 ms = ensureMorph(av, st, p, r, budget, budget_first, uploads);
-            if (ms == INV) continue;
+            if (ms == INV) { noteWhy(av, st, p, 8, lod); continue; }
             want[p].on = true; want[p].lod = lod; want[p].morph = ms; want[p].tid = tid; want[p].stand_in = stand_in;
-            noteWhy(av, st, p, 0);
         }
 
         // Skin: built after the parts (a newly captured part can grow the palette).
@@ -667,13 +802,16 @@ void LLCleanSysAvatar::tick()
             Part& pt = st.parts[p];
             if (!want[p].on || st.skin_id == INV)
             {
+                if (want[p].on) noteWhy(av, st, p, 9);   // skeleton not resolvable / skin store full
                 if (pt.live) hidePart(id, st, p);
                 ++skipped;
                 continue;
             }
+            noteWhy(av, st, p, want[p].stand_in ? 11 : 0);
+            if (want[p].stand_in) ++stand_ins;
             const PartInfo& pi = kPartInfo[p];
             const Shared& sh = mShared[p][want[p].lod];
-            const LLUUID& tid = want[p].tid;   // <GMDX> null for the stand-in (white, tinted grey)
+            const LLUUID& tid = want[p].tid;   // null for the stand-in (white, tinted grey)
             if (pt.material == INV || pt.tex != tid)
             {
                 LLCleanMaterialStore::MaterialDesc md;
@@ -689,7 +827,7 @@ void LLCleanSysAvatar::tick()
             F32 tint[4] = {1.f, 1.f, 1.f, 1.f};
             if (LLAvatarJointMesh* jm = meshPart(av->getViewerJoint(p), want[p].lod))
                 jm->getColor(&tint[0], &tint[1], &tint[2], &tint[3]);
-            if (want[p].stand_in) for (S32 c = 0; c < 3; ++c) tint[c] *= kStandInGrey;   // <GMDX>
+            if (want[p].stand_in) for (S32 c = 0; c < 3; ++c) tint[c] *= kStandInGrey;
             U32 flags = 1u | kInstFlag | (pi.blend ? 2u : 4u);
             if (pi.two_sided) flags |= 256u;
             if (av->isSelf()) flags |= 8192u | (pi.head ? kHeadFlag : 0u);
@@ -719,6 +857,22 @@ void LLCleanSysAvatar::tick()
             av_drawn = true;
         }
         if (av_drawn) ++drawn_avatars;
+
+        // #1131: a part skipped (or still grey) for a reason the avatar's own data doesn't
+        // explain (>= 4).
+        if (!av->isSelf())
+        {
+            U32 sig = 0;
+            bool odd = false;
+            for (S32 p = 0; p < kParts; ++p)
+            {
+                sig |= (U32)(st.why[p] & 15u) << (4 * p);
+                odd |= st.why[p] >= 4;
+            }
+            if (odd) ++odd_avatars;
+            noteStuck(av, st, (odd || (s_bake_diag && !av_drawn)) ? sig : 0u, now, stuck_due,
+                      stuck_listed, stuck_deferred);
+        }
     }
 
     // Avatars gone (or no longer eligible) since the last tick.
@@ -731,8 +885,13 @@ void LLCleanSysAvatar::tick()
         }
         else ++it;
     }
+    if (stuck_deferred)
+        LL_INFOS("VKSysAvatar") << "#1131 " << stuck_deferred << " more avatar(s) with a system body part missing: "
+            "listed in the next rounds" << LL_ENDL;
     mLastDrawnAvatars = drawn_avatars;
     LLVKHitch::count("avSysPartsDrawn", drawn);
     LLVKHitch::count("avSysPartsSkipped", skipped);
     LLVKHitch::count("avSysMorphUploads", uploads);
+    LLVKHitch::count("avSysOddAvatars", odd_avatars);
+    LLVKHitch::count("avSysPartsStandIn", stand_ins);   // drawn grey: no bake pixels
 }

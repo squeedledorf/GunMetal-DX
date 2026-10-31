@@ -37,14 +37,29 @@
 #include "llviewercontrol.h"
 #include "llviewerwindow.h"
 #include "slbridge.h"
+#include "slcombatfx.h"
 
 #include <boost/json.hpp>
+
+// Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4 (SoapStorm's hit marker).
+// Slipstream: CombatFX only -- with it off the helper is never asked for hits, nothing is
+// drawn and draw() returns at once. Fewer settings: the name / symbol / collision / avatar-only
+// / text style / gain choices are fixed at GunMetal-DX's defaults.
+// <GMDX> GunMetal-DX 0.3.0's options are settings again (FSHitMarkerShortNames, ShowName, ShowEmoji,
+// IgnoreCollision, AgentTargetsOnly, TextScale, TextBold, SoundGain; Combat > Hit Marker and the
+// Hit Marker Options floater).
 
 using DamageTypeInfo = FSCombatHitMarker::DamageTypeInfo;
 
 namespace
 {
 constexpr char BRIDGE_USER[] = "hitmarker";
+
+bool hitmarker_on()
+{
+    static LLCachedControl<bool> enabled(gSavedSettings, "FSHitMarkerEnabled", false);
+    return enabled && SLCombatFX::enabled();
+}
 
 // Timing envelope (matches the user-tuned LSL original)
 constexpr F64 BATCH_WINDOW   = 0.3;   // damage aggregation window
@@ -214,23 +229,49 @@ void FSCombatHitMarker::clearEmojiOverrides()
 
 // Ask the helper for the agent's own hits only while the hit marker is on; the helper
 // is worn while this or another feature (the kill feed) needs it.
+// Slipstream: the hits were asked for this session (so an "off" is owed). With CombatFX off
+// from login nothing combat is ever sent; a fresh helper script starts with the hits off.
+static bool sHitsAsked = false;
+
 static void update_bridge_use()
 {
     SLBridge& bridge = SLBridge::instance();
-    if (gSavedSettings.getBOOL("FSHitMarkerEnabled"))
+    if (hitmarker_on())
     {
         bridge.addUser(BRIDGE_USER);
         if (bridge.isReady())
         {
-            bridge.sendControl("hits|1"); // otherwise sent when it becomes ready
+            bridge.sendControl(SLCombatFX::Bridge::command(SLCombatFX::Bridge::CMD_HITS, "1")); // otherwise sent when it becomes ready
+            sHitsAsked = true;
         }
     }
     else
     {
-        // Always queued (sent in order once ready, so a later "hits|1" still wins): the
-        // helper may stay on for the kill feed, and one mid-handshake may still forward hits.
-        bridge.sendControl("hits|0");
         bridge.removeUser(BRIDGE_USER);
+        // Queued (sent in order once ready, so a later "|1" still wins) when the helper stays
+        // on for another feature (the kill feed, poses): one mid-handshake may still forward
+        // hits. Nobody wearing it: it comes off, and the next wear starts a fresh script.
+        if (sHitsAsked && bridge.isWanted())
+        {
+            bridge.sendControl(SLCombatFX::Bridge::command(SLCombatFX::Bridge::CMD_HITS, "0"));
+        }
+        sHitsAsked = false;
+    }
+}
+
+// The current state when the helper becomes ready (a lost "|0" must not leave the hits on).
+static void send_hits_state()
+{
+    SLBridge& bridge = SLBridge::instance();
+    if (hitmarker_on())
+    {
+        bridge.sendControl(SLCombatFX::Bridge::command(SLCombatFX::Bridge::CMD_HITS, "1"));
+        sHitsAsked = true;
+    }
+    else if (sHitsAsked)
+    {
+        bridge.sendControl(SLCombatFX::Bridge::command(SLCombatFX::Bridge::CMD_HITS, "0"));
+        sHitsAsked = false;
     }
 }
 
@@ -245,23 +286,24 @@ void FSCombatHitMarker::init()
     initialized = true;
 
     SLBridge& bridge = SLBridge::instance();
-    bridge.registerHandler("hit", &FSCombatHitMarker::handleBridgeEvent);
+    bridge.registerHandler(SLCombatFX::Bridge::EVT_HIT, &FSCombatHitMarker::handleBridgeEvent);
     // A fresh helper script (login, reattach, reinstall) starts with the hits off.
     bridge.setStateCallback([](SLBridge::EState state)
         {
-            // The current state either way: a lost hits|0 must not leave the hits on.
             if (state == SLBridge::STATE_READY)
             {
-                SLBridge::instance().sendControl(gSavedSettings.getBOOL("FSHitMarkerEnabled") ? "hits|1" : "hits|0");
+                send_hits_state();
             }
         });
     // Again after a teleport or crossing (harmless if still on): the helper drops the
     // combat log when the viewer's pings stop for a minute, which a long teleport can cause.
     bridge.setReadyInRegionCallback([]()
         {
-            SLBridge::instance().sendControl(gSavedSettings.getBOOL("FSHitMarkerEnabled") ? "hits|1" : "hits|0");
+            send_hits_state();
         });
     gSavedSettings.getControl("FSHitMarkerEnabled")->getSignal()->connect(
+        [](LLControlVariable*, const LLSD&, const LLSD&) { update_bridge_use(); });
+    gSavedSettings.getControl("CombatFX")->getSignal()->connect(
         [](LLControlVariable*, const LLSD&, const LLSD&) { update_bridge_use(); });
     update_bridge_use();
 }
@@ -284,7 +326,7 @@ static std::string hitmarker_name(const LLUUID& id, bool allow_request = true)
         return "(resolving)";
     }
     std::string name = av_name.getDisplayName();
-    static LLCachedControl<bool> short_names(gSavedSettings, "FSHitMarkerShortNames", true);
+    static LLCachedControl<bool> short_names(gSavedSettings, "FSHitMarkerShortNames", true); // <GMDX>
     if (short_names)
     {
         size_t last_space = name.find_last_of(' ');
@@ -314,7 +356,7 @@ static void play_sound_setting_impl(const char* setting_name, bool respect_toggl
     LLUUID sound_id;
     if (LLUUID::parseUUID(gSavedSettings.getString(setting_name), &sound_id) && sound_id.notNull())
     {
-        static LLCachedControl<F32> gain(gSavedSettings, "FSHitMarkerSoundGain", 1.0f);
+        static LLCachedControl<F32> gain(gSavedSettings, "FSHitMarkerSoundGain", 1.0f); // <GMDX>
         gAudiop->triggerSound(sound_id, gAgent.getID(), llclamp((F32)gain, 0.f, 1.f), LLAudioEngine::AUDIO_TYPE_UI);
     }
 }
@@ -342,8 +384,8 @@ static void finalize_batch()
     sBatching = false;
 
     static LLCachedControl<bool> show_text(gSavedSettings, "FSHitMarkerText", true);
-    static LLCachedControl<bool> show_name(gSavedSettings, "FSHitMarkerShowName", true);
-    static LLCachedControl<bool> show_emoji(gSavedSettings, "FSHitMarkerShowEmoji", true);
+    static LLCachedControl<bool> show_name(gSavedSettings, "FSHitMarkerShowName", true); // <GMDX>
+    static LLCachedControl<bool> show_emoji(gSavedSettings, "FSHitMarkerShowEmoji", true); // <GMDX>
 
     sFlashStart = LLFrameTimer::getTotalSeconds();
     sFlashIsKill = sKillSeen;
@@ -420,8 +462,7 @@ static void finalize_batch_if_due(F64 now)
 // static
 void FSCombatHitMarker::handleBridgeEvent(const std::string& line)
 {
-    static LLCachedControl<bool> enabled(gSavedSettings, "FSHitMarkerEnabled", false);
-    if (!enabled)
+    if (!hitmarker_on())
     {
         return;
     }
@@ -450,7 +491,7 @@ void FSCombatHitMarker::handleBridgeEvent(const std::string& line)
     // Object targets (your damage landing on a prim, not an avatar) should not
     // flash the marker or play a sound. The helper tags each event with whether
     // the target is an agent (llGetAgentSize).
-    static LLCachedControl<bool> agent_only(gSavedSettings, "FSHitMarkerAgentTargetsOnly", true);
+    static LLCachedControl<bool> agent_only(gSavedSettings, "FSHitMarkerAgentTargetsOnly", true); // <GMDX>
     const bool is_agent = fields[2] != "0";
     if (agent_only && !is_agent)
     {
@@ -477,7 +518,7 @@ void FSCombatHitMarker::handleBridgeEvent(const std::string& line)
         // Generic LL physics/collision damage (type -1, "Impact") comes from
         // bumps and falls, not scripted combat. Optionally drop it so it does
         // not flash a hitmarker or play a hit sound.
-        static LLCachedControl<bool> ignore_collision(gSavedSettings, "FSHitMarkerIgnoreCollision", true);
+        static LLCachedControl<bool> ignore_collision(gSavedSettings, "FSHitMarkerIgnoreCollision", true); // <GMDX>
         if (ignore_collision && dmg_type == -1)
         {
             return;
@@ -511,6 +552,10 @@ void FSCombatHitMarker::handleBridgeEvent(const std::string& line)
 // static
 void FSCombatHitMarker::draw()
 {
+    if (!SLCombatFX::enabled())
+    {
+        return;   // Slipstream: no combat per-frame work with CombatFX off
+    }
     const F64 now = LLFrameTimer::getTotalSeconds();
 
     finalize_batch_if_due(now);
@@ -548,7 +593,7 @@ void FSCombatHitMarker::draw()
     // Fading hit report text (independent scale and weight)
     if (texting)
     {
-        static LLCachedControl<F32> text_scale_setting(gSavedSettings, "FSHitMarkerTextScale", 1.0f);
+        static LLCachedControl<F32> text_scale_setting(gSavedSettings, "FSHitMarkerTextScale", 1.0f); // <GMDX>
         static LLCachedControl<bool> text_bold(gSavedSettings, "FSHitMarkerTextBold", true);
         const F32 text_scale = llclamp((F32)text_scale_setting, 0.5f, 3.f);
 

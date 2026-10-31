@@ -43,7 +43,7 @@ struct Material {
 };
 layout(std430, set = 0, binding = 1) readonly buffer Materials { Material materials[]; };
 layout(set = 1, binding = 0) uniform sampler2D uTextures[];
-// <GMDX> rez effects: the de-rez cut of a dying object, as the lit FS runs it
+// <GMDX> rez effects (CombatFX): the de-rez cut of a dying object, as the lit FS runs it
 #define GMDX_REZFX_FS
 #include "gmdx_rezfx.glsl"
 #endif

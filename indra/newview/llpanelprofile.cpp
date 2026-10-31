@@ -101,6 +101,17 @@ static const std::string PANEL_NOTES        = "panel_profile_notes";
 static const std::string PROFILE_PROPERTIES_CAP = "AgentProfile";
 static const std::string PROFILE_IMAGE_UPLOAD_CAP = "UploadAgentProfileImage";
 
+// Swaps an own profile text editor for its read-only preview box, which renders
+// the text the way others see it, links and SLURL names included. The editor
+// itself is left alone, unsaved edits and undo history with it.
+static void show_text_preview(bool show, LLTextEditor* editor, LLTextEditor* preview, LLButton* button)
+{
+    preview->setValue(show ? editor->getValue() : LLSD());
+    editor->setVisible(!show);
+    preview->setVisible(show);
+    button->setToggleState(show);
+}
+
 ///----------------------------------------------------------------------------
 /// LLFloaterProfilePermissions
 ///----------------------------------------------------------------------------
@@ -356,6 +367,7 @@ LLPanelProfileSecondLife::LLPanelProfileSecondLife()
     , mWaitingForImageUpload(false)
     , mAllowPublish(false)
     , mHideAge(false)
+    , mPreviewing(false)
 {
     mCommitCallbackRegistrar.add("Profile.Commit", [this](LLUICtrl*, const LLSD& userdata) { onCommitMenu(userdata); });
     mEnableCallbackRegistrar.add("Profile.EnableItem", [this](LLUICtrl*, const LLSD& userdata) { return onEnableMenu(userdata); });
@@ -385,9 +397,11 @@ bool LLPanelProfileSecondLife::postBuild()
     mSecondLifePic          = getChild<LLProfileImageCtrl>("2nd_life_pic");
     mSecondLifePicLayout    = getChild<LLPanel>("image_panel");
     mDescriptionEdit        = getChild<LLTextEditor>("sl_description_edit");
+    mDescriptionPreview     = getChild<LLTextEditor>("sl_description_preview");
     mAgentActionMenuButton  = getChild<LLMenuButton>("agent_actions_menu");
     mSaveDescriptionChanges = getChild<LLButton>("save_description_changes");
     mDiscardDescriptionChanges = getChild<LLButton>("discard_description_changes");
+    mPreviewButton          = getChild<LLButton>("btn_preview");
     mCanSeeOnlineIcon       = getChild<LLIconCtrl>("can_see_online");
     mCantSeeOnlineIcon      = getChild<LLIconCtrl>("cant_see_online");
     mCanSeeOnMapIcon        = getChild<LLIconCtrl>("can_see_on_map");
@@ -401,6 +415,7 @@ bool LLPanelProfileSecondLife::postBuild()
     mGroupList->setReturnCallback([this](LLUICtrl*, const LLSD&) { LLPanelProfileSecondLife::openGroupProfile(); });
     mSaveDescriptionChanges->setCommitCallback([this](LLUICtrl*, void*) { onSaveDescriptionChanges(); }, nullptr);
     mDiscardDescriptionChanges->setCommitCallback([this](LLUICtrl*, void*) { onDiscardDescriptionChanges(); }, nullptr);
+    mPreviewButton->setCommitCallback([this](LLUICtrl*, void*) { setPreviewing(!mPreviewing); }, nullptr);
     mDescriptionEdit->setKeystrokeCallback([this](LLTextEditor* caller) { onSetDescriptionDirty(); });
 
     mCanSeeOnlineIcon->setMouseUpCallback([this](LLUICtrl*, S32 x, S32 y, MASK mask) { onShowAgentPermissionsDialog(); });
@@ -429,6 +444,7 @@ void LLPanelProfileSecondLife::onOpen(const LLSD& key)
     childSetVisible("notes_panel", !own_profile);
     childSetVisible("settings_panel", own_profile);
     childSetVisible("about_buttons_panel", own_profile);
+    mPreviewButton->setVisible(own_profile);
 
     if (own_profile)
     {
@@ -831,45 +847,48 @@ void LLPanelProfileSecondLife::fillRightsData()
 
 void LLPanelProfileSecondLife::fillAgeData(const LLAvatarData* avatar_data)
 {
-    // Date from server comes already converted to stl timezone,
-    // so display it as an UTC + 0
-    bool hide_age = avatar_data->hide_age && !getSelfProfile();
-    std::string name_and_date = getString(hide_age ? "date_format_short" : "date_format_full");
-    LLSD args_name;
-    args_name["datetime"] = (S32)avatar_data->born_on.secondsSinceEpoch();
-    LLStringUtil::format(name_and_date, args_name);
-    getChild<LLUICtrl>("sl_birth_date")->setValue(name_and_date);
-
-    LLUICtrl* userAgeCtrl = getChild<LLUICtrl>("user_age");
-    if (hide_age)
-    {
-        userAgeCtrl->setVisible(false);
-    }
-    else
-    {
-        std::string register_date = getString("age_format");
-        LLSD args_age;
-        args_age["[AGE]"] = LLDateUtil::ageFromDate(avatar_data->born_on, LLDate::now());
-        LLStringUtil::format(register_date, args_age);
-        userAgeCtrl->setValue(register_date);
-    }
+    mBornOn = avatar_data->born_on;
+    fillBirthDate(avatar_data->hide_age && !getSelfProfile());
 
     bool showHideAgeCombo = false;
     if (getSelfProfile())
     {
+        // Kept even when the combo is hidden, the preview shows the date as others get it
+        mHideAge = avatar_data->hide_age;
         if (LLAvatarPropertiesProcessor::getInstance()->isHideAgeSupportedByServer())
         {
             F64 birth = avatar_data->born_on.secondsSinceEpoch();
             F64 now = LLDate::now().secondsSinceEpoch();
             if (now - birth > 365 * 24 * 60 * 60)
             {
-                mHideAge = avatar_data->hide_age;
                 mHideAgeCombo->setValue(mHideAge);
                 showHideAgeCombo = true;
             }
         }
     }
     mHideAgeCombo->setVisible(showHideAgeCombo);
+}
+
+void LLPanelProfileSecondLife::fillBirthDate(bool hide_age)
+{
+    // Date from server comes already converted to stl timezone,
+    // so display it as an UTC + 0
+    std::string name_and_date = getString(hide_age ? "date_format_short" : "date_format_full");
+    LLSD args_name;
+    args_name["datetime"] = (S32)mBornOn.secondsSinceEpoch();
+    LLStringUtil::format(name_and_date, args_name);
+    getChild<LLUICtrl>("sl_birth_date")->setValue(name_and_date);
+
+    LLUICtrl* userAgeCtrl = getChild<LLUICtrl>("user_age");
+    userAgeCtrl->setVisible(!hide_age);
+    if (!hide_age)
+    {
+        std::string register_date = getString("age_format");
+        LLSD args_age;
+        args_age["[AGE]"] = LLDateUtil::ageFromDate(mBornOn, LLDate::now());
+        LLStringUtil::format(register_date, args_age);
+        userAgeCtrl->setValue(register_date);
+    }
 }
 
 void LLPanelProfileSecondLife::onImageLoaded(bool success, LLViewerFetchedTexture *imagep)
@@ -963,6 +982,7 @@ void LLPanelProfileSecondLife::setLoaded()
             mHideAgeCombo->setEnabled(true);
         }
         mDescriptionEdit->setEnabled(true);
+        mPreviewButton->setEnabled(true);
     }
 }
 
@@ -1202,6 +1222,9 @@ void LLPanelProfileSecondLife::onAvatarNameCacheSetName(const LLUUID& agent_id, 
 
 void LLPanelProfileSecondLife::setDescriptionText(const std::string &text)
 {
+    // Reset, reload or discard, a preview of the old text ends here
+    setPreviewing(false);
+
     mSaveDescriptionChanges->setEnabled(false);
     mDiscardDescriptionChanges->setEnabled(false);
     mHasUnsavedDescriptionChanges = false;
@@ -1239,6 +1262,8 @@ void LLPanelProfileSecondLife::onHideAgeCallback()
 
 void LLPanelProfileSecondLife::onSaveDescriptionChanges()
 {
+    setPreviewing(false);
+
     mDescriptionText = mDescriptionEdit->getValue().asString();
     saveAgentUserInfoCoro("sl_about_text", mDescriptionText);
 
@@ -1250,6 +1275,26 @@ void LLPanelProfileSecondLife::onSaveDescriptionChanges()
 void LLPanelProfileSecondLife::onDiscardDescriptionChanges()
 {
     setDescriptionText(mDescriptionText);
+}
+
+void LLPanelProfileSecondLife::setPreviewing(bool previewing)
+{
+    if (previewing == mPreviewing)
+    {
+        return;
+    }
+    mPreviewing = previewing;
+
+    show_text_preview(previewing, mDescriptionEdit, mDescriptionPreview, mPreviewButton);
+    mSaveDescriptionChanges->setEnabled(!previewing && mHasUnsavedDescriptionChanges);
+    mDiscardDescriptionChanges->setEnabled(!previewing && mHasUnsavedDescriptionChanges);
+
+    // As others get it: only the groups listed in the profile, the born date as
+    // the hide age setting has it (own profile shows the full one), and none of
+    // the own profile settings
+    mGroupList->setProfilePreview(previewing);
+    fillBirthDate(previewing && mHideAge);
+    childSetVisible("settings_panel", !previewing);
 }
 
 void LLPanelProfileSecondLife::onShowAgentPermissionsDialog()
@@ -1559,6 +1604,7 @@ void LLPanelProfileWeb::handleMediaEvent(LLPluginClassMedia* self, EMediaEvent e
 LLPanelProfileFirstLife::LLPanelProfileFirstLife()
  : LLPanelProfilePropertiesProcessorTab()
  , mHasUnsavedChanges(false)
+ , mPreviewing(false)
 {
 }
 
@@ -1569,6 +1615,7 @@ LLPanelProfileFirstLife::~LLPanelProfileFirstLife()
 bool LLPanelProfileFirstLife::postBuild()
 {
     mDescriptionEdit = getChild<LLTextEditor>("fl_description_edit");
+    mDescriptionPreview = getChild<LLTextEditor>("fl_description_preview");
     mPicture = getChild<LLProfileImageCtrl>("real_world_pic");
 
     mUploadPhoto = getChild<LLButton>("fl_upload_image");
@@ -1576,12 +1623,14 @@ bool LLPanelProfileFirstLife::postBuild()
     mRemovePhoto = getChild<LLButton>("fl_remove_image");
     mSaveChanges = getChild<LLButton>("fl_save_changes");
     mDiscardChanges = getChild<LLButton>("fl_discard_changes");
+    mPreviewButton = getChild<LLButton>("btn_preview");
 
     mUploadPhoto->setCommitCallback([this](LLUICtrl*, void*) { onUploadPhoto(); }, nullptr);
     mChangePhoto->setCommitCallback([this](LLUICtrl*, void*) { onChangePhoto(); }, nullptr);
     mRemovePhoto->setCommitCallback([this](LLUICtrl*, void*) { onRemovePhoto(); }, nullptr);
     mSaveChanges->setCommitCallback([this](LLUICtrl*, void*) { onSaveDescriptionChanges(); }, nullptr);
     mDiscardChanges->setCommitCallback([this](LLUICtrl*, void*) { onDiscardDescriptionChanges(); }, nullptr);
+    mPreviewButton->setCommitCallback([this](LLUICtrl*, void*) { setPreviewing(!mPreviewing); }, nullptr);
     mDescriptionEdit->setKeystrokeCallback([this](LLTextEditor* caller) { onSetDescriptionDirty(); });
     mPicture->setMouseUpCallback([this](LLUICtrl*, S32 x, S32 y, MASK mask) { onShowAgentFirstlifeTexture(); });
 
@@ -1597,6 +1646,9 @@ void LLPanelProfileFirstLife::onOpen(const LLSD& key)
         // Otherwise as the only focusable element it will be selected
         mDescriptionEdit->setTabStop(false);
     }
+
+    // Own text is edited raw, rendered links would be saved back as plain names
+    mDescriptionEdit->setParseHTML(!getSelfProfile());
 
     resetData();
 }
@@ -1724,6 +1776,9 @@ void LLPanelProfileFirstLife::onCommitPhoto(const LLUUID& id)
 
 void LLPanelProfileFirstLife::setDescriptionText(const std::string &text)
 {
+    // Reset, reload or discard, a preview of the old text ends here
+    setPreviewing(false);
+
     mSaveChanges->setEnabled(false);
     mDiscardChanges->setEnabled(false);
     mHasUnsavedChanges = false;
@@ -1741,6 +1796,8 @@ void LLPanelProfileFirstLife::onSetDescriptionDirty()
 
 void LLPanelProfileFirstLife::onSaveDescriptionChanges()
 {
+    setPreviewing(false);
+
     mCurrentDescription = mDescriptionEdit->getValue().asString();
     saveAgentUserInfoCoro("fl_about_text", mCurrentDescription);
 
@@ -1752,6 +1809,21 @@ void LLPanelProfileFirstLife::onSaveDescriptionChanges()
 void LLPanelProfileFirstLife::onDiscardDescriptionChanges()
 {
     setDescriptionText(mCurrentDescription);
+}
+
+void LLPanelProfileFirstLife::setPreviewing(bool previewing)
+{
+    if (previewing == mPreviewing)
+    {
+        return;
+    }
+    mPreviewing = previewing;
+
+    show_text_preview(previewing, mDescriptionEdit, mDescriptionPreview, mPreviewButton);
+    // A labelled button, so the eye is its overlay (the Second Life tab's flat eye swaps images)
+    mPreviewButton->setImageOverlay(previewing ? "Profile_Group_Visibility_Off" : "Profile_Group_Visibility_On");
+    mSaveChanges->setEnabled(!previewing && mHasUnsavedChanges);
+    mDiscardChanges->setEnabled(!previewing && mHasUnsavedChanges);
 }
 
 void LLPanelProfileFirstLife::processProperties(void* data, EAvatarProcessorType type)
@@ -1785,6 +1857,7 @@ void LLPanelProfileFirstLife::resetData()
     mRemovePhoto->setVisible(getSelfProfile());
     mSaveChanges->setVisible(getSelfProfile());
     mDiscardChanges->setVisible(getSelfProfile());
+    mPreviewButton->setVisible(getSelfProfile());
 }
 
 void LLPanelProfileFirstLife::setLoaded()
@@ -1796,6 +1869,7 @@ void LLPanelProfileFirstLife::setLoaded()
         mDescriptionEdit->setEnabled(true);
         mPicture->setEnabled(true);
         mRemovePhoto->setEnabled(mPicture->getImageAssetId().notNull());
+        mPreviewButton->setEnabled(true);
     }
 }
 

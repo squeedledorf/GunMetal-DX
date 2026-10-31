@@ -50,6 +50,9 @@
     <on_check
      function="Inventory.GearDefault.Check"
      parameter="toggle_search_gmdx_outdated" />
+    <on_visible
+     function="Inventory.GearDefault.Visible"
+     parameter="toggle_search_gmdx_outdated" />
   </menu_item_check>
   <!-- </GMDX> -->
   <menu_item_separator

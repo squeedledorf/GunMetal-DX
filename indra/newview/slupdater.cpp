@@ -1,6 +1,6 @@
 /**
  * @file slupdater.cpp
- * @brief Auto-updater (#421): background download + verification of a signed update.
+ * @brief Auto-updater (#421): download + verification of a signed update, on request.
  *
  * See slupdater.h for the flow. Everything that decides what is downloaded (URL, size,
  * sha256, version) comes from the signature-verified manifest (SLUpdateApply::parseManifest).
@@ -22,12 +22,15 @@
 #include <boost/json.hpp>
 
 #include "llapp.h"
+#include "llappviewer.h"
 #include "llcorehttputil.h"
 #include "llcoros.h"
 #include "lldir.h"
 #include "lldiriterator.h"
 #include "lleventcoro.h"
 #include "llfile.h"
+#include "llfloater.h"
+#include "llfloaterreg.h"
 #include "llnotificationsutil.h"
 #include "llstartup.h"
 #include "llversioninfo.h"
@@ -40,17 +43,23 @@
 namespace
 {
     constexpr U64  CHUNK_BYTES = 2u * 1024 * 1024;   // ranged requests: bounded memory, resumable
-    constexpr F32  CHUNK_PAUSE = 1.0f;               // seconds between chunks: stay out of the way
     constexpr S32  MAX_CHUNK_FAILURES = 4;
 
+    // <GMDX> State files (state_dir()). Only APPROVED is ever installed at startup.
+    constexpr const char* DOWNLOADED = "downloaded-update";   // downloaded + verified, not yet approved
+    constexpr const char* APPROVED = "approved-update";       // the person chose to install it
+    constexpr const char* LEGACY_PENDING = "pending-update";  // 0.3.0 and older, written unasked: = DOWNLOADED
+    constexpr const char* DOWNLOAD_FLOATER = "gmdx_update_download";
+
     bool sActive = false;                            // a download coroutine is running
+    bool sCancel = false;                            // the progress window's Cancel was clicked
     std::string sActiveBuild;
-    std::string sStagedBuild;                        // staged this session
+    std::string sPromptedBuild;                      // asked about this run (scheduled checks don't repeat it)
 
     // ---- state files -------------------------------------------------------------
 
     // Directory of the pointer / marker files. Linux: the launcher's XDG state dir (it reads
-    // pending-update from there). Windows: %LOCALAPPDATA%\GunMetalDX\update (readable
+    // approved-update from there). Windows: %LOCALAPPDATA%\GunMetalDX\update (readable
     // before the viewer's own directories are set up).
     std::string state_dir()
     {
@@ -98,13 +107,6 @@ namespace
         return LLFile::rename(tmp, path) == 0;
     }
 
-    // Forget the staged update: the launcher / WinMain only act on this pointer file.
-    void cancel_pending()
-    {
-        const std::string dir = state_dir();
-        if (!dir.empty()) LLFile::remove(join(dir, "pending-update"));
-        sStagedBuild.clear();
-    }
 
     bool is_bad_build(const std::string& build)
     {
@@ -135,6 +137,153 @@ namespace
         }
     }
 
+    // ---- downloaded updates and the person's answers ----------------------------------
+
+    // A staged record ({manifest, signature, artifact, file}) a pointer file names, whose file
+    // still exists; the manifest is signature-checked again.
+    struct Staged
+    {
+        SLUpdateApply::Manifest manifest;
+        std::string             manifest_text;
+        std::string             artifact;
+        std::string             file;
+    };
+
+    bool load_staged(const char* pointer_name, Staged& out)
+    {
+        const std::string dir = state_dir();
+        std::string pointer, rec;
+        if (dir.empty() || !read_text(join(dir, pointer_name), pointer, 4096) || !read_text(trim_nl(pointer), rec))
+        {
+            return false;
+        }
+        boost::system::error_code ec;
+        const boost::json::value doc = boost::json::parse(rec, ec);
+        if (ec || !doc.is_object()) return false;
+        auto str = [&](const char* k) {
+            const boost::json::value* v = doc.as_object().if_contains(k);
+            return v && v->is_string() ? std::string(v->as_string()) : std::string();
+        };
+        out.manifest_text = str("manifest");
+        out.artifact = str("artifact");
+        out.file = str("file");
+        std::string error;
+        return LLFile::isfile(out.file)   // gone (cache cleared, pruned): nothing to install
+               && SLUpdateApply::parseManifest(out.manifest_text, str("signature"), out.manifest, error);
+    }
+
+    // The downloaded update becomes the one to install at startup.
+    bool approve()
+    {
+        const std::string dir = state_dir();
+        if (dir.empty()) return false;
+        const std::string approved = join(dir, APPROVED);
+        if (LLFile::isfile(join(dir, DOWNLOADED)) && LLFile::replace(join(dir, DOWNLOADED), approved) != 0) return false;
+        return LLFile::isfile(approved);
+    }
+
+    void discard(const std::string& build)
+    {
+        const std::string dir = state_dir();
+        if (!dir.empty())
+        {
+            LLFile::remove(join(dir, DOWNLOADED), ENOENT);
+            LLFile::remove(join(dir, APPROVED), ENOENT);
+        }
+        gDirUtilp->deleteDirAndContents(gDirUtilp->add(updates_dir(), build));   // build: four numbers (parseManifest)
+        LL_INFOS("SLUpdater") << "Downloaded update " << build << " discarded" << LL_ENDL;
+    }
+
+#if LL_LINUX
+    // The apply step runs in the launcher, so "Install now" starts the launcher again once this
+    // process has gone (a detached sh polls our pid), with a clean SLIPSTREAM_UPDATE_APPLIED.
+    bool start_launcher_after_exit()
+    {
+        const std::string launcher = install_root() + "/gunmetal-dx";
+        if (access(launcher.c_str(), X_OK) != 0) return false;
+        const std::string pid = std::to_string((long)getpid());
+        long max_fd = sysconf(_SC_OPEN_MAX);
+        if (max_fd <= 0 || max_fd > 65536) max_fd = 65536;
+        const pid_t child = fork();
+        if (child < 0) return false;
+        if (child == 0)
+        {
+            // Child of a multi-threaded process: async-signal-safe calls only until exec.
+            setsid();
+            for (long fd = 3; fd < max_fd; ++fd) close((int)fd);
+            execl("/bin/sh", "sh", "-c",
+                  "while kill -0 \"$1\" 2>/dev/null; do sleep 1; done; unset SLIPSTREAM_UPDATE_APPLIED; exec \"$2\"",
+                  "gmdx-update", pid.c_str(), launcher.c_str(), (char*)nullptr);
+            _exit(127);
+        }
+        return true;
+    }
+#endif
+
+    // Install now: approve, quit, and start again; the start installs it (launcher / WinMain).
+    void install_now()
+    {
+        if (!approve())
+        {
+            LL_WARNS("SLUpdater") << "Cannot record the approved update" << LL_ENDL;
+            LLNotificationsUtil::add("GMDXUpdateDownloadFailed", LLSD().with("REASON", "its record could not be written."));
+            return;
+        }
+#if LL_LINUX
+        if (!start_launcher_after_exit())
+        {
+            LLNotificationsUtil::add("GMDXUpdateInstallLater");
+            return;
+        }
+        LL_INFOS("SLUpdater") << "Quitting to install the update" << LL_ENDL;
+        LLAppViewer::instance()->requestQuit();
+#else
+        LLAppViewer::instance()->requestRelaunch({}, "to install the update");
+#endif
+    }
+
+    // An update downloaded earlier (this run's prompts were answered "later", or 0.3.0 fetched it).
+    void ask_downloaded(const std::string& build, const std::string& label)
+    {
+        sPromptedBuild = build;
+        LLNotificationsUtil::add("GMDXUpdateDownloaded", LLSD().with("VERSION", label), LLSD(),
+            [build](const LLSD& notification, const LLSD& response)
+            {
+                switch (LLNotificationsUtil::getSelectedOption(notification, response))
+                {
+                    case 0: install_now(); break;
+                    case 2: discard(build); break;
+                    default: break;   // Later: asked again at the next start
+                }
+            });
+    }
+
+    // ---- download progress window -----------------------------------------------------
+
+    class GMDXFloaterUpdateDownload : public LLFloater
+    {
+    public:
+        GMDXFloaterUpdateDownload(const LLSD& key) : LLFloater(key) {}
+        bool postBuild() override
+        {
+            getChild<LLUICtrl>("cancel_btn")->setCommitCallback([](LLUICtrl*, const LLSD&) { sCancel = true; });
+            return true;
+        }
+    };
+
+    // Closing the window only hides it: the download carries on and still asks at the end.
+    void show_progress(const std::string& label, U64 have, U64 total, bool verifying)
+    {
+        LLFloater* f = LLFloaterReg::findInstance(DOWNLOAD_FLOATER);
+        if (!f || !f->getVisible()) return;
+        LLStringUtil::format_map_t args;
+        args["[VERSION]"] = label;
+        args["[DONE]"] = llformat("%.1f", (F64)have / (1024.0 * 1024.0));
+        args["[TOTAL]"] = llformat("%.1f", (F64)total / (1024.0 * 1024.0));
+        f->getChild<LLUICtrl>("status")->setValue(f->getString(verifying ? "verifying" : "downloading", args));
+        f->getChild<LLUICtrl>("progress")->setValue(total ? 100.0 * (F64)have / (F64)total : 0.0);
+    }
+
     // ---- download ----------------------------------------------------------------
 
     struct Job
@@ -143,7 +292,7 @@ namespace
         std::string             manifest_text;
         std::string             signature;
         std::string             key;           // linux_tarball / windows_setup
-        std::string             version_label;
+        std::string             version_label;   // the feed's label, shown in the prompts
     };
 
     // GET one byte range. Returns the HTTP status; `body` receives the data on 206.
@@ -203,7 +352,14 @@ namespace
         const std::string part = gDirUtilp->add(dir, art.name + ".part");
         const std::string final_path = gDirUtilp->add(dir, art.name);
 
-        auto finish = [&]() { sActive = false; sActiveBuild.clear(); };
+        const std::string label = job.version_label;
+        auto finish = [&]() { sActive = false; sActiveBuild.clear(); LLFloaterReg::hideInstance(DOWNLOAD_FLOATER); };
+        // <GMDX> the person is waiting: every failure is told
+        auto fail = [&](const std::string& reason)
+        {
+            finish();
+            LLNotificationsUtil::add("GMDXUpdateDownloadFailed", LLSD().with("REASON", reason));
+        };
 
         // Resume: the .part file is a prefix of the artifact. A leftover that is too big, or
         // from a different size, is discarded.
@@ -218,6 +374,13 @@ namespace
         S32 failures = 0;
         while (have < art.size && !LLApp::isExiting())
         {
+            show_progress(label, have, art.size, false);
+            if (sCancel)
+            {
+                LL_INFOS("SLUpdater") << "Download cancelled at " << have << " bytes; kept for a later click" << LL_ENDL;
+                finish();
+                return;
+            }
             const U64 last = std::min<U64>(have + CHUNK_BYTES, art.size) - 1;
             std::string body;
             const S32 code = get_range(art.url, have, last, body);
@@ -225,10 +388,14 @@ namespace
             if (code != 206 || body.size() != (size_t)(last - have + 1))
             {
                 // 200 = the server ignored Range (would be the whole file); anything else =
-                // network trouble. Keep the .part and try again at the next update check.
+                // network trouble. Keep the .part: the next "Download and install" resumes it.
                 LL_WARNS("SLUpdater") << "Chunk " << have << "-" << last << " failed: HTTP " << code
                                       << ", " << body.size() << " bytes" << LL_ENDL;
-                if (++failures >= MAX_CHUNK_FAILURES || code == 200) { finish(); return; }
+                if (++failures >= MAX_CHUNK_FAILURES || code == 200)
+                {
+                    fail(llformat("the server answered HTTP %d.", code));
+                    return;
+                }
                 llcoro::suspendUntilTimeout(5.f * failures);
                 continue;
             }
@@ -239,15 +406,16 @@ namespace
                 if (!out.flush())
                 {
                     LL_WARNS("SLUpdater") << "Cannot write " << part << " (disk full?)" << LL_ENDL;
-                    finish();
+                    fail("it could not be saved (is the disk full?).");
                     return;
                 }
             }
             have += body.size();
-            llcoro::suspendUntilTimeout(CHUNK_PAUSE);
+            llcoro::suspend();   // <GMDX> the person is waiting for it: no pause between chunks
         }
-        if (have < art.size) { finish(); return; }   // exiting; resumes next run
+        if (have < art.size) { finish(); return; }   // exiting; resumes after the next click
 
+        show_progress(label, have, art.size, true);
         unsigned long long size = 0;
         const std::string digest = hash_in_thread(part, size);
         if (LLApp::isExiting()) { finish(); return; }
@@ -256,12 +424,12 @@ namespace
             LL_WARNS("SLUpdater") << "Downloaded update does not match the signed manifest (sha256 " << digest
                                   << "); discarding it" << LL_ENDL;
             LLFile::remove(part);
-            finish();
+            fail("the downloaded file did not match its signature, so it was deleted.");
             return;
         }
         if (LLFile::rename(part, final_path) != 0)
         {
-            finish();
+            fail("it could not be saved.");
             return;
         }
 
@@ -275,27 +443,36 @@ namespace
         const std::string staged = gDirUtilp->add(dir, "staged.json");
         { std::error_code mk_ec; std::filesystem::create_directories(state_dir(), mk_ec); }
         if (!write_text_atomic(staged, boost::json::serialize(rec))
-            || !write_text_atomic(join(state_dir(), "pending-update"), staged + "\n"))
+            || !write_text_atomic(join(state_dir(), DOWNLOADED), staged + "\n"))
         {
             LL_WARNS("SLUpdater") << "Cannot record the staged update" << LL_ENDL;
-            finish();
+            fail("its record could not be written.");
             return;
         }
-        sStagedBuild = build;
-        LL_INFOS("SLUpdater") << "Update " << build << " downloaded and verified; installs at the next start" << LL_ENDL;
-        LLSD args;
-        args["VERSION"] = job.version_label;
-        // OK keeps the update pending; "Don't install" cancels it and keeps this build quiet.
-        LLNotificationsUtil::add("UpdateStaged", args, LLSD(),
-            [build](const LLSD& notification, const LLSD& response)
+        LL_INFOS("SLUpdater") << "Update " << build << " downloaded and verified; asking when to install it" << LL_ENDL;
+        finish();
+        // <GMDX> Install now / Install at next start. Closed unanswered: asked again at the next start.
+        sPromptedBuild = build;
+        LLNotificationsUtil::add("GMDXUpdateReady", LLSD().with("VERSION", label), LLSD(),
+            [](const LLSD& notification, const LLSD& response)
             {
-                if (LLNotificationsUtil::getSelectedOption(notification, response) == 1)
+                switch (LLNotificationsUtil::getSelectedOption(notification, response))
                 {
-                    cancel_pending();
-                    gSavedSettings.setString("UpdateCheckSkippedBuild", build);
+                    case 0: install_now(); break;
+                    case 1: approve(); break;
+                    default: break;
                 }
             });
-        finish();
+    }
+
+    void start_download(const Job& job)
+    {
+        if (sActive) return;
+        sActive = true;
+        sCancel = false;
+        sActiveBuild = job.manifest.build;
+        LLFloaterReg::showInstance(DOWNLOAD_FLOATER);
+        LLCoros::instance().launch("SLUpdater::download", [job]() { download_coro(job); });
     }
 }
 
@@ -321,11 +498,11 @@ namespace SLUpdater
 #endif
     }
 
-    bool onFeedUpdate(const std::string& manifest_text, const std::string& signature,
-                      const std::string& feed_build, const std::string& current_build, bool release_feed)
+    bool offerUpdate(const std::string& manifest_text, const std::string& signature,
+                     const std::string& feed_build, const std::string& current_build, bool release_feed,
+                     const std::string& label, const std::string& notes_url, bool modal, bool manual)
     {
-        if (!gSavedSettings.getBOOL("UpdateAutoInstall") || manifest_text.empty() || signature.empty()) return false;
-        if (!supported()) return false;
+        if (manifest_text.empty() || signature.empty() || !supported()) return false;
 
         Job job;
         std::string error;
@@ -351,60 +528,79 @@ namespace SLUpdater
             LL_INFOS("SLUpdater") << "Build " << m.build << " failed to start on this machine before; not installing it" << LL_ENDL;
             return false;
         }
-        if (sStagedBuild == m.build) return true;
+        const std::string build = m.build;
         if (sActive)
         {
-            return sActiveBuild == m.build;
+            if (manual) LLFloaterReg::showInstance(DOWNLOAD_FLOATER);   // already downloading: show it
+            return true;
         }
-        // Staged by an earlier run and still pending?
-        std::string pointer;
-        if (read_text(join(state_dir(), "pending-update"), pointer, 4096))
+        if (!manual && sPromptedBuild == build) return true;            // asked about already this run
+        // Downloaded earlier (maybe already approved): ask what to do with it, don't fetch again.
+        Staged staged;
+        if ((load_staged(DOWNLOADED, staged) || load_staged(APPROVED, staged)) && staged.manifest.build == build)
         {
-            std::string rec;
-            boost::system::error_code ec;
-            if (read_text(trim_nl(pointer), rec))
-            {
-                const boost::json::value doc = boost::json::parse(rec, ec);
-                if (!ec && doc.is_object())
-                {
-                    const boost::json::value* mt = doc.as_object().if_contains("manifest");
-                    if (mt && mt->is_string() && std::string(mt->as_string()) == manifest_text) return true;
-                }
-            }
+            ask_downloaded(build, label);
+            return true;
         }
 
         job.manifest_text = manifest_text;
         job.signature = signature;
-        job.version_label = m.version;
-        sActive = true;
-        sActiveBuild = m.build;
-        LLCoros::instance().launch("SLUpdater::download", [job]() { download_coro(job); });
+        job.version_label = label;
+        sPromptedBuild = build;
+        LLSD args;
+        args["VERSION"] = label;
+        args["CURRENT"] = current_build;
+        args["NOTES_URL"] = notes_url;
+        LLNotificationsUtil::add(modal ? "GMDXUpdateOfferModal" : "GMDXUpdateOffer", args, LLSD(),
+            [job](const LLSD& notification, const LLSD& response)
+            {
+                switch (LLNotificationsUtil::getSelectedOption(notification, response))
+                {
+                    case 0: start_download(job); break;
+                    case 2: gSavedSettings.setString("UpdateCheckSkippedBuild", job.manifest.build); break;
+                    default: break;   // Remind me later: offered again at the next start
+                }
+            });
         return true;
+    }
+
+    void askAboutDownloaded(const std::string& current_build)
+    {
+        static bool asked = false;
+        if (asked) return;
+        asked = true;
+        const std::string dir = state_dir();
+        if (dir.empty()) return;
+        // 0.3.0 and older downloaded on their own and left pending-update for the launcher to
+        // install; from now on that is only "downloaded": the person decides.
+        const std::string legacy = join(dir, LEGACY_PENDING);
+        if (LLFile::isfile(legacy))
+        {
+            if (LLFile::isfile(join(dir, DOWNLOADED))) LLFile::remove(legacy);
+            else LLFile::rename(legacy, join(dir, DOWNLOADED));
+        }
+        if (!LLFile::isfile(join(dir, DOWNLOADED))) return;
+        Staged s;
+        const char* key = artifactKey();
+        llstat st;
+        const bool usable = supported() && load_staged(DOWNLOADED, s) && key && s.artifact == key
+                            && s.manifest.artifacts.count(key)
+                            && SLUpdateApply::compareBuild(s.manifest.build, current_build) == 1
+                            && !is_bad_build(s.manifest.build) && LLFile::stat(s.file, &st) == 0
+                            && (U64)st.st_size == s.manifest.artifacts.at(key).size;
+        if (!usable)
+        {
+            LL_INFOS("SLUpdater") << "Dropping a downloaded update that no longer applies" << LL_ENDL;
+            LLFile::remove(join(dir, DOWNLOADED));
+            return;
+        }
+        ask_downloaded(s.manifest.build, s.manifest.version);
     }
 
     void confirmStartup()
     {
-        // Turning UpdateAutoInstall off cancels an update that is downloaded but not yet
-        // installed (the launcher applies whatever "pending-update" points at).
-        static bool hooked = false;
-        if (!hooked)
-        {
-            hooked = true;
-            if (LLControlVariable* control = gSavedSettings.getControl("UpdateAutoInstall"))
-            {
-                control->getSignal()->connect([](LLControlVariable*, const LLSD& value, const LLSD&)
-                {
-                    if (!value.asBoolean()) cancel_pending();
-                });
-            }
-        }
         const std::string dir = state_dir();
         if (dir.empty()) return;
-        if (!gSavedSettings.getBOOL("UpdateAutoInstall"))
-        {
-            // Switched off since the download: don't install it behind the person's back.
-            LLFile::remove(join(dir, "pending-update"));
-        }
         const std::string marker = join(dir, "update-unconfirmed");
         if (LLFile::isfile(marker))
         {
@@ -413,15 +609,22 @@ namespace SLUpdater
         }
     }
 
+    LLFloater* buildDownloadFloater(const LLSD& key)
+    {
+        return new GMDXFloaterUpdateDownload(key);
+    }
+
     bool applyPendingAtStartup()
     {
 #if LL_WINDOWS
         // Runs before almost anything is initialised: plain Win32 + std only.
         const std::string dir = state_dir();
         if (dir.empty()) return false;
+        // <GMDX> Only an update the person chose to install (approved-update); a merely downloaded
+        // one (downloaded-update, or 0.3.0's pending-update) waits for their answer in the viewer.
         std::string pointer;
-        if (!read_text(join(dir, "pending-update"), pointer, 4096)) return false;
-        const std::string pending_file = join(dir, "pending-update");
+        const std::string pending_file = join(dir, "approved-update");
+        if (!read_text(pending_file, pointer, 4096)) return false;
         auto drop = [&]() { LLFile::remove(pending_file); };
 
         std::string rec;

@@ -1,6 +1,7 @@
 /**
  * @file llimagetiff.cpp
  * @brief Baseline TIFF decoder (read only).
+ * Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * This library is free software; you can redistribute it and/or

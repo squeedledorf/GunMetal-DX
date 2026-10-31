@@ -558,6 +558,12 @@ void init_sdl(const std::string& app_name)
                     // window relative flag set with global relative mode off -> a
                     // drag started right after another receives no motion at all.
                     {SDL_HINT_MOUSE_EMULATE_WARP_WITH_RELATIVE,"0"},
+                    // SDL 3.4: the alternate-resolution images of a colour cursor (the
+                    // I-beam's, see LLWindowSDL makeTextCursor) are used on a HiDPI display
+                    // only with this hint, and it must be set before the cursors are made.
+                    // Windows only; other platforms ignore it. Without it the cursor stays
+                    // at its 100% size on a scaled monitor, as SDL 3.2 never did.
+                    {SDL_HINT_MOUSE_DPI_SCALE_CURSORS,"1"},
             };
 
     for (auto hint: hintList)

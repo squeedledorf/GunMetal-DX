@@ -19,8 +19,9 @@
  * $/LicenseInfo$
  */
 
-// <GMDX> See gmdxrezfx.h. The Tron wireframe's lit FS twins live in this file only (the
-// renderer and the spec sets ask for them by name). The effect table (draw set 0 binding 45,
+// <GMDX> See gmdxrezfx.h. Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
+// The Tron wireframe's lit FS twins live in this file only (the
+// renderer and the spec sets ask for them by name). The effect table (draw set 0 binding 58,
 // made in writeDescriptors) is updated in the command buffer (vkCmdUpdateBuffer, as the terrain
 // bake table), so every frame's draws read that frame's rows whatever the frames in flight.
 
@@ -34,9 +35,9 @@
 #include <string>
 #include <vector>
 
-void GMDXRezFx::wireModule(const char* name, const uint32_t*& code, size_t& bytes)
+void GMDXRezFx::wireModule(const char* name, const uint32_t*& code, size_t& bytes, bool wire)
 {
-    if (!name || !wireframe()) return;
+    if (!name || !wire) return;
     // "kWorldFragSpv" (moduleFromSpv) and "Frag" (the spec sets) name the same module.
     std::string n(name);
     if (n.rfind("kWorld", 0) == 0) n.erase(0, 6);
@@ -65,9 +66,13 @@ void LLCleanRendererVK::rezFxRecord(VkCommandBuffer cmd)
     U32 count = 0, gen = 0;
     const GMDXRezFx::Slot* rows = GMDXRezFx::table(count, gen);
     if (mRezFxValid && gen == mRezFxGen) return;   // nothing changed (no effect running): no work
-    // WAR: earlier frames' reads (VS / FS) -> these updates; then the updates -> this frame's draws.
+    // WAR: earlier frames' reads -> these updates; then the updates -> this frame's draws.
+    VkPipelineStageFlags2 readers = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+#ifdef VK_EXT_mesh_shader
+    if (mCtx->clusterFeatures().meshShader) readers |= VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_EXT;
+#endif
     VkBufferMemoryBarrier2 b{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2};
-    b.srcStageMask = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+    b.srcStageMask = readers;
     b.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_CLEAR_BIT;
     b.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
     b.buffer = mRezFxTable.buffer; b.size = VK_WHOLE_SIZE;
@@ -87,7 +92,7 @@ void LLCleanRendererVK::rezFxRecord(VkCommandBuffer cmd)
     mRezFxGen = gen;
     b.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_CLEAR_BIT;
     b.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-    b.dstStageMask = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+    b.dstStageMask = readers;
     b.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
     vkCmdPipelineBarrier2(cmd, &d);
 }

@@ -553,6 +553,26 @@ void SLAOEngine::onSelfAnimations(const std::vector<std::pair<LLUUID, LLUUID>>& 
         }
     }
 
+    // <GMDX> Agent-started animations that showed up right after a state change
+    // or a movement key: how a server-side override looks (scanForeign), unlike
+    // a gesture or an animation played from inventory.
+    {
+        const F64 t = now();
+        const F64 trigger = llmax(mStateChangedAt, mControlsChangedAt);
+        for (auto it = mReactiveAnims.begin(); it != mReactiveAnims.end(); )
+        {
+            it = mSignaled.count(*it) ? std::next(it) : mReactiveAnims.erase(it);
+        }
+        for (const auto& [anim, source] : added)
+        {
+            if ((source.isNull() || source == gAgentID) && t - trigger <= SCRIPTED_AO_REACTION_SECS &&
+                !isBuiltinAnim(anim) && mReactiveAnims.size() < 64)
+            {
+                mReactiveAnims.insert(anim);
+            }
+        }
+    }
+    // </GMDX>
     scanForeign();
     for (const auto& [anim, source] : added)
     {
@@ -947,6 +967,15 @@ SLAOEngine::EPause SLAOEngine::pauseFor(EState state) const
     static LLCachedControl<bool> sPauseForScripts(gSavedSettings, "SLAOPauseForScriptAnimations", true);
     static LLCachedControl<F32> sSitDelay(gSavedSettings, "SLAOSmartSitDelay", 0.75f);
 
+    // <GMDX> A server-side override (llSetAnimationOverride, e.g. a worn weapon)
+    // replaces walk, run, jump and fall as well: step aside for every posture.
+    // Before, only idle states paused, and the AO kept its last pose (a fall,
+    // a jump) over the override's walk: frozen and sliding until a teleport.
+    if (mReactiveOverride && sPauseForScripts)
+    {
+        return PAUSE_SERVER_AO;
+    }
+    // </GMDX>
     if (state == SIT)
     {
         if (!set->mSitOverride)
@@ -1288,6 +1317,15 @@ void SLAOEngine::restoreSystemAnims(std::vector<std::pair<LLUUID, bool>>& reques
     // animation): give the built-in back at once so the avatar never ends up
     // without one. Not when the seat animates us: poseballs stop "sit"
     // themselves and would be fought.
+    // <GMDX> Under a server-side override the server plays the script's
+    // animation for each state, not a built-in: restarting the built-in of the
+    // state we last saw would pin that stale state. Keep the list until a
+    // built-in comes back (onSelfAnimations clears it then).
+    if (mReactiveOverride)
+    {
+        return;
+    }
+    // </GMDX>
     if (!mStoppedDefaults.empty())
     {
         const EState current = mSignaledState;
@@ -1925,7 +1963,11 @@ bool SLAOEngine::suppressesStockMotion(const LLUUID& anim_id) const
         return false;
     }
     // Not before the replacement can play: until then the built-in holds the pose
-    return LLKeyframeDataCache::getKeyframeData(mMain.mAnim) != nullptr;
+    // <GMDX> ...and only while it actually runs here: a replacement a script
+    // stopped, or a non-looping one that ended, must not leave the legs with
+    // no motion at all (the built-in comes back within a tick)
+    return LLKeyframeDataCache::getKeyframeData(mMain.mAnim) != nullptr
+        && isAgentAvatarValid() && gAgentAvatarp->isMotionActive(mMain.mAnim);
 }
 
 bool SLAOEngine::interceptStockStart(const LLUUID& anim_id)
@@ -2235,6 +2277,7 @@ void SLAOEngine::scanForeign()
     mBodyTakeover = false;
     mSeatAnimates = false;
     mServerOverride = false;
+    mReactiveOverride = false;   // <GMDX>
     mTakeoverSource.setNull();
     mTakeoverAnim.setNull();
 
@@ -2282,6 +2325,18 @@ void SLAOEngine::scanForeign()
         }
         if (cls == CLS_BODY)
         {
+            // <GMDX> No built-in state animation, and a body animation the agent
+            // "started" right after a state change or a movement key
+            // (mReactiveAnims): a script replaces states server-side
+            // (llSetAnimationOverride, e.g. a worn weapon). It owns the state
+            // whatever its priority, so this comes before the priority test.
+            // A gesture or an animation played from inventory doesn't react to
+            // movement and never counts.
+            if (agent_source && !has_default_state && mReactiveAnims.count(anim))
+            {
+                mReactiveOverride = true;
+            }
+            // </GMDX>
             // A pose on the body joints below our replacement's priority loses
             // to it anyway: no need to pause (a priority-4 collar pose does pause)
             const S32 theirs = posePriority(anim);

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8" standalone="yes"?>
 <!-- Pose Creator (#117): keyframes over the Pose Studio target -> .anim (slposecreator.h). -->
-<floater
+<floater can_pop_out="true"
  positioning="cascading"
  save_rect="true"
  can_resize="false"

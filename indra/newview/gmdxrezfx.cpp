@@ -19,7 +19,10 @@
  * $/LicenseInfo$
  */
 
-// <GMDX> See gmdxrezfx.h.
+// <GMDX> See gmdxrezfx.h. Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4 (the Tron
+// rez-in and the ember de-rez from Vulkanstorm, SoapStorm's Vulkan fork). Slipstream:
+// fewer settings (colours, the random-mix ticks, Tron glow / line width and the wait for textures
+// are fixed at GunMetal-DX's defaults).
 
 #include "llviewerprecompiledheaders.h"
 #include "gmdxrezfx.h"
@@ -46,6 +49,7 @@
 #include "llworld.h"
 
 #include <algorithm>
+#include <atomic>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -205,7 +209,8 @@ Slot sTable[MAX_SLOTS];
 U32 sHigh = 0, sGen = 0, sFrame = 0;
 bool sHiding = false;   // a hidden-mode slot is live (hiding())
 F64 sNow = 0.0, sLastUpdate = -1.0, sRecentPurge = 0.0;
-bool sWire = false, sCollect = false;
+std::atomic<bool> sWire{false};
+bool sCollect = false;
 std::vector<LLUUID> sNewIds;
 // Killed linksets: the root's de-rez decision for each child (objectKilled), and the child's pose
 // while it was still linked (its debris), until the root's markDead has killed them (the same
@@ -389,7 +394,7 @@ bool stillLoading(LLViewerObject* obj)
     return false;
 }
 
-// Combat-safe (GMDXRezFxCombatSafe, off by default): on damage-enabled land -- the parcel or
+// Combat-safe (SLRezFXCombatSafe, off by default): on damage-enabled land -- the parcel or
 // region the agent stands in -- no effect lasts longer than this, and the Tron wireframe does
 // not wait for textures. Read once per frame (update).
 constexpr F32 kCombatSafeMax = 0.25f;
@@ -397,7 +402,7 @@ bool sCombatSafe = false;
 
 void refreshCombatSafe()
 {
-    static LLCachedControl<bool> s_safe(gSavedSettings, "GMDXRezFxCombatSafe", false);
+    static LLCachedControl<bool> s_safe(gSavedSettings, "SLRezFXCombatSafe", false);
     sCombatSafe = false;
     if (!s_safe) return;
     LLViewerParcelMgr* pm = LLViewerParcelMgr::getInstance();
@@ -407,60 +412,73 @@ void refreshCombatSafe()
 // The effect's duration in seconds.
 F32 duration()
 {
-    static LLCachedControl<F32> s_dur(gSavedSettings, "GMDXRezFxDuration", 0.6f);
+    static LLCachedControl<F32> s_dur(gSavedSettings, "SLRezFXDuration", 0.6f);
     const F32 d = llclamp((F32)s_dur, 0.05f, 5.f);
     return sCombatSafe ? llmin(d, kCombatSafeMax) : d;
 }
 
-// A random one of the ticked effects (the random mix), or none if nothing is ticked.
-U32 pickTicked(const U32* fx, LLCachedControl<bool>* const* ticks, U32 n)
+// A random one of the effects (the random mix). (Slipstream: GunMetal-DX's per-effect "in the
+// mix" ticks are gone: the mix takes them all.)
+U32 pickTicked(const U32* fx, U32 n)
 {
-    U32 pool[8];
-    U32 k = 0;
-    for (U32 i = 0; i < n; ++i)
-        if (*ticks[i]) pool[k++] = fx[i];
-    return k ? pool[llmin((U32)(ll_frand() * (F32)k), k - 1)] : (U32)FX_NONE;
+    return n ? fx[llmin((U32)(ll_frand() * (F32)n), n - 1)] : (U32)FX_NONE;
 }
 
-// The rez-in for one object: the chosen effect, or for "random mix" (7) one of the ticked ones.
+// The rez-in for one object: the chosen effect, or for "random mix" (7) one of them all.
 U32 pickRezIn(bool forObject = true)
 {
-    static LLCachedControl<S32> s_in(gSavedSettings, "GMDXRezFxInEffect", 1);
+    static LLCachedControl<S32> s_in(gSavedSettings, "SLRezFXInEffect", 1);
     const S32 v = s_in;
     if (v >= 1 && v <= 6) return (U32)v;
+    if (v == 8) return FX_FADE_IN;
     if (v != 7) return FX_NONE;
     if (!forObject) return FX_TRON;   // (only "is any rez-in on")
-    static LLCachedControl<bool> t0(gSavedSettings, "GMDXRezFxMixTron", true), t1(gSavedSettings, "GMDXRezFxMixFire", true),
-        t2(gSavedSettings, "GMDXRezFxMixHologram", true), t3(gSavedSettings, "GMDXRezFxMixVoxel", true),
-        t4(gSavedSettings, "GMDXRezFxMixPrinter", true), t5(gSavedSettings, "GMDXRezFxMixTransporter", true);
-    static LLCachedControl<bool>* const ticks[6] = {&t0, &t1, &t2, &t3, &t4, &t5};
     static const U32 fx[6] = {FX_TRON, FX_FIRE, FX_HOLOGRAM, FX_VOXEL, FX_PRINTER, FX_TRANSPORTER};
-    return pickTicked(fx, ticks, 6);
+    return pickTicked(fx, 6);
 }
 
-// The de-rez for one object: the chosen effect, or for "random mix" (6) one of the ticked ones.
+// The de-rez for one object: the chosen effect, or for "random mix" (6) one of them all.
 // (7 and 8, Tron de-rez and shatter, came after the random mix.)
 U32 pickDeRez()
 {
-    static LLCachedControl<S32> s_out(gSavedSettings, "GMDXRezFxOutEffect", 1);
+    static LLCachedControl<S32> s_out(gSavedSettings, "SLRezFXOutEffect", 1);
     const S32 v = s_out;
     if (v >= 1 && v <= 5) return (U32)(FX_EMBER - 1 + v);
     if (v == 7) return FX_TRON_OUT;
     if (v == 8) return FX_SHATTER;
+    if (v == 9) return FX_FADE_OUT;
     if (v != 6) return FX_NONE;
-    static LLCachedControl<bool> t0(gSavedSettings, "GMDXRezFxMixEmber", true), t1(gSavedSettings, "GMDXRezFxMixDisintegrate", true),
-        t2(gSavedSettings, "GMDXRezFxMixAsh", true), t3(gSavedSettings, "GMDXRezFxMixGlitch", true),
-        t4(gSavedSettings, "GMDXRezFxMixImplode", true), t5(gSavedSettings, "GMDXRezFxMixTronOut", true),
-        t6(gSavedSettings, "GMDXRezFxMixShatter", true);
-    static LLCachedControl<bool>* const ticks[7] = {&t0, &t1, &t2, &t3, &t4, &t5, &t6};
     static const U32 fx[7] = {FX_EMBER, FX_DISINTEGRATE, FX_ASH, FX_GLITCH, FX_IMPLODE, FX_TRON_OUT, FX_SHATTER};
-    return pickTicked(fx, ticks, 7);
+    return pickTicked(fx, 7);
 }
 
 bool avatarsToo()
 {
-    static LLCachedControl<bool> s_av(gSavedSettings, "GMDXRezFxAvatars", true);
+    static LLCachedControl<bool> s_av(gSavedSettings, "SLRezFXAvatars", true);
     return s_av;
+}
+
+// Each effect's glow colour (linear rgb), GunMetal-DX's defaults for its GMDXRezFxColor* settings
+// (Slipstream: fixed, not settings), by Effect id.
+LLColor4 effectColour(U32 fx)
+{
+    static const LLColor4 colours[15] = {
+        LLColor4(0.3f, 0.74f, 1.f, 1.f),    // (0 unused: Tron's)
+        LLColor4(0.3f, 0.74f, 1.f, 1.f),    // Tron
+        LLColor4(1.f, 0.55f, 0.2f, 1.f),    // fire
+        LLColor4(0.3f, 0.8f, 1.f, 1.f),     // hologram
+        LLColor4(0.3f, 1.f, 0.55f, 1.f),    // voxel
+        LLColor4(1.f, 0.55f, 0.15f, 1.f),   // 3D printer
+        LLColor4(0.75f, 0.9f, 1.f, 1.f),    // transporter
+        LLColor4(0.3f, 0.74f, 1.f, 1.f),    // (7 unused: Tron's)
+        LLColor4(1.f, 0.6f, 0.28f, 1.f),    // ember
+        LLColor4(0.5f, 0.8f, 1.f, 1.f),     // disintegrate
+        LLColor4(1.f, 0.5f, 0.2f, 1.f),     // ash
+        LLColor4(1.f, 0.2f, 0.85f, 1.f),    // glitch
+        LLColor4(0.85f, 0.9f, 1.f, 1.f),    // implode
+        LLColor4(0.f, 0.9f, 1.f, 1.f),      // Tron de-rez
+        LLColor4(0.78f, 0.9f, 1.f, 1.f)};   // shatter
+    return colours[llmin(fx, (U32)14)];
 }
 
 // The build an object prints with (the printer's slot and frame): its avatar for anything worn,
@@ -720,13 +738,14 @@ bool start(LLViewerObject* obj, U32 effect, bool dying, const LinkKill* pose = n
     o.len = effect == FX_TRON ? d * kWireBuild : d;
     if (hide) o.len = effect == FX_PRINTER ? llmin(d * kPrinterLength, llmax(d, kPrinterMax))
                                            : llmin(d * kTransporterLength, llmax(d, 6.f));
-    if (dying) o.len = llmin(d * deRezScale(effect), kDeRezMax);
+    // Dead flexi chains are reaped after 300 frames; they cannot retain the full five-second fade.
+    if (dying) o.len = effect == FX_FADE_OUT && !obj->isFlexible() ? d : llmin(d * deRezScale(effect), kDeRezMax);
     if (sCombatSafe) o.len = llmin(o.len, kCombatSafeMax);
     o.wait = sCombatSafe ? 0.f : kTextureWait;
     o.dying = dying;
     // <GMDX> GMDXRezFxWaitForTextures (kWaitMax): the first part holds for the textures. Tron's
     // wireframe waits in full instead of 2 s, its fill still done within kWaitMax.
-    static LLCachedControl<bool> s_wait(gSavedSettings, "GMDXRezFxWaitForTextures", false);
+    constexpr bool s_wait = false;   // (Slipstream: fixed off; was GMDXRezFxWaitForTextures)
     const F32 hold = (s_wait && !dying && !sCombatSafe) ? holdPoint(effect) : -1.f;
     o.waitTex = s_wait && !dying && !sCombatSafe && effect == FX_TRON;
     if (o.waitTex) o.wait = llmax(kWaitMax - o.len - d, 0.f);
@@ -738,7 +757,8 @@ bool start(LLViewerObject* obj, U32 effect, bool dying, const LinkKill* pose = n
         if (o.slot) { o.start = sSlots[o.slot].start; o.len = sSlots[o.slot].len; }
     }
     else
-        o.slot = allocSlot(effect, 0, o.len, hide, hold, 0, o.waitTex);
+        // Fade-in needs the existing mask pre-pass for its coverage cut on opaque rows.
+        o.slot = allocSlot(effect, 0, o.len, hide || effect == FX_FADE_IN, hold, 0, o.waitTex);
     if (!o.slot) return false;
     if (effect == FX_SHATTER && sSlots[o.slot].refs == 1)
     {
@@ -826,7 +846,7 @@ void considerRezIn(const LLUUID& id)
     }
     if (!worn)
     {
-        static LLCachedControl<bool> s_loading(gSavedSettings, "GMDXRezFxOnlyLoading", true);
+        static LLCachedControl<bool> s_loading(gSavedSettings, "SLRezFXOnlyLoading", true);
         if (s_loading && !texturesLoading(obj)) return;   // already textured: it just appears
     }
     const U32 effect = pickRezIn();
@@ -836,9 +856,10 @@ void considerRezIn(const LLUUID& id)
 
 namespace GMDXRezFx
 {
-void setWireframe(bool on) { sWire = on; }
+bool wantsWireframe() { return pickRezIn(false) == FX_TRON; }
+void setWireframe(bool on) { sWire.store(on, std::memory_order_relaxed); }
 bool hiding() { return sHiding; }
-bool wireframe() { return sWire; }
+bool wireframe() { return sWire.load(std::memory_order_relaxed); }
 
 const Slot* table(U32& count, U32& gen)
 {
@@ -1011,22 +1032,6 @@ void update()
     }
 
     // The table: every live slot's progress this frame.
-    static LLCachedControl<LLColor4> s_col[15] = {
-        {gSavedSettings, "GMDXRezFxColorTron", LLColor4::white},  // (0 unused)
-        {gSavedSettings, "GMDXRezFxColorTron", LLColor4::white},
-        {gSavedSettings, "GMDXRezFxColorFire", LLColor4::white},
-        {gSavedSettings, "GMDXRezFxColorHologram", LLColor4::white},
-        {gSavedSettings, "GMDXRezFxColorVoxel", LLColor4::white},
-        {gSavedSettings, "GMDXRezFxColorPrinter", LLColor4::white},
-        {gSavedSettings, "GMDXRezFxColorTransporter", LLColor4::white},
-        {gSavedSettings, "GMDXRezFxColorTron", LLColor4::white},  // (7 unused)
-        {gSavedSettings, "GMDXRezFxColorEmber", LLColor4::white},
-        {gSavedSettings, "GMDXRezFxColorDisintegrate", LLColor4::white},
-        {gSavedSettings, "GMDXRezFxColorAsh", LLColor4::white},
-        {gSavedSettings, "GMDXRezFxColorGlitch", LLColor4::white},
-        {gSavedSettings, "GMDXRezFxColorImplode", LLColor4::white},
-        {gSavedSettings, "GMDXRezFxColorTronOut", LLColor4::white},
-        {gSavedSettings, "GMDXRezFxColorShatter", LLColor4::white}};
     // Ash drifts with the region's wind where the camera is (LLWind, gWindVec); in still air a
     // fixed light breeze.
     LLVector3 wind = gWindVec;
@@ -1050,12 +1055,14 @@ void update()
         }
         row.effect = st.effect;
         row.stage = st.stage;
-        sHiding |= st.hide;
+        sHiding |= st.hide && st.effect != FX_FADE_IN;
         // <GMDX> (tbase / p0 / p1: the same as before unless the rez-in waits for textures)
         row.time = (F32)(sNow - st.tbase);
         const F32 x = llclamp((F32)(sNow - st.start) / st.len, 0.f, 1.f);
         row.progress = st.p0 + (st.p1 - st.p0) * x;
-        const LLColor4 c = linearColor4(s_col[llmin(st.effect, 14u)]);
+        // <GMDX> a rez-in never hides on combat-safe land: Fade in shows the object whole at once there
+        if (st.effect == FX_FADE_IN && sCombatSafe) row.progress = 1.f;
+        const LLColor4 c = linearColor4(effectColour(st.effect));
         row.colour[0] = c.mV[VRED]; row.colour[1] = c.mV[VGREEN]; row.colour[2] = c.mV[VBLUE]; row.colour[3] = 1.f;
         // Only ash has wind; every other effect: wind.z = its length (s).
         if (st.effect == FX_ASH) { row.wind[0] = wind.mV[VX]; row.wind[1] = wind.mV[VY]; row.wind[2] = wind.mV[VZ]; row.wind[3] = strength; }
@@ -1186,8 +1193,7 @@ static void renderBeams()
         beams.resize(kMaxBeams);
     }
 
-    static LLCachedControl<LLColor4> s_col(gSavedSettings, "GMDXRezFxColorTransporter", LLColor4::white);
-    const LLColor4 col = s_col;   // (display colour: the overlay draws after the world is tonemapped)
+    const LLColor4 col = effectColour(FX_TRANSPORTER);   // (display colour: the overlay draws after the world is tonemapped)
     constexpr F32 kSolid = 0.7f;   // gmdx_rezfx.glsl RZ_TRANS_SOLID: the flash
     constexpr F32 kTau = 6.2831853f;
     auto smooth = [](F32 e0, F32 e1, F32 x) { const F32 k = llclamp((x - e0) / (e1 - e0), 0.f, 1.f); return k * k * (3.f - 2.f * k); };
@@ -1392,8 +1398,7 @@ static void renderPrintHeads(bool solid)
         std::nth_element(heads.begin(), heads.begin() + kMaxHeads, heads.end(), [](const Head& a, const Head& b) { return a.d < b.d; });
         heads.resize(kMaxHeads);
     }
-    static LLCachedControl<LLColor4> s_col(gSavedSettings, "GMDXRezFxColorPrinter", LLColor4::white);
-    const LLColor4 col = s_col;
+    const LLColor4 col = effectColour(FX_PRINTER);   // (Slipstream: fixed colour)
     gGL.begin(LLRender::TRIANGLES);
     for (const Head& hd : heads)
     {
@@ -1473,9 +1478,6 @@ static void renderDebris(bool solid)
     if (sCombatSafe || sDebris == 0) return;
     const LLViewerCamera* cam = LLViewerCamera::getInstance();
     const LLVector3 eye = cam->getOrigin(), left = cam->getLeftAxis(), up = cam->getUpAxis();
-    static LLCachedControl<LLColor4> s_ash(gSavedSettings, "GMDXRezFxColorAsh", LLColor4::white);
-    static LLCachedControl<LLColor4> s_dis(gSavedSettings, "GMDXRezFxColorDisintegrate", LLColor4::white);
-    static LLCachedControl<LLColor4> s_sha(gSavedSettings, "GMDXRezFxColorShatter", LLColor4::white);
     gGL.begin(LLRender::TRIANGLES);
     for (const auto& kv : sObjs)
     {
@@ -1496,7 +1498,7 @@ static void renderDebris(bool solid)
                 e += fabsf((ax * o.rot) * axis);
             }
             e = llmax(0.5f * e, 1e-3f);
-            const LLColor4 c = s_ash;
+            const LLColor4 c = effectColour(FX_ASH);
             const F32 fs0 = llclamp(radius * 0.05f, 0.015f, 0.35f);
             LLVector3 side = axis % LLVector3(0.f, 0.f, 1.f);
             if (side.normVec() < 1e-3f) side.set(1.f, 0.f, 0.f);
@@ -1552,7 +1554,7 @@ static void renderDebris(bool solid)
         }
         else if (o.effect == FX_DISINTEGRATE && !solid)
         {
-            const LLColor4 c = s_dis;
+            const LLColor4 c = effectColour(FX_DISINTEGRATE);
             const F32 vs = llclamp(radius * 0.09f, 0.03f, 1.5f);
             const F32 spd0 = llclamp(0.5f + 0.45f * radius, 0.6f, 6.f);
             for (const Bit& b : o.bits)
@@ -1574,7 +1576,7 @@ static void renderDebris(bool solid)
         }
         else if (o.effect == FX_SHATTER)
         {
-            const LLColor4 c = s_sha;
+            const LLColor4 c = effectColour(FX_SHATTER);
             const LLColor4 white(1.f, 1.f, 1.f, 1.f), gc(0.6f + 0.4f * c.mV[0], 0.6f + 0.4f * c.mV[1], 0.6f + 0.4f * c.mV[2], 1.f);
             const F32 t = p * len;                                // s since the impact
             const LLVector3 n = sSlots[o.slot].dir;

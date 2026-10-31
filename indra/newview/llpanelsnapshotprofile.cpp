@@ -62,6 +62,7 @@ private:
     void updateControls(const LLSD& info) override;
 
     void onSend();
+    void performTimedAction(const LLSD& action) override;
 };
 
 static LLPanelInjector<LLPanelSnapshotProfile> panel_class("llpanelsnapshotprofile");
@@ -96,6 +97,16 @@ void LLPanelSnapshotProfile::onSend()
     std::string caption = getChild<LLUICtrl>("caption")->getValue().asString();
     bool add_location = getChild<LLUICtrl>("add_location_cb")->getValue().asBoolean();
 
-    LLWebProfile::uploadImage(mSnapshotFloater->getImageData(), caption, add_location);
+    LLSD action = LLSD().with("type", "profile").with("caption", caption).with("location", add_location);
+    if (auto* floater = dynamic_cast<LLFloaterSnapshot*>(mSnapshotFloater))
+    {
+        if (floater->startTimedAction(this, action)) return;
+    }
+    performTimedAction(action);
+}
+
+void LLPanelSnapshotProfile::performTimedAction(const LLSD& action)
+{
+    LLWebProfile::uploadImage(mSnapshotFloater->getImageData(), action["caption"].asString(), action["location"].asBoolean());
     mSnapshotFloater->postSave();
 }

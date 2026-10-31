@@ -61,7 +61,8 @@ layout(std140, set = WX_OWN_SET, binding = 0) uniform WeatherParams
                       // P.xy - (top - P.z) s, clean_weather_surface.glsl), zw the near map's
     vec4 splash;      // M2 splashes: x 1 = on, y ring size, z lifetime (s), w spawn radius (m)
     vec4 occlN;       // M2 the near map (splash heights): xy corner, z 1 / extent, w which (0 none, 1 / 2 = uOccl[2] / [3])
-    vec4 occlN2;      // x its top height (m), y top - bottom (m), z cover bias (m), w unused
+    vec4 occlN2;      // x its top height (m), y top - bottom (m), z cover bias (m), w #1145 both maps' casters'
+                      // slope-scaled depth bias factor (the streaks' roof test puts it back)
     // M4 RUN-OFF (llcleanweathervk_runoff.cpp):
     vec4 runoff;      // x strength S 0..1 (0 = none), y drips / s per m2 of catchment at S 1,
                       // z stream threshold (catchment m2 x S), w the drip budget (drips / s, all emitters)
@@ -77,7 +78,8 @@ layout(std140, set = WX_OWN_SET, binding = 0) uniform WeatherParams
                       // factor (x shape.z), z snow motion-blur exposure (s), w snow swirl (x the wind)
     vec4 veil;        // rgb the precipitation's in-scatter colour (the world draws' light), w its
                       // extinction (1/m; 0 = none): the particles' own veil
-    vec4 veil2;       // x the precipitation's ceiling above the camera (m), yz unused, w the snow
+    vec4 veil2;       // x the precipitation's ceiling above the camera (m), y 1 = RenderVKWeatherOcclDebug
+                      // (the streaks coloured by their roof test), z unused, w the snow
                       // share of the fall
     mat4 inv_view_proj;   // the inverse of view_proj (the veil's camera-relative points)
 } wp;

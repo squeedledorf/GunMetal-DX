@@ -29,20 +29,28 @@
 #include "fsfloatergrouptitles.h"
 #include "slkeycommands.h"
 #include "fsgrouptitleregionmgr.h"
+#include "llcallbacklist.h"
 #include "llcheckboxctrl.h"
+#include "lleventtimer.h"
 #include "llfiltereditor.h"
 #include "llgroupactions.h"
 #include "llmenugl.h"
 #include "llscrolllistctrl.h"
 #include "lltrans.h"
+#include "llviewercontrol.h"
 #include "llviewermenu.h"
+
+// #868: titles requests out at once (Premium Plus allows 140 groups), how long one may take before
+// its group shows a retry, and how long titles already fetched are reused instead of asked again
+static constexpr S32 MAX_TITLE_REQUESTS_IN_FLIGHT = 4;
+static constexpr F64 TITLES_REQUEST_TIMEOUT       = 20.0;
+static constexpr F64 TITLES_FRESH_SECONDS         = 300.0;
 
 /////////////////////////////////////////////////////
 // FSGroupTitlesObserver class
 //
-FSGroupTitlesObserver::FSGroupTitlesObserver(const LLGroupData& group_data, LLHandle<FSFloaterGroupTitles> parent) :
-    LLGroupMgrObserver(group_data.mID),
-    mGroupData(group_data),
+FSGroupTitlesObserver::FSGroupTitlesObserver(const LLUUID& group_id, LLHandle<FSFloaterGroupTitles> parent) :
+    LLGroupMgrObserver(group_id),
     mParent(parent)
 {
     LLGroupMgr::instance().addObserver(this);
@@ -57,7 +65,11 @@ void FSGroupTitlesObserver::changed(LLGroupChange gc)
 {
     if (gc == GC_TITLES && !mParent.isDead())
     {
-        mParent.get()->processGroupTitleResults(mGroupData);
+        mParent.get()->processGroupTitleResults(mID);
+    }
+    else if ((gc == GC_ROLE_DATA || gc == GC_ROLE_MEMBER_DATA || gc == GC_MEMBER_DATA) && !mParent.isDead())
+    {
+        mParent.get()->invalidateGroupTitles(mID);
     }
 }
 
@@ -70,18 +82,17 @@ FSFloaterGroupTitles::FSFloaterGroupTitles(const LLSD& key) :
     mFilterSubString(LLStringUtil::null),
     mFilterSubStringOrig(LLStringUtil::null)
 {
-    // Register observer and event listener
-    LLGroupMgr::getInstance()->addObserver(this);
-
-    // Don't use "new group" listener. The "new group" event
-    // will be fired n times with n = number of groups!
-    gAgent.addListener(this, "update grouptitle list");
+    // #868: FS fires its own "update grouptitle list" event from llagent.cpp. Here the agent's
+    // "new group" event (group list, active group and title updates) schedules a sync on idle, as
+    // it fires once per group on a group list update. Titles replies come through the per-group
+    // FSGroupTitlesObserver.
+    gAgent.addListener(this, "new group");
 }
 
 FSFloaterGroupTitles::~FSFloaterGroupTitles()
 {
     gAgent.removeListener(this);
-    LLGroupMgr::getInstance()->removeObserver(this);
+    delete mRequestTimer;
 
     if (mAssignmentsChangedConnection.connected())
     {
@@ -95,7 +106,7 @@ FSFloaterGroupTitles::~FSFloaterGroupTitles()
     }
 
     // Clean up still registered observers
-    clearObservers();
+    mGroupStates.clear();
 }
 
 bool FSFloaterGroupTitles::postBuild()
@@ -112,7 +123,7 @@ bool FSFloaterGroupTitles::postBuild()
     mFilterEditor = getChild<LLFilterEditor>("filter_input");
 
     mActivateButton->setCommitCallback(boost::bind(&FSFloaterGroupTitles::activateGroupTitle, this));
-    mRefreshButton->setCommitCallback(boost::bind(&FSFloaterGroupTitles::refreshGroupTitles, this));
+    mRefreshButton->setCommitCallback(boost::bind(&FSFloaterGroupTitles::refreshGroupTitles, this, true));
     mInfoButton->setCommitCallback(boost::bind(&FSFloaterGroupTitles::openGroupInfo, this));
     mSetRegionButton->setCommitCallback(boost::bind(&FSFloaterGroupTitles::onSetRegion, this));
     mSetRegionManualButton->setCommitCallback(boost::bind(&FSFloaterGroupTitles::onSetRegionManual, this));
@@ -130,9 +141,15 @@ bool FSFloaterGroupTitles::postBuild()
     mUseDefaultCheck->set(FSGroupTitleRegionMgr::getInstance()->getEnabled());
     mAssignmentsChangedConnection = FSGroupTitleRegionMgr::getInstance()->setAssignmentsChangedCallback([this]() { updateRegionColumn(); });
 
-    mTitleList->sortByColumn("title_sort_column", true);
+    // #868: the sort order (set by a header click) is kept in settings
+    const std::string sort_column = gSavedSettings.getString("SlipstreamGroupTitlesSortColumn");
+    mTitleList->sortByColumn(mTitleList->getColumn(sort_column) ? sort_column : "title_sort_column",
+                             gSavedSettings.getBOOL("SlipstreamGroupTitlesSortAscending"));
+    mTitleList->setSortChangedCallback(boost::bind(&FSFloaterGroupTitles::onSortChanged, this));
 
-    refreshGroupTitles();
+    mRequestTimer = LLEventTimer::run_every(1.f, [this]() { checkRequestTimeouts(); });
+
+    refreshGroupTitles(false);
 
     return true;
 }
@@ -156,38 +173,119 @@ bool FSFloaterGroupTitles::handleKeyHere(KEY key, MASK mask)
     return LLFloater::handleKeyHere(key, mask);
 }
 
-void FSFloaterGroupTitles::changed(LLGroupChange gc)
-{
-    switch (gc)
-    {
-        case GC_MEMBER_DATA:
-        case GC_ROLE_MEMBER_DATA:
-        case GC_TITLES:
-            refreshGroupTitles();
-            break;
-        default:
-            ;
-    }
-}
-
 bool FSFloaterGroupTitles::handleEvent(LLPointer<LLOldEvents::LLEvent> event, const LLSD& userdata)
 {
-    if (event->desc() == "update grouptitle list")
+    if (event->desc() == "new group")
     {
-        refreshGroupTitles();
-        return true;
+        scheduleSync();
     }
     return false;
 }
 
-
-void FSFloaterGroupTitles::clearObservers()
+void FSFloaterGroupTitles::scheduleSync()
 {
-    for (observer_map_t::iterator it = mGroupTitleObserverMap.begin(); it != mGroupTitleObserverMap.end(); ++it)
+    if (mSyncScheduled)
     {
-        delete it->second;
+        return;
     }
-    mGroupTitleObserverMap.clear();
+    mSyncScheduled = true;
+
+    LLHandle<FSFloaterGroupTitles> handle = getDerivedHandle<FSFloaterGroupTitles>();
+    doOnIdleOneTime([handle]()
+    {
+        if (FSFloaterGroupTitles* floater = handle.get())
+        {
+            floater->syncGroups();
+        }
+    });
+}
+
+// #868: follow group joins and leaves, role changes and active group or title changes made
+// elsewhere (group profile, chat command, RLV) without reopening
+void FSFloaterGroupTitles::syncGroups()
+{
+    mSyncScheduled = false;
+
+    for (group_state_map_t::iterator it = mGroupStates.begin(); it != mGroupStates.end(); )
+    {
+        if (gAgent.isInGroup(it->first, true))
+        {
+            ++it;
+            continue;
+        }
+        removeGroupRows(it->first);
+        mRequestQueue.erase(std::remove(mRequestQueue.begin(), mRequestQueue.end(), it->first), mRequestQueue.end());
+        it = mGroupStates.erase(it);
+    }
+
+    // A role given or taken shows as a change in the group's powers (one that leaves them as they
+    // were only shows on Refresh)
+    for (const LLGroupData& group_data : gAgent.mGroups)
+    {
+        group_state_map_t::iterator found_it = mGroupStates.find(group_data.mID);
+        if (found_it == mGroupStates.end())
+        {
+            addGroup(group_data, false);
+        }
+        else if (found_it->second.mPowers != group_data.mPowers)
+        {
+            found_it->second.mPowers = group_data.mPowers;
+            requestTitles(group_data.mID, true);
+        }
+    }
+    sendQueuedRequests();
+
+    updateActiveFlags();
+    selectedTitleChanged();
+}
+
+void FSFloaterGroupTitles::updateActiveFlags()
+{
+    const LLUUID& active_group_id = gAgent.getGroupID();
+    bool changed = false;
+    for (TitleEntry& entry : mEntries)
+    {
+        bool is_active = false;
+        if (!entry.mIsGroup)
+        {
+            is_active = active_group_id.isNull();
+        }
+        else if (entry.mGroupID == active_group_id && getTitlesState(entry.mGroupID) == ETitlesState::LOADED)
+        {
+            // The selection sendGroupTitleUpdate() saved, or the last titles reply's; while titles
+            // are being fetched again (cleared) the row keeps its state
+            const LLGroupMgrGroupData* gmgr_data = LLGroupMgr::getInstance()->getGroupData(entry.mGroupID);
+            if (!gmgr_data || !gmgr_data->hasTitlesReply())
+            {
+                is_active = entry.mIsActive;
+            }
+            else
+            {
+                is_active = gmgr_data->mTitles.empty(); // only the blank-title row
+                for (const LLGroupTitle& group_title : gmgr_data->mTitles)
+                {
+                    if (group_title.mRoleID == entry.mRoleID)
+                    {
+                        is_active = group_title.mSelected;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (is_active != entry.mIsActive)
+        {
+            entry.mIsActive = is_active;
+            changed = true;
+        }
+    }
+
+    if (changed)
+    {
+        const S32 scroll_pos = mTitleList->getScrollPos();
+        rebuildList();
+        mTitleList->setScrollPos(scroll_pos);
+    }
 }
 
 void FSFloaterGroupTitles::addListItem(const LLUUID& group_id, const LLUUID& role_id, const std::string& title,
@@ -206,8 +304,10 @@ void FSFloaterGroupTitles::addListRow(const TitleEntry& entry)
     const std::string& group_name = entry.mGroupName;
     const bool is_active = entry.mIsActive;
     const bool is_group = entry.mIsGroup;
+    // #868: a group's "loading" or "retry" row, sorted after the titles
+    const bool is_placeholder = is_group && getTitlesState(group_id) != ETitlesState::LOADED;
 
-    std::string font_style = (is_active ? "BOLD" : "NORMAL");
+    std::string font_style = (is_active ? "BOLD" : (is_placeholder ? "ITALIC" : "NORMAL"));
     std::string region_name = FSGroupTitleRegionMgr::getInstance()->getRegionForTitle(group_id, role_id);
 
     if (!mFilterSubString.empty())
@@ -242,7 +342,7 @@ void FSFloaterGroupTitles::addListRow(const TitleEntry& entry)
     item["columns"][4]["value"] = group_id;
     item["columns"][5]["column"] = "title_sort_column";
     item["columns"][5]["type"] = "text";
-    item["columns"][5]["value"] = (is_group ? ("1_" + title) : "0");
+    item["columns"][5]["value"] = (is_group ? ((is_placeholder ? "2_" : "1_") + title) : "0");
     item["columns"][6]["column"] = "name_sort_column";
     item["columns"][6]["type"] = "text";
     item["columns"][6]["value"] = (is_group ? ("1_" + group_name) : "0");
@@ -258,42 +358,256 @@ void FSFloaterGroupTitles::addListRow(const TitleEntry& entry)
 
     // Need to do use the selectByValue method or there would be multiple
     // selections on login.
-    if (is_active)
+    // #868: only while nothing is selected, as rows now arrive group by group
+    if (is_active && !mTitleList->getFirstSelected())
     {
         mTitleList->selectByValue(group_id.asString() + role_id.asString());
+        mTitleList->scrollToShowSelected();
     }
 }
 
-void FSFloaterGroupTitles::processGroupTitleResults(const LLGroupData& group_data)
+void FSFloaterGroupTitles::rebuildList()
 {
-    LLGroupMgrGroupData* gmgr_data = LLGroupMgr::getInstance()->getGroupData(group_data.mID);
-    if (!gmgr_data || gmgr_data->mTitles.empty())
+    const LLSD selected_value = mTitleList->getSelectedValue();
+    mTitleList->clearRows();
+    for (const TitleEntry& entry : mEntries)
+    {
+        addListRow(entry);
+    }
+    if (selected_value.isDefined())
+    {
+        mTitleList->selectByValue(selected_value);
+    }
+    updateDefaultColumn();
+    selectedTitleChanged();
+}
+
+void FSFloaterGroupTitles::invalidateGroupTitles(const LLUUID& group_id)
+{
+    if (LLGroupMgrGroupData* data = LLGroupMgr::getInstance()->getGroupData(group_id))
+    {
+        data->invalidateTitlesCache();
+    }
+    mInvalidatedGroups.insert(group_id);
+    if (mInvalidationScheduled) return;
+    mInvalidationScheduled = true;
+    LLHandle<FSFloaterGroupTitles> handle = getDerivedHandle<FSFloaterGroupTitles>();
+    doOnIdleOneTime([handle]()
+    {
+        if (FSFloaterGroupTitles* floater = handle.get())
+        {
+            floater->mInvalidationScheduled = false;
+            std::set<LLUUID> groups;
+            groups.swap(floater->mInvalidatedGroups);
+            for (const LLUUID& id : groups) floater->requestTitles(id, true);
+            floater->sendQueuedRequests();
+        }
+    });
+}
+
+void FSFloaterGroupTitles::processGroupTitleResults(const LLUUID& group_id)
+{
+    // #868: GC_TITLES can also come for a group whose titles were just cleared for a new request
+    group_state_map_t::iterator found_it = mGroupStates.find(group_id);
+    const LLGroupMgrGroupData* gmgr_data = LLGroupMgr::getInstance()->getGroupData(group_id);
+    if (found_it == mGroupStates.end() || !gmgr_data || gmgr_data->isTitlesReplyPending())
+    {
+        return;
+    }
+    if (found_it->second.mState == ETitlesState::QUEUED) return;
+    if (!gmgr_data->hasTitlesReply())
+    {
+        // A role/member change invalidated this reply while it was in flight.
+        if (found_it->second.mState == ETitlesState::LOADING)
+        {
+            mInvalidatedGroups.erase(group_id);
+            found_it->second.mRefreshAfterReply = false;
+            found_it->second.mState = ETitlesState::FAILED;
+            requestTitles(group_id, true);
+            sendQueuedRequests();
+        }
+        return;
+    }
+
+
+    if (found_it->second.mRefreshAfterReply)
+    {
+        found_it->second.mRefreshAfterReply = false;
+        found_it->second.mState = ETitlesState::FAILED;
+        requestTitles(group_id, true);
+    }
+    else
+    {
+        found_it->second.mState = ETitlesState::LOADED;
+        setGroupRows(group_id);
+    }
+    sendQueuedRequests();
+}
+
+void FSFloaterGroupTitles::addGroup(const LLGroupData& group_data, bool force)
+{
+    GroupTitlesState& state = mGroupStates[group_data.mID];
+    state.mName = group_data.mName;
+    state.mPowers = group_data.mPowers;
+    // Kept while the floater is open: titles fetched elsewhere (a group profile) update the rows,
+    // and LLGroupMgr doesn't evict an observed group's data
+    state.mObserver = std::make_unique<FSGroupTitlesObserver>(group_data.mID, getDerivedHandle<FSFloaterGroupTitles>());
+    requestTitles(group_data.mID, force);
+}
+
+void FSFloaterGroupTitles::requestTitles(const LLUUID& group_id, bool force)
+{
+    group_state_map_t::iterator found_it = mGroupStates.find(group_id);
+    if (found_it == mGroupStates.end())
     {
         return;
     }
 
-    std::string group_name(group_data.mName);
-    const std::vector<LLGroupTitle> group_titles = gmgr_data->mTitles;
-
-    // Add group titles
-    for (std::vector<LLGroupTitle>::const_iterator it = group_titles.begin(); it != group_titles.end(); ++it)
+    if (found_it->second.mState == ETitlesState::LOADING)
     {
-        LLGroupTitle group_title = *it;
-        bool is_active_title = (group_title.mSelected && group_data.mID == gAgent.getGroupID());
-        addListItem(group_data.mID, group_title.mRoleID, group_title.mTitle, group_name, is_active_title);
+        if (force) found_it->second.mRefreshAfterReply = true;
+        return;
+    }
+    const LLGroupMgrGroupData* gmgr_data = LLGroupMgr::getInstance()->getGroupData(group_id);
+    if (!force && gmgr_data && gmgr_data->hasTitlesReply()
+        && LLFrameTimer::getElapsedSeconds() - gmgr_data->getTitlesRequestTime() < TITLES_FRESH_SECONDS)
+    {
+        found_it->second.mState = ETitlesState::LOADED;
+    }
+    else
+    {
+        found_it->second.mState = ETitlesState::QUEUED;
+        if (std::find(mRequestQueue.begin(), mRequestQueue.end(), group_id) == mRequestQueue.end())
+        {
+            mRequestQueue.push_back(group_id);
+        }
+    }
+    setGroupRows(group_id);
+}
+
+void FSFloaterGroupTitles::sendQueuedRequests()
+{
+    S32 in_flight = 0;
+    for (const auto& [group_id, state] : mGroupStates)
+    {
+        if (state.mState == ETitlesState::LOADING)
+        {
+            ++in_flight;
+        }
     }
 
-    mTitleList->scrollToShowSelected();
-    selectedTitleChanged();
+    while (in_flight < MAX_TITLE_REQUESTS_IN_FLIGHT && !mRequestQueue.empty())
+    {
+        const LLUUID group_id = mRequestQueue.front();
+        mRequestQueue.pop_front();
+
+        // Skip groups left, and titles that arrived (or were queued again) meanwhile
+        group_state_map_t::iterator found_it = mGroupStates.find(group_id);
+        if (found_it == mGroupStates.end() || found_it->second.mState != ETitlesState::QUEUED)
+        {
+            continue;
+        }
+
+        found_it->second.mState = ETitlesState::LOADING;
+        found_it->second.mRequestTime = LLFrameTimer::getElapsedSeconds();
+        LLGroupMgr::getInstance()->sendGroupTitlesRequest(group_id);
+        ++in_flight;
+    }
+}
+
+void FSFloaterGroupTitles::checkRequestTimeouts()
+{
+    const F64 now = LLFrameTimer::getElapsedSeconds();
+    bool timed_out = false;
+    for (auto& [group_id, state] : mGroupStates)
+    {
+        if (state.mState == ETitlesState::LOADING && now - state.mRequestTime > TITLES_REQUEST_TIMEOUT)
+        {
+            // A late reply still fills the group in
+            LL_WARNS("GrpMgr") << "Titles request for group " << group_id << " timed out" << LL_ENDL;
+            state.mState = ETitlesState::FAILED;
+            if (state.mRefreshAfterReply)
+            {
+                state.mRefreshAfterReply = false;
+                requestTitles(group_id, true);
+            }
+            else setGroupRows(group_id);
+            timed_out = true;
+        }
+    }
+
+    if (timed_out)
+    {
+        sendQueuedRequests();
+    }
+}
+
+void FSFloaterGroupTitles::removeGroupRows(const LLUUID& group_id)
+{
+    mEntries.erase(std::remove_if(mEntries.begin(), mEntries.end(),
+                                  [&group_id](const TitleEntry& entry) { return entry.mGroupID == group_id; }),
+                   mEntries.end());
+
+    const S32 group_id_col_idx = mTitleList->getColumn("group_id")->mIndex;
+    for (LLScrollListItem* item : mTitleList->getAllData())
+    {
+        if (item->getColumn(group_id_col_idx)->getValue().asUUID() == group_id)
+        {
+            mTitleList->deleteSingleItem(item);
+        }
+    }
+}
+
+void FSFloaterGroupTitles::setGroupRows(const LLUUID& group_id)
+{
+    group_state_map_t::const_iterator found_it = mGroupStates.find(group_id);
+    if (found_it == mGroupStates.end())
+    {
+        return;
+    }
+    const GroupTitlesState& state = found_it->second;
+
+    const LLSD selected_value = mTitleList->getSelectedValue();
+    removeGroupRows(group_id);
+
+    if (state.mState != ETitlesState::LOADED)
+    {
+        // One row for the group; activating it retries a failed request
+        addListItem(group_id, LLUUID::null, getString(state.mState == ETitlesState::FAILED ? "TitlesFailed" : "TitlesLoading"),
+                    state.mName, false);
+    }
+    else
+    {
+        const bool is_active_group = (group_id == gAgent.getGroupID());
+        const LLGroupMgrGroupData* gmgr_data = LLGroupMgr::getInstance()->getGroupData(group_id);
+        if (gmgr_data && !gmgr_data->mTitles.empty())
+        {
+            for (const LLGroupTitle& group_title : gmgr_data->mTitles)
+            {
+                addListItem(group_id, group_title.mRoleID, group_title.mTitle, state.mName, is_active_group && group_title.mSelected);
+            }
+        }
+        else
+        {
+            // Every title held is blank (the reply leaves those out): the group can still be worn
+            addListItem(group_id, LLUUID::null, getString("BlankTitle"), state.mName, is_active_group);
+        }
+    }
+
+    // A title of this group that was selected stays selected when titles are fetched again
+    if (selected_value.isDefined() && mTitleList->getItem(selected_value))
+    {
+        mTitleList->selectByValue(selected_value);
+    }
+
     updateDefaultColumn();
+    selectedTitleChanged();
+}
 
-    // Remove observer
-    observer_map_t::iterator found_it = mGroupTitleObserverMap.find(group_data.mID);
-    if (found_it != mGroupTitleObserverMap.end())
-    {
-        delete found_it->second;
-        mGroupTitleObserverMap.erase(found_it);
-    }
+FSFloaterGroupTitles::ETitlesState FSFloaterGroupTitles::getTitlesState(const LLUUID& group_id) const
+{
+    group_state_map_t::const_iterator found_it = mGroupStates.find(group_id);
+    return (found_it != mGroupStates.end() ? found_it->second.mState : ETitlesState::LOADED);
 }
 
 void FSFloaterGroupTitles::activateGroupTitle()
@@ -304,38 +618,66 @@ void FSFloaterGroupTitles::activateGroupTitle()
         LLUUID group_id = selected_item->getColumn(mTitleList->getColumn("group_id")->mIndex)->getValue().asUUID();
         LLUUID role_id = selected_item->getColumn(mTitleList->getColumn("role_id")->mIndex)->getValue().asUUID();
 
-        // Don't update group title for role if "no group" is going to be activated
-        if (group_id.notNull())
+        // #868: a group's placeholder row: retry its titles if they didn't load
+        const ETitlesState state = getTitlesState(group_id);
+        if (state != ETitlesState::LOADED)
         {
-            LLGroupMgr::getInstance()->sendGroupTitleUpdate(group_id, role_id);
+            if (state == ETitlesState::FAILED)
+            {
+                requestTitles(group_id, true);
+                sendQueuedRequests();
+            }
+            return;
         }
 
-        // Send activate group request only if group is different from current group
-        if (gAgent.getGroupID() != group_id)
-        {
-            LLGroupActions::activate(group_id);
-        }
+        // #868: FS sent the title update and then ActivateGroup; the region-title manager now
+        // activates first and sends the title once the group is active ("no group" has no title)
+        FSGroupTitleRegionMgr::getInstance()->applyGroupTitle(group_id, role_id);
+
+        // A title change in the already active group is saved locally right away
+        updateActiveFlags();
     }
 }
 
-void FSFloaterGroupTitles::refreshGroupTitles()
+void FSFloaterGroupTitles::refreshGroupTitles(bool force)
 {
-    clearObservers();
+    if (!mGroupStates.empty())
+    {
+        for (const LLGroupData& group_data : gAgent.mGroups)
+        {
+            if (mGroupStates.find(group_data.mID) == mGroupStates.end()) addGroup(group_data, force);
+            else requestTitles(group_data.mID, force);
+        }
+        sendQueuedRequests();
+        return;
+    }
+    mRequestQueue.clear();
     mTitleList->clearRows();
     mEntries.clear();
 
     // Add "no group"
     addListItem(LLUUID::null, LLUUID::null, getString("NoGroupTitle"), LLTrans::getString("GroupsNone"), gAgent.getGroupID().isNull(), false);
 
-    for (std::vector<LLGroupData>::iterator it = gAgent.mGroups.begin(); it != gAgent.mGroups.end(); ++it)
+    // #868: each group gets a row at once ("loading" until its titles arrive); titles fetched in the
+    // last few minutes are reused unless refreshing
+    for (const LLGroupData& group_data : gAgent.mGroups)
     {
-        LLGroupData& group_data = *it;
-        FSGroupTitlesObserver* roleObserver = new FSGroupTitlesObserver(group_data, getDerivedHandle<FSFloaterGroupTitles>());
-        mGroupTitleObserverMap[group_data.mID] = roleObserver;
-        LLGroupMgr::getInstance()->sendGroupTitlesRequest(group_data.mID);
+        addGroup(group_data, force);
     }
+    sendQueuedRequests();
 
     updateDefaultColumn();
+}
+
+void FSFloaterGroupTitles::onSortChanged()
+{
+    // getSortColumnName() is the sort key column (title_sort_column for the Title header)
+    const std::string sort_column = mTitleList->getSortColumnName();
+    if (!sort_column.empty())
+    {
+        gSavedSettings.setString("SlipstreamGroupTitlesSortColumn", sort_column);
+        gSavedSettings.setBOOL("SlipstreamGroupTitlesSortAscending", mTitleList->getSortAscending());
+    }
 }
 
 void FSFloaterGroupTitles::selectedTitleChanged()
@@ -345,15 +687,20 @@ void FSFloaterGroupTitles::selectedTitleChanged()
     {
         LLUUID group_id = selected_item->getColumn(mTitleList->getColumn("group_id")->mIndex)->getValue().asUUID();
         LLUUID role_id  = selected_item->getColumn(mTitleList->getColumn("role_id")->mIndex)->getValue().asUUID();
+        // #868: a placeholder row has no title to assign; only a failed one activates (a retry)
+        const ETitlesState state = getTitlesState(group_id);
+        const bool is_title = (state == ETitlesState::LOADED);
+        mActivateButton->setEnabled(is_title || state == ETitlesState::FAILED);
         mInfoButton->setEnabled(group_id.notNull());
         const bool has_region = !FSGroupTitleRegionMgr::getInstance()->getRegionForTitle(group_id, role_id).empty();
-        mSetRegionButton->setEnabled(true);
-        mSetRegionManualButton->setEnabled(true);
-        mClearRegionButton->setEnabled(has_region);
-        mSetDefaultButton->setEnabled(true);
+        mSetRegionButton->setEnabled(is_title);
+        mSetRegionManualButton->setEnabled(is_title);
+        mClearRegionButton->setEnabled(is_title && has_region);
+        mSetDefaultButton->setEnabled(is_title);
     }
     else
     {
+        mActivateButton->setEnabled(false);
         mInfoButton->setEnabled(false);
         mSetRegionButton->setEnabled(false);
         mSetRegionManualButton->setEnabled(false);
@@ -388,18 +735,7 @@ void FSFloaterGroupTitles::onFilterEdit(const std::string& search_string)
     mFilterSubString = search_upper;
 
     // Apply new filter: rebuild the visible rows from the cached entries
-    const LLSD selected_value = mTitleList->getSelectedValue();
-    mTitleList->clearRows();
-    for (const TitleEntry& entry : mEntries)
-    {
-        addListRow(entry);
-    }
-    if (selected_value.isDefined())
-    {
-        mTitleList->selectByValue(selected_value);
-    }
-    updateDefaultColumn();
-    selectedTitleChanged();
+    rebuildList();
 }
 
 void FSFloaterGroupTitles::onSetRegion()

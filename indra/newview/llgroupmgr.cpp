@@ -1710,6 +1710,7 @@ void LLGroupMgr::sendGroupTitlesRequest(const LLUUID& group_id)
     group_datap->mTitlesRequestID.generate();
     group_datap->mTitlesRequestTime = LLFrameTimer::getElapsedSeconds();
     group_datap->mTitlesReplyPending = true;
+    group_datap->mTitlesCacheValid = true;
 
     LLMessageSystem* msg = gMessageSystem;
     msg->newMessage("GroupTitlesRequest");

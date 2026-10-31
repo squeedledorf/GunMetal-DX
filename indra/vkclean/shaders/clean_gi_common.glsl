@@ -99,6 +99,9 @@
                                // cell at its point in as a prior of up to that many samples -- its estimate is the
                                // cell's (many receivers over many frames) instead of a 1-spp speckle; the cache
                                // itself still takes the raw estimate. 0 = off.
+#define GI_FWD_FILTER_SHIFT 26u // bits 26-27 (RenderVKGIForwardCacheFilter): how a FORWARD surface reads the cache
+                               // (giCacheForward): 0 its own cell, 1 the 4 cells around it in its face plane,
+                               // 2 the 8 around it (trilinear; also across the cell layers a tilted face crosses)
 #define GI_F_LIGHT_CHG  65536u // CHANGED LIGHTS (RenderVKGILightChangeCut): a reservoir sample stores the
                                // radiance its hit point had WHEN IT WAS SHADED; a reused sample whose
                                // point a light reaches that changed since last frame (moved, or its colour /
@@ -216,9 +219,11 @@ struct GiHeader
 #define GI_STATE_ACCESS
 #endif
 // The state buffer: the header, then the cache -- RESOLVED cells (2 uvec4 each: [0] key (0 empty,
-// GI_KEY_TOMB freed), n | age << 16, centre x, y bits; [1] centre z bits, half(r, g), half(b, 0),
+// GI_KEY_TOMB freed), valid marker, centre x, y bits; [1] centre z bits, half(r, g), half(b, 0),
 // cell edge bits) at gi_data[2 slot ..], then the ACCUMULATORS (1 uvec4 each: r, g, b fixed point
-// x GI_ACC_SCALE, count) at gi_data[2 cap + slot].
+// x GI_ACC_SCALE, count) at gi_data[2 cap + slot]. Final region at [3 cap + slot]:
+// float32 millisecond EMA age, idle age, two reserved words (64 B/slot in all).
+// Resolved c0.y is only a valid marker; sample counts remain in the accumulator.
 #define GI_KEY_TOMB 0xFFFFFFFFu
 // (the deferred kernels: set 3 binding 23; the forward lit FS: draw set 0 binding 53, CLEAN_GI_FORWARD)
 #ifndef GI_STATE_SET
@@ -244,18 +249,32 @@ uint giPcg(uint v)
 float giLum(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
 
 // ---- the cache's cell of (P, N): its key (never 0), level and edge ----
-uint giCellKey(vec3 P, vec3 N, vec3 cam, out float edge)
+// The distance level of P (edge: its cell edge).
+int giCellLevel(vec3 P, vec3 cam, out float edge)
 {
     const float d = length(P - cam);
     const float step = max(gi.prm3.y, 1.0);
     const int level = clamp(int(floor(log2(max(d / step, 1.0)))), 0, 7);
     edge = max(gi.prm3.x, 0.05) * float(1u << uint(level));
-    const ivec3 q = ivec3(floor(P / edge));
+    return level;
+}
+// N's dominant axis (0 x, 1 y, 2 z) and its face bucket (axis x 2, + 1 when it points down that axis).
+uint giCellAxis(vec3 N)
+{
     const vec3 a = abs(N);
-    const uint axis = (a.x >= a.y && a.x >= a.z) ? 0u : (a.y >= a.z ? 1u : 2u);
-    const uint bucket = axis * 2u + ((axis == 0u ? N.x : (axis == 1u ? N.y : N.z)) < 0.0 ? 1u : 0u);
+    return (a.x >= a.y && a.x >= a.z) ? 0u : (a.y >= a.z ? 1u : 2u);
+}
+uint giCellBucket(vec3 N, uint axis) { return axis * 2u + ((axis == 0u ? N.x : (axis == 1u ? N.y : N.z)) < 0.0 ? 1u : 0u); }
+// The key of cell q at a level and face bucket.
+uint giCellKeyQ(ivec3 q, int level, uint bucket)
+{
     uint h = giPcg(uint(q.x) ^ giPcg(uint(q.y) ^ giPcg(uint(q.z) ^ giPcg(uint(level) * 8u + bucket))));
     return (h == 0u || h == GI_KEY_TOMB) ? 1u : h;
+}
+uint giCellKey(vec3 P, vec3 N, vec3 cam, out float edge)
+{
+    const int level = giCellLevel(P, cam, edge);
+    return giCellKeyQ(ivec3(floor(P / edge)), level, giCellBucket(N, giCellAxis(N)));
 }
 // The cell centre of P at edge (the resolve's change-sphere test).
 vec3 giCellCentre(vec3 P, float edge) { return (floor(P / edge) + 0.5) * edge; }
@@ -274,6 +293,21 @@ uint giCacheFind(uint key)
         s = (s + 1u) & (cap - 1u);
     }
     return 0xFFFFFFFFu;
+}
+// This recording's finite invalidation region, shared by cache readers, reuse and
+// history. Emitter spheres already include two ray lengths on the host; geometry
+// spheres keep their own radius. Missing bounds/overflow invalidates conservatively.
+bool giSceneChanged(vec3 P, float padding)
+{
+    if (gi.sph_n.y != 0u) return true;
+    for (uint i = 0u; i < min(gi.sph_n.x, GI_SPHERES_MAX); ++i)
+    {
+        const vec4 sp = gi.sph[i];
+        const vec3 delta = P - sp.xyz;
+        const float radius = sp.w + padding;
+        if (dot(delta, delta) <= radius * radius) return true;
+    }
+    return false;
 }
 #ifndef GI_STATE_READONLY
 // Find or insert the cell of key (centre / edge written by its inserter); 0xFFFFFFFF: the probe
@@ -295,6 +329,7 @@ uint giCacheFindOrInsert(uint key, vec3 centre, float edge, out bool inserted)
             {
                 inserted = true;
                 gi_data[2u * s].y = 0u;
+                gi_data[3u * cap + s] = uvec4(0u); // float32 EMA age and idle age, milliseconds
                 gi_data[2u * s].z = floatBitsToUint(centre.x);
                 gi_data[2u * s].w = floatBitsToUint(centre.y);
                 gi_data[2u * s + 1u] = uvec4(floatBitsToUint(centre.z), 0u, 0u, floatBitsToUint(edge));
@@ -334,9 +369,56 @@ bool giCacheRead(uint s, out vec3 E)
     const uvec4 c0 = gi_data[2u * s];
     const uvec4 c1 = gi_data[2u * s + 1u];
     if ((c0.y & 0xFFFFu) == 0u) return false;
+    const vec3 centre = vec3(uintBitsToFloat(c0.zw), uintBitsToFloat(c1.x));
+    if (giSceneChanged(centre, 0.87 * uintBitsToFloat(c1.w))) return false;
     const vec2 rg = unpackHalf2x16(c1.y);
     E = vec3(rg, unpackHalf2x16(c1.z).x);
-    return !(any(isnan(E)) || any(isinf(E)));
+    if (any(isnan(E)) || any(isinf(E))) return false;
+    // Cache priors/forward reads obey the CURRENT clamp too (settings may have
+    // changed since this cell was resolved). The prior never feeds the accumulator.
+    const float clampL = gi.prm2.w, lum = giLum(E);
+    if (clampL > 0.0 && lum > clampL) E *= clampL / lum;
+    return true;
+}
+// A FORWARD surface's cache irradiance at P (giForwardRefl): it has no GI pixel of its own and reads
+// the cells directly. Its own cell alone drew the cell grid on glass -- squares on a window facing an
+// axis, polygons where a tilted or curved pane cuts the cubes -- so (GI_FWD_FILTER_SHIFT) 2 weights
+// the 8 cells around P by their centres (trilinear), 1 the 4 of its own cell layer (half the finds;
+// the steps where a tilted face crosses a layer stay), 0 its own cell. Cells with no estimate drop
+// out; w: the weight the found ones carry (0: none -- the probes stand).
+vec3 giCacheForward(vec3 P, vec3 N, vec3 cam, out float w)
+{
+    w = 0.0;
+    float edge;
+    const int level = giCellLevel(P, cam, edge);
+    const uint axis = giCellAxis(N);
+    const uint bucket = giCellBucket(N, axis);
+    const uint mode = (gi.cfg.x >> GI_FWD_FILTER_SHIFT) & 3u;
+    vec3 E;
+    if (mode == 0u)
+    {
+        if (!giCacheRead(giCacheFind(giCellKeyQ(ivec3(floor(P / edge)), level, bucket)), E)) return vec3(0.0);
+        w = 1.0;
+        return E;
+    }
+    const vec3 g = P / edge - 0.5;
+    ivec3 b = ivec3(floor(g));
+    vec3 f = g - vec3(b);
+    if (mode == 1u)
+    {
+        b[axis] = int(floor(P[axis] / edge));   // the face's own layer: its far corners weigh 0
+        f[axis] = 0.0;
+    }
+    vec3 sum = vec3(0.0);
+    for (int i = 0; i < 8; ++i)
+    {
+        const ivec3 o = ivec3(i & 1, (i >> 1) & 1, (i >> 2) & 1);
+        const vec3 t = mix(1.0 - f, f, vec3(o));
+        const float wi = t.x * t.y * t.z;
+        if (wi < 1e-3) continue;   // (no find for a corner that would not show)
+        if (giCacheRead(giCacheFind(giCellKeyQ(b + o, level, bucket)), E)) { sum += wi * E; w += wi; }
+    }
+    return w > 0.0 ? sum / w : vec3(0.0);
 }
 
 // ---- reservoirs (GI-2 / GI-3): 2 uvec4 per texel and parity, set 3 binding 22 ----

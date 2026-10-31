@@ -129,6 +129,8 @@ uint64_t keyWith(uint64_t key, uint32_t id, uint32_t v)
 // row): the session's view count, fixed at startup.
 constexpr uint32_t kSpecViewsField = 15;   // bits 60-63 (the SpecIds use 0 .. 4 * SPEC_COUNT - 1)
 static_assert(LLCleanRendererVK::SPEC_COUNT < kSpecViewsField, "the view-count field overlaps a SpecId");
+constexpr uint32_t kSpecWireField = 14;
+static_assert(LLCleanRendererVK::SPEC_COUNT <= kSpecWireField, "the wire module field overlaps a SpecId");
 
 // The UI snapshot (specStatusText): written by the render thread's tick, read by the prefs.
 std::mutex  sStatusMutex;
@@ -188,10 +190,10 @@ SpecModSrc specModSrc(uint32_t m, bool g11, bool clk)
     }
 }
 
-VkShaderModule specModule(VkDevice dev, const SpecModSrc& src_in)
+VkShaderModule specModule(VkDevice dev, const SpecModSrc& src_in, bool wire = false)
 {
     SpecModSrc src = src_in;
-    GMDXRezFx::wireModule(src.name, src.code, src.bytes);   // <GMDX> a lit FS's Tron-wireframe twin
+    GMDXRezFx::wireModule(src.name, src.code, src.bytes, wire);
     if (!src.code) return VK_NULL_HANDLE;
     VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
     ci.codeSize = src.bytes;
@@ -369,6 +371,7 @@ uint64_t LLCleanRendererVK::specKeyFromSettings() const
     uint64_t key = 0;
     for (uint32_t i = 0; i < SPEC_COUNT; ++i) key = keyWith(key, i, std::min(v[i], kSpecTable[i].maxValue));
     if (mViewCount > 1u) key = keyWith(key, kSpecViewsField, mViewCount - 1u);   // #1075 (N = 1: no change)
+    key = keyWith(key, kSpecWireField, mRezFxWire ? 1u : 0u);
     return key;
 #else
     return kSpecNone;
@@ -386,11 +389,12 @@ std::string LLCleanRendererVK::specKeyText(uint64_t key) const
 {
     if (key == kSpecNone) return "generic";
     char b[128];
-    std::snprintf(b, sizeof(b), "%05" PRIx64 " [filt %u sun %u proj %u trans %u ssr %u mirror %u cel %u topN %u ao %u/%u/%u sky %s]",
+    std::snprintf(b, sizeof(b), "%05" PRIx64 " [filt %u sun %u proj %u trans %u ssr %u mirror %u cel %u topN %u ao %u/%u/%u sky %s wire %u]",
                   key, keyField(key, SPEC_FILTER), keyField(key, SPEC_SUN), keyField(key, SPEC_PROJ),
                   keyField(key, SPEC_TRANS), keyField(key, SPEC_SSR), keyField(key, SPEC_MIRROR), keyField(key, SPEC_CEL),
                   keyField(key, SPEC_TOPN), keyField(key, SPEC_AO), keyField(key, SPEC_AOMODE), keyField(key, SPEC_AOUP),
-                  keyField(key, SPEC_SKY) == 0u ? "linear" : keyField(key, SPEC_SKY) == 1u ? "classic" : "runtime");
+                  keyField(key, SPEC_SKY) == 0u ? "linear" : keyField(key, SPEC_SKY) == 1u ? "classic" : "runtime",
+                  keyField(key, kSpecWireField));
     return b;
 }
 
@@ -528,7 +532,8 @@ bool LLCleanRendererVK::specStartBuild(uint64_t key, const char* why)
     const std::string tag = mCtx->pipelineCacheTag();
     const bool g11 = s.g11;
     const bool clk = mClkOn;   // (RenderVKShaderClockLighting: fixed for the session)
-    s.loadJob = std::async(std::launch::async, [dev, phys, path, tag, m, g11, clk]()
+    const bool wire = keyField(key, kSpecWireField) != 0;
+    s.loadJob = std::async(std::launch::async, [dev, phys, path, tag, m, g11, clk, wire]()
     {
         SpecSet::Loaded L;
         std::vector<uint8_t> blob;
@@ -545,7 +550,7 @@ bool LLCleanRendererVK::specStartBuild(uint64_t key, const char* why)
             if (vkCreatePipelineCache(dev, &ci, nullptr, &L.cache) != VK_SUCCESS) L.cache = VK_NULL_HANDLE;
         }
         for (uint32_t i = 0; i < SM_COUNT; ++i)
-            if (m & (1u << i)) L.mods[i] = specModule(dev, specModSrc(i, g11, clk));
+            if (m & (1u << i)) L.mods[i] = specModule(dev, specModSrc(i, g11, clk), wire);
         return L;
     });
     lane = set.get();
@@ -960,6 +965,7 @@ void LLCleanRendererVK::specFrameTick()
     // here: a set's plain phase overlaps it (~10 s of a cold login), its ray-query phase waits
     // for it (specPollBuild).
     if (mPipelineJob) return;
+    if (rezFxFrameTick()) mSpecLive = nullptr;
     const double now = specClock();
     // Frame time for prewarm's busy test (this tick runs once per world frame).
     if (mSpecTickLast > 0.0)

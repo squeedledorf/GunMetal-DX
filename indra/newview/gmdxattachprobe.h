@@ -2,6 +2,8 @@
  * @file gmdxattachprobe.h
  * @brief Throttled property probes of other residents' attachments.
  *
+ * Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
+ *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -22,6 +24,8 @@
 #ifndef GMDX_ATTACHPROBE_H
 #define GMDX_ATTACHPROBE_H
 
+#include "lluuid.h"
+
 class LLVOAvatar;
 class LLViewerObject;
 
@@ -35,6 +39,9 @@ namespace GMDXAttachProbe
 {
     // LLVOAvatar::addChild, after the derender list has seen the attachment.
     void onAttachmentAdded(LLVOAvatar* wearer, LLViewerObject* attachment);
+
+    // True if this object was asked about this session (its reply is expected, not stray).
+    bool wasAsked(const LLUUID& object_id);
 }
 
 #endif // GMDX_ATTACHPROBE_H

@@ -1,0 +1,414 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<!--
+  <GMDX> Teleport Effects preferences (gmdxtpfx.cpp). Every control is bound to a GMDXTPFX* setting.
+  GMDXTPFX::initPrefs (from LLPanelPreference::postBuild) wires the two Previews and keeps what is
+  live in step with the settings: the page follows "Play teleport effects" (its note and the Previews
+  excepted), Glass only for Shatter or Random, the same-region effect only with its checkbox, Volume
+  only with sounds; so no enabled_control here. A new control follows the master checkbox by itself.
+
+  Layout grid, as on the Combat and Rez Effects tabs:
+    section header   left 10, bold
+    checkbox         left 12; under it (labels, notes, sliders) left 30
+    label column     left 30, 180 wide: combos and slider bars start at 210
+    combo            210..380, its Preview button 388..470 (the slider value boxes end at 470)
+    slider           left 30, label_width 180, width 440
+-->
+<panel
+ border="true"
+ follows="left|top|right|bottom"
+ height="438"
+ label="Teleport Effects"
+ layout="topleft"
+ left="102"
+ name="tpfx"
+ top="1"
+ width="517">
+    <check_box
+     control_name="GMDXTPFXEnabled"
+     follows="left|top"
+     height="16"
+     label="Play teleport effects"
+     layout="topleft"
+     left="12"
+     name="tpfx_enabled"
+     tool_tip="Plays when you teleport with a landmark, Home, the world map, a map or chat link, or by accepting a teleport offer. Never for teleports by scripts, objects or RLV, god summons or deaths. The teleport itself is never slowed down."
+     top="10"
+     width="470" />
+    <text
+     type="string"
+     follows="left|top"
+     height="16"
+     layout="topleft"
+     left="30"
+     name="tpfx_note"
+     top="28"
+     width="470">
+        Only for teleports you start. Only you see them.
+    </text>
+
+    <!-- ============ Teleporting to another region ============ -->
+    <text
+     type="string"
+     follows="left|top"
+     font="SansSerifSmallBold"
+     height="16"
+     layout="topleft"
+     left="10"
+     name="tpfx_cross_header"
+     text_readonly_color="LabelDisabledColor"
+     top="56"
+     width="490">
+        Teleporting to another region
+    </text>
+    <text
+     type="string"
+     follows="left|top"
+     height="16"
+     layout="topleft"
+     left="30"
+     name="tpfx_effect_label"
+     text_readonly_color="LabelDisabledColor"
+     top="82"
+     width="175">
+        Effect:
+    </text>
+    <combo_box
+     control_name="GMDXTPFXEffect"
+     follows="left|top"
+     height="20"
+     layout="topleft"
+     left="210"
+     name="tpfx_effect_combo"
+     tool_tip="What you see as you leave. Shatter: the picture breaks like glass. CRT power-off: it switches off like an old TV. Portal swirl: it twists into a glowing ring. Glitch: it breaks up like bad video. Fold-away: it flips away like a card. Hyperspace: a jump to light speed. Random: a different one each time."
+     top="79"
+     width="170">
+        <combo_box.item
+         label="Shatter"
+         name="shatter"
+         value="shatter" />
+        <combo_box.item
+         label="CRT power-off"
+         name="crt"
+         value="crt" />
+        <combo_box.item
+         label="Portal swirl"
+         name="portal"
+         value="portal" />
+        <combo_box.item
+         label="Glitch"
+         name="glitch"
+         value="glitch" />
+        <combo_box.item
+         label="Fold-away"
+         name="fold"
+         value="fold" />
+        <combo_box.item
+         label="Hyperspace"
+         name="hyperspace"
+         value="hyperspace" />
+        <combo_box.item
+         label="Random"
+         name="random"
+         value="random" />
+    </combo_box>
+    <button
+     follows="left|top"
+     height="22"
+     label="Preview"
+     layout="topleft"
+     left="388"
+     name="tpfx_preview_btn"
+     tool_tip="Play this effect here, without teleporting. This window steps aside while it plays. Works even with teleport effects off."
+     top="78"
+     width="82" />
+    <text
+     type="string"
+     follows="left|top"
+     height="16"
+     layout="topleft"
+     left="30"
+     name="tpfx_pattern_label"
+     text_readonly_color="LabelDisabledColor"
+     top="108"
+     width="175">
+        Glass breaks into:
+    </text>
+    <combo_box
+     control_name="GMDXTPFXGlassPattern"
+     follows="left|top"
+     height="20"
+     layout="topleft"
+     left="210"
+     name="tpfx_pattern_combo"
+     tool_tip="For Shatter only (and Random, when it picks Shatter): how the picture breaks. Rays and rings spread out from one point; shards are uneven pieces; splinters are many thin ones."
+     top="105"
+     width="170">
+        <combo_box.item
+         label="Rays and rings"
+         name="impact"
+         value="0" />
+        <combo_box.item
+         label="Shards"
+         name="shards"
+         value="1" />
+        <combo_box.item
+         label="Splinters"
+         name="splinters"
+         value="2" />
+    </combo_box>
+    <slider
+     can_edit_text="true"
+     control_name="GMDXTPFXDuration"
+     decimal_digits="2"
+     follows="left|top"
+     height="15"
+     increment="0.05"
+     initial_value="1.0"
+     label="Length (1 = normal):"
+     label_width="180"
+     layout="topleft"
+     left="30"
+     max_val="2.0"
+     min_val="0.6"
+     name="tpfx_duration"
+     show_text="true"
+     tool_tip="How long the effect takes as you leave. 1 is its normal length (about a second); 2 takes twice as long. Arriving takes a little less. Teleports within a region always get a short effect."
+     top="133"
+     width="440" />
+    <slider
+     can_edit_text="true"
+     control_name="GMDXTPFXIntensity"
+     decimal_digits="2"
+     follows="left|top"
+     height="15"
+     increment="0.05"
+     initial_value="1.0"
+     label="Strength (1 = normal):"
+     label_width="180"
+     layout="topleft"
+     left="30"
+     max_val="2.0"
+     min_val="0.25"
+     name="tpfx_intensity"
+     show_text="true"
+     tool_tip="How wild the effect is: how hard the glass flies, how far the portal twists, how much the picture glitches, how bright the smoke and lightning are. Lower is calmer, higher is wilder. Also used for teleports within a region."
+     top="155"
+     width="440" />
+
+    <!-- ============ Teleporting within a region ============ -->
+    <text
+     type="string"
+     follows="left|top"
+     font="SansSerifSmallBold"
+     height="16"
+     layout="topleft"
+     left="10"
+     name="tpfx_same_header"
+     text_readonly_color="LabelDisabledColor"
+     top="182"
+     width="490">
+        Teleporting within a region
+    </text>
+    <check_box
+     control_name="GMDXTPFXSameRegion"
+     follows="left|top"
+     height="16"
+     label="Also play a short effect"
+     layout="topleft"
+     left="12"
+     name="tpfx_same_region"
+     tool_tip="A short effect when you teleport to another spot in the region you are in. Nothing waits for it: the teleport is just as quick."
+     top="205"
+     width="470" />
+    <text
+     type="string"
+     follows="left|top"
+     height="16"
+     layout="topleft"
+     left="30"
+     name="tpfx_same_region_label"
+     text_readonly_color="LabelDisabledColor"
+     top="230"
+     width="175">
+        Effect:
+    </text>
+    <combo_box
+     control_name="GMDXTPFXSameRegionEffect"
+     follows="left|top"
+     height="20"
+     layout="topleft"
+     left="210"
+     name="tpfx_same_region_combo"
+     tool_tip="Ninja smoke, Smoke puff and Lightning strike happen around you in the world: smoke or a lightning bolt where you leave and where you land. CRT power-off, Glitch and Fold-away play on the screen, as short versions. Random: a different one each time."
+     top="227"
+     width="170">
+        <combo_box.item
+         label="Ninja smoke"
+         name="ninjasmoke"
+         value="ninjasmoke" />
+        <combo_box.item
+         label="Smoke puff"
+         name="smokepuff"
+         value="smokepuff" />
+        <combo_box.item
+         label="Lightning strike"
+         name="lightning"
+         value="lightning" />
+        <combo_box.item
+         label="CRT power-off"
+         name="crt"
+         value="crt" />
+        <combo_box.item
+         label="Glitch"
+         name="glitch"
+         value="glitch" />
+        <combo_box.item
+         label="Fold-away"
+         name="fold"
+         value="fold" />
+        <combo_box.item
+         label="Random"
+         name="random"
+         value="random" />
+    </combo_box>
+    <button
+     follows="left|top"
+     height="22"
+     label="Preview"
+     layout="topleft"
+     left="388"
+     name="tpfx_preview_same_region_btn"
+     tool_tip="Play this short effect here, without teleporting. This window steps aside while it plays. Works even with the effects off."
+     top="226"
+     width="82" />
+    <text
+     type="string"
+     follows="left|top"
+     height="16"
+     layout="topleft"
+     left="30"
+     name="tpfx_same_region_note"
+     text_readonly_color="LabelDisabledColor"
+     top="253"
+     width="470">
+        Never where you can be hurt (damage-enabled land).
+    </text>
+
+    <!-- ============ Sounds ============ -->
+    <text
+     type="string"
+     follows="left|top"
+     font="SansSerifSmallBold"
+     height="16"
+     layout="topleft"
+     left="10"
+     name="tpfx_sounds_header"
+     text_readonly_color="LabelDisabledColor"
+     top="281"
+     width="490">
+        Sounds
+    </text>
+    <check_box
+     control_name="GMDXTPFXSounds"
+     follows="left|top"
+     height="16"
+     label="Play sounds"
+     layout="topleft"
+     left="12"
+     name="tpfx_sounds"
+     tool_tip="A sound as you leave and another as you arrive, for each effect. Simple sounds for now; better ones will replace them."
+     top="304"
+     width="470" />
+    <slider
+     can_edit_text="true"
+     control_name="GMDXTPFXVolume"
+     decimal_digits="2"
+     follows="left|top"
+     height="15"
+     increment="0.05"
+     initial_value="0.5"
+     label="Volume:"
+     label_width="180"
+     layout="topleft"
+     left="30"
+     max_val="1.0"
+     min_val="0.0"
+     name="tpfx_volume"
+     show_text="true"
+     tool_tip="How loud the teleport sounds are. The Buttons volume in Sound &amp; Media turns them down too."
+     top="325"
+     width="440" />
+
+    <!-- ============ If a teleport is slow ============ -->
+    <text
+     type="string"
+     follows="left|top"
+     font="SansSerifSmallBold"
+     height="16"
+     layout="topleft"
+     left="10"
+     name="tpfx_slow_header"
+     text_readonly_color="LabelDisabledColor"
+     top="352"
+     width="490">
+        If a teleport is slow
+    </text>
+    <spinner
+     control_name="GMDXTPFXHoldCancelSec"
+     decimal_digits="0"
+     follows="left|top"
+     height="20"
+     increment="1"
+     initial_value="3"
+     label="Offer Cancel after"
+     label_width="245"
+     layout="topleft"
+     left="30"
+     max_val="15"
+     min_val="1"
+     name="tpfx_cancel_after"
+     tool_tip="While you wait for a teleport to another region, a Cancel button appears after this many seconds (when the teleport can still be cancelled)."
+     top="375"
+     width="295" />
+    <text
+     type="string"
+     follows="left|top"
+     height="16"
+     layout="topleft"
+     left="331"
+     name="tpfx_cancel_after_unit"
+     text_readonly_color="LabelDisabledColor"
+     top="378"
+     width="80">
+        seconds
+    </text>
+    <spinner
+     control_name="GMDXTPFXHoldTimeoutSec"
+     decimal_digits="0"
+     follows="left|top"
+     height="20"
+     increment="1"
+     initial_value="20"
+     label="Show the normal teleport screen after"
+     label_width="245"
+     layout="topleft"
+     left="30"
+     max_val="60"
+     min_val="5"
+     name="tpfx_timeout"
+     tool_tip="If the teleport still is not done after this many seconds, the effect fades away and the normal teleport screen, with its progress bar, takes over."
+     top="401"
+     width="295" />
+    <text
+     type="string"
+     follows="left|top"
+     height="16"
+     layout="topleft"
+     left="331"
+     name="tpfx_timeout_unit"
+     text_readonly_color="LabelDisabledColor"
+     top="404"
+     width="80">
+        seconds
+    </text>
+</panel>

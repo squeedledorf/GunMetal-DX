@@ -27,9 +27,9 @@
 #include "llviewerprecompiledheaders.h"
 
 #include "llworldmapview.h"
+#include "llregionmapcapture.h"   // captured maps on the World Map (GunMetal-DX port)
 
-#include "gmdxregioncapture.h"   // <GMDX> captured maps on the World Map
-#include "gmdxmapshare.h"        // <GMDX> pings on the World Map
+#include "gmdxmapshare.h"        // <GMDX> pings on the World Map (CombatFX)
 
 #include "indra_constants.h"
 #include "llui.h"
@@ -428,7 +428,8 @@ void LLWorldMapView::draw()
 
     // Draw the image tiles
     drawMipmap(width, height);
-    // <GMDX> captured region maps over the server's tiles (GMDXWorldMapUseCapturedMaps)
+    // Captured region maps over the server's tiles (SLRegionMapUseCaptured; llregionmapcapture.h).
+    // Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
     {
         auto region_rect = [&](U64 handle, F64 size, F32& left, F32& bottom, F32& right, F32& top)
         {
@@ -437,7 +438,7 @@ void LLWorldMapView::draw()
             const LLVector3 ne = globalPosToView(origin + LLVector3d(size, size, 0.0));
             left = sw.mV[VX]; bottom = sw.mV[VY]; right = ne.mV[VX]; top = ne.mV[VY];
         };
-        GMDXRegionCapture::forEachWorldMapTexture(
+        LLRegionMapCapture::forEachWorldMapTexture(
             [&](U64 handle)
             {
                 F32 l, b, r, t;
@@ -462,7 +463,6 @@ void LLWorldMapView::draw()
             });
         gGL.getTexUnit(0)->unbind(LLTexUnit::TT_TEXTURE);
     }
-    // </GMDX>
 
     // Draw per sim overlayed information (names, mature, offline...)
     // Read only (#723): the flat per-region cache is rebuilt only when regions are added; requests,

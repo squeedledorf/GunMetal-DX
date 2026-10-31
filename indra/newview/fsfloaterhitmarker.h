@@ -29,8 +29,13 @@
 class LLLineEditor;
 class LLScrollListCtrl;
 
+// Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4. Slipstream: the hit marker
+// options live in Preferences > Combat only (GunMetal-DX's duplicate options floater is not
+// taken); this is the symbols editor it opens.
+// <GMDX> GunMetal-DX's Hit Marker Options floater is back (the Combat menu).
+
 // Hitmarker options. All controls are settings-bound; this class only
-// exists to wire the "Customize symbols" button.
+// exists to wire the "Customize symbols" and sound test buttons.
 class FSFloaterHitMarker : public LLFloater
 {
 public:
@@ -39,6 +44,7 @@ public:
 
     bool postBuild() override;
 };
+// </GMDX>
 
 // Damage type symbols editor: per-type symbol assignments persisted into
 // the FSHitMarkerEmojiMap setting.

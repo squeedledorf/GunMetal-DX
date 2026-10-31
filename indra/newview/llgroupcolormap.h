@@ -9,10 +9,15 @@
  * Data is persisted to  <account_dir>/settings_group_colors.xml  so colors
  * survive relogs.  The file is keyed by group UUID string → LLColor4 LLSD.
  *
+ * Gated by the SLGroupColors preference: off means no tint, no traffic.
+ *
  * GunMetal-DX: the active-group resolution (Title NameValue matched against
  * the AvatarGroupsReply titles, with the worn-attachment group as fallback
  * for hidden groups) lived inside LLVOAvatar in SoapStorm. It is kept here,
  * keyed by avatar id, so LLVOAvatar only needs a one-line colour hook.
+ *
+ * Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4; the active-group
+ * resolution is from SoapStorm <OTS>.
  *
  * $LicenseInfo:firstyear=2024&license=viewerlgpl$
  * Second Life Viewer Source Code
@@ -31,6 +36,7 @@
 #include <map>
 #include <string>
 #include <unordered_map>
+#include <boost/signals2.hpp>
 
 class LLMessageSystem;
 class LLPanelGroupTab;
@@ -55,9 +61,12 @@ public:
     /** True if a non-transparent color is stored for this group. */
     bool hasGroupColor(const LLUUID& group_id) const;
 
-    /** True if any group has a color configured; used to skip group lookups
+    /** True if the SLGroupColors preference is on and any group has a color configured; used to skip group lookups
      *  (and the attachment-group probe) entirely when tinting is unused. */
-    bool hasAnyColors() const { return !mColors.empty(); }
+    bool hasAnyColors() const;
+
+    /** The SLGroupColors preference. */
+    static bool enabled();
 
     /** Remove the color entry for this group. */
     void clearGroupColor(const LLUUID& group_id);
@@ -122,6 +131,7 @@ private:
     std::map<LLUUID, LLUUID> mPendingProbes;                // object id → avatar id
     LLFrameTimer mIdleTimer;
     U32 mPass{ 0 };
+    boost::signals2::scoped_connection mEnabledConnection;
 };
 
 #endif // LL_LLGROUPCOLORMAP_H

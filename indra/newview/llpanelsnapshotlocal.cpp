@@ -37,6 +37,7 @@
 #include "llspinctrl.h"
 
 #include "llfloatersnapshot.h" // FIXME: replace with a snapshot storage model
+#include "llnotificationsutil.h"
 #include "llpanelsnapshot.h"
 #include "llsnapshotlivepreview.h"
 #include "llviewercontrol.h" // gSavedSettings
@@ -74,19 +75,44 @@ private:
     void onFormatComboCommit(LLUICtrl* ctrl);
     void onQualitySliderCommit(LLUICtrl* ctrl);
     void onSaveFlyoutCommit(LLUICtrl* ctrl);
+    void performTimedAction(const LLSD& action) override;
 
     void onLocalSaved();
     void onLocalCanceled();
 
-    // Output folder row (SnapshotBaseDir, per-account).
+    // Output folder row (SnapshotBaseDir, per-account), showing the next file's path.
     void refreshFolderDisplay();
     void onBrowseFolder();
     void onOpenFolder();
 
+    // #788: file name row (SnapshotFileNamePattern)
+    void refreshNameCombo();
+    void onNameComboCommit();
+    void editCustomPattern();
+    std::string getNextPath();
+
     boost::signals2::scoped_connection mSnapshotDirConnection;
+    boost::signals2::scoped_connection mBaseNameConnection;
+    boost::signals2::scoped_connection mPatternConnection;
+    // The next path, kept while what it depends on is unchanged: finding it may stat many
+    // files ({n} in a full folder). Cleared after a save and on opening.
+    std::string mNextPathKey;
+    std::string mNextPath;
 };
 
 static LLPanelInjector<LLPanelSnapshotLocal> panel_class("llpanelsnapshotlocal");
+
+// SnapshotFileNamePattern, its default when empty
+static std::string snapshot_name_pattern()
+{
+    std::string pattern = gSavedSettings.getString("SnapshotFileNamePattern");
+    if (pattern.empty())
+    {
+        LLControlVariablePtr control = gSavedSettings.getControl("SnapshotFileNamePattern");
+        pattern = control ? control->getDefault().asString() : std::string();
+    }
+    return pattern;
+}
 
 LLPanelSnapshotLocal::LLPanelSnapshotLocal()
 {
@@ -102,6 +128,7 @@ bool LLPanelSnapshotLocal::postBuild()
     getChild<LLUICtrl>("image_quality_slider")->setCommitCallback(boost::bind(&LLPanelSnapshotLocal::onQualitySliderCommit, this, _1));
     getChild<LLUICtrl>("local_format_combo")->setCommitCallback(boost::bind(&LLPanelSnapshotLocal::onFormatComboCommit, this, _1));
     getChild<LLUICtrl>("save_btn")->setCommitCallback(boost::bind(&LLPanelSnapshotLocal::onSaveFlyoutCommit, this, _1));
+    getChild<LLUICtrl>("local_name_combo")->setCommitCallback(boost::bind(&LLPanelSnapshotLocal::onNameComboCommit, this));
 
     // Follow the folder setting so the first-save picker, "Save As..." and
     // a missing-folder reset (LLViewerWindow::saveImageLocal) all show up here.
@@ -112,6 +139,23 @@ bool LLPanelSnapshotLocal::postBuild()
             refreshFolderDisplay();
         });
     }
+    // "Save As..." names the snapshots ({name})
+    if (LLControlVariablePtr ctrl = gSavedPerAccountSettings.getControl("SnapshotBaseName"))
+    {
+        mBaseNameConnection = ctrl->getSignal()->connect([this](LLControlVariable*, const LLSD&, const LLSD&)
+        {
+            refreshFolderDisplay();
+        });
+    }
+    if (LLControlVariablePtr ctrl = gSavedSettings.getControl("SnapshotFileNamePattern"))
+    {
+        mPatternConnection = ctrl->getSignal()->connect([this](LLControlVariable*, const LLSD&, const LLSD&)
+        {
+            refreshNameCombo();
+            refreshFolderDisplay();
+        });
+    }
+    refreshNameCombo();
     refreshFolderDisplay();
 
     return LLPanelSnapshot::postBuild();
@@ -124,6 +168,8 @@ void LLPanelSnapshotLocal::onOpen(const LLSD& key)
     {
         getChild<LLComboBox>("local_format_combo")->selectNthItem(mLocalFormat);
     }
+    mNextPathKey.clear();
+    refreshNameCombo();
     refreshFolderDisplay();
     LLPanelSnapshot::onOpen(key);
 }
@@ -184,8 +230,12 @@ void LLPanelSnapshotLocal::refreshFolderDisplay()
         return;
     }
 
+    // #788: the folder and the name the next snapshot gets there, as an example of the
+    // file name setting
+    const std::string next_path = getNextPath();
+
     // Paths are interesting at the tail: keep the end and trim from the front.
-    LLWString display = utf8str_to_wstring(dir);
+    LLWString display = utf8str_to_wstring(next_path);
     const LLFontGL* font = path_text->getFont();
     const S32 avail = path_text->getRect().getWidth() - 2 * path_text->getHPad() - 2;
     if (font && avail > 0 && font->getWidth(display.c_str()) > avail)
@@ -198,9 +248,80 @@ void LLPanelSnapshotLocal::refreshFolderDisplay()
         display = ellipsis + display;
     }
     path_text->setText(wstring_to_utf8str(display));
-    path_text->setToolTip(dir);
+    LLStringUtil::format_map_t args;
+    args["[PATH]"] = next_path;
+    path_text->setToolTip(getString("next_file_tooltip", args));
 
     getChildView("local_folder_open_btn")->setEnabled(LLFile::isdir(dir));
+}
+
+std::string LLPanelSnapshotLocal::getNextPath()
+{
+    std::string extension;
+    switch (getImageFormat())
+    {
+        case LLSnapshotModel::SNAPSHOT_FORMAT_JPEG: extension = "jpg"; break;
+        case LLSnapshotModel::SNAPSHOT_FORMAT_BMP:  extension = "bmp"; break;
+        default:                                    extension = "png"; break;
+    }
+    const std::string pattern = gSavedSettings.getString("SnapshotFileNamePattern");
+    const S32 width = getTypedPreviewWidth();
+    const S32 height = getTypedPreviewHeight();
+    const std::string key = llformat("%s|%s|%s|%s|%dx%d", pattern.c_str(), extension.c_str(),
+                                     gSavedPerAccountSettings.getString("SnapshotBaseDir").c_str(),
+                                     gSavedPerAccountSettings.getString("SnapshotBaseName").c_str(), width, height);
+    if (key != mNextPathKey)
+    {
+        mNextPathKey = key;
+        mNextPath = gViewerWindow->getNextSnapshotPath(pattern, width, height, extension);
+    }
+    return mNextPath;
+}
+
+void LLPanelSnapshotLocal::refreshNameCombo()
+{
+    LLComboBox* combo = getChild<LLComboBox>("local_name_combo");
+    const std::string pattern = snapshot_name_pattern();
+    // A pattern none of the presets has is the custom one
+    if (!combo->selectByValue(pattern))
+    {
+        combo->selectByValue("custom");
+    }
+    combo->setToolTip(getString("name_combo_tooltip") + "\n" + pattern);
+}
+
+void LLPanelSnapshotLocal::onNameComboCommit()
+{
+    const std::string value = getChild<LLUICtrl>("local_name_combo")->getValue().asString();
+    if (value == "custom")
+    {
+        editCustomPattern();
+        return;
+    }
+    gSavedSettings.setString("SnapshotFileNamePattern", value);
+}
+
+void LLPanelSnapshotLocal::editCustomPattern()
+{
+    LLSD args;
+    args["PATTERN"] = snapshot_name_pattern();
+    args["BASE_NAME"] = gSavedPerAccountSettings.getString("SnapshotBaseName");
+    // The setting's signal refreshes the panel. The combo is put back on the pattern in use
+    // also when that did not change (Cancel, or OK on the same pattern).
+    LLHandle<LLPanelSnapshotLocal> handle = getDerivedHandle<LLPanelSnapshotLocal>();
+    LLNotificationsUtil::add("SnapshotFileNamePattern", args, LLSD(), [handle](const LLSD& notification, const LLSD& response)
+    {
+        if (LLNotificationsUtil::getSelectedOption(notification, response) == 0)
+        {
+            std::string pattern = response["pattern"].asString();
+            LLStringUtil::trim(pattern);
+            gSavedSettings.setString("SnapshotFileNamePattern", pattern);
+        }
+        if (LLPanelSnapshotLocal* panel = handle.get())
+        {
+            panel->refreshNameCombo();
+        }
+    });
 }
 
 void LLPanelSnapshotLocal::onBrowseFolder()
@@ -268,7 +389,15 @@ void LLPanelSnapshotLocal::onQualitySliderCommit(LLUICtrl* ctrl)
 
 void LLPanelSnapshotLocal::onSaveFlyoutCommit(LLUICtrl* ctrl)
 {
-    if (ctrl->getValue().asString() == "save as")
+    LLSD action = LLSD().with("type", "local").with("save_as", ctrl->getValue().asString() == "save as");
+    LLFloaterSnapshot* floater = LLFloaterSnapshot::getInstance();
+    if (floater->startTimedAction(this, action)) return;
+    performTimedAction(action);
+}
+
+void LLPanelSnapshotLocal::performTimedAction(const LLSD& action)
+{
+    if (action["save_as"].asBoolean())
     {
         gViewerWindow->resetSnapshotLoc();
     }
@@ -276,11 +405,21 @@ void LLPanelSnapshotLocal::onSaveFlyoutCommit(LLUICtrl* ctrl)
     LLFloaterSnapshot* floater = LLFloaterSnapshot::getInstance();
 
     floater->notify(LLSD().with("set-working", true));
-    floater->saveLocal((boost::bind(&LLPanelSnapshotLocal::onLocalSaved, this)), (boost::bind(&LLPanelSnapshotLocal::onLocalCanceled, this)));
+    LLHandle<LLPanel> panel = getHandle();
+    floater->saveLocal([panel]()
+    {
+        if (auto* self = dynamic_cast<LLPanelSnapshotLocal*>(panel.get()); self && self->isInVisibleChain()) self->onLocalSaved();
+    }, [panel]()
+    {
+        if (auto* self = dynamic_cast<LLPanelSnapshotLocal*>(panel.get()); self && self->isInVisibleChain()) self->onLocalCanceled();
+    });
 }
 
 void LLPanelSnapshotLocal::onLocalSaved()
 {
+    // the file just saved takes the name shown, find the next one
+    mNextPathKey.clear();
+    refreshFolderDisplay();
     mSnapshotFloater->postSave();
     LLFloaterSnapshot::getInstance()->notify(LLSD().with("set-finished", LLSD().with("ok", true).with("msg", "local")));
 }

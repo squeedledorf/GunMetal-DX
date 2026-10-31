@@ -79,6 +79,7 @@ namespace
     bool sInFlight = false;
     std::string sNotifiedBuild; // already offered this session (scheduled checks don't repeat it)
     bool sWarnedBadFeed = false;
+    bool sRetryAfterLogin = false;  // <GMDX> the login screen check failed: try again once logged in
 
     // "1.2.3.4" -> {1,2,3,4}; digits and exactly four parts only.
     bool parse_version(const std::string& text, Version& out)
@@ -301,11 +302,17 @@ namespace
         }
     }
 
-    // A manual check answers with a dialog: toasts aren't shown until after login, and
-    // the person is waiting for an answer anyway. The daily check uses a toast.
+    // <GMDX> A dialog for a manual check (the person is waiting for an answer) and before login
+    // (toasts aren't shown until after login: the offer must be on the login screen). The
+    // daily check once logged in uses a toast.
+    bool use_modal(bool manual)
+    {
+        return manual || LLStartUp::getStartupState() < STATE_STARTED;
+    }
+
     void offer_update(const Feed& feed, const std::string& current, bool manual)
     {
-        const std::string suffix = manual ? "Modal" : "";
+        const std::string suffix = use_modal(manual) ? "Modal" : "";
         sNotifiedBuild = feed.build;
         LLSD args;
         args["VERSION"] = feed.label;
@@ -389,8 +396,10 @@ namespace
         if (fetched == FetchResult::Exiting) return;
         if (fetched == FetchResult::HttpFailed)
         {
-            // Offline, site down, proxy trouble: try again at the next interval.
+            // Offline, site down, proxy trouble: try again at the next interval (<GMDX> or, for
+            // the check at the login screen, soon after login).
             LL_INFOS("UpdateCheck") << "Update check failed: " << why << LL_ENDL;
+            if (!manual && LLStartUp::getStartupState() < STATE_STARTED) sRetryAfterLogin = true;
             notify_failed(manual);
             return;
         }
@@ -416,20 +425,19 @@ namespace
             }
             return;
         }
-        // Auto-install (#421, setting UpdateAutoInstall, default off): a signed manifest that
-        // verifies means the installer is downloaded in the background and applied at the next
-        // start; SLUpdater then announces it itself. Anything it can't do falls through to the
-        // normal notice below.
-        if (SLUpdater::onFeedUpdate(feed.update_manifest, feed.update_signature, feed.build, current,
-                                    is_release_feed()))
-        {
-            sNotifiedBuild = feed.build;
-            return;
-        }
         // A manual check shows the offer even for a skipped version (the way to un-skip).
         if (!manual && (feed.build == gSavedSettings.getString("UpdateCheckSkippedBuild")
                         || feed.build == sNotifiedBuild))
         {
+            return;
+        }
+        // <GMDX> Self-update (#421): when the signed manifest verifies, SLUpdater asks "Download and
+        // install / Remind me later / Skip this version"; nothing is fetched before that click.
+        // Anything it can't do falls through to the plain notice below (opens the browser).
+        if (SLUpdater::offerUpdate(feed.update_manifest, feed.update_signature, feed.build, current,
+                                   is_release_feed(), feed.label, feed.notes_url, use_modal(manual), manual))
+        {
+            sNotifiedBuild = feed.build;
             return;
         }
         offer_update(feed, current, manual);
@@ -495,9 +503,23 @@ namespace SLUpdateChecker
 {
     void idle()
     {
-        if (LLStartUp::getStartupState() < STATE_STARTED || is_test_build()) return;
-        // <GMDX> Nothing is fetched until the person says so, once (GMDXUpdateConsent -1): check and
-        // install automatically, check and tell, or never check (Help > Check for updates still works).
+        // <GMDX> From the login screen on: the person is told about (and asked about) updates
+        // before logging in. Fetching the small feed is the only thing done without a click.
+        if (LLStartUp::getStartupState() < STATE_LOGIN_WAIT) return;
+        static bool started = false;
+        if (!started)
+        {
+            started = true;
+            // UpdateAutoInstall (0.3.0's "Check and install") no longer downloads anything; clear it
+            // so an older build run later doesn't either.
+            if (gSavedSettings.getBOOL("UpdateAutoInstall")) gSavedSettings.setBOOL("UpdateAutoInstall", false);
+            std::string current;
+            running_version(current);
+            SLUpdater::askAboutDownloaded(current);   // local files only, no network
+        }
+        if (is_test_build()) return;
+        // Nothing is fetched until the person says so, once (GMDXUpdateConsent -1): check and tell
+        // me, or never check (Help > Check for updates still works).
         static LLCachedControl<S32> consent(gSavedSettings, "GMDXUpdateConsent", -1);
         if (consent < 0)
         {
@@ -508,18 +530,22 @@ namespace SLUpdateChecker
                 LLNotificationsUtil::add("GMDXUpdateConsent", LLSD(), LLSD(), [](const LLSD& n, const LLSD& r)
                     {
                         const S32 option = LLNotificationsUtil::getSelectedOption(n, r);
-                        if (option < 0 || option > 2) return;   // closed: ask again next session
-                        gSavedSettings.setBOOL("UpdateCheckEnabled", option != 2);
-                        if (option != 2) gSavedSettings.setBOOL("UpdateAutoInstall", option == 0);
-                        gSavedSettings.setS32("GMDXUpdateConsent", option == 2 ? 0 : 1);
+                        if (option < 0 || option > 1) return;   // closed: ask again next session
+                        gSavedSettings.setBOOL("UpdateCheckEnabled", option == 0);
+                        gSavedSettings.setS32("GMDXUpdateConsent", option == 0 ? 1 : 0);
                     });
             }
             return;
         }
-        // </GMDX>
         static LLCachedControl<bool> enabled(gSavedSettings, "UpdateCheckEnabled", true);
         if (!enabled) return;
         const double now = LLTimer::getTotalSeconds();
+        if (sRetryAfterLogin && LLStartUp::getStartupState() >= STATE_STARTED && !sInFlight)
+        {
+            sRetryAfterLogin = false;
+            sNextCheck = now + 20.0;   // once the region has settled
+        }
+        // </GMDX>
         if (sNextCheck == 0.0)
         {
             sNextCheck = now + FIRST_CHECK_DELAY;

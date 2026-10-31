@@ -1,4 +1,5 @@
-// <GMDX> PHYSICAL SKY maths (RenderVKPhysicalSky; the C++ half is newview/vkgfx/gmdxphysskyvk.cpp).
+// PHYSICAL SKY maths (RenderVKPhysicalSky; the C++ half is newview/vkgfx/llcleanphysskyvk.cpp).
+// Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
 //
 // Hillaire 2020, "A Scalable and Production Ready Sky and Atmosphere Rendering Technique"
 // (EGSR 2020). Adapted from Epic Games' reference implementation,
@@ -27,10 +28,9 @@
 //                                                              exposure applied), viewer height
 //   [4] light direction (world, unit), on                  [5] ambient rgb (linear), Rayleigh
 //                                                              exp scale (1/km, negative)
-//       (<GMDX> physical night: [3] / [4] are the sun's; [4].w 2 = the moon is a second light,
-//       3 = the sky-view pass of the moon's half; gmdxphysskyvk.cpp)
-//   [6] Mie exp scale (1/km, negative), ground albedo, highlight roll-off (0 none), aerial
-//       perspective distance scale (0 = WindLight's haze only)
+//       (physical night: [3] / [4] are the sun's; [4].w 2 = the moon is a second light,
+//       3 = the sky-view pass of the moon's half; llcleanphysskyvk.cpp)
+//   [6] Mie exp scale (1/km, negative), ground albedo, highlight roll-off (0 none), reserved
 //   [7] Rayleigh in-scatter tint rgb (EEP blue_horizon), Mie in-scatter tint (haze_horizon):
 //       the sky's colour as its artist set it, on what is scattered, not on what is absorbed
 
@@ -55,7 +55,6 @@ vec3  pkAmbient()      { return PHYSKY_P(5).rgb; }
 float pkRayleighExp()  { return PHYSKY_P(5).w; }
 float pkMieExp()       { return PHYSKY_P(6).x; }
 float pkGroundAlbedo() { return PHYSKY_P(6).y; }
-float pkAerialScale()  { return PHYSKY_P(6).w; }
 vec3  pkRayleighTint() { return PHYSKY_P(7).rgb; }
 float pkMieTint()      { return PHYSKY_P(7).w; }
 
@@ -167,8 +166,8 @@ PkMedium pkMedium(vec3 p)
     float dRay = exp(pkRayleighExp() * h);
     float dOzo = clamp(h < 25.0 ? h / 15.0 - 2.0 / 3.0 : -h / 15.0 + 8.0 / 3.0, 0.0, 1.0);
     PkMedium m;
-    m.scatMie = dMie * pkMieScat() * pkMieTint();
-    m.scatRay = dRay * pkRayleigh() * pkRayleighTint();
+    m.scatMie = min(dMie * pkMieScat() * max(pkMieTint(), 0.0), dMie * pkMieExt());
+    m.scatRay = dRay * pkRayleigh() * clamp(pkRayleighTint(), vec3(0.0), vec3(1.0));
     m.scattering = m.scatMie + m.scatRay;
     m.extinction = dMie * pkMieExt() + dRay * pkRayleigh() + dOzo * PK_OZONE;   // (untinted)
     return m;

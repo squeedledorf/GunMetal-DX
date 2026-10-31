@@ -37,12 +37,9 @@
 #include "llavatarpropertiesprocessor.h"
 #include "llconversationlog.h"
 #include "llgamecontrol.h"
-#include "llkeyconflict.h"
-#include "llscrolllistcell.h"
-#include "llscrolllistctrl.h"
 #include "llsearcheditor.h"
 #include "llsetkeybinddialog.h"
-#include "llspinctrl.h"
+#include "llkeyconflict.h"
 
 class LLConversationLogObserver;
 class LLPanelPreference;
@@ -84,14 +81,14 @@ public:
 
     void apply();
     void cancel(const std::vector<std::string> settings_to_skip = {});
-    virtual void draw() override;
-    virtual bool postBuild() override;
-    virtual void onOpen(const LLSD& key) override;
-    virtual void onClose(bool app_quitting) override;
-    virtual void changed() override;
-    virtual void changed(const LLUUID& session_id, U32 mask) override {};
+    /*virtual*/ void draw();
+    /*virtual*/ bool postBuild();
+    /*virtual*/ void onOpen(const LLSD& key);
+    /*virtual*/ void onClose(bool app_quitting);
+    /*virtual*/ void changed();
+    /*virtual*/ void changed(const LLUUID& session_id, U32 mask) {};
 
-    static void refreshInstance();
+    static void refreshInstance();   // <GMDX>
 
     // static data update, called from message handler
     static void updateUserInfo(const std::string& visibility);
@@ -108,7 +105,7 @@ public:
     // update Show Favorites checkbox
     static void updateShowFavoritesCheckbox(bool val);
 
-    void processProperties( void* pData, EAvatarProcessorType type ) override;
+    void processProperties( void* pData, EAvatarProcessorType type );
     void saveAvatarProperties( void );
     static void saveAvatarPropertiesCoro(const std::string url, bool allow_publish);
     void selectPrivacyPanel();
@@ -133,7 +130,6 @@ protected:
     void onDoNotDisturbResponseChanged();
     void onRejectTeleportOffersResponseChanged();
     void onRejectFriendshipRequestResponseChanged();
-    void onAdHocSelectionChanged(const LLSD& newValue);
     void onAutoRespondResponseChanged();
     void onAutoRespondNonFriendsResponseChanged();
     void onAwayResponseChanged(); // <FS:PP> FIRE-10500
@@ -192,7 +188,7 @@ public:
     void setPersonalInfo(const std::string& visibility);
     void refreshEnabledState();
     void onCommitWindowedMode();
-    void refresh() override; // Refresh enable/disable
+    void refresh(); // Refresh enable/disable
     // if the quality radio buttons are changed
     void onChangeQuality(const LLSD& data);
 
@@ -221,7 +217,6 @@ public:
     void buildPopupLists();
     static void refreshSkin(void* data);
     void selectPanel(const LLSD& name);
-    void setPanelVisibility(const LLSD& name, bool visible);
     void saveGraphicsPreset(std::string& preset);
 
     void setRecommendedSettings();
@@ -305,7 +300,7 @@ class LLPanelPreference : public LLPanel
 {
 public:
     LLPanelPreference();
-    virtual bool postBuild() override;
+    /*virtual*/ bool postBuild();
 
     virtual ~LLPanelPreference();
 
@@ -333,6 +328,10 @@ protected:
     control_values_map_t mSavedValues;
 
 private:
+    void refreshAdHocControls();
+    void commitAdHocControls();
+    boost::signals2::scoped_connection mAdHocSettingsConnection;
+
     //for "Only friends and groups can call or IM me"
     static void showFriendsOnlyWarning(LLUICtrl*, const LLSD&);
     //for  "Allow Multiple Viewers"
@@ -351,12 +350,12 @@ private:
 class LLPanelPreferenceGraphics : public LLPanelPreference
 {
 public:
-    bool postBuild() override;
-    void draw() override;
-    void cancel(const std::vector<std::string> settings_to_skip = {}) override;
-    void saveSettings() override;
+    bool postBuild();
+    void draw();
+    void cancel(const std::vector<std::string> settings_to_skip = {});
+    void saveSettings();
     void resetDirtyChilds();
-    void setHardwareDefaults() override;
+    void setHardwareDefaults();
     void setPresetText();
 
 protected:
@@ -374,13 +373,13 @@ public:
     LLPanelPreferenceControls();
     virtual ~LLPanelPreferenceControls();
 
-    bool postBuild() override;
+    bool postBuild();
 
     void refresh() override;
 
-    void apply() override;
-    void cancel(const std::vector<std::string> settings_to_skip = {}) override;
-    void saveSettings() override;
+    void apply();
+    void cancel(const std::vector<std::string> settings_to_skip = {});
+    void saveSettings();
     void resetDirtyChilds();
 
     void onListCommit();
@@ -401,10 +400,10 @@ public:
     void updateAndApply();
 
     // from interface
-    bool onSetKeyBind(EMouseClickType click, KEY key, MASK mask, bool all_modes) override;
+    /*virtual*/ bool onSetKeyBind(EMouseClickType click, KEY key, MASK mask, bool all_modes);
     bool onSetControllerBind(U8 action_type, U8 action, bool all_modes) override; // OCOL
-    void onDefaultKeyBind(bool all_modes) override;
-    void onCancelKeyBind() override;
+    /*virtual*/ void onDefaultKeyBind(bool all_modes);
+    /*virtual*/ void onCancelKeyBind();
 
     // Cleans content and then adds content from xml files according to current mEditingMode
     void populateControlTable();
@@ -465,13 +464,13 @@ public:
     void cancel();
 
 protected:
-    bool postBuild() override;
-    void onOpen(const LLSD& key) override;
-    void onClose(bool app_quitting) override;
+    bool postBuild();
+    void onOpen(const LLSD& key);
+    void onClose(bool app_quitting);
     void saveSettings();
     void onBtnOk();
     void onBtnCancel();
-    void onClickCloseBtn(bool app_quitting = false) override;
+    void onClickCloseBtn(bool app_quitting = false);
 
     void onChangeSocksSettings();
 

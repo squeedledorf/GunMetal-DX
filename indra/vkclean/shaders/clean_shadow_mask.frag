@@ -30,20 +30,33 @@ struct Material {
 };
 layout(std430, set = 0, binding = 1) readonly buffer Materials { Material materials[]; };
 layout(set = 1, binding = 0) uniform sampler2D uTextures[];
-// <GMDX> rez effects: the draw push (pad1 bit 31: the build-effect casters only, below)
+// <GMDX> rez effects: the draw push (pad1 bit 31: the build-effect casters only, below; the weather
+// twin's pad1 is a positive float, bit 31 clear)
+// #1159 WEATHER OCCLUSION MAP twin (constant 0 TRUE: mWeatherBlendPipe, recordWeatherOcclusion's
+// alpha-blend bucket only): an alpha-blend caster is a roof from the weather's own low cutoff --
+// g_draw_push.pad1, float bits (RenderVKWeatherGlassAlphaCutoff) -- instead of the binary
+// question's 0.5, so tinted / clear glass keeps the rain out while an alpha-0 prim stays open.
+// Mask materials keep their own cutoff (foliage gaps stay open). FALSE (every sun / projector /
+// cluster shadow pipeline): the test below is exactly THE rule, the push is never read.
+layout(constant_id = 0) const bool kWeatherOccl = false;
+// (the world draw push, clean_draw_view.glsl DrawPush: same 16 B range, VS | FS)
 layout(push_constant) uniform DrawPush { uint view; uint f8; uint pad0; uint pad1; } g_draw_push;
 
 void main()
 {
+    // Shared cluster rig lists still carry retained rows: shadow-map casters pop at death.
+    if ((v_flags & 0x00400000u) != 0u) discard;
     // Cull-none pipeline for alpha / double-sided casters: single-sided alpha
     // casters still drop their back faces, as LL's culled shadow pass does.
     if (!gl_FrontFacing && (v_flags & 256u) == 0u) discard;
-    // <GMDX> REZ EFFECTS: an opaque rigged row the main view routed to the mask buckets for a build
-    // effect (slot bit 31, not dying, natively neither blend nor mask; clean_cull.comp) casts solid,
-    // as from its own opaque bucket. With avatar shadow detail 0 the renderer casts the rigged mask
-    // buckets for these rows alone (push pad1 bit 31): everything else in them stays out.
+    // <GMDX> REZ EFFECTS (CombatFX; ported from GunMetal-DX, squeedledorf, LGPL 2.1, v0.3.0 cf5f1f4):
+    // an opaque rigged row the main view routed to the mask buckets for a build effect (slot bit 31,
+    // not dying, natively neither blend nor mask; clean_cull.comp) casts solid, as from its own
+    // opaque bucket. With avatar shadow detail 0 the renderer casts the rigged mask buckets for
+    // these rows alone (push pad1 bit 31; never on the weather twin, whose pad1 is its cutoff):
+    // everything else in them stays out.
     const bool rzBuild = (v_flags & 0x80400006u) == 0x80000000u;
-    if ((g_draw_push.pad1 & 0x80000000u) != 0u && !rzBuild) discard;
+    if (!kWeatherOccl && (g_draw_push.pad1 & 0x80000000u) != 0u && !rzBuild) discard;
     if (rzBuild) return;
     Material m = materials[v_material_id];
     float ta = 1.0;
@@ -56,6 +69,12 @@ void main()
         // tests its texel's own coverage). (#1044: the old max(.., 0.05) floor cut faint mask texels --
         // and every texel of a cutoff-0 mask -- that the raster draws and the RT shadow rays block.)
         if (!alphaKeeps(a, m.alpha_cutoff, 0.0, 0.0)) discard;
+        return;
+    }
+    // #1159 the weather occlusion twin: an alpha-blend caster is a roof from the weather's own cutoff.
+    if (kWeatherOccl)
+    {
+        if (!alphaKeeps(a, uintBitsToFloat(g_draw_push.pad1), 0.0, 0.0)) discard;
         return;
     }
     // <SS:Skoomastream> Alpha-blend caster: LL's shadow pass (Firestorm parity), not

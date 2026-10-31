@@ -28,6 +28,8 @@
 #include "llviewerprecompiledheaders.h"
 
 #include "llconversationview.h"
+#include "llavatarpresence.h"
+#include "lggcontactsets.h"
 
 #include <boost/bind.hpp>
 #include "llagentdata.h"
@@ -38,6 +40,7 @@
 #include "llfloaterimsessiontab.h"
 #include "llfloaterimcontainer.h"
 #include "llfloaterreg.h"
+#include "llfontregistry.h"
 #include "llgroupiconctrl.h"
 #include "lluictrlfactory.h"
 #include "lltoolbarview.h"
@@ -96,6 +99,7 @@ LLConversationViewSession::LLConversationViewSession(const LLConversationViewSes
 
 LLConversationViewSession::~LLConversationViewSession()
 {
+    LLAvatarTracker::instance().removeParticularFriendObserver(mFriendID, this);
     mActiveVoiceChannelConnection.disconnect();
 
     if (mVoiceClientObserver)
@@ -225,6 +229,12 @@ bool LLConversationViewSession::postBuild()
 
     mCallIconLayoutPanel = mItemPanel->getChild<LLPanel>("call_icon_panel");
     mSessionTitle = mItemPanel->getChild<LLTextBox>("conversation_title");
+    mClassicNameColorsConnection = gSavedSettings.getControl("SLClassicNameColors")->getSignal()->connect(
+        boost::bind(&LLConversationViewSession::refresh, this));
+    mContactSetColorsConnection = gSavedSettings.getControl("FSContactSetsColorizeFriends")->getSignal()->connect(
+        boost::bind(&LLConversationViewSession::refresh, this));
+    mContactSetChangesConnection = LGGContactSets::getInstance()->setContactSetChangeCallback(
+        boost::bind(&LLConversationViewSession::refresh, this));
 
     mActiveVoiceChannelConnection = LLVoiceChannel::setCurrentVoiceChannelChangedCallback(boost::bind(&LLConversationViewSession::onCurrentVoiceSessionChanged, this, _1));
     mSpeakingIndicator = getChild<LLOutputMonitorCtrl>("speaking_indicator");
@@ -237,13 +247,17 @@ bool LLConversationViewSession::postBuild()
         case LLConversationItem::CONV_PARTICIPANT:
         case LLConversationItem::CONV_SESSION_1_ON_1:
         {
-            LLIMModel::LLIMSession* session=  LLIMModel::instance().findIMSession(vmi->getUUID());
-            if (session)
+            LLIMModel::LLIMSession* session = vmi->getType() == LLConversationItem::CONV_SESSION_1_ON_1 ?
+                                            LLIMModel::instance().findIMSession(vmi->getUUID()) : nullptr;
+            mFriendID = session ? session->mOtherParticipantID :
+                        vmi->getType() == LLConversationItem::CONV_PARTICIPANT ? vmi->getUUID() : LLUUID::null;
+            if (mFriendID.notNull())
             {
+                LLAvatarTracker::instance().addParticularFriendObserver(mFriendID, this);
                 LLAvatarIconCtrl* icon = mItemPanel->getChild<LLAvatarIconCtrl>("avatar_icon");
                 icon->setVisible(true);
-                icon->setValue(session->mOtherParticipantID);
-                mSpeakingIndicator->setSpeakerId(session->mOtherParticipantID, session->mSessionID, true);
+                icon->setValue(mFriendID);
+                mSpeakingIndicator->setSpeakerId(mFriendID, session ? session->mSessionID : LLUUID::null, true);
                 mHasArrow = false;
             }
             break;
@@ -605,15 +619,7 @@ void LLConversationViewSession::refresh()
     {
         vmi->resetRefresh();
 
-        if (mSessionTitle)
-        {
-            if (!highlightFriendTitle(vmi))
-            {
-                LLStyle::Params title_style;
-                title_style.color = LLUIColorTable::instance().getColor("LabelTextColor");
-                mSessionTitle->setText(vmi->getDisplayName(), title_style);
-            }
-        }
+        updateSessionTitle(vmi);
     }
 
     // Update all speaking indicators
@@ -661,20 +667,35 @@ void LLConversationViewSession::onCurrentVoiceSessionChanged(const LLUUID& sessi
     }
 }
 
-bool LLConversationViewSession::highlightFriendTitle(LLConversationItem* vmi)
+void LLConversationViewSession::changed(U32 mask)
 {
-    if(vmi->getType() == LLConversationItem::CONV_PARTICIPANT || vmi->getType() == LLConversationItem::CONV_SESSION_1_ON_1)
+    if (mask & (LLFriendObserver::ADD | LLFriendObserver::REMOVE | LLFriendObserver::ONLINE | LLFriendObserver::POWERS))
     {
-        LLIMModel::LLIMSession* session=  LLIMModel::instance().findIMSession(vmi->getUUID());
-        if (session && LLAvatarActions::isFriend(session->mOtherParticipantID))
-        {
-            LLStyle::Params title_style;
-            title_style.color = LLUIColorTable::instance().getColor("ConversationFriendColor");
-            mSessionTitle->setText(vmi->getDisplayName(), title_style);
-            return true;
-        }
+        refresh();
     }
-    return false;
+}
+
+void LLConversationViewSession::updateSessionTitle(LLConversationItem* vmi)
+{
+    if (!mSessionTitle)
+    {
+        return;
+    }
+    const auto presence = LLAvatarTracker::instance().getBuddyPresence(mFriendID);
+    const bool classic = LLAvatarPresence::useClassicNameColors();
+    LLStyle::Params title_style;
+    title_style.color = LLUIColorTable::instance().getColor(classic ?
+        (presence == LLAvatarTracker::EPresence::NOT_FRIEND ? "LabelTextColor" : "ConversationFriendColor") :
+        LLAvatarPresence::colorName(presence));
+    if (mFriendID.notNull())
+    {
+        title_style.color = LGGContactSets::getInstance()->getAvatarColor(
+            mFriendID, title_style.color.getValue().get(), ContactSetType::FRIENDS);
+    }
+    LLFontDescriptor font = mSessionTitle->getFont()->getFontDesc();
+    font.setStyle(!classic && presence == LLAvatarTracker::EPresence::ONLINE ? LLFontGL::BOLD : LLFontGL::NORMAL);
+    title_style.font = LLFontGL::getFont(font);
+    mSessionTitle->setText(vmi->getDisplayName(), title_style);
 }
 
 //
@@ -704,6 +725,7 @@ LLConversationViewParticipant::LLConversationViewParticipant( const LLConversati
 
 LLConversationViewParticipant::~LLConversationViewParticipant()
 {
+    LLAvatarTracker::instance().removeParticularFriendObserver(mUUID, this);
     mActiveVoiceChannelConnection.disconnect();
 }
 
@@ -727,6 +749,7 @@ void LLConversationViewParticipant::initFromParams(const LLConversationViewParti
 
 bool LLConversationViewParticipant::postBuild()
 {
+    LLAvatarTracker::instance().addParticularFriendObserver(mUUID, this);
     mAvatarIcon = getChild<LLAvatarIconCtrl>("avatar_icon");
 
     mInfoBtn = getChild<LLButton>("info_btn");
@@ -744,6 +767,12 @@ bool LLConversationViewParticipant::postBuild()
     }
 
     updateChildren();
+    mClassicNameColorsConnection = gSavedSettings.getControl("SLClassicNameColors")->getSignal()->connect(
+        boost::bind(&LLConversationViewParticipant::refresh, this));
+    mContactSetColorsConnection = gSavedSettings.getControl("FSContactSetsColorizeFriends")->getSignal()->connect(
+        boost::bind(&LLConversationViewParticipant::refresh, this));
+    mContactSetChangesConnection = LGGContactSets::getInstance()->setContactSetChangeCallback(
+        boost::bind(&LLConversationViewParticipant::refresh, this));
     if (getViewModelItem())
     {
         LLFolderViewItem::postBuild();
@@ -754,14 +783,12 @@ bool LLConversationViewParticipant::postBuild()
 
 void LLConversationViewParticipant::draw()
 {
-    static LLUIColor sFgColor = LLUIColorTable::instance().getColor("MenuItemEnabledColor", DEFAULT_WHITE);
     static LLUIColor sFgDisabledColor = LLUIColorTable::instance().getColor("MenuItemDisabledColor", DEFAULT_WHITE);
     static LLUIColor sHighlightFgColor = LLUIColorTable::instance().getColor("MenuItemHighlightFgColor", DEFAULT_WHITE);
     static LLUIColor sHighlightBgColor = LLUIColorTable::instance().getColor("MenuItemHighlightBgColor", DEFAULT_WHITE);
     static LLUIColor sFlashBgColor = LLUIColorTable::instance().getColor("MenuItemFlashBgColor", DEFAULT_WHITE);
     static LLUIColor sFocusOutlineColor = LLUIColorTable::instance().getColor("InventoryFocusOutlineColor", DEFAULT_WHITE);
     static LLUIColor sMouseOverColor = LLUIColorTable::instance().getColor("InventoryMouseOverColor", DEFAULT_WHITE);
-    static LLUIColor sFriendColor = LLUIColorTable::instance().getColor("ConversationFriendColor");
 
     const bool show_context = (getRoot() ? getRoot()->getShowSelectionContext() : false);
 
@@ -771,23 +798,23 @@ void LLConversationViewParticipant::draw()
     F32 y = (F32)getRect().getHeight() - font->getLineHeight() - (F32)mTextPad;
     F32 text_left = (F32)getLabelXPos();
 
-    LLUIColor* color;
+    LLColor4 color;
 
     LLLocalSpeakerMgr *speakerMgr = LLLocalSpeakerMgr::getInstance();
 
     if (speakerMgr && speakerMgr->isSpeakerToBeRemoved(mUUID))
     {
-        color = &sFgDisabledColor;
+        color = sFgDisabledColor.get();
     }
     else
     {
-        if (LLAvatarActions::isFriend(mUUID))
+        if (mIsSelected)
         {
-            color = &sFriendColor;
+            color = sHighlightFgColor.get();
         }
         else
         {
-            color = mIsSelected ? &sHighlightFgColor : &sFgColor;
+            color = mNameColor;
         }
     }
 
@@ -798,7 +825,7 @@ void LLConversationViewParticipant::draw()
     }
 
     drawHighlight(show_context, mIsSelected, sHighlightBgColor, sFlashBgColor, sFocusOutlineColor, sMouseOverColor);
-    drawLabel(font, text_left, y, color->get(), right_x);
+    drawLabel(font, text_left, y, color, right_x);
 
     LLView::draw();
 }
@@ -836,6 +863,25 @@ void LLConversationViewParticipant::refresh()
 
         // Do the regular upstream refresh
         LLFolderViewItem::refresh();
+        mPresence = LLAvatarTracker::instance().getBuddyPresence(mUUID);
+        const bool classic = LLAvatarPresence::useClassicNameColors();
+        const char* color_name = mPresence == LLAvatarTracker::EPresence::NOT_FRIEND ? "MenuItemEnabledColor" :
+            classic ? "ConversationFriendColor" : LLAvatarPresence::colorName(mPresence);
+        mNameColor = LGGContactSets::getInstance()->getAvatarColor(
+            mUUID, LLUIColorTable::instance().getColor(color_name).get(), ContactSetType::FRIENDS);
+        mLabelStyle = participant_model->getLabelStyle();
+        if (getParentFolder())
+        {
+            getParentFolder()->requestArrange();
+        }
+    }
+}
+
+void LLConversationViewParticipant::changed(U32 mask)
+{
+    if (mask & (LLFriendObserver::ADD | LLFriendObserver::REMOVE | LLFriendObserver::ONLINE | LLFriendObserver::POWERS))
+    {
+        refresh();
     }
 }
 

@@ -32,10 +32,14 @@
 #include "llagent.h"
 #include "llgroupmgr.h"
 #include <boost/signals2.hpp>
+#include <deque>
+#include <memory>
+#include <set>
 
 class FSFloaterGroupTitles;
 class LLCheckBoxCtrl;
 class LLContextMenu;
+class LLEventTimer;
 class LLFilterEditor;
 class LLScrollListCtrl;
 
@@ -43,17 +47,16 @@ class FSGroupTitlesObserver : LLGroupMgrObserver
 {
 
 public:
-    FSGroupTitlesObserver(const LLGroupData& group_data, LLHandle<FSFloaterGroupTitles> parent);
+    FSGroupTitlesObserver(const LLUUID& group_id, LLHandle<FSFloaterGroupTitles> parent);
     virtual ~FSGroupTitlesObserver();
 
     void changed(LLGroupChange gc) override;
 
 protected:
     LLHandle<FSFloaterGroupTitles>  mParent;
-    LLGroupData                     mGroupData;
 };
 
-class FSFloaterGroupTitles : public LLFloater, public LLGroupMgrObserver, public LLOldEvents::LLSimpleListener
+class FSFloaterGroupTitles : public LLFloater, public LLOldEvents::LLSimpleListener
 {
 
 public:
@@ -65,19 +68,17 @@ public:
     bool handleKeyHere(KEY key, MASK mask) override;
     bool hasAccelerators() const override { return true; }
 
-    void changed(LLGroupChange gc) override;
     bool handleEvent(LLPointer<LLOldEvents::LLEvent> event, const LLSD& userdata) override; // called on agent group list changes
 
-    void processGroupTitleResults(const LLGroupData& group_data);
+    void processGroupTitleResults(const LLUUID& group_id);
+    void invalidateGroupTitles(const LLUUID& group_id);
 
 private:
-    void clearObservers();
-
     void addListItem(const LLUUID& group_id, const LLUUID& role_id, const std::string& title,
         const std::string& group_name, bool is_active, bool is_no_group = true);
 
     // FS filters inside its patched LLScrollListCtrl; we keep the rows here and rebuild the
-    // visible list when the filter changes.
+    // visible list when the filter changes (a group's rows are replaced as its titles load).
     struct TitleEntry
     {
         LLUUID      mGroupID;
@@ -89,8 +90,41 @@ private:
     };
     std::vector<TitleEntry> mEntries;
     void addListRow(const TitleEntry& entry);
+    void rebuildList();
 
-    void refreshGroupTitles();
+    // #868: titles load per group, a few requests at a time; until then (or when the request
+    // times out) the group has one placeholder row
+    enum class ETitlesState { QUEUED, LOADING, LOADED, FAILED };
+    struct GroupTitlesState
+    {
+        std::string                             mName;
+        U64                                     mPowers = 0;
+        ETitlesState                            mState = ETitlesState::QUEUED;
+        F64                                     mRequestTime = 0.0;
+        bool                                    mRefreshAfterReply = false;
+        std::unique_ptr<FSGroupTitlesObserver>  mObserver;
+    };
+    typedef std::map<LLUUID, GroupTitlesState> group_state_map_t;
+    group_state_map_t   mGroupStates;
+    std::deque<LLUUID>  mRequestQueue;
+    LLEventTimer*       mRequestTimer = nullptr;
+    bool                mSyncScheduled = false;
+    std::set<LLUUID>    mInvalidatedGroups;
+    bool                mInvalidationScheduled = false;
+
+    void addGroup(const LLGroupData& group_data, bool force);
+    void requestTitles(const LLUUID& group_id, bool force);
+    void sendQueuedRequests();
+    void checkRequestTimeouts();
+    void removeGroupRows(const LLUUID& group_id);
+    void setGroupRows(const LLUUID& group_id);
+    ETitlesState getTitlesState(const LLUUID& group_id) const;
+    void scheduleSync();
+    void syncGroups();
+    void updateActiveFlags();
+    void onSortChanged();
+
+    void refreshGroupTitles(bool force);
     void activateGroupTitle();
     void selectedTitleChanged();
     void openGroupInfo();
@@ -120,9 +154,6 @@ private:
 
     boost::signals2::connection mAssignmentsChangedConnection;
     LLHandle<LLContextMenu>     mClearRegionMenuHandle;
-
-    typedef std::map<LLUUID, FSGroupTitlesObserver*> observer_map_t;
-    observer_map_t      mGroupTitleObserverMap;
 };
 
 #endif // FS_FLOATERGROUPTITLES_H

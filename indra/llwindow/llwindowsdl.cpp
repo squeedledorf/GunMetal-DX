@@ -28,6 +28,7 @@
 #include "linden_common.h"
 
 #include "llwindowsdl.h"
+#include "llnativewindow.h"
 
 #include "llwindowcallbacks.h"
 #include "llkeyboardsdl.h"
@@ -38,8 +39,8 @@
 #include "lldir.h"
 #include "llfindlocale.h"
 #include "llpreeditor.h"
-#include "llimagebmp.h" // <GMDX> image clipboard
-#include "llimagepng.h" // <GMDX>
+#include "llimagebmp.h" // image clipboard
+#include "llimagepng.h"
 
 #if LL_WINDOWS
 // #847: DirectInput8 for libndofdev (joystick / 3D mouse), see getInputDevices()
@@ -130,6 +131,7 @@ LLWindowSDL::LLWindowSDL(LLWindowCallbacks* callbacks,
         //start with arrow cursor
         initCursors();
         setCursor( UI_CURSOR_ARROW );
+
     }
 
     // Stash an object pointer for OSMessageBox()
@@ -259,14 +261,22 @@ bool LLWindowSDL::createContext(int x, int y, int width, int height, bool fullsc
     SDL_SetBooleanProperty(vkprops, SDL_PROP_WINDOW_CREATE_HIGH_PIXEL_DENSITY_BOOLEAN, gHiDPISupport);
 
     mWindow = SDL_CreateWindowWithProperties(vkprops);
+    mMainWindow = mWindow;
     SDL_DestroyProperties(vkprops);
     if (mWindow && !mFullscreen)
     {
         // Saved/requested window sizes are pixels; SDL sizes windows in logical units.
+        // SDL 3.4 clamps a resizable window to the compositor's recommended bounds when it is
+        // created (Wayland xdg_toplevel configure_bounds), so also re-apply the size whenever
+        // the created window differs from the request, not only when the density is above 1.
         const F32 density = pixelDensity();
-        if (density > 1.01f)
+        const int want_w = llmax(1, ll_round((F32)width / density));
+        const int want_h = llmax(1, ll_round((F32)height / density));
+        int have_w = 0, have_h = 0;
+        SDL_GetWindowSize(mWindow, &have_w, &have_h);
+        if (density > 1.01f || have_w != want_w || have_h != want_h)
         {
-            SDL_SetWindowSize(mWindow, llmax(1, ll_round((F32)width / density)), llmax(1, ll_round((F32)height / density)));
+            SDL_SetWindowSize(mWindow, want_w, want_h);
         }
     }
     if (mWindow)
@@ -285,13 +295,18 @@ bool LLWindowSDL::createContext(int x, int y, int width, int height, bool fullsc
     }
     LL_INFOS() << "Created SDL_WINDOW_VULKAN window " << width << "x" << height << LL_ENDL;
     // Set the application icon.
-    SDL_Surface* vkicon = Load_BMP_Resource("ll_icon.BMP");
-    if (vkicon)
-    {
-        SDL_SetWindowIcon(mWindow, vkicon);
-        SDL_DestroySurface(vkicon);
-    }
+    setAppIcon(mWindow);
+
     return true;
+}
+
+void LLWindowSDL::setAppIcon(SDL_Window* window)
+{
+    if (SDL_Surface* icon = Load_BMP_Resource("ll_icon.BMP"))
+    {
+        SDL_SetWindowIcon(window, icon);
+        SDL_DestroySurface(icon);
+    }
 }
 
 // changing fullscreen resolution, or switching between windowed and fullscreen mode.
@@ -319,6 +334,7 @@ bool LLWindowSDL::switchContext(bool fullscreen, const LLCoordScreen &size, bool
 void LLWindowSDL::destroyContext()
 {
     LL_INFOS() << "destroyContext begins" << LL_ENDL;
+    mMainWindow = nullptr;
 
     // Stop unicode input
     SDL_StopTextInput(mWindow);
@@ -339,12 +355,12 @@ void LLWindowSDL::destroyContext()
     LL_INFOS() << "destroyContext end" << LL_ENDL;
 }
 
-namespace { void clear_clipboard_image(); } // <GMDX> (the image clipboard, below)
+namespace { void clear_clipboard_image(); } // the image clipboard, below
 
 LLWindowSDL::~LLWindowSDL()
 {
     destroyContext();
-    clear_clipboard_image(); // <GMDX> the clipboard image, while the image classes are still up
+    clear_clipboard_image(); // while the image classes are still up
 
 #if LL_WINDOWS
     if (mDirectInput8)
@@ -655,6 +671,12 @@ bool LLWindowSDL::setCursorPosition(const LLCoordWindow position)
 
 bool LLWindowSDL::getCursorPosition(LLCoordWindow *position)
 {
+    if (mUICursorOverride)
+    {
+        if (!position) return false;
+        *position = *mUICursorOverride;
+        return true;
+    }
     //Point cursor_point;
     LLCoordScreen screen_pos;
 
@@ -908,6 +930,12 @@ std::string LLWindowSDL::getFullscreenStateText()
     return text.str();
 }
 
+static bool is_wayland_video_driver()
+{
+    const char* driver = SDL_GetCurrentVideoDriver();
+    return driver && std::strcmp(driver, "wayland") == 0;
+}
+
 void LLWindowSDL::flashIcon(F32 seconds)
 {
     // Requesting attention on the focused window is pointless, and on X11 the
@@ -920,13 +948,20 @@ void LLWindowSDL::flashIcon(F32 seconds)
     // focus-on-activate (Hyprland misc:focus_on_activate, KWin's focus stealing policy)
     // hand the viewer the keyboard focus on every IM. There is no "attention only" request
     // there, so don't ask at all.
-    if (const char* driver = SDL_GetCurrentVideoDriver(); driver && std::strcmp(driver, "wayland") == 0)
+    if (is_wayland_video_driver())
     {
         return;
     }
     // </GMDX>
-
     LL_DEBUGS("Window") << "LLWindowSDL::flashIcon(" << seconds << ")" << LL_ENDL;
+
+    // SDL requests Wayland attention without an input serial; the compositor
+    // chooses whether and how to display it.
+    if (!SDL_FlashWindow(mWindow, SDL_FLASH_UNTIL_FOCUSED))
+    {
+        LL_WARNS("Window") << "Window attention request failed: " << SDL_GetError() << LL_ENDL;
+        return;
+    }
 
     if (seconds <= 0.f)
     {
@@ -945,7 +980,6 @@ void LLWindowSDL::flashIcon(F32 seconds)
     // else: an until-focused flash is active; a timed request must not
     // downgrade it to a timed one.
 
-    SDL_FlashWindow(mWindow, SDL_FLASH_UNTIL_FOCUSED);
     mFlashing = true;
 }
 
@@ -954,7 +988,11 @@ void LLWindowSDL::maybeStopFlashIcon()
     if (mFlashing && !mFlashUntilFocused && mFlashTimer.hasExpired())
     {
         mFlashing = false;
-        SDL_FlashWindow( mWindow, SDL_FLASH_CANCEL );
+        // SDL's Wayland backend issues another activation request for CANCEL.
+        if (!is_wayland_video_driver())
+        {
+            SDL_FlashWindow(mWindow, SDL_FLASH_CANCEL);
+        }
     }
 }
 
@@ -1020,11 +1058,10 @@ bool LLWindowSDL::copyTextToClipboard(const LLWString& text)
     return SDL_SetClipboardText(utf8.c_str());
 }
 
-// <GMDX> Image clipboard. SDL asks for the data by MIME type, when another application pastes
-// (Wayland / X11) or at once (Windows), until the next clipboard change, when it calls the
-// cleanup: the encoded images live until then. Windows takes only the first image type
-// offered, so it gets image/bmp (CF_DIB, which every Windows program can paste); the others
-// get image/png.
+// Image clipboard. Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4
+// SDL asks for the data by MIME type, when another application pastes (Wayland / X11) or at
+// once (Windows). Windows takes only the first image type offered, so it gets image/bmp
+// (CF_DIB, which every Windows program can paste); the others get image/png.
 namespace
 {
     struct ClipboardImage
@@ -1127,7 +1164,47 @@ bool LLWindowSDL::copyImageToClipboard(const LLImageRaw* image)
     }
     return true;
 }
-// </GMDX>
+
+// Paste side (ours; GunMetal-DX only copies): decode image/png or image/bmp from the clipboard.
+bool LLWindowSDL::isClipboardImageAvailable()
+{
+    return SDL_HasClipboardData("image/png") || SDL_HasClipboardData("image/bmp");
+}
+
+bool LLWindowSDL::pasteImageFromClipboard(LLPointer<LLImageRaw>& dst)
+{
+    static const char* const mimes[] = { "image/png", "image/bmp" };
+    for (const char* mime : mimes)
+    {
+        if (!SDL_HasClipboardData(mime))
+        {
+            continue;
+        }
+        size_t size = 0;
+        void* data = SDL_GetClipboardData(mime, &size);
+        if (!data)
+        {
+            continue;
+        }
+        LLPointer<LLImageFormatted> fmt = size > 0 ? LLImageFormatted::loadFromMemory((const U8*)data, (U32)size, mime) : nullptr;
+        bool ok = false;
+        if (fmt)
+        {
+            LLPointer<LLImageRaw> raw = new LLImageRaw();
+            ok = fmt->decode(raw, 0.f) && !raw->isBufferInvalid();
+            if (ok)
+            {
+                dst = raw;
+            }
+        }
+        SDL_free(data);
+        if (ok)
+        {
+            return true;
+        }
+    }
+    return false;
+}
 
 bool LLWindowSDL::isPrimaryTextAvailable()
 {
@@ -1544,6 +1621,7 @@ void LLWindowSDL::gatherInput(bool app_has_focus)
 
 SDL_AppResult LLWindowSDL::handleEvent(const SDL_Event& event, bool app_has_focus)
 {
+    if (LLNativeWindow::dispatch(event, mWindow)) return SDL_APP_CONTINUE;
     switch(event.type)
     {
         case SDL_EVENT_MOUSE_MOTION:
@@ -1677,12 +1755,19 @@ SDL_AppResult LLWindowSDL::handleEvent(const SDL_Event& event, bool app_has_focu
 #endif
             const bool ctrl_shortcut = (mKeyModifiers & SDL_KMOD_GUI) || ((mKeyModifiers & SDL_KMOD_CTRL) && !altgr);
 
+            // Keys that type no character (arrows, Home/End, Page Up/Down, F-keys, keypad) have
+            // SDL3 keycodes with SDLK_SCANCODE_MASK set, e.g. SDLK_UP = 0x40000052, and must not
+            // be passed on as characters (#943). Scroll list type-ahead lowercases with towlower,
+            // which on Windows (16-bit wint_t) drops the mask: Up became 'r' and Down 'q', so
+            // Debug Settings jumped to the first R / Q row. Menu jump keys cut them to a KEY too.
+            const bool types_char = !(mKeyVirtualKey & (SDLK_SCANCODE_MASK | SDLK_EXTENDED_MASK));
+
             // Focused web media is unaffected by the ctrl_shortcut skip: media focus turns
             // language text input on (LLViewerMediaFocus::onFocusReceived, #525), so this
             // forced pass never ran for it except for Return, and the media key-down path
             // already swallows Ctrl+letter (LLViewerMediaImpl::handleKeyHere).
             if (mKeyVirtualKey == SDLK_RETURN
-                || (!mLanguageTextInputAllowed && !ctrl_shortcut))
+                || (!mLanguageTextInputAllowed && !ctrl_shortcut && types_char))
             {
                 // Return reaches focused media a second time through this character
                 // pass (LLViewerWindow::handleUnicodeChar -> handleKey(KEY_RETURN)); tag
@@ -1755,7 +1840,10 @@ SDL_AppResult LLWindowSDL::handleEvent(const SDL_Event& event, bool app_has_focu
             {
                 // The user is back: drop any taskbar highlight (timed or
                 // until-focused) and reset so the next request flashes again.
-                SDL_FlashWindow(mWindow, SDL_FLASH_CANCEL);
+                if (!is_wayland_video_driver())
+                {
+                    SDL_FlashWindow(mWindow, SDL_FLASH_CANCEL);
+                }
                 mFlashing = false;
                 mFlashUntilFocused = false;
             }
@@ -1831,6 +1919,7 @@ SDL_AppResult LLWindowSDL::handleEvent(const SDL_Event& event, bool app_has_focu
             }
             break;
         default:
+            // Controllers: LLGameControl (ported from GunMetal-DX, squeedledorf, LGPL 2.1, v0.3.0 cf5f1f4)
             LLGameControl::handleEvent(event, app_has_focus);
             break;
     }
@@ -1846,9 +1935,10 @@ SDL_AppResult LLWindowSDL::handleEvents(const SDL_Event& event, bool app_has_foc
     return gWindowImplementation->handleEvent(event, app_has_focus);
 }
 
-// <GMDX> Cursor scaling (from SoapStorm): the viewer's own tool cursors are small bitmaps that do
-// not follow the cursor size of the desktop the way the system cursors do. Whole-number scale from
-// FS_CURSOR_SCALE / SOAPSTORM_CURSOR_SCALE (1-8), else XCURSOR_SIZE / 24, else 1.
+// <GMDX> Cursor scaling, from SoapStorm (Soap Frenzy, 209b2c5447), LGPL 2.1: the viewer's own tool
+// cursors are small bitmaps that do not follow the cursor size of the desktop the way the system
+// cursors do. Whole-number scale from FS_CURSOR_SCALE / SOAPSTORM_CURSOR_SCALE (1-8), else
+// XCURSOR_SIZE / 24, else 1.
 static int getCursorScaleFactor()
 {
     const char* env_scale = getenv("FS_CURSOR_SCALE");
@@ -1880,84 +1970,183 @@ static int getCursorScaleFactor()
 
 static SDL_Cursor *makeSDLCursorFromBMP(const char *filename, int hotx, int hoty)
 {
-    SDL_Cursor *sdlcursor = nullptr;
-    SDL_Surface *bmpsurface;
-
-    // Load cursor pixel data from BMP file
-    bmpsurface = Load_BMP_Resource(filename);
-    if (bmpsurface) // <GMDX> a colour cursor has no width-multiple-of-8 limit
+    // The BMPs are 32-bit with alpha (scripts/content_tools/sdl_cursor_alpha.py), so they go to
+    // SDL as they are, greys, shadows and colour included.
+    SDL_Surface* surface = Load_BMP_Resource(filename);
+    if (!surface)
     {
-        SDL_Surface *cursurface;
-        LL_DEBUGS() << "Loaded cursor file " << filename << " "
-                    << bmpsurface->w << "x" << bmpsurface->h << LL_ENDL;
-        SDL_PixelFormat pix_format = SDL_GetPixelFormatForMasks(32,
-            SDL_Swap32LE(0xFFU),
-            SDL_Swap32LE(0xFF00U),
-            SDL_Swap32LE(0xFF0000U),
-            SDL_Swap32LE(0xFF000000U));
-        if (pix_format == SDL_PIXELFORMAT_UNKNOWN)
-        {
-            return nullptr;
-        }
-
-        const SDL_PixelFormatDetails* pix_format_details = SDL_GetPixelFormatDetails(pix_format);
-        if(!pix_format_details)
-        {
-            return nullptr;
-        }
-
-        cursurface = SDL_CreateSurface(bmpsurface->w,
-                                           bmpsurface->h,
-                                           pix_format);
-        SDL_FillSurfaceRect(cursurface, nullptr, SDL_Swap32LE(0x00000000U));
-
-        // Blit the cursor pixel data onto a 32-bit RGBA surface so we
-        // only have to cope with processing one type of pixel format.
-        if (SDL_BlitSurface(bmpsurface, nullptr,
-                                 cursurface, nullptr))
-        {
-            // <GMDX> Scaled up by whole pixels into a colour cursor with alpha (was a 1-bit
-            // SDL_CreateCursor at the bitmap's own size). Transparent where the bitmap is the
-            // 200,200,200 colour key.
-            static const int scale = getCursorScaleFactor();
-            SDL_Surface* scaled = SDL_CreateSurface(cursurface->w * scale, cursurface->h * scale, pix_format);
-            if (scaled)
-            {
-                const int bpp = pix_format_details->bytes_per_pixel;
-                for (int i = 0; i < scaled->h; ++i)
-                {
-                    for (int j = 0; j < scaled->w; ++j)
-                    {
-                        const U8* src = (const U8*)cursurface->pixels + cursurface->pitch * (i / scale) + (j / scale) * bpp;
-                        U8* dst = (U8*)scaled->pixels + scaled->pitch * i + j * bpp;
-                        const bool transparent = src[0] == 200 && src[1] == 200 && src[2] == 200;
-                        dst[0] = transparent ? 0 : src[0];
-                        dst[1] = transparent ? 0 : src[1];
-                        dst[2] = transparent ? 0 : src[2];
-                        dst[3] = transparent ? 0 : 255;
-                    }
-                }
-                sdlcursor = SDL_CreateColorCursor(scaled, hotx * scale, hoty * scale);
-                if (!sdlcursor)
-                {
-                    LL_WARNS() << "SDL_CreateColorCursor failed for " << filename << ": " << SDL_GetError() << LL_ENDL;
-                }
-                SDL_DestroySurface(scaled);
-            }
-            // </GMDX>
-        } else {
-            LL_WARNS() << "CURSOR BLIT FAILURE, cursurface: " << cursurface << LL_ENDL;
-        }
-        SDL_DestroySurface(cursurface);
-        SDL_DestroySurface(bmpsurface);
-    } else {
-        LL_WARNS() << "CURSOR LOAD FAILURE " << filename << LL_ENDL;
+        LL_WARNS() << "CURSOR LOAD FAILURE " << filename << ": " << SDL_GetError() << LL_ENDL;
+        return nullptr;
     }
-
+    // <GMDX> Scaled up by whole pixels to the desktop's cursor size (getCursorScaleFactor).
+    static const int scale = getCursorScaleFactor();
+    if (scale > 1)
+    {
+        if (SDL_Surface* scaled = SDL_ScaleSurface(surface, surface->w * scale, surface->h * scale, SDL_SCALEMODE_NEAREST))
+        {
+            SDL_DestroySurface(surface);
+            surface = scaled;
+            hotx *= scale;
+            hoty *= scale;
+        }
+    }
+    // </GMDX>
+    SDL_Cursor* sdlcursor = SDL_CreateColorCursor(surface, hotx, hoty);
+    if (!sdlcursor)
+    {
+        LL_WARNS() << "CURSOR CREATE FAILURE " << filename << ": " << SDL_GetError() << LL_ENDL;
+    }
+    SDL_DestroySurface(surface);
     return sdlcursor;
 }
 
+// #1110: the viewer's own text cursor. The system I-beam follows the OS pointer scheme, and on
+// the white scheme it vanishes over light text fields (the LSL editor). A black I-beam with a
+// white outline reads on any background. Drawn in code so every size is sharp.
+static int textCursorBaseSize()
+{
+#if LL_WINDOWS
+    // Windows pointer size (Accessibility > Mouse pointer) at 100% scale: 32 at size 1, +16 per step.
+    DWORD size = 0;
+    DWORD bytes = sizeof(size);
+    if (RegGetValueW(HKEY_CURRENT_USER, L"Control Panel\\Cursors", L"CursorBaseSize", RRF_RT_REG_DWORD,
+                     nullptr, &size, &bytes) == ERROR_SUCCESS && size >= 16 && size <= 256)
+    {
+        return (int)size;
+    }
+#endif
+    return 32;
+}
 
+static SDL_Surface* drawTextCursor(int size, int* hot_x = nullptr, int* hot_y = nullptr)
+{
+    SDL_Surface* surface = SDL_CreateSurface(size, size, SDL_PIXELFORMAT_RGBA32);
+    if (!surface)
+    {
+        return nullptr;
+    }
+
+    // Proportions of the Windows I-beam at 32px: 1px stroke, 17px tall, 3px serifs either side.
+    // The white outline is one stroke wide.
+    const int stroke = llmax(1, ll_round(size / 32.f));
+    const int height = ll_round(size * 17.f / 32.f);
+    const int serif = ll_round(size * 3.f / 32.f);
+    const int left = (size - stroke) / 2;
+    const int top = (size - height) / 2;
+    auto in_beam = [&](int x, int y)
+    {
+        if (y < top || y >= top + height)
+        {
+            return false;
+        }
+        if (x >= left && x < left + stroke)
+        {
+            return true;
+        }
+        const bool serif_row = y < top + stroke || y >= top + height - stroke;
+        return serif_row && x >= left - serif && x < left + stroke + serif;
+    };
+    auto near_beam = [&](int x, int y)
+    {
+        for (int dy = -stroke; dy <= stroke; ++dy)
+        {
+            for (int dx = -stroke; dx <= stroke; ++dx)
+            {
+                if (in_beam(x + dx, y + dy))
+                {
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+
+    for (int y = 0; y < size; ++y)
+    {
+        U8* pixel = (U8*)surface->pixels + y * surface->pitch;
+        for (int x = 0; x < size; ++x, pixel += 4)
+        {
+            // Transparent pixels must be black too: Windows combines a cursor's colour with the
+            // screen even where alpha is 0, so white there shows as a white box.
+            const bool beam = in_beam(x, y);
+            const bool outline = !beam && near_beam(x, y);
+            const U8 value = outline ? 255 : 0;
+            pixel[0] = pixel[1] = pixel[2] = value;
+            pixel[3] = (beam || outline) ? 255 : 0;
+        }
+    }
+
+    if (hot_x)
+    {
+        *hot_x = left + stroke / 2;
+    }
+    if (hot_y)
+    {
+        *hot_y = top + height / 2;
+    }
+    return surface;
+}
+
+static SDL_Cursor* makeTextCursor()
+{
+    const int base = textCursorBaseSize();
+    int hot_x = 0;
+    int hot_y = 0;
+    SDL_Surface* surface = drawTextCursor(base, &hot_x, &hot_y);
+    if (!surface)
+    {
+        return nullptr;
+    }
+    // High-DPI versions: SDL picks the one matching the display scale under the window.
+    for (F32 scale : { 1.25f, 1.5f, 1.75f, 2.f, 2.5f, 3.f, 4.f })
+    {
+        const int size = ll_round(base * scale);
+        if (size > 256)
+        {
+            break;
+        }
+        if (SDL_Surface* image = drawTextCursor(size))
+        {
+            SDL_AddSurfaceAlternateImage(surface, image);
+            SDL_DestroySurface(image);
+        }
+    }
+    SDL_Cursor* cursor = SDL_CreateColorCursor(surface, hot_x, hot_y);
+    SDL_DestroySurface(surface);
+    if (!cursor)
+    {
+        LL_WARNS() << "Text cursor creation failed: " << SDL_GetError() << LL_ENDL;
+    }
+    return cursor;
+}
+
+void LLWindowSDL::setUseSystemTextCursor(bool use_system)
+{
+    if (use_system == mUseSystemTextCursor && mSDLCursors[UI_CURSOR_IBEAM])
+    {
+        return;
+    }
+    mUseSystemTextCursor = use_system;
+    if (!mWindow)
+    {
+        return;
+    }
+
+    SDL_Cursor* cursor = use_system ? nullptr : makeTextCursor();
+    if (!cursor)
+    {
+        cursor = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_TEXT);
+    }
+    if (mCurrentCursor == UI_CURSOR_IBEAM && cursor)
+    {
+        SDL_SetCursor(cursor);
+    }
+    if (mSDLCursors[UI_CURSOR_IBEAM])
+    {
+        SDL_DestroyCursor(mSDLCursors[UI_CURSOR_IBEAM]);
+    }
+    mSDLCursors[UI_CURSOR_IBEAM] = cursor;
+}
 
 void LLWindowSDL::updateCursor()
 {
@@ -1997,7 +2186,11 @@ void LLWindowSDL::initCursors()
     mSDLCursors[UI_CURSOR_ARROW] = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_DEFAULT);
     mSDLCursors[UI_CURSOR_WAIT] = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_WAIT);
     mSDLCursors[UI_CURSOR_HAND] = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_POINTER);
-    mSDLCursors[UI_CURSOR_IBEAM] = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_TEXT);
+    mSDLCursors[UI_CURSOR_IBEAM] = mUseSystemTextCursor ? nullptr : makeTextCursor();
+    if (!mSDLCursors[UI_CURSOR_IBEAM])
+    {
+        mSDLCursors[UI_CURSOR_IBEAM] = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_TEXT);
+    }
     mSDLCursors[UI_CURSOR_CROSS] = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_CROSSHAIR);
     mSDLCursors[UI_CURSOR_SIZENWSE] = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_NWSE_RESIZE);
     mSDLCursors[UI_CURSOR_SIZENESW] = SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_NESW_RESIZE);
@@ -2542,21 +2735,21 @@ void LLWindowSDL::allowLanguageTextInput(LLPreeditor *preeditor, bool b)
 
     if (mLanguageTextInputAllowed)
     {
-        SDL_StartTextInput(mWindow);
+        SDL_StartTextInput(mTextInputWindow ? mTextInputWindow : mWindow);
     }
     else
     {
-        SDL_StopTextInput(mWindow);
+        SDL_StopTextInput(mTextInputWindow ? mTextInputWindow : mWindow);
     }
 }
 
 void LLWindowSDL::setLanguageTextInput(const LLCoordGL& position)
 {
-    if (mLanguageTextInputAllowed && mPreeditor)
+    if (mLanguageTextInputAllowed)
     {
         LLCoordGL caret_coord;
-        LLRect preedit_bounds;
-        if (mPreeditor->getPreeditLocation(-1, &caret_coord, &preedit_bounds, nullptr))
+        LLRect preedit_bounds(0, 1, 1, 0);
+        if (!mPreeditor || mPreeditor->getPreeditLocation(-1, &caret_coord, &preedit_bounds, nullptr))
         {
             LLCoordWindow window_pos;
             convertCoords(position, &window_pos);
@@ -2565,11 +2758,30 @@ void LLWindowSDL::setLanguageTextInput(const LLCoordGL& position)
             SDL_Rect coords;
             coords.x = ll_round((F32)window_pos.mX / density);
             coords.y = ll_round((F32)window_pos.mY / density);
-            coords.w = ll_round((F32)preedit_bounds.getWidth() / density) - coords.x;
-            coords.h = ll_round((F32)preedit_bounds.getHeight() / density) - coords.y;
-            SDL_SetTextInputArea(mWindow, &coords, 0);
+            coords.w = llmax(1, ll_round((F32)preedit_bounds.getWidth() / density));
+            coords.h = llmax(1, ll_round((F32)preedit_bounds.getHeight() / density));
+            SDL_SetTextInputArea(mTextInputWindow ? mTextInputWindow : mWindow, &coords, 0);
         }
     }
+}
+
+void LLWindowSDL::setTextInputWindow(SDL_Window* window)
+{
+    SDL_Window* previous = mTextInputWindow ? mTextInputWindow : mWindow;
+    SDL_Window* next = window ? window : mWindow;
+    if (previous == next) return;
+    interruptLanguageTextInput();
+    SDL_StopTextInput(previous);
+    mTextInputWindow = window;
+    if (mLanguageTextInputAllowed) SDL_StartTextInput(next);
+}
+
+void LLWindowSDL::interruptLanguageTextInput()
+{
+    if (!mPreeditActive) return;
+    if (mPreeditor) mPreeditor->resetPreedit();
+    SDL_ClearComposition(mTextInputWindow ? mTextInputWindow : mWindow);
+    mPreeditActive = false;
 }
 
 F32 LLWindowSDL::pixelDensity() const
@@ -2597,3 +2809,24 @@ F32 LLWindowSDL::getSystemUISize()
 }
 
 
+
+LLWindowSDL::ScopedUIWindow::ScopedUIWindow(LLWindowSDL& owner, SDL_Window* target,
+                                           const LLCoordWindow* cursor)
+    : mOwner(owner), mPrevious(owner.mWindow), mCursor(owner.mUICursorOverride),
+      mFullscreen(owner.mFullscreen), mExclusive(owner.mFullscreenExclusive), mDialog(owner.mInDialog)
+{
+    owner.mWindow = target;
+    owner.mFullscreen = owner.mFullscreenExclusive = owner.mInDialog = false;
+    owner.mUICursorOverride = cursor;
+}
+
+void LLWindowSDL::ScopedUIWindow::restore()
+{
+    if (!mActive) return;
+    mActive = false;
+    mOwner.mWindow = mPrevious;
+    mOwner.mFullscreen = mFullscreen;
+    mOwner.mFullscreenExclusive = mExclusive;
+    mOwner.mInDialog = mDialog;
+    mOwner.mUICursorOverride = mCursor;
+}

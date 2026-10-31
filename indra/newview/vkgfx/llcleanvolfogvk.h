@@ -1,66 +1,11 @@
-/**
- * @file llcleanvolfogvk.h
- * @brief Volumetric fog (#718, epic #722 phase 1): froxel grid + local volume primitives for
- *        the Vulkan clean renderer.
- *
- * Our own implementation of published techniques: the camera-aligned froxel grid with
- * exponential depth slices and temporal reprojection (Wronski, "Volumetric Fog", AC4 /
- * SIGGRAPH 2014), physically based participating media and the energy-conserving
- * integration (Hillaire, "Physically Based and Unified Volumetric Rendering in Frostbite",
- * SIGGRAPH 2015).
- *
- * PASSES (compute, recorded by recordCompute; GPU sub-marks c_vol_*):
- *   0. PARTICLES (clean_vol_part.comp)      VOLUMETRIC PARTICLES (#721, RenderVKVolumetricParticles,
- *                                           opt-in): the GPU particle pool -> classify per
- *                                           distance bucket -> capped nearest-first selection
- *                                           into soft-sphere records, binned per 8x8-froxel
- *                                           screen tile; writes each particle's sprite fade
- *                                           (glow.z) for the lit particle VS. Sub-mark c_vol_part.
- *   1. INJECT    (clean_vol_inject.comp)    height fog + local volumes + the binned particles
- *                                           (+ the cloud-layer hook) -> medium (sigma_s,
- *                                           sigma_t) per cell; particle emission -> mEmit
- *   2. LIGHT     (clean_vol_light.comp)     sun / moon (cascades x cloudShadow), sky ambient,
- *                                           clustered local lights, HG phase; + the haze's
- *                                           shadowed sun scatter (the god rays term).
- *                                           Shadowed projectors (RenderVKVolumetricFogLocalShadows):
- *                                           atlas tap per shadow-mapped one; ray-traced ones
- *                                           by a stochastic weighted pick + one opaque shadow
- *                                           ray per cell (its VOL_RT variant, sub-mark
- *                                           c_vol_light_rt; {draw 0, draw 1, own, RT set}).
- *                                           Shadowed POINT lights (RenderVKVolumetricFogPointShadows)
- *                                           join the same pick: one ray toward the picked light
- *                                           (own prim sphere + own-fixture rule), so a lamp
- *                                           under a floor no longer lights the fog above it.
- *                                           The same variant carries the OCCLUSION TERMS: the
- *                                           sky ambient x a per-cell sky-visibility ray while
- *                                           GI runs (RenderVKVolumetricFogAmbientOcclusion), and
- *                                           a sun / moon shadow ray in ray-traced sun mode
- *                                           (RenderVKVolumetricFogSunRT): a sealed room's fog
- *                                           stays dark, a window / lamp still lights it
- *   3. TEMPORAL  (clean_vol_temporal.comp)  own reprojection + 6-neighbour clamp (anti-lag)
- *   4. INTEGRATE (clean_vol_integrate.comp) front-to-back -> (in-scatter, transmittance)
- * and the APPLY (clean_vol_apply.frag, recordApply): the first draw of render pass 2,
- * C' = C * T + L over opaques + sky. Transparents (alpha FS, water, particles) sample the
- * integrated volume themselves through draw set 0 binding 45 (clean_vol_apply.glsl).
- *
- * PLACEMENT (LLCleanRendererVK::recordWorld): the froxels need no depth -- only the
- * cascades, the light clusters and the frame info -- so the compute is recorded right before
- * pass 1b (after the AO / RT-mask block, before the ray-traced probe faces) and, with async
- * compute (RenderVKAsyncVolumetrics; the #845 RDNA2 auto-disable applies through the
- * renderer's async availability), runs on the async queue beside pass 1b's G-buffer /
- * lighting raster. Joined (up to its own timeline value only) right before the apply.
- *
- * ZERO COST WHEN OFF: RenderVKVolumetricFog 0 -> the renderer never creates this object;
- * turned off -> destroy() + delete (no pipeline, image or buffer survives; draw set 0
- * binding 45 goes back to the renderer's 1x1x1 identity stub). Camera under water: no
- * passes that frame (the water fog owns it; the history resets).
- *
- * VRAM (RGBA16F 3D, all GENERAL): current cells + 2 history + integrated = 4 x 8 B per
- * cell: low 128x72x48 ~14 MB, medium 160x90x64 ~29.5 MB, high 192x108x96 ~64 MB; + the
- * volume list (2 x 6 KB host-visible). Volumetric particles on (only then): + the emission
- * grid (one more 8 B per cell: 3.5 / 7.4 / 16 MB) + the particle volume buffer (fixed
- * ~540 KB: header, distance histogram, 336 tiles x 256 indices, 4096 records x 48 B) + a
- * 2 x 16 B stats readback. Freed when the setting goes back to 0.
+/** @file llcleanvolfogvk.h
+ * Per-eye camera-medium resources. Physical baseline: L/RGB-T at 64x36x32
+ * plus two air-only 2D endpoints. Volumetric lighting replaces that baseline:
+ * local coefficients, two local-source histories, L, RGB-T, current height
+ * illumination (also particle emission input), and two height histories.
+ * Eight RGBA16F-equivalent 3D images per eye, at most 121.5 MiB plus endpoints.
+ * Physical-off retains the existing extra-fog compute and scalar apply path.
+ * Pipeline results are adopted only after poll; resource changes retire GPU use.
  */
 #ifndef LL_LLCLEANVOLFOGVK_H
 #define LL_LLCLEANVOLFOGVK_H
@@ -108,6 +53,15 @@ public:
         float waterHeight = 0.f;
         float drawDistance = 256.f;                        // the main view's draw distance (m)
         float shadowMode = 0.f;                            // shadow_params.w as known now (0 / 1 / 2 RT)
+        bool physical = false;
+        bool baseline = false;
+        bool orthographic = false;
+        uint32_t eyeIndex = 0;
+        const float* forward = nullptr;
+        const float* projection = nullptr;
+        const LLCleanVolFogVK* particleOwner = nullptr; // stereo shares ONE representation decision
+        const float* particleForward = nullptr;
+        VkImageView hdrView = VK_NULL_HANDLE; // ARRAY view, rgba16f storage
         bool  underwater = false;
         bool  offscreen = false;                           // snapshot: no history, no jitter
         uint32_t snapSample = 0;                           // #932: a supersampled shot's recording 1..N (0 = none)
@@ -164,6 +118,18 @@ public:
     // Inside render pass 2's first scope (HDR + glow + reactive + read-only depth; viewport /
     // scissor set), as its first draw. dsetDraw0: the current draw set 0.
     void recordApply(VkCommandBuffer cmd, VkDescriptorSet dsetDraw0);
+    void recordMediumApply(VkCommandBuffer cmd, const VkDescriptorSet draw01[2]);
+    bool physical() const { return mPhysical; }
+    VkImageView transmittanceView() const { return mTrans.view; }
+    VkImageView airRadianceView() const { return mAir[0].view; }
+    VkImageView airTransmittanceView() const { return mAir[1].view; }
+    const float* forward() const { return mForward; }
+    const float* mapping() const { return mMapping; }
+    void fillMist(float out[2][4]) const
+    {
+        for(int c=0;c<4;++c) out[0][c]=mOcolOffsets[c];
+        out[1][0]=mOcolMist[2]; out[1][1]=mOcolMist[3]; out[1][2]=mOcolMist[1]; out[1][3]=0.f;
+    }
     // This recording's main-view projection jitter (NDC xy; null = none) for the apply's depth
     // unprojection -- decided after prepare() (the renderer's jitter step).
     void setApplyJitter(const float* ndc)
@@ -179,6 +145,7 @@ public:
     // binding 45 (the device is idle then -- prepare() waited before re-creating).
     bool takeBindingDirty() { const bool d = mBindingDirty; mBindingDirty = false; return d; }
     // Nothing allocated (the renderer deletes the object then).
+    void invalidateHistory() { mHistValid=false; }
     bool idle() const { return !mInteg.image && !mCur.image && !mInjectPipe && !mDsl && !mJob.pending() && !mRtJob.pending(); }
     // Frees everything (waits for the device). Safe to call repeatedly.
     void destroy(VkDevice dev);
@@ -194,7 +161,7 @@ public:
         float scroll[4];      // noise scroll (m/s), w bounding radius (m)
     };
     static_assert(sizeof(VolPrimGPU) == 96, "VolPrimGPU = clean_vol_inject.comp VolPrim");
-    static constexpr uint32_t kVolCap = 64;   // per-frame list capacity (CPU + GPU appenders)
+    static constexpr uint32_t kVolCap = 64;   // immutable CPU-uploaded list; GPU producers require separate storage
 
     // VOLUMETRIC PARTICLES (#721): the particle volume buffer (clean_vol_part_common.glsl).
     struct PVolGPU
@@ -261,8 +228,23 @@ private:
     VkDescriptorSetLayout mPipeRtDsl[4] = {};   // draw 0, draw 1, own, RT the RT pass was built for
 
     GpuImage  mCur, mHist[2], mInteg;
+    GpuImage  mTrans, mAir[2], mHeightHist[2];
+    bool mPhysical = false, mBaseline = false;
+    uint32_t mEyeIndex = 0;
+    float mForward[4] = {};
+    float mMapping[4] = {};
+    float mPreviousProjection[16] = {};
+    float mPreviousMedium[4] = {};
+    bool mPreviousUnderwater = false;
+    VkImageView mHdrView = VK_NULL_HANDLE;
+    VkPipeline mMediumApplyPipe = VK_NULL_HANDLE;
+    VkPipeline mMediumApplyStage = VK_NULL_HANDLE;
+    uint32_t mRetryFrame = 0;
+    uint32_t mRetryTier = 2;
     uint32_t  mW = 0, mH = 0, mD = 0;
     bool      mBindingDirty = false;
+    GpuBuffer mMediumStats, mMediumStatsReadback[2];
+    bool mMediumStatsValid[2] = {};
     GpuBuffer mList[2];   // host-visible volume list ring (per frame slot)
 
     // Volumetric particles (#721).
@@ -275,6 +257,8 @@ private:
     VkBuffer  mSetPool = VK_NULL_HANDLE;     // what bindings 5 / 6 / 7 were last written with
     VkBuffer  mSetPV = VK_NULL_HANDLE;
     VkImageView mSetEmit = VK_NULL_HANDLE;
+    bool      mBorrowParticles = false;
+    uint64_t mParticleGeneration=0,mBorrowGeneration=0;
     bool      mPartOn = false;               // latched: the particle pass runs this recording
     uint32_t  mPartRetryFrame = 0;           // #697: an allocation refusal retries after this
     struct PartPush { float q[8][4]; } mPartPush{};   // clean_vol_part.comp PartVolPush (128 B)

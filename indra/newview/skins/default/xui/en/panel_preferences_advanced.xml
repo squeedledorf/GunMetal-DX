@@ -344,6 +344,19 @@
    tool_tip="Use the original bitmap icons instead of the sharp vector icons (drawn at the exact on-screen size at any UI size). Takes effect immediately."
    top_pad="10"
    width="250" />
+  <combo_box
+   control_name="InventorySystemFolderIconStyle"
+   follows="left|top"
+   height="23"
+   layout="topleft"
+   left="290"
+   name="system_folder_icon_style"
+   tool_tip="Inventory system folder icons (vector icons only)."
+   top_delta="-4"
+   width="190">
+    <combo_box.item label="System folders: item icons" name="type" value="0" />
+    <combo_box.item label="System folders: colored folders" name="folder" value="1" />
+  </combo_box>
   <text
   type="string"
   length="1"

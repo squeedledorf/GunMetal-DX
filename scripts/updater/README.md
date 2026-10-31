@@ -1,8 +1,10 @@
 # Auto-updater (#421)
 
-Windows (NSIS installer) and Linux tarball installs can update themselves. Everything is
-**off by default**: the Preferences setting `UpdateAutoInstall` is off, and the updater stays
-inert in any build that does not have the update signing public key compiled in.
+Windows (NSIS installer) and Linux tarball installs can update themselves, **only when the
+person asks**: nothing is downloaded before they click "Download and install", and nothing is
+installed before they click "Install now" or "Install at next start" (GunMetal-DX; the old
+`UpdateAutoInstall` setting no longer does anything). The updater stays inert in any build that
+does not have the update signing public key compiled in.
 
 ## How it works
 
@@ -12,16 +14,23 @@ inert in any build that does not have the update signing public key compiled in.
 2. The website feed builder (`scripts/build_update.py`, website repo) embeds
    `{"manifest": "<json string>", "signature": "<base64>", "key_id": "1"}` as `"update"` in
    `/update/release.json` and `/update/beta.json`.
-3. The viewer's update check (`slupdatechecker.cpp`) passes it to `SLUpdater`
-   (`slupdater.cpp`). The signature is verified with the embedded key (`slupdateverify.h`)
+3. The viewer's update check (`slupdatechecker.cpp`, at the login screen and once a day,
+   if the person allowed checking) passes it to `SLUpdater` (`slupdater.cpp`). The signature is verified with the embedded key (`slupdateverify.h`)
    **before** anything in the manifest is used; URLs, hashes and versions come only from the
    verified text, URLs must be https on slipstreamviewer.org / git.slipstreamviewer.org, and
    the build must be newer than the running one (no downgrades).
-4. The installer is downloaded in the background in 2 MiB ranged requests (resumable across
-   restarts; one installer at a time is kept in `<cache>/updates`), hashed on a worker thread
-   and compared with the signed sha256 and size. A notice says it installs at the next start.
+4. The person is asked: *Download and install* / *Remind me later* (offered again at the next
+   start) / *Skip this version* (`UpdateCheckSkippedBuild`). On the click the installer is
+   downloaded with a progress window in 2 MiB ranged requests (Cancel keeps the partial file,
+   the next click resumes it; one installer at a time is kept in `<cache>/updates`), hashed
+   on a worker thread and compared with the signed sha256 and size. The state dir then holds
+   `downloaded-update` (pointer to the staged record) and the person is asked *Install now*
+   (quits and starts again) / *Install at next start*; either renames it to
+   `approved-update`, the only file the startup step acts on. An update downloaded but not
+   approved (or a `pending-update` left by GunMetal-DX 0.3.0, which downloaded on its own) is
+   asked about at the next login screen: *Install now* / *Later* / *Discard*.
 5. **Linux tarball**: the next start goes through the launcher (`slipstream`,
-   `linux_tools/wrapper.sh` + `etc/update_hooks.sh`). If `~/.local/state/slipstream-update/pending-update`
+   `linux_tools/wrapper.sh` + `etc/update_hooks.sh`). If `~/.local/state/gunmetal-dx-update/approved-update`
    exists it runs `bin/do-not-directly-run-slipstream-bin --slipstream-apply-update <root>`
    (`slupdateapply.cpp`), which re-verifies signature and hash, unpacks beside the install,
    checks the unpacked tree (single top directory, launcher + binary, `build_data.json` version

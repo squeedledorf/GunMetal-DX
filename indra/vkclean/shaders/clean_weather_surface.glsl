@@ -81,7 +81,8 @@
 // cover (clean_weather_snow.comp) instead of the global cover x the current openness: the top
 // surface of a column its accumulated cover (soft at the drip lines by the PCF sky term), a
 // surface under it the cover it had when something was put over it (a moved table keeps the
-// lawn's snow underneath; its old spot is bare and refills). Moving objects (instance bit21)
+// lawn's snow underneath -- #1037 melting under it over ~90 s, and none at all under a roof that
+// merely loaded after what it covers; its old spot is bare and refills). Moving objects (instance bit21)
 // carry their own amount, drawn with object-space noise so the patches ride along. Includers
 // name the fragment's instance flags / slot with WEATHER_INST_FLAGS / WEATHER_INST_ID (clean_draw.frag:
 // v_flags, v_terrain_rec -- the VS writes the instance slot there for non-terrain draws; M3: the
@@ -127,7 +128,10 @@ float wx_footprint = 0.01;
 // M2: [4] / [5] the persistent snow cover grids, [6] the per-instance snow (GENERAL layout;
 // the stand-in where they do not exist -- never read then, ssr.weather[10].w / [11].x are 0).
 // M4: [7] the run-off flow map (rgba32f, GENERAL; read only with ssr.weather[14].w bit 1).
+#ifndef CLEAN_WEATHER_OCCL_DECLARED
+#define CLEAN_WEATHER_OCCL_DECLARED
 layout(set = 0, binding = 49) uniform sampler2D uWeatherOccl[10];
+#endif
 #ifndef WEATHER_INST_FLAGS
 #define WEATHER_INST_FLAGS 0u
 #define WEATHER_INST_ID 0xFFFFFFFFu
@@ -586,12 +590,14 @@ void weatherWetAvatar(inout SurfaceLit s, vec3 P, float wet, float rainHere)
         s.spec = max(s.spec, vec3(0.25 * wet));
         s.env = max(s.env, 0.2 * wet);
     }
-    // rain ripples on a flat, open top (an umbrella's canopy, a hat's crown) while it rains on it
+    // rain ripples on a flat, open top (an umbrella's canopy, a hat's crown) while it rains on it;
+    // #1005: faded in over the tilt, not cut -- a curved top (shoulders, a brim) has no hard ripple edge
     const float rain = ssr.weather[0].y;
     const float strength = ssr.weather[0].w;
-    if (strength > 0.0 && rain > 0.01 && rainHere > 0.0 && s.Ng.z > 0.9)
+    if (strength > 0.0 && rain > 0.01 && rainHere > 0.0 && s.Ng.z > 0.8)
     {
-        const float fade = (1.0 - smoothstep(12.0, 30.0, distance(P, ssr.cam_origin.xyz))) * rainHere * wet;
+        const float fade = (1.0 - smoothstep(12.0, 30.0, distance(P, ssr.cam_origin.xyz))) * rainHere * wet
+                         * smoothstep(0.8, 0.92, s.Ng.z);
         if (fade > 0.0)
         {
             const float t = ssr.weather[0].z;
@@ -975,10 +981,47 @@ void weatherRivulets(inout SurfaceLit s, vec3 P, float amount, float acc)
 }
 
 // The run-off below an outlet at P: 0..1 (a wall between an outlet's edge and its landing).
-float weatherRunoffBelow(vec3 P, vec4 fl)
+// Only on the OUTSIDE face of a wall: the flow map knows heights and columns, not which side of a
+// wall the water runs down, and a wall's INTERIOR lies in the same column as the roof edge above its
+// outside (an attic's gable wall: a rivulet streak across its inside, under the roof, all the way
+// down to the floor). The outside is where the open air is: a point half a metre out from the wall
+// along its horizontal normal must be open to the sky in the roof map; inside a building it is
+// under the roof. (An eave overhanging the wall by more than that keeps the wall dry: the water
+// leaves the eave's edge, not the wall.) Ng: the surface's geometric normal.
+float weatherRunoffBelow(vec3 P, vec4 fl, vec3 Ng)
 {
     if (!(fl.x > 0.0) || P.z > fl.y + 0.05 || P.z < fl.z - 0.1) return 0.0;
-    return ssr.weather[13].w * smoothstep(0.05, 1.5, fl.x);
+    float below = ssr.weather[13].w * smoothstep(0.05, 1.5, fl.x);
+    const float lh = length(Ng.xy);
+    if (below > 0.0 && abs(Ng.z) < 0.85 && lh > 0.05)
+        below *= smoothstep(0.2, 0.7, weatherSkyOpen(P + vec3(Ng.xy / lh * 0.5, 0.0), vec3(0.0, 0.0, 1.0)));
+    return below;
+}
+
+// RenderVKWeatherOcclDebug (ssr.weather[14].w bit 256): what the rain DOES to this static surface --
+// the same facing and sky test the wetness runs (weatherFacing, weatherSkyOpen: both cascades, the
+// bias, the receiver plane, the PCF disc), not the raw map:
+//   magenta  a moving object (instance bit21): never in the map -- a house that is magenta has no roof
+//   grey     no map at all
+//   blue     turned away from the precipitation (a ceiling, a roof's underside, a lee wall): never wet
+//   red .. orange .. green   facing it: covered .. partly .. open to the sky (wet)
+// Bright = the near map covers P; dull = only the coarse one does (the camera's column is past half
+// the near map's extent, or it is not published).
+vec3 weatherOcclDebug(vec3 P, vec3 Ng, uint flags)
+{
+    if ((flags & 2097152u) != 0u) return vec3(1.0, 0.0, 1.0);
+    if (!(ssr.weather[1].w > 0.5) && !(ssr.weather[3].w > 0.5)) return vec3(0.35);
+    float bright = 0.55;
+    if (ssr.weather[3].w > 0.5)
+    {
+        const vec2 uv = weatherMapUV(ssr.weather[3], ssr.weather[4].x, ssr.weather[7].xy, P);
+        if (all(greaterThanEqual(uv, vec2(0.0))) && all(lessThanEqual(uv, vec2(1.0)))) bright = 1.0;
+    }
+    if (weatherFacing(Ng, weatherShear()) <= 0.0) return vec3(0.15, 0.35, 1.0) * bright;
+    const float sky = weatherSkyOpen(P, Ng);
+    const vec3 c = sky < 0.5 ? mix(vec3(1.0, 0.1, 0.1), vec3(1.0, 0.55, 0.0), sky * 2.0)
+                             : mix(vec3(1.0, 0.55, 0.0), vec3(0.1, 0.9, 0.15), sky * 2.0 - 1.0);
+    return c * bright;
 }
 
 void weatherSurface(inout SurfaceLit s, vec3 P)
@@ -990,6 +1033,14 @@ void weatherSurface(inout SurfaceLit s, vec3 P)
     // overlay too.
     const bool avFrag = (WEATHER_INST_FLAGS & (1u | 512u)) != 0u;
     const bool shOn = ssr.weather[6].w > 0.5;
+    if (!avFrag && (uint(ssr.weather[14].w + 0.5) & 256u) != 0u && (s.model == SURF_PBR || s.model == SURF_LEGACY))
+    {
+        // RenderVKWeatherOcclDebug: what the rain does to this static surface (see weatherOcclDebug)
+        const vec3 oc = weatherOcclDebug(P, s.Ng, WEATHER_INST_FLAGS);
+        s.albedo = mix(s.albedo, oc, 0.85);
+        s.emissive = max(s.emissive, oc * 0.4);
+        return;
+    }
     if (wet0 <= 0.0 && snow0 <= 0.0 && !(shOn && (avFrag || weatherShDebug()))) return;   // weather off / dry, no snow: one uniform branch
     if (s.model != SURF_PBR && s.model != SURF_LEGACY) return;
     if (!avFrag && shOn && weatherShDebug())
@@ -1032,7 +1083,7 @@ void weatherSurface(inout SurfaceLit s, vec3 P)
             const float face = weatherFacing(s.Ng, weatherShear());
             // the ripples only: rain landing on this fragment NOW (a canopy, a hat's crown)
             float rainHere = 0.0;
-            if (wet0 > 0.0 && acWet > 0.003 && ssr.weather[0].y > 0.01 && ssr.weather[0].w > 0.0 && s.Ng.z > 0.9 && face > 0.0)
+            if (wet0 > 0.0 && acWet > 0.003 && ssr.weather[0].y > 0.01 && ssr.weather[0].w > 0.0 && s.Ng.z > 0.8 && face > 0.0)
                 rainHere = weatherSkyOpen(P, s.Ng) * shO * smoothstep(0.05, 0.45, face);
             if (acWet > 0.003) weatherWetAvatar(s, P, acWet, rainHere);
             if (acSnow > 5.0e-4)
@@ -1066,7 +1117,7 @@ void weatherSurface(inout SurfaceLit s, vec3 P)
     {
         if (rivulets && flow)
         {
-            const float below = weatherRunoffBelow(P, fl);
+            const float below = weatherRunoffBelow(P, fl, s.Ng);
             weatherRivulets(s, P, below * smoothstep(0.0, 0.3, wet0), below);
         }
         return;
@@ -1128,7 +1179,7 @@ void weatherSurface(inout SurfaceLit s, vec3 P)
         float acc = 0.0;
         if (flow)
         {
-            const float below = weatherRunoffBelow(P, fl);
+            const float below = weatherRunoffBelow(P, fl, s.Ng);
             amt += below;
             acc = below;
             if (s.Ng.z > 0.3)

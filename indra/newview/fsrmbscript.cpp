@@ -24,6 +24,11 @@
 #include "llviewerprecompiledheaders.h"
 
 #include "fsrmbscript.h"
+#include "slcombatfx.h"
+
+// Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4 (SoapStorm's FSRMBScriptEnabled).
+// <GMDX> From SoapStorm (Soap Frenzy), LGPL 2.1: right mouse button to scripts (5f76d31c7f, 35f6384a83,
+// a32af6a274).
 
 #include "llagent.h"
 #include "llagentcamera.h"
@@ -38,7 +43,8 @@ static bool rmb_reportable()
 {
     static LLCachedControl<bool> enabled(gSavedSettings, "FSRMBScriptEnabled", false);
     // <GMDX> Not while the mouselook pointer is freed for the UI: that right click is for a menu.
-    return enabled && gAgentCamera.cameraMouselook() && gAgent.getRegion()
+    // Slipstream: a CombatFX option.
+    return enabled && SLCombatFX::enabled() && gAgentCamera.cameraMouselook() && gAgent.getRegion()
         && !LLToolCompGun::getInstance()->isMouseFreed();
 }
 

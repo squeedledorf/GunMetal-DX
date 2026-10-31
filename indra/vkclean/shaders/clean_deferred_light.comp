@@ -1,4 +1,8 @@
 #version 460
+#ifdef CLEAN_RS_EMISSIVE_BUILD
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+#endif
 #extension GL_EXT_nonuniform_qualifier : require
 #extension GL_GOOGLE_include_directive : require
 #define CLEAN_SKY_LUT   // (#819) skyColor() reads the sky-view LUT (draw set 0 binding 52) when valid
@@ -1275,6 +1279,10 @@ void deferPdnVisLight(uint li, vec3 P, vec3 N, out vec3 visD, out vec3 visS);   
 #define CLEAN_PROJ_STOCH_VIS deferPdnVisLight
 bool deferRsStoch(uint li, vec3 P);   // (below: #869 ReSTIR DI's extended light set)
 #define CLEAN_RS_STOCH deferRsStoch
+// (RenderVKReSTIRRadiance) RADIANCE MODE: pass 15's denoised image carries the stochastic lights' shadowed light
+// itself -- localLight leaves those lights out (deferEmitterLight adds the image once per pixel)
+bool deferPdnRadOn();   // (below)
+#define CLEAN_PROJ_STOCH_RAD deferPdnRadOn
 // (#91 LIGHT TAKEOVER) a point light whose emitting triangles carry it this frame: localLight skips it
 bool deferLightTaken(uint li);   // (below)
 #define CLEAN_LIGHT_TAKEN deferLightTaken
@@ -1284,8 +1292,9 @@ bool deferPstochOn() { return (g_draw_push.flags & DEFER_FLAG_PSTOCH) != 0u; }
 void deferPdnVis(vec3 P, out vec3 visD, out vec3 visS);   // (below)
 #endif
 #if CLEAN_DEFER_PASS == 3 || CLEAN_DEFER_PASS == 7
-// (#91) the emissive surfaces' light in lightSurface's tail (clean_surface_light.glsl; below)
-vec3 deferEmitterLight(vec3 P, vec3 N, vec3 diffuseColor);
+// (#91) the emissive surfaces' light in lightSurface's tail (clean_surface_light.glsl; below) -- (RADIANCE MODE)
+// or pass 15's whole shadowed radiance, remodulated by the diffuse / specular colours
+vec3 deferEmitterLight(vec3 P, vec3 N, vec3 diffuseColor, vec3 specularColor);
 #define CLEAN_EMITTER_LIGHT deferEmitterLight
 #endif
 #if DEFER_PSTOCH
@@ -1361,6 +1370,7 @@ float vqShFixMax();
 #endif
 
 #include "clean_draw_common.glsl"
+#include "clean_history_time.glsl"
 #include "clean_surface_light.glsl"
 #include "clean_gbuffer.glsl"
 
@@ -1807,7 +1817,9 @@ void deferPdnFetch(vec3 P, out vec3 d, out vec3 s)
     }
     const vec2 r = vec2(dims) / vec2(float(g_draw_push.width), float(g_draw_push.height));
     const vec2 j = ssr.taa_params.w > 0.5 ? ssr.taa_jitter.xy : vec2(0.0);
-    const vec2 f = CLEAN_FRAG_XY * r - 0.5 - j;
+    vec2 f = CLEAN_FRAG_XY * r - 0.5 - j;
+    if ((linfo.fwd.z & 2u) != 0u && ssr.taa_params.w < 0.5)
+        f = pdnExactHc(CLEAN_FRAG_XY, 1.0 / r, f);
     const ivec2 b = ivec2(floor(f));
     const vec2 fr = f - vec2(b);
     const float vz = dot(P - linfo.cam_pos.xyz, linfo.cam_fwd.xyz);
@@ -1862,6 +1874,13 @@ void deferPdnVis(vec3 P, out vec3 visD, out vec3 visS)
     visD = g_pdn_vis_d;
     visS = g_pdn_vis_s;
 }
+// (RenderVKReSTIRRadiance) RADIANCE MODE this frame (pass 15's pdnRadOn: the light info's fwd.z bit 1, latched by
+// the host for the whole frame) with pass 15's image bound (DEFER_FLAG_PSTOCH). The final image is then the
+// DEMODULATED SHADOWED LIGHT of every light pass 15 owns (the same ownership as the ratio's: the ray-traced
+// records, ReSTIR's extended set inside the grid -- deferRsStoch --, the emitters): never a [0, 1] visibility,
+// so it is never read through deferPdnVis's clamp. The walk leaves those lights out (deferPdnVisLight 0 + the
+// early outs in localLight, CLEAN_PROJ_STOCH_RAD); BASE / the combine add the image once (deferEmitterLight).
+bool deferPdnRadOn() { return deferPstochOn() && (linfo.fwd.z & 2u) != 0u; }   // (push + frame info: uniform)
 #if CLEAN_DEFER_PASS == 3 || CLEAN_DEFER_PASS == 8
 // (#869 OCCLUSION CULL) this pixel's patch (P, its shading normal N: pass 15's key), found on the first
 // stochastic light the walk meets; then one word load per light test
@@ -1914,8 +1933,12 @@ void occLitPatches(vec3 P, vec3 N)
 // of every estimate the same way. (#1052 SOFT CULL) x (1 - c), c its bilinear cull weight at P: pass 15
 // leaves it out with that probability (the jittered key). (THE POINT LIGHTS' SHARE) A point light: never
 // -- pass 15 keeps it in the ratio's light set with its exact zero, so the ratio alone carries its cull.
+// (RADIANCE MODE, deferPdnRadOn) 0: pass 15's radiance carries every shadowed share of the light -- what is
+// left in localLight is the terms pass 15 does not sample (the unshadowed ambiance without
+// RenderVKProjAmbianceShadowedMode); the cull and the split are off in that mode.
 void deferPdnVisLight(uint li, vec3 P, vec3 N, out vec3 visD, out vec3 visS)
 {
+    if (deferPdnRadOn()) { visD = visS = vec3(0.0); return; }
     float keep = 1.0;
     if (occFrameOn() && !occKeepsShare(li))   // (a header word: uniform; then the light's kind)
     {
@@ -2067,8 +2090,22 @@ vec3 emLitBlend(vec3 P, vec3 N, vec4 org, bool overlay, bool dropWeak)
     }
     return wsum > 0.0 ? sum / wsum : vec3(0.0);
 }
-vec3 deferEmitterLight(vec3 P, vec3 N, vec3 diffuseColor)
+// (RenderVKReSTIRRadiance) RADIANCE MODE (deferPdnRadOn): pass 15's denoised image is the shadowed light of
+// EVERY light it owns -- the ray-traced projectors, ReSTIR's point lights / projectors and these emitters
+// alike: they share one RIS stream, so the emitters cannot keep a visibility ratio of their own -- read here
+// once per lit pixel (BASE / the combine: LOCAL never adds it, as above) and remodulated with the colours pass
+// 15 demodulated by (pdnRadDiff / pdnRadSpec: diffuseColor, specularColor -- the local lights' own). The
+// trilinear unshadowed blend below is not evaluated (its light is in the samples). Light takeover keeps its
+// rule: a taken-over point light is no candidate there and the walk skips it; its glass's samples carry it.
+vec3 deferEmitterLight(vec3 P, vec3 N, vec3 diffuseColor, vec3 specularColor)
 {
+    if (deferPdnRadOn())
+    {
+        if (litDbg(LDBG_NO_LOCAL)) return vec3(0.0);
+        vec3 radD, radS;
+        deferPdnFetch(P, radD, radS);
+        return pdnSane(radD) * pdnDiffFactor(diffuseColor) + pdnSane(radS) * pdnSpecFactor(specularColor);
+    }
     if (!deferPstochOn() || !rsFrameOn() || !emLitOn() || litDbg(LDBG_NO_LOCAL)) return vec3(0.0);
     const uint cell = regirCell(P);
     if (cell == REGIR_NO_CELL) return vec3(0.0);
@@ -2198,7 +2235,7 @@ uint rtrLightCluster(vec3 P)
     const vec4 v = linfo.view * vec4(P, 1.0);   // -Z forward
     const float z = -v.z;
     if (z <= 1e-3) return RT_SHADE_ALL_LIGHTS;
-    const float sx = (v.x / CL_VIEW_Z(linfo, z)) / max(linfo.grid.z, 1e-4);   // <GMDX>
+    const float sx = (v.x / CL_VIEW_Z(linfo, z)) / max(linfo.grid.z, 1e-4);
     const float sy = (v.y / CL_VIEW_Z(linfo, z)) / max(linfo.grid.w, 1e-4);
     if (abs(sx) > 1.0 || abs(sy) > 1.0) return RT_SHADE_ALL_LIGHTS;
     return mainClusterProject(P);
@@ -2225,7 +2262,7 @@ void rtrProjRaySetup(Light L, vec3 P, vec3 N, out vec3 o, out vec3 l, out float 
     l = lv / max(d, 1e-4);
     const vec3 n = dot(N, l) < 0.0 ? -N : N;
     o = offsetRayOrigin(P + n * 0.01, n);
-    const float stop = point ? max(clamp(L.proj_axis.x, 0.0, 64.0), 0.05) : 0.05;
+    const float stop = point ? clamp(L.proj_axis.x, 0.0, RS_POINT_NEAR_MAX) : 0.05;   // (pass 15's cap)
     tmax = max(d - stop, 0.0);
 #if DEFER_GI_TRACE
     // (#1041) ... and its OWN FIXTURE (pass 15's SH_FIXTURE, clean_vis_walk.glsl): a lamp's shade /
@@ -2360,6 +2397,14 @@ void vqHitOcc(out float vis, out float bt);
 // The environment at a hit: one probe walk (irradiance along N, radiance along R at the
 // roughness's lod and at lod 0); the sky along R where no probe covers it. Legacy irradiance
 // keeps the sky ambient in classic mode (as lightSurface's legacy branch).
+vec3 rtrRawSky(vec3 direction,vec3 origin)
+{
+#if DEFER_GI_TRACE
+    return cmOn() ? physkyRolloff(cmBoundarySky(origin,normalize(direction))) : skyColor(direction);
+#else
+    return skyColorAtOrigin(direction,origin);
+#endif
+}
 void rtrHitEnv(vec3 P, vec3 N, vec3 R, float rough, bool legacy, vec3 amblit, out vec3 irr, out vec3 rad, out vec3 rad2)
 {
 #if DEFER_GI_TRACE
@@ -2459,7 +2504,7 @@ void rtrHitEnv(vec3 P, vec3 N, vec3 R, float rough, bool legacy, vec3 amblit, ou
         {
             have = sampleProbesEx(P, N, R, clamp(rough, 0.0, 1.0) * phdr.info.y, 0.0, amblit,
                                   true, legacy, true, rad, rad2, pirr);
-            if (!have) { rad = skyColor(R); rad2 = rad; }
+            if (!have) { rad = rtrRawSky(R,P); rad2 = rad; }
         }
         if (vis < 1.0)
         {
@@ -2485,7 +2530,7 @@ void rtrHitEnv(vec3 P, vec3 N, vec3 R, float rough, bool legacy, vec3 amblit, ou
                                      true, legacy, true, rad, rad2, pirr);
     if (!have)
     {
-        rad = skyColor(R);
+        rad = rtrRawSky(R,P);
         rad2 = rad;
     }
     irr = (have && !(legacy && atmosClassic())) ? pirr : amblit;
@@ -3231,7 +3276,8 @@ vec3 deferGiFetchLag(vec3 P, vec3 N, out bool ok, out float skyVis)
 {
     ok = false;
     skyVis = 1.0;
-    const bool stale = (gi.cfg.x & GI_F_LAG_STALE) != 0u || ssr.taa_params.z > 0.5;
+    const bool stale = (gi.cfg.x & GI_F_LAG_STALE) != 0u || ssr.taa_params.z > 0.5
+        || giSceneChanged(P, 0.0);
     const vec4 c = ssr.views[CLEAN_VIEW].taa_prev_vp * vec4(P - ssr.cam_origin.xyz, 1.0);
     const vec2 puv = c.w > 1e-4 ? c.xy / c.w * 0.5 + 0.5 : vec2(-1.0);
     if (!stale && all(greaterThanEqual(puv, vec2(0.0))) && all(lessThanEqual(puv, vec2(1.0))))
@@ -3276,7 +3322,7 @@ vec3 deferGiFetchLag(vec3 P, vec3 N, out bool ok, out float skyVis)
     if ((gi.cfg.x & GI_F_CACHE) != 0u && giCacheSlots() != 0u)
     {
         const vec3 cam = pc.u_cam_time.xyz;
-        const vec3 Nv = dot(N, cam - P) < 0.0 ? -N : N;   // (the trace's cell rule: N toward the viewer)
+        const vec3 Nv = dot(N, CL_VIEW_EYE(linfo, P, cam) - P) < 0.0 ? -N : N;   // (the trace's cell rule: N toward the viewer)
         float edge;
         vec3 E;
         if (giCacheRead(giCacheFind(giCellKey(P, Nv, cam, edge)), E)) { ok = true; return E; }
@@ -3607,7 +3653,8 @@ void writeLitOutput(ivec2 px, vec3 color, float glow)
     if (rtrDebugOn()) { color = rtrDebugColor(px, color); glow = 0.0; }
 #endif
     if (!(glow >= 0.0 && glow <= LG_MAX_VALUE)) glow = 0.0;   // (NaN fails both)
-    imageStore(uHdrOut, ivec3(px, DEFER_LAYER), vec4(color, 1.0));
+    const bool noFade=(uint(defTexel(uG2,px).w*255.0+0.5)&4u)!=0u;
+    imageStore(uHdrOut, ivec3(px, DEFER_LAYER), vec4(color,cmOn() && noFade ? 0.0 : 1.0));
     imageStore(uGlowOut, ivec3(px, DEFER_LAYER), vec4(vec3(glow), 1.0));   // <SS:Skoomastream> the glow AMOUNT (clean_glow.comp)
 }
 // </SS:Skoomastream>
@@ -4615,7 +4662,7 @@ void DEFER_MAIN()
             bool noFade;
             const SurfaceLit s = deferSurface(px, g2, glow, noFade);
             const vec3 camPos = pc.u_cam_time.xyz;
-            const vec3 V = normalize(camPos - P);
+            const vec3 V = linfo.cam_fwd.w > 0.5 ? -linfo.cam_fwd.xyz : normalize(camPos - P);
             CLK_MARK(GBUF);
             // amblit as lightSurface has it (the walk's ambient default; fullbright takes none).
             vec3 sunlit = vec3(0.0), amblit = vec3(0.0), additive = vec3(0.0), atten = vec3(1.0);
@@ -4672,7 +4719,7 @@ void DEFER_MAIN()
     bool noFade;
     const SurfaceLit s = deferSurface(px, g2, glow, noFade);
     const vec3 camPos = pc.u_cam_time.xyz;
-    const vec3 V = normalize(camPos - P);
+    const vec3 V = linfo.cam_fwd.w > 0.5 ? -linfo.cam_fwd.xyz : normalize(camPos - P);
     CLK_MARK(GBUF);   // (the four decodes + classification, and the representative's)
     vec3 sunlit = vec3(0.0), amblit = vec3(0.0), additive = vec3(0.0), atten = vec3(1.0);
     atmosLightTerms(P - camPos, s.N, sunlit, amblit, additive, atten);   // (lit: rank < 3)
@@ -4719,7 +4766,7 @@ void DEFER_MAIN()
             // sharp class to cover every RT candidate)
             if (kind != DS_SOFT)
             {
-                const vec3 V = normalize(pc.u_cam_time.xyz - P);
+                const vec3 V = linfo.cam_fwd.w > 0.5 ? -linfo.cam_fwd.xyz : normalize(pc.u_cam_time.xyz - P);
                 // (no irradiance kept -- but #872's PBR environment normalization compares the
                 // probes' irradiance with the ambient the diffuse uses: the real amblit, as pass 4)
                 const vec3 amblit = s.model == SURF_PBR ? atmosAmbientTerm(s.N) : vec3(0.0);
@@ -4811,7 +4858,7 @@ vec3 giShadeMiss(vec3 d, vec3 P, out vec3 xs, out vec3 ns)
 {
     xs = P + d * GI_FAR;
     ns = -d;
-    vec3 sky = skyColor(d);
+    vec3 sky = cmOn() ? physkyRolloff(cmBoundarySky(P,d)) : skyColor(d);
     if ((gi.cfg.x & GI_F_MISS_PROBES) != 0u)
     {
         // the far field: the probes along d (what lies past the ray length -- a far building, the
@@ -4829,7 +4876,12 @@ RtSurface giHitMaterial(RtHit h, vec3 d)
     // (in the emitter hash: its triangle block was written) lights the receiver through DI -- its emission
     // is not GI's (no double light). Its reflected light stays; an emitter the caps dropped keeps its
     // emission here.
-    if (rsFrameOn() && (rg.rs_em_cfg.z & EM_F_GI_SPLIT) != 0u && emLitOn() && emHashFind(h.instance) != REGIR_EM_NONE)
+    // De-rez rows may remain visible for their effect after object death. They no
+    // longer emit into GI; preserve any reflected fullbright-shiny environment term.
+    // This is the existing dying flag, not a classification of live temporary objects.
+    if ((hs.flags & 4194304u) != 0u
+        || (rsFrameOn() && (rg.rs_em_cfg.z & EM_F_GI_SPLIT) != 0u
+            && emLitOn() && emHashFind(h.instance) != REGIR_EM_NONE))
     {
         hs.emissive = vec3(0.0);
         if (hs.model == RT_SURF_FULLBRIGHT) hs.fb = vec3(0.0);
@@ -4898,21 +4950,15 @@ void DEFER_MAIN()
             const uint a = 2u * cap + s;
             const uvec4 acc = gi_data[a];
             uvec4 c1 = gi_data[2u * s + 1u];
-            uint n = c0.y & 0xFFFFu, age = c0.y >> 16u;
+            vec2 ages = uintBitsToFloat(gi_data[3u * cap + s].xy) / HT_REF_MS;
+            float n = ages.x, age = ages.y;
             vec3 E = vec3(unpackHalf2x16(c1.y), unpackHalf2x16(c1.z).x);
             // change spheres (the host's, this frame)
             const vec3 cc = vec3(uintBitsToFloat(c0.z), uintBitsToFloat(c0.w), uintBitsToFloat(c1.x));
             const float edge = uintBitsToFloat(c1.w);
-            bool hitSph = false;
-            for (uint i = 0u; i < min(gi.sph_n.x, GI_SPHERES_MAX); ++i)
-            {
-                const vec4 sp = gi.sph[i];
-                const vec3 dd = cc - sp.xyz;
-                const float rr = sp.w + 0.87 * edge;
-                if (dot(dd, dd) < rr * rr) { hitSph = true; break; }
-            }
-            if (hitSph) { n = 0u; E = vec3(0.0); ++inval; }
-            uint nWin = max(uint(gi.prm3.z + 0.5), 1u);
+            const bool hitSph = giSceneChanged(cc, 0.87 * edge);
+            if (hitSph) { n = 0.0; E = vec3(0.0); ++inval; }
+            float nWin = max(gi.prm3.z, 1.0);
             // (#1087) a cell inside a recently moved light's old or new sphere: a short mean window
             // (prm6.z) -- it follows the moving light instead of averaging its path (a decay, its
             // samples kept: never the restart #980 removed for colour-cycling lights)
@@ -4926,7 +4972,7 @@ void DEFER_MAIN()
                     const float ro = abs(so.w) + 0.87 * edge, rn = sn.w + 0.87 * edge;
                     if (dot(dO, dO) < ro * ro || dot(dN, dN) < rn * rn)
                     {
-                        nWin = min(nWin, max(uint(gi.prm6.z + 0.5), 1u));
+                        nWin = min(nWin, max(gi.prm6.z, 1.0));
                         n = min(n, nWin);
                         break;
                     }
@@ -4935,12 +4981,13 @@ void DEFER_MAIN()
             if (acc.w > 0u)
             {
                 const vec3 mean = vec3(acc.xyz) / (GI_ACC_SCALE * float(acc.w));
-                n = min(n + 1u, nWin);
-                E = mix(E, mean, 1.0 / float(n));
-                age = 0u;
+                const bool fresh = n <= 0.0;
+                n = htAdvance(n, nWin);
+                E = mix(E, mean, fresh ? 1.0 : htAlpha(1.0 / max(n, 1.0)));
+                age = 0.0;
                 gi_data[a] = uvec4(0u);
             }
-            else age = min(age + 1u, 0xFFFFu);
+            else age = htAdvance(age, max(gi.prm3.w + htStep(), 1.0));
             if (float(age) > gi.prm3.w)
             {
                 gi_data[2u * s] = uvec4(GI_KEY_TOMB, 0u, 0u, 0u);
@@ -4948,7 +4995,9 @@ void DEFER_MAIN()
             }
             else
             {
-                gi_data[2u * s].y = n | (age << 16u);
+                // Low word is only the reader's valid marker; clocks live in float32 ms.
+                gi_data[2u * s].y = n > 0.0 ? 1u : 0u;
+                gi_data[3u * cap + s] = uvec4(floatBitsToUint(vec2(n, age) * HT_REF_MS), 0u, 0u);
                 c1.y = packHalf2x16(E.rg);
                 c1.z = packHalf2x16(vec2(E.b, 0.0));
                 gi_data[2u * s + 1u] = c1;
@@ -5183,13 +5232,17 @@ float giTap(ivec2 q, ivec2 D, uint pl, float zExp, float ztol, vec3 P, vec3 N, f
     const uint i = giResIndex(q, D, pl);
     const uvec4 r0 = gi_res[i], r1 = gi_res[i + 1u];
     const float W = uintBitsToFloat(r0.w);
-    if (!(W > 0.0) || !(W < 3.0e38)) return 0.0;
+    if (!(W >= 0.0) || !(W < 3.0e38)) return 0.0;
     y.xs = uintBitsToFloat(r0.xyz);
+    if (giSceneChanged(y.xs, 0.0)) return 0.0;
     y.ns = giUnpackN(r1.x);
     const vec2 lrg = unpackHalf2x16(r1.y), lbm = unpackHalf2x16(r1.z), dc = unpackHalf2x16(r1.w);
     y.L = vec3(lrg, lbm.x);
     const float M = min(lbm.y, mcap);
-    if (!(M > 0.0) || any(isnan(y.L))) return 0.0;
+    if (!(M > 0.0) || any(isnan(y.L)) || any(isinf(y.L))) return 0.0;
+    // W=0, M>0, L=0 is an informative black reservoir. A positive-radiance sample
+    // with W=0 was excluded from selection (e.g. its fresh grazing cosine), not black.
+    if (W == 0.0 && giLum(y.L) > 0.0) return 0.0;
     const vec3 v = y.xs - P;
     const float d2 = dot(v, v);
     if (!(d2 > 1e-8)) return 0.0;
@@ -5209,10 +5262,12 @@ float giTap(ivec2 q, ivec2 D, uint pl, float zExp, float ztol, vec3 P, vec3 N, f
                                                     //  amplifies one sample into a firefly)
     }
     py = giLum(y.L) * cr;
-    if (!(py > 0.0)) return 0.0;
-    Mq = M;
+    if (!(py >= 0.0)) return 0.0;
     const float wt = py * W * M * J;
-    if (!(wt < 3.0e38)) return 0.0;
+    if (!(wt >= 0.0) || !(wt < 3.0e38)) return 0.0;
+    // Eligibility/count is independent of positive selection weight: dropping black
+    // history from M conditions normalization on brightness and biases reuse upward.
+    Mq = M;
 #if CLEAN_GI_STAGE == GI_STAGE_REUSE
     // (#1039) CHG-TAG computed the two tests below for this reservoir (the same inputs: its stored point, normal and
     // radiance); without changed lights the tag is 0 as both tests are (giHotOn: the hot list is the changed
@@ -5282,7 +5337,9 @@ void giFreshRay(ivec2 m, uint frame, vec2 r, vec3 P, vec3 N, vec3 Ng, vec3 V, fl
     rt_cone_spread = pa + 0.5;
     rt_cone_aniso = max(g_draw_push.rtr.w, 1.0);
     rtrMaskCone(camd * pa, pa);
-    traced = giTracesNow(m, frame);
+    // A lighting invalidation is information loss, not a reason to hold checkerboard
+    // history. At most one fresh ray per GI texel, including TraceEvery 2/4 frames.
+    traced = giTracesNow(m, frame) || giSceneChanged(P, 0.0);
 }
 // The walk's ray cone again for a stage that shades (or re-traces) what another one walked: the
 // receiver P's footprint, as giFreshRay set it (the alpha test's stays at its defaults).
@@ -5451,7 +5508,7 @@ void DEFER_MAIN()
     }
     const vec3 P = deferPosition(rp);
     const vec3 cam = pc.u_cam_time.xyz;
-    const vec3 V = normalize(cam - P);
+    const vec3 V = linfo.cam_fwd.w > 0.5 ? -linfo.cam_fwd.xyz : normalize(cam - P);
     const vec3 Ng = dot(s.Ng, V) < 0.0 ? -s.Ng : s.Ng;
     const vec3 N = dot(s.N, V) < 0.0 ? -s.N : s.N;
     vec3 d, o;
@@ -5821,6 +5878,9 @@ void giReuseFinish(ivec2 m, ivec2 D, int par, vec3 P, vec3 N, vec3 d, float vz, 
     {
         float pw;
         const vec2 dS = giPrevDelta(P, m, vec2(D), pw);
+        // GI-local hard history rejection (dnHistOk requires pw>0). RR retains its
+        // ownership of RR history; this adds no temporal pass or second denoiser.
+        if (giSceneChanged(P, 0.0)) pw = 0.0;
         // (w: the changed lights' share x 255 -- clean_dn_temporal.comp's moving-light history cap, read
         //  only when the host gives the GI denoiser a move history: RenderVKGILightChangeHistory)
         imageStore(uGiMot, m, uvec4(packHalf2x16(dS), packHalf2x16(dS), floatBitsToUint(pw),
@@ -5882,7 +5942,7 @@ void giReuseFinish(ivec2 m, ivec2 D, int par, vec3 P, vec3 N, vec3 d, float vz, 
                 vec3 E;
                 if (giCacheRead(slot, E))
                 {
-                    const float n = min(float(gi_data[2u * slot].y & 0xFFFFu), nCap);
+                    const float n = min(uintBitsToFloat(gi_data[3u * giCacheSlots() + slot].x) / HT_REF_MS, nCap);
                     l0.rgb = (S + n * E) / (1.0 + n);
                 }
             }
@@ -5916,6 +5976,7 @@ void giReusePick(ivec2 m, ivec2 D, int par, uint frame, ivec2 rp, vec3 P, vec3 N
                  inout bool reuseTried, inout GiSample y, inout float py, inout uint src, inout uint yChg, inout uint yq)
 {
     const uint gf = gi.cfg.x;
+    if (giSceneChanged(P, 0.0)) return;
     const bool reuse = (gf & GI_F_TEMPORAL) != 0u && (gf & GI_F_RES_PREV) != 0u && ssr.taa_params.z < 0.5;
     if (reuse)
     {
@@ -5939,7 +6000,7 @@ void giReusePick(ivec2 m, ivec2 D, int par, uint frame, ivec2 rp, vec3 P, vec3 N
             reuseTried = true;
             float wt = giTap(qt, D, pl, pw, max(0.04 * pw, 0.03) + zx, P, N, mcap, yt, pt, Mt, tc);
             ivec2 tq = qt;   // (the temporal candidate's texel: qt, or the search's)
-            if (!(wt > 0.0) && (gf & GI_F_REPROJ_SEARCH) != 0u)
+            if (!(Mt > 0.0) && (gf & GI_F_REPROJ_SEARCH) != 0u)
             {
                 // (GI_F_REPROJ_SEARCH) REPROJECTION SEARCH: the nearest texel is not this surface
                 // (sub-texel motion across a thin strand / a silhouette at the GI extent): the
@@ -5967,11 +6028,12 @@ void giReusePick(ivec2 m, ivec2 D, int par, uint frame, ivec2 rp, vec3 P, vec3 N
                     tq = bq;
                 }
             }
-            if (wt > 0.0)
+            if (Mt > 0.0)
             {
+                const bool first = Msum == 0.0;
                 wsum += wt; Msum += Mt; ++keptT; wAll += wt;
                 if (giTagCounts(tc)) wChg += wt;
-                if (giRand(rng) * wsum < wt)
+                if (giRand(rng) * wsum < wt || first)
                 {
                     y = yt; py = pt; src = 1u; yChg = tc;
                     yq = uint(tq.x) | (uint(tq.y) << 16u);
@@ -5990,11 +6052,12 @@ void giReusePick(ivec2 m, ivec2 D, int par, uint frame, ivec2 rp, vec3 P, vec3 N
                     const float dz = dot(grad, vec2(q - qt));
                     const float ws = giTap(q, D, pl, pw + dz, max(0.05 * pw, 0.05) + 0.25 * abs(dz) + zx, P, N, mcap, yt,
                                            pt, Mt, tc);
-                    if (ws > 0.0)
+                    if (Mt > 0.0)
                     {
+                        const bool first = Msum == 0.0;
                         wsum += ws; Msum += Mt; ++keptS; wAll += ws;
                         if (giTagCounts(tc)) wChg += ws;
-                        if (giRand(rng) * wsum < ws)
+                        if (giRand(rng) * wsum < ws || first)
                         {
                             y = yt; py = pt; src = 2u; yChg = tc;
                             yq = uint(q.x) | (uint(q.y) << 16u);
@@ -6021,11 +6084,12 @@ void giReusePick(ivec2 m, ivec2 D, int par, uint frame, ivec2 rp, vec3 P, vec3 N
                     const float dz = dot(grad, vec2(q - qt));
                     const float ws = giTap(q, D, pl, pw + dz, max(0.05 * pw, 0.05) + 0.25 * abs(dz) + zx, P, N, mcap, yt,
                                            pt, Mt, tc);
-                    if (ws > 0.0)
+                    if (Mt > 0.0)
                     {
+                        const bool first = Msum == 0.0;
                         wsum += ws; Msum += Mt; ++keptS; wAll += ws;
                         if (giTagCounts(tc)) wChg += ws;
-                        if (giRand(rng) * wsum < ws)
+                        if (giRand(rng) * wsum < ws || first)
                         {
                             y = yt; py = pt; src = 2u; yChg = tc;
                             yq = uint(q.x) | (uint(q.y) << 16u);
@@ -6111,7 +6175,7 @@ void DEFER_MAIN()
     const vec3 N = uintBitsToFloat(q4.xyz);
     const vec3 d = uintBitsToFloat(gi_hit[ri].xyz);
     // the fresh sample y0 (the record's words, else the untraced defaults) and its target / pdf, as REUSE's
-    const bool traced = giTracesNow(m, frame);
+    const bool traced = giTracesNow(m, frame) || giSceneChanged(P, 0.0);
     bool hit, bt;
     float hdist;
     const GiSample y0 = giRecFresh(ri, traced, P, N, d, hit, hdist, bt);
@@ -6172,7 +6236,7 @@ void DEFER_MAIN()
     }
     const vec3 P = deferPosition(rp);
     const vec3 cam = pc.u_cam_time.xyz;
-    const vec3 V = normalize(cam - P);
+    const vec3 V = linfo.cam_fwd.w > 0.5 ? -linfo.cam_fwd.xyz : normalize(cam - P);
     const vec3 Ng = dot(s.Ng, V) < 0.0 ? -s.Ng : s.Ng;
     vec3 N = dot(s.N, V) < 0.0 ? -s.N : s.N;
     const float vz = dot(P - linfo.cam_pos.xyz, linfo.cam_fwd.xyz);
@@ -6562,7 +6626,7 @@ void rtrRayBegin(ivec2 px, uvec4 m, bool blockRay, bool grad, float gs, out vec3
     bool noFade;
     const SurfaceLit s = deferSurface(px, g2, glow, noFade);
     P = deferPosition(px);
-    const vec3 V = normalize(pc.u_cam_time.xyz - P);
+    const vec3 V = linfo.cam_fwd.w > 0.5 ? -linfo.cam_fwd.xyz : normalize(pc.u_cam_time.xyz - P);
     const vec3 Ng = dot(s.Ng, V) < 0.0 ? -s.Ng : s.Ng;
     CLK_MARK(GBUF);
     env = rtrMarkEnv(m);
@@ -7194,7 +7258,7 @@ void DEFER_MAIN()
     }
     const float tmax = max(g_draw_push.rtr.x, 1.0);
     float t;
-    vec3 c = rtrTraceRefl(o, R, tmax, recv, skyColor(R), (rtrOpts() & 1u) != 0u, t);
+    vec3 c = rtrTraceRefl(o, R, tmax, recv, skyColorAtOrigin(R,recv), (rtrOpts() & 1u) != 0u, t);
     if (any(isnan(c)) || any(isinf(c))) c = vec3(0.0);
     imageStore(uRtMirror, px, vec4(clamp(c, vec3(0.0), vec3(LG_MAX_VALUE)), 1.0));
 }
@@ -7215,7 +7279,7 @@ void DEFER_MAIN()
         bool noFade;
         const SurfaceLit s = deferSurface(px, g2, glow, noFade);
         const vec3 P = deferPosition(px);
-        const vec3 V = normalize(pc.u_cam_time.xyz - P);
+        const vec3 V = linfo.cam_fwd.w > 0.5 ? -linfo.cam_fwd.xyz : normalize(pc.u_cam_time.xyz - P);
         const float thr = rtrRoughThr();
         const float camd = length(pc.u_cam_time.xyz - P);
         const float maxRecv = g_draw_push.rtr.z;   // (the receiver gate: as the split's mark)
@@ -7295,7 +7359,7 @@ bool rtrTap(ivec2 q, ivec2 self, vec3 P, vec3 Ng, float vz, out vec4 rt, out flo
     if (dz >= 1.0) return false;
     if (lobe)
     {
-        const vec3 Vq = normalize(pc.u_cam_time.xyz - Pq);
+        const vec3 Vq = linfo.cam_fwd.w > 0.5 ? -linfo.cam_fwd.xyz : normalize(pc.u_cam_time.xyz - Pq);
         vec3 nq = gbOctDecode(g1.xy);
         if (dot(nq, Vq) < 0.0) nq = -nq;
         const float x = max(1.0 - dot(reflect(-Vq, nq), g_rtr_R), 0.0);   // (~ theta^2 / 2)
@@ -7425,7 +7489,7 @@ void DEFER_MAIN()
     const SurfaceLit s = deferSurface(px, g2, glow, noFade);
     const vec3 P = deferPosition(px);
     const vec3 cam = pc.u_cam_time.xyz;
-    const vec3 V = normalize(cam - P);
+    const vec3 V = linfo.cam_fwd.w > 0.5 ? -linfo.cam_fwd.xyz : normalize(cam - P);
     const vec3 Ng = dot(s.Ng, V) < 0.0 ? -s.Ng : s.Ng;
     const float vz = max(dot(P - linfo.cam_pos.xyz, linfo.cam_fwd.xyz), 1e-3);
     const float camd = length(P - cam);
@@ -7963,12 +8027,42 @@ vec3 pdnRatio(vec3 num, vec3 den)
     for (int c = 0; c < 3; ++c) r[c] = den[c] > 1e-3 * dl ? clamp(num[c] / den[c], 0.0, 1.0) : rl;
     return (any(isnan(r)) || any(isinf(r))) ? vec3(rl) : r;
 }
+// ---- RADIANCE MODE (RenderVKReSTIRRadiance, A/B; the light info's fwd.z bit 1 -- the host latches it
+//      once per frame, so this pass, the denoiser and the lit kernels agree) ----
+// The ratio above is ONE visibility for the texel's whole light set, and the lit kernels multiply every
+// light's exact unshadowed term by it: a hidden light takes its neighbours' visibility (the leak through
+// a wall, the gobo through it), which the occlusion cull, the split and the moving-light rules exist to
+// patch. Here the same samples estimate the SHADOWED light directly -- num alone, sum of term x vis x
+// weight (the RIS / reservoir / exact-list weights are unbiased for it, as for num before) -- DEMODULATED
+// like the GI denoiser's signal (clean_pdn_common.glsl THE SIGNAL): the diffuse / pdnDiffFactor, the
+// specular / pdnSpecFactor of the colours projDirectTerms multiplied in (PBR diffuseColor / specularColor,
+// legacy the base / the specular colour); the lit kernels remodulate with the same (deferEmitterLight).
+// A hidden light's sample is 0: it adds nothing. The emitters' samples ride along (their light is read
+// from here too). Layer 0 a = the candidate count (confidence; never negated -- 0 is a real value here),
+// layer 1 a = the hit distance. The cull, the split and the moving-light rules are off (the host).
+bool pdnRadOn() { return (linfo.fwd.z & 2u) != 0u; }   // (a frame-info word: uniform)
+vec3 pdnRadDiff(bool pbr, vec3 base, vec3 diffuseColor) { return pdnDiffFactor(pbr ? diffuseColor : base); }
+vec3 pdnRadSpec(bool pbr, vec3 specularColor, LegacySpec ls) { return pdnSpecFactor(pbr ? specularColor : ls.spec); }
+// FIREFLY CLAMP AT THE SOURCE (the GI's RenderVKGIFireflyClamp role; a constant: no new setting). A RIS
+// pick's estimate is term / p x Wsum / K, and the target p (pdnTargetGobo: atten x the light's luminance
+// x (0.25 + N.L) x the gobo) tracks the DIFFUSE term (demodulated, <= ~1.03 p) -- not a glossy lobe's
+// peak, nor a reused reservoir's light under a neighbour's weight. A pick whose demodulated term exceeds
+// PDN_RAD_FIREFLY x its own target is scaled down to it (both shares alike). RIS picks only: an exact list
+// (weight 1, no selection noise) keeps its terms. 32: a legacy glint (~15 x its diffuse) passes.
+#define PDN_RAD_FIREFLY 32.0
+void pdnRadClamp(float pp, vec3 dfac, vec3 sfac, inout vec3 dt, inout vec3 st)
+{
+    if (!(pp > 0.0)) return;
+    const float l = pdnLum(dt / dfac) + pdnLum(st / sfac);
+    const float lim = PDN_RAD_FIREFLY * pp;
+    if (l > lim) { const float k = lim / l; dt *= k; st *= k; }
+}
 // One shadow ray toward the projector (its soft disc sampled once: npx decorrelates the picks).
 vec3 pdnShadow(uint li, vec3 P, vec3 Ng, vec2 npx)
 {
     const Light L = lights[li];
     rtSelfBegin(P);
-    return projShadowRayCore(L, pshadow[L.tex.z - 1u], P, Ng, pc.u_cam_time.xyz, pc.u_cam_time.w, npx, 1u);
+    return projShadowRayCore(L, pshadow[L.tex.z - 1u], P, Ng, CL_VIEW_EYE(linfo, P, pc.u_cam_time.xyz), pc.u_cam_time.w, npx, 1u);
 }
 // The previous-frame denoiser texel coordinate of world point X (camera-only) - m; w: its view depth then.
 vec2 pdnPrevDelta(vec3 X, ivec2 m, vec2 D, out float pw)
@@ -7976,7 +8070,7 @@ vec2 pdnPrevDelta(vec3 X, ivec2 m, vec2 D, out float pw)
     const vec4 c = ssr.views[CLEAN_VIEW].taa_prev_vp * vec4(X - ssr.cam_origin.xyz, 1.0);
     pw = 0.0;
     if (!(c.w > 1e-4)) return vec2(0.0);
-    pw = c.w;
+    pw = rtPreviousViewDepth(c);
     const vec2 puv = c.xy / c.w * 0.5 + 0.5;
     return clamp(puv * D - 0.5 - vec2(m), vec2(-30000.0), vec2(30000.0));
 }
@@ -8034,7 +8128,7 @@ bool pdnProbeNormal(vec3 P, vec3 cam, out vec3 n)
     if (camd < 1e-4) return false;
     V /= camd;
     const float pm = max(max(abs(P.x), abs(P.y)), abs(P.z));
-    const float w = max(4.0 * (camd * RT_DEPTH_REL_ERR + max(RT_OFS_FRAME_ULPS * rtUlp(pm), RT_OFS_FLOAT_SCALE)), 1e-3);
+    const float w = max(4.0 * (rtDepthErrDist(camd) * RT_DEPTH_REL_ERR + max(RT_OFS_FRAME_ULPS * rtUlp(pm), RT_OFS_FLOAT_SCALE)), 1e-3);
     vec3 qo = P - V * w;
     float qt0 = 0.0, qt1 = 2.0 * w;
     if (!rtRaySane(qo, qt0, V, qt1)) return false;   // (Xid 109: an invalid probe ray)
@@ -8059,6 +8153,7 @@ bool pdnProbeNormal(vec3 P, vec3 cam, out vec3 n)
 // the mask's condition for the #841 footprint jitter (creases / silhouettes / relief: no slide).
 vec3 pdnFacetNormal(ivec2 rp, vec3 P, vec3 cam, vec3 gb, out bool onPlane)
 {
+    cam = CL_VIEW_EYE(linfo, P, cam);
     vec3 Ng = vec3(0.0);
     bool have = false;
     onPlane = false;
@@ -8078,7 +8173,9 @@ vec3 pdnFacetNormal(ivec2 rp, vec3 P, vec3 cam, vec3 gb, out bool onPlane)
         const ivec2 mx = ivec2(int(g_draw_push.width), int(g_draw_push.height)) - 1;
         const float vz = max(dot(P - linfo.cam_pos.xyz, linfo.cam_fwd.xyz), 1e-3);
         const float pm = max(max(abs(P.x), abs(P.y)), abs(P.z));
-        const float dtol = 8.0 * rtUlp(d) + d * 2.0 * max(RT_OFS_FRAME_ULPS * rtUlp(pm), RT_OFS_FLOAT_SCALE) / vz;
+        const float dtol = rtViewOrtho()
+            ? 8.0 * rtUlp(d) + 2.0 * max(RT_OFS_FRAME_ULPS * rtUlp(pm), RT_OFS_FLOAT_SCALE) / rtOrthoRange()
+            : 8.0 * rtUlp(d) + d * 2.0 * max(RT_OFS_FRAME_ULPS * rtUlp(pm), RT_OFS_FLOAT_SCALE) / vz;
         vec3 dx, dy;
         const bool okx = pdnTangent(rp, ivec2(1, 0), cpx, d, P, dtol, mx, dx);
         const bool oky = pdnTangent(rp, ivec2(0, 1), cpx, d, P, dtol, mx, dy);
@@ -8164,7 +8261,7 @@ vec3 pdnSunTrace(SurfaceLit s, ivec2 rp, vec3 P, vec3 Ng, float vz, uint frame, 
         || vz >= ssr.shadow_clip.w || !pdnSunWant(s, L))
         return vec3(1.0);
     const bool away = !surfaceSunWant(s, L);   // (PDN_OPT_SUN_AWAY: filter support only -- one ray)
-    const vec3 cam = pc.u_cam_time.xyz;
+    const vec3 cam = CL_VIEW_EYE(linfo, P, pc.u_cam_time.xyz);
     const float time = pc.u_cam_time.w;
     const vec2 cpx = vec2(rp) + 0.5;
     const float d = defTexel(uDepthG, rp).r;
@@ -8193,11 +8290,14 @@ vec3 pdnSunTrace(SurfaceLit s, ivec2 rp, vec3 P, vec3 Ng, float vz, uint frame, 
         if (on)
         {
             // the offset view ray against the receiver's plane
-            const vec3 dir = normalize(pdnWorldAt(cpx + o, d) - cam);
+            const vec3 Q = pdnWorldAt(cpx + o, d);
+            const vec3 dir = linfo.cam_fwd.w > 0.5 ? linfo.cam_fwd.xyz : normalize(Q - cam);
             const float dn = dot(dir, Ng);
             if (abs(dn) > 1e-3)
             {
-                const vec3 f = cam + dir * (dot(P - cam, Ng) / dn) - P;
+                const vec3 f = linfo.cam_fwd.w > 0.5
+                    ? Q + dir * (dot(P - Q, Ng) / dn) - P
+                    : cam + dir * (dot(P - cam, Ng) / dn) - P;
                 if (dot(f, f) < 4.0 * pxw * pxw * (1.0 + dot(o, o))) sun_foot = f;
             }
         }
@@ -8225,7 +8325,7 @@ vec3 pdnSunTrace(SurfaceLit s, ivec2 rp, vec3 P, vec3 Ng, float vz, uint frame, 
         rt_block_dyn = false;
         rt_term_on = term; rt_term_lift = tlift; rt_term_ns = tns;
         rt_cl_lift = (dot(Nsun, L) > 0.0 || (term && dot(tlift, tlift) > 0.0)) ? cl_lift + recv_ofs : 0.0;
-        sun = mix(sunShadowRayCore(Psun, Nsun, L, cam, time, cpx, opaque_only,
+        sun = mix(sunShadowRayCore(Psun, Nsun, L, CL_VIEW_EYE(linfo, Psun, cam), time, cpx, opaque_only,
                                    ((pdnOpts() & PDN_OPT_SUN_ONE) != 0u || away) ? 1u : 16u), vec3(1.0), fade);
         rt_term_on = false;
         rt_cl_lift = 0.0;
@@ -8239,47 +8339,13 @@ vec3 pdnSunTrace(SurfaceLit s, ivec2 rp, vec3 P, vec3 Ng, float vz, uint frame, 
 #endif
 
 #if defined(CLEAN_RS_EMISSIVE_BUILD)
-// ---- (#91 / #869 / #986 / #1006) EMISSIVE LIGHTS (RenderVKReSTIREmissive 1; clean_regir.glsl EMISSIVE LIGHTS):
-//      pass 15's layout, ten dispatches before it on a ReSTIR frame (push rtr3.z = the mode, rtr3.w =
-//      this build's record parity; the host clears this parity's hash, the cell lists' counts and (#1006)
-//      the signatures, the forward map and the cache header's per-build words first):
-//   mode 0 EMITTERS: a grid-stride loop over the instance store -- an instance in this frame's TLAS
-//          (static legacy BLAS: no rigged / worn / attached / terrain / water row; #1009 + a static traced on
-//          its cluster cut, through its legacy row: CLUSTER STATICS) whose
-//          material emits above the threshold appends one emitter entry (atomic, bounded by
-//          REGIR_EM_INST_CAP; a LIGHT TAKEOVER face writes its own table row instead, clean_regir.glsl)
-//          with its content signature (RECORD REUSE), (#1006) its geometry key and WEAK flag, and adds its
-//          triangle count to rs_em_cfg.y;
-//   mode 1 BLOCKS (one workgroup): each emitter's block of records (every s-th triangle when all of them
-//          exceed the cap: computed, no triangle is visited) laid out by a prefix sum, + its hash entry +
-//          the last build's block to copy (RECORD REUSE); then the LIGHT TAKEOVER's verdict and gain per
-//          light of the table; (#1006) the build stamp and every emitter's REACH range;
-//   mode 2 TRIANGLES: one workgroup per group of 64 records (grid-stride), one lane per record (built, or
-//          copied from the last build), + the group's light box; (#1006) + its side words and its FORWARD
-//          MAP entry;
-//   mode 12 (#1006, EM_F_SHIFT) the ORIGIN SHIFT: every cell moved with the clipmap from the scratch copy;
-//   modes 3-6 CELL LISTS: COUNT (one workgroup per record; #1006 + the cells' signatures), SCAN (one per
-//          64-cell block, the overlay's too; #1006 + the cells' DIRTY state), SUMS (one; #1006 + the budget,
-//          the indirect dispatch), FILL (one per record) -- each cell's candidate triangles;
-//   mode 11 (#1006) SELECT: one invocation per cell id -- the cells re-gathered this build (the build list,
-//          the long list), the kept ones' slots carried to this build's records;
-//   mode 7 POPULATION 2: (#1006) one invocation per entry of mode 11's build list (an indirect dispatch;
-//          64 per workgroup) -- each lane walks its cell's list (GATHER: one invocation per grid cell, the
-//          workgroup culls the record groups by their box, then each surviving group's triangles against
-//          its 64-cell box in shared memory, each lane walks the survivors): walk 1 the count M, the target
-//          sum W and the R_e strongest, walk 2 (only where M > R_e) the stratified samples and the
-//          aggregate of the rest -- except the LONG CELLS:
-//   mode 9 LONG CELLS: one workgroup per cell with more than EM_LONG_LIST candidates (mode 11's list),
-//          its pairs split over the lanes; (#1108) on a GATHER build every cell of the grid, a workgroup
-//          each, its candidates the reaching record groups' records split over the lanes (mode 7 none). ----
-shared uint s_emList[64];
-shared vec4 s_emCr[64], s_emPl[64], s_emLa[64];
-shared vec4 s_emV0[64], s_emE1[64], s_emE2[64], s_emCol[64];   // (walk 2: the rest's aggregate)
-shared uint s_emN;
-shared uint s_entList[64];   // (the cell build: the record groups near the workgroup)
-shared uint s_entN;
+// Bounded emitter producer. Modes 13/17 discover/admit <=1024 rows and <=2048
+// resident faces; 0/1/2 classify retained faces, grant <=64 records/face, rebuild
+// <=16384 current records. 3/6 COUNT/FILL share <=64 attempted cells/record across
+// all levels/overlay. 4/5 scan fixed cell/block arrays; 7/9 reduce short/long lists
+// with <=2*pairCapacity total visits. Mode 8 is the independent occlusion resolve.
+// There is no whole-grid record-group gather, forced-cell escape, or image-history filter.
 shared uint s_emScan[64];
-shared uint s_emNeed;
 shared uint s_emTk;          // (mode 1: the takeover rows' triangles)
 shared uint s_emGLo[3], s_emGHi[3];
 // (#91 LIGHT TAKEOVER, clean_regir.glsl) Instance id's row in the takeover table (REGIR_EM_NONE: none);
@@ -8313,7 +8379,7 @@ bool emTakeLightOk(uint li, vec3 glo, vec3 ghi)
     if (!(pdnLum(max(cf.rgb, vec3(0.0))) > 0.0) || any(isinf(cf)) || any(isnan(cf))) return false;
     return all(greaterThanEqual(pr.xyz - pr.w, glo)) && all(lessThanEqual(pr.xyz + pr.w, ghi));
 }
-// (#986 RECORD REUSE, clean_regir.glsl) One word into a content signature (two independent 32-bit
+// Diagnostic/priority hint only; never a lifetime/content-identity proof. One word into a signature (two independent 32-bit
 // hashes: FNV-1a and a PCG step).
 void emSig(inout uvec2 h, uint w)
 {
@@ -8338,7 +8404,7 @@ uvec3 emTriIndices(uint id, uvec4 eg, uint prim)
     const uint ilen = uint(rt_ibo.length()) * 2u;   // 16-bit indices
     if (!(b < ilen && ilen - b >= 3u)) return uvec3(0u);
     const uvec3 t = uvec3(QV_INDEX16(rt_ibo, b), QV_INDEX16(rt_ibo, b + 1u), QV_INDEX16(rt_ibo, b + 2u));
-    const uint vc = (rt_geom[id].z & RT_GEOM_CLUSTER) != 0u ? 0u : rtGeomVc(id);
+    const uint vc = id < uint(rt_geom_vc.length()) / RT_GEOM_VC_WORDS ? rt_geom_vc[id * RT_GEOM_VC_WORDS + 6u] : 0u;
     if (vc != 0u && max(max(t.x, t.y), t.z) >= vc) return uvec3(0u);
     return t;
 }
@@ -8361,8 +8427,9 @@ float emTriArea(uint id, uvec4 eg, uint prim, mat3 M, inout uvec2 h)
     const float a = 0.5 * length(cross(M * (p1 - p0), M * (p2 - p0)));
     return (a < 1e8) ? a : 0.0;   // (NaN / inf: 0)
 }
-// (#1006 INCREMENTAL CELLS, clean_regir.glsl) the side words: an entry's (reach range, geometry key), a
-// record's (reach range, pair key), the forward map's entry of last build's slot os, the cache header
+// Entry side words retain a diagnostic geometry key. RECX is (previous record slot,
+// current owner entry), NEVER the old whole-emitter range. Range fitting/COUNT/FILL
+// read only the current per-triangle payload; no reach hysteresis can resurrect face range.
 uint emEntXWord(uint par, uint e) { return REGIR_EM_ENTX_BASE + par * REGIR_EM_INST_CAP + e; }
 uint emRecXWord(uint par, uint slot) { return REGIR_EM_RECX_BASE + par * REGIR_EM_CAP + slot; }
 uint emFwdGet(uint os)
@@ -8448,14 +8515,99 @@ void emSkipNote(uint id, uint fl, uint nMat, float thr)
     if (c == 0u) atomicAdd(rg_cells[emCcHdr(w)].x, 1u);
     else         atomicAdd(rg_cells[emCcHdr(w)].y, 1u);
 }
+layout(buffer_reference, std430, buffer_reference_align = 4) readonly buffer EmGenerationRef { uint words[]; };
+uint emInputGeneration(uint id)
+{
+    return EmGenerationRef(g_draw_push.rtr3.xy).words[id];
+}
+uint emBudgetIdWord(uint bucket) { return REGIR_EM_BUDGET_BASE + bucket; }
+uint emBudgetTicket(uint bucket) { return REGIR_EM_BUDGET_BASE + 2u * EM_BUDGET_OBJECTS + 10u * bucket; }
+uint emBudgetOfferWord(uint bucket) { return REGIR_EM_BUDGET_BASE + EM_BUDGET_OBJECTS + bucket; }
+void emDiscover()
+{
+    rt_anim_time = pc.u_cam_time.w;
+    const uint lid = gl_LocalInvocationIndex;
+    const uint size = min(floatBitsToUint(g_draw_push.rtr.x), min(uint(rt_instances.length()), uint(rt_geom.length())));
+    const uint cursor = rg_cells[emCcHdr(10u)].x;
+    const uint limit = cursor == 0u ? size : min(size,rg_cells[emCcHdr(10u)].y);
+    const uint start = cursor < limit ? cursor : 0u;
+    const uint end = ebDiscoveryEnd(start,limit);
+    const uint nMat = uint(rt_materials.length());
+    const float thr = max(rg.rs_em_params.x, 1e-4);
+    uint found = 0u, evicted = 0u;
+    for (uint id = start + lid; id < end; id += 64u)
+    {
+        if (emInputGeneration(id) == 0u) continue; // exhausted allocation identity: safe unavailable
+        const uint fl = rt_instances[id].flags;
+        if ((fl & (512u | 8192u | 32u | 2048u)) != 0u) continue;
+        const uvec4 geo = rtGeomEmRow(id, emClusterOn());
+        if ((geo.w & 0x7FFFFFFFu) == 0u) continue;
+        const uint mi = rt_instances[id].material_id;
+        if (mi >= nMat) continue;
+        vec3 F, Lavg; uint tex, ef;
+        if (!(emMatEmission(id, fl, mi, F, Lavg, tex, ef) > thr)) continue;
+        const uint bucket = emHashSlot(id), w = emBudgetOfferWord(bucket);
+        const uint owner = rg_cells[emBudgetIdWord(bucket)].x <= limit ? rg_cells[emBudgetIdWord(bucket)].x : 0u;
+        const uint old = rg_cells[w].x <= limit ? rg_cells[w].x : 0u;
+        // One successor per bucket, selected over a COMPLETE frozen address sweep. ID-order
+        // round robin, not first atomic winner. Each frame's contiguous span has unique buckets.
+        const uint d = ebOfferDistance(id+1u,owner,limit);
+        const uint od = ebOfferDistance(old,owner,limit);
+        if (d < od || old == id + 1u)
+        {
+            rg_cells[w] = uvec2(id + 1u,emInputGeneration(id));
+            ++found;
+        }
+    }
+    memoryBarrierBuffer();
+    barrier(); // every lane read the old cursor before its one writer advances it
+    if (lid == 0u)
+    {
+        rg_cells[emCcHdr(10u)] = uvec2(end < limit ? end : 0u,limit);
+        rg_cells[emCcHdr(49u)].y = end >= limit ? 1u : 0u;
+        rg_cells[emCcHdr(48u)].x = end - start;
+    }
+    const uint nf = subgroupAdd(found), ne = subgroupAdd(evicted);
+    if (subgroupElect())
+    {
+        atomicAdd(rg_cells[emCcHdr(48u)].y, nf);
+        atomicAdd(rg_cells[emCcHdr(49u)].x, ne);
+    }
+}
+void emAdmitOffers()
+{
+    const uint bucket = gl_GlobalInvocationID.x;
+    if (bucket >= EM_BUDGET_OBJECTS || rg_cells[emCcHdr(49u)].y == 0u) return;
+    const uint iw = emBudgetIdWord(bucket), ow = emBudgetOfferWord(bucket), tw = emBudgetTicket(bucket);
+    const uvec2 offer = rg_cells[ow], owner = rg_cells[iw];
+    if (offer.x == 0u) return;
+    // Stable eligible cohorts receive up to eight builds of service-before-replacement.
+    // A malformed/now-ineligible owner cannot lock a colliding new light indefinitely.
+    const uvec2 tenure = rg_cells[tw+9u];
+    if (owner.x != 0u && owner.x != offer.x && tenure.x == owner.x
+        && rg_cells[emCcHdr(0u)].x - tenure.y < 8u
+        && (rg_cells[tw+7u].y & 0x80000000u) == 0u) return;
+    const uint size = min(floatBitsToUint(g_draw_push.rtr.x),min(uint(rt_instances.length()),uint(rt_geom.length())));
+    if (offer.x - 1u < size && offer.y != 0u && offer.y == emInputGeneration(offer.x - 1u))
+    {
+        rg_cells[iw] = offer;
+        if (any(notEqual(owner,offer)))
+        {
+            rg_cells[tw+9u] = uvec2(offer.x,rg_cells[emCcHdr(0u)].x);
+            rg_cells[tw+7u].y = 0u;
+        }
+        if (owner.x != 0u && owner.x != offer.x) atomicAdd(rg_cells[emCcHdr(49u)].x,1u);
+    }
+    rg_cells[ow] = uvec2(0u);
+}
 void emEntBuild()
 {
     rt_anim_time = pc.u_cam_time.w;   // (draw time: texture animation, as the raster)
-    const uint nInst = min(uint(rt_instances.length()), uint(rt_geom.length()));
+    const uint nInst = min(floatBitsToUint(g_draw_push.rtr.x), min(uint(rt_instances.length()), uint(rt_geom.length())));
     const uint stride = gl_NumWorkGroups.x * gl_NumWorkGroups.y * 64u;
     const uint lin = (gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x) * 64u + gl_LocalInvocationIndex;
     const uint par = g_draw_push.rtr3.w & 1u;
-    if (lin == 0u) rg.rs_em.w = par;   // (this build's parity: every reader after the barrier)
+    if (lin == 0u) { rg.rs_em.w = par; rg.rs_em_cfg.w = min(rg.rs_em_take_cfg.x, REGIR_EM_TAKE_N) + EM_BUDGET_OBJECTS; }   // (this build's parity: every reader after the barrier)
     const float thr = max(rg.rs_em_params.x, 1e-4);
     const float cutoff = max(rg.rs_em_params2.x, 1e-5);
     const float rangeMax = max(rg.rs_em_params2.y, 0.1);
@@ -8468,15 +8620,20 @@ void emEntBuild()
     const bool clOn = emClusterOn();
     const bool statOn = (rg.rs_em_cfg.z & EM_F_GATHER) == 0u;   // (CC_HDR's per-build words: zeroed with the lists)
     const bool skipOn = statOn && (rg.rs_em_cfg.z & EM_F_SKIPSTAT) != 0u;   // (#1009 SKIP DIAGNOSTIC)
-    [[dont_unroll]] for (uint id = lin; id < nInst; id += stride)
+    [[dont_unroll]] for (uint bucket = lin; bucket < EM_BUDGET_OBJECTS; bucket += stride)
     {
+        const uint cached = rg_cells[emBudgetIdWord(bucket)].x;
+        if (cached == 0u) continue;
+        const uint id = cached - 1u;
+        if (id >= nInst || emInputGeneration(id) != rg_cells[emBudgetIdWord(bucket)].y) { rg_cells[emBudgetIdWord(bucket)] = uvec2(0u); continue; }
         // the emitter's GEOMETRY ROW (clean_rt_common.glsl rtGeomEmRow): a legacy static's rt_geom row, or
         // (#1009 CLUSTER STATICS, clean_regir.glsl) a cluster-traced static's legacy row -- (not in the TLAS /
         // rigged / a cluster row without one: no static triangles to list). Read as `geo` below: every word
         // the records, the signature and the geometry key take from a row is this one's.
         const uvec4 geo = rtGeomEmRow(id, clOn);
+        if (rtGeomEmRevision(id).y == 0u) continue; // exhausted/unpublished exact geometry token
         const uint fl = rt_instances[id].flags;
-        if ((geo.w & 0x7FFFFFFFu) == 0u) { if (skipOn) emSkipNote(id, fl, nMat, thr); continue; }
+        if ((geo.w & 0x7FFFFFFFu) == 0u) { rg_cells[emBudgetIdWord(bucket)] = uvec2(0u); if (skipOn) emSkipNote(id, fl, nMat, thr); continue; }
         const bool clRow = (rt_geom[id].z & RT_GEOM_CLUSTER) != 0u;
         if ((fl & (512u | 8192u | 32u | 2048u)) != 0u)   // (worn / attached / terrain / water)
         {
@@ -8497,25 +8654,8 @@ void emEntBuild()
         const vec3 l = h * vec3(length(Wm[0].xyz), length(Wm[1].xyz), length(Wm[2].xyz));
         const float r = length(l);
         if (any(isnan(c)) || any(isinf(c)) || !(r < 1e4)) continue;
-        // ---- OUTSIDE THE GRID (far emitters): the world AABB of the oriented box (every surface point of the
-        //      emitter lies in it AND in the sphere (c, r)). The light reaches at most `range` <= rangeMax from a
-        //      surface point (the range formula below, hard-capped at rangeMax), so an emitter whose AABB is
-        //      farther than reach from the grid's outermost level box [glo, ghi] (the clipmap's current extent:
-        //      rg.origin, shifted by mode 12 with the camera) cannot light any cell and is not listed -- it
-        //      neither takes an entry nor counts toward the triangle cap (a far emissive build otherwise
-        //      pushes the whole rest onto a coarser subset stride). Re-evaluated every build, so an emitter
-        //      the grid moves toward is admitted the build its reach touches the box. A LIGHT TAKEOVER row
-        //      (inside the grid by emTakeLightOk) is exempt: the exact test below runs for the others. ----
-        const uint nTriAll = (geo.w & 0x7FFFFFFFu) / 3u;
+        // Admission is world/eye independent. Only cell queries clip to the shared grid.
         const vec3 ext = abs(Wm[0].xyz) * h.x + abs(Wm[1].xyz) * h.y + abs(Wm[2].xyz) * h.z;
-        const vec3 gapB = max(max(glo - (c + ext), (c - ext) - ghi), vec3(0.0));
-        const vec3 gapS = clamp(c, glo, ghi) - c;
-        // (the range's upper bound alone, before the area samples; a takeover candidate skips this early out)
-        if (!takeOn && (dot(gapB, gapB) >= rangeMax * rangeMax || dot(gapS, gapS) >= (rangeMax + r) * (rangeMax + r)))
-        {
-            if (statOn) { atomicAdd(rg_cells[emCcHdr(EM_CCH_OUT)].x, 1u); atomicAdd(rg_cells[emCcHdr(EM_CCH_OUT)].y, nTriAll); }
-            continue;
-        }
         // ---- the RANGE (one for the whole emitter): a white surface facing it at distance d reflects
         //      ~ lum x area / (pi d^2) -> the cutoff; the area from up to 32 strided triangles ----
         const uint nTri = (geo.w & 0x7FFFFFFFu) / 3u;
@@ -8539,19 +8679,11 @@ void emEntBuild()
             take = row != REGIR_EM_NONE && row < REGIR_EM_INST_CAP && emTakeLightOk(tli, glo, ghi);
             if (take) e = row;
         }
-        if (!take)
-        {
-            {   // (a takeover light is wholly inside the grid: this test is for the others)
-                const float rr = range + r;
-                if (!(dot(gapS, gapS) < rr * rr) || !(dot(gapB, gapB) < range * range))
-                {   // (its range misses the grid)
-                    if (statOn) { atomicAdd(rg_cells[emCcHdr(EM_CCH_OUT)].x, 1u); atomicAdd(rg_cells[emCcHdr(EM_CCH_OUT)].y, nTri); }
-                    continue;
-                }
-            }
-            e = atomicAdd(rg.rs_em_cfg.w, 1u);
-            if (e >= REGIR_EM_INST_CAP) { atomicAdd(rg.rs_em.y, nTri); continue; }   // (dropped: keeps its GI emission)
-        }
+        if (!take) e = min(rg.rs_em_take_cfg.x, REGIR_EM_TAKE_N) + bucket;
+        const uvec2 revision = rtGeomEmRevision(id);
+        const uint tagWord = emEntryTagWord(par,e);
+        rg_cells[tagWord] = uvec2(emInputGeneration(id), revision.x);
+        rg_cells[tagWord + 1u] = uvec2(revision.y, rg.cfg.w);
         atomicAdd(rg.rs_em_cfg.y, nTri);
         if (clRow && statOn) atomicAdd(rg_cells[emCcHdr(EM_CCH_CLUSTER)].x, 1u);   // (#1009 stats)
         if (clRow && statOn) atomicAdd(rg_cells[emCcHdr(EM_CCH_CLUSTER)].y, nTri);
@@ -8608,8 +8740,35 @@ void emEntBuild()
         rg_cells[b + 9u] = uvec2(floatBitsToUint(1.0), floatBitsToUint(1.0));   // (mode 1: a taken light's gain)
         rg_cells[b + 10u] = uvec2(floatBitsToUint(1.0), floatBitsToUint(-1.0));   // (... and its falloff; < 0: none)
         rg_cells[b + 11u] = sig;
-        rg_cells[b + 12u] = uvec2(REGIR_EM_NONE, dyn);   // (mode 1: the last build's block to copy)
-        rg_cells[emEntXWord(par, e)] = uvec2(0u, gkey);   // (#1006; mode 1: the reach range)
+        rg_cells[b + 12u] = uvec2(0u);   // (mode 1: the last build's block to copy)
+        rg_cells[emEntXWord(par, e)] = uvec2(0u, gkey);
+        if ((rg.rs_em_cfg.z & EM_F_DIAG) != 0u)
+        {
+            // No classification here: record the exact F/Lavg/threshold used above.
+            uvec2 ph = uvec2(2166136261u, 0x51ED27u);
+            emSigV(ph, Wm[0]); emSigV(ph, Wm[1]); emSigV(ph, Wm[2]); emSigV(ph, Wm[3]);
+            const uint pose = ph.x ^ regirHash(ph.y);
+            uint state = 0u; // 0: no consecutive previous diagnostic, not "stationary"
+            if ((rg.rs_em_cfg.z & EM_F_DIAG_LAST) != 0u)
+            {
+                const uint pe = emHashFindP(par ^ 1u, id);
+                if (pe != REGIR_EM_NONE)
+                {
+                    const uint pb = emEntWordP(par ^ 1u, pe);
+                    if (rg_cells[pb + 20u].y == rg.cfg.w - 1u)
+                        state = 1u | (rg_cells[pb + 13u].x != pose ? 2u : 0u)
+                                   | (rg_cells[emEntXWord(par ^ 1u, pe)].y != gkey ? 4u : 0u);
+                }
+            }
+            rg_cells[b + 13u] = uvec2(pose, state);
+            rg_cells[b + 14u] = floatBitsToUint(vec2(area, 2.0 * ext.x));
+            rg_cells[b + 15u] = floatBitsToUint(2.0 * ext.yz);
+            rg_cells[b + 16u] = uvec2(rt_materials[mi].flags, fl);
+            rg_cells[b + 17u] = floatBitsToUint(vec2(lum, thr));
+            rg_cells[b + 18u] = uvec2(0u); // actual selected-cell target hits, dark/degenerate record rejections
+            rg_cells[b + 19u] = floatBitsToUint(vec2(rt_materials[mi].base_color_factor.a * rt_instances[id].tint.a, pdnLum(F)));
+            rg_cells[b + 20u] = uvec2(mi, rg.cfg.w);
+        }   // (#1006; mode 1: the reach range)
     }
 }
 // mode 1 (ONE workgroup): every emitter's block -- its record count (every s-th triangle from a random
@@ -8622,64 +8781,54 @@ void emBlockAlloc()
     const uint lid = gl_LocalInvocationIndex;
     if (gl_WorkGroupID.x != 0u || gl_WorkGroupID.y != 0u) return;   // (the host dispatches one)
     const uint par = emParity();
-    const bool reuseOn = (rg.rs_em_cfg.z & EM_F_REUSE) != 0u;
     const uint nEnt = emEntCount();
     const uint cap = min(rg.rs_em.z, REGIR_EM_CAP);
-    const uint T = rg.rs_em_cfg.y;
-    // (LIGHT TAKEOVER, clean_regir.glsl SUBSET STRIDE) the takeover rows -- entries [0, nT), laid out first --
-    // keep EVERY triangle (stride 1): a lamp's glass carries its point light's power, and a 1-in-s subset of a
-    // few triangles moves that light to a part of the glass (or, with off >= its triangles, takes none: the
-    // light is not taken and the point light comes back). Their triangles leave the cap first (while they
-    // take at most half of it; past that every row strides as before, and the verdict refuses what is dropped).
-    const uint nT = (rg.rs_em_cfg.z & EM_F_TAKE) != 0u ? min(min(rg.rs_em_take_cfg.x, REGIR_EM_TAKE_N), nEnt) : 0u;
     if (lid == 0u) s_emTk = 0u;
     barrier();
-    {
-        uint tk = 0u;
-        for (uint e = lid; e < nT; e += 64u) tk += rg_cells[emEntWord(e)].y;
-        tk = subgroupAdd(tk);
-        if (subgroupElect() && tk != 0u) atomicAdd(s_emTk, tk);
-    }
+    uint localActive = 0u;
+    for (uint e = lid; e < nEnt; e += 64u) localActive += rg_cells[emEntWord(e)].y != 0u ? 1u : 0u;
+    const uint na = subgroupAdd(localActive);
+    if (subgroupElect()) atomicAdd(s_emTk, na);
     barrier();
-    const uint Tt = s_emTk;
-    const bool tkExact = nT != 0u && Tt <= cap / 2u;
-    const uint nTe = tkExact ? nT : 0u;
-    const uint capR = cap - (tkExact ? Tt : 0u);
-    const uint Tr = T - min(tkExact ? Tt : 0u, T);
-    const uint nEntR = nEnt - nTe;
-    // the SUBSET stride of the rest: 1 while their triangles fit, else one s for all (keeping a reserve of one
-    // record per emitter for each block's rounding up) -- with HYSTERESIS (clean_regir.glsl SUBSET STRIDE): a
-    // step re-subsets every emitter at once, so a step up is immediate (it must fit) and a step down waits
-    // until the triangles fit the lower stride with a quarter to spare (CC_HDR [EM_CCH_STRIDE]: the last
-    // build's stride, valid while it names the last build's stamp)
-    const uint room = max(capR > nEntR ? capR - nEntR : 0u, capR / 2u);
-    const uint sNeed = Tr <= capR ? 1u : (Tr + room - 1u) / max(room, 1u);
-    const uint Tm = Tr + Tr / 4u;
-    const uint sMargin = Tm <= capR ? 1u : (Tm + room - 1u) / max(room, 1u);
+    const uint liveCount = s_emTk;
+    const uint admitted = min(liveCount, cap);
+    const uint quota = ebRecordQuota(cap, admitted);
+    const uint firstRank = liveCount != 0u ? rg_cells[emCcHdr(13u)].y % liveCount : 0u;
     const uint stamp0 = rg_cells[emCcHdr(0u)].x;
-    const uvec2 hs = rg_cells[emCcHdr(EM_CCH_STRIDE)];
-    const uint sLast = (hs.y == stamp0 && hs.x >= 1u) ? hs.x : sNeed;
-    const uint s = sNeed >= sLast ? sNeed : min(sLast, sMargin);
-    barrier();   // (every lane read the stamp and the last stride before lane 0 writes them)
     if (lid == 0u)
     {
-        atomicOr(rg.rs_em.w, nEnt << 1u);                       // (stats; bit 0, the parity, unchanged)
-        rg_cells[emCcHdr(0u)].x = stamp0 + 1u;                 // (#1006: this build's stamp -- every later mode reads it)
-        rg_cells[emCcHdr(EM_CCH_STRIDE)] = uvec2(s, stamp0 + 1u);
-        rg.rs_em_take_cfg.w = s;                               // (stats: the host notes a stride step)
+        rg.rs_em.w = par | (liveCount << 1u);
+        rg_cells[emCcHdr(0u)].x = stamp0 + 1u;
+        rg_cells[emCcHdr(13u)].y = liveCount != 0u ? (firstRank + admitted) % liveCount : 0u;
+        rg_cells[emCcHdr(50u)] = uvec2(liveCount, liveCount - admitted);
+        rg.rs_em_take_cfg.w = 1u; // diagnostic per-face stride remains authoritative
     }
+    uint liveCountRun = 0u;
     uint run = 0u;   // (uniform) the records of the earlier steps' blocks
     for (uint c = 0u; c < nEnt; c += 64u)
     {
         const uint e = c + lid;
         uvec2 w0 = uvec2(0u);
         uint off = 0u, kept = 0u, se = 1u;
-        if (e < nEnt)
+        const bool liveEntry = e < nEnt && rg_cells[emEntWord(e)].y != 0u;
+        barrier();
+        s_emScan[lid] = liveEntry ? 1u : 0u;
+        barrier();
+        for (uint d = 1u; d < 64u; d <<= 1u)
         {
-            w0 = rg_cells[emEntWord(e)];   // instance, triangles
-            se = e < nTe ? 1u : s;         // (a takeover row: every triangle)
-            off = se > 1u ? regirHash(w0.x ^ 0x51ED27u) % se : 0u;   // (fixed per object: no frame noise)
-            kept = w0.y > off ? (w0.y - off + se - 1u) / se : 0u;
+            const uint v = lid >= d ? s_emScan[lid - d] : 0u;
+            barrier(); s_emScan[lid] += v; barrier();
+        }
+        const uint rank = liveCountRun + s_emScan[lid] - (liveEntry ? 1u : 0u);
+        const uint distance = rank >= firstRank ? rank - firstRank : liveCount - firstRank + rank;
+        const bool selected = liveEntry && distance < admitted;
+        liveCountRun += s_emScan[63];
+        if (e < nEnt) w0 = rg_cells[emEntWord(e)];
+        if (selected)
+        {
+            se = max(ebTriangleStride(w0.y, quota), 1u);
+            off = regirHash(w0.x ^ 0x51ED27u) % se;
+            kept = ebTriangleCount(w0.y,se,off); // <= quota; offset < triangle count
         }
         barrier();
         s_emScan[lid] = kept;
@@ -8703,38 +8852,15 @@ void emBlockAlloc()
             if (k > 0u)
             {
                 atomicAdd(rg.rs_em.x, k);
-                // the hash: instance -> entry (each instance once per build; load <= 0.5 -- a free entry exists)
-                uint hs = emHashSlot(w0.x);
-                [[dont_unroll]] for (uint i = 0u; i < REGIR_EM_HASH_N; ++i)
-                {
-                    const uint hw = emHashWord(par, hs);
-                    if (atomicCompSwap(rg_cells[hw].x, 0u, w0.x + 1u) == 0u)
-                    {
-                        rg_cells[hw].y = e;
-                        break;
-                    }
-                    hs = (hs + 1u) & (REGIR_EM_HASH_N - 1u);
-                }
+                atomicOr(rg_cells[emBudgetTicket(emHashSlot(w0.x))+7u].y,0x80000000u);
+                // One retained instance owns each discovery bucket; collision-free one-load hash.
+                rg_cells[emHashWord(par, emHashSlot(w0.x))] = uvec2(w0.x + 1u, e);
+                atomicMax(rg.rs_em_take_cfg.w, se);
                 // (#986 RECORD REUSE) the same instance in the LAST build's hash with the same signature,
                 // triangle count, subset and block size: mode 2 copies its records from that block. Not a
                 // dynamic one, not this build's rolling refresh share (every EM_REFRESH builds per emitter).
-                uint reuse = REGIR_EM_NONE;
-                const uvec2 w12 = rg_cells[eb + 12u];
-                const bool refresh = ((regirHash(w0.x ^ 0xC0FFEEu) + rg.cfg.w) % EM_REFRESH) == 0u;
-                if (reuseOn && (w12.y & EM_E_DYN) == 0u && !refresh)
-                {
-                    const uint pe = emHashFindP(par ^ 1u, w0.x);
-                    if (pe != REGIR_EM_NONE)
-                    {
-                        const uint pb = emEntWordP(par ^ 1u, pe);
-                        const uvec2 pk = rg_cells[pb + 1u];
-                        if (rg_cells[pb] == w0 && rg_cells[pb + 2u] == uvec2(se, off) && pk.y == k
-                            && pk.x < REGIR_EM_CAP && REGIR_EM_CAP - pk.x >= k
-                            && rg_cells[pb + 11u] == rg_cells[eb + 11u] && (rg_cells[pb + 12u].y & EM_E_DYN) == 0u)
-                            reuse = pk.x;
-                    }
-                }
-                rg_cells[eb + 12u].x = reuse;
+                // Current records always rebuilt; diagnostic support counters start at zero.
+
             }
             if (w0.y > k) atomicAdd(rg.rs_em.y, w0.y - k);   // (not in this frame's subset, or dropped)
         }
@@ -8746,37 +8872,9 @@ void emBlockAlloc()
     // (a uniform branch: header words)
     const uint nTake = (rg.rs_em_cfg.z & EM_F_TAKE) != 0u ? min(min(rg.rs_em_take_cfg.x, REGIR_EM_TAKE_N), nEnt) : 0u;
     if (nTake != 0u) emTakeVerdict(lid, nTake);
-    // ---- (#1006 INCREMENTAL CELLS, clean_regir.glsl REACH RANGE) every emitter with records: its reach range
-    //      Rg -- the last build's, while the same instance has the same geometry key and range <= Rg <= 2 x
-    //      range; else its range now (the cell lists' candidate test uses it: a brightness change inside that
-    //      band moves no list edge) ----
-    memoryBarrierBuffer();   // (the blocks and the takeover's words above: written by other lanes)
-    barrier();
-    const bool last = (rg.rs_em_cfg.z & EM_F_LAST) != 0u;
-    for (uint e = lid; e < nEnt; e += 64u)
-    {
-        const uint eb = emEntWordP(par, e);
-        const uvec2 w0 = rg_cells[eb];
-        if (w0.y == 0u || rg_cells[eb + 1u].y == 0u) continue;   // (no records this build)
-        // the range its records carry (emRecWrite): a taken light's radius, else the emitter's own
-        const uvec2 w6 = rg_cells[eb + 6u];
-        const bool take = w6.y != 0u && uintBitsToFloat(rg_cells[eb + 10u].y) >= 0.0;
-        const float range = take ? lights[w6.y - 1u].pos_radius.w : uintBitsToFloat(rg_cells[eb + 5u].x);
-        const uint gk = rg_cells[emEntXWord(par, e)].y;
-        float Rg = range;
-        if (last)
-        {
-            const uint pe = emHashFindP(par ^ 1u, w0.x);
-            if (pe != REGIR_EM_NONE)
-            {
-                const uvec2 px = rg_cells[emEntXWord(par ^ 1u, pe)];
-                const float pr = uintBitsToFloat(px.x);
-                if (px.y == gk && range <= pr && range >= 0.5 * pr && pr < 3.0e38) Rg = pr;
-            }
-        }
-        rg_cells[emEntXWord(par, e)].x = floatBitsToUint((Rg > 0.0 && Rg < 3.0e38) ? Rg : 0.0);
-    }
+
 }
+// Inactive compatibility helper: bounded host never sets EM_F_TAKE without a footprint certificate.
 // (LIGHT TAKEOVER, mode 1's tail) the verdict and gain per light of the table (lane lid of the workgroup)
 void emTakeVerdict(uint lid, uint nTake)
 {
@@ -8795,11 +8893,11 @@ void emTakeVerdict(uint lid, uint nTake)
         {
             const uint eb = emEntWord(e);
             const uvec2 w0 = rg_cells[eb];
-            if (w0.y == 0u || rg_cells[eb + 6u].y != li + 1u) continue;   // (no emitter this frame / not taken over)
+            if (w0.y == 0u || rg_cells[eb + 6u].y != li + 1u) { bad = true; break; }
             const uvec2 fk = rg_cells[eb + 1u], so = rg_cells[eb + 2u];
             const uint st = max(so.x, 1u);
             const uint kept = w0.y > so.y ? (w0.y - so.y + st - 1u) / st : 0u;
-            if (fk.y < kept) { bad = true; break; }   // (a block past the cap: its light would be missing)
+            if (st != 1u || fk.y != w0.y || fk.y < kept) { bad = true; break; }   // (a block past the cap: its light would be missing)
             if (fk.y == 0u) continue;
             const uvec2 w7 = rg_cells[eb + 7u], w8 = rg_cells[eb + 8u];
             const float ac = uintBitsToFloat(w8.y);
@@ -8833,10 +8931,58 @@ void emTakeVerdict(uint lid, uint nTake)
         atomicAdd(rg.rs_em_take_cfg.y, 1u);
     }
 }
-// One record (mode 2): slot's emitter (a binary search over the blocks' first slots), its mesh triangle
-// offset + j s, written in world space with the map's UVs and its own average radiance -- or (#986 RECORD
-// REUSE: mode 1 found the emitter unchanged) copied from the last build's record of the same triangle.
-// True: a light, bnd = the sphere its light reaches (centre, radius + range).
+// One current record (mode2): find its deterministic face block and rebuild from
+// synchronized current geometry/material/texture inputs. Old records are identity data
+// for remapping only; their geometry/descriptor pointers are never dereferenced.
+uint emEntryForSlot(uint slot, uint nEnt)
+{
+    uint lo = 0u, hi = nEnt - 1u;
+    while (lo < hi)
+    {
+        const uint mid = (lo + hi + 1u) >> 1u;
+        if (rg_cells[emEntWord(mid) + 1u].x <= slot) lo = mid; else hi = mid - 1u;
+    }
+    return lo;
+}
+// Total attempted support, including every active level and the weak overlay replacing level 0.
+// World-lattice boxes are budgeted BEFORE clipping to the grid; looking away never admits extra reach.
+void emReachBox(vec3 centre, float radius, vec4 origin, out ivec3 first, out ivec3 last)
+{
+    const vec3 c=(centre-origin.xyz)/origin.w;
+    const float r=max(radius,0.0)/origin.w+0.001+0.001/origin.w;
+    first=ivec3(floor(clamp(c-vec3(r),vec3(-1e8),vec3(1e8))));
+    last=ivec3(floor(clamp(c+vec3(r),vec3(-1e8),vec3(1e8))));
+}
+vec4 emReachOrigin(uint level,bool weak) { return weak&&level==0u ? emOvOrigin() : rg.origin[level]; }
+uint emReachVolume(vec3 centre,float geometryRadius,float range,bool weak)
+{
+    uint sum=0u;
+    for(uint level=0u;level<regirLevels();++level)
+    {
+        ivec3 a,z;emReachBox(centre,geometryRadius+range,emReachOrigin(level,weak),a,z);
+        const uvec3 d=uvec3(max(z-a+1,ivec3(0)));
+        sum+=ebReachVolume3(d.x,d.y,d.z);
+        if(sum>EM_BUDGET_REACH)return EM_BUDGET_REACH+1u;
+    }
+    return sum;
+}
+float emFitReach(vec3 centre,float geometryRadius,float requested,bool weak,out bool centroidSupport)
+{
+    centroidSupport=emReachVolume(centre,geometryRadius,0.0,weak)>EM_BUDGET_REACH;
+    // An overlong primitive cannot fit even at R=0. Its analytic form factor is retained,
+    // but a smooth CENTROID radial window replaces the geometry-expanded window, explicitly biased.
+    const float gr=centroidSupport?0.0:geometryRadius;
+    const float wanted=centroidSupport?min(requested+geometryRadius,max(rg.rs_em_params2.y,0.1)):requested;
+    if(emReachVolume(centre,gr,wanted,weak)<=EM_BUDGET_REACH)return wanted;
+    float lo=0.0,hi=wanted;
+    for(uint step=0u;step<EM_BUDGET_RADIUS_STEPS;++step)
+    {
+        const float mid=0.5*(lo+hi);
+        if(emReachVolume(centre,gr,mid,weak)<=EM_BUDGET_REACH)lo=mid;else hi=mid;
+    }
+    return lo;
+}
+
 bool emRecWrite(uint slot, uint nEnt, uint par, float thr, out vec4 bnd, out bool copied)
 {
     bnd = vec4(0.0);
@@ -8844,12 +8990,7 @@ bool emRecWrite(uint slot, uint nEnt, uint par, float thr, out vec4 bnd, out boo
     rt_anim_time = pc.u_cam_time.w;   // (draw time: texture animation, as the raster)
     // the last entry whose block starts at or before the slot (blocks are in entry order; an empty
     // block shares its start with the next one, so the last such entry is the one holding the slot)
-    uint lo = 0u, hi = nEnt - 1u;
-    while (lo < hi)
-    {
-        const uint mid = (lo + hi + 1u) >> 1u;
-        if (rg_cells[emEntWord(mid) + 1u].x <= slot) lo = mid; else hi = mid - 1u;
-    }
+    const uint lo = emEntryForSlot(slot, nEnt);
     const uint eb = emEntWord(lo);
     const uvec2 fk = rg_cells[eb + 1u];
     if (slot < fk.x || slot - fk.x >= fk.y) return false;   // (never: the blocks tile [0, rs_em.x))
@@ -8861,11 +9002,14 @@ bool emRecWrite(uint slot, uint nEnt, uint par, float thr, out vec4 bnd, out boo
         // slot of this very triangle (the same instance in the last hash, its subset holding this mesh
         // triangle, checked against that record's (instance, triangle) word) -> this slot
         const uvec2 ex = rg_cells[emEntXWord(par, lo)];
-        rg_cells[emRecXWord(par, slot)] = uvec2(ex.x, regirHash((id * 2654435761u) ^ regirHash(prim ^ ex.y)));
+        rg_cells[emRecXWord(par, slot)] = uvec2(REGIR_EM_NONE,lo);
+        const uvec4 tag = emEntryTag(par,lo);
+        const uint tw = emRecordTagWord(par,slot);
+        rg_cells[tw] = tag.xy; rg_cells[tw + 1u] = tag.zw;
         if ((rg.rs_em_cfg.z & EM_F_LAST) != 0u)
         {
             const uint pe = emHashFindP(par ^ 1u, id);
-            if (pe != REGIR_EM_NONE)
+            if (pe != REGIR_EM_NONE && emEntryTag(par ^ 1u,pe).xyz == tag.xyz)
             {
                 const uint pb = emEntWordP(par ^ 1u, pe);
                 const uvec2 pfk = rg_cells[pb + 1u], pso = rg_cells[pb + 2u];
@@ -8874,30 +9018,14 @@ bool emRecWrite(uint slot, uint nEnt, uint par, float thr, out vec4 bnd, out boo
                 {
                     const uint j = (prim - pso.y) / ps;
                     const uint os = pfk.x + j;
-                    if (j < pfk.y && os < REGIR_EM_CAP && rg_cells[emRecWord(par ^ 1u, os) + 11u] == uvec2(id, prim))
+                    if (j < pfk.y && os < REGIR_EM_CAP && emRecordTag(par ^ 1u,os).w == rg_cells[emCcHdr(15u)].x
+                        && emRecordTag(par ^ 1u,os).xyz == tag.xyz && rg_cells[emRecWord(par ^ 1u, os) + 11u] == uvec2(id, prim))
+                    {
                         emFwdPut(os, slot);
+                        rg_cells[emRecXWord(par,slot)].x = os;
+                    }
                 }
             }
-        }
-    }
-    {   // (#986 RECORD REUSE) the last build's record of this very triangle (checked: its (instance, triangle))
-        const uint ps = rg_cells[eb + 12u].x;
-        const uint src = emRecWord(par ^ 1u, min(ps, REGIR_EM_CAP - 1u) + (slot - fk.x));
-        if (ps != REGIR_EM_NONE && ps + (slot - fk.x) < REGIR_EM_CAP && rg_cells[src + 11u] == uvec2(id, prim))
-        {
-            const uint b = emRecWord(par, slot);
-            [[unroll]] for (uint k = 0u; k < REGIR_EM_WORDS; ++k) rg_cells[b + k] = rg_cells[src + k];
-            copied = true;
-            const vec3 v0 = uintBitsToFloat(uvec3(rg_cells[src], rg_cells[src + 1u].x));
-            const vec3 e1 = uintBitsToFloat(uvec3(rg_cells[src + 1u].y, rg_cells[src + 2u]));
-            const vec3 e2 = uintBitsToFloat(uvec3(rg_cells[src + 3u], rg_cells[src + 4u].x));
-            const float lumSel = uintBitsToFloat(rg_cells[src + 4u].y);
-            const float range = uintBitsToFloat(rg_cells[src + 6u].y);
-            vec3 cen;
-            float r;
-            emTriBound(e1, e2, cen, r);
-            bnd = vec4(v0 + cen, r + range);
-            return range > 0.0 && lumSel > 0.0 && !any(isnan(bnd)) && !any(isinf(bnd));
         }
     }
     const uvec2 w3 = rg_cells[eb + 3u], w4 = rg_cells[eb + 4u], w5 = rg_cells[eb + 5u];
@@ -8914,7 +9042,7 @@ bool emRecWrite(uint slot, uint nEnt, uint par, float thr, out vec4 bnd, out boo
     const bool take = w6.y != 0u && tkF >= 0.0;
     const vec3 G = take ? vec3(uintBitsToFloat(rg_cells[eb + 9u]), uintBitsToFloat(w10.x)) : vec3(1.0);
     const vec3 F = uintBitsToFloat(uvec3(w3, w4.x)) * G;
-    const float range = take ? lights[w6.y - 1u].pos_radius.w : uintBitsToFloat(w5.x);
+    const float rangeMax = max(rg.rs_em_params2.y,0.1);
     // the emitter's geometry row, as mode 0 read it (the same buffers this frame; #1009: a CLUSTER STATIC's
     // legacy row)
     const uvec4 eg = rtGeomEmRow(id, emClusterOn());
@@ -8962,6 +9090,21 @@ bool emRecWrite(uint slot, uint nEnt, uint par, float thr, out vec4 bnd, out boo
     bool live = lumSel > 0.02 * thr && ar > 1e-8 && ar < 1e8;
     live = live && !any(isnan(v0)) && !any(isinf(v0)) && !any(isnan(e1)) && !any(isnan(e2));
     const float ws = float(max(so.x, 1u));   // (the subset weight: in with probability 1 / s)
+    vec3 centre;float geometryRadius;emTriBound(e1,e2,centre,geometryRadius);centre+=v0;
+    const float requested=live?min(sqrt(max(lumT*ar*ws,0.0)/(EM_PI*max(rg.rs_em_params2.x,1e-5))),rangeMax):0.0;
+    bool centroidSupport=false;
+    const float range=live?emFitReach(centre,geometryRadius,requested,(ef&EM_R_WEAK)!=0u,centroidSupport):0.0;
+    live=live && range>0.0;
+    const bool reduced=range<requested || centroidSupport;
+    if(reduced)atomicAdd(rg_cells[emCcHdr(54u)].x,1u);
+    if(centroidSupport)atomicAdd(rg_cells[emCcHdr(54u)].y,1u);
+    if((rg.rs_em_cfg.z&EM_F_DIAG)!=0u)
+    {
+        atomicAdd(rg_cells[eb+12u].x,reduced?1u:0u);
+        atomicAdd(rg_cells[eb+12u].y,centroidSupport?1u:0u);
+        atomicMax(rg_cells[eb+21u].x,floatBitsToUint(requested));
+        atomicMax(rg_cells[eb+21u].y,floatBitsToUint(range));
+    }
     const vec3 Fw = F * ws;
     const uint b = emRecWord(par, slot);
     rg_cells[b + 0u]  = uvec2(floatBitsToUint(v0.x), floatBitsToUint(v0.y));
@@ -8974,7 +9117,7 @@ bool emRecWrite(uint slot, uint nEnt, uint par, float thr, out vec4 bnd, out boo
     rg_cells[b + 7u]  = floatBitsToUint(u[0]);
     rg_cells[b + 8u]  = floatBitsToUint(u[1]);
     rg_cells[b + 9u]  = floatBitsToUint(u[2]);
-    rg_cells[b + 10u] = uvec2(tex, (ef & (EM_R_TWOSIDED | EM_R_WEAK)) | (take ? EM_R_TAKE : 0u));
+    rg_cells[b + 10u] = uvec2(tex, (ef & (EM_R_TWOSIDED | EM_R_WEAK)) | (centroidSupport ? EM_R_CENTROID : 0u) | (take ? EM_R_TAKE : 0u));
     rg_cells[b + 11u] = uvec2(id, prim);
     rg_cells[b + 12u] = uvec2(floatBitsToUint(Lt.r * ws), floatBitsToUint(Lt.g * ws));
     rg_cells[b + 13u] = uvec2(floatBitsToUint(Lt.b * ws), floatBitsToUint(take ? tkF : -1.0));
@@ -8982,12 +9125,11 @@ bool emRecWrite(uint slot, uint nEnt, uint par, float thr, out vec4 bnd, out boo
     vec3 cen;
     float r;
     emTriBound(e1, e2, cen, r);
-    bnd = vec4(v0 + cen, r + range);
+    bnd = vec4(v0 + cen, (centroidSupport?0.0:r) + range);
     return live && !any(isnan(bnd)) && !any(isinf(bnd));
 }
-// mode 2: one workgroup per GROUP of 64 consecutive records (grid-stride) -- each lane writes one record,
-// the workgroup the group's box (the union of its lights' reach spheres; empty: lo > hi), the cell build's
-// first cull.
+// Mode2: <=16384 current records. Group bounds retain their allocated layout but the
+// bounded COUNT/FILL path does not gather or visit record groups.
 uint emOrd(float f) { const uint u = floatBitsToUint(f); return (u & 0x80000000u) != 0u ? ~u : (u | 0x80000000u); }
 float emOrdInv(uint u) { return uintBitsToFloat((u & 0x80000000u) != 0u ? (u & 0x7FFFFFFFu) : ~u); }
 void emRecBuild()
@@ -9012,6 +9154,8 @@ void emRecBuild()
         {
             const bool lit = emRecWrite(slot, nEnt, par, thr, bnd, copied);
             if (copied) ++nCopied; else ++nBuilt;
+            if (!lit && (rg.rs_em_cfg.z & EM_F_DIAG) != 0u)
+                atomicAdd(rg_cells[emEntWord(emEntryForSlot(slot, nEnt)) + 18u].y, 1u);
             if (lit)
             {
                 [[unroll]] for (uint i = 0u; i < 3u; ++i)
@@ -9043,481 +9187,144 @@ void emRecBuild()
     }
 }
 
-// One step of the cell build's triangle walk: the records of group g that reach the workgroup's box
-// [wlo, whi] -> s_emList / the compact copies (s_emN of them). Uniform.
-void emChunk(uint par, uint g, uint nRec, vec3 wlo, vec3 whi)
-{
-    barrier();
-    if (gl_LocalInvocationIndex == 0u) s_emN = 0u;
-    barrier();
-    const uint t = g * 64u + gl_LocalInvocationIndex;
-    if (t < nRec)
-    {
-        vec4 cr, pl, la;
-        const EmTri tr = emLoad(par, t);
-        emTriCompact(tr, cr, pl, la);
-        if (emReachBox(cr, pl, la, wlo, whi))
-        {
-            const uint i = atomicAdd(s_emN, 1u);
-            s_emList[i] = t; s_emCr[i] = cr; s_emPl[i] = pl; s_emLa[i] = la;
-            s_emV0[i] = vec4(tr.v0, uintBitsToFloat(tr.flags)); s_emE1[i] = vec4(tr.e1, tr.range);
-            s_emE2[i] = vec4(tr.e2, tr.tkF); s_emCol[i] = vec4(tr.Lavg, 0.0);
-        }
-    }
-    barrier();
-}
-// ---- (#986) CELL LISTS (clean_regir.glsl): the candidate triangles of every cell by a counting sort ----
-// (#1006) the list words of any cell id: a clipmap cell's, or an overlay cell's (ids from REGIR_EM_NCELLS; their
-// blocks from REGIR_EM_NCELLS / 64 -- cell >> 6 of an overlay id lands there)
-uint emLCellWord(uint cell)
-{
-    return cell < REGIR_EM_NCELLS ? REGIR_EM_LCELL_BASE + cell : REGIR_EM_OV_LCELL_BASE + (cell - REGIR_EM_NCELLS);
-}
-uint emLBlkWord(uint b)
-{
-    return b < REGIR_EM_NCELLS / 64u ? REGIR_EM_LBLK_BASE + b : REGIR_EM_OV_LBLK_BASE + (b - REGIR_EM_NCELLS / 64u);
-}
-uint emPairGet(uint i)
-{
-    const uvec2 w = rg_cells[REGIR_EM_PAIR_BASE + (i >> 1u)];
-    return (i & 1u) != 0u ? w.y : w.x;
-}
-void emPairPut(uint i, uint slot)
-{
-    if ((i & 1u) != 0u) rg_cells[REGIR_EM_PAIR_BASE + (i >> 1u)].y = slot;
-    else                rg_cells[REGIR_EM_PAIR_BASE + (i >> 1u)].x = slot;
-}
-// The cell build reads the lists this build (else it gathers: the host's EM_F_GATHER, or mode 5 found the
-// pairs past REGIR_EM_PAIR_CAP). Uniform (header words).
-bool emListsOn() { return (rg.rs_em_cfg.z & EM_F_GATHER) == 0u && (rg.rs_em_cache.w & EM_C_GATHER) == 0u; }
-// One lattice slice of the list walk: the cells of slice z of the lattice (origin o.xyz, edge o.w, dims, cell
-// ids idBase + (z dy + y) dx + x) inside the record's reach box -- each whose emCellTarget > 0 counted (+ the
-// #1006 SIGNATURE terms h) / given the record's slot r at its next place.
-void emListSlice(bool fill, uint r, vec4 cr, vec4 pl, vec4 la, vec4 o, uvec3 dimsU, uint idBase, uint z, uvec2 h,
-                 bool ovl)
-{
-    const vec3 dims = vec3(dimsU);
-    const float pad = 2e-3 * o.w + 2e-3;   // (> regirCellBox's pad)
-    const float rr = la.z + cr.w + pad;
-    const vec3 qlo = (cr.xyz - rr - o.xyz) / o.w, qhi = (cr.xyz + rr - o.xyz) / o.w;
-    if (any(isnan(qlo)) || any(isnan(qhi)) || any(greaterThanEqual(qlo, dims)) || any(lessThan(qhi, vec3(0.0))))
-        return;
-    const uvec3 clo = uvec3(clamp(floor(qlo), vec3(0.0), dims - 1.0));
-    const uvec3 chi = uvec3(clamp(floor(qhi), vec3(0.0), dims - 1.0));
-    if (z < clo.z || z > chi.z) return;
-    [[dont_unroll]] for (uint y = clo.y; y <= chi.y; ++y)
-    {
-        [[dont_unroll]] for (uint x = clo.x; x <= chi.x; ++x)
-        {
-            const uint cell = idBase + (z * dimsU.y + y) * dimsU.x + x;
-            vec3 lo, hi;
-            if (ovl) emOvCellBox(cell - REGIR_EM_NCELLS, lo, hi);
-            else     regirCellBox(cell, lo, hi);
-            if (!(emCellTarget(cr, pl, la, lo, hi) > 0.0)) continue;
-            const uint cw = emLCellWord(cell);
-            if (!fill)
-            {
-                atomicAdd(rg_cells[cw].x, 1u);
-                // (#1006) the cell's membership signature: two independent sums of the pair key
-                atomicAdd(rg_cells[REGIR_EM_SIG_BASE + cell].x, h.x);
-                atomicAdd(rg_cells[REGIR_EM_SIG_BASE + cell].y, h.y);
-                continue;
-            }
-            const uint old = atomicAdd(rg_cells[cw].x, 0x10000u);
-            if ((old >> 16u) >= (old & 0xFFFFu)) continue;   // (past the count: never, the same walk)
-            const uint i = rg_cells[emLBlkWord(cell >> 6u)].y + rg_cells[cw].y + (old >> 16u);
-            if (i < REGIR_EM_PAIR_CAP) emPairPut(i, r);
-        }
-    }
-}
-// mode 3 COUNT / mode 6 FILL: one workgroup per record (grid-stride), a lane per (level lid / 16, z slice
-// lid % 16) -- the cells of the record's reach box in that slice (<= 32 x 32), each whose emCellTarget > 0
-// (exactly population 2's candidate test) counted / given the record's slot at its next place. The two
-// walks are the same code over the same records: they find the same pairs (the fill also stops at the
-// count, so a cell never writes into its neighbour's places). No barriers.
-// (#1006, clean_regir.glsl INCREMENTAL CELLS / WEAK OVERLAY) the reach is the emitter's REACH range (>= its
-// light range: a superset; mode 7's targets keep the true range), the count also sums each cell's membership
-// signature, and a WEAK record's level-0 lanes walk the overlay's slice z (z < REGIR_EM_OV_Z) instead.
-void emListWalk(bool fill)
-{
-    const uint lid = gl_LocalInvocationIndex;
-    const uint l = lid >> 4u, z = lid & 15u;
-    if (l >= regirLevels() || z >= REGIR_DIM_Z) return;
-    if (fill && !emListsOn()) return;
-    const uint nRec = emCount();
-    const uint par = emParity();
-    const uint nWG = gl_NumWorkGroups.x * gl_NumWorkGroups.y;
-    const bool weakOn = emWeakOn();
-    const vec4 o = rg.origin[l];
-    const vec4 ov = emOvOrigin();
-    [[dont_unroll]] for (uint r = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x; r < nRec; r += nWG)
-    {
-        vec4 cr, pl, la;
-        const EmTri t = emLoad(par, r);
-        emTriCompact(t, cr, pl, la);
-        if (!(la.x > 0.0) || !(la.y > 0.0) || !(la.z > 0.0)) continue;   // (not a light: emReachBox's own test)
-        const uvec2 rx = rg_cells[emRecXWord(par, r)];
-        la.z = max(la.z, uintBitsToFloat(rx.x));   // (the reach range; NaN-safe: max keeps la.z)
-        const uvec2 h = uvec2(rx.y, regirHash(rx.y ^ 0x68E31DA4u));
-        if (l == 0u && weakOn && (t.flags & EM_R_WEAK) != 0u)
-        {
-            if (z < REGIR_EM_OV_Z)
-                emListSlice(fill, r, cr, pl, la, ov, uvec3(REGIR_EM_OV_X, REGIR_EM_OV_Y, REGIR_EM_OV_Z),
-                            REGIR_EM_NCELLS, z, h, true);
-            continue;
-        }
-        emListSlice(fill, r, cr, pl, la, o, uvec3(REGIR_DIM_X, REGIR_DIM_Y, REGIR_DIM_Z),
-                    l * REGIR_CELLS_PER_LEVEL, z, h, false);
-    }
-}
-bool emLongOn() { return (rg.rs_em_cfg.z & EM_F_LONG) != 0u; }
-// (LONG CELLS) the long cells' list: entry k (< REGIR_EM_NCELLS)
 uint emLongGet(uint k)
 {
-    const uvec2 w = rg_cells[REGIR_EM_LONG_BASE + 1u + (k >> 1u)];
-    return (k & 1u) != 0u ? w.y : w.x;
+    const uvec2 v = rg_cells[REGIR_EM_LONG_BASE+1u+(k>>1u)]; return (k&1u)!=0u ? v.y : v.x;
 }
-void emLongPut(uint k, uint cell)
+void emLongPut(uint k,uint cell)
 {
-    if ((k & 1u) != 0u) rg_cells[REGIR_EM_LONG_BASE + 1u + (k >> 1u)].y = cell;
-    else                rg_cells[REGIR_EM_LONG_BASE + 1u + (k >> 1u)].x = cell;
+    if ((k&1u)!=0u) rg_cells[REGIR_EM_LONG_BASE+1u+(k>>1u)].y=cell;
+    else rg_cells[REGIR_EM_LONG_BASE+1u+(k>>1u)].x=cell;
 }
-// ---- (#1006 INCREMENTAL CELLS, clean_regir.glsl) the cell cache ----
-uint emCcWord(uint cell) { return REGIR_EM_CC_BASE + 2u * cell; }
-// A cell id population 2 builds this frame: a clipmap cell of a level in use, or (EM_F_WEAK) an overlay cell
 bool emCellInUse(uint cell)
 {
     if (cell < REGIR_EM_NCELLS) return cell < regirLevels() * REGIR_CELLS_PER_LEVEL;
     return emWeakOn() && cell - REGIR_EM_NCELLS < REGIR_EM_OV_N;
 }
-// The dirty-since word's stamp (+1: 0 is clean; 30 bits: an age stays exact across the stamp's wrap)
-uint emSince(uint stamp) { return (stamp & 0x3FFFFFFFu) + 1u; }
-uint emAge(uint ds, uint stamp) { return (emSince(stamp) - (ds & 0x3FFFFFFFu)) & 0x3FFFFFFFu; }
-// The cell's stagger for the rolling refreshes
-uint emCellPhase(uint cell, uint stamp) { return regirHash(cell * 0x9E3779B1u + 0x7F4A7C15u) + stamp; }
-// Every cell is re-gathered this build: the host's EM_F_FULL, the cache not VALID (a new buffer, a gather
-// build), or a level's origin / edge not the stored build's (unless mode 12 moved the cells: EM_F_SHIFT, the
-// same edges). Uniform (header + cache header words). Modes 4 and 5 evaluate it BEFORE mode 5 can clear VALID;
-// mode 11 reads mode 5's verdict (CC_HDR [40].x).
-bool emFullNow()
+uint emLCellWord(uint cell)
 {
-    if ((rg.rs_em_cfg.z & EM_F_FULL) != 0u || rg_cells[emCcHdr(0u)].y == 0u) return true;
-    const bool shifted = (rg.rs_em_cfg.z & EM_F_SHIFT) != 0u;
-    for (uint l = 0u; l < REGIR_LEVELS_MAX; ++l)
-    {
-        const vec4 p = emCcOrigin(l), c = rg.origin[l];
-        if (p.w != c.w) return true;
-        if (!shifted && any(notEqual(p.xyz, c.xyz))) return true;
-    }
-    return false;
+    return cell<REGIR_EM_NCELLS?REGIR_EM_LCELL_BASE+cell:REGIR_EM_OV_LCELL_BASE+cell-REGIR_EM_NCELLS;
 }
-// mode 4 SCAN: one workgroup per 64-cell block -- each cell's first pair within the block (LCELL y) and
-// the block's pairs (LBLK x). (#1006) Every block of the clipmap and of the overlay (REGIR_EM_NBLK_ALL); each
-// cell in use updates its DIRTY state from this build's signature (clean_regir.glsl INCREMENTAL CELLS) and a
-// dirty cell waiting for the budget joins the age histogram; an overlay cell with a candidate sets EM_C_OVL.
-// (The LONG CELLS' list is mode 11's: only the cells re-gathered this build.)
-void emListScan()
+uint emLBlkWord(uint block)
 {
-    const uint lid = gl_LocalInvocationIndex;
-    const uint b = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
-    if (b >= REGIR_EM_NBLK_ALL) return;   // (the whole workgroup)
-    const uint cell = b * 64u + lid;
-    const uint cw = emLCellWord(cell);
-    const uint n = rg_cells[cw].x & 0xFFFFu;
-    {   // (stats: the longest list, one atomic per subgroup)
-        const uint mx = subgroupMax(n);
-        if (subgroupElect() && mx != 0u) atomicMax(rg_cells[REGIR_EM_LONG_BASE].y, mx);
-    }
-    s_emScan[lid] = n;
-    barrier();
-    for (uint d = 1u; d < 64u; d <<= 1u)
-    {
-        const uint v = lid >= d ? s_emScan[lid - d] : 0u;
-        barrier();
-        s_emScan[lid] += v;
-        barrier();
-    }
-    rg_cells[cw].y = s_emScan[lid] - n;
-    if (lid == 63u) rg_cells[emLBlkWord(b)].x = s_emScan[63];
-    if (!emCellInUse(cell)) return;
-    if (cell >= REGIR_EM_NCELLS && n != 0u) atomicOr(rg.rs_em_cache.w, EM_C_OVL);
-    if (emFullNow()) return;
-    // ---- (#1006) DIRTY: the signature against the one the cell was gathered with ----
-    const uint stamp = emStamp();
-    const uint ccw = emCcWord(cell);
-    const uvec2 sigG = rg_cells[ccw];
-    const uvec2 sigN = rg_cells[REGIR_EM_SIG_BASE + cell];
-    const uint ds0 = rg_cells[ccw + 1u].x;
-    uint ds = ds0;
-    const bool changed = any(notEqual(sigN, sigG));
-    if (!changed && (ds & EM_CC_FORCE) == 0u) ds = 0u;          // (back to the gathered set: clean again)
-    else if (changed && (ds & 0x3FFFFFFFu) == 0u) ds |= emSince(stamp);
-    if (changed)
-    {   // a cell with a stratified rest: its aggregate holds the changed triangles' light as a VALUE -- forced
-        const uint hx = rg_cells[emCellWord(cell)].x;
-        if ((hx & REGIR_COUNT_MASK) != 0u && (hx & REGIR_CELL_EXACT) == 0u) ds |= EM_CC_FORCE;
-    }
-    if (ds != ds0) rg_cells[ccw + 1u].x = ds;
-    if (ds != 0u && (ds & EM_CC_FORCE) == 0u)
-    {   // the age histogram: 32 bins, two per uvec2 (bin 31 = 31 builds and older)
-        const uint bin = min(emAge(ds, stamp), 31u);
-        if ((bin & 1u) != 0u) atomicAdd(rg_cells[emCcHdr(24u + (bin >> 1u))].y, 1u);
-        else                  atomicAdd(rg_cells[emCcHdr(24u + (bin >> 1u))].x, 1u);
-    }
+    return block<REGIR_EM_NCELLS/64u?REGIR_EM_LBLK_BASE+block:REGIR_EM_OV_LBLK_BASE+block-REGIR_EM_NCELLS/64u;
 }
-// mode 5 (ONE workgroup): the blocks' first pairs (LBLK y; 17 blocks per lane, the overlay's included), the
-// pairs this build (rs_em_cache.z) and EM_C_GATHER past REGIR_EM_PAIR_CAP; then (#1006) the build's verdict:
-// FULL (CC_HDR [40].x), the budget's threshold age and quota (oldest first: the histogram from the oldest
-// bin down), the indirect dispatch of mode 7 (mode 11 counts its groups) -- or, on a gather build, the
-// cache made invalid (the next build is FULL) and the whole grid to mode 9 (#1108; mode 7's with the long
-// cells off).
-void emListSums()
+uint emPairGet(uint i) { const uvec2 w=rg_cells[REGIR_EM_PAIR_BASE+(i>>1u)];return (i&1u)!=0u?w.y:w.x; }
+void emPairPut(uint i,uint record)
 {
-    const uint lid = gl_LocalInvocationIndex;
-    if (gl_WorkGroupID.x != 0u || gl_WorkGroupID.y != 0u) return;   // (the host dispatches one)
-    const uint per = (REGIR_EM_NBLK_ALL + 63u) / 64u;   // (17)
-    uint sum = 0u;
-    for (uint j = 0u; j < per; ++j)
+    if((i&1u)!=0u)rg_cells[REGIR_EM_PAIR_BASE+(i>>1u)].y=record;
+    else rg_cells[REGIR_EM_PAIR_BASE+(i>>1u)].x=record;
+}
+// Same immutable record/ranges and target test for COUNT and FILL. A record never
+// examines more than 64 cells, including rejected/off-grid cells, across ALL bands.
+shared vec4 s_pairCr,s_pairPl,s_pairLa;
+shared uint s_pairWeak;
+shared ivec3 s_pairFirst[REGIR_LEVELS_MAX];
+shared uvec3 s_pairDims[REGIR_LEVELS_MAX];
+shared uint s_pairCount[REGIR_LEVELS_MAX];
+void emPairWalk(bool fill)
+{
+    const uint record=gl_WorkGroupID.x;
+    if(record>=emCount())return;
+    const uint lane=gl_LocalInvocationIndex;
+    if(lane==0u)
     {
-        const uint bb = lid * per + j;
-        if (bb < REGIR_EM_NBLK_ALL) sum += rg_cells[emLBlkWord(bb)].x;
+        const EmTri tr=emLoad(emParity(),record);
+        emTriCompact(tr,s_pairCr,s_pairPl,s_pairLa);
+        s_pairWeak=emWeakOn()&&(tr.flags&EM_R_WEAK)!=0u?1u:0u;
     }
-    s_emScan[lid] = sum;
     barrier();
-    for (uint d = 1u; d < 64u; d <<= 1u)
+    const vec4 cr=s_pairCr,pl=s_pairPl,la=s_pairLa;
+    if(!(la.z>0.0)||!(la.x>0.0))return; // shared uniform verdict
+    const bool weak=s_pairWeak!=0u;
+    if(lane<regirLevels())
     {
-        const uint v = lid >= d ? s_emScan[lid - d] : 0u;
-        barrier();
-        s_emScan[lid] += v;
-        barrier();
+        ivec3 a,z;emReachBox(cr.xyz,cr.w+la.z,emReachOrigin(lane,weak),a,z);
+        const uvec3 d=uvec3(max(z-a+1,ivec3(0)));
+        s_pairFirst[lane]=a;s_pairDims[lane]=d;s_pairCount[lane]=ebReachVolume3(d.x,d.y,d.z);
     }
-    uint run = s_emScan[lid] - sum;
-    for (uint j = 0u; j < per; ++j)
+    barrier();
+    uint totalAttempts=0u;
+    for(uint level=0u;level<regirLevels();++level)totalAttempts+=s_pairCount[level];
+    if(totalAttempts>EM_BUDGET_REACH)return; // shared uniform fail-closed verdict
+    if(!fill&&lane==0u)atomicAdd(rg_cells[emCcHdr(55u)].x,totalAttempts);
+    uint start=0u;
+    for(uint level=0u;level<regirLevels();++level)
     {
-        const uint bb = lid * per + j;
-        if (bb >= REGIR_EM_NBLK_ALL) break;
-        const uint bw = emLBlkWord(bb);
-        const uint n = rg_cells[bw].x;
-        rg_cells[bw].y = run;
-        run += n;
-    }
-    if (lid == 63u)
-    {
-        const uint total = s_emScan[63];
-        rg.rs_em_cache.z = total;
-        const bool gather = total > REGIR_EM_PAIR_CAP;
-        if (gather) atomicOr(rg.rs_em_cache.w, EM_C_GATHER);
-        // ---- (#1006 INCREMENTAL CELLS) ----
-        const bool full = emFullNow();   // (reads VALID before the gather clears it)
-        rg_cells[emCcHdr(40u)].x = full ? 1u : 0u;
-        if (full) atomicAdd(rg_cells[emCcHdr(EM_CCH_STAT + 3u)].y, 1u);
-        if (gather)
-        {   // (mode 11 does nothing; the next build starts over) (#1108) with the LONG CELLS on, mode 9 builds
-            // every cell of the grid -- a workgroup per cell, its candidates split over the lanes (emLongCells) --
-            // and mode 7 none (0 groups); else mode 7 gathers over the whole grid (a lane per cell)
-            rg_cells[emCcHdr(0u)].y = 0u;
-            rg_cells[emCcHdr(18u)] = uvec2(emLongOn() ? 0u : regirLevels() * (REGIR_CELLS_PER_LEVEL / 64u), 1u);
-            rg_cells[emCcHdr(19u)].x = 1u;
-        }
-        else
+        const bool overlay=weak&&level==0u;
+        const uvec3 dims=overlay?uvec3(REGIR_EM_OV_X,REGIR_EM_OV_Y,REGIR_EM_OV_Z):uvec3(REGIR_DIM_X,REGIR_DIM_Y,REGIR_DIM_Z);
+        const ivec3 a=s_pairFirst[level];
+        const uvec3 d=s_pairDims[level];
+        const uint count=s_pairCount[level];
+        // Unreachable for records from emFitReach; fail closed rather than enumerate excess geometry.
+        if(count>EM_BUDGET_REACH || start+count>EM_BUDGET_REACH)return;
+        if(lane>=start && lane-start<count)
         {
-            rg_cells[emCcHdr(18u)] = uvec2(0u, 1u);   // (x: mode 11 raises it to the build list's groups)
-            rg_cells[emCcHdr(19u)].x = 1u;
-            // the threshold: every dirty cell of an older bin, the quota of bin bt (oldest first)
-            const uint budget = uint(clamp(rg.rs_em_params2.z, 0.0, 1.0e9));
-            uint bt = REGIR_EM_NONE, quota = 0u;
-            if (budget != 0u && !full)
+            const uint k=lane-start;
+            const ivec3 c=a+ivec3(k%d.x,(k/d.x)%d.y,k/(d.x*d.y));
+            if(all(greaterThanEqual(c,ivec3(0)))&&all(lessThan(c,ivec3(dims))))
             {
-                uint cum = 0u;
-                for (int k = 31; k >= 0; --k)
+                const uint cell=(overlay?REGIR_EM_NCELLS:level*REGIR_CELLS_PER_LEVEL)+(uint(c.z)*dims.y+uint(c.y))*dims.x+uint(c.x);
+                vec3 lo,hi;emCellBoxAny(cell,lo,hi);
+                if(emCellTarget(cr,pl,la,lo,hi)>0.0)
                 {
-                    const uint hk = rg_cells[emCcHdr(24u + uint(k >> 1))][uint(k & 1)];
-                    if (cum + hk >= budget) { bt = uint(k); quota = budget - cum; break; }
-                    cum += hk;
+                    const uint cw=emLCellWord(cell);
+                    if(!fill)
+                    {
+                        atomicAdd(rg_cells[cw].x,1u);
+                        if((rg.rs_em_cfg.z&EM_F_DIAG)!=0u)atomicAdd(rg_cells[emEntWord(rg_cells[emRecXWord(emParity(),record)].y)+18u].x,1u);
+                    }
+                    else
+                    {
+                        const uint prior=atomicAdd(rg_cells[cw].x,1u<<16u);
+                        const uint i=rg_cells[emLBlkWord(cell>>6u)].y+rg_cells[cw].y+(prior>>16u);
+                        if(i<REGIR_EM_PAIR_CAP)emPairPut(i,record);
+                    }
                 }
             }
-            rg_cells[emCcHdr(17u)] = uvec2(bt, quota);
         }
+        start+=count;
     }
 }
-// mode 11 SELECT (#1006, clean_regir.glsl INCREMENTAL CELLS): one invocation per cell id (REGIR_EM_NBLK_ALL
-// workgroups), after mode 5 -- which cells mode 7 / 9 re-gather this build: all of them on a FULL build; else
-// the forced (EM_CC_FORCE), the budget's dirty cells (oldest first), the rolling refreshes; every other cell
-// with slots is KEPT -- its slots carried to this build's record slots through the forward map (a slot with
-// no forward entry forces it instead). A selected cell joins the build list (mode 7, the indirect dispatch's
-// groups counted here) or the long list (mode 9) and its cache records this build's signature.
-void emCellSelect()
+void emPairScan()
 {
-    if (!emListsOn()) return;   // (a gather build: mode 7 walks the whole grid)
-    const uint lid = gl_LocalInvocationIndex;
-    const uint b = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
-    const uint cell = b * 64u + lid;
-    if (cell == 0u)
-    {   // the cache now holds this build at these origins (nothing below reads these words)
-        rg_cells[emCcHdr(0u)].y = 1u;
-        for (uint l = 0u; l < REGIR_LEVELS_MAX; ++l)
-        {
-            const vec4 o = rg.origin[l];
-            rg_cells[emCcHdr(1u + 2u * l)] = floatBitsToUint(o.xy);
-            rg_cells[emCcHdr(2u + 2u * l)] = floatBitsToUint(o.zw);
-        }
-    }
-    if (b >= REGIR_EM_NBLK_ALL || !emCellInUse(cell)) return;
-    const bool full = rg_cells[emCcHdr(40u)].x != 0u;
-    const uint stamp = emStamp();
-    const uint ccw = emCcWord(cell);
-    const uvec2 sigN = rg_cells[REGIR_EM_SIG_BASE + cell];
-    bool sel = full, forced = false, kept = false, miss = false;
-    uint ds = 0u;
-    if (!full)
-    {
-        ds = rg_cells[ccw + 1u].x;
-        const uint ecw = emCellWord(cell);
-        const uint hx = rg_cells[ecw].x;
-        const uint nS = min(hx & REGIR_COUNT_MASK, REGIR_EM_SLOTS_MAX);
-        const bool hasRest = nS != 0u && (hx & REGIR_CELL_EXACT) == 0u;
-        forced = (ds & EM_CC_FORCE) != 0u;
-        if (!forced && ds != 0u)
-        {   // the budget: older than the threshold bin, or within that bin's quota
-            const uvec2 th = rg_cells[emCcHdr(17u)];
-            const uint bin = min(emAge(ds, stamp), 31u);
-            if (th.x == REGIR_EM_NONE || bin > th.x) sel = true;
-            else if (bin == th.x) sel = atomicAdd(rg_cells[emCcHdr(16u)].y, 1u) < th.y;
-        }
-        const uint restP = uint(clamp(rg.rs_em_params2.w, 1.0, 4096.0));
-        if (hasRest && emCellPhase(cell, stamp) % restP == 0u) forced = true;   // (the rest's draw; 1 = every build)
-        if ((nS != 0u || any(notEqual(sigN, uvec2(0u)))) && emCellPhase(cell ^ 0x55AA55u, stamp) % EM_CELL_REFRESH == 0u)
-            forced = true;                                 // (the rolling refresh: once per EM_CELL_REFRESH builds)
-        if (!sel && !forced && nS != 0u)
-        {   // KEPT: every slot to this build's slot of the same triangle -- all or none (else re-gathered)
-            uint ns[REGIR_EM_SLOTS_MAX];
-            bool ok = true;
-            for (uint j = 0u; j < nS; ++j)
-            {
-                ns[j] = emFwdGet(rg_cells[ecw + 1u + j].x);
-                ok = ok && ns[j] != REGIR_EM_NONE;
-            }
-            if (ok)
-            {
-                for (uint j = 0u; j < nS; ++j) rg_cells[ecw + 1u + j].x = ns[j];
-                kept = true;
-            }
-            else { forced = true; miss = true; }
-        }
-        sel = sel || forced;
-    }
-    // ---- the lists of this build's re-gathered cells: long ones a workgroup each (mode 9), the rest mode 7's ----
-    const uint n = rg_cells[emLCellWord(cell)].x & 0xFFFFu;
-    const bool isLong = sel && n > EM_LONG_LIST && emLongOn();
-    if (isLong)
-    {
-        const uint k = atomicAdd(rg_cells[REGIR_EM_LONG_BASE].x, 1u);
-        if (k < REGIR_EM_NCELLS) emLongPut(k, cell);
-    }
-    {   // the build list (one atomic per subgroup; the indirect dispatch's x = the groups it fills)
-        const bool bl = sel && !isLong;
-        const uint cnt = subgroupAdd(bl ? 1u : 0u);
-        uint base0 = 0u;
-        if (subgroupElect() && cnt != 0u)
-        {
-            base0 = atomicAdd(rg_cells[emCcHdr(16u)].x, cnt);
-            atomicMax(rg_cells[emCcHdr(18u)].x, (min(base0 + cnt, REGIR_EM_NCELLS_ALL) + 63u) / 64u);
-        }
-        base0 = subgroupMax(base0);
-        const uint k = base0 + subgroupExclusiveAdd(bl ? 1u : 0u);
-        if (bl && k < REGIR_EM_NCELLS_ALL)
-        {
-            if ((k & 1u) != 0u) rg_cells[REGIR_EM_BLD_BASE + (k >> 1u)].y = cell;
-            else                rg_cells[REGIR_EM_BLD_BASE + (k >> 1u)].x = cell;
-        }
-    }
-    if (sel)
-    {
-        rg_cells[ccw] = sigN;
-        rg_cells[ccw + 1u] = uvec2(0u, stamp);
-    }
-    {   // stats (one atomic per subgroup): dirty, re-gathered, forced, the stalest cell left dirty, misses, kept
-        const uint sd = subgroupAdd(ds != 0u ? 1u : 0u), ss = subgroupAdd(sel ? 1u : 0u);
-        const uint sf = subgroupAdd(forced ? 1u : 0u), sm = subgroupAdd(miss ? 1u : 0u);
-        const uint sk = subgroupAdd(kept ? 1u : 0u);
-        const uint st = subgroupMax(!sel && ds != 0u ? emAge(ds, stamp) : 0u);
-        if (subgroupElect())
-        {
-            if (sd != 0u) atomicAdd(rg_cells[emCcHdr(EM_CCH_STAT)].x, sd);
-            if (ss != 0u) atomicAdd(rg_cells[emCcHdr(EM_CCH_STAT)].y, ss);
-            if (sf != 0u) atomicAdd(rg_cells[emCcHdr(EM_CCH_STAT + 1u)].x, sf);
-            if (st != 0u) atomicMax(rg_cells[emCcHdr(EM_CCH_STAT + 1u)].y, st);
-            if (sm != 0u) atomicAdd(rg_cells[emCcHdr(EM_CCH_STAT + 2u)].y, sm);
-            if (sk != 0u) atomicAdd(rg_cells[emCcHdr(EM_CCH_STAT + 3u)].x, sk);
-        }
-    }
+    const uint lid=gl_LocalInvocationIndex,block=gl_WorkGroupID.x;
+    if(block>=REGIR_EM_NBLK_ALL)return;
+    const uint cell=block*64u+lid,cw=emLCellWord(cell),n=rg_cells[cw].x&0xFFFFu;
+    s_emScan[lid]=n;barrier();
+    for(uint d=1u;d<64u;d<<=1u){const uint v=lid>=d?s_emScan[lid-d]:0u;barrier();s_emScan[lid]+=v;barrier();}
+    rg_cells[cw].y=s_emScan[lid]-n;
+    if(lid==63u)rg_cells[emLBlkWord(block)].x=s_emScan[63];
+    if(n>EM_LONG_LIST)emLongPut(atomicAdd(rg_cells[REGIR_EM_LONG_BASE].x,1u),cell);
+    const uint longest=subgroupMax(n);
+    if(subgroupElect()&&longest!=0u)atomicMax(rg_cells[REGIR_EM_LONG_BASE].y,longest);
+    if(n!=0u&&cell>=REGIR_EM_NCELLS)atomicOr(rg.rs_em_cache.w,EM_C_OVL);
 }
-// The build list's entry k (mode 7)
-uint emBldGet(uint k)
+void emPairSums()
 {
-    const uvec2 w = rg_cells[REGIR_EM_BLD_BASE + (k >> 1u)];
-    return (k & 1u) != 0u ? w.y : w.x;
-}
-// The overlay's origin of a level-0 origin o0 (emOvOrigin's rule)
-vec4 emOvOriginOf(vec4 o0)
-{
-    const float e2 = 2.0 * o0.w;
-    return vec4(floor(o0.xyz / e2 + 1e-4) * e2, e2);
-}
-// mode 12 SHIFT (#1006, clean_regir.glsl ORIGIN SHIFT; EM_F_SHIFT only, after the host's copy to the scratch):
-// one invocation per cell id -- its lattice moved by (this build's origin - the stored build's) / edge whole
-// cells: the cell's words and cache come from the scratch copy of the cell that held its world box, or (new to
-// the clipmap) start empty and FORCED.
-void emCellShift()
-{
-    const uint cell = (gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x) * 64u + gl_LocalInvocationIndex;
-    if (cell >= REGIR_EM_NCELLS_ALL) return;
-    const bool ovl = cell >= REGIR_EM_NCELLS;
-    if (ovl && cell - REGIR_EM_NCELLS >= REGIR_EM_OV_N) return;
-    vec4 on, op;
-    ivec3 dims;
-    uvec3 c;
-    uint base;
-    if (!ovl)
+    const uint lid=gl_LocalInvocationIndex,per=(REGIR_EM_NBLK_ALL+63u)/64u;
+    uint sum=0u;
+    for(uint j=0u;j<per;++j){const uint b=lid*per+j;if(b<REGIR_EM_NBLK_ALL)sum+=rg_cells[emLBlkWord(b)].x;}
+    s_emScan[lid]=sum;barrier();
+    for(uint d=1u;d<64u;d<<=1u){const uint v=lid>=d?s_emScan[lid-d]:0u;barrier();s_emScan[lid]+=v;barrier();}
+    uint run=s_emScan[lid]-sum;
+    for(uint j=0u;j<per;++j){const uint b=lid*per+j;if(b>=REGIR_EM_NBLK_ALL)break;rg_cells[emLBlkWord(b)].y=run;run+=rg_cells[emLBlkWord(b)].x;}
+    if(lid==63u)
     {
-        const uint l = cell / REGIR_CELLS_PER_LEVEL, i = cell - l * REGIR_CELLS_PER_LEVEL;
-        on = rg.origin[l]; op = emCcOrigin(l);
-        dims = ivec3(REGIR_DIM_X, REGIR_DIM_Y, REGIR_DIM_Z);
-        c = uvec3(i % REGIR_DIM_X, (i / REGIR_DIM_X) % REGIR_DIM_Y, i / (REGIR_DIM_X * REGIR_DIM_Y));
-        base = l * REGIR_CELLS_PER_LEVEL;
-    }
-    else
-    {
-        const uint i = cell - REGIR_EM_NCELLS;
-        on = emOvOriginOf(rg.origin[0]); op = emOvOriginOf(emCcOrigin(0u));
-        dims = ivec3(REGIR_EM_OV_X, REGIR_EM_OV_Y, REGIR_EM_OV_Z);
-        c = uvec3(i % REGIR_EM_OV_X, (i / REGIR_EM_OV_X) % REGIR_EM_OV_Y, i / (REGIR_EM_OV_X * REGIR_EM_OV_Y));
-        base = REGIR_EM_NCELLS;
-    }
-    const vec3 df = (on.xyz - op.xyz) / max(on.w, 1e-6);
-    const ivec3 d = ivec3(clamp(round(df), vec3(-4096.0), vec3(4096.0)));
-    const ivec3 s = ivec3(c) + d;
-    const uint dst = emCellWord(cell), dcc = emCcWord(cell);
-    if (all(greaterThanEqual(s, ivec3(0))) && all(lessThan(s, dims)) && on.w == op.w)
-    {
-        const uint src = base + uint((s.z * dims.y + s.y) * dims.x + s.x);
-        const uint sw = !ovl ? REGIR_EM_SCR_BASE + src * REGIR_EM_CELL_WORDS
-                             : REGIR_EM_SCR2_BASE + (src - REGIR_EM_NCELLS) * REGIR_EM_CELL_WORDS;
-        const uint scc = REGIR_EM_SCR2_BASE + REGIR_EM_OV_CELLS * REGIR_EM_CELL_WORDS + 2u * src;
-        for (uint k = 0u; k < REGIR_EM_CELL_WORDS; ++k) rg_cells[dst + k] = rg_cells[sw + k];
-        rg_cells[dcc] = rg_cells[scc];
-        rg_cells[dcc + 1u] = rg_cells[scc + 1u];
-    }
-    else
-    {   // new to the clipmap: empty (no slot, no aggregate) and forced -- its signature can never match
-        for (uint k = 0u; k < REGIR_EM_CELL_WORDS; ++k) rg_cells[dst + k] = uvec2(0u);
-        rg_cells[dcc] = uvec2(0xFFFFFFFFu, 0x5EED5EEDu);
-        rg_cells[dcc + 1u] = uvec2(EM_CC_FORCE | emSince(emStamp()), emStamp());
+        const uint total=s_emScan[63];rg.rs_em_cache.z=total;
+        // No overflow route exists. The count invariant is T*64 <= pair capacity.
+        rg.rs_em_cache.w|=4u;
+        rg_cells[emCcHdr(18u)]=uvec2(min(rg_cells[REGIR_EM_LONG_BASE].x,REGIR_EM_PAIR_CAP/(EM_LONG_LIST+1u)),1u);
+        rg_cells[emCcHdr(19u)].x=1u;
+        rg_cells[emCcHdr(20u)].y=REGIR_EM_NCELLS_ALL; // all bounded lists refreshed, including empty cells
+        rg_cells[emCcHdr(51u)]=uvec2(total,REGIR_EM_PAIR_CAP);
+        rg_cells[emCcHdr(52u)]=uvec2(emCount()*EM_BUDGET_REACH,rg_cells[REGIR_EM_LONG_BASE].x);
+        rg_cells[emCcHdr(15u)]=uvec2(rg.cfg.w,rg_cells[emCcHdr(15u)].x);
+        if(total>REGIR_EM_PAIR_CAP){rg.rs_em.x=0u;rg.rs_em_cfg.z&=~(EM_F_LIT|EM_F_GI_SPLIT|EM_F_TAKE);rg_cells[emCcHdr(55u)].y=1u;}
     }
 }
-// (EXACT TOP, clean_regir.glsl POPULATION 2) Record slot s with target t ranks before slot sq with tq: the
-// larger target, equal ones by the smaller (instance, triangle) -- never by the list's atomic order or the
-// slots (mode 0's atomic entry order): the exact / aggregate split must not change between two frames.
+
+// Stable exact-top ranking: target, then instance/primitive, independent of pair-fill atomic order.
 bool emRanksBefore(float t, uint s, float tq, uint sq, uint par)
 {
     if (t != tq) return t > tq;
@@ -9536,221 +9343,6 @@ void emTopInsert(float t, uint sl, uint R, uint par, inout uint nTop,
     }
     topT[p] = t; topS[p] = sl;
     nTop = min(nTop + 1u, R);
-}
-// Walk 2's step: rest triangle tq (slot sl, target t, average colour col) -- its share of the cell's
-// deterministic aggregate (the vector form factor at the cell centre) and the stratified samples whose
-// positions its target covers.
-void emRestStep(uint base, uint Kt, uint Rs, float Wr, float strat, float xi, vec3 ccell,
-                float t, uint sl, EmTri tq, vec3 col,
-                inout uint r, inout float cum, inout uint lastS, inout float lastT,
-                inout vec3 aggV, inout vec3 aggC, inout float aggS)
-{
-    const vec3 Fv = emTriVecFF(tq, ccell);
-    const float fl = length(Fv);
-    if (fl > 0.0 && fl < 3.0e38) { aggV += Fv; aggC += col * fl; aggS += fl; }
-    cum += t;
-    lastS = sl; lastT = t;
-    const float inv = Wr / (t * float(Rs));
-    while (r < Rs && (float(r) + xi) * strat < cum)
-    {
-        rg_cells[base + 1u + Kt + r] = uvec2(sl, floatBitsToUint(inv));
-        ++r;
-    }
-}
-// mode 7 POPULATION 2: one invocation per cell, 64 per workgroup. Its candidates: the cell's LIST (CELL
-// LISTS; a LONG CELL is mode 9's), or on the GATHER path the record groups near the workgroup (emChunk,
-// shared memory).
-void emCellBuild()
-{
-    const uint lid = gl_LocalInvocationIndex;
-    const uint wg = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
-    const bool lists = emListsOn();   // (uniform: the barriers of the gather path)
-    // (#1006 INCREMENTAL CELLS) with the lists, lane k of the dispatch builds entry k of mode 11's BUILD LIST
-    // (an indirect dispatch: its groups); the gather path walks the whole grid, 64 contiguous cells a group
-    uint cell, cell0;
-    vec3 lo, hi, wlo = vec3(0.0), whi = vec3(0.0), tmp;
-    if (lists)
-    {
-        const uint k = wg * 64u + lid;
-        if (k >= min(rg_cells[emCcHdr(16u)].x, REGIR_EM_NCELLS_ALL)) return;   // (no barrier on the list path)
-        cell = emBldGet(k);
-        if (!emCellInUse(cell)) return;
-        cell0 = cell;
-        emCellBoxAny(cell, lo, hi);
-    }
-    else
-    {
-        cell0 = wg * 64u;
-        if (cell0 >= regirLevels() * REGIR_CELLS_PER_LEVEL) return;   // (the whole workgroup)
-        cell = cell0 + lid;   // (REGIR_CELLS_PER_LEVEL is a multiple of 64: every lane is live)
-        regirCellBox(cell, lo, hi);
-        // the workgroup's box: cells cell0 .. cell0 + 63 = x 0..31 of two rows (REGIR_DIM_X = 32), one z slab
-        regirCellBox(cell0, wlo, tmp);
-        regirCellBox(cell0 + 63u, tmp, whi);
-    }
-    const uint nRec = emCount();
-    const uint nGrp = (nRec + 63u) / 64u;
-    const uint par = emParity();
-    const uint R = emSlots();
-    uint ln = 0u, lst = 0u;
-    if (lists)
-    {
-        const uvec2 lc = rg_cells[emLCellWord(cell)];
-        lst = rg_cells[emLBlkWord(cell >> 6u)].y + lc.y;
-        ln = min(lc.x & 0xFFFFu, lc.x >> 16u);   // (the places the fill wrote)
-        ln = lst < REGIR_EM_PAIR_CAP ? min(ln, REGIR_EM_PAIR_CAP - lst) : 0u;
-        // (LONG CELLS: mode 9's, a workgroup each -- the same test as mode 4's on the same count; no
-        //  barrier below on the list path)
-        if ((lc.x & 0xFFFFu) > EM_LONG_LIST && emLongOn()) return;
-    }
-    // ---- walk 1: M, W and the R strongest (sorted by target, descending; EXACT TOP) ----
-    float W = 0.0;
-    uint M = 0u, nTop = 0u;
-    uint topS[REGIR_EM_SLOTS_MAX];
-    float topT[REGIR_EM_SLOTS_MAX];
-    [[unroll]] for (uint k = 0u; k < REGIR_EM_SLOTS_MAX; ++k) { topS[k] = 0u; topT[k] = 0.0; }
-    if (lists)
-    {
-        [[dont_unroll]] for (uint i = 0u; i < ln; ++i)
-        {
-            const uint sl = emPairGet(lst + i);
-            if (sl >= nRec) continue;
-            vec4 cr, pl, la;
-            emTriCompact(emLoad(par, sl), cr, pl, la);
-            const float t = emCellTarget(cr, pl, la, lo, hi);
-            if (!(t > 0.0)) continue;
-            W += t; ++M;
-            emTopInsert(t, sl, R, par, nTop, topS, topT);
-        }
-    }
-    else
-    {
-        for (uint gb = 0u; gb < nGrp; gb += 64u)
-        {
-            barrier();
-            if (lid == 0u) s_entN = 0u;
-            barrier();
-            if (gb + lid < nGrp && emGrpReach(gb + lid, wlo, whi)) s_entList[atomicAdd(s_entN, 1u)] = gb + lid;
-            barrier();
-            const uint nG = s_entN;
-            for (uint k = 0u; k < nG; ++k)
-            {
-                emChunk(par, s_entList[k], nRec, wlo, whi);
-                const uint cnt = s_emN;
-                for (uint j = 0u; j < cnt; ++j)
-                {
-                    const float t = emCellTarget(s_emCr[j], s_emPl[j], s_emLa[j], lo, hi);
-                    if (!(t > 0.0)) continue;
-                    W += t; ++M;
-                    emTopInsert(t, s_emList[j], R, par, nTop, topS, topT);
-                }
-            }
-        }
-    }
-    {   // stats (one atomic per subgroup)
-        const uint ne = subgroupAdd(M > 0u ? 1u : 0u);
-        const uint sm = subgroupAdd(M);
-        if (subgroupElect() && ne != 0u)
-        {
-            atomicAdd(rg.rs_em_stat[0], ne);
-            atomicAdd(rg.rs_em_stat[1], sm);
-        }
-    }
-    const uint base = emCellWord(cell);
-    const bool any_ = M > 0u && W > 0.0 && W < 3.0e38;
-    const bool exactL = M <= R;
-    // M > R: the Kt strongest exactly + Rs stratified samples of the rest
-    const uint Rs = exactL ? 0u : (R + 3u) / 4u;
-    const uint Kt = exactL ? min(M, R) : R - Rs;
-    float Wt = 0.0;
-    for (uint k = 0u; k < Kt; ++k) Wt += topT[k];
-    const float Wr = max(W - Wt, 0.0);
-    const bool rest = any_ && !exactL && Wr > 0.0;
-    uint rng = regirHash(cell ^ regirHash(rg.cfg.w + 2u * 0x9E3779B9u));
-    const float xi = regirU01(rng);
-    const float strat = Wr / float(max(Rs, 1u));
-    uint r = 0u, lastS = 0u;
-    float cum = 0.0, lastT = 0.0;
-    // THE REST'S AGGREGATE (the lit kernels' share of the rest): the vector form factor of every rest
-    // triangle at the cell centre (V, summed) and their average colour weighted by it (C / S) --
-    // DETERMINISTIC: the unshadowed light the lit kernels add is never denoised, so it must not depend on
-    // which rest triangles this frame's stratified samples hit (those feed pass 15's visibility only; the
-    // list's order moves them, and the sums' rounding only).
-    vec3 aggV = vec3(0.0), aggC = vec3(0.0);
-    float aggS = 0.0;
-    const vec3 ccell = 0.5 * (lo + hi);
-    // ---- walk 2 (only where there is a rest to sample) ----
-    if (lists)
-    {
-        [[dont_unroll]] for (uint i = 0u; i < ln && rest; ++i)
-        {
-            const uint sl = emPairGet(lst + i);
-            if (sl >= nRec) continue;
-            const EmTri tr = emLoad(par, sl);
-            vec4 cr, pl, la;
-            emTriCompact(tr, cr, pl, la);
-            const float t = emCellTarget(cr, pl, la, lo, hi);
-            if (!(t > 0.0)) continue;
-            bool top = false;
-            for (uint q = 0u; q < Kt; ++q) top = top || topS[q] == sl;
-            if (top) continue;
-            emRestStep(base, Kt, Rs, Wr, strat, xi, ccell, t, sl, tr, tr.Lavg, r, cum, lastS, lastT, aggV, aggC, aggS);
-        }
-    }
-    else
-    {   // (uniform: the barriers; only when a lane of the workgroup has a rest to sample)
-        barrier();
-        if (lid == 0u) s_emNeed = 0u;
-        barrier();
-        if (rest) atomicOr(s_emNeed, 1u);
-        barrier();
-        if (s_emNeed != 0u)
-        {
-            for (uint gb = 0u; gb < nGrp; gb += 64u)
-            {
-                barrier();
-                if (lid == 0u) s_entN = 0u;
-                barrier();
-                if (gb + lid < nGrp && emGrpReach(gb + lid, wlo, whi)) s_entList[atomicAdd(s_entN, 1u)] = gb + lid;
-                barrier();
-                const uint nG = s_entN;
-                for (uint k = 0u; k < nG; ++k)
-                {
-                    emChunk(par, s_entList[k], nRec, wlo, whi);
-                    const uint cnt = s_emN;
-                    for (uint j = 0u; j < cnt && rest; ++j)
-                    {
-                        const uint sl = s_emList[j];
-                        const float t = emCellTarget(s_emCr[j], s_emPl[j], s_emLa[j], lo, hi);
-                        if (!(t > 0.0)) continue;
-                        bool top = false;
-                        for (uint q = 0u; q < Kt; ++q) top = top || topS[q] == sl;
-                        if (top) continue;
-                        EmTri tq;
-                        tq.v0 = s_emV0[j].xyz; tq.e1 = s_emE1[j].xyz; tq.e2 = s_emE2[j].xyz;
-                        tq.range = s_emE1[j].w; tq.flags = floatBitsToUint(s_emV0[j].w); tq.tkF = s_emE2[j].w;
-                        emRestStep(base, Kt, Rs, Wr, strat, xi, ccell, t, sl, tq, s_emCol[j].rgb,
-                                   r, cum, lastS, lastT, aggV, aggC, aggS);
-                    }
-                }
-            }
-        }
-    }
-    {   // the aggregate (zero: no rest)
-        const vec3 Cm = aggS > 0.0 ? aggC / aggS : vec3(0.0);
-        const bool ok = rest && aggS > 0.0 && !any(isnan(aggV)) && !any(isinf(aggV)) && !any(isnan(Cm)) && !any(isinf(Cm));
-        const vec3 V = ok ? aggV : vec3(0.0), C = ok ? Cm : vec3(0.0);
-        rg_cells[base + REGIR_EM_SLOTS_MAX + 1u] = floatBitsToUint(V.xy);
-        rg_cells[base + REGIR_EM_SLOTS_MAX + 2u] = floatBitsToUint(vec2(V.z, C.r));
-        rg_cells[base + REGIR_EM_SLOTS_MAX + 3u] = floatBitsToUint(C.gb);
-    }
-    if (!any_) { rg_cells[base] = uvec2(0u); return; }
-    for (uint k = 0u; k < Kt; ++k) rg_cells[base + 1u + k] = uvec2(topS[k], floatBitsToUint(1.0));
-    if (exactL) { rg_cells[base] = uvec2(Kt | REGIR_CELL_EXACT, floatBitsToUint(W)); return; }
-    // (rounding: no rest left -- the strongest alone carry the cell)
-    if (!rest || !(lastT > 0.0)) { rg_cells[base] = uvec2(Kt | (Kt << 16u), floatBitsToUint(W)); return; }
-    for (; r < Rs; ++r) rg_cells[base + 1u + Kt + r] = uvec2(lastS, floatBitsToUint(Wr / (lastT * float(Rs))));
-    rg_cells[base] = uvec2((Kt + Rs) | (Kt << 16u), floatBitsToUint(W));
 }
 // ---- (#869 OCCLUSION CULL) mode 8 THE RESOLVE (clean_deferred_light.comp OCCLUSION CULL; before pass 15, one
 //      invocation per patch, 64 per workgroup): last frame's notes -> the per-light counts, carried to this
@@ -9819,23 +9411,124 @@ void occResolve()
         occStatAdd(nCull < 4u ? 3u : (nCull < 16u ? 4u : (nCull < 64u ? 5u : 6u)), 1u);
     }
 }
-// ---- (#986) LONG CELLS (clean_regir.glsl): mode 9, one workgroup per long cell (grid-stride over mode
-//      11's list) -- emCellBuild's result for that cell with its pairs split over the 64 lanes.
-//      (#1108 GATHER) on a gather build (no lists: the pairs passed the cap) EVERY cell of the grid, its
-//      candidates the records of each group whose light box reaches the cell (emLongCand) -- the same
-//      candidates and result as mode 7's gather walk, without its serial per-lane tail ----
-// Lane lid's candidate in step k of a cell's walk: the list's pair lid + 64 k, or (gather) record 64 k + lid
-// when record group k's light box reaches the cell box [lo, hi] (uniform per k: one group per step).
-// REGIR_EM_NONE: none this step.
-uint emLongCand(bool lists, uint k, uint lid, uint lst, uint ln, vec3 lo, vec3 hi)
+void emRestStep(uint base, uint Kt, uint Rs, float Wr, float strat, float xi, vec3 ccell,
+                float t, uint sl, EmTri tq, vec3 col,
+                inout uint r, inout float cum, inout uint lastS, inout float lastT,
+                inout vec3 aggV, inout vec3 aggC, inout float aggS)
 {
-    if (lists)
+    const vec3 Fv = emTriVecFF(tq, ccell);
+    const float fl = length(Fv);
+    if (fl > 0.0 && fl < 3.0e38) { aggV += Fv; aggC += col * fl; aggS += fl; }
+    cum += t;
+    lastS = sl; lastT = t;
+    const float inv = Wr / (t * float(Rs));
+    while (r < Rs && (float(r) + xi) * strat < cum)
     {
-        const uint i = k * 64u + lid;
-        return i < ln ? emPairGet(lst + i) : REGIR_EM_NONE;
+        rg_cells[base + 1u + Kt + r] = uvec2(sl, floatBitsToUint(inv));
+        ++r;
     }
-    return emGrpReach(k, lo, hi) ? k * 64u + lid : REGIR_EM_NONE;
 }
+void emPairShortCells()
+{
+    const uint cell=gl_GlobalInvocationID.x;
+    if(cell>=REGIR_EM_NCELLS_ALL)return;
+    const uint par=emParity(),nRec=emCount(),R=emSlots();
+    const uvec2 lc=rg_cells[emLCellWord(cell)];
+    if((lc.x&0xFFFFu)>EM_LONG_LIST)return; // only the parallel long-list pass owns these
+    const uint lst=rg_cells[emLBlkWord(cell>>6u)].y+lc.y;
+    const uint written=min(lc.x&0xFFFFu,lc.x>>16u);
+    const uint ln=lst<REGIR_EM_PAIR_CAP?min(written,REGIR_EM_PAIR_CAP-lst):0u;
+    vec3 lo,hi;emCellBoxAny(cell,lo,hi);
+    // ---- walk 1: M, W and the R strongest (sorted by target, descending; EXACT TOP) ----
+    float W = 0.0;
+    uint M = 0u, nTop = 0u;
+    uint topS[REGIR_EM_SLOTS_MAX];
+    float topT[REGIR_EM_SLOTS_MAX];
+    [[unroll]] for (uint k = 0u; k < REGIR_EM_SLOTS_MAX; ++k) { topS[k] = 0u; topT[k] = 0.0; }
+    {
+        [[dont_unroll]] for (uint i = 0u; i < ln; ++i)
+        {
+            const uint sl = emPairGet(lst + i);
+            if (sl >= nRec) continue;
+            vec4 cr, pl, la;
+            emTriCompact(emLoad(par, sl), cr, pl, la);
+            const float t = emCellTarget(cr, pl, la, lo, hi);
+            if (!(t > 0.0)) continue;
+            W += t; ++M;
+            emTopInsert(t, sl, R, par, nTop, topS, topT);
+        }
+    }
+    {   // stats (one atomic per subgroup)
+        const uint ne = subgroupAdd(M > 0u ? 1u : 0u);
+        const uint sm = subgroupAdd(M);
+        if (subgroupElect() && ne != 0u)
+        {
+            atomicAdd(rg.rs_em_stat[0], ne);
+            atomicAdd(rg.rs_em_stat[1], sm);
+        }
+    }
+    const uint base = emCellWord(cell);
+    const bool any_ = M > 0u && W > 0.0 && W < 3.0e38;
+    const bool exactL = M <= R;
+    // M > R: the Kt strongest exactly + Rs stratified samples of the rest
+    const uint Rs = exactL ? 0u : (R + 3u) / 4u;
+    const uint Kt = exactL ? min(M, R) : R - Rs;
+    float Wt = 0.0;
+    for (uint k = 0u; k < Kt; ++k) Wt += topT[k];
+    const float Wr = max(W - Wt, 0.0);
+    const bool rest = any_ && !exactL && Wr > 0.0;
+    uint rng = regirHash(cell ^ regirHash(rg.cfg.w + 2u * 0x9E3779B9u));
+    const float xi = regirU01(rng);
+    const float strat = Wr / float(max(Rs, 1u));
+    uint r = 0u, lastS = 0u;
+    float cum = 0.0, lastT = 0.0;
+    // THE REST'S AGGREGATE (the lit kernels' share of the rest): the vector form factor of every rest
+    // triangle at the cell centre (V, summed) and their average colour weighted by it (C / S) --
+    // DETERMINISTIC: the unshadowed light the lit kernels add is never denoised, so it must not depend on
+    // which rest triangles this frame's stratified samples hit (those feed pass 15's visibility only; the
+    // list's order moves them, and the sums' rounding only).
+    vec3 aggV = vec3(0.0), aggC = vec3(0.0);
+    float aggS = 0.0;
+    const vec3 ccell = 0.5 * (lo + hi);
+    // ---- walk 2 (only where there is a rest to sample) ----
+    {
+        [[dont_unroll]] for (uint i = 0u; i < ln && rest; ++i)
+        {
+            const uint sl = emPairGet(lst + i);
+            if (sl >= nRec) continue;
+            const EmTri tr = emLoad(par, sl);
+            vec4 cr, pl, la;
+            emTriCompact(tr, cr, pl, la);
+            const float t = emCellTarget(cr, pl, la, lo, hi);
+            if (!(t > 0.0)) continue;
+            bool top = false;
+            for (uint q = 0u; q < Kt; ++q) top = top || topS[q] == sl;
+            if (top) continue;
+            emRestStep(base, Kt, Rs, Wr, strat, xi, ccell, t, sl, tr, tr.Lavg, r, cum, lastS, lastT, aggV, aggC, aggS);
+        }
+    }
+    {   // the aggregate (zero: no rest)
+        const vec3 Cm = aggS > 0.0 ? aggC / aggS : vec3(0.0);
+        const bool ok = rest && aggS > 0.0 && !any(isnan(aggV)) && !any(isinf(aggV)) && !any(isnan(Cm)) && !any(isinf(Cm));
+        const vec3 V = ok ? aggV : vec3(0.0), C = ok ? Cm : vec3(0.0);
+        rg_cells[base + REGIR_EM_SLOTS_MAX + 1u] = floatBitsToUint(V.xy);
+        rg_cells[base + REGIR_EM_SLOTS_MAX + 2u] = floatBitsToUint(vec2(V.z, C.r));
+        rg_cells[base + REGIR_EM_SLOTS_MAX + 3u] = floatBitsToUint(C.gb);
+    }
+    if (!any_) { rg_cells[base] = uvec2(0u); return; }
+    for (uint k = 0u; k < Kt; ++k) rg_cells[base + 1u + k] = uvec2(topS[k], floatBitsToUint(1.0));
+    if (exactL) { rg_cells[base] = uvec2(Kt | REGIR_CELL_EXACT, floatBitsToUint(W)); return; }
+    // (rounding: no rest left -- the strongest alone carry the cell)
+    if (!rest || !(lastT > 0.0)) { rg_cells[base] = uvec2(Kt | (Kt << 16u), floatBitsToUint(W)); return; }
+    for (; r < Rs; ++r) rg_cells[base + 1u + Kt + r] = uvec2(lastS, floatBitsToUint(Wr / (lastT * float(Rs))));
+    rg_cells[base] = uvec2((Kt + Rs) | (Kt << 16u), floatBitsToUint(W));
+}
+uint emPairLongCandidate(uint step,uint lane,uint first,uint count)
+{
+    const uint i=step*64u+lane;
+    return i<count?emPairGet(first+i):REGIR_EM_NONE;
+}
+
 shared float s_lgT[64u * REGIR_EM_SLOTS_MAX];   // each lane's R strongest (walk 1)
 shared uint  s_lgS[64u * REGIR_EM_SLOTS_MAX];
 shared uint  s_lgN[64];
@@ -9851,36 +9544,30 @@ shared uint  s_gM;
 shared float s_gW;
 shared uint  s_smpS[REGIR_EM_SLOTS_MAX];        // the stratified samples (each owned by one lane)
 shared float s_smpW[REGIR_EM_SLOTS_MAX];
-void emLongCells()
+
+void emPairLongCells()
 {
     const uint lid = gl_LocalInvocationIndex;
-    if (!emLongOn()) return;   // (uniform: header words)
-    // (#1108) EM_F_LONG is set with the lists only (never with the host's EM_F_GATHER): no lists here is mode
-    // 5's verdict -- a gather build, every cell of the grid this mode's
-    const bool lists = emListsOn();
-    const uint nLong = lists ? min(rg_cells[REGIR_EM_LONG_BASE].x, REGIR_EM_NCELLS)
-                             : regirLevels() * REGIR_CELLS_PER_LEVEL;
+    const uint nLong=min(rg_cells[REGIR_EM_LONG_BASE].x,REGIR_EM_PAIR_CAP/(EM_LONG_LIST+1u));
     const uint nRec = emCount();
-    const uint nGrp = (nRec + 63u) / 64u;
     const uint par = emParity();
     const uint R = emSlots();
     const uint nWG = gl_NumWorkGroups.x * gl_NumWorkGroups.y;
     [[dont_unroll]] for (uint c = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x; c < nLong; c += nWG)
     {
-        const uint cell = lists ? emLongGet(c) : c;
+        const uint cell = emLongGet(c);
         if (!emCellInUse(cell)) continue;   // (uniform: one cell per workgroup; #1006 an overlay cell too)
         vec3 lo, hi;
         emCellBoxAny(cell, lo, hi);
         uint lst = 0u, ln = 0u;
-        if (lists)
         {
             const uvec2 lc = rg_cells[emLCellWord(cell)];
             lst = rg_cells[emLBlkWord(cell >> 6u)].y + lc.y;
             ln = min(lc.x & 0xFFFFu, lc.x >> 16u);
             ln = lst < REGIR_EM_PAIR_CAP ? min(ln, REGIR_EM_PAIR_CAP - lst) : 0u;
         }
-        // the walks' steps (uniform): the list's 64-pair steps, or (gather) one per record group
-        const uint nIt = lists ? (ln + 63u) / 64u : nGrp;
+        // Parallel steps over this bounded list only; no record-group gather.
+        const uint nIt = (ln + 63u) / 64u;
         // ---- walk 1 (lane l: pairs l, l + 64, ... / its record of each group reaching the cell): this lane's
         //      M, W and R strongest ----
         float W = 0.0;
@@ -9890,7 +9577,7 @@ void emLongCells()
         [[unroll]] for (uint k = 0u; k < REGIR_EM_SLOTS_MAX; ++k) { topS[k] = 0u; topT[k] = 0.0; }
         [[dont_unroll]] for (uint it = 0u; it < nIt; ++it)
         {
-            const uint sl = emLongCand(lists, it, lid, lst, ln, lo, hi);
+            const uint sl = emPairLongCandidate(it,lid,lst,ln);
             if (sl >= nRec) continue;
             vec4 cr, pl, la;
             emTriCompact(emLoad(par, sl), cr, pl, la);
@@ -9978,7 +9665,7 @@ void emLongCells()
         uint lastS = REGIR_EM_NONE;
         [[dont_unroll]] for (uint it = 0u; it < nIt && rest; ++it)
         {
-            const uint sl = emLongCand(lists, it, lid, lst, ln, lo, hi);
+            const uint sl = emPairLongCandidate(it,lid,lst,ln);
             if (sl >= nRec) continue;
             const EmTri tr = emLoad(par, sl);
             vec4 cr, pl, la;
@@ -10048,17 +9735,18 @@ void DEFER_MAIN()
 {
     const uint mode = g_draw_push.rtr3.z;
     if (mode == 8u) { occResolve(); return; }
-    if (mode == 0u) emEntBuild();
+    if (mode == 17u) emAdmitOffers();
+    else if (mode == 13u) emDiscover();
+    else if (mode == 0u) emEntBuild();
     else if (mode == 1u) emBlockAlloc();
     else if (mode == 2u) emRecBuild();
-    else if (mode == 3u) emListWalk(false);
-    else if (mode == 4u) emListScan();
-    else if (mode == 5u) emListSums();
-    else if (mode == 6u) emListWalk(true);
-    else if (mode == 7u) emCellBuild();
-    else if (mode == 9u) emLongCells();
-    else if (mode == 11u) emCellSelect();   // (#1006)
-    else if (mode == 12u) emCellShift();    // (#1006)
+    else if (mode == 3u) emPairWalk(false);
+    else if (mode == 4u) emPairScan();
+    else if (mode == 5u) emPairSums();
+    else if (mode == 6u) emPairWalk(true);
+    else if (mode == 7u) emPairShortCells();
+    else if (mode == 9u) emPairLongCells();
+
 }
 #elif !defined(CLEAN_SHADOW_CORE)
 // ---- THE PER-LIGHT-TYPE PATH (RenderVKShadowGenericCore 0: the fallback; the generic core's
@@ -10103,7 +9791,7 @@ void DEFER_MAIN()
     }
     CLK_SURF();
     const vec3 P = deferPosition(rp);
-    const vec3 V = normalize(pc.u_cam_time.xyz - P);
+    const vec3 V = linfo.cam_fwd.w > 0.5 ? -linfo.cam_fwd.xyz : normalize(pc.u_cam_time.xyz - P);
     const vec3 Ng = dot(s.Ng, V) < 0.0 ? -s.Ng : s.Ng;
     const float vz = dot(P - linfo.cam_pos.xyz, linfo.cam_fwd.xyz);
     // The LOCAL pass's own localLights inputs (lightSurface's common tail).
@@ -10118,6 +9806,9 @@ void DEFER_MAIN()
     const vec3 diffuseColor  = base * (1.0 - 0.04) * (1.0 - metal);
     const vec3 specularColor = mix(vec3(0.04), base, metal);
     const float specRough = pbr ? rough : clamp(1.0 - ls.gloss, 0.0, 1.0);   // (dsSpecRough)
+    // (RADIANCE MODE, pdnRadOn above) num alone, demodulated by these
+    const bool radOn = pdnRadOn();
+    const vec3 radDf = pdnRadDiff(pbr, base, diffuseColor), radSf = pdnRadSpec(pbr, specularColor, ls);
     CLK_MARK(GBUF);
 
     // RATIO ESTIMATOR (Heitz et al. 2018): the same picks estimate the SHADOWED (num) and the
@@ -10180,6 +9871,7 @@ void DEFER_MAIN()
             const bool away = (pdnOpts() & PDN_OPT_FACING) != 0u
                            && dot(Ng, normalize(lights[li].proj_origin.xyz - P)) < -0.25;
             const vec3 vis = away ? vec3(0.0) : pdnShadow(li, P, Ng, vec2(m) + 0.5 + vec2(17.0, 59.0) * float(i));
+            if (radOn && !exact) pdnRadClamp(ppick[min(i, 1u)], radDf, radSf, dt, st);   // (RADIANCE MODE: a pick's fireflies)
             numD += dt * vis * wgt; denD += dt * wgt;
             numS += st * vis * wgt; denS += st * wgt;
             const float hl = pdnLum(st) * wgt + 1e-6;
@@ -10190,8 +9882,16 @@ void DEFER_MAIN()
     }
     const float hitDist = hitW > 0.0 ? hitSum / hitW : 0.0;
     const bool infoFix = (pdnOpts() & PDN_OPT_BLEED) != 0u;
-    imageStore(uPdnIn, ivec3(m, 0), vec4(pdnRatio(numD, denD), pdnInfoA(nCand, denD, infoFix)));
-    imageStore(uPdnIn, ivec3(m, 1), vec4(pdnRatio(numS, denS), pdnInfoSpecA(hitDist, nCand, denS, infoFix)));
+    if (radOn)
+    {   // (RADIANCE MODE) the shadowed light itself, demodulated; a = the candidate count / the hit distance
+        imageStore(uPdnIn, ivec3(m, 0), vec4(pdnSane(numD / radDf), nCand));
+        imageStore(uPdnIn, ivec3(m, 1), vec4(pdnSane(numS / radSf), hitDist));
+    }
+    else
+    {
+        imageStore(uPdnIn, ivec3(m, 0), vec4(pdnRatio(numD, denD), pdnInfoA(nCand, denD, infoFix)));
+        imageStore(uPdnIn, ivec3(m, 1), vec4(pdnRatio(numS, denS), pdnInfoSpecA(hitDist, nCand, denS, infoFix)));
+    }
 #if DEFER_SHADOW_MERGE
     if ((pdnOpts() & PDN_OPT_SUN_SKIP) == 0u)
     {
@@ -10240,6 +9940,14 @@ void DEFER_MAIN()
 #elif CLEAN_VQ_SHADOW != 1
 #define SH_PARK
 #endif
+// (RenderVKReSTIRRadiance) RADIANCE MODE (the light info's fwd.z bit 1, pdnRadOn below): a light sample's ALPHA-BLEND
+// casters are read at the light cone's LOD from the denoiser texel's footprint (clean_shadow_core.glsl
+// shadowSampleSetup, clean_rt_common.glsl rt_blend_cone) -- a translucent sign's lettering gives each ray the
+// mean transmission over what the texel's rays sweep instead of a per-frame 0 / 1. The ratio path: off.
+// (The visibility queue's split walk kernels, CLEAN_VQ_SHADOW 2, do not carry the cone: their walks keep the
+//  receiver pixel's LOD.)
+#define SH_BLEND_CONE_ON ((linfo.fwd.z & 2u) != 0u)
+#define SH_BLEND_TEXEL_PX max(float(g_draw_push.width) / max(g_draw_push.rtr.x, 1.0), 1.0)
 #include "clean_shadow_core.glsl"
 
 // The ray-traced projector li as a light sample: its apex, soft radius, axis + near plane, the
@@ -10263,7 +9971,10 @@ void pdnProjSample(uint li, vec2 npx, out ShadowSample S)
         soft = rg.rs_params.x;
         S.pos = lights[li].pos_radius.xyz;
         S.axis = vec3(0.0);
-        S.nearClip = clamp(lights[li].proj_axis.x, 0.0, 0.5 * lights[li].pos_radius.w);
+        // (the own prim's bounding sphere, capped at RS_POINT_NEAR_MAX: a sign's or panel's half-diagonal
+        //  swallowed the wall right behind its light -- light leaked into the next room; the lamp's own
+        //  shade / bulb is the own-fixture rule's, which stays)
+        S.nearClip = min(clamp(lights[li].proj_axis.x, 0.0, 0.5 * lights[li].pos_radius.w), RS_POINT_NEAR_MAX);
         S.bias = rg.rs_params.w;
         S.flags = SH_POSITIONAL | SH_SPHERE | SH_FIXTURE | (rtSplitOn() ? SH_SPLIT : 0u);
     }
@@ -10341,11 +10052,14 @@ bool pdnSunSample(SurfaceLit s, ShadowRecv R, float d, float vz, uint frame, flo
         }
         if (on)
         {
-            const vec3 dir = normalize(pdnWorldAt(cpx + o, d) - cam);
+            const vec3 Q = pdnWorldAt(cpx + o, d);
+            const vec3 dir = linfo.cam_fwd.w > 0.5 ? linfo.cam_fwd.xyz : normalize(Q - cam);
             const float dn = dot(dir, Ng);
             if (abs(dn) > 1e-3)
             {
-                const vec3 f = cam + dir * (dot(P - cam, Ng) / dn) - P;
+                const vec3 f = linfo.cam_fwd.w > 0.5
+                    ? Q + dir * (dot(P - Q, Ng) / dn) - P
+                    : cam + dir * (dot(P - cam, Ng) / dn) - P;
                 if (dot(f, f) < 4.0 * pxw * pxw * (1.0 + dot(o, o))) sun_foot = f;
             }
         }
@@ -10483,7 +10197,13 @@ float rsTap(ivec2 q, ivec2 D, uint pl, float zExp, float ztol, vec3 P, vec3 N, f
         if (li >= count || !rsInSet(li) || pdnSplitHas(spLi, li) || occCulled(ocCull, li)) return 0.0;   // (#869: the rest only)
     }
     const float W = uintBitsToFloat(r.y);
-    if (!(W > 0.0) || !(W < 3.0e38)) return 0.0;
+    // (RS_F_VIS_REUSE, radiance mode) W exactly 0 with a light: last frame's own ray found that pick blocked --
+    // the reservoir still holds M samples' worth of evidence (that their pick carried no light), so its M joins
+    // the combination at weight 0 (never picked: y stays none; the temporal caller adds Mq, a spatial one skips
+    // it). Without the flag such a
+    // reservoir is never written (W > 0 or no light), so the ratio path reads exactly as before.
+    const bool zeroW = W == 0.0 && !em && (rg.rs_cfg.z & RS_F_VIS_REUSE) != 0u;
+    if (!zeroW && (!(W > 0.0) || !(W < 3.0e38))) return 0.0;
     float M = min(unpackHalf2x16(r.x >> 16u).x, mcap);
     if (wRef >= 0.0)
     {
@@ -10495,6 +10215,7 @@ float rsTap(ivec2 q, ivec2 D, uint pl, float zExp, float ztol, vec3 P, vec3 N, f
     float p0;
     const float p = em ? rsEmTarget(li - REGIR_EM_KEY, P, N) : pdnTargetGoboL(li, P, N, true, p0);
     if (!(p > 0.0)) return 0.0;
+    if (zeroW) { Mq = M; return 0.0; }   // (RS_F_VIS_REUSE: its M only -- the light still reaches P unshadowed)
     y = li; py = p; Mq = M;
     const float w = p * W * M;
     return w < 3.0e38 ? w : 0.0;
@@ -10719,6 +10440,7 @@ uint pdnSampleLight(PdnSelD d, uint j, uint count, uint ocCull, out uint ni, out
 #define PDN_SEL_REUSED 0x1000u   // a reused reservoir is the one final sample
 #define PDN_SEL_KE2    0x2000u   // two picks (else one)
 #define PDN_SEL_CELL   0x4000u   // P lies in the light grid (rsCell != REGIR_NO_CELL)
+#define PDN_SEL_SUN_LIT 0x8000u  // SELECT stored lit sun: pdnSunGate rejected this receiver
 uint pdnSelIndex(ivec2 m, ivec2 D) { return 4u * uint(m.y * D.x + m.x); }
 // The evaluation list of the descriptor at sdi (q0 = sd0 already loaded)
 PdnSelD pdnSelLoad(uint sdi, uvec4 sd0)
@@ -10755,6 +10477,16 @@ uint pdnVisSlots() { return g_draw_push.rtr3.w; }   // (push: the slots per texe
 uint pdnVisBase(ivec2 D) { return 4u + uint(D.x * D.y) * pdnVisSlots(); }
 #define PDN_JOB_SLOT_BITS 5u   // a job: texel << 5 | slot (slots <= 22)
 #define PDN_VIS_EVIDENCE 0x40000000u
+// (RenderVKReSTIRRadiance, RS_F_VIS_REUSE) bit 29 of a MONO word (bits 24-29 are free there; a coloured word uses
+// them): the sample's rays met a MOVING caster (rtNoteBlocker: an avatar, an attachment, a moved / spinning prim)
+// -- set only on a fully blocked sample in radiance mode (pdnVisMover), where it is the only one read: SHADE's
+// visibility reuse does not zero a reservoir for a blocker that will have moved by the next frames
+#define PDN_VIS_MOVER 0x20000000u
+uint pdnVisMover(vec3 v, bool mover)
+{
+    return (mover && pdnRadOn() && max(max(v.r, v.g), v.b) <= 0.0) ? PDN_VIS_MOVER : 0u;
+}
+bool pdnVisMoverOf(uint w) { return (w & (0x80000000u | PDN_VIS_MOVER)) == PDN_VIS_MOVER; }
 uint pdnVisPack(vec3 v, bool evidence)
 {
     v = clamp(v, vec3(0.0), vec3(1.0));
@@ -10789,12 +10521,12 @@ bool pdnVisRecv(ivec2 m, ivec2 D, uint frame, out SurfaceLit s, out vec3 P, out 
     s = deferSurface(rp, g2, glow, noFade);
     if (s.model == SURF_FULLBRIGHT) return false;
     P = deferPosition(rp);
-    const vec3 V = normalize(pc.u_cam_time.xyz - P);
+    const vec3 V = linfo.cam_fwd.w > 0.5 ? -linfo.cam_fwd.xyz : normalize(pc.u_cam_time.xyz - P);
     const vec3 Ng = dot(s.Ng, V) < 0.0 ? -s.Ng : s.Ng;
     vz = dot(P - linfo.cam_pos.xyz, linfo.cam_fwd.xyz);
     s.cel = s.cel && specCelOn();
     g_cel = s.cel;
-    const vec3 cam = pc.u_cam_time.xyz;
+    const vec3 cam = CL_VIEW_EYE(linfo, P, pc.u_cam_time.xyz);
     dR = defTexel(uDepthG, rp).r;
     const vec3 Nf = pdnFacetNormal(rp, P, cam, Ng, ngOnPlane);
     Rv.P = P; Rv.Ng = Nf; Rv.cam = cam; Rv.rp = rp;
@@ -10871,11 +10603,11 @@ void vqShWalkBegin(bool footOn, vec3 footA, vec3 footB, float width0, uint owner
     g_rt_self_set = true;   // (rtSelfBegin's state: the producer's, possibly resolved by its probes)
     rt_self_owner = owner;
     rt_self_P = selfP;
-    rt_self_cam = pc.u_cam_time.xyz;
+    rt_self_cam = CL_VIEW_EYE(linfo, selfP, pc.u_cam_time.xyz);
     rt_block_t = 1e30;
 }
 #if CLEAN_VQ_SHADOW == 2
-vec3 vqShCam() { return pc.u_cam_time.xyz; }   // (RT_SELF_CAM)
+vec3 vqShCam() { return CL_VIEW_EYE(linfo, vqShSelfP(), pc.u_cam_time.xyz); }   // (RT_SELF_CAM)
 vec4 vqShFolP() { return ssr.foliage_rt; }      // (RT_FOL_P)
 #endif
 uint vqShOwner16(uint o) { return o == RT_SELF_UNKNOWN ? VQ_SH_OWNER_UNKNOWN : min(o, VQ_SH_OWNER_UNKNOWN - 1u); }
@@ -10972,7 +10704,7 @@ ShRayGen shRayGenUnpark()
     g.Pb = uintBitsToFloat(q0.xyz);
     g.biasLift = uintBitsToFloat(q2.w);
     g.Nin = vqOctUnpack(q1.y);
-    g.camd = length(P - pc.u_cam_time.xyz);
+    g.camd = length(P - CL_VIEW_EYE(linfo, P, pc.u_cam_time.xyz));
     // (shadowSampleSetup: Nv = rtVisibleSide(Nin): Nin or -Nin; an emitter's sample is hard: no floor)
     g.Nv = (bits & VQ_SH_NVFLIP) != 0u ? -g.Nin : g.Nin;
     const bool em = (bits & VQ_SH_EM) != 0u;
@@ -11028,16 +10760,16 @@ vec3 vqShSelfP()   // the receiver P (vqShWalkBegin's rt_self_P)
 void vqShFoot(out vec3 a, out vec3 b)   // rtSetShadowFootprint(P, Nin, cam)'s rt_foot_a / _b (read while rt_foot_on)
 {
     a = vec3(0.0); b = vec3(0.0);
-    rtShadowFootprint(vqShSelfP(), vqOctUnpack(vqShParked().q[vqShW() + 1u].y), pc.u_cam_time.xyz, a, b);
+    rtShadowFootprint(vqShSelfP(), vqOctUnpack(vqShParked().q[vqShW() + 1u].y), CL_VIEW_EYE(linfo, vqShSelfP(), pc.u_cam_time.xyz), a, b);
 }
 float vqShConeW0()   // vqShWalkBegin's rt_cone_width0: the cone fallback, or (isotropic LOD) the footprint's minor axis
 {
     const vec3 P = vqShSelfP();
 #ifdef RT_NO_FOOT_LOD
     vec3 a = vec3(0.0), b = vec3(0.0);
-    if (rtShadowFootprint(P, vqOctUnpack(vqShParked().q[vqShW() + 1u].y), pc.u_cam_time.xyz, a, b)) return length(a);
+    if (rtShadowFootprint(P, vqOctUnpack(vqShParked().q[vqShW() + 1u].y), CL_VIEW_EYE(linfo, P, pc.u_cam_time.xyz), a, b)) return length(a);
 #endif
-    return length(P - pc.u_cam_time.xyz) * 0.001;
+    return rtShadowConeWidth(length(P - CL_VIEW_EYE(linfo, P, pc.u_cam_time.xyz)));
 }
 vec3 vqShFixP()   // the sample's S.pos while rt_fix_on (a point light: pdnProjSample's lights[li] centre;
 {                 // a taken-over lamp's emitting triangle: its sampled point, vqShVisSample's T)
@@ -11079,7 +10811,7 @@ void DEFER_MAIN()
                                             : lights[q1.x & 255u].proj_origin.w < 0.5;
         // the footprint / cone fallback of (P, Nin) -- shadowSampleSetup's rtSetShadowFootprint and width0 (the
         // values: the hooks; rt_foot_on here)
-        rtSetShadowFootprint(P, vqOctUnpack(q1.y), pc.u_cam_time.xyz);
+        rtSetShadowFootprint(P, vqOctUnpack(q1.y), CL_VIEW_EYE(linfo, P, pc.u_cam_time.xyz));
         vqShWalkBegin(rt_foot_on, vec3(0.0), vec3(0.0), 0.0, vqShOwnerOf16(q1.x >> 16u), vec3(0.0), false);
     }
     vec3 vis = shadowSampleRays(shRayGenUnpark(), (r.q[w + 1u].w >> VQ_SH_N_SHIFT) & 31u, true, false);   // (THE walk site; G: unused)
@@ -11221,10 +10953,12 @@ void DEFER_MAIN()
     if (!pdnVisRecv(m, D, frame, s, P, vz, dR, Rv, ngOnPlane)) return;   // (never: SELECT listed a surface)
     if ((sd0.x & PDN_SEL_CELL) != 0u) rt_fix_max = rg.rs_params.y;
     const uint count = uint(linfo.cam_pos.w);
-    // P's culling patch (the dense window's skips; SELECT read the same: the resolve ran before pass 15;
-    // #1052: the same jittered key and draw -- occKeyTexel of (m, frame))
+    // Only a dense window's light slot reads ocCull in pdnSampleLight. The other slots carry SELECT's
+    // chosen light already (including split lights, the probe and the dense emitter stratum).
+    // Keep the same jittered key and draw for dense light slots: occKeyTexel also sets g_occ_u.
+    const bool denseLight = (sd0.x & PDN_SEL_DENSE) != 0u && j < (sd0.x & 31u) && j < (sd0.z >> 24u);
     uint ocCull = OCC_NONE;
-    if (count > 0u && !litDbg(LDBG_NO_LOCAL) && occFrameOn())
+    if (denseLight && count > 0u && !litDbg(LDBG_NO_LOCAL) && occFrameOn())
     {
         uint slot0;
         const uint c = occFind(occKeyTexel(P, s.N, m, frame, slot0), slot0);
@@ -11267,6 +11001,9 @@ void DEFER_MAIN()
     const float nsl = shadowRecvLight(Rv, (S.flags & SH_POSITIONAL) != 0u ? normalize(S.pos - P) : S.pos, Nin);
     const bool trace = !((S.flags & SH_POSITIONAL) != 0u && (pdnOpts() & PDN_OPT_FACING) != 0u && nsl < -0.25);
     rt_block_t = 1e30;
+#ifdef RT_TRACK_BLOCKER
+    rt_block_dyn = false;   // (RenderVKReSTIRRadiance: PDN_VIS_MOVER below)
+#endif
 #if CLEAN_VQ_SHADOW == 1
     // ---- (#1039 bit 8) GEN: shadowSampleVis's set-up, then the sample as a COMPACT request instead of its walk
     //      (clean_vis_queue.glsl LIGHT-SAMPLE REQUEST: what the walk cannot rebuild from the texel / the light) ----
@@ -11280,7 +11017,7 @@ void DEFER_MAIN()
         float tg;
         uint pf;
         vqShPostOf(G.post, tg, pf);
-        const bool nvflip = dot(Nin, pc.u_cam_time.xyz - P) < 0.0;   // (rtVisibleSide's test: G.Nv = -Nin)
+        const bool nvflip = dot(Nin, Rv.cam - P) < 0.0;   // (rtVisibleSide's test: G.Nv = -Nin)
         const bool em = vqLi >= REGIR_EM_KEY;   // (an emitting triangle: always hard -- its point where the floor was)
         pf |= (nvflip ? VQ_SH_NVFLIP : 0u) | ((sd0.x & PDN_SEL_CELL) != 0u ? VQ_SH_CELL : 0u) | (em ? VQ_SH_EM : 0u)
             | ((em && (S.flags & SH_FIXTURE) != 0u) ? VQ_SH_EMFIX : 0u);
@@ -11319,7 +11056,11 @@ void DEFER_MAIN()
     // (#1052) bit 30: occlusion evidence for SHADE's note (before shadowRecvLightEnd: rt_block_t is the walk's)
     const bool ev = occEvidence(trace, vis, P);
     shadowRecvLightEnd();
-    pdn_vis[pdnVisBase(D) + tex * slots + j] = pdnVisPack(vis, ev);
+    uint mv = 0u;   // (RenderVKReSTIRRadiance) a fully blocked sample whose rays met a moving caster
+#ifdef RT_TRACK_BLOCKER
+    mv = pdnVisMover(vis, trace && rt_block_dyn);
+#endif
+    pdn_vis[pdnVisBase(D) + tex * slots + j] = pdnVisPack(vis, ev) | mv;
 }
 #elif CLEAN_SHADOW_STAGE == SH_STAGE_SUNVIS
 // ---- (#1031) SUNVIS (merged): the sun / moon sample -- the fused loop's sample 0 line for line: the
@@ -11337,7 +11078,17 @@ void DEFER_MAIN()
     if (any(greaterThanEqual(m, D))) return;
     const uint opts = pdnOpts();
     if ((opts & PDN_OPT_SUN_SKIP) != 0u) return;   // (the host skips the dispatch too)
-    if ((pdn_sel[pdnSelIndex(m, D)].x & PDN_SEL_SURF) == 0u) return;   // (SELECT stored the lit texel)
+    const uint recvFlags = pdn_sel[pdnSelIndex(m, D)].x;
+    if ((recvFlags & PDN_SEL_SURF) == 0u) return;   // (SELECT stored the lit texel)
+    if ((recvFlags & PDN_SEL_SUN_LIT) != 0u)
+    {
+        // SELECT used the same sun gate before any facet / receiver probes. It wrote this frame's
+        // lit value, including the no-caster radius; the denoiser still filters the sun channel.
+#if CLEAN_VQ_SHADOW == 1
+        vqCount(vqShRegion(), 1u, 1u, 0u);
+#endif
+        return;
+    }
     const uint frame = uint(g_draw_push.rtr.z + 0.5);
     SurfaceLit s;
     vec3 P;
@@ -11345,7 +11096,7 @@ void DEFER_MAIN()
     ShadowRecv Rv;
     bool ngOnPlane;
     if (!pdnVisRecv(m, D, frame, s, P, vz, dR, Rv, ngOnPlane)) return;
-    const vec3 cam = pc.u_cam_time.xyz;
+    const vec3 cam = CL_VIEW_EYE(linfo, P, pc.u_cam_time.xyz);
     const float time = pc.u_cam_time.w;
     const vec3 Nf = Rv.Ng;
     const float sw = g_draw_push.rtr2.x;
@@ -11527,7 +11278,7 @@ void DEFER_MAIN()
     }
     CLK_SURF();
     const vec3 P = deferPosition(rp);
-    const vec3 V = normalize(pc.u_cam_time.xyz - P);
+    const vec3 V = linfo.cam_fwd.w > 0.5 ? -linfo.cam_fwd.xyz : normalize(pc.u_cam_time.xyz - P);
     const vec3 Ng = dot(s.Ng, V) < 0.0 ? -s.Ng : s.Ng;
     const float vz = dot(P - linfo.cam_pos.xyz, linfo.cam_fwd.xyz);
     // The LOCAL pass's own localLights inputs (lightSurface's common tail).
@@ -11542,11 +11293,14 @@ void DEFER_MAIN()
     const vec3 diffuseColor  = base * (1.0 - 0.04) * (1.0 - metal);
     const vec3 specularColor = mix(vec3(0.04), base, metal);
     const float specRough = pbr ? rough : clamp(1.0 - ls.gloss, 0.0, 1.0);   // (dsSpecRough)
+    // (RADIANCE MODE, pdnRadOn: SHADE / the fused kernel store num alone, demodulated by these)
+    const bool radOn = pdnRadOn();
+    const vec3 radDf = pdnRadDiff(pbr, base, diffuseColor), radSf = pdnRadSpec(pbr, specularColor, ls);
     CLK_MARK(GBUF);
 
     // ---- THE RECEIVER (light-independent, once per texel): position, visible-side normal,
     //      pixel footprint, view-slope offset; the self-shadow owner, the noise phase ----
-    const vec3 cam = pc.u_cam_time.xyz;
+    const vec3 cam = CL_VIEW_EYE(linfo, P, pc.u_cam_time.xyz);
     const float time = pc.u_cam_time.w;
     const float dR = defTexel(uDepthG, rp).r;
 #if CLEAN_SHADOW_STAGE == SH_STAGE_FUSED   // (#1031: the walks' receiver -- VIS / SUNVIS build their own)
@@ -11798,6 +11552,7 @@ void DEFER_MAIN()
         }
         CLK_MARK(LOCAL);
     }
+    if (radOn && nCand == 0.0) W0 = 0.0;
     // (#869) the moved lights' share of this texel's unshadowed target (before the reuse below
     // replaces Wsum with the reused sample's weight): MOT w, the denoiser's moving-light history cap
     const float fMoveL = (Wmov > 0.0 && Wsum > 0.0) ? clamp(Wmov / Wsum, 0.0, 1.0) : 0.0;
@@ -11810,7 +11565,8 @@ void DEFER_MAIN()
     // frames, a 80 / 20 one ~10. The flickering light's shadow did not move: its rays stay one
     // (RS_MOVE_RAYS is for rsMoved lights only).
     const float fFlk = (Wflk > 0.0 && Wsum > 0.0)
-                     ? clamp(2.0 * min(Wflk / Wsum, 1.0 - wMax / Wsum), 0.0, 1.0) : 0.0;
+                     ? (radOn ? clamp(Wflk / Wsum, 0.0, 1.0)
+                              : clamp(2.0 * min(Wflk / Wsum, 1.0 - wMax / Wsum), 0.0, 1.0)) : 0.0;
     // the share the denoiser's moving-light rule and the dense evaluation read (MOT w)
     const float fMove = max(fMoveL, fFlk);
     // (#1052) THE STRONGEST CANDIDATE'S SHARE of this texel's target (before the reuse replaces Wsum): the
@@ -11838,6 +11594,7 @@ void DEFER_MAIN()
     //      texel with a surface (the cluster walk's too: in-grid neighbours may reuse a record).
     const uint rsf = rsResFlags();
     const bool rsResOn = rsFrameOn() && (rsf & RS_RES_ON) != 0u;   // (uniform)
+    const float WsumF = Wsum;   // (this frame's candidates' sum, before the reuse replaces Wsum: RADIANCE K = 2 below)
     uint rsY = 0xFFFFFFFFu;
     float rsM = 0.0;
     bool reused = false;
@@ -11848,6 +11605,10 @@ void DEFER_MAIN()
         float wsumC = rsY != 0xFFFFFFFFu ? Wsum : 0.0;   // p(y0) W0 M0 = p Wsum / p x 1
         float Msum = 1.0;
         uint keptT = 0u, keptS = 0u;
+        // (RS_F_VIS_REUSE, radiance mode) the TEMPORAL tap whose reservoir's pick was found blocked last frame
+        // (W 0): its M joins Msum at weight 0 -- the combination counts those samples as the zeros they were
+        const bool visReuse = (rg.rs_cfg.z & RS_F_VIS_REUSE) != 0u;   // (a header word: uniform)
+        uint keptZ = 0u;
         const bool canReuse = rsCell != REGIR_NO_CELL && (rsf & RS_RES_PREV) != 0u && ssr.taa_params.z < 0.5
                            && (rg.rs_cfg.z & RS_F_TEMPORAL) != 0u && !(exactOk && nCand <= float(K));
         if (canReuse)
@@ -11875,6 +11636,7 @@ void DEFER_MAIN()
                     wsumC += wt; Msum += lM; ++keptT;
                     if (pdnRand(rng) * wsumC < wt) { rsY = ly; py = lp; }
                 }
+                else if (visReuse && lM > 0.0) { Msum += lM; ++keptZ; }
                 // SPATIAL (5c): last frame's neighbours of the reprojected texel, on this plane
                 if ((rg.rs_cfg.z & RS_F_SPATIAL) != 0u)
                 {
@@ -11894,6 +11656,9 @@ void DEFER_MAIN()
                             wsumC += ws; Msum += lM; ++keptS;
                             if (pdnRand(rng) * wsumC < ws) { rsY = ly; py = lp; }
                         }
+                        // (RS_F_VIS_REUSE: a NEIGHBOUR's blocked pick is skipped, its M not counted -- its blocker
+                        //  need not block this texel: counted, every shadow edge darkened a reuse-radius halo
+                        //  beside it. Only the temporal tap -- this very point -- counts its zero.)
                     }
                 }
             }
@@ -11901,7 +11666,9 @@ void DEFER_MAIN()
         float rsW = (rsY != 0xFFFFFFFFu && py > 0.0 && wsumC > 0.0) ? wsumC / (py * Msum) : 0.0;
         if (!(rsW > 0.0) || !(rsW < 3.0e38)) { rsY = 0xFFFFFFFFu; rsW = 0.0; }
         rsM = min(Msum, float(max(rg.rs_cfg2.x, 1u)));
-        if (canReuse && rsY != 0xFFFFFFFFu && keptT + keptS > 0u)
+        // (RS_F_VIS_REUSE: a zero-weight tap counts -- the pick is shaded with the combination's W, Msum included,
+        //  exactly the reservoir stored below)
+        if (canReuse && rsY != 0xFFFFFFFFu && keptT + keptS + keptZ > 0u)
         {
             reused = true;
             pick0 = rsY; pp0 = py;
@@ -11945,7 +11712,14 @@ void DEFER_MAIN()
             dOff = min(uint(pdnRand(ds) * float(dWin)), dWin - 1u);
         }
     }
-    const uint Ke = reused ? 1u : K;   // (a reused reservoir: ONE final sample)
+    // (RADIANCE MODE, RenderVKProjStochasticSamples 2) A FIXED TWO-RAY BUDGET with a reused reservoir: the
+    // reservoir's pick (weight W / 2) AND this frame's second fresh RIS pick (weight Wsum / (2 p), its own
+    // candidates' sum WsumF) -- two unbiased estimates of the same shadowed light, averaged. For the ratio one
+    // reused pick was the whole sample (its num / den cancel the weight); in radiance mode the second ray
+    // halves the variance wherever the lights are many, at a constant 2 rays per texel.
+    const bool rad2 = radOn && reused && K >= 2u && pick1 != 0xFFFFFFFFu && pp1 > 0.0 && WsumF > 0.0
+                   && WsumF < 3.0e38;
+    const uint Ke = (reused && !rad2) ? 1u : K;   // (a reused reservoir: ONE final sample -- RADIANCE K = 2: two)
     const bool exact = exactOk && nCand <= float(K) && !reused;
     if (exact) dC = 0u;   // (every candidate is evaluated already: no noise to remove)
     const bool dense = dC != 0u;
@@ -11971,7 +11745,14 @@ void DEFER_MAIN()
         sel.f0 = dScale; sel.f1 = ppE; sel.f2 = WsumE;
     }
     else if (exact) { sel.u0 = ex0; sel.u1 = ex1; sel.u2 = (exi0 & 0xFFFFu) | (exi1 << 16u); }
-    else { sel.u0 = pick0; sel.u1 = pick1; sel.f0 = pp0; sel.f1 = pp1; sel.f2 = Wsum; }
+    else
+    {
+        sel.u0 = pick0; sel.u1 = pick1; sel.f0 = pp0; sel.f1 = pp1; sel.f2 = Wsum;
+        // (rad2 above) pdnSampleLight weighs pick j by f2 / (Ke p_j) with f2 the reservoir's W p(y): the fresh
+        // pick's p is stored scaled by f2 / WsumF so its weight comes out WsumF / (2 p1). (The radiance firefly
+        // clamp then compares it against that scaled target: the two sums estimate the same light set, O(1).)
+        if (rad2) sel.f1 = pp1 * (Wsum / WsumF);
+    }
 #if CLEAN_SHADOW_STAGE == SH_STAGE_SELECT
     // ---- (#1031) SELECT's outputs: the descriptor (the others regenerate the sample list from it) with
     //      the GATE -- which light samples have light at P (the fused loop's terms test before its ray:
@@ -12033,6 +11814,20 @@ void DEFER_MAIN()
         if (reused) q0.x |= PDN_SEL_REUSED;
         if (Ke == 2u) q0.x |= PDN_SEL_KE2;
         if (rsCell != REGIR_NO_CELL) q0.x |= PDN_SEL_CELL;
+#if DEFER_SHADOW_MERGE
+        // SUNVIS would reconstruct this same surface and depth, then reject it at pdnSunGate.
+        // Decide here while they are live: avoid its G-buffer reload and facet-normal fallback ray.
+        // Weak-sun skip leaves the channel untouched as before (the host also skips its denoiser).
+        if ((opts & PDN_OPT_SUN_SKIP) == 0u)
+        {
+            float sunFade;
+            if (!pdnSunGate(s, vz, g_draw_push.rtr2.x, atmosLightDir(), sunFade))
+            {
+                q0.x |= PDN_SEL_SUN_LIT;
+                imageStore(uPdnIn, ivec3(m, 2), vec4(1.0, 1.0, 1.0, pdnSunEncA(-1.0, false)));
+            }
+        }
+#endif
         uint li4 = 0u;
         [[unroll]] for (uint k = 0u; k < PDN_SPLIT_MAX; ++k)
             if (k < spN) li4 |= (spLi[k] & 255u) << (8u * k);
@@ -12085,6 +11880,9 @@ void DEFER_MAIN()
 #else
     const uint s0 = 0u;
 #endif
+    // (RS_F_VIS_REUSE, radiance mode) the projector / point-light samples' outcome by light: one whose ray found
+    // it fully blocked (rvOccLi), one that reached it (rvVisLi) -- the reservoir store after the loop
+    uint rvOccLi = 0xFFFFFFFFu, rvVisLi = 0xFFFFFFFFu;
     [[dont_unroll]] for (uint si = 0u; si < s0 + nProj + spN + nOcP; ++si)
     {
         ShadowSample S;
@@ -12238,6 +12036,24 @@ void DEFER_MAIN()
             spV[spT] = cl > 1e-8 ? clamp(pdnLum(cc * vis) / cl, 0.0, 1.0) : -1.0;
             continue;
         }
+        if (sLi != 0xFFFFFFFFu)   // (RS_F_VIS_REUSE: a light sample with terms here -- traced, or facing away)
+        {
+            // (a sample blocked by a MOVING caster -- an avatar, an attachment, a moved prim -- is no verdict for
+            //  the next frames: the caster will have moved; zeroed, the reservoir's M held the texel's estimate
+            //  down for frames after the avatar's shadow had passed -- the dark crawl around avatars)
+#if CLEAN_SHADOW_STAGE == SH_STAGE_SHADE
+            const bool rvMover = pdnVisMoverOf(visW);
+#elif DEFER_SHADOW_MERGE
+            const bool rvMover = rt_block_dyn;
+#else
+            const bool rvMover = false;
+#endif
+            if (max(max(vis.r, vis.g), vis.b) > 0.0) rvVisLi = sLi;
+            else if (!rvMover)                       rvOccLi = sLi;
+        }
+        // (RADIANCE MODE) a RIS pick's firefly clamp against its own target (pdnRadClamp: the picks' targets
+        // pp0 / pp1, a reused reservoir's py in pp0; the exact list keeps its terms; no dense window here)
+        if (radOn && !sel.exact && !sel.dense) pdnRadClamp(si - s0 == 0u ? sel.f0 : sel.f1, radDf, radSf, dt, st);
         numD += dt * vis * wgt; denD += dt * wgt;
         numS += st * vis * wgt; denS += st * wgt;
         const float hl = pdnLum(st) * wgt + 1e-6;
@@ -12255,6 +12071,19 @@ void DEFER_MAIN()
     const float rsM = uintBitsToFloat(sd3.y);
     const float rsDom = uintBitsToFloat(sd3.w);   // (#1052: SELECT's strongest-candidate share)
 #endif
+    // (RS_F_VIS_REUSE, radiance mode) VISIBILITY REUSE: this texel's reservoir (SELECT / the selection above stored
+    // it, this parity) holds a light whose sample here was fully blocked -- no sample of it reached it -- so
+    // the reservoir is re-stored with W = 0, its M kept: next frame its texel counts its M at weight 0 (rsTap,
+    // the temporal tap) and neither it nor its neighbours pick it. Without it an occluded pick (a projector of the next room, in the
+    // same grid cell) kept its full weight for up to the M cap in frames and the spatial taps spread it: a
+    // neighbourhood of exact zeros beside one of the visible light's over-weighted picks, held for many
+    // frames -- blotches no denoiser history averages away. The light still lights P unshadowed, so the
+    // fresh candidates keep proposing it (a light coming into view is found again at once). Bias: the
+    // ReSTIR paper's biased variant (a blocked neighbour's zero counted here). A light sample without terms
+    // here (a black gobo texel: no ray) says nothing: untouched.
+    if (rsResOn && (rg.rs_cfg.z & RS_F_VIS_REUSE) != 0u && rvOccLi != 0xFFFFFFFFu && rvOccLi == rsYl
+        && rvVisLi != rsYl)
+        rs_res[rsResIndex(m, D, uint(par))] = rsResPack(rsYl, rsM, 0.0);
     // (#869 OCCLUSION CULL, THE POINT LIGHTS' SHARE above) every POINT light this texel's patch culls (its
     // draw: occCulled, the same g_occ_u that kept it out of the candidates, the reservoirs, the split and the
     // dense window) that the lit kernels shade with the ratio here (deferRsStoch: in the set, no record, in
@@ -12320,6 +12149,17 @@ void DEFER_MAIN()
     const bool convOk = (rg.rs_cfg.z & RS_F_CONV_ANY) != 0u || rsDom >= RS_CONV_DOM;
     if (reused && a0 > 0.0 && pick0 < REGIR_EM_KEY && convOk) a0 = 1000.0 + rsM;
     vec3 l0 = pdnRatio(numD, denD);
+    vec3 l1 = pdnRatio(numS, denS);
+    float a1 = pdnInfoSpecA(hitDist, nCand, denS, infoFix);
+    if (radOn)
+    {   // (RADIANCE MODE, pdnRadOn above) the shadowed light itself, demodulated; a = the candidate count (no
+        // no-information negation, no converged marker: the host runs the denoiser with radiance semantics)
+        // and the hit distance
+        l0 = pdnSane(numD / radDf);
+        l1 = pdnSane(numS / radSf);
+        a0 = nCand;
+        a1 = hitDist;
+    }
     if ((opts & PDN_OPT_DBG_RS) != 0u)   // (RenderVKDenoiseDebug 7: the ReSTIR view)
     {
         const uint yl = rsYl;
@@ -12334,7 +12174,7 @@ void DEFER_MAIN()
         a0 = 1.0;
     }
     imageStore(uPdnIn, ivec3(m, 0), vec4(l0, a0));
-    imageStore(uPdnIn, ivec3(m, 1), vec4(pdnRatio(numS, denS), pdnInfoSpecA(hitDist, nCand, denS, infoFix)));
+    imageStore(uPdnIn, ivec3(m, 1), vec4(l1, a1));
 #if DEFER_SHADOW_MERGE
     if ((opts & PDN_OPT_SUN_SKIP) == 0u) imageStore(uPdnIn, ivec3(m, 2), vec4(sunOut, pdnSunEncA(srad, sdyn)));
     CLK_MARK(SUNVIS);
@@ -12470,7 +12310,7 @@ void DEFER_MAIN()
     if (s.model == SURF_FULLBRIGHT) { CLK_MARK(GBUF); return; }   // (unlit: no local lights)
     CLK_SURF();
     const vec3 P = deferPosition(px);
-    const vec3 V = normalize(pc.u_cam_time.xyz - P);
+    const vec3 V = linfo.cam_fwd.w > 0.5 ? -linfo.cam_fwd.xyz : normalize(pc.u_cam_time.xyz - P);
     CLK_MARK(GBUF);
     // lightSurface's common tail inputs (clean_surface_light.glsl): cel as lightSurface sets it,
     // PBR base / metal / rough + no legacy specular, legacy base + metal 0 / rough 1 + its spec.

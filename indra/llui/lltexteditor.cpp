@@ -923,16 +923,31 @@ bool LLTextEditor::handleMiddleMouseDown(S32 x, S32 y, MASK mask)
         setFocus(true);
     }
 
-    if (!LLTextBase::handleMouseDown(x, y, mask))
+    if (LLTextBase::handleMouseDown(x, y, mask))
     {
-        if( canPastePrimary() )
-        {
-            setCursorAtLocalPos( x, y, true );
-            // does not rely on focus being set
-            pastePrimary();
-        }
+        return true;
     }
-    return true;
+
+    auto paste_primary = [&]()
+    {
+        if (!canPastePrimary())
+        {
+            return false;
+        }
+        setCursorAtLocalPos( x, y, true );
+        // does not rely on focus being set
+        pastePrimary();
+        return true;
+    };
+    // Paste the primary selection, or middle-button autoscroll through the scroller (#1144).
+    // On Linux middle-click paste is the desktop's convention and comes first; elsewhere the
+    // primary selection is only the viewer's own, and scrolling comes first where the text can.
+    // Neither: not used, so a scrolling view around the editor may take it.
+#if LL_LINUX
+    return paste_primary() || LLTextBase::handleMiddleMouseDown(x, y, mask);
+#else
+    return LLTextBase::handleMiddleMouseDown(x, y, mask) || paste_primary();
+#endif
 }
 
 

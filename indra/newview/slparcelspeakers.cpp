@@ -33,10 +33,8 @@
 #include "llviewerparcelmgr.h"
 #include "llviewerregion.h"
 #include "llworld.h"
-#include "message.h"
 
 #include <algorithm>
-#include <array>
 #include <cctype>
 #include <charconv>
 #include <cmath>
@@ -56,18 +54,10 @@ constexpr F64 kPropsBackoff = 120.0;
 constexpr F64 kPropsStale = 300.0;          // re-verify owner / group this often anyway
 constexpr F64 kPropsRetagFresh = 30.0;      // a retag re-verifies when the answer is older than this
 constexpr F64 kParcelRate = 4.0;            // parcel-by-position requests per second
-constexpr F64 kParcelTimeout = 10.0;
 constexpr F64 kParcelTtl = 120.0;           // a cell's parcel answer is reused this long
 constexpr U32 kMaxCells = 64;
 constexpr U32 kDirtyMax = 1024;             // more pending hover-text changes: rescan instead
 constexpr size_t kMaxGroupLen = 24;
-
-// Parcel-by-position requests use sequence ids [kSeqBase - kSeqSlots + 1, kSeqBase]: between
-// COLLISION_NOT_ON_LIST_PARCEL_SEQ_ID (-40000) and HOVERED_PARCEL_SEQ_ID (-50000), unused there.
-constexpr S32 kSeqBase = -45000;
-constexpr U32 kSeqSlots = 64;
-static_assert(kSeqBase - (S32)kSeqSlots > HOVERED_PARCEL_SEQ_ID && kSeqBase < COLLISION_NOT_ON_LIST_PARCEL_SEQ_ID,
-              "speaker parcel sequence ids must not collide with LL's");
 
 using Tag = SLParcelSpeakers::Tag;
 using Speaker = SLParcelSpeakers::Speaker;
@@ -132,7 +122,7 @@ struct Cell
     S32  localId = -1;
     LLUUID owner;               // the parcel's OwnerID (the group for group-owned land)
     F64  expires = 0.0;
-    S32  slot = -1;             // request in flight
+    bool pending = false;
     F64  requestedAt = 0.0;
 };
 
@@ -153,7 +143,7 @@ struct Ctl
     SLParcelSpeakers::EOutside outside = SLParcelSpeakers::OUTSIDE_SILENT;
 
     std::unordered_map<U32, Cell> cells;            // key: row << 16 | col, agent region only
-    std::array<S64, kSeqSlots> slotCell;            // cell key per in-flight slot, -1 free
+    U64 parcelGeneration = 0;                     // invalidates outstanding cell requests
 
     std::vector<Speaker> out;
     U32 generation = 0;
@@ -163,7 +153,7 @@ struct Ctl
     SLParcelSpeakers::Stats stats;
     std::string lastSummary;
 
-    Ctl() { slotCell.fill(-1); stats.cap = SLParcelSpeakers::kMaxCandidates; }
+    Ctl() { stats.cap = SLParcelSpeakers::kMaxCandidates; }
 };
 Ctl& ctl()
 {
@@ -273,7 +263,7 @@ void clearAll(Ctl& c)
     c.dirty.clear();
     c.dirtySet.clear();
     c.cells.clear();
-    c.slotCell.fill(-1);
+    ++c.parcelGeneration;
     if (!c.out.empty()) ++c.generation;
     c.out.clear();
     c.regionId.setNull();
@@ -406,34 +396,33 @@ U32 cellKey(const LLVector3& pos_region, F32 width)
 
 void requestCell(Ctl& c, LLViewerRegion* region, U32 key, Cell& cell, F64 now)
 {
-    S32 slot = -1;
-    for (U32 i = 0; i < kSeqSlots; ++i)
-    {
-        if (c.slotCell[i] < 0) { slot = (S32)i; break; }
-    }
-    if (slot < 0) return;
     const F32 west = PARCEL_GRID_STEP_METERS * (F32)(key & 0xffff);
     const F32 south = PARCEL_GRID_STEP_METERS * (F32)(key >> 16);
-
-    LLMessageSystem* msg = gMessageSystem;
-    msg->newMessageFast(_PREHASH_ParcelPropertiesRequest);
-    msg->nextBlockFast(_PREHASH_AgentData);
-    msg->addUUIDFast(_PREHASH_AgentID, gAgent.getID());
-    msg->addUUIDFast(_PREHASH_SessionID, gAgent.getSessionID());
-    msg->nextBlockFast(_PREHASH_ParcelData);
-    msg->addS32Fast(_PREHASH_SequenceID, kSeqBase - slot);
-    msg->addF32Fast(_PREHASH_West, west);
-    msg->addF32Fast(_PREHASH_South, south);
-    msg->addF32Fast(_PREHASH_East, west + PARCEL_GRID_STEP_METERS);
-    msg->addF32Fast(_PREHASH_North, south + PARCEL_GRID_STEP_METERS);
-    msg->addBOOL("SnapSelection", false);
-    msg->sendReliable(region->getHost());
-
-    c.slotCell[slot] = (S64)key;
-    cell.slot = slot;
+    cell.pending = true;
     cell.requestedAt = now;
     c.parcelTokens -= 1.0;
     ++c.stats.parcelLookups;
+    const LLUUID region_id = region->getRegionID();
+    const U64 generation = c.parcelGeneration;
+    const LLVector3d position = region->getPosGlobalFromRegion(
+        LLVector3(west + PARCEL_GRID_STEP_METERS * .5f, south + PARCEL_GRID_STEP_METERS * .5f, 0.f));
+    LLViewerParcelMgr::instance().requestParcelIdentity(position,
+        [key, region_id, generation, now](const LLSD& identity)
+        {
+            Ctl& state = ctl();
+            auto it = state.cells.find(key);
+            if (!state.enabled || state.regionId != region_id || state.parcelGeneration != generation ||
+                it == state.cells.end() || !it->second.pending || it->second.requestedAt != now)
+                return;
+            Cell& result = it->second;
+            result.pending = false;
+            if (!identity.isDefined())
+                return; // The shared service handles timeout and capacity failures.
+            result.known = true;
+            result.localId = identity["local_id"].asInteger();
+            result.owner = identity["owner_id"].asUUID();
+            result.expires = LLFrameTimer::getElapsedSeconds() + kParcelTtl;
+        });
 }
 
 // Whether a trusted speaker at `pos_global` stands where it may play this parcel's stream.
@@ -456,21 +445,16 @@ S32 onParcel(Ctl& c, LLViewerRegion* region, const LLVector3d& pos_global, F64 n
         {
             // Evict an expired / unanswered cell; none: wait.
             auto victim = std::find_if(c.cells.begin(), c.cells.end(), [now](const auto& kv)
-                                       { return kv.second.slot < 0 && (!kv.second.known || kv.second.expires < now); });
+                                       { return !kv.second.pending && (!kv.second.known || kv.second.expires < now); });
             if (victim == c.cells.end()) return -1;
             c.cells.erase(victim);
         }
         it = c.cells.emplace(key, Cell()).first;
     }
     Cell& cell = it->second;
-    if (cell.slot >= 0 && now - cell.requestedAt > kParcelTimeout)
-    {
-        c.slotCell[cell.slot] = -1;
-        cell.slot = -1;
-    }
     if (cell.known && cell.expires >= now)
         return (cell.owner.notNull() && cell.owner == c.parcelOwner) ? 1 : 0;
-    if (cell.slot < 0 && c.parcelTokens >= 1.0)
+    if (!cell.pending && c.parcelTokens >= 1.0)
         requestCell(c, region, key, cell, now);
     // An expired answer still stands until the new one arrives.
     if (cell.known)
@@ -493,7 +477,7 @@ void heavyPass(Ctl& c, F64 now)
     if (region->getRegionID() != c.regionId)
     {
         c.cells.clear();
-        c.slotCell.fill(-1);
+        ++c.parcelGeneration;
     }
     const bool parcel_changed = region->getRegionID() != c.regionId || parcel->getLocalID() != c.parcelId
                                 || parcel->getOwnerID() != c.parcelOwner || parcel->getGroupID() != c.parcelGroup;
@@ -502,7 +486,7 @@ void heavyPass(Ctl& c, F64 now)
         if (parcel->getOwnerID() != c.parcelOwner)
         {
             c.cells.clear();   // (the cached answers compare against the old owner)
-            c.slotCell.fill(-1);
+            ++c.parcelGeneration;
         }
         c.regionId = region->getRegionID();
         c.parcelId = parcel->getLocalID();
@@ -875,33 +859,6 @@ bool SLParcelSpeakers::onPropertiesFamily(const LLUUID& object_id, const LLUUID&
 }
 
 // static
-bool SLParcelSpeakers::isSpeakerParcelSeq(S32 sequence_id)
-{
-    return sequence_id <= kSeqBase && sequence_id > kSeqBase - (S32)kSeqSlots;
-}
-
-// static
-void SLParcelSpeakers::onParcelProperties(S32 sequence_id, const LLViewerRegion* region, S32 local_id,
-                                          const LLUUID& owner_id, const LLUUID& group_id, bool group_owned)
-{
-    if (!isSpeakerParcelSeq(sequence_id)) return;
-    Ctl& c = ctl();
-    const U32 slot = (U32)(kSeqBase - sequence_id);
-    const S64 key = c.slotCell[slot];
-    c.slotCell[slot] = -1;
-    if (key < 0 || !region || region->getRegionID() != c.regionId) return;   // stale (region changed)
-    auto it = c.cells.find((U32)key);
-    if (it == c.cells.end() || it->second.slot != (S32)slot) return;
-    Cell& cell = it->second;
-    cell.slot = -1;
-    cell.known = true;
-    cell.localId = local_id;
-    cell.owner = owner_id;   // (group-owned land: OwnerID is the group, as for the agent parcel)
-    cell.expires = LLFrameTimer::getElapsedSeconds() + kParcelTtl;
-    (void)group_id;
-    (void)group_owned;
-}
-
 // static
 void SLParcelSpeakers::update()
 {

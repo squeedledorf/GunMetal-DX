@@ -55,7 +55,7 @@ const F64 Ndens     = 2.55e25;
 const F64 Ndens2    = Ndens*Ndens;
 
 class LLFace;
-class LLHaze;
+class LLLegacyHaze;
 
 LL_FORCE_INLINE LLColor3 refr_ind_calc(const LLColor3 &wave_length)
 {
@@ -71,17 +71,17 @@ LL_FORCE_INLINE LLColor3 refr_ind_calc(const LLColor3 &wave_length)
 }
 
 
-class LLHaze
+class LLLegacyHaze
 {
 public:
-    LLHaze() : mG(0), mFalloff(1), mAbsCoef(0.f) {mSigSca.setToBlack();}
-    LLHaze(const F32 g, const LLColor3& sca, const F32 fo = 2.f) :
+    LLLegacyHaze() : mG(0), mFalloff(1), mAbsCoef(0.f) {mSigSca.setToBlack();}
+    LLLegacyHaze(const F32 g, const LLColor3& sca, const F32 fo = 2.f) :
             mG(g), mSigSca(0.25f/F_PI * sca), mFalloff(fo), mAbsCoef(0.f)
     {
         mAbsCoef = color_intens(mSigSca) / sAirScaIntense;
     }
 
-    LLHaze(const F32 g, const F32 sca, const F32 fo = 2.f) : mG(g),
+    LLLegacyHaze(const F32 g, const F32 sca, const F32 fo = 2.f) : mG(g),
             mSigSca(0.25f/F_PI * LLColor3(sca, sca, sca)), mFalloff(fo)
     {
         mAbsCoef = 0.01f * sca / sAirScaAvg;
@@ -242,10 +242,10 @@ public:
     void init();
     void updateFog(const F32 distance, const LLVector3& tosun);
 
-    const LLHaze& getHaze() const                    { return mHaze; }
-    LLHaze& getHaze()                                { return mHaze; }
+    const LLLegacyHaze& getHaze() const                    { return mHaze; }
+    LLLegacyHaze& getHaze()                                { return mHaze; }
     F32 getHazeConcentration() const                 { return mHazeConcentration; }
-    void setHaze(const LLHaze& h)                    { mHaze = h; }
+    void setHaze(const LLLegacyHaze& h)                    { mHaze = h; }
     void setFogRatio(const F32 fog_ratio)            { mFogRatio = fog_ratio; }
 
     F32      getFogRatio() const                     { return mFogRatio; }
@@ -261,7 +261,7 @@ protected:
 
     void     calcSkyColorWLVert(const LLSettingsSky::ptr_t &psky, LLVector3 & Pn, AtmosphericsVars& vars);
 
-    LLHaze              mHaze;
+    LLLegacyHaze              mHaze;
     F32                 mHazeConcentration;
     F32                 mCloudDensity;
     F32                 mWind;

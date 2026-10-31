@@ -40,6 +40,35 @@ class LLPreeditor;
 class LLWindowSDL final : public LLWindow
 {
 public:
+    // Legacy window services (dialogs, caret, cursor) scoped to a UI target.
+    // This carries no toolkit tree or ownership and always restores main state.
+    class ScopedUIWindow
+    {
+    public:
+        ScopedUIWindow(LLWindowSDL& owner, SDL_Window* target, const LLCoordWindow* cursor);
+        ~ScopedUIWindow() { restore(); }
+        void restore();
+        ScopedUIWindow(const ScopedUIWindow&) = delete;
+        ScopedUIWindow& operator=(const ScopedUIWindow&) = delete;
+    private:
+        LLWindowSDL& mOwner;
+        SDL_Window* mPrevious;
+        const LLCoordWindow* mCursor;
+        bool mFullscreen, mExclusive, mDialog, mActive = true;
+    };
+    SDL_Window* textInputWindow() const { return mTextInputWindow; }
+    LLPreeditor* preeditor() const { return mPreeditor; }
+    bool preeditActive() const { return mPreeditActive; }
+    void setPreeditActive(bool active) { mPreeditActive = active; }
+    void setUIKeyData(U32 key, U32 modifiers, bool character = false)
+    {
+        mKeyVirtualKey = key == SDLK_RETURN2 || key == SDLK_KP_ENTER ? SDLK_RETURN : key;
+        mKeyModifiers = modifiers;
+        mInKeyCharPass = character;
+    }
+    void setTextInputWindow(SDL_Window* window);
+    void interruptLanguageTextInput() override;
+    static void setAppIcon(SDL_Window* window);
     void show() override;
     void hide() override;
     void restore() override;
@@ -90,6 +119,7 @@ public:
     void hideCursorUntilMouseMove() override;
 
     void updateCursor() override;
+    void setUseSystemTextCursor(bool use_system) override;
 
     void captureMouse() override;
     void releaseMouse() override;
@@ -104,7 +134,9 @@ public:
     bool isClipboardTextAvailable() override;
     bool pasteTextFromClipboard(LLWString &dst) override;
     bool copyTextToClipboard(const LLWString &src) override;
-    bool copyImageToClipboard(const LLImageRaw* image) override; // <GMDX>
+    bool copyImageToClipboard(const LLImageRaw* image) override;
+    bool isClipboardImageAvailable() override;
+    bool pasteImageFromClipboard(LLPointer<LLImageRaw>& dst) override;
 
     bool isPrimaryTextAvailable() override;
     bool pasteTextFromPrimary(LLWString &dst) override;
@@ -157,9 +189,11 @@ public:
 
     void *getPlatformWindow() override;
 
-    // Raw SDL_Window* — needed by the experimental Vulkan path to create a
-    // VkSurfaceKHR via SDL_Vulkan_CreateSurface. Returns nullptr if not created.
+    // Current service target, which may be auxiliary inside ScopedUIWindow.
     SDL_Window* getSDLWindow() const { return mWindow; }
+    // Actual viewer window, independent of the scoped service target. Borrowed
+    // until destroyContext; nullptr before creation/after teardown.
+    SDL_Window* getMainSDLWindow() const { return mMainWindow; }
 
     void bringToFront() override;
 
@@ -230,7 +264,9 @@ protected:
     bool mInRelativeMouseMode = false;
 
     SDL_Window *mWindow = nullptr;
+    SDL_Window *mMainWindow = nullptr; // lifecycle identity; never scoped to auxiliary UI
     SDL_Cursor *mSDLCursors[UI_CURSOR_COUNT];
+    bool mUseSystemTextCursor = false;
 
     std::string mWindowTitle;
     F32 mOriginalAspectRatio = 1.0f;
@@ -254,6 +290,9 @@ private:
 
     bool mLanguageTextInputAllowed = false;
     LLPreeditor* mPreeditor = nullptr;
+    SDL_Window* mTextInputWindow = nullptr;
+    bool mPreeditActive = false;
+    const LLCoordWindow* mUICursorOverride = nullptr;
 
     void tryFindFullscreenSize(int &aWidth, int &aHeight);
 

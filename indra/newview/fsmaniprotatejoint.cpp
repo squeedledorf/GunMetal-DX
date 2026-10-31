@@ -1147,7 +1147,6 @@ void FSManipRotateJoint::highlightManipulators(S32 x, S32 y)
 
     // Variables to help choose the best candidate.
     F32 min_select_distance = 0.f;
-    F32 cur_select_distance = 0.f;
 
     // These vectors will hold the intersection points on planes defined by each axis.
     LLVector3 mouse_dir_x, mouse_dir_y, mouse_dir_z, intersection_roll;

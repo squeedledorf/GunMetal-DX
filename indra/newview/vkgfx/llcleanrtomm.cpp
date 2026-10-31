@@ -1109,8 +1109,7 @@ void LLCleanRTVK::ommRecordBuilds(VkCommandBuffer cmd, const std::function<VkDev
     if (plan.empty()) return;
     // ---- bake: zero the data, one workgroup per micromap triangle ----
     VkDeviceSize data_end = 0;
-    uint32_t rec_n = 0;
-    for (const OmmBuild& b : plan) { data_end = std::max(data_end, b.dataOff + b.dataBytes); rec_n += b.prims; }
+    for (const OmmBuild& b : plan) { data_end = std::max(data_end, b.dataOff + b.dataBytes); }
     vkCmdFillBuffer(cmd, db.buffer, 0, alignO(data_end, 4), 0);
     barrier2(cmd, VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
              VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);

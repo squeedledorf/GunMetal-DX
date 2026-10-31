@@ -216,6 +216,7 @@ public:
         viewer_media_t mMediaSource;
         S32 mTextureWidth,
             mTextureHeight;
+        LLCoordGL mTextInputPoint;
 
         class LLWindowShade* mWindowShade;
         LLHandle<LLContextMenu> mContextMenuHandle;

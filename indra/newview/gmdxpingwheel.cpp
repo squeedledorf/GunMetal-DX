@@ -43,6 +43,9 @@
 #include "lltoolcomp.h"
 #include "llviewercontrol.h"
 #include "llviewerwindow.h"
+#include "slcombatfx.h"
+
+// Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4 (CombatFX).
 
 namespace
 {
@@ -149,31 +152,33 @@ void tick(void*)
         let_go();
         return;
     }
-    static LLCachedControl<S32> hold_ms(gSavedSettings, "GMDXPingWheelHoldMs", 250);
-    if (sPhase == Phase::Pressed && LLFrameTimer::getTotalSeconds() - sPressedAt >= llclamp((S32)hold_ms, 50, 2000) / 1000.0)
+    constexpr S32 hold_ms = 250;   // (Slipstream: fixed; was GMDXPingWheelHoldMs)
+    if (sPhase == Phase::Pressed && LLFrameTimer::getTotalSeconds() - sPressedAt >= hold_ms / 1000.0)
         open_wheel();
 }
 } // namespace
 
-void GMDXPingWheel::onKey(const LLKeyPressState& state)
+bool GMDXPingWheel::onKey(EKeystate state)
 {
-    if (state.mState == KEYSTATE_UP)
+    if (!SLCombatFX::enabled() && sPhase == Phase::Idle) return false;   // Slipstream: inert with CombatFX off
+    if (state == KEYSTATE_UP)
     {
         if (sPhase != Phase::Idle) let_go();
-        return;
+        return true;
     }
-    if (state.mState == KEYSTATE_LEVEL)
+    if (state == KEYSTATE_LEVEL)
     {
         if (sPhase != Phase::Idle) sHeldFrame = LLFrameTimer::getFrameCount();
-        return;
+        return true;
     }
     // down: (as the ping keys, Alt / Ctrl with it is not a ping)
-    if (sPhase != Phase::Idle || (gKeyboard->currentMask(false) & (MASK_ALT | MASK_CONTROL))) return;
-    if (!GMDXMapShare::pingTarget(sTarget)) return;   // (nothing there: a tip said so)
+    if (sPhase != Phase::Idle || (gKeyboard->currentMask(false) & (MASK_ALT | MASK_CONTROL))) return true;
+    if (!GMDXMapShare::pingTarget(sTarget)) return true;   // (nothing there: a tip said so)
     sPhase = Phase::Pressed;
     sPressedAt = LLFrameTimer::getTotalSeconds();
     sHeldFrame = LLFrameTimer::getFrameCount();
     ensure_idle();
+    return true;
 }
 
 void GMDXPingWheel::draw()

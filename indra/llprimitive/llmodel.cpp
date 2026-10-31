@@ -1868,7 +1868,8 @@ void LLMeshSkinInfo::updateHash()
     hash.update((const void*)mJointNums.data(), sizeof(S32) * mJointNums.size());
 
     //mInvBindMatrix
-    F32* src = mInvBindMatrix[0].getF32ptr();
+    // data(), not [0]: a skin with no joints (network data) has an empty vector
+    const F32* src = mInvBindMatrix.empty() ? nullptr : mInvBindMatrix.data()->getF32ptr();
 
     for (size_t i = 0, count = mInvBindMatrix.size() * 16; i < count; ++i)
     {

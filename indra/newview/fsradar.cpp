@@ -45,6 +45,7 @@
 #include "fscommon.h"
 #include "llagent.h"
 #include "llavataractions.h"
+#include "llavatarpresence.h"
 #include "llcallingcard.h"
 #include "llfontgl.h"
 #include "llmutelist.h"
@@ -69,6 +70,25 @@
 
 namespace
 {
+    void set_radar_name_style(const LLUUID& id, LLSD& options, bool classic, bool muted)
+    {
+        const auto presence = LLAvatarTracker::instance().getBuddyPresence(id);
+        U8 style = LLFontGL::NORMAL;
+        if ((classic ? presence != LLAvatarTracker::EPresence::NOT_FRIEND : presence == LLAvatarTracker::EPresence::ONLINE) &&
+            !gRlvHandler.hasBehaviour(RLV_BHVR_SHOWNAMES))
+        {
+            style |= LLFontGL::BOLD;
+        }
+        if (muted)
+        {
+            style |= LLFontGL::ITALIC;
+        }
+        options["name_style"] = style;
+        const LLColor4 color = LLUIColorTable::instance().getColor(
+            classic ? "AvatarListItemOnlineColor" : LLAvatarPresence::colorName(presence)).get();
+        options["name_color"] = LGGContactSets::getInstance()->getAvatarColor(id, color, ContactSetType::RADAR).getValue();
+    }
+
     // <FS:PP> FIRE-6069: Radar alerts sounds. Our make_ui_sound has no PlayMode gate, so the
     // FS "PlayModeUISndRadar*" switches are honoured here (all default to off, as in FS).
     void play_radar_sound(const char* sound_name)
@@ -187,6 +207,22 @@ FSRadar::~FSRadar()
 void FSRadar::initSingleton()
 {
     mRadarListUpdater = std::make_unique<FSRadarListUpdater>(std::bind(&FSRadar::updateRadarList, this));
+    mClassicNameColorsConnection = gSavedSettings.getControl("SLClassicNameColors")->getSignal()->connect(
+        boost::bind(&FSRadar::refreshNameStyles, this));
+}
+
+void FSRadar::refreshNameStyles()
+{
+    const bool classic = LLAvatarPresence::useClassicNameColors();
+    for (auto& row : mRadarEntriesData)
+    {
+        const LLUUID id = row["entry"]["id"].asUUID();
+        set_radar_name_style(id, row["options"], classic, LLMuteList::getInstance()->isMuted(id));
+    }
+    if (!mUpdateSignal.empty())
+    {
+        mUpdateSignal(mRadarEntriesData, mAvatarStats);
+    }
 }
 
 void FSRadar::radarAlertMsg(const LLUUID& agent_id, const LLAvatarName& av_name, std::string_view postMsg)
@@ -243,7 +279,7 @@ void FSRadar::updateRadarList()
     LLVoiceClient* voice_client = LLVoiceClient::getInstance();
     LLViewerParcelMgr& parcelmgr = LLViewerParcelMgr::instance();
     LLUIColorTable& colortable = LLUIColorTable::instance();
-    LLAvatarTracker& avatartracker = LLAvatarTracker::instance();
+    const bool classic = LLAvatarPresence::useClassicNameColors();
 
     // Region-provided chat ranges (FS: LFSimFeatureHandler)
     F32 chat_range_say = 20.f;
@@ -276,8 +312,6 @@ void FSRadar::updateRadarList()
     static LLCachedControl<F32> sNearMeRange(gSavedSettings, "NearMeRange");
     static LLCachedControl<bool> sLimitRange(gSavedSettings, "LimitRadarByRange");
     static LLCachedControl<F32> sRenderFarClip(gSavedSettings, "RenderFarClip");
-    static LLCachedControl<bool> sFSLegacyRadarFriendColoring(gSavedSettings, "FSLegacyRadarFriendColoring");
-    static LLCachedControl<bool> sFSRadarColorNamesByDistance(gSavedSettings, "FSRadarColorNamesByDistance", false);
     static LLCachedControl<bool> sFSRadarShowMutedAndDerendered(gSavedSettings, "FSRadarShowMutedAndDerendered");
 
     F32 drawRadius(sRenderFarClip);
@@ -630,23 +664,7 @@ void FSRadar::updateRadarList()
         // nearly every row; the range colour already carries the chat/shout distinction.
         entry_options["range_style"] = LLFontGL::NORMAL;
 
-        // Set friends colors / styles
-        LLFontGL::StyleFlags nameCellStyle = LLFontGL::NORMAL;
-        const LLRelationship* relation = avatartracker.getBuddyInfo(avId);
-        if (relation && !sFSLegacyRadarFriendColoring && !gRlvHandler.hasBehaviour(RLV_BHVR_SHOWNAMES))
-        {
-            nameCellStyle = (LLFontGL::StyleFlags)(nameCellStyle | LLFontGL::BOLD);
-        }
-        if (is_muted)
-        {
-            nameCellStyle = (LLFontGL::StyleFlags)(nameCellStyle | LLFontGL::ITALIC);
-        }
-        entry_options["name_style"] = nameCellStyle;
-
-        // Same base colour as names in the Friends / Groups / Recent avatar lists
-        LLColor4 name_color = colortable.getColor("AvatarListItemOnlineColor", LLColor4::white).get();
-        name_color = LGGContactSets::getInstance()->getAvatarColor(avId, (sFSRadarColorNamesByDistance ? range_color.get() : name_color), ContactSetType::RADAR);
-        entry_options["name_color"] = name_color.getValue();
+        set_radar_name_style(avId, entry_options, classic, is_muted);
 
         // Voice power level indicator
         if (voice_client->voiceEnabled() && voice_client->isVoiceWorking())

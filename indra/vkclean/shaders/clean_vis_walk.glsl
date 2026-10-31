@@ -19,7 +19,7 @@
 //   RT_WALK_GREY / RT_WALK_RGB: the MIXED walk (traceShadowRay / traceShadowRayRGB).
 //   RT_WALK_VIS: the opaque set, binary (traceShadowRayVis).
 //   RT_WALK_TRANS / RT_WALK_TRANS_RGB: the translucent set (traceTransmittance).
-//   RT_WALK_OPAQUE: every instance force-opaque (traceShadowRayOpaque).
+//   RT_WALK_OPAQUE: every caster solid, except qualified world emitters (traceShadowRayOpaque).
 //   RT_WALK_FOL / RT_WALK_FOL_RGB: the #735 foliage transmission ray (traceFoliageTransmit).
 //
 // Shadow / visibility ray (RT_WALK_GREY): 1.0 = unoccluded over [tmin, tmax], 0.0 = blocked.
@@ -275,11 +275,10 @@ vec3 rtVisWalkFP(vec3 origin, vec3 dir, float tmin, float tmax, uint mask, uint 
         flags = gl_RayFlagsNoOpaqueEXT | (rtFolFlip() ? gl_RayFlagsCullFrontFacingTrianglesEXT
                                                       : gl_RayFlagsCullBackFacingTrianglesEXT);
     else if (opaque_walk)
-        // FORCE-OPAQUE (traceShadowRayOpaque): a receiver that may sit on a no-self-shadow character
-        // (rt_self_owner != 0) drops the opaque flag -- it would commit that character's own faces
-        // without a candidate -- and confirms every candidate but the receiver's own
-        flags = gl_RayFlagsTerminateOnFirstHitEXT | (rt_self_owner != 0u ? gl_RayFlagsNoneEXT : gl_RayFlagsOpaqueEXT)
-              | rtFolShadowFlags();
+        // Every caster solid, except qualified world emitters and the receiver's own
+        // no-self-shadow character. Ordinary FORCE_OPAQUE instances stay hardware hits;
+        // a ray-wide Opaque override would hide the emitter's visibility predicate.
+        flags = gl_RayFlagsTerminateOnFirstHitEXT | rtFolShadowFlags();
     else
         flags = gl_RayFlagsTerminateOnFirstHitEXT | (trans_walk ? gl_RayFlagsNoneEXT : rtFolShadowFlags());
     // (Xid 109, rtRaySane: an invalid ray is blocked as G-7; the foliage walk keeps no colour)
@@ -325,16 +324,21 @@ vec3 rtVisWalkFP(vec3 origin, vec3 dir, float tmin, float tmax, uint mask, uint 
         while (rayQueryProceedEXT(rq))
         {
             if (rayQueryGetIntersectionTypeEXT(rq, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
+            const uint id = rtHitInstance(uint(rayQueryGetIntersectionInstanceCustomIndexEXT(rq, false)),
+                                          uint(rayQueryGetIntersectionGeometryIndexEXT(rq, false)));
             if (++n_cand > budget)
             {
                 // over budget (G-7): the shadow walks treat it as opaque -- the ray is blocked here; the
-                // foliage ray keeps the colour gathered so far (visibility is the shadow rays')
-                if (!fol_walk) rayQueryConfirmIntersectionEXT(rq);
+                // foliage ray keeps the colour gathered so far. A qualified emitter never
+                // becomes a blocker on saturation: terminate with transmission so far;
+                // occluders not visited within this bound can be missed in that case.
+                if (!fol_walk && !rtEmissiveNoShadow(id)) rayQueryConfirmIntersectionEXT(rq);
                 rayQueryTerminateEXT(rq);
                 break;
             }
-            const uint id = rtHitInstance(uint(rayQueryGetIntersectionInstanceCustomIndexEXT(rq, false)),
-                                          uint(rayQueryGetIntersectionGeometryIndexEXT(rq, false)));
+            // Before alpha/transmittance, self probes and opaque-mode confirmation.
+            // Still counted against the fixed traversal budget (no unbounded beam walk).
+            if (rtEmissiveNoShadow(id)) continue;
             // <GMDX> projector rays: a single-sided face met on its front faces away from the light
             if (rt_proj_facing && !fol_walk && rtIdIn(id) && (rt_instances[id].flags & 256u) == 0u
                 && rayQueryGetIntersectionFrontFaceEXT(rq, false)) continue;

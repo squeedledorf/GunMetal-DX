@@ -19,9 +19,12 @@
  * $/LicenseInfo$
  */
 
+// <GMDX> Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4 (CombatFX loadouts).
+
 #include "llviewerprecompiledheaders.h"
 
 #include "gmdxfloaterloadouts.h"
+#include "slcombatfx.h"
 
 #include "llbutton.h"
 #include "llfloaterreg.h"
@@ -145,15 +148,15 @@ bool GMDXFloaterLoadouts::postBuild()
     getChild<LLButton>("remove_cat_btn")->setCommitCallback([this](LLUICtrl*, const LLSD&) { onRemoveCategory(); });
     getChild<LLButton>("key_btn")->setCommitCallback([this](LLUICtrl*, const LLSD&) { onSetKey(); });
     LLLineEditor* watch = getChild<LLLineEditor>("watch_edit");
-    watch->setText(gSavedPerAccountSettings.getString("GMDXLoadoutWatchTags"));
+    watch->setText(gSavedPerAccountSettings.getString("SLLoadoutWatchTags"));
     watch->setCommitOnFocusLost(true);
     watch->setCommitCallback([](LLUICtrl* ctrl, const LLSD&)
     {
-        gSavedPerAccountSettings.setString("GMDXLoadoutWatchTags", ctrl->getValue().asString());
+        gSavedPerAccountSettings.setString("SLLoadoutWatchTags", ctrl->getValue().asString());
     });
     getChild<LLButton>("scan_btn")->setCommitCallback([watch](LLUICtrl*, const LLSD&)
     {
-        gSavedPerAccountSettings.setString("GMDXLoadoutWatchTags", watch->getText());
+        gSavedPerAccountSettings.setString("SLLoadoutWatchTags", watch->getText());
         GMDXWeaponSorter::instance().scanInventory();
     });
     return true;
@@ -161,7 +164,12 @@ bool GMDXFloaterLoadouts::postBuild()
 
 void GMDXFloaterLoadouts::onOpen(const LLSD& key)
 {
-    GMDXLoadouts::instance().ensureFolders();
+    if (!SLCombatFX::enabled())   // Slipstream: no combat UI while CombatFX is off
+    {
+        closeFloater();
+        return;
+    }
+    GMDXLoadouts::instance().ensureFolders();   // (Slipstream: asks before making anything)
     if (key.has("tab"))
     {
         getChild<LLTabContainer>("tabs")->selectTabByName(key["tab"].asString());
@@ -664,7 +672,7 @@ void GMDXFloaterLoadouts::onEquip()
         return;
     }
     GMDXLoadouts::instance().equip(id);
-    if (gSavedSettings.getBOOL("GMDXLoadoutCloseOnEquip"))
+    if (gSavedSettings.getBOOL("SLLoadoutCloseOnEquip"))
     {
         closeFloater();
     }

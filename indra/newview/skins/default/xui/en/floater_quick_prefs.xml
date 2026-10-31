@@ -7,7 +7,7 @@
  can_minimize="true"
  can_close="true"
  can_resize="false"
- height="294"
+ height="329"
  width="320"
  layout="topleft"
  name="quick_prefs"
@@ -41,7 +41,18 @@
      left="10"
      name="BindCameraCheck"
      top_pad="6"
-     width="280"/>
+     width="230"/>
+  <button
+     enabled="false"
+     follows="left|top"
+     height="19"
+     label="Reset"
+     layout="topleft"
+     left="250"
+     name="ResetButton"
+     tool_tip="Set hover height back to 0"
+     top_delta="-2"
+     width="60"/>
   <view_border
      bevel_style="none"
      follows="left|top"
@@ -175,6 +186,11 @@
      name="qp_hdr"
      top_delta="0"
      width="140"/>
+  <check_box control_name="SlipstreamTPSCamera" follows="left|top" height="20"
+     label="Third-person shooter camera" layout="topleft" left="10"
+     name="qp_tps_enabled" top_pad="8" width="300"
+     tool_tip="Behind the avatar: click your avatar to engage, Esc to release. The over-the-shoulder aim camera is M." />
+  <!-- <GMDX> no TPS position: GunMetal-DX's TPS camera is behind the avatar only (the shoulder view is the OTS aim camera, M) -->
   <button
      follows="left|top"
      height="22"

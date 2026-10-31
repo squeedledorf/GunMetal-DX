@@ -14,6 +14,7 @@
 #include <vector>
 #include "lluuid.h"
 #include "v3math.h"
+#include "llcleaninstancestore.h"   // PoseSample
 class LLViewerObject;
 class LLFace;
 
@@ -52,7 +53,7 @@ public:
     // one sweep slice per frame through this public entry. GL default path unaffected.
     // Section timers (RenderVKSectionLog): ing_priority, sweep_total, ing_gltf, ing_gc, ing_diag.
     void vkIngestTick();
-    // <GMDX> The last full sweep cycle changed nothing (the region map capture waits for it).
+    // The last full sweep cycle changed nothing (the region map capture waits for it; GunMetal-DX port).
     bool isSweepIdle() const { return mSweepIdle; }
     // glTF scene assets (#39): prune dead records, re-pose animated nodes, VKGLTF summary.
     void vkGLTFTick();
@@ -60,6 +61,32 @@ public:
     // frame (seat root pose vs uploaded instance pose, moved-queue slice, avatar offset
     // in the seat frame, camera) to locate vehicle stutter.
     void vkVehicleDiagTick();
+    // RenderVKTempMotionDiag (session only). Fixed-size numeric trace, main thread
+    // only; observes updates/registration/stream recording without changing poses.
+    struct TempMotionUpdate
+    {
+        LLVector3 pos, vel, accel;
+        U64 order = 0;
+        U32 frame = 0, flags = 0;
+        S32 type = 0;
+        bool created = false, cached = false, compressed = false, drawable = false;
+    };
+    static bool tempMotionDiagEnabled();
+    static TempMotionUpdate tempMotionDiagBefore(LLViewerObject* obj, S32 type,
+                                                 bool created, bool cached, bool compressed);
+    static void tempMotionDiagAfter(LLViewerObject* obj, const TempMotionUpdate& before, U32 result);
+    static void tempMotionDiagClassify(LLViewerObject* obj);
+    // fields: position=1, velocity=2, acceleration=4, from the existing decode route.
+    static void tempMotionDiagDecoded(LLViewerObject* obj, S32 type, const LLVector3& pos, U32 fields);
+    // result: 1 reached normal application end, 2 old-packet pose application skipped.
+    static void tempMotionDiagResult(LLViewerObject* obj, U32 result);
+    static void tempMotionDiagRegistered(LLViewerObject* obj, S32 face, U32 iid, const F32 pose[16]);
+    // phase: 1 kill packet resolved, 2 crossing deferred, 3 markDead decision,
+    // 4 after the immediate release/keep decision. No admission on a kill.
+    static void tempMotionDiagKill(LLViewerObject* obj, U32 phase, bool kept);
+    static void tempMotionDiagUpload(const std::vector<U8>& mirror,
+                                    const std::vector<std::pair<U32, U32>>& runs,
+                                    const F32 offset[3], U32 upload_rows, bool full, bool pending);
     // SELECT-TO-DIAGNOSE (RenderVKIngestDiag, #88). On an edit-selection change, log one
     // "VKIngestDiag" INFO block per selected object (every linkset member) describing its
     // ingest state face by face, then a one-line summary of what is NOT in the GPU scene.
@@ -179,22 +206,32 @@ private:
     // the per-frame overlay (gVKDynSpheres says which tiles hold one), so a moving object
     // costs an overlay draw instead of a full static re-render of every tile around it.
     // Static tiles are invalidated only on the class TRANSITIONS (start / settle).
-    struct DynCaster { F64 last = 0.0; U32 frame = 0; bool spinner = false; bool texanim = false; };   // texanim: <GMDX>   // frame: gFrameCount of the last move (#771)
+    struct DynCaster { F64 last = 0.0; U32 frame = 0; bool spinner = false; bool texanim = false; };   // frame: gFrameCount of the last move (#771); texanim: GunMetal-DX port
     std::unordered_map<LLUUID, DynCaster> mDynCasters;
+    // Texture-animated mask / blend casters (noteTexAnimCaster): re-noted every tick so their
+    // shadow, which changes each frame, never settles into a cached static layer.
+    std::unordered_set<LLUUID> mTexAnimCasters;
     void noteDynCaster(LLViewerObject* obj, bool spinner);
     void tickDynCasters();
+    // MOTION, NOT FLOAT NOISE: a pose refresh counts as motion (the dynamic class, the static
+    // tiles' changed sphere) only when the object moved more than RenderVKShadowMoverPoseThreshold
+    // (#1007's near-unchanged-pose measure) from its REFERENCE pose: the row the static layer
+    // holds (the pose before its first change since it was last static), then the pose of its
+    // last noted motion -- so a slow mover's sub-threshold steps add up. Erased when a mover
+    // settles; cleared on an origin shift (store-frame rows: the next change re-takes its baseline).
+    std::unordered_map<LLUUID, LLCleanInstanceStore::PoseSample> mPoseRef;
+    bool poseMoved(LLViewerObject* obj, const LLCleanInstanceStore::PoseSample& before,
+                   const LLCleanInstanceStore::PoseSample& after);
+    void prunePoseRefs();
 public:
     // updateDrawable: a pure GPU spinner (vkUsesGpuSpin) still on LL's move list, per frame.
     void noteSpinner(LLViewerObject* obj);
     // glTF rigid node animation re-posed this object this frame: true if it went to the
     // dynamic class (else the caller invalidates the static tiles around it as before).
     bool noteAnimated(LLViewerObject* obj);
-    // <GMDX> registerCleanFace: a mask / blend face with GPU texture animation. Its shadow
-    // changes every frame without a re-registration, so tickDynCasters keeps the object in
-    // the dynamic class while the animation runs (a cached static layer would freeze it).
+    // A texture-animated cut-out / blend face (registerCleanFace): its shadow changes per frame.
     void noteTexAnimCaster(LLViewerObject* obj);
 private:
-    std::unordered_set<LLUUID>   mTexAnimCasters;   // <GMDX>
     struct MovedDiag   // RenderVKVehicleDiag: what this frame's drain did
     {
         size_t at_drain = 0, drained = 0;

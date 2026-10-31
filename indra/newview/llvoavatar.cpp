@@ -28,7 +28,6 @@
 
 
 #include "llvoavatar.h"
-#include "llgroupcolormap.h" // <GMDX>
 #include "slaoengine.h"
 #include "slsoundlog.h"
 #include "llpolymorph.h"
@@ -36,6 +35,7 @@
 #include "llcleananimstore.h"
 #include "llcleanskinstore.h"
 #include "llcrossingkeep.h"           // #607 time-to-rezzed after a crossing re-create
+#include "llworldclock.h"             // #1172 a sit / stand keeps the frozen pose
 
 #include <stdio.h>
 #include <ctype.h>
@@ -109,9 +109,9 @@
 #include "llviewerwearable.h"
 #include "llvoavatarself.h"
 #include "llderenderlist.h"     // #202
-#include "gmdxattachprobe.h" // <GMDX>
 #include "llvovolume.h"
 #include "llvolumemgr.h"
+#include "gmdxattachprobe.h" // GunMetal-DX
 #include "llworld.h"
 #include "pipeline.h"
 #include "llsky.h"
@@ -125,6 +125,7 @@
 // [/RLVa:KB]
 
 #include "llgesturemgr.h" //needed to trigger the voice gesticulations
+#include "llgroupcolormap.h" // GunMetal-DX group colours
 #include "llvoiceclient.h"
 #include "llvoicevisualizer.h" // Ventrella
 
@@ -135,6 +136,8 @@
 #include "llskinningutil.h"
 
 #include "llperfstats.h"
+#include "gmdxtpfx.h"   // <GMDX> teleport effects: the own avatar hidden for a moment
+#include "gmdxots.h"   // <GMDX> the over-the-shoulder aim camera: the own avatar stays drawn
 
 #include <boost/lexical_cast.hpp>
 
@@ -634,15 +637,16 @@ bool LLVOAvatar::sVisibleInFirstPerson = false;
 // static
 bool LLVOAvatar::selfHiddenInMainView()
 {
-    // <SS:Skoomastream> OTS reports cameraMouselook() too, but is a third-person view.
     // RLV @showself hides the whole own avatar, worn attachments included (HUDs stay), as
     // LL's pipeline did; the system body alone is handled by needsRenderAvatar.
-    // Game control: a flycam started in mouselook stops hiding the avatar once it is
-    // out of the flycam's view (LLAgentCamera::isHidingAvatarForFirstPerson()).
     // #1074: the VR camera (eye at the head, like mouselook) follows "Show me in Mouselook" too:
     // from inside, a mesh head / hair would block the view. False on the desktop.
-    return (!sVisibleInFirstPerson && ((gAgentCamera.isHidingAvatarForFirstPerson() && !gAgentCamera.cameraOTS()) || LLVRCamera::firstPerson())) ||
-           (RlvActions::isRlvEnabled() && RlvActions::hasBehaviour(RLV_BHVR_SHOWSELF));
+    // A flycam entered from mouselook keeps the avatar hidden until it is out of the flycam's view
+    // (LLAgentCamera::isHidingAvatarForFirstPerson(); ported from GunMetal-DX, squeedledorf, LGPL 2.1, v0.3.0 cf5f1f4).
+    // <SS:Skoomastream> OTS (CombatFX) reports cameraMouselook() too, but is a third-person view.
+    return (!sVisibleInFirstPerson && ((gAgentCamera.isHidingAvatarForFirstPerson() && !(GMDXOTS::shoulderCamera() && gAgent.getShowAvatar())) || LLVRCamera::firstPerson())) || // <GMDX> (gmdxots.h)
+           (RlvActions::isRlvEnabled() && RlvActions::hasBehaviour(RLV_BHVR_SHOWSELF)) ||
+           GMDXTPFX::hidesSelf();   // <GMDX> a teleport effect: gone inside its smoke / bolt
 }
 
 // static
@@ -1344,6 +1348,18 @@ const LLVector3 LLVOAvatar::getRenderPosition() const
     }
 }
 
+LLVector3 LLVOAvatar::getPicturePositionAgent() const
+{
+    // The drawn body is the root joint, posed from the drawable every frame (a seated one in
+    // its seat's frame) unless a sit / stand while frozen holds it (#1172); a new arrival's
+    // root is placed once its drawable has moved.
+    if (mRoot && mDrawable.notNull() && mDrawable->getGeneration() >= 0)
+    {
+        return mRoot->getWorldPosition();
+    }
+    return getPositionAgent();
+}
+
 void LLVOAvatar::updateDrawable(bool force_damped)
 {
     clearChanged(SHIFTED);
@@ -1354,6 +1370,10 @@ void LLVOAvatar::onShift(const LLVector4a& shift_vector)
     const LLVector3& shift = reinterpret_cast<const LLVector3&>(shift_vector);
     mLastAnimExtents[0] += shift;
     mLastAnimExtents[1] += shift;
+    // #1172: an origin shift snaps every drawable to its live position (LLDrawable::shiftPos),
+    // frozen or not. A root held through a sit / stand would stay in the old agent frame, the
+    // body drawn a region away: it follows its drawable again.
+    mRootHeldFreeze = 0;
 }
 
 void LLVOAvatar::updateSpatialExtents(LLVector4a& newMin, LLVector4a &newMax)
@@ -3233,7 +3253,7 @@ void LLVOAvatar::idleUpdateLipSync(bool voice_enabled)
 
 void LLVOAvatar::idleUpdateLoadingEffect()
 {
-    static LLCachedControl<bool> s_draw_loading(gSavedSettings, "GMDXDrawLoadingAvatars", true);   // <GMDX>
+    static LLCachedControl<bool> s_draw_loading(gSavedSettings, "RenderVKDrawLoadingAvatars", true);
     // update visibility when avatar is partially loaded
     if (!mFullyLoaded && updateIsFullyLoaded()) // Avoid repeat calculations by checking if mFullyLoaded is true first.
     {
@@ -3258,13 +3278,12 @@ void LLVOAvatar::idleUpdateLoadingEffect()
             deleteParticleSource();
             updateLOD();
         }
-        // <GMDX> GMDXDrawLoadingAvatars: the avatar is drawn while it loads
-        // (llcleansysavatar.cpp), so no cloud -- and one made before the switch goes.
+        // Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4: the avatar is drawn
+        // while it loads (llcleansysavatar.cpp), so no cloud -- and one made before the switch goes.
         else if (s_draw_loading)
         {
             deleteParticleSource();
         }
-        // </GMDX>
         else
         {
             LLPartSysData particle_parameters;
@@ -3347,6 +3366,7 @@ void LLVOAvatar::idleUpdateNameTag(const LLVector3& root_pos_last)
         static LLCachedControl<S32> name_tag_mode(gSavedSettings, "AvatarNameTagMode");
         render_name = render_name
             && !gAgentCamera.isHidingAvatarForFirstPerson()
+            && !GMDXTPFX::hidesSelf()   // <GMDX> gone inside a teleport effect's smoke: the tag too
             && (visible_chat || (render_name_show_self && name_tag_mode));
     }
 
@@ -3934,7 +3954,7 @@ LLColor4 LLVOAvatar::getNameTagColor(bool is_friend)
     static LLUIColor name_tag_match = LLUIColorTable::instance().getColor("NameTagMatch");
     LLColor4 color_name = name_tag_match;
     color_name = LGGContactSets::getInstance()->getAvatarColor(getID(), color_name, ContactSetType::TAG);
-    color_name = LLGroupColorMap::instance().tint(getID(), color_name); // <GMDX> group colour wins over contact sets
+    color_name = LLGroupColorMap::instance().tint(getID(), color_name); // Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4: group colour wins over contact sets
 
     return color_name;
 }
@@ -5097,7 +5117,13 @@ bool LLVOAvatar::updateCharacter(LLAgent &agent)
     // In some cases, calls updateOrientation() for a lot of the
     // work
     // --------------------------------------------------------------------
-    updateRootPositionAndRotation(agent, speed, was_sit_ground_constrained);
+    // World frozen (#1172): a body that sat down or stood up during this freeze keeps its
+    // held pose (its drawable is mid re-parent until the thaw).
+    const bool root_held = isRootHeldForFreeze();
+    if (!root_held)
+    {
+        updateRootPositionAndRotation(agent, speed, was_sit_ground_constrained);
+    }
 
     //-------------------------------------------------------------------------
     // Update character motions
@@ -5149,8 +5175,9 @@ bool LLVOAvatar::updateCharacter(LLAgent &agent)
         endMorphEvaluation();
     }
 
-    // Special handling for sitting on ground.
-    if (!getParent() && (isSitting() || was_sit_ground_constrained))
+    // Special handling for sitting on ground. (Not on a held root: it adds to the root's
+    // current height, which the update above did not reset.)
+    if (!root_held && !getParent() && (isSitting() || was_sit_ground_constrained))
     {
 
         F32 off_z = (F32)LLVector3d(getHoverOffset()).mdV[VZ];
@@ -8130,10 +8157,7 @@ void LLVOAvatar::addChild(LLViewerObject *childp)
     // #202: a re-worn attachment of a derendered (item-keyed) entry; killed on the next idle
     if ( (!isSelf()) && (LLDerenderList::instanceExists()) )
         LLDerenderList::instance().onAttachmentAdded(this, childp);
-    // <GMDX> Attachments get a new UUID on every re-rez and relog: a permanent derender or sound
-    // emitter blacklist entry that only wearer + object name can find again asks the sim for the
-    // new object's properties (throttled), and the reply re-points the entry.
-    GMDXAttachProbe::onAttachmentAdded(this, childp);
+    GMDXAttachProbe::onAttachmentAdded(this, childp); // Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4: throttled; inert unless SLSoundEmitterBlacklist
     if (childp->mDrawable)
     {
         if (!attachObject(childp))
@@ -8595,6 +8619,34 @@ void LLVOAvatar::sitDown(bool bSitting)
 }
 
 //-----------------------------------------------------------------------------
+// frozenRootPose()
+//-----------------------------------------------------------------------------
+// World frozen (#1172): the root's world pose (the drawn body: GPU skeleton root,
+// attachments, rigged mesh) for sitOnObject / getOffObject to carry across the re-parent, so
+// the body keeps its frozen pose; the caller then stamps mRootHeldFreeze. False while the
+// world runs, and for a body not placed yet (a new arrival: its root is still at the origin).
+bool LLVOAvatar::frozenRootPose(LLVector3& pos, LLQuaternion& rot)
+{
+    if (!LLWorldClock::isFrozen() || mLastRootPos.length() < MAX_STANDOFF_FROM_ORIGIN)
+    {
+        return false;
+    }
+    pos = mRoot->getWorldPosition();
+    rot = mRoot->getWorldRotation();
+    return true;
+}
+
+//-----------------------------------------------------------------------------
+// isRootHeldForFreeze()
+//-----------------------------------------------------------------------------
+// The root keeps the pose a sit / stand carried across until the freeze it happened in ends:
+// updateCharacter leaves it alone meanwhile.
+bool LLVOAvatar::isRootHeldForFreeze() const
+{
+    return LLWorldClock::isFrozen() && mRootHeldFreeze == LLWorldClock::freezeSerial();
+}
+
+//-----------------------------------------------------------------------------
 // sitOnObject()
 //-----------------------------------------------------------------------------
 void LLVOAvatar::sitOnObject(LLViewerObject *sit_object)
@@ -8646,6 +8698,15 @@ void LLVOAvatar::sitOnObject(LLViewerObject *sit_object)
     {
         return;
     }
+    // World frozen (#1172): the body keeps its frozen pose through the sit until the thaw.
+    // The drawable's moves are held, so the local xform set below is never eased onto the
+    // seat, and the per-frame root update copied it to the body (from the network
+    // re-parent it is the pre-sit region position read as seat-relative): the frozen body
+    // jumped and turned.
+    LLVector3 held_pos;
+    LLQuaternion held_rot;
+    const bool hold_root = frozenRootPose(held_pos, held_rot);
+
     LLQuaternion inv_obj_rot = ~sit_object->getRenderRotation();
     LLVector3 obj_pos = sit_object->getRenderPosition();
 
@@ -8660,8 +8721,26 @@ void LLVOAvatar::sitOnObject(LLViewerObject *sit_object)
     // objects to be not rendered for new arrivals. See EXT-6835 and EXT-1655.
     sitDown(true);
     mRoot->getXform()->setParent(&sit_object->mDrawable->mXform); // LLVOAvatar::sitOnObject
-    // SL-315
-    mRoot->setPosition(getPosition());
+    if (hold_root)
+    {
+        // The held world pose in the seat's frame (the root composes with the seat xform's
+        // world values), and the drawable in step with it: a seated root follows its
+        // drawable, so the thaw eases on from here.
+        const LLXformMatrix& seat = sit_object->mDrawable->mXform;
+        const LLQuaternion inv_seat_rot = ~seat.getWorldRotation();
+        const LLQuaternion root_rot = held_rot * inv_seat_rot;
+        const LLVector3 root_pos = (held_pos - seat.getWorldPosition()) * inv_seat_rot;
+        mDrawable->mXform.setPosition(root_pos - getHoverOffset() * root_rot);
+        mDrawable->mXform.setRotation(root_rot);
+        mRoot->setPosition(root_pos);
+        mRoot->setRotation(root_rot);
+        mRootHeldFreeze = LLWorldClock::freezeSerial();
+    }
+    else
+    {
+        // SL-315
+        mRoot->setPosition(getPosition());
+    }
     mRoot->updateWorldMatrixChildren();
 
     stopMotion(ANIM_AGENT_BODY_NOISE);
@@ -8688,6 +8767,11 @@ void LLVOAvatar::getOffObject()
     {
         return;
     }
+    // World frozen (#1172): the body keeps its frozen pose through standing up until the
+    // thaw, as through a sit (sitOnObject).
+    LLVector3 held_pos;
+    LLQuaternion held_rot;
+    const bool hold_root = frozenRootPose(held_pos, held_rot);
 
     LLViewerObject* sit_object = (LLViewerObject*)getParent();
 
@@ -8731,9 +8815,13 @@ void LLVOAvatar::getOffObject()
 
     mRoot->getXform()->setParent(NULL); // LLVOAvatar::getOffObject
     // SL-315
-    mRoot->setPosition(cur_position_world);
-    mRoot->setRotation(cur_rotation_world);
+    mRoot->setPosition(hold_root ? held_pos : cur_position_world);
+    mRoot->setRotation(hold_root ? held_rot : cur_rotation_world);
     mRoot->getXform()->update();
+    if (hold_root)
+    {
+        mRootHeldFreeze = LLWorldClock::freezeSerial();
+    }
 
     if (mEnableDefaultMotions)
     {

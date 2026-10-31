@@ -101,7 +101,7 @@ float aoSample(vec3 P, vec3 Ng)
     const float vz = max(dot(rel, linfo.cam_fwd.xyz), 1e-3);
     // Render-pixel footprint at this depth (grid.w = tan(half fov y)); a tap's representative
     // is <= ~2 px from this pixel on screen, more along a surface seen at a grazing angle.
-    const float foot = CL_VIEW_Z(linfo, vz) * 2.0 * linfo.grid.w / float(2 * hsz.y);   // <GMDX>
+    const float foot = CL_VIEW_Z(linfo, vz) * 2.0 * linfo.grid.w / float(2 * hsz.y);
     const float cosv = max(abs(dot(Ng, normalize(rel))), 0.05);
     const float tol = max(ssr.ao_up.y, 1e-3) + 5e-4 * vz + 0.0175 * 2.0 * foot / cosv;
     vec4 e, nw;
@@ -175,21 +175,23 @@ float g_gi_amb_occ = 1.0;
 // so far things still fade; surfaceLocalGain's slope (the attenuation) is unchanged.
 float g_haze_sky_k = 1.0;
 #ifdef CLEAN_GI_FORWARD
-// (#87) A FORWARD surface on a GI frame with the radiance cache: its world cell's irradiance (last
-// frame's) replaces the probes' diffuse (x intensity, floored by the minimum ambient) and the probe /
-// SSR / env specular is occluded by GI / probe irradiance (the deferred kernels use the sky
-// visibility; a forward fragment has no GI pixel of its own). No cell yet: the probes stand.
+// (#87) A FORWARD surface on a GI frame with the radiance cache: the cache's irradiance at P (last
+// frame's; giCacheForward, the cells around P) replaces the probes' diffuse (x intensity, floored by
+// the minimum ambient) and the probe / SSR / env specular is occluded by GI / probe irradiance (the
+// deferred kernels use the sky visibility; a forward fragment has no GI pixel of its own). No cell
+// yet: the probes stand -- also for the share of the cells around P that have none, so the cache's
+// cover ends without a seam.
 SurfaceRefl giForwardRefl(SurfaceRefl r, SurfaceLit s, vec3 P)
 {
     if (!giFrameOn() || s.model == SURF_FULLBRIGHT) return r;
     if ((gi.cfg.x & (GI_F_ON | GI_F_CACHE)) != (GI_F_ON | GI_F_CACHE) || giCacheSlots() == 0u) return r;
-    float edge;
-    const vec3 N = dot(s.N, linfo.cam_pos.xyz - P) < 0.0 ? -s.N : s.N;
-    vec3 E;
-    if (!giCacheRead(giCacheFind(giCellKey(P, N, linfo.cam_pos.xyz, edge)), E)) return r;
+    const vec3 N = dot(s.N, mainReceiverEye(P, linfo.cam_pos.xyz) - P) < 0.0 ? -s.N : s.N;
+    float wf;
+    vec3 E = giCacheForward(P, N, linfo.cam_pos.xyz, wf);
+    if (wf <= 0.0) return r;
     E = max(E, vec3(0.0)) * max(gi.prm.x, 0.0);
     const vec3 probeIrr = r.irr;
-    const vec3 Ec = atmosClassic() ? atmosLinearToSrgb(E) : E;
+    const vec3 Ec = mix(probeIrr, atmosClassic() ? atmosLinearToSrgb(E) : E, wf);
     const float floorA = clamp(gi.prm.y, 0.0, 1.0);
     r.irr = max(Ec, probeIrr * floorA);
     if ((gi.cfg.x & GI_F_CEL_OCC) != 0u)
@@ -264,15 +266,19 @@ float iblNormWeight(float rough, vec3 irrUsed, vec3 irrEnv)
 // The sky averaged over a cone around d (half-angle th, radians): the centre + 4 taps on the
 // ring, weighted 1 : cos(th) -- a 5-tap stand-in for a lobe prefilter (the sky-view LUT has no
 // mips). th = 60 degrees ~ the cosine-weighted mean (the sky's irradiance / pi around d).
-vec3 skyCone(vec3 d, float th)
+vec3 materialFallbackSky(vec3 direction,vec3 origin)
 {
-    const vec3 c = skyColor(d);
+    return probeCapture() ? skyColorAtOrigin(direction,origin) : skyColor(direction);
+}
+vec3 skyCone(vec3 d, float th,vec3 origin)
+{
+    const vec3 c = materialFallbackSky(d,origin);
     if (th < 0.02) return c;
     const vec3 t = abs(d.z) < 0.999 ? normalize(cross(vec3(0.0, 0.0, 1.0), d)) : vec3(1.0, 0.0, 0.0);
     const vec3 b = cross(d, t);
     const float ct = cos(th), st = sin(th);
-    const vec3 ring = skyColor(d * ct + t * st) + skyColor(d * ct - t * st)
-                    + skyColor(d * ct + b * st) + skyColor(d * ct - b * st);
+    const vec3 ring = materialFallbackSky(d * ct + t * st,origin) + materialFallbackSky(d * ct - t * st,origin)
+                    + materialFallbackSky(d * ct + b * st,origin) + materialFallbackSky(d * ct - b * st,origin);
     return (c + ring * ct) / (1.0 + 4.0 * ct);
 }
 // The PBR specular radiance where no probe covers P (probes off / not ready, probe captures).
@@ -280,17 +286,17 @@ vec3 skyCone(vec3 d, float th)
 // surface reflected the sharp sun glow (#1051's view-dependent streaks with probes off).
 // Now: the sky prefiltered over the GGX lobe (dominant direction, Lagarde & de Rousiers 2014;
 // cone ~ alpha), normalized to the diffuse ambient (amblit) as the probe path.
-vec3 iblSkyRadiance(vec3 N, vec3 R, float rough, vec3 amblit)
+vec3 iblSkyRadiance(vec3 N, vec3 R, float rough, vec3 amblit,vec3 origin)
 {
-    if (litDbg(LDBG_NO_IBL_NORM)) { g_ibl_norm_w = 1.0; return skyColor(R); }
+    if (litDbg(LDBG_NO_IBL_NORM)) { g_ibl_norm_w = 1.0; return materialFallbackSky(R,origin); }
     const float a = rough * rough;
     const vec3 md = mix(N, R, (1.0 - a) * (sqrt(1.0 - a) + a));
     const vec3 Rd = dot(md, md) > 1e-8 ? normalize(md) : N;
-    vec3 rad = skyCone(Rd, min(a, 1.0));
+    vec3 rad = skyCone(Rd, min(a, 1.0),origin);
     g_ibl_norm_w = 1.0;
     if (rough > IBL_NORM_ROUGH0)
     {
-        g_ibl_norm_w = iblNormWeight(rough, amblit, skyCone(N, 1.0472));
+        g_ibl_norm_w = iblNormWeight(rough, amblit, skyCone(N, 1.0472,origin));
         rad *= g_ibl_norm_w;
     }
     return rad;
@@ -358,7 +364,7 @@ SurfaceRefl surfaceReflectionsW(SurfaceLit s, vec3 P, vec3 V, vec3 amblit, bool 
         have = sampleProbesEx(P, pN, R, pLod, 0.0, amblit, needRad, needRad2, needIrr, prad, prad2, pirr);
     // The sky along R where no probe covers P (the legacy / fullbright radiance fallbacks; PBR
     // takes the prefiltered, normalized iblSkyRadiance).
-    const vec3 skyR = (!have && !pbr && (needRad || needRad2)) ? skyColor(R) : vec3(0.0);
+    const vec3 skyR = (!have && !pbr && (needRad || needRad2)) ? materialFallbackSky(R,P) : vec3(0.0);
     g_ibl_norm_w = 1.0;
     CLK_MARK(PROBE);   // (shader clock, clean_shader_clock.glsl: empty in every other build)
 
@@ -389,7 +395,7 @@ SurfaceRefl surfaceReflectionsW(SurfaceLit s, vec3 P, vec3 V, vec3 amblit, bool 
             }
         }
         else if (needRad)
-            radiance = iblSkyRadiance(N, R, rough, amblit);
+            radiance = iblSkyRadiance(N, R, rough, amblit,P);
 #ifdef CLEAN_REFL_RT_IN
         if (wSpec) { const vec4 ri = CLEAN_REFL_RT_IN(); radiance = mix(radiance, ri.rgb, ri.a); }
 #endif
@@ -500,6 +506,7 @@ SurfaceRefl surfaceReflections(SurfaceLit s, vec3 P, vec3 V, vec3 amblit, bool d
 // (fullbright, or no lightSurface) -- surfacePost scatters the ray itself.
 vec3 g_haze_add = vec3(0.0), g_haze_atten = vec3(1.0);
 bool g_haze_ok = false;
+bool g_medium_inline = false;
 
 // WEATHER LIGHTNING (#783 M2; ssr.weather[8] / [9], LLCleanWeatherVK): a brief cool-white fill
 // from the strike's direction -- soft (a wrapped Lambert plus a sky-wide share: the flash lights
@@ -525,7 +532,7 @@ vec4 lightSurface(SurfaceLit s, vec3 P, float alpha)
     const bool fullbright = s.model == SURF_FULLBRIGHT;
 
     vec3 N = s.N;
-    const vec3 V = normalize(camPos - P);
+    const vec3 V = mainViewDirection(P, camPos);
     const bool classic = atmosClassic();
     const vec3 L = atmosLightDir();      // sun or moon, whichever is up (LL light_dir)
     // Sun/moon shadow (LL scol): offsets use the geometric normal, not a normal map.
@@ -987,7 +994,7 @@ vec4 lightSurface(SurfaceLit s, vec3 P, float alpha)
             color = mix(color, reflected * 0.5, envIntensity);
         }
         if (s.cel) color += cel_rim.rgb * celRimMask(clamp(abs(dot(N, V)), 0.0, 1.0), N.z) * (irradiance + sunlit * celLv);
-        color += s.emissive;   // <GMDX> rez effect emission (legacy faces carry none otherwise)
+        color += s.emissive;   // <GMDX> rez effect emission (CombatFX; legacy faces carry none otherwise)
 
 #ifdef CLEAN_SURFACE_DEBUG
         {   // DEBUG VIEW (legacy faces): base / irradiance / env / normal; PBR-only terms black.
@@ -1043,11 +1050,14 @@ vec4 lightSurface(SurfaceLit s, vec3 P, float alpha)
     // (#91) EMISSIVE SURFACES' light (the deferred BASE / combine kernels: clean_deferred_light.comp
     // deferEmitterLight -- the cell's emitting triangles x the denoised ReSTIR DI ratio), a diffuse term
     // beside the local lights (LOCAL never adds it: BASE carries it on every lit pixel). The local
-    // lights' diffuse colour: PBR base x 0.96 x (1 - metal), legacy the base.
-    local += CLEAN_EMITTER_LIGHT(P, N, pbr ? ll_base * (1.0 - 0.04) * (1.0 - ll_metal) : ll_base);
+    // lights' diffuse colour: PBR base x 0.96 x (1 - metal), legacy the base; (RenderVKReSTIRRadiance:
+    // the whole stochastic lights' radiance, remodulated -- + their specular colour: PBR F0, legacy
+    // the specular colour)
+    local += CLEAN_EMITTER_LIGHT(P, N, pbr ? ll_base * (1.0 - 0.04) * (1.0 - ll_metal) : ll_base,
+                                 pbr ? mix(vec3(0.04), ll_base, ll_metal) : ls.spec);
 #endif
     color = atmosClampHDR(color * (classic ? 1.1 : 1.0)) + local * (classic ? 0.9 : 1.0);
-    if (!litDbg(LDBG_NO_HAZE))
+    if (!cmOn() && !litDbg(LDBG_NO_HAZE))
         color = atmosOrWaterFog(color, P, camPos, additive * g_haze_sky_k, atten);
     CLK_MARK(HAZE);
     if (pbr) return vec4(color, alpha);
@@ -1076,6 +1086,23 @@ vec3 surfacePost(uint model, bool noFade, vec3 color, vec3 P)
 {
     const vec3 camPos = pc.u_cam_time.xyz;
     const bool fog = waterFogged(P);
+    if(cmOn())
+    {
+        if(probeCapture() || mirrorPass())
+        {
+            const vec3 origin=mainReceiverEye(P,camPos);
+            return cmWaterPrefix(atmosApply(color,P,origin),P,origin);
+        }
+        if(!g_medium_inline) return color;
+        const vec3 origin=mainReceiverEye(P,camPos);
+        color=cmWaterPrefix(cmApply(color,cmAt(P,CLEAN_VIEW)),P,origin);
+        if(!fog && !noFade)
+        {
+            g_cm_sky_prefix=true;g_cm_sky_origin=origin;
+            color=atmosDistanceFade(color,P,origin,linfo.cam_fwd,linfo.zinfo.y);
+        }
+        return color;
+    }
     vec3 hAdd = g_haze_add, hAtt = g_haze_atten;
     const bool fade = !probeCapture() && !fog && !noFade;
     const bool fbHaze = model == SURF_FULLBRIGHT && !litDbg(LDBG_NO_HAZE) && !fog;
@@ -1084,7 +1111,7 @@ vec3 surfacePost(uint model, bool noFade, vec3 color, vec3 P)
         color = fog ? applyWaterFog(color, P - camPos, camPos.z - waterHeight())
                     : atmosApplyRay(color, hAdd, hAtt);
     if (fade)
-        color = atmosDistanceFade(color, P, camPos, linfo.cam_fwd.xyz, linfo.zinfo.y, hAdd, hAtt);
+        color = atmosDistanceFade(color, P, camPos, linfo.cam_fwd, linfo.zinfo.y, hAdd, hAtt);
     return color;
 }
 
@@ -1104,9 +1131,9 @@ float surfaceLocalGain(bool noFade, vec3 P)
     const vec3 camPos = pc.u_cam_time.xyz;
     float g = atmosClassic() ? 0.9 : 1.0;
     const bool fog = waterFogged(P);
-    if (!litDbg(LDBG_NO_HAZE))
+    if (!cmOn() && !litDbg(LDBG_NO_HAZE))
         g *= fog ? waterFogLL(P - camPos, camPos.z - waterHeight()).a : (atmosEnabled() ? g_haze_atten.r : 1.0);
-    if (!probeCapture() && !fog && !noFade)
+    if (!cmOn() && !probeCapture() && !fog && !noFade)
         g *= atmosDistanceFadeKeep(P, camPos, linfo.cam_fwd.xyz, linfo.zinfo.y);
     return g;
 }

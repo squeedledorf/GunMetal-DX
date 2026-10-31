@@ -1111,10 +1111,9 @@ bool LLToolPie::handleHover(S32 x, S32 y, MASK mask)
 {
     if (mRightOrbitArmed && hasMouseCapture()
         && (gAgentCamera.getCameraMode() == CAMERA_MODE_MOUSELOOK
-            || gAgentCamera.getCameraMode() == CAMERA_MODE_OTS // <SS:Skoomastream/>
             || gAgentCamera.getCameraMode() == CAMERA_MODE_CUSTOMIZE_AVATAR))
     {
-        // Camera mode changed under the drag (e.g. M for mouselook or OTS): drop the orbit.
+        // Camera mode changed under the drag (e.g. M for mouselook): drop the orbit.
         endRightOrbit();
         setMouseCapture(false);
     }

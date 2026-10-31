@@ -12,6 +12,9 @@ layout(location = 0) in vec2 v_uv;
 layout(location = 1) flat in float v_alpha;
 layout(location = 2) flat in float v_snow;
 layout(location = 4) flat in float v_veil;   // #954 (clean_weather.vert)
+#if !defined(WEATHER_STREAM) && !defined(WEATHER_SPLASH)
+layout(location = 5) flat in vec3 v_dbg;     // RenderVKWeatherOcclDebug: the roof test's colour (-1 off)
+#endif
 #ifdef WEATHER_SPLASH
 layout(location = 3) flat in float v_age;
 #endif
@@ -71,6 +74,11 @@ void main()
         const float along = smoothstep(0.0, 0.2, v_uv.x) * (1.0 - smoothstep(0.55, 1.0, v_uv.x));
         a = v_alpha * across * along;
         col = wp.amb.rgb * 0.75 + wp.sun.rgb * (0.2 * wp.sun.w);
+        if (v_dbg.x >= 0.0)
+        {
+            col = v_dbg;
+            a = min(a * 6.0, 1.0);
+        }
     }
 #endif
     if (a < 1.0 / 512.0) discard;

@@ -171,7 +171,7 @@ bool FSManipTranslateJoint::handleMouseDownOnPart(S32 x, S32 y, MASK mask)
     poser->setFocus(true);
 
     // Compute unit vectors for arrow hit and a plane through that vector
-    bool axis_exists = getManipJointAxis(mJoint, mManipPart, axis);
+    getManipJointAxis(mJoint, mManipPart, axis);
     getManipJointNormal(mJoint, mManipPart, mManipNormal);
 
     LLVector3 select_center_agent = mJoint->getWorldPosition();
@@ -289,11 +289,6 @@ bool FSManipTranslateJoint::handleHover(S32 x, S32 y, MASK mask)
     relative_move -= mDragCursorStartGlobal;
 
     F64 axis_magnitude = relative_move * axis_d; // dot product
-    LLVector3d cursor_point_snap_line;
-    F64 off_axis_magnitude;
-
-    getMousePointOnPlaneGlobal(cursor_point_snap_line, x, y, current_pos_global, mSnapOffsetAxis % axis_f);
-    off_axis_magnitude = axis_exists ? llabs((cursor_point_snap_line - current_pos_global) * LLVector3d(mSnapOffsetAxis)) : 0.f;
 
     // Clamp to arrow direction
     // *FIX: does this apply anymore?
@@ -305,7 +300,6 @@ bool FSManipTranslateJoint::handleHover(S32 x, S32 y, MASK mask)
         axis_f.setVec(axis_d);
     }
 
-    LLVector3d clamped_relative_move = axis_magnitude * axis_d; // scalar multiply
     LLVector3 clamped_relative_move_f = (F32)axis_magnitude * axis_f; // scalar multiply
     auto* poser = dynamic_cast<FSFloaterPoser*>(LLFloaterReg::findInstance("fs_poser"));
     if (poser && mJoint)

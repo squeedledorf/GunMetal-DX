@@ -286,7 +286,8 @@ public:
     void frameDropped();
     // Select + cull + emit for one view (compute, outside any rendering scope). Returns the
     // cluster view index (kNone = nothing to draw: no instances, view budget full, not ready).
-    uint32_t recordCull(VkCommandBuffer cmd, const LLClusterViewIn& view);
+    // Region-map captures keep their selection flags but do not replace the main RT/lift view.
+    uint32_t recordCull(VkCommandBuffer cmd, const LLClusterViewIn& view, bool track_main = true);
     // Draw a view's emitted clusters inside the renderer's rendering scope. Returns true when
     // draws were recorded.
     bool recordDraw(const LLClusterDrawIn& in);
@@ -322,9 +323,10 @@ public:
     // its LOD0 (and so from the legacy rigged geometry that still casts its shadows):
     // eps(P) <= tol_px * max(|P - cam|, znear) / px_scale with the main view's post-controller
     // tolerance and held px_scale (the selection's own projection; its LOD-camera band covers
-    // |cam - lod_cam|). m_per_m = tol_px / px_scale. False = no avatar switched this frame or
-    // no main-view selection recorded (then nothing is lifted).
-    bool shadowLiftBound(float& m_per_m, float& znear) const;
+    // |cam - lod_cam|). m_per_m = tol_px / px_scale; in an orthographic main view (ortho),
+    // px_scale is pixels per metre and m_per_m is the flat bound in metres, without distance.
+    // False = no avatar switched this frame or no main-view selection (nothing is lifted).
+    bool shadowLiftBound(float& m_per_m, float& znear, bool& ortho) const;
     // #748 rigged cluster RT: the cluster view index of THIS frame's main-view selection (its
     // ClusterView in CL_B_VIEWS -- projection, LOD camera, tolerance -- is the rigged RT cut's
     // projection), kNone when no main view was selected this frame.
@@ -420,6 +422,7 @@ private:
     uint32_t mViewsSkipped = 0;                  // secondary view selections skipped (no static drawn), summary window
     // The main view's selection inputs this frame (shadowLiftBound): post-controller.
     float mMainTolPx = 0.f, mMainPxScale = 0.f, mMainZnear = 0.1f;
+    bool mMainOrtho = false;                    // px_scale is pixels per metre, not per metre at distance 1
     uint64_t mMainViewFrame = ~0ull;             // frame the main view was selected (~0 = none)
     uint32_t mMainView = 0xFFFFFFFFu;            // its cluster view index (mainView)
 

@@ -135,7 +135,7 @@ struct SxcCfg
              change_frames = 12, gap = 30, levels = 6;
     float bin_deg = 2.f, lat_deg = 0.5f, cell = 0.25f, cell_px = 8.f, max_age = 120.f, idle = 60.f, jump_deg = 2.f,
           fast_deg = 0.05f, soft = 0.01f;
-    bool log = true;
+    bool log = true, emissive_no_shadow = true;
 };
 SxcCfg sxcCfg()
 {
@@ -161,6 +161,8 @@ SxcCfg sxcCfg()
     static LLCachedControl<F32>  s_fast(gSavedSettings, "RenderVKSunCertFastDeg", 0.05f);
     static LLCachedControl<bool> s_log(gSavedSettings, "RenderVKSunCertLog", true);
     static LLCachedControl<F32>  s_soft(gSavedSettings, "RenderVKRTShadowSoftness", 0.01f);
+    static LLCachedControl<bool> s_emissive_shadow(gSavedSettings, "RenderVKEmissiveNoShadows", true);
+    c.emissive_no_shadow = s_emissive_shadow;
     c.on = s_on; c.debug = std::min<U32>(s_dbg, 2u);
     c.bin_deg = llclamp((F32)s_bin, 0.25f, 15.f);
     c.lat_deg = llclamp((F32)s_lat, 0.05f, 5.f);
@@ -190,6 +192,7 @@ uint32_t cfgKey(const SxcCfg& c)
     auto mixu = [&](uint32_t v) { h = (h ^ v) * 16777619u; };
     auto mixf = [&](float v) { uint32_t u; std::memcpy(&u, &v, 4); mixu(u); };
     mixu(c.lookahead); mixu(c.rays); mixu(c.levels);
+    mixu(c.emissive_no_shadow ? 1u : 0u);
     mixf(c.bin_deg); mixf(c.lat_deg); mixf(c.cell); mixf(c.cell_px); mixf(c.soft);
     return h | 1u;
 }

@@ -85,14 +85,13 @@ class ViewerManifest(LLManifest):
                 supporters_names = self.extract_names(supporters_path)
                 self.put_in_file(supporters_names.encode(), "supporters.txt", src=supporters_path)
 
-                # <GMDX> the volumetric clouds' cloud bodies (CorvaeOboro's CC0 volumes,
-                # scripts/clouds/corvae_shapes.py)
-                self.path("gmdx_cloud_shapes.bin")
-
-                # <GMDX> the night sky's stars (Yale Bright Star Catalogue) and Milky Way
-                # (ESO/S. Brunier, CC BY 4.0; scripts/nightsky/gmdx_night_sky_assets.py)
-                self.path("gmdx_bsc5.bin")
-                self.path("gmdx_milkyway.jpg")
+                # the night sky's stars (Yale Bright Star Catalogue) and Milky Way (ESO/S. Brunier,
+                # CC BY 4.0; credited in Help > About and the licences files). Ported from
+                # GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
+                self.path("slipstream_bsc5.bin")
+                self.path("slipstream_milkyway.jpg")
+                # the volumetric clouds' sculpted bodies (CorvaeOboro's CC0 cloud volumes)
+                self.path("slipstream_cloud_shapes.bin")
 
                 # ... and the default camera position settings
                 self.path("camera")
@@ -201,7 +200,7 @@ class ViewerManifest(LLManifest):
                     # #1056: Phosphor vector icons (vector_file in textures.xml) + their licence
                     self.path("phosphor/*.svg")
                     self.path("phosphor/LICENSE")
-                    self.path("phosphor_authored/*.svg")   # our own, in the same style
+                    self.path("phosphor_authored/*.svg")   # in the same style: ours, plus the letter-* / number-* pin icons from GunMetal-DX (squeedledorf, LGPL 2.1, v0.3.0 cf5f1f4)
                     self.path("icons_cc/*.svg")            # <GMDX> pin icons under CC licences (credits: Help > About)
                     self.path("salt_and_pepper.jpg")
                     self.path("*.tga")

@@ -540,7 +540,7 @@
                         width="58"
                         height="58"
                         tool_tip="Where the stick is now. The shaded middle is the dead zone."/>
-                    <curve_editor
+                    <sl_curve_editor
                         name="curve_view"
                         layout="topleft"
                         follows="top|right"
@@ -706,6 +706,7 @@
         tool_tip="Raw input, calibration, hardware remapping and the data sent to the region"/>
     <check_box
         name="game_control_to_server"
+        control_name="GameControlToScripts"
         label="Send controller data to Second Life regions"
         layout="topleft"
         follows="left|bottom"

@@ -35,6 +35,11 @@ target_include_directories(vkclean PRIVATE
     ${Vulkan_INCLUDE_DIRS}
 )
 
+# Strict warning tier for our own files (not the vktest helper layer). Shared with the
+# viewer build: indra/cmake/SLStrictWarnings.cmake (SL_STRICT_WARNINGS[_FATAL]).
+include(${CMAKE_CURRENT_SOURCE_DIR}/../cmake/SLStrictWarnings.cmake)
+sl_apply_strict_warnings(main.cpp clean_scene.cpp)
+
 # vk_offscreen.cpp pulls stb_image_write via "third_party/stb_image_write.h";
 # it resolves relative to that .cpp's own directory, so vktest/third_party is
 # on the include path implicitly. We also keep our own copy for standalone use.

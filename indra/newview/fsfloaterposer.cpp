@@ -1685,7 +1685,7 @@ void FSFloaterPoser::onToggleRotationFrameButton(const LLUICtrl* toggleButton)
     if (!toggleButton)
         return;
 
-    if (bool buttonDown = toggleButton->getValue().asBoolean())
+    if (toggleButton->getValue().asBoolean())
     {
         mBtnAvatarFrame->setValue(toggleButton == mBtnAvatarFrame);
         mBtnScreenFrame->setValue(toggleButton == mBtnScreenFrame);
@@ -1738,10 +1738,8 @@ void FSFloaterPoser::onSetAvatarToTpose()
     enableOrDisableRedoAndUndoButton();
 }
 
-void FSFloaterPoser::onResetJoint(const LLSD& data)
+void FSFloaterPoser::onResetJoint(const LLSD& /*data*/)
 {
-    int resetType = data.asInteger();
-
     LLVOAvatar* avatar = getUiSelectedAvatar();
     if (!avatar)
         return;
@@ -1867,7 +1865,6 @@ void FSFloaterPoser::selectJointByName(const std::string& jointName)
         mCollisionVolumesScrollList
     };
 
-    bool found = false;
     for (S32 i = 0; i < tabContainer->getTabCount(); ++i)
     {
         LLPanel* panel = tabContainer->getPanelByIndex(i);
@@ -2514,7 +2511,6 @@ void FSFloaterPoser::onAvatarSelect()
     if (!avatar)
         return;
 
-    bool          isSelf                 = avatar->isSelf();
     bool          haveImplicitPermission = havePermissionToAnimateAvatar(avatar); // self & control avatars you own
     bool          haveExplicitPermission = havePermissionToAnimateOtherAvatar(avatar); // as permissions allow
 
@@ -2659,7 +2655,7 @@ void FSFloaterPoser::onAvatarsRefresh()
         row["columns"][COL_UUID]["value"]  = uuid;
         row["columns"][COL_SAVE]["column"] = "saveFileName";
         row["columns"][COL_SAVE]["value"]  = "";
-        LLScrollListItem* item             = mAvatarSelectionScrollList->addElement(row);
+        mAvatarSelectionScrollList->addElement(row);
     }
 
     // Add Animesh avatars
@@ -2777,7 +2773,6 @@ void FSFloaterPoser::addBoldToScrollList(LLScrollListCtrl* list, LLVOAvatar* ava
         return;
 
     std::string iconValue                    = "";
-    bool        considerExternalFormatSaving = getSavingToBvh();
 
     for (auto listItem : list->getAllData())
     {

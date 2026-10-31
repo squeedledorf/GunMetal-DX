@@ -90,6 +90,7 @@ class LLViewerTextureList
     friend class LLTextureView;
     friend class LLViewerTextureManager;
     friend class LLLocalBitmap;
+    friend class LLLocalGLTFMaterialMgr;   // #1233: releases its local material textures (like LLLocalBitmap)
 
 public:
     static bool createUploadFile(LLPointer<LLImageRaw> raw_image,

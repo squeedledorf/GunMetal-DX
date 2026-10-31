@@ -2,6 +2,9 @@
  * @file fssoundemitterblacklist.h
  * @brief Per-emitter sound blacklist (silence a specific noisy object).
  *
+ * Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4; original code from
+ * SkoomaStorm (SoapStorm <OTS>). Only active with the SLSoundEmitterBlacklist preference.
+ *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Second Life Viewer Source Code
  * Copyright (C) 2026, SkoomaStorm
@@ -81,6 +84,10 @@ class FSSoundEmitterBlacklist : public LLSingleton<FSSoundEmitterBlacklist>
     LLSINGLETON_EMPTY_CTOR(FSSoundEmitterBlacklist);
 
 public:
+    // The SLSoundEmitterBlacklist preference: menus, floater, sound gates and the property
+    // probes (here and in the derender list) are all inert while it is off.
+    static bool enabled();
+
     // Loads the persisted permanent list. Call once after login.
     void init();
 
@@ -102,7 +109,8 @@ public:
     // attachment entry whose object is no longer worn by that owner, and object_id
     // is the root of an attachment they wear, re-point the entry at object_id. The
     // mute gate silences it from the next audio update on.
-    void noteObjectProperties(const LLUUID& object_id, const LLUUID& owner_id, const std::string& name);
+    // Returns true when the reply answered a probe of ours (so it is not an unexpected reply).
+    bool noteObjectProperties(const LLUUID& object_id, const LLUUID& owner_id, const std::string& name);
 
     // The sound gates. An object is blacklisted when it or its linkset root is.
     // The UUID form is for SoundTrigger, whose emitter may not be in gObjectList:

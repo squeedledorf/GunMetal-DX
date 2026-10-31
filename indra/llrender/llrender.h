@@ -39,6 +39,7 @@
 #include "llstrider.h"
 #include "llpointer.h"
 #include <vector>
+#include <utility>
 #include "llwin32headers.h"
 #include "llpixelformat.h"
 #include "llmatrix4a.h"
@@ -142,6 +143,13 @@ class LLRender
 {
     friend class LLTexUnit;
 public:
+    std::pair<size_t, size_t> uiStackDepths() const { return {mUIOffset.size(), mUIScale.size()}; }
+    void unwindUIStacks(std::pair<size_t, size_t> depths)
+    {
+        if (mUIOffset.size() > depths.first) mUIOffset.resize(depths.first);
+        if (mUIScale.size() > depths.second) mUIScale.resize(depths.second);
+    }
+
 
     enum eTexIndex : U8
     {
@@ -337,8 +345,8 @@ public:
 
     // In-world label occlusion (#487): name tags / hover text set the agent-space
     // point they are attached to before drawing (with a DepthScope testing) and clear it
-    // after; the backend hides or fades the whole label when the scene covers that
-    // point, instead of depth-testing each glyph.
+    // after; the backend depth-tests each pixel of the label at that point's depth
+    // (#1126), hiding the parts the scene covers.
     void setLabelAnchor(F32 x, F32 y, F32 z, F32 bias = 0.15f);
     void clearLabelAnchor();
 

@@ -128,9 +128,61 @@ Thank you to everyone who has contributed to Slipstream:
        width="545"
        word_wrap="true">
 TheSlowly: Fly Override, camera pass-through option in Preferences, Preferences search focus, chat layout options (conversation sorting, typing in the conversation list, reorganised chat preferences), script dialog limits in Preferences, glTF model and material upload improvements
+squeedledorf (GunMetal-DX): game controller support, CombatFX (hit markers, kill feed, projectile tools), orthographic camera, physical sky and night sky, rez effects, MMO chat log
       </text_editor>
     </panel>
   </accordion_tab>
+  <!-- <GMDX> SoapStorm credits -->
+  <accordion_tab
+   expanded="false"
+   fit_panel="false"
+   layout="topleft"
+   name="soapstorm_credits_tab"
+   title="SoapStorm, Alchemy: Skooma, Megapahit">
+    <panel
+     border="false"
+     follows="all"
+     left="10"
+     name="soapstorm_credits_panel"
+     height="210"
+     top="10">
+      <text
+          follows="top|left|right"
+          font.style="BOLD"
+          height="20"
+          layout="topleft"
+          left="5"
+          name="soapstorm_intro"
+          top="0"
+          width="465"
+          wrap="true">
+GunMetal-DX includes work from these viewers, used under the LGPL 2.1:
+      </text>
+      <text_editor
+       enabled="false"
+       follows="top|left"
+       height="180"
+       bg_readonly_color="Transparent"
+       left="5"
+       text_color="LtGray"
+       max_length="65536"
+       name="soapstorm_names"
+       parse_urls="true"
+       top_pad="5"
+       width="545"
+       word_wrap="true">
+SoapStorm (Soap Frenzy): camera, snapshot and quality-of-life features; aim convergence developed together.
+SoapStorm (Nexii Malthus): rez queue warning and ghost projectile cleanup.
+Alchemy: Skooma (Nexii Malthus): combat render lockout, fast-velocity recovery, ghosted object cleanup, SLMC factions, measured avatar hitbox.
+Megapahit: over-the-shoulder camera and group nameplate colours.
+
+SoapStorm: https://github.com/soapyf/soapstorm
+Alchemy: Skooma: https://github.com/Martin-Pitt/Alchemy-Skooma
+Megapahit: https://github.com/megapahit/viewer
+      </text_editor>
+    </panel>
+  </accordion_tab>
+  <!-- </GMDX> -->
   <accordion_tab
    expanded="false"
    fit_panel="false"
@@ -337,10 +389,12 @@ PCRE Copyright (c) 1997-2012 University of Cambridge
 SDL Copyright (C) 1997, 1998, 1999, 2000, 2001, 2002 Sam Lantinga
 SSLeay Copyright (C) 1995-1998 Eric Young (eay@cryptsoft.com)
 Weather sound recordings from Freesound.org (CC0 1.0, public domain): audible-edge, bbrownmuse, BudJillett, Cinetony, cocaine, csengeri, felix.blume, Fission9, gyzhor, jmbphilmes, Kinoton, kyles, milosaudio, musmaster, Nox_Sound, pheiland, qubodup, ragamuffin, Sadiquecat, Sassaby, SoundsLikeYukon, swiftoid, TRP, visionear, xkeril, xUMR.
+Physical sky, physical night and night sky ported from GunMetal-DX by squeedledorf (LGPL 2.1). Physical sky after Hillaire 2020 and Epic Games' reference implementation (https://github.com/sebh/UnrealEngineSkyAtmosphere), MIT License, Copyright (c) 2020 Epic Games, Inc.
 Night sky stars: The Bright Star Catalogue, 5th Revised Ed., D. Hoffleit and W. H. Warren Jr. (Yale University Observatory / NASA ADC, 1991), from CDS Strasbourg (catalogue V/50).
 Night sky Milky Way: "The Milky Way panorama", ESO/S. Brunier (eso0932a), CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/); resized and its resolved stars removed.
+Volumetric cloud bodies: CorvaeOboro's hand-sculpted cloud volumes (CC0 1.0, public domain).
 Night sky planets: mean orbital elements from E. M. Standish, "Keplerian Elements for Approximate Positions of the Major Planets" (JPL Solar System Dynamics, https://ssd.jpl.nasa.gov/planets/approx_pos.html).
-Toolbar pin icons: "gun" from Font Awesome Free 6 by Fonticons, Inc., CC BY 4.0 (https://fontawesome.com/license/free); "winchester-rifle" and "rifle" by Lorc and Delapouite, game-icons.net, CC BY 3.0 (https://creativecommons.org/licenses/by/3.0/); "flintlock-pistol" from Pinhead Icons, CC0. Letters and digits: Barlow SemiBold outlines, SIL Open Font License 1.1.
+Toolbar pin icons: "gun" from Font Awesome Free 6 by Fonticons, Inc., CC BY 4.0 (https://fontawesome.com/license/free); "winchester-rifle" and "rifle" by Lorc and Delapouite, game-icons.net, CC BY 3.0 (https://creativecommons.org/licenses/by/3.0/); "flintlock-pistol" from Pinhead Icons, CC0; letters and digits from Barlow SemiBold outlines, SIL Open Font License 1.1 (fontsets/BarlowOFL.txt).
 xmlrpc-epi Copyright (C) 2000 Epinions, Inc.
 xxHash Copyright (C) 2012-2020 Yann Collet.
 zlib Copyright (C) 1995-2012 Jean-loup Gailly and Mark Adler.

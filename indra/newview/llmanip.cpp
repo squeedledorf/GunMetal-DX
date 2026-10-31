@@ -491,9 +491,12 @@ void LLManip::renderXYZ(const LLVector3 &vec)
 {
     const S32 PAD = 10;
     std::string feedback_string;
-    S32 window_center_x = gViewerWindow->getWorldViewRectScaled().getWidth() / 2;
-    S32 window_center_y = gViewerWindow->getWorldViewRectScaled().getHeight() / 2;
-    S32 vertical_offset = window_center_y - VERTICAL_OFFSET;
+    // #1115: centred near the top of the area under the status / navigation bars (the HUD
+    // rect, LL's world view rect). The world view itself is the whole window under Vulkan,
+    // so its top is behind those bars and the readout was drawn under them.
+    const LLRect area = gViewerWindow->getHudRectScaled();
+    S32 window_center_x = area.mLeft + area.getWidth() / 2;
+    S32 baseline_y = area.mTop - VERTICAL_OFFSET;
 
 
     gGL.pushMatrix();
@@ -505,7 +508,7 @@ void LLManip::renderXYZ(const LLVector3 &vec)
 
         imagep->draw(
             (S32)((window_center_x - 115) * display_scale.mV[VX]),
-            (S32)((window_center_y + vertical_offset - PAD) * display_scale.mV[VY]),
+            (S32)((baseline_y - PAD) * display_scale.mV[VY]),
             (S32)(235 * display_scale.mV[VX]),
             (S32)((PAD * 2 + 10) * display_scale.mV[VY]),
             LLColor4(0.f, 0.f, 0.f, 0.7f) );
@@ -517,33 +520,33 @@ void LLManip::renderXYZ(const LLVector3 &vec)
         // render drop shadowed text (manually because of bigger 'distance')
         F32 right_x;
         feedback_string = llformat("X: %.3f", vec.mV[VX]);
-        font->render(utf8str_to_wstring(feedback_string), 0, window_center_x - 102.f + 1.f, (F32)(window_center_y + vertical_offset) - 2.f, LLColor4::black,
+        font->render(utf8str_to_wstring(feedback_string), 0, window_center_x - 102.f + 1.f, (F32)baseline_y - 2.f, LLColor4::black,
             LLFontGL::LEFT, LLFontGL::BASELINE,
             LLFontGL::NORMAL, LLFontGL::NO_SHADOW, S32_MAX, 1000, &right_x);
 
         feedback_string = llformat("Y: %.3f", vec.mV[VY]);
-        font->render(utf8str_to_wstring(feedback_string), 0, window_center_x - 27.f + 1.f, (F32)(window_center_y + vertical_offset) - 2.f, LLColor4::black,
+        font->render(utf8str_to_wstring(feedback_string), 0, window_center_x - 27.f + 1.f, (F32)baseline_y - 2.f, LLColor4::black,
             LLFontGL::LEFT, LLFontGL::BASELINE,
             LLFontGL::NORMAL, LLFontGL::NO_SHADOW, S32_MAX, 1000, &right_x);
 
         feedback_string = llformat("Z: %.3f", vec.mV[VZ]);
-        font->render(utf8str_to_wstring(feedback_string), 0, window_center_x + 48.f + 1.f, (F32)(window_center_y + vertical_offset) - 2.f, LLColor4::black,
+        font->render(utf8str_to_wstring(feedback_string), 0, window_center_x + 48.f + 1.f, (F32)baseline_y - 2.f, LLColor4::black,
             LLFontGL::LEFT, LLFontGL::BASELINE,
             LLFontGL::NORMAL, LLFontGL::NO_SHADOW, S32_MAX, 1000, &right_x);
 
         // render text on top
         feedback_string = llformat("X: %.3f", vec.mV[VX]);
-        font->render(utf8str_to_wstring(feedback_string), 0, window_center_x - 102.f, (F32)(window_center_y + vertical_offset), LLColor4(1.f, 0.5f, 0.5f, 1.f),
+        font->render(utf8str_to_wstring(feedback_string), 0, window_center_x - 102.f, (F32)baseline_y, LLColor4(1.f, 0.5f, 0.5f, 1.f),
             LLFontGL::LEFT, LLFontGL::BASELINE,
             LLFontGL::NORMAL, LLFontGL::NO_SHADOW, S32_MAX, 1000, &right_x);
 
         feedback_string = llformat("Y: %.3f", vec.mV[VY]);
-        font->render(utf8str_to_wstring(feedback_string), 0, window_center_x - 27.f, (F32)(window_center_y + vertical_offset), LLColor4(0.5f, 1.f, 0.5f, 1.f),
+        font->render(utf8str_to_wstring(feedback_string), 0, window_center_x - 27.f, (F32)baseline_y, LLColor4(0.5f, 1.f, 0.5f, 1.f),
             LLFontGL::LEFT, LLFontGL::BASELINE,
             LLFontGL::NORMAL, LLFontGL::NO_SHADOW, S32_MAX, 1000, &right_x);
 
         feedback_string = llformat("Z: %.3f", vec.mV[VZ]);
-        font->render(utf8str_to_wstring(feedback_string), 0, window_center_x + 48.f, (F32)(window_center_y + vertical_offset), LLColor4(0.5f, 0.5f, 1.f, 1.f),
+        font->render(utf8str_to_wstring(feedback_string), 0, window_center_x + 48.f, (F32)baseline_y, LLColor4(0.5f, 0.5f, 1.f, 1.f),
             LLFontGL::LEFT, LLFontGL::BASELINE,
             LLFontGL::NORMAL, LLFontGL::NO_SHADOW, S32_MAX, 1000, &right_x);
     }

@@ -42,6 +42,7 @@
 static constexpr char   REGION_GROUP_TITLES_FILE[] = "region_group_titles.xml";
 static constexpr S32    MAX_REGION_NAME_LENGTH     = 63;
 static constexpr F32    REGION_VALIDATION_TIMEOUT  = 10.f;
+static constexpr F64    ACTIVATE_TITLE_TIMEOUT     = 20.0;
 
 // ---------------------------------------------------------------------------
 // Construction / destruction
@@ -50,10 +51,12 @@ static constexpr F32    REGION_VALIDATION_TIMEOUT  = 10.f;
 FSGroupTitleRegionMgr::FSGroupTitleRegionMgr()
 {
     mRegionChangedConnection = gAgent.addRegionChangedCallback([this]() { onRegionChanged(); });
+    gAgent.addListener(this, "new group");
 }
 
 FSGroupTitleRegionMgr::~FSGroupTitleRegionMgr()
 {
+    gAgent.removeListener(this);
     cancelPendingValidation();
 
     if (mLoginRetryTimer)
@@ -523,31 +526,67 @@ void FSGroupTitleRegionMgr::applyGroupTitle(const LLUUID& group_id, const LLUUID
         return;
     }
 
-    bool title_already_active = false;
+    // #868: FS sent the title update first and ActivateGroup right after. Activate first and send
+    // the title once the server reports the group active (handleEvent), so the title change is
+    // made in the active group and the name tag follows it instead of racing the activation.
+    mActivatingGroupID.setNull();
+    if (gAgent.getGroupID() == group_id)
+    {
+        sendGroupTitle(group_id, role_id);
+        return;
+    }
+
+    LLGroupActions::activate(group_id);
     if (group_id.notNull())
     {
-        if (const auto* group_data = LLGroupMgr::getInstance()->getGroupData(group_id))
+        mActivatingGroupID = group_id;
+        mActivatingRoleID = role_id;
+        mActivatingExpiry = LLFrameTimer::getElapsedSeconds() + ACTIVATE_TITLE_TIMEOUT;
+    }
+}
+
+void FSGroupTitleRegionMgr::sendGroupTitle(const LLUUID& group_id, const LLUUID& role_id)
+{
+    if (group_id.isNull())
+    {
+        return;
+    }
+
+    bool title_already_active = false;
+    if (const auto* group_data = LLGroupMgr::getInstance()->getGroupData(group_id))
+    {
+        for (const auto& title : group_data->mTitles)
         {
-            for (const auto& title : group_data->mTitles)
+            if (title.mRoleID == role_id && title.mSelected)
             {
-                if (title.mRoleID == role_id && title.mSelected)
-                {
-                    title_already_active = true;
-                    break;
-                }
+                title_already_active = true;
+                break;
             }
         }
     }
 
-    if (group_id.notNull() && !title_already_active)
+    if (!title_already_active)
     {
         LLGroupMgr::getInstance()->sendGroupTitleUpdate(group_id, role_id);
     }
+}
 
-    if (gAgent.getGroupID() != group_id)
+bool FSGroupTitleRegionMgr::handleEvent(LLPointer<LLOldEvents::LLEvent> event, const LLSD& userdata)
+{
+    // #868: "new group" follows every AgentDataUpdate (the active group) and group list update. An
+    // activation that never lands (refused, or RLV @setgroup) leaves the title unsent at the expiry.
+    if (event->desc() != "new group" || mActivatingGroupID.isNull() || gAgent.getGroupID() != mActivatingGroupID)
     {
-        LLGroupActions::activate(group_id);
+        return false;
     }
+
+    const LLUUID group_id = mActivatingGroupID;
+    mActivatingGroupID.setNull();
+    if (LLFrameTimer::getElapsedSeconds() < mActivatingExpiry)
+    {
+        sendGroupTitle(group_id, mActivatingRoleID);
+    }
+    return false;
 }
 
 void FSGroupTitleRegionMgr::onRegionChanged()

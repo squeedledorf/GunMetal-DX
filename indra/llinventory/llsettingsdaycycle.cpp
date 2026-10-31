@@ -554,8 +554,7 @@ namespace
             std::string ftype = frame[LLSettingsBase::SETTING_TYPE];
             if (ftype == "sky")
             {
-                LLSettingsSky::validation_list_t valid_sky = LLSettingsSky::validationList();
-                LLSD res_sky = LLSettingsBase::settingValidation(frame, valid_sky, flags);
+                LLSD res_sky = LLSettingsSky::validateSkySettings(frame, (flags & LLSettingsBase::Validator::VALIDATION_PARTIAL) != 0);
 
                 if (res_sky["success"].asInteger() == 0)
                 {
@@ -563,6 +562,7 @@ namespace
                     LL_WARNS("SETTINGS") << "Sky: " << frame << LL_ENDL;
                     continue;
                 }
+                (*itf).second = frame;
                 hasSky |= true;
             }
             else if (ftype == "water")

@@ -2,6 +2,8 @@
  * @file gmdxattachprobe.cpp
  * @brief Throttled property probes of other residents' attachments.
  *
+ * Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
+ *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -63,6 +65,11 @@ namespace
 
     bool wanted(const LLUUID& wearer_id, const LLUUID& object_id)
     {
+        // Off: no probe is ever queued or sent.
+        if (!FSSoundEmitterBlacklist::enabled())
+        {
+            return false;
+        }
         return (LLDerenderList::instanceExists() && LLDerenderList::instance().wantsProperties(wearer_id, object_id))
             || FSSoundEmitterBlacklist::instance().wantsProperties(wearer_id, object_id);
     }
@@ -122,6 +129,11 @@ namespace
 
 namespace GMDXAttachProbe
 {
+    bool wasAsked(const LLUUID& object_id)
+    {
+        return sAsked.find(object_id) != sAsked.end();
+    }
+
     void onAttachmentAdded(LLVOAvatar* wearer, LLViewerObject* attachment)
     {
         if (!wearer || wearer->isSelf() || !attachment || attachment->isDead())

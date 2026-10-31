@@ -48,7 +48,7 @@ public:
     void    draw() override;
     void    setMinimized(bool b) override;
     void    handleReshape(const LLRect& new_rect, bool by_user) override; // <GMDX>
-    void    updateTitleButtons() override; // <GMDX> GMDXMiniMapHideButtons
+    void    updateTitleButtons() override; // <GMDX> SLMiniMapHideButtons
 
 private:
     void setDirectionPos( LLTextBox* text_box, F32 rotation );
@@ -67,6 +67,7 @@ private:
     boost::signals2::scoped_connection mCompassStyleConn;
     boost::signals2::scoped_connection mRotateConn;
     boost::signals2::scoped_connection mHideButtonsConn;
+    class LLButton* mSettingsButton = nullptr;   // the gear: Map Settings
     // </GMDX>
 
     LLTextBox*      mTextBoxEast;

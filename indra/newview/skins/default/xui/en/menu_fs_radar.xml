@@ -173,6 +173,7 @@
 	</menu_item_call>
 	<menu_item_call
 		label="Parcel Eject"
+		tool_tip="Eject from the parcel. A ban is a separate choice in the confirmation."
 		name="eject">
 		<menu_item_call.on_click
 			function="Avatar.Eject"/>
@@ -189,6 +190,7 @@
 	</menu_item_call>
 	<menu_item_call
 		label="Estate Teleport Home"
+		tool_tip="Remove from the region by sending home, without adding a ban."
 		name="teleport_home">
 		<menu_item_call.on_click
 			function="Avatar.TeleportHome"/>

@@ -68,6 +68,7 @@
 #include "lltextureentry.h"
 #include "llgltfmaterial.h"
 #include "pipeline.h"
+#include "slblenderconnectfile.h"
 
 /*=======================================*/
 /*  Async load plumbing                  */
@@ -91,6 +92,33 @@ namespace
         JointNameSet          mJointsFromNode;
         U32                   mLoadState = LLModelLoader::STARTING;
         LLPointer<LLVOAvatar> mAvatar; // preview skeleton for joint lookup (never the agent)
+        std::shared_ptr<SLBlenderConnectSnapshot> mSnapshot; // outlives disconnect during a load
+        std::string mSnapshotError;
+        bool mOwnedByLoader = false;
+        bool mRetrySnapshot = false;
+    };
+
+    // Own the local import policy rather than adding mode flags to the ordinary
+    // upload loader. The context survives shutdown even when callbacks are skipped.
+    class SLBlenderConnectLoader final : public LLGLTFLoader
+    {
+    public:
+        template<class... Args>
+        SLBlenderConnectLoader(std::shared_ptr<LoadContext> context, std::string source, Args&&... args)
+            : LLGLTFLoader(std::forward<Args>(args)...), mContext(std::move(context)), mSource(std::move(source)) {}
+        bool OpenFile(const std::string&) override
+        {
+            mContext->mSnapshot = SLBlenderConnectFile::snapshot(mSource, mContext->mSnapshotError, &mContext->mRetrySnapshot);
+            if (!mContext->mSnapshot) { setLoadState(ERROR_PARSING); return false; }
+            mFilename = mContext->mSnapshot->filename;
+            return LLGLTFLoader::OpenFile(mFilename);
+        }
+    protected:
+        std::string processTexture(std::string&, S32, const std::string&, const std::string&) override
+        { return {}; } // PBR materials consume embedded data; no shared temp extraction.
+    private:
+        std::shared_ptr<LoadContext> mContext;
+        std::string mSource;
     };
 
     // Build the joint alias map the loaders use to recognise rig joints,
@@ -238,7 +266,17 @@ namespace
 
         if (LLLocalMeshMgr* mgr = LLLocalMeshMgr::instanceExists() ? LLLocalMeshMgr::getInstance() : nullptr)
         {
-            mgr->onLoadResult(ctx->mTrackingID, scene, ctx->mLoadState);
+            try
+            {
+                mgr->onLoadResult(ctx->mTrackingID, scene, ctx->mLoadState, ctx->mSnapshot, ctx->mSnapshotError, ctx->mRetrySnapshot);
+            }
+            catch (const std::exception&)
+            {
+                if (!ctx->mOwnedByLoader) throw;
+                LL_WARNS("LocalMesh") << "BlenderConnect commit failed; releasing the local session" << LL_ENDL;
+                if (mgr->getBlenderConnectID() == ctx->mTrackingID)
+                    mgr->stopBlenderConnect("Import resource failure. Preview removed; reconnect with a smaller export.");
+            }
         }
 
         // The model loader deletes itself in LLModelLoader::loadModelCallback
@@ -246,15 +284,16 @@ namespace
         // `delete this`). So we must NOT shut it down or delete it here -- that
         // was a double free. Free only our context, deferred so it outlives the
         // loader's self-deletion (the loader holds references into the
-        // context's joint maps).
-        doOnIdleOneTime([ctx]() { delete ctx; });
+        // context's joint maps). The Blender Connect loader subclass instead owns
+        // its context, including the exit-without-callback path.
+        if (!ctx->mOwnedByLoader) doOnIdleOneTime([ctx]() { delete ctx; });
     }
 }
 
 /*=======================================*/
 /*  LLLocalMesh: unit class              */
 /*=======================================*/
-LLLocalMesh::LLLocalMesh(std::string filename, bool include_joints)
+LLLocalMesh::LLLocalMesh(std::string filename, bool include_joints, bool live)
     : mFilename(filename)
     , mShortName(gDirUtilp->getBaseFileName(filename, true))
     , mFormat(FMT_NONE)
@@ -266,6 +305,7 @@ LLLocalMesh::LLLocalMesh(std::string filename, bool include_joints)
     , mNumVertices(0)
     , mNumTriangles(0)
     , mNumJoints(0)
+    , mBlenderConnect(live)
     , mReloading(false)
     , mPendingModified()
     , mFailedModified()
@@ -273,6 +313,12 @@ LLLocalMesh::LLLocalMesh(std::string filename, bool include_joints)
     mTrackingID.generate();
 
     std::string ext = gDirUtilp->getExtension(mFilename);
+    if (mBlenderConnect && ext != "glb")
+    {
+        mBlenderConnectError = "Blender Connect accepts only a self-contained .glb file.";
+        mState = ST_FAILED;
+        return;
+    }
     if (ext == "dae")
     {
         mFormat = FMT_DAE;
@@ -327,8 +373,19 @@ void LLLocalMesh::startLoad()
     std::error_code ec;
     mPendingModified = std::filesystem::last_write_time(fsyspath(mFilename), ec);
 
-    LoadContext* ctx = new LoadContext();
+    // The Blender Connect loader subclass owns the context even when
+    // shutdown skips the result callback. No snapshot leaks on that path.
+    auto connect_context = mBlenderConnect ? std::make_shared<LoadContext>() : std::shared_ptr<LoadContext>();
+    LoadContext* ctx = connect_context ? connect_context.get() : new LoadContext();
+    ctx->mOwnedByLoader = mBlenderConnect;
     ctx->mTrackingID = mTrackingID;
+    if (mBlenderConnect)
+    {
+        const auto pulse = SLBlenderConnectFile::pulse(mFilename);
+        mConnectPendingRevision = pulse.revision;
+        mConnectPendingSession = pulse.session;
+    }
+    ctx->mSnapshot = mBlenderConnectPendingSnapshot;
 
     // Resolve joints against a dedicated UI avatar -- never the agent. The DAE
     // loader writes the model's joint-position overrides onto the looked-up
@@ -347,7 +404,7 @@ void LLLocalMesh::startLoad()
     if (mFormat == FMT_DAE)
     {
         ctx->mLoader = new LLDAELoader(
-            mFilename,
+            importFilename(),
             LLModel::LOD_HIGH,
             load_cb,
             joint_cb,
@@ -365,7 +422,7 @@ void LLLocalMesh::startLoad()
     else if (mFormat == FMT_FBX)
     {
         ctx->mLoader = new LLFBXLoader(
-            mFilename,
+            importFilename(),
             LLModel::LOD_HIGH,
             load_cb,
             joint_cb,
@@ -386,21 +443,42 @@ void LLLocalMesh::startLoad()
         {
             preview_av->getJointMatricesAndHierarhy(viewer_skeleton);
         }
-        ctx->mLoader = new LLGLTFLoader(
-            mFilename,
-            LLModel::LOD_HIGH,
-            load_cb,
-            joint_cb,
-            texture_cb,
-            state_cb,
-            ctx,
-            ctx->mJointTransformMap,
-            ctx->mJointsFromNode,
-            joint_alias_map,
-            LLSkinningUtil::getMaxJointCount(),
-            gSavedSettings.getU32("ImporterModelLimit"),
-            gSavedSettings.getU32("ImporterDebugMode"),
-            viewer_skeleton);
+        if (mBlenderConnect)
+        {
+            ctx->mLoader = new SLBlenderConnectLoader(connect_context, mFilename,
+                importFilename(),
+                LLModel::LOD_HIGH,
+                load_cb,
+                joint_cb,
+                texture_cb,
+                state_cb,
+                ctx,
+                ctx->mJointTransformMap,
+                ctx->mJointsFromNode,
+                joint_alias_map,
+                LLSkinningUtil::getMaxJointCount(),
+                gSavedSettings.getU32("ImporterModelLimit"),
+                gSavedSettings.getU32("ImporterDebugMode"),
+                viewer_skeleton);
+        }
+        else
+        {
+            ctx->mLoader = new LLGLTFLoader(
+                importFilename(),
+                LLModel::LOD_HIGH,
+                load_cb,
+                joint_cb,
+                texture_cb,
+                state_cb,
+                ctx,
+                ctx->mJointTransformMap,
+                ctx->mJointsFromNode,
+                joint_alias_map,
+                LLSkinningUtil::getMaxJointCount(),
+                gSavedSettings.getU32("ImporterModelLimit"),
+                gSavedSettings.getU32("ImporterDebugMode"),
+                viewer_skeleton);
+        }
     }
 
     ctx->mLoader->setLodSuffixes(LLModelPreview::getLodSuffixes());
@@ -460,20 +538,32 @@ LLUUID LLLocalMesh::registerOwnedBitmap(const std::string& filename, std::vector
     return mgr->getWorldID(tracking_id); // null if the image failed to load
 }
 
+const std::string& LLLocalMesh::importFilename() const
+{
+    return mBlenderConnectPendingSnapshot ? mBlenderConnectPendingSnapshot->filename
+         : mBlenderConnectSnapshot ? mBlenderConnectSnapshot->filename : mFilename;
+}
+
 void LLLocalMesh::importGLTFMaterials(std::map<std::string, LLUUID>& out_by_name, std::vector<LLUUID>& owned)
 {
     LLLocalGLTFMaterialMgr* mgr = LLLocalGLTFMaterialMgr::getInstance();
+    if (mBlenderConnectPendingSnapshot)
+    {
+        mgr->addBlenderConnectSnapshot(*mBlenderConnectPendingSnapshot, out_by_name, owned);
+        return;
+    }
 
     // Load the file's materials once as mesh-owned, unless a prior parse already did.
     // (A user-loaded copy from the Materials tab is a separate, non-mesh-owned set
     // and doesn't count.) Import-time dedup can leave gaps in per-file material
     // indices, so enumerate units by tracking id rather than walking indices.
     std::vector<LLUUID> tids;
-    mgr->getTrackingIDs(mFilename, tids, /*mesh_owned=*/true);
+    const std::string& filename = importFilename();
+    mgr->getTrackingIDs(filename, tids, /*mesh_owned=*/true);
     if (tids.empty())
     {
-        mgr->addUnit(mFilename, /*mesh_owned=*/true);
-        mgr->getTrackingIDs(mFilename, tids, /*mesh_owned=*/true);
+        mgr->addUnit(filename, /*mesh_owned=*/true);
+        mgr->getTrackingIDs(filename, tids, /*mesh_owned=*/true);
     }
 
     // Keep this parse's mesh-owned units referenced (a user-loaded copy is left
@@ -484,10 +574,10 @@ void LLLocalMesh::importGLTFMaterials(std::map<std::string, LLUUID>& out_by_name
     }
     // Bind faces to the mesh's own imports; the user's deletable copies are only a
     // fallback for the corner where the mesh-owned import failed to load.
-    mgr->getWorldIDsByName(mFilename, out_by_name, /*mesh_owned=*/true);
+    mgr->getWorldIDsByName(filename, out_by_name, /*mesh_owned=*/true);
     if (out_by_name.empty())
     {
-        mgr->getWorldIDsByName(mFilename, out_by_name, /*mesh_owned=*/false);
+        mgr->getWorldIDsByName(filename, out_by_name, /*mesh_owned=*/false);
     }
 }
 
@@ -538,6 +628,17 @@ bool LLLocalMesh::ingestScene(LLModelLoader::scene& scene)
     if (mFormat == FMT_GLTF)
     {
         importGLTFMaterials(gltf_mat_by_name, new_owned_materials);
+        if (mBlenderConnectPendingSnapshot)
+        {
+            for (const auto& binding : mBlenderConnectPendingSnapshot->materialBindings)
+            {
+                if (gltf_mat_by_name.find(binding) == gltf_mat_by_name.end())
+                {
+                    release_dropped(LLLocalGLTFMaterialMgr::getInstance(), new_owned_materials, mOwnedMaterials, this);
+                    return false; // accept geometry and materials together
+                }
+            }
+        }
     }
 
     for (auto iter = scene.begin(); iter != scene.end(); ++iter)
@@ -754,7 +855,8 @@ bool LLLocalMesh::pollForReload()
 {
     // Only watch units that are currently showing good geometry; skip while an
     // initial load or a previous reload is still in flight.
-    if (mState != ST_LOADED || mReloading)
+    if (mBlenderConnect) return false; // revision protocol is polled by the manager
+    if ((mState != ST_LOADED && !(mBlenderConnect && mState == ST_FAILED)) || mReloading)
     {
         return false;
     }
@@ -831,6 +933,7 @@ LLLocalMeshMgr::~LLLocalMeshMgr()
 
 void LLLocalMeshMgr::cleanup()
 {
+    stopBlenderConnect();
     // Release every client-only object we rezzed and the preview avatar. Called
     // from LLViewerObjectList::killAllObjects() so they die while the object list
     // and regions are still valid, rather than later when this singleton is torn
@@ -1002,6 +1105,91 @@ LLUUID LLLocalMeshMgr::addUnit(const std::string& filename, bool include_joints)
     return addUnitInternal(filename, include_joints);
 }
 
+void LLLocalMeshMgr::startBlenderConnect(const std::string& filename)
+{
+    stopBlenderConnect();
+    if (gDirUtilp->getExtension(filename) != "glb")
+    {
+        mBlenderConnectStatus = "Blender Connect accepts only the add-on's self-contained .glb file.";
+        mUnitsChangedSignal();
+        return;
+    }
+    if (!isAgentAvatarValid() || !SLBlenderConnectFile::connected(filename))
+    {
+        mBlenderConnectStatus = "Start Blender Connect in Blender and log in before connecting.";
+        mUnitsChangedSignal();
+        return;
+    }
+    // Do not reuse an ordinary Local Mesh unit: its file watcher and materials
+    // may read the source directly. BlenderConnect only imports validated snapshots.
+    try
+    {
+        auto unit = std::make_unique<LLLocalMesh>(filename, false, true);
+        if (unit->isFailed())
+        {
+            mBlenderConnectStatus = "Cannot open Blender Connect source. Start the add-on and reconnect.";
+            mUnitsChangedSignal();
+            return;
+        }
+        unit->setSpawnWhenReady(true);
+        mMeshList.push_back(unit.get());
+        mBlenderConnectID = unit->getTrackingID();
+        unit.release();
+    }
+    catch (const std::exception&)
+    {
+        mBlenderConnectStatus = "Cannot allocate a Blender Connect session. Try a smaller export.";
+        mUnitsChangedSignal();
+        return;
+    }
+    mTimer.setConnectPolling(true);
+    mTimer.startTimer();
+    mUnitsChangedSignal();
+}
+
+void LLLocalMeshMgr::stopBlenderConnect(const std::string& status)
+{
+    if (mBlenderConnectID.notNull())
+    {
+        const LLUUID id = mBlenderConnectID;
+        std::string pending_file;
+        if (const auto* unit = getUnit(id); unit && unit->mBlenderConnectPendingSnapshot)
+            pending_file = unit->mBlenderConnectPendingSnapshot->filename;
+        mBlenderConnectID.setNull();
+        delUnit(id); // detaches, releases previews/materials and snapshot ownership
+        // A commit allocation failure can leave candidate material units that
+        // have not yet been adopted into mOwnedMaterials. They belong only to
+        // this immutable revision, so release those too.
+        if (!pending_file.empty())
+        {
+            std::vector<LLUUID> pending;
+            auto* materials = LLLocalGLTFMaterialMgr::getInstance();
+            materials->getTrackingIDs(pending_file, pending, true);
+            for (const auto& material : pending) materials->delUnit(material);
+        }
+    }
+    mTimer.setConnectPolling(false);
+    mBlenderConnectStatus = status.empty() ? "Disconnected. Start the Blender add-on, then choose its GLB." : status;
+    mUnitsChangedSignal();
+}
+
+bool LLLocalMeshMgr::isBlenderConnectWorldID(const LLUUID& id) const
+{
+    const auto* unit = getUnit(mBlenderConnectID);
+    if (unit) for (const auto& part : unit->getParts()) if (part.mWorldID == id) return true;
+    return false;
+}
+
+std::string LLLocalMeshMgr::blenderConnectStatus() const
+{
+    const auto* unit = getUnit(mBlenderConnectID);
+    if (!unit) return mBlenderConnectStatus;
+    if (unit->mConnectPaused) return "Paused: waiting for Blender; last accepted preview retained.";
+    if (!unit->mBlenderConnectError.empty()) return unit->mBlenderConnectError;
+    if (unit->isLoading()) return "Loading Blender snapshot...";
+    return unit->isReloading() ? "Updating preview..." : "Connected: " + unit->getShortName();
+}
+
 bool LLLocalMeshMgr::addUnit(const std::vector<std::string>& filenames)
 {
     bool any = false;
@@ -1114,6 +1302,7 @@ LLUUID LLLocalMeshMgr::getUnitID(const std::string& filename) const
 {
     for (LLLocalMesh* unit : mMeshList)
     {
+        if (unit->isBlenderConnect()) continue;
         if (unit->getFilename() == filename)
         {
             return unit->getTrackingID();
@@ -1209,7 +1398,7 @@ std::vector<std::string> LLLocalMeshMgr::getFilenames() const
     out.reserve(mMeshList.size());
     for (const LLLocalMesh* unit : mMeshList)
     {
-        out.push_back(unit->getFilename());
+        if (!unit->isBlenderConnect()) out.push_back(unit->getFilename());
     }
     return out;
 }
@@ -1644,7 +1833,8 @@ LLViewerObject* LLLocalMeshMgr::spawnLinkset(const LLUUID& tracking_id, const LL
     return root;
 }
 
-void LLLocalMeshMgr::respawnInstancesInPlace(const LLUUID& tracking_id)
+void LLLocalMeshMgr::respawnInstancesInPlace(const LLUUID& tracking_id, const LLQuaternion& old_rotation,
+                                          const LLVector3& old_offset)
 {
     // Capture each existing copy's identity, transform and attachment, then re-rez
     // them in place. Used when a reload changes the prim count (hot-swap can't swap
@@ -1660,10 +1850,10 @@ void LLLocalMeshMgr::respawnInstancesInPlace(const LLUUID& tracking_id)
     // spawnLinkset() composes the root part's intrinsic rotation (parts[0].mRotation)
     // with the root_rot argument, so save root_rot as the USER delta
     // (~intrinsic * world), not the full world rotation -- otherwise the re-rez would
-    // apply the intrinsic rotation twice. Read it from the (already reparsed) unit.
+    // apply the intrinsic rotation twice. Use the pre-swap source rotation.
     const LLLocalMesh* unit = getUnit(tracking_id);
-    const LLQuaternion intrinsic0 = (unit && !unit->getParts().empty())
-        ? unit->getParts().front().mRotation : LLQuaternion();
+    const LLQuaternion intrinsic0 = unit && unit->isBlenderConnect() ? old_rotation
+        : unit && !unit->getParts().empty() ? unit->getParts().front().mRotation : LLQuaternion();
     std::vector<Saved> saved;
     for (const auto& entry : mSpawnedCopies)
     {
@@ -1683,6 +1873,10 @@ void LLLocalMeshMgr::respawnInstancesInPlace(const LLUUID& tracking_id)
         s.mRot        = ~intrinsic0 * r->getRotation(); // user delta, not full world rotation
         s.mAttached   = r->isAttachment();
         s.mPoint      = s.mAttached ? ATTACHMENT_ID_FROM_STATE(r->getAttachmentState()) : 0;
+        if (unit && unit->isBlenderConnect() && !s.mAttached && !unit->getParts().empty())
+        {
+            s.mBase += (unit->getParts().front().mOffset - old_offset) * s.mRot;
+        }
         saved.push_back(s);
     }
 
@@ -1701,6 +1895,13 @@ void LLLocalMeshMgr::respawnInstancesInPlace(const LLUUID& tracking_id)
 // OLD parts' imported materials to diff user edits against.
 struct LLLocalMeshPreSwapSnapshot
 {
+    struct PartTransform
+    {
+        std::string mName;
+        LLQuaternion mRotation;
+        LLVector3 mOffset;
+    };
+    std::vector<PartTransform> mOldTransforms;
     struct Face
     {
         LLTextureEntry mTE;          // diffuse id, color, glow, bump/shiny/fullbright, transforms, Blinn-Phong material, glTF override
@@ -1807,6 +2008,7 @@ void LLLocalMeshMgr::capturePreSwap(const LLUUID& tracking_id, const LLLocalMesh
     for (const LLLocalMeshPart& part : unit.getParts())
     {
         out.mOldImported.push_back(part.mFaceMaterials);
+        out.mOldTransforms.push_back({part.mName, part.mRotation, part.mOffset});
     }
     for (const auto& entry : mSpawnedCopies)
     {
@@ -1850,6 +2052,19 @@ bool LLLocalMeshMgr::hotSwapInWorld(const LLUUID& tracking_id, const LLLocalMesh
         return false;
     }
     const std::vector<LLLocalMeshPart>& parts = unit->getParts();
+
+    if (unit->isBlenderConnect())
+    {
+        if (parts.size() != pre_swap.mOldTransforms.size()) return false;
+        for (size_t i = 0; i < parts.size(); ++i)
+        {
+            const auto& old = pre_swap.mOldTransforms[i];
+            // Rebuild changed authored transforms/part ordering while retaining
+            // the viewer placement. Pure geometry/material updates hot-swap.
+            if (old.mName != parts[i].mName || old.mRotation != parts[i].mRotation
+                || old.mOffset != parts[i].mOffset) return false;
+        }
+    }
 
     // Only structurally identical copies can be swapped 1:1; a changed prim count
     // needs a real re-spawn (to add/remove prims) -- caller falls back. The copies
@@ -2134,15 +2349,33 @@ void LLLocalMeshMgr::applyPartGeometry(LLVOVolume* vol, const LLLocalMeshPart& p
     vol->markForUpdate();
 }
 
-void LLLocalMeshMgr::onLoadResult(const LLUUID& tracking_id, LLModelLoader::scene& scene, U32 load_state)
+void LLLocalMeshMgr::onLoadResult(const LLUUID& tracking_id, LLModelLoader::scene& scene, U32 load_state,
+                                 std::shared_ptr<SLBlenderConnectSnapshot> snapshot, const std::string& error, bool retry)
 {
     LLLocalMesh* unit = getUnit(tracking_id);
     if (!unit) // removed while loading
     {
         return;
     }
+    if (unit->mBlenderConnect)
+    {
+        unit->mBlenderConnectPendingSnapshot = std::move(snapshot);
+        unit->mConnectNeedsRetry = retry;
+        if (!retry)
+        {
+            unit->mConnectRevision = unit->mBlenderConnectPendingSnapshot ? unit->mBlenderConnectPendingSnapshot->revision : unit->mConnectPendingRevision;
+            unit->mConnectSession = unit->mBlenderConnectPendingSnapshot ? unit->mBlenderConnectPendingSnapshot->session : unit->mConnectPendingSession;
+            unit->mConnectRetryDelay = 0.f;
+        }
+        else
+        {
+            unit->mConnectRetryDelay = llmin(unit->mConnectRetryDelay ? unit->mConnectRetryDelay * 2.f : 1.f, 8.f);
+            unit->mConnectRetryTimer.reset();
+        }
+        unit->mBlenderConnectError = error;
+    }
 
-    const bool reloading = unit->isReloading();
+    const bool reloading = unit->isReloading() && !unit->mParts.empty();
     const bool parse_ok  = (load_state < LLModelLoader::ERROR_PARSING) && !scene.empty();
 
     // Snapshot the spawned copies' live face state and the old parts' imported
@@ -2157,6 +2390,24 @@ void LLLocalMeshMgr::onLoadResult(const LLUUID& tracking_id, LLModelLoader::scen
 
     const bool assembled = parse_ok && unit->ingestScene(scene);
 
+    if (unit->mBlenderConnect)
+    {
+        if (assembled)
+        {
+            if (unit->mBlenderConnectPendingSnapshot) unit->mBlenderConnectPendingSnapshot->materialModel.reset();
+            unit->mBlenderConnectSnapshot = unit->mBlenderConnectPendingSnapshot;
+            unit->mBlenderConnectError.clear();
+        }
+        else
+        {
+            if (unit->mBlenderConnectError.empty())
+                unit->mBlenderConnectError = "Import failed; last good preview retained. Check the rig and export limits.";
+        }
+        SLBlenderConnectFile::verdict(unit->getFilename(), unit->mConnectRevision,
+            assembled ? "Accepted" : unit->mBlenderConnectError);
+        unit->mBlenderConnectPendingSnapshot.reset();
+    }
+
     if (!parse_ok)
     {
         LL_WARNS("LocalMesh") << "Parse failed (state " << load_state << ") for " << unit->getFilename() << LL_ENDL;
@@ -2165,6 +2416,7 @@ void LLLocalMeshMgr::onLoadResult(const LLUUID& tracking_id, LLModelLoader::scen
     if (reloading)
     {
         unit->finishReload(assembled);
+        mUnitsChangedSignal();
         if (assembled)
         {
             logUnit("Reloaded", unit);
@@ -2176,7 +2428,8 @@ void LLLocalMeshMgr::onLoadResult(const LLUUID& tracking_id, LLModelLoader::scen
             {
                 if (!hotSwapInWorld(tracking_id, pre_swap))
                 {
-                    respawnInstancesInPlace(tracking_id); // prim count changed -> re-rez each copy
+                    const auto& old_root = pre_swap.mOldTransforms.front();
+                    respawnInstancesInPlace(tracking_id, old_root.mRotation, old_root.mOffset);
                 }
                 // The skin may have changed (a live edit, or a Joint Positions
                 // toggle), so recompute joint-position overrides on every affected
@@ -2207,7 +2460,8 @@ void LLLocalMeshMgr::onLoadResult(const LLUUID& tracking_id, LLModelLoader::scen
         return;
     }
 
-    // Initial load.
+    // Initial load (including recovery from an invalid first Blender snapshot).
+    if (unit->mBlenderConnect && assembled) unit->finishReload(true);
     if (assembled)
     {
         logUnit("Loaded", unit);
@@ -2235,7 +2489,8 @@ void LLLocalMeshMgr::onLoadResult(const LLUUID& tracking_id, LLModelLoader::scen
     else
     {
         unit->markFailed();
-        delUnit(tracking_id); // drop the failed unit
+        if (unit->mBlenderConnect) { unit->finishReload(false); mUnitsChangedSignal(); }
+        else delUnit(tracking_id); // drop the failed unit
     }
 }
 
@@ -2243,9 +2498,25 @@ void LLLocalMeshMgr::doUpdates()
 {
     // Stop/restart around the sweep so a long poll can't re-enter via the timer.
     mTimer.stopTimer();
-    for (LLLocalMesh* unit : mMeshList)
+    if (auto* unit = getUnit(mBlenderConnectID))
     {
-        unit->pollForReload();
+        const auto pulse = SLBlenderConnectFile::pulse(unit->getFilename());
+        if (pulse.state == SLBlenderConnectFile::State::Stopped)
+            stopBlenderConnect("Sender stopped. Preview removed.");
+        else
+        {
+            const bool paused = pulse.state != SLBlenderConnectFile::State::Active || !gDirUtilp->fileExists(unit->getFilename());
+            if (unit->mConnectPaused != paused) { unit->mConnectPaused = paused; mUnitsChangedSignal(); }
+            if (!paused && (unit->mConnectNeedsRetry || pulse.session != unit->mConnectSession || pulse.revision != unit->mConnectRevision) && !unit->isLoading() && !unit->isReloading()
+                && (pulse.session != unit->mConnectPendingSession || pulse.revision != unit->mConnectPendingRevision || unit->mConnectRetryTimer.getElapsedTimeF32() >= unit->mConnectRetryDelay))
+                if (unit->forceReload()) mUnitsChangedSignal(); // revision counter, independent of mtime
+        }
+    }
+    if (mOrdinaryPoll.getElapsedTimeF32() >= 3.f)
+    {
+        mOrdinaryPoll.reset();
+        for (LLLocalMesh* unit : mMeshList)
+            if (!unit->isBlenderConnect()) unit->pollForReload();
     }
     if (!mMeshList.empty())
     {
@@ -2336,6 +2607,7 @@ void LLLocalMeshMgr::feedScrollList(LLScrollListCtrl* ctrl)
 
     for (LLLocalMesh* unit : mMeshList)
     {
+        if (unit->isBlenderConnect()) continue; // dedicated session UI, no Upload action
         const S32 count = getSpawnedCount(unit->getTrackingID());
         LLViewerObject* root = getSpawnedRoot(unit->getTrackingID());
 
@@ -2381,7 +2653,7 @@ void LLLocalMeshMgr::feedScrollList(LLScrollListCtrl* ctrl)
 /*=======================================*/
 /*  LLLocalMeshTimer: live-reload poll   */
 /*=======================================*/
-static const F32 LOCAL_MESH_TIMER_HEARTBEAT = 3.0f; // seconds between file-change polls
+static const F32 LOCAL_MESH_TIMER_HEARTBEAT = 3.f; // bounded, one in-flight parse per unit
 
 LLLocalMeshTimer::LLLocalMeshTimer()
     : LLEventTimer(LOCAL_MESH_TIMER_HEARTBEAT)

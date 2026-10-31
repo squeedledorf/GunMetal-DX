@@ -187,14 +187,16 @@ PipelineJob* pipelineBatchFlushAsync(VkDevice device, VkPipelineCache cache);
 // pipelines nobody has taken. Compiles already running are never preempted (a cold
 // RT lit FS takes ~16 s), so a prewarm batch also runs with few threads. Order: a
 // pipeline the user is waiting for (a settings change) > login / first-use warm-up >
-// speculative prewarm. Synchronous creates (createGraphicsPipeline / createComputePipeline
-// on the render thread) are never held back by this.
+// the deferred ray-query group (#1029) > speculative prewarm. Synchronous creates
+// (createGraphicsPipeline / createComputePipeline on the render thread) are never held
+// back by this.
 enum VkPipePriority : uint8_t
 {
     VKPIPE_PRIO_USER = 0,      // the user is looking at a fallback until it lands
     VKPIPE_PRIO_LOGIN = 1,     // world / first-use pipelines (the default)
-    VKPIPE_PRIO_PREWARM = 2,   // speculative (a key the user may switch to)
-    VKPIPE_PRIO_COUNT = 3
+    VKPIPE_PRIO_DEFERRED = 2,  // the deferred group (pipelineBatchTakeDeferred): the world draws without it
+    VKPIPE_PRIO_PREWARM = 3,   // speculative (a key the user may switch to)
+    VKPIPE_PRIO_COUNT = 4
 };
 struct PipelineJobOpts
 {
@@ -221,8 +223,7 @@ VkPipeline createComputePipelineAdmitted(VkDevice device, VkShaderModule comp, V
 VkPipeline createGraphicsPipelineAdmitted(VkDevice device, const GraphicsPipelineDesc& desc, const char* name,
                                           uint8_t prio = VKPIPE_PRIO_USER);
 // The SHADER GATE's progress: pipelines queued to / finished by gate jobs since launch,
-// and gate jobs whose compile has not finished (a deferred job counts from
-// pipelineBatchTakeDeferred until it finished or was dropped).
+// and gate jobs whose compile has not finished (a deferred job is never a gate job, #1029).
 void vkPipelineGateProgress(unsigned& done, unsigned& queued, unsigned& jobsLive);
 // COMPUTE pipelines in the batch: inside a PipelineBatchScope this only queues (the spec
 // info is copied; `comp` must go to destroyShaderModuleDeferred, not vkDestroyShaderModule),

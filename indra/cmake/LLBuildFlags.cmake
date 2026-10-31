@@ -44,7 +44,8 @@ elseif (DARWIN)
       "-O0 ${_ll_base_switches} -DLL_RELEASE=1 -DLL_RELEASE_WITH_DEBUG_INFO=1 -DNDEBUG ${_ll_base_macros}")
 else ()
   set(_ll_base_macros "-DLL_LINUX=1 -DPIC")
-  set(_ll_base_switches "-march=x86-64-v2 -g -std=c++20 -fPIC")
+  # -gdwarf64: the viewer binary's debug info passed 4 GB (32-bit DWARF offsets overflowed at link)
+  set(_ll_base_switches "-march=x86-64-v2 -g -gdwarf64 -std=c++20 -fPIC")
   set(LL_BUILD_RELEASE
       "-O3 -fstack-protector ${_ll_base_switches} -DLL_RELEASE=1 -DLL_RELEASE_FOR_DOWNLOAD=1 -DNDEBUG ${_ll_base_macros}")
   set(LL_BUILD_RELWITHDEBINFO

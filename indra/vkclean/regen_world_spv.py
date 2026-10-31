@@ -86,13 +86,14 @@ SHADERS = [
     # #1033 slim vertex-shader instance records derived from the Instance rows each frame.
     ("clean_vs_inst.comp",      "comp", "kWorldVsInstSpv"),
     ("clean_select.frag",       "frag", "kWorldSelectFragSpv"),
-    # <GMDX> selection outline (GMDXSelectionStyle 1, vkgfx/gmdxseloutlinevk.cpp): the filled
-    # selection mask + tile marks, and the tile-quad edge pass over the finished frame.
-    ("gmdx_sel_mask.frag",      "frag", "kGmdxSelMaskFragSpv"),
-    ("gmdx_sel_outline.vert",   "vert", "kGmdxSelOutlineVertSpv"),
-    ("gmdx_sel_outline.frag",   "frag", "kGmdxSelOutlineFragSpv"),
-    # <GMDX> instant replay (vkgfx/gmdxreplayvk.cpp): the captured frame -> the encoder's 4:2:0 input
-    ("gmdx_replay_nv12.comp",   "comp", "kGmdxReplayNv12Spv"),
+    # Selection outline (RenderVKSelectionStyle 1, vkgfx/llcleanseloutlinevk.cpp; GunMetal-DX port):
+    # the filled selection mask + tile marks, and the tile-quad edge pass over the finished frame.
+    ("clean_sel_mask.frag",     "frag", "kWorldSelMaskFragSpv"),
+    ("clean_sel_outline.vert",  "vert", "kWorldSelOutlineVertSpv"),
+    ("clean_sel_outline.frag",  "frag", "kWorldSelOutlineFragSpv"),
+    # Instant replay (vkgfx/llcleanreplayvk.cpp; GunMetal-DX port): the captured frame -> the
+    # encoder's 4:2:0 input.
+    ("clean_replay_nv12.comp",  "comp", "kWorldReplayNv12Spv"),
     ("clean_tonemap.frag",      "frag", "kWorldTonemapFragSpv"),
     # (#820) the tonemap / grade tail baked into a 3D LUT (RenderVKTonemapLut; recordTonemapLut).
     ("clean_tonemap_lut.comp",  "comp", "kWorldTonemapLutSpv"),
@@ -295,13 +296,14 @@ SHADERS = [
     ("clean_snap_live.comp",   "comp", "kWorldSnapLiveDepthSpv",   ["-DSNAP_MODE=2"]),
     ("clean_snap_live.comp",   "comp", "kWorldSnapLiveAccSpv",     ["-DSNAP_MODE=3"]),
     ("clean_snap_live.comp",   "comp", "kWorldSnapLiveResolveSpv", ["-DSNAP_MODE=4"]),
-    # God rays / volumetric sun shafts (#208; RenderVKGodRays): cascade march at reduced
-    # resolution + depth-aware upsample / additive composite in pass 2a.
-    # <GMDX> Physical sky (RenderVKPhysicalSky, gmdxphysskyvk.cpp): Hillaire's transmittance,
-    # multiple-scattering and sky-view lookup tables.
+    # Physical sky (RenderVKPhysicalSky, vkgfx/llcleanphysskyvk.cpp): Hillaire's transmittance,
+    # multiple-scattering and sky-view lookup tables. Ported from GunMetal-DX (squeedledorf,
+    # LGPL 2.1), v0.3.0 cf5f1f4.
     ("clean_physky_lut.comp",         "comp", "kWorldPhysSkyTransSpv",   ["-DPK_PASS_TRANS"]),
     ("clean_physky_lut.comp",         "comp", "kWorldPhysSkyMsSpv",      ["-DPK_PASS_MS"]),
     ("clean_physky_lut.comp",         "comp", "kWorldPhysSkyViewSpv",    ["-DPK_PASS_SKYVIEW"]),
+    # God rays / volumetric sun shafts (#208; RenderVKGodRays): cascade march at reduced
+    # resolution + depth-aware upsample / additive composite in pass 2a.
     ("clean_godrays.comp",            "comp", "kWorldGodRaysSpv"),
     ("clean_godrays.comp",            "comp", "kWorldGodRaysRtSpv", ["-DGODRAYS_RT", "-DRT_SET=2"]),
     ("clean_godrays_temporal.comp",   "comp", "kWorldGodRaysTemporalSpv"),
@@ -321,6 +323,7 @@ SHADERS = [
     ("clean_vol_light.comp",          "comp", "kWorldVolLightRtSpv", ["-DVOL_RT", "-DRT_SET=3"]),
     ("clean_vol_temporal.comp",       "comp", "kWorldVolTemporalSpv"),
     ("clean_vol_integrate.comp",      "comp", "kWorldVolIntegrateSpv"),
+    ("clean_medium_apply.comp",       "comp", "kWorldMediumApplySpv"),
     ("clean_vol_apply.frag",          "frag", "kWorldVolApplyFragSpv"),
     # (+ volumetric particles #721, RenderVKVolumetricParticles: the pool -> per-distance
     # classify + capped selection / screen-tile binning pass, before the inject)
@@ -351,13 +354,16 @@ SHADERS = [
     ("clean_vol_cloud_march.comp",     "comp", "kWorldVolCloudMarchSpv"),
     ("clean_vol_cloud_temporal.comp",  "comp", "kWorldVolCloudTemporalSpv"),
     ("clean_vol_cloud_composite.frag", "frag", "kWorldVolCloudCompFragSpv"),
-    # <GMDX> the shadow map, panorama and march on GunMetal-DX's cloud model (gmdx_cloud_common.glsl:
-    # Wicked Engine's shape + light, the physical sky's sun); llcleanvolcloudsvk.cpp uses these.
+    # <GMDX> GunMetal-DX's own cloud model (gmdx_cloud_common.glsl; vkgfx/gmdxvolcloudsvk.cpp, which
+    # also uses Slipstream's noises above): the weather map + world coverage, shadow map, panorama,
+    # march, temporal pass and composite.
     ("gmdx_cloud_weather.comp",        "comp", "kWorldGmdxCloudWeatherSpv"),
     ("gmdx_cloud_shadowmap.comp",      "comp", "kWorldGmdxCloudShadowSpv"),
     ("gmdx_cloud_pano.comp",           "comp", "kWorldGmdxCloudPanoSpv"),
     ("gmdx_cloud_march.comp",          "comp", "kWorldGmdxCloudMarchSpv"),
+    ("gmdx_cloud_temporal.comp",       "comp", "kWorldGmdxCloudTemporalSpv"),
     ("gmdx_cloud_composite.frag",      "frag", "kWorldGmdxCloudCompFragSpv"),
+    # </GMDX>
     # Weather (#783; WeatherEnabled, vkgfx/llcleanweathervk.cpp): the precipitation simulation +
     # visible-list compaction around the camera and its streak / flake draw in pass 2b. (The wet
     # surfaces are clean_draw.frag's weatherSurface, clean_weather_surface.glsl.)

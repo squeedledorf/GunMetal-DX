@@ -50,6 +50,7 @@ class LLTerrainMaterials : public LLModifyRegion
 {
 public:
     friend class LLDrawPoolTerrain;
+    friend class LLMinimapTerrain;   // paints the mini-map from the detail images (GunMetal-DX port)
 
     LLTerrainMaterials() {}
     virtual ~LLTerrainMaterials();
@@ -152,7 +153,7 @@ public:
 
     friend class LLVOSurfacePatch;
     friend class LLDrawPoolTerrain;
-    friend class GMDXMinimapTerrain; // <GMDX> paints the mini-map from the detail images
+    friend class LLMinimapTerrain;   // paints the mini-map from the detail images (GunMetal-DX port)
     void setParamsReady()       { mParamsReady = true; }
     bool getParamsReady() const { return mParamsReady; }
 

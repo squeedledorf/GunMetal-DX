@@ -257,7 +257,7 @@ void LLViewerJoystick::updateEnabled(bool autoenable)
 {
     if (mDriverState == JDS_UNINITIALIZED)
     {
-        // <GMDX> SoapStorm c798038fa5 (Nexii): only forget the enable when no device was pinned.
+        // <GMDX> SoapStorm c798038fa5 (Nexii Malthus): only forget the enable when no device was pinned.
         // Clearing it whenever the device is missing right now (not enumerated yet at startup,
         // unplugged for a moment) latched the feature off for good, since startup init() is gated on it.
         if (!isDeviceUUIDSet())
@@ -438,7 +438,7 @@ void LLViewerJoystick::init(bool autoenable)
                 {
                     LL_INFOS("Joystick") << "Failed to gather input devices. Falling back to ndof's init" << LL_ENDL;
                     // Failed to gather devices, init first suitable one
-                // <GMDX> SoapStorm c798038fa5 (Nexii): keep the pinned id through a failed enumeration;
+                // <GMDX> SoapStorm c798038fa5 (Nexii Malthus): keep the pinned id through a failed enumeration;
                 // clearing it let the next saveDeviceIdToSettings() write the empty id over the stored one.
                 //mLastDeviceUUID = LLSD();
                 // </GMDX>
@@ -1424,7 +1424,7 @@ void LLViewerJoystick::scanJoystick()
             || !gSavedSettings.getBOOL("JoystickEnabled")
             || !mDeviceIs3DConnexion)
     {
-        // <GMDX> SoapStorm c798038fa5 (Nexii): the pinned device is wanted but not live, so retry on a
+        // <GMDX> SoapStorm c798038fa5 (Nexii Malthus): the pinned device is wanted but not live, so retry on a
         // slow timer. Devices are not always enumerable when startup init() runs, and the ndof hot plug
         // callbacks do not fire on Windows. init() enumerates every DirectInput device, which hitches on
         // Windows, so a device that stays unplugged is retried less and less often (5 s doubling to 60 s).
@@ -1533,7 +1533,7 @@ void LLViewerJoystick::saveDeviceIdToSettings()
     // someone editing the xml will corrupt it
     // so convert to string first
     std::string device_string = getDeviceUUIDString();
-    // <GMDX> SoapStorm c798038fa5 (Nexii): store the id in a map. JoystickDeviceUUID is an LLSD control
+    // <GMDX> SoapStorm c798038fa5 (Nexii Malthus): store the id in a map. JoystickDeviceUUID is an LLSD control
     // and LLControlVariable::getComparableValue() re-parses a String as LLSD notation; a GUID string
     // "{6F1D...}" opens a map there, so every id collapsed to {} and nothing could be restored.
     //gSavedSettings.setLLSD("JoystickDeviceUUID", LLSD(device_string));
@@ -1555,7 +1555,7 @@ void LLViewerJoystick::loadDeviceIdFromSettings()
     // so _GUID data gets converted to string (we probably can convert it to LLUUID with memcpy)
     // and here we need to convert it back to binary from string
     std::string device_string;
-    // <GMDX> SoapStorm c798038fa5 (Nexii): map form from saveDeviceIdToSettings(); the plain string is the old format
+    // <GMDX> SoapStorm c798038fa5 (Nexii Malthus): map form from saveDeviceIdToSettings(); the plain string is the old format
     if (dev_id.isMap())
     {
         device_string = dev_id["guid"].asString();

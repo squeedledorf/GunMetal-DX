@@ -38,6 +38,7 @@
 #include "vk_descpool.h"
 #include "vk_stagering.h"   // TexStageRing
 #include "vk_pipeline.h"   // GraphicsPipelineDesc (mLitDesc)
+#include "../../vkclean/shaders/clean_emissive_budget.h"
 #include "llvulkancontext.h"   // LLVKWorldFrame / LLVKLight
 #include "llcleantexencvk.h"   // GPU texture block compression (#263)
 #include "llvrambudgetvk.h"    // one VRAM budget + soft pressure ladder (#405, #407)
@@ -46,6 +47,7 @@
 
 #include <cstddef>   // offsetof (VKSSRInfo layout asserts, #814)
 #include <cstdint>
+#include <deque>
 #include <vector>
 #include <string>
 #include <array>
@@ -73,6 +75,7 @@ class LLCleanVolFogVK;    // volumetric fog: froxel grid + local volumes (#718)
 class LLCleanPartFogVK;   // particle fog: fog-like particle systems as dense local bricks (#1003)
 class LLCleanDenoiserVK;  // diffuse / specular lighting denoiser (#85 phase 2)
 class LLCleanVolCloudsVK; // volumetric sky cloud layer (#719)
+class GMDXVolCloudsVK;    // <GMDX> GunMetal-DX's own cloud model on it (gmdxvolcloudsvk.h)
 class LLCleanWeatherVK;   // weather: precipitation, occlusion map, wet surfaces (#783)
 class LLCleanPartLowResVK;   // reduced-resolution particles (RenderVKParticleLowRes)
 class LLCleanMotionBlurVK;   // motion blur (#118)
@@ -80,7 +83,7 @@ class LLCleanSnapshotVK;     // live snapshots (#873)
 class LLCleanPickVK;      // GPU raster cursor pick (#702) + particle pick (#481)
 class LLCleanAudioRTVK;   // acoustics probe (#683): room + occlusion rays against the TLAS
 class LLCelShadeVK;       // avatar mask + cel shading (#549 / #550)
-struct GMDXSelOutlineVK;  // <GMDX> selection styles (gmdxseloutlinevk.cpp)
+struct LLCleanSelOutlineVK;   // selection styles (llcleanseloutlinevk.cpp; GunMetal-DX port)
 class LLCleanFSR3VK;      // AMD FSR 3.1 upscaler (RenderVKUpscaler 1-6)
 class LLCleanClusterVK;   // cluster LOD (#642; RenderVKClusterLOD, llcleanclustervk.h)
 
@@ -170,7 +173,9 @@ struct VKDrawViewPush
                         // cull-FRONT draw, 2 the cull-BACK draw (clean_draw*.vert)
     uint32_t pad0;      // main-view LIT_ALPHA draws (pass 2): mVisReuseFlags (clean_draw_common.glsl
                         // VISR_*: split-lighting visibility reuse); the cluster draws reuse it otherwise
-    uint32_t pad1;
+    uint32_t pad1;      // (#1159) the weather occlusion map's alpha-blend cutoff (float bits), read only
+                        // by mWeatherBlendPipe's alpha-test FS; the cluster draws reuse it otherwise
+                        // (llcleanclusterselectvk.cpp DrawPush16::bucket)
 };
 static_assert(sizeof(VKDrawViewPush) == 16 && sizeof(VKDrawViewPush) <= kVkPushConstantBudget, "VKDrawViewPush");
 
@@ -286,22 +291,27 @@ public:
     // Main-view rigged draw push ambient_color.w (clean_draw_view.glsl): 1 hides the own
     // avatar, 0.25 only its system-body head parts, 0 nothing.
     float selfHideW() const { return mHideSelf ? 1.f : (mHideSelfHead ? 0.25f : 0.f); }
-    // <GMDX> region map capture: this offscreen recording is orthographic (LLVKWorldFrame::ortho /
-    // ortho_ppm, set by renderOffscreen; clean_cull.comp CULL_ORTHO = kCullOrtho).
-    bool  mOrtho = false;
-    float mOrthoPpm = 0.f;
-    // <GMDX> the live orthographic view (LLVKWorldFrame::ortho_view): the orthographic cull / LOD
-    // only, no clean plate; the passes with perspective-only geometry (volumetric and particle
-    // fog froxels, god rays) are skipped.
+    // The live orthographic view (LLVKWorldFrame::ortho_view; ported from GunMetal-DX, squeedledorf,
+    // LGPL 2.1, v0.3.0 cf5f1f4): the orthographic cull / LOD (clean_cull.comp CULL_ORTHO =
+    // kCullOrtho: px per metre at every depth, every LOD at its finest) in the main view; the
+    // passes with perspective-only geometry (volumetric and particle fog froxels, god rays)
+    // are skipped.
     bool  mOrthoView = false;
     static constexpr uint32_t kCullOrtho = 131072u;
-    // <GMDX> AVATAR MATTE SNAPSHOTS (gmdxsnapshotavatars.h; vkgfx/gmdxsnapmattevk.cpp defines these).
+    // Region map capture (llregionmapcapture.h): this offscreen recording is orthographic
+    // (LLVKWorldFrame::ortho / ortho_ppm, set by renderOffscreen): CULL_ORTHO in every pass,
+    // the texel demand at ortho_ppm, and a clean plate (no bloom, glow, lens or screen effects).
+    // Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
+    bool  mOrtho = false;
+    float mOrthoPpm = 0.f;
+    // AVATAR MATTE SNAPSHOTS (llsnapshotavatars.h; vkgfx/llcleansnapmattevk.cpp defines these).
     // An offscreen sequence for an avatar layer (LLVKWorldFrame::avatar_matte, driven by
     // LLVulkanContext::renderOffscreen): the warm-up recording renders the normal view and reports
-    // the avatars its avatar-id pass saw (gmdxSnapshotMatteSetSeen); every later recording keeps only
+    // the avatars its avatar-id pass saw (snapshotMatteSetSeen); every later recording keeps only
     // avatars in the main view (mSnapMatte: clean_cull.comp kCullAvatarsOnly, bloom / glow / lens /
     // post AA off) and its coverage (the avatar ids, else the depth) is read back and averaged into
-    // the 8-bit matte (snapMatteTake).
+    // the 8-bit matte (snapMatteTake). Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0
+    // cf5f1f4 (from SoapStorm's GL transparent-avatar snapshots).
     bool mSnapMatte = false;                       // this recording: the avatar-only main view
     static constexpr uint32_t kCullAvatarsOnly = 262144u;
     void snapMatteBegin(bool on, uint32_t w, uint32_t h);
@@ -317,7 +327,6 @@ public:
     std::vector<uint16_t> mSnapCov;                // covered samples per pixel (image rows)
     std::vector<float>    mSnapOcc;                // world occluder depth per pixel, from recording 0 (image rows)
     std::vector<uint8_t>  mSnapAlpha;              // the result (LLImageRaw rows, bottom-up)
-    // </GMDX>
     // Build pipelines + descriptor layouts against `ctx`. `colorFormat` is the
     // swapchain format the world renders into. Returns false (logged) on failure;
     // the caller then simply skips world rendering (UI-only present).
@@ -329,8 +338,12 @@ public:
     void pollPipelines(bool wait = false);
     // The world batch is still compiling (graphics + init's compute pipelines). The login
     // shader gate (LLVulkanContext::worldPipelinesPending) ORs in every other gate job --
-    // the ray-query lit variant and the first-use batches warmFirstUse queues on landing.
+    // the first-use batches warmFirstUse queues on landing.
     bool pipelinesPending() const { return mPipelineJob != nullptr; }
+    // (#1029) The deferred ray-traced group (mRtPipelineJob) has not landed: the world draws
+    // without it. Not a gate job: the login hold waits for it at most RenderVKShaderWaitRTMaxSec
+    // (llstartup.cpp), the in-world shader notice until it lands.
+    bool rtPipelinesPending() const { return mRtPipelineJob != nullptr; }
 
     // Pull the latest CPU-side store contents (or the prototype scene) into the
     // VK buffers. Cheap when nothing changed (dirty tracking); re-uploads on
@@ -340,6 +353,7 @@ public:
     // syncFromStores() joins it. Safe to skip: syncFromStores() then fills inline.
     void syncFromStoresBegin();
     void syncFromStoresPrestep();
+    bool mRsEmInputWanted = false; // settings snapshot for fill-worker identity capture
     uint32_t mSelfHealMode = 1;   // C8 RenderVKSelfHealRate (0 off, 1 low, 2 legacy), latched in the prestep
     // Persistent fill worker (one thread for the renderer's lifetime; a std::async per
     // frame cost ~0.35 ms of thread creation on the main thread).
@@ -632,9 +646,10 @@ private:
     uint32_t         mRtCacheFrame = 0;      // refresh-slice phase
     uint32_t         mRtCacheCfgKey = 0;     // tile size / eps / min length: a change forces every tile
     float            mRtCacheSunStep = -1.f; // this mask frame's sun step (rad, rtMaskPushFill; -1 unknown)
-    struct RtCacheSphere { float s[4]; uint32_t until; };
+    struct RtCacheSphere { float s[4]; double until; }; // clamped lighting-clock milliseconds
     std::vector<RtCacheSphere> mRtCacheChanged;   // static change spheres (agent space), kept N frames
-    uint32_t         mRtCacheOverflowUntil = 0;   // the ingest's sphere list overflowed: force all until
+    double           mRtCacheAgeMs = 0.0, mRtCacheClock = -1.0;
+    double           mRtCacheOverflowUntil = 0;   // the ingest's sphere list overflowed: force all until
     // Stats readback (every ~5 s, 2 frame slots) and the host's own counters for the log.
     GpuBuffer        mRtCacheStatsRb[2]{};
     bool             mRtCacheStatsPending[2] = {false, false};
@@ -1332,6 +1347,8 @@ private:
     // (1 x 1 x 1 RGBA16F identity: no in-scatter, T = 1; made at init, never freed before
     // shutdown) -- every pipeline on the draw set 0 layout always sees a valid descriptor.
     LLCleanVolFogVK* mVolFog = nullptr;
+    LLCleanVolFogVK* mMediumEyes[4] = {};
+    bool mCameraMediumReady = false;
     GpuImage    mVolFogStub;
     VkSampler   mVolFogSampler = VK_NULL_HANDLE;      // linear / clamp (binding 45)
     VkImageView mVolFogBoundView = VK_NULL_HANDLE;    // what binding 45 names now
@@ -1341,6 +1358,7 @@ private:
     // The target-ensure step (recordWorld, before anything binds draw set 0): settings,
     // lifetime, binding 45. camTime: the main view's eye + time.
     void ensureVolFog(VkCommandBuffer cmd, const float* camTime, uint32_t rw, uint32_t rh);
+    bool cameraMediumStorageSupported() const;
     // PARTICLE FOG (#1003, RenderVKParticleFog; llcleanpartfogvk.h): exists only while enabled.
     // Fog-like particle systems' particles become density carriers splatted into local bricks,
     // marched after pass 1 (recordPartFogCompute, right after the per-particle lighting) and
@@ -1372,6 +1390,27 @@ private:
     bool                  mSkyLutLogged = false;
     void initSkyLut();                           // init: table + sampler + bake set, binding 52 written
     void recordSkyLut(VkCommandBuffer cmd);      // after the frame-info upload, when mSkyLutNow
+    // PHYSICAL SKY (RenderVKPhysicalSky; llcleanphysskyvk.cpp, clean_physky*.glsl): Hillaire's
+    // transmittance, multiple-scattering and sky-view tables, draw set 0 bindings 56 (sky view) /
+    // 57 (transmittance). Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
+    // (physSkyFill(VKSSRInfo&): beside fillSkyFx, after VKSSRInfo)
+    void     physSkyInit();                          // init: images (GENERAL), sampler, bindings 56 / 57
+    void     physSkyRecord(VkCommandBuffer cmd);     // after the frame-info upload: the tables, when changed
+    void     physSkyDestroy();                       // shutdown (device idle)
+    GpuImage mPkTrans{}, mPkMs{}, mPkView{};
+    VkSampler mPkSampler = VK_NULL_HANDLE;           // linear / clamp
+    VkDescriptorSetLayout mPkDsl = VK_NULL_HANDLE;   // 0 out (storage), 1 transmittance, 2 MS
+    VkDescPool mPkPool;
+    VkDescriptorSet mPkSet[3] = {};                  // trans, MS, sky view
+    VkPipelineLayout mPkLayout = VK_NULL_HANDLE;
+    VkPipeline mPkPipe[3] = {};
+    float    mPkPush[8][4] = {};                     // this frame's parameters (= si.physky[0..7])
+    float    mPkMediumKey[16] = {};                  // what the transmittance / MS tables were built for
+    float    mPkViewKey[36] = {};                    // ... and the sky-view table (push block + moon dir)
+    bool     mPkMediumValid = false;
+    bool     mPkViewValid = false;
+    bool     mPkWanted = false;                      // the setting wants the mode and the tables exist
+    bool     mPkPipeFailed = false;
     // The fog's four compute passes (once per recording, outside any rendering scope):
     // on the async queue when RenderVKAsyncVolumetrics allows, else on graphics.
     void recordVolFogCompute(VkCommandBuffer& cmd, bool allowAsync);
@@ -1415,7 +1454,7 @@ private:
     VkImageView mWxAccumBoundView = VK_NULL_HANDLE;
     // Volumetric clouds (#719, RenderVKVolumetricClouds; llcleanvolcloudsvk.h): exists only
     // while enabled (or while its resources are being released).
-    LLCleanVolCloudsVK* mVolClouds = nullptr;
+    GMDXVolCloudsVK* mVolClouds = nullptr;   // <GMDX> GunMetal-DX's cloud model (was LLCleanVolCloudsVK, the same interface)
     // This recording composites the volumetric clouds over the main view (set before the sky
     // draw: clean_sky.frag then leaves the clouds to the composite instead of the panorama).
     bool mVolCloudsComposite = false;
@@ -2928,22 +2967,37 @@ private:
         // (RenderVKShadowReceiverFit), y plane slope tolerance (RenderVKShadowPlaneTolerance),
         // z PCSS filter radius cap in metres (RenderVKShadowPCSSMaxRadius, 0 = none), w unused.
         float shadow_fit[4];
-        // <GMDX> PHYSICAL SKY parameters (clean_frame_info.glsl physky; clean_physky.glsl has the
-        // layout): physSkyFill, from atmos[] and the camera, once per frame.
+        // PHYSICAL SKY (clean_frame_info.glsl physky; clean_physky.glsl has the layout):
+        // physSkyFill, from atmos[] and the camera, once per frame. Ported from GunMetal-DX
+        // (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4, as were the night blocks below.
         float physky[8][4];
-        // <GMDX> clean_frame_info.glsl gmdx_misc: the alpha-mask pull (x base m, y m per m, z graze cap).
-        float gmdx_misc[4];
+        // PHYSICAL NIGHT (clean_frame_info.glsl night; slnightlight.h): zeros = off.
+        float night[3][4];
+        // NIGHT SKY (clean_frame_info.glsl night_sky / night_space; slnightsky.h fillFrame).
+        float night_sky[3][4];
+        float night_space[24][4];
         // #1075: the per-view block (VKSSRView above), [0] = the desktop's / the left eye's.
         VKSSRView views[kMaxViews];
+        struct MediumView {
+            float vp[16], inv_vp[16];
+            float eye[4], grid[4], slice[4], fog[4], albedo[4], misc[4];
+            float forward[4], mapping[4];
+        } medium[kMaxViews];
+        float haze[4], haze_mode[4], haze_mist[2][4];
+        float medium_union_vp[16];
+        float history_time[4]; // independent lighting-history clock: milliseconds
+        // <GMDX> clean_frame_info.glsl gmdx_alpha_pull (clean_draw.vert ALPHA-MASK PULL): x base m,
+        // y m per m of distance, z grazing-factor cap, w 0. Last: no upstream member moves.
+        float gmdx_alpha_pull[4];
     };
     // #814: clean_frame_info.glsl declares this block std140 (a UNIFORM BUFFER, draw set 0 /
     // AO set binding 9). Every member is a vec4 / mat4 / array of them, so the std140 offsets
     // equal the std430 ones this struct was laid out for (verified on the SPIR-V: every
     // OpMemberDecorate Offset identical before / after); these pin the ends + a few anchors.
     // #1075: 6560 B with kMaxViews = 4 view blocks (5408 before the per-view split), well under
-    // the spec minimum maxUniformBufferRange (16 KB). <GMDX> + physky[8], gmdx_misc (144 B) between
-    // shadow_fit and views: 6704 B.
-    static_assert(sizeof(VKSSRInfo) == 6704, "VKSSRInfo = clean_frame_info.glsl SSRBuf (std140, 6704 B)");
+    // the spec minimum maxUniformBufferRange (16 KB). GunMetal-DX port: + physky / night /
+    // night_sky / night_space (608 B) before the views: 7168 B.
+    static_assert(sizeof(VKSSRInfo) == 8352, "VKSSRInfo = clean_frame_info.glsl SSRBuf (std140, 8352 B)");   // <GMDX> + gmdx_alpha_pull
     static_assert(sizeof(VKSSRInfo) % 16 == 0, "std140 block size");
     static_assert(sizeof(VKSSRInfo) <= 16384, "VKSSRInfo must fit the minimum maxUniformBufferRange");
     static_assert(offsetof(VKSSRInfo, atmos) == 32 && offsetof(VKSSRInfo, shadow_mat) == 384
@@ -2951,11 +3005,18 @@ private:
                   && offsetof(VKSSRInfo, atmos_k) == 4352 && offsetof(VKSSRInfo, vol_vp) == 4448
                   && offsetof(VKSSRInfo, vol_misc) == 4656 && offsetof(VKSSRInfo, vol_clouds) == 4672
                   && offsetof(VKSSRInfo, weather) == 4736 && offsetof(VKSSRInfo, shadow_fit) == 5008
-                  && offsetof(VKSSRInfo, physky) == 5024 && offsetof(VKSSRInfo, gmdx_misc) == 5152
-                  && offsetof(VKSSRInfo, views) == 5168,
+                  && offsetof(VKSSRInfo, physky) == 5024 && offsetof(VKSSRInfo, night) == 5152
+                  && offsetof(VKSSRInfo, night_sky) == 5200 && offsetof(VKSSRInfo, night_space) == 5248
+                  && offsetof(VKSSRInfo, views) == 5632 && offsetof(VKSSRInfo, medium) == 7168
+                  && offsetof(VKSSRInfo, haze) == 8192 && offsetof(VKSSRInfo, haze_mode) == 8208
+                  && offsetof(VKSSRInfo, haze_mist) == 8224 && offsetof(VKSSRInfo, medium_union_vp) == 8256
+                  && offsetof(VKSSRInfo, history_time) == 8320
+                  && offsetof(VKSSRInfo, gmdx_alpha_pull) == 8336,   // <GMDX>
                   "VKSSRInfo member offsets = clean_frame_info.glsl SSRBuf (std140)");
     // Lightbox sky effects (upstream LLDrawPoolWLSky aurora/meteors, RenderStarCount).
     void fillSkyFx(VKSSRInfo& si, uint32_t height);
+    // Physical sky (llcleanphysskyvk.cpp): si.physky from si.atmos and the eye, once per frame.
+    void physSkyFill(VKSSRInfo& si);
     // #816: si.atmos_k from si.atmos (the per-pixel atmosScatter's per-frame terms).
     static void fillAtmosK(VKSSRInfo& si);
     float mAtmos[64] = {};
@@ -2977,6 +3038,11 @@ private:
     void queueGeomUpload(uint32_t sl);
     // A geometry buffer was created empty (first build): stream every packed row.
     bool mGeomStreamAll = false;
+    // #1128: success of the current recording's AS input publication, not buffer existence.
+    bool mRtInputStreamRefused = false, mRtGeometryRetry = false;
+    bool mRtPosePublicationInvalid = false;
+    uint64_t mRtPosePublishedSerial = 0;
+    uint32_t mRtInputReasons = 0;
     // The proto scene's packed prefix (KB; its slots SHARE ranges, so it streams as one
     // blob): ranges below mGeomOwned*From. Dropped by the first full repack.
     std::vector<uint8_t>  mProtoVerts;   // QVertex bytes, header-prefixed per proto slot
@@ -3168,8 +3234,9 @@ private:
     int32_t mCloudNoiseIdx[2] = {-1, -1};
     // Sky bodies block (clean_sky_bodies.glsl) + its six textures: sun A, sun B, moon,
     // bloom (stars), rainbow, halo (bindless indices, UNORM like LL's raw samples).
+    // + 6 / 7 the night sky's star grid and Milky Way (slnightsky.h textureId; GunMetal-DX port).
     float   mBodies[40] = {};
-    LLUUID  mSkyTexId[8];   // <GMDX> + 6 / 7: the night sky's (gmdxnightsky.h textureId)
+    LLUUID  mSkyTexId[8];
     int32_t mSkyTexIdx[8] = {-1, -1, -1, -1, -1, -1, -1, -1};
     // Refraction source for water: the solid-scene HDR colour, copied after pass 1.
     GpuImage mRefract{};
@@ -3525,6 +3592,7 @@ private:
     // per recording -- their own clocks would differ by the first eye's record time, so IPD 0
     // (identical inputs) would not give identical eyes. Unused at N = 1 (each module's own clock).
     double    mUpscaleClock = -1.0;
+    double    mLightingHistoryClock = -1.0; // monotonic seconds, independent of AA / RR
     float     mUpscaleDt = 1.f / 60.f;    // seconds
     uint32_t  mTaaJitterPhases = 16;      // this frame's Halton cycle length (FSR's lock logic)
     bool fsrRequested() const;            // an FSR mode is selected and the device can run it
@@ -3591,9 +3659,14 @@ private:
     // the network as 2x2-block-correlated noise through the upsample, which RR cannot denoise).
     static constexpr uint32_t kRrRawMask = 1u, kRrRawProj = 2u, kRrRawRefl = 4u, kRrRawGi = 8u,
                               kRrRawMergedSun = 16u, kRrRawAnyExtent = 32u;
-    // This signal goes raw this frame (its bit, and its extent w x h is the render extent or forced).
+    // Radiance-mode projectors keep their local sample integration even at full extent:
+    // the signal contains the sampled gobo/BRDF and correlated reservoir picks, not only
+    // visibility noise. Dropping both filters only at full resolution exposed that pattern
+    // to RR; half resolution already kept the filters through the extent check below.
+    // The ratio-mode projector signal and the other channels retain their raw-mask policy.
     bool rrRawSignal(uint32_t bit, uint32_t w, uint32_t h) const
     {
+        if (bit == kRrRawProj && mPdnRadiance) return false;
         return mRrRaw && (mRrRawMask & bit) != 0u
             && ((mRrRawMask & kRrRawAnyExtent) != 0u || (w >= mRenderW && h >= mRenderH));
     }
@@ -3780,32 +3853,13 @@ private:
     void     terrBakeRecord(VkCommandBuffer cmd);    // recordWorld, after the material streams
     void     terrBakeDestroy();                      // shutdown (device idle), before the slot teardown
     bool     terrBakeOn() const;
-    // <GMDX> REZ EFFECTS (gmdxrezfx.h; gmdxrezfxvk.cpp): the effect table, draw set 0 binding 45
-    // (GMDXRezFx::MAX_SLOTS rows of 80 B, device local), uploaded by rezFxRecord when its content
-    // changed -- only while effects run.
+    // <GMDX> REZ EFFECTS (CombatFX; gmdxrezfx.h; gmdxrezfxvk.cpp): the effect table, draw set 0
+    // binding 58 (GMDXRezFx::MAX_SLOTS rows of 80 B, device local), uploaded by rezFxRecord when its
+    // content changed -- only while effects run.
     void     rezFxRecord(VkCommandBuffer cmd);       // recordWorld, beside terrBakeRecord
     GpuBuffer mRezFxTable{};
     uint32_t mRezFxGen = 0;                          // GMDXRezFx::table generation on the GPU
     bool     mRezFxValid = false;                    // the GPU table was zeroed once
-    // PHYSICAL SKY (RenderVKPhysicalSky; gmdxphysskyvk.cpp, clean_physky*.glsl): Hillaire's
-    // lookup tables, the sky-view and transmittance ones at draw set 0 bindings 46 / 47 (made
-    // and written once in writeDescriptors, in GENERAL; valid even while the mode is off).
-    void     physSkyFill(VKSSRInfo& si);             // frame info fill: si.physky from si.atmos
-    void     physSkyInit();                          // writeDescriptors: images, set 0 46 / 47
-    void     physSkyRecord(VkCommandBuffer cmd);     // recordWorld, beside rezFxRecord: the LUTs
-    void     physSkyDestroy();                       // shutdown (device idle)
-    GpuImage mPkTrans{}, mPkMs{}, mPkView{};
-    VkSampler mPkSampler = VK_NULL_HANDLE;           // linear / clamp
-    VkDescriptorSetLayout mPkDsl = VK_NULL_HANDLE;   // 0 out (storage), 1 transmittance, 2 MS
-    VkDescPool mPkPool;
-    VkDescriptorSet mPkSet[3] = {};                  // trans, MS, sky view
-    VkPipelineLayout mPkLayout = VK_NULL_HANDLE;
-    VkPipeline mPkPipe[3] = {};
-    float    mPkPush[8][4] = {};                     // this frame's parameters (= si.physky[0..7])
-    float    mPkMediumKey[16] = {};                  // what the transmittance / MS tables were built for
-    bool     mPkMediumValid = false;
-    bool     mPkLayoutsReady = false;                // the images left UNDEFINED once
-    bool     mPkPipeFailed = false;
     // </GMDX>
     bool     terrBakeStartJob(TerrBakeRegion& r, uint32_t res);
     void     terrBakeFreeSet(TerrBakeSet& s);
@@ -4237,6 +4291,8 @@ private:
     // of a device wait + immediate destroy (#790 class; 273b17321d).
     void        destroyShadowStatic(bool retire = false);
     uint32_t    mShadowFrame = 0;
+    bool        mRtMaskEmissiveNoShadows = true;   // independent mask-history A/B state
+    bool        mEmissiveNoShadows = true;   // cache invalidation on the live A/B transition
     uint32_t    mShadowCacheShift = 0;   // gVKOriginShiftGen at the last render
     // STAGGERED FAR-CASCADE OVERLAY (RenderVKShadowFarCascadeInterval): cascades 2 / 3 refresh
     // their dynamic overlay (static copy + this frame's dynamic / rigged / particle casters)
@@ -4276,12 +4332,28 @@ private:
     // RAY-QUERY LIT VARIANT, compiled AFTER the world pipelines (cold-start ordering): its
     // pipelines are the heaviest compiles of the renderer and the first frames draw
     // correctly without them (plain variant + sun cascades + shadow-mapped projectors,
-    // the state RT warm-up already uses), so the login reveal does not wait for them.
+    // the state RT warm-up already uses), so the login reveal waits for them only briefly
+    // (RenderVKShaderWaitRTMaxSec, #1029).
     // A deferred batch (vk_pipeline.h PipelineBatchDeferScope) started once mPipelineJob
     // is done; its handles land in mLitVarRt and move to mLitVar[1] when it finishes.
+    // (#1029) The ray-traced effects' kernels (RT reflections / mirrors, the RT shadow mask,
+    // the RT probe deferred lighting, ray-traced GI, the stochastic projector shadows) join
+    // it: the world draws without them (every user checks the handle each frame), and on a
+    // cold cache they are the longest compiles of all (~15-25 s, ~700 MB each), so with them
+    // in the world batch the first frame waited minutes on low-memory machines. Queued with
+    // rtDeferredOut(&member) as their target: the workers write mRtStaged, never a member a
+    // frame reads, and pollRtPipelines installs the whole group at once.
     ::PipelineJob* mRtPipelineJob = nullptr;
     bool           mRtPipelineStarted = false;
     double         mRtPipesSince = 0.0;   // steady-clock seconds at its start (log)
+    bool           mRtDeferTaken = false; // the group was taken (init's end): later creates cannot join it
+    std::deque<std::pair<VkPipeline*, VkPipeline>> mRtStaged;   // (member, compile target); deque: stable slots
+    VkPipeline* rtDeferredOut(VkPipeline* member);
+    // createComputePipelineInto into the deferred group, staged (init only: inside the world batch scope)
+    void rtDeferredCompute(VkDevice dev, VkShaderModule comp, VkPipelineLayout layout,
+                           VkPipelineShaderStageCreateFlags stageFlags, const VkSpecializationInfo* spec,
+                           VkPipeline* member, const char* name);
+    void installRtStaged();
     void pollRtPipelines(bool wait);
     void destroyShadowTrans();
     bool projTransOn() const { return mShadowTransOn && mProjTransDepth.image && mProjTransColor.image
@@ -4514,6 +4586,25 @@ private:
     bool             litDebugWanted() const;             // a debug feature reads the lit FS this frame
     void             ensureLitDebug(int v);
     void             pollLitDebug(bool wait);            // harvest a finished twin job (wait: shutdown)
+    enum class RezFxVertex : uint8_t { WORLD, RIGGED, GBUFFER, GBUFFER_RIGGED, GBUFFER_SKIP_TERRAIN };
+    enum class RezFxFrag : uint8_t { LIT, GBUFFER, GBUFFER_NO_TERRAIN };
+    struct RezFxRecipe
+    {
+        GraphicsPipelineDesc desc;
+        VkPipeline* dest;
+        RezFxVertex vertex;
+        RezFxFrag fragment;
+        std::string name;
+    };
+    std::vector<RezFxRecipe> mRezFxRecipes;
+    std::deque<std::pair<VkPipeline*, VkPipeline>> mRezFxStage;
+    ::PipelineJob* mRezFxJob = nullptr;
+    bool mRezFxWire = false, mRezFxBuildWire = false;
+    int mRezFxFailedWire = -1;
+    void rememberRezFxPipeline(const GraphicsPipelineDesc& d, VkPipeline* dest,
+                               RezFxVertex vertex, RezFxFrag fragment, const char* name);
+    bool rezFxFrameTick();
+    void rezFxShutdown();
     // Deferred lighting compute's twin (RenderVKLitDebugMask cost switches in deferred frames).
     VkPipeline       mDeferPipeDbg = VK_NULL_HANDLE;
     bool             mDeferDbgBuilt = false;
@@ -4610,7 +4701,7 @@ private:
         uint32_t rs_em_take_cfg[4]; // (#91 LIGHT TAKEOVER) the table's rows T (host), GPU: lights taken over,
                                  // lights refused (a block dropped), GPU: the rest's subset stride
         uint32_t rs_em_cache[4]; // (#986) GPU: records copied from the last build, records built, cell
-                                 // candidate pairs, EM_C_* (1: the cell build gathered: pairs past the cap)
+                                 // bounded actual pairs, EM_C_* (legacy GATHER bit never set)
         uint32_t rs_em_take[8];  // (#91) GPU: the point lights taken over this frame (bit = light index)
     };
     static_assert(sizeof(RegirHeader) == 784, "RegirHeader = clean_regir.glsl RegirHeader");
@@ -4621,7 +4712,7 @@ private:
         = (VkDeviceSize)kRegirLevelsMax * kRegirCellsPerLevel * (kRegirResMax + 1u) * 8u;
     // (#91) + the emissive lights after both populations (clean_regir.glsl EMISSIVE LIGHTS): two parities
     // of triangle records (REGIR_EM_CAP x 112 B each), two parities of the instance hash (REGIR_EM_HASH_N x
-    // 8 B) and of the emitter entries (REGIR_EM_INST_CAP x 104 B; #986 RECORD REUSE reads the last build's),
+    // 8 B) and of the emitter entries (REGIR_EM_INST_CAP x 176 B; exact tokens validate prior references),
     // the record groups' boxes (REGIR_EM_CAP / 64 x 24 B), population 2 (every cell x (4 +
     // REGIR_EM_SLOTS_MAX) x 8 B: header, slots, the rest's aggregate), the LIGHT TAKEOVER table (256 light
     // ranges + REGIR_EM_TAKE_N rows x 8 B), the #986 CELL LISTS (every cell x 8 B, every 64-cell block x 8 B,
@@ -4630,7 +4721,7 @@ private:
     static constexpr uint32_t kRsEmRecBytes = 112;      // (= REGIR_EM_WORDS x 8)
     static constexpr uint32_t kRsEmHashN = 8192;        // (= REGIR_EM_HASH_N)
     static constexpr uint32_t kRsEmInstCap = 4096;      // emitter entries (= REGIR_EM_INST_CAP)
-    static constexpr uint32_t kRsEmEntBytes = 104;      // (= REGIR_EM_ENT_WORDS x 8)
+    static constexpr uint32_t kRsEmEntBytes = 176;      // (= REGIR_EM_ENT_WORDS x 8)
     static constexpr uint32_t kRsEmTakeN = 1024;        // LIGHT TAKEOVER table rows (= REGIR_EM_TAKE_N)
     static constexpr uint32_t kRsEmGrpBytes = 24;       // per 64 records (3 x 8)
     static constexpr uint32_t kRsEmSlotsMax = 8;        // (= REGIR_EM_SLOTS_MAX)
@@ -4686,7 +4777,10 @@ private:
         = (VkDeviceSize)kRsEmOvCells * kRsEmCellWordBytes + (VkDeviceSize)kRsEmNCellsAll * 16u;
     static constexpr VkDeviceSize kRsEmScrOffset = kRsEmOvCellOffset + kRsEmMoveBytes;
     static constexpr VkDeviceSize kRsEmCellOffset = kRsEmTakeOffset - kRsEmCellBytes;   // (population 2's cells)
-    static constexpr VkDeviceSize kRegirBytes = kRsEmScrOffset + kRsEmCellBytes + kRsEmMoveBytes;
+    static constexpr VkDeviceSize kRsEmBudgetOffset = kRsEmScrOffset + kRsEmCellBytes + kRsEmMoveBytes;
+    static constexpr VkDeviceSize kRsEmBudgetBytes = (EM_BUDGET_OBJECTS * EM_BUDGET_WORDS + 4u * kRsEmInstCap + 4u * kRsEmCap) * 8ull;
+    static constexpr VkDeviceSize kRegirBytes = kRsEmBudgetOffset + kRsEmBudgetBytes;
+    static_assert(EM_BUDGET_OBJECTS + kRsEmTakeN <= kRsEmInstCap, "bounded emitter entry slots");
     static_assert(kRsEmCellBytes == (VkDeviceSize)kRsEmNCells * kRsEmCellWordBytes, "population 2's cell words");
     bool                  mRsOccNow = false;        // this recording's header says RS_F_OCC (regirHeaderFill)
     bool                  mRsOccPrev = false;       // ... and the last one's (a re-enable clears the cache)
@@ -4781,6 +4875,21 @@ private:
     void                  rsLightSet(const LLVKWorldFrame& wf);   // setLights: the set + the remap
     // Stats (clean_regir.glsl RS_STATS; the "ReSTIR DI over N frames" VKGpu line with the GPU timers):
     // the header's rs_stat words copied after pass 15 into a 3-slot host ring, read 3 frames later.
+    std::vector<uint32_t> mRsEmInputGenerations;
+    GpuBuffer             mRsEmInputGen{}, mRsEmInputGenStaging[2]{};
+    bool                  mRsEmInputReady = false, mRsEmInputFull = true;
+    double                mRsEmInputRetry = 0.0;
+    GpuBuffer             mRsEmDiagRb{}; // optional, three retired snapshot slots; never CPU-written
+    bool                  mRsEmDiagNow = false, mRsEmDiagLog = false;
+    bool                  mRsEmDiagUsed[3] = {};
+    uint32_t              mRsEmDiagFrame[3] = {}, mRsEmDiagNewCount[3] = {};
+    uint32_t              mRsEmDiagPrevFrame = 0;
+    double                mRsEmDiagNext = 0.0, mRsEmDiagRetry = 0.0;
+    void                  rsEmDiagRead(uint32_t slot, const uint32_t* stats);
+    uint32_t              mRsStatFrame[3] = {}, mRsStatFrameNow = 0;
+    uint32_t              mRsEmTransitionState = ~0u, mRsEmTransitionPending = 0, mRsEmTriPeak = 0;
+    uint32_t              mRsEmObserved[26] = {}, mRsEmChangeFrom[26] = {}, mRsEmChangeTo[26] = {};
+    double                mRsEmTransitionNext = 0.0;
     GpuBuffer             mRsStatRb{};
     bool                  mRsStatUsed[3] = {false, false, false};
     uint32_t              mRsStatSlot = 0;
@@ -4791,12 +4900,6 @@ private:
     // recorded with the timers on feeds mRsStatAcc; the long cells' flag of the slot's build (the note's text)
     bool                  mRsStatTs[3] = {false, false, false};
     bool                  mRsStatLong[3] = {false, false, false};
-    // (#1108) the emissive build's WHOLE-GRID GATHER note (rsStatsRecord): at most one line per
-    // kRsEmGatherLogSecs, with the gather builds counted since the last line; the setting's reason logged once
-    double                mRsEmGatherLogT = -1.0e30;
-    uint32_t              mRsEmGatherN = 0;
-    bool                  mRsEmGatherSetLogged = false;
-    static constexpr double kRsEmGatherLogSecs = 30.0;
     // (clean_regir.glsl SUBSET STRIDE) the emissive build's stride STEP note (rsStatsRecord, rs_em_take_cfg.w): a
     // step re-subsets every emitter at once; at most one line per kRsEmStrideLogSecs, the steps since the last
     double                mRsEmStrideLogT = -1.0e30;
@@ -4809,6 +4912,7 @@ private:
                        double emTake[3] = {};   // (#91 takeover: table lights, taken, refused)
                        // (#986) records copied / built, cell candidate pairs (sum, peak), gather builds
                        double emCopied = 0, emBuilt = 0, emPairs = 0, emPairsPeak = 0; uint32_t emGather = 0;
+                       double emBudget[16] = {};
                        double emLong = 0, emLongest = 0;   // (#986 LONG CELLS: cells per frame, the longest list)
                        // (#1006 INCREMENTAL CELLS: EM_CCH_STAT -- dirty, re-gathered, forced, forward misses, kept,
                        //  weak emitters per build; the stalest cell left dirty; full builds)
@@ -4819,13 +4923,9 @@ private:
                        double emSkip[5] = {}; uint32_t emSkipFrames = 0;   // (#1009 SKIP DIAGNOSTIC: [42..44])
                        double occ[13] = {}; uint32_t occFrames = 0;   // (#869 OCCLUSION CULL: OCC_STAT words 0-12)
                      } mRsStatAcc;
-    // (#91) EMISSIVE LIGHTS (RenderVKReSTIREmissive; clean_regir.glsl EMISSIVE LIGHTS): pass 15's
-    // emissive variant, ten dispatches before pass 15 on a ReSTIR frame -- the emitters, their record
-    // blocks (+ the instance hash, cleared first), the TRIANGLE records (#986: an unchanged emitter's copied
-    // from the last build), the CELL LISTS (count, scan, sums, fill), (#1006) the cell SELECT and population 2
-    // (the triangles per grid cell: only the changed cells re-gathered, through an indirect dispatch; + the
-    // ORIGIN SHIFT when the clipmap stepped). 1: pass 15 samples them with the lights and the lit kernels add
-    // their light (+ the GI split); 2: the records + cells only (cost A/B).
+    // Bounded emissive producer: fixed row discovery/admission, fresh capped records,
+    // <=64 attempted cells/record total, fixed-capacity pair lists and short/parallel-long
+    // reductions. No whole-grid record gather; mode2 remains the producer-only timing A/B.
     VkPipeline            mRsEmPipe = VK_NULL_HANDLE;
     bool                  mRsEmNow = false;          // this recording's header asked for the build
     uint32_t              mRsEmMode = 0;             // RenderVKReSTIREmissive as this header read it
@@ -4886,7 +4986,8 @@ private:
     // expiry). opr / ocf: its reference before its latest move flag (opr[3] < 0: moved); npr: its current
     // sphere; li: its index this frame (-1: not
     // in the list); left: frames it stays (the hold, counted from its latest flag). Bounded by kGiHotMax.
-    struct GiHotLight { uint64_t key; float opr[4]; float ocf[4]; float npr[4]; int32_t li; uint32_t left; };
+    double mGiHotClock = -1.0; // steady seconds, distinct from GPU recording clock
+    struct GiHotLight { uint64_t key; float opr[4]; float ocf[4]; float npr[4]; int32_t li; double left; };
     static constexpr size_t kGiHotMax = 32;   // = clean_gi_common.glsl GI_HOT_MAX
     std::vector<GiHotLight> mGiHot;
     class LLCleanDenoiserVK* mGiDn = nullptr;       // the GI signal's own denoiser instance
@@ -4929,10 +5030,17 @@ private:
     double                mGiRetryAt = 0.0;          // a refused allocation: retry later (#697)
     bool                  mGiLogged = false;
     uint32_t              mGiLogKey = ~0u;
-    std::vector<float>    mGiSpheres;                // (GI-4) change spheres for the next header (<= 64)
+    // Separate finite batches: new deltas can arrive after this recording's header.
+    // Only the covered batch retires after trace/resolve; late deltas wait for the next header.
+    std::array<float, 64u * 4u> mGiSpheres{}, mGiHdrSpheres{};
+    uint32_t              mGiSphereN = 0, mGiHdrSphereN = 0;
+    uint64_t              mGiSceneSerial = 0, mGiHdrSceneSerial = 0; // pending deltas / header snapshot
+    uint64_t              mGiGlobalSerial = 0, mGiHdrGlobalSerial = 0; // global recovery acknowledged independently of later local deltas
     bool                  mGiStateFresh = false;     // the state buffer is new: the header write clears the cache
     double                mGiLastActive = 0.0;       // the last frame GI ran (the resources' hold)
-    uint32_t              mGiCacheRestarts = 0;      // change-sphere overflows that wiped the cache (session)
+    uint32_t              mGiCacheRestarts = 0;      // rare global recovery/origin resets (session)
+    uint64_t              mGiMaterialSkipped = 0, mGiGeometrySkipped = 0, mGiDroppedResets = 0;
+    double                mGiDeltaLogAt = 0.0;
     bool                  mRegirReflOn = false;      // the light grid is wanted by the RT reflections themselves
     bool                  mGiSphOverflow = false;
     GpuBuffer             mGiStatRb{};
@@ -5517,8 +5625,14 @@ private:
     uint32_t         mPdnK = 1u;                       // samples per texel (RenderVKProjStochasticSamples)
     uint32_t         mPdnDebug = 0u;                   // RenderVKDenoiseDebug
     uint32_t         mPdnSplitK = 0u;                  // (#869) split lights per texel (RenderVKProjStochasticSplitK)
+    // (RenderVKReSTIRRadiance, A/B) RADIANCE MODE this frame: pass 15 hands the denoiser the shadowed
+    // direct radiance itself instead of a visibility ratio, and the lit kernels read it for the lights
+    // pass 15 owns (clean_deferred_light.comp RADIANCE MODE). Latched once per frame with the light info
+    // (its linfo.fwd.z bit 1), so the header, pass 15, the denoiser and the lit kernels agree.
+    bool             mPdnRadiance = false;
     uint32_t         mPdnAtrous = 3u;                  // RenderVKDenoiseAtrous (clamped 1..5)
     uint32_t         mPdnFrame = 0u;                   // the sampler's noise phase
+    uint32_t         mPdnRouteKey[12] = {};            // last logged physical extents / signal ownership
     double           mPdnLastWant = -1e9;              // the images' hold (kRtReflHoldSecs)
     double           mPdnRetryAt = 0.0;                // refused (#697): next attempt
     void  pdnInit(VkDevice dev);                       // initDeferSplit (+ pass 15 with RT)
@@ -5777,6 +5891,12 @@ private:
     VkPipeline  mProjRigPipe = VK_NULL_HANDLE, mProjRigMaskPipe = VK_NULL_HANDLE;
     VkPipeline  mProjDsPipe = VK_NULL_HANDLE, mProjMaskDsPipe = VK_NULL_HANDLE;
     VkPipeline  mProjRigDsPipe = VK_NULL_HANDLE, mProjRigMaskDsPipe = VK_NULL_HANDLE;
+    // #1159 the weather occlusion map's alpha-blend casters: mProjMaskDsPipe with the alpha-test
+    // FS's weather twin (clean_shadow_mask.frag kWeatherOccl; the cutoff in VKDrawViewPush::pad1).
+    VkPipeline  mWeatherBlendPipe = VK_NULL_HANDLE;
+    // The weather occlusion map's opaque and alpha-mask casters: the projector depth pipelines with no
+    // depth bias (the map stores the real roof height). Only recordWeatherOcclusion binds them.
+    VkPipeline  mWeatherDepthPipe = VK_NULL_HANDLE, mWeatherMaskPipe = VK_NULL_HANDLE;
     bool initProjShadows();
     // #600 lazy projector shadow atlas (see initProjShadows).
     bool allocProjAtlas();                       // atlas + cache + translucency at the current budget; soft
@@ -5784,7 +5904,7 @@ private:
     void bindProjAtlasDummies();                 // draw set 0 bindings 18 / 29 / 30 -> 1x1 stand-ins
     // #719: draw set 0 bindings 45 / 46 -> the volumetric clouds' shadow map / panorama, or (any
     // null) the 1x1 white stand-in. Device idle.
-    void bindVolCloudImages(VkSampler sampler, VkImageView shadow, VkImageView pano);
+    void bindVolCloudImages(VkSampler sampler, VkImageView shadow, VkImageView pano, VkImageView mean = VK_NULL_HANDLE);
     void volCloudsTick();                        // #719: create / free the module (prestep, device idle on toggles)
     double mVolCloudsRetryAt = 0.0;              // #719: a refused allocation's retry time (steady clock s)
     void projAtlasTick();                        // prestep: allocate when wanted, free after the grace period
@@ -6413,9 +6533,11 @@ private:
     void writeSelRigDescriptors();
     void recordSelRigFixup(VkCommandBuffer cmd);
     void recordSelection(VkCommandBuffer cmd, const VKDrawPush& push, bool hud);
-    // <GMDX> SELECTION STYLE (GMDXSelectionStyle; vkgfx/gmdxseloutlinevk.cpp defines these):
-    // 0 Classic (Firestorm's mesh wireframe for what has no LL silhouette), 1 Outline (the
-    // screen-space outline, everything), 2 Wireframe (Slipstream's, the pipelines above).
+    // SELECTION STYLE (RenderVKSelectionStyle; vkgfx/llcleanseloutlinevk.cpp defines these,
+    // the CPU silhouettes are newview/llselectionoutline.cpp): 0 Classic (LL's silhouettes for
+    // prims / sculpties, Firestorm's mesh wireframe for what has none), 1 Outline (the
+    // screen-space outline, everything), 2 Wireframe (every triangle, the pipelines above).
+    // Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
     int  selectionStyle() const;
     // Classic pipelines [pair * 2 + pass] (pair 0 world, 1 HUD, 2 rigged; pass 0 hidden,
     // 1 visible), built on first use; null = unavailable (the wireframe pipelines then).
@@ -6428,8 +6550,7 @@ private:
                           VkImageView colorView, const GpuImage& depth, uint32_t width, uint32_t height,
                           const VkViewport& vp, const VkRect2D& sc);
     void destroySelOutline();
-    GMDXSelOutlineVK* mSelOutline = nullptr;
-    // </GMDX>
+    LLCleanSelOutlineVK* mSelOutline = nullptr;
     // Advanced > Rendering > Wireframe (gUseWireframe, #29): every world draw this frame's
     // main cull emitted, edges only, over a cleared target (LL: glPolygonMode LINE around
     // the world render). Replays the cull's indirect lists through the selection-outline
@@ -6613,7 +6734,7 @@ private:
     // swapped in: that slot keeps the full VS. Slot order: depthVsSlots().
     // The normal / motion / motion-only pre-pass pipes (slots 34..57) take the SLIM pre-pass VS
     // flavours (+normalVS / +normalMotionVS / +motionVS: -DCLEAN_DEPTH_NORMAL / _MOTION).
-    static constexpr int kDepthVsSlots = 58;
+    static constexpr int kDepthVsSlots = 61;   // (+ #1159 mWeatherBlendPipe, slot 58; + the weather map's unbiased depth / mask, 59 / 60)
     VkPipeline       mDepthVsAlt[kDepthVsSlots] = {};
     bool             mDepthVsLive[kDepthVsSlots] = {};   // true: the member holds the depth-only VS twin
     std::array<VkPipeline*, kDepthVsSlots> depthVsSlots();
@@ -7694,9 +7815,9 @@ private:
     // how many priority ones); per terrain record, how many terrain patches name it.
     // Maintained from the dirtied instance runs (+ a rolling self-heal slice) instead
     // of walking every instance (~6 ms per scan at 60k instances).
-    struct InstMatRef { uint32_t mat = 0xFFFFFFFFu, trec = 0xFFFFFFFFu; uint8_t prio = 0; };
+    struct InstMatRef { uint32_t mat = 0xFFFFFFFFu, trec = 0xFFFFFFFFu; uint8_t prio = 0, giFullbright = 0; };
     std::vector<InstMatRef> mInstMatRef;
-    std::vector<uint32_t> mMatRef, mMatPrioRef, mTrecRef;
+    std::vector<uint32_t> mMatRef, mMatPrioRef, mTrecRef, mMatGiFullbrightRef;
     std::vector<std::pair<uint32_t, uint32_t>> mMatRefRuns;
     bool     mMatRefFull = true;
     uint32_t mMatRefCursor = 0;

@@ -118,6 +118,9 @@ public:
     // The farthest the document can be scrolled (top of the last page).
     S32                 getDocPosMax() const    { return llmax( 0, mDocSize - mPageSize); }
 
+    // One line (a wheel notch's worth per click).
+    S32                 getStepSize() const     { return mStepSize; }
+
     void                pageUp(S32 overlap);
     void                pageDown(S32 overlap);
 

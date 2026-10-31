@@ -25,6 +25,7 @@
 #include "llviewerprecompiledheaders.h"
 
 #include "slviewerimportplan.h"
+#include "fsyspath.h"
 
 #include "lggcontactsets.h"
 #include "llautoreplace.h"
@@ -95,7 +96,7 @@ std::string utf8(const fs::path& p)
 
 fs::path u8(const std::string& s)
 {
-    return fs::u8path(s);
+    return fsyspath(s);
 }
 
 bool readText(const fs::path& p, std::string& out)

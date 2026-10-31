@@ -1,23 +1,7 @@
-// vkclean -- VOLUMETRIC FOG (#718): the CONSUMER side. Every main-view surface after LL's
-// haze takes C' = C_LLhazed * T + L from the integrated froxel volume (draw set 0 binding 45,
-// clean_vol_integrate.comp; a 1 x 1 x 1 identity stub while the fog is off), plus the
-// analytic height fog past the grid's far plane:
-//   * opaque surfaces + sky: clean_vol_apply.frag, one fullscreen draw at the start of
-//     render pass 2 (after the deferred lighting / forward pass 1, before any transparent);
-//   * alpha-blended world faces: clean_draw.frag (blend flag), after surfacePost;
-//   * water surface: clean_water.frag (its refraction sample is first un-fogged: the solid
-//     scene behind it already took the air segment in front of the surface);
-//   * "over" particles: clean_particle.frag, after their haze.
-// Probe / mirror captures never apply it (the grid is the main view's).
-//
-// WHY ON TOP OF LL'S HAZE (not replacing it): LL's haze is srgb_to_linear(additive x
-// (1 - atten)) x hdr -- not a per-metre integral, so it cannot be split into froxels without
-// changing its look. Keeping it exact and adding only what LL lacks (shadowed sun shafts in
-// the haze, the extra fog, local volumes) keeps every region's sky exactly as its EEP draws
-// it: with the extra fog density 0 and the haze sun scatter 0 the frame is identical to
-// fog-off outside the local volumes.
-//
-// Requires clean_frame_info.glsl + clean_atmos_common.glsl (included before this).
+// Physical main-view consumers use CameraTransport L/RGB-T from cmAt. The
+// scalar volFogAt helper is retained only for physical-off extra fog. Physical
+// opaque transport is a storage-image compute composite before transparents;
+// capture/secondary rays integrate their own bounded segment, never this grid.
 #ifndef CLEAN_VOL_APPLY_GLSL
 #define CLEAN_VOL_APPLY_GLSL
 
@@ -47,7 +31,7 @@ vec4 volFogAt(vec3 P)
     {
         const float f = far / vz;
         const vec3 A = ssr.vol_eye.xyz + rel * f;
-        const float Tf = exp(-volFogOpticalDepth(A, P));
+        const float Tf = exp(-gmdxHazeDepth(ssr.vol_eye.xyz, A, P));   // <GMDX> (the haze controls; clean_vol_common.glsl)
         const float len = length(rel);
         const vec3 V = rel / max(len, 1e-6);
         const float Th = exp(-volHazeExt() * len * f);
@@ -67,6 +51,7 @@ vec4 volFogAt(vec3 P)
         const vec3 L = atmosLightDir();
         vec3 src = volAmbient();
         if (L.z > 0.0) src += ATMOS_PI * volBeam() * volPhaseHG(dot(V, L), 0.3);
+        if (gmdxAerialScale() > 0.0) src = gmdxVolPhysSource(P, V, 1.0, 1.0);   // <GMDX> (clean_vol_common.glsl)
         s.rgb += s.a * src * mix(0.85, 0.95, ssr.weather[16].z) * (1.0 - Tp);
         s.a *= Tp;
     }
@@ -75,6 +60,7 @@ vec4 volFogAt(vec3 P)
 
 vec3 volFogApply(vec3 C, vec3 P)
 {
+    if(cmOn()) return cmApply(C,cmAt(P,CLEAN_VIEW));
     if (!volOn()) return C;
     const vec4 f = volFogAt(P);
     return C * f.a + f.rgb;
@@ -85,6 +71,7 @@ vec3 volFogApply(vec3 C, vec3 P)
 // what the scene sample got, up to the refraction's screen offset).
 vec3 volFogRemove(vec3 C, vec3 P)
 {
+    if(cmOn()) return cmRemove(C,cmAt(P,CLEAN_VIEW),atmosSrgbToLinear(ssr.water[4].rgb));
     if (!volOn()) return C;
     const vec4 f = volFogAt(P);
     return max(C - f.rgb, vec3(0.0)) / max(f.a, 1e-3);

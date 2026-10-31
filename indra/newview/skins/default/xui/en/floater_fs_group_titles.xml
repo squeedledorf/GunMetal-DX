@@ -16,6 +16,9 @@
  
 	<floater.string name="NoGroupTitle" value="&lt;No group title&gt;"/>
 	<floater.string name="ClearAllRegions" value="Clear All Regions"/>
+	<floater.string name="TitlesLoading" value="Loading titles..."/>
+	<floater.string name="TitlesFailed" value="Titles didn't load (double-click to retry)"/>
+	<floater.string name="BlankTitle" value="&lt;Blank title&gt;"/>
 
 	<filter_editor
 	 follows="left|top|right"

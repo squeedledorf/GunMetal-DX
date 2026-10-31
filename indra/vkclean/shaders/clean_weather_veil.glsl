@@ -32,7 +32,10 @@
 
 #ifndef CLEAN_WEATHER_SURFACE_GLSL
 // (the same declaration as clean_weather_surface.glsl: draw set 0 binding 49)
+#ifndef CLEAN_WEATHER_OCCL_DECLARED
+#define CLEAN_WEATHER_OCCL_DECLARED
 layout(set = 0, binding = 49) uniform sampler2D uWeatherOccl[10];
+#endif
 #endif
 
 // The precipitation's ceiling above the camera (m; llcleanweathervk.cpp kVeilCeiling).
@@ -149,6 +152,7 @@ void weatherPrecipMedium(vec3 P, vec2 wind, float fall, float t, float motion, i
 // The veil's transmittance to world point P (1 when P is under cover).
 float weatherVeilT(vec3 P)
 {
+    if(ssr.haze_mode.x>0.5) return 1.0;
     const float sigma = ssr.weather[15].w;
     if (!(sigma > 0.0)) return 1.0;
     const bool covered = weatherPrecipOpen(P) < 0.5;   // <GMDX> (the opaque veil's rule, clean_weather_veil.frag)

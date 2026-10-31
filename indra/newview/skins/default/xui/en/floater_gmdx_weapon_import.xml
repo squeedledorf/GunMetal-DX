@@ -160,8 +160,7 @@
      width="180"
      tool_tip="What happens to the versions not kept, in the rows being sorted">
         <combo_box.item label="Move to Outdated" name="outdated" value="0" />
-        <combo_box.item label="Move to the Trash" name="trash" value="1" />
-        <combo_box.item label="Leave them" name="leave" value="2" />
+        <combo_box.item label="Leave them" name="leave" value="1" />
     </combo_box>
     <text
      name="hint_text"

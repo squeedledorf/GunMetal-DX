@@ -232,8 +232,10 @@ public:
         kCntRigRaster, kCntRigRefreshSlots,
         // #1011 CLAS reuse / skinning source (= CNT_RIG_REUSE_CMP ...)
         kCntRigReuseCmp = 72, kCntRigReuseSkip, kCntRigOwnSkin, kCntRigCopied,
+        kRigSkinDispatch = 76,                        // 3 words: VkDispatchIndirectCommand, GPU-written by admission
         kCntWords = 80
     };
+    static_assert(kRigSkinDispatch + 3 <= kCntWords, "rig skin dispatch fits the counter buffer");
     static constexpr uint32_t kImpBuckets = 20;          // = CNT_IMP_BUCKETS (1.5 per octave from 2^-14)
     static_assert(kCntSbInfos == 32 && kCntSbLeak == 59, "= CNT_SB_INFOS / CNT_SB_LEAK");
     // ---- STATIC (#748 static pass; header "STATIC") ----
@@ -342,6 +344,8 @@ public:
     // Sized for `cap` records (call after the TLAS record buffer is sized). False = no PTLAS
     // this frame (the frame's TLAS is invalid: RT consumers fall back).
     bool ptlasEnsure(uint32_t cap);
+    // #1128: recovery must not use a pre-refusal PTLAS as its update source.
+    void ptlasForceBuild() { mPtlasFresh = true; }
     VkDeviceAddress ptlasAddress() const { return mPtlasAddr; }
     VkDeviceSize ptlasScratch() const { return mPtlasScratch; }
     // Records (count) -> write ops -> PTLAS build (in place). In place of the KHR TLAS build.

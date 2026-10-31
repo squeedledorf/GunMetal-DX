@@ -568,7 +568,7 @@ bool LLImageJ2COJ::encodeImpl(LLImageJ2C &base, const LLImageRaw &raw_image, con
         }
         nb_layers = llclamp(nb_layers, 1, 6);
         parameters.tcp_numlayers = nb_layers;
-        // <GMDX> the image's own rate (LLImageJ2C::setRate; 1:8 by default, as before)
+        // the image's own rate (LLImageJ2C::setRate; 1:8 by default, as before) -- GunMetal-DX port
         const F32 rate = (base.mRate > 0.f && base.mRate < 1.f) ? base.mRate : DEFAULT_COMPRESSION_RATE;
         parameters.tcp_rates[nb_layers - 1] = (rate == DEFAULT_COMPRESSION_RATE) ? (F32)(U32)(1.f / rate) : 1.f / rate;
         // for each subsequent layer, computes its rate and adds surface * numcomps * 1/rate to the max_cs_size
@@ -691,9 +691,16 @@ bool getMetadataFast( LLImageJ2C &aImage, S32 &aW, S32 &aH, S32 &aComps )
     S32 y0 = extractLong4( pBuffer, J2K_HDR_Y0 );
     S32 numComps = extractShort2( pBuffer, J2K_HDR_NUMCOMPS );
 
+    // Header fields are unsigned 32-bit on the wire: take the difference in 64 bits and
+    // leave anything that doesn't give a sane size to the full OpenJPEG path.
+    const S64 w = (S64)(U32)x1 - (S64)(U32)x0;
+    const S64 h = (S64)(U32)y1 - (S64)(U32)y0;
+    if (w <= 0 || h <= 0 || w > S32_MAX || h > S32_MAX || numComps <= 0)
+        return false;
+
     aComps = numComps;
-    aW = x1 - x0;
-    aH = y1 - y0;
+    aW = (S32)w;
+    aH = (S32)h;
 
     return true;
 }

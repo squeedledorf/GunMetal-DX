@@ -31,9 +31,17 @@ layout(push_constant) uniform VolPush {
 // view depth = depth(g.z / dims.z).
 vec3 volRelPos(vec3 g)
 {
-    const vec3 dims = ssr.vol_grid.xyz;
+    const vec3 dims = volGrid().xyz;
+    if(cmOn())
+    {
+        vec3 O,V; cmRay(g.xy/dims.xy,MEDIUM_EYE,O,V);
+        const CameraMediumView view=ssr.medium[MEDIUM_EYE];
+        const float factor=view.forward.w>0.5 ? 1.0 : max(dot(V,view.forward.xyz),1e-5);
+        const float z=cmDepth(g.z/dims.z,view,factor);
+        return O-volEye().xyz+V*(z/factor);
+    }
     const vec2 ndc = g.xy / dims.xy * 2.0 - 1.0;
-    const vec4 w = ssr.vol_inv_vp * vec4(ndc, 0.5, 1.0);
+    const vec4 w = volInvVP() * vec4(ndc, 0.5, 1.0);
     const vec3 dir = w.xyz / w.w;
     const float vz = volDepthOfSlice(g.z / dims.z);
     return dir * (vz / max(dot(dir, vp.fwd.xyz), 1e-6));

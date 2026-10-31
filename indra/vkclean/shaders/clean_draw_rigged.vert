@@ -292,7 +292,7 @@ void main()
                                  texcoord0, nrm, pos, inst_model, pc.u_cam_time.w);
     v_material_id  = inst.material_id;
     v_tint         = inst.tint;
-    v_flags        = inst.flags;
+    v_flags        = inst.flags & ~16384u;
     rezfxRigOutputs(inst.flags, rz_src, v_rez, v_rez_box);   // <GMDX>
 #endif
 #ifndef CLEAN_DEPTH_ONLY

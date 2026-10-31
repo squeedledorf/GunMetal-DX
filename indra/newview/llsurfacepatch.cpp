@@ -27,7 +27,7 @@
 #include "llviewerprecompiledheaders.h"
 
 #include "llsurfacepatch.h"
-#include "gmdxminimapterrain.h" // <GMDX>
+#include "llminimapterrain.h" // (GunMetal-DX port)
 #include "llpatchvertexarray.h"
 #include "llviewerobjectlist.h"
 #include "llvosurfacepatch.h"
@@ -899,7 +899,7 @@ void LLSurfacePatch::updateGL()
 {
     LL_PROFILE_ZONE_SCOPED;
     updateCompositionStats();
-    mSurfacep->getMinimapTerrain().dirtyPatch(this); // <GMDX> repaint it on the mini-map
+    mSurfacep->getMinimapTerrain().dirtyPatch(this); // (GunMetal-DX port) repaint it on the mini-map
 
     mSTexUpdate = false;
 }

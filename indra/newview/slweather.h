@@ -109,7 +109,8 @@
  * SNOW DEPTH (M3; #954 physical): State::snowDepth integrates beside the cover -- the SNOWFALL RATE
  * (cm/h) x (1 - kSnowSettle: fresh snow settles by about a third as it lies) while it snows -- 5 cm/h
  * for 10 minutes lays ~0.58 cm --, melting at WeatherSnowMaxDepth per WeatherSnowMeltSeconds once
- * the snow stops (faster in rain), capped at WeatherSnowMaxDepth x snowCover. (WeatherSnowDepthPerHour
+ * the snow stops (faster in rain), capped at WeatherSnowMaxDepth x snowCover (#1130: while it snows the
+ * cover keeps pace with the depth, so the cap never holds a fast snowfall back). (WeatherSnowDepthPerHour
  * is no longer read.) It is the GLOBAL accumulated depth: the renderer's persistent depth field
  * (llcleanweathervk.h) fills any texel it enters to it at once.
  *
@@ -271,6 +272,13 @@ public:
         F32 snowDepthMelt = 0.f;
         // The level is tag-driven (snowLevelAt): the parcel's shared depth, not a local build-up.
         bool snowDepthShared = false;
+        // #1130 FRESH SNOW: what the snowfall lays on an open, level surface right now (m/s: the
+        // snowfall rate x (1 - kSnowSettle) while it snows), whatever drives the level -- a local
+        // build-up from bare ground, a parcel tag's held or shared depth --, and the deepest snow the
+        // settings let lie (m: WeatherSnowMaxDepth). Both 0 with WeatherSnowCoating off. The avatars'
+        // coats fill by these (the snow landing on them), not up to the ground's level.
+        F32 snowFallBuild = 0.f;
+        F32 snowDepthMax = 0.f;
         // M4 RUN-OFF 0..1: water streaming off covered surfaces (follows the rain on wet surfaces
         // and melt water; drains after; never above the wetness while wet surfaces are on).
         F32 runoff = 0.f;
@@ -324,10 +332,10 @@ public:
     static F32 fallFromAmount(EPrecip type, F32 amount);
     // The ladder's top (amount 1) and the largest rate accepted (settings, tags, the floater).
     static constexpr F32 kRainFallTop = 100.f, kRainFallMax = 200.f;   // mm/h
-    // Snow goes far past nature (360 cm/h = 1 mm/s of fresh snow) so a place can bury itself fast;
+    // Snow goes far past nature (3600 cm/h = 1 cm/s of fresh snow) so a place can bury itself fast;
     // everything that LOOKS at the rate (visibility, flakes, curtains) saturates at kSnowFallLookMax,
     // a heavy blizzard -- only the build-up keeps following the rate above it.
-    static constexpr F32 kSnowFallTop = 15.f, kSnowFallMax = 360.f;    // cm/h
+    static constexpr F32 kSnowFallTop = 15.f, kSnowFallMax = 3600.f;   // cm/h
     static constexpr F32 kSnowFallLookMax = 30.f;                      // cm/h
     // A rate's class: 0 light (drizzle / flurries), 1 moderate, 2 heavy, 3 violent / blizzard-grade
     // (the floater's preset ladder and status).

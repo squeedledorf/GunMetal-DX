@@ -457,9 +457,7 @@ LLSettingsVOSky::LLSettingsVOSky()
 //-------------------------------------------------------------------------
 LLSettingsSky::ptr_t LLSettingsVOSky::buildSky(LLSD settings)
 {
-    LLSettingsSky::validation_list_t validations = LLSettingsSky::validationList();
-
-    LLSD results = LLSettingsBase::settingValidation(settings, validations);
+    LLSD results = LLSettingsSky::validateSkySettings(settings);
 
     if (!results["success"].asBoolean())
     {
@@ -482,9 +480,7 @@ LLSettingsSky::ptr_t LLSettingsVOSky::buildFromLegacyPreset(const std::string &n
     }
 
     newsettings[SETTING_NAME] = name;
-
-    LLSettingsSky::validation_list_t validations = LLSettingsSky::validationList();
-    LLSD results = LLSettingsBase::settingValidation(newsettings, validations);
+    LLSD results = LLSettingsSky::validateSkySettings(newsettings);
     if (!results["success"].asBoolean())
     {
         messages["REASONS"] = LLTrans::getString("SettingValidationError", LLSDMap("NAME", name));
@@ -532,9 +528,7 @@ LLSettingsSky::ptr_t LLSettingsVOSky::buildDefaultSky()
         default_settings = LLSettingsSky::defaults();
 
         default_settings[SETTING_NAME] = DEFAULT_SETTINGS_NAME;
-
-        LLSettingsSky::validation_list_t validations = LLSettingsSky::validationList();
-        LLSD results = LLSettingsBase::settingValidation(default_settings, validations);
+        LLSD results = LLSettingsSky::validateSkySettings(default_settings);
         if (!results["success"].asBoolean())
         {
             LL_WARNS("SETTINGS") << "Sky setting validation failed!\n" << results << LL_ENDL;
@@ -550,9 +544,7 @@ LLSettingsSky::ptr_t LLSettingsVOSky::buildClone()
 {
     LLSD settings = cloneSettings();
     U32 flags = getFlags();
-
-    LLSettingsSky::validation_list_t validations = LLSettingsSky::validationList();
-    LLSD results = LLSettingsBase::settingValidation(settings, validations);
+    LLSD results = LLSettingsSky::validateSkySettings(settings);
     if (!results["success"].asBoolean())
     {
         LL_WARNS("SETTINGS") << "Sky setting validation failed!\n" << results << LL_ENDL;
@@ -561,6 +553,7 @@ LLSettingsSky::ptr_t LLSettingsVOSky::buildClone()
 
     LLSettingsSky::ptr_t skyp = std::make_shared<LLSettingsVOSky>(settings);
     skyp->setFlags(flags);
+    skyp->copyHazeTransitionFrom(*this);
     return skyp;
 }
 

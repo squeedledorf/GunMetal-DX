@@ -35,8 +35,8 @@ struct Material {
 };
 layout(std430, set = 0, binding = 1) readonly buffer Materials { Material materials[]; };
 layout(set = 1, binding = 0) uniform sampler2D uTextures[];
-// <GMDX> rez effects: the de-rez cut of a dying object and a build effect's hidden part, as the
-// lit FS runs them (the draw view: probe captures cut nothing)
+// <GMDX> rez effects (CombatFX): the de-rez cut of a dying object and a build effect's hidden
+// part, as the lit FS runs them (the draw view: probe captures cut nothing)
 #include "clean_draw_view.glsl"
 #define GMDX_REZFX_FS
 #include "gmdx_rezfx.glsl"

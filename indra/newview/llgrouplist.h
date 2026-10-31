@@ -70,6 +70,9 @@ public:
     void setIconsVisible(bool show_icons) { mShowIcons = show_icons; }
     void setShowNone(bool show_none) { mShowNone = show_none; }
     void setGroups(const std::map< std::string,LLUUID> group_list);
+    // Agent's list the way others see it in the agent's profile: only the groups
+    // listed there, without the notices and visibility buttons
+    void setProfilePreview(bool preview);
 
     LLToggleableMenu* getContextMenu() const { return mContextMenuHandle.get(); }
 
@@ -92,6 +95,7 @@ private:
 
     bool mForAgent;
     bool mShowNone;
+    bool mProfilePreview{ false };
     boost::signals2::scoped_connection mFavoritesChangedConnection; // <FS:PP> Group favorites / pinning
     typedef std::map< std::string,LLUUID>   group_map_t;
     group_map_t             mGroups;
@@ -123,6 +127,7 @@ public:
     virtual void changed(LLGroupChange gc);
 
     void setVisibleInProfile(bool visible);
+    void setShowAgentButtons(bool show)         { mShowAgentButtons = show; }
     bool isFavorite() const                     { return mIsFavorite; } // <FS:PP> Group favorites / pinning
     void setFavorite(bool favorite)             { mIsFavorite = favorite; } // <FS:PP> Group favorites / pinning
 private:
@@ -143,6 +148,7 @@ private:
 
     std::string mGroupName;
     bool        mForAgent;
+    bool        mShowAgentButtons{ true }; // notices and profile visibility, on hover
     LLStyle::Params mGroupNameStyle;
 
     S32 mIconWidth;

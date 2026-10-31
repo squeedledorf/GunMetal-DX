@@ -307,7 +307,7 @@ LLSYMEXPORT LLWebRTCDeviceInterface* getDeviceInterface();
 LLSYMEXPORT LLWebRTCPeerConnectionInterface* newPeerConnection();
 LLSYMEXPORT void freePeerConnection(LLWebRTCPeerConnectionInterface *connection);
 
-// <GMDX> Instant replay audio (newview/gmdxreplayaudio.cpp): the Opus encoder libwebrtc carries,
+// Instant replay audio (newview/llinstantreplayaudio.cpp; ported from GunMetal-DX, v0.3.0 cf5f1f4): the Opus encoder libwebrtc carries,
 // reached through this library (on Windows libwebrtc is built with its own C runtime, so it can't
 // be linked into the viewer itself). Interleaved float PCM; frames must be an Opus frame size.
 LLSYMEXPORT void* opusEncoderCreate(int rate, int channels, int bitrate, int* lookahead);

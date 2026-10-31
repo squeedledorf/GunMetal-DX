@@ -71,7 +71,7 @@ void LLViewerWindowListener::saveSnapshot(const LLSD& event) const
 #define tp(name) types[#name] = LLSnapshotModel::SNAPSHOT_TYPE_##name
     tp(COLOR);
     tp(DEPTH);
-    tp(AVATAR_TRANSPARENT);   // <GMDX> avatar layers (gmdxsnapshotavatars.h)
+    tp(AVATAR_TRANSPARENT);   // <GMDX> avatar layers (llsnapshotavatars.h)
     tp(AVATAR_MASK_BLACK);    // <GMDX>
     tp(AVATAR_MASK_WHITE);    // <GMDX>
 #undef  tp

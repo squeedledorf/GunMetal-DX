@@ -33,8 +33,17 @@
 #include "llviewerstats.h"
 #include "llviewerwindow.h"
 #include "v4color.h"
+#include "slcombatfx.h"
 
 // <SS:Nexii> Rez queue watch
+// Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4. Slipstream: a CombatFX option;
+// the blocking threshold and the text style are fixed.
+
+static bool rezqueue_on()
+{
+    static LLCachedControl<bool> enabled(gSavedSettings, "FSRezQueueIndicator", false);
+    return enabled && SLCombatFX::enabled();
+}
 
 // Thresholds and timings carried over from the LSL original.
 static const F32 QUEUE_EPSILON = 0.01f; // above this the region has queue activity at all
@@ -54,8 +63,7 @@ static F32  sClearedDuration  = 0.f;
 // static
 void FSRezQueue::onSimStat(U32 stat_id, F32 value)
 {
-    static LLCachedControl<bool> enabled(gSavedSettings, "FSRezQueueIndicator", false);
-    if (!enabled) return;
+    if (!rezqueue_on()) return;
 
     switch (stat_id)
     {
@@ -64,7 +72,7 @@ void FSRezQueue::onSimStat(U32 stat_id, F32 value)
         default: return;
     }
 
-    static LLCachedControl<F32> threshold(gSavedSettings, "FSRezQueueThreshold", 0.9f);
+    constexpr F32 threshold = 0.9f;   // (Slipstream: fixed; was FSRezQueueThreshold)
     const F64 now = LLFrameTimer::getTotalSeconds();
 
     // Stats stop arriving while crossing regions or reconnecting; an episode
@@ -106,10 +114,9 @@ void FSRezQueue::onSimStat(U32 stat_id, F32 value)
 // static
 void FSRezQueue::draw()
 {
-    static LLCachedControl<bool> enabled(gSavedSettings, "FSRezQueueIndicator", false);
-    if (!enabled) return;
+    if (!rezqueue_on()) return;
 
-    if (!gAgentCamera.cameraMouselook()) return;
+    if (!gAgentCamera.cameraMouselook()) return;   // (the OTS shoulder camera too: it is mouselook)
 
     const F64 now = LLFrameTimer::getTotalSeconds();
     std::string text;
@@ -134,10 +141,9 @@ void FSRezQueue::draw()
 
     // Anchored like the hit report text, but above the crosshair rather than below.
     static LLCachedControl<F32> scale_setting(gSavedSettings, "FSHitMarkerScale", 1.0f);
-    static LLCachedControl<F32> text_scale_setting(gSavedSettings, "FSHitMarkerTextScale", 1.0f);
-    static LLCachedControl<bool> text_bold(gSavedSettings, "FSHitMarkerTextBold", true);
+    constexpr F32 text_scale = 1.f;   // (Slipstream: the hit report's fixed text style)
+    constexpr bool text_bold = true;
     const F32 scale = llclamp((F32)scale_setting, 0.5f, 3.f);
-    const F32 text_scale = llclamp((F32)text_scale_setting, 0.5f, 3.f);
     // <GMDX> The world view's centre, as the crosshair and hit report use: toolbars can move the world view.
     const LLRect& world_rect = gViewerWindow->getWorldViewRectScaled();
     const S32 center_x = world_rect.getCenterX();

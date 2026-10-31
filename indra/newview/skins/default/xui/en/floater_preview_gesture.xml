@@ -139,7 +139,7 @@
      left_pad="4"
      name="key_combo"
      top_delta="0"
-     width="50" />
+     width="60" />
     <text
      type="string"
      length="1"

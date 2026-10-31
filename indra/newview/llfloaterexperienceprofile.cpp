@@ -403,8 +403,8 @@ void LLFloaterExperienceProfile::refreshExperience( const LLSD& experience )
         child = getChild<LLTextBox>(TF_PRIVILEGED);
         child->setVisible(true);
     }
-    // <GMDX> SoapStorm 45a8027a98: fetch the permission for privileged experiences too, so they
-    // can be left or blocked like any other; the privileged label still shows.
+    // <GMDX> SoapStorm 45a8027a98 (Soap Frenzy): fetch the permission for privileged experiences
+    // too, so they can be left or blocked like any other; the privileged label still shows.
     LLViewerRegion* region = gAgent.getRegion();
     if (region)
     {

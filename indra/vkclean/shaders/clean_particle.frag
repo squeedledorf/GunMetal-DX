@@ -30,6 +30,51 @@ layout(location = 1) out vec4 outGlow;
 // pass 2's third attachment (MAX blend). Sprites have no motion vectors.
 layout(location = 2) out vec4 outReact;
 
+// Coverage-aware atmospheric source for the two source-driven over buckets.
+// Destination-driven/modulate pairs preserve their blend semantics; additive
+// emission takes only RGB transmittance in each path below.
+CameraTransport particleMediumSegment(vec3 P,vec3 origin)
+{
+    const vec3 ray=P-origin;
+    return probeCapture() || mirrorPass()
+        ? cmFinite(origin,ray/max(length(ray),1e-7),0.0,length(ray),0.0)
+        : cmAt(P,CLEAN_VIEW);
+}
+vec3 particleMediumAttenuation(vec3 P)
+{
+    const vec3 origin=mainReceiverEye(P,pc.u_cam_time.xyz);
+    vec3 transmittance=particleMediumSegment(P,origin).T;
+    if(origin.z<waterHeight())
+    {
+        vec3 rel=P-origin;
+        if(P.z>waterHeight()) rel*=clamp((waterHeight()-origin.z)/max(rel.z,1e-7),0.0,1.0);
+        transmittance*=waterFogLL(rel,origin.z-waterHeight()).a;
+    }
+    return transmittance;
+}
+vec3 particleMediumOver(vec3 color,vec3 P,float coverage,bool premultiplied)
+{
+    const float weight=premultiplied ? coverage : 1.0;
+    const vec3 origin=mainReceiverEye(P,pc.u_cam_time.xyz);
+    const bool capture=probeCapture() || mirrorPass();
+    const CameraTransport transport=particleMediumSegment(P,origin);
+    color=color*transport.T+weight*transport.L;
+    if(origin.z<waterHeight())
+    {
+        vec3 rel=P-origin;
+        if(P.z>waterHeight()) rel*=clamp((waterHeight()-origin.z)/max(rel.z,1e-7),0.0,1.0);
+        const vec4 water=waterFogLL(rel,origin.z-waterHeight());
+        color=color*water.a+weight*water.rgb;
+    }
+    else if(!capture)
+    {
+        g_cm_sky_prefix=true;g_cm_sky_origin=origin;
+        const float keep=atmosDistanceFadeKeep(P,origin,linfo.cam_fwd.xyz,linfo.zinfo.y);
+        if(keep<1.0) color=color*keep+weight*(1.0-keep)*atmosFadeTarget(P-origin,origin.z);
+    }
+    return color;
+}
+
 #ifdef PART_VERTEX_LIGHT
 // PER-PARTICLE LIGHTING (RenderVKParticleLighting 1, the main view's default): the
 // lighting compute's record (clean_particle_light.comp / clean_particle_common.glsl),
@@ -55,10 +100,16 @@ void main()
              ? base_lin * atmosHdrScale()                                     // EMISSIVE: fullbright
              : atmosClampHDR(v_plight * base_lin) + v_plocal * base_lin;      // lit (LL alpha pool)
     const bool over = (bdst == 7u || bdst == 1u) && (bsrc == 0u || bsrc == 3u || bsrc == 6u);
-    if (over) lin = lin * v_phaze.a + v_phaze.rgb;
+    if (over && !cmOn()) lin = lin * v_phaze.a + v_phaze.rgb;
     // Volumetric fog (#718) over the hazed "over" sprites, main view only (additive /
     // modulate pairs stay unfogged, as they stay unhazed: it would accumulate per sprite).
-    if (over && volOn() && !probeCapture() && !mirrorPass()) lin = volFogApply(lin, v_world_pos);
+    if(cmOn())
+    {
+        if(over && (bsrc==0u || bsrc==6u))
+            lin=particleMediumOver(lin,v_world_pos,c.a,bsrc==0u && bdst==7u);
+        else if(bdst==0u && (bsrc==0u || bsrc==6u)) lin*=particleMediumAttenuation(v_world_pos);
+    }
+    if (!cmOn() && over && volOn() && !probeCapture() && !mirrorPass()) lin = volFogApply(lin, v_world_pos);
     if (over && !probeCapture() && !mirrorPass()) lin = weatherVeilApply(lin, v_world_pos);   // (#954)
     outColor = vec4(max(lin, vec3(0.0)), c.a);
     outGlow  = vec4(vec3(v_glow * c.a), 0.0);   // <SS:Skoomastream> glow amount only (as below)
@@ -88,7 +139,7 @@ void main()
         // viewer), irradiance from the probes, sun/moon min(da, shadow), local
         // lights -- dark at night instead of glowing.
         const vec3 N   = -linfo.cam_fwd.xyz;
-        const vec3 V   = normalize(pc.u_cam_time.xyz - v_world_pos);
+        const vec3 V   = mainViewDirection(v_world_pos, pc.u_cam_time.xyz);
         const vec3 L   = atmosLightDir();
         const vec3 rel = v_world_pos - pc.u_cam_time.xyz;
         const bool classic = atmosClassic();
@@ -127,20 +178,24 @@ void main()
     const bool over = (bdst == 7u || bdst == 1u) && (bsrc == 0u || bsrc == 3u || bsrc == 6u);
     if (over)
     {
-        if (waterFogged(v_world_pos))
+        if (!cmOn() && waterFogged(v_world_pos))
             lin = applyWaterFog(lin, v_world_pos - pc.u_cam_time.xyz, pc.u_cam_time.z - waterHeight());
         else
         {
             // (#816: one scatter of the ray for the haze and the fade -- the lit branch's
             // when it ran: the same rel)
-            if (!hOk) atmosScatterHaze(v_world_pos - pc.u_cam_time.xyz, hAdd, hAtt);
-            lin = atmosApplyRay(lin, hAdd, hAtt);
-            lin = atmosDistanceFade(lin, v_world_pos, pc.u_cam_time.xyz, linfo.cam_fwd.xyz, linfo.zinfo.y, hAdd, hAtt);
+            if (!cmOn() && !hOk) atmosScatterHaze(v_world_pos - pc.u_cam_time.xyz, hAdd, hAtt);
+            if(!cmOn()) lin = atmosApplyRay(lin, hAdd, hAtt);
+            if(!cmOn()) lin = atmosDistanceFade(lin, v_world_pos, pc.u_cam_time.xyz, linfo.cam_fwd, linfo.zinfo.y, hAdd, hAtt);
         }
         // Volumetric fog (#718) over the hazed sprite, main view only.
-        if (volOn() && !probeCapture() && !mirrorPass()) lin = volFogApply(lin, v_world_pos);
+        if(cmOn() && (bsrc==0u || bsrc==6u))
+            lin=particleMediumOver(lin,v_world_pos,c.a,bsrc==0u && bdst==7u);
+        if (!cmOn() && volOn() && !probeCapture() && !mirrorPass()) lin = volFogApply(lin, v_world_pos);
         if (!probeCapture() && !mirrorPass()) lin = weatherVeilApply(lin, v_world_pos);   // (#954)
     }
+    if(cmOn() && !over && bdst==0u && (bsrc==0u || bsrc==6u))
+        lin*=particleMediumAttenuation(v_world_pos);
     outColor = vec4(max(lin, vec3(0.0)), c.a);
     // <SS:Skoomastream> Glow AMOUNT only (additive, as LL's emissive pass adds into screen
     // alpha); the extracts multiply by the composited scene colour.

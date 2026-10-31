@@ -40,6 +40,7 @@
 #include "llviewborder.h"
 #include "llfocusmgr.h"
 #include "llframetimer.h"
+#include "llmiddleautoscroll.h"
 #include "lluictrlfactory.h"
 #include "llpanel.h"
 #include "llfontgl.h"
@@ -343,6 +344,20 @@ bool LLScrollContainer::handleScrollHWheel(S32 x, S32 y, S32 clicks)
     }
 
     return false;
+}
+
+bool LLScrollContainer::handleMiddleMouseDown(S32 x, S32 y, MASK mask)
+{
+    // A child that uses the middle button (text paste, a nested scroller) keeps it; content it
+    // merely lands on (folder items, panels) doesn't count.
+    {
+        LLView::MiddleClickBubbleScope bubble;
+        if (LLUICtrl::handleMiddleMouseDown(x, y, mask))
+        {
+            return true;
+        }
+    }
+    return LLMiddleAutoScroll::getInstance()->begin(this, mScrollbar[VERTICAL], mScrollbar[HORIZONTAL], 1.f, x, y);
 }
 
 bool LLScrollContainer::handleDragAndDrop(S32 x, S32 y, MASK mask,

@@ -40,6 +40,7 @@
 #include "llcleaninstancestore.h"
 #include "llcleaningest.h"
 #include "slbridge.h"
+#include "gmdxghostwatch.h" // <GMDX>
 #include "llcleangltfingest.h"
 #include "llcleandebug.h"
 #include "llcleanmaterialstore.h"
@@ -106,7 +107,7 @@
 // [RLVa:KB] - Checked: RLVa-2.0.0
 #include "rlvactions.h"
 #include "rlvlocks.h"
-#include "gmdxregioncapture.h"   // <GMDX> region map capture: max LOD in the region being mapped
+#include "llregionmapcapture.h"   // region map capture: max LOD in the region being mapped (GunMetal-DX port)
 // [/RLVa:KB]
 
 #include <cmath>
@@ -758,8 +759,6 @@ void LLVOVolume::updateTextureVirtualSize(bool forced)
         }
 
         F32 vsize;
-        F32 old_size = face->getVirtualSize();
-
         if (isHUDAttachment())
         {
             F32 area = (F32) camera->getScreenPixelArea();
@@ -1548,7 +1547,7 @@ bool LLVOVolume::calcLOD()
         }
     }
 
-    // <GMDX> orthographic view: everything is drawn at the focus distance's scale
+    // orthographic view: everything is drawn at the focus distance's scale (GunMetal-DX port)
     if (LLViewerCamera::getInstance()->getOrtho())
     {
         distance = LLViewerCamera::getInstance()->getOrthoFocusDist();
@@ -1659,10 +1658,11 @@ bool LLVOVolume::calcLOD()
         setDebugText(llformat("%d", cur_detail));
     }
 
-    // <GMDX> REGION MAP CAPTURE (gmdxregioncapture.h): everything standing in the region being mapped
+    // REGION MAP CAPTURE (llregionmapcapture.h): everything standing in the region being mapped
     // loads its highest LOD while the capture runs (not avatars, attachments or HUDs).
+    // Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
     if (cur_detail < 3 && !isAttachment() && !mDrawable->isState(LLDrawable::RIGGED)
-        && GMDXRegionCapture::forceMaxLOD(mDrawable->getPositionAgent(), mDrawable->getRadius()))
+        && LLRegionMapCapture::forceMaxLOD(mDrawable->getPositionAgent(), mDrawable->getRadius()))
     {
         cur_detail = 3;
     }
@@ -5048,6 +5048,44 @@ static bool cleanEffectiveFullbright(LLFace* facep, const LLTextureEntry* te)
     return vobj && vobj->isHUDAttachment();
 }
 
+// Positive world classification only. Orphans and pathological/cyclic ancestry keep
+// casting; the fixed bound runs only during face ingest, never in a render scene walk.
+static bool cleanShadowWorld(LLViewerObject* obj)
+{
+    for (U32 depth = 0; obj && depth < 64u; ++depth)
+    {
+        if (obj->isDead() || obj->isOrphaned() || !obj->getRegion() || obj->isAvatar()
+            || obj->isAttachment() || obj->isHUDAttachment()) return false;
+        auto* parent = static_cast<LLViewerObject*>(obj->getParent());
+        if (!parent) return true;
+        obj = parent;
+    }
+    return false;
+}
+
+static bool cleanShadowEmission(const LLTextureEntry* te, bool fullbright)
+{
+    if (!te) return false;
+    if (const LLGLTFMaterial* mat = te->getGLTFRenderMaterial())
+    {
+        // A factor times an arbitrary emissive map does NOT prove whole-face emission.
+        // Use the authored UUID (not the residency-dependent GPU has-emissive flag).
+        if (static_cast<const LLFetchedGLTFMaterial*>(mat)->isFetching()
+            || mat->mAlphaMode != LLGLTFMaterial::ALPHA_MODE_BLEND
+            || !mat->mTextureId[LLGLTFMaterial::GLTF_TEXTURE_INFO_EMISSIVE].isNull()) return false;
+        bool positive = false;
+        for (U32 c = 0; c < 3; ++c)
+        {
+            const F32 e = mat->mEmissiveColor.mV[c];
+            if (!std::isfinite(e) || e < 0.f) return false;
+            positive |= e > 0.f;
+        }
+        return positive;
+    }
+    const F32 glow = te->getGlow();
+    return fullbright && std::isfinite(glow) && glow > 0.f;
+}
+
 static void classifyCleanFace(LLFace* facep,
                               bool& out_alpha_blend,
                               bool& out_alpha_mask,
@@ -5131,11 +5169,18 @@ static void classifyCleanFace(LLFace* facep,
         switch (gltf_mat->mAlphaMode)
         {
             case LLGLTFMaterial::ALPHA_MODE_BLEND:
-                // <SS:Skoomastream> LL never auto-masks a glTF BLEND material; demoting
-                // soft-alpha glTF faces drew them opaque wherever alpha > the cutoff.
+            {
+                // RenderVKGltfBlendNoAutoMask (Advanced Graphics, default off; GunMetal-DX #1206 (d): LL never
+                // auto-masks a glTF BLEND material): on = always blended.
+                static LLCachedControl<bool> s_no_auto(gSavedSettings, "RenderVKGltfBlendNoAutoMask", false);
                 reason = CAM_BLEND_TINT;
-                out_alpha_blend = true;
+                if (!s_no_auto && gltf_mat->mBaseColor.mV[3] >= 0.999f
+                    && facep && tex_maskable(facep->getTexture()))
+                    out_alpha_mask = true;
+                else
+                    out_alpha_blend = true;
                 break;
+            }
             case LLGLTFMaterial::ALPHA_MODE_MASK:  out_alpha_mask  = true; break;
             default: break; // ALPHA_MODE_OPAQUE -> opaque PBR
         }
@@ -5146,8 +5191,6 @@ static void classifyCleanFace(LLFace* facep,
     // Fullbright follows the TextureEntry flag for legacy faces.
     out_fullbright = cleanEffectiveFullbright(facep, te);
 
-    LLViewerObject* vobj   = facep->getViewerObject();
-    const bool      hud    = vobj && vobj->isHUDAttachment();
     LLMaterial*     mat    = te->getMaterialParams().get();
     LLViewerTexture* tex   = facep->getTexture();
 
@@ -5537,7 +5580,8 @@ void LLCleanIngest::vkPumpAsyncCaptures(std::vector<LLUUID>& wake)
 // the noise passes, while real anti-aliased rims (well below) still cut where they did.
 static constexpr F32 kMaskCutoffCeiling = 247.5f / 255.f;
 
-// <GMDX> ...except on a gradient-alpha texture (half its texels or more partly transparent: a
+// Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4:
+// ...except on a gradient-alpha texture (half its texels or more partly transparent: a
 // dissolve map). A cutoff there above the ceiling is a script fading the face out, and the
 // ceiling kept its most opaque parts alive (a staff's "dissolve" left bright shards that GL
 // hides). Those test the cutoff as LL does; the shaders give cutoffs above the ceiling no mip
@@ -5578,6 +5622,15 @@ void LLCleanIngest::registerCleanFace(LLFace* facep, bool force_reingest)
         facep->mVKIngest = LLFace::VKI_NOT_DRAWN;
         return;
     }
+    // <GMDX> A ghost suspect hidden while the simulator is asked about it (gmdxghostwatch.cpp): drawn again
+    // when it answers or is still there a second later.
+    if (GMDXGhostWatch::isHidden(pObj))
+    {
+        LLCleanInstanceStore::instance().releaseObject(pObj->getID());
+        facep->mVKIngest = LLFace::VKI_NOT_DRAWN;
+        return;
+    }
+    // </GMDX>
 
     const S32 face_idx = facep->getTEOffset();
     if (face_idx < 0 || face_idx >= live->getNumVolumeFaces())
@@ -6278,8 +6331,7 @@ void LLCleanIngest::registerCleanFace(LLFace* facep, bool force_reingest)
     }
     facep->mVKIngest = LLFace::VKI_UP_TO_DATE;
 
-    LLCleanInstanceStore::Instance inst;
-    std::memset(&inst, 0, sizeof(inst));
+    LLCleanInstanceStore::Instance inst{};   // value-init: every member zeroed
 
     // ATTACHMENT SKINNING. A statically-worn UNRIGGED attachment rides rigidly on
     // one avatar joint (the attach point). Rather than the CPU re-composing its
@@ -6591,6 +6643,7 @@ void LLCleanIngest::registerCleanFace(LLFace* facep, bool force_reingest)
     const bool clean_static = is_attach ||
         (!rigged && !slot_has_weights &&
          !drawable->isActive() && !drawable->isState(LLDrawable::ANIMATED_CHILD));
+    const bool shadow_world = !rigged && !slot_has_weights && !is_attach && cleanShadowWorld(pObj);
     U64 clean_sig = 0;
     bool do_ingest = true;
     if (clean_static)
@@ -6615,6 +6668,7 @@ void LLCleanIngest::registerCleanFace(LLFace* facep, bool force_reingest)
         mix(sig_mm, sizeof(sig_mm));
         mix(inst.spin_axis, sizeof(F32) * 3);   // not t0: phase re-derives each call
         mix(&inst.lod_group_id, sizeof(inst.lod_group_id));
+        mix(&shadow_world, sizeof(shadow_world));   // attach/reparent cannot retain a world policy
         mix(inst.tint, sizeof(inst.tint));
         mix(inst.uv_matrix, sizeof(inst.uv_matrix));
         mix(&inst.spin_pivot[3], sizeof(F32));   // UV density / raw UV extent
@@ -6745,7 +6799,7 @@ void LLCleanIngest::registerCleanFace(LLFace* facep, bool force_reingest)
                 mdesc.metallic_factor      = gm->mMetallicFactor;
                 mdesc.roughness_factor     = gm->mRoughnessFactor;
                 mdesc.alpha_cutoff = (gm->mAlphaMode == LLGLTFMaterial::ALPHA_MODE_MASK)
-                                     ? clean_mask_cutoff(gm->mAlphaCutoff, gm->mBaseColorTexture.get()) : -1.f;   // <GMDX>
+                                     ? clean_mask_cutoff(gm->mAlphaCutoff, gm->mBaseColorTexture.get()) : -1.f;
             }
             else
             {
@@ -6796,7 +6850,7 @@ void LLCleanIngest::registerCleanFace(LLFace* facep, bool force_reingest)
                     // cutout edges up close (#840). (Clamped: cutoff 0 stays a mask.)
                     if (lm->getDiffuseAlphaMode() == LLMaterial::DIFFUSE_ALPHA_MODE_MASK)
                         mdesc.alpha_cutoff = clean_mask_cutoff(llmax(lm->getAlphaMaskCutoff() / 255.f - 1.f / 512.f, 0.f),
-                                                               facep->getTexture());   // <GMDX>
+                                                               facep->getTexture());
                     mdesc.emissive_mask = lm->getDiffuseAlphaMode() == LLMaterial::DIFFUSE_ALPHA_MODE_EMISSIVE;
                 }
                 else
@@ -7130,7 +7184,8 @@ void LLCleanIngest::registerCleanFace(LLFace* facep, bool force_reingest)
         if (clean_alpha_mask)                  inst.flags |= 4u;
         if (clean_fullbright && !alpha_blend)  inst.flags |= 16u;
         if (pObj->isHUDAttachment())           inst.flags |= 8u;
-        // <GMDX> A texture-animated cut-out / blend face moves its shadow every frame.
+        // A texture-animated cut-out / blend face moves its shadow every frame.
+        // Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
         if (anim_parametric && (alpha_blend || clean_alpha_mask))
             LLCleanIngest::instance().noteTexAnimCaster(pObj);
         if (cleanIsSelfPriority(pObj))         inst.flags |= 8192u; // bit13 self/HUD texture priority
@@ -7147,6 +7202,10 @@ void LLCleanIngest::registerCleanFace(LLFace* facep, bool force_reingest)
         if (water_exclusion)
             inst.flags = (inst.flags & ~(4u | 16u)) | 2u | 65536u;
 
+        if (shadow_world && !gpu_rigged && (inst.flags & (8u | 512u | 65536u)) == 0u
+            && cleanShadowEmission(te, clean_fullbright))
+            inst.flags |= LLCleanInstanceStore::kEmissiveNoShadow;
+
         mdesc.alpha_blend = (inst.flags & 2u) != 0;
         inst.material_id = LLCleanMaterialStore::instance().getOrCreate(mdesc);
 
@@ -7157,8 +7216,9 @@ void LLCleanIngest::registerCleanFace(LLFace* facep, bool force_reingest)
         const bool is_active = !is_attach &&
             (drawable->isActive() ||
              drawable->isState(LLDrawable::ANIMATED_CHILD) || gpu_rigged);
-        LLCleanInstanceStore::instance().upsert(
+        const U32 motion_diag_iid = LLCleanInstanceStore::instance().upsert(
             pObj->getID(), face_idx, inst, is_active, clean_sig);
+        LLCleanIngest::tempMotionDiagRegistered(pObj, face_idx, motion_diag_iid, inst.model_matrix);
         facep->mVKIngest = LLFace::VKI_INGESTED;
     }
 }

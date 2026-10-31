@@ -35,6 +35,10 @@
 #include "llfloaterpreference.h"
 #include "fsdroptarget.h"
 #include "fscombathitmarker.h" // <GMDX>
+#include "gmdxtpfx.h" // <GMDX>
+#include "fscombathitmarker.h" // <GMDX> CombatFX
+#include "gmdxmapshare.h" // <GMDX> CombatFX pings
+#include "llfloateravatarpicker.h"
 #include "llinventorymodel.h"
 #include "llviewerinventory.h"
 
@@ -326,7 +330,7 @@ public:
 };
 LLKeybindingHandler gKeybindHandler;
 
-// TODO: move this out of llfloaterpreference.cpp
+// Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4; Linden Lab game control (viewer PR #6202)
 class LLGameControlBindingHandler: public LLCommandHandler
 {
 public:
@@ -345,7 +349,7 @@ public:
 
         if (prefsfloater)
         {
-            // find 'controls' panel and bring it the front
+            // find the game controller panel and bring it the front
             LLTabContainer* tabcontainer = prefsfloater->getChild<LLTabContainer>("pref core");
             LLPanel* panel = prefsfloater->getChild<LLPanel>("game_control");
             if (tabcontainer && panel)
@@ -480,6 +484,16 @@ LLFloaterPreference::LLFloaterPreference(const LLSD& key)
     // <GMDX> Combat > Hit Marker: preview the hit and kill sounds
     mCommitCallbackRegistrar.add("Pref.TestHitSound", [](LLUICtrl*, const LLSD&) { FSCombatHitMarker::playHitSoundPreview(); });
     mCommitCallbackRegistrar.add("Pref.TestKillSound", [](LLUICtrl*, const LLSD&) { FSCombatHitMarker::playKillSoundPreview(); });
+    // Combat > Pings: the per-sender mute (SLMapShareBlocked)
+    mCommitCallbackRegistrar.add("Pref.PingBlock", [this](LLUICtrl* ctrl, const LLSD&)
+        {
+            LLFloater* picker = LLFloaterAvatarPicker::show([](const uuid_vec_t& ids, const std::vector<LLAvatarName>&)
+                {
+                    for (const LLUUID& id : ids) GMDXMapShare::block(id);
+                }, true, true, true, getName(), ctrl);
+            if (picker) addDependentFloater(picker);
+        });
+    mCommitCallbackRegistrar.add("Pref.PingUnblockAll", [](LLUICtrl*, const LLSD&) { GMDXMapShare::unblockAll(); });
     // </GMDX>
 }
 
@@ -731,12 +745,6 @@ void LLFloaterPreference::onRejectFriendshipRequestResponseChanged()
             != getChild<LLUICtrl>("autorespond_reject_friends_response")->getValue().asString();
 
     gSavedPerAccountSettings.setBOOL("SlipstreamRejectFriendshipRequestsChanged", reject_friendship_request_response_changed_flag);
-}
-
-void LLFloaterPreference::onAdHocSelectionChanged(const LLSD& newvalue)
-{
-    S32 value = gSavedPerAccountSettings.getS32("SlipstreamIgnoreAdHocSessions");
-    getChild<LLCheckBoxCtrl>("SlipstreamReportIgnoredAdHocSession")->setEnabled(value != 0);
 }
 
 // <FS> The "...Changed" flags record whether a response was edited, so initAutoResponses()
@@ -1195,33 +1203,35 @@ void LLFloaterPreference::draw()
 void LLFloaterPreference::saveSettings()
 {
     LLTabContainer* tabcontainer = getChild<LLTabContainer>("pref core");
-    for (LLView* view : *tabcontainer->getChildList())
+    child_list_t::const_iterator iter = tabcontainer->getChildList()->begin();
+    child_list_t::const_iterator end = tabcontainer->getChildList()->end();
+    for ( ; iter != end; ++iter)
     {
-        if (LLPanelPreference* panel = dynamic_cast<LLPanelPreference*>(view))
-        {
+        LLView* view = *iter;
+        LLPanelPreference* panel = dynamic_cast<LLPanelPreference*>(view);
+        if (panel)
             panel->saveSettings();
-        }
     }
     saveIgnoredNotifications();
 }
 
 void LLFloaterPreference::apply()
 {
-    LLAvatarPropertiesProcessor::getInstance()->addObserver(gAgent.getID(), this);
+    LLAvatarPropertiesProcessor::getInstance()->addObserver( gAgent.getID(), this );
 
     LLTabContainer* tabcontainer = getChild<LLTabContainer>("pref core");
     if (sSkin != gSavedSettings.getString("SkinCurrent"))
     {
         sSkin = gSavedSettings.getString("SkinCurrent");
     }
-
     // Call apply() on all panels that derive from LLPanelPreference
-    for (LLView* view : *tabcontainer->getChildList())
+    for (child_list_t::const_iterator iter = tabcontainer->getChildList()->begin();
+         iter != tabcontainer->getChildList()->end(); ++iter)
     {
-        if (LLPanelPreference* panel = dynamic_cast<LLPanelPreference*>(view))
-        {
+        LLView* view = *iter;
+        LLPanelPreference* panel = dynamic_cast<LLPanelPreference*>(view);
+        if (panel)
             panel->apply();
-        }
     }
 
     gViewerWindow->requestResolutionUpdate(); // for UIScaleFactor
@@ -1236,7 +1246,7 @@ void LLFloaterPreference::apply()
 
     LLViewerMedia::getInstance()->setCookiesEnabled(getChild<LLUICtrl>("cookies_enabled")->getValue());
 
-    if (hasChild("web_proxy_enabled", true) && hasChild("web_proxy_editor", true) && hasChild("web_proxy_port", true))
+    if (hasChild("web_proxy_enabled", true) &&hasChild("web_proxy_editor", true) && hasChild("web_proxy_port", true))
     {
         bool proxy_enable = getChild<LLUICtrl>("web_proxy_enabled")->getValue();
         std::string proxy_address = getChild<LLUICtrl>("web_proxy_editor")->getValue();
@@ -1282,12 +1292,13 @@ void LLFloaterPreference::cancel(const std::vector<std::string> settings_to_skip
 {
     LLTabContainer* tabcontainer = getChild<LLTabContainer>("pref core");
     // Call cancel() on all panels that derive from LLPanelPreference
-    for (LLView* view : *tabcontainer->getChildList())
+    for (child_list_t::const_iterator iter = tabcontainer->getChildList()->begin();
+        iter != tabcontainer->getChildList()->end(); ++iter)
     {
-        if (LLPanelPreference* panel = dynamic_cast<LLPanelPreference*>(view))
-        {
+        LLView* view = *iter;
+        LLPanelPreference* panel = dynamic_cast<LLPanelPreference*>(view);
+        if (panel)
             panel->cancel(settings_to_skip);
-        }
     }
     // hide joystick pref floater
     LLFloaterReg::hideInstance("pref_joystick");
@@ -1315,7 +1326,7 @@ void LLFloaterPreference::cancel(const std::vector<std::string> settings_to_skip
     }
     //Need to reload the navmesh if the pathing console is up
     LLHandle<LLFloaterPathfindingConsole> pathfindingConsoleHandle = LLFloaterPathfindingConsole::getInstanceHandle();
-    if (!pathfindingConsoleHandle.isDead())
+    if ( !pathfindingConsoleHandle.isDead() )
     {
         LLFloaterPathfindingConsole* pPathfindingConsole = pathfindingConsoleHandle.get();
         pPathfindingConsole->onRegionBoundaryCross();
@@ -1378,7 +1389,6 @@ void LLFloaterPreference::onClearAutoresponseItem()
 
 void LLFloaterPreference::onOpen(const LLSD& key)
 {
-    refreshAutoresponseItem(); // <FS:Ansariel>
     LLTabContainer* tabcontainer = getChild<LLTabContainer>("pref core");
     for (LLView* view : *tabcontainer->getChildList())
     {
@@ -1388,6 +1398,7 @@ void LLFloaterPreference::onOpen(const LLSD& key)
         }
     }
 
+    refreshAutoresponseItem(); // <FS:Ansariel>
     // this variable and if that follows it are used to properly handle do not disturb mode response message
     static bool initialized = false;
     // if user is logged in and we haven't initialized do not disturb mode response yet, do it
@@ -1740,9 +1751,9 @@ void LLFloaterPreference::onBtnOK(const LLSD& userdata)
         closeFloater(false); // <GMDX> (no "closeadvanced": the advanced floater is gone)
 
         //Conversation transcript and log path changed so reload conversations based on new location
-        if (mPriorInstantMessageLogPath.length())
+        if(mPriorInstantMessageLogPath.length())
         {
-            if (moveTranscriptsAndLog())
+            if(moveTranscriptsAndLog())
             {
                 //When floaters are empty but have a chat history files, reload chat history into them
                 LLFloaterIMSessionTab::reloadEmptyFloaters();
@@ -1759,8 +1770,8 @@ void LLFloaterPreference::onBtnOK(const LLSD& userdata)
         LLUIColorTable::instance().saveUserSettings();
         gSavedSettings.saveToFile(gSavedSettings.getString("ClientSettingsFile"), true);
 
-        // Only save once logged in and loaded per account settings
-        if (mGotPersonalInfo)
+        //Only save once logged in and loaded per account settings
+        if(mGotPersonalInfo)
         {
             gSavedPerAccountSettings.saveToFile(gSavedSettings.getString("PerAccountSettingsFile"), true);
         }
@@ -2257,6 +2268,7 @@ void LLFloaterPreference::onClickLogPath()
     std::string proposed_name(gSavedPerAccountSettings.getString("InstantMessageLogPath"));
     mPriorInstantMessageLogPath.clear();
 
+
     (new LLDirPickerThread(boost::bind(&LLFloaterPreference::changeLogPath, this, _1, _2), proposed_name))->getFile();
 }
 
@@ -2281,10 +2293,10 @@ bool LLFloaterPreference::moveTranscriptsAndLog()
     bool madeDirectory = false;
 
     //Does the directory really exist, if not then make it
-    if (!LLFile::isdir(chatLogPath))
+    if(!LLFile::isdir(chatLogPath))
     {
         //mkdir success is defined as zero
-        if (LLFile::mkdir(chatLogPath) != 0)
+        if(LLFile::mkdir(chatLogPath) != 0)
         {
             return false;
         }
@@ -2294,10 +2306,10 @@ bool LLFloaterPreference::moveTranscriptsAndLog()
     std::string originalConversationLogDir = LLConversationLog::instance().getFileName();
     std::string targetConversationLogDir = gDirUtilp->add(chatLogPath, "conversation.log");
     //Try to move the conversation log
-    if (!LLConversationLog::instance().moveLog(originalConversationLogDir, targetConversationLogDir))
+    if(!LLConversationLog::instance().moveLog(originalConversationLogDir, targetConversationLogDir))
     {
         //Couldn't move the log and created a new directory so remove the new directory
-        if (madeDirectory)
+        if(madeDirectory)
         {
             LLFile::rmdir(chatLogPath);
         }
@@ -2310,7 +2322,7 @@ bool LLFloaterPreference::moveTranscriptsAndLog()
 
     LLLogChat::getListOfTranscriptFiles(listOfTranscripts);
 
-    if (!LLLogChat::moveTranscripts(gDirUtilp->getChatLogsDir(),
+    if(!LLLogChat::moveTranscripts(gDirUtilp->getChatLogsDir(),
                                     instantMessageLogPath,
                                     listOfTranscripts,
                                     listOfFilesMoved))
@@ -2323,7 +2335,7 @@ bool LLFloaterPreference::moveTranscriptsAndLog()
         //Move the conversation log back
         LLConversationLog::instance().moveLog(targetConversationLogDir, originalConversationLogDir);
 
-        if (madeDirectory)
+        if(madeDirectory)
         {
             LLFile::rmdir(chatLogPath);
         }
@@ -2369,6 +2381,7 @@ void LLFloaterPreference::setPersonalInfo(const std::string& visibility)
     getChild<LLUICtrl>("voice_call_friends_only_check")->setEnabled(true);
     getChild<LLUICtrl>("voice_call_friends_only_check")->setValue(gSavedPerAccountSettings.getBOOL("VoiceCallsFriendsOnly"));
 }
+
 
 void LLFloaterPreference::refreshUI()
 {
@@ -2806,16 +2819,6 @@ void LLFloaterPreference::selectPanel(const LLSD& name)
     }
 }
 
-void LLFloaterPreference::setPanelVisibility(const LLSD& name, bool visible)
-{
-    LLTabContainer * tab_containerp = getChild<LLTabContainer>("pref core");
-    LLPanel * panel = tab_containerp->getPanelByName(name.asStringRef());
-    if (NULL != panel)
-    {
-        tab_containerp->setTabVisibility(panel, visible);
-    }
-}
-
 void LLFloaterPreference::selectPrivacyPanel()
 {
     selectPanel("im");
@@ -2846,6 +2849,7 @@ void LLFloaterPreference::changed()
 
     // set 'enable' property for 'Delete transcripts...' button
     updateDeleteTranscriptsButton();
+
 }
 
 void LLFloaterPreference::saveGraphicsPreset(std::string& preset)
@@ -2914,6 +2918,17 @@ LLPanelPreference::LLPanelPreference()
 //virtual
 bool LLPanelPreference::postBuild()
 {
+    if (auto* ignore = findChild<LLCheckBoxCtrl>("adhoc_ignore_check"))
+    {
+        auto* friends = getChild<LLCheckBoxCtrl>("adhoc_friends_check");
+        friends->setValue(gSavedPerAccountSettings.getS32("SlipstreamIgnoreAdHocSessions") != 2);
+        ignore->setCommitCallback(boost::bind(&LLPanelPreference::commitAdHocControls, this));
+        friends->setCommitCallback(boost::bind(&LLPanelPreference::commitAdHocControls, this));
+        mAdHocSettingsConnection = gSavedPerAccountSettings.getControl("SlipstreamIgnoreAdHocSessions")->getSignal()->connect(
+            boost::bind(&LLPanelPreference::refreshAdHocControls, this));
+        refreshAdHocControls();
+    }
+
     ////////////////////// PanelGeneral ///////////////////
     if (hasChild("display_names_check", true))
     {
@@ -2938,6 +2953,7 @@ bool LLPanelPreference::postBuild()
     if (hasChild("media_enabled", true))
     {
         bool media_enabled = gSavedSettings.getBOOL("AudioStreamingMedia");
+
         getChild<LLCheckBoxCtrl>("media_enabled")->set(media_enabled);
         getChild<LLCheckBoxCtrl>("autoplay_enabled")->setEnabled(media_enabled);
     }
@@ -2977,6 +2993,8 @@ bool LLPanelPreference::postBuild()
         getChild<LLTextBox>("mute_chb_label")->setClickedCallback(boost::bind(&toggleMuteWhenMinimized));
     }
 
+    if (hasChild("tpfx_enabled", true)) GMDXTPFX::initPrefs(this); // <GMDX> Teleport Effects: what is live, the Previews
+
     //////////////////////PanelSetup ///////////////////
     if (hasChild("max_bandwidth", true))
     {
@@ -2994,6 +3012,7 @@ bool LLPanelPreference::postBuild()
     }
 #endif
 
+    apply();
     return true;
 }
 
@@ -3011,7 +3030,26 @@ void LLPanelPreference::apply()
     // no-op
 }
 
-// virtual
+void LLPanelPreference::refreshAdHocControls()
+{
+    const S32 mode = gSavedPerAccountSettings.getS32("SlipstreamIgnoreAdHocSessions");
+    getChild<LLCheckBoxCtrl>("adhoc_ignore_check")->setValue(mode != 0);
+    auto* friends = getChild<LLCheckBoxCtrl>("adhoc_friends_check");
+    if (mode != 0)
+    {
+        friends->setValue(mode == 1);
+    }
+    friends->setEnabled(mode != 0);
+    getChild<LLCheckBoxCtrl>("SlipstreamReportIgnoredAdHocSession")->setEnabled(mode != 0);
+}
+
+void LLPanelPreference::commitAdHocControls()
+{
+    const bool ignore = getChild<LLCheckBoxCtrl>("adhoc_ignore_check")->getValue().asBoolean();
+    const bool friends = getChild<LLCheckBoxCtrl>("adhoc_friends_check")->getValue().asBoolean();
+    gSavedPerAccountSettings.setS32("SlipstreamIgnoreAdHocSessions", ignore ? (friends ? 1 : 2) : 0);
+}
+
 void LLPanelPreference::saveSettings()
 {
     // Save the value of all controls in the hierarchy
@@ -3425,11 +3463,9 @@ void LLPanelPreferenceGraphics::cancel(const std::vector<std::string> settings_t
 {
     LLPanelPreference::cancel(settings_to_skip);
 }
-
 void LLPanelPreferenceGraphics::saveSettings()
 {
     resetDirtyChilds();
-
     std::string preset_graphic_active = gSavedSettings.getString("PresetGraphicActive");
     if (preset_graphic_active.empty())
     {
@@ -3440,10 +3476,8 @@ void LLPanelPreferenceGraphics::saveSettings()
             instance->saveGraphicsPreset(preset_graphic_active);
         }
     }
-
     LLPanelPreference::saveSettings();
 }
-
 void LLPanelPreferenceGraphics::setHardwareDefaults()
 {
     resetDirtyChilds();
@@ -4445,7 +4479,6 @@ void LLPanelPreferenceControls::onDefaultKeyBind(bool all_modes)
             mConflictHandler[mEditingMode].saveToSettings(true);
         }
     }
-
     updateTable();
 
     if (mEditingMode == LLKeyConflictHandler::MODE_THIRD_PERSON || all_modes)
@@ -4509,7 +4542,7 @@ void LLFloaterPreferenceProxy::onOpen(const LLSD& key)
 
 void LLFloaterPreferenceProxy::onClose(bool app_quitting)
 {
-    if (app_quitting)
+    if(app_quitting)
     {
         cancel();
     }
@@ -4533,7 +4566,7 @@ void LLFloaterPreferenceProxy::saveSettings()
     mSavedValues.clear();
     std::list<LLView*> view_stack;
     view_stack.push_back(this);
-    while (!view_stack.empty())
+    while(!view_stack.empty())
     {
         // Process view on top of the stack
         LLView* curview = view_stack.front();
@@ -4653,14 +4686,15 @@ void LLFloaterPreferenceProxy::onChangeSocksSettings()
     {
         otherHttpProxy->selectFirstItem();
     }
+
 }
 
 void LLFloaterPreference::onUpdateFilterTerm(bool force)
 {
-    LLWString seachValue = utf8str_to_wstring( mFilterEdit->getValue() );
-    LLWStringUtil::toLower( seachValue );
+    LLWString seachValue = utf8str_to_wstring(mFilterEdit->getValue());
+    LLWStringUtil::toLower(seachValue);
 
-    if( !mSearchData || (mSearchData->mLastFilter == seachValue && !force))
+    if (!mSearchData || (mSearchData->mLastFilter == seachValue && !force))
         return;
 
     if (mSearchDataDirty)
@@ -4671,7 +4705,7 @@ void LLFloaterPreference::onUpdateFilterTerm(bool force)
 
     mSearchData->mLastFilter = seachValue;
 
-    if( !mSearchData->mRootTab )
+    if (!mSearchData->mRootTab)
         return;
 
     mSearchData->mRootTab->hightlightAndHide( seachValue );
@@ -4694,10 +4728,10 @@ void LLFloaterPreference::filterIgnorableNotifications()
 
 void collectChildren( LLView const *aView, ll::prefs::PanelDataPtr aParentPanel, ll::prefs::TabContainerDataPtr aParentTabContainer )
 {
-    if( !aView )
+    if (!aView)
         return;
 
-    llassert_always( aParentPanel || aParentTabContainer );
+    llassert_always(aParentPanel || aParentTabContainer);
 
     for (LLView* pView : *aView->getChildList())
     {
@@ -4707,56 +4741,56 @@ void collectChildren( LLView const *aView, ll::prefs::PanelDataPtr aParentPanel,
         ll::prefs::PanelDataPtr pCurPanelData = aParentPanel;
         ll::prefs::TabContainerDataPtr pCurTabContainer = aParentTabContainer;
 
-        LLPanel const *pPanel = dynamic_cast< LLPanel const *>( pView );
-        LLTabContainer const *pTabContainer = dynamic_cast< LLTabContainer const *>( pView );
-        ll::ui::SearchableControl const *pSCtrl = dynamic_cast< ll::ui::SearchableControl const *>( pView );
+        LLPanel const *pPanel = dynamic_cast<LLPanel const*>(pView);
+        LLTabContainer const *pTabContainer = dynamic_cast<LLTabContainer const*>(pView);
+        ll::ui::SearchableControl const *pSCtrl = dynamic_cast<ll::ui::SearchableControl const*>( pView );
 
-        if( pTabContainer )
+        if (pTabContainer)
         {
             pCurPanelData.reset();
 
-            pCurTabContainer = ll::prefs::TabContainerDataPtr( new ll::prefs::TabContainerData );
-            pCurTabContainer->mTabContainer = const_cast< LLTabContainer *>( pTabContainer );
+            pCurTabContainer = ll::prefs::TabContainerDataPtr(new ll::prefs::TabContainerData);
+            pCurTabContainer->mTabContainer = const_cast< LLTabContainer *>(pTabContainer);
             pCurTabContainer->mLabel = pTabContainer->getLabel();
             pCurTabContainer->mPanel = 0;
 
-            if( aParentPanel )
-                aParentPanel->mChildPanel.push_back( pCurTabContainer );
-            if( aParentTabContainer )
-                aParentTabContainer->mChildPanel.push_back( pCurTabContainer );
+            if (aParentPanel)
+                aParentPanel->mChildPanel.push_back(pCurTabContainer);
+            if (aParentTabContainer)
+                aParentTabContainer->mChildPanel.push_back(pCurTabContainer);
         }
-        else if( pPanel )
+        else if (pPanel)
         {
             pCurTabContainer.reset();
 
-            pCurPanelData = ll::prefs::PanelDataPtr( new ll::prefs::PanelData );
+            pCurPanelData = ll::prefs::PanelDataPtr(new ll::prefs::PanelData);
             pCurPanelData->mPanel = pPanel;
             pCurPanelData->mLabel = pPanel->getLabel();
 
             llassert_always( aParentPanel || aParentTabContainer );
 
-            if( aParentTabContainer )
-                aParentTabContainer->mChildPanel.push_back( pCurPanelData );
-            else if( aParentPanel )
-                aParentPanel->mChildPanel.push_back( pCurPanelData );
+            if (aParentTabContainer)
+                aParentTabContainer->mChildPanel.push_back(pCurPanelData);
+            else if (aParentPanel)
+                aParentPanel->mChildPanel.push_back(pCurPanelData);
         }
-        else if( pSCtrl && pSCtrl->getSearchText().size() )
+        else if (pSCtrl && pSCtrl->getSearchText().size())
         {
-            ll::prefs::SearchableItemPtr item = ll::prefs::SearchableItemPtr( new ll::prefs::SearchableItem() );
+            ll::prefs::SearchableItemPtr item = ll::prefs::SearchableItemPtr(new ll::prefs::SearchableItem());
             item->mView = pView;
             item->mCtrl = pSCtrl;
 
-            item->mLabel = utf8str_to_wstring( pSCtrl->getSearchText() );
-            LLWStringUtil::toLower( item->mLabel );
+            item->mLabel = utf8str_to_wstring(pSCtrl->getSearchText());
+            LLWStringUtil::toLower(item->mLabel);
 
-            llassert_always( aParentPanel || aParentTabContainer );
+            llassert_always(aParentPanel || aParentTabContainer);
 
-            if( aParentPanel )
-                aParentPanel->mChildren.push_back( item );
-            if( aParentTabContainer )
-                aParentTabContainer->mChildren.push_back( item );
+            if (aParentPanel)
+                aParentPanel->mChildren.push_back(item);
+            if (aParentTabContainer)
+                aParentTabContainer->mChildren.push_back(item);
         }
-        collectChildren( pView, pCurPanelData, pCurTabContainer );
+        collectChildren(pView, pCurPanelData, pCurTabContainer);
     }
 }
 

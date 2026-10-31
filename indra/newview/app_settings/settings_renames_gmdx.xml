@@ -1,0 +1,144 @@
+<?xml version="1.0" ?>
+<!--
+GunMetal-DX: settings Slipstream renamed when it ported GunMetal-DX v0.3.0 (GMDX* / FS* / OCOL* ->
+SL* / RenderVK*), old name -> new name. Read once per settings file (marker GMDXSettingsRenamed) by
+SLSettingsMigration::migrateGMDXRenames (slsettingsmigration.cpp): a value saved under an old name in
+user_settings/settings.xml or an account's settings_per_account.xml is carried to the new name while
+the new one is still at its default. The OTS* camera settings are not here: upstream's
+migrateTPSFraming carries them to SlipstreamTPS*.
+-->
+<llsd>
+<map>
+    <key>version</key>
+    <integer>1</integer>
+    <key>renames</key>
+    <map>
+      <key>FSSaveAvatarMasksWithSnapshot</key>
+      <string>SLSnapshotSaveAvatarMattes</string>
+      <key>FSSnapshotAvatarScope</key>
+      <string>SLSnapshotAvatarScope</string>
+      <key>GMDXChatLogRect</key>
+      <string>SLChatLogRect</string>
+      <key>GMDXDrawLoadingAvatars</key>
+      <string>RenderVKDrawLoadingAvatars</string>
+      <key>GMDXFolderEquipment</key>
+      <string>SLLoadoutFolderEquipment</string>
+      <key>GMDXFolderLoadouts</key>
+      <string>SLLoadoutFolderLoadouts</string>
+      <key>GMDXFolderOutdated</key>
+      <string>SLLoadoutFolderOutdated</string>
+      <key>GMDXLoadoutCategories</key>
+      <string>SLLoadoutCategories</string>
+      <key>GMDXLoadoutCloseOnEquip</key>
+      <string>SLLoadoutCloseOnEquip</string>
+      <key>GMDXLoadoutWatchTags</key>
+      <string>SLLoadoutWatchTags</string>
+      <key>GMDXLoadoutWorn</key>
+      <string>SLLoadoutWorn</string>
+      <key>GMDXMapShareBlocked</key>
+      <string>SLMapShareBlocked</string>
+      <key>GMDXMapShareMyGroup</key>
+      <string>SLMapShareMyGroup</string>
+      <key>GMDXMapShareSend</key>
+      <string>SLMapShareSend</string>
+      <key>GMDXMapShareShow</key>
+      <string>SLMapShareShow</string>
+      <key>GMDXMapShareTargetGroups</key>
+      <string>SLMapShareTargetGroups</string>
+      <key>GMDXMapShareTargetPeople</key>
+      <string>SLMapShareTargetPeople</string>
+      <key>GMDXMiniMapCompassStyle</key>
+      <string>SLMiniMapCompassStyle</string>
+      <key>GMDXMiniMapCursorCoords</key>
+      <string>SLMiniMapCursorCoords</string>
+      <key>GMDXMiniMapHideAbove</key>
+      <string>SLMiniMapHideAbove</string>
+      <key>GMDXMiniMapHideAboveMeters</key>
+      <string>SLMiniMapHideAboveMeters</string>
+      <key>GMDXMiniMapHideButtons</key>
+      <string>SLMiniMapHideButtons</string>
+      <key>GMDXMiniMapOCOLLook</key>
+      <string>SLMiniMapTerrainLook</string>
+      <key>GMDXMiniMapOpacity</key>
+      <string>SLMiniMapOpacity</string>
+      <key>GMDXMiniMapPhysicalOnly</key>
+      <string>SLMiniMapPhysicalOnly</string>
+      <key>GMDXMiniMapRotateCompass</key>
+      <string>SLMiniMapRotateCompass</string>
+      <key>GMDXMiniMapRotateView</key>
+      <string>SLMiniMapRotateView</string>
+      <key>GMDXMiniMapShowMarks</key>
+      <string>SLMiniMapShowMarks</string>
+      <key>GMDXMiniMapShowZones</key>
+      <string>SLMiniMapShowZones</string>
+      <key>GMDXMiniMapUseMapTile</key>
+      <string>SLMiniMapUseMapTile</string>
+      <key>GMDXMiniMapWholeRegion</key>
+      <string>SLMiniMapWholeRegion</string>
+      <key>GMDXMiniMapZoneColor</key>
+      <string>SLMiniMapZoneColor</string>
+      <key>GMDXMiniMapZoneDotted</key>
+      <string>SLMiniMapZoneDotted</string>
+      <key>GMDXMiniMapZoneFill</key>
+      <string>SLMiniMapZoneFill</string>
+      <key>GMDXMinimapUseCapturedMaps</key>
+      <string>SLRegionMapUseCaptured</string>
+      <key>GMDXOTSDynamicCamera</key>
+      <string>SlipstreamTPSDynamicCamera</string>
+      <key>GMDXPhysicalNight</key>
+      <string>RenderVKPhysicalNight</string>
+      <key>GMDXPingSeconds</key>
+      <string>SLPingSeconds</string>
+      <key>GMDXPingSound</key>
+      <string>SLPingSound</string>
+      <key>GMDXQuickSwapKeys</key>
+      <string>SLQuickSwapKeys</string>
+      <key>GMDXRegionMapCeilingOffset</key>
+      <string>SLRegionMapCeilingOffset</string>
+      <key>GMDXRegionMapLossless</key>
+      <string>SLRegionMapLossless</string>
+      <key>GMDXRegionMapOcolWater</key>
+      <string>SLRegionMapOcolWater</string>
+      <key>GMDXRegionMapShadows</key>
+      <string>SLRegionMapShadows</string>
+      <key>GMDXReplayEnabled</key>
+      <string>SLInstantReplay</string>
+      <key>GMDXRezFxAvatars</key>
+      <string>SLRezFXAvatars</string>
+      <key>GMDXRezFxCombatSafe</key>
+      <string>SLRezFXCombatSafe</string>
+      <key>GMDXRezFxDuration</key>
+      <string>SLRezFXDuration</string>
+      <key>GMDXRezFxInEffect</key>
+      <string>SLRezFXInEffect</string>
+      <key>GMDXRezFxOnlyLoading</key>
+      <string>SLRezFXOnlyLoading</string>
+      <key>GMDXRezFxOutEffect</key>
+      <string>SLRezFXOutEffect</string>
+      <key>GMDXSelectionStyle</key>
+      <string>RenderVKSelectionStyle</string>
+      <key>GMDXWorldMapUseCapturedMaps</key>
+      <string>SLRegionMapUseCaptured</string>
+      <key>OCOLGestureControllerButtons</key>
+      <string>SLGestureControllerButtons</string>
+      <key>OCOLHeightFog</key>
+      <string>RenderVKMist</string>
+      <key>OCOLHeightFogBankSize</key>
+      <string>RenderVKMistBankSize</string>
+      <key>OCOLHeightFogBaseHeight</key>
+      <string>RenderVKMistBaseHeight</string>
+      <key>OCOLHeightFogBreakup</key>
+      <string>RenderVKMistBreakup</string>
+      <key>OCOLHeightFogDensity</key>
+      <string>RenderVKMistDensity</string>
+      <key>OCOLHeightFogFalloff</key>
+      <string>RenderVKMistFalloff</string>
+      <key>OCOLHeightFogRollHeight</key>
+      <string>RenderVKMistRollHeight</string>
+      <key>OCOLHeightFogWindDirection</key>
+      <string>RenderVKMistWindDirection</string>
+      <key>OCOLHeightFogWindSpeed</key>
+      <string>RenderVKMistWindSpeed</string>
+    </map>
+</map>
+</llsd>

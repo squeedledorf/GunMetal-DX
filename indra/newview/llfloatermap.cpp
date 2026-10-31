@@ -28,9 +28,10 @@
 
 // self include
 #include "llfloatermap.h"
-#include "gmdxminimapcompass.h" // <GMDX>
+#include "llminimapcompass.h" // <GMDX>
 #include "llfocusmgr.h" // <GMDX>
 #include "llbutton.h" // <GMDX>
+#include "gmdxfloaterminimapsettings.h" // <GMDX> the gear: Map Settings
 
 // Library includes
 #include "llfloaterreg.h"
@@ -126,7 +127,7 @@ bool LLFloaterMap::postBuild()
     gFloaterView->adjustToFitScreen(this, false);
 
     // <GMDX> Show Whole Region keeps the mini-map square: squared when it is turned on
-    mWholeRegionConn = gSavedSettings.getControl("GMDXMiniMapWholeRegion")->getSignal()->connect(
+    mWholeRegionConn = gSavedSettings.getControl("SLMiniMapWholeRegion")->getSignal()->connect(
         [this](LLControlVariable*, const LLSD& value, const LLSD&)
         {
             if (value.asBoolean())
@@ -134,32 +135,48 @@ bool LLFloaterMap::postBuild()
                 makeSquare();
             }
         });
-    // the window buttons (minimize, tear off, close) can be hidden (mini-map menu, View)
-    mHideButtonsConn = gSavedSettings.getControl("GMDXMiniMapHideButtons")->getSignal()->connect(
+    // the gear left of the window buttons: Map Settings
+    LLButton::Params gear;
+    gear.name("map_settings_btn");
+    gear.image_unselected = LLUI::getUIImage("Icon_Gear_Foreground");
+    gear.image_selected = LLUI::getUIImage("Icon_Gear_Press");
+    gear.image_hover_selected = LLUI::getUIImage("Icon_Gear_Press");
+    gear.hover_glow_amount(0.33f);
+    gear.tab_stop(false);
+    gear.follows.flags(FOLLOWS_TOP | FOLLOWS_RIGHT);
+    gear.scale_image(true);
+    gear.chrome(true);
+    gear.tool_tip("Map Settings");
+    gear.click_callback.function([this](LLUICtrl*, const LLSD&) { GMDXFloaterMinimapSettings::showFor(mMap); });
+    mSettingsButton = LLUICtrlFactory::create<LLButton>(gear);
+    addChild(mSettingsButton);
+    // the window buttons (minimize, tear off, close) and the gear can be hidden (Map Settings, View)
+    mHideButtonsConn = gSavedSettings.getControl("SLMiniMapHideButtons")->getSignal()->connect(
         [this](LLControlVariable*, const LLSD&, const LLSD&) { updateTitleButtons(); });
     updateTitleButtons();
     // (a compass style or rotation change resizes it too: the heading tape adds its strip above
     // the map, and only while north is at the top)
     auto resquare = [this](LLControlVariable*, const LLSD&, const LLSD&)
     {
-        if (gSavedSettings.getBOOL("GMDXMiniMapWholeRegion"))
+        if (gSavedSettings.getBOOL("SLMiniMapWholeRegion"))
         {
             makeSquare();
         }
     };
-    mCompassStyleConn = gSavedSettings.getControl("GMDXMiniMapCompassStyle")->getSignal()->connect(resquare);
+    mCompassStyleConn = gSavedSettings.getControl("SLMiniMapCompassStyle")->getSignal()->connect(resquare);
     mRotateConn = gSavedSettings.getControl("MiniMapRotate")->getSignal()->connect(resquare);
     // </GMDX>
 
     return true;
 }
 
-// <GMDX> GMDXMiniMapHideButtons: the minimize / tear-off / close buttons are hidden (the mini-map
+// <GMDX> SLMiniMapHideButtons: the minimize / tear-off / close buttons are hidden (the mini-map
 // still closes from its toolbar button or the World menu).
 void LLFloaterMap::updateTitleButtons()
 {
     LLFloater::updateTitleButtons();
-    if (gSavedSettings.getBOOL("GMDXMiniMapHideButtons"))
+    const bool hide = gSavedSettings.getBOOL("SLMiniMapHideButtons");
+    if (hide)
     {
         for (LLButton* button : mButtons)
         {
@@ -168,6 +185,24 @@ void LLFloaterMap::updateTitleButtons()
                 button->setVisible(false);
             }
         }
+    }
+    // the gear: the same size, just left of the leftmost window button (none while minimized)
+    if (mSettingsButton)
+    {
+        static LLUICachedControl<S32> box_size("UIFloaterCloseBoxSize", 0);
+        static LLUICachedControl<S32> box_from_top("UICloseBoxFromTop", 0);
+        S32 right = getRect().getWidth() - LLPANEL_BORDER_WIDTH;
+        for (LLButton* button : mButtons)
+        {
+            if (button && button->getVisible())
+            {
+                right = llmin(right, button->getRect().mLeft - 1);
+            }
+        }
+        LLRect rect;
+        rect.setLeftTopAndSize(right - box_size, getRect().getHeight() - box_from_top, box_size, box_size);
+        mSettingsButton->setRect(rect);
+        mSettingsButton->setVisible(!hide && !isMinimized());
     }
 }
 // </GMDX>
@@ -260,7 +295,7 @@ void LLFloaterMap::updateMinorDirections()
 }
 
 // <GMDX> The floater-edge direction letters; hidden in Show Whole Region, whose compass
-// (gmdxminimapcompass.h) draws its own.
+// (llminimapcompass.h) draws its own.
 void LLFloaterMap::setDirectionsVisible(bool visible)
 {
     mDirectionsHidden = !visible;
@@ -290,7 +325,7 @@ void LLFloaterMap::makeSquare()
         return;
     }
     LLRect rect = getRect();
-    const S32 extra = (S32)GMDXMinimapCompass::getTopReserve();   // the heading tape's strip above the map
+    const S32 extra = (S32)LLMinimapCompass::getTopReserve();   // the heading tape's strip above the map
     const S32 side = llmax(llmin(rect.getWidth(), rect.getHeight() - extra), getMinWidth(), getMinHeight());
     const LLView* parent = getParent();
     const bool keep_right = parent && rect.getCenterX() > parent->getRect().getWidth() / 2;
@@ -319,7 +354,7 @@ bool LLFloaterMap::isUserResizing() const
 
 void LLFloaterMap::handleReshape(const LLRect& new_rect, bool by_user)
 {
-    static LLCachedControl<bool> whole_region(gSavedSettings, "GMDXMiniMapWholeRegion", false);
+    static LLCachedControl<bool> whole_region(gSavedSettings, "SLMiniMapWholeRegion", false);
     if (by_user && whole_region && !isMinimized() && isUserResizing() && mDragStartRect.isEmpty())
     {
         mDragStartRect = getRect();   // a drag begins: remember where it started (see draw)
@@ -338,7 +373,7 @@ void LLFloaterMap::fitAfterResize()
         return;
     }
     LLRect rect = getRect();
-    const S32 extra = (S32)GMDXMinimapCompass::getTopReserve();   // the heading tape's strip above the map
+    const S32 extra = (S32)LLMinimapCompass::getTopReserve();   // the heading tape's strip above the map
     const S32 side = llmax(llmin(rect.getWidth(), rect.getHeight() - extra), getMinWidth(), getMinHeight());
     if (rect.getWidth() == side && rect.getHeight() == side + extra)
     {

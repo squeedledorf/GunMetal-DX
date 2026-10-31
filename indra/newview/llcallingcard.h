@@ -128,6 +128,8 @@ public:
     // online status
     void setBuddyOnline(const LLUUID& id, bool is_online);
     bool isBuddyOnline(const LLUUID& id) const;
+    enum class EPresence { NOT_FRIEND, HIDDEN, OFFLINE, ONLINE };
+    EPresence getBuddyPresence(const LLUUID& id) const;
 
     // simple empowered status
     void setBuddyEmpowered(const LLUUID& id, bool is_empowered);

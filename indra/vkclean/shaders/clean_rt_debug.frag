@@ -1,4 +1,6 @@
 #version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
 // vkclean — ray-tracing ACCEPTANCE debug views (RenderVKDebugView 13 / 14), drawn
 // fullscreen over the final world image (after tonemap / AA, before selection+HUD).
 //
@@ -41,6 +43,8 @@ layout(set = 2, binding = 7) uniform sampler2D uRasterDepth;
 //   [3] sum of visibility * 1024   [4..] blocker table: 64 x (instance id + 1, count)
 layout(std430, set = 2, binding = 8) buffer RtDbgStats { uint dbg_stats[]; };
 
+// Same entry stride as REGIR_EM_ENT_WORDS; words [13..20] are diagnostics only.
+layout(buffer_reference, std430, buffer_reference_align = 8) readonly buffer EmDiagRef { uvec2 w[]; };
 layout(location = 0) in vec2 v_uv;
 layout(location = 0) out vec4 outColor;
 
@@ -48,9 +52,15 @@ layout(push_constant) uniform Push {
     mat4 inv_view_proj;   // VK clip -> world
     vec4 cam_time;        // xyz camera, w time
     vec4 params;          // x view (13/14), y relative tolerance, z absolute tolerance (m), w tmax
-    vec4 params2;         // x raster sampler max anisotropy (1 = off); view 15: yzw projector axis
-    vec4 params3;         // view 15: xyz projector apex, w near-plane distance from the apex
+    uvec4 raw2;         // x raster sampler max anisotropy (1 = off); view 15: yzw projector axis
+    uvec4 raw3;         // view 15: xyz projector apex, w near-plane distance from the apex
 } pc;
+
+float rtDepthErrDist(float camd)
+{
+    const bool ortho = pc.inv_view_proj[0][3] == 0.0 && pc.inv_view_proj[1][3] == 0.0 && pc.inv_view_proj[2][3] == 0.0;
+    return ortho ? length(pc.inv_view_proj[2].xyz) : camd;
+}
 
 uint hashColorKey(uint x)
 {
@@ -64,6 +74,9 @@ vec3 hashColor(uint x)
     return vec3(float(x & 255u), float((x >> 8) & 255u), float((x >> 16) & 255u)) / 255.0 * 0.8 + 0.2;
 }
 
+// Exact emHashSlot/regirHash arithmetic, shared behavior checked by the scratch helper test.
+uint emDiagHashSlot(uint id) { return id & 2047u; }
+
 void main()
 {
     rt_anim_time = pc.cam_time.w;
@@ -75,7 +88,7 @@ void main()
     // raster's screen-space derivatives, as a cone). Uniform control flow here.
     rt_cone_spread = max(length(dFdx(dir)), length(dFdy(dir)));
     rt_cone_width0 = 0.0;
-    rt_cone_aniso  = max(pc.params2.x, 1.0);
+    rt_cone_aniso  = max(uintBitsToFloat(pc.raw2).x, 1.0);
 
     const float d = textureLod(uRasterDepth, v_uv, 0.0).r;
     const bool rsky = d <= 0.0;   // reversed-Z: far = 0
@@ -93,12 +106,12 @@ void main()
     if (view == 15)
     {
         // params.y = light reach (m), params.z = receiver normal offset (record texel.y)
-        const vec3 O = pc.params3.xyz, A = pc.params2.yzw;
+        const vec3 O = uintBitsToFloat(pc.raw3).xyz, A = uintBitsToFloat(pc.raw2).yzw;
         vec3 P = cam + dir * rdist;
         // Flat receiver normal from the reconstructed positions (the lit FS uses the
         // interpolated geometric normal; the same offset rule on top).
         vec3 Ng = normalize(cross(dFdx(P), dFdy(P)));
-        const bool reach = !rsky && dot(P - O, A) > pc.params3.w && length(P - O) < pc.params.y;
+        const bool reach = !rsky && dot(P - O, A) > uintBitsToFloat(pc.raw3).w && length(P - O) < pc.params.y;
         if (!reach || any(isnan(Ng))) { outColor = vec4(0.02, 0.03, 0.12, 1.0); return; }
         vec3 toL = O - P;
         if (dot(Ng, toL) < 0.0) Ng = -Ng;
@@ -107,7 +120,7 @@ void main()
         const float len = length(toL);
         const vec3 ldir = toL / max(len, 1e-6);
         const float da = dot(ldir, A), dp = dot(Po - O, A);
-        float tmax = (da < -1e-6) ? (pc.params3.w - dp) / da : len;
+        float tmax = (da < -1e-6) ? (uintBitsToFloat(pc.raw3).w - dp) / da : len;
         tmax = min(tmax, len) - 0.002;
         if (tmax <= 0.0) { outColor = vec4(0.02, 0.03, 0.12, 1.0); return; }
         rt_cone_spread = 0.0;
@@ -148,7 +161,7 @@ void main()
     if (view == 18)
     {
         // params2.yzw = toward the light, params.z = extra receiver offset (m)
-        const vec3 L = normalize(pc.params2.yzw);
+        const vec3 L = normalize(uintBitsToFloat(pc.raw2).yzw);
         const vec3 P = cam + dir * min(rdist, 1e6);
         vec3 Ng = normalize(cross(dFdx(P), dFdy(P)));   // (uniform control flow: before any return)
         if (rsky) { outColor = vec4(0.0, 0.0, 0.0, 1.0); return; }
@@ -183,7 +196,7 @@ void main()
             c = (int(floor((gl_FragCoord.x + gl_FragCoord.y) / 6.0)) & 1) == 0 ? hashColor(oblocker) : vec3(vis);
         else c = vec3(vis);
         // Screen-centre probe (params3.xy = the pixel): its blockers for the VKRT log.
-        if (all(equal(uvec2(gl_FragCoord.xy), uvec2(pc.params3.xy))))
+        if (all(equal(uvec2(gl_FragCoord.xy), uvec2(uintBitsToFloat(pc.raw3).xy))))
         {
             dbg_stats[0] = 1u;
             dbg_stats[1] = blocker + 1u;    // 0 = none (alpha-tested ray)
@@ -194,6 +207,35 @@ void main()
         return;
     }
 
+    if (view == 30)
+    {
+        outColor = vec4(0.035, 0.035, 0.035, 1.0);
+        if (uintBitsToFloat(pc.raw2).w < 0.5) { outColor.rgb = vec3(0.15, 0.0, 0.15); return; }
+        const RtHit h = traceClosestHit(cam, dir, tmin, pc.params.w, RT_MASK_SHADOW, true);
+        if (!h.hit) return;
+        EmDiagRef hash = EmDiagRef(pc.raw2.yz);
+        EmDiagRef ent = EmDiagRef(pc.raw3.xy);
+        uint hs = emDiagHashSlot(h.instance);
+        for (uint probe = 0u; probe < 1u; ++probe)
+        {
+            const uvec2 v = hash.w[hs];
+            if (v.x == 0u) break;
+            if (v.x == h.instance + 1u && v.y < 4096u)
+            {
+                const uint b = v.y * 22u;
+                if (ent.w[b].x != h.instance || ent.w[b + 20u].y != pc.raw3.z) break;
+                if (ent.w[b + 18u].y >= ent.w[b + 1u].y) break; // all kept records dark/degenerate
+                const uvec2 flags = ent.w[b + 16u];
+                const bool pbr = (flags.x & 64u) != 0u;
+                const vec3 color = pbr ? ((flags.x & 8u) != 0u ? vec3(0.1, 0.3, 1.0) : vec3(0.0, 1.0, 1.0))
+                                       : (flags.y & 2u) != 0u ? vec3(1.0, 0.35, 0.0) : vec3(0.1, 1.0, 0.1);
+                outColor.rgb = color * (0.4 + 0.6 * abs(dot(rtHitWorldNormal(h), dir)));
+                break;
+            }
+            hs = (hs + 1u) & 8191u;
+        }
+        return;
+    }
     if (view == 14)
     {
         RtHit h = traceClosestHit(cam, dir, tmin, pc.params.w, RT_MASK_SHADOW, true);

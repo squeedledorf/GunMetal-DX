@@ -91,6 +91,8 @@ public:
     virtual bool postBuild();
 
     virtual bool handleRightMouseDown   ( S32 x, S32 y, MASK mask);
+    // Middle-button autoscroll (LLMiddleAutoScroll) unless a tab's content uses the press.
+    virtual bool handleMiddleMouseDown  ( S32 x, S32 y, MASK mask);
     virtual bool handleScrollWheel      ( S32 x, S32 y, S32 clicks );
     virtual bool handleKeyHere          (KEY key, MASK mask);
     virtual bool handleDragAndDrop      (S32 x, S32 y, MASK mask, bool drop,

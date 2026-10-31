@@ -32,12 +32,13 @@
 #endif
 
 #include "llviewermenu.h"
-#include "gmdxreplay.h"   // <GMDX> instant replay
-#include "gmdxloadouts.h" // <GMDX> loadouts quick swap
-#include "llcallbacklist.h" // <GMDX> doOnIdleOneTime for the quick swap menu
+#include "llinstantreplay.h"   // instant replay (GunMetal-DX port)
 
 #include "slkeycommands.h"
 #include "sltpscamera.h"
+#include "gmdxloadouts.h"   // <GMDX> CombatFX quick swap (Combat menu)
+#include "gmdxots.h"        // <GMDX> M and Esc: GunMetal-DX 0.3.0's over-the-shoulder aim camera
+#include "llcallbacklist.h" // doOnIdleOneTime
 
 // linden library includes
 #include "llavatarnamecache.h"  // IDEVO (I Are Not Men!)
@@ -59,7 +60,6 @@
 #include "llagentaccess.h"
 #include "llagentbenefits.h"
 #include "llagentcamera.h"
-#include "llviewercamera.h"   // <GMDX> orthographic view
 #include "llvrcamera.h"          // #1074 VR: Recenter VR View
 #include "llvrinput.h"           // #1076 VR: Show UI Wall in VR
 #include "llagentui.h"
@@ -68,13 +68,11 @@
 // [SL:KB] - Patch: Appearance-PhantomAttach | Checked: Catznip-5.0
 #include "llattachmentsmgr.h"
 // [/SL:KB]
-#include "llavataractions.h"
 #include "llcompilequeue.h"
 #include "llconsole.h"
 #include "lldebugview.h"
 // [SL:KB] - Patch: World-Derender | Checked: 2011-12-15 (Catznip-3.2)
 #include "llderenderlist.h"
-#include "fssoundemitterblacklist.h" // <GMDX>
 // [/SL:KB]
 #include "lldiskcache.h"
 #include "slcachestore.h"         // #714 Develop > Cache > Cache Store entries
@@ -89,6 +87,7 @@
 #include "llfloatergodtools.h"
 #include "llfloaterimcontainer.h"
 #include "fsfloatercontacts.h"
+#include "fssoundemitterblacklist.h"
 #include "llgltfexporter.h"
 #include "llfloaterland.h"
 #include "llfloaterimnearbychat.h"
@@ -96,7 +95,6 @@
 #include "llfloaterpathfindingcharacters.h"
 #include "llfloaterpathfindinglinksets.h"
 #include "llfloaterpay.h"
-#include "llfloaterpreference.h"
 #include "llfloaterreporter.h"
 #include "llfloatersearch.h"
 #include "llfloaterscriptdebug.h"
@@ -104,8 +102,9 @@
 #include "llfloatertools.h"
 #include "llfloaterworldmap.h"
 #include "llfloaterbuildoptions.h"
-#include "llgroupmgr.h"
+#include "llavataractions.h"
 #include "lllandmarkactions.h"
+#include "llgroupmgr.h"
 #include "lltooltip.h"
 #include "lltoolface.h"
 #include "llhints.h"
@@ -158,6 +157,7 @@
 #include "llvoavatarself.h"
 #include "llvoiceclient.h"
 #include "llworld.h"
+#include "llworldclock.h"
 #include "llworldmap.h"
 #include "pipeline.h"
 #include "llviewerjoystick.h"
@@ -671,7 +671,8 @@ void init_menus()
     // tooltips are on top of EVERYTHING, including menus
     gViewerWindow->getRootView()->sendChildToFront(gToolTipView);
 
-    GMDXLoadouts::applyHotkeys(); // <GMDX> the quick-swap keys the user set
+    // <GMDX> the quick-swap keys the user set; the Combat menu only while CombatFX is on
+    GMDXLoadouts::applyHotkeys();
 }
 
 ///////////////////
@@ -1089,36 +1090,17 @@ class LLAdvancedToggleFeature : public view_listener_t
 class LLAdvancedCheckFeature : public view_listener_t
 {
     bool handleEvent(const LLSD& userdata)
-    {
-        U32 feature = feature_from_string( userdata.asString() );
-        bool new_value = false;
-
-        if ( feature != 0 )
-        {
-            new_value = LLPipeline::toggleRenderDebugFeatureControl( feature );
-        }
-
-        return new_value;
-    }
-};
-
-class LLAdvancedToggleExperiment : public view_listener_t
 {
-    bool handleEvent(const LLSD& userdata)
-    {
-        std::string feature = userdata.asString();
-        return false;
-    }
-};
+    U32 feature = feature_from_string( userdata.asString() );
+    bool new_value = false;
 
-class LLAdvancedCheckExperiment : public view_listener_t
-{
-    bool handleEvent(const LLSD& userdata)
+    if ( feature != 0 )
     {
-        bool value = false;
-        std::string feature = userdata.asString();
-        return value;
+        new_value = LLPipeline::toggleRenderDebugFeatureControl( feature );
     }
+
+    return new_value;
+}
 };
 
 // Texture Density (RENDER_DEBUG_TEXEL_DENSITY) had no Vulkan drawer (#684). The Vulkan
@@ -3976,79 +3958,15 @@ class LLAvatarReportAbuse : public view_listener_t
 //---------------------------------------------------------------------------
 // Parcel freeze, eject, etc.
 //---------------------------------------------------------------------------
-bool callback_freeze(const LLSD& notification, const LLSD& response)
-{
-    LLUUID avatar_id = notification["payload"]["avatar_id"].asUUID();
-    S32 option = LLNotificationsUtil::getSelectedOption(notification, response);
-
-    if (0 == option || 1 == option)
-    {
-        U32 flags = 0x0;
-        if (1 == option)
-        {
-            // unfreeze
-            flags |= 0x1;
-        }
-
-        LLMessageSystem* msg = gMessageSystem;
-        LLViewerObject* avatar = gObjectList.findObject(avatar_id);
-
-        if (avatar)
-        {
-            msg->newMessage("FreezeUser");
-            msg->nextBlock("AgentData");
-            msg->addUUID("AgentID", gAgent.getID());
-            msg->addUUID("SessionID", gAgent.getSessionID());
-            msg->nextBlock("Data");
-            msg->addUUID("TargetID", avatar_id );
-            msg->addU32("Flags", flags );
-            msg->sendReliable( avatar->getRegion()->getHost() );
-        }
-    }
-    return false;
-}
-
-
 void handle_avatar_freeze(const LLSD& avatar_id)
 {
-        // Use avatar_id if available, otherwise default to right-click avatar
-        LLVOAvatar* avatar = NULL;
-        if (avatar_id.asUUID().notNull())
-        {
-            avatar = find_avatar_from_object(avatar_id.asUUID());
-        }
-        else
-        {
-            avatar = find_avatar_from_object(
-                LLSelectMgr::getInstance()->getSelection()->getPrimaryObject());
-        }
-
-        if( avatar )
-        {
-            std::string fullname = avatar->getFullname();
-            LLSD payload;
-            payload["avatar_id"] = avatar->getID();
-
-            if (!fullname.empty())
-            {
-                LLSD args;
-//              args["AVATAR_NAME"] = fullname;
-// [RLVa:KB] - Checked: RLVa-1.0.0
-                args["AVATAR_NAME"] = (RlvActions::canShowName(RlvActions::SNC_DEFAULT, avatar->getID())) ? fullname : RlvStrings::getAnonym(fullname);
-// [/RLVa:KB]
-                LLNotificationsUtil::add("FreezeAvatarFullname",
-                            args,
-                            payload,
-                            callback_freeze);
-            }
-            else
-            {
-                LLNotificationsUtil::add("FreezeAvatar",
-                            LLSD(),
-                            payload,
-                            callback_freeze);
-            }
-        }
+    LLVOAvatar* avatar = avatar_id.asUUID().notNull()
+        ? find_avatar_from_object(avatar_id.asUUID())
+        : find_avatar_from_object(LLSelectMgr::getInstance()->getSelection()->getPrimaryObject());
+    if (avatar)
+        SLAvatarActions::parcelFreeze(avatar->getID());
+    else
+        LL_INFOS("Moderation") << "Action not sent: reason=selected-avatar-unavailable" << LL_ENDL;
 }
 
 class LLAvatarVisibleDebug : public view_listener_t
@@ -4081,130 +3999,15 @@ class LLAvatarDebug : public view_listener_t
     }
 };
 
-bool callback_eject(const LLSD& notification, const LLSD& response)
-{
-    S32 option = LLNotificationsUtil::getSelectedOption(notification, response);
-    if (2 == option)
-    {
-        // Cancel button.
-        return false;
-    }
-    LLUUID avatar_id = notification["payload"]["avatar_id"].asUUID();
-    bool ban_enabled = notification["payload"]["ban_enabled"].asBoolean();
-
-    if (0 == option)
-    {
-        // Eject button
-        LLMessageSystem* msg = gMessageSystem;
-        LLViewerObject* avatar = gObjectList.findObject(avatar_id);
-
-        if (avatar)
-        {
-            U32 flags = 0x0;
-            msg->newMessage("EjectUser");
-            msg->nextBlock("AgentData");
-            msg->addUUID("AgentID", gAgent.getID() );
-            msg->addUUID("SessionID", gAgent.getSessionID() );
-            msg->nextBlock("Data");
-            msg->addUUID("TargetID", avatar_id );
-            msg->addU32("Flags", flags );
-            msg->sendReliable( avatar->getRegion()->getHost() );
-        }
-    }
-    else if (ban_enabled)
-    {
-        // This is tricky. It is similar to say if it is not an 'Eject' button,
-        // and it is also not an 'Cancle' button, and ban_enabled==ture,
-        // it should be the 'Eject and Ban' button.
-        LLMessageSystem* msg = gMessageSystem;
-        LLViewerObject* avatar = gObjectList.findObject(avatar_id);
-
-        if (avatar)
-        {
-            U32 flags = 0x1;
-            msg->newMessage("EjectUser");
-            msg->nextBlock("AgentData");
-            msg->addUUID("AgentID", gAgent.getID() );
-            msg->addUUID("SessionID", gAgent.getSessionID() );
-            msg->nextBlock("Data");
-            msg->addUUID("TargetID", avatar_id );
-            msg->addU32("Flags", flags );
-            msg->sendReliable( avatar->getRegion()->getHost() );
-        }
-    }
-    return false;
-}
-
 void handle_avatar_eject(const LLSD& avatar_id)
 {
-        // Use avatar_id if available, otherwise default to right-click avatar
-        LLVOAvatar* avatar = NULL;
-        if (avatar_id.asUUID().notNull())
-        {
-            avatar = find_avatar_from_object(avatar_id.asUUID());
-        }
-        else
-        {
-            avatar = find_avatar_from_object(
-                LLSelectMgr::getInstance()->getSelection()->getPrimaryObject());
-        }
-
-        if( avatar )
-        {
-            LLSD payload;
-            payload["avatar_id"] = avatar->getID();
-            std::string fullname = avatar->getFullname();
-
-            const LLVector3d& pos = avatar->getPositionGlobal();
-            LLParcel* parcel = LLViewerParcelMgr::getInstance()->selectParcelAt(pos)->getParcel();
-
-            if (LLViewerParcelMgr::getInstance()->isParcelOwnedByAgent(parcel,GP_LAND_MANAGE_BANNED))
-            {
-                payload["ban_enabled"] = true;
-                if (!fullname.empty())
-                {
-                    LLSD args;
-//                  args["AVATAR_NAME"] = fullname;
-// [RLVa:KB] - Checked: RLVa-1.0.0
-                    args["AVATAR_NAME"] = (RlvActions::canShowName(RlvActions::SNC_DEFAULT, avatar->getID())) ? fullname : RlvStrings::getAnonym(fullname);
-// [/RLVa:KB]
-                    LLNotificationsUtil::add("EjectAvatarFullname",
-                                args,
-                                payload,
-                                callback_eject);
-                }
-                else
-                {
-                    LLNotificationsUtil::add("EjectAvatarFullname",
-                                LLSD(),
-                                payload,
-                                callback_eject);
-                }
-            }
-            else
-            {
-                payload["ban_enabled"] = false;
-                if (!fullname.empty())
-                {
-                    LLSD args;
-//                  args["AVATAR_NAME"] = fullname;
-// [RLVa:KB] - Checked: RLVa-1.0.0
-                    args["AVATAR_NAME"] = (RlvActions::canShowName(RlvActions::SNC_DEFAULT, avatar->getID())) ? fullname : RlvStrings::getAnonym(fullname);
-// [/RLVa:KB]
-                    LLNotificationsUtil::add("EjectAvatarFullnameNoBan",
-                                args,
-                                payload,
-                                callback_eject);
-                }
-                else
-                {
-                    LLNotificationsUtil::add("EjectAvatarNoBan",
-                                LLSD(),
-                                payload,
-                                callback_eject);
-                }
-            }
-        }
+    LLVOAvatar* avatar = avatar_id.asUUID().notNull()
+        ? find_avatar_from_object(avatar_id.asUUID())
+        : find_avatar_from_object(LLSelectMgr::getInstance()->getSelection()->getPrimaryObject());
+    if (avatar)
+        SLAvatarActions::parcelEject(avatar->getID());
+    else
+        LL_INFOS("Moderation") << "Action not sent: reason=selected-avatar-unavailable" << LL_ENDL;
 }
 
 bool my_profile_visible()
@@ -4220,36 +4023,10 @@ bool picks_tab_visible()
 
 bool enable_freeze_eject(const LLSD& avatar_id)
 {
-    // Use avatar_id if available, otherwise default to right-click avatar
-    LLVOAvatar* avatar = NULL;
-    if (avatar_id.asUUID().notNull())
-    {
-        avatar = find_avatar_from_object(avatar_id.asUUID());
-    }
-    else
-    {
-        avatar = find_avatar_from_object(
-            LLSelectMgr::getInstance()->getSelection()->getPrimaryObject());
-    }
-    if (!avatar) return false;
-
-    // Gods can always freeze
-    if (gAgent.isGodlike()) return true;
-
-    // Estate owners / managers can freeze
-    // Parcel owners can also freeze
-    const LLVector3& pos = avatar->getPositionRegion();
-    const LLVector3d& pos_global = avatar->getPositionGlobal();
-    LLParcel* parcel = LLViewerParcelMgr::getInstance()->selectParcelAt(pos_global)->getParcel();
-    LLViewerRegion* region = avatar->getRegion();
-    if (!region) return false;
-
-    bool new_value = region->isOwnedSelf(pos);
-    if (!new_value || region->isOwnedGroup(pos))
-    {
-        new_value = LLViewerParcelMgr::getInstance()->isParcelOwnedByAgent(parcel,GP_LAND_ADMIN);
-    }
-    return new_value;
+    LLVOAvatar* avatar = avatar_id.asUUID().notNull()
+        ? find_avatar_from_object(avatar_id.asUUID())
+        : find_avatar_from_object(LLSelectMgr::getInstance()->getSelection()->getPrimaryObject());
+    return avatar && SLAvatarActions::canFreezeEject(avatar->getID());
 }
 
 bool callback_leave_group(const LLSD& notification, const LLSD& response)
@@ -4849,6 +4626,7 @@ void handle_object_sit(const LLUUID& object_id)
     handle_object_sit(obj, offset);
 }
 
+// Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4; Linden Lab game control (viewer PR #6202)
 // Looks for the nearest sittable object -- one whose click-action is set to
 // CLICK_ACTION_SIT, the flag content creators set (usually alongside a custom
 // llSetSitText() label) to mark a prim as a seat -- within a hard-coded
@@ -4952,39 +4730,8 @@ class LLLandCanSit : public view_listener_t
 //
 void reset_view_final(bool proceed);
 
-// <GMDX> Aim mode, as M enters it (LLViewMouselook): the shoulder camera when OTS is on and can be
-// used (with OTSRememberLastView, the view last toggled into), else first-person mouselook.
-static void enter_aim_mode()
-{
-    if (gSavedSettings.getBOOL("OTSEnabled")
-        && gAgentCamera.canUseOTS()
-        && !(gSavedSettings.getBOOL("OTSRememberLastView")
-             && gSavedSettings.getBOOL("OTSLastViewFirstPerson")))
-    {
-        gAgentCamera.changeCameraToOTS();
-        return;
-    }
-    gAgentCamera.changeCameraToMouselook();
-}
-
-// OTS "Dynamic camera" (GMDXOTSDynamicCamera): the last Esc left aim mode, so the next one (on the
-// follow camera, not building) goes back in. M clears it.
-static bool sEscLeftAim = false;
-// </GMDX>
-
 void handle_reset_view()
 {
-    // <GMDX> OTS Dynamic camera: Esc toggles aim mode and the follow camera
-    static LLCachedControl<bool> ots_dynamic_camera(gSavedSettings, "GMDXOTSDynamicCamera", false);
-    if (ots_dynamic_camera && sEscLeftAim && gAgentCamera.getCameraMode() == CAMERA_MODE_THIRD_PERSON
-        && !LLToolMgr::getInstance()->inBuildMode() && !gAgentCamera.cameraCustomizeAvatar())
-    {
-        sEscLeftAim = false;
-        enter_aim_mode();
-        return;
-    }
-    sEscLeftAim = ots_dynamic_camera && gAgentCamera.cameraMouselook();   // (OTS too: the reset below leaves aim mode)
-    // </GMDX>
     // Esc first releases the third-person shooter camera. With "Dynamic camera" on
     // (#944, #952) it hands the view back to the normal follow camera behind the
     // avatar with the pointer free, so Esc toggles between the two; off, it parks
@@ -5031,12 +4778,13 @@ class LLViewResetView : public view_listener_t
 {
     bool handleEvent(const LLSD& userdata)
     {
+        if (GMDXOTS::onEsc()) return true; // <GMDX> Esc: Dynamic camera goes back into aim mode (gmdxots.h)
         handle_reset_view();
         return true;
     }
 };
 
-// <GMDX> orthographic view (SoapStorm 7179701d85)
+// Orthographic view. Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
 class LLViewToggleOrthoView : public view_listener_t
 {
     bool handleEvent(const LLSD& userdata) override
@@ -5053,7 +4801,6 @@ class LLViewCheckOrthoView : public view_listener_t
         return LLViewerCamera::getInstance()->getOrtho();
     }
 };
-// </GMDX>
 
 // Note: extra parameters allow this function to be called from dialog.
 void reset_view_final(bool proceed)
@@ -5080,36 +4827,9 @@ class LLViewMouselook : public view_listener_t
 {
     bool handleEvent(const LLSD& userdata)
     {
-        // <SS:Skoomastream>
-        // When OTS is enabled M toggles aim mode using the shoulder cam (or,
-        // with OTSRememberLastView, whichever view was last toggled into).
-        // When disabled M toggles normal first-person mouselook.
-        // M from EITHER aim view (OTS or toggled-to-first-person) exits.
-        sEscLeftAim = false;   // <GMDX> (OTS Dynamic camera: M, not Esc)
-        if (gAgentCamera.cameraOTS())
-        {
-            gAgentCamera.changeCameraFromOTS();
-            return true;
-        }
-        // </SS:Skoomastream>
-
+        if (GMDXOTS::onMouselookKey()) return true; // <GMDX> M: the shoulder camera, as GunMetal-DX 0.3.0 (gmdxots.h)
         if (!gAgentCamera.cameraMouselook())
         {
-            // <SS:Skoomastream>
-            // If the user is seated on an object/vehicle that has NOT defined a custom
-            // sit camera offset (llSetCameraEyeOffset), fall back to vanilla first-person
-            // mouselook (cockpit view) to prevent awkward camera clipping and placement.
-            // canUseOTS() also refuses under an RLVa camera distance cap too small
-            // for a shoulder camera.
-            if (gSavedSettings.getBOOL("OTSEnabled")
-                && gAgentCamera.canUseOTS()
-                && !(gSavedSettings.getBOOL("OTSRememberLastView")
-                     && gSavedSettings.getBOOL("OTSLastViewFirstPerson")))
-            {
-                gAgentCamera.changeCameraToOTS();
-                return true;
-            }
-            // </SS:Skoomastream>
             gAgentCamera.changeCameraToMouselook();
         }
         else
@@ -5135,13 +4855,25 @@ class LLViewToggleUI : public view_listener_t
 {
     bool handleEvent(const LLSD& userdata)
     {
-        if(gAgentCamera.getCameraMode() != CAMERA_MODE_MOUSELOOK)
+        // mouselook and the over-the-shoulder aim camera hide the UI alike (endAnimationUpdateUI)
+        const ECameraMode mode = gAgentCamera.getCameraMode();
+        if (mode == CAMERA_MODE_MOUSELOOK)
+        {
+            // #624: no confirmation, the gun toolset holds the mouse so it could not be clicked
+            gAgent.toggleMouselookUI();
+        }
+        else
         {
             LLNotification::Params params("ConfirmHideUI");
             params.functor.function(boost::bind(&LLViewToggleUI::confirm, this, _1, _2));
             LLSD substitutions;
-            // the Hide all controls menu item's current shortcut (#863)
-            substitutions["SHORTCUT"] = SLKeyCommands::instance().getMenuBindingString("viewer", "Hide UI");
+            // the Hide all controls menu item's current shortcut (#863), else its Firestorm key (#1221)
+            std::string shortcut = SLKeyCommands::instance().getMenuBindingString("viewer", "Hide UI");
+            if (shortcut.empty())
+            {
+                shortcut = SLKeyCommands::instance().getMenuBindingString("viewer", "Hide UI Alt");
+            }
+            substitutions["SHORTCUT"] = shortcut;
             params.substitutions = substitutions;
             if (!gSavedSettings.getBOOL("HideUIControls"))
             {
@@ -7187,6 +6919,20 @@ bool enable_place_profile()
 }
 // [/RLVa:KB]
 
+// World frozen (Freeze World): an object's bounding box is built from its live position, but
+// the frozen picture holds the object elsewhere (LLViewerObject::getPicturePositionAgent).
+// The shift from one to the other; zero while the world runs, and for a worn object (its
+// root's parent is the avatar), whose box already rides the held skeleton
+// (LLViewerObject::getBoundingBoxAgent).
+static LLVector3 frozen_picture_shift(const LLViewerObject* objectp)
+{
+    if (!objectp || !LLWorldClock::isFrozen() || objectp->getRootEdit()->getParent())
+    {
+        return LLVector3::zero;
+    }
+    return objectp->getPicturePositionAgent() - objectp->getPositionAgent();
+}
+
 void handle_look_at_selection(const LLSD& param)
 {
     const F32 PADDING_FACTOR = 1.75f;
@@ -7195,11 +6941,16 @@ void handle_look_at_selection(const LLSD& param)
     {
         gAgentCamera.setFocusOnAvatar(false, ANIMATE);
 
+        // World frozen: frame the selection where the frozen picture holds it (the whole
+        // selection takes its primary object's shift).
+        const LLVector3 frozen_shift = frozen_picture_shift(LLSelectMgr::getInstance()->getSelection()->getPrimaryObject());
+        const LLVector3d selection_center_global = LLSelectMgr::getInstance()->getSelectionCenterGlobal() + LLVector3d(frozen_shift);
+
         LLBBox selection_bbox = LLSelectMgr::getInstance()->getBBoxOfSelection();
         F32 angle_of_view = llmax(0.1f, LLViewerCamera::getInstance()->getAspect() > 1.f ? LLViewerCamera::getInstance()->getView() * LLViewerCamera::getInstance()->getAspect() : LLViewerCamera::getInstance()->getView());
         F32 distance = selection_bbox.getExtentLocal().magVec() * PADDING_FACTOR / atan(angle_of_view);
 
-        LLVector3 obj_to_cam = LLViewerCamera::getInstance()->getOrigin() - selection_bbox.getCenterAgent();
+        LLVector3 obj_to_cam = LLViewerCamera::getInstance()->getOrigin() - (selection_bbox.getCenterAgent() + frozen_shift);
         obj_to_cam.normVec();
 
         LLUUID object_id;
@@ -7210,17 +6961,17 @@ void handle_look_at_selection(const LLSD& param)
         if (zoom)
         {
             // Make sure we are not increasing the distance between the camera and object
-            LLVector3d orig_distance = gAgentCamera.getCameraPositionGlobal() - LLSelectMgr::getInstance()->getSelectionCenterGlobal();
+            LLVector3d orig_distance = gAgentCamera.getCameraPositionGlobal() - selection_center_global;
             distance = llmin(distance, (F32) orig_distance.length());
 
-            gAgentCamera.setCameraPosAndFocusGlobal(LLSelectMgr::getInstance()->getSelectionCenterGlobal() + LLVector3d(obj_to_cam * distance),
-                                        LLSelectMgr::getInstance()->getSelectionCenterGlobal(),
+            gAgentCamera.setCameraPosAndFocusGlobal(selection_center_global + LLVector3d(obj_to_cam * distance),
+                                        selection_center_global,
                                         object_id );
 
         }
         else
         {
-            gAgentCamera.setFocusGlobal( LLSelectMgr::getInstance()->getSelectionCenterGlobal(), object_id );
+            gAgentCamera.setFocusGlobal( selection_center_global, object_id );
         }
     }
 }
@@ -7239,11 +6990,14 @@ bool handle_zoom_to_object(const LLUUID& object_id)
         F32 angle_of_view = llmax(0.1f, LLViewerCamera::getInstance()->getAspect() > 1.f ? LLViewerCamera::getInstance()->getView() * LLViewerCamera::getInstance()->getAspect() : LLViewerCamera::getInstance()->getView());
         F32 distance = bbox.getExtentLocal().magVec() * PADDING_FACTOR / atan(angle_of_view);
 
-        LLVector3 obj_to_cam = LLViewerCamera::getInstance()->getOrigin() - bbox.getCenterAgent();
+        // World frozen: frame the object where the frozen picture holds it.
+        const LLVector3 center_agent = bbox.getCenterAgent() + frozen_picture_shift(object);
+
+        LLVector3 obj_to_cam = LLViewerCamera::getInstance()->getOrigin() - center_agent;
         obj_to_cam.normVec();
 
 
-        LLVector3d object_center_global = gAgent.getPosGlobalFromAgent(bbox.getCenterAgent());
+        LLVector3d object_center_global = gAgent.getPosGlobalFromAgent(center_agent);
 
         gAgentCamera.setCameraPosAndFocusGlobal(object_center_global + LLVector3d(obj_to_cam * distance),
                                             object_center_global,
@@ -7492,9 +7246,9 @@ class LLAvatarResetSelfSkeletonAndAnimations : public view_listener_t
                 effectp->setSourceObject(gAgentAvatarp);
                 effectp->setTargetObject((LLViewerObject*)avatar);
                 effectp->setResetAnimations(true);
-            }
-            else
-            {
+        }
+        else
+        {
                 avatar->resetSkeleton(true);
             }
         }
@@ -10928,8 +10682,8 @@ void initialize_menus()
     view_listener_t::addMenu(new LLViewMouselook(), "View.Mouselook");
     view_listener_t::addMenu(new LLViewJoystickFlycam(), "View.JoystickFlycam");
     view_listener_t::addMenu(new LLViewResetView(), "View.ResetView");
-    view_listener_t::addMenu(new LLViewToggleOrthoView(), "View.ToggleOrthoView");   // <GMDX>
-    view_listener_t::addMenu(new LLViewCheckOrthoView(), "View.CheckOrthoView");     // <GMDX>
+    view_listener_t::addMenu(new LLViewToggleOrthoView(), "View.ToggleOrthoView");
+    view_listener_t::addMenu(new LLViewCheckOrthoView(), "View.CheckOrthoView");
     view_listener_t::addMenu(new LLViewLookAtLastChatter(), "View.LookAtLastChatter");
     view_listener_t::addMenu(new LLViewShowHoverTips(), "View.ShowHoverTips");
     view_listener_t::addMenu(new LLViewHighlightTransparent(), "View.HighlightTransparent");
@@ -10994,6 +10748,7 @@ void initialize_menus()
     enable.add("World.EnablePlaceProfile", boost::bind(&enable_place_profile));
 // [/RLVa:KB]
     view_listener_t::addMenu(new LLWorldEnableSetHomeLocation(), "World.EnableSetHomeLocation");
+    commit.add("World.SaveReplay", boost::bind(&LLInstantReplay::save));   // instant replay, Alt+F10 (GunMetal-DX port)
     view_listener_t::addMenu(new LLWorldEnableTeleportHome(), "World.EnableTeleportHome");
     view_listener_t::addMenu(new LLWorldEnableBuyLand(), "World.EnableBuyLand");
 
@@ -11073,9 +10828,6 @@ void initialize_menus()
     //// Advanced > Render > Features
     view_listener_t::addMenu(new LLAdvancedToggleFeature(), "Advanced.ToggleFeature");
     view_listener_t::addMenu(new LLAdvancedCheckFeature(), "Advanced.CheckFeature");
-
-    view_listener_t::addMenu(new LLAdvancedToggleExperiment(), "Advanced.ToggleExperiment");
-    view_listener_t::addMenu(new LLAdvancedCheckExperiment(), "Advanced.CheckExperiment");
 
     view_listener_t::addMenu(new LLAdvancedCheckDisplayTextureDensity(), "Advanced.CheckDisplayTextureDensity");
     view_listener_t::addMenu(new LLAdvancedSetDisplayTextureDensity(), "Advanced.SetDisplayTextureDensity");
@@ -11344,6 +11096,10 @@ void initialize_menus()
     commit.add("Object.Delete", boost::bind(&handle_object_delete));
 // [SL:KB] - Patch: World-Derender | Checked: 2011-12-15 (Catznip-3.2)
     commit.add("Object.Derender", boost::bind(&handle_object_derender, _2));
+    // Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4: SkoomaStorm's sound emitter blacklist (fssoundemitterblacklist.cpp)
+    commit.add("Object.BlacklistSoundEmitter", [](LLUICtrl*, const LLSD&) { FSSoundEmitterBlacklist::blacklistSelection(false); });
+    commit.add("Object.BlacklistSoundEmitterPermanent", [](LLUICtrl*, const LLSD&) { FSSoundEmitterBlacklist::blacklistSelection(true); });
+    enable.add("Object.SoundEmitterBlacklistEnabled", [](LLUICtrl*, const LLSD&) { return FSSoundEmitterBlacklist::enabled(); });
     // #654: open the Sound Explorer filtered to the right-clicked object
     commit.add("Object.SoundExplorer", [](LLUICtrl*, const LLSD&)
     {
@@ -11354,10 +11110,6 @@ void initialize_menus()
     commit.add("Avatar.Derender", boost::bind(&handle_avatar_derender, _2));
     enable.add("Avatar.EnableDerender", boost::bind(&enable_avatar_derender));
 // [/SL:KB]
-    // <GMDX> SkoomaStorm's sound emitter blacklist (fssoundemitterblacklist.cpp)
-    commit.add("Object.BlacklistSoundEmitter", [](LLUICtrl*, const LLSD&) { FSSoundEmitterBlacklist::blacklistSelection(false); });
-    commit.add("Object.BlacklistSoundEmitterPermanent", [](LLUICtrl*, const LLSD&) { FSSoundEmitterBlacklist::blacklistSelection(true); });
-    // </GMDX>
     commit.add("Object.PlayLocalAnim", boost::bind(&handle_play_local_anim));
     commit.add("Object.StopLocalAnim", boost::bind(&handle_stop_local_anim));
     view_listener_t::addMenu(new LLObjectAttachToAvatar(true), "Object.AttachToAvatar");
@@ -11444,8 +11196,7 @@ void initialize_menus()
     view_listener_t::addMenu(new LLResetControl(), "ResetControl");
     view_listener_t::addMenu(new LLGoToObject(), "GoToObject");
     commit.add("PayObject", boost::bind(&handle_give_money_dialog));
-    commit.add("GMDX.SaveReplay", boost::bind(&GMDXReplay::save));   // <GMDX> instant replay (Alt+F10)
-    // <GMDX> Alt+1..4. Next frame: right after a shortcut fires, the menu bar closes every open menu.
+    // <GMDX> Alt+1..4 (CombatFX). Next frame: right after a shortcut fires, the menu bar closes every open menu.
     commit.add("GMDX.QuickSwap", [](LLUICtrl*, const LLSD& slot)
     {
         const S32 index = slot.asInteger();

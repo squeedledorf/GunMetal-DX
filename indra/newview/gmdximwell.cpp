@@ -2,6 +2,8 @@
  * @file gmdximwell.cpp
  * @brief GunMetal-DX: the unread IM indicator in the chiclet bar, left of the notifications well.
  *
+ * Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4. Only shown with the MMO chat log style.
+ *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -35,6 +37,8 @@
 #include "llviewerprecompiledheaders.h"
 
 #include "llchiclet.h"
+
+#include "gmdxchatlog.h"
 
 #include "llagent.h"
 #include "llavatariconctrl.h"
@@ -187,6 +191,14 @@ GMDXIMWellChiclet::~GMDXIMWellChiclet()
 
 void GMDXIMWellChiclet::update(const LLUUID& new_msg_session)
 {
+    // Only with the chat log style: otherwise the well stays hidden and does nothing.
+    if (!GMDXChatLog::active())
+    {
+        mOrder.clear();
+        mCounter = 0;
+        if (LLView* panel = getParent()) panel->setVisible(false);
+        return;
+    }
     if (new_msg_session.notNull())
     {
         mOrder.erase(std::remove(mOrder.begin(), mOrder.end(), new_msg_session), mOrder.end());

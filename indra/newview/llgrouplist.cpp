@@ -259,6 +259,8 @@ void LLGroupList::refresh()
             const LLGroupData& group_data = gAgent.mGroups.at(i);
             if (have_filter && !findInsensitive(group_data.mName, mNameFilter))
                 continue;
+            if (mProfilePreview && !group_data.mListInProfile)
+                continue;
             addNewItem(id, group_data.mName, group_data.mInsigniaID, ADD_BOTTOM, group_data.mListInProfile,
                        FSFavoriteGroups::getInstance()->isFavorite(id)); // <FS:PP> Group favorites / pinning
         }
@@ -314,6 +316,15 @@ void LLGroupList::setGroups(const std::map< std::string,LLUUID> group_list)
     setDirty(true);
 }
 
+void LLGroupList::setProfilePreview(bool preview)
+{
+    if (mProfilePreview != preview)
+    {
+        mProfilePreview = preview;
+        setDirty(true);
+    }
+}
+
 //////////////////////////////////////////////////////////////////////////
 // PRIVATE Section
 //////////////////////////////////////////////////////////////////////////
@@ -322,6 +333,7 @@ void LLGroupList::addNewItem(const LLUUID& id, const std::string& name, const LL
 {
     LLGroupListItem* item = new LLGroupListItem(mForAgent, mShowIcons);
     item->setFavorite(is_favorite); // <FS:PP> Group favorites / pinning
+    item->setShowAgentButtons(!mProfilePreview);
 
     item->setGroupID(id);
     item->setName(name, mNameFilter);
@@ -535,7 +547,7 @@ void LLGroupListItem::onMouseEnter(S32 x, S32 y, MASK mask)
     {
         mInfoBtn->setVisible(true);
         mProfileBtn->setVisible(true);
-        if (mForAgent)
+        if (mForAgent && mShowAgentButtons)
         {
             LLGroupData agent_gdatap;
             if (gAgent.getGroupData(mGroupID, agent_gdatap))

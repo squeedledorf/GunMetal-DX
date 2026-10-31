@@ -81,6 +81,8 @@ layout(std430, set = 0, binding = 23) readonly buffer PrevInstances { Instance p
 #include "clean_frame_info.glsl"
 #define CEL_VERTEX
 #include "clean_cel_common.glsl"
+#define GMDX_REZFX_VS
+#include "gmdx_rezfx.glsl"
 
 // The outputs the G-buffer fragment shaders read (clean_draw_common.glsl locations).
 struct ClVOut
@@ -91,6 +93,8 @@ struct ClVOut
     vec3 world_normal;   // 2
     vec4 tint;           // 3 (debug views: the debug colour)
     uint flags;          // 4
+    vec4 rez;            // 16 fade inputs (no vertex displacement on the cluster path)
+    vec4 rez_box;        // 17 .w enables the existing fragment fade
     vec3 world_pos;      // 5
     vec4 world_tangent;  // 7
     vec2 uv_raw;         // 8
@@ -161,7 +165,8 @@ ClVOut clusterSkinnedVertex(uint sel, ClSelected cs, Instance inst, uint s, uint
     o.uv = cleanFaceUV(inst.flags & ~64u, inst.uv_matrix, texcoord0, nrm, rel, inst.model_matrix, pc.u_cam_time.w);
     o.material_id = inst.material_id;
     o.tint = inst.tint;
-    o.flags = inst.flags;
+    o.flags = inst.flags & ~16384u;
+    rezfxFadeOutputs(inst.flags, o.rez, o.rez_box);
 #endif
 #ifdef CLEAN_VS_NORMAL_FRAME
     vec4 tng = svUnpackTangent(cl_skin_out[v * SV_WORDS + 4u]);
@@ -323,7 +328,8 @@ ClVOut clusterVertex(uint sel, uint local, vec3 position, vec2 texcoord0, vec3 n
     o.uv = cleanFaceUV(inst.flags, inst.uv_matrix, texcoord0, normal, position, inst.model_matrix, pc.u_cam_time.w);
     o.material_id = inst.material_id;
     o.tint = inst.tint;
-    o.flags = inst.flags;
+    o.flags = inst.flags & ~16384u;
+    rezfxFadeOutputs(inst.flags, o.rez, o.rez_box);
 #endif
 #ifdef CLEAN_VS_NORMAL_FRAME
     const mat3 M3   = mat3(M);

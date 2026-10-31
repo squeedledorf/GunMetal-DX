@@ -178,6 +178,11 @@ void LLFloaterWebContent::geometryChanged(const std::string &uuid, S32 x, S32 y,
 
 void LLFloaterWebContent::geometryChanged(S32 x, S32 y, S32 width, S32 height)
 {
+    // Native host geometry is authoritative. Plugin callbacks run from idle,
+    // outside its scoped UI context; interpreting their coordinates against
+    // main would shrink/move the child without resizing its OS window.
+    if (isNativePopout()) return;
+
     // Make sure the layout of the browser control is updated, so this calculation is correct.
     getChild<LLLayoutStack>("stack1")->updateLayout();
 

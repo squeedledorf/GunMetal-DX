@@ -830,7 +830,7 @@ void LLFolderView::closeRenamer( void )
     }
 }
 
-// <GMDX> SoapStorm 984a07fa80
+// <GMDX> SoapStorm 984a07fa80 (Soap Frenzy): no crash when an object dies during a pending rename
 void LLFolderView::cancelRenaming( void )
 {
     // disconnect first, so removing the popup does not run onRenamerLost() (which commits)

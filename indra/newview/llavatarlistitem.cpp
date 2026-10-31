@@ -31,6 +31,7 @@
 
 #include "llavataractions.h"
 #include "llavatarlistitem.h"
+#include "llavatarpresence.h"
 
 #include "llbutton.h"
 #include "llfloaterreg.h"
@@ -64,6 +65,9 @@ LLAvatarListItem::Params::Params()
     voice_call_left_style("voice_call_left_style"),
     online_style("online_style"),
     offline_style("offline_style"),
+    classic_default_style("classic_default_style"),
+    classic_online_style("classic_online_style"),
+    classic_offline_style("classic_offline_style"),
     name_right_pad("name_right_pad", 0)
 {};
 
@@ -175,6 +179,9 @@ bool LLAvatarListItem::postBuild()
     mIconPermissionOnlineTheirs->setEnabled(SP_NEVER != mShowPermissions);
     mIconPermissionMapTheirs->setEnabled(SP_NEVER != mShowPermissions);
 
+    mClassicNameColorsConnection = gSavedSettings.getControl("SLClassicNameColors")->getSignal()->connect(
+        boost::bind(&LLAvatarListItem::refreshNameStyle, this));
+    refreshNameStyle();
     return true;
 }
 
@@ -257,15 +264,15 @@ void LLAvatarListItem::changed(U32 mask)
 
 void LLAvatarListItem::setOnline(bool online)
 {
-    // *FIX: setName() overrides font style set by setOnline(). Not an issue ATM.
-
-    if (mOnlineStatus != E_UNKNOWN && (bool) mOnlineStatus == online)
+    const auto presence = LLAvatarTracker::instance().getBuddyPresence(mAvatarId);
+    const EOnlineStatus status = presence == LLAvatarTracker::EPresence::NOT_FRIEND ? E_UNKNOWN :
+                                presence == LLAvatarTracker::EPresence::ONLINE && online ? E_ONLINE : E_OFFLINE;
+    if (mOnlineStatus != E_UNKNOWN && mOnlineStatus == status)
         return;
 
-    mOnlineStatus = (EOnlineStatus) online;
+    mOnlineStatus = status;
 
-    // Change avatar name font style depending on the new online status.
-    setState(online ? IS_ONLINE : IS_OFFLINE);
+    setState(status == E_UNKNOWN ? IS_DEFAULT : status == E_ONLINE ? IS_ONLINE : IS_OFFLINE);
 }
 
 void LLAvatarListItem::setAvatarName(const std::string& name)
@@ -286,12 +293,14 @@ void LLAvatarListItem::setHighlight(const std::string& highlight)
 void LLAvatarListItem::setState(EItemState item_style)
 {
     const LLAvatarListItem::Params& params = LLUICtrlFactory::getDefaultParams<LLAvatarListItem>();
+    mItemState = item_style;
+    const bool classic = LLAvatarPresence::useClassicNameColors();
 
     switch(item_style)
     {
     default:
     case IS_DEFAULT:
-        mAvatarNameStyle = params.default_style();
+        mAvatarNameStyle = classic ? params.classic_default_style() : params.default_style();
         break;
     case IS_VOICE_INVITED:
         mAvatarNameStyle = params.voice_call_invited_style();
@@ -303,10 +312,10 @@ void LLAvatarListItem::setState(EItemState item_style)
         mAvatarNameStyle = params.voice_call_left_style();
         break;
     case IS_ONLINE:
-        mAvatarNameStyle = params.online_style();
+        mAvatarNameStyle = classic ? params.classic_online_style() : params.online_style();
         break;
     case IS_OFFLINE:
-        mAvatarNameStyle = params.offline_style();
+        mAvatarNameStyle = classic ? params.classic_offline_style() : params.offline_style();
         break;
     }
 
@@ -324,7 +333,12 @@ void LLAvatarListItem::setState(EItemState item_style)
     mAvatarIcon->setColor(item_icon_color_map[item_style]);
 }
 
-void LLAvatarListItem::setAvatarId(const LLUUID& id, const LLUUID& session_id, bool ignore_status_changes/* = false*/, bool is_resident/* = true*/, bool use_colorizer/* = false*/)
+void LLAvatarListItem::refreshNameStyle()
+{
+    setState(mItemState);
+}
+
+void LLAvatarListItem::setAvatarId(const LLUUID& id, const LLUUID& session_id, bool ignore_status_changes/* = false*/, bool is_resident/* = true*/, bool use_colorizer)
 {
     if (mAvatarId.notNull())
         LLAvatarTracker::instance().removeParticularFriendObserver(mAvatarId, this);
@@ -559,7 +573,7 @@ void LLAvatarListItem::setNameInternal(const std::string& name, const std::strin
     if (mUseContactSetListStyle)
     {
         static LLCachedControl<bool> fsContactSetsListColorizeOffline(gSavedSettings, "FSContactSetsListColorizeOffline", false);
-        if (fsContactSetsListColorizeOffline && mOnlineStatus != E_ONLINE)
+        if (fsContactSetsListColorizeOffline && mOnlineStatus == E_OFFLINE)
         {
             static LLCachedControl<LLColor4> fsContactSetsListOfflineColor(gSavedSettings, "FSContactSetsListOfflineColor", LLColor4(0.5f, 0.5f, 0.5f, 1.f));
             avatar_name_style.color = fsContactSetsListOfflineColor();

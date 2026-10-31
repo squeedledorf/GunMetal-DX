@@ -61,6 +61,7 @@ public:
                             LLPanelSettingsSkyAtmosTab();
 
     virtual bool            postBuild() override;
+    virtual void            draw() override;
     virtual void            setEnabled(bool enabled) override;
 
 protected:
@@ -72,6 +73,8 @@ private:
     void                    onBlueDensityChanged();
     void                    onHazeHorizonChanged();
     void                    onHazeDensityChanged();
+    void                    onHazeGuardrailChanged(bool opacity);
+    void                    updateHazeStatus();
     void                    onSceneGammaChanged();
     void                    onDensityMultipChanged();
     void                    onDistanceMultipChanged();

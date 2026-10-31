@@ -19,6 +19,10 @@
  * $/LicenseInfo$
  */
 
+// Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4 (<SS:Skoomastream>,
+// SkoomaStorm). Slipstream: CombatFX only -- with it off no key is asked for and
+// fillRequests sends no aux ray.
+//
 // <SS:Skoomastream>
 // Static world geometry along a segment: prims, linksets and terrain. Avatars,
 // attachments, animesh, trees and grass never block; phantom prims and the linkset
@@ -51,8 +55,8 @@ namespace SSCombatRay
         KEY_OTS_COLLISION = 1,
         KEY_AIM_CONVERGE  = 2,
         KEY_AIM_LOS       = 3,
-        KEY_FLYCAM_ORBIT  = 4,    // <GMDX> game-control flycam orbit pivot
-        KEY_IFF_BASE      = 16,   // + 2 * (target hash) + (0 centre, 1 head height)
+        KEY_FLYCAM_ORBIT  = 4,    // <GMDX> game-control flycam orbit pivot (CombatFX on; else the fixed distance)
+        KEY_IFF_BASE     = 16,   // + 2 * (target hash) + (0 centre, 1 head height)
     };
 
     // True = blocked; dist = metres from start to the nearest blocker (terrain now, or the

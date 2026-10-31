@@ -294,9 +294,10 @@ void main()
     }
 
     // <SS:Skoomastream> ALL-STATIC rays (job.w bit 2: the OTS camera / aim rays,
-    // sscombatray.cpp): a static, unworn world row the main view did NOT draw (behind the
-    // camera, off screen, occluded) still answers, at its highest resident level -- the
-    // camera pulled in front of a wall must keep seeing that wall behind it.
+    // sscombatray.cpp; CombatFX only): a static, unworn world row the main view did NOT
+    // draw (behind the camera, off screen, occluded) still answers, at its highest resident
+    // level -- the camera pulled in front of a wall must keep seeing that wall behind it.
+    // Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
     if ((pc.job.w & 5u) == 5u && (inst.flags & (1u | 512u | 2048u)) == 0u)
     {
         bool drawn = id < pc.valid.z && id < uint(cand_meta.length()) && id < uint(cand.length());

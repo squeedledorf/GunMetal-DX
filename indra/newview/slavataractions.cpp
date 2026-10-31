@@ -32,11 +32,16 @@
 #include "llclipboard.h"
 #include "llnotifications.h"
 #include "llnotificationsutil.h"
+#include "llmenugl.h"
+#include "llparcel.h"
+#include "llsdutil.h"
 #include "lltrans.h"
+#include "lltimer.h"
 #include "roles_constants.h"
 
 #include "llagent.h"
 #include "llagentcamera.h"
+#include "llappviewer.h"
 #include "llavataractions.h"
 #include "llcallbacklist.h"
 #include "llfloaterreg.h"
@@ -48,9 +53,397 @@
 #include "llviewermenu.h"
 #include "llviewerobjectlist.h"
 #include "llviewerparcelmgr.h"
+#include "llviewerparceloverlay.h"
 #include "llviewerregion.h"
 #include "llworld.h"
 #include "rlvactions.h"
+
+#include <cmath>
+#include <functional>
+#include <map>
+#include <memory>
+#include <set>
+#include <tuple>
+
+namespace
+{
+// Menu hints may be cached briefly. Every confirmed eject uses fresh simulator data.
+struct ModerationParcel
+{
+    LLSD identity;
+    F64 requested_at = 0.;
+    bool pending = true;
+};
+using ModerationCell = std::tuple<LLUUID, LLUUID, LLUUID, S32, S32>;
+std::map<ModerationCell, ModerationParcel> sModerationParcels;
+LLNotificationPtr sMenuPermissionWait;
+size_t sPendingMenuPermissions = 0;
+
+struct ModerationMenu
+{
+    LLHandle<LLView> menu;
+    std::shared_ptr<const uuid_vec_t> ids;
+    LLUUID session;
+};
+std::vector<ModerationMenu> sModerationMenus;
+
+void refreshModerationMenus()
+{
+    if (LLApp::isExiting() || gDisconnected)
+        return;
+    // Capacity/disconnect failures can complete a lookup synchronously during arrange.
+    static bool refreshing = false;
+    if (refreshing)
+        return;
+    refreshing = true;
+    std::vector<LLHandle<LLView>> visible_contexts;
+    for (auto it = sModerationMenus.begin(); it != sModerationMenus.end(); )
+    {
+        auto* menu = dynamic_cast<LLMenuGL*>(it->menu.get());
+        if (!menu || it->session != gAgent.getSessionID())
+        {
+            it = sModerationMenus.erase(it);
+            continue;
+        }
+        if (!menu->getVisible())
+        {
+            ++it;
+            continue; // An old, closed Nearby menu must not generate lookup traffic.
+        }
+        if (LLView* manage = menu->findChildView("manage_menu", false))
+            manage->setVisible(SLAvatarActions::canFreezeEject(*it->ids) ||
+                               SLAvatarActions::canManageAvatarsEstate(*it->ids));
+        menu->needsArrange();
+        if (dynamic_cast<LLContextMenu*>(menu))
+            visible_contexts.push_back(menu->getHandle());
+        ++it;
+    }
+    // Context menus evaluate visibility on arrange, not on every frame. Refresh the
+    // existing open avatar/radar menu; never close/reopen it or change its selection.
+    if (gMenuHolder)
+    {
+        for (LLView* child : *gMenuHolder->getChildList())
+        {
+            auto* menu = dynamic_cast<LLMenuGL*>(child);
+            if (!menu || (!menu->findChildView("eject", false) && !menu->findChildView("Eject...", false)))
+                continue;
+            menu->needsArrange();
+            if (auto* context = dynamic_cast<LLContextMenu*>(child); context && context->getVisible())
+                visible_contexts.push_back(context->getHandle());
+        }
+        // Revealing rows changes popup dimensions. Arrange the existing popup and
+        // keep it inside the same viewport, without reopening or changing selection.
+        // Use weak handles: arranging can create/remove spillover menu children.
+        const LLRect bounds = gMenuHolder->getMenuRect();
+        for (const auto& handle : visible_contexts)
+        {
+            auto* context = dynamic_cast<LLContextMenu*>(handle.get());
+            if (!context || !context->getVisible())
+                continue;
+            context->arrangeAndClear();
+            LLRect rect = context->getRect();
+            S32 delta_x = llmin(0, bounds.mRight - rect.mRight);
+            rect.translate(delta_x, 0);
+            delta_x += llmax(0, bounds.mLeft - rect.mLeft);
+            S32 delta_y = llmax(0, bounds.mBottom - rect.mBottom);
+            rect.translate(0, delta_y);
+            delta_y += llmin(0, bounds.mTop - rect.mTop);
+            context->translate(delta_x, delta_y);
+        }
+    }
+    refreshing = false;
+}
+
+bool moderationTarget(const LLUUID& id, LLSD& target, const char** failure = nullptr)
+{
+    if (id.isNull() || id == gAgent.getID() || gDisconnected || LLApp::isExiting())
+    {
+        if (failure)
+            *failure = id.isNull() ? "null-target" : id == gAgent.getID() ? "self-target" :
+                LLApp::isExiting() ? "application-exiting" : "disconnected";
+        return false;
+    }
+    LLWorld::region_gpos_map_t avatars;
+    LLWorld::getInstance()->getAvatars(&avatars);
+    auto it = avatars.find(id);
+    if (it == avatars.end() || !it->second.first)
+    {
+        if (failure)
+            *failure = "target-unavailable";
+        return false;
+    }
+    LLViewerRegion* region = it->second.first;
+    const LLVector3 pos = region->getPosRegionFromGlobal(it->second.second);
+    if (!std::isfinite(pos.mV[VX]) || !std::isfinite(pos.mV[VY]) ||
+        pos.mV[VX] < 0.f || pos.mV[VY] < 0.f ||
+        pos.mV[VX] >= region->getWidth() || pos.mV[VY] >= region->getWidth())
+    {
+        if (failure)
+            *failure = "target-position-invalid";
+        return false;
+    }
+    target["id"] = id;
+    target["region_id"] = region->getRegionID();
+    target["region_owner"] = region->getOwner();
+    target["x"] = S32(pos.mV[VX] / PARCEL_GRID_STEP_METERS);
+    target["y"] = S32(pos.mV[VY] / PARCEL_GRID_STEP_METERS);
+    return true;
+}
+
+bool sameModerationTarget(const LLSD& target, bool parcel, const char** failure = nullptr)
+{
+    LLSD current;
+    if (!moderationTarget(target["id"].asUUID(), current, failure))
+        return false;
+    const char* reason = nullptr;
+    if (current["region_id"] != target["region_id"])
+        reason = "target-region-changed";
+    else if (current["region_owner"] != target["region_owner"])
+        reason = "estate-owner-changed";
+    else if (parcel && (current["x"] != target["x"] || current["y"] != target["y"]))
+        reason = "target-cell-changed";
+    if (reason && failure)
+        *failure = reason;
+    return !reason;
+}
+
+bool parcelPower(const LLSD& identity, U64 power)
+{
+    const LLUUID owner = identity["owner_id"].asUUID();
+    return identity.isDefined() && identity["local_id"].asInteger() >= 0 &&
+        (gAgent.isGodlike() || (owner.notNull() && (owner == gAgent.getID() ||
+         (identity["group_owned"].asBoolean() && gAgent.hasPowerInGroup(owner, power)))));
+}
+
+bool canParcelEject(const LLSD& target, const LLSD& identity)
+{
+    LLViewerRegion* region = LLWorld::getInstance()->getRegionFromID(target["region_id"].asUUID());
+    return region && (region->canManageEstate() || parcelPower(identity, GP_LAND_ADMIN));
+}
+
+LLVector3d moderationPosition(const LLSD& target, LLViewerRegion* region)
+{
+    // Query the centre of the target's 4 m parcel cell, never a boundary.
+    return region->getPosGlobalFromRegion(LLVector3(
+        (target["x"].asInteger() + .5f) * PARCEL_GRID_STEP_METERS,
+        (target["y"].asInteger() + .5f) * PARCEL_GRID_STEP_METERS, 0.f));
+}
+
+LLSD menuParcelIdentity(const LLSD& target)
+{
+    static boost::signals2::scoped_connection overlay_connection(LLViewerParcelOverlay::setUpdateCallback(
+        [](const LLViewerRegion* changed)
+        {
+            for (auto it = sModerationParcels.begin(); it != sModerationParcels.end(); )
+            {
+                if (changed && std::get<0>(it->first) == changed->getRegionID())
+                    it = sModerationParcels.erase(it);
+                else
+                    ++it;
+            }
+            refreshModerationMenus();
+        }));
+    const F64 now = LLTimer::getTotalSeconds();
+    const LLUUID session = gAgent.getSessionID();
+    // Bound the table and free unused hints (including avatars that have left).
+    for (auto it = sModerationParcels.begin(); it != sModerationParcels.end(); )
+    {
+        const F64 lifetime = it->second.identity.isDefined() ? 120. : 10.;
+        if (std::get<2>(it->first) != session || now - it->second.requested_at > lifetime)
+            it = sModerationParcels.erase(it);
+        else
+            ++it;
+    }
+    const ModerationCell cell(target["region_id"].asUUID(), target["region_owner"].asUUID(), session,
+                              target["x"].asInteger(), target["y"].asInteger());
+    auto it = sModerationParcels.find(cell);
+    if (it != sModerationParcels.end())
+        return it->second.identity;
+    if (sModerationParcels.size() >= 64)
+    {
+        auto victim = sModerationParcels.end();
+        for (auto candidate = sModerationParcels.begin(); candidate != sModerationParcels.end(); ++candidate)
+            if (!candidate->second.pending && (victim == sModerationParcels.end() ||
+                candidate->second.requested_at < victim->second.requested_at))
+                victim = candidate;
+        if (victim == sModerationParcels.end())
+            return LLSD(); // An outstanding reply will refresh this same open menu.
+        sModerationParcels.erase(victim);
+    }
+    LLViewerRegion* region = LLWorld::getInstance()->getRegionFromID(target["region_id"].asUUID());
+    if (!region)
+        return LLSD();
+    sModerationParcels[cell] = {LLSD(), now};
+    if (sPendingMenuPermissions++ == 0)
+        sMenuPermissionWait = LLNotificationsUtil::add("AvatarModerationChecking");
+    LLViewerParcelMgr::instance().requestParcelIdentity(moderationPosition(target, region),
+        [cell, now, session](const LLSD& identity)
+        {
+            if (--sPendingMenuPermissions == 0)
+            {
+                if (!LLApp::isExiting())
+                    LLNotificationsUtil::cancel(sMenuPermissionWait);
+                sMenuPermissionWait.reset();
+            }
+            auto entry = sModerationParcels.find(cell);
+            if (entry != sModerationParcels.end() &&
+                entry->second.requested_at == now && session == gAgent.getSessionID())
+            {
+                entry->second.identity = identity;
+                entry->second.pending = false;
+                // A failed request is cached too; do not retry on every pie frame.
+                refreshModerationMenus();
+            }
+        });
+    return LLSD();
+}
+
+void logModerationAbort(const char* reason, size_t count = 0)
+{
+    LL_INFOS("Moderation") << "Action not sent: reason=" << reason << ", targets=" << count << LL_ENDL;
+}
+
+void moderationUnavailable(const char* reason, size_t count = 0)
+{
+    logModerationAbort(reason, count);
+    if (!LLApp::isExiting())
+        LLNotificationsUtil::add("AvatarModerationUnavailable");
+}
+
+bool moderationSession(const LLSD& payload)
+{
+    const char* reason = nullptr;
+    if (LLApp::isExiting())
+        reason = "application-exiting";
+    else if (gDisconnected)
+        reason = "disconnected";
+    else if (!gMessageSystem)
+        reason = "message-system-unavailable";
+    else if (payload["agent_id"].asUUID() != gAgent.getID())
+        reason = "agent-changed";
+    else if (payload["session_id"].asUUID() != gAgent.getSessionID())
+        reason = "session-changed";
+    if (reason)
+        logModerationAbort(reason, payload["targets"].size());
+    return !reason;
+}
+
+bool moderationTargets(const uuid_vec_t& ids, LLSD& payload, bool parcel)
+{
+    if (ids.empty() || ids.size() > 64 || gDisconnected || !gMessageSystem)
+    {
+        logModerationAbort(ids.empty() ? "empty-selection" : ids.size() > 64 ? "selection-limit" : "disconnected", ids.size());
+        return false;
+    }
+    payload["targets"] = LLSD::emptyArray();
+    payload["agent_id"] = gAgent.getID();
+    payload["session_id"] = gAgent.getSessionID();
+    std::set<LLUUID> seen;
+    for (const LLUUID& id : ids)
+    {
+        LLSD target;
+        const char* reason = "estate-authority-unavailable";
+        if (!moderationTarget(id, target, &reason) || (!parcel && !SLAvatarActions::canManageAvatarsEstate(id)))
+        {
+            logModerationAbort(reason, ids.size());
+            return false;
+        }
+        if (seen.insert(id).second)
+            payload["targets"].append(target);
+    }
+    return true;
+}
+
+// Fetch all parcels before proceeding, so a mixed selection cannot act on a hidden subset.
+void lookupModerationParcels(LLSD payload, std::function<void(const LLSD&)> completion)
+{
+    struct Batch
+    {
+        LLSD payload;
+        size_t remaining;
+        const char* reason = nullptr;
+        LLNotificationPtr waiting;
+    };
+    auto batch = std::make_shared<Batch>();
+    batch->payload = payload;
+    batch->remaining = payload["targets"].size();
+    if (!batch->remaining)
+    {
+        logModerationAbort("empty-confirmed-selection");
+        return;
+    }
+    batch->waiting = LLNotificationsUtil::add("AvatarModerationChecking");
+    for (size_t i = 0; i < payload["targets"].size(); ++i)
+    {
+        LLSD target = payload["targets"][i];
+        LLSD current;
+        const bool available = sameModerationTarget(target, false) &&
+            moderationTarget(target["id"].asUUID(), current);
+        if (available)
+        {
+            // Walking within the confirmed parcel is fine. Query the current cell and
+            // compare its identity with the confirmed parcel, rather than the old position.
+            if (target.has("parcel"))
+                current["parcel"] = target["parcel"];
+            target = current;
+            batch->payload["targets"][i] = target;
+        }
+        LLViewerRegion* region = available
+            ? LLWorld::getInstance()->getRegionFromID(target["region_id"].asUUID()) : nullptr;
+        auto received = [batch, i, target, completion](const LLSD& identity)
+        {
+            const char* mismatch = nullptr;
+            if (!identity.isDefined())
+                batch->reason = "parcel-identity-unavailable";
+            else if (!sameModerationTarget(target, true, &mismatch))
+                batch->reason = mismatch;
+            else if (!canParcelEject(target, identity))
+                batch->reason = "parcel-authority-lost";
+            else if (target.has("parcel") && identity != target["parcel"])
+                batch->reason = "parcel-identity-changed";
+            batch->payload["targets"][i]["parcel"] = identity;
+            if (--batch->remaining == 0)
+            {
+                // Recheck the entire selection after the last reply, including targets that
+                // moved or lost authority while the other parcel requests were in flight.
+                for (const LLSD& entry : llsd::inArray(batch->payload["targets"]))
+                {
+                    if (!sameModerationTarget(entry, true, &mismatch))
+                        batch->reason = mismatch;
+                    else if (!canParcelEject(entry, entry["parcel"]))
+                        batch->reason = "parcel-authority-lost-during-batch";
+                }
+                if (!LLApp::isExiting())
+                    LLNotificationsUtil::cancel(batch->waiting);
+                if (!moderationSession(batch->payload))
+                    batch->reason = "session-invalid";
+                if (!batch->reason)
+                    completion(batch->payload);
+                else
+                    moderationUnavailable(batch->reason, batch->payload["targets"].size());
+            }
+        };
+        if (region)
+            LLViewerParcelMgr::instance().requestParcelIdentity(moderationPosition(target, region), received);
+        else
+            received(LLSD());
+    }
+}
+
+std::string moderationNames(const LLSD& payload)
+{
+    std::string names;
+    for (const LLSD& target : llsd::inArray(payload["targets"]))
+    {
+        if (!names.empty())
+            names += "\n";
+        const LLUUID id = target["id"].asUUID();
+        names += LLSLURL("agent", id,
+            RlvActions::canShowName(RlvActions::SNC_DEFAULT, id) ? "about" : "rlvanonym").getSLURLString();
+    }
+    return names;
+}
+}
 
  // Flags for kick message
 const U32 KICK_FLAGS_DEFAULT = 0x0;
@@ -277,8 +670,8 @@ void SLAvatarActions::camToAvatar(const LLUUID& avatar_id)
             if (gAgentCamera.getFocusOnAvatar() || gAgentCamera.getFocusObject().notNull() ||
                 dist_vec_squared(gAgentCamera.getFocusTargetGlobal(), target_global) > 0.01)
                 return true;
-            LLViewerObject* objectp = gObjectList.findObject(avatar_id);
-            if (objectp && objectp->isAvatar())
+            LLViewerObject* loaded_avatar = gObjectList.findObject(avatar_id);
+            if (loaded_avatar && loaded_avatar->isAvatar())
             {
                 handle_zoom_to_object(avatar_id);
                 return true;
@@ -337,6 +730,20 @@ void SLAvatarActions::reportAbuse(const LLUUID& idAgent)
 }
 
 // static
+void SLAvatarActions::watchModerationMenu(LLMenuGL* menu, const uuid_vec_t& ids)
+{
+    sModerationMenus.erase(std::remove_if(sModerationMenus.begin(), sModerationMenus.end(),
+        [](const ModerationMenu& entry) { return entry.menu.isDead(); }), sModerationMenus.end());
+    if (sModerationMenus.size() >= 16)
+        sModerationMenus.erase(sModerationMenus.begin());
+    sModerationMenus.push_back({menu->getHandle(), std::make_shared<const uuid_vec_t>(ids), gAgent.getSessionID()});
+    // createMenu runs before show(), so establish first-open visibility here.
+    if (LLView* manage = menu->findChildView("manage_menu", false))
+        manage->setVisible(canFreezeEject(ids) || canManageAvatarsEstate(ids));
+    menu->needsArrange();
+}
+
+// static
 bool SLAvatarActions::canFreezeEject(const LLUUID& avatar_id)
 {
     if (avatar_id.isNull())
@@ -349,63 +756,47 @@ bool SLAvatarActions::canFreezeEject(const LLUUID& avatar_id)
 // static
 bool SLAvatarActions::canFreezeEject(const uuid_vec_t& ids)
 {
-    if (ids.empty())
+    if (ids.empty() || ids.size() > 64)
         return false;
-
-    if (std::find(ids.cbegin(), ids.cend(), gAgentID) != ids.cend())
-        return false;
-
-    // Gods can always freeze and eject
-    if (gAgent.isGodlike())
-        return true;
-
-    LLWorld::region_gpos_map_t idRegions;
-    LLWorld::getInstance()->getAvatars(&idRegions);
-
-    auto ret = false;
-
-    for (const auto& id : ids)
+    bool allowed = true;
+    for (const LLUUID& id : ids)
     {
-        if (id.isNull())
+        LLSD target;
+        if (!moderationTarget(id, target))
+            return false;
+        LLViewerRegion* region = LLWorld::getInstance()->getRegionFromID(target["region_id"].asUUID());
+        if (!region)
+            return false;
+        // Personal ownership and estate authority are available without a parcel lookup.
+        const LLVector3 pos = region->getPosRegionFromGlobal(moderationPosition(target, region));
+        if (region->canManageEstate() || region->isOwnedSelf(pos))
             continue;
-        auto it = idRegions.find(id);
-        if (it != idRegions.cend())
+        // The overlay does not carry the owning group's UUID. On the agent's
+        // parcel, the exact group and its powers are already available synchronously.
+        LLViewerParcelMgr& parcels = LLViewerParcelMgr::instance();
+        const LLVector3d position = moderationPosition(target, region);
+        const LLParcel* parcel = parcels.getAgentParcel();
+        if (parcel && parcel->getRegionID() == region->getRegionID() && parcels.inAgentParcel(position))
         {
-            const LLViewerRegion* region = it->second.first;
-            const LLVector3d& pos_global = it->second.second;
-            if (region)
-            {
-                // Estate owners / managers can freeze
-                // Parcel owners can also freeze
-                LLParcelSelectionHandle selection = LLViewerParcelMgr::getInstance()->selectParcelAt(pos_global);
-                const LLParcel* parcel = selection->getParcel();
-                auto local_pos = region->getPosRegionFromGlobal(pos_global);
-
-                if ((region->getOwner() == gAgent.getID() || region->isEstateManager() || region->isOwnedSelf(local_pos))
-                    || (region->isOwnedGroup(local_pos) && parcel && LLViewerParcelMgr::getInstance()->isParcelOwnedByAgent(parcel, GP_LAND_ADMIN)))
-                {
-                    ret = true;
-                }
-                // We hit a false so bail out early in case of multi-select
-                if (!ret)
-                {
-                    break;
-                }
-                continue;
-            }
+            allowed &= parcel->getOwnerID() == gAgent.getID() || (parcel->getIsGroupOwned() &&
+                gAgent.hasPowerInGroup(parcel->getOwnerID(), GP_LAND_ADMIN));
+            continue;
         }
-        ret = false;
-        break;
+        // No requests for unrelated residents' land. Rights in another group can
+        // only justify resolving this unknown group, never exposing an action.
+        const bool candidate = region->isOwnedGroup(pos) &&
+            std::any_of(gAgent.mGroups.begin(), gAgent.mGroups.end(), [](const LLGroupData& group)
+                { return gAgent.hasPowerInGroup(group.mID, GP_LAND_ADMIN); });
+        if (!candidate)
+            return false;
+        allowed &= canParcelEject(target, menuParcelIdentity(target));
     }
-    return ret;
+    return allowed;
 }
 
 // static
 void SLAvatarActions::parcelFreeze(const LLUUID& avatar_id)
 {
-    if (avatar_id.isNull())
-        return;
-
     uuid_vec_t ids = { avatar_id };
     return parcelFreeze(ids);
 }
@@ -413,37 +804,24 @@ void SLAvatarActions::parcelFreeze(const LLUUID& avatar_id)
 // static
 void SLAvatarActions::parcelFreeze(const uuid_vec_t& ids)
 {
-    if (ids.empty())
-        return;
-
     LLSD payload;
-    payload["avatar_ids"] = LLSD::emptyArray();
-    std::string avatars;
-    for (auto id : ids)
+    if (!moderationTargets(ids, payload, true))
     {
-        if (id.notNull())
-        {
-            payload["avatar_ids"].append(id);
-
-            if (!avatars.empty())
-                avatars += "\n";
-
-            avatars += LLSLURL("agent", id, "about").getSLURLString();
-        }
+        moderationUnavailable("selection-invalid", ids.size());
+        return;
     }
-
-    LLSD args;
-    args["AVATAR_NAMES"] = avatars;
-
-    LLNotificationsUtil::add((payload["avatar_ids"].size() == 1) ? "FreezeAvatar" : "FreezeAvatarMultiple", args, payload, handleParcelFreeze);
+    lookupModerationParcels(payload, [](const LLSD& checked)
+    {
+        LLSD args;
+        args["AVATAR_NAMES"] = moderationNames(checked);
+        LLNotificationsUtil::add(checked["targets"].size() == 1 ? "FreezeAvatar" : "FreezeAvatarMultiple",
+                                 args, checked, handleParcelFreeze);
+    });
 }
 
 // static
 void SLAvatarActions::parcelEject(const LLUUID& avatar_id)
 {
-    if (avatar_id.isNull())
-        return;
-
     uuid_vec_t ids = { avatar_id };
     return parcelEject(ids);
 }
@@ -451,62 +829,29 @@ void SLAvatarActions::parcelEject(const LLUUID& avatar_id)
 // static
 void SLAvatarActions::parcelEject(const uuid_vec_t& ids)
 {
-    if (ids.empty())
-        return;
-
-    LLWorld::pos_map_t avatar_positions;
-    LLWorld::getInstance()->getAvatars(&avatar_positions);
-
     LLSD payload;
-    payload["avatar_ids"] = LLSD::emptyArray();
-    std::string avatars;
-    bool ban_enabled = false;
-    bool ban_killed = false;
-    for (auto id : ids)
+    if (!moderationTargets(ids, payload, true))
     {
-        if (id.notNull())
-        {
-            payload["avatar_ids"].append(id);
-
-            if (!ban_killed)
-            {
-                const auto& pos_it = avatar_positions.find(id);
-                if (pos_it != avatar_positions.cend())
-                {
-                    const auto& pos = pos_it->second;
-                    LLParcel* parcel = LLViewerParcelMgr::getInstance()->selectParcelAt(pos)->getParcel();
-                    if (parcel)
-                    {
-                        ban_enabled = LLViewerParcelMgr::getInstance()->isParcelOwnedByAgent(parcel, GP_LAND_MANAGE_BANNED);
-                        if (!ban_enabled)
-                        {
-                            ban_killed = true;
-                        }
-                    }
-                }
-            }
-
-            if (!avatars.empty())
-                avatars += "\n";
-
-            avatars += LLSLURL("agent", id, "about").getSLURLString();
-        }
+        moderationUnavailable("selection-invalid", ids.size());
+        return;
     }
-    payload["ban_enabled"] = ban_enabled;
-
-    LLSD args;
-    args["AVATAR_NAMES"] = avatars;
-    std::string notification;
-    bool is_single = (payload["avatar_ids"].size() == 1);
-    if (ban_enabled)
+    lookupModerationParcels(payload, [](const LLSD& checked)
     {
-        notification = is_single ? "EjectAvatarFullname" : "EjectAvatarMultiple";
-    }
-    else
-    {
-        notification = is_single ? "EjectAvatarFullnameNoBan" : "EjectAvatarMultipleNoBan";
-    }
-    LLNotificationsUtil::add(notification, args, payload, handleParcelEject);
+        LLSD confirmation = checked;
+        bool ban_enabled = true;
+        for (const LLSD& target : llsd::inArray(confirmation["targets"]))
+            ban_enabled &= parcelPower(target["parcel"], GP_LAND_MANAGE_BANNED);
+        confirmation["ban_enabled"] = ban_enabled;
+        LLSD args;
+        args["AVATAR_NAMES"] = moderationNames(confirmation);
+        // Existing single-resident translations still use the singular token.
+        args["AVATAR_NAME"] = args["AVATAR_NAMES"];
+        const bool single = confirmation["targets"].size() == 1;
+        const std::string notification = ban_enabled
+            ? (single ? "EjectAvatarFullname" : "EjectAvatarMultiple")
+            : (single ? "EjectAvatarFullnameNoBan" : "EjectAvatarMultipleNoBan");
+        LLNotificationsUtil::add(notification, args, confirmation, handleParcelEject);
+    });
 }
 
 // static
@@ -522,54 +867,23 @@ bool SLAvatarActions::canManageAvatarsEstate(const LLUUID& avatar_id)
 // static
 bool SLAvatarActions::canManageAvatarsEstate(const uuid_vec_t& ids)
 {
-    if (ids.empty())
+    if (ids.empty() || ids.size() > 64)
         return false;
-
-    if (std::find(ids.cbegin(), ids.cend(), gAgentID) != ids.cend())
-        return false;
-
-    // Gods can always estate manage
-    if (gAgent.isGodlike())
-        return true;
-
-    LLWorld::region_gpos_map_t idRegions;
-    LLWorld::getInstance()->getAvatars(&idRegions);
-
-    auto ret = false;
-
-    for (const auto& id : ids)
+    for (const LLUUID& id : ids)
     {
-        if (id.isNull())
-            continue;
-        auto it = idRegions.find(id);
-        if (it != idRegions.cend())
-        {
-            auto region = it->second.first;
-            if (region)
-            {
-                const auto& owner = region->getOwner();
-                // Can't manage the estate owner!
-                if (owner == id)
-                {
-                    ret = false;
-                    break;
-                }
-                ret = (owner == gAgentID || region->canManageEstate());
-                continue;
-            }
-        }
-        ret = false;
-        break;
+        LLSD target;
+        if (!moderationTarget(id, target))
+            return false;
+        LLViewerRegion* region = LLWorld::getInstance()->getRegionFromID(target["region_id"].asUUID());
+        if (!region || region->getOwner() == id || !region->canManageEstate())
+            return false;
     }
-    return ret;
+    return true;
 }
 
 // static
 void SLAvatarActions::estateTeleportHome(const LLUUID& avatar_id)
 {
-    if (avatar_id.isNull())
-        return;
-
     uuid_vec_t ids = { avatar_id };
     estateTeleportHome(ids);
 }
@@ -577,37 +891,21 @@ void SLAvatarActions::estateTeleportHome(const LLUUID& avatar_id)
 // static
 void SLAvatarActions::estateTeleportHome(const uuid_vec_t& ids)
 {
-    if (ids.empty())
-        return;
-
     LLSD payload;
-    payload["avatar_ids"] = LLSD::emptyArray();
-    std::string avatars;
-    for (auto id : ids)
+    if (!moderationTargets(ids, payload, false))
     {
-        if (id.notNull())
-        {
-            payload["avatar_ids"].append(id);
-
-            if (!avatars.empty())
-                avatars += "\n";
-
-            avatars += LLSLURL("agent", id, "about").getSLURLString();
-        }
+        moderationUnavailable("selection-invalid", ids.size());
+        return;
     }
-
     LLSD args;
-    args["AVATAR_NAMES"] = avatars;
-
-    LLNotificationsUtil::add((payload["avatar_ids"].size() == 1) ? "EstateTeleportHomeSingle" : "EstateTeleportHomeMultiple", args, payload, handleEstateTeleportHome);
+    args["AVATAR_NAMES"] = moderationNames(payload);
+    LLNotificationsUtil::add(payload["targets"].size() == 1 ? "EstateTeleportHomeSingle" : "EstateTeleportHomeMultiple",
+                             args, payload, handleEstateTeleportHome);
 }
 
 // static
 void SLAvatarActions::estateKick(const LLUUID& avatar_id)
 {
-    if (avatar_id.isNull())
-        return;
-
     uuid_vec_t ids = { avatar_id };
     estateKick(ids);
 }
@@ -615,29 +913,16 @@ void SLAvatarActions::estateKick(const LLUUID& avatar_id)
 // static
 void SLAvatarActions::estateKick(const uuid_vec_t& ids)
 {
-    if (ids.empty())
-        return;
-
     LLSD payload;
-    payload["avatar_ids"] = LLSD::emptyArray();
-    std::string avatars;
-    for (auto id : ids)
+    if (!moderationTargets(ids, payload, false))
     {
-        if (id.notNull())
-        {
-            payload["avatar_ids"].append(id);
-
-            if (!avatars.empty())
-                avatars += "\n";
-
-            avatars += LLSLURL("agent", id, "about").getSLURLString();
-        }
+        moderationUnavailable("selection-invalid", ids.size());
+        return;
     }
-
     LLSD args;
-    args["AVATAR_NAMES"] = avatars;
-
-    LLNotificationsUtil::add((payload["avatar_ids"].size() == 1) ? "EstateKickSingle" : "EstateKickMultiple", args, payload, handleEstateKick);
+    args["AVATAR_NAMES"] = moderationNames(payload);
+    LLNotificationsUtil::add(payload["targets"].size() == 1 ? "EstateKickSingle" : "EstateKickMultiple",
+                             args, payload, handleEstateKick);
 }
 
 // static
@@ -711,6 +996,7 @@ void SLAvatarActions::godFreeze(const LLUUID& id)
     payload["avatar_id"] = id;
     LLNotifications::instance().add("FreezeUser", args, payload, handleGodKick);
 }
+
 // static
 void SLAvatarActions::godUnfreeze(const LLUUID& id)
 {
@@ -738,101 +1024,116 @@ void SLAvatarActions::godKick(const LLUUID& id)
 // static
 bool SLAvatarActions::handleParcelFreeze(const LLSD& notification, const LLSD& response)
 {
-    S32 option = LLNotification::getSelectedOption(notification, response);
-
-    if (0 == option || 1 == option)
+    const S32 option = LLNotificationsUtil::getSelectedOption(notification, response);
+    const LLSD payload = notification["payload"];
+    if (option != 0 && option != 1)
     {
-        U32 flags = 0x0;
-        if (1 == option)
+        logModerationAbort(option < 0 ? "confirmation-dismissed" : "confirmation-cancelled", payload["targets"].size());
+        return false;
+    }
+    if (!moderationSession(payload))
+        return false;
+    lookupModerationParcels(payload, [option](const LLSD& checked)
+    {
+        for (const LLSD& target : llsd::inArray(checked["targets"]))
         {
-            // unfreeze
-            flags |= 0x1;
-        }
-        const auto& avatar_ids = notification["payload"]["avatar_ids"];
-        for (LLSD::array_const_iterator it = avatar_ids.beginArray(), it_end = avatar_ids.endArray(); it != it_end; ++it)
-        {
-            const auto& id = it->asUUID();
+            LLViewerRegion* region = LLWorld::getInstance()->getRegionFromID(target["region_id"].asUUID());
             LLMessageSystem* msg = gMessageSystem;
-
             msg->newMessageFast(_PREHASH_FreezeUser);
             msg->nextBlockFast(_PREHASH_AgentData);
             msg->addUUIDFast(_PREHASH_AgentID, gAgent.getID());
             msg->addUUIDFast(_PREHASH_SessionID, gAgent.getSessionID());
             msg->nextBlockFast(_PREHASH_Data);
-            msg->addUUIDFast(_PREHASH_TargetID, id);
-            msg->addU32Fast(_PREHASH_Flags, flags);
-            gAgent.sendReliableMessage();
+            msg->addUUIDFast(_PREHASH_TargetID, target["id"].asUUID());
+            msg->addU32Fast(_PREHASH_Flags, option == 1 ? 0x1 : 0x0);
+            msg->sendReliable(region->getHost());
         }
-    }
+    });
     return false;
 }
 
 // static
 bool SLAvatarActions::handleParcelEject(const LLSD& notification, const LLSD& response)
 {
-    S32 option = LLNotificationsUtil::getSelectedOption(notification, response);
-    if (2 == option)
+    const S32 option = LLNotificationsUtil::getSelectedOption(notification, response);
+    const LLSD payload = notification["payload"];
+    // No-ban dialogs use option 1 for Cancel; full dialogs use it for Eject and Ban.
+    if (option != 0 && !(option == 1 && payload["ban_enabled"].asBoolean()))
     {
+        logModerationAbort(option < 0 ? "confirmation-dismissed" : "confirmation-cancelled", payload["targets"].size());
         return false;
     }
+    if (!moderationSession(payload))
+        return false;
 
-    bool ban_enabled = notification["payload"]["ban_enabled"].asBoolean();
-    const auto& avatar_ids = notification["payload"]["avatar_ids"];
-    for (LLSD::array_const_iterator it = avatar_ids.beginArray(), it_end = avatar_ids.endArray(); it != it_end; ++it)
+    lookupModerationParcels(payload, [option](const LLSD& checked)
     {
-        const auto& id = it->asUUID();
-        U32 flags = (1 == option && ban_enabled) ? 0x1 : 0x0;
-        LLMessageSystem* msg = gMessageSystem;
-        msg->newMessageFast(_PREHASH_EjectUser);
-        msg->nextBlockFast(_PREHASH_AgentData);
-        msg->addUUIDFast(_PREHASH_AgentID, gAgent.getID());
-        msg->addUUIDFast(_PREHASH_SessionID, gAgent.getSessionID());
-        msg->nextBlockFast(_PREHASH_Data);
-        msg->addUUIDFast(_PREHASH_TargetID, id);
-        msg->addU32Fast(_PREHASH_Flags, flags);
-        gAgent.sendReliableMessage();
-    }
+        if (option == 1)
+        {
+            for (const LLSD& target : llsd::inArray(checked["targets"]))
+            {
+                if (!parcelPower(target["parcel"], GP_LAND_MANAGE_BANNED))
+                {
+                    moderationUnavailable("ban-authority-lost", checked["targets"].size());
+                    return; // Never silently downgrade an explicit ban to an eject.
+                }
+            }
+        }
+        for (const LLSD& target : llsd::inArray(checked["targets"]))
+        {
+            LLViewerRegion* region = LLWorld::getInstance()->getRegionFromID(target["region_id"].asUUID());
+            LLMessageSystem* msg = gMessageSystem;
+            msg->newMessageFast(_PREHASH_EjectUser);
+            msg->nextBlockFast(_PREHASH_AgentData);
+            msg->addUUIDFast(_PREHASH_AgentID, gAgent.getID());
+            msg->addUUIDFast(_PREHASH_SessionID, gAgent.getSessionID());
+            msg->nextBlockFast(_PREHASH_Data);
+            msg->addUUIDFast(_PREHASH_TargetID, target["id"].asUUID());
+            msg->addU32Fast(_PREHASH_Flags, option == 1 ? 0x1 : 0x0);
+            msg->sendReliable(region->getHost());
+        }
+    });
     return false;
 }
 
 // static
 bool SLAvatarActions::handleEstateTeleportHome(const LLSD& notification, const LLSD& response)
 {
-    S32 option = LLNotification::getSelectedOption(notification, response);
-
-    if (option == 0)
+    if (LLNotificationsUtil::getSelectedOption(notification, response) != 0)
     {
-        LLWorld::region_gpos_map_t idRegions;
-        LLWorld::getInstance()->getAvatars(&idRegions);
-        const auto& avatar_ids = notification["payload"]["avatar_ids"];
-        for (LLSD::array_const_iterator it = avatar_ids.beginArray(), it_end = avatar_ids.endArray(); it != it_end; ++it)
+        logModerationAbort("confirmation-cancelled-or-dismissed", notification["payload"]["targets"].size());
+        return false;
+    }
+    const LLSD& payload = notification["payload"];
+    if (!moderationSession(payload) || !payload["targets"].size())
+        return false;
+    for (const LLSD& target : llsd::inArray(payload["targets"]))
+    {
+        const char* reason = "estate-authority-lost";
+        if (!sameModerationTarget(target, false, &reason) ||
+            !canManageAvatarsEstate(target["id"].asUUID()))
         {
-            const auto& id = it->asUUID();
-            LLViewerRegion* regionp = nullptr;
-            auto idreg_it = idRegions.find(id);
-            if (idreg_it != idRegions.cend())
-            {
-                regionp = idreg_it->second.first;
-            }
-
-            if (!regionp)
-                continue;
-
-            LLMessageSystem* msg = gMessageSystem;
-            msg->newMessageFast(_PREHASH_EstateOwnerMessage);
-            msg->nextBlockFast(_PREHASH_AgentData);
-            msg->addUUIDFast(_PREHASH_AgentID, gAgent.getID());
-            msg->addUUIDFast(_PREHASH_SessionID, gAgent.getSessionID());
-            msg->addUUIDFast(_PREHASH_TransactionID, LLUUID::null); //not used
-            msg->nextBlockFast(_PREHASH_MethodData);
-            msg->addStringFast(_PREHASH_Method, "teleporthomeuser");
-            msg->addUUIDFast(_PREHASH_Invoice, LLUUID::null);
-            msg->nextBlockFast(_PREHASH_ParamList);
-            msg->addStringFast(_PREHASH_Parameter, gAgent.getID().asString().c_str());
-            msg->nextBlockFast(_PREHASH_ParamList);
-            msg->addStringFast(_PREHASH_Parameter, id.asString().c_str());
-            msg->sendReliable(regionp->getHost());
+            moderationUnavailable(reason, payload["targets"].size());
+            return false;
         }
+    }
+    for (const LLSD& target : llsd::inArray(payload["targets"]))
+    {
+        LLViewerRegion* region = LLWorld::getInstance()->getRegionFromID(target["region_id"].asUUID());
+        LLMessageSystem* msg = gMessageSystem;
+        msg->newMessageFast(_PREHASH_EstateOwnerMessage);
+        msg->nextBlockFast(_PREHASH_AgentData);
+        msg->addUUIDFast(_PREHASH_AgentID, gAgent.getID());
+        msg->addUUIDFast(_PREHASH_SessionID, gAgent.getSessionID());
+        msg->addUUIDFast(_PREHASH_TransactionID, LLUUID::null);
+        msg->nextBlockFast(_PREHASH_MethodData);
+        msg->addStringFast(_PREHASH_Method, "teleporthomeuser");
+        msg->addUUIDFast(_PREHASH_Invoice, LLUUID::null);
+        msg->nextBlockFast(_PREHASH_ParamList);
+        msg->addStringFast(_PREHASH_Parameter, gAgent.getID().asString());
+        msg->nextBlockFast(_PREHASH_ParamList);
+        msg->addStringFast(_PREHASH_Parameter, target["id"].asUUID().asString());
+        msg->sendReliable(region->getHost());
     }
     return false;
 }
@@ -840,39 +1141,39 @@ bool SLAvatarActions::handleEstateTeleportHome(const LLSD& notification, const L
 // static
 bool SLAvatarActions::handleEstateKick(const LLSD& notification, const LLSD& response)
 {
-    S32 option = LLNotification::getSelectedOption(notification, response);
-
-    if (option == 0)
+    if (LLNotificationsUtil::getSelectedOption(notification, response) != 0)
     {
-        LLWorld::region_gpos_map_t idRegions;
-        LLWorld::getInstance()->getAvatars(&idRegions);
-        const auto& avatar_ids = notification["payload"]["avatar_ids"];
-        for (LLSD::array_const_iterator it = avatar_ids.beginArray(), it_end = avatar_ids.endArray(); it != it_end; ++it)
+        logModerationAbort("confirmation-cancelled-or-dismissed", notification["payload"]["targets"].size());
+        return false;
+    }
+    const LLSD& payload = notification["payload"];
+    if (!moderationSession(payload) || !payload["targets"].size())
+        return false;
+    for (const LLSD& target : llsd::inArray(payload["targets"]))
+    {
+        const char* reason = "estate-authority-lost";
+        if (!sameModerationTarget(target, false, &reason) ||
+            !canManageAvatarsEstate(target["id"].asUUID()))
         {
-            const auto& id = it->asUUID();
-            LLViewerRegion* regionp = nullptr;
-            auto idreg_it = idRegions.find(id);
-            if (idreg_it != idRegions.cend())
-            {
-                regionp = idreg_it->second.first;
-            }
-
-            if (!regionp)
-                continue;
-
-            LLMessageSystem* msg = gMessageSystem;
-            msg->newMessageFast(_PREHASH_EstateOwnerMessage);
-            msg->nextBlockFast(_PREHASH_AgentData);
-            msg->addUUIDFast(_PREHASH_AgentID, gAgent.getID());
-            msg->addUUIDFast(_PREHASH_SessionID, gAgent.getSessionID());
-            msg->addUUIDFast(_PREHASH_TransactionID, LLUUID::null); //not used
-            msg->nextBlockFast(_PREHASH_MethodData);
-            msg->addStringFast(_PREHASH_Method, "kickestate");
-            msg->addUUIDFast(_PREHASH_Invoice, LLUUID::null);
-            msg->nextBlockFast(_PREHASH_ParamList);
-            msg->addStringFast(_PREHASH_Parameter, id.asString().c_str());
-            msg->sendReliable(regionp->getHost());
+            moderationUnavailable(reason, payload["targets"].size());
+            return false;
         }
+    }
+    for (const LLSD& target : llsd::inArray(payload["targets"]))
+    {
+        LLViewerRegion* region = LLWorld::getInstance()->getRegionFromID(target["region_id"].asUUID());
+        LLMessageSystem* msg = gMessageSystem;
+        msg->newMessageFast(_PREHASH_EstateOwnerMessage);
+        msg->nextBlockFast(_PREHASH_AgentData);
+        msg->addUUIDFast(_PREHASH_AgentID, gAgent.getID());
+        msg->addUUIDFast(_PREHASH_SessionID, gAgent.getSessionID());
+        msg->addUUIDFast(_PREHASH_TransactionID, LLUUID::null);
+        msg->nextBlockFast(_PREHASH_MethodData);
+        msg->addStringFast(_PREHASH_Method, "kickestate");
+        msg->addUUIDFast(_PREHASH_Invoice, LLUUID::null);
+        msg->nextBlockFast(_PREHASH_ParamList);
+        msg->addStringFast(_PREHASH_Parameter, target["id"].asUUID().asString());
+        msg->sendReliable(region->getHost());
     }
     return false;
 }

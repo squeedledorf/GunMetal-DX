@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<!-- <GMDX> Update download progress (slupdater.cpp). Closing only hides it: the download carries
+     on and still asks before installing. Cancel stops it; the next "Download and install" resumes. -->
+<floater
+ can_close="true"
+ can_minimize="false"
+ can_resize="false"
+ height="100"
+ layout="topleft"
+ name="floater_gmdx_update_download"
+ save_rect="true"
+ single_instance="true"
+ title="GunMetal-DX update"
+ width="340">
+    <string name="downloading">Downloading GunMetal-DX [VERSION]: [DONE] of [TOTAL] MB</string>
+    <string name="verifying">Checking the download of GunMetal-DX [VERSION]...</string>
+    <text
+     name="status"
+     type="string"
+     length="1"
+     follows="left|top|right"
+     layout="topleft"
+     left="10"
+     top="26"
+     right="-10"
+     height="16">Starting the download...</text>
+    <progress_bar
+     name="progress"
+     follows="left|top|right"
+     layout="topleft"
+     left="10"
+     top_pad="6"
+     right="-10"
+     height="10" />
+    <button
+     name="cancel_btn"
+     follows="right|bottom"
+     layout="topleft"
+     right="-10"
+     bottom="-8"
+     height="23"
+     width="90"
+     label="Cancel" />
+</floater>

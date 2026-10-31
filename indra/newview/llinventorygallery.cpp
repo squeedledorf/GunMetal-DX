@@ -120,6 +120,15 @@ LLInventoryGallery::LLInventoryGallery(const LLInventoryGallery::Params& p)
     mThumbnailsObserver = new LLThumbnailsObserver();
     gInventory.addObserver(mThumbnailsObserver);
 
+    mFolderIconStyleConnection = gSavedSettings.getControl("InventorySystemFolderIconStyle")->getSignal()->connect(
+        [this](LLControlVariable*, const LLSD&, const LLSD&)
+        {
+            for (const auto& entry : mItemMap)
+            {
+                entry.second->refreshFolderIcon();
+            }
+        });
+
     mGestureObserver = new LLGalleryGestureObserver(this);
     LLGestureMgr::instance().addObserver(mGestureObserver);
 
@@ -2280,14 +2289,7 @@ bool LLInventoryGallery::isItemCopyable(const LLUUID & item_id)
     LLViewerInventoryItem* item = gInventory.getItem(item_id);
     if (item)
     {
-        // Can't copy worn objects.
-        // Worn objects are tied to their inworld conterparts
-        // Copy of modified worn object will return object with obsolete asset and inventory
-        if (get_is_item_worn(item_id))
-        {
-            return false;
-        }
-
+        // Worn items copy too (#1112), see LLItemBridge::isItemCopyable
         static LLCachedControl<bool> inventory_linking(gSavedSettings, "InventoryLinking", true);
         return (item->getIsLinkType() && inventory_linking)
             || item->getPermissions().allowCopyBy(gAgent.getID());
@@ -2863,6 +2865,26 @@ void LLInventoryGalleryItem::setType(LLAssetType::EType type, LLInventoryType::E
 
     getChild<LLIconCtrl>("item_type")->setValue(icon_name);
     getChild<LLIconCtrl>("link_overlay")->setVisible(is_link);
+}
+
+void LLInventoryGalleryItem::refreshFolderIcon()
+{
+    if (!mIsFolder)
+    {
+        return;
+    }
+    LLUUID folder_id = mUUID;
+    if (mIsLink)
+    {
+        if (const LLInventoryObject* obj = gInventory.getObject(mUUID))
+        {
+            folder_id = obj->getLinkedUUID();
+        }
+    }
+    if (const LLViewerInventoryCategory* category = gInventory.getCategory(folder_id))
+    {
+        getChild<LLIconCtrl>("item_type")->setValue(LLViewerFolderType::lookupIconName(category->getPreferredType()));
+    }
 }
 
 void LLInventoryGalleryItem::setFavorite(bool is_favorite)

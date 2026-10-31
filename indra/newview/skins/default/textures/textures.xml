@@ -165,6 +165,7 @@ with the same filename but different name
   <texture name="Command_Gestures_Icon"     file_name="toolbar_icons/gestures.png"     preload="true" vector_file="phosphor/hand-waving.svg" vector_color="IconColor" vector_box="0.000,0.056,1.000,1.000" />
   <texture name="Command_Weather_Icon"      file_name="toolbar_icons/weather.png"      preload="true" vector_file="phosphor/cloud-sun.svg" vector_color="#ADADAD" vector_box="0.111,0.056,0.944,1.000" />
   <texture name="Command_Grid_Status_Icon"  file_name="toolbar_icons/grid_status.png"  preload="true" vector_file="phosphor/pulse.svg" vector_color="IconColor" vector_box="0.100,0.100,0.900,0.900" />
+  <texture name="Command_GroupTitles_Icon"  file_name="toolbar_icons/group_titles.png" preload="true" vector_file="phosphor/tag.svg" vector_color="IconColor" vector_box="0.056,0.056,0.944,0.944" />
   <texture name="Command_HowTo_Icon"        file_name="toolbar_icons/howto.png"        preload="true" vector_file="phosphor/question.svg" vector_color="IconColor" vector_box="0.111,0.056,0.889,1.000" />
   <texture name="Command_Inventory_Icon"    file_name="toolbar_icons/inventory.png"    preload="true" vector_file="phosphor/backpack.svg" vector_color="IconColor" vector_box="0.000,0.111,0.944,0.944" />
   <texture name="Command_Photo_Studio_Icon" file_name="toolbar_icons/photo_studio.png" preload="true" vector_file="phosphor/aperture.svg" vector_color="#C5C5C5" />
@@ -271,12 +272,19 @@ with the same filename but different name
   <texture name="ForSale_Badge" file_name="icons/ForSale_Badge.png" preload="false" vector_file="phosphor/tag.svg" vector_color="#EA4D36E3" vector_box="0.031,0.031,0.984,0.984" />
   <texture name="ForwardArrow_Off" file_name="icons/ForwardArrow_Off.png" preload="false" vector_file="phosphor/arrow-right.svg" vector_color="IconColor@BF" vector_box="0.222,0.222,0.833,0.722" />
   <texture name="ForwardArrow_Press" file_name="icons/ForwardArrow_Press.png" preload="false" vector_file="phosphor/arrow-right.svg" vector_color="IconColor@80" vector_box="0.222,0.222,0.833,0.722" />
-  <!-- <SS:Skoomastream> custom crosshair (FSCustomCrosshair) -->
-  <texture name="FSCrosshairArrows"  file_name="fs_crosshair_arrows.png" preload="true" />
-  <texture name="FSCrosshairDot"  file_name="fs_crosshair_dot.png" preload="true" />
+  <!-- <SS:Skoomastream> custom crosshair (CombatFX, FSCustomCrosshair; GunMetal-DX) -->
+  <texture name="FSCrosshairArrows"  file_name="fs_crosshair_arrows.png" preload="false" />
+  <texture name="FSCrosshairDot"  file_name="fs_crosshair_dot.png" preload="false" />
   <!-- </SS:Skoomastream> -->
-  <!-- <GMDX> hit marker flash (FSHitMarkerEnabled) -->
-  <texture name="FSHitMarker"  file_name="fs_hitmarker.png" preload="true" />
+  <!-- <GMDX> hit marker flash (CombatFX, FSHitMarkerEnabled) -->
+  <texture name="FSHitMarker"  file_name="fs_hitmarker.png" preload="false" />
+  <!-- <GMDX> loadout folders' inventory icons (CombatFX; gmdxloadouts.h) -->
+  <texture name="GMDX_Inv_EquipmentClosed" file_name="icons/GMDX_Inv_EquipmentClosed.png" preload="false" />
+  <texture name="GMDX_Inv_EquipmentOpen" file_name="icons/GMDX_Inv_EquipmentOpen.png" preload="false" />
+  <texture name="GMDX_Inv_LoadoutsClosed" file_name="icons/GMDX_Inv_LoadoutsClosed.png" preload="false" />
+  <texture name="GMDX_Inv_LoadoutsOpen" file_name="icons/GMDX_Inv_LoadoutsOpen.png" preload="false" />
+  <texture name="GMDX_Inv_OutdatedClosed" file_name="icons/GMDX_Inv_OutdatedClosed.png" preload="false" />
+  <texture name="GMDX_Inv_OutdatedOpen" file_name="icons/GMDX_Inv_OutdatedOpen.png" preload="false" />
 
   <texture name="Generic_Experience" file_name="Blank.png" preload="false" />
   <texture name="Generic_Group" file_name="icons/Generic_Group.png" preload="false" vector_file="phosphor/users-three.svg" vector_color="IconColor" vector_box="0.100,0.100,0.900,0.900" />
@@ -299,6 +307,9 @@ with the same filename but different name
   <texture name="Home_Off" file_name="navbar/Home_Off.png" preload="false" vector_file="phosphor/house.svg" vector_color="IconColor@BF" vector_box="0.125,0.062,0.938,0.938" />
 	<texture name="Horizontal Drag Handle" file_name="widgets/horizontal_drag_handle.png" scale.left="8" scale.right="120" scale.bottom="1" scale.top="6" scale_type="scale_outer"/>
 
+  <!-- snapshot orientation swap (llsnapshotavatars.cpp; ported from GunMetal-DX, v0.3.0 cf5f1f4) -->
+  <texture name="Icon_Orientation_Portrait" file_name="icons/icn_orientation_portrait.png" preload="true" />
+  <texture name="Icon_Orientation_Landscape" file_name="icons/icn_orientation_landscape.png" preload="true" />
   <texture name="Icon_Close_Foreground" file_name="windows/Icon_Close_Foreground.png" preload="true" vector_file="phosphor/x.svg" vector_color="#979797" vector_box="0.250,0.188,0.688,0.688" />
   <texture name="Icon_Close_Press" file_name="windows/Icon_Close_Press.png" preload="true" vector_file="phosphor/x.svg" vector_color="#323232" vector_box="0.250,0.250,0.688,0.750" />
   <texture name="Icon_Close_Toast" file_name="windows/Icon_Close_Toast.png" preload="true" vector_file="phosphor/x-circle.svg" vector_color="#989898" />
@@ -335,9 +346,6 @@ with the same filename but different name
   <texture name="Icon_Restore_Press" file_name="windows/Icon_Restore_Press.png" preload="false" vector_file="phosphor/corners-out.svg" vector_color="#3B3B3B" vector_box="0.312,0.125,0.875,0.750" />
 
   <texture name="Icon_Snapshot" file_name="icons/snapshot_icon.png" preload="true" vector_file="phosphor/camera.svg" vector_color="IconColor@CA" vector_box="0.167,0.233,0.833,0.767" />
-  <!-- <GMDX> snapshot orientation (SoapStorm) -->
-  <texture name="Icon_Orientation_Portrait" file_name="icons/icn_orientation_portrait.png" preload="true" />
-  <texture name="Icon_Orientation_Landscape" file_name="icons/icn_orientation_landscape.png" preload="true" />
   
   <texture name="Icon_Use_Texture" file_name="icons/texture_icon.png" preload="true" vector_file="phosphor/image.svg" vector_color="IconColor@CC" vector_box="0.267,0.267,0.733,0.733" />
 
@@ -353,16 +361,103 @@ with the same filename but different name
   <texture name="Inspector_I" file_name="windows/Inspector_I.png" preload="false" vector_file="phosphor/info.svg" vector_color="IconAccentColor" />
 
   <texture name="Inv_Alpha" file_name="icons/Inv_Alpha.png" preload="false" vector_file="phosphor/checkerboard.svg" vector_color="#B7B7B7" vector_box="0.000,0.000,1.000,0.938" />
-  <texture name="Inv_Animation" file_name="icons/Inv_Animation.png" preload="false" vector_file="phosphor/person-simple-run.svg" vector_color="#B6C6CF" vector_box="0.000,0.062,1.000,1.000" />
+  <texture name="Inv_Animation" file_name="icons/Inv_Animation.png" preload="false" vector_file="phosphor/person-simple-run.svg" vector_color="#58C2D2" vector_box="0.000,0.062,1.000,1.000" />
   <texture name="Inv_BodyShape" file_name="icons/Inv_BodyShape.png" preload="false" vector_file="phosphor/person-simple.svg" vector_color="IconColor" />
   <texture name="Inv_CallingCard" file_name="icons/Inv_CallingCard.png" preload="false" vector_file="phosphor/identification-card.svg" vector_color="#A8A8A8" vector_box="0.000,0.188,1.000,0.875" />
-  <texture name="Inv_Clothing" file_name="icons/Inv_Clothing.png" preload="false" vector_file="phosphor/t-shirt.svg" vector_color="#FFEFE1" vector_box="0.000,0.000,1.000,0.938" />
+  <texture name="Inv_Clothing" file_name="icons/Inv_Clothing.png" preload="false" vector_file="phosphor/t-shirt.svg" vector_color="#DA8CE2" vector_box="0.000,0.000,1.000,0.938" />
   <texture name="Inv_Eye" file_name="icons/Inv_Eye.png" preload="false" vector_file="phosphor/eye.svg" vector_color="#C3A998" vector_box="0.000,0.188,1.000,0.875" />
   <texture name="Inv_Favorite_Star_Content" file_name="icons/Inv_Favorite_Star_Content.png" preload="false" vector_file="phosphor/star.svg" vector_color="#959595" vector_box="0.000,0.000,0.929,0.929" />
   <texture name="Inv_Favorite_Star_Full" file_name="icons/Inv_Favorite_Star_Full.png" preload="false" vector_file="phosphor/star.svg" vector_color="#B7B7B7" vector_box="0.071,0.071,0.929,0.929" />
   <texture name="Inv_FolderClosed" file_name="icons/Inv_FolderClosed.png" preload="false" vector_file="phosphor/folder.svg" vector_color="#F7DCAE" vector_box="0.000,0.062,1.000,1.000" />
   <texture name="Inv_FolderOpen" file_name="icons/Inv_FolderOpen.png" preload="false" vector_file="phosphor/folder-open.svg" vector_color="#EFD6A7" vector_box="0.000,0.000,1.000,0.938" />
-  <texture name="Inv_Gesture" file_name="icons/Inv_Gesture.png" preload="false" vector_file="phosphor/hand-waving.svg" vector_color="#D9BEA9" />
+  <!-- Typed folder textures use system-folder bitmaps in classic mode. The folder-style boxes
+       convert each SVG's ink bounds to the 256-unit viewBox: glyph scale 112/256, translated
+       to (72,92) closed or (72,104) open, so the loader's ink fitting preserves the composition. -->
+  <texture name="Inv_FolderFavoriteTypeClosed" file_name="icons/Inv_SysClosed.png" vector_file="phosphor/star.svg" vector_color="#F2B544" vector_box="0.062744,0.062544,0.937240,0.906159" />
+  <texture name="Inv_FolderFavoriteClosed" file_name="icons/Inv_SysClosed.png" vector_file="phosphor/folder.svg" vector_color="#F2B544" vector_box="0.093750,0.156250,0.906250,0.843750" vector_file2="phosphor/star.svg" vector_color2="#2A2622" vector_box2="0.308700,0.386738,0.691293,0.755820" />
+  <texture name="Inv_FolderFavoriteTypeOpen" file_name="icons/Inv_SysOpen.png" vector_file="phosphor/star.svg" vector_color="#F2B544" vector_box="0.062744,0.062544,0.937240,0.906159" />
+  <texture name="Inv_FolderFavoriteOpen" file_name="icons/Inv_SysOpen.png" vector_file="phosphor/folder-open.svg" vector_color="#F2B544" vector_box="0.093750,0.187500,0.968761,0.843750" vector_file2="phosphor/star.svg" vector_color2="#2A2622" vector_box2="0.308700,0.433613,0.691293,0.802695" />
+  <texture name="Inv_FolderCurrentOutfitTypeClosed" file_name="icons/Inv_SysClosed.png" vector_file="phosphor/person-arms-spread.svg" vector_color="#DA8CE2" vector_box="0.109366,0.031247,0.890779,0.937500" />
+  <texture name="Inv_FolderCurrentOutfitClosed" file_name="icons/Inv_SysClosed.png" vector_file="phosphor/folder.svg" vector_color="#DA8CE2" vector_box="0.093750,0.156250,0.906250,0.843750" vector_file2="phosphor/person-arms-spread.svg" vector_color2="#2A2622" vector_box2="0.329097,0.373045,0.670966,0.769531" />
+  <texture name="Inv_FolderCurrentOutfitTypeOpen" file_name="icons/Inv_SysOpen.png" vector_file="phosphor/person-arms-spread.svg" vector_color="#DA8CE2" vector_box="0.109366,0.031247,0.890779,0.937500" />
+  <texture name="Inv_FolderCurrentOutfitOpen" file_name="icons/Inv_SysOpen.png" vector_file="phosphor/folder-open.svg" vector_color="#DA8CE2" vector_box="0.093750,0.187500,0.968761,0.843750" vector_file2="phosphor/person-arms-spread.svg" vector_color2="#2A2622" vector_box2="0.329097,0.419920,0.670966,0.816406" />
+  <texture name="Inv_FolderMyOutfitsTypeClosed" file_name="icons/Inv_SysClosed.png" vector_file="phosphor/coat-hanger.svg" vector_color="#DA8CE2" vector_box="0.031363,0.125000,0.968754,0.781250" />
+  <texture name="Inv_FolderMyOutfitsClosed" file_name="icons/Inv_SysClosed.png" vector_file="phosphor/folder.svg" vector_color="#DA8CE2" vector_box="0.093750,0.156250,0.906250,0.843750" vector_file2="phosphor/coat-hanger.svg" vector_color2="#2A2622" vector_box2="0.294971,0.414062,0.705080,0.701172" />
+  <texture name="Inv_FolderMyOutfitsTypeOpen" file_name="icons/Inv_SysOpen.png" vector_file="phosphor/coat-hanger.svg" vector_color="#DA8CE2" vector_box="0.031363,0.125000,0.968754,0.781250" />
+  <texture name="Inv_FolderMyOutfitsOpen" file_name="icons/Inv_SysOpen.png" vector_file="phosphor/folder-open.svg" vector_color="#DA8CE2" vector_box="0.093750,0.187500,0.968761,0.843750" vector_file2="phosphor/coat-hanger.svg" vector_color2="#2A2622" vector_box2="0.294971,0.460937,0.705080,0.748047" />
+  <texture name="Inv_FolderInboxTypeClosed" file_name="icons/Inv_SysClosed.png" vector_file="phosphor/tray.svg" vector_color="#9AA7B8" vector_box="0.125000,0.125000,0.875000,0.875000" />
+  <texture name="Inv_FolderInboxClosed" file_name="icons/Inv_SysClosed.png" vector_file="phosphor/folder.svg" vector_color="#9AA7B8" vector_box="0.093750,0.156250,0.906250,0.843750" vector_file2="phosphor/tray.svg" vector_color2="#2A2622" vector_box2="0.335938,0.414062,0.664062,0.742188" />
+  <texture name="Inv_FolderInboxTypeOpen" file_name="icons/Inv_SysOpen.png" vector_file="phosphor/tray.svg" vector_color="#9AA7B8" vector_box="0.125000,0.125000,0.875000,0.875000" />
+  <texture name="Inv_FolderInboxOpen" file_name="icons/Inv_SysOpen.png" vector_file="phosphor/folder-open.svg" vector_color="#9AA7B8" vector_box="0.093750,0.187500,0.968761,0.843750" vector_file2="phosphor/tray.svg" vector_color2="#2A2622" vector_box2="0.335938,0.460938,0.664062,0.789062" />
+  <texture name="Inv_FolderOutboxTypeClosed" file_name="icons/Inv_SysClosed.png" vector_file="phosphor/package.svg" vector_color="#E0A060" vector_box="0.093750,0.062576,0.906250,0.937346" />
+  <texture name="Inv_FolderOutboxClosed" file_name="icons/Inv_SysClosed.png" vector_file="phosphor/folder.svg" vector_color="#E0A060" vector_box="0.093750,0.156250,0.906250,0.843750" vector_file2="phosphor/package.svg" vector_color2="#2A2622" vector_box2="0.322266,0.386752,0.677734,0.769464" />
+  <texture name="Inv_FolderOutboxTypeOpen" file_name="icons/Inv_SysOpen.png" vector_file="phosphor/package.svg" vector_color="#E0A060" vector_box="0.093750,0.062576,0.906250,0.937346" />
+  <texture name="Inv_FolderOutboxOpen" file_name="icons/Inv_SysOpen.png" vector_file="phosphor/folder-open.svg" vector_color="#E0A060" vector_box="0.093750,0.187500,0.968761,0.843750" vector_file2="phosphor/package.svg" vector_color2="#2A2622" vector_box2="0.322266,0.433627,0.677734,0.816339" />
+  <texture name="Inv_FolderMarketplaceListingsTypeClosed" file_name="icons/Inv_SysClosed.png" vector_file="phosphor/storefront.svg" vector_color="#E0A060" vector_box="0.093750,0.125000,0.906250,0.875000" />
+  <texture name="Inv_FolderMarketplaceListingsClosed" file_name="icons/Inv_SysClosed.png" vector_file="phosphor/folder.svg" vector_color="#E0A060" vector_box="0.093750,0.156250,0.906250,0.843750" vector_file2="phosphor/storefront.svg" vector_color2="#2A2622" vector_box2="0.322266,0.414062,0.677734,0.742188" />
+  <texture name="Inv_FolderMarketplaceListingsTypeOpen" file_name="icons/Inv_SysOpen.png" vector_file="phosphor/storefront.svg" vector_color="#E0A060" vector_box="0.093750,0.125000,0.906250,0.875000" />
+  <texture name="Inv_FolderMarketplaceListingsOpen" file_name="icons/Inv_SysOpen.png" vector_file="phosphor/folder-open.svg" vector_color="#E0A060" vector_box="0.093750,0.187500,0.968761,0.843750" vector_file2="phosphor/storefront.svg" vector_color2="#2A2622" vector_box2="0.322266,0.460938,0.677734,0.789062" />
+  <texture name="Inv_FolderAnimationTypeClosed" file_name="icons/Inv_SysClosed.png" vector_file="phosphor/person-simple-run.svg" vector_color="#58C2D2" vector_box="0.000,0.062,1.000,1.000" />
+  <texture name="Inv_FolderAnimationClosed" file_name="icons/Inv_SysClosed.png" vector_file="phosphor/folder.svg" vector_color="#58C2D2" vector_box="0.093750,0.156250,0.906250,0.843750" vector_file2="phosphor/person-simple-run.svg" vector_color2="#2A2622" vector_box2="0.322265,0.400389,0.664103,0.769531" />
+  <texture name="Inv_FolderAnimationTypeOpen" file_name="icons/Inv_SysOpen.png" vector_file="phosphor/person-simple-run.svg" vector_color="#58C2D2" vector_box="0.000,0.062,1.000,1.000" />
+  <texture name="Inv_FolderAnimationOpen" file_name="icons/Inv_SysOpen.png" vector_file="phosphor/folder-open.svg" vector_color="#58C2D2" vector_box="0.093750,0.187500,0.968761,0.843750" vector_file2="phosphor/person-simple-run.svg" vector_color2="#2A2622" vector_box2="0.322265,0.447264,0.664103,0.816406" />
+  <texture name="Inv_FolderBodyPartTypeClosed" file_name="icons/Inv_SysClosed.png" vector_file="phosphor/fingerprint.svg" vector_color="#C9A27E" />
+  <texture name="Inv_FolderBodyPartClosed" file_name="icons/Inv_SysClosed.png" vector_file="phosphor/folder.svg" vector_color="#C9A27E" vector_box="0.093750,0.156250,0.906250,0.843750" vector_file2="phosphor/fingerprint.svg" vector_color2="#2A2622" vector_box2="0.322220,0.400370,0.677720,0.755881" />
+  <texture name="Inv_FolderBodyPartTypeOpen" file_name="icons/Inv_SysOpen.png" vector_file="phosphor/fingerprint.svg" vector_color="#C9A27E" />
+  <texture name="Inv_FolderBodyPartOpen" file_name="icons/Inv_SysOpen.png" vector_file="phosphor/folder-open.svg" vector_color="#C9A27E" vector_box="0.093750,0.187500,0.968761,0.843750" vector_file2="phosphor/fingerprint.svg" vector_color2="#2A2622" vector_box2="0.322220,0.447245,0.677720,0.802756" />
+  <texture name="Inv_FolderCallingCardTypeClosed" file_name="icons/Inv_SysClosed.png" vector_file="phosphor/identification-card.svg" vector_color="#A8A8A8" vector_box="0.000,0.188,1.000,0.875" />
+  <texture name="Inv_FolderCallingCardClosed" file_name="icons/Inv_SysClosed.png" vector_file="phosphor/folder.svg" vector_color="#A8A8A8" vector_box="0.093750,0.156250,0.906250,0.843750" vector_file2="phosphor/identification-card.svg" vector_color2="#2A2622" vector_box2="0.322266,0.427734,0.677734,0.728516" />
+  <texture name="Inv_FolderCallingCardTypeOpen" file_name="icons/Inv_SysOpen.png" vector_file="phosphor/identification-card.svg" vector_color="#A8A8A8" vector_box="0.000,0.188,1.000,0.875" />
+  <texture name="Inv_FolderCallingCardOpen" file_name="icons/Inv_SysOpen.png" vector_file="phosphor/folder-open.svg" vector_color="#A8A8A8" vector_box="0.093750,0.187500,0.968761,0.843750" vector_file2="phosphor/identification-card.svg" vector_color2="#2A2622" vector_box2="0.322266,0.474609,0.677734,0.775391" />
+  <texture name="Inv_FolderClothingTypeClosed" file_name="icons/Inv_SysClosed.png" vector_file="phosphor/t-shirt.svg" vector_color="#DA8CE2" vector_box="0.000,0.000,1.000,0.938" />
+  <texture name="Inv_FolderClothingClosed" file_name="icons/Inv_SysClosed.png" vector_file="phosphor/folder.svg" vector_color="#DA8CE2" vector_box="0.093750,0.156250,0.906250,0.843750" vector_file2="phosphor/t-shirt.svg" vector_color2="#2A2622" vector_box2="0.281268,0.414062,0.718745,0.742188" />
+  <texture name="Inv_FolderClothingTypeOpen" file_name="icons/Inv_SysOpen.png" vector_file="phosphor/t-shirt.svg" vector_color="#DA8CE2" vector_box="0.000,0.000,1.000,0.938" />
+  <texture name="Inv_FolderClothingOpen" file_name="icons/Inv_SysOpen.png" vector_file="phosphor/folder-open.svg" vector_color="#DA8CE2" vector_box="0.093750,0.187500,0.968761,0.843750" vector_file2="phosphor/t-shirt.svg" vector_color2="#2A2622" vector_box2="0.281268,0.460938,0.718745,0.789062" />
+  <texture name="Inv_FolderGestureTypeClosed" file_name="icons/Inv_SysClosed.png" vector_file="phosphor/hand-waving.svg" vector_color="#E89A48" />
+  <texture name="Inv_FolderGestureClosed" file_name="icons/Inv_SysClosed.png" vector_file="phosphor/folder.svg" vector_color="#E89A48" vector_box="0.093750,0.156250,0.906250,0.843750" vector_file2="phosphor/hand-waving.svg" vector_color2="#2A2622" vector_box2="0.322733,0.400679,0.677737,0.769428" />
+  <texture name="Inv_FolderGestureTypeOpen" file_name="icons/Inv_SysOpen.png" vector_file="phosphor/hand-waving.svg" vector_color="#E89A48" />
+  <texture name="Inv_FolderGestureOpen" file_name="icons/Inv_SysOpen.png" vector_file="phosphor/folder-open.svg" vector_color="#E89A48" vector_box="0.093750,0.187500,0.968761,0.843750" vector_file2="phosphor/hand-waving.svg" vector_color2="#2A2622" vector_box2="0.322733,0.447554,0.677737,0.816303" />
+  <texture name="Inv_FolderLandmarkTypeClosed" file_name="icons/Inv_SysClosed.png" vector_file="phosphor/map-pin.svg" vector_color="#62A6EC" vector_box="0.062,0.000,0.875,1.000" />
+  <texture name="Inv_FolderLandmarkClosed" file_name="icons/Inv_SysClosed.png" vector_file="phosphor/folder.svg" vector_color="#62A6EC" vector_box="0.093750,0.156250,0.906250,0.843750" vector_file2="phosphor/map-pin.svg" vector_color2="#2A2622" vector_box2="0.349609,0.386719,0.650391,0.769527" />
+  <texture name="Inv_FolderLandmarkTypeOpen" file_name="icons/Inv_SysOpen.png" vector_file="phosphor/map-pin.svg" vector_color="#62A6EC" vector_box="0.062,0.000,0.875,1.000" />
+  <texture name="Inv_FolderLandmarkOpen" file_name="icons/Inv_SysOpen.png" vector_file="phosphor/folder-open.svg" vector_color="#62A6EC" vector_box="0.093750,0.187500,0.968761,0.843750" vector_file2="phosphor/map-pin.svg" vector_color2="#2A2622" vector_box2="0.349609,0.433594,0.650391,0.816402" />
+  <texture name="Inv_FolderMaterialTypeClosed" file_name="icons/Inv_SysClosed.png" vector_file="phosphor/palette.svg" vector_color="#E672AE" vector_box="0.062,0.062,0.938,0.938" />
+  <texture name="Inv_FolderMaterialClosed" file_name="icons/Inv_SysClosed.png" vector_file="phosphor/folder.svg" vector_color="#E672AE" vector_box="0.093750,0.156250,0.906250,0.843750" vector_file2="phosphor/palette.svg" vector_color2="#2A2622" vector_box2="0.322266,0.400391,0.677741,0.742172" />
+  <texture name="Inv_FolderMaterialTypeOpen" file_name="icons/Inv_SysOpen.png" vector_file="phosphor/palette.svg" vector_color="#E672AE" vector_box="0.062,0.062,0.938,0.938" />
+  <texture name="Inv_FolderMaterialOpen" file_name="icons/Inv_SysOpen.png" vector_file="phosphor/folder-open.svg" vector_color="#E672AE" vector_box="0.093750,0.187500,0.968761,0.843750" vector_file2="phosphor/palette.svg" vector_color2="#2A2622" vector_box2="0.322266,0.447266,0.677741,0.789047" />
+  <texture name="Inv_FolderMeshTypeClosed" file_name="icons/Inv_SysClosed.png" vector_file="phosphor/polygon.svg" vector_color="#D6C450" vector_box="0.000,0.000,1.000,0.938" />
+  <texture name="Inv_FolderMeshClosed" file_name="icons/Inv_SysClosed.png" vector_file="phosphor/folder.svg" vector_color="#D6C450" vector_box="0.093750,0.156250,0.906250,0.843750" vector_file2="phosphor/polygon.svg" vector_color2="#2A2622" vector_box2="0.301759,0.393520,0.684575,0.762716" />
+  <texture name="Inv_FolderMeshTypeOpen" file_name="icons/Inv_SysOpen.png" vector_file="phosphor/polygon.svg" vector_color="#D6C450" vector_box="0.000,0.000,1.000,0.938" />
+  <texture name="Inv_FolderMeshOpen" file_name="icons/Inv_SysOpen.png" vector_file="phosphor/folder-open.svg" vector_color="#D6C450" vector_box="0.093750,0.187500,0.968761,0.843750" vector_file2="phosphor/polygon.svg" vector_color2="#2A2622" vector_box2="0.301759,0.440395,0.684575,0.809591" />
+  <texture name="Inv_FolderNotecardTypeClosed" file_name="icons/Inv_SysClosed.png" vector_file="phosphor/note.svg" vector_color="#9A9CF2" vector_box="0.000,0.188,1.000,0.875" />
+  <texture name="Inv_FolderNotecardClosed" file_name="icons/Inv_SysClosed.png" vector_file="phosphor/folder.svg" vector_color="#9A9CF2" vector_box="0.093750,0.156250,0.906250,0.843750" vector_file2="phosphor/note.svg" vector_color2="#2A2622" vector_box2="0.335938,0.414062,0.664063,0.742188" />
+  <texture name="Inv_FolderNotecardTypeOpen" file_name="icons/Inv_SysOpen.png" vector_file="phosphor/note.svg" vector_color="#9A9CF2" vector_box="0.000,0.188,1.000,0.875" />
+  <texture name="Inv_FolderNotecardOpen" file_name="icons/Inv_SysOpen.png" vector_file="phosphor/folder-open.svg" vector_color="#9A9CF2" vector_box="0.093750,0.187500,0.968761,0.843750" vector_file2="phosphor/note.svg" vector_color2="#2A2622" vector_box2="0.335938,0.460938,0.664063,0.789063" />
+  <texture name="Inv_FolderObjectTypeClosed" file_name="icons/Inv_SysClosed.png" vector_file="phosphor/cube.svg" vector_color="#4F78F0" />
+  <texture name="Inv_FolderObjectClosed" file_name="icons/Inv_SysClosed.png" vector_file="phosphor/folder.svg" vector_color="#4F78F0" vector_box="0.093750,0.156250,0.906250,0.843750" vector_file2="phosphor/cube.svg" vector_color2="#2A2622" vector_box2="0.322266,0.386752,0.677734,0.769464" />
+  <texture name="Inv_FolderObjectTypeOpen" file_name="icons/Inv_SysOpen.png" vector_file="phosphor/cube.svg" vector_color="#4F78F0" />
+  <texture name="Inv_FolderObjectOpen" file_name="icons/Inv_SysOpen.png" vector_file="phosphor/folder-open.svg" vector_color="#4F78F0" vector_box="0.093750,0.187500,0.968761,0.843750" vector_file2="phosphor/cube.svg" vector_color2="#2A2622" vector_box2="0.322266,0.433627,0.677734,0.816339" />
+  <texture name="Inv_FolderScriptTypeClosed" file_name="icons/Inv_SysClosed.png" vector_file="phosphor/file-code.svg" vector_color="#A6CF52" vector_box="0.062,0.000,0.938,1.000" />
+  <texture name="Inv_FolderScriptClosed" file_name="icons/Inv_SysClosed.png" vector_file="phosphor/folder.svg" vector_color="#A6CF52" vector_box="0.093750,0.156250,0.906250,0.843750" vector_file2="phosphor/file-code.svg" vector_color2="#2A2622" vector_box2="0.349609,0.400391,0.650391,0.755859" />
+  <texture name="Inv_FolderScriptTypeOpen" file_name="icons/Inv_SysOpen.png" vector_file="phosphor/file-code.svg" vector_color="#A6CF52" vector_box="0.062,0.000,0.938,1.000" />
+  <texture name="Inv_FolderScriptOpen" file_name="icons/Inv_SysOpen.png" vector_file="phosphor/folder-open.svg" vector_color="#A6CF52" vector_box="0.093750,0.187500,0.968761,0.843750" vector_file2="phosphor/file-code.svg" vector_color2="#2A2622" vector_box2="0.349609,0.447266,0.650391,0.802734" />
+  <texture name="Inv_FolderSettingsTypeClosed" file_name="icons/Inv_SysClosed.png" vector_file="phosphor/sliders.svg" vector_color="#4FBFA0" vector_box="0.000,0.062,1.000,1.000" />
+  <texture name="Inv_FolderSettingsClosed" file_name="icons/Inv_SysClosed.png" vector_file="phosphor/folder.svg" vector_color="#4FBFA0" vector_box="0.093750,0.156250,0.906250,0.843750" vector_file2="phosphor/sliders.svg" vector_color2="#2A2622" vector_box2="0.329118,0.414062,0.670882,0.742188" />
+  <texture name="Inv_FolderSettingsTypeOpen" file_name="icons/Inv_SysOpen.png" vector_file="phosphor/sliders.svg" vector_color="#4FBFA0" vector_box="0.000,0.062,1.000,1.000" />
+  <texture name="Inv_FolderSettingsOpen" file_name="icons/Inv_SysOpen.png" vector_file="phosphor/folder-open.svg" vector_color="#4FBFA0" vector_box="0.093750,0.187500,0.968761,0.843750" vector_file2="phosphor/sliders.svg" vector_color2="#2A2622" vector_box2="0.329118,0.460938,0.670882,0.789062" />
+  <texture name="Inv_FolderSnapshotTypeClosed" file_name="icons/Inv_SysClosed.png" vector_file="phosphor/camera.svg" vector_color="#6CC47A" vector_box="0.062,0.000,1.000,1.000" />
+  <texture name="Inv_FolderSnapshotClosed" file_name="icons/Inv_SysClosed.png" vector_file="phosphor/folder.svg" vector_color="#6CC47A" vector_box="0.093750,0.156250,0.906250,0.843750" vector_file2="phosphor/camera.svg" vector_color2="#2A2622" vector_box2="0.322266,0.414062,0.677734,0.728516" />
+  <texture name="Inv_FolderSnapshotTypeOpen" file_name="icons/Inv_SysOpen.png" vector_file="phosphor/camera.svg" vector_color="#6CC47A" vector_box="0.062,0.000,1.000,1.000" />
+  <texture name="Inv_FolderSnapshotOpen" file_name="icons/Inv_SysOpen.png" vector_file="phosphor/folder-open.svg" vector_color="#6CC47A" vector_box="0.093750,0.187500,0.968761,0.843750" vector_file2="phosphor/camera.svg" vector_color2="#2A2622" vector_box2="0.322266,0.460937,0.677734,0.775391" />
+  <texture name="Inv_FolderSoundTypeClosed" file_name="icons/Inv_SysClosed.png" vector_file="phosphor/speaker-high.svg" vector_color="#B47EE4" />
+  <texture name="Inv_FolderSoundClosed" file_name="icons/Inv_SysClosed.png" vector_file="phosphor/folder.svg" vector_color="#B47EE4" vector_box="0.093750,0.156250,0.906250,0.843750" vector_file2="phosphor/speaker-high.svg" vector_color2="#2A2622" vector_box2="0.308594,0.400414,0.705127,0.755850" />
+  <texture name="Inv_FolderSoundTypeOpen" file_name="icons/Inv_SysOpen.png" vector_file="phosphor/speaker-high.svg" vector_color="#B47EE4" />
+  <texture name="Inv_FolderSoundOpen" file_name="icons/Inv_SysOpen.png" vector_file="phosphor/folder-open.svg" vector_color="#B47EE4" vector_box="0.093750,0.187500,0.968761,0.843750" vector_file2="phosphor/speaker-high.svg" vector_color2="#2A2622" vector_box2="0.308594,0.447289,0.705127,0.802725" />
+  <texture name="Inv_FolderTextureTypeClosed" file_name="icons/Inv_SysClosed.png" vector_file="phosphor/image.svg" vector_color="#EB6540" vector_box="0.062,0.062,0.938,0.938" />
+  <texture name="Inv_FolderTextureClosed" file_name="icons/Inv_SysClosed.png" vector_file="phosphor/folder.svg" vector_color="#EB6540" vector_box="0.093750,0.156250,0.906250,0.843750" vector_file2="phosphor/image.svg" vector_color2="#2A2622" vector_box2="0.322266,0.427734,0.677734,0.728516" />
+  <texture name="Inv_FolderTextureTypeOpen" file_name="icons/Inv_SysOpen.png" vector_file="phosphor/image.svg" vector_color="#EB6540" vector_box="0.062,0.062,0.938,0.938" />
+  <texture name="Inv_FolderTextureOpen" file_name="icons/Inv_SysOpen.png" vector_file="phosphor/folder-open.svg" vector_color="#EB6540" vector_box="0.093750,0.187500,0.968761,0.843750" vector_file2="phosphor/image.svg" vector_color2="#2A2622" vector_box2="0.322266,0.474609,0.677734,0.775391" />
+  <texture name="Inv_Gesture" file_name="icons/Inv_Gesture.png" preload="false" vector_file="phosphor/hand-waving.svg" vector_color="#E89A48" />
   <texture name="Inv_Gloves" file_name="icons/Inv_Gloves.png" preload="false" vector_file="phosphor/hand.svg" vector_color="#C8BBB0" vector_box="0.000,0.000,0.938,1.000" />
   <texture name="Inv_Hair" file_name="icons/Inv_Hair.png" preload="false" vector_file="phosphor/scissors.svg" vector_color="#C09881" vector_box="0.062,0.000,0.938,1.000" />
   <texture name="Inv_LinkItem" file_name="icons/Inv_LinkItem.png" preload="false" vector_file="phosphor/link.svg" vector_color="#AEAFAF" vector_box="0.000,0.500,0.500,1.000" />
@@ -372,29 +467,23 @@ with the same filename but different name
   <texture name="Inv_LookFolderClosed" file_name="icons/Inv_LookFolderClosed.png" preload="false" vector_file="phosphor/coat-hanger.svg" vector_color="#E1C592" vector_box="0.000,0.062,1.000,1.000" />
   <texture name="Inv_LostClosed" file_name="icons/Inv_LostClosed.png" preload="false" vector_file="phosphor/archive.svg" vector_color="#EFCFA3" vector_box="0.000,0.062,1.000,1.000" />
   <texture name="Inv_LostOpen" file_name="icons/Inv_LostOpen.png" preload="false" vector_file="phosphor/archive.svg" vector_color="#E7C89B" vector_box="0.000,0.000,1.000,0.938" />
-  <texture name="Inv_Landmark" file_name="icons/Inv_Landmark.png" preload="false" vector_file="phosphor/map-pin.svg" vector_color="#6D90B3C1" vector_box="0.062,0.000,0.875,1.000" />
-  <texture name="Inv_Material" file_name="icons/Inv_Material.png" preload="false" vector_file="phosphor/palette.svg" vector_color="#AA5A45" vector_box="0.062,0.062,0.938,0.938" />
-  <texture name="Inv_Mesh" file_name="icons/Inv_Mesh.png" preload="false" vector_file="phosphor/polygon.svg" vector_color="#524014" vector_box="0.000,0.000,1.000,0.938" />  
-  <texture name="Inv_Notecard" file_name="icons/Inv_Notecard.png" preload="false" vector_file="phosphor/note.svg" vector_color="#C5C9EB" vector_box="0.000,0.188,1.000,0.875" />
-  <texture name="Inv_Object" file_name="icons/Inv_Object.png" preload="false" vector_file="phosphor/cube.svg" vector_color="#D86B43" />
+  <texture name="Inv_Landmark" file_name="icons/Inv_Landmark.png" preload="false" vector_file="phosphor/map-pin.svg" vector_color="#62A6EC" vector_box="0.062,0.000,0.875,1.000" />
+  <texture name="Inv_Material" file_name="icons/Inv_Material.png" preload="false" vector_file="phosphor/palette.svg" vector_color="#E672AE" vector_box="0.062,0.062,0.938,0.938" />
+  <texture name="Inv_Mesh" file_name="icons/Inv_Mesh.png" preload="false" vector_file="phosphor/polygon.svg" vector_color="#D6C450" vector_box="0.000,0.000,1.000,0.938" />
+  <texture name="Inv_Notecard" file_name="icons/Inv_Notecard.png" preload="false" vector_file="phosphor/note.svg" vector_color="#9A9CF2" vector_box="0.000,0.188,1.000,0.875" />
+  <texture name="Inv_Object" file_name="icons/Inv_Object.png" preload="false" vector_file="phosphor/cube.svg" vector_color="#4F78F0" />
   <texture name="Inv_Object_Multi" file_name="icons/Inv_Object_Multi.png" preload="false" vector_file="phosphor/stack.svg" vector_color="#BB5637" />
   <texture name="Inv_Pants" file_name="icons/Inv_Pants.png" preload="false" vector_file="phosphor/pants.svg" vector_color="#83A5B8" vector_box="0.125,0.000,0.812,1.000" />
-  <texture name="Inv_Script" file_name="icons/Inv_Script.png" preload="false" vector_file="phosphor/file-code.svg" vector_color="#BFBFBF" vector_box="0.062,0.000,0.938,1.000" />
+  <texture name="Inv_Script" file_name="icons/Inv_Script.png" preload="false" vector_file="phosphor/file-code.svg" vector_color="#A6CF52" vector_box="0.062,0.000,0.938,1.000" />
   <texture name="Inv_Shirt" file_name="icons/Inv_Shirt.png" preload="false" vector_file="phosphor/t-shirt.svg" vector_color="#ACB8BE" vector_box="0.000,0.000,1.000,0.938" />
   <texture name="Inv_Shoe" file_name="icons/Inv_Shoe.png" preload="false" vector_file="phosphor/sneaker.svg" vector_color="#F83A3A" vector_box="0.000,0.188,1.000,0.750" />
-  <texture name="Inv_Skin" file_name="icons/Inv_Skin.png" preload="false" vector_file="phosphor/fingerprint.svg" vector_color="#B89888" />
+  <texture name="Inv_Skin" file_name="icons/Inv_Skin.png" preload="false" vector_file="phosphor/fingerprint.svg" vector_color="#C9A27E" />
   <texture name="Inv_Skirt" file_name="icons/Inv_Skirt.png" preload="false" vector_file="phosphor/dress.svg" vector_color="#BAA5B0" vector_box="0.000,0.062,1.000,1.000" />
-  <texture name="Inv_Snapshot" file_name="icons/Inv_Snapshot.png" preload="false" vector_file="phosphor/camera.svg" vector_color="#AFCBAE" vector_box="0.062,0.000,1.000,1.000" />
+  <texture name="Inv_Snapshot" file_name="icons/Inv_Snapshot.png" preload="false" vector_file="phosphor/camera.svg" vector_color="#6CC47A" vector_box="0.062,0.000,1.000,1.000" />
   <texture name="Inv_Socks" file_name="icons/Inv_Socks.png" preload="false" vector_file="phosphor/sock.svg" vector_color="#D6C3C6" vector_box="0.062,0.000,0.938,1.000" />
-  <texture name="Inv_Sound" file_name="icons/Inv_Sound.png" preload="false" vector_file="phosphor/speaker-high.svg" vector_color="#C9A992" />
+  <texture name="Inv_Sound" file_name="icons/Inv_Sound.png" preload="false" vector_file="phosphor/speaker-high.svg" vector_color="#B47EE4" />
   <texture name="Inv_StockFolderClosed" file_name="icons/Inv_StockFolderClosed.png" preload="false" vector_file="phosphor/stack.svg" vector_color="#D0BB95" vector_box="0.000,0.062,1.000,1.000" />
   <texture name="Inv_StockFolderOpen" file_name="icons/Inv_StockFolderOpen.png" preload="false" vector_file="phosphor/stack.svg" vector_color="#C6B28B" vector_box="0.000,0.000,1.000,0.938" />
-  <texture name="GMDX_Inv_EquipmentClosed" file_name="icons/GMDX_Inv_EquipmentClosed.png" preload="false" /> <!-- <GMDX> -->
-  <texture name="GMDX_Inv_EquipmentOpen" file_name="icons/GMDX_Inv_EquipmentOpen.png" preload="false" /> <!-- <GMDX> -->
-  <texture name="GMDX_Inv_LoadoutsClosed" file_name="icons/GMDX_Inv_LoadoutsClosed.png" preload="false" /> <!-- <GMDX> -->
-  <texture name="GMDX_Inv_LoadoutsOpen" file_name="icons/GMDX_Inv_LoadoutsOpen.png" preload="false" /> <!-- <GMDX> -->
-  <texture name="GMDX_Inv_OutdatedClosed" file_name="icons/GMDX_Inv_OutdatedClosed.png" preload="false" /> <!-- <GMDX> -->
-  <texture name="GMDX_Inv_OutdatedOpen" file_name="icons/GMDX_Inv_OutdatedOpen.png" preload="false" /> <!-- <GMDX> -->
   <texture name="Inv_SysClosed" file_name="icons/Inv_SysClosed.png" preload="false" vector_file="phosphor/folder-lock.svg" vector_color="#DCD4A8" vector_box="0.000,0.062,1.000,1.000" />
   <texture name="Inv_SysOpen" file_name="icons/Inv_SysOpen.png" preload="false" vector_file="phosphor/folder-lock.svg" vector_color="#D5CEA1" vector_box="0.000,0.000,1.000,0.938" />
   <texture name="Inv_Tattoo" file_name="icons/Inv_Tattoo.png" preload="false" vector_file="phosphor/fingerprint-simple.svg" vector_color="#F77A7A" vector_box="0.125,0.000,0.875,1.000" />
@@ -406,7 +495,7 @@ with the same filename but different name
   <texture name="Inv_Underpants" file_name="icons/Inv_Underpants.png" preload="false" vector_file="phosphor/pants.svg" vector_color="IconColor" vector_box="0.000,0.188,1.000,0.812" />
   <texture name="Inv_Undershirt" file_name="icons/Inv_Undershirt.png" preload="false" vector_file="phosphor/t-shirt.svg" vector_color="IconColor" vector_box="0.125,0.000,0.875,1.000" />
   <texture name="Inv_Link" file_name="icons/Inv_Link.png" preload="false" vector_file="phosphor/arrow-bend-up-right.svg" vector_color="#676767" />
-  <texture name="Inv_Settings" file_name="icons/Inv_Settings.png" preload="false" vector_file="phosphor/sliders.svg" vector_color="#77998F" vector_box="0.000,0.062,1.000,1.000" />
+  <texture name="Inv_Settings" file_name="icons/Inv_Settings.png" preload="false" vector_file="phosphor/sliders.svg" vector_color="#4FBFA0" vector_box="0.000,0.062,1.000,1.000" />
   <texture name="Inv_SettingsSky" file_name="icons/Inv_SettingsSky.png" preload="false" vector_file="phosphor/cloud-sun.svg" vector_color="#1EA4C5" vector_box="0.000,0.188,1.000,0.812" />
   <texture name="Inv_SettingsWater" file_name="icons/Inv_SettingsWater.png" preload="false" vector_file="phosphor/drop.svg" vector_color="#11B5FF" vector_box="0.188,0.062,0.812,0.875" />
   <texture name="Inv_SettingsDay" file_name="icons/Inv_SettingsDay.png" preload="false" vector_file="phosphor/sun-horizon.svg" vector_color="#1C5F82" vector_box="0.000,0.125,1.000,0.875" />
@@ -433,7 +522,7 @@ with the same filename but different name
   <texture name="Lock2" file_name="navbar/Lock.png" preload="false" vector_file="phosphor/lock.svg" vector_color="#5F5F5F" vector_box="0.167,0.056,0.833,0.889" />
 
   <texture name="Locked_Icon" file_name="icons/Locked_Icon.png" preload="false" vector_file="phosphor/lock.svg" vector_color="#A9A9A9" />
-  <!-- <GMDX> the chat log's lock (gmdxchatlog.cpp), the height of its gear beside it -->
+  <!-- the MMO chat log's lock (gmdxchatlog.cpp) -->
   <texture name="GMDX_ChatLog_Locked" file_name="icons/Locked_Icon.png" preload="false" vector_file="phosphor/lock.svg" vector_color="IconColor@BF" vector_box="0.200,0.167,0.800,0.778" />
   <texture name="GMDX_ChatLog_Unlocked" file_name="icons/Locked_Icon.png" preload="false" vector_file="phosphor/lock-open.svg" vector_color="IconColor@BF" vector_box="0.200,0.167,0.800,0.778" />
 
@@ -485,10 +574,9 @@ with the same filename but different name
 
   <texture name="Nearby_chat_icon" file_name="icons/nearby_chat_icon.png" preload="false" vector_file="phosphor/chat.svg" vector_color="IconColor@B3" vector_box="0.050,0.100,0.900,0.850" />
 
-  <!-- <GMDX> the unread IM well (gmdximwell.cpp), beside Notices_Unread: its glyph, and a conference's -->
-  <texture name="GMDX_IM_Unread" file_name="icons/nearby_chat_icon.png" preload="true" vector_file="phosphor/chat-circle.svg" vector_color="IconColor" vector_box="0.150,0.150,0.850,0.850" />
-  <texture name="GMDX_IM_Conference" file_name="icons/Generic_Group.png" preload="true" vector_file="phosphor/users.svg" vector_color="IconColor" vector_box="0.150,0.150,0.850,0.850" />
   <texture name="Notices_Unread" file_name="bottomtray/Notices_Unread.png" preload="true" vector_file="phosphor/envelope.svg" vector_color="IconColor" vector_box="0.100,0.100,0.900,0.900" />
+  <!-- the unread IM well (gmdximwell.cpp), beside Notices_Unread -->
+  <texture name="GMDX_IM_Unread" file_name="icons/nearby_chat_icon.png" preload="true" vector_file="phosphor/chat-circle.svg" vector_color="IconColor" vector_box="0.150,0.150,0.850,0.850" />
 
   <texture name="NoEntryLines" file_name="world/NoEntryLines.png" use_mips="true" preload="false" />
   <texture name="NoEntryPassLines" file_name="world/NoEntryPassLines.png" use_mips="true" preload="false" />
@@ -898,6 +986,7 @@ with the same filename but different name
   <texture name="down_arrow.tga" file_name="down_arrow.png" vector_file="phosphor/caret-down.svg" vector_color="#C0C1C3" vector_box="0.250,0.312,0.812,0.688" />
   <texture name="arrow_down.tga" vector_file="phosphor/caret-down.svg" vector_color="#A1A1A4" vector_box="0.125,0.250,0.875,0.812" />
 
+  <texture name="NativeFloaterPopout" vector_file="phosphor/arrow-square-out.svg" vector_color="IconColor" vector_box="0.125,0.125,0.875,0.875" />
   <texture name="tearoffbox.tga" vector_file="phosphor/copy-simple.svg" vector_color="IconColor" vector_box="0.188,0.188,0.875,0.875" />
   <texture name="tearoff_pressed.tga" vector_file="phosphor/copy-simple.svg" vector_color="IconColor" vector_box="0.125,0.125,0.938,0.938" />
 
@@ -1322,5 +1411,4 @@ with the same filename but different name
   <texture name="GMDX_PinIcon_robot" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/robot.svg" vector_color="IconColor" />
   <texture name="GMDX_PinIcon_planet" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/planet.svg" vector_color="IconColor" />
   <texture name="GMDX_PinIcon_infinity" file_name="toolbar_icons/inventory.png" preload="false" vector_file="phosphor/infinity.svg" vector_color="IconColor" />
-  <!-- </GMDX> -->
 </textures>

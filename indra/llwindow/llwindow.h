@@ -35,11 +35,12 @@
 #include "llcursortypes.h"
 #include "llinstancetracker.h"
 #include "llsd.h"
+#include "llpointer.h"
 
 class LLSplashScreen;
 class LLPreeditor;
 class LLWindowCallbacks;
-class LLImageRaw; // <GMDX>
+class LLImageRaw;
 
 // Refer to llwindow_test in test/common/llwindow for usage example
 
@@ -127,6 +128,8 @@ public:
     virtual ECursorType getCursor() const;
     virtual ECursorType getNextCursor() const { return mNextCursor; };
     virtual void updateCursor() = 0;
+    // #1110: the OS text cursor instead of the viewer's outlined one.
+    virtual void setUseSystemTextCursor(bool use_system) {}
 
     virtual void captureMouse() = 0;
     virtual void releaseMouse() = 0;
@@ -135,9 +138,10 @@ public:
     virtual bool isClipboardTextAvailable() = 0;
     virtual bool pasteTextFromClipboard(LLWString &dst) = 0;
     virtual bool copyTextToClipboard(const LLWString &src) = 0;
-    // <GMDX> Puts an image on the system clipboard (replacing what is there, text included).
-    // False where the platform layer has no image clipboard or the image could not be offered.
+    // Image clipboard (PNG / BMP by MIME type). Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4
     virtual bool copyImageToClipboard(const LLImageRaw* image) { return false; }
+    virtual bool isClipboardImageAvailable() { return false; }
+    virtual bool pasteImageFromClipboard(LLPointer<LLImageRaw>& dst) { return false; }
 
     virtual bool isPrimaryTextAvailable();
     virtual bool pasteTextFromPrimary(LLWString &dst);

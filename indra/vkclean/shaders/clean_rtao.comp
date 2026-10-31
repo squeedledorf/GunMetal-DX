@@ -119,7 +119,7 @@ void rtaoSetFootprint(vec3 P, vec3 Ng, vec3 cam)
     if (dot(N, V) < 0.0) N = -N;
     const float nv = max(dot(N, V), 1.0 / 64.0);
     const float bias = ssr.taa_params.w > 0.5 ? ssr.taa_scale.x : 0.0;
-    const float w = camd * 2.0 * ssr.mirror_params.z / p11 * exp2(bias);
+    const float w = (rtViewOrtho() ? 1.0 : camd) * 2.0 * ssr.mirror_params.z / p11 * exp2(bias);
     vec3 t1 = cross(N, V);
     if (dot(t1, t1) < 1e-8) t1 = cross(N, abs(N.z) < 0.9 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0));
     t1 = normalize(t1);
@@ -163,14 +163,17 @@ void main()
     // agent space, the TLAS's (ssr.cam_origin: this recording's eye).
     const mat3 v2w = transpose(mat3(ssr.views[CLEAN_VIEW].cur_view));
     const vec3 vpos = viewPos(tc, d);
-    const vec3 cam = ssr.cam_origin.xyz;
     const vec3 rel = v2w * vpos;
-    const vec3 P = cam + rel;
-    const float camd = length(rel);
-    const vec3 V = camd > 1e-6 ? -rel / camd : vec3(0.0, 0.0, 1.0);   // receiver -> eye
+    const vec3 P = ssr.cam_origin.xyz + rel;
+    const bool ortho = rtViewOrtho();
+    const vec3 cam = ortho ? ssr.cam_origin.xyz + v2w * vec3(vpos.xy, 0.0) : ssr.cam_origin.xyz;
+    const float camd = ortho ? -vpos.z : length(rel);
+    const vec3 V = ortho ? v2w * vec3(0.0, 0.0, 1.0)
+                        : (camd > 1e-6 ? -rel / camd : vec3(0.0, 0.0, 1.0));
     const vec3 nv = vertexNormal(tc);
     vec3 Ng = normalize(v2w * geomNormal(tc, vpos, nv));   // facet (faces the camera)
     if (any(isnan(Ng))) Ng = V;
+    if (ortho && dot(Ng, V) < 0.0) Ng = -Ng;
     vec3 N = normalize(v2w * nv);
     if (any(isnan(N))) N = Ng;
     if (dot(N, V) < 0.0) N = -N;   // the visible side (two-sided / back-facing smooth normals)

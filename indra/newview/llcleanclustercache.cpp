@@ -683,6 +683,7 @@ bool LLCleanClusterCache::ready() const
 LLCleanClusterCache::State LLCleanClusterCache::requestMeta(const LLClusterKey& key,
                                                            std::shared_ptr<const LLClusterMeshData>& out)
 {
+    if (key.transient) { out.reset(); return State::Missing; }
     if (LLCleanClusterStore::active()) return LLCleanClusterStore::requestMeta(key, out);
     Impl& d = *mImpl;
     out.reset();
@@ -747,6 +748,7 @@ LLCleanClusterCache::State LLCleanClusterCache::requestMeta(const LLClusterKey& 
 
 bool LLCleanClusterCache::requestPages(const LLClusterKey& key, const U32* pages, U32 n, U64 ticket)
 {
+    if (key.transient) return false;
     if (LLCleanClusterStore::active()) return LLCleanClusterStore::requestPages(key, pages, n, ticket);
     Impl& d = *mImpl;
     if (!pages || n == 0 || !d.enabled() || !d.ensureStarted() || !d.scanned) return false;
@@ -780,6 +782,7 @@ bool LLCleanClusterCache::requestPages(const LLClusterKey& key, const U32* pages
 
 LLCleanClusterCache::PageSource LLCleanClusterCache::pageSource(const LLClusterKey& key, U32 header_hash)
 {
+    if (key.transient) return PageSource::None;
     if (LLCleanClusterStore::active()) return LLCleanClusterStore::pageSource(key, header_hash);
     Impl& d = *mImpl;
     if (!d.enabled() || !d.ensureStarted()) return PageSource::None;
@@ -799,6 +802,7 @@ void LLCleanClusterCache::takePages(std::vector<PageRead>& out)
 
 void LLCleanClusterCache::store(const std::shared_ptr<const LLClusterMeshData>& mesh)
 {
+    if (mesh && mesh->key.transient) return;
     if (LLCleanClusterStore::active()) { LLCleanClusterStore::store(mesh); return; }
     Impl& d = *mImpl;
     if (!mesh || !mesh->hasPayload() || !d.enabled() || d.read_only) return;
@@ -842,6 +846,7 @@ void LLCleanClusterCache::store(const std::shared_ptr<const LLClusterMeshData>& 
 
 void LLCleanClusterCache::drop(const LLClusterKey& key)
 {
+    if (key.transient) return;
     if (LLCleanClusterStore::active()) { LLCleanClusterStore::drop(key); return; }
     Impl& d = *mImpl;
     d.metas.erase(key);

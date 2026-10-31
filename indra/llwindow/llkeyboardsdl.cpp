@@ -254,6 +254,12 @@ bool LLKeyboardSDL::handleKeyDown(const LLKeyboard::NATIVE_KEY_TYPE key, const M
     return handled;
 }
 
+bool LLKeyboardSDL::translateUIKey(U32 key, U32 modifiers, KEY* translated)
+{
+    if (key == SDLK_RETURN2 || key == SDLK_KP_ENTER) key = SDLK_RETURN;
+    return translateNumpadKey(adjustNativekeyFromUnhandledMask(key, modifiers), translated);
+}
+
 
 bool LLKeyboardSDL::handleKeyUp(const LLKeyboard::NATIVE_KEY_TYPE key, const MASK mask)
 {
@@ -293,7 +299,7 @@ MASK LLKeyboardSDL::currentMask(bool for_mouse_event)
             result |= MASK_CONTROL;
     }
 
-    return result | mEmulatedMask; // OCOL: controller buttons bound to keys
+    return result | mEmulatedMask; // OCOL: controller buttons bound to keys (GunMetal-DX)
 }
 
 void LLKeyboardSDL::scanKeyboard()
@@ -326,7 +332,16 @@ void LLKeyboardSDL::scanKeyboard()
 
 bool LLKeyboardSDL::translateNumpadKey( const LLKeyboard::NATIVE_KEY_TYPE os_key, KEY *translated_key)
 {
-    return translateKey(os_key, translated_key);
+    if (translateKey(os_key, translated_key))
+        return true;
+    // Keypad keys with no ordinary twin (numpad 5 with NumLock off: KEY_PAD_CENTER, the orthographic
+    // camera toggle, #1206) come from the numpad map; adjustNativekeyFromUnhandledMask already turned
+    // the others into navigation keys or digits.
+    const auto it = mTranslateNumpadMap.find(os_key);
+    if (it == mTranslateNumpadMap.end())
+        return false;
+    *translated_key = it->second;
+    return true;
 }
 
 LLKeyboard::NATIVE_KEY_TYPE LLKeyboardSDL::inverseTranslateNumpadKey(const KEY translated_key)

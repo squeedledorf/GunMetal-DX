@@ -42,6 +42,7 @@
 #include "llgl.h"
 #include "llrender.h"           // LLRender::UIScope
 #include "lllocalcliprect.h"
+#include "llmiddleautoscroll.h"
 #include "llresmgr.h"
 #include "llscrollbar.h"
 #include "llscrolllistcell.h"
@@ -1888,6 +1889,19 @@ bool LLScrollListCtrl::handleScrollWheelFraction(F32 notches, bool horizontal)
         LLScrollbar::sWheelDelta = 0.f;
     }
     return handled || mMouseWheelOpaque;
+}
+
+bool LLScrollListCtrl::handleMiddleMouseDown(S32 x, S32 y, MASK mask)
+{
+    // A child that uses the middle button keeps it; the rows and the header don't.
+    {
+        LLView::MiddleClickBubbleScope bubble;
+        if (LLUICtrl::handleMiddleMouseDown(x, y, mask))
+        {
+            return true;
+        }
+    }
+    return LLMiddleAutoScroll::getInstance()->begin(this, mScrollbar, nullptr, (F32)mLineHeight, x, y);
 }
 
 bool LLScrollListCtrl::handleScrollHWheel(S32 x, S32 y, S32 clicks)

@@ -36,6 +36,7 @@ class LLAvatarName;
 class LLInventoryPanel;
 class LLFloater;
 class LLView;
+class LLMenuGL;
 
 /**
  * Friend-related actions (add, remove, offer teleport, etc)
@@ -78,6 +79,8 @@ public:
     // Parcel actions
     static bool canFreezeEject(const LLUUID& avatar_id);
     static bool canFreezeEject(const uuid_vec_t& ids);
+    // Refresh a Nearby Manage submenu when an exact group-parcel lookup completes.
+    static void watchModerationMenu(LLMenuGL* menu, const uuid_vec_t& ids);
     static void parcelFreeze(const LLUUID& avatar_id);
     static void parcelFreeze(const uuid_vec_t& ids);
     static void parcelEject(const LLUUID& avatar_id);

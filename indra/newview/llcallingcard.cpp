@@ -339,6 +339,20 @@ bool LLAvatarTracker::isBuddy(const LLUUID& id) const
     return (info != NULL);
 }
 
+LLAvatarTracker::EPresence LLAvatarTracker::getBuddyPresence(const LLUUID& id) const
+{
+    const LLRelationship* relationship = getBuddyInfo(id);
+    if (!relationship)
+    {
+        return EPresence::NOT_FRIEND;
+    }
+    if (!relationship->isRightGrantedFrom(LLRelationship::GRANT_ONLINE_STATUS))
+    {
+        return EPresence::HIDDEN;
+    }
+    return relationship->isOnline() ? EPresence::ONLINE : EPresence::OFFLINE;
+}
+
 // online status
 void LLAvatarTracker::setBuddyOnline(const LLUUID& id, bool is_online)
 {

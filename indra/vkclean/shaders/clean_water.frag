@@ -62,6 +62,8 @@ vec3 scenePos(vec2 uv)
 {
     float d = textureLod(uSceneDepth, vec3(uv, WATER_LAYER), 0.0).r;
     vec4 wp = pc.u_inv_view_proj * vec4(uv * 2.0 - 1.0, d, 1.0);
+    if(abs(wp.w)<1e-7)
+        return pc.u_cam_time.xyz+normalize(wp.xyz)*1e6;
     return wp.xyz / wp.w;
 }
 #endif
@@ -71,7 +73,7 @@ void main()
     if ((v_flags & 2048u) == 0u) discard;    // water only
 
     const vec3  P    = v_world_pos;
-    const vec3  eye  = pc.u_cam_time.xyz;
+    const vec3  eye  = cmOn() ? mainReceiverEye(P,pc.u_cam_time.xyz) : pc.u_cam_time.xyz;
 #ifdef WATER_OPAQUE
     // Capture views (probe cube face / reflected mirror camera): their own eye decides
     // which side of the surface they see; the frame's camUnderwater() is the main one.
@@ -81,7 +83,7 @@ void main()
     if (texelFetch(uWaterExcl, ivec3(ivec2(gl_FragCoord.xy), int(CLEAN_VIEW)), 0).r < 1.0) demote;    // excluded (invisiprim)
     outWaterMask = vec4(0.0, 1.0, 0.0, 0.0);   // (every path below; helpers write nothing)
     const bool opaque = ssr.ao_params2.w > 0.5;   // RenderTransparentWater off
-    const bool under  = camUnderwater();
+    const bool under  = cmOn() ? eye.z<waterHeight() : camUnderwater();
 #endif
     const float time = pc.u_cam_time.w * 0.5;          // LL phase_time = elapsed * 0.5
     const vec3  up   = vec3(0.0, 0.0, 1.0);
@@ -122,6 +124,11 @@ void main()
             vec3 wn = normalize(wave1 + wave2 + wave3);
             uv = clamp(uv + wn.xy * ssr.water[2].w, vec2(0.0), vec2(0.999));
             above = textureLod(uSceneColor, vec3(uv, WATER_LAYER), 0.0).rgb;
+            if(cmOn())
+            {
+                const vec3 sampled=scenePos(uv);
+                above=cmWaterRemove(above,sampled,mainReceiverEye(sampled,pc.u_cam_time.xyz),atmosSrgbToLinear(ssr.water[4].rgb));
+            }
         }
 #endif
         outColor = vec4(max(applyWaterFog(above, view, eye.z - waterHeight()), vec3(0.0)), 1.0);
@@ -176,7 +183,9 @@ void main()
         // VOLUMETRIC FOG (#718): the solid scene was fogged over the air in front of the
         // water by clean_vol_apply.frag; the surface applies it again below -- take it back
         // out of the refraction first (no extra fog under the water: the same segment).
-        if (volOn() && !probeCapture() && !mirrorPass()) fb = volFogRemove(fb, P);
+        if(cmOn() && !probeCapture() && !mirrorPass())
+            fb=cmRemove(fb,cmAt(refPos2,CLEAN_VIEW),atmosSrgbToLinear(ssr.water[4].rgb));
+        else if (volOn() && !probeCapture() && !mirrorPass()) fb = volFogRemove(fb, P);
         if (!probeCapture() && !mirrorPass()) fb = weatherVeilRemove(fb, P);   // (#954, as the fog)
         // Water fog over the in-water path (surface -> bottom); the sky/far plane behind
         // the water becomes a very long path -> fully fogged.
@@ -191,7 +200,7 @@ void main()
     vec3 radiance, irradiance;
     gProbeSkipAuto = true;    // <SS:Skoomastream/> LL sampleProbesWater: manual probes + probe 0 only
     if (!sampleProbes(P, wave_ibl, R, rough * phdr.info.y, amblit, radiance, irradiance))
-        radiance = skyColor(R);
+        radiance = probeCapture() ? skyColorAtOrigin(R,P) : skyColor(R);
     gProbeSkipAuto = false;
 #if !defined(WATER_OPAQUE) && defined(CLEAN_RT_FWD_AVAILABLE)
     // (#859) the ray-traced reflection of this water surface (compute, half resolution) where it
@@ -243,12 +252,18 @@ void main()
 
     // Distance haze + far-clip fade, as the solid scene gets. (#816: the haze of this same
     // ray, view = P - eye, came with the light terms above: no second / third scatter.)
-    color = atmosApplyRay(color, additive, atten);
+    if(cmOn())
+    {
+        if(probeCapture() || mirrorPass()) color=atmosApply(color,P,eye);
+        else color=cmApply(color,cmAt(P,CLEAN_VIEW));
+        g_cm_sky_prefix=true; g_cm_sky_origin=eye;
+    }
+    else color = atmosApplyRay(color, additive, atten);
     // The far-clip fade is a main-view thing (clean_draw.frag skips it in probe cubes).
-    if (!probeCapture())
-        color = atmosDistanceFade(color, P, eye, linfo.cam_fwd.xyz, linfo.zinfo.y, additive, atten);
+    if (!probeCapture() && (!cmOn() || !mirrorPass()))
+        color = atmosDistanceFade(color, P, eye, linfo.cam_fwd, linfo.zinfo.y, additive, atten);
     // Volumetric fog (#718, clean_vol_apply.glsl) over the hazed surface; main view only.
-    if (volOn() && !probeCapture() && !mirrorPass()) color = volFogApply(color, P);
+    if (!cmOn() && volOn() && !probeCapture() && !mirrorPass()) color = volFogApply(color, P);
     // Precipitation veil (#954, clean_weather_veil.glsl) over it; main view only.
     if (!probeCapture() && !mirrorPass()) color = weatherVeilApply(color, P);
     outColor = vec4(max(color, vec3(0.0)), 1.0);

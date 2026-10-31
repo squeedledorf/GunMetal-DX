@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8" standalone="yes"?>
-<!-- <GMDX> snapshot avatar picker (SoapStorm; gmdxsnapshotavatars.h) -->
+<!-- snapshot avatar picker (SoapStorm, via GunMetal-DX v0.3.0 cf5f1f4; llsnapshotavatars.h) -->
 <floater
  legacy_header_height="18"
  can_minimize="false"

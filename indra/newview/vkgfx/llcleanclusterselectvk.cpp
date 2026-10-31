@@ -24,6 +24,7 @@
 #  include "llviewercontrol.h"
 #  include "llviewerobjectlist.h"
 #  include "llviewerobject.h"
+#  include "lllocalmesh.h"
 #  include "llvovolume.h"
 #  include "llvoavatar.h"
 #  include "llviewercamera.h"
@@ -1691,6 +1692,7 @@ bool LLCleanClusterSelectVK::resolveKey(Cand& c, uint32_t frame32)
     LLClusterKey key;
     key.mesh_id = mesh_id;
     key.face = face;
+    key.transient = LLLocalMeshMgr::instanceExists() && LLLocalMeshMgr::instance().isBlenderConnectWorldID(mesh_id);
     uint32_t mi;
     auto it = mMeshUseIdx.find(key);
     if (it != mMeshUseIdx.end()) mi = it->second;
@@ -1789,6 +1791,10 @@ void LLCleanClusterSelectVK::revalidate(uint32_t budget)
         if (mRevalCursor >= n) mRevalCursor = 0;
         Cand& c = mCands[mOrder[mRevalCursor++].second];
         if (!c.rigged || c.state != 1 || (c.avatar == kNoIdx && c.bind == kNoIdx)) continue;
+        // A retained de-rez row outlives its object. Its cached bind and wearer stay valid
+        // until row release; gather still rejects a wearer that has left. Never fall back
+        // to legacy geometry, which may not exist for a cluster-owned attachment.
+        if ((c.flags & LLCleanInstanceStore::REZFX_DYING_FLAG) != 0u) continue;
         ++done;
         bool ok = false;
         LLViewerObject* o = gObjectList.findObject(c.object);
@@ -2058,6 +2064,9 @@ void LLCleanClusterSelectVK::gather(uint64_t frame)
         ci.mesh_generation = m.ref_gen;
         if (c.flags & 8192u) ci.flags |= CLI_SELF;
         if (c.flags & 256u) ci.flags |= kInstDoubleSided;
+        if (!rigged && (c.flags & LLCleanInstanceStore::kEmissiveNoShadow)
+            && (c.flags & (1u | 8u | 32u | 512u | 2048u | 8192u | 65536u | 131072u | 262144u | 524288u)) == 0u)
+            ci.flags |= kInstEmissiveNoShadow;
         // RIGGED ALPHA-BLEND (row flag 2): the alpha lists only (ordered back to front, blended);
         // a tighter tolerance cap -- thin cards / lashes are what a coarse level deletes first.
         if (rigged && (c.flags & 2u))
@@ -2313,8 +2322,14 @@ uint32_t LLCleanClusterSelectVK::recordSelect(VkCommandBuffer cmd, const LLClust
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mCompLayout, 0, 1, &set, 0, nullptr);
     // pad = 2a (#747): the rigged posed-bound margins of this frame are written (recordBounds).
     // bit 1 (#702): this secondary view skips moving casters (the cascades' #567 split).
+    bool emissive_shadow = true;
+#if defined(LL_HAS_CLEAN_PIPELINE)
+    static LLCachedControl<bool> s_emissive_shadow(gSavedSettings, "RenderVKEmissiveNoShadows", true);
+    emissive_shadow = s_emissive_shadow;
+#endif
     const SelectPush sp{v, mInstanceCount, (uint32_t)tier,
-                        (mOwner.skin().boundsValid() ? 1u : 0u) | (!main && vin.skip_dyn ? 2u : 0u)};
+                        (mOwner.skin().boundsValid() ? 1u : 0u) | (!main && vin.skip_dyn ? 2u : 0u)
+                        | (emissive_shadow ? 4u : 0u)};
     vkCmdPushConstants(cmd, mCompLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(sp), &sp);
     const uint32_t gx = std::min(mInstanceCount, kGridX);
     vkCmdDispatch(cmd, gx, (mInstanceCount + gx - 1) / gx, 1);

@@ -2,7 +2,7 @@
 <!-- Photo Studio's undo stack as a list: every step by name, the present
      marked. Double-click a step (or select it and press Go to) to go back or
      forward to it. Owned by the Photo Studio floater and closed with it. -->
-<floater
+<floater can_pop_out="true"
  width="340"
  height="300"
  min_width="260"

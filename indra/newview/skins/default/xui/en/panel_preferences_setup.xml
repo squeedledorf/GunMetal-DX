@@ -184,7 +184,7 @@
     left_delta="50"
     mouse_opaque="true"
     name="update_check_enabled"
-    tool_tip="Once a day, ask slipstreamviewer.org whether a newer Slipstream is out and tell you if so. Nothing about you is sent. Nothing is downloaded or installed without you."
+    tool_tip="At the login screen and once a day, ask GunMetal-DX's GitHub page whether a newer version is out and tell you if so. Nothing about you is sent. Nothing is downloaded or installed until you click Download and install."
     width="170"
     top_pad="5"/>
   <button
@@ -209,7 +209,7 @@
     left="80"
     mouse_opaque="true"
     name="update_show_release_notes"
-    tool_tip="The first time a new version starts, open its release notes (slipstreamviewer.org)."
+    tool_tip="The first time a new version starts, open its release notes."
     width="400"
     top_pad="5"/>
   <check_box
@@ -224,18 +224,7 @@
     tool_tip="The update check also tells you about beta versions, not only final releases. Beta builds always offer betas."
     width="400"
     top_pad="5"/>
-  <check_box
-    enabled="true"
-    follows="left|top"
-    height="14"
-    control_name="UpdateAutoInstall"
-    label="Install updates automatically (beta feature)"
-    left="80"
-    mouse_opaque="true"
-    name="update_auto_install"
-    tool_tip="Downloads updates in the background, checks them against a signed manifest and installs them the next time you start. Windows installer and Linux tarball installs only; otherwise you get the usual notice."
-    width="400"
-    top_pad="5"/>
+  <!-- <GMDX> no "install automatically" option: updates are always offered and only downloaded and installed when you click -->
   <text
      type="string"
      length="1"

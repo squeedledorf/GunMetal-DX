@@ -36,6 +36,7 @@
 //    LLPipeline::updateMove*), CPU particle sources (spawning), EEP day cycle and cloud
 //    scroll (LLEnvironment::update), avatar animation (every LLCharacter holds a pause
 //    request while frozen -> motion controller time stops, GPU pose is sticky).
+//  - freezeSerial(): an avatar's root held through a sit / stand while frozen (#1172).
 class LLWorldClock
 {
 public:
@@ -43,6 +44,10 @@ public:
     static bool isFrozen()  { return sFrozen; }
     static F64  getTime()   { return sTime; }
     static F32  getDelta()  { return sDelta; }
+    // Which freeze this is: bumped as each one begins, so 0 = none yet. State stamped with it
+    // while frozen lapses by itself on thaw (stamp == freezeSerial() && isFrozen()), with
+    // nothing to clear, and never matches a later freeze.
+    static U32  freezeSerial() { return sFreezeSerial; }
     // The user toggle alone (the on-screen indicator); isFrozen() also covers FreezeTime.
     static bool userFrozen();
     // #873: an upscaled live snapshot holds the world for its jittered frames (not a setting,
@@ -55,6 +60,7 @@ private:
     static bool sCaptureFreeze;
     static F64  sTime;
     static F32  sDelta;
+    static U32  sFreezeSerial;
 };
 
 #endif // LL_LLWORLDCLOCK_H

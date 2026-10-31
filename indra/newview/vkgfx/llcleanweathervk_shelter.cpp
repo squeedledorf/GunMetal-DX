@@ -652,14 +652,12 @@ bool LLCleanWeatherVK::planShelter(VkCommandBuffer cmd, const Frame& f)
     int32_t tierOf[1024];   // (the wanted tier per slot: -1 none, 0 A, 1 B)
     std::fill(tierOf, tierOf + 1024, -1);
     for (size_t i = 0; i < nKeep; ++i) tierOf[s_cands[i].slot] = i < nA ? 0 : 1;
-    bool placed[kShLayers] = {};
     for (uint32_t L = 0; L < kShLayers; ++L)
     {
         const int32_t s = mShLayerSlot[L];
         if (s < 0) continue;
         const int32_t tier = L < nA ? 0 : 1;
         if (L >= nLayers || tierOf[s] != tier) { mShLayerSlot[L] = -1; continue; }
-        placed[L] = true;
         tierOf[s] = 2;   // (has its layer)
     }
     for (size_t i = 0; i < nKeep; ++i)

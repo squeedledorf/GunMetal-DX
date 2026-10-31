@@ -19,10 +19,13 @@
  * $/LicenseInfo$
  */
 
-// <SS:Skoomastream> See sscombatray.h.
+// <SS:Skoomastream> See sscombatray.h. Ported from GunMetal-DX (squeedledorf, LGPL 2.1),
+// v0.3.0 cf5f1f4.
 
 #include "llviewerprecompiledheaders.h"
 #include "sscombatray.h"
+
+#include "slcombatfx.h"
 
 #include "llagent.h"
 #include "llappviewer.h"           // gFrameCount
@@ -227,6 +230,7 @@ bool cast(U32 key, const LLVector3& start, const LLVector3& end, const LLViewerO
 {
     if (known) *known = false;
     if (answer_frame) *answer_frame = 0;   // <GMDX>
+    if (!SLCombatFX::enabled()) return false;   // Slipstream: nothing combat runs with CombatFX off
     LLVector3 d = end - start;
     const F32 len = d.normVec();
     dist = len;
@@ -265,6 +269,17 @@ bool cast(U32 key, const LLVector3& start, const LLVector3& end, const LLViewerO
 void fillRequests(LLVKWorldFrame& wf)
 {
     for (LLVKPickRequest& r : wf.aux_pick) r = LLVKPickRequest{};
+    // Slipstream: CombatFX off -> no aux rays and no bookkeeping (drop what is left once).
+    if (!SLCombatFX::enabled())
+    {
+        if (!sKeys.empty() || !sPending.empty() || !sQueue.empty())
+        {
+            sKeys.clear();
+            sQueue.clear();
+            sPending.clear();
+        }
+        return;
+    }
     std::vector<LLVKPickResult> answers;
     LLVulkanContext::instance().takeAuxPicks(answers);
     if (gAgent.getTeleportState() != LLAgent::TELEPORT_NONE)

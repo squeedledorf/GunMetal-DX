@@ -1,0 +1,24 @@
+<llsd>
+<map>
+  <key>events</key>
+  <array>
+    <map>
+      <key>message</key><string>TeleportFinish</string>
+      <key>body</key>
+      <map>
+        <key>Info</key>
+        <array>
+          <map>
+            <key>AgentID</key><uuid>00000000-0000-0000-0000-000000000000</uuid>
+            <key>LocationID</key><binary encoding="base64">AAAAAA==</binary>
+            <key>SimIP</key><binary encoding="base64">fwAAAQ==</binary>
+            <key>SimPort</key><integer>13000</integer>
+            <key>SeedCapability</key><string>https://sim.invalid/cap/00000000-0000-0000-0000-000000000000</string>
+          </map>
+        </array>
+      </map>
+    </map>
+  </array>
+  <key>id</key><integer>1</integer>
+</map>
+</llsd>

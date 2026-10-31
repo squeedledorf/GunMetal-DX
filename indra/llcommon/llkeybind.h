@@ -54,10 +54,11 @@ public:
     EMouseClickType mMouse;
     KEY mKey;
     MASK mMask;
-    U8 mControllerActionType;
-    U8 mControllerAction;
     // Either to expect exact match or ignore not expected masks as long as expected mask-bit is present
     bool mIgnoreMasks;
+    // OCOL: game controller input (255 = none; see LLGameControl::ActionType)
+    U8 mControllerActionType = 255;
+    U8 mControllerAction = 0;
 };
 
 // One function can bind to multiple Key options

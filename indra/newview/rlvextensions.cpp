@@ -40,15 +40,17 @@ RlvExtGetSet::RlvExtGetSet()
         m_DbgAllowed.insert(std::pair<std::string, S16>(RlvSettingNames::ForbidGiveToRlv, DBG_READ));
         m_DbgAllowed.insert(std::pair<std::string, S16>(RlvSettingNames::NoSetEnv, DBG_READ));
         m_DbgAllowed.insert(std::pair<std::string, S16>("WindLightUseAtmosShaders", DBG_READ));
-        // <SS:Skoomastream>
+        // <SS:Skoomastream> (CombatFX; ported from GunMetal-DX, LGPL 2.1, v0.3.0 cf5f1f4)
         // OTS over-the-shoulder camera settings: scriptable so HUDs can
         // swap shoulders, lean, or zoom the aim camera inworld
+        // <GMDX> back with GunMetal-DX's OTS camera (gmdxots.h), under the names it reads now
         m_DbgAllowed.insert(std::pair<std::string, S16>("OTSEnabled", DBG_READ | DBG_WRITE));
-        m_DbgAllowed.insert(std::pair<std::string, S16>("OTSCameraDistance", DBG_READ | DBG_WRITE));
-        m_DbgAllowed.insert(std::pair<std::string, S16>("OTSCameraSide", DBG_READ | DBG_WRITE));
-        m_DbgAllowed.insert(std::pair<std::string, S16>("OTSCameraHeight", DBG_READ | DBG_WRITE));
-        m_DbgAllowed.insert(std::pair<std::string, S16>("OTSFocusDistance", DBG_READ | DBG_WRITE));
-        m_DbgAllowed.insert(std::pair<std::string, S16>("OTSCameraCollision", DBG_READ | DBG_WRITE));
+        m_DbgAllowed.insert(std::pair<std::string, S16>("SlipstreamTPSCameraDistance", DBG_READ | DBG_WRITE));
+        m_DbgAllowed.insert(std::pair<std::string, S16>("SlipstreamTPSCameraSide", DBG_READ | DBG_WRITE));
+        m_DbgAllowed.insert(std::pair<std::string, S16>("SlipstreamTPSCameraHeight", DBG_READ | DBG_WRITE));
+        m_DbgAllowed.insert(std::pair<std::string, S16>("SlipstreamTPSFocusDistance", DBG_READ | DBG_WRITE));
+        m_DbgAllowed.insert(std::pair<std::string, S16>("SlipstreamTPSCameraCollision", DBG_READ | DBG_WRITE));
+        // </GMDX>
         // </SS:Skoomastream>
 
         // Cache persistance of every setting
@@ -271,8 +273,7 @@ ERlvCmdRet RlvExtGetSet::onSetDebug(std::string strSetting, const std::string& s
             LLControlVariable* pSetting = gSavedSettings.getControl(strSetting);
             if (pSetting)
             {
-                U32 u32Value; S32 s32Value; bool fValue;
-                F32 f32Value; // <SS:Skoomastream/>
+                U32 u32Value; S32 s32Value; bool fValue; F32 f32Value;
                 switch (pSetting->type())
                 {
                     case TYPE_U32:
@@ -282,6 +283,16 @@ ERlvCmdRet RlvExtGetSet::onSetDebug(std::string strSetting, const std::string& s
                             eRet = RLV_RET_SUCCESS;
                         }
                         break;
+                    // <SS:Skoomastream>
+                    // F32 settings (OTS camera sliders)
+                    case TYPE_F32:
+                        if (LLStringUtil::convertToF32(strValue, f32Value))
+                        {
+                            gSavedSettings.setF32(strSetting, f32Value);
+                            eRet = RLV_RET_SUCCESS;
+                        }
+                        break;
+                    // </SS:Skoomastream>
                     case TYPE_S32:
                         if (LLStringUtil::convertToS32(strValue, s32Value))
                         {
@@ -296,16 +307,6 @@ ERlvCmdRet RlvExtGetSet::onSetDebug(std::string strSetting, const std::string& s
                             eRet = RLV_RET_SUCCESS;
                         }
                         break;
-                    // <SS:Skoomastream>
-                    // F32 settings (OTS camera sliders)
-                    case TYPE_F32:
-                        if (LLStringUtil::convertToF32(strValue, f32Value))
-                        {
-                            gSavedSettings.setF32(strSetting, f32Value);
-                            eRet = RLV_RET_SUCCESS;
-                        }
-                        break;
-                    // </SS:Skoomastream>
                     default:
                         RLV_ERRS << "Unexpected debug setting type" << LL_ENDL;
                         eRet = RLV_RET_FAILED;

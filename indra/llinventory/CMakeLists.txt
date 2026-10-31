@@ -30,6 +30,8 @@ set(llinventory_HEADER_FILES
     CMakeLists.txt
 
     llcategory.h
+    llhaze.h
+    llhazesky.h
     llfoldertype.h
     llinventory.h
     llinventorydefines.h
@@ -74,5 +76,6 @@ if (LL_TESTS)
     #set(TEST_DEBUG on)
     set(test_libs llinventory llmath llcorehttp llfilesystem )
     LL_ADD_INTEGRATION_TEST(inventorymisc "" "${test_libs}")
+    LL_ADD_INTEGRATION_TEST(llhaze "" "${test_libs}")
     LL_ADD_INTEGRATION_TEST(llparcel "" "${test_libs}")
 endif (LL_TESTS)

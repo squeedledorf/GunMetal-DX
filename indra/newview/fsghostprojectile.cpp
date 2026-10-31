@@ -31,10 +31,13 @@
 #include "llviewerobject.h"
 #include "llviewerregion.h"
 #include "message.h"
+#include "slcombatfx.h"
 
 #include <vector>
 
 // <SS:Nexii> Projectile ghost probing
+// Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4. Slipstream: CombatFX only --
+// with it off every per-object hook returns at once (no tagging, no watch, no probes).
 
 static const F32        PROJECTILE_MIN_LENGTH_M = 4.0f;
 static const F32        PROJECTILE_MAX_THICKNESS_M = 0.2f;
@@ -56,6 +59,7 @@ static void track_likely(bool was_likely, bool is_likely)
 // static
 void FSGhostProjectile::onVelocityUpdate(LLViewerObject* objectp)
 {
+    if (!SLCombatFX::enabled()) return;
     FSGhostProjectileState& s = objectp->mGhostProjectile;
     if (s.mTagged) return;
     s.mTagged = true;
@@ -98,7 +102,7 @@ void FSGhostProjectile::onGoingStatic(LLViewerObject* objectp)
 {
     // <GMDX> and mSeenMoving: mStatic starts out false, so SoapStorm also watched (and probed
     // three times) every long thin prim whose very first update was static.
-    if (objectp->mGhostProjectile.mLikely && !objectp->mStatic && objectp->mGhostProjectile.mSeenMoving)
+    if (SLCombatFX::enabled() && objectp->mGhostProjectile.mLikely && !objectp->mStatic && objectp->mGhostProjectile.mSeenMoving)
     {
         LL_DEBUGS("Projectile") << "Object " << objectp->getID() << " was a likely projectile bullet, but is now static. It may have crossed a region boundary and become a ghost." << LL_ENDL;
         beginWatch(objectp);
@@ -124,7 +128,8 @@ void FSGhostProjectile::onIdleStatic(LLViewerObject* objectp)
 {
     const FSGhostProjectileState& s = objectp->mGhostProjectile;
     // <GMDX> Only objects seen moving: a static thin prim that never moved is no projectile.
-    if (s.mLikely && s.mSeenMoving && !s.mOnWatch && s.mProbeCount == 0 && !objectp->isSelected())
+    // (mLikely is only ever set with CombatFX on; the CombatFX check covers turning it off.)
+    if (s.mLikely && SLCombatFX::enabled() && s.mSeenMoving && !s.mOnWatch && s.mProbeCount == 0 && !objectp->isSelected())
     {
         beginWatch(objectp);
     }
@@ -137,15 +142,21 @@ void FSGhostProjectile::onIdleStatic(LLViewerObject* objectp)
 // static
 F64Seconds FSGhostProjectile::getProbeThreshold()
 {
-    static LLCachedControl<F32> probe_delay(gSavedSettings, "FSSoapstormGhostProjectileProbeDelay", 2.f);
-    return LLViewerObject::sMaxUpdateInterpolationTime + F64Seconds(llmax(0.f, (F32)probe_delay));
+    // (Slipstream: fixed; was the debug setting FSSoapstormGhostProjectileProbeDelay, 2 s)
+    constexpr F32 probe_delay = 2.f;
+    return LLViewerObject::sMaxUpdateInterpolationTime + F64Seconds(probe_delay);
 }
 
 // static
 void FSGhostProjectile::onInterpolate(LLViewerObject* objectp, F64Seconds frame_time, F64Seconds time_since_last_update)
 {
+    // <GMDX> Retired, with beginWatch below: gmdxghostwatch.cpp is the one ghost watch now and judges
+    // silence by distance, not by these time thresholds. This file keeps the projectile count.
+    return;
+    // </GMDX>
     FSGhostProjectileState& s = objectp->mGhostProjectile;
     if (!s.mLikely || !objectp->mRegionp || objectp->mDead || objectp->mLocalID == 0) return;
+    if (!SLCombatFX::enabled()) return;
 
     if (time_since_last_update < getProbeThreshold()) return;
 
@@ -161,6 +172,7 @@ void FSGhostProjectile::onInterpolate(LLViewerObject* objectp, F64Seconds frame_
 // static
 void FSGhostProjectile::beginWatch(LLViewerObject* objectp)
 {
+    return; // <GMDX> retired: see onInterpolate
     FSGhostProjectileState& s = objectp->mGhostProjectile;
     if (s.mOnWatch || objectp->mDead || !objectp->mRegionp || objectp->mLocalID == 0) return;
 
@@ -275,6 +287,11 @@ void FSGhostProjectile::removeFromWatch(LLViewerObject* objectp)
 void FSGhostProjectile::idleUpdate(F64 frame_time)
 {
     if (sWatchList.empty()) return;
+    if (!SLCombatFX::enabled())
+    {
+        clear();   // CombatFX turned off: stop watching (nothing is added while it stays off)
+        return;
+    }
 
     // Iterate a copy: probes can kill objects, which removes them from the watch list.
     const std::vector<LLPointer<LLViewerObject> > watch_list = sWatchList;

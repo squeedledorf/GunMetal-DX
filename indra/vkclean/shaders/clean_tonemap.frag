@@ -15,7 +15,7 @@ layout(set = 0, binding = 0) uniform sampler2DArray uHdr;
 #define HDR_UV(uv) vec3((uv), float(CLEAN_VIEW))
 layout(set = 0, binding = 1, r32f) uniform readonly image2D uExposure;   // 1x1 dynamic exposure
 
-#define GMDX_TONEMAP_NIGHT_EYE   // <GMDX> p3 / p4 in the push block (night vision)
+#define TONEMAP_NIGHT_EYE   // p3 / p4 in the push block (physical night's night vision)
 #include "clean_tonemap_common.glsl"   // #820: the push block, the grade, tonemapTail, the LUT shaper
 
 // ---- Output dither (clean_final.frag's, verbatim: IGN TPDF, 8-bit) ----
@@ -43,10 +43,11 @@ vec3 applyDither(vec3 color, vec2 fragCoord)
     return color + tpdf * (pc.p2.x / 255.0);
 }
 
-// <GMDX> NIGHT VISION (GMDXPhysicalNight; vkgfx/gmdxnighteyevk.h fills p3 / p4).
+// NIGHT VISION (physical night; vkgfx/slnighteyevk.h fills p3 / p4). Ported from GunMetal-DX
+// (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
 // PURKINJE SHIFT: Kirk & O'Brien 2011 ("Perceptually based tone mapping for low-light
 // conditions") after Cao et al. 2008, as made real-time by J. Patry, "Real-Time Samurai Cinema"
-// (SIGGRAPH 2021 Advances, slides 164-168). Written here from the talk's equations:
+// (SIGGRAPH 2021 Advances, slides 164-168). Written from the talk's equations:
 //   q = M c (L, M, S cone and R rod catches of the linear Rec.709 colour c)
 //   g_i = [1 + 0.33 / m_i (q_i + k_i q_R)]^-1/2           (i = L, M, S)
 //   do = K/S [-(k3 + rw)  1 + k3 rw   0] diag(k) diag(m)^-1 g q_R
@@ -81,7 +82,7 @@ const mat3 kNvColour = mat3(vec3(8.41161, 1.52745, 17.329),
                             vec3(0.266656, -0.289097, 1.57053));
 const float kNvPupil = 30.0;   // mm^2 (6.2 mm: a mesopic pupil)
 
-vec3 gmdxPurkinje(vec3 c, float w)
+vec3 nightPurkinje(vec3 c, float w)
 {
     const float td = max(pc.p3.y, 1e-6) * kNvPupil;
     const vec3 q = max(c, vec3(0.0)) * td;
@@ -91,30 +92,29 @@ vec3 gmdxPurkinje(vec3 c, float w)
     s = (y1 > 1e-10) ? s * (y0 / y1) : c;
     return mix(c, s, w * clamp(pc.p3.x, 0.0, 1.0));
 }
-vec3 gmdxNightBlur(vec2 uv, float amount)
+vec3 nightBlur(vec2 uv, float amount)
 {
     const vec2 r = (1.5 * amount) / vec2(textureSize(uHdr, 0).xy);
     return 0.25 * (texture(uHdr, HDR_UV(uv + vec2(r.x, r.y))).rgb + texture(uHdr, HDR_UV(uv + vec2(-r.x, r.y))).rgb
                  + texture(uHdr, HDR_UV(uv + vec2(r.x, -r.y))).rgb + texture(uHdr, HDR_UV(uv - r)).rgb);
 }
-float gmdxNightGrain(vec2 frag)
+float nightGrain(vec2 frag)
 {
     const float f = pc.p4.y;
     const vec2 p = frag + vec2(hash12(vec2(f, 5.3)), hash12(vec2(f, 47.9))) * 1024.0;
     return hash12(p) + hash12(p + vec2(37.1, 11.9)) - 1.0;   // triangular, -1..1
 }
-// PHOTOGRAPHIC NIGHT (GMDXNightLook 1, p4.z; gmdxnighteyevk.h): the cold white balance of a night
-// photograph, on the display colour (after the tonemap, so "shadow" means dark on screen whatever
-// the exposure): the pixel's luma in a blue tint, most in the shadows and mids (75% of the way),
-// least on the clipped moon and highlights (30%: blue-white). Plain look constants.
-vec3 gmdxNightGrade(vec3 c, float s)
+// PHOTOGRAPHIC NIGHT (p4.z; slnighteyevk.h): the cold white balance of a night photograph, on the
+// display colour (after the tonemap, so "shadow" means dark on screen whatever the exposure): the
+// pixel's luma in a blue tint, most in the shadows and mids (75% of the way), least on the clipped
+// moon and highlights (30%: blue-white). Plain look constants.
+vec3 nightGrade(vec3 c, float s)
 {
     const vec3 tint = vec3(0.70, 0.90, 1.45) / dot(vec3(0.70, 0.90, 1.45), CG_LUMA);   // luma 1
     const float l = dot(c, CG_LUMA);
     const float sh = 1.0 - smoothstep(0.05, 0.85, l);
     return clamp(mix(c, l * tint, clamp(s, 0.0, 1.0) * mix(0.3, 0.75, sh)), vec3(0.0), vec3(1.0));
 }
-// </GMDX>
 
 layout(set = 1, binding = 3) uniform sampler2D uBloom;   // HDR bloom pyramid, mip 0
 layout(set = 1, binding = 4) uniform sampler2D uCrossFilter;        // cross-filter streak accumulator
@@ -366,7 +366,7 @@ void main()
     }
     // (Motion blur, #118, runs on the render-size scene before the TAA / FSR resolve:
     // vkgfx/llcleanmotionblurvk.h.)
-    // <GMDX> night vision weight from the adapted exposure (post on, dynamic exposure metering).
+    // Physical night's night vision weight from the adapted exposure (post on, dynamic exposure metering).
     float night_w = 0.0;
     if (pc.p3.w > pc.p3.z && pc.p1.x < 0.5 && pc.p1.z > 0.5)
     {
@@ -376,8 +376,7 @@ void main()
     }
     vec3 c = sampleSceneCA(v_uv);
     const float night_soft = clamp(pc.p4.x, 0.0, 1.0) * night_w;
-    if (night_soft > 0.0) c = mix(c, gmdxNightBlur(v_uv, night_soft), night_soft);
-    // </GMDX>
+    if (night_soft > 0.0) c = mix(c, nightBlur(v_uv, night_soft), night_soft);
     // Light on the front element, accumulated as it is composited (lens dirt).
     vec3 lens_light = vec3(0.0);
     {
@@ -431,10 +430,9 @@ void main()
     // and the tonemap / clamp, as upstream's COLOR_GRADE does independently of TONEMAP.
     if (pc.p1.x < 0.5)
     {
-        // <GMDX> night vision, on the scene-referred colour (before exposure).
-        if (night_w > 0.0 && pc.p3.x > 0.0) c = gmdxPurkinje(c, night_w);
-        if (night_soft > 0.0) c *= max(1.0 + 0.5 * night_soft * gmdxNightGrain(gl_FragCoord.xy), 0.0);
-        // </GMDX>
+        // Physical night's night vision, on the scene-referred colour (before exposure).
+        if (night_w > 0.0 && pc.p3.x > 0.0) c = nightPurkinje(c, night_w);
+        if (night_soft > 0.0) c *= max(1.0 + 0.5 * night_soft * nightGrain(gl_FragCoord.xy), 0.0);
         // toneMap(): exposure * dynamic scale, tonemapper, mix with the clamped input.
         float exp_scale = (pc.p1.z > 0.5) ? imageLoad(uExposure, ivec2(0)).r : 1.0;
         if (isnan(exp_scale) || isinf(exp_scale) || exp_scale <= 0.0) exp_scale = 1.0;   // (NaN safety)
@@ -468,7 +466,7 @@ void main()
             c = mix(c, linear_to_srgb(hp), bsp * clamp(bloom_frac * 4.0, 0.0, 1.0));
         }
     }
-    if (night_w > 0.0 && pc.p4.z > 0.0) c = gmdxNightGrade(c, night_w * pc.p4.z);   // <GMDX>
+    if (night_w > 0.0 && pc.p4.z > 0.0) c = nightGrade(c, night_w * pc.p4.z);   // (photographic night)
     if (pc.p2.x > 0.0) c = clamp(applyDither(c, gl_FragCoord.xy), vec3(0.0), vec3(1.0));
     outColor = vec4(c, 1.0);
 }

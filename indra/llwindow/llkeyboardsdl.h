@@ -41,6 +41,8 @@ public:
     void    resetMaskKeys() override;
     MASK    currentMask(bool for_mouse_event) override;
     void    scanKeyboard() override;
+    // UI translation never publishes keys to the world held-key scanner.
+    bool translateUIKey(U32 key, U32 modifiers, KEY* translated);
 
 protected:
     MASK    updateModifiers(const MASK mask) override;

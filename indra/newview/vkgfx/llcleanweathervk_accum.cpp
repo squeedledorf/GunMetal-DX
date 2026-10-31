@@ -454,13 +454,17 @@ void LLCleanWeatherVK::planAccum(VkCommandBuffer cmd, const Frame& f, uint32_t u
         float* p = mAcPush;
         std::memset(mAcPush, 0, sizeof(mAcPush));
         p[3] = mShWetPush[3];                                                                   // b.w world wetness
-        p[4] = st.snowDepth;                                                                    // c.x
-        p[5] = std::max(st.snowDepthBuild, 0.f);                                                // c.y (#783: the state's rates)
+        p[4] = st.snowDepth;                                                                    // c.x (a first sample's guess)
+        // #1130: a coat fills by the snow landing on it -- the fresh snowfall (or a parcel tag's faster
+        // level rate), toward its full coat within the deepest snow the settings allow -- not up to
+        // the ground's depth (from bare ground with local weather, the coats waited for it)
+        p[5] = std::max({st.snowDepthBuild, st.snowFallBuild, 0.f});                            // c.y (#783: the state's rates)
         p[6] = std::max(st.snowDepthMelt, 0.f);                                                 // c.z
         p[7] = kAcCoverMelt;                                                                    // c.w
         p[8] = mShWetPush[0]; p[9] = mShWetPush[1]; p[10] = mShWetPush[2];                      // d.xyz rain, wet / s, dry / s
         p[11] = mTilt[0];                                                                       // d.w
-        p[12] = mTilt[1]; p[13] = kAcShedSpeed; p[14] = kAcShedVSpeed;                          // e
+        p[12] = mTilt[1]; p[13] = kAcShedSpeed; p[14] = kAcShedVSpeed;                          // e.xyz
+        p[15] = llclamp(st.snowDepthMax, 0.f, kAcSnowFull);                                     // e.w (#1130 the fill's cap)
         mAcFlags = (s_snow ? 1u : 0u) | (mShWetPush[6] > 0.5f ? 2u : 0u) | (mAvState.buffer ? 4u : 0u);
     }
     uint32_t live = 0;

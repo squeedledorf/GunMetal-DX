@@ -36,6 +36,22 @@
  * MEASURE. Per-class deferred / re-keyed / expired / immediate counters, re-key latency,
  * kill->re-create churn (same UUID re-created after a kill), and time-to-fully-rezzed of
  * re-created avatars ("CrossingKeep" log tag, one line in each Crossing568 block).
+ *
+ * FREEZE WORLD (#1172). While the world is frozen (LLWorldClock) a kill of another avatar,
+ * of anything it wears (only along with its wearer's: a plain detach applies), or of a
+ * linkset another avatar sits on is HELD, so the frozen picture keeps it (an avatar leaving
+ * a private parcel we are in is killed for us by the sim). The thaw applies it, unless the
+ * sim sent the object again after the kill (it came back) or it now has another key
+ * (re-keyed / re-created); one that is gone by then (its region dropped) is skipped. "Sent
+ * again after the kill" needs ordering evidence (slheldkills.h): a live full update the
+ * object accepted, from the killing sim, in a packet sent after the kill's. A cache load, an
+ * update dropped as older, or one sent before the kill but received after it (reordered or
+ * resent) keeps the kill held.
+ * A worn object whose wearer is sent again waits for it again, so what the sim does not
+ * re-send (re-rezzed under new ids) applies as a detach. The crossing deferral above goes
+ * first: a crossing's kill keeps its grace, and one that runs out while frozen is held like
+ * any other. Plain objects are not held. Same no-pointer bookkeeping; capped, and applied
+ * at once under RAM / VRAM pressure. Not tied to SLCrossingKeep.
  */
 #ifndef LL_LLCROSSINGKEEP_H
 #define LL_LLCROSSINGKEEP_H
@@ -43,6 +59,7 @@
 #include "stdtypes.h"
 #include <string>
 
+class LLMessageSystem;
 class LLViewerObject;
 class LLViewerRegion;
 class LLVOAvatar;
@@ -50,9 +67,10 @@ class LLVOAvatar;
 namespace LLCrossingKeep
 {
     // process_kill_object, after the id resolved to a live object: true = the kill was
-    // deferred (the caller must not kill it now). sender_ip/port = the killing sim.
+    // deferred (the caller must not kill it now). sender_ip/port = the killing sim,
+    // packet_id = the KillObject's packet on that circuit.
     bool deferKill(LLViewerObject* objectp, LLViewerRegion* sender_region,
-                   U32 local_id, U32 sender_ip, U32 sender_port);
+                   U32 local_id, U32 sender_ip, U32 sender_port, U32 packet_id);
     // A kill was applied to objectp now (immediate path): churn tracking.
     void noteKilled(LLViewerObject* objectp);
     // processObjectUpdate re-keyed objectp to a new (region, local id): cancels its pending kill.
@@ -69,6 +87,13 @@ namespace LLCrossingKeep
     // #850: the last kill of our own vehicle (root) from the agent region within window_s
     // seconds, as "own_vehicle_kill=-2.1s(applied now)" / "(deferred, edge)"; "" if none.
     std::string ownVehicleKillBefore(F64 window_s);
+    // #1172 process_kill_object, when deferKill declined the kill: true = the world is frozen
+    // and the kill is held until the thaw (the caller must not kill it now).
+    bool holdForFreeze(LLViewerObject* objectp, U32 local_id, U32 sender_ip, U32 sender_port, U32 packet_id);
+    // #1172 processUpdateCore, after a full (non-terse) update reached objectp: msg = the live
+    // message (null: loaded from the cache). If the killing sim sent it after the kill, the
+    // held kill is void (and what an avatar wore waits for it again).
+    void onFullUpdate(LLViewerObject* objectp, LLMessageSystem* msg);
     // Logout / disconnect: drop everything (the objects die with their regions).
     void clear();
 

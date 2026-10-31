@@ -76,6 +76,9 @@
 #include "llviewertexturelist.h"
 #include "llviewerinventory.h"
 #include "llviewerobjectlist.h"
+#include "sltempobjectedge.h"
+#include "gmdxclampedvelocity.h" // <GMDX>
+#include "gmdxghostwatch.h"      // <GMDX>
 #include "llviewerparceloverlay.h"
 #include "llviewerpartsource.h"
 #include "llviewerregion.h"
@@ -426,6 +429,7 @@ void LLViewerObject::markDead()
         LL_PROFILE_ZONE_SCOPED;
         //LL_INFOS() << "Marking self " << mLocalID << " as dead." << LL_ENDL;
         const bool rezfx_keep = GMDXRezFx::objectKilled(this); // <GMDX> rez effects: decided while still linked
+        LLCleanIngest::tempMotionDiagKill(this, 3, rezfx_keep);
 
         // Root object of this hierarchy unlinks itself.
         if (getParent())
@@ -462,6 +466,7 @@ void LLViewerObject::markDead()
         // active list and finding the gObjectList lookup fail.
         if (!rezfx_keep) // <GMDX> a de-rez keeps the rows drawing, then releases them
             LLCleanInstanceStore::instance().releaseObject(mID);
+        LLCleanIngest::tempMotionDiagKill(this, 4, rezfx_keep);
         gObjectList.cleanupReferences(this);
 
         LLViewerObject *childp;
@@ -1201,6 +1206,7 @@ U32 LLViewerObject::processUpdateMessage(LLMessageSystem *mesgsys,
     const S32 OBJECTDATA_FIELD_SIZE_32  =  32;  // Terse object update, 16 bit precision
 
     U32 retval = 0x0;
+    U32 motion_diag_fields = 0; // diagnostic only; no additional wire parsing
 
     // If region is removed from the list it is also deleted.
     if (!LLWorld::instance().isRegionListed(mRegionp))
@@ -1370,6 +1376,7 @@ U32 LLViewerObject::processUpdateMessage(LLMessageSystem *mesgsys,
 
                 case OBJECTDATA_FIELD_SIZE_124:
                 case OBJECTDATA_FIELD_SIZE_60:
+                    motion_diag_fields = 7;
                     this_update_precision = 32;
                     // this is a full precision update
                     // pos
@@ -1620,6 +1627,7 @@ U32 LLViewerObject::processUpdateMessage(LLMessageSystem *mesgsys,
 
                 case OBJECTDATA_FIELD_SIZE_64:
                 case OBJECTDATA_FIELD_SIZE_32:
+                    motion_diag_fields = 7;
                     // this is a terse 16 bit quantized update
                     this_update_precision = 16;
                     test_pos_parent.quantize16(-0.5f*size, 1.5f*size, MIN_HEIGHT, MAX_HEIGHT);
@@ -1721,6 +1729,7 @@ U32 LLViewerObject::processUpdateMessage(LLMessageSystem *mesgsys,
         {
             case OUT_TERSE_IMPROVED:
             {
+                motion_diag_fields = 7;
 #ifdef DEBUG_UPDATE_TYPE
                 LL_INFOS() << "CompTI:" << getID() << LL_ENDL;
 #endif
@@ -1767,6 +1776,7 @@ U32 LLViewerObject::processUpdateMessage(LLMessageSystem *mesgsys,
             case OUT_FULL_COMPRESSED:
             case OUT_FULL_CACHED:
             {
+                motion_diag_fields = 1; // compressed full carries no linear velocity
 #ifdef DEBUG_UPDATE_TYPE
                 LL_INFOS() << "CompFull:" << getID() << LL_ENDL;
 #endif
@@ -2007,6 +2017,9 @@ U32 LLViewerObject::processUpdateMessage(LLMessageSystem *mesgsys,
     }
 
     //
+    // Observe existing decoded values before parenting, ping extrapolation and
+    // packet-order rejection. A velocity field can be decoded before pose rejection.
+    LLCleanIngest::tempMotionDiagDecoded(this, (S32)update_type, new_pos_parent, motion_diag_fields);
     // Fix object parenting.
     //
     bool b_changed_status = false;
@@ -2319,6 +2332,14 @@ U32 LLViewerObject::processUpdateMessage(LLMessageSystem *mesgsys,
 
     new_rot.normQuat();
 
+    // <GMDX> From Alchemy: Skooma (Nexii Malthus), LGPL 2.1: velocities clamped at +-128 m/s by the terse
+    // encoding are recovered before anything reads them (ping interpolation below, prediction, the ghost watch)
+    if (update_type == OUT_TERSE_IMPROVED)
+    {
+        GMDXClampedVelocity::onTerseUpdate(this, new_pos_parent);
+    }
+    // </GMDX>
+
     if (sPingInterpolate && mesgsys != NULL)
     {
         LLCircuitData *cdp = gMessageSystem->mCircuitInfo.findCircuit(mesgsys->getSender());
@@ -2351,6 +2372,7 @@ U32 LLViewerObject::processUpdateMessage(LLMessageSystem *mesgsys,
         mLatestRecvPacketID - packet_id < 65536)
     {
         //skip application of this message, it's old
+        LLCleanIngest::tempMotionDiagResult(this, 2);
         return retval;
     }
     mLatestRecvPacketID = packet_id;
@@ -2541,6 +2563,8 @@ U32 LLViewerObject::processUpdateMessage(LLMessageSystem *mesgsys,
     }
 
     FSGhostProjectile::onSimUpdate(this); // <GMDX> a fresh update re-arms the ghost probe budget
+    GMDXGhostWatch::onSimUpdate(this);    // <GMDX> the ghost watch: the simulator still knows this object
+    LLCleanIngest::tempMotionDiagResult(this, 1);
 
     return retval;
 }
@@ -2749,6 +2773,8 @@ void LLViewerObject::interpolateLinearMotion(const F64SecondsImplicit& frame_tim
                                          << " from " << new_pos << LL_ENDL;
                 new_pos = clip_pos;
 
+                SLTempObjectEdge::stopped(this);
+
                 // Stop motion and get server update for bouncing on the edge
                 new_v.clear();
                 setAcceleration(LLVector3::zero);
@@ -2771,6 +2797,7 @@ void LLViewerObject::interpolateLinearMotion(const F64SecondsImplicit& frame_tim
                 {
                     // Predicting crossing over 1s, stop motion
                     // Stop motion
+                    SLTempObjectEdge::stopped(this);
                     LL_DEBUGS("Interpolate") << "Predicting region crossing for too long, stopping at " << new_pos << LL_ENDL;
                     new_v.clear();
                     setAcceleration(LLVector3::zero);
@@ -3958,7 +3985,7 @@ void LLViewerObject::setPixelAreaAndAngle(LLAgent &agent)
     F32 range = sqrt(dx*dx + dy*dy + dz*dz) - min_scale/2;
 
     LLViewerCamera* camera = LLViewerCamera::getInstance();
-    if (camera->getOrtho())   // <GMDX> orthographic: every object is shown at the focus distance's scale
+    if (camera->getOrtho())   // orthographic: every object is shown at the focus distance's scale (GunMetal-DX port)
     {
         range = camera->getOrthoFocusDist();
     }
@@ -4812,6 +4839,15 @@ const LLVector3 LLViewerObject::getRenderPosition() const
     {
         return mDrawable->getPositionAgent();
     }
+}
+
+LLVector3 LLViewerObject::getPicturePositionAgent() const
+{
+    if (mDrawable.isNull() || mDrawable->getGeneration() < 0)
+    {
+        return getPositionAgent();
+    }
+    return mDrawable->getPositionAgent();
 }
 
 const LLVector3 LLViewerObject::getPivotPositionAgent() const

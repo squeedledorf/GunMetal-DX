@@ -137,8 +137,9 @@ layout(location = 15) in vec4 v_wx_rest;
 #ifdef CLEAN_GBUFFER
 #include "clean_gbuffer.glsl"
 #endif
-// <GMDX> rez effects: the de-rez cut (decodeSurface) and the surface paint (shade / G-buffer
-// main). Probe captures never paint (a cached cube would keep a half-rezzed object for good).
+// <GMDX> rez effects (CombatFX; ported from GunMetal-DX, LGPL 2.1, v0.3.0 cf5f1f4): the de-rez cut
+// (decodeSurface) and the surface paint (shade / G-buffer main). Probe captures never paint (a
+// cached cube would keep a half-rezzed object for good). No flag bit is set without an effect.
 #define GMDX_REZFX_FS
 #ifndef CLEAN_CAPTURE
 #define GMDX_REZFX_SURFACE
@@ -231,6 +232,8 @@ bool decodeSurface(Material m, out SurfaceLit s, out float alpha, out vec4 hud)
     const vec3 t_dp1  = dFdx(v_world_pos), t_dp2 = dFdy(v_world_pos);
     g_shadow_ng = cross(t_dp1, t_dp2);   // projector shadow map: geometric normal (#441)
     rezfxDerivs(v_flags);                // <GMDX> the Tron wireframe's edge rate, before any discard
+    // Cluster rig lists retain dead rows for the main fade; never bake them into a probe.
+    if (probeCapture() && (v_flags & 0x00400000u) != 0u) discard;
 #ifdef CLEAN_PROJ_SHADOW_RAYQUERY
     g_rt_face_ng = cross(t_dp1, t_dp2);   // the triangle's plane: RT shadow-ray origins
 #endif
@@ -701,7 +704,7 @@ bool blendDepthTolerance()
     // a float inverse built around a ~km translation). Reversed-Z: 0 = sky, nearer = larger.
     const float kz = pc.u_inv_view_proj[2][3];
     // Metres along this ray per metre of view depth (>= 1), and the tolerance.
-    const vec3  toEye = pc.u_cam_time.xyz - v_world_pos;
+    const vec3  toEye = mainReceiverEye(v_world_pos, pc.u_cam_time.xyz) - v_world_pos;
     const float distF = length(toEye);
     const float k = distF * iw;
     const float nl = length(v_world_normal);
@@ -718,11 +721,12 @@ bool blendDepthTolerance()
     // made win -- and they are small, so the #573 lattice step the tolerance absorbs (~1-2 mm
     // on 64 m world faces) is microns there. World faces keep it (the #731 road decal).
     const bool exact = (v_flags & (1u | 512u)) != 0u;
-    // <GMDX> ORTHOGRAPHIC views (the region map capture): w is 1 everywhere, so the 1 / w line
-    // above is flat (kz = 0) and could never find a fragment behind the opaque surface -- every
-    // blended face drew over everything (blended floors through roofs). There depth is linear:
-    // metres along the (parallel) ray per unit of depth = |column 2 of the inverse view-projection|.
-    // The eye is ~1 km away, so the distance term is left out (the base tolerance only).
+    // ORTHOGRAPHIC view (ported from GunMetal-DX, squeedledorf, LGPL 2.1, v0.3.0 cf5f1f4): w is
+    // 1 everywhere, so the 1 / w line above is flat (kz = 0) and could never find a fragment
+    // behind the opaque surface -- every blended face drew over everything (blended floors
+    // through roofs). There depth is linear: metres along the (parallel) ray per unit of depth =
+    // |column 2 of the inverse view-projection|. The eye is ~1 km away, so the distance term is
+    // left out (the base tolerance only).
     const bool ortho = abs(kz) < 1e-12;
     const float ortho_mpz = ortho ? length(vec3(pc.u_inv_view_proj[2].xyz)) : 0.0;
     const float tol = exact ? noise : max((ssr.blend_tol.x + (ortho ? 0.0 : ssr.blend_tol.y * distF)) * graze, noise);
@@ -740,7 +744,7 @@ bool blendDepthTolerance()
             const float zF  = gl_FragCoord.z + dot(dz, off);
             const float zO  = texelFetch(uBlendSceneDepth, ivec3(clamp(pix, ivec2(0), res - 1), int(CLEAN_VIEW)), 0).r;
             bool keep = true;
-            if (ortho)   // <GMDX> (see above): reversed-Z, nearer = larger
+            if (ortho)   // (see above): reversed-Z, nearer = larger
             {
                 if (zO > 0.0 && zO > zF)
                 {
@@ -828,12 +832,15 @@ void main()
     if (litDbg(LDBG_VRS_VIEW)) fsz = vec2(abs(dFdx(gl_FragCoord.x)), abs(dFdy(gl_FragCoord.y)));
     Material m = materials[v_material_id];
     outColor = shade(m);
+    const float rez_fade = (v_flags & 2u) != 0u ? rezfxFadeOpacity(v_flags) : 1.0;
+    outColor.a *= rez_fade;
     const bool hud = (v_flags & 8u) != 0u;
     // World fragments are LINEAR HDR (the tonemap pass displays them). Fullbright
     // world faces still take the haze (they skipped the lit branches above).
     if (!hud && litDebugView() == 0)
     {
         const uint model = ((v_flags & 4096u) != 0u && V_NOT_TERRAIN) ? SURF_FULLBRIGHT : SURF_LEGACY;
+        g_medium_inline=(v_flags & 2u)!=0u;
         outColor.rgb = surfacePost(model, (v_flags & 16384u) != 0u, outColor.rgb, v_world_pos);
     }
 #ifndef CLEAN_CAPTURE
@@ -842,7 +849,7 @@ void main()
     // scene behind them. Opaque / mask faces never do here (the fullscreen apply covers them
     // -- forward pass 1 and the deferred lighting alike); probe / mirror captures neither
     // (the grid is the main view's).
-    if (!hud && (v_flags & 2u) != 0u && volOn() && !probeCapture() && !mirrorPass() && litDebugView() == 0)
+    if (!cmOn() && !hud && (v_flags & 2u) != 0u && volOn() && !probeCapture() && !mirrorPass() && litDebugView() == 0)
         outColor.rgb = volFogApply(outColor.rgb, v_world_pos);
     // PRECIPITATION VEIL (#954, clean_weather_veil.glsl): likewise over the alpha-blended faces (the
     // fullscreen veil gave the opaque scene behind them its own distance's).
@@ -957,23 +964,25 @@ void main()
     // the face alpha here the blended glow write was multiplied by zero.
     float glow_a = outColor.a;
     float glow_out = glow;
-    if ((m.flags & 128u) != 0u && (m.flags & 64u) == 0u)
-        glow_a = 1.0;   // emissive mask: alpha already folded into the glow factor (#515)
+    if ((m.flags & 128u) != 0u && (m.flags & 64u) == 0u)   // <SS:Skoomastream> HUDs too (SSHudGlow)
+        glow_a = rez_fade;   // emissive mask: alpha already folded into the glow factor (#515)
     else if ((m.flags & 64u) == 0u && glow > 0.0)   // <SS:Skoomastream> HUDs too (SSHudGlow)
     {
         glow_a = m.base_color_factor.a;
         if ((m.flags & 1u) != 0u && V_NOT_TERRAIN)
             glow_a *= texture(uTextures[nonuniformEXT(m.base_color_handle.x)], v_uv, taaLodBias(v_flags)).a;
+        glow_a *= rez_fade;
     }
     // <SS:Skoomastream> Alpha-BLENDED glTF (Firestorm lldrawpoolalpha renderPbrEmissives):
     // the face's blend scales the glow under it by (1 - a), then the PBR glow pass ADDS
     // its amount unscaled (blendFunc ZERO, ONE, ONE, ONE). Our attachment blends
     // src * a + dst * (1 - a), so writing amount / a at coverage a gives exactly
     // dst * (1 - a) + amount. Coverage floored at 1/255 (a ~0 face: dst * 254/255).
+    // (glow_a already carries the rez fade; the amount fades with it.)
     else if ((m.flags & 64u) != 0u && (v_flags & 2u) != 0u && glow > 0.0)   // (HUDs too)
     {
         glow_a = max(glow_a, 1.0 / 255.0);
-        glow_out = glow / glow_a;
+        glow_out = glow * rez_fade / glow_a;
     }
     // </SS:Skoomastream>
     if (!hud) glow_out *= g_glow_black_k;   // (upstream: legacy glow scales with base-colour brightness)
@@ -993,5 +1002,8 @@ void main()
     // </SS:Skoomastream>
     const float cov = clamp(outColor.a, 0.0, 1.0);
     outReact = vec4(cov, 0.0, noTemporalFace(v_flags) ? cov : 0.0, 0.0);
+    if(cmOn() && !hud && (v_flags & 2u)==0u && !probeCapture() && !mirrorPass())
+        outColor.a=(v_flags & 16384u)!=0u ? 0.0 : 1.0;
+
 }
 #endif   // CLEAN_GBUFFER

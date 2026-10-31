@@ -262,6 +262,12 @@ public:
     bool isRoleDataPending() { return mRoleDataRequestID.notNull(); }
     bool isRoleMemberDataPending() { return (mRoleMembersRequestID.notNull() || mPendingRoleMemberRequest); }
     bool isGroupTitlePending() { return mTitlesRequestID.notNull(); }
+    // The latest titles request was answered (mTitles is complete), and when it was sent (#868 reuses
+    // recent titles)
+    bool hasTitlesReply() const { return mTitlesCacheValid && mTitlesRequestTime > 0.0 && !mTitlesReplyPending; }
+    F64 getTitlesRequestTime() const { return mTitlesRequestTime; }
+    void invalidateTitlesCache() { mTitlesCacheValid = false; }
+    bool isTitlesReplyPending() const { return mTitlesReplyPending; }
 
     bool isSingleMemberNotOwner();
 
@@ -321,8 +327,9 @@ private:
     LLUUID              mRoleDataRequestID;
     LLUUID              mRoleMembersRequestID;
     LLUUID              mTitlesRequestID;
-    F64                 mTitlesRequestTime = 0.0;   // when the outstanding titles request was sent
+    F64                 mTitlesRequestTime = 0.0;   // when the latest titles request was sent
     bool                mTitlesReplyPending = false;
+    bool                mTitlesCacheValid = false; // no role/member change since the request
     U32                 mReceivedRoleMemberPairs;
 
     bool                mMemberDataComplete;

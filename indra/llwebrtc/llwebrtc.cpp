@@ -32,7 +32,7 @@
 #include <string>
 #include <vector>
 #include <string.h>
-#include "third_party/opus/src/include/opus.h"   // <GMDX> replay audio encoder
+#include "third_party/opus/src/include/opus.h"   // instant replay audio encoder (GunMetal-DX port)
 #include "api/audio/create_audio_device_module.h"
 #include "api/audio_codecs/audio_decoder_factory.h"
 #include "api/audio_codecs/audio_encoder_factory.h"
@@ -2389,7 +2389,7 @@ void terminate()
     }
 }
 
-// <GMDX> Instant replay audio: see llwebrtc.h
+// Instant replay audio: see llwebrtc.h. Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
 void* opusEncoderCreate(int rate, int channels, int bitrate, int* lookahead)
 {
     int err = 0;

@@ -6,8 +6,9 @@
  * tiny command-line mode of the viewer binary and is tested standalone
  * (scripts/updater/test_update_apply.sh).
  *
- * Linux flow: the viewer downloads + verifies the tarball in the background and records it
- * (SLUpdater, slupdater.cpp). The NEXT start goes through the launcher (etc/update_hooks.sh),
+ * Linux flow: the viewer downloads + verifies the tarball when the person clicks "Download and
+ * install" and records it (SLUpdater, slupdater.cpp); it is installed only once they also chose
+ * "Install now" or "Install at next start" (<GMDX> pointer file approved-update). The NEXT start goes through the launcher (etc/update_hooks.sh),
  * which runs `<bin> --slipstream-apply-update <install root>` BEFORE the viewer starts. That
  * mode re-verifies signature + hash, unpacks the tarball into a sibling directory of the
  * install, checks the unpacked tree and swaps the two directories atomically
@@ -89,7 +90,7 @@ namespace SLUpdateApply
 
     // The apply step described above. `staged_json` is the file written by the viewer
     // ({manifest, signature, artifact, file}); `root` the install directory (the launcher's
-    // directory). `state_dir` holds pending-update / update-unconfirmed / bad-build.
+    // directory). `state_dir` holds approved-update / update-unconfirmed / bad-build.
     int applyStaged(const std::string& staged_json, const std::string& root, const std::string& state_dir,
                     std::string& message, const char* pubkey_hex = nullptr);
 

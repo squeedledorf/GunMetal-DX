@@ -14,7 +14,8 @@
 // curves, moving with the pose (every AO ray at once). A receiver within eps of such a legacy surface (a
 // short camera-ray probe over the rigged classes, +-2 eps around P, any face flagged
 // RT_GEOM_W_CLUSTER_RIG) gets its ray origins lifted by eps along the light-facing normal: out of its own
-// legacy hull, so only occluders nearer than the LOD's own error go unresolved. Returns the lift (m),
+// legacy hull, so only occluders nearer than the LOD's own error go unresolved. Orthographic main
+// views use the flat eps = tol_px / px_scale (px_scale is pixels per metre). Returns the lift (m),
 // 0 = none (LOD off, nothing switched, no flagged surface near: the previous behaviour exactly).
 // (Before #1048 three copies: the mask's, RTAO's and pass 15's; only the last guarded the probe ray.)
 float rtClusterRigLift(vec3 P, vec3 cam)
@@ -29,7 +30,7 @@ float rtClusterRigLift(vec3 P, vec3 cam)
     const float camd = length(V);
     if (camd < 1e-4) return 0.0;
     V /= camd;
-    const float eps = ssr.cluster_rt.x * max(camd, ssr.cluster_rt.y);
+    const float eps = ssr.cluster_rt.w > 0.5 ? ssr.cluster_rt.x : ssr.cluster_rt.x * max(camd, ssr.cluster_rt.y);
     const float w = 2.0 * eps + 1e-3;
     vec3 qo = P - V * w;
     float qt0 = 0.0, qt1 = 2.0 * w;

@@ -25,13 +25,15 @@
  */
 
 #include "llviewerprecompiledheaders.h"
+#include "llcleanemissivediag.h"
 
 // file include
 #define LLSELECTMGR_CPP
 #include "llselectmgr.h"
-#include "llgroupcolormap.h" // <GMDX>
-#include "fssoundemitterblacklist.h" // <GMDX>
-#include "llderenderlist.h" // <GMDX>
+#include "llgroupcolormap.h"
+#include "fssoundemitterblacklist.h"
+#include "llderenderlist.h"
+#include "gmdxattachprobe.h"
 #include "llmaterialmgr.h"
 
 // library includes
@@ -6204,13 +6206,10 @@ void LLSelectMgr::requestObjectPropertiesFamily(LLViewerObject* object)
     msg->sendReliable( regionp->getHost() );
 }
 
-
-// <GMDX>
-// Briefly select and deselect an object server-side to elicit a full
-// ObjectProperties reply. Unlike RequestObjectPropertiesFamily this also
-// works for worn attachments (same approach FSAreaSearch uses for bulk
-// property scans). The selection never enters the viewer-side selection
-// list, so user selection state is unaffected. (From SkoomaStorm.)
+// Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4 (from SkoomaStorm).
+// Briefly select and deselect an object server-side to elicit a full ObjectProperties reply.
+// Unlike RequestObjectPropertiesFamily this also works for worn attachments. The selection
+// never enters the viewer-side selection list, so user selection state is unaffected.
 void LLSelectMgr::requestObjectPropertiesViaSelect(LLViewerObject* object)
 {
     LLViewerRegion* regionp = object ? object->getRegion() : nullptr;
@@ -6246,7 +6245,7 @@ void LLSelectMgr::requestObjectPropertiesViaSelect(LLViewerRegion* regionp, U32 
     msg->addU32Fast(_PREHASH_ObjectLocalID, local_id);
     msg->sendReliable(regionp->getHost());
 }
-// </GMDX>
+
 
 // static
 void LLSelectMgr::processObjectProperties(LLMessageSystem* msg, void** user_data)
@@ -6283,7 +6282,6 @@ void LLSelectMgr::processObjectProperties(LLMessageSystem* msg, void** user_data
         msg->getUUIDFast(_PREHASH_ObjectData, _PREHASH_CreatorID, creator_id, i);
         msg->getUUIDFast(_PREHASH_ObjectData, _PREHASH_OwnerID, owner_id, i);
         msg->getUUIDFast(_PREHASH_ObjectData, _PREHASH_GroupID, group_id, i);
-        const bool group_probe_reply = LLGroupColorMap::handleAttachmentGroupReply(id, group_id); // <GMDX> attachment-group probe
         msg->getU64Fast(_PREHASH_ObjectData, _PREHASH_CreationDate, creation_date, i);
         msg->getU32Fast(_PREHASH_ObjectData, _PREHASH_BaseMask, base_mask, i);
         msg->getU32Fast(_PREHASH_ObjectData, _PREHASH_OwnerMask, owner_mask, i);
@@ -6314,13 +6312,16 @@ void LLSelectMgr::processObjectProperties(LLMessageSystem* msg, void** user_data
         std::string desc;
         msg->getStringFast(_PREHASH_ObjectData, _PREHASH_Description, desc, i);
 
-        // <GMDX> Owner + name are how a permanent sound emitter blacklist or derender
-        // entry finds a worn attachment again after a re-rez gave it a new UUID. This is
-        // the only place both are known for someone else's object.
-        FSSoundEmitterBlacklist::instance().noteObjectProperties(id, owner_id, name);
-        if (LLDerenderList::instanceExists())
-            LLDerenderList::instance().onObjectProperties(id, owner_id, name);
-        // </GMDX>
+        // Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4: owner + name are how a permanent
+        // sound blacklist or derender entry finds a worn attachment again after a re-rez gave it a new UUID.
+        bool probe_reply = LLGroupColorMap::handleAttachmentGroupReply(id, group_id); // attachment-group probe
+        if (FSSoundEmitterBlacklist::enabled())
+        {
+            if (FSSoundEmitterBlacklist::instance().noteObjectProperties(id, owner_id, name) || GMDXAttachProbe::wasAsked(id))
+                probe_reply = true;
+            if (LLDerenderList::instanceExists())
+                LLDerenderList::instance().onObjectProperties(id, owner_id, name);
+        }
 
         std::string touch_name;
         msg->getStringFast(_PREHASH_ObjectData, _PREHASH_TouchName, touch_name, i);
@@ -6364,7 +6365,7 @@ void LLSelectMgr::processObjectProperties(LLMessageSystem* msg, void** user_data
 
         if (!node)
         {
-            if (!group_probe_reply) // <GMDX> probed attachments are never in the selection
+            if (!probe_reply) // GunMetal-DX: probed attachments are never in the selection
             LL_WARNS() << "Couldn't find object " << id << " selected." << LL_ENDL;
         }
         else
@@ -6546,6 +6547,7 @@ void LLSelectMgr::processObjectPropertiesFamily(LLMessageSystem* msg, void** use
     const bool links_list_reply = LLPanelObjectLinks::processPropertiesFamily(id, name, desc);
     // #892: the parcel speaker registry's owner / group check (never touches selection state).
     const bool speaker_reply = SLParcelSpeakers::onPropertiesFamily(id, owner_id, group_id);
+    const bool emissive_reply = llEmissiveDiagProperties(id, name);
 
     if (node)
     {
@@ -6558,7 +6560,7 @@ void LLSelectMgr::processObjectPropertiesFamily(LLMessageSystem* msg, void** use
         node->mName.assign(name);
         node->mDescription.assign(desc);
     }
-    else if (links_list_reply || speaker_reply)
+    else if (links_list_reply || speaker_reply || emissive_reply)
     {
         return;   // the list updated its row / a speaker check; no all-dialog refresh per reply
     }

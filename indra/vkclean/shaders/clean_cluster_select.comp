@@ -81,6 +81,7 @@ layout(push_constant) uniform SelectPush
     uint tier;             // raster tier of the draw records (0 pull, 1 uint8, 2 mesh)
     uint rig_bounds;       // bit 0 (2a, #747): this frame's rigged posed-bound margins are written;
                            // bit 1: skip moving casters (CLI1B_DYN_CASTER; secondary views, #567 split)
+                           // bit 2: suppress qualified emissive world shadow casters
 } sp;
 
 // Subgroup-aggregated append: one atomicAdd per subgroup on cl_cnt[counter]; returns this
@@ -196,11 +197,14 @@ void main()
     const ClMesh mesh = cl_meshes[inst.mesh];
     if (mesh.generation != inst.mesh_generation || mesh.page_count == 0u) return;   // stale ref
     const bool is_main = (v.flags & CLV_MAIN) != 0u;
+    if ((v.flags & CLV_SHADOW) != 0u && (sp.rig_bounds & 4u) != 0u
+        && (inst.flags & CLI1B_EMISSIVE_NOSHADOW) != 0u) return;
     // Secondary views: rigged instances come from the main view's shared rig lists; moving
     // casters stay legacy under the cascades' static / dynamic split.
     if (!is_main && (inst.flags & CLI_RIGGED) != 0u) return;
-    // <GMDX> Avatars render type off (CLV_NO_RIGGED, main view; Develop > Render Types, the region map
-    // capture): no rigged cut at all -- the shared rig lists (shadows, captures) and the RT cut derive from it.
+    // Avatars render type off (CLV_NO_RIGGED, main view; Develop > Render Types, the region map
+    // capture): no rigged cut at all -- the shared rig lists (shadows, captures) and the RT cut
+    // derive from it. Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
     if ((v.flags & CLV_NO_RIGGED) != 0u && (inst.flags & CLI_RIGGED) != 0u) return;
     if (!is_main && (sp.rig_bounds & 2u) != 0u && (inst.flags & CLI1B_DYN_CASTER) != 0u) return;
     if (lid == 0u) CL_STAT_ADD(CLS_INSTANCES, 1u);
@@ -235,8 +239,9 @@ void main()
     // Our own avatar hidden in the main view (mouselook, CLV_HIDE_SELF): its cut is still
     // selected (the shared rig lists -- shadows, captures -- and the RT cut derive from it) but
     // the main view draws none of it.
-    // <GMDX> Avatar matte snapshot (CLV_AVATARS_ONLY, the legacy cull's kCullAvatarsOnly): the same
-    // for every static -- the main view draws avatars only (worn rigid attachments are never here).
+    // Avatar matte snapshot (CLV_AVATARS_ONLY, the legacy cull's kCullAvatarsOnly): the same for
+    // every static -- the main view draws avatars only (worn rigid attachments are never here).
+    // Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
     const bool hide_main = ((v.flags & CLV_HIDE_SELF) != 0u && (inst.flags & CLI_SELF) != 0u)
                         || ((v.flags & CLV_AVATARS_ONLY) != 0u && (inst.flags & CLI_RIGGED) == 0u);
     // (#748 perf pass 3) RESIDENCY ONLY for an instance no view draws this frame (a registered

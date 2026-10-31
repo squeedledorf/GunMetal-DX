@@ -2,6 +2,9 @@
  * @file fssoundemitterblacklist.cpp
  * @brief Per-emitter sound blacklist (silence a specific noisy object).
  *
+ * Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4; original code from
+ * SkoomaStorm (SoapStorm <OTS>). Only active with the SLSoundEmitterBlacklist preference.
+ *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Second Life Viewer Source Code
  * Copyright (C) 2026, SkoomaStorm
@@ -27,6 +30,7 @@
 #include "fssoundemitterblacklist.h"
 
 #include "lldir.h"
+#include "llviewercontrol.h"   // gSavedSettings
 #include "llfile.h"
 #include "llframetimer.h"
 #include "llsdserialize.h"
@@ -60,6 +64,13 @@ FSSoundEmitterBlacklistData FSSoundEmitterBlacklistData::fromLLSD(const LLSD& sd
     d.permanent = sd["permanent"].asBoolean();
     d.attachment = sd["attachment"].asBoolean();
     return d;
+}
+
+// static
+bool FSSoundEmitterBlacklist::enabled()
+{
+    static LLCachedControl<bool> sEnabled(gSavedSettings, "SLSoundEmitterBlacklist", false);
+    return sEnabled;
 }
 
 void FSSoundEmitterBlacklist::init()
@@ -164,11 +175,11 @@ bool FSSoundEmitterBlacklist::wantsProperties(const LLUUID& wearer_id, const LLU
     return false;
 }
 
-void FSSoundEmitterBlacklist::noteObjectProperties(const LLUUID& object_id, const LLUUID& owner_id, const std::string& name)
+bool FSSoundEmitterBlacklist::noteObjectProperties(const LLUUID& object_id, const LLUUID& owner_id, const std::string& name)
 {
     if (object_id.isNull())
     {
-        return;
+        return false;
     }
 
     // A reply to a probe we fired when the entry was added: record what the entry
@@ -190,28 +201,28 @@ void FSSoundEmitterBlacklist::noteObjectProperties(const LLUUID& object_id, cons
             }
             mChangedSignal();
         }
-        return;
+        return true;
     }
 
     if (mPermIndex.empty() || owner_id.isNull() || name.empty())
     {
-        return;
+        return false;
     }
 
     auto owner_it = mPermIndex.find(owner_id);
     if (owner_it == mPermIndex.end())
     {
-        return;
+        return false;
     }
     auto name_it = owner_it->second.find(name);
     if (name_it == owner_it->second.end())
     {
-        return;
+        return false;
     }
 
     if (mData.find(object_id) != mData.end())
     {
-        return; // already blacklisted; the sound path has it
+        return false; // already blacklisted; the sound path has it
     }
 
     // GunMetal-DX: only the root of an attachment this owner wears takes an entry
@@ -220,7 +231,7 @@ void FSSoundEmitterBlacklist::noteObjectProperties(const LLUUID& object_id, cons
     // to share the owner and name would pull the entry off the object it was made for.
     if (!is_worn_by(gObjectList.findObject(object_id), owner_id, true))
     {
-        return;
+        return false;
     }
 
     for (LLUUID& old_id : name_it->second)
@@ -246,13 +257,14 @@ void FSSoundEmitterBlacklist::noteObjectProperties(const LLUUID& object_id, cons
 
         save();
         mChangedSignal();
-        return;
+        return false;
     }
+    return false;
 }
 
 bool FSSoundEmitterBlacklist::isEmitterBlacklisted(const LLViewerObject* objectp) const
 {
-    if (mData.empty() || !objectp)
+    if (mData.empty() || !objectp || !enabled())
     {
         return false;
     }
@@ -271,7 +283,7 @@ bool FSSoundEmitterBlacklist::isEmitterBlacklisted(const LLUUID& object_id, cons
     // Every incoming sound reaches here, so do nothing at all when nobody has
     // blacklisted an emitter: the findObject below is a lookup per sound that
     // only the root fallback needs.
-    if (mData.empty())
+    if (mData.empty() || !enabled())
     {
         return false;
     }

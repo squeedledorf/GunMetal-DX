@@ -429,9 +429,17 @@ float sxcCertRay(vec3 o, vec3 d, float tmax)
     float tmin = 0.0;
     if (!rtRaySane(o, tmin, d, tmax)) return -1.0;   // (Xid 109: an invalid ray is inconclusive)
     rayQueryEXT rq;
-    rayQueryInitializeEXT(rq, uTLAS, gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT,
+    rayQueryInitializeEXT(rq, uTLAS, gl_RayFlagsTerminateOnFirstHitEXT,
                           (RT_MASK_OPAQUE | RT_MASK_TERRAIN) & 0xFFu, o, tmin, d, tmax);
-    while (rayQueryProceedEXT(rq)) {}
+    uint candidates = 0u;
+    while (rayQueryProceedEXT(rq))
+    {
+        if (++candidates > RT_CANDIDATE_BUDGET) { rayQueryTerminateEXT(rq); return -1.0; }
+        if (rayQueryGetIntersectionTypeEXT(rq, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
+        const uint id = rtHitInstance(uint(rayQueryGetIntersectionInstanceCustomIndexEXT(rq, false)),
+                                     uint(rayQueryGetIntersectionGeometryIndexEXT(rq, false)));
+        if (!rtEmissiveNoShadow(id)) rayQueryConfirmIntersectionEXT(rq);
+    }
     if (rayQueryGetIntersectionTypeEXT(rq, true) != gl_RayQueryCommittedIntersectionTriangleEXT) return -1.0;
     const uint id = rtHitInstance(uint(rayQueryGetIntersectionInstanceCustomIndexEXT(rq, true)),
                                   uint(rayQueryGetIntersectionGeometryIndexEXT(rq, true)));
@@ -444,6 +452,7 @@ float sxcCertRay(vec3 o, vec3 d, float tmax)
 // point Pin on the facet Nin, plus the sample's bias and the rig / slope lift).
 void sxcSunPost(SxcTexel t, vec3 vis, vec3 Pin, vec3 Nin, vec3 cam, float bias, uint frame)
 {
+    cam = CL_VIEW_EYE(linfo, Pin, cam);
     if (t.cls == SXC_C_OFF || t.cls == SXC_C_SKIP || t.e == 0xFFFFFFFFu) return;
     SxcBuf b = sxcBuf();
     const bool lit = max(max(vis.r, vis.g), vis.b) > 0.02;
@@ -514,6 +523,7 @@ void sxcSunRevoke(SxcTexel t, vec3 vis)
 }
 void sxcSunCertify(SxcTexel t, vec3 Pin, vec3 Nin, vec3 cam, float bias, uint frame)
 {
+    cam = CL_VIEW_EYE(linfo, Pin, cam);
     if (t.cls == SXC_C_OFF || t.cls == SXC_C_SKIP || t.e == 0xFFFFFFFFu || !t.ticket) return;
     SxcBuf b = sxcBuf();
     const uint nb = max(b.w[SXC_H_NB], 1u);

@@ -27,13 +27,14 @@
 //     (gun + holster). Links work as well as the objects themselves.
 //   Loadouts/<loadout>/  links to the parts of at most one weapon per category.
 //   Outdated/  old versions the sorter / importer replaced (left out of inventory search).
-// The three are known by id (per-account GMDXFolder* settings), shown like system folders: own
-// icons, sorted to the top, not deletable or renamable (llinventorybridge.cpp's <GMDX> hooks).
-// Folders made under their first names ("GunMetal-DX Equipment" ...) are renamed on first use.
+// The three are known by id (per-account SLLoadoutFolder* settings), shown like system folders while
+// CombatFX is on: own icons, sorted to the top, not deletable or renamable (llinventorybridge.cpp's
+// <GMDX> hooks). Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4; Slipstream: made
+// only after the user confirms (ensureFolders) or by an action that needs one.
 // Equipping touches only the categories: what is worn from them comes off, the loadout's weapons go on,
 // everything else stays. Swapping one weapon never edits a loadout until the user saves it. The only
 // guard is that swaps never overlap: one asked for during a swap waits for it. The category list and
-// its order are a per-account setting (GMDXLoadoutCategories); its folders are in inventory.
+// its order are a per-account setting (SLLoadoutCategories); its folders are in inventory.
 
 #pragma once
 
@@ -77,7 +78,8 @@ public:
     U64 generation() const;
     void bump() { ++mGeneration; }
 
-    // Creates the two folders and the category folders when they are missing.
+    // Creates the folders and the category folders when they are missing, after the user confirms
+    // (once per session; Slipstream inventory safety).
     void ensureFolders();
 
     std::vector<std::string> categories() const;
@@ -113,13 +115,15 @@ public:
 
     // Quick swap: a menu of the category's weapons beside the crosshair (frees the mouse in mouselook).
     void showQuickMenu(S32 slot);
-    // Its keys, one per slot (Combat > Quick Swap's items; GMDXQuickSwapKeys, default Alt+1..4).
+    // Its keys, one per slot (Combat > Quick Swap's items; SLQuickSwapKeys, default Alt+1..4).
     static const S32 HOTKEY_SLOTS = 4;
     static void hotkey(S32 slot, KEY& key, MASK& mask);
     static std::string hotkeyLabel(S32 slot);   // "Alt+1", or empty when unbound
     // false: another menu already uses the key (nothing changed). A key another slot had moves here.
     static bool setHotkey(S32 slot, KEY key, MASK mask);
-    static void applyHotkeys(bool clear = false);   // clear: none on the items (while a key is being picked)
+    // clear: none on the items (while a key is being picked). Also shows the Combat menu only while
+    // CombatFX is on (and clears the keys while it is off).
+    static void applyHotkeys(bool clear = false);
     // The weapon chooser used by the Loadouts tab, at a screen point.
     void showChooser(const std::string& cat, const LLUUID& current, S32 x, S32 y,
                      std::function<void(const Weapon*)> on_pick, bool quick);
@@ -228,6 +232,8 @@ private:
     std::vector<std::function<void(const LLUUID&)>> mFolderWaiters[FOLDER_COUNT];   // withFolder
     bool mCreateFailed = false;
     bool mFetched = false;
+    bool mFoldersConfirmed = false;   // the user said yes to making the missing folders (this session)
+    bool mAskingFolders = false;      // that question is showing
 
     Progress mProgress;
     Job mQueued;  // the newest request made during a swap; it replaces an older one

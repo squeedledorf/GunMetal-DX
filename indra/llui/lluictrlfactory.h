@@ -262,7 +262,9 @@ private:
 
         if (widget && !widget->postBuild())
         {
-            delete widget;
+            // Out-of-line delete: inlining ~T() here made GCC 16 speculatively devirtualize
+            // to a derived dtor and raise -Warray-bounds against the sizeof(T) allocation.
+            deleteView(widget);
             widget = NULL;
         }
 

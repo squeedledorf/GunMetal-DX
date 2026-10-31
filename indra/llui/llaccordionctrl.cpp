@@ -33,6 +33,7 @@
 #include "llwindow.h"
 #include "llfocusmgr.h"
 #include "lllocalcliprect.h"
+#include "llmiddleautoscroll.h"
 
 #include "boost/bind.hpp"
 
@@ -191,6 +192,20 @@ void LLAccordionCtrl::reshape(S32 width, S32 height, bool called_from_parent)
 bool LLAccordionCtrl::handleRightMouseDown(S32 x, S32 y, MASK mask)
 {
     return LLPanel::handleRightMouseDown(x, y, mask);
+}
+
+//---------------------------------------------------------------------------------
+bool LLAccordionCtrl::handleMiddleMouseDown(S32 x, S32 y, MASK mask)
+{
+    // An inner list that scrolls by itself keeps the press; tab headers and content don't count.
+    {
+        LLView::MiddleClickBubbleScope bubble;
+        if (LLPanel::handleMiddleMouseDown(x, y, mask))
+        {
+            return true;
+        }
+    }
+    return LLMiddleAutoScroll::getInstance()->begin(this, mScrollbar, nullptr, 1.f, x, y);
 }
 
 //---------------------------------------------------------------------------------

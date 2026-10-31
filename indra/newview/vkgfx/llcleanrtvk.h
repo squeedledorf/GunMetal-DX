@@ -39,6 +39,7 @@
 #include "vk_descpool.h"
 #include "../llavatarslots.h"
 
+#include <atomic>
 #include <cstdint>
 #include <deque>
 #include <map>
@@ -76,6 +77,8 @@ public:
     // repack). Its BLAS (if any) is retired now; the lazy path rebuilds it if the
     // TLAS pass selects it again. from_repack only feeds the statistics.
     void slotChanged(uint32_t sl, bool from_repack);
+    // Failed geometry publication: retry must never retain a build from mixed inputs.
+    void geometryUploadRetry(uint32_t sl);
     // Renderer hook, every frame before its instance runs are cleared: the instance id
     // runs [first, second) whose CPU rows changed this frame (full = every row was
     // (re)streamed). Keeps the rigged-instance set current without scanning all rows.
@@ -419,7 +422,9 @@ private:
     std::vector<uint8_t>  mInWant;                // per slot: listed in mWant
     void wantSlot(uint32_t sl);
     std::vector<uint32_t> mSlotGen;               // content generation per slot
-    std::vector<uint32_t> mSlotAddrCpu;           // 2 words per slot (lo, hi)
+    std::vector<uint32_t> mSlotEmGen;             // exact optional emitter token, never wraps
+    uint64_t mNextSlotEmGen = 0;                 // retained across slot/address-table shrink
+    std::vector<uint32_t> mSlotAddrCpu;           // 4 words: BLAS lo/hi, emitter token, slot ID
     std::vector<uint32_t> mIdxCheckGen;           // per slot: mSlotGen + 1 when scanned
     std::vector<uint8_t>  mIdxBad;                // per slot: scan found an index >= vert_count
     uint32_t mIdxBadLogged = 0;
@@ -643,6 +648,14 @@ private:
     uint32_t  mTlasCap = 0;
     VkDeviceSize mTlasScratch = 0;                // max(build, update) over both flag sets
     bool mTlasBuilt = false;
+    // #1128: atomic diagnostics are safe for the worker-thread device-loss callback.
+    std::atomic<uint64_t> mInputGated{0}, mInputRecovered{0}, mInputAborted{0}, mInputRetrySlots{0};
+    std::atomic<uint32_t> mInputLastReasons{0}, mInputLastGateFrame{0}, mInputLastRecoveryFrame{0};
+    std::atomic<bool> mInputRecoveryPending{false};
+    double mInputGateNextLog = 0.0, mInputRecoveryNextLog = 0.0;
+    void refuseInputBuild(uint32_t reasons, bool aborted = false);
+    void inputRecoveryRecorded();
+    void inputLostReport() const;
     // TLAS REFIT (RenderVKTLASRefit): MODE_UPDATE in place while everything an update
     // must keep identical still matches the last BUILD (see recordBuild).
     bool      mTlasHasBuild = false;              // mTlas holds a completed (recorded) BUILD

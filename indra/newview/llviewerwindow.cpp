@@ -26,13 +26,16 @@
 
 #include "llviewerprecompiledheaders.h"
 #include "llviewerwindow.h"
+#include "gmdxchatlog.h"
 #include "gmdxfloaterinputoverlay.h"   // <GMDX> scroll on the input overlay
+#include "gmdxhudeditpan.h" // <GMDX> HUD edit bounds overlay
 #include "slkeycommands.h"
 #include "llworldclock.h"
 #include "llmemorygovernor.h"         // #873 live snapshot system-memory check
 #include "llvkhitch.h"
 
 #include "vkgfx/llvulkancontext.h"  // EXPERIMENTAL Vulkan: swapchain recreate on resize
+#include "llfloaterpopout.h"
 #include "llvrcamera.h"             // #1074 VR: a minimised mirror window keeps the viewer active
 
 // system library includes
@@ -55,6 +58,7 @@
 #include "llpanellogin.h"
 #include "llsetkeybinddialog.h"
 #include "llviewerinput.h"
+#include "llgamecontrol.h"
 #include "llviewermenu.h"
 
 #include "llviewquery.h"
@@ -100,15 +104,14 @@
 #include "slmmbnav.h"
 #include "slchatbar.h"
 #include "sltpscamera.h"
-#include "fscombathitmarker.h" // <GMDX>
-#include "fsfloaterkillfeed.h" // <GMDX>
-#include "fsghostprojectile.h" // <GMDX>
-#include "fsrezqueue.h" // <GMDX>
-#include "fsrmbscript.h" // <GMDX>
-#include "gmdxselectionoutline.h" // <GMDX>
-#include "gmdxhudeditpan.h" // <GMDX> HUD edit bounds overlay
-#include "gmdxchatlog.h" // <GMDX>
-#include "gmdxsnapshotavatars.h" // <GMDX> snapshot avatar layers / scope
+#include "llsnapshotavatars.h"   // snapshot avatar layers / scope (GunMetal-DX port)
+#include "llselectionoutline.h"  // LL selection silhouettes (GunMetal-DX port)
+#include "fsrmbscript.h" // <GMDX> CombatFX (ported from GunMetal-DX, LGPL 2.1, v0.3.0 cf5f1f4)
+#include "fscombathitmarker.h" // <GMDX> CombatFX
+#include "fsfloaterkillfeed.h" // <GMDX> CombatFX
+#include "fsrezqueue.h" // <GMDX> CombatFX
+#include "fsghostprojectile.h" // <GMDX> DebugShowSoapstormProjectilesInfo
+#include "gmdxghostwatch.h"    // <GMDX> DebugShowSoapstormProjectilesInfo
 #include "llagent.h"
 // [SL:KB] - Patch: Build-DragNDrop | Checked: 2013-07-22 (Catznip-3.6)
 #include "llagentbenefits.h"
@@ -140,7 +143,6 @@
 #include "llfloaterworldmap.h"
 #include "llfocusmgr.h"
 #include "llfontfreetype.h"
-#include "llgamecontrol.h"
 #include "llgesturemgr.h"
 #include "llhudmanager.h"
 #include "llhudobject.h"
@@ -155,6 +157,7 @@
 #include "lllocalgltfmaterials.h"
 #include "llmenugl.h"
 #include "llmenuoptionpathfindingrebakenavmesh.h"
+#include "llmiddleautoscroll.h"
 #include "llmodaldialog.h"
 #include "llchannelmanager.h"
 #include "llmorphview.h"
@@ -162,6 +165,7 @@
 #include "llnavigationbar.h"
 #include "llpaneltopinfobar.h"
 #include "llpopupview.h"
+#include "llpreviewgesture.h"
 #include "llpreviewtexture.h"
 #include "llprogressview.h"
 #include "llresmgr.h"
@@ -796,9 +800,9 @@ public:
         {
             addText(xpos, ypos, llformat("Projectiles: %u", FSGhostProjectile::getNumLikely()));
             ypos += y_inc;
-            addText(xpos, ypos, llformat("Ghost projectiles dropped: %u", FSGhostProjectile::getNumDropped()));
+            addText(xpos, ypos, llformat("Ghosts dropped: %u", GMDXGhostWatch::numDropped()));
             ypos += y_inc;
-            addText(xpos, ypos, llformat("Ghost projectiles watched: %u", FSGhostProjectile::getNumWatched()));
+            addText(xpos, ypos, llformat("Ghost watch: %u", GMDXGhostWatch::numWatched()));
             ypos += y_inc;
         }
         // </GMDX>
@@ -836,6 +840,7 @@ public:
                 av_iter++;
             }
         }
+        // <GMDX> LL game control's controller state overlay (viewer PR #6202)
         static LLCachedControl<bool> debug_show_game_controller_state(gSavedSettings, "DebugShowControllerState", false);
         if (debug_show_game_controller_state())
         {
@@ -880,6 +885,7 @@ public:
             addText(xpos, ypos, "Game Controller Final State Buttons");
             ypos += y_inc;
         }
+        // </GMDX>
         static LLCachedControl<bool> debug_show_render_matrices(gSavedSettings, "DebugShowRenderMatrices", false);
         if (debug_show_render_matrices())
         {
@@ -1198,6 +1204,24 @@ void LLViewerWindow::handlePieMenu(S32 x, S32 y, MASK mask)
     }
 }
 
+// The mouse side buttons and gestures (#1189). Pressed while a gesture editor's key dropdown has
+// focus, a button picks itself there; otherwise a press plays the gesture bound to the button and
+// a release ends its "wait for key release" step. No view or tool uses these buttons, so they work
+// wherever the pointer is; only a mouse captor (the Controls key bind dialog) gets them first.
+static bool handle_side_button(EMouseClickType clicktype, MASK mask, bool down)
+{
+    if (clicktype != CLICK_BUTTON4 && clicktype != CLICK_BUTTON5)
+    {
+        return false;
+    }
+    if (LLPreviewGesture::pickSideButton(clicktype, down))
+    {
+        return true;
+    }
+    LLGestureMgr& gestures = LLGestureMgr::instance();
+    return down ? gestures.triggerMouseGesture(clicktype, mask) : gestures.triggerMouseGestureRelease(clicktype);
+}
+
 bool LLViewerWindow::handleAnyMouseClick(LLWindow *window, LLCoordGL pos, MASK mask, EMouseClickType clicktype, bool down, bool& is_toolmgr_action)
 {
     const char* buttonname = "";
@@ -1225,18 +1249,71 @@ bool LLViewerWindow::handleAnyMouseClick(LLWindow *window, LLCoordGL pos, MASK m
     // bindings) until we know it is not the start of a camera drag; the guard runs the bindings on
     // the way out unless SLMMBNav claims the press below. Its release belongs to SLMMBNav while a
     // press is being decided (it replays the bindings itself).
+    // Middle-button autoscroll (#1144) holds every press back the same way: a press that starts
+    // it, and any middle event while it is on (the release, the click that ends it), belongs to
+    // the scrolling view and never keys push-to-talk.
+    if (clicktype == CLICK_MIDDLE && down)
+    {
+        // A fresh physical press also discards a stale latch after focus loss.
+        mMiddleAutoScrollPressConsumed = false;
+    }
+    const bool mmb_autoscroll = clicktype == CLICK_MIDDLE && LLMiddleAutoScroll::isActive();
+    const bool consumed_release = clicktype == CLICK_MIDDLE && !down && mMiddleAutoScrollPressConsumed;
+    if (consumed_release)
+    {
+        mMiddleAutoScrollPressConsumed = false;
+        mMiddleMouseDown = false;
+        if (!mmb_autoscroll)
+        {
+            mWindow->releaseMouse();
+            return true;
+        }
+        if (!gPipeline.hasRenderDebugFeatureMask(LLPipeline::RENDER_DEBUG_FEATURE_UI))
+        {
+            mWindow->releaseMouse();
+            LLMiddleAutoScroll::instance().handleMiddleMouseUp(x, y, mask);
+            return true;
+        }
+    }
+    if (clicktype == CLICK_MIDDLE && down && mmb_autoscroll)
+    {
+        mMiddleAutoScrollPressConsumed = true;
+    }
     struct MMBDeferGuard
     {
         bool pending;
         MASK mask;
+        bool& consumed;
         ~MMBDeferGuard()
         {
-            if (pending) gViewerInput.handleGlobalBindsMouse(CLICK_MIDDLE, mask, true);
+            if (pending)
+            {
+                if (LLMiddleAutoScroll::isActive()) consumed = true;
+                else gViewerInput.handleGlobalBindsMouse(CLICK_MIDDLE, mask, true);
+            }
         }
-    } mmb_guard{ clicktype == CLICK_MIDDLE && down && SLMMBNav::isEnabled(), mask };
-    if (!mmb_guard.pending && !(clicktype == CLICK_MIDDLE && !down && SLMMBNav::isActive()))
+    } mmb_guard{ clicktype == CLICK_MIDDLE && down && !mmb_autoscroll, mask, mMiddleAutoScrollPressConsumed };
+    if (!mmb_guard.pending && !mmb_autoscroll && !consumed_release && !(clicktype == CLICK_MIDDLE && !down && SLMMBNav::isActive()))
     {
         gViewerInput.handleGlobalBindsMouse(clicktype, mask, down);
+    }
+
+    if (clicktype == CLICK_RIGHT)
+    {
+        // A fresh press starts a new gesture, even if focus loss swallowed the old up.
+        if (down)
+        {
+            mConsumeTPSRightMouseUp = false;
+        }
+        else if (mConsumeTPSRightMouseUp)
+        {
+            // Balance native/button bookkeeping and global binds, but never send
+            // this TPS release to the UI or tool that inherited mouse capture.
+            mConsumeTPSRightMouseUp = false;
+            mRightMouseDown = false;
+            mWindow->releaseMouse();
+            return true;
+        }
     }
 
     // only send mouse clicks to UI if UI is visible
@@ -1343,6 +1420,12 @@ bool LLViewerWindow::handleAnyMouseClick(LLWindow *window, LLCoordGL pos, MASK m
                 handlePieMenu(x, y, mask);
                 r = true;
             }
+            else
+            {
+                // A side button the captor has no use for (mouselook's gun tool while the left
+                // button fires) still plays its gesture
+                r = handle_side_button(clicktype, mask, down);
+            }
             return r;
         }
 
@@ -1383,6 +1466,12 @@ bool LLViewerWindow::handleAnyMouseClick(LLWindow *window, LLCoordGL pos, MASK m
             }
     }
 
+    // Side button gestures; with a mouse captor (UI shown), its branch above has them
+    if (handle_side_button(clicktype, mask, down))
+    {
+        return true;
+    }
+
     // Middle-mouse navigation (#652) with the UI hidden: no captor routing above, so its release comes here.
     if (clicktype == CLICK_MIDDLE && !down && SLMMBNav::isActive())
     {
@@ -1398,7 +1487,7 @@ bool LLViewerWindow::handleAnyMouseClick(LLWindow *window, LLCoordGL pos, MASK m
     }
 
     // Middle-mouse navigation (#652): the press reached the world (no UI, Pose Studio handle or captor took it).
-    if (mmb_guard.pending && !gDisconnected && SLMMBNav::getInstance()->tryBegin(x, y, mask))
+    if (mmb_guard.pending && SLMMBNav::isEnabled() && !gDisconnected && SLMMBNav::getInstance()->tryBegin(x, y, mask))
     {
         mmb_guard.pending = false;
         LLViewerEventRecorder::instance().clear_xui();
@@ -1465,7 +1554,7 @@ bool LLViewerWindow::handleMouseUp(LLWindow *window,  LLCoordGL pos, MASK mask)
 }
 bool LLViewerWindow::handleRightMouseDown(LLWindow *window,  LLCoordGL pos, MASK mask)
 {
-    FSRMBScript::onRightMouse(true); // <GMDX> right button to scripts in mouselook (FSRMBScriptEnabled)
+    FSRMBScript::onRightMouse(true); // <GMDX> right button to scripts in mouselook (FSRMBScriptEnabled, CombatFX)
     bool down = true;
     return gViewerInput.handleMouse(window, pos, mask, CLICK_RIGHT, down);
 }
@@ -2161,10 +2250,7 @@ bool LLViewerWindow::handleActivate(LLWindow *window, bool activated)
         }
 
         // SL-53351: Make sure we're not in mouselook when minimised, to prevent control issues
-        // <SS:Skoomastream>
-        //if (gAgentCamera.getCameraMode() == CAMERA_MODE_MOUSELOOK)
-        if (gAgentCamera.cameraMouselook()) // also true in OTS
-        // </SS:Skoomastream>
+        if (gAgentCamera.getCameraMode() == CAMERA_MODE_MOUSELOOK) // <SS:Skoomastream/> OTS too
         {
             gAgentCamera.changeCameraToDefault();
         }
@@ -2636,6 +2722,7 @@ LLViewerWindow::LLViewerWindow(const Params& p)
 
     const bool do_not_enforce = false;
     mWindow->setMinSize(p.min_width, p.min_height, do_not_enforce);  // root view not set
+    mWindow->setUseSystemTextCursor(gSavedSettings.getBOOL("SlipstreamSystemTextCursor"));
     LLCoordScreen scr;
     mWindow->getSize(&scr);
 
@@ -2738,6 +2825,7 @@ struct MainPanel : public LLPanel
 
 void LLViewerWindow::initBase()
 {
+    LLFloaterPopout::init();
     S32 height = getWindowHeightScaled();
     S32 width = getWindowWidthScaled();
 
@@ -2831,13 +2919,13 @@ void LLViewerWindow::initBase()
     cp.visible(false);
     mNearbyChatConsole = LLUICtrlFactory::create<LLConsole>(cp);
     getRootView()->addChild(mNearbyChatConsole);
-    // <GMDX> the chat log (NearbyChatOverlayStyle "gmdx"), over the whole window; it draws only then
+    // Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4: the MMO chat log (NearbyChatOverlayStyle "gmdx"),
+    // over the whole window; it draws only while that style is chosen
     if (GMDXChatLog* chat_log = GMDXChatLog::create())
     {
         chat_log->setRect(getRootView()->getLocalRect());
         getRootView()->addChild(chat_log);
     }
-    // </GMDX>
     // #489: the console style of the nearby chat overlay has its own persist / fade / line count /
     // text size / background settings (Preferences > Chat > Alerts), applied live.
     applyNearbyChatConsoleSettings();
@@ -2982,10 +3070,7 @@ void LLViewerWindow::initWorldUI()
     {
         navbar->setVisible(false);
     }
-    else
-    {
-        reshapeStatusBarContainer();
-    }
+    reshapeStatusBarContainer();
 
 
     // Top Info bar
@@ -3069,6 +3154,7 @@ void LLViewerWindow::initWorldUI()
 // Destroy the UI
 void LLViewerWindow::shutdownViews()
 {
+    LLFloaterPopout::shutdown();
     // clean up warning logger
     RecordToChatConsole::getInstance()->stopRecorder();
     LL_INFOS() << "Warning logger is cleaned." << LL_ENDL ;
@@ -3474,6 +3560,7 @@ void LLViewerWindow::draw()
         // Draw tool specific overlay on world
         LLToolMgr::getInstance()->getCurrentTool()->draw();
 
+        // Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4
         if (gAgentCamera.isUsingFlycam() && LLGameControl::isFlycamCrosshairEnabled())
         {
             // Same crosshair image/centering LLToolGun::draw() uses for
@@ -3495,10 +3582,12 @@ void LLViewerWindow::draw()
             SLTPSCamera::drawOverlay();
         }
 
-        // <GMDX> Kill feed: text-only overlay, in and out of mouselook
-        FSFloaterKillFeed::drawOverlay();
-        FSCombatHitMarker::draw(); // <GMDX> hit marker flash and fading hit report
-        FSRezQueue::draw(); // <GMDX> rez queue warning above the crosshair (mouselook and OTS)
+        // <GMDX> CombatFX overlays (each returns at once with CombatFX off). Ported from
+        // GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
+        FSFloaterKillFeed::drawOverlay(); // kill feed: text-only overlay, in and out of mouselook
+        FSCombatHitMarker::draw();        // hit marker flash and fading hit report
+        FSRezQueue::draw();               // rez queue warning above the crosshair (mouselook and OTS)
+        // </GMDX>
         gmdx_draw_hud_edit_bounds(); // <GMDX> HUD edit: where the real screen is
 
         // Draw all nested UI views.
@@ -3524,6 +3613,8 @@ void LLViewerWindow::draw()
             LLUI::popMatrix();
         }
 
+        // Middle-button autoscroll's anchor marker (#1144), over everything.
+        LLMiddleAutoScroll::drawAnchor();
 
         if( gShowOverlayTitle && !mOverlayTitle.empty() )
         {
@@ -3550,6 +3641,30 @@ void LLViewerWindow::draw()
                 (F32)(getWindowHeightScaled() - DIST_FROM_TOP),
                 LLColor4(0.55f, 0.85f, 1.f, 0.95f),
                 LLFontGL::HCENTER, LLFontGL::TOP, LLFontGL::BOLD, LLFontGL::DROP_SHADOW_SOFT);
+        }
+
+        // (#1029) Shaders still compiling after login (a cold pipeline cache: a new build or
+        // driver): the world draws with what has landed, ray-traced effects join as theirs do.
+        // Only the startup compile: once it is in, a later batch (an effect switched on) never
+        // brings the notice back.
+        static bool s_startup_shaders_done = false;
+        if (!s_startup_shaders_done && LLStartUp::getStartupState() >= STATE_STARTED)
+            s_startup_shaders_done = !LLVulkanContext::instance().startupPipelinesPending();
+        if (!s_startup_shaders_done && LLStartUp::getStartupState() >= STATE_STARTED)
+        {
+            const S32 DIST_FROM_TOP = LLWorldClock::userFrozen() ? 96 : 64;
+            U32 done = 0, queued = 0;
+            F64 idle = 0.0;
+            LLVulkanContext::instance().pipelineCompileProgress(done, queued, idle);
+            LLStringUtil::format_map_t args;
+            args["[DONE]"] = llformat("%u", done);
+            args["[TOTAL]"] = llformat("%u", queued);
+            LLFontGL::getFontSansSerif()->renderUTF8(
+                LLTrans::getString(queued > done ? "PreparingShadersCount" : "PreparingShaders", args), 0,
+                (F32)ll_round(getWindowWidthScaled() * 0.5f),
+                (F32)(getWindowHeightScaled() - DIST_FROM_TOP),
+                LLColor4(1.f, 1.f, 1.f, 0.85f),
+                LLFontGL::HCENTER, LLFontGL::TOP, LLFontGL::NORMAL, LLFontGL::DROP_SHADOW_SOFT);
         }
 
         LLUI::setScaleFactor(old_scale_factor);
@@ -3647,6 +3762,12 @@ bool LLViewerWindow::handleKey(KEY key, MASK mask)
 {
     // hide tooltips on keypress
     LLToolTipMgr::instance().blockToolTips();
+
+    // Escape ends middle-button autoscroll (#1144) and goes no further.
+    if (key == KEY_ESCAPE && LLMiddleAutoScroll::handleEscape())
+    {
+        return true;
+    }
 
     // UI hidden (Advanced > Rendering Features > UI, Ctrl+Alt+F1): Escape brings it
     // back. On Linux Ctrl+Alt+F1 switches the virtual console and never reaches us,
@@ -3931,7 +4052,7 @@ bool LLViewerWindow::handleKey(KEY key, MASK mask)
 
     // <GMDX> Keys a text field did not use (numpad +/-, F-keys, Ctrl combos) do not fire gestures while
     // it has the keyboard: typing in chat or the script editor must not start an animation. The tool and
-    // the menu accelerators below still get the key.
+    // the menu accelerators below still get the key. From SoapStorm (Soap Frenzy, 1bec39b6fb), LGPL 2.1.
     const bool text_focus = text_input_has_focus();
     // </GMDX>
 
@@ -4192,6 +4313,22 @@ bool LLViewerWindow::releaseCursorToCenter()
     return true;
 }
 
+void LLViewerWindow::moveCursorTo(S32 x, S32 y)
+{
+    // Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4: the whole window (menu bar
+    // and toolbars included) so a gamepad-driven cursor (LLAgent::applyExternalActions'
+    // CONTROL_MODE_CURSOR) can reach them, but not escape it.
+    x = llclamp(x, 0, getWindowWidthScaled());
+    y = llclamp(y, 0, getWindowHeightScaled());
+
+    LLUI::getInstance()->setMousePositionScreen(x, y);
+
+    // on a forced move, all deltas get zeroed out to prevent jumping
+    mCurrentMousePoint.set(x, y);
+    mLastMousePoint.set(x, y);
+    mCurrentMouseDelta.set(0, 0);
+}
+
 void LLViewerWindow::moveCursorToCenter()
 {
     if (! gSavedSettings.getBOOL("DisableMouseWarp"))
@@ -4282,22 +4419,6 @@ void LLViewerWindow::moveCursorToCenter()
     }
 }
 
-void LLViewerWindow::moveCursorTo(S32 x, S32 y)
-{
-    // Clamp to the whole window (not just the world view) so a gamepad-driven
-    // cursor (see LLAgent::applyExternalActions()'s CONTROL_MODE_CURSOR
-    // handling) can reach the menu bar and toolbars, but not escape the window.
-    x = llclamp(x, 0, getWindowWidthScaled());
-    y = llclamp(y, 0, getWindowHeightScaled());
-
-    LLUI::getInstance()->setMousePositionScreen(x, y);
-
-    // on a forced move, all deltas get zeroed out to prevent jumping
-    mCurrentMousePoint.set(x, y);
-    mLastMousePoint.set(x, y);
-    mCurrentMouseDelta.set(0, 0);
-}
-
 
 //////////////////////////////////////////////////////////////////////
 //
@@ -4338,50 +4459,14 @@ static LLTrace::BlockTimerStatHandle ftm("Update UI");
 
 // Update UI based on stored mouse position from mouse-move
 // event processing.
-// Collects visible views whose screen bounding rect contains (x, y), in display order, carrying the screen
-// origin down the tree instead of re-walking ancestors per view. With honor_opaque, a mouse-opaque hit ends
-// the traversal once its own subtree has been visited (nothing behind it can be hovered).
-static void collectHoverViews(LLView* viewp, S32 origin_x, S32 origin_y, S32 x, S32 y, bool honor_opaque,
-                              std::set<LLHandle<LLView> >& hover_set, bool& stop)
-{
-    if (!viewp->getVisible() || !viewp->calcScreenBoundingRect(origin_x, origin_y).pointInRect(x, y))
-    {
-        return;
-    }
-
-    hover_set.insert(viewp->getHandle());
-
-    const bool opaque = honor_opaque && viewp->getMouseOpaque();
-    for (LLView* childp : *viewp->getChildList())
-    {
-        const LLRect& child_rect = childp->getRect();
-        collectHoverViews(childp, origin_x + child_rect.mLeft, origin_y + child_rect.mBottom, x, y, honor_opaque, hover_set, stop);
-        if (stop)
-        {
-            return;
-        }
-    }
-    if (opaque)
-    {
-        stop = true;
-    }
-}
-
-static void collectHoverViews(LLView* rootp, S32 x, S32 y, bool honor_opaque, std::set<LLHandle<LLView> >& hover_set)
-{
-    LL_PROFILE_ZONE_SCOPED_CATEGORY_UI;
-    S32 origin_x, origin_y;
-    rootp->localPointToScreen(0, 0, &origin_x, &origin_y);
-    bool stop = false;
-    collectHoverViews(rootp, origin_x, origin_y, x, y, honor_opaque, hover_set, stop);
-}
-
 void LLViewerWindow::updateUI()
 {
     LL_PROFILE_ZONE_SCOPED_CATEGORY_UI; //LL_RECORD_BLOCK_TIME(ftm);
 
-    // Ease any in-flight smooth scrolls (UISmoothScroll).
+    // Ease any in-flight smooth scrolls (UISmoothScroll), and scroll a view in middle-button
+    // autoscroll (#1144).
     LLScrollbar::updateSmoothScrolling(LLFrameTimer::getFrameDeltaTimeF32());
+    LLMiddleAutoScroll::update(LLFrameTimer::getFrameDeltaTimeF32());
 
     static std::string last_handle_msg;
 
@@ -4414,6 +4499,17 @@ void LLViewerWindow::updateUI()
     updateWorldViewRect(true);
     // #919: the HUD lays out over LL's world view rect (the placeholder), not the window.
     updateHudRect();
+
+    // Keep world layout above, but never send main-window hover coordinates to
+    // a native view or a cargo drag currently over another OS window.
+    if (LLFloaterPopout::hasWork() && LLFloaterPopout::ownsMouse())
+    {
+        LLView::clearHoverViews(mMouseHoverViews, mCurrentMousePoint.mX, mCurrentMousePoint.mY,
+                                gKeyboard->currentMask(true));
+        mPointerOverWorld = false;
+        if (SLPoseIK::instanceExists()) SLPoseIK::instance().clearHover();
+        return;
+    }
 
     LLView::sMouseHandlerMessage.clear();
 
@@ -4519,8 +4615,9 @@ void LLViewerWindow::updateUI()
         }
     }
 
-    // only update mouse hover set when UI is visible (since we shouldn't send hover events to invisible UI
-    if (gPipeline.hasRenderDebugFeatureMask(LLPipeline::RENDER_DEBUG_FEATURE_UI))
+    // A departed OS pointer must not repopulate main's hover set at its old
+    // coordinates while another native surface (or application) owns the mouse.
+    if (mMouseInWindow && gPipeline.hasRenderDebugFeatureMask(LLPipeline::RENDER_DEBUG_FEATURE_UI))
     {
         // include all ancestors of captor_view as automatically having mouse
         if (captor_view)
@@ -4541,18 +4638,18 @@ void LLViewerWindow::updateUI()
             LLView* popup = popup_it->get();
             if (popup && popup->calcScreenBoundingRect().pointInRect(x, y))
             {
-                collectHoverViews(popup, x, y, false, mouse_hover_set);
+                LLView::collectHoverViews(popup, x, y, false, mouse_hover_set);
             }
         }
 
         // while the top_ctrl contains the mouse cursor, only it and its descendants will receive onMouseEnter events
         if (top_ctrl && top_ctrl->calcScreenBoundingRect().pointInRect(x, y))
         {
-            collectHoverViews(top_ctrl, x, y, false, mouse_hover_set);
+            LLView::collectHoverViews(top_ctrl, x, y, false, mouse_hover_set);
         }
         else
         {
-            collectHoverViews(root_view, x, y, true, mouse_hover_set);
+            LLView::collectHoverViews(root_view, x, y, true, mouse_hover_set);
         }
     }
 
@@ -5193,8 +5290,8 @@ void LLViewerWindow::renderSelections( bool for_gl_pick, bool pick_parcel_walls,
     else if (( for_hud && selection->getSelectType() == SELECT_TYPE_HUD) ||
              (!for_hud && selection->getSelectType() != SELECT_TYPE_HUD))
     {
-        // The selection outline is drawn by the VK renderer (LLCleanRendererVK).
-        // <GMDX> ...except LL's silhouettes for prims and sculpties (below).
+        // The selection outline is drawn by the VK renderer (LLCleanRendererVK), except LL's
+        // silhouettes for prims and sculpties in the Classic style (below; GunMetal-DX port).
         // setup HUD render
         if (selection->getSelectType() == SELECT_TYPE_HUD && LLSelectMgr::getInstance()->getSelection()->getObjectCount())
         {
@@ -5221,7 +5318,7 @@ void LLViewerWindow::renderSelections( bool for_gl_pick, bool pick_parcel_walls,
             gGL.translatef(-hud_bbox.getCenterLocal().mV[VX] + (depth *0.5f), 0.f, 0.f);
         }
 
-        GMDXSelectionOutline::render(for_hud); // <GMDX> LL's renderSilhouettes(for_hud)
+        LLSelectionOutline::render(for_hud);   // LL's renderSilhouettes(for_hud) (RenderVKSelectionStyle 0)
 
         // Render light for editing
         if (LLSelectMgr::sRenderLightRadius && LLToolMgr::getInstance()->inEdit())
@@ -5550,7 +5647,7 @@ LLViewerObject* LLViewerWindow::cursorIntersect(S32 mouse_x, S32 mouse_y, F32 de
     LLVector3 pos;
     line_plane(mouse_point_global, mouse_direction_global, p, n, pos);
     mouse_point_global = pos;
-    // <GMDX> orthographic view: parallel rays from the near plane under the cursor
+    // orthographic view: parallel rays from the near plane under the cursor (GunMetal-DX port)
     LLViewerCamera::getInstance()->orthoMouseRay(x, y, mouse_point_global, mouse_direction_global);
 
     LLVector3 mouse_world_start = mouse_point_global;
@@ -5978,6 +6075,37 @@ static std::string snapshotFileName(const std::string& pattern, const std::strin
     return out;
 }
 
+std::string LLViewerWindow::getNextSnapshotPath(const std::string& pattern_setting, S32 width, S32 height, const std::string& extension) const
+{
+    static LLCachedControl<std::string> sSnapshotBaseName(LLCachedControl<std::string>(gSavedPerAccountSettings, "SnapshotBaseName", "Snapshot"));
+    static LLCachedControl<std::string> sSnapshotDir(LLCachedControl<std::string>(gSavedPerAccountSettings, "SnapshotBaseDir", ""));
+
+    // Look for an unused file name (never overwriting: the counter, or a "_N" suffix when the
+    // pattern has none, moves on until the name is free).
+    const std::string pattern = pattern_setting.empty() ? std::string("{name}_{date}_{time}{n:2}") : pattern_setting;
+    std::string filepath;
+    auto i = 1;
+    auto err = 0;
+    auto now = LLDate::now();
+    do
+    {
+        bool has_counter = false;
+        std::string name = snapshotFileName(pattern, sSnapshotBaseName, now, width, height, i, has_counter);
+        if (!has_counter && i > 1) name += llformat("_%d", i);
+        filepath = sSnapshotDir;
+        filepath += gDirUtilp->getDirDelimiter();
+        filepath += name;
+        filepath += "." + extension;
+
+        llstat stat_info;
+        err = LLFile::stat(filepath, &stat_info);
+        i++;
+    }
+    while( -1 != err  // Search until the file is not found (i.e., stat() gives an error).
+            && i < 100000);
+    return filepath;
+}
+
 void LLViewerWindow::saveImageLocal(LLImageFormatted *image, const snapshot_saved_signal_t::slot_type& success_cb, const snapshot_saved_signal_t::slot_type& failure_cb)
 {
     std::string lastSnapshotDir = LLViewerWindow::getLastSnapshotDir();
@@ -6033,40 +6161,14 @@ void LLViewerWindow::saveImageLocal(LLImageFormatted *image, const snapshot_save
         // Shouldn't there be a return here?
     }
 
-    static LLCachedControl<std::string> sSnapshotBaseName(LLCachedControl<std::string>(gSavedPerAccountSettings, "SnapshotBaseName", "Snapshot"));
-    static LLCachedControl<std::string> sSnapshotDir(LLCachedControl<std::string>(gSavedPerAccountSettings, "SnapshotBaseDir", ""));
-
-    // Look for an unused file name (never overwriting: the counter, or a "_N" suffix when the
-    // pattern has none, moves on until the name is free).
-    static LLCachedControl<std::string> sSnapshotPattern(gSavedSettings, "SnapshotFileNamePattern", "{name}_{date}_{time}{n:2}");
-    std::string pattern(sSnapshotPattern);
-    if (pattern.empty()) pattern = "{name}_{date}_{time}{n:2}";
-    std::string filepath;
-    auto i = 1;
-    auto err = 0;
-    auto extension("." + image->getExtension());
-    auto now = LLDate::now();
-    do
-    {
-        bool has_counter = false;
-        std::string name = snapshotFileName(pattern, sSnapshotBaseName, now, image->getWidth(), image->getHeight(), i, has_counter);
-        if (!has_counter && i > 1) name += llformat("_%d", i);
-        filepath = sSnapshotDir;
-        filepath += gDirUtilp->getDirDelimiter();
-        filepath += name;
-        filepath += extension;
-
-        llstat stat_info;
-        err = LLFile::stat(filepath, &stat_info);
-        i++;
-    }
-    while( -1 != err  // Search until the file is not found (i.e., stat() gives an error).
-            && i < 100000);
+    static LLCachedControl<std::string> sSnapshotPattern(gSavedSettings, "SnapshotFileNamePattern", "");
+    const std::string extension("." + image->getExtension());
+    const std::string filepath = getNextSnapshotPath(sSnapshotPattern, image->getWidth(), image->getHeight(), image->getExtension());
 
     LL_INFOS() << "Saving snapshot to " << filepath << LL_ENDL;
     if (image->save(filepath))
     {
-        gmdxSaveSnapshotMattes(image, filepath, extension);   // <GMDX> FSSaveAvatarMasksWithSnapshot
+        snapshotSaveMattes(image, filepath, extension);   // SLSnapshotSaveAvatarMattes (GunMetal-DX port)
         playSnapshotAnimAndSound();
         success_cb();
     }
@@ -6098,7 +6200,7 @@ bool LLViewerWindow::saveSnapshot(const std::string& filepath, S32 image_width, 
     LL_INFOS() << "Saving snapshot to: " << filepath << LL_ENDL;
 
     LLPointer<LLImageRaw> raw = new LLImageRaw;
-    // <GMDX> (was show_balance as no_post and no layer type)
+    // (GunMetal-DX port: show_balance was passed as no_post, and the layer type not at all)
     bool success = rawSnapshot(raw, image_width, image_height, true, false, show_ui, show_hud, do_rebuild, false, show_balance, type);
 
     if (success)
@@ -6116,7 +6218,7 @@ bool LLViewerWindow::saveSnapshot(const std::string& filepath, S32 image_width, 
             image_codec = IMG_CODEC_BMP;
             break;
         }
-        if (type == LLSnapshotModel::SNAPSHOT_TYPE_AVATAR_TRANSPARENT) image_codec = IMG_CODEC_PNG;   // <GMDX> (alpha)
+        if (type == LLSnapshotModel::SNAPSHOT_TYPE_AVATAR_TRANSPARENT) image_codec = IMG_CODEC_PNG;   // (alpha; GunMetal-DX port)
 
         LLPointer<LLImageFormatted> formated_image = LLImageFormatted::createFromType(image_codec);
         success = formated_image->encode(raw, 0.0f);
@@ -6390,20 +6492,20 @@ bool LLViewerWindow::rawSnapshot(LLImageRaw *raw, S32 image_width, S32 image_hei
         ~HudAttachmentHold() { LLPipeline::sShowHUDAttachments = saved; }
     } hud_hold(show_ui && !show_hud);
 
-    // <GMDX> Avatar layers (transparent avatar, holdout mattes): their own offscreen render. The
+    // Avatar layers (transparent avatar, holdout mattes): their own offscreen render. The
     // snapshot avatar scope applies to the world snapshots below, which then render offscreen
-    // (gmdxsnapshotavatars.h; the interface snapshots are the presented frame, unfiltered).
-    if (gmdxIsAvatarLayer(type))
+    // (llsnapshotavatars.h; the interface snapshots are the presented frame, unfiltered).
+    // Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
+    if (snapshotIsAvatarLayer(type))
     {
         setCursor(UI_CURSOR_WAIT);
-        const bool ok = gmdxRawAvatarSnapshot(raw, image_width, image_height, type, max_size);
+        const bool ok = snapshotRawAvatar(raw, image_width, image_height, type, max_size);
         setCursor(UI_CURSOR_ARROW);
         return ok;
     }
-    const bool gmdx_world = !show_ui || type == LLSnapshotModel::SNAPSHOT_TYPE_DEPTH;
-    GMDXSnapshotScopeHold gmdx_scope(gmdx_world);
-    const bool gmdx_offscreen = gmdx_world && gmdxSnapshotWantsOffscreen(type);
-    // </GMDX>
+    const bool scoped_world = !show_ui || type == LLSnapshotModel::SNAPSHOT_TYPE_DEPTH;
+    LLSnapshotScopeHold scope_hold(scoped_world);
+    const bool scoped_offscreen = scoped_world && snapshotWantsOffscreen(type);
 
     //  * #873: every snapshot is taken from the MAIN RENDER PATH (vk_live_snapshot, above) --
     //    unless RenderSnapshotOffscreen (A/B, fallback) or "No post-processing" (the live
@@ -6416,7 +6518,7 @@ bool LLViewerWindow::rawSnapshot(LLImageRaw *raw, S32 image_width, S32 image_hei
     {
         static LLCachedControl<bool> s_offscreen(gSavedSettings, "RenderSnapshotOffscreen", false);
         const bool want_depth = (type == LLSnapshotModel::SNAPSHOT_TYPE_DEPTH);
-        if (!s_offscreen && !(no_post && !show_ui && !want_depth) && !gmdx_offscreen)   // <GMDX> (+ avatar scope / mattes)
+        if (!s_offscreen && !(no_post && !show_ui && !want_depth) && !scoped_offscreen)   // (+ avatar scope / mattes)
         {
             setCursor(UI_CURSOR_WAIT);
             if (show_ui) setBalanceVisible(show_balance);
@@ -6499,14 +6601,15 @@ bool LLViewerWindow::rawSnapshot(LLImageRaw *raw, S32 image_width, S32 image_hei
             const F32 znear = LLViewerCamera::getInstance()->getNear();
             const F32 zfar = llmax(LLViewerCamera::getInstance()->getFar(), (F32)far_clip);
             U8* out = raw->getData();
-            const bool ortho = LLViewerCamera::getInstance()->getOrtho();   // <GMDX> linear: D = (P14 - d) / P10
+            // Orthographic view (GunMetal-DX port): linear, D = (P14 - d) / P10
+            const bool ortho = LLViewerCamera::getInstance()->getOrtho();
             for (S32 y = 0; y < rh; ++y)
             {
                 const F32* row = depth.data() + (size_t)(rh - 1 - y) * rw;   // bottom-up
                 for (S32 x = 0; x < rw; ++x)
                 {
                     const F32 den = row[x] + proj[0];
-                    const F32 lin = ortho ? (fabsf(proj[0]) > 1e-12f ? (proj[1] - row[x]) / proj[0] : zfar)   // <GMDX>
+                    const F32 lin = ortho ? (fabsf(proj[0]) > 1e-12f ? (proj[1] - row[x]) / proj[0] : zfar)
                                           : (fabsf(den) > 1e-7f) ? proj[1] / den : zfar;
                     const U8 b = F32_to_U8(lin, znear, zfar);
                     U8* px = out + ((size_t)y * rw + x) * 3;
@@ -6638,12 +6741,16 @@ void LLViewerWindow::drawMouselookInstructions()
     LLViewerParcelMgr* vpm = LLViewerParcelMgr::getInstance();
     const bool allow_damage = vpm->allowAgentDamage(gAgent.getRegion(), vpm->getAgentParcel());
     if (draw_mouselook_position || draw_mouselook_instructions || allow_damage)
+    // </GMDX>
     {
         // Draw information for mouselook (pos, health)
         const LLFontGL* font = LLFontGL::getFontSansSerifBig();
+        // #1115: in the area the top bars leave free (the HUD rect, LL's world view rect);
+        // the world view is the whole window under Vulkan, its top behind the bars
+        const LLRect area = getHudRectScaled();
         //to be at top of viewer
-        const S32 INSTRUCTIONS_TOP_PAD = getWorldViewRectScaled().mTop - 15;
-        const S32 text_pos_start = getWorldViewRectScaled().getCenterX() - 150;
+        const S32 INSTRUCTIONS_TOP_PAD = area.mTop - 15;
+        const S32 text_pos_start = area.getCenterX() - 150;
 
         if (draw_mouselook_position)
         {
@@ -6680,7 +6787,7 @@ void LLViewerWindow::drawMouselookInstructions()
             }
             font->renderUTF8(
                 llformat("HP: %d%%", health), 0,
-                draw_mouselook_position ? text_pos_start + 300 : getWorldViewRectScaled().getCenterX(),
+                draw_mouselook_position ? text_pos_start + 300 : area.getCenterX(),   // <GMDX> centred without the coordinates
                 INSTRUCTIONS_TOP_PAD,
                 LLColor4(1.0f, 1.0f, 1.0f, 0.5f),
                 LLFontGL::HCENTER, LLFontGL::TOP,
@@ -6697,8 +6804,8 @@ void LLViewerWindow::drawMouselookInstructions()
 
             font->renderUTF8(
                 instructions, 0,
-                getWorldViewRectScaled().getCenterX(),
-                getWorldViewRectScaled().mBottom + INSTRUCTIONS_BOTTOM_PAD,
+                area.getCenterX(),
+                area.mBottom + INSTRUCTIONS_BOTTOM_PAD,
                 LLColor4(1.0f, 1.0f, 1.0f, 0.5f),
                 LLFontGL::HCENTER, LLFontGL::TOP,
                 LLFontGL::BOLD, LLFontGL::DROP_SHADOW);
@@ -7176,35 +7283,59 @@ LLRect LLViewerWindow::getChatConsoleRect()
     return console_rect;
 }
 
+// #1082: the container is the menu bar row plus, once initWorldUI has put the navigation bar
+// in it and ShowNavbarNavigationPanel is on, the navigation bar. It used to grow or shrink by
+// the navigation bar's height on every call. The first-run viewer import applies settings at
+// the login screen, before initWorldUI: an imported "navigation bar off" (or mini-location
+// bar on) took 34 px off the 19 px row, the layout stack gave the container no height and
+// clipped it away, and the whole top bar (menu, status and navigation bar) was missing for
+// that session. The next start built it from the saved setting.
 void LLViewerWindow::reshapeStatusBarContainer()
 {
-    S32 new_height = mStatusBarContainer->getRect().getHeight();
-    S32 new_width = mStatusBarContainer->getRect().getWidth();
-
-    if (gSavedSettings.getBOOL("ShowNavbarNavigationPanel"))
+    S32 new_height = mStatusBarContainer->getChildView("menu_bar_holder")->getRect().getHeight();
+    if (gSavedSettings.getBOOL("ShowNavbarNavigationPanel")
+        && LLNavigationBar::instanceExists()
+        && LLNavigationBar::getInstance()->getParent() == mNavBarContainer)
     {
-        // Navigation bar is outside visible area, expand status_bar_container to show it
         new_height += mNavBarContainer->getRect().getHeight();
     }
-    else
-    {
-        // collapse status_bar_container
-        new_height -= mNavBarContainer->getRect().getHeight();
-    }
-    mStatusBarContainer->reshape(new_width, new_height, true);
+    mStatusBarContainer->reshape(mStatusBarContainer->getRect().getWidth(), new_height, true);
 }
 
 void LLViewerWindow::resetStatusBarContainer()
 {
-    LLNavigationBar* navbar = LLNavigationBar::getInstance();
-    if (gSavedSettings.getBOOL("ShowNavbarNavigationPanel") || navbar->getVisible())
+    // Back to the menu bar row alone. This took the navigation bar's height off whenever the
+    // bar's own visible flag was set, which it always is (LLNavigationBar::setVisible shows or
+    // hides its container), so with the navigation bar off it shrank the row away (#1082).
+    const S32 new_height = mStatusBarContainer->getChildView("menu_bar_holder")->getRect().getHeight();
+    mStatusBarContainer->reshape(mStatusBarContainer->getRect().getWidth(), new_height, true);
+}
+
+// #1082: one line at the end of startup, so a report of a missing menu or navigation bar
+// shows how the top bar was laid out (screen rects in UI units, and whether each is shown).
+void LLViewerWindow::logTopBarLayout() const
+{
+    auto describe = [](const LLView* view)
     {
-        // was previously showing navigation bar
-        S32 new_height = mStatusBarContainer->getRect().getHeight();
-        S32 new_width = mStatusBarContainer->getRect().getWidth();
-        new_height -= mNavBarContainer->getRect().getHeight();
-        mStatusBarContainer->reshape(new_width, new_height, true);
-    }
+        std::ostringstream s;
+        if (view)
+        {
+            s << view->calcScreenRect() << (view->isInVisibleChain() ? " shown" : " hidden");
+        }
+        else
+        {
+            s << "none";
+        }
+        return s.str();
+    };
+    LL_INFOS("AppInit") << "Top bar at end of startup: container " << describe(mStatusBarContainer)
+                        << ", menu bar " << describe(gMenuBarView) << ", status bar " << describe(gStatusBar)
+                        << ", navigation bar " << describe(mNavBarContainer)
+                        << "; ShowNavbarNavigationPanel " << gSavedSettings.getBOOL("ShowNavbarNavigationPanel")
+                        << ", ShowMiniLocationPanel " << gSavedSettings.getBOOL("ShowMiniLocationPanel")
+                        << ", UI shown " << mUIVisible << ", window " << mWindowRectScaled.getWidth() << "x"
+                        << mWindowRectScaled.getHeight() << " at display scale " << mDisplayScale
+                        << ", first login " << gSavedSettings.getBOOL("FirstLoginThisInstall") << LL_ENDL;
 }
 //----------------------------------------------------------------------------
 
@@ -7215,7 +7346,12 @@ void LLViewerWindow::setUIVisibility(bool visible)
 
     if (!visible)
     {
-        gAgentCamera.changeCameraToThirdPerson(false);
+        // #624: Hide all controls in mouselook (or the over-the-shoulder aim camera) keeps you there
+        const ECameraMode mode = gAgentCamera.getCameraMode();
+        if (mode != CAMERA_MODE_MOUSELOOK)
+        {
+            gAgentCamera.changeCameraToThirdPerson(false);
+        }
         gFloaterView->hideAllFloaters();
     }
     else

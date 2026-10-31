@@ -37,6 +37,7 @@
 #include "llstring.h"
 #include "volume_catcher.h"
 #include "media_plugin_base.h"
+#include <new>
 
 // _getpid()/getpid()
 #if LL_WINDOWS
@@ -1184,6 +1185,13 @@ void MediaPluginCEF::keyEvent(dullahan::EKeyEvent key_event, LLSD native_key_dat
     uint32_t native_virtual_key_win = (uint32_t)(native_key_data["virtual_key_win"].asInteger());
     uint32_t native_modifiers = (uint32_t)(native_key_data["modifiers"].asInteger());
 
+    if (native_key_data["is_char"].asBoolean())
+    {
+        if (native_virtual_key == '\r')
+            mCEFLib->nativeKeyboardEventSDL2(dullahan::KE_KEY_CHAR, '\r', 0, false);
+        return;
+    }
+
     // only for non-printable keysyms, the actual text input is done in unicodeInput() below
     if (native_virtual_key <= 0x1b || native_virtual_key >= 0x7f)
     {
@@ -1235,11 +1243,19 @@ void MediaPluginCEF::unicodeInput(std::string event, const std::string& text, LL
 
 #if LL_LINUX
 
-    uint32_t native_scan_code = (uint32_t)(native_key_data["sdl_sym"].asInteger());
-    uint32_t native_virtual_key = (uint32_t)(native_key_data["virtual_key"].asInteger());
-    uint32_t native_modifiers = (uint32_t)(native_key_data["modifiers"].asInteger());
-
-    mCEFLib->nativeKeyboardEvent(dullahan::KE_KEY_DOWN, native_scan_code, native_virtual_key, native_modifiers);
+    // SDL text is already composed (layout, dead keys and IME applied). The
+    // preceding keycode may be unrelated, or absent for an IME commit. CEF
+    // character events carry UTF-16 units; never synthesize another raw keydown
+    // or apply the held Ctrl/Alt modifiers to the committed text a second time.
+    try
+    {
+        for (auto ch : utf8str_to_utf16str(text))
+            mCEFLib->nativeKeyboardEventSDL2(dullahan::KE_KEY_CHAR, (U32)ch, 0, false);
+    }
+    catch (const std::bad_alloc&)
+    {
+        LL_WARNS("Media") << "Committed browser text dropped under memory pressure" << LL_ENDL;
+    }
 
 #endif // LL_LINUX
 };

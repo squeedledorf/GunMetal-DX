@@ -530,7 +530,7 @@ Only used with a DLSS upscaling mode.
             top="128" />
           <!-- <GMDX> -->
           <check_box
-            control_name="GMDXDrawLoadingAvatars"
+            control_name="RenderVKDrawLoadingAvatars"
             height="16"
             initial_value="true"
             label="Draw avatars while they load (no loading cloud)"
@@ -1628,6 +1628,16 @@ Only used with a DLSS upscaling mode.
           </check_box>
           <!-- <GMDX> The Atmosphere section (fog, clouds, god rays, weather quality, physical sky)
                moved to the Sky tab. -->
+          <check_box
+            control_name="RenderVKGltfBlendNoAutoMask"
+            height="16"
+            label="Always blend soft transparency"
+            layout="topleft"
+            name="GltfBlendNoAutoMask"
+            tool_tip="Draw every alpha-blended surface blended: glTF blend materials and soft-alpha textures are never turned into faster alpha-masked (cut-out) surfaces. Soft glass, light shafts and gradient fades keep their smooth edges, but busy scenes may run slower (more blended overdraw). Takes effect as objects load: teleport or relog to apply it to everything."
+            width="250"
+            left="334"
+            top="646" />
           <text
             type="string"
             length="1"
@@ -1668,7 +1678,7 @@ Only used with a DLSS upscaling mode.
         <panel
           background_visible="false"
           follows="left|top"
-          height="1806"
+          height="900"
           layout="topleft"
           left="0"
           name="adv_tab_sky_scroll_panel"
@@ -1698,74 +1708,6 @@ Only used with a DLSS upscaling mode.
             tool_tip="Off: the Classic WindLight sky, as other viewers draw it. On: a physically based sky (multiple scattering, sunsets, altitude) made from the region's sky settings; haze amount and lighting stay the same."
             top_pad="6"
             width="285" />
-          <slider
-            control_name="RenderVKPhysicalSkyExposure"
-            enabled_control="RenderVKPhysicalSky"
-            decimal_digits="1"
-            follows="left|top"
-            height="16"
-            increment="0.5"
-            label="Sky brightness:"
-            label_width="165"
-            layout="topleft"
-            left="50"
-            max_val="24"
-            min_val="1"
-            name="RenderVKPhysicalSkyExposureSlider"
-            tool_tip="How bright the physical sky is: the sun or moon light's illuminance scale (default 8)."
-            top_pad="6"
-            width="310" />
-          <slider
-            control_name="RenderVKPhysicalSkyHighlight"
-            enabled_control="RenderVKPhysicalSky"
-            decimal_digits="1"
-            follows="left|top"
-            height="16"
-            increment="0.1"
-            label="Sunset glow roll-off:"
-            label_width="165"
-            layout="topleft"
-            left="50"
-            max_val="4"
-            min_val="0"
-            name="RenderVKPhysicalSkyHighlightSlider"
-            tool_tip="Soft roll-off of the brightest parts of the sky, such as a low sun's glow; lower gives gentler sunsets. 0 = none (default 1.5)."
-            top_pad="6"
-            width="310" />
-          <slider
-            control_name="RenderVKPhysicalSkyAerial"
-            enabled_control="RenderVKPhysicalSky"
-            decimal_digits="1"
-            follows="left|top"
-            height="16"
-            increment="0.5"
-            label="Distance haze:"
-            label_width="165"
-            layout="topleft"
-            left="50"
-            max_val="20"
-            min_val="0"
-            name="RenderVKPhysicalSkyAerialSlider"
-            tool_tip="Aerial perspective: how strongly distant scenery fades into the sky, on top of the region's own haze. 0 = the region's haze only (default 6)."
-            top_pad="6"
-            width="310" />
-          <slider
-            control_name="RenderVKPhysicalSkyAmbient"
-            enabled_control="RenderVKPhysicalSky"
-            decimal_digits="2"
-            follows="left|top"
-            height="16"
-            increment="0.05"
-            label="Sky ambient light:"
-            label_width="165"
-            layout="topleft"
-            left="50"
-            max_val="1"
-            min_val="0"
-            name="RenderVKPhysicalSkyAmbientSlider"
-            tool_tip="How much of the sky's colour is added as scattered light; keeps night skies from going black (default 0.3)."
-            top_pad="6"
-            width="310" />
           <check_box
             control_name="RenderVKVolumetricFog"
             height="16"
@@ -1799,22 +1741,6 @@ Only used with a DLSS upscaling mode.
               name="2"
               value="2" />
           </combo_box>
-          <!-- <OCOL> -->
-          <button
-            follows="left|top"
-            height="20"
-            label="Mist..."
-            layout="topleft"
-            left="305"
-            name="OCOLMistButton"
-            tool_tip="OCOL rolling mist and the fog's sliders (density, banks, drift, light, range)."
-            top_delta="0"
-            width="80">
-            <button.commit_callback
-              function="Floater.Show"
-              parameter="ocol_mist" />
-          </button>
-          <!-- </OCOL> -->
           <check_box
             control_name="RenderVKParticleFog"
             enabled_control="RenderVKVolumetricFog"
@@ -1919,38 +1845,39 @@ Only used with a DLSS upscaling mode.
             Night
           </text>
           <check_box
-            control_name="GMDXPhysicalNight"
+            control_name="RenderVKPhysicalNight"
             height="16"
             label="Physical night"
             layout="topleft"
             left="30"
             name="GMDXPhysicalNightCheck"
-            tool_tip="Night lighting from the moon's real brightness and phase, a smooth dusk, stars, airglow and night vision. Off: the old Second Life night (and none of the settings below)."
+            tool_tip="The moon lights the night with its real brightness and phase, dusk blends sun and moon smoothly, the eye adapts to the dark, and the night sky shows the real stars and the Milky Way. Off: Second Life's own night."
             top_pad="6"
             width="250" />
+          <!-- <GMDX> the night's player settings (gmdxskysettings.h) -->
           <text
             type="string"
             length="1"
-            enabled_control="GMDXPhysicalNight"
+            enabled_control="RenderVKPhysicalNight"
             follows="left|top"
             height="16"
             layout="topleft"
-            left="30"
+            left="50"
             name="GMDXNightLookText"
             text_readonly_color="LabelDisabledColor"
-            tool_tip="Photo: like a night photograph, about one stop under the day for a full moon, a cold blue grade in the shadows. Eye: as the eye sees it, about two stops under the day, with the Purkinje shift."
+            tool_tip="Photo: like a night photograph, about one stop under the day for a full moon, with a cold blue grade in the shadows. Eye: as the eye sees it, darker, with the blue shift of night vision."
             top_pad="6"
-            width="150">
+            width="130">
             Night look:
           </text>
           <combo_box
             control_name="GMDXNightLook"
-            enabled_control="GMDXPhysicalNight"
+            enabled_control="RenderVKPhysicalNight"
             height="18"
             layout="topleft"
             left="215"
             name="GMDXNightLookCombo"
-            tool_tip="Photo: like a night photograph, about one stop under the day for a full moon, a cold blue grade in the shadows. Eye: as the eye sees it, about two stops under the day, with the Purkinje shift."
+            tool_tip="Photo: like a night photograph, about one stop under the day for a full moon, with a cold blue grade in the shadows. Eye: as the eye sees it, darker, with the blue shift of night vision."
             top_delta="0"
             width="110">
             <combo_box.item
@@ -1962,267 +1889,50 @@ Only used with a DLSS upscaling mode.
               name="0"
               value="0" />
           </combo_box>
-          <!-- <GMDX> -->
-          <check_box
-            control_name="GMDXRespectRegionSky"
-            enabled_control="GMDXPhysicalNight"
-            height="16"
-            label="Respect region skies"
-            layout="topleft"
-            left="30"
-            name="GMDXRespectRegionSkyCheck"
-            tool_tip="On a region's or parcel's own sky (or any sky that is not one of Second Life's defaults), no night exposure lift and no night colour grade: the night keeps the brightness and colours its creator chose, and the moon lights the scene at its full Second Life strength, as its creator saw it. The star catalogue and Milky Way stay. Off: the night look on every sky."
-            top_pad="6"
-            width="250" />
           <slider
             control_name="GMDXMoonlightScale"
-            enabled_control="GMDXPhysicalNight"
+            enabled_control="RenderVKPhysicalNight"
             decimal_digits="3"
             follows="left|top"
             height="16"
             increment="0.005"
             label="Moonlight:"
-            label_width="185"
+            label_width="165"
             layout="topleft"
-            left="30"
+            left="50"
             max_val="0.5"
             min_val="0"
             name="GMDXMoonlightScaleSlider"
-            tool_tip="How much light a high full moon gives, as a fraction of the sun's (default 0.05). The moon's phase and the sky's moon brightness scale it further."
+            tool_tip="How much light a high full moon gives, as a share of the sun's (default 0.05). Higher = brighter moonlit nights. The moon's phase and the sky's moon brightness scale it further."
             top_pad="6"
-            width="330" />
-          <slider
-            control_name="GMDXMoonDisc"
-            enabled_control="GMDXPhysicalNight"
-            decimal_digits="1"
-            follows="left|top"
-            height="16"
-            increment="0.1"
-            label="Moon disc brightness:"
-            label_width="185"
-            layout="topleft"
-            left="30"
-            max_val="10"
-            min_val="0"
-            name="GMDXMoonDiscSlider"
-            tool_tip="Brightness of the moon's disc, as a multiple of the moonlight. 1 = bright enough to clip and bloom like a photographed moon (default); 0 = Second Life's disc."
-            top_pad="6"
-            width="330" />
+            width="310" />
           <slider
             control_name="GMDXMoonGlow"
-            enabled_control="GMDXPhysicalNight"
-            decimal_digits="1"
+            decimal_digits="2"
             follows="left|top"
             height="16"
-            increment="0.1"
+            increment="0.05"
             label="Moon glow:"
-            label_width="185"
+            label_width="165"
             layout="topleft"
-            left="30"
-            max_val="8"
+            left="50"
+            max_val="3"
             min_val="0"
             name="GMDXMoonGlowSlider"
-            tool_tip="The soft night bloom round the bright moon and other true highlights (default 1, 0 = none). Needs bloom on."
-            top_pad="6"
-            width="330" />
-          <slider
-            control_name="GMDXNightCloudLight"
-            enabled_control="GMDXPhysicalNight"
-            decimal_digits="1"
-            follows="left|top"
-            height="16"
-            increment="0.1"
-            label="Moonlight on clouds:"
-            label_width="185"
-            layout="topleft"
-            left="30"
-            max_val="20"
-            min_val="0"
-            name="GMDXNightCloudLightSlider"
-            tool_tip="The moon lights the clouds this many times brighter than everything else, so night clouds read (default 4.5; 1 = lit like everything else)."
-            top_pad="6"
-            width="330" />
-          <slider
-            control_name="GMDXDuskSunHigh"
-            enabled_control="GMDXPhysicalNight"
-            decimal_digits="1"
-            follows="left|top"
-            height="16"
-            increment="0.5"
-            label="Dusk begins (sun height):"
-            label_width="185"
-            layout="topleft"
-            left="30"
-            max_val="20"
-            min_val="-5"
-            name="GMDXDuskSunHighSlider"
-            tool_tip="Sun height in degrees where dusk begins: from here down the moon's light fades in and the light turns from the sun to the moon (default 4)."
-            top_pad="6"
-            width="330" />
-          <slider
-            control_name="GMDXDuskSunLow"
-            enabled_control="GMDXPhysicalNight"
-            decimal_digits="1"
-            follows="left|top"
-            height="16"
-            increment="0.5"
-            label="Dusk ends (sun height):"
-            label_width="185"
-            layout="topleft"
-            left="30"
-            max_val="0"
-            min_val="-20"
-            name="GMDXDuskSunLowSlider"
-            tool_tip="Sun height in degrees (below the horizon) where dusk ends and the moon lights the scene at full strength (default -10)."
-            top_pad="6"
-            width="330" />
-          <text
-            type="string"
-            length="1"
-            enabled_control="GMDXPhysicalNight"
-            follows="left|top"
-            height="16"
-            layout="topleft"
-            left="30"
-            name="NightExposureText"
-            text_readonly_color="LabelDisabledColor"
-            top_pad="10"
-            width="300">
-            Night exposure
-          </text>
-          <slider
-            control_name="GMDXNightExposureAdapt"
-            enabled_control="GMDXPhysicalNight"
-            decimal_digits="2"
-            follows="left|top"
-            height="16"
-            increment="0.05"
-            label="Eye adaptation:"
-            label_width="165"
-            layout="topleft"
-            left="50"
-            max_val="1"
-            min_val="0"
-            name="GMDXNightExposureAdaptSlider"
-            tool_tip="How much of each stop of darkness the eye gives back at night (default 0.5: a scene 4 stops darker shows 2 stops darker). 1 = nights as bright as dusk, 0 = the stock curve."
+            tool_tip="The soft glow round a bright moon (and other night highlights), on every sky, personal lighting included. 0 = none, 1 = default. Needs bloom on."
             top_pad="6"
             width="310" />
-          <slider
-            control_name="GMDXNightExposureKnee"
-            enabled_control="GMDXPhysicalNight"
-            decimal_digits="1"
-            follows="left|top"
+          <check_box
+            control_name="GMDXRespectRegionSky"
+            enabled_control="RenderVKPhysicalNight"
             height="16"
-            increment="0.5"
-            label="Deep night starts (stops):"
-            label_width="165"
+            label="Respect region skies"
             layout="topleft"
             left="50"
-            max_val="20"
-            min_val="0"
-            name="GMDXNightExposureKneeSlider"
-            tool_tip="Stops below the start of night where deep-night adaptation takes over: about a moonlit night's level (default 4)."
+            name="GMDXRespectRegionSkyCheck"
+            tool_tip="On a sky made by a region, parcel or script owner (not one of Second Life's own skies), the night stays as its creator lit it: Second Life's moon, light and exposure. The stars, Milky Way and cloud corona stay. Off: the physical night look on every sky."
             top_pad="6"
-            width="310" />
-          <slider
-            control_name="GMDXNightExposureDeepAdapt"
-            enabled_control="GMDXPhysicalNight"
-            decimal_digits="2"
-            follows="left|top"
-            height="16"
-            increment="0.05"
-            label="Deep night adaptation:"
-            label_width="165"
-            layout="topleft"
-            left="50"
-            max_val="1"
-            min_val="0"
-            name="GMDXNightExposureDeepAdaptSlider"
-            tool_tip="How much of each stop is given back past the deep-night point, so a moonless night stays dark but readable (default 0.75)."
-            top_pad="6"
-            width="310" />
-          <slider
-            control_name="GMDXNightExposureMaxLift"
-            enabled_control="GMDXPhysicalNight"
-            decimal_digits="1"
-            follows="left|top"
-            height="16"
-            increment="0.5"
-            label="Most brightening (stops):"
-            label_width="165"
-            layout="topleft"
-            left="50"
-            max_val="12"
-            min_val="0"
-            name="GMDXNightExposureMaxLiftSlider"
-            tool_tip="The most the night curve brightens over the stock auto exposure, in stops (default 6). Darker than that stays dark, so noise is not amplified. It never brightens by more than physical night dimmed the moon (4.3 stops for the default full moon), so a dark night sky stays dark."
-            top_pad="6"
-            width="310" />
-          <text
-            type="string"
-            length="1"
-            enabled_control="GMDXPhysicalNight"
-            follows="left|top"
-            height="16"
-            layout="topleft"
-            left="30"
-            name="NightVisionText"
-            text_readonly_color="LabelDisabledColor"
-            top_pad="10"
-            width="300">
-            Night vision
-          </text>
-          <slider
-            control_name="GMDXNightVisionPurkinje"
-            enabled_control="GMDXPhysicalNight"
-            decimal_digits="2"
-            follows="left|top"
-            height="16"
-            increment="0.05"
-            label="Purkinje shift:"
-            label_width="165"
-            layout="topleft"
-            left="50"
-            max_val="1"
-            min_val="0"
-            name="GMDXNightVisionPurkinjeSlider"
-            tool_tip="The blue cast and loss of colour as the eye's rods take over in low light (default 1, 0 = off). Colour only, never brightness. Eye night look only."
-            top_pad="6"
-            width="310" />
-          <slider
-            control_name="GMDXNightVisionLuminance"
-            enabled_control="GMDXPhysicalNight"
-            decimal_digits="0"
-            follows="left|top"
-            height="16"
-            increment="1"
-            label="Scene luminance (cd/m²):"
-            label_width="165"
-            layout="topleft"
-            left="50"
-            max_val="100"
-            min_val="1"
-            name="GMDXNightVisionLuminanceSlider"
-            tool_tip="Candelas per square metre for one unit of scene brightness (default 10). Higher: night vision starts later and stays weaker; lower: it starts sooner."
-            top_pad="6"
-            width="310" />
-          <slider
-            control_name="GMDXNightVisionNoise"
-            enabled_control="GMDXPhysicalNight"
-            decimal_digits="2"
-            follows="left|top"
-            height="16"
-            increment="0.05"
-            label="Low-light grain:"
-            label_width="165"
-            layout="topleft"
-            left="50"
-            max_val="1"
-            min_val="0"
-            name="GMDXNightVisionNoiseSlider"
-            tool_tip="Grain and loss of sharpness in the dark, as the eye sees it (default 0 = off, 1 = strongest)."
-            top_pad="6"
-            width="310" />
+            width="250" />
           <text
             type="string"
             length="1"
@@ -2238,7 +1948,7 @@ Only used with a DLSS upscaling mode.
           </text>
           <slider
             control_name="GMDXStarBrightness"
-            enabled_control="GMDXPhysicalNight"
+            enabled_control="RenderVKPhysicalNight"
             decimal_digits="2"
             follows="left|top"
             height="16"
@@ -2250,63 +1960,12 @@ Only used with a DLSS upscaling mode.
             max_val="4"
             min_val="0"
             name="GMDXStarBrightnessSlider"
-            tool_tip="Brightness of the catalogue stars (9096 real stars at their real places and colours), on top of the sky's own star brightness (default 1, 0 = none). Needs physical night."
-            top_pad="6"
-            width="330" />
-          <slider
-            control_name="GMDXStarScintillation"
-            enabled_control="GMDXPhysicalNight"
-            decimal_digits="2"
-            follows="left|top"
-            height="16"
-            increment="0.05"
-            label="Twinkle:"
-            label_width="185"
-            layout="topleft"
-            left="30"
-            max_val="3"
-            min_val="0"
-            name="GMDXStarScintillationSlider"
-            tool_tip="How much the stars twinkle, more near the horizon (default 1, 0 = steady)."
-            top_pad="6"
-            width="330" />
-          <slider
-            control_name="GMDXStarLatitude"
-            enabled_control="GMDXPhysicalNight"
-            decimal_digits="0"
-            follows="left|top"
-            height="16"
-            increment="1"
-            label="Latitude:"
-            label_width="185"
-            layout="topleft"
-            left="30"
-            max_val="90"
-            min_val="-90"
-            name="GMDXStarLatitudeSlider"
-            tool_tip="The latitude the night sky is seen from, in degrees (north positive): how high the celestial pole stands (default 35)."
-            top_pad="6"
-            width="330" />
-          <slider
-            control_name="GMDXNightSkySunLongitude"
-            enabled_control="GMDXPhysicalNight"
-            decimal_digits="0"
-            follows="left|top"
-            height="16"
-            increment="5"
-            label="Season:"
-            label_width="185"
-            layout="topleft"
-            left="30"
-            max_val="360"
-            min_val="0"
-            name="GMDXNightSkySunLongitudeSlider"
-            tool_tip="The season of the night sky, as the sun's ecliptic longitude in degrees: 0 = March equinox, 90 = June solstice (default; the Milky Way's core in the south), 180 = September, 270 = December."
+            tool_tip="Brightness of the real stars and planets (9096 catalogue stars at their real places and colours), on top of the sky's own star brightness (default 1, 0 = none). Needs physical night."
             top_pad="6"
             width="330" />
           <slider
             control_name="GMDXMilkyWay"
-            enabled_control="GMDXPhysicalNight"
+            enabled_control="RenderVKPhysicalNight"
             decimal_digits="2"
             follows="left|top"
             height="16"
@@ -2318,310 +1977,32 @@ Only used with a DLSS upscaling mode.
             max_val="4"
             min_val="0"
             name="GMDXMilkyWaySlider"
-            tool_tip="Brightness of the Milky Way in a dark sky; twilight and moonlight wash it out (default 1, 0 = none)."
-            top_pad="6"
-            width="330" />
-          <slider
-            control_name="GMDXAirglow"
-            enabled_control="GMDXPhysicalNight"
-            decimal_digits="2"
-            follows="left|top"
-            height="16"
-            increment="0.05"
-            label="Airglow:"
-            label_width="185"
-            layout="topleft"
-            left="30"
-            max_val="4"
-            min_val="0"
-            name="GMDXAirglowSlider"
-            tool_tip="The dark sky's own glow: the navy that keeps a moonless sky from black and a faint green-grey low over the horizon (default 1, 0 = a black sky)."
-            top_pad="6"
-            width="330" />
-          <slider
-            control_name="GMDXZodiacalLight"
-            enabled_control="GMDXPhysicalNight"
-            decimal_digits="2"
-            follows="left|top"
-            height="16"
-            increment="0.05"
-            label="Zodiacal light:"
-            label_width="185"
-            layout="topleft"
-            left="30"
-            max_val="4"
-            min_val="0"
-            name="GMDXZodiacalLightSlider"
-            tool_tip="The faint warm cone over the horizon on the sun's side after dusk and before dawn (default 1, 0 = none)."
-            top_pad="6"
-            width="330" />
-          <slider
-            control_name="GMDXStarLimitMagnitude"
-            enabled_control="GMDXPhysicalNight"
-            decimal_digits="1"
-            follows="left|top"
-            height="16"
-            increment="0.1"
-            label="Star density (faintest magnitude):"
-            label_width="185"
-            layout="topleft"
-            left="30"
-            max_val="8"
-            min_val="3"
-            name="GMDXStarLimitMagnitudeSlider"
-            tool_tip="The faintest stars drawn, as a magnitude: 8 = every catalogue star (default), 6.5 = what the eye sees in a dark sky, 3 = only the brightest."
-            top_pad="6"
-            width="330" />
-          <slider
-            control_name="GMDXStarSize"
-            enabled_control="GMDXPhysicalNight"
-            decimal_digits="2"
-            follows="left|top"
-            height="16"
-            increment="0.05"
-            label="Star size:"
-            label_width="185"
-            layout="topleft"
-            left="30"
-            max_val="3"
-            min_val="0.5"
-            name="GMDXStarSizeSlider"
-            tool_tip="Size of the stars, planets and satellites on screen; bigger also looks brighter (default 1)."
-            top_pad="6"
-            width="330" />
-          <slider
-            control_name="GMDXStarSaturation"
-            enabled_control="GMDXPhysicalNight"
-            decimal_digits="2"
-            follows="left|top"
-            height="16"
-            increment="0.05"
-            label="Star colour:"
-            label_width="185"
-            layout="topleft"
-            left="30"
-            max_val="3"
-            min_val="0"
-            name="GMDXStarSaturationSlider"
-            tool_tip="Colour of the stars, planets, Milky Way and deep-sky glow: 1 = real colours (default), 0 = white, 2 = twice as colourful."
-            top_pad="6"
-            width="330" />
-          <slider
-            control_name="GMDXMilkyWayRotation"
-            enabled_control="GMDXPhysicalNight"
-            decimal_digits="0"
-            follows="left|top"
-            height="16"
-            increment="1"
-            label="Milky Way rotation:"
-            label_width="185"
-            layout="topleft"
-            left="30"
-            max_val="180"
-            min_val="-180"
-            name="GMDXMilkyWayRotationSlider"
-            tool_tip="Turns the Milky Way along its band, in degrees, moving its bright core (the stars stay put). 0 = the real sky (default)."
-            top_pad="6"
-            width="330" />
-          <slider
-            control_name="GMDXMilkyWayTilt"
-            enabled_control="GMDXPhysicalNight"
-            decimal_digits="0"
-            follows="left|top"
-            height="16"
-            increment="1"
-            label="Milky Way tilt:"
-            label_width="185"
-            layout="topleft"
-            left="30"
-            max_val="90"
-            min_val="-90"
-            name="GMDXMilkyWayTiltSlider"
-            tool_tip="Tilts the Milky Way's band about its core, in degrees, so it crosses the sky at another angle (the stars stay put). 0 = the real sky (default)."
+            tool_tip="Brightness of the Milky Way in a dark sky; twilight and moonlight wash it out (default 1, 0 = none). Needs physical night."
             top_pad="6"
             width="330" />
           <check_box
+            control_name="GMDXMeteorShower"
+            enabled_control="RenderVKPhysicalNight"
+            height="16"
+            label="Meteor shower"
+            layout="topleft"
+            left="30"
+            name="GMDXMeteorShowerCheck"
+            tool_tip="Many more shooting stars, most flying from one point in the sky: the shower nearest the season (the Perseids in August, the Geminids in December...)."
+            top_pad="6"
+            width="250" />
+          <check_box
             control_name="GMDXFantasySky"
-            enabled_control="GMDXPhysicalNight"
+            enabled_control="RenderVKPhysicalNight"
             height="16"
             label="Fantasy sky (bigger, more colourful)"
             layout="topleft"
             left="30"
             name="GMDXFantasySkyCheck"
-            tool_tip="A game look on top of the settings above: brighter, bigger, more colourful stars, a much brighter Milky Way, more shooting stars, stronger deep-sky glow. Off = the real sky (default)."
+            tool_tip="A game look on top of the settings above: brighter, bigger, more colourful stars, a much brighter Milky Way, more shooting stars and glowing galaxies. Off: the real sky."
             top_pad="6"
             width="300" />
-          <!-- ==== SPACE: space at altitude (GMDXSpace*) and sky objects (planets, meteors,
-               satellites, deep sky). Rows chain with top_pad; raise adv_tab_sky_scroll_panel's
-               height by 22 per added row. -->
-          <text
-            type="string"
-            length="1"
-            follows="left|top"
-            font="SansSerifBold"
-            height="16"
-            layout="topleft"
-            left="10"
-            name="SkySpaceText"
-            top_pad="14"
-            width="300">
-            Space
-          </text>
-          <check_box
-            control_name="GMDXSpaceAltitude"
-            height="16"
-            label="Space at altitude (the sky thins as you climb)"
-            layout="topleft"
-            left="30"
-            name="GMDXSpaceAltitudeCheck"
-            tool_tip="The higher the camera, the thinner the air: the sky darkens to navy and black, haze thins, the sun turns into a sharp disc and stars show by day. Off: the same sky at every height."
-            top_pad="6"
-            width="330" />
-          <slider
-            control_name="GMDXSpaceStart"
-            enabled_control="GMDXSpaceAltitude"
-            decimal_digits="0"
-            follows="left|top"
-            height="16"
-            increment="100"
-            label="Thin air begins at (m):"
-            label_width="165"
-            layout="topleft"
-            left="50"
-            max_val="8000"
-            min_val="0"
-            name="GMDXSpaceStartSlider"
-            tool_tip="The camera height where the air starts to thin; below it nothing changes (default 1500 m)."
-            top_pad="6"
-            width="310" />
-          <slider
-            control_name="GMDXSpaceFull"
-            enabled_control="GMDXSpaceAltitude"
-            decimal_digits="0"
-            follows="left|top"
-            height="16"
-            increment="100"
-            label="Near-space look at (m):"
-            label_width="165"
-            layout="topleft"
-            left="50"
-            max_val="10000"
-            min_val="500"
-            name="GMDXSpaceFullSlider"
-            tool_tip="The camera height where the sky has its full near-space look, held above (default 4000 m)."
-            top_pad="6"
-            width="310" />
-          <slider
-            control_name="GMDXSpaceStrength"
-            enabled_control="GMDXSpaceAltitude"
-            decimal_digits="2"
-            follows="left|top"
-            height="16"
-            increment="0.05"
-            label="Space look strength:"
-            label_width="165"
-            layout="topleft"
-            left="50"
-            max_val="1"
-            min_val="0"
-            name="GMDXSpaceStrengthSlider"
-            tool_tip="How far toward the near-space look the sky goes: 1 = a black sky (default), 0.5 = a dark blue one."
-            top_pad="6"
-            width="310" />
-          <text
-            type="string"
-            length="1"
-            enabled_control="GMDXPhysicalNight"
-            follows="left|top"
-            height="16"
-            layout="topleft"
-            left="30"
-            name="SkyObjectsText"
-            text_readonly_color="LabelDisabledColor"
-            top_pad="10"
-            width="300">
-            Sky objects
-          </text>
-          <slider
-            control_name="GMDXPlanets"
-            enabled_control="GMDXPhysicalNight"
-            decimal_digits="2"
-            follows="left|top"
-            height="16"
-            increment="0.05"
-            label="Planets:"
-            label_width="165"
-            layout="topleft"
-            left="50"
-            max_val="4"
-            min_val="0"
-            name="GMDXPlanetsSlider"
-            tool_tip="Brightness of Mercury, Venus, Mars, Jupiter and Saturn, moving on the real calendar (1 = their real brightness, 0 = none)."
-            top_pad="6"
-            width="310" />
-          <slider
-            control_name="GMDXMeteors"
-            enabled_control="GMDXPhysicalNight"
-            decimal_digits="2"
-            follows="left|top"
-            height="16"
-            increment="0.05"
-            label="Shooting stars:"
-            label_width="165"
-            layout="topleft"
-            left="50"
-            max_val="4"
-            min_val="0"
-            name="GMDXMeteorsSlider"
-            tool_tip="How often shooting stars cross a dark night sky (1 = a few a minute, 0 = none)."
-            top_pad="6"
-            width="310" />
-          <check_box
-            control_name="GMDXMeteorShower"
-            enabled_control="GMDXPhysicalNight"
-            height="16"
-            label="Meteor shower"
-            layout="topleft"
-            left="50"
-            name="GMDXMeteorShowerCheck"
-            tool_tip="Many more shooting stars, most flying from one point: the shower nearest the season (the Perseids in August, the Geminids in December...)."
-            top_pad="6"
-            width="250" />
-          <slider
-            control_name="GMDXSatellites"
-            enabled_control="GMDXPhysicalNight"
-            decimal_digits="2"
-            follows="left|top"
-            height="16"
-            increment="0.05"
-            label="Satellites:"
-            label_width="165"
-            layout="topleft"
-            left="50"
-            max_val="4"
-            min_val="0"
-            name="GMDXSatellitesSlider"
-            tool_tip="How many satellites glide across the sky after dusk and before dawn (1 = one every 40 seconds or so, 0 = none)."
-            top_pad="6"
-            width="310" />
-          <slider
-            control_name="GMDXDeepSky"
-            enabled_control="GMDXPhysicalNight"
-            decimal_digits="2"
-            follows="left|top"
-            height="16"
-            increment="0.05"
-            label="Galaxies and nebulae:"
-            label_width="165"
-            layout="topleft"
-            left="50"
-            max_val="4"
-            min_val="0"
-            name="GMDXDeepSkySlider"
-            tool_tip="Brightness of Andromeda, the Orion nebula, the Pleiades' haze and the Magellanic Clouds (1 = default, 0 = none)."
-            top_pad="6"
-            width="310" />
-          <!-- ==== end of SPACE ==== -->
+          <!-- </GMDX> -->
           <text
             type="string"
             length="1"
@@ -2792,6 +2173,7 @@ Only used with a DLSS upscaling mode.
             tool_tip="Distance at which the cloud layer has faded into the sky (default 40000 m)."
             top_pad="6"
             width="310" />
+          <!-- <GMDX> -->
           <slider
             control_name="GMDXCloudBodies"
             enabled_control="RenderVKVolumetricClouds"
@@ -2806,7 +2188,7 @@ Only used with a DLSS upscaling mode.
             max_val="1"
             min_val="0"
             name="GMDXCloudBodiesSlider"
-            tool_tip="How many hand-sculpted cumulus clouds stand among the generated ones where the sky is cloudy (0 = none)."
+            tool_tip="How many hand-sculpted cumulus clouds stand among the generated ones where the sky is cloudy (default 1, 0 = none)."
             top_pad="6"
             width="310" />
           <slider
@@ -2826,88 +2208,7 @@ Only used with a DLSS upscaling mode.
             tool_tip="How fast the clouds travel, as a multiple of the region's own cloud scroll (1 = the region's speed, 0 = still). The direction is the region's."
             top_pad="6"
             width="310" />
-          <slider
-            control_name="GMDXCloudMinWidth"
-            enabled_control="RenderVKVolumetricClouds"
-            decimal_digits="2"
-            follows="left|top"
-            height="16"
-            increment="0.01"
-            label="Smallest cloud:"
-            label_width="165"
-            layout="topleft"
-            left="50"
-            max_val="0.5"
-            min_val="0"
-            name="GMDXCloudMinWidthSlider"
-            tool_tip="The smallest cloud the sky's cloud texture may draw, as a share of the layer's thickness (default 0.05 = 125 m at 2500 m). Stops thin vertical columns; 0 = as fine as the weather map."
-            top_pad="6"
-            width="310" />
-          <text
-            type="string"
-            length="1"
-            enabled_control="GMDXPhysicalNight"
-            follows="left|top"
-            height="16"
-            layout="topleft"
-            left="30"
-            name="CloudOpticsText"
-            text_readonly_color="LabelDisabledColor"
-            top_pad="10"
-            width="300">
-            Corona and halo (physical night)
-          </text>
-          <slider
-            control_name="GMDXCloudCorona"
-            enabled_control="GMDXPhysicalNight"
-            decimal_digits="2"
-            follows="left|top"
-            height="16"
-            increment="0.05"
-            label="Corona:"
-            label_width="165"
-            layout="topleft"
-            left="50"
-            max_val="4"
-            min_val="0"
-            name="GMDXCloudCoronaSlider"
-            tool_tip="The glow and faint coloured rings thin clouds show round the moon or sun, and pastel colours on thin cloud edges (default 1 = real strength, 0 = off)."
-            top_pad="6"
-            width="310" />
-          <slider
-            control_name="GMDXCloudCoronaDroplet"
-            enabled_control="GMDXPhysicalNight"
-            decimal_digits="1"
-            follows="left|top"
-            height="16"
-            increment="0.5"
-            label="Droplet size (µm):"
-            label_width="165"
-            layout="topleft"
-            left="50"
-            max_val="50"
-            min_val="5"
-            name="GMDXCloudCoronaDropletSlider"
-            tool_tip="The cloud droplets' diameter in micrometres: smaller droplets give larger corona rings (default 15; typical clouds 10 to 20)."
-            top_pad="6"
-            width="310" />
-          <slider
-            control_name="GMDXCloudHalo22"
-            enabled_control="GMDXPhysicalNight"
-            decimal_digits="2"
-            follows="left|top"
-            height="16"
-            increment="0.05"
-            label="22° ice halo:"
-            label_width="165"
-            layout="topleft"
-            left="50"
-            max_val="4"
-            min_val="0"
-            name="GMDXCloudHalo22Slider"
-            tool_tip="The ring ice-crystal clouds show 22 degrees from the moon or sun. Second Life skies do not say which clouds are ice, so when on every cloud shows it (default 0 = off, 1 = moderate)."
-            top_pad="6"
-            width="310" />
+          <!-- </GMDX> -->
           <text
             type="string"
             length="1"
@@ -3078,7 +2379,7 @@ Only used with a DLSS upscaling mode.
           <check_box
             control_name="RenderVKRTReflections"
             height="16"
-            initial_value="true"
+            initial_value="false"
             label="Ray-traced reflection fallback"
             layout="topleft"
             name="RTReflections"
@@ -4380,6 +3681,264 @@ Only used with a DLSS upscaling mode.
             left="30"
             top="618" />
         </panel>
+      </scroll_container>
+    </panel>
+    <panel
+      border="false"
+      follows="all"
+      height="735"
+      label="Rez Effects"
+      layout="topleft"
+      left="0"
+      name="adv_tab_rezfx"
+      top="0"
+      width="800">
+      <scroll_container
+        follows="all"
+        height="731"
+        layout="topleft"
+        left="0"
+        name="rezfx_scroll"
+        reserve_scroll_corner="false"
+        top="0"
+        width="800">
+        <!-- <GMDX> ============================== Rez Effects ============================== -->
+        <!-- gmdxrezfx.cpp: what objects do when they appear and when they disappear (GunMetal-DX's
+             panel_preferences_rezfx.xml; Slipstream: no per-effect mix ticks or colours; Tron's glow and
+             line width are GunMetal-DX's sliders again) -->
+        <panel
+         follows="left|top"
+         layout="topleft"
+         label="Rez Effects"
+         name="rezfx_settings"
+         background_visible="false"
+         height="250"
+         width="780"
+         left="0"
+         top="0">
+            <text
+             type="string"
+             follows="left|top" font="SansSerifSmallBold"
+             height="16"
+             layout="topleft"
+             left="10"
+             top="10"
+             width="240"
+             wrap="true">
+                Rez-in: objects appearing
+            </text>
+            <text
+             type="string"
+             follows="left|top" font="SansSerifSmallBold"
+             height="16"
+             layout="topleft"
+             left="265"
+             top="10"
+             width="240"
+             wrap="true">
+                De-rez: objects disappearing
+            </text>
+            <combo_box
+             control_name="SLRezFXInEffect"
+             follows="left|top"
+             height="20"
+             layout="topleft"
+             left="12"
+             name="rezfx_in_combo"
+             tool_tip="What objects do when they appear. Fade in reveals the object gradually; the 3D printer and transporter hide what is not built yet (it cannot be clicked), unless combat-safe applies."
+             top="30"
+             width="216">
+                <combo_box.item
+                 label="None"
+                 name="none"
+                 value="0" />
+                <combo_box.item
+                 label="Tron"
+                 name="in_tron"
+                 value="1" />
+                <combo_box.item
+                 label="Fire"
+                 name="in_fire"
+                 value="2" />
+                <combo_box.item
+                 label="Hologram"
+                 name="in_hologram"
+                 value="3" />
+                <combo_box.item
+                 label="Voxel assemble"
+                 name="in_voxel"
+                 value="4" />
+                <combo_box.item
+                 label="3D printer"
+                 name="in_printer"
+                 value="5" />
+                <combo_box.item
+                 label="Transporter"
+                 name="in_transporter"
+                 value="6" />
+                <combo_box.item
+                 label="Fade in"
+                 name="in_fade"
+                 value="8" />
+                <combo_box.item
+                 label="Random"
+                 name="in_random"
+                 value="7" />
+            </combo_box>
+            <combo_box
+             control_name="SLRezFXOutEffect"
+             follows="left|top"
+             height="20"
+             layout="topleft"
+             left="265"
+             name="rezfx_out_combo"
+             tool_tip="What objects do when they are removed. A removed object keeps drawing only for the effect: it casts no shadow and cannot be clicked."
+             top="30"
+             width="216">
+                <combo_box.item
+                 label="None"
+                 name="none"
+                 value="0" />
+                <combo_box.item
+                 label="Ember burn"
+                 name="out_ember"
+                 value="1" />
+                <combo_box.item
+                 label="Disintegrate"
+                 name="out_disintegrate"
+                 value="2" />
+                <combo_box.item
+                 label="Ash on the wind"
+                 name="out_ash"
+                 value="3" />
+                <combo_box.item
+                 label="Glitch out"
+                 name="out_glitch"
+                 value="4" />
+                <combo_box.item
+                 label="Implode"
+                 name="out_implode"
+                 value="5" />
+                <combo_box.item
+                 label="Tron de-rez"
+                 name="out_tron"
+                 value="7" />
+                <combo_box.item
+                 label="Shatter"
+                 name="out_shatter"
+                 value="8" />
+                <combo_box.item
+                 label="Fade out"
+                 name="out_fade"
+                 value="9" />
+                <combo_box.item
+                 label="Random"
+                 name="out_random"
+                 value="6" />
+            </combo_box>
+            <slider
+             can_edit_text="true"
+             control_name="SLRezFXDuration"
+             decimal_digits="2"
+             follows="left|top"
+             height="15"
+             increment="0.05"
+             initial_value="0.6"
+             label="Effect duration (s):"
+             label_width="180"
+             layout="topleft"
+             left="30"
+             max_val="3.0"
+             min_val="0.1"
+             name="rezfx_duration"
+             show_text="true"
+             tool_tip="How long an effect takes. Tron: the fill scan (its wireframe scan takes 0.6 of this, and the wireframe waits up to 2 s more for textures). The 3D printer takes about 5.8 times this (3.5 s at the default, 8 s at most) and the transporter 1.5 times (6 s at most). Disintegrate takes 1.8 times this; ash, Tron de-rez and shatter twice; a de-rez lasts 1.2 s at most."
+             top="64"
+             width="440" />
+            <check_box
+             control_name="SLRezFXOnlyLoading"
+             follows="left|top"
+             height="16"
+             label="Rez-in only for objects still loading their textures"
+             layout="topleft"
+             left="12"
+             name="rezfx_only_loading"
+             tool_tip="An object whose textures are already loaded (one you rez while building) just appears. Avatars and attachments always play the rez-in."
+             top="88"
+             width="490" />
+            <check_box
+             control_name="SLRezFXAvatars"
+             follows="left|top"
+             height="16"
+             label="Avatars and attachments too (rigged mesh included)"
+             layout="topleft"
+             left="12"
+             name="rezfx_avatars"
+             tool_tip="Avatars arriving and what they wear play the rez-in; an attachment taken off plays the de-rez. A leaving avatar just goes."
+             top="110"
+             width="490" />
+            <slider
+             can_edit_text="true"
+             control_name="GMDXRezFxTronGlow"
+             decimal_digits="2"
+             follows="left|top"
+             height="15"
+             increment="0.05"
+             initial_value="1.0"
+             label="Tron glow strength:"
+             label_width="180"
+             layout="topleft"
+             left="30"
+             max_val="4.0"
+             min_val="0.0"
+             name="rezfx_tron_glow"
+             show_text="true"
+             tool_tip="How brightly Tron's wireframe and scan line glow. 0: plain lines with no glow; 1: the default; up to 4."
+             top="132"
+             width="440" />
+            <slider
+             can_edit_text="true"
+             control_name="GMDXRezFxTronLineWidth"
+             decimal_digits="1"
+             follows="left|top"
+             height="15"
+             increment="0.1"
+             initial_value="1.5"
+             label="Tron line width (px):"
+             label_width="180"
+             layout="topleft"
+             left="30"
+             max_val="5.0"
+             min_val="0.5"
+             name="rezfx_tron_line_width"
+             show_text="true"
+             tool_tip="Width of Tron's wireframe lines on screen, in pixels."
+             top="152"
+             width="440" />
+            <check_box
+             control_name="SLRezFXCombatSafe"
+             follows="left|top"
+             height="16"
+             label="Combat-safe: on damage-enabled land, shorten every effect to 0.25 s"
+             layout="topleft"
+             left="12"
+             name="rezfx_combat_safe"
+             tool_tip="Where the land you stand on allows damage, no effect lasts longer than 0.25 s, the 3D printer and transporter keep the object whole and solid, paint only, and Fade in shows the object at once."
+             top="174"
+             width="490" />
+            <text
+             type="string"
+             follows="left|top"
+             height="42"
+             layout="topleft"
+             left="12"
+             top="198"
+             width="490"
+             wrap="true">
+    Printer and transporter hide unbuilt parts. Temp objects never play effects. Tron wireframe requires a GPU with fragment-shader barycentrics; otherwise Tron uses a filled effect.
+            </text>
+        </panel>
+        <!-- </GMDX> -->
       </scroll_container>
     </panel>
   </tab_container>

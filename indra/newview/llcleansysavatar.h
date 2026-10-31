@@ -97,14 +97,24 @@ private:
         U32 skin_frame = 0;
         Part parts[kParts];
         U8 why[kParts] = {255,255,255,255,255,255,255,255};   // #461 last logged state per part
+        S8 why_lod[kParts] = {-1,-1,-1,-1,-1,-1,-1,-1};       // #1131 LOD a geometry / morph reason hit
+        F64 bake_wait[kParts] = {-1,-1,-1,-1,-1,-1,-1,-1};    // #1131 no bake pixels since (< 0: has them)
+        // #1131 no-body state (noteStuck): 0 = none, else the per-part reasons or kLoadingSig;
+        // since when; when the logged episode began (< 0: nothing logged).
+        U32 stuck_sig = 0;
+        F64 stuck_since = 0.0;
+        F64 stuck_logged = -1.0;
         Morph morph[kParts][kMaxLod];   // per REFERENCE mesh (part, its LOD index)
     };
     std::unordered_map<LLUUID, AvState> mAv;
+    std::unordered_map<LLUUID, U32> mStuckSeen;   // #1131 avatar -> no-body state logged this session
+    F64 mNextStuckLog = 0.0;
     U32 mFrame = 0;
     U32 mLastDrawnAvatars = 0;
     bool mWasEnabled = false;
 
-    void noteWhy(LLVOAvatar* av, AvState& st, S32 part, U8 why);
+    void noteWhy(LLVOAvatar* av, AvState& st, S32 part, U8 why, S32 lod = -1);
+    void noteStuck(LLVOAvatar* av, AvState& st, U32 sig, F64 now, bool due, U32& listed, U32& deferred);
     bool ensurePalette(LLVOAvatar* av, S32 part, S32 ref_lod);
     bool ensureRigidPal(LLVOAvatar* av, S32 part, S32 lod);
     bool ensureShared(LLVOAvatar* av, S32 part, S32 lod);

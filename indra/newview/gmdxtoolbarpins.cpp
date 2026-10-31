@@ -31,6 +31,7 @@
 #include "llcommandmanager.h"
 #include "lldir.h"
 #include "llfloater.h"
+#include "llfloaterpopout.h"
 #include "llfloaterreg.h"
 #include "llfocusmgr.h"
 #include "llfolderview.h"
@@ -83,8 +84,9 @@ namespace
     // entry shows its item's inventory icon and name.
     //-------------------------------------------------------------------------
 
-    // "Change Icon..." library: Phosphor fill icons (skins/default/textures/phosphor, MIT), each a
-    // textures.xml entry GMDX_PinIcon_<name> drawn in IconColor at the toolbar icon size.
+    // "Change Icon..." library: Phosphor fill icons (skins/default/textures/phosphor, MIT), four CC
+    // weapon icons (icons_cc, credited in Help > About) and letters / digits (phosphor_authored), each
+    // a textures.xml entry GMDX_PinIcon_<name> drawn in IconColor at the toolbar icon size.
     const char* const kPinIcons[] =
     {
         "sword", "pistol", "rifle", "flintlock", "ammo", "knife", "axe", "hammer", "gavel", "crosshair",
@@ -1104,7 +1106,8 @@ namespace GMDXToolbarPins
         *acceptance = ACCEPT_NO;
         tooltip = "Drop it on a toolbar to pin it there.";
         LLViewerInventoryCategory* cat = ids.size() == 1 ? gInventory.getCategory(ids.front()) : nullptr;
-        if (!cat || !gToolBarView || !canPin(cat->getUUID()))
+        // (x, y are the main window's; a popped-out floater window under the mouse has its own)
+        if (!cat || !gToolBarView || !canPin(cat->getUUID()) || LLFloaterPopout::ownsMouse())
         {
             return true;
         }

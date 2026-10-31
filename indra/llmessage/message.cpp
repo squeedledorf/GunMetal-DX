@@ -3355,8 +3355,18 @@ void LLMessageSystem::dumpPacketToLog()
     for (i = 0; i < mTrueReceiveSize; i++)
     {
         S32 offset = cur_line_pos * 3;
+        // GCC 16 false positive: cur_line_pos is always in [0,15] (reset at 16 below), so
+        // offset <= 45 and the bound is >= 211, but the analyzer cannot see that invariant
+        // and reports a wrapped size_t bound against the 256-byte buffer.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
+#endif
         snprintf(line_buffer + offset, sizeof(line_buffer) - offset,
                  "%02x ", mTrueReceiveBuffer[i]);   /* Flawfinder: ignore */
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
         cur_line_pos++;
         if (cur_line_pos >= 16)
         {

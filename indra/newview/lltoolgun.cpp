@@ -58,13 +58,14 @@
 #include "lltrans.h"
 #include "lltracker.h"
 #include "rlvhandler.h"
-// <SS:Skoomastream>
+// <SS:Skoomastream> CombatFX (ported from GunMetal-DX, LGPL 2.1, v0.3.0 cf5f1f4)
 #include "fscombataim.h"
-#include "llvoavatarself.h"
-#include "sscombatray.h"
-// </SS:Skoomastream>
 #include "fscombatads.h" // <GMDX> ADS mouse sensitivity
 #include "lltoolcomp.h" // <GMDX> zoomed mouse sensitivity
+#include "llvoavatarself.h"
+#include "slcombatfx.h"
+#include "sscombatray.h"
+// </SS:Skoomastream>
 
 LLToolGun::LLToolGun( LLToolComposite* composite )
 :   LLTool( std::string("gun"), composite ),
@@ -112,7 +113,8 @@ bool LLToolGun::handleHover(S32 x, S32 y, MASK mask)
 
         static LLCachedControl<F32> mouse_sensitivity_setting(gSavedSettings, "MouseSensitivity");
         // <GMDX> Aiming down sights and the plain right-click zoom each have their own sensitivity, on the
-        // same scale. ADS is checked first: its press also holds the right button.
+        // same scale. ADS is checked first: its press also holds the right button. The zoomed
+        // sensitivity is from SoapStorm (Soap Frenzy, 2dfdb00078), LGPL 2.1.
         static LLCachedControl<F32> ads_sensitivity_setting(gSavedSettings, "FSADSMouseSensitivity", 3.f);
         static LLCachedControl<F32> zoomed_sensitivity_setting(gSavedSettings, "MouseSensitivityZoomed", 3.f);
         const F32 sensitivity = FSCombatADS::isHeld() ? (F32)ads_sensitivity_setting
@@ -182,7 +184,10 @@ void LLToolGun::draw()
 
     static LLCachedControl<bool> show_crosshairs(gSavedSettings, "ShowCrosshairs");
     static LLCachedControl<bool> show_iff(gSavedSettings, "SlipstreamMouselookIFF", true);
-    static LLCachedControl<bool> show_iff_markers(gSavedSettings, "SlipstreamMouselookIFFMarkers", false);
+    // <GMDX> No target markers: they marked every avatar within IFF range through walls (a wallhack),
+    // as Alchemy: Skooma found and removed (Nexii Malthus, 0608798b0e). SlipstreamMouselookIFFMarkers is not read.
+    constexpr bool show_iff_markers = false;
+    // </GMDX>
     static LLCachedControl<F32> iff_range(gSavedSettings, "SlipstreamMouselookIFFRange", 380.f);
     static LLCachedControl<F32> userPresetX(gSavedSettings, "SlipstreamMouselookTextOffsetX", 0.f);
     static LLCachedControl<F32> userPresetY(gSavedSettings, "SlipstreamMouselookTextOffsetY", -25.f);
@@ -197,6 +202,7 @@ void LLToolGun::draw()
     // <SS:Skoomastream>
     // Reset the custom crosshair tint each frame; the IFF pass below re-tints
     // it when a target is identified under the crosshair.
+    const bool combat_fx = SLCombatFX::enabled();
     FSCombatAim::setCrosshairTint(LLColor4::white);
     // </SS:Skoomastream>
 
@@ -242,32 +248,37 @@ void LLToolGun::draw()
                 magicVector.setVec(-magicVector.mdV[VY], magicVector.mdV[VZ], magicVector.mdV[VX]);
 
                 // <SS:Skoomastream>
-                // Line of sight: never identify targets through walls, floors or
+                // Line of sight (CombatFX): never identify targets through walls, floors or
                 // terrain. Two rays (avatar center, then head height) so a target
                 // peeking over low cover still identifies. World geometry only;
                 // avatars and attachments never block the check, and like the aim
                 // code, phantom prims and the vehicle we sit on do not either.
-                // Always enforced -- there is deliberately no setting to turn this off.
+                // With CombatFX on there is deliberately no setting to turn this off;
+                // with it off the stock check stands (Slipstream).
+                // <GMDX> No: with CombatFX off there are no rays, so the stock check named targets
+                // through walls. Without the line of sight nothing is identified at all.
                 bool target_visible = false;
                 if (magicVector.mdV[VX] > -0.75 && magicVector.mdV[VX] < 0.75 && magicVector.mdV[VZ] > 0.0 && magicVector.mdV[VY] > -1.5 && magicVector.mdV[VY] < 1.5) // Do not fuck with these, cheater. :(
                 {
-                    target_visible = true;
-                    const LLViewerObject* seated_root = (isAgentAvatarValid() && gAgentAvatarp->isSitting())
-                        ? (const LLViewerObject*)gAgentAvatarp->getRoot() : nullptr;
-                    // (SSCombatRay: object answers are ~2 frames old; a target without
-                    // one yet is not identified.)
-                    LLVector3 ray_target = gAgent.getPosAgentFromGlobal(targetPosition);
-                    const LLVector3 ray_start = LLViewerCamera::getInstance()->getOrigin();
-                    const U32 key = SSCombatRay::KEY_IFF_BASE + 2 * (id.getCRC32() & 0xFFFFu);
-                    F32 hit_dist = 0.f;
-                    bool known = false;
-                    if (SSCombatRay::cast(key, ray_start, ray_target, seated_root, hit_dist, &known) || !known)
+                    target_visible = combat_fx; // <GMDX> (was true)
+                    if (combat_fx)
                     {
-                        ray_target.mV[VZ] += 0.6f;
-                        target_visible = !SSCombatRay::cast(key + 1, ray_start, ray_target, seated_root, hit_dist, &known) && known;
+                        const LLViewerObject* seated_root = (isAgentAvatarValid() && gAgentAvatarp->isSitting())
+                            ? (const LLViewerObject*)gAgentAvatarp->getRoot() : nullptr;
+                        // (SSCombatRay: object answers are ~2 frames old; a target without
+                        // one yet is not identified.)
+                        LLVector3 ray_target = gAgent.getPosAgentFromGlobal(targetPosition);
+                        const LLVector3 ray_start = LLViewerCamera::getInstance()->getOrigin();
+                        const U32 key = SSCombatRay::KEY_IFF_BASE + 2 * (id.getCRC32() & 0xFFFFu);
+                        F32 hit_dist = 0.f;
+                        bool known = false;
+                        if (SSCombatRay::cast(key, ray_start, ray_target, seated_root, hit_dist, &known) || !known)
+                        {
+                            ray_target.mV[VZ] += 0.6f;
+                            target_visible = !SSCombatRay::cast(key + 1, ray_start, ray_target, seated_root, hit_dist, &known) && known;
+                        }
                     }
                 }
-                //if (magicVector.mdV[VX] > -0.75 && magicVector.mdV[VX] < 0.75 && magicVector.mdV[VZ] > 0.0 && magicVector.mdV[VY] > -1.5 && magicVector.mdV[VY] < 1.5) // Do not fuck with these, cheater. :(
                 if (target_visible)
                 // </SS:Skoomastream>
                 {
@@ -313,9 +324,9 @@ void LLToolGun::draw()
     if (show_crosshairs)
     {
         // <SS:Skoomastream>
-        // Custom composite crosshair (dot + arrows) replaces the stock one
+        // Custom composite crosshair (dot + arrows) replaces the stock one (CombatFX)
         static LLCachedControl<bool> custom_crosshair(gSavedSettings, "FSCustomCrosshair", false);
-        if (custom_crosshair)
+        if (combat_fx && custom_crosshair)
         {
             FSCombatAim::drawCrosshair(windowWidth, windowHeight);
             return;

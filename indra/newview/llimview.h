@@ -485,6 +485,8 @@ public:
      * @return false if the session with specified id was not exist
      */
     bool leaveSession(const LLUUID& session_id);
+    bool rejectAdHocSession(const LLUUID& session_id, const LLUUID& caller_id,
+                            const std::string& caller_name, bool pending_invitation);
 
     void inviteToSession(
         const LLUUID& session_id,

@@ -73,7 +73,7 @@
 			<icon tool_tip="フレンドは、自分のオブジェクトを編集できません。" name="cant_edit_objects"/>
 			<text name="Key:" value="キー：" width="36"/>
 			<line_editor name="user_key" value="00000000-0000-0000-0000-000000000000"/>
-			<menu_button name="clipboard_avatar_params" tool_tip="ペースト時のオプション"/>
+			<menu_button name="clipboard_avatar_params" tool_tip="コピーのオプション"/>
 		</layout_panel>
 		<layout_panel name="about_buttons_panel">
 			<button name="save_description_changes" label="保存"/>

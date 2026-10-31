@@ -38,6 +38,7 @@
 #include "llevent.h"        // LLSimpleListener
 #include "llfilepicker.h"
 #include "llfloaterwebcontent.h"    // for handling window close requests and geometry change requests in media browser windows.
+#include "llfloaterpopout.h"
 #include "llfocusmgr.h"
 #include "lltexturedata.h"
 #include "llkeyboard.h"
@@ -893,7 +894,11 @@ void LLViewerMedia::updateMedia(void *dummy_arg)
 
             // Overrides if the window is minimized or we lost focus (taking care
             // not to accidentally "raise" the priority either)
-            if (!gViewerWindow->getActive() /* viewer window minimized? */
+            // Only media owned by a live, visible native root survives main's
+            // minimize policy. No view-tree scan or world-object work is added.
+            const bool native_ui = pimpl->getUsedInUI() && LLFloaterPopout::hasWork() &&
+                LLFloaterPopout::isVisibleNativeView(pimpl->getUIOwner());
+            if (!gViewerWindow->getActive() && !native_ui
                 && new_priority > LLPluginClassMedia::PRIORITY_HIDDEN)
             {
                 new_priority = LLPluginClassMedia::PRIORITY_HIDDEN;
@@ -2998,6 +3003,7 @@ bool LLViewerMediaImpl::handleUnicodeCharHere(llwchar uni_char)
             LLSD native_key_data = gViewerWindow->getWindow()->getNativeKeyData();
 
             mMediaSource->textInput(wstring_to_utf8str(LLWString(1, uni_char)), gKeyboard->currentMask(false), native_key_data);
+            result = true;
         }
     }
 

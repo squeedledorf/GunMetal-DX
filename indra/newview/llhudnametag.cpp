@@ -293,10 +293,11 @@ void LLHUDNameTag::renderText()
             + (y_pixel_vec * screen_offset.mV[VY]);
 
     LLRender::DepthScope gls_depth(true, false);
-    // Occlusion (#487): the whole tag -- bubble and every line -- is hidden / faded by
-    // the scene at ONE point, its anchor, instead of per glyph (LL's depth test on the
-    // screen-facing quads). Not for a bubble pinned to the screen edge (its anchor is
-    // off screen) or a tag with z-compare off.
+    // Occlusion (#487, #1126): the tag -- bubble and every line -- sits at its anchor's
+    // depth and each pixel is tested against the scene there, as LL's depth test on
+    // the screen-facing quads: geometry in front hides the part of the tag it covers.
+    // Not for a bubble pinned to the screen edge (its anchor is off screen) or a tag
+    // with z-compare off.
     const bool occlude = mZCompare && !mOffscreen;
     if (occlude)
     {
@@ -691,11 +692,11 @@ LLVector2 LLHUDNameTag::updateScreenPos(LLVector2 &offset)
     LLVector3 x_pixel_vec;
     LLVector3 y_pixel_vec;
     LLViewerCamera::getInstance()->getPixelVectors(mPositionAgent, y_pixel_vec, x_pixel_vec);
-    return updateScreenPos(offset, x_pixel_vec, y_pixel_vec, gViewerWindow->getWorldViewRectScaled());
+    return updateScreenPos(offset, x_pixel_vec, y_pixel_vec, gViewerWindow->getHudRectScaled());
 }
 
 LLVector2 LLHUDNameTag::updateScreenPos(LLVector2 &offset, const LLVector3& x_pixel_vec,
-                                        const LLVector3& y_pixel_vec, const LLRect& world_rect)
+                                        const LLVector3& y_pixel_vec, const LLRect& visible_rect)
 {
     LLCoordGL screen_pos;
     LLVector2 screen_pos_vec;
@@ -708,16 +709,16 @@ LLVector2 LLHUDNameTag::updateScreenPos(LLVector2 &offset, const LLVector3& x_pi
 
     screen_pos_vec.setVec((F32)screen_pos.mX, (F32)screen_pos.mY);
 
-    S32 bottom = world_rect.mBottom + STATUS_BAR_HEIGHT;
+    S32 bottom = visible_rect.mBottom + STATUS_BAR_HEIGHT;
 
     LLVector2 screen_center;
-    screen_center.mV[VX] = llclamp((F32)screen_pos_vec.mV[VX], (F32)world_rect.mLeft + mWidth * 0.5f, (F32)world_rect.mRight - mWidth * 0.5f);
+    screen_center.mV[VX] = llclamp((F32)screen_pos_vec.mV[VX], (F32)visible_rect.mLeft + mWidth * 0.5f, (F32)visible_rect.mRight - mWidth * 0.5f);
 
     if(mVertAlignment == ALIGN_VERT_TOP)
     {
         screen_center.mV[VY] = llclamp((F32)screen_pos_vec.mV[VY],
             (F32)bottom,
-            (F32)world_rect.mTop - mHeight - (F32)MENU_BAR_HEIGHT);
+            (F32)visible_rect.mTop - mHeight - (F32)MENU_BAR_HEIGHT);
         mSoftScreenRect.setLeftTopAndSize(screen_center.mV[VX] - (mWidth + BUFFER_SIZE) * 0.5f,
             screen_center.mV[VY] + (mHeight + BUFFER_SIZE), mWidth + BUFFER_SIZE, mHeight + BUFFER_SIZE);
     }
@@ -725,7 +726,7 @@ LLVector2 LLHUDNameTag::updateScreenPos(LLVector2 &offset, const LLVector3& x_pi
     {
         screen_center.mV[VY] = llclamp((F32)screen_pos_vec.mV[VY],
             (F32)bottom + mHeight * 0.5f,
-            (F32)world_rect.mTop - mHeight * 0.5f - (F32)MENU_BAR_HEIGHT);
+            (F32)visible_rect.mTop - mHeight * 0.5f - (F32)MENU_BAR_HEIGHT);
         mSoftScreenRect.setCenterAndSize(screen_center.mV[VX], screen_center.mV[VY], mWidth + BUFFER_SIZE, mHeight + BUFFER_SIZE);
     }
 
@@ -804,11 +805,13 @@ void LLHUDNameTag::updateAll()
     // sort back to front for rendering purposes
     std::sort(sVisibleTextObjects.begin(), sVisibleTextObjects.end(), llhudnametag_further_away());
 
-    // Frame invariants of updateScreenPos (#336): the world view rect, and per tag the
-    // pixel vectors at its (now final) mPositionAgent. LL recomputed both inside every
+    // Frame invariants of updateScreenPos (#336): the area tags are kept inside, and per tag
+    // the pixel vectors at its (now final) mPositionAgent. LL recomputed both inside every
     // updateScreenPos call -- twice per overlapping pair per solver iteration.
+    // #1115: the area the top bars leave free (the HUD rect, LL's world view rect); the world
+    // view is the whole window under Vulkan, its top behind the bars.
     LLViewerCamera* camera = LLViewerCamera::getInstance();
-    const LLRect world_rect = gViewerWindow->getWorldViewRectScaled();
+    const LLRect visible_rect = gViewerWindow->getHudRectScaled();
 
     // iterate from front to back, and set LOD based on current screen coverage
     F32 screen_area = (F32)(gViewerWindow->getWindowWidthScaled() * gViewerWindow->getWindowHeightScaled());
@@ -836,7 +839,7 @@ void LLHUDNameTag::updateAll()
         textp->updateSize();
         // find on-screen position and initialize collision rectangle
         camera->getPixelVectors(textp->mPositionAgent, textp->mSolverYPixel, textp->mSolverXPixel);
-        textp->mTargetPositionOffset = textp->updateScreenPos(LLVector2::zero, textp->mSolverXPixel, textp->mSolverYPixel, world_rect);
+        textp->mTargetPositionOffset = textp->updateScreenPos(LLVector2::zero, textp->mSolverXPixel, textp->mSolverYPixel, visible_rect);
         current_screen_area += (F32)(textp->mSoftScreenRect.getWidth() * textp->mSoftScreenRect.getHeight());
     }
 
@@ -942,9 +945,9 @@ void LLHUDNameTag::updateAll()
                     src_textp->mTargetPositionOffset += src_force;
                     dst_textp->mTargetPositionOffset += dst_force;
                     src_textp->mTargetPositionOffset = src_textp->updateScreenPos(src_textp->mTargetPositionOffset,
-                        src_textp->mSolverXPixel, src_textp->mSolverYPixel, world_rect);
+                        src_textp->mSolverXPixel, src_textp->mSolverYPixel, visible_rect);
                     dst_textp->mTargetPositionOffset = dst_textp->updateScreenPos(dst_textp->mTargetPositionOffset,
-                        dst_textp->mSolverXPixel, dst_textp->mSolverYPixel, world_rect);
+                        dst_textp->mSolverXPixel, dst_textp->mSolverYPixel, visible_rect);
                     load_rect(src);
                     load_rect(dst);
                     moved = true;

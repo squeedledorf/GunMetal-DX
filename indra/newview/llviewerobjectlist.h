@@ -162,8 +162,6 @@ public:
 
     inline S32 getNumObjects() { return (S32) mObjects.size(); }
     inline S32 getNumActiveObjects() { return (S32) mActiveObjects.size(); }
-    // <GMDX> the objects that move / update each frame (the mini-map's physical-objects pass)
-    const std::vector<LLPointer<LLViewerObject> >& getActiveObjects() const { return mActiveObjects; }
 
     void addToMap(LLViewerObject *objectp);
     void removeFromMap(LLViewerObject *objectp);
@@ -234,6 +232,9 @@ protected:
 
     vobj_list_t mObjects;
     std::vector<LLPointer<LLViewerObject> > mActiveObjects;
+public:
+    const std::vector<LLPointer<LLViewerObject> >& getActiveObjects() const { return mActiveObjects; }   // (GunMetal-DX minimap)
+protected:
 
     vobj_list_t mMapObjects;
 

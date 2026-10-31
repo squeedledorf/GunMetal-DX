@@ -2,12 +2,14 @@
 <!-- Pose Studio (#500). Dial colours match the rotation gizmo: X red, Y green, Z blue.
      The dials are the OP Pose HUD's: same numbers, same ranges, same motion (an exact port
      of its generator, per bone, in app_settings/posestudio/bone_axes.xml). -->
-<floater
+<floater can_pop_out="true"
  positioning="cascading"
  save_rect="true"
- can_resize="false"
+ can_resize="true"
  height="740"
- width="620"
+ min_height="300"
+ min_width="635"
+ width="635"
  layout="topleft"
  name="sl_pose_studio"
  help_topic="poser"
@@ -49,6 +51,24 @@
     <string name="lookat_status_rlv">Not sending: RLV restricts the pose channel.</string>
     <string name="lookat_status_disabled">Not sending: "Disable Look At Animation" is on.</string>
     <string name="lookat_status_ao">Not sending: your AO keeps your head still (AO option "Keep head still").</string>
+    <scroll_container
+     color="PanelDefaultBackgroundColor"
+     follows="all"
+     height="720"
+     layout="topleft"
+     left="0"
+     name="pose_studio_scroll"
+     opaque="true"
+     top="20"
+     width="635">
+    <panel
+     follows="left|top|right"
+     height="720"
+     layout="topleft"
+     left="0"
+     name="pose_studio_panel"
+     top="0"
+     width="620">
 
     <!-- Target and view -->
     <text
@@ -57,7 +77,7 @@
      layout="topleft"
      left="8"
      name="target_label"
-     top="27"
+     top="7"
      width="44">
         Posing:
     </text>
@@ -68,7 +88,7 @@
      left_pad="2"
      name="target_combo"
      tool_tip="Who to pose: yourself, an animated object you own, or someone who accepted your request (Pose other...)"
-     top="24"
+     top="4"
      width="150" />
     <button
      follows="left|top"
@@ -96,7 +116,7 @@
      layout="topleft"
      left="430"
      name="view_label"
-     top="27"
+     top="7"
      width="40">
         View:
     </text>
@@ -107,7 +127,7 @@
      left_pad="2"
      name="view_combo"
      tool_tip="Which part of the figure to show: body, hands, face, tail and wings"
-     top="24"
+     top="4"
      width="140" />
 
     <!-- Bone picker -->
@@ -119,7 +139,7 @@
      left="8"
      name="figure"
      tool_tip="Click a dot to pick a bone. Blue dots are edited bones -- the ones a save writes and sharing sends; grey ones are not in this skeleton."
-     top="52"
+     top="32"
      width="300" />
     <text
      follows="left|top"
@@ -128,7 +148,7 @@
      layout="topleft"
      left="8"
      name="bone_name"
-     top="388"
+     top="368"
      width="150">
         Head
     </text>
@@ -140,7 +160,7 @@
      left="160"
      name="stop_posed_btn"
      tool_tip="End every pose request you accepted. Everyone stops seeing you posed."
-     top="384"
+     top="364"
      visible="false"
      width="148" />
 
@@ -156,7 +176,7 @@
      name="dial_x"
      ring_color="1 0.3 0.3 1"
      tool_tip="X, as on the OP Pose HUD (head: tilt along the nose). Click the hub or the knob to reset to 0."
-     top="52"
+     top="32"
      width="94" />
     <sl_pose_dial
      follows="left|top"
@@ -195,7 +215,7 @@
      min_val="-180"
      name="spin_x"
      tool_tip="X in degrees (OP Pose HUD numbers)"
-     top="126"
+     top="106"
      width="86" />
     <spinner
      decimal_digits="1"
@@ -230,7 +250,7 @@
      layout="topleft"
      left="320"
      name="snap_label"
-     top="155"
+     top="135"
      width="40">
         Snap:
     </text>
@@ -241,7 +261,7 @@
      left_pad="2"
      name="snap_combo"
      tool_tip="Off (default): dials move smoothly at full precision. Or round drags to a step; Bone uses each bone's OP Pose HUD step."
-     top="152"
+     top="132"
      width="70">
         <combo_box.item label="Off" name="snap_off" value="0" />
         <combo_box.item label="1°" name="snap_1" value="1" />
@@ -259,7 +279,7 @@
      left_pad="10"
      name="mirror_check"
      tool_tip="Posing one limb also poses the opposite one, mirrored across the spine"
-     top="155"
+     top="135"
      width="64" />
     <check_box
      follows="left|top"
@@ -280,7 +300,7 @@
      left="320"
      name="undo_btn"
      tool_tip="Undo the last change to this bone, or the last IK handle drag (every bone it moved)"
-     top="182"
+     top="162"
      width="70" />
     <button
      follows="left|top"
@@ -319,7 +339,7 @@
      layout="topleft"
      left="320"
      name="advanced_label"
-     top="212"
+     top="192"
      width="128">
         Position / scale (metres)
     </text>
@@ -332,7 +352,7 @@
      left="450"
      name="ik_check"
      tool_tip="Show IK handles on the avatar you are posing. Drag a cone to move a hand, foot or the head (it stays where you drop it; Shift: along one axis); Ctrl+drag turns it, Ctrl+Shift+drag rolls it. Click a cone to select it: its arrows and squares move it along an axis or plane; hold Ctrl for rotate rings. Drag the small diamond at an elbow or knee to aim it, the big one at the hips to move the body. Right-click a cone to pin it in place. Undo takes back a whole drag."
-     top="211"
+     top="191"
      width="80" />
     <button
      follows="left|top"
@@ -342,7 +362,7 @@
      left_pad="2"
      name="ik_unpin_btn"
      tool_tip="Release every pinned IK handle"
-     top="209"
+     top="189"
      width="38" />
     <button
      follows="left|top"
@@ -352,7 +372,7 @@
      left_pad="2"
      name="ik_snap_btn"
      tool_tip="Put every IK handle (and elbow / knee pole) back on its bones as they are now"
-     top="209"
+     top="189"
      width="38" />
     <spinner
      decimal_digits="3"
@@ -367,7 +387,7 @@
      min_val="-1"
      name="pos_x"
      tool_tip="Position offset, X"
-     top="230"
+     top="210"
      width="94" />
     <spinner
      decimal_digits="3"
@@ -412,7 +432,7 @@
      min_val="-1"
      name="scale_x"
      tool_tip="Scale change, X"
-     top="254"
+     top="234"
      width="94" />
     <spinner
      decimal_digits="3"
@@ -454,7 +474,7 @@
      left="320"
      name="export_btn"
      tool_tip="Open your poses folder; pose files are plain XML you can copy and share"
-     top="290"
+     top="270"
      width="70" />
     <button
      follows="left|top"
@@ -490,7 +510,7 @@
      min_val="0"
      name="edit_ease_spin"
      tool_tip="Seconds a bone change eases in over instead of snapping (0 = at once): typed or stepped dial values, undo / redo. Dragging a dial or IK handle follows the mouse. Shared poses send it, so other Slipstream viewers see the same ease."
-     top="291"
+     top="271"
      width="66" />
     <check_box
      follows="left|top"
@@ -500,7 +520,7 @@
      left="320"
      name="share_check"
      tool_tip="Show your pose to other Slipstream users nearby who have 'Show poses' on. Uses a small helper object (#GunMetal-DX Helper) while sharing."
-     top="318"
+     top="298"
      width="250" />
     <check_box
      follows="left|top"
@@ -510,7 +530,7 @@
      left="320"
      name="show_others_check"
      tool_tip="See the poses other Slipstream users share with you (uses a small helper object while on)"
-     top="336"
+     top="316"
      width="290" />
     <combo_box
      follows="left|top"
@@ -519,7 +539,7 @@
      left="320"
      name="synced_combo"
      tool_tip="People whose shared poses you see, people you ignore, and people whose pose requests you blocked"
-     top="356"
+     top="336"
      width="86" />
     <button
      follows="left|top"
@@ -557,7 +577,7 @@
      layout="topleft"
      left="320"
      name="status_text"
-     top="382"
+     top="362"
      width="292"
      word_wrap="true">
         Not posing.
@@ -571,7 +591,7 @@
      layout="topleft"
      left="8"
      name="poses_label"
-     top="410"
+     top="390"
      width="200">
         Poses
     </text>
@@ -584,7 +604,7 @@
      multi_select="false"
      name="pose_list"
      tool_tip="Your saved poses (also the classic poser's). Double-click to load."
-     top="428"
+     top="408"
      width="300">
         <scroll_list.columns
          label="Name"
@@ -599,7 +619,7 @@
      max_length_bytes="64"
      name="pose_name"
      tool_tip="Name to save the pose under"
-     top="558"
+     top="538"
      width="120" />
     <button
      follows="left|top"
@@ -642,7 +662,7 @@
      min_val="0"
      name="save_ease_spin"
      tool_tip="Saved with the pose: how long playing it blends from the current pose into it (0 = snap)"
-     top="586"
+     top="566"
      width="130" />
     <button
      follows="left|top"
@@ -652,7 +672,7 @@
      left_pad="6"
      name="add_seq_btn"
      tool_tip="Append the selected pose to the sequence, held for the time set on the right"
-     top="584"
+     top="564"
      width="120" />
 
     <!-- Sequence -->
@@ -663,7 +683,7 @@
      layout="topleft"
      left="320"
      name="sequence_label"
-     top="410"
+     top="390"
      width="200">
         Sequence
     </text>
@@ -675,7 +695,7 @@
      left="320"
      multi_select="false"
      name="sequence_list"
-     top="428"
+     top="408"
      width="292">
         <scroll_list.columns
          label=""
@@ -702,7 +722,7 @@
      left="320"
      name="prev_btn"
      tool_tip="Previous pose"
-     top="558"
+     top="538"
      width="28" />
     <button
      follows="left|top"
@@ -742,7 +762,7 @@
      left_pad="8"
      name="loop_check"
      tool_tip="Start over after the last pose"
-     top="561"
+     top="541"
      width="54" />
     <spinner
      decimal_digits="1"
@@ -758,7 +778,7 @@
      min_val="0.25"
      name="hold_spin"
      tool_tip="Seconds to hold the selected pose (also used for poses you add)"
-     top="586"
+     top="566"
      width="86" />
     <button
      follows="left|top"
@@ -768,7 +788,7 @@
      left_pad="6"
      name="seq_up_btn"
      tool_tip="Move up"
-     top="584"
+     top="564"
      width="28" />
     <button
      follows="left|top"
@@ -804,7 +824,7 @@
      min_val="-1"
      name="seq_ease_spin"
      tool_tip="Ease-in for the selected sequence step, in seconds; -1 uses the pose file's own"
-     top="586"
+     top="566"
      width="74" />
 
     <!-- Look-at sync (#902) -->
@@ -815,7 +835,7 @@
      layout="topleft"
      left="8"
      name="lookat_border"
-     top="612"
+     top="592"
      width="604" />
     <text
      follows="left|top"
@@ -824,7 +844,7 @@
      layout="topleft"
      left="8"
      name="lookat_label"
-     top="618"
+     top="598"
      width="300">
         Look-at for mesh bodies
     </text>
@@ -837,7 +857,7 @@
      left="8"
      name="lookat_send_check"
      tool_tip="Other Slipstream users with 'Show look-at' on see your mesh body turn its own neck and head (pony, Bento neck, human) toward what you look at, even over animations. Sends a direction only, never what you look at. Cannot be switched on while 'Don&apos;t send my Look At target to others' (Preferences, Privacy) is on; nothing is sent while your AO holds your head either. Uses the small helper object while on."
-     top="638"
+     top="618"
      width="155" />
     <check_box
      control_name="SLLookAtSyncShow"
@@ -848,7 +868,7 @@
      left="8"
      name="lookat_show_check"
      tool_tip="Turn other Slipstream users' heads by the look-at they send (needs 'Show poses' on). A bone that a Pose Studio pose holds keeps the pose."
-     top="658"
+     top="638"
      width="155" />
     <check_box
      control_name="SLLookAtSyncShowSelf"
@@ -859,7 +879,7 @@
      left="8"
      name="lookat_self_check"
      tool_tip="While sending, turn your own avatar's head the same way here, so you see what others see"
-     top="678"
+     top="658"
      width="155" />
     <text
      follows="left|top"
@@ -867,7 +887,7 @@
      layout="topleft"
      left="168"
      name="lookat_map_label"
-     top="640"
+     top="620"
      width="36">
         Body
     </text>
@@ -878,7 +898,7 @@
      left="204"
      name="lookat_map_combo"
      tool_tip="Which bones turn your head (sent with your look-at). Auto: the Pose Studio figure you picked, else what your worn meshes are rigged to, else Human. The maps are in app_settings/posestudio/lookat_maps.xml."
-     top="636"
+     top="616"
      width="150" />
     <spinner
      control_name="SLLookAtSyncStrength"
@@ -894,7 +914,7 @@
      min_val="0"
      name="lookat_strength_spin"
      tool_tip="How far your head turns toward what you look at (sent with your look-at)"
-     top="664"
+     top="644"
      width="110" />
     <spinner
      control_name="SLLookAtSyncLimitScale"
@@ -910,7 +930,7 @@
      min_val="0.25"
      name="lookat_limit_spin"
      tool_tip="Scales how far each neck and head bone may turn, for the avatars you see"
-     top="664"
+     top="644"
      width="100" />
     <spinner
      control_name="SLLookAtSyncEase"
@@ -926,7 +946,7 @@
      min_val="0"
      name="lookat_ease_spin"
      tool_tip="Seconds a head takes to settle onto a new look-at target and to fade in or out, for you and for the people you see (0 = no easing). Sent with your look-at, so others see your preference."
-     top="664"
+     top="644"
      width="100" />
     <combo_box
      follows="left|top"
@@ -935,7 +955,7 @@
      left="362"
      name="lookat_people_combo"
      tool_tip="People whose look-at you see, and the ones you muted"
-     top="636"
+     top="616"
      width="180" />
     <button
      follows="left|top"
@@ -954,7 +974,7 @@
      left="8"
      name="lookat_privacy_note"
      text_color="EmphasisColor"
-     top="698"
+     top="678"
      visibility_control="EnableLookAtTarget"
      width="604">
         "Send where I look" needs "Don't send my Look At target to others" off (Preferences > Privacy).
@@ -965,6 +985,8 @@
      layout="topleft"
      left="8"
      name="lookat_status_text"
-     top="716"
+     top="696"
      width="604" />
+    </panel>
+    </scroll_container>
 </floater>

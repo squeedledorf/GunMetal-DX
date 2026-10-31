@@ -31,6 +31,9 @@
 #include "llmemory.h"
 #include "llvisualparam.h"
 #include "llcontrol.h"
+#include "llcallbacklist.h"
+#include "llinventorymodel.h"
+#include "llinventoryobserver.h"
 
 extern LLControlGroup gSavedSettings;
 
@@ -44,13 +47,17 @@ struct ViewerFolderEntry : public LLDictionaryEntry
                       const std::string &icon_name_closed,
                       bool is_quiet,                        // folder doesn't need a UI update when changed
                       bool hide_if_empty,                   // folder not shown if empty
-                      const std::string &dictionary_name = empty_string // no reverse lookup needed on non-ensembles, so in most cases just leave this blank
+                      const std::string &dictionary_name = empty_string, // no reverse lookup needed on most non-ensembles
+                      const std::string &type_icon_open = empty_string,
+                      const std::string &type_icon_closed = empty_string
         )
         :
         LLDictionaryEntry(dictionary_name),
         mNewCategoryName(new_category_name),
         mIconNameOpen(icon_name_open),
         mIconNameClosed(icon_name_closed),
+        mTypeIconOpen(type_icon_open),
+        mTypeIconClosed(type_icon_closed),
         mIsQuiet(is_quiet),
         mHideIfEmpty(hide_if_empty)
     {
@@ -93,6 +100,8 @@ struct ViewerFolderEntry : public LLDictionaryEntry
     }
     const std::string mIconNameOpen;
     const std::string mIconNameClosed;
+    const std::string mTypeIconOpen;
+    const std::string mTypeIconClosed;
     const std::string mNewCategoryName;
     typedef std::vector<std::string> name_vec_t;
     name_vec_t mAllowedNames;
@@ -112,40 +121,40 @@ LLViewerFolderDictionary::LLViewerFolderDictionary()
 {
     //                                                                    NEW CATEGORY NAME         FOLDER OPEN             FOLDER CLOSED          QUIET?      HIDE IF EMPTY?
     //                                                                   |-------------------------|-----------------------|----------------------|-----------|--------------|
-    addEntry(LLFolderType::FT_TEXTURE,              new ViewerFolderEntry("Textures",               "Inv_SysOpen",          "Inv_SysClosed",        false,     true));
-    addEntry(LLFolderType::FT_SOUND,                new ViewerFolderEntry("Sounds",                 "Inv_SysOpen",          "Inv_SysClosed",        false,     true));
-    addEntry(LLFolderType::FT_CALLINGCARD,          new ViewerFolderEntry("Calling Cards",          "Inv_SysOpen",          "Inv_SysClosed",        false,     true));
-    addEntry(LLFolderType::FT_LANDMARK,             new ViewerFolderEntry("Landmarks",              "Inv_SysOpen",          "Inv_SysClosed",        false,     true));
-    addEntry(LLFolderType::FT_CLOTHING,             new ViewerFolderEntry("Clothing",               "Inv_SysOpen",          "Inv_SysClosed",        false,     true));
-    addEntry(LLFolderType::FT_OBJECT,               new ViewerFolderEntry("Objects",                "Inv_SysOpen",          "Inv_SysClosed",        false,     true));
-    addEntry(LLFolderType::FT_NOTECARD,             new ViewerFolderEntry("Notecards",              "Inv_SysOpen",          "Inv_SysClosed",        false,     true));
+    addEntry(LLFolderType::FT_TEXTURE,              new ViewerFolderEntry("Textures",               "Inv_FolderTextureOpen",         "Inv_FolderTextureClosed",         false,     true, empty_string, "Inv_FolderTextureTypeOpen", "Inv_FolderTextureTypeClosed"));
+    addEntry(LLFolderType::FT_SOUND,                new ViewerFolderEntry("Sounds",                 "Inv_FolderSoundOpen",           "Inv_FolderSoundClosed",           false,     true, empty_string, "Inv_FolderSoundTypeOpen", "Inv_FolderSoundTypeClosed"));
+    addEntry(LLFolderType::FT_CALLINGCARD,          new ViewerFolderEntry("Calling Cards",          "Inv_FolderCallingCardOpen",     "Inv_FolderCallingCardClosed",     false,     true, empty_string, "Inv_FolderCallingCardTypeOpen", "Inv_FolderCallingCardTypeClosed"));
+    addEntry(LLFolderType::FT_LANDMARK,             new ViewerFolderEntry("Landmarks",              "Inv_FolderLandmarkOpen",        "Inv_FolderLandmarkClosed",        false,     true, empty_string, "Inv_FolderLandmarkTypeOpen", "Inv_FolderLandmarkTypeClosed"));
+    addEntry(LLFolderType::FT_CLOTHING,             new ViewerFolderEntry("Clothing",               "Inv_FolderClothingOpen",        "Inv_FolderClothingClosed",        false,     true, empty_string, "Inv_FolderClothingTypeOpen", "Inv_FolderClothingTypeClosed"));
+    addEntry(LLFolderType::FT_OBJECT,               new ViewerFolderEntry("Objects",                "Inv_FolderObjectOpen",          "Inv_FolderObjectClosed",          false,     true, empty_string, "Inv_FolderObjectTypeOpen", "Inv_FolderObjectTypeClosed"));
+    addEntry(LLFolderType::FT_NOTECARD,             new ViewerFolderEntry("Notecards",              "Inv_FolderNotecardOpen",        "Inv_FolderNotecardClosed",        false,     true, empty_string, "Inv_FolderNotecardTypeOpen", "Inv_FolderNotecardTypeClosed"));
     addEntry(LLFolderType::FT_ROOT_INVENTORY,       new ViewerFolderEntry("My Inventory",           "Inv_SysOpen",          "Inv_SysClosed",        false,     false));
-    addEntry(LLFolderType::FT_LSL_TEXT,             new ViewerFolderEntry("Scripts",                "Inv_SysOpen",          "Inv_SysClosed",        false,     true));
-    addEntry(LLFolderType::FT_BODYPART,             new ViewerFolderEntry("Body Parts",             "Inv_SysOpen",          "Inv_SysClosed",        false,     true));
+    addEntry(LLFolderType::FT_LSL_TEXT,             new ViewerFolderEntry("Scripts",                "Inv_FolderScriptOpen",          "Inv_FolderScriptClosed",          false,     true, empty_string, "Inv_FolderScriptTypeOpen", "Inv_FolderScriptTypeClosed"));
+    addEntry(LLFolderType::FT_BODYPART,             new ViewerFolderEntry("Body Parts",             "Inv_FolderBodyPartOpen",        "Inv_FolderBodyPartClosed",        false,     true, empty_string, "Inv_FolderBodyPartTypeOpen", "Inv_FolderBodyPartTypeClosed"));
     addEntry(LLFolderType::FT_TRASH,                new ViewerFolderEntry("Trash",                  "Inv_TrashOpen",        "Inv_TrashClosed",      true,      false));
-    addEntry(LLFolderType::FT_SNAPSHOT_CATEGORY,    new ViewerFolderEntry("Photo Album",            "Inv_SysOpen",          "Inv_SysClosed",        false,     true));
+    addEntry(LLFolderType::FT_SNAPSHOT_CATEGORY,    new ViewerFolderEntry("Photo Album",            "Inv_FolderSnapshotOpen",        "Inv_FolderSnapshotClosed",        false,     true, empty_string, "Inv_FolderSnapshotTypeOpen", "Inv_FolderSnapshotTypeClosed"));
     addEntry(LLFolderType::FT_LOST_AND_FOUND,       new ViewerFolderEntry("Lost And Found",         "Inv_LostOpen",         "Inv_LostClosed",       true,      true));
-    addEntry(LLFolderType::FT_ANIMATION,            new ViewerFolderEntry("Animations",             "Inv_SysOpen",          "Inv_SysClosed",        false,     true));
-    addEntry(LLFolderType::FT_GESTURE,              new ViewerFolderEntry("Gestures",               "Inv_SysOpen",          "Inv_SysClosed",        false,     true));
-    addEntry(LLFolderType::FT_FAVORITE,             new ViewerFolderEntry("Favorites",              "Inv_SysOpen",          "Inv_SysClosed",        false,     true));
+    addEntry(LLFolderType::FT_ANIMATION,            new ViewerFolderEntry("Animations",             "Inv_FolderAnimationOpen",       "Inv_FolderAnimationClosed",       false,     true, empty_string, "Inv_FolderAnimationTypeOpen", "Inv_FolderAnimationTypeClosed"));
+    addEntry(LLFolderType::FT_GESTURE,              new ViewerFolderEntry("Gestures",               "Inv_FolderGestureOpen",         "Inv_FolderGestureClosed",         false,     true, empty_string, "Inv_FolderGestureTypeOpen", "Inv_FolderGestureTypeClosed"));
+    addEntry(LLFolderType::FT_FAVORITE,             new ViewerFolderEntry("Favorites",              "Inv_FolderFavoriteOpen",          "Inv_FolderFavoriteClosed",        false,     true, empty_string, "Inv_FolderFavoriteTypeOpen", "Inv_FolderFavoriteTypeClosed"));
 
-    addEntry(LLFolderType::FT_CURRENT_OUTFIT,       new ViewerFolderEntry("Current Outfit",         "Inv_SysOpen",          "Inv_SysClosed",        true,      false));
+    addEntry(LLFolderType::FT_CURRENT_OUTFIT,       new ViewerFolderEntry("Current Outfit",         "Inv_FolderCurrentOutfitOpen",          "Inv_FolderCurrentOutfitClosed",        true,      false, empty_string, "Inv_FolderCurrentOutfitTypeOpen", "Inv_FolderCurrentOutfitTypeClosed"));
     addEntry(LLFolderType::FT_OUTFIT,               new ViewerFolderEntry("New Outfit",             "Inv_LookFolderOpen",   "Inv_LookFolderClosed", true,      false));
-    addEntry(LLFolderType::FT_MY_OUTFITS,           new ViewerFolderEntry("My Outfits",             "Inv_SysOpen",          "Inv_SysClosed",        true,      true));
-    addEntry(LLFolderType::FT_MESH,                 new ViewerFolderEntry("Meshes",                 "Inv_SysOpen",          "Inv_SysClosed",        false,     true));
-    addEntry(LLFolderType::FT_SETTINGS,             new ViewerFolderEntry("Settings",               "Inv_SysOpen",          "Inv_SysClosed",        false,     true));
-    addEntry(LLFolderType::FT_MATERIAL,             new ViewerFolderEntry("Materials",              "Inv_SysOpen",          "Inv_SysClosed",        false,     true));
+    addEntry(LLFolderType::FT_MY_OUTFITS,           new ViewerFolderEntry("My Outfits",             "Inv_FolderMyOutfitsOpen",          "Inv_FolderMyOutfitsClosed",        true,      true, empty_string, "Inv_FolderMyOutfitsTypeOpen", "Inv_FolderMyOutfitsTypeClosed"));
+    addEntry(LLFolderType::FT_MESH,                 new ViewerFolderEntry("Meshes",                 "Inv_FolderMeshOpen",            "Inv_FolderMeshClosed",            false,     true, empty_string, "Inv_FolderMeshTypeOpen", "Inv_FolderMeshTypeClosed"));
+    addEntry(LLFolderType::FT_SETTINGS,             new ViewerFolderEntry("Settings",               "Inv_FolderSettingsOpen",        "Inv_FolderSettingsClosed",        false,     true, empty_string, "Inv_FolderSettingsTypeOpen", "Inv_FolderSettingsTypeClosed"));
+    addEntry(LLFolderType::FT_MATERIAL,             new ViewerFolderEntry("Materials",              "Inv_FolderMaterialOpen",        "Inv_FolderMaterialClosed",        false,     true, empty_string, "Inv_FolderMaterialTypeOpen", "Inv_FolderMaterialTypeClosed"));
 
     bool boxes_invisible = !gSavedSettings.getBOOL("InventoryOutboxMakeVisible");
     // Received Items is an ordinary system folder of the tree (#489), shown whatever
     // InventoryOutboxMakeVisible says -- and always, even when empty: it is where new
     // purchases arrive, so people look for it.
-    addEntry(LLFolderType::FT_INBOX,                new ViewerFolderEntry("Received Items",         "Inv_SysOpen",          "Inv_SysClosed",        false,     false));
-    addEntry(LLFolderType::FT_OUTBOX,               new ViewerFolderEntry("Merchant Outbox",        "Inv_SysOpen",          "Inv_SysClosed",        false,     true));
+    addEntry(LLFolderType::FT_INBOX,                new ViewerFolderEntry("Received Items",         "Inv_FolderInboxOpen",          "Inv_FolderInboxClosed",        false,     false, empty_string, "Inv_FolderInboxTypeOpen", "Inv_FolderInboxTypeClosed"));
+    addEntry(LLFolderType::FT_OUTBOX,               new ViewerFolderEntry("Merchant Outbox",        "Inv_FolderOutboxOpen",          "Inv_FolderOutboxClosed",        false,     true, empty_string, "Inv_FolderOutboxTypeOpen", "Inv_FolderOutboxTypeClosed"));
 
     addEntry(LLFolderType::FT_BASIC_ROOT,           new ViewerFolderEntry("Basic Root",             "Inv_SysOpen",          "Inv_SysClosed",        false,     true));
 
-    addEntry(LLFolderType::FT_MARKETPLACE_LISTINGS, new ViewerFolderEntry("Marketplace Listings",   "Inv_SysOpen",          "Inv_SysClosed",        false,     boxes_invisible));
+    addEntry(LLFolderType::FT_MARKETPLACE_LISTINGS, new ViewerFolderEntry("Marketplace Listings",   "Inv_FolderMarketplaceListingsOpen",          "Inv_FolderMarketplaceListingsClosed",        false,     boxes_invisible, empty_string, "Inv_FolderMarketplaceListingsTypeOpen", "Inv_FolderMarketplaceListingsTypeClosed"));
     addEntry(LLFolderType::FT_MARKETPLACE_STOCK,    new ViewerFolderEntry("New Stock",              "Inv_StockFolderOpen",  "Inv_StockFolderClosed",        false,     false, "default"));
     addEntry(LLFolderType::FT_MARKETPLACE_VERSION,  new ViewerFolderEntry("New Version",            "Inv_VersionFolderOpen","Inv_VersionFolderClosed",      false,     false, "default"));
 
@@ -155,6 +164,36 @@ LLViewerFolderDictionary::LLViewerFolderDictionary()
     {
         addEntry((LLFolderType::EType)type,         new ViewerFolderEntry("New Folder",             "Inv_FolderOpen",       "Inv_FolderClosed",     false,     false));
     }
+
+    gSavedSettings.getControl("InventorySystemFolderIconStyle")->getSignal()->connect(
+        [](LLControlVariable*, const LLSD&, const LLSD&)
+        {
+            doOnIdleOneTime([]()
+            {
+                LLInventoryModel::cat_array_t categories;
+                LLInventoryModel::item_array_t items;
+                for (const LLUUID& root : { gInventory.getRootFolderID(), gInventory.getLibraryRootFolderID() })
+                {
+                    if (root.notNull())
+                    {
+                        gInventory.collectDescendents(root, categories, items, LLInventoryModel::INCLUDE_TRASH);
+                    }
+                }
+                for (const auto& category : categories)
+                {
+                    const ViewerFolderEntry* entry = LLViewerFolderDictionary::getInstance()->lookup(category->getPreferredType());
+                    if (entry && !entry->mTypeIconClosed.empty())
+                    {
+                        gInventory.addChangedMask(LLInventoryObserver::LABEL, category->getUUID());
+                        for (const auto& link : gInventory.collectLinksTo(category->getUUID()))
+                        {
+                            gInventory.addChangedMask(LLInventoryObserver::LABEL, link->getUUID());
+                        }
+                    }
+                }
+                gInventory.notifyObservers();
+            });
+        });
 }
 
 bool LLViewerFolderDictionary::initEnsemblesFromFile()
@@ -244,6 +283,10 @@ const std::string &LLViewerFolderType::lookupIconName(LLFolderType::EType folder
     const ViewerFolderEntry *entry = LLViewerFolderDictionary::getInstance()->lookup(folder_type);
     if (entry)
     {
+        if (gSavedSettings.getU32("InventorySystemFolderIconStyle") == 0 && !entry->mTypeIconClosed.empty())
+        {
+            return is_open ? entry->mTypeIconOpen : entry->mTypeIconClosed;
+        }
         if (is_open)
             return entry->mIconNameOpen;
         else

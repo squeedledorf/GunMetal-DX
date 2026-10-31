@@ -344,6 +344,11 @@ public:
     virtual const LLVector3 getPositionEdit() const;
     virtual const LLVector3 &getPositionAgent() const;
     virtual const LLVector3 getRenderPosition() const;
+    // Where the object is drawn: its drawable once that has moved, the object state before.
+    // Under Freeze World (#1172) this is the frozen picture while the live position keeps
+    // moving. Unlike getRenderPosition(), never the live position of a worn rigged object's
+    // avatar, and no pelvis fixup.
+    virtual LLVector3 getPicturePositionAgent() const;
 
     LLMatrix4a getAgentToGLTFAssetTransform() const;
     LLMatrix4a getGLTFAssetToAgentTransform() const;
@@ -589,6 +594,7 @@ public:
     bool            permCopy() const;
     bool            permMove() const;
     bool            permTransfer() const;
+    U32 getObjectFlags() const { return mFlags; }
     inline bool     flagUsePhysics() const          { return ((mFlags & FLAGS_USE_PHYSICS) != 0); }
     inline bool     flagObjectAnyOwner() const      { return ((mFlags & FLAGS_OBJECT_ANY_OWNER) != 0); }
     inline bool     flagObjectYouOwner() const      { return ((mFlags & FLAGS_OBJECT_YOU_OWNER) != 0); }
@@ -1048,6 +1054,10 @@ public:
     void setLastUpdateType(EObjectUpdateType last_update_type);
     bool getLastUpdateCached() const;
     void setLastUpdateCached(bool last_update_cached);
+    F64 lastSimulatorUpdateSeconds() const { return mLastMessageUpdateSecs.value(); }
+    static F64 maxMotionPredictionSeconds() { return sMaxUpdateInterpolationTime.value(); }
+    // #1172: the packet id of the last update applied (an older packet is dropped before it is recorded)
+    TPACKETID getLatestRecvPacketID() const { return mLatestRecvPacketID; }
 
     virtual void updateRiggingInfo() {}
 

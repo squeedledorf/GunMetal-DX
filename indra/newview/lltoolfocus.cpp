@@ -171,7 +171,7 @@ void LLToolCamera::pickCallback(const LLPickInfo& pick_in)
     // Potentially recenter if click outside rectangle
     LLViewerObject* hit_obj = pick_info.getObject();
 
-    // <GMDX> Alt-cam reach (SoapStorm 1f04dc44c9): the pick reaches 512 m and water has no ray
+    // <GMDX> Alt-cam reach (SoapStorm 1f04dc44c9, Nexii Malthus): the pick reaches 512 m and water has no ray
     // intersection, so an ALT click on the sky, on terrain past 512 m or on void water hit nothing
     // and the camera stayed put. For an ALT click that hit nothing: a long-range cast along the
     // same mouse ray out to 4096 m, then the region water plane along that ray.
@@ -450,8 +450,9 @@ bool LLToolCamera::handleHover(S32 x, S32 y, MASK mask)
             {
                 const F32 RADIANS_PER_PIXEL = 360.f * DEG_TO_RAD / gViewerWindow->getWorldViewWidthScaled();
 
-                // <GMDX> (SoapStorm ed0f69bd0e) screen deltas into the unrolled camera's
-                // input, so a rolled camera orbits the way the mouse moves on screen
+                // Screen deltas into the unrolled camera's input, so a rolled camera orbits the
+                // way the mouse moves on screen. Ported from GunMetal-DX (squeedledorf, LGPL 2.1),
+                // v0.3.0 cf5f1f4.
                 const F32 rot = gAgentCamera.getRollAngle();
                 const F32 cos_r = cosf(rot);
                 const F32 sin_r = sinf(rot);
@@ -467,7 +468,6 @@ bool LLToolCamera::handleHover(S32 x, S32 y, MASK mask)
                 {
                     gAgentCamera.cameraOrbitOver( up_input * RADIANS_PER_PIXEL );
                 }
-                // </GMDX>
 
                 gViewerWindow->moveCursorToCenter();
             }
@@ -509,7 +509,7 @@ bool LLToolCamera::handleHover(S32 x, S32 y, MASK mask)
 
                 const F32 RADIANS_PER_PIXEL = 360.f * DEG_TO_RAD / gViewerWindow->getWorldViewWidthScaled();
 
-                // <GMDX> unrolled input, as the orbit tool above
+                // unrolled input, as the orbit tool above
                 const F32 rot = gAgentCamera.getRollAngle();
                 const F32 cos_r = cosf(rot);
                 const F32 sin_r = sinf(rot);
@@ -520,7 +520,6 @@ bool LLToolCamera::handleHover(S32 x, S32 y, MASK mask)
                 {
                     gAgentCamera.cameraOrbitAround( left_input * RADIANS_PER_PIXEL );
                 }
-                // </GMDX>
 
                 const F32 IN_FACTOR = 0.99f;
 
@@ -528,7 +527,7 @@ bool LLToolCamera::handleHover(S32 x, S32 y, MASK mask)
                 {
                     if (mMouseSteering)
                     {
-                        gAgentCamera.cameraOrbitOver( up_input * RADIANS_PER_PIXEL );   // <GMDX>
+                        gAgentCamera.cameraOrbitOver( up_input * RADIANS_PER_PIXEL );
                     }
                     else
                     {

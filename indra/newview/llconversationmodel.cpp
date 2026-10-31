@@ -29,7 +29,9 @@
 
 #include "llagent.h"
 #include "llavatarnamecache.h"
+#include "llavatarpresence.h"
 #include "llavataractions.h"
+#include "llcallingcard.h"
 #include "llevents.h"
 #include "llfloaterimsession.h"
 #include "llsdutil.h"
@@ -553,6 +555,13 @@ void LLConversationItemSession::onAvatarNameCache(const LLAvatarName& av_name)
 //
 // LLConversationItemParticipant
 //
+
+LLFontGL::StyleFlags LLConversationItemParticipant::getLabelStyle() const
+{
+    return !LLAvatarPresence::useClassicNameColors() &&
+           LLAvatarTracker::instance().getBuddyPresence(mUUID) == LLAvatarTracker::EPresence::ONLINE ?
+           LLFontGL::BOLD : LLFontGL::NORMAL;
+}
 
 LLConversationItemParticipant::LLConversationItemParticipant(std::string display_name, const LLUUID& uuid, LLFolderViewModelInterface& root_view_model) :
     LLConversationItem(display_name,uuid,root_view_model),

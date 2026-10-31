@@ -111,6 +111,7 @@ protected:
 
 private:
     void updateRadarList();
+    void refreshNameStyles();
     void updateTracking();
     void checkTracking();
     void radarAlertMsg(const LLUUID& agent_id, const LLAvatarName& av_name, std::string_view postMsg);
@@ -143,6 +144,7 @@ private:
     LLSD                    mAvatarStats;
 
     radar_update_callback_t mUpdateSignal;
+    boost::signals2::scoped_connection mClassicNameColorsConnection;
 
     boost::signals2::connection mShowUsernamesCallbackConnection;
     boost::signals2::connection mNameFormatCallbackConnection;

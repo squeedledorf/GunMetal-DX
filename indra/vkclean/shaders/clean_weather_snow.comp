@@ -11,7 +11,9 @@
 //      so it melts with it;
 //   G  the cover on what lies UNDER the top: set when something new appears on top of a
 //      snowy surface (a moved table on the lawn: the lawn keeps its snow under it), capped
-//      by the global cover;
+//      by the global cover; #1037 it melts under the top (kBuriedMelt), and nothing is buried
+//      while new static geometry is arriving in the near map (WX_F_NOBURY: a late-loading roof
+//      over furniture that loaded first is no table set down over lying snow);
 //   B  the top surface's (raw) height, as metres below the grid's top plane (the coating's
 //      top test, clean_weather_surface.glsl);
 //   A  M3 SNOW DEPTH (m) on the FILTERED BASE (RenderVKWeatherSnowDepth; 0 when off).
@@ -25,8 +27,9 @@
 // Each frame a texel follows its SURFACE POINT back into the previous grid (the previous
 // frame's map plane, shear and corner: the grid scrolls with the cascade's snap and survives
 // a tilt change), then compares heights: the top rose (something new on top) -> the old top's
-// cover is buried (G) and the new top starts at the open-sky cover; the top dropped (the
-// shelter left) -> what it covered shows again (G, bare when it was never seen open) -- so a
+// cover is buried (G; not while WX_F_NOBURY holds) and the new top starts at the open-sky
+// cover; the top dropped (the shelter left) -> what it covered shows again (G, bare when it
+// was never seen open or has melted under the cover) -- so a
 // moved object leaves its old spot bare and refilling, and never erases the snow where it now
 // stands. Texels entering the grid start at the global cover on top and nothing below. Movers
 // never enter the maps (static casters only), so they neither shelter nor erase anything here.
@@ -208,6 +211,7 @@ const uint WX_F_MOVER = 64u;   // M5: the instance pass appends mover boxes this
 const uint WX_F_LIMB = 128u;   // #783 follow-up: the avatar pass appends limb boxes this step (the list is live)
 const uint WX_F_LIST = WX_F_MOVER | WX_F_LIMB;   // the stamp list is live (the cover / ring / berm passes gather it)
 const uint WX_F_BODY = 256u;   // #783 BODY CONTACT: the bottom maps stand in for the joints (with WX_F_LIMB)
+const uint WX_F_NOBURY = 512u; // #1037 BURY HOLD: new static geometry is arriving in the near map -- a rising top buries nothing
 
 // M5 MOVER TRACKS: the berm band beside a box (at least kMvBermK x its half-width, clamped;
 // wider when the berm would stand steeper than the repose), the bow band ahead of it (m), the
@@ -561,6 +565,11 @@ const float kDriftCover = kSnowCoverAbove;   // (6 m) #783: a downwind base this
 // kWaterSkin: a surface this far under the water line still counts as dry (a shore at the level).
 const float kWaterSkin = 0.02;
 bool wxSubmerged(float z) { return z < ssr.water[3].w - kWaterSkin; }
+// #1037 BURIED MELT: the cover BURIED under a column top (G) melts under it at this rate (cover /
+// s: a full coat in ~90 s, as #903's kAvCoverMelt for the avatars) -- a table set down on the lawn
+// shows the lawn's snow under it for a while, never forever; snow buried by mistake (a roof the
+// bury hold missed) clears on its own.
+const float kBuriedMelt = 1.0 / 90.0;
 
 shared float sA[kTs * kTs];
 shared float sB[kTs * kTs];
@@ -920,7 +929,11 @@ void main()
                 // open-sky cover (a parked car that stops being a mover keeps a snowy roof instead of
                 // popping bare, and a rezzed object matches a rezzed mover; an alpha-tested canopy
                 // flipping leaf / ground between map renders keeps its snow too).
-                if (zs > hOld + tol) { G = p.r; R = global * openR; }
+                // #1037 BURY HOLD (WX_F_NOBURY): while new static geometry is still arriving in the
+                // near map (an object loading in), a new top is something that was always there --
+                // a cabin's roof that loaded after its furniture: the furniture's open-sky coat was
+                // never real, so nothing is buried (it kept that coat indoors, as G, forever).
+                if (zs > hOld + tol) { G = (feat & WX_F_NOBURY) != 0u ? 0.0 : p.r; R = global * openR; }
                 else if (zs < hOld - tol) { R = p.g; G = 0.0; }   // the top left: what it covered shows again
                 else { R = p.r; G = p.g; }
             }
@@ -972,7 +985,7 @@ void main()
     // wind turns -- the old cap global x openR stripped a texel bare the moment a gust put it in
     // some wall's oblique shadow: bare blotches with the upwind march's staircase edges)
     R = min(R + sp.a.z * openR, global);
-    G = min(G, global);
+    G = max(min(G, global) - sp.b.z * kBuriedMelt, 0.0);   // (#1037 the buried melt)
     if (!rawOk || wxSubmerged(zs)) { R = 0.0; G = 0.0; }   // (#783 water: no cover under it)
     if (depthOn && baseOk)
     {

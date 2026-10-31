@@ -94,6 +94,7 @@
 //       Local lights are unchanged (a lamp in the room still lights its fog).
 layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
 
+#define CLEAN_MEDIUM_PASS
 #include "clean_frame_info.glsl"
 #include "clean_atmos_common.glsl"
 #include "clean_vol_common.glsl"
@@ -122,7 +123,7 @@ layout(set = 0, binding = 18) uniform sampler2DShadow uProjShadowAtlas;
 #endif
 
 layout(set = VOL_SET, binding = 0, rgba16f) uniform image3D uCur;
-layout(set = VOL_SET, binding = 7, rgba16f) readonly uniform image3D uEmit;   // (p1.w gates it)
+layout(set = VOL_SET, binding = 7, rgba16f) uniform image3D uEmit;   // (p1.w gates it)
 
 // One cascade tap (clean_godrays.comp cascadeTap).
 float cascadeTap(int c, vec3 P)
@@ -149,9 +150,9 @@ float sunVisibility(vec3 P, float vz, float n1)
 uint volCluster(vec3 P)
 {
     const vec4 v = linfo.view * vec4(P, 1.0);   // -Z forward
-    const float z = CL_VIEW_Z(linfo, max(-v.z, 1e-3));   // <GMDX>
-    const float sx = (v.x / z) / max(linfo.grid.z, 1e-4);
-    const float sy = (v.y / z) / max(linfo.grid.w, 1e-4);
+    const float z = max(-v.z, 1e-3);
+    const float sx = (v.x / CL_VIEW_Z(linfo, z)) / max(linfo.grid.z, 1e-4);
+    const float sy = (v.y / CL_VIEW_Z(linfo, z)) / max(linfo.grid.w, 1e-4);
     const uint cx = uint(clamp((sx * 0.5 + 0.5) * float(GX), 0.0, float(GX) - 1.0));
     const uint cy = uint(clamp((0.5 - sy * 0.5) * float(GY), 0.0, float(GY) - 1.0));
     const float vz = -v.z;
@@ -216,7 +217,7 @@ float volProjShadowRay(uint li, vec3 P)
 float volPointShadowRay(uint li, vec3 P, float fixMax)
 {
     const vec3  C = lights[li].pos_radius.xyz;
-    const float nearClip = clamp(lights[li].proj_axis.x, 0.0, 0.5 * lights[li].pos_radius.w);
+    const float nearClip = min(clamp(lights[li].proj_axis.x, 0.0, 0.5 * lights[li].pos_radius.w), RS_POINT_NEAR_MAX);
     const vec3  toL = C - P;
     const float len = length(toL);
     const float tmax = len - nearClip - 0.002;
@@ -232,10 +233,15 @@ float volPointShadowRay(uint li, vec3 P, float fixMax)
 
 // pi x sum over the cluster's lights of E_i x p(V.L_i) (x the projectors' visibility) at P.
 // cell: the froxel (pick noise), vz: its view depth (the ray distance limit).
+layout(std430,set=VOL_SET,binding=14) buffer MediumStats { uvec4 mediumOverflow; };
 vec3 localLightsInscatter(vec3 P, vec3 V, float g, uvec3 cell, float vz)
 {
     const uint c = volCluster(P);
-    const uint n = clusterLen(cluster_count[c]);
+    const uint rawCount=clusterLen(cluster_count[c]);
+    const uint n = min(rawCount,cmOn() ? 32u : CLUSTER_CAP);
+    // Cluster generation is stable: shadowed projectors first, then importance/index
+    // order. Retain that priority under the stricter medium candidate budget.
+    if(cmOn() && rawCount>n) atomicAdd(mediumOverflow.x,rawCount-n);
     const uint count = uint(vp.p0.y + 0.5);
     const bool shadows = vp.p0.w > 0.5;
     const uint nrec = uint(pshadow.length());
@@ -338,10 +344,46 @@ void main()
 {
     const uvec3 c = gl_GlobalInvocationID;
     if (any(greaterThanEqual(c, volDims()))) return;
-    const vec4 med = imageLoad(uCur, ivec3(c));   // (sigma_s rgb, sigma_t)
+    const vec4 med = imageLoad(uCur, ivec3(c));
+    if(cmOn())
+    {
+        const vec3 rel=volRelPos(volSampleCoord(c));
+        const vec3 P=volEye().xyz+rel;
+        vec3 O,V; cmRay((vec2(c.xy)+0.5)/volGrid().xy,MEDIUM_EYE,O,V);
+        const float depth=dot(P-O,ssr.medium[MEDIUM_EYE].forward.xyz);
+        const bool detailed=depth<=ssr.haze_mode.y;
+        float visibility=detailed ? sunVisibility(P,depth,volIgn(vec2(c.xy)+float(c.z))) * cloudShadow(P) : 1.0;
+        float ambientVisibility=1.0;
+#ifdef VOL_RT
+        const vec4 rq=vp.reproj[0];
+        const bool nearCell=detailed && (rq.w<=0.0 || depth<rq.w);
+        if(rq.z>0.5 && nearCell && vp.p0.x<0.5)
+        {
+            const vec3 lightDir=pkLightDir().z>0.0 ? pkLightDir() : physkyMoonDir();
+            visibility*=traceShadowRayOpaque(P,lightDir,0.0,ssr.sun_rt.w>0.0 ? ssr.sun_rt.w : 512.0,RT_MASK_SHADOW & ~RT_MASK_BLEND);
+        }
+        if(rq.x>0.5 && nearCell)
+        {
+            uint state=(c.x*7919u+c.y*104729u+c.z*15485863u)^(uint(vp.p1.z)*0x85EBCA6Bu);
+            const float u=volRand(state),angle=6.2831853*volRand(state);
+            const vec3 d=vec3(sqrt(u)*cos(angle),sqrt(u)*sin(angle),sqrt(1.0-u));
+            ambientVisibility=traceShadowRayOpaque(P,d,0.0,max(rq.y,0.5),RT_MASK_SHADOW & ~RT_MASK_BLEND);
+        }
+#endif
+        vec3 ext,airSource,heightSource;
+        cmLight(P,V,vec3(visibility),ambientVisibility,ext,airSource,heightSource);
+        if(detailed && vp.p0.z>0.5 && volMisc().x>0.0)
+            heightSource+=0.9*localLightsInscatter(P,V,0.6,c,depth)*volMisc().x;
+        const vec3 emission=vp.p1.w>0.5 ? max(imageLoad(uEmit,ivec3(c)).rgb,vec3(0.0)) : vec3(0.0);
+        // Cache illumination, never artistic extinction. Integration consumes exact tau
+        // after filtering; source and height extinction share the same cap factor.
+        imageStore(uCur,ivec3(c),vec4(atmosClampHDR(med.rgb*(heightSource/0.9)+emission),med.a));
+        imageStore(uEmit,ivec3(c),vec4(atmosClampHDR(heightSource),0.0));
+        return;
+    }   // (sigma_s rgb, sigma_t)
     // Haze sun scatter: only with a shadow source (the cascades; push p0.x is decided after
     // the lit variant, which can still switch the sun to ray traced after the frame-info fill).
-    const float sigma_h = vp.p0.x > 0.5 ? ssr.vol_slice.z : 0.0;
+    const float sigma_h = vp.p0.x > 0.5 ? volSlice().z : 0.0;
     const bool extra = med.a > 0.0 && any(greaterThan(med.rgb, vec3(0.0)));
     // Volumetric particles' emission (#721): radiance per metre, added unlit.
     const vec3 emit = vp.p1.w > 0.5 ? max(imageLoad(uEmit, ivec3(c)).rgb, vec3(0.0)) : vec3(0.0);
@@ -351,10 +393,10 @@ void main()
         return;
     }
     const vec3 rel = volRelPos(volSampleCoord(c));
-    const vec3 P = ssr.vol_eye.xyz + rel;
+    const vec3 P = volEye().xyz + rel;
     const vec3 V = rel / max(length(rel), 1e-6);
     const float vz = dot(rel, vp.fwd.xyz);
-    const float g = ssr.vol_slice.w;
+    const float g = volSlice().w;
 
     vec3 Ls = vec3(0.0);
     const vec3 L = atmosLightDir();
@@ -362,6 +404,11 @@ void main()
     const vec4 rq = vp.reproj[0];   // the occlusion terms (header)
     const bool rqNear = rq.w <= 0.0 || vz < rq.w;
 #endif
+    // <GMDX> GunMetal-DX's own aerial perspective: the media take the physical sky's light
+    // (clean_vol_common.glsl gmdxVolPhysSource) with the same sun / moon and sky visibility.
+    const bool gmdxPhys = gmdxAerialScale() > 0.0;
+    float gmdxVis = 1.0, gmdxAmbVis = 1.0;
+    // </GMDX>
     if (L.z > 0.0)
     {
         const float n1 = volIgn(vec2(c.xy) + vec2(17.0, 59.0) * float(c.z + 1u) + 7.13 * mod(vp.jitter.w, 64.0));
@@ -372,12 +419,13 @@ void main()
             vis *= traceShadowRayOpaque(P, L, 0.0, ssr.sun_rt.w > 0.0 ? ssr.sun_rt.w : 512.0,
                                         RT_MASK_SHADOW & ~RT_MASK_BLEND);
 #endif
+        gmdxVis = vis;   // <GMDX>
         if (vis > 0.0)
         {
             const vec3 beam = volBeam() * (volPhaseHG(dot(V, L), g) * vis);
             // (the haze's shafts end at the water plane, as the god rays' march)
-            const float sh = P.z >= ssr.vol_misc.z ? sigma_h : 0.0;
-            Ls += (med.rgb * ATMOS_PI + vec3(sh)) * beam;
+            const float sh = P.z >= volMisc().z ? sigma_h : 0.0;
+            Ls += ((gmdxPhys ? vec3(0.0) : med.rgb * ATMOS_PI) + vec3(sh)) * beam;   // <GMDX> (gmdxPhys: below)
         }
     }
     if (extra)
@@ -395,12 +443,13 @@ void main()
                                 fract(volRand(st) + vp.p1.z * 0.6180339887));
             const float r = sqrt(u.x), ph = 6.2831853 * u.y;
             const vec3 d = vec3(r * cos(ph), r * sin(ph), sqrt(max(1.0 - u.x, 0.0)));
-            amb *= traceShadowRayOpaque(P, d, 0.0, max(rq.y, 0.5), RT_MASK_SHADOW & ~RT_MASK_BLEND);
+            gmdxAmbVis = traceShadowRayOpaque(P, d, 0.0, max(rq.y, 0.5), RT_MASK_SHADOW & ~RT_MASK_BLEND);   // <GMDX> (named)
+            amb *= gmdxAmbVis;   // <GMDX> (named)
         }
 #endif
-        Ls += med.rgb * amb;
-        if (vp.p0.z > 0.5 && ssr.vol_misc.x > 0.0)
-            Ls += med.rgb * localLightsInscatter(P, V, g, c, vz) * ssr.vol_misc.x;
+        Ls += med.rgb * (gmdxPhys ? gmdxVolPhysSource(P, V, gmdxVis, gmdxAmbVis) : amb);   // <GMDX> (gmdxPhys)
+        if (vp.p0.z > 0.5 && volMisc().x > 0.0)
+            Ls += med.rgb * localLightsInscatter(P, V, g, c, vz) * volMisc().x;
     }
     imageStore(uCur, ivec3(c), vec4(atmosClampHDR(Ls + emit), med.a));
 }

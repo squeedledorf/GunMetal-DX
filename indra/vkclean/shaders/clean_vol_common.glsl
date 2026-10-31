@@ -1,39 +1,25 @@
-// vkclean -- VOLUMETRIC FOG (#718): shared definitions of the froxel passes
-// (clean_vol_inject / _light / _temporal / _integrate .comp) and their consumers
-// (clean_vol_apply.glsl). Requires clean_frame_info.glsl (ssr) and clean_atmos_common.glsl.
-//
-// THE GRID. A camera-aligned frustum grid ("froxels", Wronski 2014) of vol_grid.x x .y
-// screen tiles (the main view's UNJITTERED projection, uniform in screen uv) x vol_grid.z
-// depth slices over view depth [0, far] (far = vol_grid.w). Slice boundaries are
-// exponential: depth(u) = n (exp(u ln(1 + far / n)) - 1), u in [0, 1] -- slices thin near
-// the eye (n = vol_slice.x controls how thin: ~13 cm for the first of 64 at n = 2 m,
-// ~8.5 m for the last at far = 128 m), so near fog / volume edges get the resolution and the
-// far ones (seen small) do not waste it. View depth = clip.w of vol_vp, the main view's
-// depth along its forward axis -- the one definition every pass and consumer uses.
-//
-// WHAT THE GRID HOLDS (the composition contract, see clean_vol_apply.glsl):
-//   * the EXTRA medium: a height fog (EEP-derived default, vol_fog) + the local volume
-//     primitives (clean_vol_inject.comp) + later sources (cloud layer hook, particles):
-//     scattering + extinction, lit by sun / moon (cascade-shadowed, x cloudShadow), sky
-//     ambient and the local lights;
-//   * the HAZE's sun single scattering ("god rays", vol_slice.z): the WindLight haze stays
-//     LL's analytic haze on every surface (atmosApplyHaze: untouched), the grid adds only
-//     its shadowed sun shafts, exactly the god rays pass's term (clean_godrays.comp), which
-//     the renderer does not dispatch while the fog runs -- one sun single-scatter, never two.
-//   The integrated volume stores, per cell, the in-scatter L reaching the eye from the
-//   segment [eye, the cell's far boundary] and the EXTRA medium's transmittance T over it
-//   (the haze's own transmittance is LL's atten.r, already on the surface colour).
-//   Every consumer: C' = C_LLhazed * T + L.
+// Shared volumetric field accessors. Physical mode reads this eye's immutable
+// camera-medium parameters; legacy mode retains the original extra-fog contract.
+// Physical spatial mapping is cmDepth/cmSlice with the reserved start boundary;
+// the unwarped volDepthOfSlice/volSliceOfDepth helpers below are legacy-only.
 #ifndef CLEAN_VOL_COMMON_GLSL
 #define CLEAN_VOL_COMMON_GLSL
 
-bool  volOn()       { return ssr.vol_eye.w > 0.5; }
-float volFar()      { return ssr.vol_grid.w; }
-uvec3 volDims()     { return uvec3(ssr.vol_grid.xyz + 0.5); }
+mat4 volVP() { return cmOn() ? ssr.medium[MEDIUM_EYE].vp : ssr.vol_vp; }
+mat4 volInvVP() { return cmOn() ? ssr.medium[MEDIUM_EYE].inv_vp : ssr.vol_inv_vp; }
+vec4 volEye() { return cmOn() ? ssr.medium[MEDIUM_EYE].eye : ssr.vol_eye; }
+vec4 volGrid() { return cmOn() ? ssr.medium[MEDIUM_EYE].grid : ssr.vol_grid; }
+vec4 volSlice() { return cmOn() ? ssr.medium[MEDIUM_EYE].slice : ssr.vol_slice; }
+vec4 volFog() { return cmOn() ? ssr.medium[MEDIUM_EYE].fog : ssr.vol_fog; }
+vec4 volAlbedo() { return cmOn() ? ssr.medium[MEDIUM_EYE].albedo : ssr.vol_albedo; }
+vec4 volMisc() { return cmOn() ? ssr.medium[MEDIUM_EYE].misc : ssr.vol_misc; }
+bool  volOn()       { return volEye().w > 0.5; }
+float volFar()      { return volGrid().w; }
+uvec3 volDims()     { return uvec3(volGrid().xyz + 0.5); }
 
 // Slice coordinate u in [0, 1] <-> view depth (m).
-float volDepthOfSlice(float u) { return ssr.vol_slice.x * (exp(u * ssr.vol_slice.y) - 1.0); }
-float volSliceOfDepth(float vz) { return log(1.0 + max(vz, 0.0) / ssr.vol_slice.x) / ssr.vol_slice.y; }
+float volDepthOfSlice(float u) { return volSlice().x * (exp(u * volSlice().y) - 1.0); }
+float volSliceOfDepth(float vz) { return log(1.0 + max(vz, 0.0) / volSlice().x) / volSlice().y; }
 
 // Henyey-Greenstein phase; cos_t = dot(view direction (eye -> point), direction TO the light).
 float volPhaseHG(float cos_t, float g)
@@ -56,21 +42,21 @@ vec3 volAmbient()
         a = atmosSrgbToLinear(a);
         a = vec3(dot(a, vec3(0.2126, 0.7152, 0.0722)));
     }
-    return a * ssr.atmos[12].w * ssr.vol_fog.w
-         * (atmosClassic() ? gmdxNightAmbientSrgb() : gmdxNightAmbient());   // <GMDX> the night's ambient
+    return a * ssr.atmos[12].w * volFog().w
+         * (atmosClassic() ? nightAmbientSrgb() : nightAmbient());   // <GMDX> the night's ambient (physical night, 1 = off)
 }
 
 // The WindLight haze's extinction (/m), LL's atten.r rate (atmos_k[1].r); 0 with the
 // atmosphere off.
-float volHazeExt() { return atmosEnabled() ? ssr.atmos_k[1].r : 0.0; }
+float volHazeExt() { return !cmOn() && atmosEnabled() ? ssr.atmos_k[1].r : 0.0; }
 
 // The extra height fog's extinction at world position P (/m): sigma0 at and below the
 // base height, decaying exp(-k (z - base)) above it; none below the water cut (the water
 // fog owns everything under the surface).
 float volFogDensity(vec3 P)
 {
-    if (P.z < ssr.vol_misc.z) return 0.0;
-    return ssr.vol_fog.x * exp(-ssr.vol_fog.y * max(P.z - ssr.vol_fog.z, 0.0));
+    if (P.z < volMisc().z) return 0.0;
+    return volFog().x * exp(-volFog().y * max(P.z - volFog().z, 0.0));
 }
 
 // Optical depth of the height fog along the segment A -> B (analytic: the exponential
@@ -79,9 +65,9 @@ float volFogDensity(vec3 P)
 // for the rest).
 float volFogOpticalDepth(vec3 A, vec3 B)
 {
-    const float s0 = ssr.vol_fog.x;
+    const float s0 = volFog().x;
     if (s0 <= 0.0) return 0.0;
-    const float k = ssr.vol_fog.y, base = ssr.vol_fog.z, cut = ssr.vol_misc.z;
+    const float k = volFog().y, base = volFog().z, cut = volMisc().z;
     float za = A.z, zb = B.z;
     float len = length(B - A);
     if (za < cut && zb < cut) return 0.0;
@@ -97,16 +83,58 @@ float volFogOpticalDepth(vec3 A, vec3 B)
     return s0 * len * avg;
 }
 
+// <GMDX> THE HAZE CONTROLS ON THIS FOG'S HEIGHT LAYER (GunMetal-DX's own aerial perspective: the weather
+// layer's mist / weather fog; ssr.haze x the start (m), y the optical depth cap (< 0: none) -- the
+// resolved pair, automatic included, as the camera medium's height haze takes it; llcleanphysskyvk.cpp):
+// none nearer than the start, none past where its optical depth from there reaches the cap
+// (noise-free, as the camera medium's own budget). gmdxHazeDepth: its optical depth over [A, B] on a
+// ray from the eye E. gmdxHazeGuard: the share of it left at P (the injection).
+float gmdxHazeDepth(vec3 E, vec3 A, vec3 B)
+{
+    if (gmdxAerialScale() <= 0.0) return volFogOpticalDepth(A, B);
+    const float lb = length(B - E);
+    if (lb <= ssr.haze.x) return 0.0;
+    const vec3 S = E + (B - E) * (ssr.haze.x / lb);
+    const vec3 A2 = dot(A - E, B - E) < ssr.haze.x * lb ? S : A;
+    float tau = volFogOpticalDepth(A2, B);
+    if (ssr.haze.y >= 0.0) tau = min(tau, max(ssr.haze.y - volFogOpticalDepth(S, A2), 0.0));
+    return tau;
+}
+float gmdxHazeGuard(vec3 E, vec3 P)
+{
+    if (gmdxAerialScale() <= 0.0) return 1.0;
+    const float d = length(P - E);
+    if (d < ssr.haze.x) return 0.0;
+    if (ssr.haze.y < 0.0) return 1.0;
+    return clamp((ssr.haze.y - volFogOpticalDepth(E + (P - E) * (ssr.haze.x / max(d, 1e-4)), P)) * 20.0, 0.0, 1.0);
+}
+// </GMDX>
+
+// <GMDX> GUNMETAL-DX'S OWN AERIAL PERSPECTIVE (no camera medium; gmdxAerialScale): this fog's media (the
+// weather layer's mist / precipitation, llcleanvolfogvk.cpp gGMDXWeatherLayer) take the physical
+// sky's light, as the camera medium's do -- the sun / moon through the sky's transmittance with the
+// medium's phase, its multiple scattering and ambient (clean_medium.glsl cmLight) -- so they read as
+// strongly as upstream's, coloured by GunMetal-DX's air (golden at sunset). Radiance per unit of
+// scattering, toward the eye along V (eye -> point) at P; vis the sun / moon's visibility, amb the sky's.
+vec3 gmdxVolPhysSource(vec3 P, vec3 V, float vis, float amb)
+{
+    vec3 ext, air, height;
+    cmLight(P, V, vec3(vis), amb, ext, air, height);
+    return height / 0.9;
+}
+// </GMDX>
+
 // The extra fog's UNSHADOWED source radiance per unit extinction along view direction V:
 // albedo x (pi x beam x phase (sun above the horizon) + ambient). pi: LL's light colours are
 // irradiance / pi (a Lambertian surface shows albedo x colour x N.L), so a medium scatters
 // sigma_s x pi x colour x phase -- the same light the surfaces get, in the same units.
 vec3 volFogSource(vec3 V)
 {
+    if (gmdxAerialScale() > 0.0) return volAlbedo().rgb * gmdxVolPhysSource(volEye().xyz, V, 1.0, 1.0);   // <GMDX>
     const vec3 L = atmosLightDir();
     vec3 sun = vec3(0.0);
-    if (L.z > 0.0) sun = ATMOS_PI * volBeam() * volPhaseHG(dot(V, L), ssr.vol_slice.w);
-    return ssr.vol_albedo.rgb * (sun + volAmbient());
+    if (L.z > 0.0) sun = ATMOS_PI * volBeam() * volPhaseHG(dot(V, L), volSlice().w);
+    return volAlbedo().rgb * (sun + volAmbient());
 }
 
 #endif

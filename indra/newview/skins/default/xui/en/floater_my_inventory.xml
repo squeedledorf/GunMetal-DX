@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <floater
+ can_pop_out="true"
  positioning="cascading"
  can_close="true"
  can_resize="true"

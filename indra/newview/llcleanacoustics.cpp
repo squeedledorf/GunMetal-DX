@@ -2876,7 +2876,17 @@ void LLCleanAcoustics::fillRequest(LLVKWorldFrame& wf)
         U32 nlf = 0;
         for (U32 i = 0; i < kFarPoints; ++i)
             if (farLive(s.lfar[i], now)) lf[nlf++] = i;
+        // GCC 16 false positive inside libstdc++'s std::sort: nlf <= kFarPoints (8) by the loop
+        // above, so the >16-element branch of __final_insertion_sort is unreachable, but GCC
+        // still reports "subscript 16 is outside array bounds of U32[8]" for it.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Warray-bounds"
+#endif
         std::sort(lf, lf + nlf, [&](U32 a, U32 b) { return s.lfar[a].d > s.lfar[b].d; });
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
         nc = 0;
         for (U32 rank = 0; rank < p.n; ++rank)
         {

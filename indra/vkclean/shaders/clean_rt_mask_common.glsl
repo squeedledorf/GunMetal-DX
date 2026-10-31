@@ -1,3 +1,5 @@
+#include "clean_history_time.glsl"
+
 // vkclean — shared by the three ray-traced shadow mask passes (#195 + shadow denoiser):
 //   clean_rt_shadow_mask.comp   (A) trace: raw per-frame estimate + receiver depth plane
 //   clean_rt_mask_temporal.comp (B) temporal accumulation (clamped, adaptive length)
@@ -202,7 +204,7 @@ float rtZoomKeep(float vz, float pw)
     const float p11c = length(vec3(ssr.views[CLEAN_VIEW].taa_cur_vp[0][1], ssr.views[CLEAN_VIEW].taa_cur_vp[1][1], ssr.views[CLEAN_VIEW].taa_cur_vp[2][1]));
     const float p11p = length(vec3(ssr.views[CLEAN_VIEW].taa_prev_vp[0][1], ssr.views[CLEAN_VIEW].taa_prev_vp[1][1], ssr.views[CLEAN_VIEW].taa_prev_vp[2][1]));
     if (!(p11c > 1e-6) || !(p11p > 1e-6) || !(vz > 1e-6) || !(pw > 1e-6)) return 1.0;
-    const float q = (pw / p11p) / (vz / p11c);
+    const float q = rtViewOrtho() ? p11c / p11p : (pw / p11p) / (vz / p11c);
     return q > 1.02 ? clamp(1.0 / (q * q), 0.0, 1.0) : 1.0;
 }
 // Last frame's texel t's sample centre, unjittered render px (per axis).
@@ -283,7 +285,7 @@ layout(set = 3, binding = 15) uniform sampler2DArray uMotion;
 bool rtMaskPrevPx(vec3 P, ivec2 rp, out vec2 prpx, out float pw)
 {
     const vec4 c = ssr.views[CLEAN_VIEW].taa_prev_vp * vec4(P - ssr.cam_origin.xyz, 1.0);   // camera-relative (#555)
-    pw = c.w;
+    pw = rtPreviousViewDepth(c);
     prpx = vec2(0.0);
     if (c.w <= 1e-4) return false;
     prpx = (c.xy / c.w * 0.5 + 0.5) * mp.dims.xy;
@@ -300,14 +302,31 @@ bool rtMaskPrevPx(vec3 P, ivec2 rp, out vec2 prpx, out float pw)
 }
 
 // PROJECTOR SLOT HISTORY (#666, bindings 19 / 20): history length (frames, 1..64) in
-// bits 0-5, the fast luminance mean in bits 6-15 (unorm 10).
-uint  rtPackPM(float len, float fm)
+// authoritative milliseconds and fast mean (32-bit format below).
+// A projector age uses 18 fixed-point bits at 1/128 ms (0..2048 ms),
+// plus a 14-bit fast mean. rgba32ui on BOTH history slots: no U8/U6 age feedback.
+uint rtPackPM(float len, float fm)
 {
-    const uint l = uint(clamp(len, 1.0, 64.0) + 0.5) - 1u;
-    const uint f = uint(clamp(isnan(fm) ? 1.0 : fm, 0.0, 1.0) * 1023.0 + 0.5);
-    return l | (f << 6u);
+    const uint age = uint(clamp(len * HT_REF_MS * 128.0, 0.0, 262143.0) + 0.5);
+    const uint fast = uint(clamp(isnan(fm) ? 1.0 : fm, 0.0, 1.0) * 16383.0 + 0.5);
+    return age | (fast << 18u);
 }
-float rtPMLen(uint v)  { return float(v & 63u) + 1.0; }
-float rtPMFast(uint v) { return float(v >> 6u) * (1.0 / 1023.0); }
+float rtPMLen(uint v) { return float(v & 262143u) / (128.0 * HT_REF_MS); }
+float rtPMFast(uint v) { return float(v >> 18u) / 16383.0; }
+// xy in the mask's RGBA32F meta are milliseconds; zw remain luminance moments.
+vec4 rtHistoryMeta(vec4 raw) { return vec4(raw.xy / HT_REF_MS, raw.zw); }
+// Gradient.w stores two 12-bit timers at 1/16 ms (<= 255.94 ms each), as an
+// exact integer in float32. Gradient.z retains the original caster bits and
+// boolean persistence flags for cache / spatial readers. They never decrement it.
+uint rtPackTimers(float sun, float proj)
+{
+    const uvec2 t = uvec2(clamp(vec2(sun, proj) * HT_REF_MS * 16.0, vec2(0.0), vec2(4095.0)) + 0.5);
+    return t.x | (t.y << 12u);
+}
+vec2 rtTimers(float packed)
+{
+    const uint v = uint(max(packed, 0.0));
+    return vec2(float(v & 4095u), float(v >> 12u)) / (16.0 * HT_REF_MS);
+}
 
 float rtMaskIGN(vec2 px) { return fract(52.9829189 * fract(dot(px, vec2(0.06711056, 0.00583715)))); }

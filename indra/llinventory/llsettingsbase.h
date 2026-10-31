@@ -418,7 +418,7 @@ public:
         mFinal(endsetting)
     {
         if (mInitial && mTarget)
-            mTarget->replaceSettings(mInitial->getSettings());
+            mTarget->replaceSettings(mInitial);
 
         if (!mFinal)
             mFinal = mInitial;
@@ -439,7 +439,7 @@ public:
             mFinal = mInitial;
 
         if (mTarget)
-            mTarget->replaceSettings(mInitial->getSettings());
+            mTarget->replaceSettings(mInitial);
     }
 
     LLSettingsBase::ptr_t getTarget() const

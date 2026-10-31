@@ -18,6 +18,9 @@
 #ifndef LL_LLVULKANCONTEXT_H
 #define LL_LLVULKANCONTEXT_H
 
+#include "vk_ui_surface.h"
+#include "llnativewindow.h"
+
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -27,6 +30,8 @@
 // only need to poke the singleton. The .cpp owns the concrete Vulkan objects.
 struct SDL_Window;
 class LLRenderBackend;
+class VkDeviceContext;
+class LLCleanRendererVK;
 class LLUUID;
 struct LLVKPerfCaps;          // llvkautotune.h (#422)
 struct LLVKAutoTuneSample;
@@ -71,7 +76,8 @@ struct LLVKPickRequest
     uint32_t mode = 0;            // MODE_* bits
     static constexpr uint32_t MODE_PREPASS = 2u;   // RenderVKDepthPrepass: opaque buckets never alpha-cut
     // <SS:Skoomastream> also the static rows the main view did not draw (aux rays,
-    // sscombatray.cpp; clean_pick_select.comp job.w bit 2)
+    // sscombatray.cpp; clean_pick_select.comp job.w bit 2). Ported from GunMetal-DX
+    // (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
     static constexpr uint32_t MODE_ALL_STATIC = 4u;
 };
 // One fragment of the raster pick (clean_pick_common.glsl PickFrag).
@@ -603,19 +609,22 @@ struct LLVKWorldFrame
     // agent origin shift (region crossing) and on a camera cut.
     bool  temporal_reset = false;
 
-    // <GMDX> REGION MAP CAPTURE (gmdxregioncapture.h): an orthographic view straight down. The cull
+    // The live orthographic view (LLViewerCamera::getOrtho, buildVulkanWorldFrame): the cull
     // takes every LOD at its finest and sizes textures per metre instead of per distance
-    // (clean_cull.comp CULL_ORTHO); ortho_ppm > 0 is that texel demand in px per metre, whatever
-    // the size of this render (0 = its own). Offscreen renders only (renderOffscreen).
+    // (clean_cull.comp CULL_ORTHO), and tan_half carries the half extents in metres.
+    // Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
+    bool  ortho_view = false;
+    // REGION MAP CAPTURE (llregionmapcapture.h): an orthographic view straight down. The cull
+    // takes every LOD at its finest and sizes textures per metre in every pass, and ortho_ppm > 0
+    // is that texel demand in px per metre, whatever the size of this render (0 = its own); no
+    // bloom, glow, lens or screen-position effects. Offscreen renders only (renderOffscreen).
+    // Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
     bool  ortho = false;
     float ortho_ppm = 0.f;
-    // <GMDX> The live orthographic view (LLViewerCamera::getOrtho, buildVulkanWorldFrame): the
-    // cull / LOD / texel demand of `ortho` above at the projection's own px per metre, and
-    // tan_half carries the half extents in metres; none of the map capture's clean-plate rules.
-    bool  ortho_view = false;
-    // <GMDX> AVATAR MATTE SNAPSHOT (gmdxsnapshotavatars.h): an avatar layer -- the recordings after
-    // the warm-up keep avatars only in the main view and read their coverage back
+    // AVATAR MATTE SNAPSHOT (llsnapshotavatars.h): an avatar layer -- the recordings after the
+    // warm-up keep avatars only in the main view and read their coverage back
     // (LLCleanRendererVK::snapMatte*; LLVulkanContext::takeSnapshotMatte). Offscreen renders only.
+    // Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
     bool  avatar_matte = false;
 
     // Cursor pick ray for the GPU raster pick (#702; LLCleanCursorPick::fillRequest).
@@ -625,6 +634,7 @@ struct LLVKWorldFrame
     LLVKPickRequest part_pick;
     // <SS:Skoomastream> Extra world-only rays answered like the cursor ray, ~2 frames
     // late (sscombatray.cpp: OTS camera collision, aim convergence, line of sight).
+    // None are valid unless CombatFX asked for a ray this frame.
     static constexpr uint32_t kAuxPicks = 8;
     LLVKPickRequest aux_pick[kAuxPicks];
     // Acoustics probe (#683, LLCleanAcoustics::fillRequest): valid only while AudioAcoustics
@@ -664,6 +674,26 @@ public:
               bool enableValidation);
 
     void shutdown();
+
+    // UI-only native windows share the device, pipelines and textures, but own
+    // their presentation and vertex-buffer slots. Handles are recycled (max 16).
+    NativeSurfaceId createUIWindow(SDL_Window* window, NativeSurfaceId surfaceID);
+    void destroyUIWindow(NativeSurfaceId handle, std::unique_ptr<LLNativeWindow> host = nullptr);
+    bool renderUIWindow(NativeSurfaceId handle, const std::function<void()>& draw, bool advanceFrame);
+    // Toolkit-neutral target recording. Main provider is invoked before classic UI;
+    // caller-supplied RTT targets use vk_ui_surface.h without this native path.
+    bool setMainUIRecorder(VkUISurfaceRecorder recorder);
+    U64 completedUISurfaceSerial();
+    VkDeviceContext* uiDeviceContext(); // non-owning; valid only while initialized
+    LLCleanRendererVK* uiWorldRenderer();
+    void setUIRecorderShutdown(std::function<void(U64)> callback);
+    bool renderUIWindow(NativeSurfaceId handle, const VkUISurfaceRecorder& recorder, bool advanceFrame);
+
+    U64 uiFrameCounter() const;
+    bool uiWindowFailed(NativeSurfaceId handle) const;
+    void invalidateUIWindow(NativeSurfaceId handle);
+    void pollUIWindowRetirement();
+    void finishUIWindowsFrame();
 
     // #526: after init() returned false, the text for the "can't run here" message box
     // (vkRequirementsUserMessage: the GPUs found, what is missing, what to do) -- empty
@@ -756,11 +786,16 @@ public:
     // to initialise (nothing to wait for). The startup sequence holds the progress
     // screen while this is true so the world never reveals black (llstartup.cpp).
     // Also true while any SHADER-GATE job compiles (vk_pipeline.h vkPipelineGateProgress):
-    // the ray-query lit variant, the first-use batches (post effects, god rays, motion blur),
-    // the cluster LOD draw pipelines -- everything a world frame would otherwise compile
+    // the first-use batches (post effects, god rays, motion blur), the cluster LOD draw
+    // pipelines -- everything a world frame would otherwise compile
     // (LLCleanRendererVK::warmFirstUse). Not the setting-specialized sets (the generic
-    // pipelines draw the world; a set binds when it lands, without a hitch).
+    // pipelines draw the world; a set binds when it lands, without a hitch), and not the
+    // deferred ray-query group (#1029: the plain variant draws the world meanwhile).
     bool worldPipelinesPending() const;
+    // (#1029) worldPipelinesPending, or the deferred ray-query group (the RT lit variant +
+    // the ray-traced effects' kernels) has not landed yet: the in-world "preparing shaders"
+    // notice (llviewerwindow.cpp) shows while this is true.
+    bool startupPipelinesPending() const;
     // Pipelines finished / queued by every compile batch since launch, and seconds since the
     // last one finished (the login progress screen: progress, and a stalled driver).
     void pipelineCompileProgress(U32& done, U32& queued, F64& idle_sec) const;
@@ -828,7 +863,7 @@ public:
     bool renderOffscreen(const LLVKWorldFrame& world, uint32_t w, uint32_t h,
                          std::vector<uint8_t>& rgb, std::vector<float>* depth = nullptr,
                          uint32_t frames = 2, uint32_t aaFrames = 0);
-    // <GMDX> The last avatar_matte render's matte (8-bit, LLImageRaw rows bottom-up), once.
+    // The last avatar_matte render's matte (8-bit, LLImageRaw rows bottom-up), once (GunMetal-DX port).
     bool takeSnapshotMatte(std::vector<uint8_t>& alpha, uint32_t& w, uint32_t& h);
     uint32_t maxImageDimension() const;
     // Best-case free device-local memory (budget minus usage) -- sizing snapshots.

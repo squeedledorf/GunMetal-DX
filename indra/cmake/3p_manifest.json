@@ -3,25 +3,25 @@
   "format": 1,
   "packages": {
     "SDL3": {
-      "copyright": "Copyright (C) 1997-2025 Sam Lantinga (slouken@libsdl.org)",
+      "copyright": "Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>",
       "description": "Simple DirectMedia Layer is a cross-platform multimedia library designed to provide low level access to audio, keyboard, mouse, joystick, 3D hardware via OpenGL, and 2D video framebuffer.",
       "license": "zlib",
       "license_file": "LICENSES/SDL3.txt",
       "platforms": {
         "linux64": {
-          "hash": "be8c534db2494bb5904bb769587b2d045ef6eaa01d73150fe6a1be56517879c1650a0ecaa8762bb476a28282b84fc0661ce61da7e0bd33e2addb8b6bab86326a",
+          "hash": "62149452400d1615e5a31c1626e4e0c3f88a57467bbef62b2fc49a90dfd3a06494bb8b782e6b94f87e6ba3a58858c6db47a8efee9da6c95636a0f2670bc528bc",
           "hash_algorithm": "blake2b",
-          "sha256": "fbf8c5fd1cc3154cc9bf52730256f0d8c0891a2fac771553c9b5b6a6e32be240",
-          "url": "https://github.com/squeedledorf/GunMetal-DX/releases/download/deps/SDL3-3.4.18-gmdx1-linux64-202610221640.tar.zst"
+          "sha256": "0abc441342d32b95b6d52c259cdffc4a1e6226aa9f46732369aca239189a9ef8",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-sdl3/releases/download/v3.4.18-r1/SDL3-3.4.18-r1-linux64-202610281300.tar.zst"
         },
         "windows64": {
-          "hash": "3acf5504f69dfddb902ccd2ec4c432928017ffe0798a5d4751807d58bb4f71029cbc246cdb60899efaf121f8751a0de21b4a18567c5580da6bb29181d59119dd",
+          "hash": "e385b9e0ffaa03744d1d46697ab90cb162c2b5f81cad9befe561a31a3c5c91731a0ca7e6d1ab5571774cc0f7875f267afb6a8e12da0927a3e8dbed75b0d8f3da",
           "hash_algorithm": "blake2b",
-          "sha256": "47476e975c83287b60ee62c69cb40a4348fb011b0fc9a0c479ae1b33003ac6b7",
-          "url": "https://git.slipstreamviewer.org/sky_line/3p-sdl3/releases/download/v3.2.30-r1/SDL3-3.2.30-r1-windows64-202610061600.tar.zst"
+          "sha256": "9fad081257696130cf7a6968840002258fd20c31c9c53134ba330479f3e28e0f",
+          "url": "https://git.slipstreamviewer.org/sky_line/3p-sdl3/releases/download/v3.4.18-r1/SDL3-3.4.18-r1-windows64-202610281300.tar.zst"
         }
       },
-      "version": "3.2.30-r1"
+      "version": "3.4.18-r1"
     },
     "apr_suite": {
       "copyright": "Copyright \u00a9 2012 The Apache Software Foundation, Licensed under the Apache License, Version 2.0.",

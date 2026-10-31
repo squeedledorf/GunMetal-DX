@@ -63,6 +63,7 @@
 #include "llcleanrtvk.h"
 
 #include "llviewercontrol.h"
+#include "llframetimer.h"
 #include "llcharacter.h"
 #include "llvoavatar.h"
 #include "llcontrolavatar.h"
@@ -91,7 +92,7 @@ namespace
 {
 struct RtCacheCfg
 {
-    bool on = true, log = true, carry = true;
+    bool on = true, log = true, carry = true, emissive_no_shadow = true;
     uint32_t tile = 8, refresh = 60, sun_refresh = 16, change_frames = 12;
     float jump_deg = 0.01f, eps = 0.004f, min_len = 4.f, pad = 0.5f, soft = 0.01f;
     float max_shadow = 128.f, floor_margin = 8.f, move_texels = 0.25f, plain_above = 0.85f, full_above = 0.8f;
@@ -123,6 +124,8 @@ RtCacheCfg rtCacheCfg()
     static LLCachedControl<U32>  s_spin(gSavedSettings, "RenderVKRTShadowCacheSpinners", 0U);
     static LLCachedControl<bool> s_tight(gSavedSettings, "RenderVKRTShadowCacheTightBoxes", true);
     static LLCachedControl<F32>  s_bpad(gSavedSettings, "RenderVKRTShadowCacheBoxPad", 0.5f);
+    static LLCachedControl<bool> s_emissive_shadow(gSavedSettings, "RenderVKEmissiveNoShadows", true);
+    c.emissive_no_shadow = s_emissive_shadow;
     c.on = s_on; c.log = s_log;
     c.tile = (U32)s_tile >= 16u ? 16u : 8u;
     c.refresh = std::clamp<U32>(s_ref, 1u, 100000u);
@@ -150,6 +153,7 @@ uint32_t cfgKey(const RtCacheCfg& c)
     uint32_t h = c.tile;
     auto mix = [&](float v) { uint32_t u; std::memcpy(&u, &v, 4); h = (h ^ u) * 16777619u; };
     mix(c.eps); mix(c.min_len); mix(c.pad); mix(c.soft);
+    mix(c.emissive_no_shadow ? 1.f : 0.f);
     return h | 1u;   // (0 = never configured)
 }
 
@@ -286,7 +290,7 @@ void LLCleanRendererVK::rtMaskCacheNoteSpheres()
         return;
     }
     const RtCacheCfg cfg = rtCacheCfg();
-    const uint32_t until = mRtCacheFrame + cfg.change_frames;
+    const double until = mRtCacheAgeMs + cfg.change_frames * (1000.0 / 60.0);
     if (gVKChangedOverflow)
     {
         mRtCacheOverflowUntil = until;
@@ -766,9 +770,12 @@ void LLCleanRendererVK::rtMaskCacheRecord(VkCommandBuffer cmd)
         mRtCacheWas = false;
         return;
     }
-    ++mRtCacheFrame;
+    ++mRtCacheFrame; // sampling/refresh scheduling remains fixed work per frame
+    const double cacheNow = LLFrameTimer::getElapsedSeconds();
+    mRtCacheAgeMs += mRtCacheClock >= 0.0 ? std::clamp((cacheNow - mRtCacheClock) * 1000.0, 0.1, 100.0) : 1000.0 / 60.0;
+    mRtCacheClock = cacheNow;
     mRtCacheChanged.erase(std::remove_if(mRtCacheChanged.begin(), mRtCacheChanged.end(),
-                                         [&](const RtCacheSphere& s) { return s.until < mRtCacheFrame; }),
+                                         [&](const RtCacheSphere& s) { return s.until < mRtCacheAgeMs; }),
                           mRtCacheChanged.end());
     // Plain fallback frames: the full trace as without the cache (the history stays valid:
     // every texel traced), the classifier probed again every 30 frames.
@@ -790,7 +797,7 @@ void LLCleanRendererVK::rtMaskCacheRecord(VkCommandBuffer cmd)
     const float step_deg = mRtCacheSunStep < 0.f ? 1e9f : mRtCacheSunStep * 57.2957795f;
     const bool jump = step_deg > cfg.jump_deg;
     bool force = !mRtMaskHistOk || !hist_valid || !mRtCacheWas || key != mRtCacheCfgKey || jump
-              || mRtCacheOverflowUntil >= mRtCacheFrame;
+              || mRtCacheOverflowUntil >= mRtCacheAgeMs;
     mRtCacheCfgKey = key;
     const bool drift = !jump && mRtCacheSunStep > 1e-6f;
 

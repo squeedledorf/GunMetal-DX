@@ -26,6 +26,7 @@
 // push p0: x history weight [0, 0.98], y 1 = reset, z clamp widening (fraction of the box), w 0.
 layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
 
+#define CLEAN_MEDIUM_PASS
 #include "clean_frame_info.glsl"
 #include "clean_atmos_common.glsl"
 #include "clean_vol_common.glsl"
@@ -35,6 +36,10 @@ layout(set = VOL_SET, binding = 0, rgba16f) readonly uniform image3D uCur;
 layout(set = VOL_SET, binding = 2) uniform sampler3D uHistPrev;
 layout(set = VOL_SET, binding = 3, rgba16f) writeonly uniform image3D uHistCur;
 
+layout(set=VOL_SET,binding=7,rgba16f) readonly uniform image3D uHeightCurrent;
+layout(set=VOL_SET,binding=11,rgba16f) writeonly uniform image3D uHeightHistory;
+layout(set=VOL_SET,binding=12) uniform sampler3D uHeightPrev;
+
 void main()
 {
     const uvec3 c = gl_GlobalInvocationID;
@@ -43,6 +48,8 @@ void main()
     const ivec3 ic = ivec3(c);
     const vec4 cur = imageLoad(uCur, ic);
     vec4 outv = cur;
+    vec4 height = cmOn() ? imageLoad(uHeightCurrent,ic) : vec4(0.0);
+    vec4 heightOut=height;
     if (vp.p0.y < 0.5 && vp.p0.x > 0.0)
     {
         const vec3 rel = volRelPos(vec3(c) + 0.5);
@@ -52,12 +59,26 @@ void main()
         if (ok)
         {
             tc.xy = pc.xy / pc.w * 0.5 + 0.5;
-            tc.z = volSliceOfDepth(pc.w);
-            ok = all(greaterThanEqual(tc, vec3(0.0))) && all(lessThanEqual(tc, vec3(1.0)));
+            if(cmOn())
+            {
+                const CameraMediumView view=ssr.medium[MEDIUM_EYE];
+                const mat4 previousProjection=ssr.views[MEDIUM_EYE].prev_proj;
+                const bool ortho=abs(previousProjection[3][3])>0.5;
+                const vec4 ray=ssr.views[MEDIUM_EYE].prev_inv_proj*vec4(tc.xy*2.0-1.0,0.5,1.0);
+                const vec3 direction=normalize(ray.xyz/ray.w);
+                const float factor=ortho ? 1.0 : max(-direction.z,1e-5);
+                const float previousDepth=ortho ? (previousProjection[3][2]-pc.z)/previousProjection[2][2] : pc.w;
+                tc.z=cmSliceMapping(previousDepth,factor,view.mapping.y,view.mapping.z,max(view.mapping.w,1e-4));
+                ok=previousDepth>=0.0 && previousDepth<=view.mapping.z;
+            }
+            else tc.z = volSliceOfDepth(pc.w);
+            ok = ok && all(greaterThanEqual(tc, vec3(0.0))) && all(lessThanEqual(tc, vec3(1.0)));
         }
         if (ok)
         {
             vec4 hist = textureLod(uHistPrev, tc, 0.0);
+            vec4 heightHist=cmOn() ? textureLod(uHeightPrev,tc,0.0) : vec4(0.0);
+            vec4 hmn=height, hmx=height;
             // 6-neighbour box of this frame's estimate.
             vec4 mn = cur, mx = cur;
             const ivec3 hi = ivec3(dims) - 1;
@@ -66,14 +87,22 @@ void main()
             for (int k = 0; k < 6; ++k)
             {
                 const vec4 s = imageLoad(uCur, clamp(ic + offs[k], ivec3(0), hi));
+                if(cmOn())
+                {
+                    const vec4 h=imageLoad(uHeightCurrent,clamp(ic+offs[k],ivec3(0),hi));
+                    hmn=min(hmn,h); hmx=max(hmx,h);
+                }
                 mn = min(mn, s);
                 mx = max(mx, s);
             }
             const vec4 widen = (mx - mn) * vp.p0.z;
             hist = clamp(hist, mn - widen, mx + widen);
+            if(cmOn() && !any(isnan(heightHist)) && !any(isinf(heightHist)))
+                heightOut=mix(height,clamp(heightHist,hmn-(hmx-hmn)*vp.p0.z,hmx+(hmx-hmn)*vp.p0.z),clamp(vp.p0.x,0.0,0.98));
             if (!any(isnan(hist)) && !any(isinf(hist)))
                 outv = mix(cur, hist, clamp(vp.p0.x, 0.0, 0.98));
         }
     }
     imageStore(uHistCur, ic, max(outv, vec4(0.0)));
+    if(cmOn()) imageStore(uHeightHistory,ic,max(heightOut,vec4(0.0)));
 }

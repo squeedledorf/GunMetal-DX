@@ -194,29 +194,37 @@ bool LLDate::fromStream(std::istream& s)
     apr_int32_t tm_part;
     int c;
 
-    s >> tm_part;
+    // Dates arrive from the network (LLSD): reject a failed / overflowed read or an
+    // out-of-range field instead of doing signed arithmetic on it.
+    auto read_part = [&s, &tm_part](apr_int32_t lo, apr_int32_t hi)
+    {
+        s >> tm_part;
+        return !s.fail() && tm_part >= lo && tm_part <= hi;
+    };
+
+    if (!read_part(0, 9999)) { return false; }
     exp_time.tm_year = tm_part - 1900;
     c = s.get(); // skip the hypen
     if (c != '-') { return false; }
-    s >> tm_part;
+    if (!read_part(1, 12)) { return false; }
     exp_time.tm_mon = tm_part - 1;
     c = s.get(); // skip the hypen
     if (c != '-') { return false; }
-    s >> tm_part;
+    if (!read_part(1, 31)) { return false; }
     exp_time.tm_mday = tm_part;
 
     c = s.get(); // skip the T
     if (c != 'T') { return false; }
 
-    s >> tm_part;
+    if (!read_part(0, 24)) { return false; }
     exp_time.tm_hour = tm_part;
     c = s.get(); // skip the :
     if (c != ':') { return false; }
-    s >> tm_part;
+    if (!read_part(0, 59)) { return false; }
     exp_time.tm_min = tm_part;
     c = s.get(); // skip the :
     if (c != ':') { return false; }
-    s >> tm_part;
+    if (!read_part(0, 60)) { return false; }
     exp_time.tm_sec = tm_part;
 
     // zero out the unused fields
@@ -253,11 +261,13 @@ bool LLDate::fromStream(std::istream& s)
         S32 offset_in_seconds = 0;
 
         s >> offset_hours;
+        if (s.fail() || offset_hours < -24 || offset_hours > 24) { return false; }
 
         c = s.get(); // skip the colon a get the minutes if there are any
         if (c == ':')
         {
             s >> offset_minutes;
+            if (s.fail() || offset_minutes < 0 || offset_minutes > 59) { return false; }
         }
 
         offset_in_seconds =  (offset_hours * 60 + offset_sign * offset_minutes) * 60;

@@ -30,6 +30,8 @@ layout(location = 5)      out vec3 v_wpos;          // (v_world_pos)
 layout(location = 7)      out vec4 v_world_tangent;
 layout(location = 8)      out vec2 v_uv_raw;
 layout(location = 9) flat out uint v_terrain_rec;
+layout(location = 16) invariant out vec4 v_rez;        // the draw FS's rez-effect inputs (gmdx_rezfx.glsl):
+layout(location = 17) invariant flat out vec4 v_rez_box;   // snow has no rez effect, w = 0
 #elif !defined(WX_MESH_DEPTH)
 layout(location = 0) out vec3 v_nrm;
 layout(location = 1) out vec3 v_wpos;
@@ -89,5 +91,7 @@ void main()
     v_world_tangent = vec4(0.0);      // (no tangent: the FS builds its normal itself)
     v_uv_raw = vec2(0.0);
     v_terrain_rec = 0xFFFFFFFFu;
+    v_rez = vec4(0.0);
+    v_rez_box = vec4(0.0);
 #endif
 }

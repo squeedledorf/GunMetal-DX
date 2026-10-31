@@ -92,7 +92,7 @@ public:
 
     // In-world label anchor (#487): the agent-space point a name tag / hover text is
     // attached to. Depth-tested drawing in the backend's in-world text layer is then
-    // occluded by the scene as a whole, tested once at this point. on=false clears it.
+    // tested per pixel against the scene at this point's depth (#1126). on=false clears it.
     virtual void setLabelAnchor(bool on, F32 x, F32 y, F32 z, F32 bias) {}
 };
 

@@ -1,0 +1,2 @@
+<? llsd/xml ?>
+<llsd><map><key>a</key><array><integer>1</integer><string>x</string></array></map></llsd>

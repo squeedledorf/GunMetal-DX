@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8" standalone="yes" ?>
 <panel
+    control_name="SlipstreamIgnoreAdHocSessions"
     height="408"
     layout="topleft"
     name="autoresponse_rejection_settings"
@@ -76,45 +77,32 @@
           name="FSRejectAllGroupInvitesMode"
           width="500"
           control_name="FSRejectAllGroupInvitesMode" />
-    <text
+    <check_box
         top_pad="15"
         follows="left|top"
         height="18"
-        type="string"
-        length="1"
         layout="topleft"
         left="15"
-        name="adhoc_ignore_label"
-        mouse_opaque="false"
-        width="500">
-        Reject Ad-Hoc (conferences):
-        </text>
-    <combo_box
-      control_name="SlipstreamIgnoreAdHocSessions"
-      follows="left|top"
-      layout="topleft"
-      height="23"
-      name="adhoc_preference_combo"
-      width="115">
-      <item
-        label="Off"
-        name="adhoc_preference_allow_none"
-        value="0"/>
-      <item
-        label="Friends Only"
-        name="adhoc_preference_allow_friends"
-        value="1"/>
-      <item
-        label="All"
-        name="adhoc_preference_allow_all"
-        value="2"/>
-    </combo_box>
+        name="adhoc_ignore_check"
+        label="Automatically ignore and leave all conference (ad-hoc) chats"
+        width="500" />
     <check_box
       layout="topleft"
       follows="left|top"
-      left_delta="125"
+      left="35"
+      top_pad="5"
       height="18"
       name="SlipstreamReportIgnoredAdHocSession"
       control_name="SlipstreamReportIgnoredAdHocSession"
-      label="Report ignored conference chats"/>
+      label="Report ignored conference chats in nearby chat"
+      width="470"/>
+    <check_box
+      layout="topleft"
+      follows="left|top"
+      left="35"
+      top_pad="5"
+      height="18"
+      name="adhoc_friends_check"
+      label="Don't ignore conference chat invitations from my friends"
+      width="470"/>
 </panel>

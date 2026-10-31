@@ -25,6 +25,7 @@ bool LLWorldClock::sFrozen = false;
 F64  LLWorldClock::sTime = 0.0;
 F32  LLWorldClock::sDelta = 0.f;
 bool LLWorldClock::sCaptureFreeze = false;
+U32  LLWorldClock::sFreezeSerial = 0;
 
 namespace
 {
@@ -52,6 +53,7 @@ void LLWorldClock::tick()
     if (frozen && !sFrozen)
     {
         sFreezeStart = now;
+        ++sFreezeSerial;
         LL_INFOS("WorldClock") << "world frozen" << LL_ENDL;
     }
     else if (!frozen && sFrozen)

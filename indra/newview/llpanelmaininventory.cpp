@@ -27,6 +27,7 @@
 #include "llviewerprecompiledheaders.h"
 #include "llpanelmaininventory.h"
 #include "slkeycommands.h"
+#include "slcombatfx.h"   // <GMDX> Search Outdated (CombatFX loadouts)
 
 #include "llagent.h"
 #include "llagentbenefits.h"
@@ -2227,6 +2228,10 @@ bool LLPanelMainInventory::isActionVisible(const LLSD& userdata)
     if (param_str == "multi_folder_view")
     {
         return !mSingleFolderMode;
+    }
+    if (param_str == "toggle_search_gmdx_outdated")   // <GMDX> loadouts' Outdated folder: CombatFX only
+    {
+        return SLCombatFX::enabled();
     }
 
     return true;

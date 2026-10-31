@@ -83,7 +83,7 @@
          font="SansSerif"
          halign="left"
          name="lst_action"
-         value="Strafe Left" />
+         value="Strafe left" />
     </rows>
     <rows
      name="slide_right"
@@ -93,7 +93,7 @@
          font="SansSerif"
          halign="left"
          name="lst_action"
-         value="Strafe Right" />
+         value="Strafe right" />
     </rows>
     <rows
      name="jump"
@@ -185,6 +185,7 @@
          name="lst_action"
          value="Fly/Stop flying" />
     </rows>
+    <!-- <GMDX> the flycam toggle is bindable in the walking modes too -->
     <rows
      name="toggle_flycam"
      value="toggle_flycam">
@@ -206,7 +207,7 @@
          name="lst_action"
          value="Sit/Stand" />
     </rows>
-    <!-- <SS:Skoomastream> -->
+    <!-- <SS:Skoomastream> CombatFX -->
     <rows
      name="ots_swap_shoulder"
      value="ots_swap_shoulder">
@@ -216,8 +217,9 @@
          halign="left"
          name="lst_action"
          tool_tip="Mirror the over-the-shoulder camera to the avatar's other side"
-         value="Swap OTS Shoulder" />
+         value="Swap OTS Shoulder" /><!-- <GMDX> GunMetal-DX 0.3.0's OTS camera (gmdxots.h) -->
     </rows>
+    <!-- <GMDX> GunMetal-DX 0.3.0's toggle (gmdxots.h) -->
     <rows
      name="ots_toggle_view"
      value="ots_toggle_view">
@@ -229,8 +231,9 @@
          tool_tip="Switch between the over-the-shoulder camera and first-person mouselook"
          value="Toggle OTS / First Person" />
     </rows>
+    <!-- </GMDX> -->
     <!-- </SS:Skoomastream> -->
-    <!-- <GMDX> pings (gmdxmapshare.h) -->
+    <!-- <GMDX> pings (gmdxmapshare.h; CombatFX) -->
     <rows
      name="map_ping"
      value="map_ping">
@@ -239,7 +242,7 @@
          font="SansSerif"
          halign="left"
          name="lst_action"
-         tool_tip="Mark the place under the cursor (the crosshair in mouselook) for the people you send pings to in your region"
+         tool_tip="Mark the place under the cursor (the crosshair in mouselook) for the people you send pings to in your region (Combat features)"
          value="Ping" />
     </rows>
     <rows
@@ -250,7 +253,7 @@
          font="SansSerif"
          halign="left"
          name="lst_action"
-         tool_tip="Ping the place under the cursor as an enemy"
+         tool_tip="Ping the place under the cursor as an enemy (Combat features)"
          value="Ping Enemy" />
     </rows>
     <rows
@@ -261,7 +264,7 @@
          font="SansSerif"
          halign="left"
          name="lst_action"
-         tool_tip="Ping the place under the cursor as a rally point"
+         tool_tip="Ping the place under the cursor as a rally point (Combat features)"
          value="Ping Rally" />
     </rows>
     <rows
@@ -272,7 +275,7 @@
          font="SansSerif"
          halign="left"
          name="lst_action"
-         tool_tip="Tap: ping the place under the cursor (the crosshair in mouselook). Hold: a wheel to choose Ping, Enemy or Rally, sent when you let go"
+         tool_tip="Tap: ping the place under the cursor (the crosshair in mouselook). Hold: a wheel to choose Ping, Enemy or Rally, sent when you let go (Combat features)"
          value="Ping Wheel" />
     </rows>
     <!-- </GMDX> -->

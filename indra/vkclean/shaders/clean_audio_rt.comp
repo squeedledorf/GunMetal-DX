@@ -336,6 +336,11 @@ AcWalk acWalk(vec3 o, vec3 d, float tmin, float tmax, uint mask, uint rflags, bo
         const uint id = rtHitInstance(uint(rayQueryGetIntersectionInstanceCustomIndexEXT(rq, false)),
                                       uint(rayQueryGetIntersectionGeometryIndexEXT(rq, false)));
         if (id >= uint(rt_instances.length())) continue;
+        if (rtEmissiveWasOpaque(id))
+        {
+            rayQueryConfirmIntersectionEXT(rq);   // preserve the original acoustic wall hit
+            continue;
+        }
         uint cls;
         if ((rt_instances[id].flags & 2u) == 0u && t > foliageDist)
             cls = 1u;   // far alpha-mask: a blocker, no alpha read

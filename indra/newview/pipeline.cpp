@@ -125,6 +125,7 @@
 
 #include "llenvironment.h"
 #include "llsettingsvo.h"
+#include "gmdxcombatlockout.h" // <GMDX>
 
 #include "llerror.h"
 
@@ -1354,14 +1355,14 @@ void LLPipeline::toggleRenderTypeControl(U32 type)
 //static
 bool LLPipeline::hasRenderTypeControl(U32 type)
 {
-    return gPipeline.hasRenderType(type);
+    return type != 0 && gPipeline.mRenderTypeEnabled[type]; // <GMDX> the user's own choice, under the combat render lockout too
 }
 
 // Allows UI items labeled "Hide foo" instead of "Show foo"
 //static
 bool LLPipeline::toggleRenderTypeControlNegated(S32 type)
 {
-    return !gPipeline.hasRenderType(type);
+    return !(type != 0 && gPipeline.mRenderTypeEnabled[type]); // <GMDX> the user's own choice, under the combat render lockout too
 }
 
 //static
@@ -1675,6 +1676,7 @@ void vkBoxOutline(const LLVector3& mn, const LLVector3& mx)
 // static
 void LLPipeline::renderDebugOverlaysVK()
 {
+    if (GMDXCombatLockout::active()) return; // <GMDX> combat render lockout: no render metadata while aiming
     const bool phys = gPipeline.hasRenderDebugMask(RENDER_DEBUG_PHYSICS_SHAPES);
     const bool bbox = gPipeline.hasRenderDebugMask(RENDER_DEBUG_BBOXES);
     const bool ray = gPipeline.hasRenderDebugMask(RENDER_DEBUG_RAYCAST);
@@ -2039,7 +2041,8 @@ bool LLPipeline::hasRenderType(const U32 type) const
 {
     // STORM-365 : a render type of 0 means "do not render"
     // TODO: reintroduce RENDER_TYPE_NONE in LLRenderTypeMask and initialize its mRenderTypeEnabled[RENDER_TYPE_NONE] to false explicitely
-    return (type == 0 ? false : mRenderTypeEnabled[type]);
+    // <GMDX> Combat render lockout: world geometry draws while aiming even if its type is hidden
+    return (type == 0 ? false : mRenderTypeEnabled[type] || GMDXCombatLockout::keepsRenderType(type));
 }
 
 void LLPipeline::setRenderTypeMask(U32 type, ...)

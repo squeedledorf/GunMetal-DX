@@ -120,8 +120,8 @@ export SAVED_LD_LIBRARY_PATH="${LD_LIBRARY_PATH}"
 # Add our library directory
 export LD_LIBRARY_PATH="$PWD/lib:${LD_LIBRARY_PATH}"
 
-## Auto-update (#421, off unless the person enabled it in Preferences): a viewer that
-## downloaded and verified an update left a "pending" note; apply it before starting. The
+## Update (#421): the person downloaded a verified update and chose to install it, so the
+## viewer left an "approved" note; apply it before starting (<GMDX>: never unasked). The
 ## apply step swaps the install directory, so this launcher (which just moved to
 ## <dir>.prev) re-runs itself from the new one. Never for package-manager installs.
 if [ -z "${packaged_by}" ] && [ -f etc/update_hooks.sh ]; then

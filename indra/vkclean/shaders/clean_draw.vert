@@ -29,7 +29,7 @@ layout(location = 0) flat out uint v_material_id;
 layout(location = 1) invariant out vec2 v_uv;   // (invariant: as the static VS)
 layout(location = 3) flat out vec4 v_tint;
 layout(location = 4) flat out uint v_flags;
-// <GMDX> rez effects (gmdx_rezfx.glsl): no effect data on the cluster path (w = 0: off)
+// Fade inputs shared by the cluster MDI and mesh tiers.
 layout(location = 16) invariant out vec4 v_rez;   // <GMDX> 16 / 17 (15 is #901's v_wx_rest)
 layout(location = 17) invariant flat out vec4 v_rez_box;
 #endif
@@ -105,8 +105,8 @@ void main()
     v_uv            = o.uv;
     v_tint          = o.tint;
     v_flags         = o.flags;
-    v_rez           = vec4(0.0);   // <GMDX>
-    v_rez_box       = vec4(0.0);   // <GMDX>
+    v_rez           = o.rez;
+    v_rez_box       = o.rez_box;
 #endif
 #ifdef CLEAN_VS_NORMAL_FRAME
     v_world_normal  = o.world_normal;
@@ -469,21 +469,21 @@ void main()
     // km-sized terms per vertex -- at Z 3000 that wobbled vertices ~1.4 px at 1 m every
     // frame. u_origin = 0 (world-space u_view_proj) is the old product.
     vec3 rel_pos = mat3(M) * lpos + (M[3].xyz - pc.u_origin.xyz);
-    // <GMDX> ALPHA-MASK PULL (GMDXAlphaMaskPull*, ssr.gmdx_misc): an alpha-masked world surface (flag
+    // <GMDX> ALPHA-MASK PULL (GMDXAlphaMaskPull*, ssr.gmdx_alpha_pull): an alpha-masked world surface (flag
     // bit2, not HUD) moves a few millimetres toward the camera, more at grazing angles, so a path or
     // decal mesh lying just over the ground stays on top: the 16-bit vertex lattice (#573) rounds both
     // surfaces by up to ~1-4 mm, which closed or crossed that gap (GL keeps exact floats). Every
     // variant runs the same lines, so the pre-pass / EQUAL twins still match.
-    if ((inst.flags & 12u) == 4u && ssr.gmdx_misc.x > 0.0)
+    if ((inst.flags & 12u) == 4u && ssr.gmdx_alpha_pull.x > 0.0)
     {
         const vec3 to_cam = (pc.u_cam_time.xyz - pc.u_origin.xyz) - rel_pos;
         const float cam_d = length(to_cam);
         if (cam_d > 0.01)
         {
-            float pull = ssr.gmdx_misc.x + ssr.gmdx_misc.y * cam_d;
+            float pull = ssr.gmdx_alpha_pull.x + ssr.gmdx_alpha_pull.y * cam_d;
 #if !defined(CLEAN_DEPTH_ONLY) || defined(CLEAN_DEPTH_MASK)
             const vec3 nw = normalize(mat3(M) * normal);
-            pull *= min(1.0 / max(abs(dot(nw, to_cam)) / cam_d, 1e-3), ssr.gmdx_misc.z);
+            pull *= min(1.0 / max(abs(dot(nw, to_cam)) / cam_d, 1e-3), ssr.gmdx_alpha_pull.z);
 #endif
             rel_pos += to_cam * (min(pull, 0.25 * cam_d) / cam_d);
         }
@@ -541,7 +541,7 @@ void main()
 #endif
     v_material_id  = inst.material_id;
     v_tint         = inst.tint;
-    v_flags        = inst.flags;   // (depth variants: no bit 14 "encloses camera": no pre-pass FS reads it)
+    v_flags        = inst.flags & ~16384u;   // (depth variants: no bit 14 "encloses camera": no pre-pass FS reads it)
     rezfxOutputs(inst.flags, position, M, v_rez, v_rez_box);   // <GMDX>
 #endif
 #ifndef CLEAN_DEPTH_ONLY
@@ -553,7 +553,7 @@ void main()
 #ifdef CLEAN_VS_PICK
     v_inst         = uint(gl_InstanceIndex);
 #endif
-    // ENCLOSES CAMERA (VS-derived v_flags bit14, not an instance flag): the camera is
+    // ENCLOSES CAMERA (VS-derived v_flags bit14, after stripping the stored shadow policy): the camera is
     // inside the instance's box -- a weather dome / skybox the viewer sits in. The FS
     // skips the far-clip distance fade for it: that fade hides the draw-distance CULL
     // pop, which an object enclosing the camera never has (it always passes the cull),

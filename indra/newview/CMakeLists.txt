@@ -56,6 +56,15 @@ include(ThreeJS)
 include(Tracy)
 include(UI)
 include(ViewerMiscLibs)
+include(SLStrictWarnings)   # strict warning tier for our own sources (option SL_STRICT_WARNINGS)
+
+# The shared third-party single-header implementation is not project code.
+if (MSVC)
+    set_source_files_properties(slblenderconnecttinygltf.cpp PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE COMPILE_OPTIONS /w)
+else ()
+    set_source_files_properties(slblenderconnecttinygltf.cpp PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE COMPILE_OPTIONS -w)
+endif ()
+
 include(SDL3)        # EXPERIMENTAL Vulkan: SDL_Vulkan_* on the viewer window
 include(VulkanGfx)   # EXPERIMENTAL Vulkan: ll::vulkan (headers + loader)
 include(VisualLeakDetector)
@@ -77,14 +86,15 @@ set(viewer_SOURCE_FILES
     lutcube.cpp
     slassetblocklist.cpp
     slfloatersoundexplorer.cpp
-    fsfloatersoundemitterblacklist.cpp
-    fssoundemitterblacklist.cpp
     slfloaterweather.cpp
+    slnightlight.cpp
+    slnightsky.cpp
     slsoundlog.cpp
     slweather.cpp
     slweatheraudio.cpp
     slweatherregion.cpp
     slparcelspeakers.cpp
+    sltempobjectedge.cpp
     slparcelspeakeraudio.cpp
     slmediaurlpolicy.cpp
     slavatarcomplexitytext.cpp
@@ -106,46 +116,33 @@ set(viewer_SOURCE_FILES
     slunzip.cpp
     slviewermenu.cpp
     bdfloatercamera.cpp
-    fscombatads.cpp
-    fscombataim.cpp
-    sscombatray.cpp
-    ssghosttempattachments.cpp # <GMDX> SS:Nexii ghost temp attachment cleanup after a teleport
     fscommon.cpp
     fscontactsfriendsmenu.cpp
     fsdroptarget.cpp
     fskeywords.cpp
-    fscombathitmarker.cpp      # <GMDX> kill feed
-    gmdxminimapcompass.cpp     # <GMDX> mini-map compass (Show Whole Region)
-    gmdxminimapimage.cpp       # <GMDX> mini-map Copy / Save Map Image
-    gmdxminimapterrain.cpp     # <GMDX> mini-map terrain background
-    gmdxregioncapture.cpp      # <GMDX> region map capture
-    gmdxsnapshotavatars.cpp    # <GMDX> snapshot avatar layers / avatar scope / picker
-    gmdxchatlog.cpp      # <GMDX> chat log
-    gmdximwell.cpp       # <GMDX> unread IM well in the chiclet bar
+    gmdxfloaterminimapsettings.cpp # <GMDX> mini-map Map Settings
+    gmdxmenuswatchrow.cpp      # <GMDX> menu row of colour swatches
     gmdxcrashreport.cpp      # <GMDX> crash reports (Crashpad -> BugSplat)
-    gmdxminimapmarks.cpp      # <GMDX> mini-map marks
-    gmdxmapshare.cpp          # <GMDX> shared mini-map marks, zones and pings
-    gmdxmapsharetext.cpp      # <GMDX> ... their chat line
-    gmdxpingwheel.cpp         # <GMDX> the ping wheel and its keys
-    gmdxnightlight.cpp        # <GMDX> physical night: the moon's real light, a smooth dusk
-    gmdxattachprobe.cpp        # <GMDX> throttled property probes of other residents' attachments
-    gmdxfloaterloadouts.cpp    # <GMDX> loadouts window and swap toast
-    gmdxloadouts.cpp           # <GMDX> loadouts
-    gmdxreplay.cpp             # <GMDX> instant replay
-    gmdxreplayaudio.cpp        # <GMDX> instant replay: the viewer's own sound, Opus
-    gmdxweaponsorter.cpp       # <GMDX> offers to sort new weapons into the loadout folders
-    gmdxrezfx.cpp              # <GMDX> rez effects
-    gmdxnightsky.cpp           # <GMDX> night sky: catalogue stars, Milky Way, airglow
+    gmdxtpfx.cpp              # <GMDX> teleport effects
+    gmdxtpfxshatter.cpp       # <GMDX> ... Shatter
+    gmdxtpfxninjasmoke.cpp    # <GMDX> ... Ninja smoke
+    gmdxtpfxsmokepuff.cpp     # <GMDX> ... Smoke puff
+    gmdxtpfxlightning.cpp     # <GMDX> ... Lightning strike
+    gmdxtpfxcrt.cpp           # <GMDX> ... CRT power-off
+    gmdxtpfxportal.cpp        # <GMDX> ... Portal swirl
+    gmdxtpfxglitch.cpp        # <GMDX> ... Glitch
+    gmdxtpfxfold.cpp          # <GMDX> ... Fold-away
+    gmdxtpfxhyperspace.cpp    # <GMDX> ... Hyperspace
+    gmdxtpfxworld.cpp         # <GMDX> ... the world effects' particles and light
+    gmdxfloatermapsharing.cpp  # <GMDX> Map Sharing window
     gmdxskytest.cpp            # <GMDX> Sky Test: a local test sky for the night look
-    gmdxselectionoutline.cpp   # <GMDX> LL selection silhouettes
+    gmdxfloaterskydebug.cpp    # <GMDX> Sky Debugger: live knobs on the sky's constants (Develop menu)
     gmdxhudeditpan.cpp         # <GMDX> HUD edit: the manipulator stays on screen
+    gmdxots.cpp                # <GMDX> GunMetal-DX 0.3.0's over-the-shoulder aim camera (mouselook at the shoulder)
+    gmdxcombatlockout.cpp      # <GMDX> combat render lockout (from Alchemy: Skooma, Nexii Malthus)
+    gmdxclampedvelocity.cpp    # <GMDX> recovery of velocities clamped at 128 m/s (from Alchemy: Skooma, Nexii Malthus)
+    gmdxghostwatch.cpp         # <GMDX> the ghost watch: ghosted physical object rules (from Alchemy: Skooma, Nexii Malthus)
     gmdxtoolbarcluster.cpp     # <GMDX> toolbar buttons around the chat log, moved by grips
-    gmdxtoolbarpins.cpp        # <GMDX> inventory items and folders pinned on the toolbars
-    fsfloaterhitmarker.cpp     # <GMDX> hit marker
-    fsfloaterkillfeed.cpp      # <GMDX> kill feed
-    fsghostprojectile.cpp      # <GMDX> ghost projectile watch (SoapStorm)
-    fsrezqueue.cpp             # <GMDX> rez queue warning (SoapStorm)
-    fsrmbscript.cpp            # <GMDX> right button to scripts in mouselook (SoapStorm)
     fsfloateraddtocontactset.cpp
     fsfavoritegroups.cpp
     fsfloatercontacts.cpp
@@ -177,6 +174,27 @@ set(viewer_SOURCE_FILES
     slfloaterwearablefavorites.cpp
     slwearablefavorites.cpp
     slbridge.cpp
+    # CombatFX (ported from GunMetal-DX, LGPL 2.1, v0.3.0 cf5f1f4)
+    sscombatray.cpp
+    ssghosttempattachments.cpp # <GMDX> SS:Nexii ghost temp attachment cleanup after a teleport
+    fscombatads.cpp
+    fscombataim.cpp
+    skcensusavatarshape.cpp # <GMDX> From Alchemy: Skooma (Nexii Malthus): measured avatar hull
+    fsrmbscript.cpp
+    fscombathitmarker.cpp
+    fsfloaterhitmarker.cpp
+    fsfloaterkillfeed.cpp
+    fsghostprojectile.cpp
+    fsrezqueue.cpp
+    gmdxmapshare.cpp
+    gmdxmapsharetext.cpp
+    gmdxpingwheel.cpp
+    gmdxrezfx.cpp
+    gmdxslmcfactions.cpp
+    gmdxloadouts.cpp
+    gmdxfloaterloadouts.cpp
+    gmdxweaponsorter.cpp
+    gmdxtoolbarpins.cpp
     slscriptinfo.cpp
     sldatausage.cpp
     slcachemetrics.cpp
@@ -323,6 +341,11 @@ set(viewer_SOURCE_FILES
     lldebugview.cpp
     lldeferredsounds.cpp
     lldelayedgestureerror.cpp
+    fssoundemitterblacklist.cpp
+    gmdxattachprobe.cpp
+    gmdxchatlog.cpp
+    gmdximwell.cpp
+    llgroupcolormap.cpp
     llderenderlist.cpp
     lldirpicker.cpp
     lldonotdisturbnotificationstorage.cpp
@@ -347,6 +370,7 @@ set(viewer_SOURCE_FILES
     llcleaningest.cpp
     llcrossingkeep.cpp
     llcrossingtrace.cpp
+    slheldkills.cpp
     llmemdiag.cpp
     llmemtrendprobes.cpp
     llcleangltfingest.cpp
@@ -524,6 +548,7 @@ set(viewer_SOURCE_FILES
     llfloaterwhitelistentry.cpp
     llfloaterwindowsize.cpp
     llfloaterworldmap.cpp
+    llfloaterpopout.cpp
     llfolderviewmodelinventory.cpp
     llfollowcam.cpp
     llfriendcard.cpp
@@ -543,7 +568,6 @@ set(viewer_SOURCE_FILES
     llgputexcachestore.cpp
     llgputexrecord.cpp
     llgroupactions.cpp
-    llgroupcolormap.cpp # <GMDX> group-based nameplate/minimap tinting
     llgroupiconctrl.cpp
     llgrouplist.cpp
     llgroupmgr.cpp
@@ -569,6 +593,8 @@ set(viewer_SOURCE_FILES
     llimprocessing.cpp
     llimview.cpp
     llinspect.cpp
+    llinstantreplay.cpp
+    llinstantreplayaudio.cpp
     llinspectavatar.cpp
     llinspectgroup.cpp
     llinspectobject.cpp
@@ -599,6 +625,9 @@ set(viewer_SOURCE_FILES
     lllocalbitmaps.cpp
     lllocalgltfmaterials.cpp
     lllocalmesh.cpp
+    slblenderconnectfile.cpp
+    slblenderconnectprotocol.cpp
+    slblenderconnecttinygltf.cpp
     lllocalanim.cpp
     lllocalassetpaths.cpp
     lllocationhistory.cpp
@@ -623,6 +652,10 @@ set(viewer_SOURCE_FILES
     llmeshdiskcache.cpp
     llmeshrepository.cpp
     llmimetypes.cpp
+    llminimapcompass.cpp
+    llminimapimage.cpp
+    llminimapmarks.cpp
+    llminimapterrain.cpp
     llmodelpreview.cpp
     llmorphview.cpp
     llmoveview.cpp
@@ -709,7 +742,6 @@ set(viewer_SOURCE_FILES
     llpanelplaces.cpp
     llpanelplacestab.cpp
     llpanelpreferencegamecontrol.cpp
-    alcurveeditorctrl.cpp
     ssfloatergamecontroldebug.cpp
     ssfloatergamecontroloverlay.cpp
     gmdxfloaterinputoverlay.cpp
@@ -738,6 +770,7 @@ set(viewer_SOURCE_FILES
     llpanelsnapshotpostcard.cpp
     llpanelsnapshotprofile.cpp
     llpanelteleporthistory.cpp
+    fsfloatersoundemitterblacklist.cpp
     fsfloaterteleporthistory.cpp
     llpaneltiptoast.cpp
     llpanelvoiceeffect.cpp
@@ -787,6 +820,7 @@ set(viewer_SOURCE_FILES
     llrecentpeople.cpp
     llheroprobemanager.cpp
     llregioninfomodel.cpp
+    llregionmapcapture.cpp
     llregionposition.cpp
     llremoteparcelrequest.cpp
     llsaveoutfitcombobtn.cpp
@@ -802,6 +836,7 @@ set(viewer_SOURCE_FILES
     llsearchhistory.cpp
     llsecapi.cpp
     llsechandler_basic.cpp
+    llselectionoutline.cpp
     llselectmgr.cpp
     llsetkeybinddialog.cpp
     llsettingspicker.cpp
@@ -816,8 +851,9 @@ set(viewer_SOURCE_FILES
     llskinningutil.cpp
     llsky.cpp
     llsoundsplitupload.cpp
-    llsoundnotecardupload.cpp # <GMDX> <OTS> sound -> notecard bulk upload
+    llsoundnotecardupload.cpp
     llslurl.cpp
+    llsnapshotavatars.cpp
     llsnapshotlivepreview.cpp
     llspatialentry.cpp
     llspeakers.cpp
@@ -1020,14 +1056,17 @@ set(viewer_HEADER_FILES
     ViewerInstall.cmake
     slassetblocklist.h
     slfloatersoundexplorer.h
-    fsfloatersoundemitterblacklist.h
-    fssoundemitterblacklist.h
     slfloaterweather.h
+    slnightlight.h
+    slnightsky.h
+    slnightskygrid.h
     slsoundlog.h
+    slspacealt.h
     slweather.h
     slweatheraudio.h
     slweatherregion.h
     slparcelspeakers.h
+    sltempobjectedge.h
     slparcelspeakeraudio.h
     slmediaurlpolicy.h
     slavatarcomplexitytext.h
@@ -1049,46 +1088,27 @@ set(viewer_HEADER_FILES
     slunzip.h
     slviewermenu.h
     bdfloatercamera.h
-    fscombatads.h
-    fscombataim.h
-    sscombatray.h
     fscommon.h
     fscontactsfriendsmenu.h
     fsdroptarget.h
     fskeywords.h
-    fscombathitmarker.h      # <GMDX> kill feed
-    gmdxminimapcompass.h     # <GMDX> mini-map compass (Show Whole Region)
-    gmdxminimapimage.h       # <GMDX> mini-map Copy / Save Map Image
-    gmdxminimapterrain.h     # <GMDX> mini-map terrain background
-    gmdxregioncapture.h      # <GMDX> region map capture
-    gmdxsnapshotavatars.h    # <GMDX> snapshot avatar layers / avatar scope / picker
-    gmdxchatlog.h      # <GMDX> chat log
+    gmdxfloaterminimapsettings.h # <GMDX> mini-map Map Settings
+    gmdxmenuswatchrow.h      # <GMDX> menu row of colour swatches
     gmdxcrashreport.h      # <GMDX> crash reports
-    gmdxminimapmarks.h      # <GMDX> mini-map marks
-    gmdxmapshare.h          # <GMDX> shared mini-map marks, zones and pings
-    gmdxmapsharetext.h      # <GMDX> ... their chat line
-    gmdxpingwheel.h         # <GMDX> the ping wheel and its keys
-    gmdxnightlight.h        # <GMDX> physical night
-    gmdxspacealt.h          # <GMDX> space at altitude
-    gmdxattachprobe.h        # <GMDX> throttled property probes of other residents' attachments
-    gmdxfloaterloadouts.h    # <GMDX> loadouts window and swap toast
-    gmdxloadouts.h           # <GMDX> loadouts
-    gmdxreplay.h             # <GMDX> instant replay
-    gmdxreplayaudio.h        # <GMDX> instant replay: the viewer's own sound, Opus
-    gmdxweaponsorter.h       # <GMDX> offers to sort new weapons into the loadout folders
-    gmdxrezfx.h              # <GMDX> rez effects
-    gmdxnightsky.h           # <GMDX> night sky: catalogue stars, Milky Way, airglow
-    gmdxnightskygrid.h       # <GMDX> ... the star catalogue file and lookup grid
+    gmdxtpfx.h              # <GMDX> teleport effects
+    gmdxtpfxeffect.h        # <GMDX> ... one effect
+    gmdxtpfxworld.h         # <GMDX> ... the world effects' particles and light
+    gmdxfloatermapsharing.h  # <GMDX> Map Sharing window
     gmdxskytest.h            # <GMDX> Sky Test: a local test sky for the night look
-    gmdxselectionoutline.h   # <GMDX> LL selection silhouettes
+    gmdxfloaterskydebug.h    # <GMDX> Sky Debugger: live knobs on the sky's constants (Develop menu)
+    gmdxskysettings.h        # <GMDX> the sky, night, star, cloud and space settings (Graphics > Sky)
+    gmdxskytune.h            # <GMDX> the Sky Debugger's live knobs and readout
     gmdxhudeditpan.h         # <GMDX> HUD edit: the manipulator stays on screen
+    gmdxots.h                # <GMDX> GunMetal-DX 0.3.0's over-the-shoulder aim camera (mouselook at the shoulder)
+    gmdxcombatlockout.h      # <GMDX> combat render lockout (from Alchemy: Skooma, Nexii Malthus)
+    gmdxclampedvelocity.h    # <GMDX> recovery of velocities clamped at 128 m/s (from Alchemy: Skooma, Nexii Malthus)
+    gmdxghostwatch.h         # <GMDX> the ghost watch: ghosted physical object rules (from Alchemy: Skooma, Nexii Malthus)
     gmdxtoolbarcluster.h     # <GMDX> toolbar buttons around the chat log, moved by grips
-    gmdxtoolbarpins.h        # <GMDX> inventory items and folders pinned on the toolbars
-    fsfloaterhitmarker.h     # <GMDX> hit marker
-    fsfloaterkillfeed.h      # <GMDX> kill feed
-    fsghostprojectile.h      # <GMDX> ghost projectile watch (SoapStorm)
-    fsrezqueue.h             # <GMDX> rez queue warning (SoapStorm)
-    fsrmbscript.h            # <GMDX> right button to scripts in mouselook (SoapStorm)
     fsfloateraddtocontactset.h
     fsfavoritegroups.h
     fsfloatercontacts.h
@@ -1120,6 +1140,27 @@ set(viewer_HEADER_FILES
     slfloaterwearablefavorites.h
     slwearablefavorites.h
     slbridge.h
+    # CombatFX (ported from GunMetal-DX, LGPL 2.1, v0.3.0 cf5f1f4)
+    slcombatfx.h
+    sscombatray.h
+    fscombatads.h
+    fscombataim.h
+    skcensusavatarshape.h # <GMDX> From Alchemy: Skooma (Nexii Malthus): measured avatar hull
+    fsrmbscript.h
+    fscombathitmarker.h
+    fsfloaterhitmarker.h
+    fsfloaterkillfeed.h
+    fsghostprojectile.h
+    fsrezqueue.h
+    gmdxmapshare.h
+    gmdxmapsharetext.h
+    gmdxpingwheel.h
+    gmdxrezfx.h
+    gmdxslmcfactions.h
+    gmdxloadouts.h
+    gmdxfloaterloadouts.h
+    gmdxweaponsorter.h
+    gmdxtoolbarpins.h
     slscriptinfo.h
     sldatausage.h
     slcachemetrics.h
@@ -1155,6 +1196,7 @@ set(viewer_HEADER_FILES
     slpanelshapeeditor.h
     slphotostudiodirectory.h
     slphotostudiodraw.h
+    slphotostudiohaze.h
     slphotostudioscopes.h
     slphotostudiosettings.h
     slposecreator.h
@@ -1266,6 +1308,10 @@ set(viewer_HEADER_FILES
     lldebugview.h
     lldeferredsounds.h
     lldelayedgestureerror.h
+    fssoundemitterblacklist.h
+    gmdxattachprobe.h
+    gmdxchatlog.h
+    llgroupcolormap.h
     llderenderlist.h
     lldirpicker.h
     lldonotdisturbnotificationstorage.h
@@ -1293,6 +1339,7 @@ set(viewer_HEADER_FILES
     llcleaningest.h
     llcrossingkeep.h
     llcrossingtrace.h
+    slheldkills.h
     llmemdiag.h
     llmemtrendprobes.h
     llcleangltfingest.h
@@ -1474,6 +1521,7 @@ set(viewer_HEADER_FILES
     llfloaterwhitelistentry.h
     llfloaterwindowsize.h
     llfloaterworldmap.h
+    llfloaterpopout.h
     llfolderviewmodelinventory.h
     llfollowcam.h
     llfriendcard.h
@@ -1493,7 +1541,6 @@ set(viewer_HEADER_FILES
     llgputexrecord.h
     llj2crecord.h
     llgroupactions.h
-    llgroupcolormap.h # <GMDX> group-based nameplate/minimap tinting
     llgroupiconctrl.h
     llgrouplist.h
     llgroupmgr.h
@@ -1518,6 +1565,8 @@ set(viewer_HEADER_FILES
     llimprocessing.h
     llimview.h
     llinspect.h
+    llinstantreplay.h
+    llinstantreplayaudio.h
     llinspectavatar.h
     llinspectgroup.h
     llinspectobject.h
@@ -1548,6 +1597,8 @@ set(viewer_HEADER_FILES
     lllocalbitmaps.h
     lllocalgltfmaterials.h
     lllocalmesh.h
+    slblenderconnectfile.h
+    slblenderconnectprotocol.h
     lllocalanim.h
     lllocalassetpaths.h
     lllocationhistory.h
@@ -1571,6 +1622,10 @@ set(viewer_HEADER_FILES
     llmeshdiskcache.h
     llmeshrepository.h
     llmimetypes.h
+    llminimapcompass.h
+    llminimapimage.h
+    llminimapmarks.h
+    llminimapterrain.h
     llmodelpreview.h
     llmorphview.h
     llmoveview.h
@@ -1649,7 +1704,6 @@ set(viewer_HEADER_FILES
     llpanelplaces.h
     llpanelplacestab.h
     llpanelpreferencegamecontrol.h
-    alcurveeditorctrl.h
     ssfloatergamecontroldebug.h
     ssfloatergamecontroloverlay.h
     gmdxfloaterinputoverlay.h
@@ -1673,6 +1727,7 @@ set(viewer_HEADER_FILES
     llpanelsearchweb.h
     llpanelsnapshot.h
     llpanelteleporthistory.h
+    fsfloatersoundemitterblacklist.h
     fsfloaterteleporthistory.h
     llpaneltiptoast.h
     llpanelpulldown.h
@@ -1722,6 +1777,7 @@ set(viewer_HEADER_FILES
     llrecentpeople.h
     llheroprobemanager.h
     llregioninfomodel.h
+    llregionmapcapture.h
     llregionposition.h
     llremoteparcelrequest.h
     llresourcedata.h
@@ -1740,6 +1796,7 @@ set(viewer_HEADER_FILES
     llsearchhistory.h
     llsecapi.h
     llsechandler_basic.h
+    llselectionoutline.h
     llselectmgr.h
     llsetkeybinddialog.h
     llsettingspicker.h
@@ -1753,8 +1810,9 @@ set(viewer_HEADER_FILES
     llskinningutil.h
     llsky.h
     llsoundsplitupload.h
-    llsoundnotecardupload.h # <GMDX> <OTS> sound -> notecard bulk upload
+    llsoundnotecardupload.h
     llslurl.h
+    llsnapshotavatars.h
     llsnapshotlivepreview.h
     llsnapshotmodel.h
     llspatialentry.h
@@ -1981,6 +2039,7 @@ list(APPEND viewer_SOURCE_FILES
     vkgfx/llvrambudgetvk.cpp          # one VRAM budget: status + soft pressure ladder (#405, #407)
     vkgfx/llcleanrenderervk.cpp       # GPU-driven static-opaque world render (VK)
     vkgfx/llcleanspecvk.cpp           # graphics settings as specialization constants: spec sets, LRU, apply
+    vkgfx/gmdxrezfxvk.cpp             # CombatFX rez effects: the effect table upload (GunMetal-DX)
     vkgfx/llcleanrtvk.cpp             # ray tracing foundation (BLAS/TLAS, ray-query debug views)
     vkgfx/llcleanrtomm.cpp            # opacity micromaps (#194)
     vkgfx/llcleanrtaudit.cpp          # DEVICE_LOST RT scene audit (#874)
@@ -1988,6 +2047,7 @@ list(APPEND viewer_SOURCE_FILES
     vkgfx/llcleanvolfogvk.cpp         # volumetric fog: froxel grid + local volumes (#718)
     vkgfx/llcleanpartfogvk.cpp        # particle fog: fog-like particle systems as dense bricks (#1003)
     vkgfx/llcleanvolcloudsvk.cpp      # volumetric sky cloud layer (#719)
+    vkgfx/gmdxvolcloudsvk.cpp         # <GMDX> GunMetal-DX's own cloud model on the #719 cloud layer
     vkgfx/llcleanweathervk.cpp        # weather: precipitation, occlusion map, wet surfaces (#783)
     vkgfx/llcleanweathervk_runoff.cpp # weather run-off: flow, drips, streams (#783 M4)
     vkgfx/llcleanweathervk_movers.cpp # weather mover tracks: vehicles / movers plough the snow (#783 M5)
@@ -2005,13 +2065,12 @@ list(APPEND viewer_SOURCE_FILES
     vkgfx/llcleanrtcachevk.cpp        # RT sun shadow cache: tile classifier + indirect trace (#771)
     vkgfx/llcleansuncertvk.cpp        # sun exposure certificates: world-space sun shadow cache (#771 Phase 2)
     vkgfx/llcleanterrainbakevk.cpp    # per-region terrain bake: far terrain from baked textures (#811)
-    vkgfx/gmdxrezfxvk.cpp             # <GMDX> rez effects: the effect table upload
-    vkgfx/gmdxseloutlinevk.cpp        # <GMDX> selection styles: classic wireframe, screen-space outline
-    vkgfx/gmdxsnapmattevk.cpp         # <GMDX> avatar matte snapshots: avatar-only main view, coverage readback
-    vkgfx/gmdxphysskyvk.cpp           # <GMDX> physical sky (Hillaire): parameters, lookup tables
-    vkgfx/gmdxreplayvk.cpp            # <GMDX> instant replay: GPU H.264 encode + MP4
-    vkgfx/gmdxcloudshapesvk.cpp       # <GMDX> volumetric clouds: the sculpted cloud bodies
+    vkgfx/llcleanphysskyvk.cpp        # physical sky (Hillaire): parameters, lookup tables (GunMetal-DX port)
+    vkgfx/llcleancloudshapesvk.cpp    # volumetric clouds: the sculpted cloud bodies (GunMetal-DX port)
     vkgfx/llcelshadevk.cpp            # avatar mask + cel shading (#549 / #550)
+    vkgfx/llcleansnapmattevk.cpp      # avatar matte snapshots: avatar-only main view, coverage readback (GunMetal-DX port)
+    vkgfx/llcleanseloutlinevk.cpp     # selection styles: classic wireframe, screen-space outline (GunMetal-DX port)
+    vkgfx/llcleanreplayvk.cpp         # instant replay: GPU H.264 encode + MP4 (GunMetal-DX port)
     vkgfx/llcleanpickvk.cpp           # GPU cursor pick of rigged surfaces (#255)
     vkgfx/llcleanaudiortvk.cpp        # acoustics probe: room + occlusion rays against the TLAS (#683)
     vkgfx/llcleantexencvk.cpp         # GPU texture block compression (#263)
@@ -2060,11 +2119,13 @@ list(APPEND viewer_HEADER_FILES
     vkgfx/llcleanvolfogvk.h
     vkgfx/llcleanpartfogvk.h
     vkgfx/llcleanvolcloudsvk.h
+    vkgfx/gmdxvolcloudsvk.h           # <GMDX>
     vkgfx/llcleanweathervk.h
     vkgfx/llcleanpartlowresvk.h
     vkgfx/llcleanmotionblurvk.h
     vkgfx/llcleansnapshotvk.h
     vkgfx/llcelshadevk.h
+    vkgfx/llcleanreplayvk.h
     vkgfx/llcleanpickvk.h
     vkgfx/llcleanaudiortvk.h
     vkgfx/llcleantexencvk.h
@@ -2087,7 +2148,8 @@ list(APPEND viewer_HEADER_FILES
     vkgfx/llvulkancontext.h
     vkgfx/llrendervkbackend.h
     vkgfx/llvkdyntex.h
-    vkgfx/gmdxnighteyevk.h   # <GMDX> night eye: night exposure curve settings
+    vkgfx/slnighteyevk.h
+    vkgfx/llcleancloudshapesvk.h
     vkgfx/llrendervk/llrendervk.h
     vkgfx/llrendervk/vk_offscreen.h
     vkgfx/llrendervk/vk_pipeline_ui.h
@@ -2166,10 +2228,11 @@ set_source_files_properties(
 set_source_files_properties(
     vkgfx/llfxcompile.cpp
     PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE)
-# <GMDX> Instant replay audio: std + OS audio APIs + llwebrtc's Opus export, so no viewer
-# precompiled header.
+# Instant replay audio (GunMetal-DX port): std + OS audio APIs + llwebrtc's Opus export, so no
+# viewer precompiled header; the encoder (vkgfx/llcleanreplayvk.cpp) is plain Vulkan + std.
 set_source_files_properties(
-    gmdxreplayaudio.cpp
+    llinstantreplayaudio.cpp
+    vkgfx/llcleanreplayvk.cpp
     PROPERTIES SKIP_PRECOMPILE_HEADERS TRUE)
 # The clean renderer's main TU peaks near 6 GB in cc1plus at -O3 -g (measured 2026-10-27),
 # far above the per-job budget scripts/ci/build_jobs.sh assumes: a pool of depth 1 keeps
@@ -2272,6 +2335,7 @@ set_source_files_properties(
 set_source_files_properties(
     vkgfx/llcleanrenderervk.cpp
     vkgfx/llcleanspecvk.cpp
+    vkgfx/gmdxrezfxvk.cpp
     vkgfx/llcleanrtvk.cpp
     vkgfx/llcleanrtomm.cpp
     vkgfx/llcleanrtaudit.cpp
@@ -2279,6 +2343,7 @@ set_source_files_properties(
     vkgfx/llcleanvolfogvk.cpp
     vkgfx/llcleanpartfogvk.cpp
     vkgfx/llcleanvolcloudsvk.cpp
+    vkgfx/gmdxvolcloudsvk.cpp   # <GMDX>
     vkgfx/llcleanweathervk.cpp
     vkgfx/llcleanweathervk_runoff.cpp
     vkgfx/llcleanweathervk_movers.cpp
@@ -2295,11 +2360,11 @@ set_source_files_properties(
     vkgfx/llcleanrtcachevk.cpp
     vkgfx/llcleansuncertvk.cpp
     vkgfx/llcleanterrainbakevk.cpp
-    vkgfx/gmdxrezfxvk.cpp   # <GMDX>
-    vkgfx/gmdxseloutlinevk.cpp   # <GMDX>
-    vkgfx/gmdxsnapmattevk.cpp   # <GMDX>
-    vkgfx/gmdxphysskyvk.cpp   # <GMDX>
+    vkgfx/llcleanphysskyvk.cpp
+    vkgfx/llcleancloudshapesvk.cpp
     vkgfx/llcelshadevk.cpp
+    vkgfx/llcleansnapmattevk.cpp
+    vkgfx/llcleanseloutlinevk.cpp
     vkgfx/llcleanpickvk.cpp
     vkgfx/llcleanaudiortvk.cpp
     vkgfx/llcleantexencvk.cpp
@@ -2328,6 +2393,24 @@ source_group("CMake Rules" FILES ViewerInstall.cmake)
 # the viewer_version.txt file created here is for passing to viewer_manifest and autobuild
 file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/viewer_version.txt"
            "${VIEWER_SHORT_VERSION}.${VIEWER_VERSION_REVISION}\n")
+
+# Strict warning tier (indra/cmake/SLStrictWarnings.cmake) for OUR modules only; the
+# LL-derived files keep the baseline -Wall -Werror. Non-recursive globs, one per directory.
+sl_collect_strict_sources(SL_STRICT_SOURCES
+    vkgfx/*.cpp
+    vkgfx/llrendervk/*.cpp
+    llclean*.cpp
+    sl*.cpp
+    ss*gamecontrol*.cpp
+    llgamecontrol*.cpp
+    llflycam*.cpp
+    llregionmapcapture*.cpp
+    llminimap*.cpp
+    llinstantreplay*.cpp
+    llsnapshotavatars*.cpp)
+# vk_vma.cpp is the vendored Vulkan Memory Allocator implementation.
+list(REMOVE_ITEM SL_STRICT_SOURCES vkgfx/vk_vma.cpp)
+sl_apply_strict_warnings(${SL_STRICT_SOURCES})
 
 set_source_files_properties(
    llversioninfo.cpp tests/llversioninfo_test.cpp
@@ -2663,8 +2746,14 @@ add_executable(${VIEWER_BINARY_NAME}
 ll_fix_isa_note(${VIEWER_BINARY_NAME})
 add_dependencies(${VIEWER_BINARY_NAME} vk_shaders)
 # <GMDX> The world SPIR-V arrays are defined once here (vk_world_shaders_spv.h only declares them).
+# (No debug info or optimisation for it: the file is ~290 MB of SPIR-V array initialisers, and with
+#  -g -gdwarf64 -O3 GCC took ~18 GB of RAM to compile it, starving parallel builds.)
 set_source_files_properties("${VK_SHADER_GEN_DIR}/vk_world_shaders_spv.cpp" PROPERTIES
     GENERATED TRUE SKIP_PRECOMPILE_HEADERS ON)
+if (NOT MSVC)   # (clang-cl, the Windows cross build, sets MSVC too and takes other flags)
+    set_source_files_properties("${VK_SHADER_GEN_DIR}/vk_world_shaders_spv.cpp" PROPERTIES
+        COMPILE_OPTIONS "-g0;-O0")
+endif ()
 target_sources(${VIEWER_BINARY_NAME} PRIVATE "${VK_SHADER_GEN_DIR}/vk_world_shaders_spv.cpp")
 target_include_directories(${VIEWER_BINARY_NAME} PRIVATE "${VK_SHADER_GEN_DIR}")
 
@@ -3336,6 +3425,13 @@ if (LL_TESTS)
   LL_ADD_INTEGRATION_TEST(slassetmigrate
     "slassetmigrate.cpp;slcachemigrate.cpp"
     "llcachestore;llcommon"
+    )
+
+  # #1172: kills held while the world is frozen: what voids one (a live, accepted update the
+  # killing sim sent after the kill, packet ids wrapping), re-kills, detaches, the thaw.
+  LL_ADD_INTEGRATION_TEST(slheldkills
+    slheldkills.cpp
+    "llcommon"
     )
 
   LL_ADD_INTEGRATION_TEST(llviewerassetstats

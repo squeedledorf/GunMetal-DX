@@ -71,6 +71,29 @@ SLFloaterWeather::SLFloaterWeather(const LLSD& key)
 {
 }
 
+// #1224: never start taller than the area the floaters may use (the saved rect may come from a
+// bigger window or UI scale); the scroll container makes the shortened floater fully reachable.
+void SLFloaterWeather::onOpen(const LLSD& key)
+{
+    LLFloater::onOpen(key);
+    if (!gFloaterView) return;
+    const LLRect avail = gFloaterView->getSnapRect();
+    LLRect rect = getRect();
+    if (rect.getHeight() > avail.getHeight())
+    {
+        reshape(rect.getWidth(), llmax(getMinHeight(), avail.getHeight()));
+        rect = getRect();
+    }
+    if (rect.mTop > avail.mTop)
+    {
+        translate(0, avail.mTop - rect.mTop);
+    }
+    else if (rect.mBottom < avail.mBottom)
+    {
+        translate(0, avail.mBottom - rect.mBottom);
+    }
+}
+
 bool SLFloaterWeather::postBuild()
 {
     mStatus = getChild<LLTextBox>("status");
@@ -318,7 +341,10 @@ void SLFloaterWeather::refreshStatus()
 {
     // MASTER SWITCH: off disables every other control (their values are kept) and says why.
     const bool master = SLWeather::masterEnabled();
-    for (LLView* child : *getChildList())
+    // (the controls live in the scrolled panel, #1224)
+    LLView* controls = findChild<LLView>("weather_panel");
+    if (!controls) controls = this;
+    for (LLView* child : *controls->getChildList())
     {
         LLUICtrl* ctrl = dynamic_cast<LLUICtrl*>(child);
         if (!ctrl) continue;

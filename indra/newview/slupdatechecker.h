@@ -31,16 +31,20 @@
 // cookies, IDs or user data. Release builds read the release feed (or the beta feed when
 // UpdaterWillingToTest is on), Beta builds the beta feed (which also carries finals);
 // Test/local builds never check on their own.
-// Nothing is downloaded or run: the notice only opens the release notes or the download
-// link in the browser. Signature verification of the feed is phase 2.
+// <GMDX> The check runs at the login screen. Nothing is downloaded or run on its own: a newer
+// build is offered (SLUpdater asks "Download and install / Remind me later / Skip this
+// version" for installs that can update themselves; others get a notice that opens the
+// release notes or the download link in the browser).
 namespace SLUpdateChecker
 {
-    // Seconds after login before the first scheduled check, and between checks.
-    constexpr double FIRST_CHECK_DELAY = 20.0;
+    // Seconds after the login screen comes up (or after login, to retry a failed check)
+    // before the first scheduled check, and between checks.
+    constexpr double FIRST_CHECK_DELAY = 2.0;
     constexpr double CHECK_INTERVAL = 24.0 * 60.0 * 60.0;
 
-    // Call every frame from LLAppViewer::idle(); cheap. Once logged in, runs the
-    // scheduled check (UpdateCheckEnabled, not on Test builds) every CHECK_INTERVAL.
+    // Call every frame from LLAppViewer::idle(); cheap. From the login screen on, runs the
+    // scheduled check (GMDXUpdateConsent / UpdateCheckEnabled, not on Test builds) every
+    // CHECK_INTERVAL, and asks once about an update downloaded earlier.
     void idle();
 
     // Help > Check for updates / Preferences "Check now": always answers, with the

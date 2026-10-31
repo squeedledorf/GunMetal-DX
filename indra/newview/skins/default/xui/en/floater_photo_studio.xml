@@ -9,7 +9,7 @@ is placed here.
 
 Based on Alchemy Viewer's Lightbox (credited); see slfloaterphotostudio.cpp.
 -->
-<floater
+<floater can_pop_out="true"
  width="880"
  height="700"
  min_width="424"

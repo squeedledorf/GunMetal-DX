@@ -25,6 +25,7 @@
 #include "llviewerprecompiledheaders.h"
 
 #include "slfloaterviewerimport.h"
+#include "fsyspath.h"
 
 #include "llbutton.h"
 #include "llcallbacklist.h"
@@ -110,7 +111,7 @@ bool SLFloaterViewerImport::postBuild()
     return true;
 }
 
-// <GMDX> SoapStorm c6d090301f: when Firestorm's profile is not in the usual place (a copy,
+// <GMDX> SoapStorm c6d090301f (Soap Frenzy): when Firestorm's profile is not in the usual place (a copy,
 // a portable install, a Windows install seen from Linux), pick its folder by hand.
 void SLFloaterViewerImport::onChooseFolder()
 {
@@ -196,15 +197,15 @@ std::string SLFloaterViewerImport::stateLabel(slimport::EStatus status) const
 // static
 std::vector<slimport::SourceViewer> SLFloaterViewerImport::findInstalledViewers(std::vector<std::string>* search_log)
 {
-    const fs::path home = fs::u8path(gDirUtilp->getOSUserDir());
+    const fs::path home = fsyspath(gDirUtilp->getOSUserDir());
     std::vector<slimport::SearchBase> bases = { { home, std::string(), false } };
 #if LL_WINDOWS
     // Firestorm_x64 may also live under %LOCALAPPDATA%.
-    if (const auto local = LLStringUtil::getoptenv("LOCALAPPDATA")) bases.push_back({ fs::u8path(*local), std::string(), false });
+    if (const auto local = LLStringUtil::getoptenv("LOCALAPPDATA")) bases.push_back({ fsyspath(*local), std::string(), false });
 #elif LL_LINUX
     for (const slimport::SearchBase& base : slimport::sandboxedAppBases(home)) bases.push_back(base);
 #endif
-    return slimport::findSourceViewers(bases, fs::u8path(gDirUtilp->getOSUserAppDir()), search_log);
+    return slimport::findSourceViewers(bases, fsyspath(gDirUtilp->getOSUserAppDir()), search_log);
 }
 
 // static
@@ -243,7 +244,7 @@ void SLFloaterViewerImport::selectViewer(const std::string& viewer_id)
 
 void SLFloaterViewerImport::refreshViewers()
 {
-    const fs::path home = fs::u8path(gDirUtilp->getOSUserDir());
+    const fs::path home = fsyspath(gDirUtilp->getOSUserDir());
     const slimport::Sandbox sandbox = slimport::detectSandbox();
     if (!sandbox.kind.empty())
     {
@@ -307,7 +308,7 @@ void SLFloaterViewerImport::onViewerChanged()
     {
         mAccounts = slimport::findAccounts(*viewer);
         // Pre-select the account we're logged in as, if the other viewer has it.
-        const std::string ours = utf8(fs::u8path(gDirUtilp->getLindenUserDir()).filename());
+        const std::string ours = utf8(fsyspath(gDirUtilp->getLindenUserDir()).filename());
         S32 preselect = 0;
         for (size_t i = 0; i < mAccounts.size(); ++i)
         {

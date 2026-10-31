@@ -42,7 +42,7 @@
 #include "lldbstrings.h"
 #include "llavataractions.h"
 #include "llgroupactions.h"
-#include "llgroupcolormap.h" // <GMDX>
+#include "llgroupcolormap.h"
 #include "llgroupoptions.h"
 #include "lllineeditor.h"
 #include "llnamelistctrl.h"
@@ -213,7 +213,7 @@ bool LLPanelGroupGeneral::postBuild()
 
     }
 
-    LLGroupColorMap::initGroupColorSwatch(this); // <GMDX>
+    LLGroupColorMap::initGroupColorSwatch(this); // GunMetal-DX: nameplate colour row (hidden unless SLGroupColors)
 
     return LLPanelGroupTab::postBuild();
 }
@@ -493,6 +493,8 @@ void LLPanelGroupGeneral::update(LLGroupChange gc)
     LLGroupMgrGroupData* gdatap = LLGroupMgr::getInstance()->getGroupData(mGroupID);
 
     if (!gdatap) return;
+
+    LLGroupColorMap::refreshGroupColorSwatch(this); // GunMetal-DX
 
     LLGroupData agent_gdatap;
     bool is_member = false;
@@ -826,8 +828,6 @@ void LLPanelGroupGeneral::setGroupID(const LLUUID& id)
     mFounderName->setVisible(true);
 
     mInsignia->setImageAssetID(LLUUID::null);
-
-    LLGroupColorMap::refreshGroupColorSwatch(this); // <GMDX>
 
     resetDirty();
 

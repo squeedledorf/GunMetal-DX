@@ -74,6 +74,10 @@ public:
                                 //        UV density (LLCleanMeshAsset::computeUVDensity) or packUVExtent
     };                          // 224 B total, 16-aligned
 
+    // Per-face policy, classified at volume ingest. Stored bit14 is stripped by the
+    // vertex shaders before varying bit14 is independently derived as camera enclosure.
+    static constexpr U32 kEmissiveNoShadow = 16384u;
+
     // Owned world pose for a non-attachment, non-HUD volume prim, from OBJECT
     // state. Under Vulkan the target-omega spin (own, or the linkset root's) is
     // factored OUT of the rotation and returned as a spin record for the GPU;
@@ -126,7 +130,14 @@ public:
     // drag, scripted mover, linkset child): recompose model_matrix (+ spin record)
     // from object state and dirty the changed ones. No geometry/material work --
     // registration (capture, mesh decode) stays with the ingest sweep.
-    bool refreshObjectPose(LLViewerObject* obj);   // true if any instance pose changed
+    // The object's pose as the ingest's mover classification sees it: its first non-rigged
+    // row's model_matrix and spin axis (store frame). before / after (optional): that row
+    // before and after this refresh -- "changed" is any bit, and a settled pose recomposed
+    // through LL's eased drawable xform can differ by float rounding alone (the ingest
+    // tells motion from that noise, LLCleanIngest::poseMoved).
+    struct PoseSample { F32 m[16]; F32 spin[3]; };
+    bool refreshObjectPose(LLViewerObject* obj, PoseSample* before = nullptr,
+                           PoseSample* after = nullptr);   // true if any instance pose changed
     // #567 DYNAMIC SHADOW CASTER (instance bit21): set on an object's (non-rigged, non-HUD)
     // instances while the ingest's mover tracker sees it move on the CPU. Cached shadow
     // views (projector tiles) keep such casters out of their static layer and draw them
@@ -164,6 +175,20 @@ public:
     // the old row's AND the new row's). Bounded: past the cap only `overflow` is set.
     void setShadowDirtyCollect(bool on);
     void takeShadowDirty(std::vector<F32>& out, bool& overflow);
+    // GI's independent radiance deltas, observed at dirty-row upload from old AND new
+    // snapshots. Includes movers/tint/UV/release; never gated by static shadow relevance.
+    static constexpr U32 kGiRadianceSpheres = 64;
+    using GiRadianceSpheres = std::array<F32, 4 * kGiRadianceSpheres>;
+    void setGiRadianceCollect(bool on);
+    // Cumulative event counts, copied under the same lock as the finite delta queue.
+    // Missing local bounds must not destroy unrelated GI history every frame.
+    struct GiRadianceStats
+    {
+        U64 unknownPose = 0, badBounds = 0, nonfiniteBounds = 0;
+        U64 mirrorReset = 0, storeReset = 0, agentShift = 0;
+    };
+    U32 takeGiRadianceDirty(GiRadianceSpheres& out, bool& overflow, GiRadianceStats& stats);
+
     // #825 SHADOW REGISTRATION DIAGNOSTIC (RenderVKShadowRegDiag; the ingest turns it on with
     // the collection and logs a take every few seconds, VKShadowReg): WHY each emitting
     // registration emitted. A re-registration counts every field that differed (raw, before
@@ -215,6 +240,11 @@ private:
     // True when the row is a static-layer caster (emitted or coalesced into the last sphere).
     bool noteShadowDirtyLocked(const Instance& row);   // mMutex held
     void regDiagLocked(const LLUUID& id, U32 why, U32 row_flags, U32 flag_xor, F32 aabb_delta);   // mMutex held
+    void noteGiRadianceDirtyLocked(const Instance& row); // mMutex held; row is a store-frame snapshot
+    GiRadianceSpheres mGiRadianceDirty{};
+    GiRadianceStats mGiRadianceStats{};
+    U32 mGiRadianceCount = 0;
+    bool mGiRadianceOn = false, mGiRadianceOverflow = false;
     std::vector<F32> mShadowDirty;
     bool mShadowDirtyOn = false, mShadowDirtyOverflow = false;
     bool mRegDiagOn = false;
@@ -359,7 +389,7 @@ public:
     // sync_out (#568): the render-world frame of the mirror rows (upload: R - d) and the
     // pending GPU agent shift (consumed). Its gpu_shift ACCUMULATES into *sync_out.
     void copyDirtyVK(std::vector<U8>& mirror, std::vector<std::pair<U32, U32>>& runs, U32 heal_mode = 2,
-                     U32* live_out = nullptr, VKFrameSync* sync_out = nullptr);
+                     U32* live_out = nullptr, VKFrameSync* sync_out = nullptr, std::vector<U32>* generations = nullptr);
 
     // ROW CHANGE LOG (cluster LOD gather, llcleanclusterselectvk.cpp). While on, copyDirtyVK
     // also appends every dirtied id run it consumes (NOT the self-heal slice) here, so a
@@ -475,6 +505,7 @@ private:
 
     std::vector<std::pair<LLUUID, S32>> mIdToKey;   // id -> key (GPU pick results: keyForId)
     U32 mUpsertCount = 0;        // real instance content changes (sweep adaptive pacing)
+    U64 mNextAllocationGeneration = 0; // not reset on shrink/shutdown: row IDs may return
     U32 mNewCount = 0;           // instances created (sweep adaptive pacing)
     U32 mWaterExclCount = 0;     // live instances with WATER_EXCLUSION_FLAG
     // #568 render-world frame (see rowAgentSpace): d, the GPU agent shift not yet handed to

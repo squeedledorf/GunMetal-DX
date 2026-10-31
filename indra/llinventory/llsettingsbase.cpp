@@ -31,6 +31,7 @@
 
 #include "llmath.h"
 #include <algorithm>
+#include <cmath>
 
 #include "llsdserialize.h"
 #include <boost/bind.hpp>
@@ -780,7 +781,7 @@ void LLSettingsBlender::update(const LLSettingsBase::BlendFactor& blendf)
 F64 LLSettingsBlender::setBlendFactor(const LLSettingsBase::BlendFactor& blendf_in)
 {
     LLSettingsBase::TrackPosition blendf = (F32)blendf_in;
-    llassert(!isnan(blendf));
+    llassert(!std::isnan(blendf));
     if (blendf >= 1.0)
     {
         triggerComplete();

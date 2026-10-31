@@ -17,10 +17,6 @@
 //  - Unmarched texels keep the (clamped) reprojected history; without one (reset, off
 //    screen last frame) they take the mean of the marched neighbours.
 // Snapshots skip this pass (every texel marched, the composite reads the march directly).
-// <GMDX> Camera in the cloud layer (vc.temporal.w = 1; every texel marched): a texel whose march
-// ended at another surface than its history's (B.w: an avatar or a roof moved across it) starts
-// again from this frame -- that blend left the trails -- and B.w carries the march end on, so
-// the composite still thins the cloud in front of a near surface.
 layout(local_size_x = 8, local_size_y = 8) in;
 
 #include "clean_frame_info.glsl"
@@ -35,8 +31,13 @@ layout(set = 1, binding = 8) uniform sampler2D uHistB;
 layout(set = 1, binding = 9, rgba16f) writeonly uniform image2D uOutA;
 layout(set = 1, binding = 10, rgba16f) writeonly uniform image2D uOutB;
 
-vec3 viewDir(ivec2 px)
+vec3 viewDir(ivec2 px,out vec3 origin)
 {
+    origin=vc.cam.xyz;
+    if(cmOn())
+    {
+        vec3 V;cmRay((vec2(px)+0.5)/vc.dims.zw,MEDIUM_EYE,origin,V);return V;
+    }
     const vec2 ndc = (vec2(px) + 0.5) / vc.dims.zw * 2.0 - 1.0;
     const vec4 w = vc.inv_vp * vec4(ndc, 0.5, 1.0);
     const vec3 r = w.xyz / w.w;
@@ -44,9 +45,9 @@ vec3 viewDir(ivec2 px)
 }
 
 // Last frame's uv of the point at distance d along V; false = behind / off screen.
-bool reprojectUV(vec3 V, float d, out vec2 uv)
+bool reprojectUV(vec3 origin,vec3 V, float d, out vec2 uv)
 {
-    const vec4 c = vc.reproj * vec4(V * d, 1.0);
+    const vec4 c = vc.reproj * vec4(origin-vc.cam.xyz+V*d, 1.0);
     if (c.w <= 1e-6) { uv = vec2(-1.0); return false; }
     uv = (c.xy / c.w) * 0.5 + 0.5;
     return all(greaterThanEqual(uv, vec2(0.0))) && all(lessThanEqual(uv, vec2(1.0)));
@@ -59,7 +60,8 @@ void main()
     if (px.x >= sz.x || px.y >= sz.y) return;
 
     const bool cur = vcMarchedNow(px);
-    const vec3 V = viewDir(px);
+    vec3 origin;
+    const vec3 V = viewDir(px,origin);
     const bool reset = vc.temporal.y > 0.5;
 
     // This frame's marched neighbourhood: min / max box and mean (A), mean of B.
@@ -92,21 +94,18 @@ void main()
     vec2 uv;
     if (!cur)
     {
-        if (reprojectUV(V, VC_FAR, uv)) d = textureLod(uHistB, uv, 0.0).y;
+        if (reprojectUV(origin,V, VC_FAR, uv)) d = textureLod(uHistB, uv, 0.0).y;
     }
     d = clamp(d, 50.0, VC_FAR);
-    const bool valid = !reset && reprojectUV(V, d, uv);
+    const bool valid = !reset && reprojectUV(origin,V, d, uv);
     vec4 hA = vec4(0.0, 0.0, 0.0, 1.0), hB = vec4(VC_FAR, VC_FAR, 0.0, 0.0);
     if (valid) { hA = textureLod(uHistA, uv, 0.0); hB = textureLod(uHistB, uv, 0.0); }
 
     const vec4 widen = (mx - mn) * vc.temporal.z + vec4(vec3(0.002), 0.01);
-    // <GMDX> in the layer: the history's march ended at another surface (10% + 2 m apart)
-    const bool inLayer = vc.temporal.w > 0.5;
-    const bool endMoved = inLayer && abs(curB.w - hB.w) > 0.1 * min(curB.w, hB.w) + 2.0;
     vec4 outA, outB;
     if (cur)
     {
-        if (!valid || endMoved)   // <GMDX> (|| endMoved)
+        if (!valid)
         {
             outA = curA;
             outB = vec4(curB.xy, 1.0, 0.0);
@@ -129,7 +128,6 @@ void main()
         outA = mean;
         outB = vec4(meanB, 1.0, 0.0);
     }
-    if (inLayer) outB.w = cur ? curB.w : hB.w;   // <GMDX> the march end (the composite's thinning)
     outA = vec4(max(outA.rgb, vec3(0.0)), clamp(outA.a, 0.0, 1.0));
     imageStore(uOutA, px, outA);
     imageStore(uOutB, px, outB);

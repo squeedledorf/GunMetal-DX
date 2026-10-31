@@ -1,22 +1,25 @@
 #version 450
-// <GMDX> upstream's clean_vol_cloud_march.comp on the GunMetal-DX cloud model (gmdx_cloud_common.glsl).
 #extension GL_GOOGLE_include_directive : require
-// vkclean -- VOLUMETRIC CLOUDS (#719): the main-view MARCH.
+// GUNMETAL-DX VOLUMETRIC CLOUDS: the main-view MARCH (GunMetal-DX's cloud model, gmdx_cloud_common.glsl;
+// Slipstream's clean_vol_cloud_march.comp with the same contract). Copyright (C) 2026, squeedledorf
+// (GunMetal-DX). LGPL 2.1, as the viewer.
 //
 // At QUARTER resolution (half the render extent per axis), after pass 1 (the finished opaque
 // depth). Partial update: per frame only a pattern of texels is marched (quality 1: one of
-// each 2x2 block, Bayer order; 2: a checkerboard; 3 / snapshots: all) -- the temporal pass
-// (clean_vol_cloud_temporal.comp) reprojects the rest from history.
+// each 2x2 block, Bayer order; 2: a checkerboard; 3 / snapshots / the camera in the layer: all)
+// -- the temporal pass (gmdx_cloud_temporal.comp) reprojects the rest from history.
 //
-// Each texel marches its view ray (the texel centre's, unjittered) through the slab, ending
-// at the FARTHEST scene depth of its 2x2 render pixels (so a building edge does not cut the
-// clouds behind the sky pixels of the block; the composite's per-pixel entry-distance test
-// keeps clouds off the nearer pixels), the max distance, or the slab exit. Early exit on
-// opaque (T < 0.01). Then the aerial perspective / far fade (vcAtmosphere).
+// Each texel marches its view ray (the texel centre's, unjittered; the camera medium's own ray
+// with it on, Slipstream #1266) through the shell, ending at the FARTHEST scene depth of its 2x2
+// render pixels (so a building edge does not cut the clouds behind the sky pixels of the block;
+// the composite's per-pixel entry-distance test keeps clouds off the nearer pixels), the max
+// distance, or the shell's exit. Early exit on opaque. Then the aerial perspective / far fade
+// (vcAtmosphere).
 //
 // Out A: rgb = in-scatter (LINEAR HDR, premultiplied), a = transmittance.
 // Out B: x = entry distance (first cloud sample, m; 65000 = none), y = transmittance-weighted
-//        mean distance (reprojection / haze key), zw = 0.
+//        mean distance (reprojection / haze key), z = 0, w = where the march ended (its farthest
+//        scene depth: gmdx_cloud_composite.frag thins the cloud for nearer pixels of the block).
 layout(local_size_x = 8, local_size_y = 8) in;
 
 #include "clean_frame_info.glsl"
@@ -27,8 +30,6 @@ layout(local_size_x = 8, local_size_y = 8) in;
 layout(set = 1, binding = 4) uniform sampler2D uDepth;                 // world depth (texelFetch)
 layout(set = 1, binding = 5, rgba16f) writeonly uniform image2D uOutA;
 layout(set = 1, binding = 6, rgba16f) writeonly uniform image2D uOutB;
-
-// (View, extents, pattern: the module UBO, vc.inv_vp / dims / pat.)
 
 vec3 relAt(vec2 rpx, float d, bool unjitter)
 {
@@ -69,20 +70,23 @@ void main()
             if (d < dmin) { dmin = d; rfar = rp; }
         }
     const bool sky = dmin <= 0.0;
-    const float tmax = sky ? VC_FAR : length(relAt(vec2(rfar) + 0.5, dmin, true));
+    float tmax = sky ? VC_FAR : length(relAt(vec2(rfar) + 0.5, dmin, true));
 
     const vec3 rel = relAt((vec2(opx) + 0.5) * scale, 0.5, false);
-    const vec3 V = rel / max(length(rel), 1e-6);
+    vec3 V = rel / max(length(rel), 1e-6), O = vc.cam.xyz;
+    if (cmOn())
+    {
+        // (Slipstream #1266: the camera medium's ray, so the composite's prefix lines up)
+        cmRay((vec2(opx) + 0.5) / vc.dims.zw, MEDIUM_EYE, O, V);
+        if (!sky) tmax = max(dot(vc.cam.xyz + relAt(vec2(rfar) + 0.5, dmin, true) - O, V), 0.0);
+    }
 
     const VcLight l = vcLightSetup();
     // Rotating dither only while something integrates it (the temporal pass); snapshots and
     // the no-history mode keep a static per-texel pattern.
     const float jitter = vcIgn(vec2(opx) + 5.588238 * float(uint(vc.march.z) % 64u));
-    VcResult r = vcMarch(l, V, tmax, int(vc.pat.z), int(vc.pat.w), jitter);
+    VcResult r = vcMarch(l, V, tmax, int(vc.pat.z), int(vc.pat.w), jitter, O);
     r = vcAtmosphere(r, V);
     imageStore(uOutA, opx, vec4(r.scat, r.T));
-    // <GMDX> w = where this texel's march ended (its farthest scene depth): gmdx_cloud_composite.frag
-    // thins the cloud for nearer pixels of the block (read only without history: the temporal pass
-    // writes w = 0).
     imageStore(uOutB, opx, vec4(min(r.entry, VC_FAR), min(r.dmean, VC_FAR), 0.0, min(tmax, VC_FAR)));
 }

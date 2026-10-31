@@ -1186,11 +1186,9 @@ void FSAreaSearch::getNameFromUUID(const LLUUID& id, std::string& name, bool gro
 
     if (group)
     {
-        bool is_group = false;
         // LLCacheName lacks FS's getIfThere(); emulate by trying group then full name.
         bool found = gCacheName->getGroupName(id, name);
-        if (found) { is_group = true; }
-        else { found = gCacheName->getFullName(id, name); }
+        if (!found) { found = gCacheName->getFullName(id, name); }
         if (!found)
         {
             name = unknown_name;
@@ -2047,7 +2045,7 @@ bool FSPanelAreaSearchList::onContextMenuItemClick(const LLSD& userdata)
                 case 'q': // q_zoom
                 {
                     // Disable flycam if active.  Without this, the requested look-at doesn't happen because the flycam code overrides all other camera motion.
-                    // <GMDX> the flycam lives on LLAgentCamera now (Linden Lab's game control)
+                    // Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4: the flycam lives on LLAgentCamera
                     bool fly_cam_status(gAgentCamera.isUsingFlycam());
                     if (fly_cam_status)
                     {

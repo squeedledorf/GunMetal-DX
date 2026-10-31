@@ -27,6 +27,7 @@
 #ifndef FS_GROUPTITLEREGIONMGR_H
 #define FS_GROUPTITLEREGIONMGR_H
 
+#include "llevent.h"
 #include "lleventtimer.h"
 #include "llsingleton.h"
 #include "lluuid.h"
@@ -43,13 +44,17 @@ struct FSRegionTitleAssignment
     std::string mDisplayName;
 };
 
-class FSGroupTitleRegionMgr : public LLSingleton<FSGroupTitleRegionMgr>
+class FSGroupTitleRegionMgr : public LLSingleton<FSGroupTitleRegionMgr>, public LLOldEvents::LLSimpleListener
 {
     LOG_CLASS(FSGroupTitleRegionMgr);
     LLSINGLETON(FSGroupTitleRegionMgr);
     ~FSGroupTitleRegionMgr();
 
 public:
+    // #868: make the group active and wear the title (also the Group Titles floater's Activate)
+    void applyGroupTitle(const LLUUID& group_id, const LLUUID& role_id);
+    bool handleEvent(LLPointer<LLOldEvents::LLEvent> event, const LLSD& userdata) override;
+
     void loadFromDisk();
     void saveToDisk();
     void setAssignment(const LLUUID& group_id, const LLUUID& role_id, const std::string& region_name);
@@ -72,7 +77,7 @@ public:
 
 private:
     void validateAndSetAssignment(const LLUUID& group_id, const LLUUID& role_id, const std::string& region_name);
-    void applyGroupTitle(const LLUUID& group_id, const LLUUID& role_id);
+    void sendGroupTitle(const LLUUID& group_id, const LLUUID& role_id);
     void onRegionChanged();
     void cancelPendingValidation();
     void onValidationResult(U64 region_handle);
@@ -95,6 +100,11 @@ private:
     std::string     mPendingRegionName;
     LLEventTimer*   mValidationTimer  = nullptr;
     LLEventTimer*   mLoginRetryTimer  = nullptr;
+
+    // #868: the title to send once the server reports this group active, until the expiry
+    LLUUID          mActivatingGroupID;
+    LLUUID          mActivatingRoleID;
+    F64             mActivatingExpiry = 0.0;
 
     boost::signals2::connection  mRegionChangedConnection;
     assignments_changed_signal_t mAssignmentsChangedSignal;

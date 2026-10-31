@@ -273,6 +273,7 @@ private:
 
     typedef std::map<LLUUID, LLInventoryGalleryItem*> gallery_item_map_t;
     gallery_item_map_t mItemMap;
+    boost::signals2::scoped_connection mFolderIconStyleConnection;
     uuid_vec_t mCOFLinkedItems;
     uuid_vec_t mActiveGestures;
     uuid_set_t mItemBuildQuery;
@@ -343,6 +344,7 @@ public:
     void setHidden(bool hidden) {mHidden = hidden;}
 
     void setType(LLAssetType::EType type, LLInventoryType::EType inventory_type, U32 flags, bool is_link);
+    void refreshFolderIcon();
     void setFavorite(bool is_favorite);
     LLAssetType::EType getAssetType() { return mType; }
     void setThumbnail(LLUUID id);

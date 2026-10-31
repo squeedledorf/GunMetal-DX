@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pin icons A-Z and 0-9: the character (Barlow SemiBold, OFL, the chat log's font) inside a
+"""Pin icons A-Z and 0-9: the character (Barlow SemiBold, OFL) inside a
 rounded square drawn like Phosphor's regular icons (256 grid, 16 px stroke).
 Writes indra/newview/skins/default/textures/phosphor_authored/{letter,number}-*.svg."""
 import os, sys
@@ -9,7 +9,7 @@ from fontTools.pens.boundsPen import BoundsPen
 from fontTools.pens.transformPen import TransformPen
 
 root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
-font = TTFont(os.path.join(root, "indra/newview/fontsets/Barlow-SemiBold.ttf"))
+font = TTFont(os.path.join(root, "scripts/pinicons/Barlow-SemiBold.ttf"))   # (Barlow SemiBold, SIL OFL 1.1: scripts/pinicons/BarlowOFL.txt)
 out_dir = os.path.join(root, "indra/newview/skins/default/textures/phosphor_authored")
 gs = font.getGlyphSet(); cmap = font.getBestCmap()
 CAP = 112.0                     # character height in the 256 grid (the frame's inside is 176)

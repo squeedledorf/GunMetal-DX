@@ -25,6 +25,12 @@ struct SSRView {
     mat4 taa_cur_vp;      // TEMPORAL: UNJITTERED (P - cam_origin) -> clip of this frame / the previous one
     mat4 taa_prev_vp;
 };                        // 384 B
+struct CameraMediumView {
+    mat4 vp, inv_vp;
+    vec4 eye, grid, slice, fog, albedo, misc;
+    vec4 forward; // xyz parallel axis, w orthographic
+    vec4 mapping; // current start m, previous start m, previous range, previous distribution n
+};
 layout(std140, set = 0, binding = 9) uniform SSRBuf {
     vec4 params0;   // iterations, ray step, distance bias, depth reject bias
     vec4 params1;   // adaptive step multiplier, enabled
@@ -65,8 +71,7 @@ layout(std140, set = 0, binding = 9) uniform SSRBuf {
     vec4 sky_fx;
     vec4 sky_fx2;
     // Per meteor i: [3i] head dir.xyz (world, unit), width scale; [3i+1] tail dir.xyz;
-    // [3i+2] linear colour x envelope. <GMDX> At most 56 meteors: [168..191] are the night
-    // sky's (gmdx_night_sky.glsl NS_SPACE: planets, satellites, star options).
+    // [3i+2] linear colour x envelope.
     vec4 meteors[192];
     // Cloud layer (clean_clouds.glsl): [0] colour.rgb, scale  [1] pos/density1 (scrolled),
     // variance  [2] pos/density2, noise blend  [3] noise idx A, B, 0, enabled.
@@ -143,8 +148,8 @@ layout(std140, set = 0, binding = 9) uniform SSRBuf {
     // CLUSTER LOD SHADOW RECEIVER LIFT (#747 interim, clean_rt_shadow_mask.comp): x metres
     // of lift per metre of camera distance (the main view's tolerance / px_scale x
     // RenderVKClusterShadowLiftScale), y the near clip (m), z 1 = an avatar is drawn by the
-    // cluster path this frame (0: no lift, no probe).
-    // w <GMDX> (unused upstream): space at altitude, 0 .. 1 (clean_atmos_common.glsl gmdxSpace).
+    // cluster path this frame (0: no lift, no probe), w 1 = orthographic main view: x is
+    // the flat lift in metres, without camera-distance scaling (0: perspective).
     vec4 cluster_rt;
     // AMBIENT OCCLUSION RESOLUTION (RenderVKAOHalfRes / RenderVKAOUpsample; clean_surface_light
     // aoSample): x 0 = the AO target is full resolution (read at the pixel), 1 = half resolution,
@@ -188,9 +193,7 @@ layout(std140, set = 0, binding = 9) uniform SSRBuf {
     // [0] mode (0 = classic 2D layer, 2 = volumetric layer live), base / top altitude (m),
     //     cloud shadow strength (0 = no cloud shadow map)
     // [1] shadow map centre xy (agent world, on the base plane), 1 / extent (per m), panorama valid
-    // [2] light direction the shadow map was built for (xyz), w <GMDX> the clouds' moonlight gain
-    //     (GMDXNightCloudLight; clean_atmos_common.glsl gmdxCloudMoonGain, every frame)
-    // [3] reserved (<GMDX> cloud corona xyz, the night sky's light w)
+    // [2] light direction the shadow map was built for (xyz), unused   [3] reserved
     vec4 vol_clouds[4];
     // WEATHER (#783; LLCleanWeatherVK::fillFrameInfo, clean_weather_surface.glsl has the
     // contract): [0] wetness, rain, time, ripple strength; [1] coarse occlusion map corner xy,
@@ -205,17 +208,43 @@ layout(std140, set = 0, binding = 9) uniform SSRBuf {
     // fills it from RenderVKShadowReceiverFit / RenderVKShadowPlaneTolerance /
     // RenderVKShadowPCSSMaxRadius): x 1 = on (0 = the old receiver offsets and filter compares),
     // y the receiver-plane slope tolerance (depth m per m of filter-tap offset), z the PCSS filter
-    // radius cap (world m, 0 = none), w <GMDX> the moon disc's brightness as a light (GMDXMoonDisc,
-    // clean_atmos_common.glsl gmdxMoonDiscGain; 0 = LL's disc, -1 = a creator's moon texture: LL's disc, no phase).
+    // radius cap (world m, 0 = none), w unused.
     vec4 shadow_fit;
-    // <GMDX> PHYSICAL SKY parameters (RenderVKPhysicalSky; clean_physky.glsl has the layout,
-    // LLCleanRendererVK::physSkyFill fills them). [4].w = 0: the WindLight sky as before.
+    // PHYSICAL SKY (RenderVKPhysicalSky; clean_physky.glsl has the layout, LLCleanRendererVK::
+    // physSkyFill fills it from atmos[] and the camera). [4].w = 0: the WindLight sky as before.
+    // Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
     vec4 physky[8];
-    // <GMDX> ALPHA-MASK PULL (clean_draw.vert; GMDXAlphaMaskPull*): x base metres, y metres per
-    // metre of distance, z grazing-factor cap; x = 0: off.
-    vec4 gmdx_misc;
+    // PHYSICAL NIGHT (RenderVKPhysicalNight; slnightlight.h, clean_atmos_common.glsl nightOn ...).
+    // All zero = off (the old Second Life night):
+    //  [0] x 0 off, else the moon's light as a fraction of the sun's when the physical sky draws it
+    //      as a second light (> 0), -1 on without it; y the WindLight sky's own light strength q
+    //      (>= 0 the sun's colour x q, < 0 the moon's: the sun's colour x -q in linear light);
+    //      z the clouds' moonlight gain (1 by day); w the night's ambient factor (linear, 1 = stock)
+    //  [1] xyz the WindLight sky's own light direction (world, z >= -0.1; the dome, its #819 table,
+    //      the probes' sky, the classic 2D clouds), w space at altitude 0 .. 1 (slspacealt.h)
+    //  [2] x the moon disc's brightness as a light (0 = LL's disc, -1 = a creator's own moon
+    //      texture), y cloud corona strength (0 = off), z its droplet diameter (um), w the 22-degree
+    //      halo strength (0 = off; clean_cloud_corona.glsl)
+    vec4 night[3];
+    // NIGHT SKY (slnightsky.h, clean_night_sky.glsl; zero = LL's random stars):
+    //  [0] celestial pole latitude (rad), the season's sun longitude (rad), twinkle time (s), twinkle
+    //  [1] zodiacal light, airglow, Milky Way (linear sky units), the catalogue stars' light (0 = off)
+    //  [2] bindless idx star grid, Milky Way panorama, 0, 0
+    vec4 night_sky[3];
+    // ... and its space objects (clean_night_sky.glsl NS_SPACE): [0..4] planets (J2000 dir, light),
+    // [5..9] their colours, [10..15] satellites (world dir, light), [16] / [17] star / deep-sky options.
+    vec4 night_space[24];
     // LAYERED STEREO (#1075): the per-view block (SSRView above), [0] = the desktop's / the left eye's.
     SSRView views[CLEAN_MAX_VIEWS];
+    CameraMediumView medium[CLEAN_MAX_VIEWS];
+    vec4 haze; // sigma0 /m, scale height m, start m, height-only tau cap
+    vec4 haze_mode; // effective physical mode, volumetric lighting, water base, finite range
+    vec4 haze_mist[2]; // stable noise offsets; bank size, roll height, breakup
+    mat4 medium_union_vp; // shared particle selection and conservative XY bins
+    vec4 history_time; // x real recording delta in ms, clamped 0.1..100; yzw reserved
+    // <GMDX> ALPHA-MASK PULL (clean_draw.vert; GMDXAlphaMaskPull*): x base metres, y metres per
+    // metre of distance, z grazing-factor cap, w 0; x = 0: off. Last, after upstream's members.
+    vec4 gmdx_alpha_pull;
 } ssr;
 
 // Cascade c's shadow NDC (xy [-1,1] -> uv, z [0,1]) of world position P (#555).
@@ -269,9 +298,9 @@ bool noTemporalFace(uint flags)
 #include "clean_alpha_rule.glsl"
 float maskCoverageK() { return float((uint(ssr.lit_dbg.x + 0.5) >> 18) & 63u) * (1.0 / 16.0); }
 float maskTestAlpha(float a, float lod) { return alphaCoverage(a, lod, maskCoverageK()); }
-// <GMDX> with the material's cutoff: above the cutoff ceiling (247.5/255, llvovolume.cpp
-// kMaskCutoffCeiling) it is a dissolve's "only fully opaque" (clean_mask_cutoff): no coverage
-// scale, or the faded parts come back.
+// Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4: with the material's cutoff.
+// Above the cutoff ceiling (247.5/255, llvovolume.cpp kMaskCutoffCeiling) it is a dissolve's
+// "only fully opaque" (clean_mask_cutoff): no coverage scale, or the faded parts come back.
 float maskTestAlpha(float a, float lod, float cutoff) { return cutoff <= 0.9706 ? maskTestAlpha(a, lod) : a; }
 
 float taaLodBias(uint flags) { return (ssr.taa_params.w > 0.5 && (flags & 8u) == 0u && !noTemporalFace(flags)) ? ssr.taa_scale.x : 0.0; }
@@ -326,3 +355,5 @@ uint specProbeTopN()     { return kSpecTopN >= 0 ? uint(kSpecTopN) : min(uint(ss
 bool specAOOn()          { return kSpecAO != 0 && ssr.params1.w > 0.5; }
 bool specSpecOcc()       { return kSpecAOMode >= 0 ? (kSpecAOMode & 1) != 0 : ssr.ao_params2.x > 0.5; }
 bool specAOStandard()    { return kSpecAOMode >= 0 ? (kSpecAOMode & 2) != 0 : ssr.ao_params2.y > 0.5; }
+
+#include "clean_rt_projection.glsl"

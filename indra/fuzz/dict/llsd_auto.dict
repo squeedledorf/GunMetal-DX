@@ -1,0 +1,13 @@
+# Header sniffing for LLSDSerialize::deserialize, plus the root tokens of each flavour
+"<? llsd/binary ?>"
+"<? llsd/notation ?>"
+"<? llsd/xml ?>"
+"<?llsd/binary?>"
+"<?llsd/notation?>"
+"<?llsd/xml?>"
+"<llsd>"
+"</llsd>"
+"<?xml"
+"{"
+"["
+"\x0a"

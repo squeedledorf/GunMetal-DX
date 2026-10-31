@@ -28,7 +28,7 @@
 
 #include "llpanelpreferencegamecontrol.h"
 
-#include "alcurveeditorctrl.h"
+#include "slcurveeditorctrl.h"
 #include "llbutton.h"
 #include "llcheckboxctrl.h"
 #include "llcombobox.h"
@@ -411,7 +411,7 @@ bool LLPanelPreferenceGameControl::postBuild()
     mTuneDeadZone = getChild<LLSliderCtrl>("tune_dead_zone");
     mTuneDeadZone->setCommitCallback([this](LLUICtrl*, const LLSD&) { onDeadZoneCommit(); });
     mStickView = getChild<SSGameControlStickView>("stick_view");
-    mCurveView = getChild<ALCurveEditorCtrl>("curve_view");
+    mCurveView = getChild<SLCurveEditorCtrl>("curve_view");
     mCurveView->setHandles({});
 
     // ---- list view ----
@@ -459,7 +459,6 @@ bool LLPanelPreferenceGameControl::postBuild()
 
 void LLPanelPreferenceGameControl::onOpen(const LLSD& key)
 {
-    mCheckGameControlToServer->setValue(LLGameControl::sendToServer());
     mStyleList->setValue(std::to_string(gSavedSettings.getS32("GameControlButtonStyle")));
     clearSelectionState();
     updateControllerName();

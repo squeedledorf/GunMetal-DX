@@ -64,6 +64,7 @@ private:
     void updateControls(const LLSD& info) override;
 
     void onSend();
+    void performTimedAction(const LLSD& action) override;
     void updateUploadCost();
     S32 calculateUploadCost();
 };
@@ -116,6 +117,15 @@ void LLPanelSnapshotInventory::onResolutionCommit(LLUICtrl* ctrl)
 }
 
 void LLPanelSnapshotInventory::onSend()
+{
+    if (auto* floater = dynamic_cast<LLFloaterSnapshot*>(mSnapshotFloater))
+    {
+        if (floater->startTimedAction(this, LLSD().with("type", "inventory"))) return;
+    }
+    performTimedAction(LLSD());
+}
+
+void LLPanelSnapshotInventory::performTimedAction(const LLSD&)
 {
     S32 expected_upload_cost = calculateUploadCost();
     if (can_afford_transaction(expected_upload_cost))

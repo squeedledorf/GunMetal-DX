@@ -231,6 +231,14 @@
                             name="ice_level"
                             width="207"
                             can_edit_text="true"/>
+                    <check_box name="haze_start_auto" label="Haze start (m): Automatic" follows="left|top"
+                            layout="topleft" left_delta="-5" top_delta="30" width="200" height="16"
+                            tool_tip="Automatic derives the start distance for artistic height haze. Air and far fade are unaffected." />
+                    <slider name="haze_start" follows="left|top" layout="topleft" left_delta="5" top_delta="20"
+                            width="207" height="16" min_val="0" max_val="512" increment="1" decimal_digits="0"
+                            can_edit_text="true" tool_tip="Artistic height haze start distance in metres." />
+                    <text name="haze_start_status" follows="left|top" layout="topleft" left_delta="0" top_delta="20"
+                            width="207" height="16" />
                 </layout_panel>            
                 <layout_panel
                         name="right_lp"
@@ -361,6 +369,14 @@
                           top_delta="20"
                           width="207"
                           can_edit_text="true"/>
+                    <check_box name="haze_opacity_auto" label="Haze opacity (%): Automatic" follows="left|top"
+                            layout="topleft" left_delta="-5" top_delta="30" width="200" height="16"
+                            tool_tip="Automatic derives the opacity limit for artistic height haze. Clouds, water and far fade are unaffected." />
+                    <slider name="haze_opacity" follows="left|top" layout="topleft" left_delta="5" top_delta="20"
+                            width="207" height="16" min_val="0" max_val="95" increment="1" decimal_digits="0"
+                            can_edit_text="true" tool_tip="Maximum artistic height haze opacity, in percent." />
+                    <text name="haze_opacity_status" follows="left|top" layout="topleft" left_delta="0" top_delta="20"
+                            width="207" height="16" />
                 </layout_panel>            
             </layout_stack>                
         </layout_panel>

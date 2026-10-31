@@ -1398,11 +1398,11 @@ bool LLTextureFetchWorker::doWork(S32 param)
             }
         }
 
-        static LLCachedControl<bool> use_http(gSavedSettings, "ImagePipelineUseHTTP", true);
         U8 net_why = LLTextureFetch::NET_WHY_NO_HTTP;   // #951: unless a branch below says otherwise
 
-//      if (mHost.isInvalid()) get_url = false;
-        if ( use_http && mCanUseHTTP && mUrl.empty())//get http url.
+        // #1225: HTTP is the only network transport. The obsolete ImagePipelineUseHTTP
+        // setting could leave every UUID cache miss here forever, without a URL or retry.
+        if (mCanUseHTTP && mUrl.empty()) // get HTTP URL
         {
             LLViewerRegion* region = getRegion();
             // #951: the ViewerAsset URL is the grid's asset CDN, the same from every region. A texture

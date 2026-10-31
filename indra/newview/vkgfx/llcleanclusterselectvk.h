@@ -177,6 +177,7 @@ public:
     static constexpr uint32_t kViewsTailOffset = LLClusterFmt::kMaxViews * 256;   // ClSelectAux
     static constexpr uint32_t kSelectAuxBytes = 400;   // (+ the alpha lists' uvec4; rig bits 2 x 32 words at 1024 slots)
     // 1b-private ClusterInstance::flags bits.
+    static constexpr uint32_t kInstEmissiveNoShadow = 1u << 14;
     static constexpr uint32_t kInstDoubleSided = 1u << 8;
     static constexpr uint32_t kInstNoCone      = 1u << 9;
     static constexpr uint32_t kInstDraw        = 1u << 10;

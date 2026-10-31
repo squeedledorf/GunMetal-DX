@@ -21,6 +21,13 @@ layout(location = 0) out vec2 v_uv;          // rain: x along (0 head .. 1 tail)
 layout(location = 1) flat out float v_alpha;
 layout(location = 2) flat out float v_snow;
 layout(location = 4) flat out float v_veil;   // #954: the veil's transmittance to the particle (1 = none)
+#if !defined(WEATHER_STREAM) && !defined(WEATHER_SPLASH)
+// RenderVKWeatherOcclDebug (wp.veil2.y): the streak's colour by its roof test (clean_weather_sim.comp
+// writes the reason into the particle's w): magenta no roof over it in either map, green over the roof
+// (near map), cyan over the roof (coarse map), yellow under the roof within the slack, blue a
+// run-off drip; -1 = not debugging.
+layout(location = 5) flat out vec3 v_dbg;
+#endif
 #ifdef WEATHER_STREAM
 // M4 RUN-OFF STREAMS (-DWEATHER_STREAM): one instance per run-off emitter (the list's indirect
 // draw); an emitter whose discharge (catchment x strength) passes the stream threshold is a thin
@@ -140,6 +147,13 @@ void main()
     }
     else
         a = particles[i].xyz - wp.eye.xyz;
+    v_dbg = vec3(-1.0);
+    if (wp.veil2.y > 0.5)
+    {
+        const float why = drip ? 5.0 : particles[i].w;
+        v_dbg = why < 1.5 ? vec3(1.0, 0.0, 1.0) : why < 2.5 ? vec3(0.1, 1.0, 0.1) : why < 3.5 ? vec3(0.0, 1.0, 1.0)
+              : why < 4.5 ? vec3(1.0, 1.0, 0.0) : vec3(0.2, 0.4, 1.0);
+    }
     const bool snow = !drip && wxIsSnow(i);
     const bool blow = !drip && wxIsDrift(i);
     const vec2 cr = kCorner[gl_VertexIndex % 6];

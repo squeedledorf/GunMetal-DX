@@ -95,8 +95,11 @@ Incremental work: after the first full build, iterate with
 
 Useful variables: `make PRESET=linux-release` (with proprietary packages, rarely needed),
 `make EXTRA_CMAKE_FLAGS=...`, `make VIEWER_CHANNEL="..." BUILD_ID=...` (cosmetic: title bar and
-`build_data.json`). Local builds identify as "Slipstream Test x.y.z.0". The Makefile passes
-`-DGCC_DISABLE_FATAL_WARNINGS=ON` so a newer GCC does not stop on new warning categories.
+`build_data.json`). Local builds identify as "Slipstream Test x.y.z.0". Local builds use `-Werror`
+like CI. If a newer GCC adds a warning category, use the escape hatch
+`make EXTRA_CMAKE_FLAGS=-DGCC_DISABLE_FATAL_WARNINGS=ON`. Our own code also gets a stricter
+warning tier (`SL_STRICT_WARNINGS`, `indra/cmake/SLStrictWarnings.cmake`; non-fatal until
+`SL_STRICT_WARNINGS_FATAL=ON`).
 
 The 3p download cache: third-party prebuilt libraries (Boost, SDL3, OpenSSL, ...) are
 downloaded, hash-verified and unpacked by CMake itself (`indra/cmake/Prebuilt.cmake`, driven by

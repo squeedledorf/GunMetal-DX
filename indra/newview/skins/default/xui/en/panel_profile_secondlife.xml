@@ -543,7 +543,26 @@ Account: [ACCTTYPE]
      enabled="false"
      max_length_bytes="254"
      value="00000000-0000-0000-0000-000000000000"
-     width="250"/>
+     width="230"/>
+    <!-- own profile only: preview the profile the way others see it -->
+    <button
+     name="btn_preview"
+     tool_tip="Preview how others see your profile"
+     is_toggle="true"
+     image_unselected="Profile_Group_Visibility_On"
+     image_pressed="Profile_Group_Visibility_On_Pressed"
+     image_selected="Profile_Group_Visibility_Off"
+     image_pressed_selected="Profile_Group_Visibility_Off_Pressed"
+     image_disabled="Profile_Group_Visibility_On"
+     image_disabled_selected="Profile_Group_Visibility_Off"
+     enabled="false"
+     visible="false"
+     follows="top|right"
+     height="16"
+     layout="topleft"
+     left_pad="4"
+     tab_stop="false"
+     width="20"/>
      <menu_button
      menu_filename="menu_copy_paste_avatar_profile.xml"
      follows="top|right"
@@ -552,9 +571,9 @@ Account: [ACCTTYPE]
      image_selected="ClipboardMenu_Press"
      image_unselected="ClipboardMenu_Off"
      layout="topleft"
-     left_pad="9"
+     left_pad="5"
      name="clipboard_avatar_params"
-     tool_tip="Paste options"
+     tool_tip="Copy options"
      width="22"/>
    </layout_panel>
     <layout_panel
@@ -584,6 +603,27 @@ Account: [ACCTTYPE]
        parse_urls="true"
        word_wrap="true"
        show_emoji_helper="true"
+        />
+      <!-- own profile preview, the text the way others see it -->
+      <text_editor
+       name="sl_description_preview"
+       trusted_content="false"
+       always_show_icons="true"
+       enabled="false"
+       visible="false"
+       top="0"
+       left="2"
+       right="-1"
+       bottom="-1"
+       follows="all"
+       layout="topleft"
+       bg_readonly_color="Transparent"
+       border_visible="true"
+       font="SansSerifSmall"
+       h_pad="2"
+       max_length="65000"
+       parse_urls="true"
+       word_wrap="true"
         />
     </layout_panel>
     <layout_panel

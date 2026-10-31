@@ -143,6 +143,21 @@ bool rtAdaptiveDone(uint k, uint n, vec3 vis, vec3 first)
 // (#1039 occupancy) The footprint as a value (false: none -- the cone fallback, fa / fb untouched): the visibility
 // queue's walks recompute it from the request where the alpha test reads it instead of carrying six floats
 // across the walk.
+#ifndef RT_SHADOW_ORTHO
+#define RT_SHADOW_ORTHO rtViewOrtho()
+#endif
+
+float rtShadowConeWidth(float camd)
+{
+    if (RT_SHADOW_ORTHO)
+    {
+        const float p11 = length(vec3(ssr.views[CLEAN_VIEW].taa_cur_vp[0][1], ssr.views[CLEAN_VIEW].taa_cur_vp[1][1], ssr.views[CLEAN_VIEW].taa_cur_vp[2][1]));
+        const float bias = ssr.taa_params.w > 0.5 ? ssr.taa_scale.x : 0.0;
+        return 2.0 * max(ssr.mirror_params.z, 0.0) / max(p11, 1e-6) * exp2(bias);
+    }
+    return camd * 0.001;
+}
+
 bool rtShadowFootprint(vec3 P, vec3 Ng, vec3 cam, inout vec3 fa, inout vec3 fb)
 {
     const vec3 toC = cam - P;
@@ -155,7 +170,7 @@ bool rtShadowFootprint(vec3 P, vec3 Ng, vec3 cam, inout vec3 fa, inout vec3 fb)
     if (dot(N, V) < 0.0) N = -N;
     const float nv = max(dot(N, V), 1.0 / 64.0);
     const float bias = ssr.taa_params.w > 0.5 ? ssr.taa_scale.x : 0.0;
-    const float w = camd * 2.0 * ssr.mirror_params.z / p11 * exp2(bias);
+    const float w = (RT_SHADOW_ORTHO ? 1.0 : camd) * 2.0 * ssr.mirror_params.z / p11 * exp2(bias);
     vec3 t1 = cross(N, V);
     if (dot(t1, t1) < 1e-8) t1 = cross(N, abs(N.z) < 0.9 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0));
     t1 = normalize(t1);
@@ -472,7 +487,7 @@ int rtTerminatorProbe(vec3 P, vec3 cam, vec3 ng_ref, float min_cos, out vec3 lif
     if (camd < 1e-4) return 0;
     V /= camd;
     const float pm = max(max(abs(P.x), abs(P.y)), abs(P.z));
-    const float w = max(4.0 * (camd * RT_DEPTH_REL_ERR + max(RT_OFS_FRAME_ULPS * rtUlp(pm), RT_OFS_FLOAT_SCALE)), 1e-3);
+    const float w = max(4.0 * (rtDepthErrDist(camd) * RT_DEPTH_REL_ERR + max(RT_OFS_FRAME_ULPS * rtUlp(pm), RT_OFS_FLOAT_SCALE)), 1e-3);
     vec3 qo = P - V * w;
     float qt0 = 0.0, qt1 = 2.0 * w;
     if (!rtRaySane(qo, qt0, V, qt1)) return 0;   // (Xid 109: an invalid probe ray -- no triangle)
@@ -591,7 +606,7 @@ vec3 projShadowRayCoreImpl(Light L, ProjShadow s, vec3 P, vec3 Ng, vec3 cam, flo
     // rtReceiverOrigin), plus the user's extra offset (texel.y = RenderVKRTShadowBias, m).
     rt_anim_time   = time;
     rt_cone_spread = 0.0;
-    rt_cone_width0 = camd * 0.001;             // (fallback only: rtSetShadowFootprint's rt_foot_* override it)
+    rt_cone_width0 = rtShadowConeWidth(camd);
     rt_cone_aniso  = 1.0;
     const float soft = s.texel.x;
     // Hard shadows need one ray; soft ones take texel.z (Shadow quality: 1-4) rays
@@ -772,7 +787,7 @@ vec3 sunShadowRayCoreImpl(vec3 P, vec3 N, vec3 L, vec3 cam, float time, vec2 npx
     const vec3 Po = rtReceiverOrigin(lifted ? P + rt_term_lift : P, Ng, camd, ssr.sun_rt.z + rt_cl_lift);
     rt_anim_time   = time;
     rt_cone_spread = 0.0;
-    rt_cone_width0 = camd * 0.001;   // (fallback only: rtSetShadowFootprint's rt_foot_* override it)
+    rt_cone_width0 = rtShadowConeWidth(camd);
     rt_cone_aniso  = 1.0;
 #ifdef CLEAN_RT_SUN_HARD
     // (#829 capture FS) ONE ray straight at L: the sun's penumbra (0.27 deg; a few cm at

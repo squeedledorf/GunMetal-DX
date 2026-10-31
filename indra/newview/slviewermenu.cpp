@@ -209,6 +209,10 @@ namespace
                 break;
             }
         }
+        else if (param.asInteger() == 0 || param.asInteger() == 1)
+        {
+            LL_INFOS("Moderation") << "Action not sent: reason=selected-avatar-unavailable" << LL_ENDL;
+        }
     }
 
     //void confirm_cinematic_mode(const LLSD& notification, const LLSD& response)

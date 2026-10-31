@@ -68,16 +68,21 @@ void main()
             if (d < dmin) { dmin = d; rfar = rp; }
         }
     const bool sky = dmin <= 0.0;
-    const float tmax = sky ? VC_FAR : length(relAt(vec2(rfar) + 0.5, dmin, true));
+    float tmax = sky ? VC_FAR : length(relAt(vec2(rfar) + 0.5, dmin, true));
 
     const vec3 rel = relAt((vec2(opx) + 0.5) * scale, 0.5, false);
-    const vec3 V = rel / max(length(rel), 1e-6);
+    vec3 V = rel / max(length(rel), 1e-6),origin=vc.cam.xyz;
+    if(cmOn())
+    {
+        cmRay((vec2(opx)+0.5)/vc.dims.zw,MEDIUM_EYE,origin,V);
+        if(!sky) tmax=max(dot(vc.cam.xyz+relAt(vec2(rfar)+0.5,dmin,true)-origin,V),0.0);
+    }
 
     const VcLight l = vcLightSetup();
     // Rotating dither only while something integrates it (the temporal pass); snapshots and
     // the no-history mode keep a static per-texel pattern.
     const float jitter = vcIgn(vec2(opx) + 5.588238 * float(uint(vc.march.z) % 64u));
-    VcResult r = vcMarch(l, V, tmax, int(vc.pat.z), int(vc.pat.w), jitter);
+    VcResult r = vcMarch(l, V, tmax, int(vc.pat.z), int(vc.pat.w), jitter,origin);
     r = vcAtmosphere(r, V);
     imageStore(uOutA, opx, vec4(r.scat, r.T));
     imageStore(uOutB, opx, vec4(min(r.entry, VC_FAR), min(r.dmean, VC_FAR), 0.0, 0.0));

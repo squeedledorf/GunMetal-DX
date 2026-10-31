@@ -205,6 +205,7 @@ public:
     LLConversationItemParticipant(const LLUUID& uuid, LLFolderViewModelInterface& root_view_model);
 
     virtual const std::string& getDisplayName() const { return mDisplayName; }
+    LLFontGL::StyleFlags getLabelStyle() const override;
 
     bool isVoiceMuted();
     bool isModeratorMuted() { return mIsModeratorMuted; }

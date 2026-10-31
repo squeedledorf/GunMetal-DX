@@ -154,6 +154,7 @@ public:
     /*virtual*/ void            onShift(const LLVector4a& shift_vector);
     /*virtual*/ U32             getPartitionType() const;
     /*virtual*/ const           LLVector3 getRenderPosition() const;
+    /*virtual*/ LLVector3       getPicturePositionAgent() const;
     /*virtual*/ void            updateDrawable(bool force_damped);
     /*virtual*/ LLDrawable*     createDrawable(LLPipeline *pipeline);
     /*virtual*/ void            setPixelAreaAndAngle(LLAgent &agent);
@@ -1201,10 +1202,17 @@ public:
     void            sitOnObject(LLViewerObject *sit_object);
     void            getOffObject();
 private:
+    // World frozen (#1172): the root's world pose to carry across a sit / stand re-parent.
+    bool            frozenRootPose(LLVector3& pos, LLQuaternion& rot);
+    bool            isRootHeldForFreeze() const;
+
     // set this property only with LLVOAvatar::sitDown method
     bool            mIsSitting;
     // position backup in case of missing data
     LLVector3       mLastRootPos;
+    // World frozen (#1172): the freeze (LLWorldClock::freezeSerial) through which the root
+    // keeps the pose a sit / stand carried across, 0 = none. Lapses by itself on thaw.
+    U32             mRootHeldFreeze = 0;
 
 /**                    Hierarchy
  **                                                                            **

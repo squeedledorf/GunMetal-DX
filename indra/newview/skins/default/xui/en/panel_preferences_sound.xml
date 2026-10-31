@@ -792,6 +792,30 @@
    top_pad="5"
    left="20"
    width="420"/>
+  <check_box
+   name="sound_emitter_blacklist_check"
+   control_name="SLSoundEmitterBlacklist"
+   height="15"
+   tool_tip="Adds Blacklist Sound Emitter entries to the object and avatar menus and a Sound Emitter Blacklist window (World > Sound Explorer menu). Permanent entries on worn attachments are found again after a re-rez; that asks the region for the properties of a few of that wearer's attachments, a few at a time. Off: no menu entries, no extra requests, saved entries are ignored."
+   label="Per-object sound blacklist (menu entries and attachment re-matching)"
+   layout="topleft"
+   top_pad="5"
+   left="20"
+   width="420"/>
+  <button
+   follows="left|top"
+   height="23"
+   label="Sound emitter blacklist..."
+   layout="topleft"
+   left="40"
+   top_pad="3"
+   name="sound_emitter_blacklist_btn"
+   enabled_control="SLSoundEmitterBlacklist"
+   width="200">
+    <button.commit_callback
+     function="Floater.Show"
+     parameter="fs_sound_emitter_blacklist" />
+  </button>
   <text
    follows="left|top"
    layout="topleft"

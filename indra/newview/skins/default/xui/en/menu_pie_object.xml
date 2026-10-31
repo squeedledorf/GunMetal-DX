@@ -477,13 +477,15 @@
             <pie_slice.on_enable
                 function="EnableMuteParticle" />
         </pie_slice>
-        <!-- <GMDX> sound emitter blacklist -->
+        <!-- Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4: sound emitter blacklist, shown with SLSoundEmitterBlacklist -->
         <pie_slice
             enabled="true"
             label="Sound Emitter"
             name="BlacklistSoundEmitter">
             <pie_slice.on_click
                 function="Object.BlacklistSoundEmitter" />
+            <pie_slice.on_visible
+                function="Object.SoundEmitterBlacklistEnabled" />
         </pie_slice>
         <pie_slice
             enabled="true"
@@ -491,6 +493,8 @@
             name="BlacklistSoundEmitterPermanent">
             <pie_slice.on_click
                 function="Object.BlacklistSoundEmitterPermanent" />
+            <pie_slice.on_visible
+                function="Object.SoundEmitterBlacklistEnabled" />
         </pie_slice>
         <!-- </GMDX> -->
     </pie_menu>

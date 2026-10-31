@@ -42,6 +42,7 @@ class SLFloaterWeather : public LLFloater
     friend class LLFloaterReg;
 public:
     bool postBuild() override;
+    void onOpen(const LLSD& key) override;
     void draw() override;
 
 private:

@@ -280,23 +280,24 @@ S32 LLImageJ2C::calcDataSizeJ2C(S32 w, S32 h, S32 comp, S32 discard_level, F32 r
     S32 width  = (w > 0) ? w : 2048;
     S32 height = (h > 0) ? h : 2048;
     S32 max_dimension = llmax(width, height); // Find largest dimension
-    S32 block_area = MAX_BLOCK_SIZE * MAX_BLOCK_SIZE; // Calculated initial block area from established max block size (currently 64)
+    // Width and height come from the (network) codestream header, so the walk is done in
+    // 64-bit floating point and the result clamped: a huge claimed size must not overflow.
+    F64 block_area = MAX_BLOCK_SIZE * MAX_BLOCK_SIZE; // Calculated initial block area from established max block size (currently 64)
     S32 max_layers = (S32)llmax(llround(log2f((float)max_dimension) - log2f((float)MAX_BLOCK_SIZE)), 4); // Find number of powers of two between extents and block size to a minimum of 4
     block_area *= llmax(max_layers, 1); // Adjust initial block area by max number of layers
-    S32 totalbytes = (S32) (MIN_LAYER_SIZE * max_components * precision); // Start estimation with a minimum reasonable size
+    F64 totalbits = (F64)MIN_LAYER_SIZE * max_components * precision; // Start estimation with a minimum reasonable size
     S32 block_layers = 0;
     while (block_layers <= max_layers) // Walk the layers
     {
         if (block_layers <= (5 - discard_level))  // Walk backwards from discard 5 to required discard layer.
-            totalbytes += (S32) (block_area * max_components * precision * rate); // Add each block layer reduced by assumed compression rate
+            totalbits += std::floor(block_area * max_components * precision * rate); // Add each block layer reduced by assumed compression rate (truncated per layer, as before)
         block_layers++; // Move to next layer
         block_area *= 4; // Increase block area by power of four
     }
 
-    totalbytes /= 8; // to bytes
-    totalbytes += calcHeaderSizeJ2C();  // header
-
-    return totalbytes;
+    constexpr F64 max_bytes = (F64)(S32_MAX / 2);
+    F64 totalbytes = llmin(totalbits / 8.0, max_bytes); // to bytes
+    return (S32)totalbytes + calcHeaderSizeJ2C();  // header
 }
 
 S32 LLImageJ2C::calcHeaderSize()
@@ -308,10 +309,12 @@ S32 LLImageJ2C::calcHeaderSize()
 S32 LLImageJ2C::calcDataSize(S32 discard_level)
 {
     discard_level = llclamp(discard_level, 0, MAX_DISCARD_LEVEL);
-    if ( mAreaUsedForDataSizeCalcs != (getHeight() * getWidth())
+    // Only a cache key; unsigned so header-sized dimensions wrap instead of overflowing S32.
+    const U32 area = (U32)getHeight() * (U32)getWidth();
+    if ( mAreaUsedForDataSizeCalcs != area
         || (mDataSizes[0] == 0))
     {
-        mAreaUsedForDataSizeCalcs = getHeight() * getWidth();
+        mAreaUsedForDataSizeCalcs = area;
 
         S32 level = MAX_DISCARD_LEVEL;  // Start at the highest discard
         while ( level >= 0 )

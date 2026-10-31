@@ -1,11 +1,11 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_nonuniform_qualifier : require
-// vkclean — reflection-probe capture sky: the WindLight sky (skyColor) by the
+// vkclean — reflection-probe capture sky: the selected physical/legacy sky by the
 // face ray reconstructed from the face inverse view-projection (origin-relative),
 // without sun/moon discs or stars (LL skips them in cube snapshots).
 #include "clean_frame_info.glsl"
-#define PHYSKY_NOT_IN_PROBES   // (clean_atmos_common.glsl: the probes see the WindLight sky)
+#define CLEAN_CAPTURE_LEGACY_SKY // retain physical-off capture sky/space policy
 #include "clean_atmos_common.glsl"
 layout(set = 1, binding = 0) uniform sampler2D uTextures[];   // bindless (cloud noise, rainbow/halo)
 #include "clean_clouds.glsl"
@@ -23,6 +23,7 @@ layout(push_constant) uniform Push {
 
 void main()
 {
+    g_cm_capture_sky=cmOn(); g_cm_secondary_sky=cmOn(); g_cm_sky_origin=pc.horizon.xyz;
     vec2 ndc = v_uv * 2.0 - 1.0;
     vec4 p = pc.inv_view_proj * vec4(ndc, 1.0, 1.0);
     vec3 dir = normalize(p.xyz / p.w);

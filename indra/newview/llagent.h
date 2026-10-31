@@ -476,7 +476,7 @@ public:
     void            standUp();
     /// @brief ground-sit at agent's current position
     void            sitDown();
-    void            sitDownNearby(); // <GMDX> game controller sit: walks to the ground below first
+    void            sitDownNearby(); // game controller sit: walks to the ground below first
 
     //--------------------------------------------------------------------
     // Do Not Disturb
@@ -492,6 +492,7 @@ private:
     //--------------------------------------------------------------------
 public:
     bool            leftButtonGrabbed() const;
+    bool            leftButtonGrabbed(bool mouselook) const;
     bool            rotateGrabbed() const;
     bool            forwardGrabbed() const;
     bool            backwardGrabbed() const;
@@ -535,10 +536,7 @@ public:
 private:
     S32             mControlsTakenCount[TOTAL_CONTROLS];
     S32             mControlsTakenPassedOnCount[TOTAL_CONTROLS];
-    // mControlFlags is a bitmask of behavior instructions for compact
-    // transmission to the server.  It does NOT represent "input", rather
-    // the consequences of it, which will sometimes depend on "state".
-    U32             mControlFlags;
+    U32             mControlFlags;                  // Replacement for the mFooKey's
 
     bool            mIgnorePrejump;
     //--------------------------------------------------------------------
@@ -600,6 +598,8 @@ public:
     void            sendRevokePermissions(const LLUUID & target, U32 permissions);
 
     void            endAnimationUpdateUI();
+    // #624: Hide all controls in mouselook, which shows the UI or hides it again
+    void            toggleMouselookUI();
     void            unpauseAnimation() { mPauseRequest = NULL; }
     bool            getCustomAnim() const { return mCustomAnim; }
     void            setCustomAnim(bool anim) { mCustomAnim = anim; }
@@ -609,6 +609,9 @@ public:
     boost::signals2::connection setMouselookModeOutCallback( const camera_signal_t::slot_type& cb );
 
 private:
+    // Hides the bars and the open floaters but the mini map for mouselook, or shows them again
+    void            setMouselookUIHidden(bool hidden);
+
     camera_signal_t* mMouselookModeInSignal;
     camera_signal_t* mMouselookModeOutSignal;
     bool            mCustomAnim;        // Current animation is ANIM_AGENT_CUSTOMIZE ?

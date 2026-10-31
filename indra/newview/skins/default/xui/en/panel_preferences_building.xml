@@ -232,7 +232,7 @@
    word_wrap="true">
     New Script, in your inventory and in an object's Contents, makes a copy of this script instead of the standard one. In an object the copy keeps the script's own name.
   </text>
-  <!-- <GMDX> how the edit selection is drawn (GMDXSelectionStyle) -->
+  <!-- how the edit selection is drawn (RenderVKSelectionStyle; ported from GunMetal-DX, v0.3.0 cf5f1f4) -->
   <text
    type="string"
    length="1"
@@ -246,7 +246,7 @@
     Selection style:
   </text>
   <combo_box
-   control_name="GMDXSelectionStyle"
+   control_name="RenderVKSelectionStyle"
    follows="left|top"
    height="20"
    layout="topleft"
@@ -268,5 +268,4 @@
      name="selection_style_wireframe"
      value="2" />
   </combo_box>
-  <!-- </GMDX> -->
 </panel>

@@ -23,6 +23,7 @@
  */
 
 #include "slviewerimportcore.h"
+#include "fsyspath.h"
 
 #include <algorithm>
 #include <cctype>
@@ -686,7 +687,7 @@ std::vector<SourceAccount> findAccounts(const SourceViewer& viewer)
         }
         else
         {
-            fs::path base = fs::u8path(log_path).lexically_normal();
+            fs::path base = fsyspath(log_path).lexically_normal();
             if (base.filename().empty()) base = base.parent_path();   // trailing separator
             const fs::path sub = base / name;
             const std::string prefix = "InstantMessageLogPath " + log_path + " (" + from + "): ";
@@ -964,7 +965,7 @@ bool TranscriptWriter::put(const fs::path& p, const std::string& data, bool exis
 
 void TranscriptWriter::import(const std::string& name, const std::string& content, bool dated, const std::string& shown, bool remember)
 {
-    const fs::path target = mDst / fs::u8path(name);
+    const fs::path target = mDst / fsyspath(name);
     std::string ours, why;
     bool have = false;
     if (!read(target, ours, have, why)) return fail(shown + ": could not read our " + name + " (" + why + ")");
@@ -1015,7 +1016,7 @@ void TranscriptWriter::import(const std::string& name, const std::string& conten
         return;
     }
     const std::string sep_name = name.substr(0, name.size() - 4) + " (imported).txt";
-    const fs::path sep = mDst / fs::u8path(sep_name);
+    const fs::path sep = mDst / fsyspath(sep_name);
     std::string prev;
     bool have_sep = false;
     if (!read(sep, prev, have_sep, why)) return fail(shown + ": could not read our " + sep_name + " (" + why + ")");

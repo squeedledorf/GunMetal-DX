@@ -72,7 +72,8 @@ namespace LLCrossingTrace
 
     // Events
     void onKill(U32 local_id, U32 ip, U32 port, const LLUUID& resolved_id, LLViewerObject* objectp);
-    // #607: process_kill_object deferred this kill (LLCrossingKeep) instead of applying it.
+    // #607: process_kill_object deferred this kill (LLCrossingKeep) instead of applying it:
+    // a crossing deferral, or (#1172) a Freeze World hold until the thaw.
     void onKillDeferred(LLViewerObject* objectp);
     void onObjectUpdate(LLViewerObject* objectp);
     void regionEvent(const std::string& text);     // always recorded (ring, pruned), included if within +-10 s

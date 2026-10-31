@@ -5,7 +5,7 @@
 // the full-resolution march -- reflection-probe captures (raster + ray traced), the planar
 // mirror's sky (water / mirror reflections) -- see the clouds through this panorama instead:
 // an equirectangular map of the layer as seen from the main camera (rgb = the clouds'
-// in-scatter with the aerial perspective already applied, LINEAR HDR premultiplied; a = the
+// in-scatter (physical: raw, legacy: aerial perspective applied), LINEAR HDR premultiplied; a = the
 // transmittance), refreshed a band per frame by the clouds module. The main view composites
 // its own march (clean_vol_cloud_composite.frag) and skips this.
 //
@@ -17,6 +17,7 @@
 #ifndef CLEAN_VOL_CLOUD_SKY_GLSL
 #define CLEAN_VOL_CLOUD_SKY_GLSL
 
+layout(set = 0, binding = 64) uniform sampler2D uCloudPanoMean; // representative distance, RGBA16F.r
 layout(set = 0, binding = 47) uniform sampler2D uCloudPano;   // rgb in-scatter, a transmittance
 
 bool volCloudsLive() { return ssr.vol_clouds[0].x > 1.5; }
@@ -31,7 +32,16 @@ vec2 volCloudPanoUV(vec3 d)
 vec3 volCloudSkyApply(vec3 lin, vec3 dir)
 {
     if (!volCloudsLive() || ssr.vol_clouds[1].w < 0.5) return lin;
-    const vec4 c = textureLod(uCloudPano, volCloudPanoUV(normalize(dir)), 0.0);
+    const vec2 uv=volCloudPanoUV(normalize(dir));
+    vec4 c = textureLod(uCloudPano,uv,0.0);
+    if(cmOn())
+    {
+        const float mean=max(textureLod(uCloudPanoMean,uv,0.0).r,0.0);
+        const vec3 O=g_cm_sky_origin;
+        const vec3 V=!g_cm_secondary_sky && ssr.medium[MEDIUM_EYE].forward.w>0.5 ? ssr.medium[MEDIUM_EYE].forward.xyz : normalize(dir);
+        const CameraTransport t=g_cm_secondary_sky ? cmFinite(O,V,0.0,mean,0.0) : cmAt(O+V*mean,MEDIUM_EYE);
+        c.rgb=t.T*c.rgb+(1.0-c.a)*t.L;
+    }
     return lin * clamp(c.a, 0.0, 1.0) + max(c.rgb, vec3(0.0));
 }
 

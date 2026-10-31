@@ -66,13 +66,14 @@
 #include "llviewerparceloverlay.h"
 #include "llviewerregion.h"
 #include "llworld.h"
-#include "slparcelspeakers.h"   // #892 parcel-by-position replies
 #include "roles_constants.h"
 #include "llweb.h"
 #include "llvieweraudio.h"
 #include "llcorehttputil.h"
 
 #include "llenvironment.h"
+
+#include <cmath>
 
 const F32 PARCEL_BAN_LINES_DRAW_SECS_ON_COLLISION = 10.f;
 const F32 PARCEL_COLLISION_DRAW_SECS_ON_PROXIMITY = 1.f;
@@ -118,7 +119,8 @@ struct LLGodForceOwnerData
 // Methods
 //
 LLViewerParcelMgr::LLViewerParcelMgr()
-:   mSelected(false),
+:   mNextParcelSequenceID(HOVERED_PARCEL_SEQ_ID),
+    mSelected(false),
     mSelectionSequenceID(HOVERED_PARCEL_SEQ_ID),
     mRequestResult(0),
     mWestSouth(),
@@ -469,13 +471,68 @@ LLParcelSelectionHandle LLViewerParcelMgr::selectParcelInRectangle()
 }
 
 
+S32 LLViewerParcelMgr::nextParcelSequenceID()
+{
+    if (mNextParcelSequenceID == S32_MIN)
+    {
+        mNextParcelSequenceID = HOVERED_PARCEL_SEQ_ID;
+    }
+    return --mNextParcelSequenceID;
+}
+
 S32 LLViewerParcelMgr::nextSelectionSequenceID()
 {
-    if (mSelectionSequenceID == S32_MIN)
+    mSelectionSequenceID = nextParcelSequenceID();
+    return mSelectionSequenceID;
+}
+
+void LLViewerParcelMgr::requestParcelIdentity(const LLVector3d& pos_global,
+                                             boost::function<void(const LLSD&)> callback)
+{
+    LLViewerRegion* region = LLWorld::getInstance()->getRegionFromPosGlobal(pos_global);
+    if (!region || gDisconnected || LLApp::isExiting() || !gMessageSystem || mParcelIdentityRequests.size() >= 64)
     {
-        mSelectionSequenceID = HOVERED_PARCEL_SEQ_ID;
+        LL_INFOS("ParcelIdentity") << "Lookup refused: reason=" << (!region ? "region-unavailable" :
+            LLApp::isExiting() ? "application-exiting" :
+            gDisconnected || !gMessageSystem ? "disconnected" : "pending-limit")
+            << ", pending=" << mParcelIdentityRequests.size() << LL_ENDL;
+        callback(LLSD());
+        return;
     }
-    return --mSelectionSequenceID;
+
+    const LLVector3 pos = region->getPosRegionFromGlobal(pos_global);
+    const F32 west = std::floor(pos.mV[VX] / PARCEL_GRID_STEP_METERS) * PARCEL_GRID_STEP_METERS;
+    const F32 south = std::floor(pos.mV[VY] / PARCEL_GRID_STEP_METERS) * PARCEL_GRID_STEP_METERS;
+    const S32 sequence = nextParcelSequenceID();
+    mParcelIdentityRequests.emplace(sequence, ParcelIdentityRequest{region->getRegionID(), gAgent.getSessionID(), callback});
+    doAfterInterval([sequence]()
+    {
+        if (!LLViewerParcelMgr::instanceExists())
+            return;
+        auto& requests = LLViewerParcelMgr::instance().mParcelIdentityRequests;
+        auto it = requests.find(sequence);
+        if (it != requests.end())
+        {
+            LL_INFOS("ParcelIdentity") << "Lookup failed: reason=timeout, pending=" << requests.size() << LL_ENDL;
+            auto completion = it->second.callback;
+            requests.erase(it);
+            completion(LLSD());
+        }
+    }, 10.f);
+
+    LLMessageSystem* msg = gMessageSystem;
+    msg->newMessageFast(_PREHASH_ParcelPropertiesRequest);
+    msg->nextBlockFast(_PREHASH_AgentData);
+    msg->addUUIDFast(_PREHASH_AgentID, gAgent.getID());
+    msg->addUUIDFast(_PREHASH_SessionID, gAgent.getSessionID());
+    msg->nextBlockFast(_PREHASH_ParcelData);
+    msg->addS32Fast(_PREHASH_SequenceID, sequence);
+    msg->addF32Fast(_PREHASH_West, west);
+    msg->addF32Fast(_PREHASH_South, south);
+    msg->addF32Fast(_PREHASH_East, west + PARCEL_GRID_STEP_METERS);
+    msg->addF32Fast(_PREHASH_North, south + PARCEL_GRID_STEP_METERS);
+    msg->addBOOL("SnapSelection", false);
+    msg->sendReliable(region->getHost());
 }
 
 bool LLViewerParcelMgr::isSelectionReady() const
@@ -1613,6 +1670,45 @@ void LLViewerParcelMgr::processParcelProperties(LLMessageSystem *msg, void **use
     msg->getS32Fast(_PREHASH_ParcelData, _PREHASH_RequestResult, request_result);
     msg->getS32Fast(_PREHASH_ParcelData, _PREHASH_SequenceID, sequence_id);
 
+    auto identity_request = parcel_mgr.mParcelIdentityRequests.find(sequence_id);
+    if (identity_request != parcel_mgr.mParcelIdentityRequests.end())
+    {
+        if (identity_request->second.session_id != gAgent.getSessionID())
+        {
+            LL_INFOS("ParcelIdentity") << "Reply ignored: reason=session-changed" << LL_ENDL;
+            auto callback = identity_request->second.callback;
+            parcel_mgr.mParcelIdentityRequests.erase(identity_request);
+            callback(LLSD());
+            return;
+        }
+        LLViewerRegion* region = LLWorld::getInstance()->getRegion(msg->getSender());
+        if (!region || region->getRegionID() != identity_request->second.region_id)
+        {
+            LL_INFOS("ParcelIdentity") << "Reply ignored: reason=sender-mismatch" << LL_ENDL;
+            return;
+        }
+
+        LLSD identity;
+        if (request_result == PARCEL_RESULT_SUCCESS)
+        {
+            LLUUID owner;
+            bool group_owned = false;
+            S32 parcel_id = -1;
+            msg->getUUIDFast(_PREHASH_ParcelData, _PREHASH_OwnerID, owner);
+            msg->getBOOLFast(_PREHASH_ParcelData, _PREHASH_IsGroupOwned, group_owned);
+            msg->getS32Fast(_PREHASH_ParcelData, _PREHASH_LocalID, parcel_id);
+            identity["owner_id"] = owner;
+            identity["group_owned"] = group_owned;
+            identity["local_id"] = parcel_id;
+        }
+        else
+            LL_INFOS("ParcelIdentity") << "Lookup failed: reason=simulator-result, code=" << request_result << LL_ENDL;
+        auto callback = identity_request->second.callback;
+        parcel_mgr.mParcelIdentityRequests.erase(identity_request);
+        callback(identity);
+        return;
+    }
+
     if (request_result == PARCEL_RESULT_NO_DATA)
     {
         // no valid parcel data
@@ -1620,21 +1716,6 @@ void LLViewerParcelMgr::processParcelProperties(LLMessageSystem *msg, void **use
         return;
     }
 
-    // #892: a parcel speaker registry lookup (parcel by position). Ours alone: no hover, selection
-    // or agent-parcel state is touched.
-    if (SLParcelSpeakers::isSpeakerParcelSeq(sequence_id))
-    {
-        S32 spk_local_id = -1;
-        LLUUID spk_owner_id, spk_group_id;
-        bool spk_group_owned = false;
-        msg->getS32Fast(_PREHASH_ParcelData, _PREHASH_LocalID, spk_local_id);
-        msg->getUUIDFast(_PREHASH_ParcelData, _PREHASH_OwnerID, spk_owner_id);
-        msg->getUUIDFast(_PREHASH_ParcelData, _PREHASH_GroupID, spk_group_id);
-        msg->getBOOLFast(_PREHASH_ParcelData, _PREHASH_IsGroupOwned, spk_group_owned);
-        SLParcelSpeakers::onParcelProperties(sequence_id, LLWorld::getInstance()->getRegion(msg->getSender()),
-                                             spk_local_id, spk_owner_id, spk_group_id, spk_group_owned);
-        return;
-    }
 
     // Decide where the data will go.
     LLParcel* parcel = NULL;

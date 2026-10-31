@@ -57,9 +57,9 @@ bool LLImagePNG::updateData()
         LLImageDataLock lock(this);
 
         // Check to make sure that this instance has been initialized with data
-        if (!getData() || (0 == getDataSize()))
+        if (!getData() || (getDataSize() < 8)) // isValidPng() reads the 8-byte signature
         {
-            setLastError("Uninitialized instance of LLImagePNG");
+            setLastError("Uninitialized or truncated LLImagePNG");
             return false;
         }
 
@@ -109,7 +109,7 @@ bool LLImagePNG::decode(LLImageRaw* raw_image, F32 decode_time)
     LLImageDataLock lockOut(raw_image);
 
     // Check to make sure that this instance has been initialized with data
-    if (!getData() || (0 == getDataSize()))
+    if (!getData() || (getDataSize() < 8)) // isValidPng() reads the 8-byte signature
     {
         setLastError("LLImagePNG trying to decode an image with no data!");
         return false;

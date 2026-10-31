@@ -2,6 +2,9 @@
  * @file gmdxchatlog.h
  * @brief GunMetal-DX: the MMO-style chat log in the bottom-left corner (NearbyChatOverlayStyle "gmdx").
  *
+ * Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4. An option beside the
+ * console and cards styles of the nearby chat overlay (NearbyChatOverlayStyle "gmdx"), never the default.
+ *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -19,15 +22,15 @@
  * $/LicenseInfo$
  */
 
-// <GMDX> One chat log in place of the nearby chat toasts, drawn over the world above the chat bar:
-//  - at rest: the newest lines (GMDXChatLogLines) on no background, with a soft shadow, each fading
-//    out GMDXChatLogPersist seconds after it arrived;
+// One chat log in place of the nearby chat toasts, drawn over the world above the chat bar:
+//  - at rest: the newest lines  on no background, with a soft shadow, each fading
+//    out 20 seconds after it arrived;
 //  - typing (the chat bar has focus): a gunmetal panel over the chat bar with tabs (All / Local /
 //    Group / IM / Combat, unread counts), timestamps and the history (mouse wheel scrolls);
 //  - combat (mouselook / over the shoulder, or aiming down sights): the 3 newest lines, faint; a new
 //    line shows at full strength for a few seconds.
 // The lock left of the panel's gear unlocks it: the panel then stays up with a frame and handles, is
-// dragged to move and by its edges / corners to resize (GMDXChatLogRect, kept inside the window; the
+// dragged to move and by its edges / corners to resize (SLChatLogRect, kept inside the window; the
 // gear menu resets it). The lines at rest and in combat then sit in the panel's place. The chat bar is
 // part of it: once the panel has been moved, the bar sits right under it, as wide as it (SLChatBar::draw
 // asks dockedBarRect), the frame and handles take in both, and the panel stays where the bar fits.

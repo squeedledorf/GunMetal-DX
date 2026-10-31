@@ -21,7 +21,7 @@
  *   4. the combine / BASE (clean_deferred_light.comp deferReflIn): the denoised GI REPLACES the
  *      probes' diffuse irradiance where it has an estimate (x RenderVKGIIntensity, floored by
  *      RenderVKGIMinAmbient x the probes' value); the probes stay the specular and the far field.
- * VRAM: the GI denoiser (112 B per GI texel: ~103 MB at 1440p half extent), the reservoirs
+ * VRAM: the GI denoiser (144 B per GI texel: ~127 MB at 1440p half extent), the reservoirs
  * (64 B per GI texel), the split stages' records (100 B per GI texel + 48 B: ~88 MB at 1440p half extent;
  * the #1036 shade split's lists and material records live in the same space),
  * the state (1.2 KB + 48 B per cache slot: 12 MB at 2^18). All fixed by the
@@ -38,6 +38,7 @@
 #include "llcleanrenderervk.h"
 #include "llcleandenoisevk.h"
 #include "llcleanrtvk.h"
+#include "../llcleaninstancestore.h"
 #include "llxrsession.h"
 
 #include "llviewercontrol.h"
@@ -88,14 +89,14 @@ constexpr uint32_t GI_F_ON = 1u, GI_F_FINAL_IN = 2u, GI_F_TEMPORAL = 4u, GI_F_SP
 // One change sphere (xyz centre, w radius) into the next header's list: up to the header's 64; past
 // them the last sphere grows to enclose it (a coarser invalidation instead of wiping the whole
 // cache -- a sim with many small changes per frame kept it empty).
-void giAddSphere(std::vector<float>& v, const float* s)
+void giAddSphere(std::array<float, 64u * 4u>& v, uint32_t& n, const float* s)
 {
-    if (v.size() / 4 < 64)
+    if (n < 64u)
     {
-        v.insert(v.end(), s, s + 4);
+        std::memcpy(&v[4u * n++], s, 4u * sizeof(float));
         return;
     }
-    float* b = &v[63 * 4];
+    float* b = &v[63u * 4u];
     const float dx = s[0] - b[0], dy = s[1] - b[1], dz = s[2] - b[2];
     const float d = std::sqrt(dx * dx + dy * dy + dz * dz);
     if (d + s[3] <= b[3]) return;
@@ -131,6 +132,7 @@ struct GiCfg
     F32 window = 32.f;     // RenderVKGICacheFrames
     F32 evict = 600.f;     // RenderVKGICacheEvictFrames
     U32 specOcc = 1;       // RenderVKGISpecOcclusion
+    U32 fwdFilter = 2;     // RenderVKGIForwardCacheFilter
     U32 everyLog = 0;      // RenderVKGITraceEvery 1 / 2 / 4 -> 0 / 1 / 2
     bool missProbes = true;   // RenderVKGIMissProbes
     bool cullBack = true;  // RenderVKGICullBackFaces
@@ -185,6 +187,7 @@ GiCfg giCfg()
     static LLCachedControl<F32>  s_win(gSavedSettings, "RenderVKGICacheFrames", 32.f);
     static LLCachedControl<F32>  s_ev(gSavedSettings, "RenderVKGICacheEvictFrames", 600.f);
     static LLCachedControl<U32>  s_so(gSavedSettings, "RenderVKGISpecOcclusion", 1U);
+    static LLCachedControl<U32>  s_fwdf(gSavedSettings, "RenderVKGIForwardCacheFilter", 2U);
     static LLCachedControl<U32>  s_every(gSavedSettings, "RenderVKGITraceEvery", 1U);
     static LLCachedControl<bool> s_missp(gSavedSettings, "RenderVKGIMissProbes", true);
     static LLCachedControl<bool> s_cull(gSavedSettings, "RenderVKGICullBackFaces", true);
@@ -234,6 +237,7 @@ GiCfg giCfg()
     c.window = std::clamp((F32)s_win, 1.f, 1024.f);
     c.evict = std::clamp((F32)s_ev, 16.f, 100000.f);
     c.specOcc = std::min<U32>(s_so, 2u);
+    c.fwdFilter = std::min<U32>(s_fwdf, 2u);
     c.everyLog = s_every >= 4u ? 2u : (s_every >= 2u ? 1u : 0u);
     c.missProbes = s_missp;
     c.cullBack = s_cull;
@@ -290,17 +294,19 @@ void LLCleanRendererVK::giInit(VkDevice dev)
         }
     }
     writeGiMotion();   // (the GI denoiser's binding 5 + #1038 set 3 binding 28: valid from init on)
+    // (#1029) The GI kernels below join the deferred ray-query group (rtDeferredCompute): compiled
+    // after the world pipelines, installed together; every user checks its handle per frame.
     if (mRtReflLayout && !mGiTracePipe)
     {
         VkShaderModule m = giModule(dev, kWorldDeferGiTraceSpv, kWorldDeferGiTraceSpv_bytes, "DeferGiTrace");
-        createComputePipelineInto(dev, m, mRtReflLayout, 0u, giLitSpec(), &mGiTracePipe, "mGiTracePipe (DeferGiTrace)");
+        rtDeferredCompute(dev, m, mRtReflLayout, 0u, giLitSpec(), &mGiTracePipe, "mGiTracePipe (DeferGiTrace)");
         destroyShaderModuleDeferred(dev, m, nullptr);
     }
     if (mRtReflLayout && !mGiResolvePipe)
     {
         // (GI-4) the radiance cache's resolve
         VkShaderModule m = giModule(dev, kWorldDeferGiResolveSpv, kWorldDeferGiResolveSpv_bytes, "DeferGiResolve");
-        createComputePipelineInto(dev, m, mRtReflLayout, 0u, giLitSpec(), &mGiResolvePipe, "mGiResolvePipe (DeferGiResolve)");
+        rtDeferredCompute(dev, m, mRtReflLayout, 0u, giLitSpec(), &mGiResolvePipe, "mGiResolvePipe (DeferGiResolve)");
         destroyShaderModuleDeferred(dev, m, nullptr);
     }
     if (mRtReflLayout)
@@ -319,7 +325,7 @@ void LLCleanRendererVK::giInit(VkDevice dev)
         {
             if (mGiSplitPipe[i]) continue;
             VkShaderModule m = giModule(dev, st[i].code, st[i].bytes, st[i].mod);
-            createComputePipelineInto(dev, m, mRtReflLayout, 0u, giLitSpec(), &mGiSplitPipe[i], st[i].name);
+            rtDeferredCompute(dev, m, mRtReflLayout, 0u, giLitSpec(), &mGiSplitPipe[i], st[i].name);
             destroyShaderModuleDeferred(dev, m, nullptr);
         }
         // (#1036) the shade split's stages
@@ -333,7 +339,7 @@ void LLCleanRendererVK::giInit(VkDevice dev)
         {
             if (mGiShadePipe[i]) continue;
             VkShaderModule m = giModule(dev, sh[i].code, sh[i].bytes, sh[i].mod);
-            createComputePipelineInto(dev, m, mRtReflLayout, 0u, giLitSpec(), &mGiShadePipe[i], sh[i].name);
+            rtDeferredCompute(dev, m, mRtReflLayout, 0u, giLitSpec(), &mGiShadePipe[i], sh[i].name);
             destroyShaderModuleDeferred(dev, m, nullptr);
         }
     }
@@ -492,6 +498,7 @@ void LLCleanRendererVK::giDecide(uint32_t rw, uint32_t rh)
     mGiLagValue = 0;        // (joined by the last recording, at the latest by its tail: asyncSubmitFrame)
     if (stereoActive()) return;   // #1075: GI is deferred (design step 13); stereo frames light forward
     GiCfg cfg = giCfg();
+    LLCleanInstanceStore::instance().setGiRadianceCollect(cfg.mode != 0u);
     cfg.scale = rtSignalScale(cfg.scale);   // (RenderVKDlssFullResSignalsMode)
     U32 split = 1;
     bool defer = true;
@@ -726,7 +733,7 @@ bool LLCleanRendererVK::giApply(uint32_t w, uint32_t h, uint32_t slots, bool wan
     {
         vkDeviceWaitIdle(mCtx->device());
         if (mGiState.buffer) { mCtx->destroyBuffer(mGiState); mGiState = GpuBuffer{}; }
-        const VkDeviceSize bytes = sizeof(GiHeader) + (VkDeviceSize)slots * 48u + 16u;
+        const VkDeviceSize bytes = sizeof(GiHeader) + (VkDeviceSize)slots * 64u + 16u;
         {
             VkMemScope memcat(VKMEM_DENOISE);
             VkDeviceContext::SoftAllocScope soft(mCtx);
@@ -744,7 +751,8 @@ bool LLCleanRendererVK::giApply(uint32_t w, uint32_t h, uint32_t slots, bool wan
             return false;
         }
         mCtx->setObjectName(VK_OBJECT_TYPE_BUFFER, (uint64_t)mGiState.buffer, "giState");
-        mGiSpheres.clear();
+        // The new cache starts empty, but old reservoirs/denoiser images can survive
+        // this allocation. Preserve pending scene invalidation until their next trace.
         mGiStateFresh = true;   // (the cache starts empty: giWriteHeader clears it)
     }
     // (GI-2+) the reservoirs at the GI extent
@@ -817,7 +825,7 @@ bool LLCleanRendererVK::giApply(uint32_t w, uint32_t h, uint32_t slots, bool wan
                            << ((mGiDn->bytes() + (1u << 19)) >> 20) << " MB, reservoirs "
                            << ((mGiRes.buffer ? (uint64_t)w * h * 64u : 0u) >> 20) << " MB, split-stage records "
                            << ((mGiHit.buffer ? (uint64_t)giHitBytes(w, h) : 0u) >> 20) << " MB, state + cache "
-                           << ((sizeof(GiHeader) + (uint64_t)slots * 48u) >> 20) << " MB (" << slots << " cache slots)"
+                           << ((sizeof(GiHeader) + (uint64_t)slots * 64u) >> 20) << " MB (" << slots << " cache slots)"
                            << LL_ENDL;
     }
     return true;
@@ -849,7 +857,8 @@ void LLCleanRendererVK::giWriteHeader(VkCommandBuffer cmd)
     h.cfg[0] = mGiFlags | (cfg.specOcc << 8) | (cfg.everyLog << 10)   // (clean_gi_common.glsl GI_SPECOCC_SHIFT /
              | (cfg.missProbes ? 4096u : 0u) | (cfg.cullBack ? 8192u : 0u)       //  GI_EVERY_SHIFT / GI_F_MISS_PROBES / _CULL_BACK
              | (cfg.celOcc ? 16384u : 0u) | (cfg.specOccRtRes ? 32768u : 0u)     //  / GI_F_CEL_OCC / GI_F_SPECOCC_RT_RES
-             | (cfg.hazeOcc ? 4194304u : 0u);                                    //  / GI_F_HAZE_OCC)
+             | (cfg.hazeOcc ? 4194304u : 0u)                                     //  / GI_F_HAZE_OCC
+             | (cfg.fwdFilter << 26);                                            //  / GI_FWD_FILTER_SHIFT)
     h.cfg[1] = mGiFrame;
     h.cfg[2] = mGiStateSlots == ~0u ? 0u : mGiStateSlots;
     h.cfg[3] = mGiDebug;
@@ -949,34 +958,81 @@ void LLCleanRendererVK::giWriteHeader(VkCommandBuffer cmd)
         mGiStatAcc.allLights += (double)std::min<size_t>(mLightsCPU.size(), 256u);
         ++mGiStatAcc.hdrFrames;
     }
-    // (GI-4) the change spheres since the last header (bounded; an overflow restarts the cache)
-    const size_t ns = std::min<size_t>(mGiSpheres.size() / 4, 64);
+    // Independent emitter deltas: old+new CPU row snapshots at the actual dirty upload,
+    // including dynamic rows, tint/UV and release. Two finite GI legs cover direct
+    // emitter bounce and one cache-fed hit; arbitrary recursive transport is not bounded
+    // by this sphere. Read-side rejection happens before shading (not only in resolve).
+    LLCleanInstanceStore::GiRadianceSpheres radiance{};
+    bool radianceOverflow = false;
+    LLCleanInstanceStore::GiRadianceStats deltaStats{};
+    const U32 nr = LLCleanInstanceStore::instance().takeGiRadianceDirty(radiance, radianceOverflow, deltaStats);
+    if (nr != 0u || radianceOverflow) ++mGiSceneSerial;
+    if (nr != 0u) LLVKHitch::count("giRadianceSpheres", nr);
+    if (radianceOverflow)
+    {
+        ++mGiGlobalSerial;
+        LLVKHitch::count("giRadianceGlobal", 1u);
+    }
+    for (U32 i = 0; i < nr; ++i)
+    {
+        float sp[4];
+        std::memcpy(sp, &radiance[4 * i], sizeof(sp));
+        sp[3] += 2.f * cfg.rayLen;
+        giAddSphere(mGiSpheres, mGiSphereN, sp);
+    }
+    mGiSphOverflow |= radianceOverflow;
+    // Fixed counters distinguish skipped incomplete deltas from real global resets.
+    // No object/material-to-scene walk and no GPU readback on the deadline path.
+    const double deltaNow = giClock();
+    if (deltaNow >= mGiDeltaLogAt)
+    {
+        mGiDeltaLogAt = deltaNow + 10.0;
+        LL_INFOS("VKShadow") << "GI delta totals: skipped unknown_pose=" << deltaStats.unknownPose
+            << " bad_bounds=" << deltaStats.badBounds << " nonfinite_bounds=" << deltaStats.nonfiniteBounds
+            << " mirror_resize=" << deltaStats.mirrorReset << " material_residency=" << mGiMaterialSkipped
+            << " geometry_overflow=" << mGiGeometrySkipped
+            << "; global store_reset=" << deltaStats.storeReset << " agent_shift=" << deltaStats.agentShift
+            << " dropped_frame=" << mGiDroppedResets << " cache_restart_headers=" << mGiCacheRestarts
+            << "; local_spheres=" << nr << LL_ENDL;
+    }
+    // Moving deltas from the store into this bounded pending list is not an
+    // acknowledgement: current-frame AS publication can still prevent recordGI.
+    // Snapshot the generation; only recordGITail may consume these invalidations.
+    mGiHdrSceneSerial = mGiSceneSerial;
+    mGiHdrGlobalSerial = mGiGlobalSerial;
+    // A skipped recording still owns its covered batch. Merge new pending events
+    // into it, then leave a separate empty queue for geometry arriving after this header.
+    for (uint32_t i = 0; i < mGiSphereN; ++i)
+        giAddSphere(mGiHdrSpheres, mGiHdrSphereN, &mGiSpheres[4u * i]);
+    mGiSphereN = 0;
+    // (GI-4) bounded local changes; only origin/store/drop recovery requests a global restart
+    const size_t ns = mGiHdrSphereN;
     h.sph_n[0] = (uint32_t)ns;
     h.sph_n[1] = mGiSphOverflow ? 1u : 0u;
-    for (size_t i = 0; i < ns; ++i) std::memcpy(h.sph[i], &mGiSpheres[i * 4], sizeof(h.sph[i]));
-    mGiSpheres.clear();
+    for (size_t i = 0; i < ns; ++i) std::memcpy(h.sph[i], &mGiHdrSpheres[i * 4], sizeof(h.sph[i]));
     if (mGiSphOverflow && !mGiStateFresh)
     {
-        // (a change-sphere overflow wipes the cache: counted + logged at most every 10 s -- a sim whose
-        //  changes overflow every frame would keep the cache near empty)
+        // Global recovery is reserved for invalid coordinate/store/submission state,
+        // never ordinary streaming, unknown skin poses or bounded queue pressure.
         ++mGiCacheRestarts;
         static double s_next = 0.0;
         const double now = giClock();
         if (now >= s_next)
         {
             s_next = now + 10.0;
-            LL_INFOS("VKShadow") << "GI radiance cache restarted: more scene changes than its 64 change spheres this "
-                                    "frame (a region loading / a rez storm); " << mGiCacheRestarts << " restarts so far"
+            LL_INFOS("VKShadow") << "GI radiance cache restarted: origin/store/submission recovery; "
+                                 << mGiCacheRestarts << " restart headers so far"
                                  << LL_ENDL;
         }
     }
     if (mGiStateFresh || mGiSphOverflow)
     {   // a new / restarted cache: every slot empty (the WAR barrier above covers the fill)
         if (mGiStateSlots != ~0u && mGiStateSlots != 0u)
-            vkCmdFillBuffer(cmd, mGiState.buffer, sizeof(GiHeader), (VkDeviceSize)mGiStateSlots * 48u, 0u);
+            vkCmdFillBuffer(cmd, mGiState.buffer, sizeof(GiHeader), (VkDeviceSize)mGiStateSlots * 64u, 0u);
         mGiStateFresh = false;
     }
-    mGiSphOverflow = false;
+    // A recorded cache clear does not refresh reservoirs or temporal history.
+    // Keep the global rejection bit sticky through skipped/aborted GI recordings.
     // (#1039) REUSE reads the CHG-TAG stage's tags exactly while this header has GI_F_LIGHT_CHG and the reservoirs
     // (GI_F_RES: the fresh candidate's bit; its taps' bits need the temporal reuse as well -- the stage tests that):
     // recordGISplitReuse runs the stage on this, not on the settings again
@@ -990,20 +1046,24 @@ void LLCleanRendererVK::giNoteSpheres()
 {
     extern std::vector<float> gVKChangedSpheres;
     extern bool gVKChangedOverflow;
-    if (!mGiNow && !mGiWanted) { mGiSpheres.clear(); return; }
+    // A transient AS/readiness skip can retain GI resources and old histories.
+    // Keep their pending events; continue collecting geometry while resources exist.
+    if (!mGiNow && !mGiWanted && !mGiState.buffer) return;
     const size_t n = gVKChangedSpheres.size() / 4;
     if (gVKChangedOverflow)
-    {   // (the ingest itself lost track: nothing local is trustworthy -- the cache restarts)
-        mGiSpheres.clear();
-        mGiSphOverflow = true;
-        return;
+    {   // Preserve the bounded known regions; skip the unbounded/unknown remainder.
+        // Busy geometry must not evict every cache cell on every frame.
+        ++mGiGeometrySkipped;
     }
+    bool added = false;
     for (size_t i = 0; i < n; ++i)
     {
         const float* s = &gVKChangedSpheres[i * 4];
         if (!std::isfinite(s[0]) || !std::isfinite(s[1]) || !std::isfinite(s[2]) || !std::isfinite(s[3])) continue;
-        giAddSphere(mGiSpheres, s);
+        giAddSphere(mGiSpheres, mGiSphereN, s);
+        added = true;
     }
+    if (added) ++mGiSceneSerial;
 }
 
 bool LLCleanRendererVK::giTraceReady() const
@@ -1729,6 +1789,7 @@ void LLCleanRendererVK::recordGITail(VkCommandBuffer cmd, const VKDeferPush& p, 
     const GiCfg cfg = giCfg();
     const uint32_t dw = mGiDn->width(), dh = mGiDn->height();
     const VkDescriptorSet set2 = mGiSet2 ? mGiSet2 : mDsetDefer;
+    bool cacheResolved = (mGiFlags & GI_F_CACHE) == 0u;
     if ((mGiFlags & GI_F_CACHE) != 0u && mGiResolvePipe && mGiStateSlots != ~0u && mGiStateSlots != 0u)
     {
         // (GI-4) the radiance cache: this frame's accumulations into the means, eviction, invalidation
@@ -1744,6 +1805,7 @@ void LLCleanRendererVK::recordGITail(VkCommandBuffer cmd, const VKDeferPush& p, 
         const uint32_t gx = std::min<uint32_t>(groups, 32768u);
         vkCmdDispatch(cmd, gx, (groups + gx - 1u) / gx, 1);
         gpuSubMark(cmd, onAsync ? "c_gi_cache" : "g_gi_cache");
+        cacheResolved = true;
     }
     // stats: the header's counters into the ring (GPU timers on)
     if (mTsOn)
@@ -1812,6 +1874,15 @@ void LLCleanRendererVK::recordGITail(VkCommandBuffer cmd, const VKDeferPush& p, 
     gpuSubMark(cmd, onAsync ? "c_gi_dn_tmp" : "g_gi_dn_tmp");
     mGiDn->recordSpatial(cmd, p.width, p.height, dp);
     gpuSubMark(cmd, onAsync ? "c_gi_dn_sp" : "g_gi_dn_sp");
+    // Common completion point for fused, split, deferred-walk and lagged paths.
+    // Retire precisely the header-covered batch, even if later geometry changed
+    // the scene serial. Those later events are in mGiSpheres, never this batch.
+    // A missing resolve/trace or newer drop/global recovery consumes neither.
+    if (cacheResolved && mGiGlobalSerial == mGiHdrGlobalSerial)
+    {
+        mGiHdrSphereN = 0;
+        mGiSphOverflow = false;
+    }
     // (#978 phase 2) the trace the next frame's combine reads under GI_F_LAG (giDecide: mGiLagStale)
     mGiLagLast.have = true;
     mGiLagLast.finalIn = LLCleanDenoiserVK::finalIsIn(mGiAtrous);
@@ -1849,7 +1920,7 @@ std::string LLCleanRendererVK::giStatsText()
            << (s[8] > 0.0 ? s[9] / s[8] : 0.0) << ", inserts/frame " << std::setprecision(0) << s[10] * k
            << " (table full " << s[11] * k << "), live cells " << s[12] * k << " (peak " << a.livePeak << ") of "
            << (mGiStateSlots == ~0u ? 0u : mGiStateSlots) << ", evicted/frame " << s[13] * k
-           << ", invalidated/frame " << s[14] * k << ", restarts (change-sphere overflow) " << mGiCacheRestarts;
+           << ", invalidated/frame " << s[14] * k << ", restarts (global recovery) " << mGiCacheRestarts;
     if (a.hdrFrames)
         os << "; changed lights/frame " << std::setprecision(1) << a.chgLights / a.hdrFrames << " of "
            << a.allLights / a.hdrFrames << " (moved or radiance changed against their GI reference: RenderVKGILightChangeCut, RenderVKGILightMoveRel)"

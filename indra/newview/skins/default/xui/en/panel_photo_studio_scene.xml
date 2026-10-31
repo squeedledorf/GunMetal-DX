@@ -2399,6 +2399,600 @@ buffer reallocation, and a shader rebuild); it stays a prefs-level switch.
 		<accordion_tab
 		 expanded="false"
 		 layout="topleft"
+		 height="210"
+		 name="atab_sec_haze"
+		 title="Haze"
+		 fit_panel="true">
+			<panel follows="all" layout="topleft" height="181" left="0" top="0" right="-1" name="sec_haze">
+				<text follows="left|top|right" layout="topleft" left="8" top="8" right="-8" height="30" wrap="true" name="haze_note">Controls height fog only. Physical air, clouds, water and far fade are separate.</text>
+				<text follows="left|top|right" layout="topleft" left="8" top_pad="2" right="-8" height="16" name="haze_inactive" value="Physical sky is off; these settings are inactive." />
+				<text follows="left|top" layout="topleft" left="8" top_pad="7" width="140" height="18" name="haze_start_label" value="Start distance (m)" />
+				<spinner follows="left|top" layout="topleft" left_delta="140" top_delta="0" width="75" height="18" label_width="0" decimal_digits="1" increment="1" min_val="0" max_val="512" name="haze_RenderVKHazeStartDistance" />
+				<check_box follows="left|top" layout="topleft" left_delta="85" top_delta="0" width="100" height="18" label="Automatic" name="haze_start_auto" />
+				<button follows="top|right" layout="topleft" right="-8" top_delta="0" width="18" height="18" label="" scale_image="true" image_overlay="Refresh_Off" name="haze_start_rst" tool_tip="Reset to Automatic">
+					<button.commit_callback function="PhotoStudio.ResetControlDefault" parameter="RenderVKHazeStartDistance" />
+				</button>
+				<text follows="left|top|right" layout="topleft" left="8" top_pad="3" right="-8" height="16" name="haze_start_resolved" />
+				<text follows="left|top" layout="topleft" left="8" top_pad="7" width="140" height="18" name="haze_opacity_label" value="Maximum opacity (%)" />
+				<spinner follows="left|top" layout="topleft" left_delta="140" top_delta="0" width="75" height="18" label_width="0" decimal_digits="1" increment="1" min_val="0" max_val="95" name="haze_RenderVKHazeMaxOpacity" />
+				<check_box follows="left|top" layout="topleft" left_delta="85" top_delta="0" width="100" height="18" label="Automatic" name="haze_opacity_auto" />
+				<button follows="top|right" layout="topleft" right="-8" top_delta="0" width="18" height="18" label="" scale_image="true" image_overlay="Refresh_Off" name="haze_opacity_rst" tool_tip="Reset to Automatic">
+					<button.commit_callback function="PhotoStudio.ResetControlDefault" parameter="RenderVKHazeMaxOpacity" />
+				</button>
+				<text follows="left|top|right" layout="topleft" left="8" top_pad="3" right="-8" height="16" name="haze_opacity_resolved" />
+				<button follows="top|right" layout="topleft" right="-8" top_pad="7" width="100" height="18" label="Reset All" image_overlay="Refresh_Off" image_overlay_alignment="right" name="sec_haze_reset" tool_tip="Reset this section to Automatic">
+					<button.commit_callback function="PhotoStudio.ResetSection" parameter="sec_haze" />
+				</button>
+			</panel>
+		</accordion_tab>
+		<accordion_tab
+		 expanded="false"
+		 layout="topleft"
+		 height="551"
+		 name="atab_sec_fog"
+		 title="Fog &amp; Mist"
+		 fit_panel="true">
+			<panel
+			 follows="all"
+			 layout="topleft"
+			 height="522"
+			 left="0"
+			 top="0"
+			 right="-1"
+			 name="sec_fog">
+				<text
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top="8"
+				 right="-8"
+				 height="30"
+				 name="fog_note"
+				 wrap="true">
+					Fog lighting and range need Volumetric fog. Rolling mist also works with physical sky.
+				</text>
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="12"
+				 width="300"
+				 height="15"
+				 font="SansSerifBold"
+				 name="fog_hdr_light"
+				 value="Fog light and range" />
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="4"
+				 right="-32"
+				 height="18"
+				 label="Ambient"
+				 label_width="140"
+				 decimal_digits="2"
+				 text_width="56"
+				 increment="0.05"
+				 min_val="0"
+				 max_val="2"
+				 can_edit_text="true"
+				 name="fog_ambient"
+				 tool_tip="How much the sky lights legacy volumetric fog. Physical sky uses automatic lighting."
+				 control_name="RenderVKVolumetricFogAmbient" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="fog_ambient_rst"
+				 tool_tip="Reset legacy fog ambient to default. Physical sky uses automatic lighting.">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVKVolumetricFogAmbient" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Sun shafts"
+				 label_width="140"
+				 decimal_digits="2"
+				 text_width="56"
+				 increment="0.05"
+				 min_val="0"
+				 max_val="4"
+				 can_edit_text="true"
+				 name="fog_sun"
+				 tool_tip="Strength of legacy sun / moon shafts; needs shadows. Physical sky uses automatic lighting."
+				 control_name="RenderVKVolumetricFogSunScatter" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="fog_sun_rst"
+				 tool_tip="Reset legacy sun shafts to default. Physical sky uses automatic lighting.">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVKVolumetricFogSunScatter" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Lamp glow"
+				 label_width="140"
+				 decimal_digits="2"
+				 text_width="56"
+				 increment="0.05"
+				 min_val="0"
+				 max_val="4"
+				 can_edit_text="true"
+				 name="fog_lamps"
+				 tool_tip="How much point lights and projectors light the fog."
+				 enabled_control="RenderVKVolumetricFog"
+				 control_name="RenderVKVolumetricFogLocalLights" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="fog_lamps_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderVKVolumetricFog">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVKVolumetricFogLocalLights" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Range"
+				 label_width="140"
+				 decimal_digits="0"
+				 text_width="56"
+				 increment="8"
+				 min_val="32"
+				 max_val="512"
+				 can_edit_text="true"
+				 name="fog_range"
+				 tool_tip="Range (m) of volumetric shadows and local lights. Physical atmospheric transport covers the full finite scene; beyond this range it continues without those effects."
+				 enabled_control="RenderVKVolumetricFog"
+				 control_name="RenderVKVolumetricFogRange" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="fog_range_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderVKVolumetricFog">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVKVolumetricFogRange" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Smoothing"
+				 label_width="140"
+				 decimal_digits="2"
+				 text_width="56"
+				 increment="0.05"
+				 min_val="0"
+				 max_val="0.95"
+				 can_edit_text="true"
+				 name="fog_history"
+				 tool_tip="Frame-to-frame smoothing of the fog grid: higher is calmer but slower to follow; 0 is off (noisier)."
+				 enabled_control="RenderVKVolumetricFog"
+				 control_name="RenderVKVolumetricFogHistory" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="fog_history_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderVKVolumetricFog">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVKVolumetricFogHistory" />
+				</button>
+				<text
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="12"
+				 width="300"
+				 height="15"
+				 font="SansSerifBold"
+				 name="mist_hdr"
+				 value="Rolling mist (experimental)" />
+				<check_box
+				 follows="left|top"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 height="16"
+				 width="240"
+				 label="Rolling mist (experimental)"
+				 name="mist_on"
+				 tool_tip="Experimental rolling ground mist. In physical sky it replaces the sky-derived height profile within the resolved start and opacity cap. In legacy mode it needs volumetric fog."
+				 control_name="RenderVKMist" />
+				<text
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="6"
+				 right="-8"
+				 height="30"
+				 name="mist_note"
+				 wrap="true">
+					Work in progress: mist may look noisy. Enable Rolling mist above; legacy mode also needs Volumetric fog.
+				</text>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Density"
+				 label_width="140"
+				 decimal_digits="3"
+				 text_width="56"
+				 increment="0.001"
+				 min_val="0.001"
+				 max_val="0.1"
+				 can_edit_text="true"
+				 name="mist_density"
+				 tool_tip="Mist density at the base of the layer, per metre: higher means shorter visibility."
+				 enabled_control="RenderVKMist"
+				 control_name="RenderVKMistDensity" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="mist_density_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderVKMist">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVKMistDensity" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Base above water"
+				 label_width="140"
+				 decimal_digits="1"
+				 text_width="56"
+				 increment="0.5"
+				 min_val="-5"
+				 max_val="30"
+				 can_edit_text="true"
+				 name="mist_base"
+				 tool_tip="Height of the dense part of the layer above the water (m)."
+				 enabled_control="RenderVKMist"
+				 control_name="RenderVKMistBaseHeight" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="mist_base_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderVKMist">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVKMistBaseHeight" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Height"
+				 label_width="140"
+				 decimal_digits="1"
+				 text_width="56"
+				 increment="0.5"
+				 min_val="1"
+				 max_val="60"
+				 can_edit_text="true"
+				 name="mist_height"
+				 tool_tip="How quickly the mist thins above its base (m): larger is taller mist."
+				 enabled_control="RenderVKMist"
+				 control_name="RenderVKMistFalloff" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="mist_height_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderVKMist">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVKMistFalloff" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Breakup"
+				 label_width="140"
+				 decimal_digits="2"
+				 text_width="56"
+				 increment="0.01"
+				 min_val="0"
+				 max_val="1"
+				 can_edit_text="true"
+				 name="mist_breakup"
+				 tool_tip="How much the mist breaks into banks and gaps: 0 is an even layer."
+				 enabled_control="RenderVKMist"
+				 control_name="RenderVKMistBreakup" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="mist_breakup_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderVKMist">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVKMistBreakup" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Bank size"
+				 label_width="140"
+				 decimal_digits="0"
+				 text_width="56"
+				 increment="1"
+				 min_val="20"
+				 max_val="500"
+				 can_edit_text="true"
+				 name="mist_bank"
+				 tool_tip="Size of the mist banks (m); the wisps are a third of it."
+				 enabled_control="RenderVKMist"
+				 control_name="RenderVKMistBankSize" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="mist_bank_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderVKMist">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVKMistBankSize" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Roll height"
+				 label_width="140"
+				 decimal_digits="1"
+				 text_width="56"
+				 increment="0.5"
+				 min_val="0"
+				 max_val="100"
+				 can_edit_text="true"
+				 name="mist_roll"
+				 tool_tip="How far the top of the layer rises and falls with the banks (m)."
+				 enabled_control="RenderVKMist"
+				 control_name="RenderVKMistRollHeight" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="mist_roll_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderVKMist">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVKMistRollHeight" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Drift speed"
+				 label_width="140"
+				 decimal_digits="1"
+				 text_width="56"
+				 increment="0.1"
+				 min_val="0"
+				 max_val="15"
+				 can_edit_text="true"
+				 name="mist_speed"
+				 tool_tip="How fast the mist drifts (m/s). Everyone sees the same drift."
+				 enabled_control="RenderVKMist"
+				 control_name="RenderVKMistWindSpeed" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="mist_speed_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderVKMist">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVKMistWindSpeed" />
+				</button>
+				<slider
+				 follows="left|top|right"
+				 layout="topleft"
+				 left="8"
+				 top_pad="8"
+				 right="-32"
+				 height="18"
+				 label="Drift heading"
+				 label_width="140"
+				 decimal_digits="0"
+				 text_width="56"
+				 increment="1"
+				 min_val="0"
+				 max_val="360"
+				 can_edit_text="true"
+				 name="mist_heading"
+				 tool_tip="Compass heading the mist drifts toward (0 north, 90 east)."
+				 enabled_control="RenderVKMist"
+				 control_name="RenderVKMistWindDirection" />
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 right="-8"
+				 top_delta="0"
+				 width="18"
+				 height="18"
+				 label=""
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="center"
+				 name="mist_heading_rst"
+				 tool_tip="Reset to default"
+				 enabled_control="RenderVKMist">
+					<button.commit_callback
+					 function="PhotoStudio.ResetControlDefault"
+					 parameter="RenderVKMistWindDirection" />
+				</button>
+				<button
+				 follows="top|right"
+				 layout="topleft"
+				 height="18"
+				 width="100"
+				 right="-8"
+				 top_pad="10"
+				 label="Reset All"
+				 halign="left"
+				 scale_image="true"
+				 image_overlay="Refresh_Off"
+				 image_overlay_alignment="right"
+				 name="sec_fog_reset"
+				 tool_tip="Reset this section to defaults">
+					<button.commit_callback
+					 function="PhotoStudio.ResetSection"
+					 parameter="sec_fog" />
+				</button>
+			</panel>
+		</accordion_tab>
+		<accordion_tab
+		 expanded="false"
+		 layout="topleft"
 		 height="497"
 		 name="atab_sec_pfog"
 		 title="Particle Fog"

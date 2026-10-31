@@ -1,0 +1,290 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<!-- <GMDX> Map Sharing: who gets my shares and pings, and whose I take (gmdxfloatermapsharing.cpp, gmdxmapshare.h) -->
+<floater
+ positioning="centered"
+ can_minimize="true"
+ can_resize="true"
+ height="470"
+ min_height="430"
+ min_width="440"
+ layout="topleft"
+ name="floater_gmdx_map_sharing"
+ save_rect="true"
+ single_instance="true"
+ title="MAP SHARING"
+ width="480">
+    <string name="my_group">Send to my group: [NAME] (worn)</string>
+    <string name="no_group">My group: no group worn (put on a group tag to send to it)</string>
+    <string name="group_suffix">(group)</string>
+    <string name="group_left">(group, left)</string>
+    <string name="on_sim">on sim</string>
+    <string name="gone">gone</string>
+    <string name="members_here">[COUNT] here</string>
+    <string name="gets_yours">also gets yours</string>
+    <string name="receive_only">receive only</string>
+    <string name="this_session">, this session</string>
+    <string name="no_groups">(no other groups)</string>
+    <string name="nobody_here">(nobody else in this region)</string>
+    <string name="more_people">([COUNT] more not listed)</string>
+    <tab_container
+     name="tabs"
+     follows="all"
+     layout="topleft"
+     left="8"
+     top="4"
+     right="-8"
+     height="460"
+     tab_height="20"
+     tab_min_width="96"
+     tab_position="top">
+
+        <panel
+         name="send_panel"
+         left="0"
+         top="0"
+         width="464"
+         height="440"
+         label="Send"
+         follows="all"
+         layout="topleft">
+            <check_box
+             name="my_group"
+             control_name="SLMapShareMyGroup"
+             follows="left|top|right"
+             layout="topleft"
+             left="8"
+             top="8"
+             height="16"
+             width="448"
+             label="Send to my group"
+             tool_tip="Your pings and shares go to the members in your region of the group whose tag you wear. Share to Group, on a mark or zone, always goes to that group only." />
+            <scroll_list
+             name="target_list"
+             follows="all"
+             layout="topleft"
+             left="6"
+             top="30"
+             right="-6"
+             bottom="-40"
+             draw_heading="true"
+             draw_stripes="true"
+             multi_select="false"
+             tool_tip="The groups and people you send to (only those in your region get anything). On: they get your shares and pings. Keep: they stay listed after you log out; others go at logout, and a person who is not kept goes a few seconds after leaving the region.">
+                <columns name="on" label="On" width="34" halign="center" />
+                <columns name="keep" label="Keep" width="40" halign="center" />
+                <columns name="name" label="Name" dynamic_width="true" />
+                <columns name="here" label="Here" width="80" />
+            </scroll_list>
+            <button
+             name="add_group_btn"
+             follows="left|bottom"
+             layout="topleft"
+             left="6"
+             bottom="-8"
+             height="23"
+             width="80"
+             label="+ Group"
+             tool_tip="Send to one of your groups: its members in your region get your shares and pings" />
+            <button
+             name="add_person_btn"
+             follows="left|bottom"
+             layout="topleft"
+             left_pad="4"
+             top_delta="0"
+             height="23"
+             width="120"
+             label="+ Person nearby"
+             tool_tip="Send to someone in your region (nearest first)" />
+            <button
+             name="remove_target_btn"
+             follows="right|bottom"
+             layout="topleft"
+             right="-6"
+             bottom="-8"
+             height="23"
+             width="80"
+             label="Remove"
+             tool_tip="Take the selected group or person off your list" />
+        </panel>
+
+        <panel
+         name="receive_panel"
+         left="0"
+         top="0"
+         width="464"
+         height="440"
+         label="Receive"
+         follows="all"
+         layout="topleft">
+            <text
+             name="always_label"
+             type="string"
+             length="1"
+             font="SansSerifSmallBold"
+             follows="left|top"
+             layout="topleft"
+             left="8"
+             top="6"
+             height="16"
+             width="300">
+                Always accept
+            </text>
+            <scroll_list
+             name="always_list"
+             follows="left|top|right"
+             layout="topleft"
+             left="6"
+             top="24"
+             right="-108"
+             height="72"
+             draw_heading="false"
+             draw_stripes="true"
+             multi_select="false"
+             tool_tip="The people in your list: their marks, zones and pings are drawn without asking (Always on a share's popup adds someone here, receive only). Members of the groups you send to are accepted too.">
+                <columns name="name" dynamic_width="true" />
+                <columns name="status" width="150" />
+            </scroll_list>
+            <button
+             name="always_remove_btn"
+             follows="right|top"
+             layout="topleft"
+             right="-6"
+             top="24"
+             height="23"
+             width="96"
+             label="Remove"
+             tool_tip="Take them off your list: their shares ask again, and they get none of yours" />
+            <text
+             name="blocked_label"
+             type="string"
+             length="1"
+             font="SansSerifSmallBold"
+             follows="left|top"
+             layout="topleft"
+             left="8"
+             top="104"
+             height="16"
+             width="300">
+                Blocked
+            </text>
+            <scroll_list
+             name="blocked_list"
+             follows="left|top|right"
+             layout="topleft"
+             left="6"
+             top="122"
+             right="-108"
+             height="60"
+             draw_heading="false"
+             draw_stripes="true"
+             multi_select="false"
+             tool_tip="Nothing these people share is drawn, and they are never asked about (Mute on a share's popup, or Block sender)">
+                <columns name="name" dynamic_width="true" />
+            </scroll_list>
+            <button
+             name="unblock_btn"
+             follows="right|top"
+             layout="topleft"
+             right="-6"
+             top="122"
+             height="23"
+             width="96"
+             label="Unblock"
+             tool_tip="Their shares ask again (or are drawn, if they are in your list)" />
+            <button
+             name="unblock_all_btn"
+             follows="right|top"
+             layout="topleft"
+             right="-6"
+             top_pad="4"
+             height="23"
+             width="96"
+             label="Unblock All" />
+            <text
+             name="received_label"
+             type="string"
+             length="1"
+             font="SansSerifSmallBold"
+             follows="left|top"
+             layout="topleft"
+             left="8"
+             top="190"
+             height="16"
+             width="300">
+                Received now
+            </text>
+            <scroll_list
+             name="received_list"
+             follows="all"
+             layout="topleft"
+             left="6"
+             top="208"
+             right="-108"
+             bottom="-60"
+             draw_heading="true"
+             draw_stripes="true"
+             multi_select="false"
+             tool_tip="What others shared, drawn on your mini-map now. It goes when they leave the region, or when you do; pings when they run out.">
+                <columns name="type" label="Type" width="50" />
+                <columns name="name" label="Name" dynamic_width="true" />
+                <columns name="sender" label="From" width="110" />
+                <columns name="age" label="Age" width="52" />
+            </scroll_list>
+            <button
+             name="keep_btn"
+             follows="right|top"
+             layout="topleft"
+             right="-6"
+             top="208"
+             height="23"
+             width="96"
+             label="Keep"
+             tool_tip="Keep a copy in your own marks or zones" />
+            <button
+             name="remove_item_btn"
+             follows="right|top"
+             layout="topleft"
+             right="-6"
+             top_pad="4"
+             height="23"
+             width="96"
+             label="Remove"
+             tool_tip="Take it off your map" />
+            <button
+             name="block_btn"
+             follows="right|top"
+             layout="topleft"
+             right="-6"
+             top_pad="4"
+             height="23"
+             width="96"
+             label="Block sender"
+             tool_tip="Their items go, and nothing they share is drawn from now on" />
+            <button
+             name="clear_btn"
+             follows="right|top"
+             layout="topleft"
+             right="-6"
+             top_pad="4"
+             height="23"
+             width="96"
+             label="Clear all"
+             tool_tip="Take everything others shared off your map" />
+            <text
+             name="rules_text"
+             type="string"
+             length="1"
+             follows="left|right|bottom"
+             layout="topleft"
+             left="8"
+             right="-8"
+             bottom="-6"
+             height="48"
+             wrap="true">
+Only people in your region get your shares and pings, and only theirs reach you.
+Strangers' marks and zones ask first: Accept, Always, Deny or Mute.
+Strangers' pings are dropped.
+            </text>
+        </panel>
+    </tab_container>
+</floater>

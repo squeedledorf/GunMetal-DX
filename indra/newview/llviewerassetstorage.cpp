@@ -163,23 +163,24 @@ void LLViewerAssetStorage::storeAssetData(
             LLFileSystem vfile(asset_id, asset_type, LLFileSystem::READ);
             S32 asset_size = vfile.getSize();
 
-            LLAssetRequest *req = new LLAssetRequest(asset_id, asset_type);
-            req->mUpCallback = callback;
-            req->mUserData = user_data;
-
             if (asset_size < 1)
             {
                 // This can happen if there's a bug in our code or if the cache has been corrupted.
                 LL_WARNS("AssetStorage") << "LLViewerAssetStorage::storeAssetData()  Data _should_ already be in the cache, but it's not! " << asset_id << LL_ENDL;
 
-                delete req;
+                // Checked before allocating the request: a new/delete pair here let GCC 16
+                // speculatively devirtualize to ~LLViewerAssetRequest and flag -Warray-bounds.
                 if (callback)
                 {
                     callback(asset_id, user_data, LL_ERR_ASSET_REQUEST_FAILED, LLExtStat::CACHE_CORRUPT);
                 }
                 return;
             }
-            else
+
+            LLAssetRequest *req = new LLAssetRequest(asset_id, asset_type);
+            req->mUpCallback = callback;
+            req->mUserData = user_data;
+
             {
                 // LLAssetStorage metric: Successful Request
                 S32 size = LLFileSystem::getFileSize(asset_id, asset_type);

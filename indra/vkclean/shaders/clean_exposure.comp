@@ -14,17 +14,16 @@
 // LL's mip-8 average of a full-resolution luminance map: far less shimmer than one
 // point tap per cell on high-frequency scenes.
 //
-// <GMDX> NIGHT EYE (params4.x > 0: GMDXPhysicalNight, gmdxnighteyevk.h). LL's curve reaches
-// exp_max once the scene is a quarter of the coefficient and stops there, so below that the
-// screen darkens stop for stop with the scene: a moonlit night (night-light: about 1/20 of the
-// day's direct light) ends up ~4 stops under the day, a moonless one black. Below that point
-// the eye gives back part of every stop (EV-style exposure compensation, as UE / HDRP; Kirk &
-// O'Brien keep low light at 25-50% of the display range): params4.x per stop down to the knee,
+// NIGHT EYE (params4.x > 0: physical night, vkgfx/slnighteyevk.h; ported from GunMetal-DX
+// (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4). LL's curve reaches exp_max once the scene is a
+// quarter of the coefficient and stops there, so below that the screen darkens stop for stop with
+// the scene: a moonlit night ends up ~4 stops under the day, a moonless one black. Below that
+// point the eye gives back part of every stop (EV-style exposure compensation, as UE / HDRP; Kirk
+// & O'Brien keep low light at 25-50% of the display range): params4.x per stop down to the knee,
 // params4.z per stop past it, at most params4.w stops over exp_max. The night still darkens on
-// screen (by 1 - adaptation per stop), so the dimmer moon is never lifted back to day. Above
-// the quarter point the value is LL's, so day, dusk and shade look as before. Eased in stops
-// (log2), since the range is now many stops wide. params4.x = 0: LL's curve, unchanged.
-// </GMDX>
+// screen (by 1 - adaptation per stop), so the dimmer moon is never lifted back to day. Above the
+// quarter point the value is LL's, so day, dusk and shade look as before. Eased in stops (log2),
+// since the range is now many stops wide. params4.x = 0: LL's curve, unchanged.
 layout(local_size_x = 16, local_size_y = 16) in;
 
 // (#1075 LAYERED STEREO: the scene HDR has a layer per view -- one exposure for every eye,
@@ -39,8 +38,8 @@ layout(push_constant) uniform Push {
     vec4 params;    // coefficient (max_L), exp_min, exp_max, speed_error
     vec4 params2;   // speed_target, dt, reset (1 = snap), 0
     vec4 params3;   // diffuse luminance scale, sky detect (1 = depth bound), bloom weight,
-                    // <GMDX> per-tap luminance cap at night (0 = none; the moon's HDR disc)
-    vec4 params4;   // <GMDX> night eye: adaptation (0 = off), knee (stops), deep adaptation, max lift (stops)
+                    // per-tap luminance cap at night (0 = none; the moon's HDR disc)
+    vec4 params4;   // night eye: adaptation (0 = off), knee (stops), deep adaptation, max lift (stops)
 } pc;
 
 shared float s_lum[256];
@@ -66,7 +65,7 @@ void main()
         // NaN / Inf safety: one bad texel must not poison the 1x1 value every later frame
         // eases from (max() with a NaN operand is implementation-defined).
         float lum = dot(c, vec3(0.2126, 0.7152, 0.0722));
-        if (pc.params3.w > 0.0) lum = min(lum, pc.params3.w);   // <GMDX> (NaN still caught below)
+        if (pc.params3.w > 0.0) lum = min(lum, pc.params3.w);   // (night: NaN still caught below)
         acc += (isnan(lum) || isinf(lum)) ? 0.0 : clamp(lum, 0.0, 65504.0);
     }
     s_lum[li] = acc * 0.25;
@@ -79,12 +78,12 @@ void main()
     if (li != 0u) return;
 
     float L = s_lum[0] / 256.0;
-    const float L_avg = L;   // <GMDX> night eye
+    const float L_avg = L;   // (night eye)
     float max_L = max(pc.params.x, 1e-4);
     L = clamp(L, 0.0, max_L) / max_L;
     L = L * L;
     float s = mix(pc.params.z, pc.params.y, L);
-    // <GMDX> night eye: extra lift in the stops below a quarter of the coefficient.
+    // Night eye: extra lift in the stops below a quarter of the coefficient.
     const bool night_eye = pc.params4.x > 0.0;
     const float night_cap = night_eye ? clamp(pc.params4.w, 0.0, 12.0) : 0.0;
     if (night_eye)
@@ -95,9 +94,8 @@ void main()
                                        : pc.params4.x * knee + pc.params4.z * (x - knee);
         s *= exp2(min(lift, night_cap));
     }
-    // </GMDX>
     // The adapted value always stays inside [exp_min, exp_max] (or 1 when those are bad).
-    const float lo = min(pc.params.y, pc.params.z), hi = max(pc.params.y, pc.params.z) * exp2(night_cap);   // <GMDX> night lift
+    const float lo = min(pc.params.y, pc.params.z), hi = max(pc.params.y, pc.params.z) * exp2(night_cap);   // (+ the night lift)
     const bool range_ok = !(isnan(lo) || isinf(lo) || isnan(hi) || isinf(hi)) && hi > 0.0;
     float prev = imageLoad(uExposure, ivec2(0)).r;
     // A non-finite / non-positive previous value can't be eased from: snap.
@@ -107,7 +105,7 @@ void main()
         float speed = -log(max(pc.params.w, 1e-4)) / max(pc.params2.x, 1e-4);
         float dt = pc.params2.y;
         dt = (isnan(dt) || isinf(dt)) ? 0.0 : clamp(dt, 0.0, 1.0);
-        if (night_eye)   // <GMDX> in stops
+        if (night_eye)   // (in stops)
             s = exp2(mix(log2(prev), log2(max(s, 1e-4)), 1.0 - exp(-speed * dt)));
         else
             s = mix(prev, s, 1.0 - exp(-speed * dt));

@@ -39,8 +39,16 @@ setup
 slipstream_update_apply "$T/hi/app" "$BIN" && fail "applied without a pending update"
 [ "$(version)" = 1.0.0.1 ] || fail "A: changed"
 
-# B. pending: applied, then a crash before confirmation rolls back and blocks the build
-setup; echo "$T/hstaged.json" > "$STATE/pending-update"
+# A2. downloaded but not approved (downloaded-update, or 0.3.0's pending-update): never applied
+for f in downloaded-update pending-update; do
+  setup; echo "$T/hstaged.json" > "$STATE/$f"
+  slipstream_update_apply "$T/hi/app" "$BIN" && fail "A2: applied an unapproved $f"
+  [ "$(version)" = 1.0.0.1 ] || fail "A2: $f changed the install"
+  [ -f "$STATE/$f" ] || fail "A2: $f removed"
+done
+
+# B. approved: applied, then a crash before confirmation rolls back and blocks the build
+setup; echo "$T/hstaged.json" > "$STATE/approved-update"
 slipstream_update_apply "$T/hi/app" "$BIN" 2>/dev/null || fail "B: apply failed"
 [ "$(version)" = 1.0.0.2 ] || fail "B: not updated"
 SLIPSTREAM_UPDATE_APPLIED=1 slipstream_update_apply "$T/hi/app" "$BIN" && fail "B: applied twice in a launch"
@@ -52,12 +60,12 @@ slipstream_update_rollback_if_needed "$T/hi/app" 139 2>/dev/null || fail "B: no 
 [ "$(cat "$STATE/bad-build")" = 1.0.0.2 ] || fail "B: bad-build not recorded"
 ls "$T/hi" | grep -q failed && fail "B: failed tree left behind"
 # the same build is not offered again, even if staged again
-cp "$T/orig.tar.xz" "$T/$NAME"; echo "$T/hstaged.json" > "$STATE/pending-update"
+cp "$T/orig.tar.xz" "$T/$NAME"; echo "$T/hstaged.json" > "$STATE/approved-update"
 slipstream_update_apply "$T/hi/app" "$BIN" 2>/dev/null && fail "B: bad build re-applied"
 [ "$(version)" = 1.0.0.1 ] || fail "B: bad build installed"
 
 # C. confirmed (marker removed by the new viewer) -> a later crash does not roll back
-setup; echo "$T/hstaged.json" > "$STATE/pending-update"
+setup; echo "$T/hstaged.json" > "$STATE/approved-update"
 slipstream_update_apply "$T/hi/app" "$BIN" 2>/dev/null || fail "C: apply failed"
 rm -f "$STATE/update-unconfirmed"
 slipstream_update_rollback_if_needed "$T/hi/app" 139 && fail "C: rolled back a confirmed update"

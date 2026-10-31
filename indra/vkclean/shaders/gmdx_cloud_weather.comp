@@ -1,53 +1,53 @@
 #version 450
-// <GMDX> upstream's clean_vol_cloud_weather.comp for the GunMetal-DX cloud model (gmdx_cloud_common.glsl).
-// Wicked's model raises the coverage straight up through the cloud type's height band (250 m to
-// 2.4 km of a 2500 m shell), so any coverage feature narrower than that stands up as a thin
-// vertical column. The EEP noise is drawn for a flat dome: Second Life's Midday sky
-// (dc6e4164..., a 1024^2 photo of small puffs, plus cloud density 2 of 0.89) puts coverage
-// features of ~60 m (median) in the map, sampled at mip 0 besides (8:1 minified for the detail
-// layer: aliased speckle). Each layer is now read at the mip whose texel is the weather map's
-// texel or the smallest footprint (vc.gmdx2.z, GMDXCloudMinWidth x the thickness), whichever is
-// larger. Smooth noise (LL's default cloud texture) barely changes. The detail layer is sampled
-// at 4 x the tile (the dome's 16 x is finer still). Everything else is upstream's mapping.
-// A cloud's height follows its width (seen from above, a puff of 100 m stood 800 m tall): the
-// cloud type, which sets the height band, comes from the coverage filtered over 4 x the smallest
-// footprint (500 m by default), so only a cloud that wide reaches the tall types and its sides
-// slope down to its edges; and a feature that does not survive a 2 x filter (narrower than
-// ~250 m) is squashed toward the base (a = the height scale, gmdx_cloud_common.glsl gcWeather).
 #extension GL_GOOGLE_include_directive : require
 #extension GL_EXT_nonuniform_qualifier : require
-// vkclean -- VOLUMETRIC CLOUDS (#719): the 2D WEATHER MAP, from the region's EEP sky.
+// GUNMETAL-DX VOLUMETRIC CLOUDS: the 2D WEATHER MAP from the region's EEP sky, and the WORLD
+// COVERAGE window, for GunMetal-DX's cloud model (gmdx_cloud_common.glsl gcWeather / gcWorld).
+// Copyright (C) 2026, squeedledorf (GunMetal-DX). LGPL 2.1, as the viewer. The world coverage
+// field is Slipstream's (#1283, clean_vol_cloud_weather.comp wxCoverage), ported as it is.
 //
-// One texel per 1/512 of the weather tile (periodic: the clouds module samples it with a
+// WEATHER MAP. One texel per 1/512 of the weather tile (periodic: the clouds sample it with a
 // REPEAT sampler at world xy / tile, tile = 24 km x EEP cloud scale x RenderVKVolCloudScale).
-// Rebuilt every frame (512^2 texels, a few bilinear fetches each: ~0.02 ms) so the EEP scroll
-// (wind) and the day-cycle blend of two noise textures arrive continuously.
-//
-// The coverage is the 2D dome's own (clean_clouds.glsl cloudsF, LL's alpha1) on the same
-// inputs, so a region's sky keeps its character -- where the dome showed cloud, the shell
-// grows cloud:
-//   raw = (noise(u + pos_density1.xy) - 0.5) + (noise(16 u + pos_density2.xy) - 0.5) * density2
+// Rebuilt every frame (512^2 texels, a few bilinear fetches each) so the EEP scroll (wind) and
+// the day-cycle blend of two noise textures arrive continuously. The coverage is the 2D dome's own
+// (clean_clouds.glsl cloudsF, LL's alpha1) on the same inputs, so a region's sky keeps its
+// character -- where the dome showed cloud, the shell grows cloud:
+//   raw = (noise(u + pos_density1.xy) - 0.5) + (noise(4 u + pos_density2.xy) - 0.5) * density2
 //       + 2 (cloud_coverage - 0.25)
 //   coverage = saturate(raw x 3 x density1)
-// (EEP "Cloud Coverage" = LL cloud_shadow = ssr.atmos[2].w; density1 / 2 = pos_density.z;
-// LL sharpens x 10 for a flat layer, the volume's own shaping does part of that here.)
+// (EEP "Cloud Coverage" = LL cloud_shadow = ssr.atmos[2].w; density1 / 2 = pos_density.z.)
 // Cloud type (stratus 0 .. towering cumulus 1): heavier where the coverage is dense, varied by
 // a second noise channel and the EEP cloud variance. Local density: the detail layer, plus
 // overcast skies thickening.
-// Writes r = coverage, g = type, b = local density, a = height scale (<GMDX>; upstream 1).
+//
+// NO COLUMNS. Wicked's model raises the coverage straight up through the cloud type's height band
+// (250 m to 2.4 km of a 2500 m shell), so any coverage feature narrower than that stands up as a
+// thin vertical column. The EEP noise is drawn for a flat dome: Second Life's Midday sky
+// (dc6e4164..., a 1024^2 photo of small puffs, plus cloud density 2 of 0.89) puts coverage
+// features of ~60 m (median) in the map, sampled at mip 0 besides (aliased speckle). Each layer
+// is read at the mip whose texel is the weather map's texel or the smallest footprint
+// (vc.shape3.x, a share of the layer's thickness), whichever is larger, and the detail layer at
+// 4 x the tile (the dome's 16 x is finer still). A cloud's height follows its width (seen from
+// above, a puff of 100 m stood 800 m tall): the cloud type, which sets the height band, comes from
+// the coverage filtered over 4 x the smallest footprint (500 m by default), so only a cloud that
+// wide reaches the tall types and its sides slope down to its edges; and a feature that does not
+// survive a 2 x filter (narrower than ~250 m) is squashed toward the base (a = the height scale).
+// Writes r = coverage, g = type, b = local density, a = height scale.
+//
+// WORLD COVERAGE (binding 2, r): a smooth non-periodic field over a window around the camera
+// (vc.wmap, the texel index is the window's, not the tile's): domain-warped value fBm at a 12 km
+// scale plus a rotated, incommensurate EEP sample, advected by the wind. gcWeather raises or lowers
+// the tile's coverage with it, so the tile does not repeat across the sky.
 layout(local_size_x = 8, local_size_y = 8) in;
 
 #include "clean_frame_info.glsl"
 #include "clean_atmos_common.glsl"
 layout(set = 1, binding = 0) uniform sampler2D uTextures[];   // bindless (the EEP cloud noise)
+#define VC_SET 2
+#define VC_BINDING 1
+#include "gmdx_cloud_ubo.glsl"
 layout(set = 2, binding = 0, rgba8) uniform writeonly image2D uWeather;
-// <GMDX> the clouds' params (gmdx_cloud_common.glsl VolCloudParams): shape0.x the tile (m), y 1 / tile;
-// gmdx2.z the smallest cloud footprint (m)
-layout(std140, set = 2, binding = 1) uniform VolCloudParams
-{
-    vec4 shape0;
-    layout(offset = 336) vec4 gmdx2;
-} vc;
+layout(set = 2, binding = 2, rgba8) uniform writeonly image2D uWorld;
 
 // texel = the filter width in texture repeats (metres / the layer's repeat length)
 vec4 wxTex(int i, vec2 uv, float texel)
@@ -73,6 +73,35 @@ float wxCoverage(vec2 u, float fw, float cloud_density, out vec4 n1, out vec4 n2
     return clamp(raw * 3.0 * max(ssr.clouds[1].z, 0.05), 0.0, 1.0);
 }
 
+// ---- the world coverage field (Slipstream #1283) ----
+uint wxHash(ivec2 cell)
+{
+    uint h = uint(cell.x) * 1597334677u + uint(cell.y) * 3812015801u;
+    h = (h ^ (h >> 16u)) * 2246822519u;
+    h = (h ^ (h >> 13u)) * 3266489917u;
+    return h ^ (h >> 16u);
+}
+float wxValue(vec2 p)
+{
+    const ivec2 cell = ivec2(floor(p));
+    const vec2 f = fract(p), w = f * f * (3.0 - 2.0 * f);
+    return mix(mix(float(wxHash(cell)), float(wxHash(cell + ivec2(1, 0))), w.x),
+               mix(float(wxHash(cell + ivec2(0, 1))), float(wxHash(cell + ivec2(1, 1))), w.x), w.y) * (1.0 / 4294967295.0);
+}
+// u = the window's uv, size = the window's texels.
+float wxWorld(vec2 u, vec2 size)
+{
+    const vec2 p = vc.wnoise.xy + u * vc.wmap.w * vc.wnoise.z;
+    const vec2 warp = vec2(wxValue(p * 0.7 + vec2(17.3, 41.7)), wxValue(p * 0.7 + vec2(-63.1, 9.2))) - 0.5;
+    const vec2 q = p + warp * 0.75;
+    const float fbm = (wxValue(q) + 0.5 * wxValue(q * 2.03 + 7.1) + 0.25 * wxValue(q * 4.13 - 13.7)) / 1.75;
+    const vec2 detail = u * (vc.wmap.w * vc.shape0.y);
+    const vec2 rotated = mat2(0.8, 0.6, -0.6, 0.8) * (detail * 1.41421356237) + vc.wrot.xy;
+    // (read at the mip of the window's texel in the rotated tile)
+    const float texel = vc.wmap.w * vc.shape0.y * 1.41421356237 / min(size.x, size.y);
+    return clamp(0.7 * fbm + 0.3 * wxNoise(rotated, texel).x, 0.0, 1.0);
+}
+
 void main()
 {
     const ivec2 px = ivec2(gl_GlobalInvocationID.xy);
@@ -86,8 +115,8 @@ void main()
     const float coverage_eep = max(ssr.atmos[2].w, ssr.weather[11].z);
 
     // The filter width in tiles: the map's texel or the smallest footprint (m); 2 m and 4 m for
-    // the cloud's width (GMDXCloudMinWidth 0: all three the map's texel, the unfiltered shape).
-    const float texel = 1.0 / float(sz.x), m = vc.gmdx2.z * vc.shape0.y;
+    // the cloud's width (a footprint of 0: all three the map's texel, the unfiltered shape).
+    const float texel = 1.0 / float(sz.x), m = vc.shape3.x * vc.shape0.y;
     const float cloud_density = 2.0 * (coverage_eep - 0.25);
     vec4 n1, n2, t1, t2;
     const float cov = wxCoverage(u, max(texel, m), cloud_density, n1, n2);
@@ -97,5 +126,6 @@ void main()
                              + 0.3 * variance * (n2.y - 0.3), 0.0, 1.0);
     const float hs = mix(0.35, 1.0, smoothstep(0.3, 0.9, covS / max(cov, 1e-3)));
     const float dens = clamp(0.55 + 0.45 * n2.x + 0.3 * max(coverage_eep - 0.5, 0.0), 0.0, 1.0);
-    imageStore(uWeather, px, vec4(cov, type, dens, hs));   // (upstream: sqrt(cov), for its own shape model)
+    imageStore(uWeather, px, vec4(cov, type, dens, hs));
+    imageStore(uWorld, px, vec4(vc.wnoise.w > 0.0 ? wxWorld(u, vec2(imageSize(uWorld))) : 0.5, 0.0, 0.0, 1.0));
 }

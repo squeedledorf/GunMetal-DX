@@ -32,7 +32,7 @@
 // Viewer includes
 #include "llagent.h"
 #include "llagentcamera.h"
-#include "llfloatercamera.h"    // <GMDX> ortho toggle state on the camera floater
+#include "llfloatercamera.h"    // ortho toggle state on the camera floater
 #include "llmeshrepository.h"   // #585 released-read tripwire
 #include "llmatrix4a.h"
 #include "llviewercontrol.h"
@@ -89,7 +89,7 @@ LLViewerCamera::LLViewerCamera() : LLCamera()
         });
     }
 
-    // <GMDX> FSCameraOrtho (not persisted) drives the orthographic view.
+    // FSCameraOrtho (not persisted) drives the orthographic view.
     LLPointer<LLControlVariable> ortho_ptr = gSavedSettings.getControl("FSCameraOrtho");
     if (ortho_ptr.notNull())
     {
@@ -98,14 +98,14 @@ LLViewerCamera::LLViewerCamera() : LLCamera()
             LLViewerCamera::getInstance()->setOrtho(value.asBoolean());
         });
     }
-    // </GMDX>
 }
 
-// <GMDX> Orthographic view (SoapStorm 7179701d85 / de57904143).
+// Orthographic view. Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
+// <GMDX> From SoapStorm (Soap Frenzy), LGPL 2.1: the orthographic view that keeps the scale it had at
+// the focus distance and goes back to perspective when the camera moves (7179701d85, de57904143).
 void LLViewerCamera::setOrtho(bool ortho)
 {
-    // Not from the eyes: mouselook and the OTS combat camera (cameraMouselook covers both)
-    // stay perspective.
+    // Not from the eyes: mouselook stays perspective.
     if (ortho && gAgentCamera.cameraMouselook())
     {
         ortho = false;
@@ -169,7 +169,7 @@ bool LLViewerCamera::orthoMouseRay(S32 x, S32 y, LLVector3& origin, LLVector3& d
     return true;
 }
 
-// SoapStorm 3b3d9f0154 (its display()): the near clip from FSRenderNearClip, ramped down while
+// <GMDX> SoapStorm 3b3d9f0154 (Nexii Malthus; its display()): the near clip from FSRenderNearClip, ramped down while
 // the third person camera is focused closer than 3 m so alt-cam can get right up to a surface
 // without the plane slicing into it. Display() does not run under Vulkan, so the frame loop
 // calls this. The setting may only pull the near plane in: it is capped at the viewer's old fixed
@@ -270,7 +270,7 @@ bool LLViewerCamera::updateCameraLocation(const LLVector3 &center, const LLVecto
     mAverageAngularSpeed = (F32)LLTrace::get_frame_recording().getPeriodMeanPerSec(sAngularVelocityStat);
     mCosHalfCameraFOV = cosf(0.5f * getView() * llmax(1.0f, getAspect()));
 
-    // <GMDX> Ortho auto-perspective: back to perspective once the camera really moves.
+    // Ortho auto-perspective: back to perspective once the camera really moves.
     if (mIsOrtho)
     {
         if (gAgentCamera.cameraMouselook())
@@ -290,7 +290,6 @@ bool LLViewerCamera::updateCameraLocation(const LLVector3 &center, const LLVecto
             }
         }
     }
-    // </GMDX>
 
     // update pixel meter ratio using default fov, not modified one
     mPixelMeterRatio = (F32)(getViewHeightInPixels()/ (2.f*tanf(mCameraFOVDefault*0.5f)));
@@ -321,7 +320,7 @@ void LLViewerCamera::calcProjection(const F32 far_distance) const
     F32 z_near = getNear();
     F32 aspect = getAspect();
 
-    // <GMDX> orthographic (GL convention, as the perspective below): manipulators read it
+    // orthographic (GL convention, as the perspective below): manipulators read it
     if (mIsOrtho)
     {
         const F32 half_height = getOrthoHalfHeight();
@@ -343,7 +342,6 @@ void LLViewerCamera::calcProjection(const F32 far_distance) const
         mProjectionMatrix.mMatrix[3][3] = 1.0f;
         return;
     }
-    // </GMDX>
 
     F32 f = 1 / tan(fov_y * 0.5f);
 

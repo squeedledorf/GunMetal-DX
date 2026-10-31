@@ -519,6 +519,7 @@ layout(push_constant) uniform ClRtPush
 #define CNT_RIG_REUSE_SKIP 73u   // ... whose CLAS was kept (moved less than the avatar's tolerance)
 #define CNT_RIG_OWN_SKIN   74u   // slots mode 9 skinned itself (no shared skinned cut)
 #define CNT_RIG_COPIED     75u   // shared slots whose vertices mode 9 copied from 2a's SKIN_OUT (written)
+#define RIG_SKIN_DISPATCH  76u   // 3 words: VkDispatchIndirectCommand (= kRigSkinDispatch)
 #define CNT_RIG_REBUILD_SLOTS 60u   // arena slots of the admitted avatars NOT kept this frame (= the rigged CLAS the build may make)   // pending-free / stack overflows (blocks lost until the next epoch)
 
 #define CL_RT_SHARED_CUT 2048u
@@ -594,6 +595,9 @@ float rigRasterErr(float d)
     const uint mv = rcpu[RP_MAIN_VIEW];
     if (mv >= CL_MAX_VIEWS) return 0.0;
     const float pxs = cl_views[mv].px_scale;
+    // Orthographic px_scale is pixels per metre: raster error is independent of distance.
+    if ((cl_views[mv].flags & CLV_ORTHO) != 0u)
+        return pxs > 0.0 ? cl_views[mv].tol_px / pxs : 0.0;
     return pxs > 0.0 ? cl_views[mv].tol_px * d / pxs : 0.0;
 }
 // Avatar a re-selects its RT cut this frame. Modes 0 and 13 must agree: inputs are last frame's
@@ -1023,6 +1027,18 @@ bool rigStill(uint a)
 {
     return a < AV_SLOT_CAP && ((rcpu[RP_STILL + (a >> 5u)] >> (a & 31u)) & 1u) != 0u;
 }
+// Called by the lane publishing CNT_RIG in either admission path. Use the occupied END,
+// not a count of changed slots: kept ranges can leave holes before a moving avatar.
+// Match the host dispatch's row width and main()'s workgroup flattening. Zero demand
+// has zero rows; an early admission return leaves the transfer-cleared zero command.
+void rigSkinDispatch(uint end)
+{
+    const uint n = min(end, rcpu[RP_RIG_CAP]);
+    const uint gx = min(max(n, 1u), 32768u);   // = LLCleanClusterRTVK dispatch kGridX
+    cnt[RIG_SKIN_DISPATCH] = gx;
+    cnt[RIG_SKIN_DISPATCH + 1u] = (n + gx - 1u) / gx;
+    cnt[RIG_SKIN_DISPATCH + 2u] = 1u;
+}
 void rigAdmit()
 {
     if (gl_LocalInvocationID.x != 0u || rcpu[RP_RIG_ON] == 0u) return;
@@ -1150,6 +1166,7 @@ void rigAdmit()
     cnt[CNT_RIG_DUE_AV] = due_n;
     atomicMax(cnt[CNT_RIG_STALE_MAX], stale_max);   // (mode 9 adds its skipped slots' ages)
     cnt[CNT_RIG] = hi;   // the slots in use end here (mode 9's range; kept ranges may leave holes)
+    rigSkinDispatch(hi);
 }
 
 // #1011 (header): mode 13 on the whole workgroup -- the same decisions as rigAdmit, row for row.
@@ -1292,6 +1309,7 @@ void rigAdmitPar()
         cnt[CNT_RIG_DUE_AV] = s_ad[6];
         atomicMax(cnt[CNT_RIG_STALE_MAX], s_ad[2]);
         cnt[CNT_RIG] = s_ad[7];
+        rigSkinDispatch(s_ad[7]);
     }
 }
 

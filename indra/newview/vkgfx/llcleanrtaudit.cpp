@@ -228,6 +228,7 @@ void LLCleanRTVK::auditLostHook(const VkDeviceAddress* faults, uint32_t n)
     if (!rt) { vkFaultLogLine("[vktest] RT scene audit: not available (no RT foundation)"); return; }
     // The CPU tables are mutated by the thread that records the RT build: read them only there
     // (or later from the main loop, auditLostMainLoop). The GPU readback ring is safe anywhere.
+    rt->inputLostReport(); // atomic counters: safe even when the recorder is another thread
     const bool same_thread = rt->mAuditThread == 0 || rt->mAuditThread == threadKey();
     rt->runAudit(faults, n, true, -1, same_thread, true);
     {

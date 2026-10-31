@@ -127,10 +127,11 @@ public:
     void updateVisibility();
     LLVector2 updateScreenPos(LLVector2 &offset_target);
     // Same as updateScreenPos with the frame invariants supplied by the caller: the
-    // pixel vectors at mPositionAgent and the scaled world view rect (#336: the overlap
-    // solver computes them once per tag / once per frame instead of per overlapping pair).
+    // pixel vectors at mPositionAgent and the scaled area the tag is kept inside, the HUD rect
+    // (#336: the overlap solver computes them once per tag / once per frame instead of per
+    // overlapping pair).
     LLVector2 updateScreenPos(LLVector2 &offset_target, const LLVector3& x_pixel_vec,
-                              const LLVector3& y_pixel_vec, const LLRect& world_rect);
+                              const LLVector3& y_pixel_vec, const LLRect& visible_rect);
     void updateSize();
 //  void setMass(F32 mass) { mMass = llmax(0.1f, mass); }
     void setTextAlignment(ETextAlignment alignment) { mTextAlignment = alignment; }

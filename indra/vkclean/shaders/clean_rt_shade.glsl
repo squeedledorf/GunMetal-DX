@@ -2,7 +2,7 @@
 // clean_draw.frag / clean_water.frag shade a REFLECTION-PROBE CAPTURE fragment
 // (probeCapture(): sun_color.w = 1). That specialization of the lit FS:
 //   * no probe sampling (sampleProbes returns false in captures): irradiance = the sky
-//     ambient (amblit), radiance = skyColor(R);
+//     ambient (amblit), radiance = skyColorAtOrigin(R,P);
 //   * no SSR, planar mirror, AO, debug views, lit-debug switches or far-clip fade;
 //   * local lights = the capture's own culled list (cluster CLUSTER_COUNT + list, written
 //     by clean_probe_gpu.comp PH_LIGHTS, #478), projector shadows: shadow-map records take the
@@ -33,7 +33,7 @@
 //                                 hard shadow ray; the capture leaves those unshadowed);
 //   RT_SHADE_ENV(P, N, R, rough, legacy, amblit, irr, rad, rad2) -> the environment at the hit:
 //                                 irradiance, radiance along R at the roughness's lod and at
-//                                 lod 0 (instead of amblit / skyColor(R)).
+//                                 lod 0 (instead of amblit / skyColorAtOrigin(R,P)).
 //   RT_SHADE_PROJ_K            -> (with RT_SHADE_PROJ_RAY) the HIT SHADOW-RAY BUDGET: at most this
 //                                 many ray-traced projector records per hit get RT_SHADE_PROJ_RAY
 //                                 (0 .. RT_SHADE_PROJ_MAXK, run-time uniform). Every contributing
@@ -492,6 +492,15 @@ vec3 rtWaterReflectDir(vec3 P, vec3 eye, float time_s)
 // In two halves around the glint's sun ray: rtShadeHit traces the sun ONCE for every surface model
 // (one inlined sun walk -- the water's own call site was a second copy of the opaque / translucent /
 // foliage walks in every kernel that shades hits).
+vec3 rtShadeRawSky(vec3 direction,vec3 origin)
+{
+#ifdef RT_SHADE_NO_HAZE
+    return cmOn() ? physkyRolloff(cmBoundarySky(origin,normalize(direction))) : skyColor(direction);
+#else
+    return skyColorAtOrigin(direction,origin);
+#endif
+}
+
 struct RtWaterShade
 {
     vec3 color;      // under water: the final colour (done)
@@ -500,6 +509,7 @@ struct RtWaterShade
     vec3 fb;
     float mixK;      // min(1, df2.x)
     vec3 additive, atten;
+    CameraTransport medium;
     bool done;       // no glint ray, color is final
     vec3 R;          // (#1039 M2) the reflection direction RT_SHADE_ENV is asked along (unset when done)
 };
@@ -510,6 +520,14 @@ RtWaterShade rtShadeWaterBegin(vec3 P, vec3 eye, float time_s, bool env)
     RtWaterShade w;
     w.color = vec3(0.0); w.punctual = vec3(0.0); w.radiance = vec3(0.0); w.fb = vec3(0.0); w.mixK = 0.0;
     w.additive = vec3(0.0); w.atten = vec3(1.0); w.done = false; w.R = vec3(0.0, 0.0, 1.0);
+    w.medium=cmIdentity();
+#ifndef RT_SHADE_NO_HAZE
+    if(cmOn())
+    {
+        const vec3 segment=P-eye;
+        w.medium=cmFinite(eye,segment/max(length(segment),1e-7),0.0,length(segment),0.0);
+    }
+#endif
     const bool under = eye.z < waterHeight();
     const float time = time_s * 0.5;
     const vec3  up   = vec3(0.0, 0.0, 1.0);
@@ -569,7 +587,7 @@ RtWaterShade rtShadeWaterBegin(vec3 P, vec3 eye, float time_s, bool env)
         vec3 wirr, wrad2;
         RT_SHADE_ENV(P, up, R, rough, false, amblit, wirr, radiance, wrad2);
 #else
-        radiance = skyColor(R);   // captures never sample the probes
+        radiance = rtShadeRawSky(R,P);   // captures never sample the probes
 #endif
     }
 
@@ -598,7 +616,11 @@ vec3 rtShadeWaterEnd(RtWaterShade w, float sunVis)
 {
     if (w.done) return w.color;
     vec3 color = mix(w.fb, w.radiance, w.mixK) + w.punctual * sunVis;
-    color = atmosApplyRay(color, w.additive, w.atten);   // (#816: the light terms' haze, same ray view = P - eye)
+#ifndef RT_SHADE_NO_HAZE
+    color = cmOn() ? cmApply(color,w.medium) : atmosApplyRay(color, w.additive, w.atten);
+#else
+    if(!cmOn()) color=atmosApplyRay(color,w.additive,w.atten);
+#endif   // (#816: the light terms' haze, same ray view = P - eye)
     return max(color, vec3(0.0));
 }
 
@@ -663,7 +685,7 @@ vec4 rtShadeHit(RtLitSurface s, vec3 eye, uint list, float time_s)
         {
             // Fullbright + shiny: the sharp env (sky in captures) at the shininess level.
             const vec3 fR = reflect(-V, s.Nv);
-            const vec3 env = skyColor(fR);
+            const vec3 env = rtShadeRawSky(fR,P);
             float fresnel = 1.0 + dot(-V, s.Nv);
             fresnel *= fresnel;
             fresnel = min(fresnel + s.fb_env, 1.0);
@@ -718,7 +740,7 @@ vec4 rtShadeHit(RtLitSurface s, vec3 eye, uint list, float time_s)
         RT_SHADE_ENV(P, N, R, s.rough, false, amblit, irradiance, radiance, radiance2);
 #else
         const vec3 irradiance = amblit;
-        const vec3 radiance = skyColor(R);
+        const vec3 radiance = rtShadeRawSky(R,P);
 #endif
         const vec3 diffuseColor  = s.base.rgb * (vec3(1.0) - vec3(0.04)) * (1.0 - s.metal);
         const vec3 specularColor = mix(vec3(0.04), s.base.rgb, s.metal);
@@ -765,8 +787,8 @@ vec4 rtShadeHit(RtLitSurface s, vec3 eye, uint list, float time_s)
 #else
         const vec3 irradiance = amblit;
         const vec3 R = reflect(-V, N);
-        const vec3 glossenv  = s.gloss > 0.0 ? clamp(skyColor(R), vec3(0.0), vec3(10.0)) : vec3(0.0);
-        const vec3 legacyenv = s.env > 0.0 ? skyColor(R) : vec3(0.0);
+        const vec3 glossenv  = s.gloss > 0.0 ? clamp(rtShadeRawSky(R,P), vec3(0.0), vec3(10.0)) : vec3(0.0);
+        const vec3 legacyenv = s.env > 0.0 ? rtShadeRawSky(R,P) : vec3(0.0);
 #endif
         float da = clamp(dot(N, L), 0.0, 1.0);
         vec3 stint = vec3(1.0);
@@ -825,7 +847,13 @@ vec4 rtShadeHit(RtLitSurface s, vec3 eye, uint list, float time_s)
 #ifndef RT_SHADE_NO_HAZE
     {
         const float l0 = rtsLum(color);
-        color = atmosOrWaterFog(color, P, eye, additive * (RT_SHADE_HAZE_K), atten);
+        if(cmOn())
+        {
+            CameraTransport segment=cmFinite(eye,(P-eye)/max(length(P-eye),1e-7),0.0,length(P-eye),0.0);
+            segment.L*=RT_SHADE_HAZE_K;
+            color=cmWaterPrefix(cmApply(color,segment),P,eye);
+        }
+        else color = atmosOrWaterFog(color, P, eye, additive * (RT_SHADE_HAZE_K), atten);
         g_rts_terms.w = max(rtsLum(color) - l0, 0.0);
     }
 #endif

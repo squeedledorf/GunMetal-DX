@@ -40,11 +40,13 @@
  *    from OpenAL.
  *  - Speakers: up to ParcelAudioMaxSpeakers (16, max 32) audible ones, ranked by level at the listener
  *    (vol x distance falloff; a playing one keeps its place unless clearly outranked). Each is a
- *    positioned source of its role: full level out to r / 4, then real inverse distance (ref / d,
- *    -6 dB per doubling), r a soft maximum (the last 15 % of r fades to silence); dir= is an
+ *    positioned source of its role: clamped inverse distance with reference max(r / 8, 1 m),
+ *    times (1 - (d / r)^4)^2 inside r, zero at and beyond r. Ranking and source gain share this
+ *    curve; OpenAL distance rolloff is disabled for these sources. dir= is an
  *    OpenAL cone around the prim's +X; vol= is its gain, 0..2 (OpenAL AL_MAX_GAIN raised to fit;
  *    beyond the cap the quietest speakers are skipped, logged). ParcelAudioDiffuseReverb: the room /
- *    zone sends keep their level over distance (diffuse field); off: they decay like a channel's.
+ *    zone sends have no extra distance decay beyond the speaker gain envelope (diffuse field);
+ *    off: they also decay like a channel's.
  *    With room acoustics active (AudioAcoustics + ray tracing) each speaker is traced as an extra
  *    acoustics source and gets its occlusion low-pass, room send, reverb zone and diffraction pan
  *    (LLCleanAcoustics::sourceAcoustics); acoustics off: position and falloff only.

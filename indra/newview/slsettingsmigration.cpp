@@ -142,7 +142,112 @@ void migrateGMDXMouselookHud(LLControlGroup& group)
     group.setBOOL("SlipstreamMouselookPosition", false);       // X / Y / Z at the top
     group.setBOOL("GMDXMouselookHudMigrated", true);
 }
+
+const char* const GMDX_RENAMES_MARKER = "GMDXSettingsRenamed";
+
+const std::map<std::string, std::string>& gmdxRenames()
+{
+    static const std::map<std::string, std::string> s_renames = []
+    {
+        std::map<std::string, std::string> out;
+        const std::string path = gDirUtilp->getExpandedFilename(LL_PATH_APP_SETTINGS, "settings_renames_gmdx.xml");
+        LLSD doc;
+        if (!LLControlGroup::readSettingsFile(path, doc) || !doc["renames"].isMap())
+        {
+            LL_WARNS("SettingsMigration") << "Cannot read " << path
+                                          << "; GunMetal-DX settings saved under their old names will not carry over" << LL_ENDL;
+            return out;
+        }
+        const LLSD& table = doc["renames"];
+        for (LLSD::map_const_iterator it = table.beginMap(); it != table.endMap(); ++it)
+        {
+            out[it->first] = it->second.asString();
+        }
+        return out;
+    }();
+    return s_renames;
+}
+
+unsigned migrateGMDXRenames(LLControlGroup& group, const std::string& filename)
+{
+    // (the old names a user file still carries load as unknown controls: out of the debug settings)
+    for (const auto& [old_name, new_name] : gmdxRenames())
+    {
+        if (LLControlVariable* control = group.getControl(old_name).get())
+        {
+            control->setHiddenFromSettingsEditor(true);
+        }
+    }
+    if (!group.controlExists(GMDX_RENAMES_MARKER))
+    {
+        LL_WARNS("SettingsMigration") << GMDX_RENAMES_MARKER << " is not declared in " << group.getKey()
+                                      << "; not migrating " << filename << LL_ENDL;
+        return 0;
+    }
+    // (the marker from the file itself, as migrateSettingsFile: the per-account group keeps the last account's)
+    LLSD file;
+    const bool have_file = LLControlGroup::readSettingsFile(filename, file);
+    if (have_file && file.has(GMDX_RENAMES_MARKER) && file[GMDX_RENAMES_MARKER]["Value"].asInteger() >= (LLSD::Integer)GMDX_RENAMES_VERSION)
+    {
+        return 0;
+    }
+    const unsigned migrated = have_file ? group.migrateRenamedControls(file, gmdxRenames(), true, filename) : 0;
+    group.setU32(GMDX_RENAMES_MARKER, GMDX_RENAMES_VERSION);
+    LL_INFOS("SettingsMigration") << "GunMetal-DX renamed settings: carried " << migrated << " value(s) over from old names in "
+                                  << (filename.empty() ? std::string("(no file)") : filename) << LL_ENDL;
+    return migrated;
+}
 // </GMDX>
+
+void migrateTPSFraming(LLControlGroup& group, const std::string& filename)
+{
+    const std::map<std::string, std::string> framing = {
+        {"OTSCameraDistance", "SlipstreamTPSCameraDistance"},
+        {"OTSCameraSide", "SlipstreamTPSCameraSide"},
+        {"OTSCameraHeight", "SlipstreamTPSCameraHeight"},
+        {"OTSFocusDistance", "SlipstreamTPSFocusDistance"},
+        {"OTSCameraCollision", "SlipstreamTPSCameraCollision"}
+    };
+    // Unknown controls from old files are loaded for compatibility. Retire them
+    // after migration so they neither appear in Debug Settings nor get saved again.
+    auto retire = [&group](const std::string& name)
+    {
+        if (auto* control = group.getControl(name).get())
+        {
+            control->setHiddenFromSettingsEditor(true);
+            control->setPersist(LLControlVariable::PERSIST_NO);
+        }
+    };
+    for (const auto& [old_name, new_name] : framing) retire(old_name);
+    // <GMDX> OTSEnabled, OTSRememberLastView and OTSLastViewFirstPerson stay: GunMetal-DX's OTS aim camera uses them (gmdxots.h)
+    //retire("OTSEnabled");
+    //retire("OTSRememberLastView");
+    //retire("OTSLastViewFirstPerson");
+    if (group.getBOOL("SlipstreamTPSFramingMigrated")) return;
+
+    LLSD file;
+    if (LLControlGroup::readSettingsFile(filename, file))
+    {
+        for (const auto& [old_name, new_name] : framing)
+        {
+            if (file.has(old_name) && !file.has(new_name) && group.getControl(new_name)->isDefault())
+            {
+                group.getControl(new_name)->setValue(file[old_name]["Value"]);
+            }
+        }
+        // The old view-memory flags chose how M entered aim mode. They are not
+        // framing choices. M now always enters mouselook, independently of TPS.
+        const bool used_shoulder = file.has("OTSEnabled") ? file["OTSEnabled"]["Value"].asBoolean()
+            : (file.has("CombatFX") && file["CombatFX"]["Value"].asBoolean());
+        if (used_shoulder && !file.has("SlipstreamTPSCameraMode"))
+        {
+            group.setU32("SlipstreamTPSCameraMode", 1);
+            // <GMDX> The shoulder view stays GunMetal-DX's OTS camera (gmdxots.h): its users don't get the TPS camera turned on
+            //if (!file.has("SlipstreamTPSCamera")) group.setBOOL("SlipstreamTPSCamera", true);
+        }
+    }
+    group.setBOOL("SlipstreamTPSFramingMigrated", true);
+}
 
 void migrateChatNotifications(LLControlGroup& group, const std::string& filename)
 {
@@ -204,6 +309,25 @@ void migrateChatNotifications(LLControlGroup& group, const std::string& filename
     group.setBOOL("ChatNotificationsMigrated", true);
 }
 
+void migrateMouselookHideUI(LLControlGroup& group, const std::string& filename)
+{
+    const char* const OLD_NAME = "SlipstreamMouselookShowUI";
+    if (LLControlVariable* control = group.getControl(OLD_NAME).get())
+    {
+        control->setHiddenFromSettingsEditor(true);
+    }
+    if (group.getBOOL("MouselookHideUIMigrated"))
+    {
+        return;
+    }
+    LLSD file;
+    if (LLControlGroup::readSettingsFile(filename, file) && file.has(OLD_NAME))
+    {
+        group.setBOOL("SlipstreamMouselookHideUI", !file[OLD_NAME]["Value"].asBoolean());
+    }
+    group.setBOOL("MouselookHideUIMigrated", true);
+}
+
 unsigned migratePresetFile(LLControlGroup& group, const std::string& filename)
 {
     hideOldNames(group);
@@ -212,7 +336,8 @@ unsigned migratePresetFile(LLControlGroup& group, const std::string& filename)
     {
         return 0;
     }
-    const unsigned migrated = group.migrateRenamedControls(file, renames(), false, filename);
+    unsigned migrated = group.migrateRenamedControls(file, renames(), false, filename);
+    migrated += group.migrateRenamedControls(file, gmdxRenames(), false, filename);   // <GMDX>
     if (migrated)
     {
         LL_INFOS("SettingsMigration") << "Renamed settings: applied " << migrated

@@ -41,7 +41,7 @@
 #include "llviewercontrol.h" // gSavedSettings
 
 #include "llagentbenefits.h"
-#include "gmdxsnapshotavatars.h"   // <GMDX> orientation swap
+#include "llsnapshotavatars.h"   // orientation swap (ported from GunMetal-DX, squeedledorf, LGPL 2.1, v0.3.0 cf5f1f4)
 
 constexpr S32 MAX_TEXTURE_SIZE = 2048 ; //max upload texture size 2048 * 2048
 
@@ -79,15 +79,15 @@ bool LLPanelSnapshot::postBuild()
     {
         getChild<LLUICtrl>(getAspectRatioCBName())->setCommitCallback(boost::bind(&LLPanelSnapshot::onKeepAspectRatioCommit, this, _1));
     }
-    // <GMDX> landscape <-> portrait (gmdxsnapshotavatars.h)
+    // landscape <-> portrait (llsnapshotavatars.h)
     if (LLUICtrl* swap_btn = findChild<LLUICtrl>("swap_resolution_btn"))
     {
         swap_btn->setCommitCallback([this](LLUICtrl*, const LLSD&)
         {
-            gmdxSnapshotSwapOrientation(mSnapshotFloater ? mSnapshotFloater : getParentByType<LLFloaterSnapshotBase>());
+            snapshotSwapOrientation(mSnapshotFloater ? mSnapshotFloater : getParentByType<LLFloaterSnapshotBase>());
         });
     }
-    // </GMDX>
+
     updateControls(LLSD());
 
     mSnapshotFloater = getParentByType<LLFloaterSnapshotBase>();
@@ -218,6 +218,7 @@ void LLPanelSnapshot::goBack()
 
 void LLPanelSnapshot::cancel()
 {
+    if (auto* snapshot = dynamic_cast<LLFloaterSnapshot*>(mSnapshotFloater)) snapshot->cancelSelfTimer();
     goBack();
     getParentByType<LLFloater>()->notify(LLSD().with("set-ready", true));
 }

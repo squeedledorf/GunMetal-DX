@@ -391,6 +391,8 @@ public:
     // This will be used as part of the interest sorting algorithm.
     void setUsedInUI(bool used_in_ui);
     bool getUsedInUI() const { return mUsedInUI; };
+    void setUIOwner(LLView* view) { mUIOwner = view->getHandle(); }
+    LLView* getUIOwner() const { return mUIOwner.get(); }
 
     void setBackgroundColor(LLColor4 color);
 
@@ -479,6 +481,7 @@ private:
     EMediaNavState mMediaNavState;
     F64 mInterest;
     bool mUsedInUI;
+    LLHandle<LLView> mUIOwner;
     bool mHasFocus;
     LLPluginClassMedia::EPriority mPriority;
     bool mNavigateRediscoverType;

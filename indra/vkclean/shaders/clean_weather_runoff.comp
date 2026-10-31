@@ -88,6 +88,24 @@ bool outlet(ivec2 p, out float low, out ivec2 lowDir)
 }
 bool outlet(ivec2 p) { float l; ivec2 d; return outlet(p, l, d); }
 
+// #1145: an outlet's water falls in the open -- a point kOutletProbeDown under its edge and
+// kOutletProbeOut out of it is not under the near map's top (by more than kOutletProbeTol). Under a
+// wind the rain runs nearly parallel to, the lee roof is edge-on in the tilted map and the ridge
+// reads as a drop to the ground: its drips and streams fell through the roof into the attic.
+const float kOutletProbeDown = 0.3, kOutletProbeOut = 0.15, kOutletProbeTol = 0.05;
+bool outletOpen(ivec2 p, ivec2 lowDir, float h)
+{
+    const vec2 o = normalize(vec2(lowDir));
+    const vec2 col = pc.fr0.xy + (vec2(p) + 0.5 + 0.5 * vec2(lowDir)) * pc.fr1.y;
+    const float z = h - kOutletProbeDown;
+    const vec2 wxy = col + (pc.fr0.w - h) * pc.fr1.zw + o * kOutletProbeOut;   // (the edge in world, out)
+    const vec2 uv = (wxy - (pc.fr0.w - z) * pc.fr1.zw - pc.fr0.xy) / pc.fr0.z;   // its column on the top plane
+    if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) return true;
+    const float d = pc.a.w == 0u ? textureLod(uNear[0], uv, 0.0).r : textureLod(uNear[1], uv, 0.0).r;
+    if (d >= 1.0) return true;
+    return pc.fr0.w - d * pc.fr1.x <= z + kOutletProbeTol;
+}
+
 // Distance (m) from p to its outlet seed (jump flood result in parity par).
 float seedDist(ivec2 p, uint par)
 {
@@ -218,7 +236,7 @@ void main()
         float C = 0.0, low = kNone;
         ivec2 lowDir;
         const uint own = sc[oAcc() + 2u * i];
-        if (t == i && float(own) >= pc.c.w && outlet(p, low, lowDir))
+        if (t == i && float(own) >= pc.c.w && outlet(p, low, lowDir) && outletOpen(p, lowDir, H(i)))
         {
             C = float(own) * pc.fr1.y * pc.fr1.y;
             const float h = H(i);

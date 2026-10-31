@@ -30,6 +30,7 @@
 #include "../llui/llfolderviewitem.h"
 
 #include "llavatariconctrl.h"
+#include "llcallingcard.h"
 #include "../llui/llbutton.h"
 #include "lloutputmonitorctrl.h"
 
@@ -44,7 +45,7 @@ class LLVoiceClientStatusObserver;
 
 // Implementation of conversations list session widgets
 
-class LLConversationViewSession : public LLFolderViewFolder
+class LLConversationViewSession : public LLFolderViewFolder, private LLFriendObserver
 {
 public:
     struct Params : public LLInitParam::Block<Params, LLFolderViewItem::Params>
@@ -97,9 +98,14 @@ public:
     LLFloater* getSessionFloater();
     bool isInActiveVoiceChannel() { return mIsInActiveVoiceChannel; }
 
-    bool highlightFriendTitle(LLConversationItem* vmi);
-
 private:
+
+    void changed(U32 mask) override;
+    void updateSessionTitle(LLConversationItem* vmi);
+    LLUUID mFriendID;
+    boost::signals2::scoped_connection mClassicNameColorsConnection;
+    boost::signals2::scoped_connection mContactSetColorsConnection;
+    boost::signals2::scoped_connection mContactSetChangesConnection;
 
     void onCurrentVoiceSessionChanged(const LLUUID& session_id);
     void startFlashing();
@@ -130,7 +136,7 @@ private:
 
 // Implementation of conversations list participant (avatar) widgets
 
-class LLConversationViewParticipant : public LLFolderViewItem
+class LLConversationViewParticipant : public LLFolderViewItem, private LLFriendObserver
 {
 
 public:
@@ -171,6 +177,13 @@ protected:
     void onInfoBtnClick();
 
 private:
+
+    void changed(U32 mask) override;
+    LLAvatarTracker::EPresence mPresence = LLAvatarTracker::EPresence::NOT_FRIEND;
+    LLColor4 mNameColor = LLColor4::white;
+    boost::signals2::scoped_connection mClassicNameColorsConnection;
+    boost::signals2::scoped_connection mContactSetColorsConnection;
+    boost::signals2::scoped_connection mContactSetChangesConnection;
 
     LLAvatarIconCtrl* mAvatarIcon;
     LLButton * mInfoBtn;

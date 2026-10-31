@@ -194,6 +194,7 @@ void LLScrollListItem::draw(const LLRect& rect, const LLColor4& fg_color, const 
                 gl_rect_2d(highlight_rect, hover_color);
             }
 
+            cell->setUseDefaultColor(getSelected() || !getEnabled());
             cell->draw( fg_color, highlight_color );
         }
         LLUI::popMatrix();

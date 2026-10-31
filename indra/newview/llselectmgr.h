@@ -816,8 +816,9 @@ public:
     void sendSelect();
 
     void requestObjectPropertiesFamily(LLViewerObject* object); // asks sim for creator, permissions, resources, etc.
-    void requestObjectPropertiesViaSelect(LLViewerObject* object); // <GMDX> select+deselect: a full ObjectProperties, answered for worn attachments too
-    void requestObjectPropertiesViaSelect(LLViewerRegion* regionp, U32 local_id); // <GMDX> the same by local id (an object killed here, still in the sim)
+    // Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4: select+deselect elicits ObjectProperties for worn attachments too
+    void requestObjectPropertiesViaSelect(LLViewerObject* object);
+    void requestObjectPropertiesViaSelect(LLViewerRegion* regionp, U32 local_id);
     static void processObjectProperties(LLMessageSystem *mesgsys, void **user_data);
     static void processObjectPropertiesFamily(LLMessageSystem *mesgsys, void **user_data);
     static void processForceObjectSelect(LLMessageSystem* msg, void**);

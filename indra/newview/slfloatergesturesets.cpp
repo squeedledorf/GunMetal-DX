@@ -356,6 +356,12 @@ void SLFloaterGestureSets::refreshGestures()
             trigger = meta->mTrigger;
             shortcut = key_string(meta->mKey, meta->mMask);
         }
+        // a mouse side button shortcut (#1189) is kept by the viewer, not in the gesture
+        const std::string mouse_shortcut = LLGestureMgr::instance().getMouseTriggerLabel(id);
+        if (!mouse_shortcut.empty())
+        {
+            shortcut = mouse_shortcut;
+        }
 
         const LLViewerInventoryCategory* cat = gInventory.getCategory(item->getParentUUID());
         const std::string folder = cat ? cat->getName() : std::string();

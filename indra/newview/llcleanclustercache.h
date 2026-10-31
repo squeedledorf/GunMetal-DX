@@ -40,6 +40,10 @@ struct LLClusterKey
 {
     LLUUID mesh_id;
     S32    face = 0;
+    // Session-only local geometry. Carried through asynchronous builds so even
+    // a result arriving after disconnect cannot persist unpublished geometry.
+    // Not part of identity: the UUID already uniquely identifies the revision.
+    bool   transient = false;
 
     bool operator==(const LLClusterKey& o) const { return mesh_id == o.mesh_id && face == o.face; }
     bool operator!=(const LLClusterKey& o) const { return !(*this == o); }

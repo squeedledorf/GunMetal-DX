@@ -1,0 +1,1 @@
+{'name':'seed','count':i7,'ratio':r3.25,'flag':true,'off':false,'t':t,'f':f,'one':1,'zero':0,'nothing':!,'id':u11111111-2222-3333-4444-555555555555,'when':d"2020-01-02T03:04:05.67Z",'link':l"https://example.invalid/a",'b64':b64"AQIDBAU=",'b16':b16"010203",'raw':b(5)"hello",'dq':"quote \" here",'sized':s(4)"abcd",'list':[i1,r2.5,'three',[i5],{'six':i6}]}

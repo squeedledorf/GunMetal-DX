@@ -72,15 +72,26 @@
 #include "llcleanrtvk.h"
 
 #include "llviewercontrol.h"
+#include "../llcleanemissivediag.h"
+#if defined(LL_HAS_CLEAN_PIPELINE)
+#include "llcleaninstancestore.h"
+#include "llviewerobjectlist.h"
+#include "llviewerobject.h"
+#include "indra_constants.h"
+#include "llselectmgr.h"
+#endif
 #include "../llvkhitch.h"
 #include "vk_common.h"
 #include "vk_pipeline.h"
 #include "vk_world_shaders_spv.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstring>
+#include <iterator>
 #include <iomanip>
 #include <sstream>
 #include <unordered_set>
@@ -111,7 +122,37 @@ double pdnClock()
     return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 uint32_t pdnDim(uint32_t r, float s) { return std::max(1u, (uint32_t)std::ceil((float)r * s)); }
+#if defined(LL_HAS_CLEAN_PIPELINE)
+struct EmDiagName { LLUUID id; uint32_t frame = 0, local = 0; double until = 0.0; };
+std::array<EmDiagName, 15> s_emDiagNames;
+uint32_t s_emDiagNameCount = 0;
+std::string emDiagSafeName(std::string name)
+{
+    if (name.size() > 160u) name.resize(160u);
+    for (char& c : name) if ((unsigned char)c < 32u || c == '"' || c == '\\') c = ' ';
+    return name;
+}
+#endif
 } // namespace
+
+bool llEmissiveDiagProperties(const LLUUID& id, const std::string& name)
+{
+#if defined(LL_HAS_CLEAN_PIPELINE)
+    const double now = pdnClock();
+    auto it = std::find_if(s_emDiagNames.begin(), s_emDiagNames.begin() + s_emDiagNameCount, [&](const EmDiagName& n) { return n.id == id; });
+    if (it == s_emDiagNames.begin() + s_emDiagNameCount) return false;
+    static LLCachedControl<bool> s_on(gSavedSettings, "RenderVKReSTIREmissiveDiagnostics", false);
+    LLViewerObject* o = gObjectList.findObject(id);
+    if (s_on && now <= it->until && o && !o->isAvatar() && !o->isAttachment() && !o->getAvatar())
+        LL_INFOS("VKEmissive") << "emitter name: gpu_frame=" << it->frame << " local_id=" << it->local
+                              << " uuid=" << id << " name=\"" << emDiagSafeName(name)
+                              << "\" (asynchronous object properties; no owner/avatar names)" << LL_ENDL;
+    *it = s_emDiagNames[--s_emDiagNameCount];
+    return true;
+#else
+    return false;
+#endif
+}
 
 // Init (initDeferSplit, inside the world PipelineBatchScope): the denoiser always -- set 3
 // bindings 13-16 are declared by the combine / LOCAL kernels and must name its placeholders --
@@ -131,19 +172,21 @@ void LLCleanRendererVK::pdnInit(VkDevice dev)
         }
         writePdnMotion();
     }
+    // (#1029) The ray-query kernels below join the deferred ray-query group (rtDeferredCompute):
+    // compiled after the world pipelines, installed together; every user checks its handle per frame.
     if (mRtReflLayout && !mPdnSamplePipe)
     {
         VkShaderModule m = pdnModule(dev, kWorldDeferProjStochSpv, kWorldDeferProjStochSpv_bytes, "DeferProjStoch");
-        createComputePipelineInto(dev, m, mRtReflLayout, 0u, pdnLitSpec(), &mPdnSamplePipe,
-                                  "mPdnSamplePipe (DeferProjStoch)");
+        rtDeferredCompute(dev, m, mRtReflLayout, 0u, pdnLitSpec(), &mPdnSamplePipe,
+                          "mPdnSamplePipe (DeferProjStoch)");
         destroyShaderModuleDeferred(dev, m, nullptr);
     }
     if (mRtReflLayout && !mPdnMergePipe)
     {
         // (#195 + #85) the merged RT shadow pass: pass 15 + the sun / moon trace (CLEAN_SHADOW_MERGE)
         VkShaderModule m = pdnModule(dev, kWorldDeferShadowMergeSpv, kWorldDeferShadowMergeSpv_bytes, "DeferShadowMerge");
-        createComputePipelineInto(dev, m, mRtReflLayout, 0u, pdnLitSpec(), &mPdnMergePipe,
-                                  "mPdnMergePipe (DeferShadowMerge)");
+        rtDeferredCompute(dev, m, mRtReflLayout, 0u, pdnLitSpec(), &mPdnMergePipe,
+                          "mPdnMergePipe (DeferShadowMerge)");
         destroyShaderModuleDeferred(dev, m, nullptr);
     }
     // #85 / #869 Phase 1: the generic-core twins (RenderVKShadowGenericCore; both compiled so the
@@ -151,22 +194,22 @@ void LLCleanRendererVK::pdnInit(VkDevice dev)
     if (mRtReflLayout && !mPdnSampleCorePipe)
     {
         VkShaderModule m = pdnModule(dev, kWorldDeferProjStochCoreSpv, kWorldDeferProjStochCoreSpv_bytes, "DeferProjStochCore");
-        createComputePipelineInto(dev, m, mRtReflLayout, 0u, pdnLitSpec(), &mPdnSampleCorePipe,
-                                  "mPdnSampleCorePipe (DeferProjStochCore)");
+        rtDeferredCompute(dev, m, mRtReflLayout, 0u, pdnLitSpec(), &mPdnSampleCorePipe,
+                          "mPdnSampleCorePipe (DeferProjStochCore)");
         destroyShaderModuleDeferred(dev, m, nullptr);
     }
     if (mRtReflLayout && !mRsEmPipe)
     {
         // (#91 / #869) the emissive light records (RenderVKReSTIREmissive): pass 15's layout
         VkShaderModule m = pdnModule(dev, kWorldDeferRsEmissiveSpv, kWorldDeferRsEmissiveSpv_bytes, "DeferRsEmissive");
-        createComputePipelineInto(dev, m, mRtReflLayout, 0u, pdnLitSpec(), &mRsEmPipe, "mRsEmPipe (DeferRsEmissive)");
+        rtDeferredCompute(dev, m, mRtReflLayout, 0u, pdnLitSpec(), &mRsEmPipe, "mRsEmPipe (DeferRsEmissive)");
         destroyShaderModuleDeferred(dev, m, nullptr);
     }
     if (mRtReflLayout && !mPdnMergeCorePipe)
     {
         VkShaderModule m = pdnModule(dev, kWorldDeferShadowMergeCoreSpv, kWorldDeferShadowMergeCoreSpv_bytes, "DeferShadowMergeCore");
-        createComputePipelineInto(dev, m, mRtReflLayout, 0u, pdnLitSpec(), &mPdnMergeCorePipe,
-                                  "mPdnMergeCorePipe (DeferShadowMergeCore)");
+        rtDeferredCompute(dev, m, mRtReflLayout, 0u, pdnLitSpec(), &mPdnMergeCorePipe,
+                          "mPdnMergeCorePipe (DeferShadowMergeCore)");
         destroyShaderModuleDeferred(dev, m, nullptr);
     }
     if (mRtReflLayout)
@@ -193,7 +236,7 @@ void LLCleanRendererVK::pdnInit(VkDevice dev)
         {
             if (*sg.pipe) continue;
             VkShaderModule m = pdnModule(dev, sg.code, sg.bytes, sg.mod);
-            createComputePipelineInto(dev, m, mRtReflLayout, 0u, pdnLitSpec(), sg.pipe, sg.name);
+            rtDeferredCompute(dev, m, mRtReflLayout, 0u, pdnLitSpec(), sg.pipe, sg.name);
             destroyShaderModuleDeferred(dev, m, nullptr);
         }
     }
@@ -215,6 +258,8 @@ void LLCleanRendererVK::pdnDestroy()
     if (mPdnVis.buffer) { mCtx->destroyBuffer(mPdnVis); mPdnVis = GpuBuffer{}; }
     mPdnSelW = mPdnSelH = mPdnVisSlots = 0;
     sunCertDestroy();
+    if (mRsEmDiagRb.buffer) { retireBuffer(mRsEmDiagRb); mRsEmDiagRb = GpuBuffer{}; }
+    std::fill(std::begin(mRsEmDiagUsed), std::end(mRsEmDiagUsed), false);
     giDestroy();   // (#87)
     if (mRsEmPipe) { vkDestroyPipeline(mCtx->device(), mRsEmPipe, nullptr); mRsEmPipe = VK_NULL_HANDLE; }
     mShadowMergeTry = mShadowMergeNow = false;
@@ -678,56 +723,51 @@ void LLCleanRendererVK::recordLightPrep(VkCommandBuffer cmd, uint32_t viewIdx, u
     rp.d.view = viewIdx;
     if (em)
     {
-        // (#91, clean_regir.glsl EMISSIVE LIGHTS) this parity's instance hash cleared, then the EMITTERS
-        // (mode 0: a grid-stride loop over the instance store; push rtr3.w = this build's record parity),
-        // their record BLOCKS (mode 1: one workgroup, a prefix sum; the grid header's rs_em: the triangle
-        // cap this frame), the TRIANGLE records (mode 2: one invocation per record; #986 an unchanged
-        // emitter's copied from the last build -- the other parity), the #986 CELL LISTS (modes 3-6: count,
-        // scan, sums, fill; their counts cleared first), then POPULATION 2 (mode 7: one invocation per grid
-        // cell) -- pass 15 samples them, the lit kernels and the GI trace read them later this frame. Fixed
-        // regions of mRegir (no resource / descriptor change).
-        // (#1006 INCREMENTAL CELLS, with the lists) + mode 12 (the ORIGIN SHIFT: the cells moved with the
-        // clipmap, from a scratch copy) after the records, the dirty state in mode 4, the budget in mode 5, mode
-        // 11 (SELECT: the cells to re-gather this build, the kept ones' slots carried to this build's records)
-        // after the lists, and mode 7 over mode 11's build list through an INDIRECT dispatch (its group count
-        // written by modes 5 / 11; a gather build: the whole grid).
-        // (sub-timers: everything recorded since the previous mark -- the sun certificates, the binds --
-        //  closes here, so the emissive stages below time only themselves)
-        gpuSubMark(cmd, onAsync ? "c_rs_em_pre" : "g_rs_em_pre");
+        // Bounded discovery/admission, fresh capped records, then bounded attempted
+        // reach/count/scan/fill and short/parallel-long list reduction. CPU-owned identity
+        // input is only read; all persistent cache/cell writes remain on the GPU.
+        const bool cold = !mRsEmBuiltOnce;
         const uint32_t par = mRsEmParity;
         mRsEmParity ^= 1u;
-        mRsEmBuiltOnce = true;   // (the next header's EM_F_REUSE: this build fills parity par)
+        mRsEmBuiltOnce = true;   // (the next header can validate previous-build identities)
         // (WAR -- the hash's earlier readers: last build's GI trace / pass 15 / lit kernels; #1006 + last build's
         //  indirect read of mode 7's dispatch words, the stats copy of the cache header's per-build words and the
         //  last shift's scratch copy; the cells' last writers -> the shift's copy: the prep's opening barrier)
         vkCmdFillBuffer(cmd, mRegir.buffer, kRsEmHashOffset + (VkDeviceSize)par * kRsEmHashN * 8u,
                         (VkDeviceSize)kRsEmHashN * 8u, 0u);
-        // (LIGHT TAKEOVER) the emitter entries reserved for the table's rows start empty (a row whose face
-        // emits nothing this frame stays an empty block)
-        if (mRsEmTakeNow != 0u)
-            vkCmdFillBuffer(cmd, mRegir.buffer, kRsEmEntOffset + (VkDeviceSize)par * kRsEmInstCap * kRsEmEntBytes,
-                            (VkDeviceSize)mRsEmTakeNow * kRsEmEntBytes, 0u);
-        // (#986 CELL LISTS) every cell's count and fill cursor start at 0
-        if (mRsEmListsNow) vkCmdFillBuffer(cmd, mRegir.buffer, kRsEmLCellOffset, kRsEmLCellBytes, 0u);
-        // (#986 LONG CELLS) the long cells' count and the longest list start at 0
-        if (mRsEmListsNow) vkCmdFillBuffer(cmd, mRegir.buffer, kRsEmLongOffset, 8u, 0u);
-        if (mRsEmListsNow)
-        {   // (#1006) the cells' signatures + the overlay's list counts (one region), the forward map (all NONE),
-            // the cache header's per-build words (counters, mode 7's dispatch, stats, the age histogram)
-            vkCmdFillBuffer(cmd, mRegir.buffer, kRsEmSigOffset, kRsEmSigBytes, 0u);
-            vkCmdFillBuffer(cmd, mRegir.buffer, kRsEmFwdOffset, kRsEmFwdBytes, 0xFFFFFFFFu);
-            vkCmdFillBuffer(cmd, mRegir.buffer, kRsEmCchFrameOffset, kRsEmCchFrameBytes, 0u);
-            if (mRsEmShiftNow)
-            {   // (ORIGIN SHIFT) population 2's cell words, then the overlay's + the cache, to the scratch
-                const VkBufferCopy sc[2] = {{kRsEmCellOffset, kRsEmScrOffset, kRsEmCellBytes},
-                                            {kRsEmOvCellOffset, kRsEmScrOffset + kRsEmCellBytes, kRsEmMoveBytes}};
-                vkCmdCopyBuffer(cmd, mRegir.buffer, mRegir.buffer, 2u, sc);
-            }
+        vkCmdFillBuffer(cmd, mRegir.buffer, kRsEmEntOffset + (VkDeviceSize)par * kRsEmInstCap * kRsEmEntBytes,
+                        (VkDeviceSize)kRsEmInstCap * kRsEmEntBytes, 0u);
+        if (cold)
+        {
+            vkCmdFillBuffer(cmd, mRegir.buffer, kRsEmBudgetOffset, kRsEmBudgetBytes, 0u);
+            vkCmdFillBuffer(cmd, mRegir.buffer, kRsEmXOffset, 16u * 8u, 0u);
         }
+        // Bounded counting sort: zero all cell counts, never grow the fixed pair array.
+        vkCmdFillBuffer(cmd,mRegir.buffer,kRsEmLCellOffset,kRsEmLCellBytes,0u);
+        vkCmdFillBuffer(cmd,mRegir.buffer,kRsEmSigOffset+(VkDeviceSize)kRsEmNCellsAll*8u,(VkDeviceSize)kRsEmOvCells*8u,0u);
+        vkCmdFillBuffer(cmd,mRegir.buffer,kRsEmLongOffset,8u,0u);
+        vkCmdFillBuffer(cmd,mRegir.buffer,kRsEmFwdOffset,kRsEmFwdBytes,0xFFFFFFFFu);
+        vkCmdFillBuffer(cmd,mRegir.buffer,kRsEmCchFrameOffset,kRsEmCchFrameBytes,0u);
         memBarrier(VK_PIPELINE_STAGE_2_CLEAR_BIT | VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
                    VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, kRW);
         VKRtReflPush ep = rp;
-        ep.rtr3[2] = 0u;   // mode 0: the emitters
+        ep.rtr3[0] = (uint32_t)mRsEmInputGen.address;
+        ep.rtr3[1] = (uint32_t)(mRsEmInputGen.address >> 32u);
+        const uint32_t genRows = mInstanceCount;
+        std::memcpy(&ep.rtr[0], &genRows, sizeof(genRows));
+        ep.rtr3[2] = 13u; // fixed row discovery, no mesh triangles
+        ep.rtr3[3] = par;
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mRsEmPipe);
+        vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ep), &ep);
+        vkCmdDispatch(cmd, 1u, 1u, 1u);
+        memBarrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, kRW, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, kRW);
+        gpuSubMark(cmd, onAsync ? "c_rs_em_discover" : "g_rs_em_discover");
+        ep.rtr3[2] = 17u;
+        vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ep), &ep);
+        vkCmdDispatch(cmd, EM_BUDGET_OBJECTS / 64u, 1u, 1u);
+        memBarrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, kRW, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, kRW);
+        gpuSubMark(cmd, onAsync ? "c_rs_em_admit" : "g_rs_em_admit");
+        ep.rtr3[2] = 0u;   // mode 0: retained emitters only
         ep.rtr3[3] = par;
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mRsEmPipe);
         vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ep), &ep);
@@ -738,62 +778,31 @@ void LLCleanRendererVK::recordLightPrep(VkCommandBuffer cmd, uint32_t viewIdx, u
         vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ep), &ep);
         vkCmdDispatch(cmd, 1u, 1u, 1u);
         memBarrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, kRW, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, kRW);
+        gpuSubMark(cmd,onAsync?"c_rs_em_blocks":"g_rs_em_blocks");
         ep.rtr3[2] = 2u;   // mode 2: the triangle records, one invocation per record (grid-stride)
         vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ep), &ep);
         vkCmdDispatch(cmd, kRsEmCap / 64u, 1u, 1u);
         memBarrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, kRW, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, kRW);
-        if (mRsEmListsNow && mRsEmShiftNow)
-        {   // (#1006) mode 12: the ORIGIN SHIFT -- every cell from the scratch copy of the one that held its box
-            ep.rtr3[2] = 12u;
-            vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ep), &ep);
-            vkCmdDispatch(cmd, kRsEmNCellsAll / 64u, 1u, 1u);
-            memBarrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, kRW, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, kRW);
+        gpuSubMark(cmd,onAsync?"c_rs_em_records":"g_rs_em_records");
+        // Every stage has a count bound; all-level reach attempts <= 64 per record.
+        const uint32_t modes[5]={3u,4u,5u,6u,7u};
+        const uint32_t groups[5]={kRsEmCap,kRsEmNCellsAll/64u,1u,kRsEmCap,kRsEmNCellsAll/64u};
+        static const char* const marks[2][5]={{"g_rs_em_count","g_rs_em_scan","g_rs_em_sums","g_rs_em_fill","g_rs_em_short"},
+                                             {"c_rs_em_count","c_rs_em_scan","c_rs_em_sums","c_rs_em_fill","c_rs_em_short"}};
+        for(uint32_t i=0u;i<5u;++i)
+        {
+            ep.rtr3[2]=modes[i];
+            vkCmdPushConstants(cmd,mRtReflLayout,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof(ep),&ep);
+            vkCmdDispatch(cmd,groups[i],1u,1u);
+            memBarrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,kRW,VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,kRW);
+            gpuSubMark(cmd,marks[onAsync?1:0][i]);
         }
-        gpuSubMark(cmd, onAsync ? "c_rs_em_records" : "g_rs_em_records");   // (modes 1 + 2, #1006 + 12)
-        if (mRsEmListsNow)
-        {   // (#986) the CELL LISTS: COUNT (one workgroup per record), SCAN (one per 64-cell block), SUMS
-            // (one), FILL (one per record) -- past the pairs' cap mode 5 flags the gather for mode 7.
-            // (#1006: SCAN covers the overlay's blocks too and updates the cells' dirty state; SUMS decides the
-            //  budget and starts mode 7's indirect dispatch)
-            const uint32_t listWGs[4] = {kRsEmCap, kRsEmNCellsAll / 64u, 1u, kRsEmCap};
-            for (uint32_t m = 0; m < 4u; ++m)
-            {
-                ep.rtr3[2] = 3u + m;
-                vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ep), &ep);
-                vkCmdDispatch(cmd, listWGs[m], 1u, 1u);
-                memBarrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, kRW, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, kRW);
-                static const char* const kListMark[2][4] = {
-                    {"g_rs_em_count", "g_rs_em_scan", "g_rs_em_sums", "g_rs_em_fill"},
-                    {"c_rs_em_count", "c_rs_em_scan", "c_rs_em_sums", "c_rs_em_fill"}};
-                gpuSubMark(cmd, kListMark[onAsync ? 1 : 0][m]);
-            }
-            // (#1006) mode 11 SELECT: one invocation per cell id -> the build list, the long list, the kept cells
-            ep.rtr3[2] = 11u;
-            vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ep), &ep);
-            vkCmdDispatch(cmd, kRsEmNCellsAll / 64u, 1u, 1u);
-            // (+ the indirect read of mode 7's dispatch words)
-            memBarrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, kRW,
-                       VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,
-                       kRW | VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT);
-            gpuSubMark(cmd, onAsync ? "c_rs_em_select" : "g_rs_em_select");
-        }
-        ep.rtr3[2] = 7u;   // mode 7: population 2, 64 cells per workgroup
-        vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ep), &ep);
-        if (mRsEmListsNow) vkCmdDispatchIndirect(cmd, mRegir.buffer, kRsEmCchArgsOffset);   // (#1006: mode 11's cells)
-        else vkCmdDispatch(cmd, std::max(mRegirLevels, 1u) * (kRegirCellsPerLevel / 64u), 1u, 1u);
-        if (mRsEmLongNow)
-        {   // (#986) mode 9: the LONG CELLS, one workgroup each (grid-stride over mode 11's list; the cells are
-            // disjoint from mode 7's, so no barrier between the two; mode 8 is the #869 occlusion resolve).
-            // (#1108) On a GATHER build (mode 5: the pairs passed the cap) mode 9 builds every cell of the grid and
-            // mode 7's indirect dispatch is 0 groups -- c_rs_em_long then carries the gather's cost.
-            gpuSubMark(cmd, onAsync ? "c_rs_emissive" : "g_rs_emissive");   // (mode 7, the short cells)
-            ep.rtr3[2] = 9u;
-            vkCmdPushConstants(cmd, mRtReflLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(ep), &ep);
-            vkCmdDispatch(cmd, kRegirLevelsMax * kRegirCellsPerLevel / 64u, 1u, 1u);
-            gpuSubMark(cmd, onAsync ? "c_rs_em_long" : "g_rs_em_long");
-        }
-        else
-            gpuSubMark(cmd, onAsync ? "c_rs_emissive" : "g_rs_emissive");   // (now: mode 7, population 2, alone)
+        ep.rtr3[2]=9u; // ONLY bounded long lists, never a record-group/whole-grid gather
+        vkCmdPushConstants(cmd,mRtReflLayout,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof(ep),&ep);
+        memBarrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,kRW,VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT,VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT);
+        vkCmdDispatchIndirect(cmd,mRegir.buffer,kRsEmCchArgsOffset);
+        memBarrier(VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,kRW,VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,kRW);
+        gpuSubMark(cmd,onAsync?"c_rs_em_long":"g_rs_em_long");
         // (-> pass 15, the lit kernels, the GI: the prep's closing barrier)
     }
     if (occ)
@@ -879,7 +888,10 @@ void LLCleanRendererVK::recordProjStoch(VkCommandBuffer cmd, const VKDeferPush& 
     // (#869 SPLIT, clean_deferred_light.comp pdnSplitSelect) rtr3.z: bits 0-2 the split lights per
     // texel (only into images that carry the split layers), bit 3 last frame's split ids are valid
     // here (the hysteresis reads them)
-    const uint32_t splitK = mPdn->hasSplit() ? mPdnSplitK : 0u;
+    // (RenderVKReSTIRRadiance: no split -- it only stops the shared ratio's bleed, and every radiance sample
+    //  carries its own visibility. The images keep their split layers -- no re-allocation on the toggle --
+    //  and pass 15 writes empty slots into them, as for K = 0.)
+    const uint32_t splitK = (mPdn->hasSplit() && !mPdnRadiance) ? mPdnSplitK : 0u;
     rp.rtr3[2] = splitK | (splitK != 0u && mPdn->historyValid() ? 8u : 0u);
     U32 slope = 2, bleed = 1, facing = 1, oneRay = 0, awayTrace = 1;
 #if defined(LL_HAS_CLEAN_PIPELINE)
@@ -1050,9 +1062,36 @@ void LLCleanRendererVK::recordProjStochTail(VkCommandBuffer cmd, const VKDeferPu
     // iteration writes the depth the consumer's upsample reads). (#869 SPLIT: the split lights'
     // one-ray visibility passes raw with the rest's ratio -- the projector signal is both; with
     // RenderVKProjStochasticSplitK 0 exactly the old routing.)
+    // Radiance mode keeps the local projector integrator (rrRawSignal): its sampled gobo /
+    // BRDF and reused light picks need filtering at full resolution too. The merged sun's
+    // visibility has its own raw bit and denoiser channel.
     dp.raw = rrRawSignal(kRrRawProj, mPdn->width(), mPdn->height());
     dp.rawSun = rrRawSignal(kRrRawMergedSun, mPdn->width(), mPdn->height());
+    // Once per routing/extent change: the saved scale can differ from the live allocation
+    // (budget fallback), and "full" here is relative to DLSS's internal render extent.
+    const bool sunActive = merged && !sunSkip;
+    const uint32_t routeKey[12] = {p.width, p.height, dw, dh, mPdnK, mPdnRadiance ? 1u : 0u,
+        mRsNow ? mRsMode : 0u, dlssRrFrame() ? 1u : 0u, mRrRawMask, dp.raw ? 1u : 0u, dp.rawSun ? 1u : 0u,
+        sunActive ? 1u : 0u};
+    if (!std::equal(routeKey, routeKey + 12, mPdnRouteKey))
+    {
+        std::copy(routeKey, routeKey + 12, mPdnRouteKey);
+        LL_INFOS("VKShadow") << "stochastic signal: render=" << p.width << "x" << p.height
+            << " denoiser=" << dw << "x" << dh << " samples=" << mPdnK << " radiance=" << mPdnRadiance
+            << " restir=" << (mRsNow ? mRsMode : 0u) << " rr=" << dlssRrFrame() << " rawMask=" << mRrRawMask
+            << " projectorOwner=" << (dp.raw ? "RR" : "local")
+            << " sunOwner=" << (!sunActive ? "idle" : dp.rawSun ? "RR" : "local") << LL_ENDL;
+    }
     dp.info = bleed != 0u;   // (the producer flags no-information texels with PDN_OPT_BLEED)
+    // (RenderVKReSTIRRadiance) RADIANCE SEMANTICS (the GI denoiser's): 0 is a real value -- a texel whose
+    // samples carried no light is dark, not "unknown" -- so no no-information samples; the ratio-only rules
+    // (the converged shortcut) are off below. W stays the light-set reference (its
+    // anti-lag cut is as valid for radiance), the disocclusion rules stay.
+    if (mPdnRadiance) dp.info = false;
+    // ... and the temporal clamp's sigma floored at the history's per-sample spread (DN_F_RADIANCE): the reused
+    // reservoirs make the raw 3x3 one correlated pick, whose collapsed box reset the history every frame (the
+    // crawling blotches). Off: the ratio's clamp exactly as before.
+    dp.radiance = mPdnRadiance;
     // (#1038) DISOCCLUSION: the GI denoiser's young-history rules for the local-light shadows too (an
     // avatar walking out from behind a wall restarted its ReSTIR DI / projector shadow ratio from one
     // ray, with only the plain a-trous): the history fix (RenderVKDenoiseDisoccFix frames), the young-
@@ -1077,7 +1116,9 @@ void LLCleanRendererVK::recordProjStochTail(VkCommandBuffer cmd, const VKDeferPu
         static LLCachedControl<U32> s_conv(gSavedSettings, "RenderVKReSTIRDenoiseIters", 1U);
         convIt = s_conv;
 #endif
-        dp.convIters = (rsRes != 0u && convIt != 0u) ? std::min<U32>(convIt, 7u) : 0u;
+        // (RenderVKReSTIRRadiance: never -- a reused pick's M says the light SELECTION converged, and a
+        //  one-pick radiance sample is noisy whatever the selection: the full a-trous, like the GI's)
+        dp.convIters = (rsRes != 0u && convIt != 0u && !mPdnRadiance) ? std::min<U32>(convIt, 7u) : 0u;
         // (#869) ... but never on a surface that moved on its own (an animated avatar: a still
         // light's shadow slides over it -- the reservoir's M is no sign of a converged shadow)
         F32 surfMove = 0.5f;
@@ -1098,6 +1139,7 @@ void LLCleanRendererVK::recordProjStochTail(VkCommandBuffer cmd, const VKDeferPu
         static LLCachedControl<F32> s_mhist(gSavedSettings, "RenderVKReSTIRMoveHistory", 4.f);
         moveCut = s_mcut; moveHist = s_mhist;
 #endif
+        // Radiance uses the same bounded history, without the ratio's extra sampling.
         dp.moveHist = (mRsNow && moveCut != 0u) ? (U32)std::clamp(moveHist + 0.5f, 1.f, 15.f) : 0u;
     }
     if (merged && !sunSkip)
@@ -1393,7 +1435,7 @@ void LLCleanRendererVK::pointShadowMapSelect(const LLVKWorldFrame& wf)
 // ======================= ReSTIR DI STATS (#869 Phase 5) =======================
 // After pass 15 (a ReSTIR frame): harvest this ring slot's copy from 3 frames ago, then copy this
 // frame's counters (the grid header's rs_stat: the build's + pass 15's) into it. GPU timers on (the line
-// is logged with them), or (#1108) the emissive build on: its WHOLE-GRID GATHER note reads the same words
+// is logged with them), or the emissive build on: MODE/CAP/BUDGET transitions read the same words
 // (never a wait: the copy is 3 frames old). Bounded: 3 slots of a few hundred bytes.
 void LLCleanRendererVK::rsStatsRecord(VkCommandBuffer cmd)
 {
@@ -1402,6 +1444,7 @@ void LLCleanRendererVK::rsStatsRecord(VkCommandBuffer cmd)
     if (!mTsOn && !mRsEmNow)
     {   // (nothing to read: the slots' copies would be stale when the ring restarts)
         mRsStatUsed[0] = mRsStatUsed[1] = mRsStatUsed[2] = false;
+        std::fill(std::begin(mRsEmDiagUsed), std::end(mRsEmDiagUsed), false);
         return;
     }
     const uint32_t slot = mRsStatSlot;
@@ -1415,7 +1458,8 @@ void LLCleanRendererVK::rsStatsRecord(VkCommandBuffer cmd)
     constexpr VkDeviceSize kBytesD = kRsOccStatBytes;   // (#869 OCCLUSION CULL: OCC_STAT_WORDS -- kRegirOccOffset)
     constexpr VkDeviceSize kBytesE = 32u;   // (#1006 INCREMENTAL CELLS: EM_CCH_STAT, 4 x 8 B -- kRsEmCchStatOffset)
     constexpr VkDeviceSize kBytesF = 40u;   // (#1009 CLUSTER STATICS + SKIP DIAGNOSTIC + EM_CCH_OUT: CC_HDR [41..45] -- kRsEmCchClusterOffset)
-    constexpr VkDeviceSize kBytes = kBytesA + kBytesB + kBytesC + kBytesD + kBytesE + kBytesF;
+    constexpr VkDeviceSize kBytesG = 64u; // bounded producer CC_HDR [48..55], same GPU snapshot
+    constexpr VkDeviceSize kBytes = kBytesA + kBytesB + kBytesC + kBytesD + kBytesE + kBytesF + kBytesG;
     static_assert(offsetof(RegirHeader, rs_em) == offsetof(RegirHeader, rs_stat) + sizeof(RegirHeader::rs_stat),
                   "rs_stat / rs_em contiguous");
     static_assert(offsetof(RegirHeader, rs_em_take_cfg) == offsetof(RegirHeader, rs_em_stat) + sizeof(RegirHeader::rs_em_stat),
@@ -1423,36 +1467,63 @@ void LLCleanRendererVK::rsStatsRecord(VkCommandBuffer cmd)
     static_assert(offsetof(RegirHeader, rs_em_cache) == offsetof(RegirHeader, rs_em_take_cfg) + sizeof(RegirHeader::rs_em_take_cfg),
                   "rs_em_take_cfg / rs_em_cache contiguous");
     if (mRsStatUsed[slot] && mRsStatRb.mapped)
-    {   // (#1108) THE WHOLE-GRID GATHER NOTE (clean_regir.glsl GATHER): that build's cells were built without the
-        // cell lists -- the pairs passed the cap (rs_em_cache.w EM_C_GATHER), or the lists were off by setting
+    {   // Every counter and mode below is from this one retired GPU snapshot, never this frame's settings.
         const uint32_t* s = reinterpret_cast<const uint32_t*>(static_cast<const uint8_t*>(mRsStatRb.mapped)
                                                                + (size_t)slot * kBytes);
         const bool emBuilt = s[8 + 2] != 0u;   // (rs_em.z: the triangle cap, written while the build runs)
-        const bool overflow = emBuilt && mRsStatLists[slot] && (s[20 + 3] & 1u) != 0u;
-        const bool bySetting = emBuilt && !mRsStatLists[slot];
-        if (overflow || (bySetting && !mRsEmGatherSetLogged))
+        const uint32_t* x = s + (kBytesA + kBytesB + kBytesC + kBytesD) / 4u;
+        const bool lists = mRsStatLists[slot];
+        const uint32_t* budget = s + (kBytesA + kBytesB + kBytesC + kBytesD + kBytesE + kBytesF) / 4u;
+        const uint32_t mode = emBuilt ? 5u : 0u;
+        const uint32_t live = std::min(s[8], s[10]);
+        mRsEmTriPeak = std::max(mRsEmTriPeak, live);
+        const uint32_t state = mode | (emBuilt && s[9] != 0u ? 16u : 0u)
+                            | (emBuilt && budget[5] != 0u ? 32u : 0u)
+                            | (emBuilt && budget[12] != 0u ? 64u : 0u)
+                            | (emBuilt && budget[13] != 0u ? 128u : 0u)
+                            | (emBuilt && budget[15] != 0u ? 256u : 0u)
+                            | (emBuilt && budget[6] >= budget[7] ? 512u : 0u);
+        uint32_t snap[26] = {mRsStatFrame[slot], state, s[11] >> 1u, live, s[10], s[9], s[22],
+                             s[12], lists ? x[0] : 0u, lists ? x[1] : 0u};
+        if (emBuilt) std::copy(budget,budget+16,snap+10);
+        if (state != mRsEmTransitionState)
         {
-            ++mRsEmGatherN;
-            const double now = pdnClock();
-            if (bySetting || now - mRsEmGatherLogT >= kRsEmGatherLogSecs)
-            {
-                LL_INFOS("Vulkan") << "emissive light grid: WHOLE-GRID GATHER build ("
-                                   << (overflow ? "the cell candidate pairs passed the cap"
-                                                : "RenderVKReSTIREmissiveCellLists 0")
-                                   << "): " << mRsEmGatherN << " such build(s) since the last note; this one: emitters "
-                                   << (s[8 + 3] >> 1) << ", triangle records " << std::min(s[8], s[8 + 2]) << " / cap "
-                                   << s[8 + 2] << " (skipped or dropped " << s[8 + 1] << "), cell candidate pairs "
-                                   << s[20 + 2] << " / cap " << kRsEmPairCap << "; cells built "
-                                   << (overflow && mRsStatLong[slot]
-                                           ? "a workgroup per cell (mode 9)"
-                                           : "a lane per cell (mode 7; RenderVKReSTIREmissiveLongCells 0 or the lists off)")
-                                   << LL_ENDL;
-                if (bySetting) mRsEmGatherSetLogged = true;
-                else mRsEmGatherLogT = now;
-                mRsEmGatherN = 0;
-            }
+            std::copy(std::begin(mRsEmObserved), std::end(mRsEmObserved), mRsEmChangeFrom);
+            std::copy(std::begin(snap), std::end(snap), mRsEmChangeTo);
+            mRsEmTransitionState = state;
+            ++mRsEmTransitionPending;
         }
-        if (mRsEmListsNow) mRsEmGatherSetLogged = false;   // (the setting back on: a later switch-off is noted again)
+        std::copy(std::begin(snap), std::end(snap), mRsEmObserved);
+        const double now = pdnClock();
+        if (mRsEmTransitionPending != 0u && now >= mRsEmTransitionNext)
+        {
+            auto describe = [](const uint32_t* q) {
+                static const char* const names[] = {"off", "incremental", "full", "gather9", "gather7", "bounded"};
+                if (q[0] == 0u) return std::string("no prior GPU snapshot");
+                std::ostringstream os;
+                os << "gpu_frame=" << q[0] << " mode=" << names[std::min(q[1] & 15u, 5u)]
+                   << " state=" << q[1] << " emitters=" << q[2] << " live_tris=" << q[3]
+                   << "/" << q[4] << " subset_dropped_in_cohort=" << q[5] << " pairs=" << q[6]
+                   << " cells_with_candidates=" << q[7] << " changed/regather=" << q[8] << "/" << q[9]
+                   << " discovery_rows/offers=" << q[10] << "/" << q[11] << " evictions=" << q[12]
+                   << " discovery_sweep_complete=" << q[13] << " active/deferred_faces=" << q[14] << "/" << q[15]
+                   << " pairs/cap=" << q[16] << "/" << q[17] << " record_attempt_ceiling=" << q[18] << " long_cells=" << q[19]
+                   << " radius_clamped_records=" << q[22] << " centroid_support_records=" << q[23]
+                   << " attempted_cells=" << q[24] << " invariant_failure=" << q[25];
+                return os.str();
+            };
+            LL_INFOS("VKEmissive") << "build MODE/CAP/BUDGET transition: [" << describe(mRsEmChangeFrom)
+                                  << "] -> [" << describe(mRsEmChangeTo) << "] tri_peak=" << mRsEmTriPeak
+                                  << " pairs_cap=" << kRsEmPairCap << " transitions=" << mRsEmTransitionPending
+                                  << " reason=" << ((state & 256u) ? "PAIR_INVARIANT_FAILURE_UNAVAILABLE" : (state & 512u) ? "PAIR_BUDGET_SATURATED" : (state & 32u) ? "FACE_ADMISSION_SATURATED" : (state & 128u) ? "CENTROID_SUPPORT_APPROXIMATION"
+                                                       : (state & 16u) ? "TRI_SUBSET_OR_DROP" : (state & 64u) ? "RADIUS_BUDGET_CLAMP" : "MODE_OR_RECOVERY")
+                                  << " harvested_at_gpu_frame=" << mRsStatFrameNow << " async_lag="
+                                  << (mRsStatFrameNow - mRsStatFrame[slot]) << " grid_header_frames; no wait" << LL_ENDL;
+            mRsEmTransitionPending = 0u;
+            mRsEmTransitionNext = now + 2.0;
+        }
+        if (mRsEmDiagUsed[slot]) rsEmDiagRead(slot, s);
+        mRsEmDiagUsed[slot] = false;
         // (clean_regir.glsl SUBSET STRIDE) the rest's stride (rs_em_take_cfg.w): a STEP re-subsets every emitter at
         // once (records rebuilt, emissive reservoirs rejected, cells forced) -- noted, at most a line per
         // kRsEmStrideLogSecs with the steps since the last one
@@ -1495,11 +1566,13 @@ void LLCleanRendererVK::rsStatsRecord(VkCommandBuffer cmd)
             mRsStatAcc.emTake[0] += mRsStatTakeN[slot];
             mRsStatAcc.emTake[1] += s[16 + 1];
             mRsStatAcc.emTake[2] += s[16 + 2];
-            // (#986: rs_em_cache -- records copied / built, cell candidate pairs, EM_C_GATHER)
+            // Current records built, actual bounded pairs; the legacy GATHER bit stays zero.
             mRsStatAcc.emCopied += s[20 + 0];
             mRsStatAcc.emBuilt += s[20 + 1];
             mRsStatAcc.emPairs += s[20 + 2];
             mRsStatAcc.emPairsPeak = std::max(mRsStatAcc.emPairsPeak, (double)s[20 + 2]);
+            const uint32_t* budget = s + (kBytesA + kBytesB + kBytesC + kBytesD + kBytesE + kBytesF) / 4u;
+            for (uint32_t k=0;k<16u;++k) mRsStatAcc.emBudget[k] += budget[k];
             if ((s[20 + 3] & 1u) != 0u) ++mRsStatAcc.emGather;
             if (mRsStatLists[slot])   // (the region is cleared and copied with the cell lists only)
             {
@@ -1552,17 +1625,18 @@ void LLCleanRendererVK::rsStatsRecord(VkCommandBuffer cmd)
     VkDependencyInfo d{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
     d.memoryBarrierCount = 1; d.pMemoryBarriers = &m;
     vkCmdPipelineBarrier2(cmd, &d);
-    const VkBufferCopy c[6] = {{offsetof(RegirHeader, rs_stat), (VkDeviceSize)slot * kBytes, kBytesA},
+    const VkBufferCopy c[7] = {{offsetof(RegirHeader, rs_stat), (VkDeviceSize)slot * kBytes, kBytesA},
                                {offsetof(RegirHeader, rs_em_stat), (VkDeviceSize)slot * kBytes + kBytesA, kBytesB},
                                {kRegirOccOffset, (VkDeviceSize)slot * kBytes + kBytesA + kBytesB + kBytesC, kBytesD},
                                {kRsEmLongOffset, (VkDeviceSize)slot * kBytes + kBytesA + kBytesB, kBytesC},
                                {kRsEmCchStatOffset, (VkDeviceSize)slot * kBytes + kBytesA + kBytesB + kBytesC + kBytesD,
                                 kBytesE},
                                {kRsEmCchClusterOffset,
-                                (VkDeviceSize)slot * kBytes + kBytesA + kBytesB + kBytesC + kBytesD + kBytesE, kBytesF}};
+                                (VkDeviceSize)slot * kBytes + kBytesA + kBytesB + kBytesC + kBytesD + kBytesE, kBytesF},
+                               {kRsEmXOffset + 48u*8u, (VkDeviceSize)slot*kBytes + kBytes-kBytesG, kBytesG}};
     // (the regions present this frame, packed: A, B, + D with the occlusion cache, + C and (#1006) E, (#1009) F
     //  with the cell lists -- the per-build words they hold are cleared with the lists)
-    VkBufferCopy cc[6];
+    VkBufferCopy cc[7];
     uint32_t nc = 0;
     cc[nc++] = c[0];
     cc[nc++] = c[1];
@@ -1570,7 +1644,43 @@ void LLCleanRendererVK::rsStatsRecord(VkCommandBuffer cmd)
     if (mRsEmListsNow) cc[nc++] = c[3];
     if (mRsEmListsNow) cc[nc++] = c[4];
     if (mRsEmListsNow) cc[nc++] = c[5];
+    if (mRsEmListsNow) cc[nc++] = c[6];
     vkCmdCopyBuffer(cmd, mRegir.buffer, mRsStatRb.buffer, nc, cc);
+    // A snapshot only every 5 seconds, piggybacked on the existing retired statistics slot.
+    // No fence/query/readback wait and no additional per-frame CPU/GPU round trip.
+    mRsEmDiagUsed[slot] = false;
+    const double now = pdnClock();
+    if (mRsEmDiagLog && now >= mRsEmDiagNext && now >= mRsEmDiagRetry)
+    {
+        constexpr VkDeviceSize bytes = (VkDeviceSize)kRsEmInstCap * kRsEmEntBytes;
+        if (!mRsEmDiagRb.buffer)
+        {
+            VkDeviceContext::SoftAllocScope soft(mCtx);
+            mRsEmDiagRb = mCtx->createBuffer(3u * bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            if (!mRsEmDiagRb.buffer)
+            {
+                mRsEmDiagRetry = now + 30.0;
+                LL_WARNS("VKEmissive") << "diagnostic readback refused: " << 3u * bytes
+                                      << " bytes; retry in 30s, lighting retained" << LL_ENDL;
+            }
+        }
+        if (mRsEmDiagRb.mapped)
+        {
+            gpuSubMark(cmd, mAsyncNow.on ? "c_rs_em_diag_begin" : "g_rs_em_diag_begin");
+            const uint32_t par = mRsEmParity ^ 1u; // recordLightPrep toggled NEXT parity
+            const VkBufferCopy dc{kRsEmEntOffset + par * bytes, slot * bytes, bytes};
+            vkCmdCopyBuffer(cmd, mRegir.buffer, mRsEmDiagRb.buffer, 1u, &dc);
+            mRsEmDiagUsed[slot] = true;
+            mRsEmDiagFrame[slot] = mRsStatFrameNow;
+#if defined(LL_HAS_CLEAN_PIPELINE)
+            mRsEmDiagNewCount[slot] = LLCleanInstanceStore::instance().newInstanceCount();
+#endif
+            mRsEmDiagNext = now + 5.0;
+            gpuSubMark(cmd, mAsyncNow.on ? "c_rs_em_diag_copy" : "g_rs_em_diag_copy");
+        }
+    }
+    mRsStatFrame[slot] = mRsStatFrameNow;
     mRsStatLists[slot] = mRsEmListsNow;
     mRsStatLong[slot] = mRsEmLongNow;
     mRsStatTs[slot] = mTsOn;
@@ -1583,6 +1693,90 @@ void LLCleanRendererVK::rsStatsRecord(VkCommandBuffer cmd)
     mRsStatFlickN[slot] = mRsFlickN;
     mRsStatTakeN[slot] = mRsEmTakeNow != 0u ? mRsEmTakeLights : 0u;
     mRsStatUsed[slot] = true;
+}
+
+// Inspect only the GPU's bounded emitter-entry snapshot, once per five seconds. No scene/face scan.
+void LLCleanRendererVK::rsEmDiagRead(uint32_t slot, const uint32_t* stats)
+{
+    if (!mRsEmDiagRb.mapped) return;
+    constexpr uint32_t words = kRsEmEntBytes / 4u;
+    const auto* data = reinterpret_cast<const uint32_t*>(mRsEmDiagRb.mapped) + (size_t)slot * kRsEmInstCap * words;
+    const uint32_t n = kRsEmInstCap; // fixed cohort/table slots; frame stamp filters empty entries
+    std::array<uint32_t, kRsEmInstCap> order{};
+    size_t count = 0;
+    for (uint32_t e = 0; e < n; ++e)
+        if (data[e * words + 41u] == mRsEmDiagFrame[slot] && data[e * words + 1u] != 0u) order[count++] = e;
+    std::partial_sort(order.begin(), order.begin() + std::min<size_t>(15u, count), order.begin() + count,
+        [&](uint32_t a, uint32_t b) { return data[a * words + 1u] != data[b * words + 1u]
+            ? data[a * words + 1u] > data[b * words + 1u] : data[a * words] < data[b * words]; });
+    LL_INFOS("VKEmissive") << "TOP15 GPU emitter faces by source triangles: gpu_frame=" << mRsEmDiagFrame[slot]
+                          << " harvested_at_gpu_frame=" << mRsStatFrameNow << " async_lag="
+                          << mRsStatFrameNow - mRsEmDiagFrame[slot] << " grid_header_frames; entries=" << n
+                          << "/" << kRsEmInstCap << " source_tris=kept+subset_dropped; cells=actual all-level COUNT target hits"
+                          << " (NOT unique cells; bounded effective reach); retained cohort only, not scene total; metadata=live lookup at harvest; names async"
+                          << "; attachments/worn/rigged excluded by existing producer, not this diagnostic" << LL_ENDL;
+    auto asFloat = [](uint32_t u) { float f; std::memcpy(&f, &u, sizeof(f)); return f; };
+#if defined(LL_HAS_CLEAN_PIPELINE)
+    const double now = pdnClock();
+    const bool identityStable = mRsEmDiagNewCount[slot] == LLCleanInstanceStore::instance().newInstanceCount();
+    for (uint32_t i = 0; i < s_emDiagNameCount;)
+        if (s_emDiagNames[i].until < now) s_emDiagNames[i] = s_emDiagNames[--s_emDiagNameCount]; else ++i;
+#endif
+    for (size_t rank = 0; rank < std::min<size_t>(15u, count); ++rank)
+    {
+        const uint32_t* w = data + order[rank] * words;
+        const uint32_t mf = w[32], fl = w[33], motion = w[27];
+        std::ostringstream identity;
+        identity << "row=" << w[0];
+#if defined(LL_HAS_CLEAN_PIPELINE)
+        LLUUID id; S32 face = -1;
+        if (identityStable && LLCleanInstanceStore::instance().keyForId(w[0], id, face))
+        {
+            LLViewerObject* o = gObjectList.findObject(id);
+            if (o && (o->isAvatar() || o->isAttachment() || o->getAvatar()))
+                identity << " attachment on avatar attachpoint=" << (uint32_t)ATTACHMENT_ID_FROM_STATE(o->getAttachmentState())
+                         << " (name/identity omitted; live row may have changed since snapshot)";
+            else if (o)
+            {
+                identity << " local_id=" << o->getLocalID() << " uuid=" << id << " face=" << face;
+                LLSelectNode* node = LLSelectMgr::getInstance()->getSelection()->findNode(o);
+                if (node && node->mValid) identity << " name=\"" << emDiagSafeName(node->mName) << "\"";
+                else
+                {
+                    identity << " name=<pending/unavailable>";
+                    const bool pending = std::any_of(s_emDiagNames.begin(), s_emDiagNames.begin() + s_emDiagNameCount,
+                        [&](const EmDiagName& v) { return v.id == id; });
+                    if (!pending && s_emDiagNameCount < s_emDiagNames.size() && o->getRegion())
+                    {
+                        s_emDiagNames[s_emDiagNameCount++] = {id, mRsEmDiagFrame[slot], o->getLocalID(), now + 10.0};
+                        LLSelectMgr::getInstance()->requestObjectPropertiesFamily(o); // read-only, <=15 / 5s
+                    }
+                }
+            }
+            else identity << " identity=<object departed>";
+        }
+        else identity << " identity=<row retired or allocation epoch changed; no potentially recycled identity>";
+#endif
+        LL_INFOS("VKEmissive") << "#" << rank + 1u << " " << identity.str()
+            << " gpu_frame=" << mRsEmDiagFrame[slot] << " triangles=" << w[1] << " kept=" << w[3]
+            << " subset_dropped=" << w[1] - std::min(w[1], w[3]) << " stride=" << w[4]
+            << " why=" << ((mf & 64u) ? ((mf & 8u) ? "PBR_FACTOR_TIMES_TEX" : "PBR_FACTOR") : "FULLBRIGHT_AND_GLOW_TIMES_BASE_TEX_IF_PRESENT")
+            << " material_flags=" << mf << " instance_flags=" << fl << " fullbright=" << ((fl & 4096u) != 0u)
+            << " glow_byte=" << ((mf >> 8u) & 255u) << " tex=" << w[9]
+            << " scaled_factor_rgb=" << asFloat(w[6]) << "," << asFloat(w[7]) << "," << asFloat(w[8])
+            << " factor_luma=" << asFloat(w[39]) << " coarse_tex_luma_result=" << asFloat(w[34])
+            << " min=" << asFloat(w[35]) << " alpha_mode=" << ((fl & 2u) ? "BLEND" : (fl & 4u) ? "MASK" : "OPAQUE")
+            << " alpha_factor=" << asFloat(w[38]) << " world_aabb_extent=" << asFloat(w[29]) << "," << asFloat(w[30]) << "," << asFloat(w[31])
+            << " sampled_area_estimate=" << asFloat(w[28]) << " face_range_estimate=" << asFloat(w[10])
+            << " moved_this_frame=" << ((motion & 1u) ? ((motion & 2u) ? "yes" : "no") : "unknown/new")
+            << " geometry_key_changed=" << ((motion & 1u) ? ((motion & 4u) ? "yes" : "no") : "unknown/new")
+            << " triangle_requested_range_max=" << asFloat(w[42]) << " triangle_effective_range_max=" << asFloat(w[43])
+            << " radius_clamped_records=" << w[24] << " centroid_support_records=" << w[25]
+            << " actual_cell_triangle_pairs=" << (mRsStatLists[slot] ? std::to_string(w[36]) : "unavailable(lists off)")
+            << " unique_cells_upper_bound=" << (mRsStatLists[slot] ? std::to_string(std::min(w[36], kRsEmNCellsAll)) : "unavailable")
+            << " dark_or_degenerate_records=" << w[37] << " triangle_luma_cutoff=" << 0.02f * asFloat(w[35])
+            << "; motion/signature is a cause of invalidation, NOT a per-object cell-regather counter" << LL_ENDL;
+    }
 }
 
 std::string LLCleanRendererVK::rsStatsText()
@@ -1619,19 +1813,22 @@ std::string LLCleanRendererVK::rsStatsText()
            << std::setprecision(1) << a.emTake[0] * ef << ", taken over " << a.emTake[1] * ef
            << ", refused (a block dropped) " << a.emTake[2] * ef
            << "; records reused / rebuilt per frame (RenderVKReSTIREmissiveReuse) " << a.emCopied * ef
-           << " / " << a.emBuilt * ef << "; cell candidate pairs (RenderVKReSTIREmissiveCellLists) "
-           << std::setprecision(0) << a.emPairs * ef << " / cap " << kRsEmPairCap << " (peak " << a.emPairsPeak
-           << "), gather builds " << a.emGather
-           << "; long cells (RenderVKReSTIREmissiveLongCells) " << std::setprecision(1) << a.emLong * ef
-           << "/frame, longest list " << std::setprecision(0) << a.emLongest;
+           << " / " << a.emBuilt * ef << "; bounded pairs " << std::setprecision(0) << a.emPairs*ef << "/" << kRsEmPairCap
+           << " (peak " << a.emPairsPeak << ", no gather fallback)"
+           << "; discovery rows/offers " << a.emBudget[0]*ef << "/" << a.emBudget[1]*ef
+           << ", cohort evictions " << a.emBudget[2]*ef << ", active/deferred faces "
+           << a.emBudget[4]*ef << "/" << a.emBudget[5]*ef << ", attempted cells " << a.emBudget[14]*ef
+           << "/" << a.emBudget[8]*ef << ", radius-clamped/centroid-support records "
+           << a.emBudget[12]*ef << "/" << a.emBudget[13]*ef << ", invariant failures " << a.emBudget[15]
+           << "; long cells " << a.emLong*ef << "/frame, longest list " << a.emLongest;
         if (a.emIncFrames)
         {   // (#1006 INCREMENTAL CELLS + WEAK OVERLAY, clean_regir.glsl: EM_CCH_STAT per lists build; the cells
             // with emitting triangles above count only the cells re-gathered that frame)
             const double xf = 1.0 / a.emIncFrames;
-            os << std::setprecision(1) << "; incremental cells (RenderVKReSTIREmissiveIncremental): dirty/frame "
+            os << std::setprecision(1) << "; bounded cell rebuild: legacy_changed/frame "
                << a.emDirty * xf << ", re-gathered/frame " << a.emRegather * xf << " (forced or refreshed "
                << a.emForced * xf << ", forward-map misses among them " << a.emMiss * xf << "), kept/frame "
-               << a.emKept * xf << ", max staleness " << std::setprecision(0) << a.emStaleMax << " frames, full builds "
+               << a.emKept * xf << ", max staleness " << std::setprecision(0) << a.emStaleMax << " header frames, full invalidations "
                << a.emFull << " / " << a.emIncFrames << "; weak emitters on the overlay "
                << "(RenderVKReSTIREmissiveWeakPower)/frame " << std::setprecision(1) << a.emWeak * xf
                // (#1009 CLUSTER STATICS, clean_regir.glsl: statics traced on their cluster RT cut, emitting through
@@ -1639,7 +1836,7 @@ std::string LLCleanRendererVK::rsStatsText()
                << "; cluster-LOD statics among them (RenderVKReSTIREmissiveClusterStatic): emitters "
                << a.emClInst * xf << ", their triangles " << std::setprecision(0) << a.emClTri * xf
                // (mode 0: emitters whose reach misses the grid's outermost level -- not listed, not in the cap)
-               << "; emitters outside the grid (not listed, not in the triangle cap)/frame " << std::setprecision(1)
+               << "; legacy outside-grid counters (no admission camera cull)/frame " << std::setprecision(1)
                << a.emOutInst * xf << ", their triangles " << std::setprecision(0) << a.emOutTri * xf;
             if (a.emSkipFrames)
             {   // (#1009 SKIP DIAGNOSTIC, RenderVKReSTIREmissiveSkipStats: emitting instances left out, by why)
@@ -1689,7 +1886,7 @@ bool LLCleanRendererVK::rsEmLightWanted() const
 void LLCleanRendererVK::rsEmTakeTable(const LLVKWorldFrame& wf)
 {
     mRsEmTakeRows = mRsEmTakeLights = 0;
-    if (wf.light_takeover.empty())
+    if (wf.light_takeover.empty() || wf.light_takeover.size() > kRsEmTakeN)
     {
         mRsEmTake.clear();
         return;
@@ -1792,13 +1989,7 @@ void LLCleanRendererVK::shadowMergeSunState()
     tmin = s_min; soft = s_soft;
 #endif
     const float* lc = &mAtmos[2 * 4];
-    float lum = (0.2126f * lc[0] + 0.7152f * lc[1] + 0.0722f * lc[2]) * std::max(mAtmos[12 * 4 + 2], 0.f);
-    // <GMDX> Physical night (gmdxnightlight.h THE NIGHT'S AMBIENT): the moon is dimmed, and so is the
-    // ambient it is seen against (atmos[6].z = 2 - amb; the exposure lifts both). Its shadow shows
-    // by that ratio, so the light is measured against the ambient: as bright as it would be with
-    // Second Life's ambient (sRGB-ish space, as the colour). 1 by day and with physical night off.
-    const float night_amb = std::clamp(2.f - mAtmos[6 * 4 + 2], 1e-4f, 1.f);
-    if (night_amb < 1.f) lum *= std::pow(1.f / night_amb, 1.f / 2.4f);
+    const float lum = (0.2126f * lc[0] + 0.7152f * lc[1] + 0.0722f * lc[2]) * std::max(mAtmos[12 * 4 + 2], 0.f);
     float w = 1.f;
     if (tmin > 0.f)
     {

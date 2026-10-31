@@ -33,13 +33,14 @@ class LLViewerObject;
 // <SS:Nexii> Projectile ghost probing
 //
 // SoapStorm keeps this inside LLViewerObject / LLViewerObjectList; GMDX keeps
-// the logic here and leaves small hooks in those files.
+// the logic here and leaves small hooks in those files. Ported from GunMetal-DX
+// (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4; CombatFX only.
 //
 // An object is tagged a likely projectile once, from its first update that
 // carries a velocity: long (>= 4 m) and thin (<= 0.2 m on the other two axes),
 // not an avatar or attachment. A likely projectile that goes without a
 // simulator update for longer than the viewer interpolates
-// (InterpolationTime) plus FSSoapstormGhostProjectileProbeDelay is probed:
+// (InterpolationTime) plus a 2 s grace period is probed:
 // a brief server-side select and deselect, to which the simulator answers a
 // KillObject when it no longer knows the object. That is what clicking a
 // ghost does by hand.
@@ -78,7 +79,7 @@ public:
     // LLViewerObjectList::killAllObjects
     static void clear();
 
-    // Counts for the debug text (DebugShowSoapstormProjectilesInfo).
+    // Counts (GunMetal-DX's debug text; not shown in Slipstream yet).
     static U32 getNumLikely();
     static U32 getNumDropped();
     static U32 getNumWatched();

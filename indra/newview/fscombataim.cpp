@@ -28,6 +28,8 @@
 // debug lines use gGL.color4f: diffuseColor4f is a no-op under the Vulkan
 // backend.
 // </SS:Skoomastream>
+// Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4. Slipstream: CombatFX
+// only (LLToolGun draws this crosshair and send_agent_update converges only while it is on).
 
 #include "llviewerprecompiledheaders.h"
 
@@ -35,6 +37,7 @@
 
 #include "llagent.h"
 #include "llagentcamera.h"
+#include "gmdxots.h"   // <GMDX> the over-the-shoulder aim camera
 #include "llcriticaldamp.h"
 #include "llframetimer.h"
 #include "llquaternion.h"
@@ -46,6 +49,7 @@
 #include "llviewerwindow.h"
 #include "llvoavatarself.h"
 #include "sscombatray.h"   // <SS:Skoomastream> aim convergence / LOS rays
+#include "skcensusavatarshape.h" // <GMDX> measured avatar hull
 
 static LLColor4 sCrosshairTint = LLColor4::white;
 
@@ -102,6 +106,58 @@ static bool rayOBBIntersect(const LLVector3& O, const LLVector3& D,
     return true;
 }
 
+// <GMDX> From Alchemy: Skooma (Nexii Malthus), LGPL 2.1: convergence on the measured avatar hull
+// (skcensusavatarshape, 8dd8b54a4f). Ray (origin O, unit direction D) vs a convex hull given as
+// outward-wound triangles in its own frame, about C and turned by R: the ray is clipped by every
+// face's plane. Answers as rayOBBIntersect does: the entry distance, or the exit one from inside.
+static bool rayHullIntersect(const LLVector3& O, const LLVector3& D,
+                             const LLVector3& C, const LLQuaternion& R, const std::vector<LLVector3>& tris,
+                             F32& t_out)
+{
+    if (tris.size() < 3)
+    {
+        return false;
+    }
+    const LLQuaternion inv = ~R;
+    const LLVector3 o = (O - C) * inv; // ray origin in the hull's frame
+    const LLVector3 d = D * inv;
+    F32 tmin = -1e30f, tmax = 1e30f;
+    for (size_t i = 0; i + 2 < tris.size(); i += 3)
+    {
+        const LLVector3 n = (tris[i + 1] - tris[i]) % (tris[i + 2] - tris[i]); // outward, not unit
+        const F32 denom = n * d;
+        const F32 dist = n * (tris[i] - o); // >= 0: the origin is on the inner side of this face
+        if (fabsf(denom) < 1e-9f)
+        {
+            if (dist < 0.f)
+            {
+                return false; // parallel to this face and outside it
+            }
+            continue;
+        }
+        const F32 t = dist / denom;
+        if (denom < 0.f)
+        {
+            tmin = llmax(tmin, t); // entering through this face
+        }
+        else
+        {
+            tmax = llmin(tmax, t); // leaving through it
+        }
+        if (tmin > tmax)
+        {
+            return false;
+        }
+    }
+    if (tmax < 0.f)
+    {
+        return false; // hull entirely behind the camera
+    }
+    t_out = (tmin >= 0.f) ? tmin : tmax;
+    return true;
+}
+// </GMDX>
+
 // <GMDX> Fair fire: the convergence tunables are fixed, not settings. They decide where the
 // sim is told the shot aims (send_agent_update's eye camera), so no one may tune them.
 namespace
@@ -147,7 +203,8 @@ LLVector3 FSCombatAim::getOTSConvergenceTarget(const LLVector3& cam_origin,
     // answer the last world depth stands. Phantom prims pass through
     // (no physics, a bullet passes through). With nothing solid under the crosshair the
     // far point stands. Also skips the seated vehicle linkset so the crosshair aim
-    // ray can pass through the vehicle's hood/windshield to reach targets in the world.
+    // ray can pass through the vehicle's hood/windshield to reach targets in the world
+    // (<GMDX> developed by squeedledorf with Soap Frenzy, SoapStorm bc935c361b).
     const LLViewerObject* seated_root = (isAgentAvatarValid() && gAgentAvatarp->isSitting())
         ? (const LLViewerObject*)gAgentAvatarp->getRoot() : nullptr;
 
@@ -172,7 +229,7 @@ LLVector3 FSCombatAim::getOTSConvergenceTarget(const LLVector3& cam_origin,
     }
     s_last_world_dist = world_dist;
 
-    // <GMDX> SoapStorm 557eddcac5: the guard is measured from the eye, not the camera.
+    // <GMDX> Developed by squeedledorf with Soap Frenzy (SoapStorm 557eddcac5): the guard is measured from the eye, not the camera.
     // The shot originates at the player's eye, but the convergence ray starts at
     // the (pulled-back OTS) camera. Someone standing behind the player is still in
     // front of the camera, so the crosshair ray can graze their hitbox or geometry and steal
@@ -193,14 +250,17 @@ LLVector3 FSCombatAim::getOTSConvergenceTarget(const LLVector3& cam_origin,
     F32 best_dist = llmax(world_dist, min_world_dist);
     // </GMDX>
 
-    // Avatar convergence on the actual hitbox. We converge on the SAME oriented box
-    // LL's Avatar Hitboxes debug draws (DebugRenderHitboxes; that GL draw is not in
-    // this viewer, the box is the same): centered at getPositionAgent() (the object position, unaffected by viewer-side
-    // skeleton animation/extrapolation), sized by getScale(), oriented by
-    // getRotationRegion(). That box is what an LSL llCastRay weapon hits, so
-    // converging on it lines the crosshair up with what takes damage rather than the
-    // smoothly-rendered body, which leads the hitbox during fast movement. Taken as
-    // min() against world depth so a wall in front of the target still wins.
+    // Avatar convergence on the actual hitbox. <GMDX> That is not the agent box (getScale(), what
+    // LL's Avatar Hitboxes debug draws): an LSL llCastRay weapon hits the sim's physics shape of
+    // the avatar, a convex hull per pose (standing, sat on the ground, sat on an object) measured
+    // in-world with llCastRay scans (Alchemy: Skooma, Nexii Malthus; skcensusavatarshape.cpp). The
+    // box is wider at the feet and the edges, so a crosshair beside the shins converged on air.
+    // The hull is placed about getPositionAgent() (the object position, unaffected by viewer-side
+    // skeleton animation/extrapolation) and turned by getRotationRegion(), the body rotation the
+    // sim has, so converging on it lines the crosshair up with what takes damage rather than the
+    // smoothly-rendered body, which leads the hitbox during fast movement. Taken as min() against
+    // world depth so a wall in front of the target still wins. The hull is never drawn and never
+    // signals a hit; it only decides the convergence depth. </GMDX>
     // (Always on, exact hitbox: fixed on purpose, fair fire.)
     {
         for (LLCharacter* character : LLCharacter::sInstances)
@@ -222,14 +282,28 @@ LLVector3 FSCombatAim::getOTSConvergenceTarget(const LLVector3& cam_origin,
                 continue; // out of range
             }
 
+            // <GMDX> The measured hull, behind a box that bounds all three hulls (standing reaches
+            // 5 cm past the agent box's top and foot; sat on an object 0.54 m back and 0.75 m
+            // down): far avatars and near misses cost the one slab test the agent box did.
+            const F32 height = avatar->getScale().mV[VZ];
+            if (height < 0.1f)
+            {
+                continue; // no agent size from the sim yet
+            }
             const LLQuaternion rot = avatar->getRotationRegion();
-            const LLVector3 half = avatar->getScale() * 0.5f;
+            const LLVector3 bound(0.55f, 0.46f, llmax(0.5f * height + 0.06f, 0.76f));
 
             F32 t_hit = 0.f;
-            const bool box_hit = rayOBBIntersect(cam_origin, cam_at, center, rot, half, t_hit);
-            // t_hit > eye_dist: the box must be in front of the eye, not in the
+            if (!rayOBBIntersect(cam_origin, cam_at, center, rot, bound, t_hit))
+            {
+                continue;
+            }
+            const bool hull_hit = rayHullIntersect(cam_origin, cam_at, center, rot,
+                skcensus::avatarShape(skcensus::avatarPose(avatar), height), t_hit);
+            // t_hit > eye_dist: the hull must be in front of the eye, not in the
             // over-the-shoulder gap or behind the player.
-            if (box_hit && t_hit > eye_dist && t_hit < best_dist)
+            if (hull_hit && t_hit > eye_dist && t_hit < best_dist)
+            // </GMDX>
             {
                 best_dist = t_hit; // trusted target; exempt from the min clamp
                 avatar_best = true;
@@ -286,7 +360,7 @@ void FSCombatAim::drawCrosshair(S32 view_width, S32 view_height)
 
     // Optional target-identification tint (contact set / group color of the
     // avatar under the crosshair, fed by the combat features pass).
-    static LLCachedControl<bool> target_color(gSavedSettings, "FSCrosshairTargetColor", false);
+    static LLCachedControl<bool> target_color(gSavedSettings, "FSCrosshairTargetColor", false); // <GMDX> (GunMetal-DX 0.3.0's option)
     const LLColor4 color = target_color ? sCrosshairTint : LLColor4::white;
 
     // True-impact marker: the camera ray and the bullet (from the avatar,
@@ -301,7 +375,7 @@ void FSCombatAim::drawCrosshair(S32 view_width, S32 view_height)
     static U32 s_last_answer = 0;   // <GMDX> frame of the last counted answer
     static LLCachedControl<bool> true_aim(gSavedSettings, "FSOTSTrueAimDot", true);
     const bool is_sitting = isAgentAvatarValid() && gAgentAvatarp->isSitting();
-    if (true_aim && !is_sitting && gAgentCamera.cameraOTS() && isAgentAvatarValid() && gAgentAvatarp->mHeadp
+    if (true_aim && !is_sitting && GMDXOTS::active() && isAgentAvatarValid() && gAgentAvatarp->mHeadp
         && gAgent.getTeleportState() == LLAgent::TELEPORT_NONE) // never raycast mid-teleport
     {
         const F32 TRUE_AIM_RANGE = 256.f; // meters; past this the parallax is subpixel
@@ -339,7 +413,7 @@ void FSCombatAim::drawCrosshair(S32 view_width, S32 view_height)
         // consecutive fresh GPU answers (SSCombatRay objects are ~2 frames old, one new
         // answer a frame) must all report the shot blocked. Any frame without a known hit
         // (clear, or no recent answer) drops the count and the marker eases back to centre.
-        static LLCachedControl<U32> confirm_answers(gSavedSettings, "FSOTSTrueAimConfirmAnswers", 3);
+        static LLCachedControl<U32> confirm_answers(gSavedSettings, "FSOTSTrueAimConfirmAnswers", 3); // <GMDX>
         F32 hit_dist = 0.f;
         bool known = false;
         U32 answer_frame = 0;
@@ -388,7 +462,7 @@ void FSCombatAim::drawCrosshair(S32 view_width, S32 view_height)
 
     // <GMDX> FSOTSTrueAimMoveChevrons: the chevrons carry the true-aim offset and the dot
     // stays on the camera ray; off, the dot moves (the original layout).
-    static LLCachedControl<bool> move_chevrons(gSavedSettings, "FSOTSTrueAimMoveChevrons", true);
+    static LLCachedControl<bool> move_chevrons(gSavedSettings, "FSOTSTrueAimMoveChevrons", true); // <GMDX>
     const S32 dot_dx = move_chevrons ? 0 : (S32)smoothed_x;
     const S32 dot_dy = move_chevrons ? 0 : (S32)smoothed_y;
     const S32 arrows_dx = move_chevrons ? (S32)smoothed_x : 0;

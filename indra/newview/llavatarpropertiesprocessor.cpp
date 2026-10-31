@@ -35,7 +35,7 @@
 #include "lldateutil.h"
 #include "llviewergenericmessage.h"
 #include "llstartup.h"
-#include "llgroupcolormap.h" // <GMDX>
+#include "llgroupcolormap.h"
 
 // Linden library includes
 #include "llavataractions.h" // for getProfileUrl
@@ -566,7 +566,7 @@ void LLAvatarPropertiesProcessor::processAvatarGroupsReply(LLMessageSystem* msg,
     msg->getUUIDFast(_PREHASH_AgentData, _PREHASH_AvatarID, avatar_id);
 
     LL_DEBUGS("AvatarProperties") << "Received AvatarGroupsReply for " << avatar_id << LL_ENDL;
-    LLGroupColorMap::processAvatarGroupsReply(msg); // <GMDX> active group from the title match
+    LLGroupColorMap::processAvatarGroupsReply(msg); // GunMetal-DX: active group from the title match (no-op unless group colours are on)
 }
 
 void LLAvatarPropertiesProcessor::notifyObservers(const LLUUID& id, void* data, EAvatarProcessorType type) const

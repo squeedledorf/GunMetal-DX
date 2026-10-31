@@ -414,7 +414,7 @@ const LLSD LLScrollListText::getAltValue() const
 void LLScrollListText::draw(const LLColor4& color, const LLColor4& highlight_color)
 {
     LLColor4 display_color;
-    if (mUseColor)
+    if (mUseColor && !mUseDefaultColor)
     {
         display_color = mColor;
     }
@@ -682,7 +682,7 @@ void LLScrollListIconText::setWidth(S32 width)
 void LLScrollListIconText::draw(const LLColor4& color, const LLColor4& highlight_color)
 {
     LLColor4 display_color;
-    if (mUseColor)
+    if (mUseColor && !mUseDefaultColor)
     {
         display_color = mColor;
     }

@@ -25,6 +25,7 @@
  */
 
 #include "llviewerprecompiledheaders.h"
+#include "llfloaterpopout.h"
 
 #include "llviewerdisplay.h"
 
@@ -38,6 +39,7 @@
 #include "llfasttimer.h"
 #include "llfeaturemanager.h"
 #include "llfloaterprogressview.h"
+#include "gmdxtpfx.h" // <GMDX> teleport effects
 #include "llfloaterreg.h"
 #include "llfloatertools.h"
 #include "llfocusmgr.h"
@@ -141,7 +143,7 @@ void display_startup()
     {
         // #1074 VR: the headset keeps its frames while the mirror window is minimised
         // (displayVulkanUI renders them without the UI). Desktop: return as before.
-        if (!LLVRCamera::sessionRunning())
+        if (!LLVRCamera::sessionRunning() && !LLFloaterPopout::hasWork())
         {
             return;
         }
@@ -244,7 +246,7 @@ static void update_tp_display(bool minimized)
         {
             gTeleportDisplayTimer.reset();
             const std::string& msg = LLAgent::sTeleportProgressMessages["pending"];
-            if (!minimized)
+            if (!minimized && !GMDXTPFX::hidesProgress()) // <GMDX> a teleport effect covers the wait
             {
                 pProgFloater->setShowProgress(true);
                 pProgFloater->setProgressPercent(llmin(teleport_percent, 0.0f));
@@ -263,7 +265,7 @@ static void update_tp_display(bool minimized)
             LL_INFOS("Teleport") << "A teleport request has been sent, setting state to TELEPORT_REQUESTED" << LL_ENDL;
             gAgent.setTeleportState(LLAgent::TELEPORT_REQUESTED);
             gAgent.setTeleportMessage(msg);
-            if (!minimized)
+            if (!minimized && !GMDXTPFX::hidesProgress()) // <GMDX> a teleport effect covers the wait
             {
                 pProgFloater->setShowProgress(true);
                 pProgFloater->setProgressPercent(llmin(teleport_percent, 0.0f));

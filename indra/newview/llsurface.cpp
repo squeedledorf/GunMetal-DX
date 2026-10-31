@@ -56,7 +56,7 @@
 #include "llworldmipmap.h"
 #include "llterrainsmooth.h"
 #include "llframetimer.h"
-#include "gmdxminimapterrain.h" // <GMDX>
+#include "llminimapterrain.h" // (GunMetal-DX port)
 
 extern LLPipeline gPipeline;
 extern bool gShiftFrame;
@@ -217,7 +217,7 @@ LLViewerTexture* LLSurface::getSTexture()
         {
             tile->setBoostLevel(LLGLTexture::BOOST_MAP_VISIBLE);
         }
-        // <GMDX> A boost alone gives no draw size: a tile evicted after its region was left
+        // (GunMetal-DX port) A boost alone gives no draw size: a tile evicted after its region was left
         // (no faces, virtual size 0) was never fetched again and the mini-map fell back to the
         // terrain composite with "Use World Map Tiles" on. Report it as drawn at full size.
         tile->addTextureStats(256.f * 256.f);
@@ -242,16 +242,15 @@ LLViewerTexture* LLSurface::getSTexture()
     return mSTexturep;
 }
 
-// <GMDX>
-GMDXMinimapTerrain& LLSurface::getMinimapTerrain()
+// (GunMetal-DX port)
+LLMinimapTerrain& LLSurface::getMinimapTerrain()
 {
     if (!mMinimapTerrain)
     {
-        mMinimapTerrain = std::make_unique<GMDXMinimapTerrain>(this);
+        mMinimapTerrain = std::make_unique<LLMinimapTerrain>(this);
     }
     return *mMinimapTerrain;
 }
-// </GMDX>
 
 void LLSurface::createSTexture()
 {

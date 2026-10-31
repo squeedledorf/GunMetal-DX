@@ -77,6 +77,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "gmdxcombatlockout.h" // <GMDX>
+
 // Height of the yellow selection highlight posts for land
 constexpr F32 PARCEL_POST_HEIGHT = 0.666f;
 
@@ -861,7 +863,7 @@ void draw_cross_lines(const LLVector3& center, F32 dx, F32 dy, F32 dz)
 // per distinct line width (stable-sorted by width), not one begin/end per beacon.
 void LLViewerObjectList::renderObjectBeacons()
 {
-    if (mDebugBeacons.empty())
+    if (mDebugBeacons.empty() || GMDXCombatLockout::active()) // <GMDX> combat render lockout: no beacons while aiming
     {
         return;
     }
@@ -931,7 +933,7 @@ void LLViewerObjectList::renderObjectBeacons()
 void LLViewerObjectList::renderObjectBeaconLabels()
 {
     constexpr size_t kMaxBeaconLabels = 64;
-    if (mDebugBeacons.empty())
+    if (mDebugBeacons.empty() || GMDXCombatLockout::active()) // <GMDX> combat render lockout
     {
         return;
     }

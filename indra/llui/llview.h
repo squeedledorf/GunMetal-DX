@@ -49,6 +49,7 @@
 #include "llfocusmgr.h"
 
 #include <list>
+#include <set>
 #include <boost/function.hpp>
 #include <boost/noncopyable.hpp>
 
@@ -539,6 +540,12 @@ public:
     // return query for iterating over focus roots in tab order
     static const LLViewQuery & getFocusRootsQuery();
 
+    // Shared main/native hover traversal: front-to-back, including transparent
+    // siblings, stopping behind a mouse-opaque hit after visiting its subtree.
+    static void collectHoverViews(LLView* root, S32 x, S32 y, bool honor_opaque,
+                                  std::set<LLHandle<LLView>>& views);
+    static void clearHoverViews(std::set<LLHandle<LLView>>& views, S32 x, S32 y, MASK mask);
+
     static LLWindow*    getWindow(void) { return LLUI::getInstance()->mWindow; }
 
     // Set up params after XML load before calling new(),
@@ -665,6 +672,9 @@ private:
     typedef boost::function<bool(const LLView*, S32 x, S32 y)> DrilldownFunc;
     static DrilldownFunc sDrilldown;
 
+    // Set by MiddleClickBubbleScope.
+    static bool sMiddleClickBubbles;
+
 public:
     // This is the only public accessor to alter sDrilldown. This is not
     // an accident. The intended usage pattern is like:
@@ -688,6 +698,28 @@ public:
 
     private:
         DrilldownFunc mOldDrilldown;
+    };
+
+    // Middle-button autoscroll (#1144): a scrolling view offers a middle press to its children
+    // inside this scope. Mouse-opaque views then don't stop the press (as with the wheel), so
+    // the view learns whether a descendant really used it (text paste, a nested scroller) or it
+    // only landed on content, and then scrolls itself.
+    class MiddleClickBubbleScope: public boost::noncopyable
+    {
+    public:
+        MiddleClickBubbleScope():
+            mOldBubbles(sMiddleClickBubbles)
+        {
+            sMiddleClickBubbles = true;
+        }
+
+        ~MiddleClickBubbleScope()
+        {
+            sMiddleClickBubbles = mOldBubbles;
+        }
+
+    private:
+        bool mOldBubbles;
     };
 
     // Depth in view hierarchy during rendering

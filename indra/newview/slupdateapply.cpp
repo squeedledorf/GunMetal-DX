@@ -271,7 +271,8 @@ namespace SLUpdateApply
                     std::string& message, const char* pubkey_hex)
     {
         std::error_code ec;
-        auto drop_pending = [&]() { fs::remove(state_dir + "/pending-update", ec); };
+        // <GMDX> approved-update: the person clicked Install (pending-update alone is only "downloaded")
+        auto drop_pending = [&]() { fs::remove(state_dir + "/approved-update", ec); };
 
         std::string text;
         if (!read_file(staged_json, text, 64 * 1024))
@@ -441,7 +442,7 @@ namespace SLUpdateApply
         const std::string state = stateDir();
         if (state.empty()) return NOTHING;
         std::string pointer;
-        if (!read_file(state + "/pending-update", pointer, 4096)) return NOTHING;
+        if (!read_file(state + "/approved-update", pointer, 4096)) return NOTHING;   // <GMDX>
         std::string message;
         const int code = applyStaged(trimmed(pointer), argv[2], state, message);
         std::fprintf(stderr, "GunMetal-DX update: %s\n", message.c_str());

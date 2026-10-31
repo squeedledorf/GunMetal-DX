@@ -1,9 +1,11 @@
 <?xml version="1.0" encoding="utf-8" standalone="yes" ?>
 <!--
-  <SS:Skoomastream> Combat preferences, ported from SkoomaStorm's
-  panel_preferences_combat.xml: the over-the-shoulder camera and the reticle
-  (target identification and crosshair).
-  <GMDX> The ADS, Kill Feed and Hit Marker tabs are SoapStorm's. </GMDX>
+  Combat preferences. Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4,
+  whose panel came from SkoomaStorm's panel_preferences_combat.xml (<SS:Skoomastream>,
+  the over-the-shoulder camera and the reticle) and SoapStorm (ADS, Kill Feed, Hit Marker).
+
+  Slipstream: everything sits behind the one CombatFX checkbox at the top; the sub-tabs
+  only show while it is on.
 
   Layout grid, kept identical on every tab so the value boxes line up:
     section header   left 10
@@ -21,18 +23,46 @@
  top="1"
  width="517">
 
+<check_box
+ control_name="CombatFX"
+ follows="left|top"
+ font="SansSerifBold"
+ height="16"
+ label="Combat features (CombatFX)"
+ layout="topleft"
+ left="12"
+ name="combat_fx_enabled"
+ tool_tip="One switch for every combat feature on this page: the over-the-shoulder (OTS) aim camera, aim down sights, the custom crosshair and aiming aids, Combat 2.0 hit markers and kill feed, map share and pings, and loadouts. Off, none of them run (M goes to first-person mouselook), the helper sends no combat traffic, and the third-person shooter camera in Move &amp; View still works."
+ top="8"
+ width="490" />
+<text
+ type="string"
+ follows="left|top"
+ height="16"
+ layout="topleft"
+ left="30"
+ name="combat_fx_note"
+ invisibility_control="CombatFX"
+ top_pad="6"
+ width="470"
+ wrap="true">
+    Turn this on to use and configure the combat features.
+</text>
+
 <tab_container
  follows="all"
  layout="topleft"
  left="1"
  right="-1"
- top="5"
+ top="32"
  bottom="-1"
  name="combat_sub_tabs"
  tab_min_width="60"
- tab_position="top">
+ tab_position="top"
+ visibility_control="CombatFX">
 
-    <!-- ============================== Camera ============================== -->
+    <!-- <GMDX> ============================== Camera ============================== -->
+    <!-- GunMetal-DX 0.3.0's Camera tab: the OTS aim camera (gmdxots.h), framed by the SlipstreamTPSCamera* settings -->
     <panel
      follows="all"
      layout="topleft"
@@ -61,7 +91,7 @@
          top_pad="8"
          width="470" />
         <slider
-         control_name="OTSCameraDistance"
+         control_name="SlipstreamTPSCameraDistance"
          can_edit_text="true"
          decimal_digits="2"
          follows="left|top"
@@ -78,7 +108,7 @@
          top_pad="10"
          width="440" />
         <slider
-         control_name="OTSCameraSide"
+         control_name="SlipstreamTPSCameraSide"
          can_edit_text="true"
          decimal_digits="2"
          follows="left|top"
@@ -95,7 +125,7 @@
          top_pad="8"
          width="440" />
         <slider
-         control_name="OTSCameraHeight"
+         control_name="SlipstreamTPSCameraHeight"
          can_edit_text="true"
          decimal_digits="2"
          follows="left|top"
@@ -112,7 +142,7 @@
          top_pad="8"
          width="440" />
         <slider
-         control_name="OTSFocusDistance"
+         control_name="SlipstreamTPSFocusDistance"
          can_edit_text="true"
          decimal_digits="1"
          follows="left|top"
@@ -129,7 +159,7 @@
          top_pad="8"
          width="440" />
         <check_box
-         control_name="OTSCameraCollision"
+         control_name="SlipstreamTPSCameraCollision"
          follows="left|top"
          height="16"
          label="Camera collision (pull in when geometry blocks the view)"
@@ -152,9 +182,9 @@
          tool_tip="When entering aim mode, return to whichever view (over-the-shoulder or first person) you last switched to with the view toggle key, instead of always starting in OTS"
          top_pad="6"
          width="470" />
-        <!-- <GMDX> Esc toggles aim mode and the follow camera (GMDXOTSDynamicCamera) -->
+        <!-- <GMDX> Esc toggles aim mode and the follow camera (SlipstreamTPSDynamicCamera, was GMDXOTSDynamicCamera) -->
         <check_box
-         control_name="GMDXOTSDynamicCamera"
+         control_name="SlipstreamTPSDynamicCamera"
          follows="left|top"
          height="16"
          label="Dynamic camera (Esc leaves aim mode, Esc again goes back in)"
@@ -184,7 +214,7 @@
          label="Show me in mouselook"
          layout="topleft"
          left="12"
-         name="first_person_avatar_visible"
+         name="combat_first_person_avatar_visible"
          top="250"
          width="230" />
         <slider
@@ -197,7 +227,7 @@
          layout="topleft"
          left="12"
          max_val="15"
-         name="mouse_sensitivity"
+         name="combat_mouse_sensitivity"
          show_text="false"
          top="272"
          width="200" />
@@ -212,7 +242,7 @@
          layout="topleft"
          left="262"
          max_val="15"
-         name="mouse_sensitivity_zoomed"
+         name="combat_mouse_sensitivity_zoomed"
          show_text="false"
          tool_tip="Mouse sensitivity while you hold the right button to zoom in mouselook, on the same scale as Sensitivity. Aiming down sights has its own setting on the ADS tab."
          top="272"
@@ -225,37 +255,38 @@
          label="Invert"
          layout="topleft"
          left="12"
-         name="invert_mouse"
+         name="combat_invert_mouse"
          top="292"
          width="120" />
+        <!-- <GMDX> Slipstream's SlipstreamMouselookHideUI (#624) in place of SlipstreamMouselookShowUI -->
         <check_box
-         control_name="SlipstreamMouselookShowUI"
+         control_name="SlipstreamMouselookHideUI"
          follows="left|top"
          height="16"
-         label="Show UI in mouselook"
+         label="Hide UI in mouselook"
          layout="topleft"
          left="12"
-         name="mouselook_show_ui"
-         tool_tip="Keep toolbars, menus and open windows (such as the Area Search list and its beacons) on screen in mouselook. The mouse still steers the camera, so the UI is visible but not clickable until you leave mouselook."
+         name="combat_mouselook_hide_ui"
+         tool_tip="Hide toolbars, menus and open windows (but the mini-map) on entering mouselook or the OTS camera; Hide all controls (Me menu) shows them again. Off, aim mode keeps the UI as it was, so the Area Search list and its beacons stay on screen. The mouse still steers the camera, so the UI is visible but not clickable until you leave aim mode."
          top="310"
          width="230" />
 
-        <!-- Alchemy's free third-person camera (moved from Move & View) -->
+        <!-- Slipstream's third-person shooter camera (behind the avatar) -->
         <text
          type="string"
          follows="left|top"
-         height="40"
+         height="16"
          layout="topleft"
          left="10"
          name="cameras_note"
-         top="334"
-         width="490"
-         wrap="true">
-            Two cameras: the shooter camera is a free camera for moving around in third person; the OTS camera is the aim camera you enter with mouselook (M). While OTS is active it owns the camera.
+         top="332"
+         width="490">
+            The third-person shooter camera (behind the avatar) is in Move &amp; View.
         </text>
     </panel>
 
     <!-- <GMDX> ================================ ADS ================================ -->
+    <!-- GunMetal-DX 0.3.0's ADS tab (its tunables are settings again, fscombatads.cpp) -->
     <panel
      follows="all"
      layout="topleft"
@@ -412,7 +443,7 @@
          left="12"
          name="rmb_script_enabled"
          tool_tip="In mouselook and OTS, report the right mouse button to your weapons as the normal left button (CONTROL_LBUTTON in a control event), next to the mouselook left button (CONTROL_ML_LBUTTON). Right-click zoom and ADS keep working."
-         top_pad="10"
+         top_pad="8"
          width="470" />
         <text
          type="string"
@@ -421,7 +452,7 @@
          height="16"
          layout="topleft"
          left="10"
-         top_pad="18"
+         top_pad="8"
          width="490">
             Vignette
         </text>
@@ -480,6 +511,7 @@
     <!-- </GMDX> -->
 
     <!-- ============================== Reticle ============================= -->
+    <!-- <GMDX> GunMetal-DX 0.3.0's Reticle, Kill Feed and Hit Marker tabs (their options are settings again) -->
     <panel
      follows="all"
      layout="topleft"
@@ -509,17 +541,7 @@
          tool_tip="In mouselook and OTS, show the name and distance of the avatar under the crosshair and color the crosshair by its contact set. Targets behind walls, floors or terrain are never identified."
          top_pad="8"
          width="470" />
-        <check_box
-         control_name="SlipstreamMouselookIFFMarkers"
-         enabled_control="SlipstreamMouselookIFF"
-         follows="left|top"
-         height="16"
-         label="Draw target markers"
-         layout="topleft"
-         left="30"
-         name="SlipstreamMouselookIFFMarkers"
-         top_pad="6"
-         width="470" />
+        <!-- <GMDX> no "Draw target markers": they marked every avatar in range through walls (lltoolgun.cpp) -->
         <!-- <GMDX> -->
         <check_box
          control_name="ExodusMouselookIFFShowName"
@@ -1214,118 +1236,50 @@
         </button>
     </panel>
     <!-- </GMDX> -->
-    <!-- <GMDX> ============================ Map Share ============================ -->
-    <!-- gmdxmapshare.h: marks, zones and pings shared as readable lines, said by my helper to the people I send to in my region -->
-    <panel
-     follows="all"
-     layout="topleft"
-     label="Map Share"
-     name="combat_mapshare">
-
-        <text
-         type="string"
-         follows="left|top"
-         font="SansSerifSmallBold"
-         height="16"
-         layout="topleft"
-         left="10"
-         top="10"
-         width="490">
-            Shared Map Marks, Zones and Pings
-        </text>
-        <check_box
-         control_name="GMDXMapShareShow"
-         follows="left|top"
-         height="16"
-         label="Show what others share on the mini-map (and pings over the world)"
-         layout="topleft"
-         left="12"
-         name="map_share_show_pref"
-         tool_tip="Shares said to you by the helpers of the people in your list and of the members of the groups you send to (in your region) are drawn instead of shown as chat lines. Off: they stay plain chat text."
-         top_pad="8"
-         width="470" />
-        <text
-         type="string"
-         follows="left|top"
-         height="30"
-         layout="topleft"
-         left="30"
-         name="map_share_accept_help"
-         top_pad="6"
-         width="450"
-         wrap="true">
-Drawn only from the people in your list and the members of the groups you send to (mini-map: Ping > Send To). Anyone else's stays a chat line; their marks and zones ask first, their pings are not drawn.
-        </text>
-        <check_box
-         control_name="GMDXMapShareShowAsText"
-         enabled_control="GMDXMapShareShow"
-         follows="left|top"
-         height="16"
-         label="Also keep share lines in the chat as text (for checking)"
-         layout="topleft"
-         left="30"
-         name="map_share_as_text_pref"
-         tool_tip="Shared lines stay in the nearby chat as they arrived, as well as being drawn."
-         top_pad="6"
-         width="450" />
-
-        <text
-         type="string"
-         follows="left|top"
-         font="SansSerifSmallBold"
-         height="16"
-         layout="topleft"
-         left="10"
-         top_pad="16"
-         width="490">
-            Sending Shares and Pings
-        </text>
-        <check_box
-         control_name="GMDXMapShareSend"
-         follows="left|top"
-         height="16"
-         label="Send map shares and pings (wears the #GunMetal-DX Helper)"
-         layout="topleft"
-         left="12"
-         name="map_share_send_pref"
-         tool_tip="Your helper says each share or ping privately to the people you send to who are in your region. Nobody outside your region ever gets one. Off: the helper comes off (unless another feature uses it) and nothing can be sent."
-         top_pad="8"
-         width="470" />
-        <check_box
-         control_name="GMDXMapShareMyGroup"
-         enabled_control="GMDXMapShareSend"
-         follows="left|top"
-         height="16"
-         label="Send to my group (the one whose tag I wear)"
-         layout="topleft"
-         left="30"
-         name="map_share_my_group_pref"
-         tool_tip="Its members in your region get your shares and pings. Other groups and people in your region: the mini-map's right-click menu, Ping > Send To."
-         top_pad="6"
-         width="450" />
-    </panel>
-    <!-- </GMDX> -->
     <!-- <GMDX> ============================== Pings ============================== -->
-    <!-- gmdxmapshare.h / gmdxpingwheel.h: how received pings show, and the ping keys -->
+    <!-- gmdxmapshare.h / gmdxpingwheel.h: pings said by my helper to the people I send to in my region -->
     <panel
      follows="all"
      layout="topleft"
      label="Pings"
      name="combat_pings">
 
-        <text
-         type="string"
+        <check_box
+         control_name="SLMapShareShow"
          follows="left|top"
-         font="SansSerifSmallBold"
          height="16"
+         label="Show what people share with me (marks and zones on the mini-map, pings also over the world)"
          layout="topleft"
-         left="10"
+         left="12"
+         name="map_share_show_pref"
+         tool_tip="Shares and pings said to you by the helpers of the people and the members of the groups you send to (in your region) are drawn instead of shown as chat lines. A stranger's mark or zone asks first; a stranger's ping stays a chat line. Off: they all stay plain chat text."
          top="10"
-         width="490">
-            Pings
-        </text>
+         width="470" />
+        <check_box
+         control_name="SLMapShareSend"
+         follows="left|top"
+         height="16"
+         label="Send map shares and pings (wears the #GunMetal-DX Helper)"
+         layout="topleft"
+         left="12"
+         name="map_share_send_pref"
+         tool_tip="Your helper says each share or ping privately to the people you send to who are in your region. Nobody outside your region ever gets one. Off: nothing can be sent."
+         top_pad="6"
+         width="470" />
+        <check_box
+         control_name="SLMapShareMyGroup"
+         enabled_control="SLMapShareSend"
+         follows="left|top"
+         height="16"
+         label="Send to my group (the one whose tag I wear)"
+         layout="topleft"
+         left="30"
+         name="map_share_my_group_pref"
+         tool_tip="Its members in your region get your shares and pings, and theirs are drawn for you."
+         top_pad="6"
+         width="450" />
         <slider
-         control_name="GMDXPingSeconds"
+         control_name="SLPingSeconds"
          can_edit_text="true"
          decimal_digits="0"
          follows="left|top"
@@ -1340,22 +1294,11 @@ Drawn only from the people in your list and the members of the groups you send t
          max_val="60"
          min_val="3"
          name="ping_seconds_pref"
-         tool_tip="How long a ping you receive shows on the mini-map and over the world."
+         tool_tip="How long a ping you receive shows over the world and on the maps."
          top_pad="8"
          width="440" />
         <check_box
-         control_name="GMDXPingBlip"
-         follows="left|top"
-         height="16"
-         label="Pings blip on the maps like radar contacts"
-         layout="topleft"
-         left="30"
-         name="ping_blip_pref"
-         tool_tip="A flash and rings spreading out as a ping arrives, then its dot fades away over the time above. Off: a simple pulse, and it fades at the end."
-         top_pad="8"
-         width="450" />
-        <check_box
-         control_name="GMDXPingSound"
+         control_name="SLPingSound"
          follows="left|top"
          height="16"
          label="Sound when a ping arrives"
@@ -1364,6 +1307,32 @@ Drawn only from the people in your list and the members of the groups you send t
          name="ping_sound_pref"
          top_pad="8"
          width="450" />
+        <button
+         follows="left|top"
+         height="20"
+         label="Block pings from..."
+         layout="topleft"
+         left="30"
+         name="ping_block_btn"
+         tool_tip="Pick someone whose pings are never drawn for you (their lines stay plain chat text)."
+         top_pad="8"
+         width="150">
+            <button.commit_callback
+             function="Pref.PingBlock" />
+        </button>
+        <button
+         follows="left|top"
+         height="20"
+         label="Unblock all"
+         layout="topleft"
+         left_pad="8"
+         name="ping_unblock_btn"
+         tool_tip="Draw pings from everyone you blocked again."
+         top_delta="0"
+         width="110">
+            <button.commit_callback
+             function="Pref.PingUnblockAll" />
+        </button>
         <!-- the ping keys (gmdxpingwheel.cpp), with the viewer's key capture dialog -->
         <panel
          class="gmdx_ping_keys"
@@ -1455,38 +1424,38 @@ Drawn only from the people in your list and the members of the groups you send t
              top_delta="-2"
              width="170" />
         </panel>
-        <slider
-         control_name="GMDXPingWheelHoldMs"
-         can_edit_text="true"
-         decimal_digits="0"
-         follows="left|top"
-         height="15"
-         increment="10"
-         initial_value="250"
-         layout="topleft"
-         label="Hold for the wheel (ms):"
-         label_width="180"
-         show_text="true"
-         left="30"
-         max_val="2000"
-         min_val="50"
-         name="ping_wheel_hold_pref"
-         tool_tip="Let go of the ping wheel's key sooner: a plain Ping. Held this long: the wheel opens."
-         top_pad="6"
-         width="440" />
         <text
          type="string"
          follows="left|top"
-         height="88"
+         height="56"
          layout="topleft"
          left="30"
          name="ping_help"
-         top_pad="10"
+         top_pad="6"
          width="460"
          wrap="true">
-B pings the place under the mouse pointer (in mouselook, under the crosshair). Shift+B, the ping wheel, does too when tapped; held, a wheel opens: move toward Ping, Enemy or Rally and let go (in the middle: nothing). Pings go to your list: your group and the groups and people ticked in the mini-map's Ping > Send To (Keep makes one stay). A ping placed from the mini-map's menu shows on maps only, not over the world. On your marks and zones, the mini-map's Share sends to your group or your list. Only people in your region get them, never everyone there, as an ordinary chat line with a map link, so people on other viewers can read it.
+B pings the spot under the mouse (in mouselook, under the crosshair). Shift+B is the ping wheel: tap it to ping, hold it and move toward Ping, Enemy or Rally. Pings and shared marks and zones go to your group and to the groups and people ticked in Map Sharing, only while they are in your region, as a chat line with a map link that other viewers can read. A ping placed from the mini-map shows on maps only.
         </text>
+        <!-- <GMDX> the Map Sharing window (gmdxfloatermapsharing.cpp) -->
+        <button
+         follows="left|top"
+         height="23"
+         label="Manage sharing..."
+         layout="topleft"
+         left="30"
+         name="map_sharing_btn"
+         tool_tip="Open the Map Sharing window: who gets your pings and shares, whose you take, who is blocked, and what others shared now."
+         top_pad="8"
+         width="130">
+            <button.commit_callback
+             function="Floater.Show"
+             parameter="gmdx_map_sharing" />
+        </button>
     </panel>
     <!-- </GMDX> -->
+
+
+    <!-- sub-tabs -->
+
 </tab_container>
 </panel>

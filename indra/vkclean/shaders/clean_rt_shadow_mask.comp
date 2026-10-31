@@ -47,7 +47,7 @@ layout(set = 1, binding = 0) uniform sampler2D uTextures[];
 layout(set = 3, binding = 0) uniform sampler2DArray uDepth;                       // pre-pass depth (NEAREST)
 layout(set = 3, binding = 3, rgba16ui) writeonly uniform uimage2DArray uIdsOut;
 layout(set = 3, binding = 4, r32f) writeonly uniform image2DArray uDepthOut;      // view depth (32-bit)
-layout(set = 3, binding = 21, rgba16f) writeonly uniform image2DArray uGradOut;   // d(vz)/dx, d(vz)/dy, flags
+layout(set = 3, binding = 21, rgba32f) writeonly uniform image2DArray uGradOut;   // d(vz)/dx, d(vz)/dy, flags
 // Last frame's accumulated mask: only the (optional) ray-skipping hint reads it here.
 layout(set = 3, binding = 5) uniform sampler2DArray uHistSun;
 layout(set = 3, binding = 6) uniform sampler2DArray uHistProj;
@@ -58,7 +58,7 @@ layout(set = 3, binding = 22) uniform sampler2DArray uHistDepthG;   // history d
 // #771 STATIC CARRY: a carried block copies the history slot's accumulation / meta into
 // this frame's slot (the temporal pass skips it; clean_rt_mask_cache.glsl rcCarried).
 layout(set = 3, binding = 12, rgba16f) writeonly uniform image2DArray uCarryAccSun;
-layout(set = 3, binding = 14, rgba16f) writeonly uniform image2DArray uCarryMeta;
+layout(set = 3, binding = 14, rgba32f) writeonly uniform image2DArray uCarryMeta;
 layout(set = 3, binding = 1, rgba8) uniform image2DArray uCarryFinal;   // (its alpha: the TAA reactive)
 layout(set = 3, binding = 10, rgba8) writeonly uniform image2DArray uRawSun;
 layout(set = 3, binding = 11, rgba8) writeonly uniform image2DArray uRawProj;
@@ -160,7 +160,7 @@ bool maskProbeNormal(vec3 P, vec3 cam, out vec3 n)
     if (camd < 1e-4) return false;
     V /= camd;
     const float pm = max(max(abs(P.x), abs(P.y)), abs(P.z));
-    const float w = max(4.0 * (camd * RT_DEPTH_REL_ERR + max(RT_OFS_FRAME_ULPS * rtUlp(pm), RT_OFS_FLOAT_SCALE)), 1e-3);
+    const float w = max(4.0 * (rtDepthErrDist(camd) * RT_DEPTH_REL_ERR + max(RT_OFS_FRAME_ULPS * rtUlp(pm), RT_OFS_FLOAT_SCALE)), 1e-3);
     rayQueryEXT rq;
     rayQueryInitializeEXT(rq, uTLAS, gl_RayFlagsOpaqueEXT, RT_MASK_SHADOW & 0xFFu, P - V * w, 0.0, V, 2.0 * w);
     while (rayQueryProceedEXT(rq)) {}
@@ -309,7 +309,7 @@ void main()
     }
     const vec2 cpx = vec2(rp) + 0.5;
     const vec3 P = worldAt(cpx, d);
-    const vec3 cam = rtMaskEye();   // (#1075: this view's eye; mp.cam_time on one view)
+    const vec3 cam = CL_VIEW_EYE(linfo, P, rtMaskEye());
     const float time = mp.cam_time.w;
     const vec3 fwd = linfo.cam_fwd.xyz;
     const float vz = dot(P - linfo.cam_pos.xyz, fwd);
@@ -331,7 +331,9 @@ void main()
     // camera-ray probe. Only when the normal is used (sun in range or projectors).
     const ivec2 mx = ivec2(mp.dims.xy) - 1;
     const float pm = max(max(abs(P.x), abs(P.y)), abs(P.z));
-    const float dtol = 8.0 * rtUlp(d) + d * 2.0 * max(RT_OFS_FRAME_ULPS * rtUlp(pm), RT_OFS_FLOAT_SCALE) / max(vz, 1e-3);
+    const float dtol = rtViewOrtho()
+        ? 8.0 * rtUlp(d) + 2.0 * max(RT_OFS_FRAME_ULPS * rtUlp(pm), RT_OFS_FLOAT_SCALE) / rtOrthoRange()
+        : 8.0 * rtUlp(d) + d * 2.0 * max(RT_OFS_FRAME_ULPS * rtUlp(pm), RT_OFS_FLOAT_SCALE) / max(vz, 1e-3);
     vec3 dx, dy;
     const bool okx = maskTangent(rp, ivec2(1, 0), cpx, d, P, dtol, mx, dx);
     const bool oky = maskTangent(rp, ivec2(0, 1), cpx, d, P, dtol, mx, dy);
@@ -479,7 +481,7 @@ void main()
             // turned away is the inside of the avatar)
             // (+ the view-slope offset above, on the same side)
             rt_cl_lift = (dot(Nsun, L) > 0.0 || (term && dot(tlift, tlift) > 0.0)) ? cl_lift + recv_ofs : 0.0;
-            sun = mix(sunShadowRayCore(Psun, Nsun, L, cam, time, npx, opaque_only, 16u), vec3(1.0), fade);
+            sun = mix(sunShadowRayCore(Psun, Nsun, L, CL_VIEW_EYE(linfo, Psun, cam), time, npx, opaque_only, 16u), vec3(1.0), fade);
             rt_term_on = false;
             rt_cl_lift = 0.0;
             if (rt_block_dyn) dyn |= 1u;

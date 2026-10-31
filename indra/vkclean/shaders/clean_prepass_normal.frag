@@ -29,7 +29,7 @@
 #include "clean_draw_common.glsl"
 #include "clean_normal_tex.glsl"   // BC5 normal maps: z rebuilt (#263)
 #ifdef PREPASS_MASK
-// <GMDX> rez effects: the de-rez cut of a dying object, as the lit FS runs it
+// <GMDX> rez effects (CombatFX): the de-rez cut of a dying object, as the lit FS runs it
 #define GMDX_REZFX_FS
 #include "gmdx_rezfx.glsl"
 #endif

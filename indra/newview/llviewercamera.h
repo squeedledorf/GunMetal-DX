@@ -114,10 +114,11 @@ public:
     F32 getZoomFactor() const { return mZoomFactor; }
     S16 getZoomSubRegion() const { return mZoomSubregion; }
 
-    // <GMDX> Orthographic view (SoapStorm FSCameraOrtho, Blender numpad 5): the view keeps the
-    // scale it had at the focus distance when it was switched on; FSAutoPerspectiveOnCameraMove
+    // Orthographic view (Firestorm's FSCameraOrtho, Blender numpad 5): the view keeps the scale
+    // it had at the focus distance when it was switched on; FSAutoPerspectiveOnCameraMove
     // returns to perspective as soon as the camera moves. The Vulkan frame (llappviewer.cpp
     // buildVulkanWorldFrame) builds its projection from getOrthoHalfHeight().
+    // Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
     void setOrtho(bool ortho);
     void toggleOrtho();
     bool getOrtho() const { return mIsOrtho; }
@@ -126,7 +127,7 @@ public:
     // The pick ray through scaled UI point (x, y) while orthographic: parallel to the view axis,
     // starting on the near plane under the cursor. False in perspective (keep the eye ray).
     bool orthoMouseRay(S32 x, S32 y, LLVector3& origin, LLVector3& dir) const;
-    // Near clip for this frame (FSRenderNearClip, pulled in when the third person camera is
+    // <GMDX> Near clip for this frame (FSRenderNearClip, pulled in when the third person camera is
     // focused close). Called once per frame before the world frame is built.
     void updateNearClip();
     // </GMDX>
@@ -153,9 +154,9 @@ protected:
     S16                 mZoomSubregion;
     F32                 mSpeedFovBoost = 0.f;   // #663
     F32                 mBaseViewSent = 0.f;    // last base FoV setView() compared / broadcast against
-    bool                mIsOrtho = false;       // <GMDX> orthographic view
-    F32                 mOrthoFocusDist = 3.5f; // <GMDX>
-    U32                 mOrthoFrameCountdown = 0; // <GMDX> frames before camera motion counts
+    bool                mIsOrtho = false;       // orthographic view
+    F32                 mOrthoFocusDist = 3.5f;
+    U32                 mOrthoFrameCountdown = 0; // frames before camera motion counts
 
 public:
 };

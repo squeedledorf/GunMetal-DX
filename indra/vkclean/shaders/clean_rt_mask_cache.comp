@@ -67,7 +67,7 @@ uint rcPixelReasons(vec3 P, ivec2 m, ivec2 rp, float vz, float eps, float minlen
         hn = m;
         if (!(texelFetch(uHistDepth, ivec3(m, RT_MASK_L), 0).x > 0.0)) return (1u << RC_ST_NOHIST) | (1u << 29u);   // (sky there)
     }
-    const float len = texelFetch(uHistMeta, ivec3(hn, RT_MASK_L), 0).x;
+    const float len = rtHistoryMeta(texelFetch(uHistMeta, ivec3(hn, RT_MASK_L), 0)).x;
     if (!(len >= minlen)) return 1u << RC_ST_YOUNG;
     // Moving caster: the trace's bit 0 (rays met one) or the temporal pass's countdown
     // (bits 5-7) at the tap -- a mover's shadow (leading / trailing) re-traces every frame.

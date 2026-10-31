@@ -11,13 +11,14 @@
 // a = transmittance.
 layout(local_size_x = 8, local_size_y = 8) in;
 
-#define PHYSKY_NOT_IN_PROBES   // <GMDX> the panorama is the probes' / mirrors' sky: WindLight, as clean_probe_sky.frag
 #include "clean_frame_info.glsl"
+#define CLEAN_CAPTURE_LEGACY_SKY // retain physical-off capture sky/space policy
 #include "clean_atmos_common.glsl"
 #define VC_SET 1
 #include "clean_vol_cloud_common.glsl"
 
 layout(set = 1, binding = 12, rgba16f) uniform image2D uPano;
+layout(set = 1, binding = 14, rgba16f) uniform image2D uPanoMean;
 
 void main()
 {
@@ -30,9 +31,15 @@ void main()
     const vec3 V = vec3(sin(th) * cos(phi), sin(th) * sin(phi), cos(th));
     const VcLight l = vcLightSetup();
     const float jitter = vcIgn(vec2(px) + 5.588238 * float(uint(vc.march.z) % 64u));
-    VcResult r = vcMarch(l, V, VC_FAR, int(vc.pano.z), 4, jitter);
+    VcResult r = vcMarch(l, V, VC_FAR, int(vc.pano.z), 4, jitter,vc.cam.xyz);
     r = vcAtmosphere(r, V);
     vec4 o = vec4(r.scat, r.T);
-    if (vc.pano.w > 0.0) o = mix(o, imageLoad(uPano, px), vc.pano.w);
+    float mean=min(r.dmean,VC_FAR);
+    if (vc.pano.w > 0.0)
+    {
+        o = mix(o, imageLoad(uPano, px), vc.pano.w);
+        mean=mix(mean,imageLoad(uPanoMean,px).r,vc.pano.w);
+    }
     imageStore(uPano, px, o);
+    imageStore(uPanoMean,px,vec4(mean));
 }

@@ -29,6 +29,7 @@
 #include "llfloatersnapshot.h"
 
 #include "llfloaterreg.h"
+#include "llfontgl.h"
 #include "llimagefiltersmanager.h"
 #include "llcheckboxctrl.h"
 #include "llcombobox.h"
@@ -44,7 +45,8 @@
 #include "lltoolfocus.h"
 #include "lltoolmgr.h"
 #include "llwebprofile.h"
-#include "gmdxsnapshotavatars.h"   // <GMDX> avatar layers, avatar scope, orientation swap
+#include "pipeline.h"
+#include "llsnapshotavatars.h"   // avatar layers, avatar scope, orientation swap (ported from GunMetal-DX, squeedledorf, LGPL 2.1, v0.3.0 cf5f1f4)
 
 ///----------------------------------------------------------------------------
 /// Local function declarations, constants, enums, and typedefs
@@ -147,14 +149,14 @@ LLSnapshotModel::ESnapshotLayerType LLFloaterSnapshot::Impl::getLayerType(LLFloa
         type = LLSnapshotModel::SNAPSHOT_TYPE_COLOR;
     else if (id == "depth")
         type = LLSnapshotModel::SNAPSHOT_TYPE_DEPTH;
-    // <GMDX> avatar layers (gmdxsnapshotavatars.h)
+    // avatar layers (llsnapshotavatars.h)
     else if (id == "avatar_transparent")
         type = LLSnapshotModel::SNAPSHOT_TYPE_AVATAR_TRANSPARENT;
     else if (id == "avatar_mask_black")
         type = LLSnapshotModel::SNAPSHOT_TYPE_AVATAR_MASK_BLACK;
     else if (id == "avatar_mask_white")
         type = LLSnapshotModel::SNAPSHOT_TYPE_AVATAR_MASK_WHITE;
-    // </GMDX>
+
     return type;
 }
 
@@ -208,7 +210,8 @@ void LLFloaterSnapshotBase::ImplBase::updateLayout(LLFloaterSnapshotBase* floate
         }
     }
 
-    bool use_freeze_frame = floaterp->mFreezeFrameCheck && floaterp->mFreezeFrameCheck->getValue().asBoolean();
+    bool use_freeze_frame = floaterp->mFreezeFrameCheck && floaterp->mFreezeFrameCheck->getValue().asBoolean()
+        && !(previewp && previewp->isSelfTimerActive());
 
     if (use_freeze_frame)
     {
@@ -418,7 +421,7 @@ void LLFloaterSnapshot::Impl::updateControls(LLFloaterSnapshotBase* floater)
         info["have-snapshot"] = got_snap;
         current_panel->updateControls(info);
     }
-    gmdxSnapshotUpdateControls(floater);   // <GMDX> orientation icons, avatar picker button
+    snapshotUpdateControls(floater);   // orientation icons, avatar picker button
     LL_DEBUGS() << "finished updating controls" << LL_ENDL;
 }
 
@@ -442,6 +445,11 @@ void LLFloaterSnapshotBase::ImplBase::setStatus(EStatus status, bool ok, const s
     }
 
     mStatus = status;
+    if (LLFloaterSnapshot* snapshot = dynamic_cast<LLFloaterSnapshot*>(mFloater))
+    {
+        if (status == STATUS_WORKING) snapshot->cancelSelfTimer();
+        snapshot->updateSelfTimerControls(true);
+    }
 }
 
 // virtual
@@ -694,7 +702,7 @@ void LLFloaterSnapshot::Impl::updateResolution(LLUICtrl* ctrl, void* data, bool 
 
     S32 width = sdres[0];
     S32 height = sdres[1];
-    if (width < -1 || height < -1) return;   // <GMDX> a category header of the size list
+    if (width < -1 || height < -1) return;   // a category header of the size list
 
     LLSnapshotLivePreview* previewp = getPreviewView();
     if (previewp && combobox->getCurrentIndex() >= 0)
@@ -792,14 +800,12 @@ void LLFloaterSnapshot::Impl::updateResolution(LLUICtrl* ctrl, void* data, bool 
 // static
 void LLFloaterSnapshot::Impl::onCommitLayerTypes(LLUICtrl* ctrl, void*data)
 {
-    LLComboBox* combobox = (LLComboBox*)ctrl;
-
     LLFloaterSnapshot *view = (LLFloaterSnapshot *)data;
 
     if (view)
     {
         LLSnapshotLivePreview* previewp = view->getPreviewView();
-        // <GMDX> by value (the avatar layers follow Depth); the transparent avatar is PNG (alpha)
+        // by value (the avatar layers follow Depth); the transparent avatar is PNG (alpha)
         const LLSnapshotModel::ESnapshotLayerType layer_type = view->impl->getLayerType(view);
         if (previewp)
         {
@@ -813,10 +819,10 @@ void LLFloaterSnapshot::Impl::onCommitLayerTypes(LLUICtrl* ctrl, void*data)
                 format_combo->selectNthItem(LLSnapshotModel::SNAPSHOT_FORMAT_PNG);
             if (previewp) previewp->setSnapshotFormat(LLSnapshotModel::SNAPSHOT_FORMAT_PNG);
         }
-        // </GMDX>
+
         view->impl->checkAutoSnapshot(previewp, true);
         if (previewp) previewp->updateSnapshot(true, true);
-        view->impl->updateControls(view);   // <GMDX>
+        view->impl->updateControls(view);
     }
 }
 
@@ -970,7 +976,12 @@ LLFloaterSnapshotBase::LLFloaterSnapshotBase(const LLSD& key)
 
 LLFloaterSnapshotBase::~LLFloaterSnapshotBase()
 {
-    if (impl->mPreviewHandle.get()) impl->mPreviewHandle.get()->die();
+    if (LLSnapshotLivePreview* previewp = getPreviewView())
+    {
+        previewp->cancelSelfTimer();
+        previewp->setContainer(nullptr);
+        previewp->die();
+    }
 
     //unfreeze everything else
     gSavedSettings.setBOOL("FreezeTime", false);
@@ -1002,7 +1013,15 @@ LLFloaterSnapshot::~LLFloaterSnapshot()
 bool LLFloaterSnapshot::postBuild()
 {
     mRefreshBtn = getChild<LLUICtrl>("new_snapshot_btn");
-    childSetAction("new_snapshot_btn", ImplBase::onClickNewSnapshot, this);
+    mSnapshotTimerCombo = getChild<LLComboBox>("snapshot_timer");
+    mCancelTimerButton = getChild<LLButton>("cancel_timer_btn");
+    mRefreshBtn->setCommitCallback(boost::bind(&LLFloaterSnapshot::onClickTimerSnapshot, this));
+    mCancelTimerButton->setCommitCallback(boost::bind(&LLFloaterSnapshot::cancelSelfTimer, this));
+    mSnapshotTimerCombo->setCommitCallback(boost::bind(&LLFloaterSnapshot::cancelSelfTimer, this));
+    mTimerVisibilityConnection = setVisibleCallback([this](LLUICtrl*, const LLSD& visible)
+    {
+        if (!visible.asBoolean()) cancelSelfTimer();
+    });
     mRefreshLabel = getChild<LLUICtrl>("refresh_lbl");
     mSucceessLblPanel = getChild<LLUICtrl>("succeeded_panel");
     mFailureLblPanel = getChild<LLUICtrl>("failed_panel");
@@ -1011,15 +1030,15 @@ bool LLFloaterSnapshot::postBuild()
     childSetCommitCallback("balance_check", ImplBase::onClickDisplaySetting, this);
     childSetCommitCallback("hud_check", ImplBase::onClickDisplaySetting, this);
     childSetCommitCallback("aa_check", ImplBase::onClickDisplaySetting, this);   // SnapshotAntialias (#417)
-    // <GMDX> avatar scope (+ its picker) and the orientation swap (gmdxsnapshotavatars.h)
+    // avatar scope (+ its picker) and the orientation swap (llsnapshotavatars.h)
     getChild<LLUICtrl>("avatar_scope_combo")->setCommitCallback([this](LLUICtrl* ctrl, const LLSD&)
     {
-        gmdxSnapshotScopeChanged(this);
+        snapshotScopeChanged(this);
         ImplBase::onClickDisplaySetting(ctrl, this);
     });
-    getChild<LLUICtrl>("avatar_scope_popout_btn")->setCommitCallback([this](LLUICtrl*, const LLSD&) { gmdxSnapshotShowPicker(this); });
-    getChild<LLUICtrl>("swap_portrait_btn")->setCommitCallback([this](LLUICtrl*, const LLSD&) { gmdxSnapshotSwapOrientation(this); });
-    // </GMDX>
+    getChild<LLUICtrl>("avatar_scope_popout_btn")->setCommitCallback([this](LLUICtrl*, const LLSD&) { snapshotShowPicker(this); });
+    getChild<LLUICtrl>("swap_portrait_btn")->setCommitCallback([this](LLUICtrl*, const LLSD&) { snapshotSwapOrientation(this); });
+
 
     ((Impl*)impl)->setAspectRatioCheckboxValue(this, gSavedSettings.getBOOL("KeepAspectForSnapshot"));
 
@@ -1091,6 +1110,7 @@ bool LLFloaterSnapshot::postBuild()
 
 
     previewp->setThumbnailPlaceholderRect(getThumbnailPlaceholderRect());
+    updateSelfTimerControls();
 
     return true;
 }
@@ -1106,17 +1126,17 @@ static void draw_snapshot_crop_frame(LLView* floater, LLSnapshotLivePreview* pre
     static LLCachedControl<bool> s_frame(gSavedSettings, "SnapshotShowCropFrame", true);
     static LLCachedControl<bool> s_offscreen(gSavedSettings, "RenderSnapshotOffscreen", false);
     if (!s_frame || s_offscreen || !previewp || !gViewerWindow) return;
-    // <GMDX> an offscreen shot (avatar layer / avatar scope / mattes) is not a crop of the view
+    // an offscreen shot (avatar layer / avatar scope / mattes) is not a crop of the view
     {
         static LLCachedControl<bool> s_ui(gSavedSettings, "RenderUIInSnapshot", false);
         LLUICtrl* layers = floater->findChild<LLUICtrl>("layer_types");
         const std::string layer = layers ? layers->getValue().asString() : std::string("colors");
         const bool avatar_layer = layer.compare(0, 7, "avatar_") == 0;
-        if (avatar_layer || (!s_ui && gmdxSnapshotWantsOffscreen(layer == "depth" ? LLSnapshotModel::SNAPSHOT_TYPE_DEPTH
+        if (avatar_layer || (!s_ui && snapshotWantsOffscreen(layer == "depth" ? LLSnapshotModel::SNAPSHOT_TYPE_DEPTH
                                                                                    : LLSnapshotModel::SNAPSHOT_TYPE_COLOR)))
             return;
     }
-    // </GMDX>
+
     if (previewp->getVisible()) return;   // the full-screen freeze-frame preview shows the shot itself
     const S32 req_w = previewp->getWidth(), req_h = previewp->getHeight();
     const S32 win_w = gViewerWindow->getWindowWidthScaled(), win_h = gViewerWindow->getWindowHeightScaled();
@@ -1194,9 +1214,41 @@ void LLFloaterSnapshotBase::draw()
     impl->updateLayout(this);
 }
 
+void LLFloaterSnapshot::draw()
+{
+    LLSnapshotLivePreview* previewp = getPreviewView();
+    if (previewp && (previewp->isSnapshotActive() || previewp->getThumbnailLock()))
+    {
+        return;
+    }
+
+    updateSelfTimerControls();
+    LLFloaterSnapshotBase::draw();
+    if (previewp && previewp->isSelfTimerActive() && !isMinimized())
+    {
+        const LLRect world = gViewerWindow->getWorldViewRectScaled();
+        const S32 center_x = world.getCenterX();
+        const S32 center_y = world.getCenterY() + world.getHeight() / 4;
+        const LLFontGL* font = LLFontGL::getFontSansSerifHuge();
+        const S32 half_width = font->getWidth(mCountdownText) / 2 + 12;
+        const S32 half_height = font->getLineHeight() / 2 + 8;
+        S32 origin_x = 0, origin_y = 0;
+        localPointToScreen(0, 0, &origin_x, &origin_y);
+        LLUI::pushMatrix();
+        LLUI::translate(static_cast<F32>(-origin_x), static_cast<F32>(-origin_y));
+        gGL.getTexUnit(0)->unbind(LLTexUnit::TT_TEXTURE);
+        gl_rect_2d(center_x - half_width, center_y + half_height,
+            center_x + half_width, center_y - half_height, LLColor4(0.f, 0.f, 0.f, 0.7f), true);
+        font->renderUTF8(mCountdownText, 0, center_x, center_y, LLColor4::white,
+            LLFontGL::HCENTER, LLFontGL::VCENTER);
+        LLUI::popMatrix();
+    }
+}
+
 //virtual
 void LLFloaterSnapshot::onOpen(const LLSD& key)
 {
+    cancelSelfTimer();
     LLSnapshotLivePreview* preview = getPreviewView();
     if(preview)
     {
@@ -1215,7 +1267,7 @@ void LLFloaterSnapshot::onOpen(const LLSD& key)
 
     // Initialize default tab.
     getChild<LLSideTrayPanelContainer>("panel_container")->getCurrentPanel()->onOpen(LLSD());
-    gmdxSnapshotScopeChanged(this);   // <GMDX> "Self + Selected": the picker opens with the floater
+    snapshotScopeChanged(this);   // "Self + Selected": the picker opens with the floater
 }
 
 void LLFloaterSnapshot::onExtendFloater()
@@ -1229,6 +1281,68 @@ void LLFloaterSnapshot::on360Snapshot()
     closeFloater();
 }
 
+bool LLFloaterSnapshot::startTimedAction(LLPanelSnapshot* panel, const LLSD& action)
+{
+    const S32 seconds = mSnapshotTimerCombo->getValue().asInteger();
+    LLSnapshotLivePreview* preview = getPreviewView();
+    if (!preview || (seconds != 3 && seconds != 5 && seconds != 10)) return false;
+    cancelSelfTimer();
+    mTimedPanel = panel->getHandle();
+    mTimedAction = action;
+    impl->setStatus(ImplBase::STATUS_READY);
+    preview->startSelfTimer(seconds);
+    impl->updateLayout(this);
+    updateSelfTimerControls();
+    return true;
+}
+
+void LLFloaterSnapshot::onClickTimerSnapshot()
+{
+    cancelSelfTimer();
+    ImplBase::onClickNewSnapshot(this);
+}
+
+void LLFloaterSnapshot::cancelSelfTimer()
+{
+    mTimedAction = LLSD();
+    mTimedPanel = LLHandle<LLPanel>();
+    if (LLSnapshotLivePreview* previewp = getPreviewView())
+    {
+        if (previewp->isSelfTimerActive())
+        {
+            previewp->cancelSelfTimer();
+            updateSelfTimerControls();
+            if (isInVisibleChain() && !isMinimized()) impl->updateLayout(this);
+        }
+    }
+}
+
+void LLFloaterSnapshot::updateSelfTimerControls(bool force)
+{
+    if (!mCancelTimerButton) return;
+    const LLSnapshotLivePreview* previewp = getPreviewView();
+    const S32 seconds = previewp ? previewp->getSelfTimerRemaining() : 0;
+    if (!force && seconds == mCountdownSeconds) return;
+    mCountdownSeconds = seconds;
+    mCountdownText = seconds > 0 ? llformat("%d", seconds) : std::string();
+    LLStringUtil::format_map_t args;
+    args["[SECONDS]"] = mCountdownText;
+    mCancelTimerButton->setLabel(getString(seconds > 0 ? "cancel_countdown" : "cancel_timer", args));
+    mCancelTimerButton->setEnabled(seconds > 0 && impl->getStatus() != ImplBase::STATUS_WORKING);
+}
+
+void LLFloaterSnapshot::onClose(bool app_quitting)
+{
+    cancelSelfTimer();
+    LLFloaterSnapshotBase::onClose(app_quitting);
+}
+
+void LLFloaterSnapshot::setMinimized(bool minimized)
+{
+    if (minimized) cancelSelfTimer();
+    LLFloater::setMinimized(minimized);
+}
+
 //virtual
 void LLFloaterSnapshotBase::onClose(bool app_quitting)
 {
@@ -1238,6 +1352,7 @@ void LLFloaterSnapshotBase::onClose(bool app_quitting)
     LLSnapshotLivePreview* previewp = getPreviewView();
     if (previewp)
     {
+        previewp->cancelSelfTimer();
         previewp->setAllowFullScreenPreview(false);
         previewp->setVisible(false);
         previewp->setEnabled(false);
@@ -1276,6 +1391,10 @@ S32 LLFloaterSnapshotBase::notify(const LLSD& info)
 
     if (info.has("snapshot-updating"))
     {
+        if (impl->getStatus() == ImplBase::STATUS_FINISHED)
+        {
+            impl->setStatus(ImplBase::STATUS_READY);
+        }
         // Disable the send/post/save buttons until snapshot is ready.
         impl->updateControls(this);
         return 1;
@@ -1303,6 +1422,19 @@ S32 LLFloaterSnapshotBase::notify(const LLSD& info)
 // virtual
 S32 LLFloaterSnapshot::notify(const LLSD& info)
 {
+    if (info.has("self-timer-captured"))
+    {
+        LLSD action = mTimedAction;
+        LLPanelSnapshot* panel = dynamic_cast<LLPanelSnapshot*>(mTimedPanel.get());
+        mTimedAction = LLSD();
+        mTimedPanel = LLHandle<LLPanel>();
+        if (info["self-timer-captured"].asBoolean() && panel && isInVisibleChain()
+            && isAvailable() && panel->isAvailable() && !isMinimized() && impl->getActivePanel(this) == panel)
+        {
+            panel->performTimedAction(action);
+        }
+        return 1;
+    }
     bool res = LLFloaterSnapshotBase::notify(info);
     if (res)
         return res;
@@ -1379,6 +1511,13 @@ void LLFloaterSnapshot::update()
     LLFloaterSnapshot* inst = findInstance();
     if (inst != NULL)
     {
+        LLSnapshotLivePreview* previewp = inst->getPreviewView();
+        if (previewp && previewp->isSelfTimerActive()
+            && (!inst->isAvailable() || inst->isMinimized()
+                || !gPipeline.hasRenderDebugFeatureMask(LLPipeline::RENDER_DEBUG_FEATURE_UI)))
+        {
+            inst->cancelSelfTimer();
+        }
         inst->impl->updateLivePreview();
     }
     else
@@ -1434,6 +1573,7 @@ void LLFloaterSnapshotBase::postSave()
 // virtual
 void LLFloaterSnapshotBase::postPanelSwitch()
 {
+    if (auto* snapshot = dynamic_cast<LLFloaterSnapshot*>(this)) snapshot->cancelSelfTimer();
     impl->updateControls(this);
 
     // Remove the success/failure indicator whenever user presses a snapshot option button.
@@ -1501,6 +1641,21 @@ LLSnapshotFloaterView::LLSnapshotFloaterView (const Params& p) : LLFloaterView (
 
 LLSnapshotFloaterView::~LLSnapshotFloaterView()
 {
+}
+
+bool LLSnapshotFloaterView::drawChildRetained(LLView* childp)
+{
+    if (LLFloaterSnapshot* snapshot = dynamic_cast<LLFloaterSnapshot*>(childp))
+    {
+        LLSnapshotLivePreview* previewp = snapshot->getPreviewView();
+        if (previewp && (previewp->isSelfTimerActive() || previewp->isSnapshotActive()
+            || previewp->getThumbnailLock()))
+        {
+            snapshot->onRetainedDirty();
+            return false;
+        }
+    }
+    return LLFloaterView::drawChildRetained(childp);
 }
 
 // virtual

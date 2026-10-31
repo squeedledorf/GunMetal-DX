@@ -513,67 +513,90 @@ void LLPresetsManager::cameraSettingChanged()
     }
 }
 
+// The settings a graphics preferences XUI file binds (control_name), including those of
+// any panel it pulls in from a file of its own.
+static void collect_xui_control_names(const std::string& xui_file, std::set<std::string>& names)
+{
+    LLXMLNodePtr root;
+    if (!LLUICtrlFactory::getLayeredXMLNode(xui_file, root) || root.isNull())
+    {
+        LL_WARNS("Presets") << "Cannot read " << xui_file << "; graphics presets will miss the settings it binds"
+                            << LL_ENDL;
+        return;
+    }
+    std::vector<LLXMLNodePtr> stack = { root };
+    while (!stack.empty())
+    {
+        LLXMLNodePtr node = stack.back();
+        stack.pop_back();
+
+        std::string value;
+        if (node->getAttributeString("control_name", value) && !value.empty())
+        {
+            names.insert(value);
+        }
+        if (node->getAttributeString("filename", value) && !value.empty() && value != xui_file)
+        {
+            collect_xui_control_names(value, names);
+        }
+        for (LLXMLNodePtr child = node->getFirstChild(); child.notNull(); child = child->getNextSibling())
+        {
+            stack.push_back(child);
+        }
+    }
+}
+
 void LLPresetsManager::getGraphicsControlNames(std::vector<std::string>& names)
 {
-    const std::vector<std::string> camera_controls = {
-        // From panel_preferences_graphics.xml
-        "RenderAnisotropicLevel",
-        "RenderAvatarLODFactor",
-        "RenderAvatarMaxComplexity",
-        "RenderAvatarMaxNonImpostors",
-        "RenderAvatarPhysicsLODFactor",
-        "RenderDeferredSSAO",
-        "RenderDepthOfField",
-        "RenderFSAASamples",
-        "RenderFSAAType",
-        "RenderFarClip",
-        "RenderFlexTimeFactor",
-        "RenderLocalLightCount",
-        "RenderMaxPartCount",
-        "RenderQualityPerformance",
-        "RenderShadowDetail",
-        "RenderTerrainLODFactor",
-        "RenderExposure",
-        "SlipstreamRenderTonemapType",
-        "RenderTransparentWater",
-        "RenderTreeLODFactor",
-        "RenderVolumeLODFactor",
-        "RenderScreenSpaceReflections",
-        "RenderReflectionProbeDetail",
-        "RenderReflectionProbeLevel",   // (was missing its comma: glued to the next name)
-        "RenderCASSharpness",
-        "RenderVKUpscaler",
-        "RenderVKDlssRayReconstruction",   // #962 (with the DLSS upscaler modes)
-        // Vulkan shadows / scene (Graphics > Advanced; the shadow ones also follow the
-        // quality slider via featuretable)
-        "RenderVKSunShadows",
-        "RenderVKProjectorShadows",
-        "RenderVKShadowResolution",
-        "RenderVKShadowUpdate",
-        "RenderVKProjShadowMax",
-        "RenderVKRTShadowSoftness",
-        "RenderVKTranslucentShadows",
-        "RenderVKRTShadowMaskScale",
-        "RenderAvatarShadowDetail",
-        "SlipstreamRenderShadowFilterQuality",
-        "SlipstreamRenderTerrainHexTiling",
-        "RenderVKTerrainSmooth",          // #211 (Graphics > Advanced, featuretable)
-        "RenderVKTerrainSmoothDetail",
-        "RenderTerrainPBRDetail",         // #151 (Graphics > Advanced, featuretable)
-        "RenderHeroProbeDistance",        // #151 (Graphics > Advanced, featuretable)
-        "RenderReflectionsEnabled",
-        "RenderReflectionProbeResolution",
-        // #228: frame pacing (Graphics > Advanced, the VSync / FPS limit row), so a
-        // preset can carry e.g. a low-power idle cap. Read live by the main-loop
-        // limiter (LLCachedControl) and the VSync change listener, so a preset load
-        // takes effect at once. Preset files saved before this have no such keys and
-        // loadFromFile only writes keys present in the file, so they leave the
-        // current limits untouched.
-        "RenderVSyncEnable",
-        "RenderFPSLimit",
-        "BackgroundFPSLimit",
-    };
-    names = camera_controls;
+    // #1067: a graphics preset carries every setting the graphics preferences bind (the
+    // Graphics tab and its advanced tabs), read from their XUI so that a
+    // control added there is saved, loaded and change-tracked with no second list to keep
+    // in step. Preset files saved before a setting joined have no key for it, and
+    // loadFromFile only writes keys present in the file, so they leave it as it is.
+    //
+    // Static: the XUI cannot change while the viewer runs, and the manager is first used
+    // once the UI is up, so the files are readable by then.
+    static const std::vector<std::string> graphics_controls = []()
+    {
+        std::set<std::string> controls = {
+            // Set in code: the IndirectMax* sliders map onto these non-linearly.
+            "RenderAvatarMaxComplexity",
+            "RenderAvatarMaxNonImpostors",
+            // No longer in the graphics preferences (Photo Studio > Scene); presets kept them.
+            "RenderAvatarShadowDetail",
+            "SlipstreamRenderShadowFilterQuality",
+        };
+        collect_xui_control_names("panel_preferences_graphics1.xml", controls);
+        // <GMDX> the advanced graphics settings are Preferences > Graphics' own tabs (no floater)
+        collect_xui_control_names("panel_preferences_graphics_advanced.xml", controls);
+
+        // Bound there, but deliberately not part of a preset.
+        const char* const left_out[] = {
+            // The machine itself rather than a quality choice: a preset load would switch
+            // them under the user. Budget and capability choices stay in (texture memory,
+            // the video memory cap, ray tracing, the upscaler): Auto adapts to the machine,
+            // and a choice it cannot run falls back.
+            "RenderVKDeviceSelect",   // which graphics card, by device id (restart)
+            "LinuxDisplayBackend",    // Wayland / X11 (restart)
+            "RenderHiDPI",            // macOS Retina support (restart)
+            "FullScreenMode",         // how fullscreen takes the monitor (re-applied live)
+            // Non-persisted mirrors of RenderAvatarMaxComplexity / RenderAvatarMaxNonImpostors
+            // (above), rewritten whenever the floaters refresh: tracking them would clear
+            // the active preset with nothing changed.
+            "IndirectMaxComplexity",
+            "IndirectMaxNonImpostors",
+            "RenderVKPhysicalSky",    // <GMDX> an A/B toggle that is not saved (back on at restart): a preset would keep it off
+            "WeatherMasterEnabled",   // <GMDX> weather on / off (also the Weather floater's): not a quality choice
+        };
+        for (const char* name : left_out)
+        {
+            controls.erase(name);
+        }
+        // (Nor the Graphics tab's Effects row, SLFxEnabled / SLFxActivePreset, which is not
+        // bound: ReShade FX keeps its own presets and toggle key, and applies outside Cancel.)
+        return std::vector<std::string>(controls.begin(), controls.end());
+    }();
+    names = graphics_controls;
 }
 
 void LLPresetsManager::getCameraControlNames(std::vector<std::string>& names)

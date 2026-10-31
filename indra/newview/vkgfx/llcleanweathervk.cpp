@@ -13,6 +13,7 @@
 #include "llagentcamera.h"
 #include "lldir.h"              // #783 the snow dump's file (logs/)
 #include "llerror.h"
+#include "llformat.h"           // #1037 the bury hold's log
 #include "llviewercontrol.h"
 #include "llviewerobjectlist.h"
 #include "llworld.h"            // the ground under the camera (the maps' centring)
@@ -28,6 +29,15 @@
 #include <fstream>
 #include <limits>
 #include <sstream>
+#include <vector>
+
+// #1037: the ingest's change spheres (llcleaningest.cpp: agent-space x, y, z, r; collected while
+// the weather runs -- gVKProjShadowsUsed --, cleared by the renderer's invalidateProjShadows after
+// prepare() read them), their producer tags and the overflow flag.
+extern std::vector<float> gVKChangedSpheres;
+extern std::vector<float> gVKDynSpheres;   // (RenderVKWeatherOcclDebug's log: the moving objects out of the map)
+extern std::vector<uint8_t> gVKChangedSphereTags;
+extern bool gVKChangedOverflow;
 
 namespace
 {
@@ -40,13 +50,22 @@ constexpr float  kOcclExtentPerRadius = 4.f;
 constexpr double kOcclSnapZ = 32.0;
 constexpr float  kOcclAbove = 128.f;
 constexpr float  kOcclBelow = 64.f;
+// #1037: a cascade whose box the ingest's change spheres touched re-renders this many recordings
+// after its last render (sooner than RenderVKWeatherOcclusionInterval; a login's stream of
+// arriving objects re-renders each cascade at most this often, still one map a recording), and
+// the snow grid's bury hold lasts until this many more near maps were published after the
+// arrival (the first may have been planned before the new instance reached the GPU).
+constexpr uint32_t kOcclChangeMinAge = 10;
+constexpr uint64_t kBuryHoldMaps = 3;
 // A surface / drop within this of the map's top surface counts as that surface (texel
-// footprint on slopes, the casters' depth bias). The near cascade's texels are ~12x finer
-// and its readers correct for the receiver's slope (clean_weather_surface.glsl): a few
-// texels, at least kNearBiasMin.
+// footprint on slopes, the casters' depth bias). The near cascade's texels are ~12x finer,
+// it holds the real roof height (no depth bias since its own pipelines) and its readers correct
+// for the receiver's slope (clean_weather_surface.glsl): one texel, at least kNearBiasMin. (#1145:
+// 3 texels -- 14 cm at a 48 m cascade -- let rafters and boards under a thin roof read the sky,
+// and their rivulets ran inside.)
 constexpr float  kCoverBias = 0.4f;
-constexpr float  kNearBiasTexels = 3.f;
-constexpr float  kNearBiasMin = 0.08f;
+constexpr float  kNearBiasTexels = 1.f;
+constexpr float  kNearBiasMin = 0.02f;
 // The surfaces' PCF kernel radius (m; clean_weather_surface.glsl): at least this, at least
 // kPcfTexels of the cascade read -- the drip line is soft at both resolutions.
 constexpr float  kPcfRadius = 0.12f;
@@ -143,6 +162,12 @@ bool wxInvert4(const float* m, float* out)
 constexpr float kSnowDrift = 0.9f;
 constexpr float kMaxTiltDeg = 60.f;
 constexpr float kTiltStepDeg = 2.5f;
+// #1145 the near cascade's reach under a wind tilt (planOcclusion): the columns from the ground under
+// the camera up to kNearAbove over it, kNearMargin each side, the cascade grown to at most
+// kNearExtentMax to hold them.
+constexpr double kNearAbove = 4.0;
+constexpr double kNearMargin = 10.0;
+constexpr float  kNearExtentMax = 64.f;
 
 // M2 LIGHTNING (RenderVKWeatherLightning): the flash's fill radiance at full flash (linear
 // scene units, cool white), its falloff with the strike's distance (full within kFlashNear,
@@ -173,7 +198,8 @@ constexpr float    kSnowFalling = 0.02f;
 // (settle / slide): the share of the excess over the angle of repose an avalanche moves per
 // step (x 0.5 per neighbour) -- not frame-time scaled (an avalanche outruns the wind's supply).
 enum : uint32_t { kFDepth = 1u, kFDrift = 2u, kFSlide = 4u, kFSettle = 8u, kFFoot = 16u, kFAvatar = 32u, kFMover = 64u, kFLimb = 128u,
-                  kFBody = 256u };   // (#783 BODY CONTACT)
+                  kFBody = 256u,      // (#783 BODY CONTACT)
+                  kFNoBury = 512u };  // (#1037 the bury hold: a rising column top buries no snow)
 constexpr float    kDriftWindMin = 3.f;
 constexpr float    kDriftRate = 0.004f;
 constexpr float    kDriftCap = 3.f;
@@ -961,7 +987,7 @@ bool LLCleanWeatherVK::ensureBuffers(VkCommandBuffer cmd, uint32_t cap)
             p = mCtx->createBuffer(sizeof(Params), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
         for (GpuBuffer& l : mListen)
-            l = mCtx->createBuffer(16u, ssbo, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            l = mCtx->createBuffer(16u + 48u, ssbo, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);   // (+ the roof probe)
         mSplashes = mCtx->createBuffer((VkDeviceSize)kSplashRing * 16u, ssbo | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
         // (M4: its spare words carry the run-off spawn's sums: cleared below)
@@ -1054,8 +1080,80 @@ void LLCleanWeatherVK::writeSets()
     writeSnowSets();     // (#783: the snow set names the shelter's raster target -- re-created with the atlas)
 }
 
+// #1037 SCENE CHANGES: the ingest's change spheres since the renderer last consumed them. A
+// cascade whose box one touches is CHANGED (planOcclusion: due kOcclChangeMinAge recordings after
+// its last render instead of the interval). A sphere of new / released / re-shaped static
+// geometry (the producers below) inside the NEAR map's box also holds the snow grid's burial
+// (mBuryHoldGen) until the maps that may first show it were consumed: an object streaming in
+// after the furniture under it (a cold object cache, a teleport into a cabin) is a roof the
+// world always had, not a cover set down over lying snow -- the furniture must not keep the
+// open-sky coat it was given before the roof loaded. A mover settling (tag 5) and pose changes
+// (1 / 2) only mark the maps: a table set down on the lawn still buries the lawn's snow.
+void LLCleanWeatherVK::noteSceneChanges()
+{
+    const size_t ns = gVKChangedSpheres.size() / 4;
+    const bool overflow = gVKChangedOverflow;
+    if (!ns && !overflow) return;
+    const bool tagged = gVKChangedSphereTags.size() == ns;
+    // Producer tags (llcleaningest.cpp): 0 changed queue, 1 moved (pose), 2 seat linkset,
+    // 3 vegetation, 4 glTF re-ingest, 5 mover class start / settle, 6 registration.
+    auto content = [](uint8_t tag) { return tag == 0 || tag == 3 || tag == 4 || tag == 6; };
+    // A sphere against a published cascade's box (its sheared columns: the sphere's centre
+    // projected onto the top plane, widened by the shear over its radius).
+    auto touches = [](const OcclMap& m, const float* c)
+    {
+        if (m.pubIdx < 0) return false;   // (due anyway)
+        const float* F = m.pub;   // x0, y0, extent, top, span, texel, sx, sy
+        const float r = c[3];
+        if (c[2] - r > F[3] || c[2] + r < F[3] - F[4]) return false;
+        const float u = c[0] - (F[3] - c[2]) * F[6], v = c[1] - (F[3] - c[2]) * F[7];
+        const float rr = r * (1.f + std::sqrt(F[6] * F[6] + F[7] * F[7]));
+        return u + rr >= F[0] && u - rr <= F[0] + F[2] && v + rr >= F[1] && v - rr <= F[1] + F[2];
+    };
+    bool hold = overflow;
+    uint32_t nChanged = 0, nArrived = 0;
+    if (overflow)
+        for (OcclMap& m : mMap) m.changed = true;
+    else
+        for (size_t i = 0; i < ns; ++i)
+        {
+            const float* c = &gVKChangedSpheres[i * 4];
+            if (!std::isfinite(c[0]) || !std::isfinite(c[1]) || !std::isfinite(c[2]) || !(c[3] >= 0.f)) continue;
+            bool any = false;
+            for (OcclMap& m : mMap)
+                if (touches(m, c)) { m.changed = true; any = true; }
+            if (!any) continue;
+            ++nChanged;
+            if (content(tagged ? gVKChangedSphereTags[i] : (uint8_t)0) && touches(mMap[OCCL_NEAR], c))
+            {
+                hold = true;
+                ++nArrived;
+            }
+        }
+    if (hold && mMap[OCCL_NEAR].img[0].image)
+    {
+        // (the log: a hold that starts, at most every ~10 s -- a login's stream extends one hold)
+        static double s_nextLog = 0.0;
+        static uint32_t s_starts = 0;
+        if (mNearGen >= mBuryHoldGen) ++s_starts;
+        if (s_starts && mNow >= s_nextLog)
+        {
+            LL_INFOS("VKWeather") << "weather: new static geometry in the near roof map's box ("
+                                  << (overflow ? std::string("the ingest's change list overflowed")
+                                               : llformat("%u of %u change spheres", nArrived, nChanged))
+                                  << ") -- the snow grid buries no snow under a rising top until "
+                                  << kBuryHoldMaps << " more near maps are published (#1037; " << s_starts
+                                  << " hold(s) since the last line)" << LL_ENDL;
+            s_starts = 0;
+            s_nextLog = mNow + 10.0;
+        }
+        mBuryHoldGen = std::max(mBuryHoldGen, mNearGen + kBuryHoldMaps);
+    }
+}
+
 // The occlusion maps' schedule: a cascade is due when the camera crossed into another of its
-// snap cells, after a camera cut, when it has no map yet, or every
+// snap cells, after a camera cut, when it has no map yet, #1037 kOcclChangeMinAge recordings
+// after static casters changed in its box (noteSceneChanges), or every
 // RenderVKWeatherOcclusionInterval recordings. At most ONE renders per recording (the per-frame
 // cost stays one projector-tile-sized pass): both due -> they take turns, the other stays due
 // (its cell / age untouched) and renders next recording. The pending frame is latched here and
@@ -1078,7 +1176,7 @@ void LLCleanWeatherVK::planOcclusion(const Frame& f, float radius, const float t
     const SLWeather::State& wst = SLWeather::instance().state();
     const bool snowy = wst.snow > SLWeather::kEpsilon || wst.snowCover > SLWeather::kEpsilon;
     const float ringExt = (snowy && ringWanted()) ? ringExtent() * kRingCoarseMargin : 0.f;
-    const float extent[OCCL_COUNT] = {llclamp(std::max(kOcclExtentPerRadius * radius, ringExt), 64.f, 256.f),
+    float extent[OCCL_COUNT] = {llclamp(std::max(kOcclExtentPerRadius * radius, ringExt), 64.f, 256.f),
                                       llclamp((F32)s_nearExt, 8.f, 64.f)};
     const U32 every = std::max<U32>(s_every, 1u);
     const float groundRef = groundUnderCamera(f);
@@ -1100,21 +1198,39 @@ void LLCleanWeatherVK::planOcclusion(const Frame& f, float radius, const float t
         // The map's texel grid is horizontal on its top plane; the camera's own column meets
         // that plane UPWIND of it by the slant (top - camera height) x s: the cascade is
         // centred (and snapped) there, so the near field around the camera stays covered.
-        const double snap = (double)extent[c] / 8.0;
         double* cell = cells[c];
         cell[2] = std::floor((double)f.camTime[2] / kOcclSnapZ + 0.5) * kOcclSnapZ;
-        // The column through the GROUND under the camera (#783): centred on the camera's own
-        // height, a raised camera under a wind tilt saw the ground below it (cam.z - ground) x |s|
-        // off-centre -- past the near map's half extent the ground around the camera fell to
-        // the coarse map / the snow's outer ring, which moved with the camera height and angle.
-        const double slant = cell[2] + (double)kOcclAbove - (double)groundRef;
-        cell[0] = std::floor(((double)f.camTime[0] - slant * s[0]) / snap + 0.5) * snap;
-        cell[1] = std::floor(((double)f.camTime[1] - slant * s[1]) / snap + 0.5) * snap;
+        const double top = cell[2] + (double)kOcclAbove;
+        // The columns this cascade must hold run from the GROUND under the camera (#783: a raised
+        // camera's view of the ground) to kNearAbove over the camera (its room up to the roof):
+        // under a wind tilt they lie along a segment (zHi - zLo) x |s| long on the top plane. The
+        // near cascade grows (8 m steps, to kNearExtentMax) so the segment plus kNearMargin each side
+        // fits, centred on it; past that the camera's end keeps kNearMargin and the ground's falls
+        // out. Centred on the ground's column alone, an attic under a 59 degree rain lay past the
+        // near map's blend band: its ridge read the coarse map (0.375 m texels, 0.4 m cover bias),
+        // rain and wetness through the roof (#1145).
+        const double zLo = (double)groundRef, zHi = (double)f.camTime[2] + kNearAbove;
+        const double hiX = (double)f.camTime[0] - (top - zHi) * s[0];
+        const double hiY = (double)f.camTime[1] - (top - zHi) * s[1];
+        const double dx = -(zHi - zLo) * s[0], dy = -(zHi - zLo) * s[1];   // the high end's column -> the ground's
+        const double d = std::sqrt(dx * dx + dy * dy);
+        if (c == OCCL_NEAR)
+        {
+            const double want = std::ceil((d + 2.0 * kNearMargin) / 8.0) * 8.0;
+            extent[c] = (float)std::clamp(want, (double)extent[c], (double)std::max(extent[c], kNearExtentMax));
+        }
+        const double snap = (double)extent[c] / 8.0;
+        const double maxShift = std::max(0.0, 0.5 * (double)extent[c] - kNearMargin - 0.5 * snap);
+        const double k = d > 1.0e-6 ? std::min(0.5 * d, maxShift) / d : 0.0;
+        cell[0] = std::floor((hiX + k * dx) / snap + 0.5) * snap;
+        cell[1] = std::floor((hiY + k * dy) / snap + 0.5) * snap;
         const bool moved = cell[0] != m.cell[0] || cell[1] != m.cell[1] || cell[2] != m.cell[2];
         if (!f.offscreen) ++m.age;
         const bool stale = m.age >= every;
         if (f.cameraCut) m.forced = true;   // (kept until this cascade's render: they alternate)
-        due[c] = m.pubIdx < 0 || moved || m.forced || (tiltStep && m.haveTilt) || (stale && !f.offscreen);
+        // #1037: static casters changed in its box (noteSceneChanges) -- sooner than the interval
+        const bool changed = m.changed && m.age >= std::min(kOcclChangeMinAge, every);
+        due[c] = m.pubIdx < 0 || moved || m.forced || (tiltStep && m.haveTilt) || ((stale || changed) && !f.offscreen);
     }
     int pick = -1;
     if (due[OCCL_COARSE] && due[OCCL_NEAR])
@@ -1177,6 +1293,7 @@ void LLCleanWeatherVK::occlusionRendered()
     m.readyIdx = (int)m.target;
     m.age = 0;
     m.forced = false;
+    m.changed = false;
     mPendMap = -1;
 }
 
@@ -1223,6 +1340,7 @@ bool LLCleanWeatherVK::prepare(VkCommandBuffer cmd, const Frame& f)
             uint32_t w[4];
             std::memcpy(w, mListen[mSlot].mapped, sizeof(w));
             if (!f.offscreen) readRunoffWords(w);
+            std::memcpy(mRoofProbe, static_cast<const char*>(mListen[mSlot].mapped) + 16, sizeof(mRoofProbe));
         }
         mListenWritten[mSlot] = false;
         // M5: the mover stamp list's head this slot's last snow step copied back (its stats).
@@ -1257,6 +1375,9 @@ bool LLCleanWeatherVK::prepare(VkCommandBuffer cmd, const Frame& f)
             m.readyIdx = -1;
             if (&m == &mMap[OCCL_NEAR]) ++mNearGen;   // (M4: the run-off's flow follows it)
         }
+    // #1037: what changed in the maps' boxes since the last recording (after the publish: the
+    // bury hold counts the near maps published from here on)
+    noteSceneChanges();
     const float radius = llclamp((F32)s_radius, 8.f, 64.f);
     {
         // M2 TILTED MAP (RenderVKWeatherTiltedMap): the shear of the precipitation's mean fall
@@ -1384,6 +1505,7 @@ bool LLCleanWeatherVK::prepare(VkCommandBuffer cmd, const Frame& f)
         P.occlN2[0] = nearMap.pub[3]; P.occlN2[1] = nearMap.pub[4]; P.occlN2[2] = mWx[4][2];
         P.tilt[2] = nearMap.pub[6]; P.tilt[3] = nearMap.pub[7];
     }
+    P.occlN2[3] = std::max(f.occlBiasSlope, 0.f);   // #1145: both maps' casters' slope bias (the streaks' roof test)
     {
         // M2 SPLASHES (RenderVKWeatherSplashes): rain hits within kSplashRadius of the camera
         // spawn into the ring (live recordings only: dt is 0 in a snapshot).
@@ -1535,6 +1657,56 @@ bool LLCleanWeatherVK::prepare(VkCommandBuffer cmd, const Frame& f)
         // surface (ssr.weather[14].w bit 32; clean_weather_surface.glsl weatherSnowDepthDebug).
         static LLCachedControl<bool> s_depthDbg(gSavedSettings, "RenderVKWeatherSnowDepthDebug", false);
         if (s_depthDbg && !f.offscreen) mWx[14][3] = (float)((uint32_t)(mWx[14][3] + 0.5f) | 32u);
+    }
+    {
+        // RenderVKWeatherOcclDebug (ssr.weather[14].w bit 256): the lit FS paints every static
+        // surface by what the roof map says about its column (clean_weather_surface.glsl
+        // weatherOcclDebug). The log line says what is out of the map (moving objects) and which
+        // maps the surfaces and the streaks read.
+        static LLCachedControl<bool> s_occlDbg(gSavedSettings, "RenderVKWeatherOcclDebug", false);
+        if (s_occlDbg && !f.offscreen)
+        {
+            mWx[14][3] = (float)((uint32_t)(mWx[14][3] + 0.5f) | 256u);
+            P.veil2[1] = 1.f;   // the streaks coloured by their roof test (clean_weather.vert v_dbg)
+            static double s_nextOcclLog = 0.0;
+            if (mNow >= s_nextOcclLog)
+            {
+                s_nextOcclLog = mNow + 5.0;
+                // The moving objects (never in the map) around the camera: gVKDynSpheres holds
+                // their agent-space spheres (x, y, z, r) -- the same frame as camTime.
+                uint32_t nDyn = 0, nDynNear = 0;
+                for (size_t i = 0; i + 3 < gVKDynSpheres.size(); i += 4)
+                {
+                    ++nDyn;
+                    const float dx = gVKDynSpheres[i] - f.camTime[0], dy = gVKDynSpheres[i + 1] - f.camTime[1];
+                    if (dx * dx + dy * dy < 24.f * 24.f) ++nDynNear;
+                }
+                const OcclMap& cm = mMap[OCCL_COARSE];
+                const OcclMap& nm = mMap[OCCL_NEAR];
+                // (the camera's column offset in the near map, as the streak test reads it: past
+                // half the extent the near map does not cover the camera's surroundings)
+                float camOffN = -1.f;
+                if (nm.pubIdx >= 0)
+                {
+                    const float ux = f.camTime[0] - (nm.pub[3] - f.camTime[2]) * nm.pub[6] - (nm.pub[0] + 0.5f * nm.pub[2]);
+                    const float uy = f.camTime[1] - (nm.pub[3] - f.camTime[2]) * nm.pub[7] - (nm.pub[1] + 0.5f * nm.pub[2]);
+                    camOffN = std::sqrt(ux * ux + uy * uy);
+                }
+                LL_INFOS("VKWeather") << "weather roof map debug: moving objects out of the map " << nDyn << " (" << nDynNear
+                                      << " within 24 m of the camera); coarse " << (cm.pubIdx >= 0 ? "published" : "none")
+                                      << " texel " << (cm.pubIdx >= 0 ? cm.pub[5] : 0.f) << " m, near "
+                                      << (nm.pubIdx >= 0 ? "published" : "none") << " texel " << (nm.pubIdx >= 0 ? nm.pub[5] : 0.f)
+                                      << " m extent " << (nm.pubIdx >= 0 ? nm.pub[2] : 0.f) << " m, camera column "
+                                      << camOffN << " m from the near map's centre (covered while under half the extent), shear "
+                                      << (nm.pubIdx >= 0 ? nm.pub[6] : 0.f) << ", " << (nm.pubIdx >= 0 ? nm.pub[7] : 0.f)
+                                      << ", slope bias put back " << f.occlBiasSlope << LL_ENDL;
+                std::ostringstream pr;
+                for (int k = 0; k < 6; ++k)
+                    pr << " +" << 0.5f * (float)k << "m:" << mRoofProbe[2 * k] << (mRoofProbe[2 * k + 1] > 1.5f ? "c" : "n");
+                LL_INFOS("VKWeather") << "weather roof probe (the streaks' roof over the camera, m over the eye; n near / c coarse"
+                                      << " map, -99 none):" << pr.str() << LL_ENDL;
+            }
+        }
     }
     {
         // #970 WEATHER AT RAY-TRACED HITS (clean_rt_weather.glsl; the RT reflections, the GI trace and
@@ -2110,6 +2282,8 @@ void LLCleanWeatherVK::planSnow(VkCommandBuffer cmd, const Frame& f)
     // list carries their boxes; the shelter's raster target is the snow set's binding 8).
     mBodyDue = mLimbDue && s_body && mShH.image && mShH.view && mShConfig != 3u;   // (3: kShConfigNone)
     if (mBodyDue) feat |= kFBody;
+    // #1037 BURY HOLD (noteSceneChanges): new static geometry is still reaching the near map
+    if (mNearGen < mBuryHoldGen) feat |= kFNoBury;
     // #783 SHARED SNOW DEPTH: the state's own rates (the settings x the intensity, or a parcel tag's
     // rate= -- exactly, so the grid keeps step with the shared level; a held tag depth melts nothing).
     float depthBuild = mDt * std::max(st.snowDepthBuild, 0.f);
@@ -3188,6 +3362,7 @@ void LLCleanWeatherVK::destroy(VkDevice dev)
     mRunoffDsl = VK_NULL_HANDLE;
     mRunoffRetryAt = 0.0;
     mNearGen = 0;
+    mBuryHoldGen = 0;   // #1037
     for (VkPipeline* p : {&mCoverPipe, &mInstPipe, &mAvPipe, &mStampPipe, &mBermPipe, &mMeshBuildPipe, &mRingPipe})
         if (*p) { vkDestroyPipeline(dev, *p, nullptr); *p = VK_NULL_HANDLE; }
     for (VkPipeline* p : {&mMeshGbufPipe, &mMeshShadowPipe, &mMeshFwdPipe[0], &mMeshFwdPipe[1],

@@ -362,9 +362,6 @@ public:
 
     bool meshUploadEnabled() const;
 
-    // does the simulator accept GameControlData messages?
-    bool gameControlEnabled() const;
-
     bool bakesOnMeshEnabled() const;
 
     // has region received its simulator features list? Requires an additional query after caps received.
@@ -380,6 +377,8 @@ public:
     bool dynamicPathfindingEnabled() const;
 
     bool avatarHoverHeightEnabled() const;
+
+    bool gameControlEnabled() const;
 
     typedef enum
     {

@@ -459,6 +459,7 @@ public:
     static bool     isPartOfWord(T c) { return (c == (T)'_') || LLStringOps::isAlnum(c); }
 
 
+    // Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4; Linden Lab (viewer PR #6202)
     // Join non-empty strings from values using value itself and delimiter
     template<class C>
     static std::string join(const C& values, T delimiter = ',')
@@ -517,6 +518,7 @@ public:
         }
         return result;
     }
+
 
 #ifdef _DEBUG
     LL_COMMON_API static void       testHarness();

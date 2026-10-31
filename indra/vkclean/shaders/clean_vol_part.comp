@@ -51,6 +51,7 @@
 // the fog's own set: 5 the particle pool (read-write: glow.z), 6 the particle volume buffer.
 layout(local_size_x = 64) in;
 
+#define CLEAN_MEDIUM_PASS
 #include "clean_frame_info.glsl"
 #include "clean_atmos_common.glsl"
 #include "clean_vol_common.glsl"
@@ -77,13 +78,13 @@ const uint F_EMISSIVE = 0x100u;
 // The bounding sphere's screen tile rectangle (inclusive) on the grid; false = off-grid.
 bool pvTileRect(vec3 rel, float R, out uvec4 rect)
 {
-    const vec2 dims = ssr.vol_grid.xy;
+    const vec2 dims = volGrid().xy;
     vec2 lo = vec2(1e9), hi = vec2(-1e9);
     bool full = false;
     for (int k = 0; k < 8; ++k)
     {
         const vec3 s = vec3((k & 1) != 0 ? 1.0 : -1.0, (k & 2) != 0 ? 1.0 : -1.0, (k & 4) != 0 ? 1.0 : -1.0);
-        const vec4 cl = ssr.vol_vp * vec4(rel + s * R, 1.0);
+        const vec4 cl = (cmOn() ? ssr.medium_union_vp : volVP()) * vec4(rel + s * R, 1.0);
         if (cl.w <= 1e-3) { full = true; break; }   // straddles the eye plane: every column
         const vec2 ndc = cl.xy / cl.w;
         lo = min(lo, ndc); hi = max(hi, ndc);
@@ -123,7 +124,7 @@ bool pvQualify(uint i, out PVol rec, out float keep, out uint bucket, out uvec4 
     const float minSize = pv.q0.w * ((additive && heuristic) ? 2.0 : 1.0);
     if (!(size >= minSize) || size > 64.0) return false;
 
-    const vec3 rel = p.pos_age.xyz - ssr.vol_eye.xyz;
+    const vec3 rel = p.pos_age.xyz - (cmOn() ? ssr.cam_origin.xyz : volEye().xyz);
     const float dist = length(rel);
     const float vz = dot(rel, pv.q3.xyz);
     const float maxDist = pv.q1.x;
@@ -154,8 +155,16 @@ bool pvQualify(uint i, out PVol rec, out float keep, out uint bucket, out uvec4 
     const float share = max(pv.q1.z, 0.0) * (1.0 - lodT);
     if (share <= 0.0) return false;
     const float vzc = max(vz, 0.0);
-    const float cellXY = pv.q2.w * vzc;
-    const float cellZ = ssr.vol_slice.y * (vzc + ssr.vol_slice.x) / max(ssr.vol_grid.z, 1.0);
+    const float cellXY = pv.q2.w * (pv.q3.w>0.5 ? 1.0 : vzc);
+    float cellZ = volSlice().y * (vzc + volSlice().x) / max(volGrid().z, 1.0);
+    if(cmOn())
+    {
+        const CameraMediumView view=ssr.medium[0];
+        const float factor=pv.q3.w>0.5 ? 1.0 : max(vzc/max(dist,1e-5),1e-5);
+        const float u=cmSlice(vzc,view,factor),du=1.0/view.grid.z;
+        // Full enclosing neighbouring slab, not a center-only depth approximation.
+        cellZ=(cmDepth(min(u+du,1.0),view,factor)-cmDepth(max(u-du,0.0),view,factor))/factor;
+    }
     const float Reff = max(R, 0.5 * max(cellXY, cellZ));
     if (!pvTileRect(rel, Reff, rect)) return false;
     const float mass = scl.x * scl.y * (105.0 / (32.0 * ATMOS_PI)) / (Reff * Reff * Reff);

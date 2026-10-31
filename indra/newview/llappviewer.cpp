@@ -25,6 +25,7 @@
  */
 
 #include "llviewerprecompiledheaders.h"
+#include "fsyspath.h"
 #include "llgpuinfo.h"
 #include "llvkhitch.h"
 #include "llvkbench.h"
@@ -33,6 +34,7 @@
 #include "llgl.h"
 
 #include "llappviewer.h"
+#include "llfloaterpopout.h"
 #include "gmdxcrashreport.h" // <GMDX>
 #include "llcrossingtrace.h"
 #include "llmemdiag.h"               // crash / disconnect / memory evidence (#700)
@@ -43,12 +45,15 @@
 #include "fsareasearch.h"
 #include "fsfloaterposer.h"
 #include "slposeik.h"
-#include "gmdxrezfx.h"   // <GMDX> rez effects: the transporter beam (world overlay)
+#include "gmdxtpfx.h"    // <GMDX> teleport effects: the lightning's light
 #include "llfloaterpathfindingobjects.h"
 #include "llworldclock.h"
+#include "llregionmapcapture.h"      // region map capture (GunMetal-DX port)
+#include "llsnapshotavatars.h"       // snapshot avatar layers (GunMetal-DX port)
+#include "llselectionoutline.h"      // selection styles: LL silhouettes, Classic colours (GunMetal-DX port)
 
 #include "fsradar.h"
-#include "fsrmbscript.h" // <GMDX>
+#include "fsrmbscript.h" // <GMDX> CombatFX right button to scripts
 #include "llthreadaffinity.h"
 #include "llcleandebug.h"   // CLEAN_DEBUG gate for #FrameProf idle-vs-display timing
 
@@ -58,6 +63,9 @@
 #include "lluictrlfactory.h"
 #include "lltexteditor.h"
 #include "llenvironment.h"
+#include "slnightlight.h"   // physical night (the world frame's atmosphere)
+#include "gmdxskysettings.h" // <GMDX> the night's settings (Graphics > Sky)
+#include "gmdxskytune.h"     // <GMDX> the Sky Debugger's knobs
 #include "llerrorcontrol.h"
 #include "lleventtimer.h"
 #include "llfile.h"
@@ -70,7 +78,6 @@
 #include "llagentwearables.h"
 #include "lldirpicker.h"
 #include "llfloaterimcontainer.h"
-#include "llfloaterpreference.h"
 #include "llimprocessing.h"
 #include "llwindow.h"
 #include "llviewerstats.h"
@@ -82,9 +89,6 @@
 #include "llmarketplacenotifications.h"
 #include "llmd5.h"
 #include "llmeshrepository.h"
-#include "llpanelpreferencegamecontrol.h"
-#include "ssfloatergamecontroldebug.h"
-#include "llsetkeybinddialog.h"
 #include "llpumpio.h"
 #include "llmimetypes.h"
 #include "llslurl.h"
@@ -93,6 +97,9 @@
 #include "llurlfloaterdispatchhandler.h"
 #include "llviewerjoystick.h"
 #include "llgamecontrol.h"
+#include "llpanelpreferencegamecontrol.h"
+#include "llsetkeybinddialog.h"
+#include "ssfloatergamecontroldebug.h"
 #include "llcalc.h"
 #include "llconversationlog.h"
 #if LL_WINDOWS
@@ -113,8 +120,10 @@
 #include "vkgfx/vk_pipeline.h"         // #462 vkSetPipelineCompileThreads
 #include "vk_world_shaders_hash.h"  // embedded shader content hash (pipeline-cache build tag; generated at build time)
 #include "llcleancursorpick.h"             // GPU raster cursor pick request (#702)
+#include "sscombatray.h"                   // <SS:Skoomastream> CombatFX OTS / aim rays (aux picks)
+#include "gmdxrezfx.h"                     // <GMDX> CombatFX rez effects (world overlay)
+#include "gmdxcombatlockout.h"              // <GMDX> combat render lockout
 #include "llcleanpartpick.h"               // GPU particle pick request (#481)
-#include "sscombatray.h"                   // <SS:Skoomastream> OTS / aim rays (aux picks)
 #include "llcleanacoustics.h"               // acoustics probe request + EFX driver (#683)
 #include "slweatheraudio.h"                // weather ambience loops (#783)
 #include "slweatherregion.h"               // region / parcel weather source (#783 M2)
@@ -131,9 +140,9 @@
 #include <sys/types.h>
 #include <unistd.h>                   // fork / execv: restart after a device loss (#135)
 #endif
-#include "vkgfx/llcleanvolfogvk.h"   // <OCOL> OCOL mist origin
 #include "vkgfx/vk_descpool.h"        // vkdSetPushConstantCap (#238 debug)
 #include "vkgfx/vk_requirements.h"    // #526 Vulkan minimum: pre-flight check + user message
+#include "vkgfx/llcleanvolfogvk.h"  // height mist origin
 #include "llcleanmeshasset.h"         // VK synth-test: clean-store cube injection
 #include "llcleaninstancestore.h"
 #include "llcleanmaterialstore.h"
@@ -302,10 +311,6 @@
 #include "llstreamingaudio.h"
 #include "llviewermenu.h"
 #include "llselectmgr.h"
-#include "gmdxselectionoutline.h"   // <GMDX>
-#include "gmdxregioncapture.h"      // <GMDX> region map capture
-#include "gmdxsnapshotavatars.h"      // <GMDX> snapshot avatar layers
-#include "gmdxnightlight.h"           // <GMDX> physical night
 #include "llpanelobjectlinks.h"
 #include "lltrans.h"
 #include "lltransutil.h"
@@ -316,7 +321,6 @@
 #include "lldebugview.h"
 #include "llconsole.h"
 #include "llcontainerview.h"
-#include "lltoolfocus.h"
 #include "lltooltip.h"
 
 #include "llsdutil.h"
@@ -841,11 +845,11 @@ static void migrateAlchemyUserDir()
     if (base.empty()) return;
 #if LL_LINUX
     if (getenv("SLIPSTREAMVIEWER_USER_DIR")) return;   // user-chosen location: leave it alone
-    const fs::path old_dir = fs::u8path(base + "/.alchemyviewer");
-    const fs::path new_dir = fs::u8path(base + "/.slipstreamviewer");
+    const fs::path old_dir = fsyspath(base + "/.alchemyviewer");
+    const fs::path new_dir = fsyspath(base + "/.slipstreamviewer");
 #else
-    const fs::path old_dir = fs::u8path(base) / "AlchemyViewer";
-    const fs::path new_dir = fs::u8path(base) / "SlipstreamViewer";
+    const fs::path old_dir = fsyspath(base) / "AlchemyViewer";
+    const fs::path new_dir = fsyspath(base) / "SlipstreamViewer";
 #endif
     auto utf8 = [](const fs::path& p) { const auto u = p.u8string(); return std::string(u.begin(), u.end()); };
     std::error_code ec;
@@ -1409,7 +1413,7 @@ bool LLAppViewer::init()
     gSimLastTime = gRenderStartTime.getElapsedTimeF32();
     gSimFrames = (F32)gFrameCount;
 
-    // <GMDX> SoapStorm c798038fa5 (Nexii): also init when a device is pinned but the enable got
+    // <GMDX> SoapStorm c798038fa5 (Nexii Malthus): also init when a device is pinned but the enable got
     // cleared, so a config an older build latched off recovers by itself. String id on Windows
     // (old format), map otherwise.
     const LLSD joystick_id = gSavedSettings.getLLSD("JoystickDeviceUUID");
@@ -1422,6 +1426,7 @@ bool LLAppViewer::init()
     // Certificate revocation data (static distrust list + newest Chrome CRLSet on disk)
     // before the certificate store validates anything; needs the cache directory.
     SLRevocationUpdater::init();
+// Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4; Linden Lab game control (viewer PR #6202)
     LLGameControl::init(gDirUtilp->getExpandedFilename(LL_PATH_APP_SETTINGS, "gamecontrollerdb.txt"),
         [](const std::vector<std::string>& keys) -> LLSD
         {
@@ -1665,10 +1670,12 @@ bool LLAppViewer::frame()
     return ret;
 }
 
-void sendGameControlData()
+// Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4; Linden Lab game control (viewer PR #6202)
+// Sends a GameControlData message carrying 'state' (the engine's final state, or all zero to
+// release what the region holds).
+static void sendGameControlData(const LLGameControl::ServerState& state)
 {
     LLMessageSystem* msg = gMessageSystem;
-    const LLGameControl::ServerState& state = LLGameControl::getServerState();
 
     msg->newMessageFast(_PREHASH_GameControlData);
     msg->nextBlockFast(_PREHASH_AgentData);
@@ -1772,6 +1779,20 @@ static void slipstreamBenchTick(double frame_ms)
     const double now = LLTimer::getTotalSeconds();
     if (!st.active)
     {
+        // <GMDX> GMDXBenchAfterLogin: start the bench once, this many seconds after login
+        // (headless runs: RenderVKBench itself would start at the login screen). 0 = never.
+        static LLCachedControl<F32> s_after(gSavedSettings, "GMDXBenchAfterLogin", 0.f);
+        static double s_started_at = 0.0;
+        static bool s_auto_done = false;
+        if (!s_auto_done && s_after > 0.f && LLStartUp::getStartupState() >= STATE_STARTED)
+        {
+            if (s_started_at == 0.0) s_started_at = now;
+            else if (now - s_started_at >= (double)(F32)s_after)
+            {
+                s_auto_done = true;
+                gSavedSettings.setBOOL("RenderVKBench", true);
+            }
+        }
         if (!s_run) return;
         // ---- start ----
         st = LLVKBench::State();
@@ -2738,7 +2759,8 @@ bool LLAppViewer::cleanup()
     // Store the time of our current logoff
     gSavedPerAccountSettings.setU32("LastLogoff", (U32)time_corrected());
 
-    GMDXRegionCapture::shutdown();   // <GMDX> a region map capture's settings back before they are saved
+    // A region map capture's settings back before they are saved (GunMetal-DX port).
+    LLRegionMapCapture::shutdown();
 
     if (LLEnvironment::instanceExists())
     {
@@ -3569,10 +3591,13 @@ bool LLAppViewer::initConfiguration()
     // names. Right after the user file loads, before anything reads them and before the
     // command line is applied (so --set still wins).
     SLSettingsMigration::migrateSettingsFile(gSavedSettings, gSavedSettings.getString("ClientSettingsFile"));
+    SLSettingsMigration::migrateGMDXRenames(gSavedSettings, gSavedSettings.getString("ClientSettingsFile"));   // <GMDX>
     SLSettingsMigration::migrateNearbyChatOverlay(gSavedSettings, gSavedSettings.getString("ClientSettingsFile"));
     SLSettingsMigration::migrateGMDXChatLog(gSavedSettings);   // <GMDX>
     SLSettingsMigration::migrateGMDXMouselookHud(gSavedSettings);   // <GMDX>
     SLSettingsMigration::migrateChatNotifications(gSavedSettings, gSavedSettings.getString("ClientSettingsFile"));
+    SLSettingsMigration::migrateTPSFraming(gSavedSettings, gSavedSettings.getString("ClientSettingsFile"));
+    SLSettingsMigration::migrateMouselookHideUI(gSavedSettings, gSavedSettings.getString("ClientSettingsFile"));
 
     if (gSavedSettings.getBOOL("FirstRunThisInstall"))
     {
@@ -5549,8 +5574,7 @@ static U32 vkSynthInjectCube(LLVKWorldFrame& cam)
             for (S32 L = 0; L < 4; ++L)
                 group = LLCleanMeshAsset::instance().registerLodSlot(mesh_id, f, L, slot.slot_id);
 
-        LLCleanInstanceStore::Instance inst;
-        std::memset(&inst, 0, sizeof(inst));
+        LLCleanInstanceStore::Instance inst{};   // value-init: every member zeroed
         std::memcpy(inst.model_matrix, model, sizeof(model));
         // AABB in volume-local space (bounds capture() measured for this slot).
         inst.aabb_min[0]=slot.cap_lo[0]; inst.aabb_min[1]=slot.cap_lo[1]; inst.aabb_min[2]=slot.cap_lo[2];
@@ -5828,13 +5852,18 @@ static void buildVKMirror(LLVKWorldFrame& wf, const F32 V[16], const F32 P[16], 
             wf.mirror_frustum[idx][2] = c; wf.mirror_frustum[idx][3] = dd;
         };
         F32 t[4];
-        for (int c = 0; c < 4; ++c) t[c] = rr[3][c] + rr[0][c]; setp(0, t);
-        for (int c = 0; c < 4; ++c) t[c] = rr[3][c] - rr[0][c]; setp(1, t);
-        for (int c = 0; c < 4; ++c) t[c] = rr[3][c] + rr[1][c]; setp(2, t);
-        for (int c = 0; c < 4; ++c) t[c] = rr[3][c] - rr[1][c]; setp(3, t);
+        for (int c = 0; c < 4; ++c) { t[c] = rr[3][c] + rr[0][c]; }
+        setp(0, t);
+        for (int c = 0; c < 4; ++c) { t[c] = rr[3][c] - rr[0][c]; }
+        setp(1, t);
+        for (int c = 0; c < 4; ++c) { t[c] = rr[3][c] + rr[1][c]; }
+        setp(2, t);
+        for (int c = 0; c < 4; ++c) { t[c] = rr[3][c] - rr[1][c]; }
+        setp(3, t);
         const F32 nearp[4] = { n.mV[0], n.mV[1], n.mV[2], d + 0.05f };
         setp(4, nearp);
-        for (int c = 0; c < 4; ++c) t[c] = rr[3][c] - rr[2][c]; setp(5, t);
+        for (int c = 0; c < 4; ++c) { t[c] = rr[3][c] - rr[2][c]; }
+        setp(5, t);
     }
 
     const LLVector3 rcam = eye - n * (2.f * side);
@@ -5935,7 +5964,7 @@ static void buildVKDoF(LLVKWorldFrame& wf, F32 fov, const LLVector3& eye, const 
     }
     if (s_locked && !s_prev_focus.isExactlyZero())
         focus_point = s_prev_focus;
-    if (focus_point.isExactlyZero() && (gAgent.isCameraExternallyDriven() || s_free_focus))
+    if (focus_point.isExactlyZero() && (LLViewerJoystick::getInstance()->getOverrideCamera() || s_free_focus))
     {   // focus on point under cursor (#724): the GPU cursor pick's newest answer for the
         // cursor ray (the crosshair in mouselook), never a synchronous pick. LL read the
         // last hit cursorIntersect left in gDebugRaycastIntersection, which only the
@@ -6234,7 +6263,7 @@ static bool buildVulkanWorldFrame(LLVKWorldFrame& wf)
         aspect = (gViewerWindow ? gViewerWindow->getWorldViewAspectRatio() : 1.7778f);
     if (!(aspect > 0.05f)) aspect = 1.7778f;
     F32 zn     = cam->getNear();
-    if (!(zn >= MIN_NEAR_PLANE)) zn = 0.25f;   // <GMDX> (FSRenderNearClip reaches MIN_NEAR_PLANE itself)
+    if (!(zn >= MIN_NEAR_PLANE)) zn = 0.25f;   // (GunMetal-DX port; the same floor as LLCullCamera's saneNear)
     // Far (cull) = the draw distance, RenderFarClip, read directly: the camera far is
     // stale here (see above), which is what the OLD [64,1024] clamp tripped over. It
     // used to be floored at 512 m, which silently overrode every draw distance below
@@ -6296,7 +6325,7 @@ static bool buildVulkanWorldFrame(LLVKWorldFrame& wf)
     P[1] = -P[1]; P[5] = -P[5]; P[9] = -P[9]; P[13] = -P[13];
     Pconv[1] = -Pconv[1]; Pconv[5] = -Pconv[5]; Pconv[9] = -Pconv[9]; Pconv[13] = -Pconv[13];
 
-    // <GMDX> ORTHOGRAPHIC VIEW (LLViewerCamera::getOrtho, FSCameraOrtho): the same box the
+    // ORTHOGRAPHIC VIEW (LLViewerCamera::getOrtho, FSCameraOrtho): the same box the
     // perspective frustum cuts at the focus distance, kept at every depth. Reversed-Z as the
     // perspective (view z = -zn -> 1, -zf -> 0), Y flipped. Cull, LOD and texel demand run in
     // their orthographic mode (ortho_view -> CULL_ORTHO / CLV_ORTHO: px per metre at any
@@ -6304,6 +6333,10 @@ static bool buildVulkanWorldFrame(LLVKWorldFrame& wf)
     // cam_fwd.w), the shadow cascades are fitted to the box below; the sky keeps the
     // perspective rays (Psky: parallel rays would paint the whole sky one colour), the mirror
     // and depth of field are off. Pick rays: LLViewerCamera::orthoMouseRay.
+    // Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4. Not in VR: the stereo
+    // eyes are perspective (the toggle drops back).
+    if (cam->getOrtho() && LLVulkanContext::instance().worldViewCount() > 1u)
+        cam->setOrtho(false);
     F32 Psky[16];
     std::memcpy(Psky, P, sizeof(Psky));
     const bool ortho = cam->getOrtho();
@@ -6323,13 +6356,12 @@ static bool buildVulkanWorldFrame(LLVKWorldFrame& wf)
         wf.tan_half[1] = ortho_hh;
     }
     wf.ortho_view = ortho;
-    // </GMDX>
 
     std::memcpy(wf.proj, P, sizeof(wf.proj));
     vkInvertMat4(P, wf.inv_proj);
 
     buildVKDoF(wf, fovY, eye, LLVector3(fwd[0], fwd[1], fwd[2]));
-    if (ortho) wf.dof_enabled = false;   // <GMDX> (a thin lens has no orthographic form)
+    if (ortho) wf.dof_enabled = false;   // (a thin lens has no orthographic form)
 
     // Rotation-only view (camera-relative) projection for the rigged pre-skin output.
     {
@@ -6346,7 +6378,7 @@ static bool buildVulkanWorldFrame(LLVKWorldFrame& wf)
         // Sky view rays (#555): un-projected through the translation-free inverse, so
         // the direction never cancels a km-sized eye against a point ~2 near-planes away.
         vkInvertMat4(wf.view_proj_rel, wf.inv_view_proj_rel);
-        if (ortho)   // <GMDX> the sky alone keeps the perspective rays (its only reader)
+        if (ortho)   // the sky alone keeps the perspective rays (its only reader)
         {
             F32 sky_vp[16];
             for (int c = 0; c < 4; ++c)
@@ -6457,8 +6489,14 @@ static bool buildVulkanWorldFrame(LLVKWorldFrame& wf)
         }
     }
 
-    if (!ortho)   // <GMDX> (the mirror capture's projection rows are perspective-only)
+    if (!ortho)   // (the mirror capture's projection rows are perspective-only)
         buildVKMirror(wf, V, Pconv, eye);   // conventional depth (see P above)
+    else
+    {
+        wf.mirror_valid = false;
+        wf.mirror_key = 0;
+        wf.mirror_cam_inside = false;
+    }
     // "Show me in Mouselook" (FirstPersonAvatarVisible) off: hide the own avatar in
     // the main view only (renderer keeps it in mirrors, probes and shadows).
     // Picks follow the same rule (LLVOAvatar::isHiddenOwnAttachment, #554).
@@ -6664,9 +6702,13 @@ static bool buildVulkanWorldFrame(LLVKWorldFrame& wf)
     if (lodFactor < 0.01f) lodFactor = 1.125f;   // guard pre-init
 
     wf.cam_pos[0]=eye.mV[0]; wf.cam_pos[1]=eye.mV[1]; wf.cam_pos[2]=eye.mV[2];
-    {   // <OCOL> the OCOL mist's global noise frame (llcleanvolfogvk.h)
-        const LLVector3d o = gAgent.getPosGlobalFromAgent(LLVector3::zero);
-        LLCleanVolFogVK::setOriginGlobal(o.mdV[VX], o.mdV[VY]);
+    {   // Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4 (<OCOL>, no stated author): the height mist's global noise frame (llcleanvolfogvk.h)
+        static LLCachedControl<bool> mist_on(gSavedSettings, "RenderVKMist", false);
+        if (mist_on)
+        {
+            const LLVector3d o = gAgent.getPosGlobalFromAgent(LLVector3::zero);
+            LLCleanVolFogVK::setOriginGlobal(o.mdV[VX], o.mdV[VY]);
+        }
     }
     wf.cam_pos[3]=lodFactor;
     wf.lod_cam_pos[0]=lod_eye.mV[0]; wf.lod_cam_pos[1]=lod_eye.mV[1]; wf.lod_cam_pos[2]=lod_eye.mV[2];   // (#479 frozen: the cull camera)
@@ -6677,7 +6719,7 @@ static bool buildVulkanWorldFrame(LLVKWorldFrame& wf)
     // Temporal history (#84): nothing from before or during a teleport is a valid
     // previous frame (the renderer adds origin shifts and camera cuts itself).
     wf.temporal_reset = gAgent.getTeleportState() != LLAgent::TELEPORT_NONE;
-    {   // <GMDX> switching projection is a camera cut (setTemporal sees only eye moves)
+    {   // switching projection is a camera cut (setTemporal sees only eye moves)
         static bool s_was_ortho = false;
         if (ortho != s_was_ortho) wf.temporal_reset = true;
         s_was_ortho = ortho;
@@ -6705,7 +6747,7 @@ static bool buildVulkanWorldFrame(LLVKWorldFrame& wf)
         }
 
         LLSettingsSky::ptr_t sky = env.getCurrentSky();
-        gmdxNightLight() = GMDXNightLight();   // <GMDX> (no sky: the old night's switches)
+        slNightLight() = SLNightLight();   // (physical night; no sky: the old night's switches)
         if (sky)
         {
             LLColor3 sunc  = sky->getSunlightColor();
@@ -6782,40 +6824,34 @@ static bool buildVulkanWorldFrame(LLVKWorldFrame& wf)
             if (ld.lengthSquared() > 1e-6f) ld.normalize();
             const LLVector3 sdir = sky->getSunDirection();
             const LLVector3 mdir = sky->getMoonDirection();
-            // <GMDX> PHYSICAL NIGHT (gmdxnightlight.h): the moon lights the scene with its real
-            // brightness and phase instead of the sun's full strength. Off: the old night.
-            // At dusk the sun and moon light the scene together, the direction turning smoothly
-            // from one to the other, instead of the switch at the horizon.
-            static LLCachedControl<bool> s_phys_night(gSavedSettings, "GMDXPhysicalNight", true);
-            static LLCachedControl<F32> s_moon_scale(gSavedSettings, "GMDXMoonlightScale", 0.05f);
-            static LLCachedControl<F32> s_dusk_high(gSavedSettings, "GMDXDuskSunHigh", 4.f);
-            static LLCachedControl<F32> s_dusk_low(gSavedSettings, "GMDXDuskSunLow", -10.f);
-            static LLCachedControl<bool> s_respect_sky(gSavedSettings, "GMDXRespectRegionSky", true);
-            GMDXNightLight& night = gmdxNightLight();
-            night.creators_sky = gmdxSkyIsCreators();
-            // A creator's sky (GMDXRespectRegionSky): Second Life's own light, moon and dusk, so the
-            // moonlit look is the one they made; the catalogue stars and the corona stay.
-            night.on = s_phys_night && !(s_respect_sky && night.creators_sky);
+            // PHYSICAL NIGHT (slnightlight.h; ported from GunMetal-DX (squeedledorf, LGPL 2.1),
+            // v0.3.0 cf5f1f4): the moon lights the scene with its real brightness and phase instead
+            // of the sun's full strength, and at dusk the sun and moon light the scene together, the
+            // direction turning smoothly from one to the other instead of the switch at the horizon.
+            // A creator's sky keeps Second Life's own light. Off: the old night.
+            static LLCachedControl<bool> s_phys_night(gSavedSettings, "RenderVKPhysicalNight", true);
+            SLNightLight& night = slNightLight();
+            night.creators_sky = slSkyIsCreators();
+            night.on = s_phys_night && !(gmdxRespectRegionSky() && night.creators_sky);   // <GMDX> (GMDXRespectRegionSky)
             F32 glow_factor = sky->getSunMoonGlowFactor();
             if (night.on)
             {
-                night.moon = gmdxMoonLight(sdir.mV, mdir.mV, sky->getMoonBrightness(), s_moon_scale);
+                night.moon = slMoonLight(sdir.mV, mdir.mV, sky->getMoonBrightness(), gmdxMoonlightScale());   // <GMDX> GMDXMoonlightScale
                 night.moon_full = night.moon;
                 // WindLight's light-path extinction (fillAtmosK's light_atten), per channel.
                 const F32 dm = sky->getDensityMultiplier() * sky->getMaxY();
                 const F32 atten[3] = {(bd.mV[0] + sky->getHazeDensity() * 0.25f) * dm,
                                       (bd.mV[1] + sky->getHazeDensity() * 0.25f) * dm,
                                       (bd.mV[2] + sky->getHazeDensity() * 0.25f) * dm};
-                // No night exposure on this sky (gmdxnighteyevk.h needs an exposure range to lift in):
-                // the lift is baked into the light (gmdxnightlight.h THE NIGHT'S AMBIENT).
-                static LLCachedControl<F32> s_night_amb(gSavedSettings, "GMDXNightAmbient", 0.5f);
-                static LLCachedControl<F32> s_max_lift(gSavedSettings, "GMDXNightExposureMaxLift", 6.f);
+                // No night exposure on this sky (the night eye needs an exposure range to lift in):
+                // the lift is baked into the light (slnightlight.h THE NIGHT'S AMBIENT).
                 static LLCachedControl<bool> s_hdr_n(gSavedSettings, "RenderHDREnabled", true);
                 static LLCachedControl<bool> s_dyn_n(gSavedSettings, "RenderDynamicExposureEnabled", true);
                 static LLCachedControl<bool> s_sky_exp_n(gSavedSettings, "RenderUseExposureSkySettings", false);
                 const bool night_exposure = s_hdr_n && s_dyn_n && !s_sky_exp_n && probe_amb > 0.f && sqrtf(g) * 2.f > 1.f;
-                gmdxBlendNightLight(night, sdir.mV, mdir.mV, sunc.mV, atten, s_dusk_high, s_dusk_low,
-                                    llclamp((F32)s_night_amb, 0.f, 1.f), night_exposure ? 0.f : llclamp((F32)s_max_lift, 0.f, 12.f));
+                GMDXSkyTune& tune = gmdxSkyTune();   // <GMDX> the constants, with the Sky Debugger's knobs on them
+                slBlendNightLight(night, sdir.mV, mdir.mV, sunc.mV, atten, tune.dusk_high(kDuskSunHigh), tune.dusk_low(kDuskSunLow),
+                                  tune.night_ambient(kNightAmbient), night_exposure ? 0.f : tune.night_max_lift(kNightMaxLift));
                 if (night.blended)   // (above the band: the daytime light as it was)
                 {
                     lc.set(night.color);
@@ -6826,7 +6862,6 @@ static bool buildVulkanWorldFrame(LLVKWorldFrame& wf)
                     glow_factor = night.sun_lead ? 1.f : (sky->getIsMoonUp() ? sky->getMoonBrightness() * 0.25f : 0.f);
                 }
             }
-            // </GMDX>
 
             static LLCachedControl<F32> s_fade(gSavedSettings, "RenderVKDistanceFade", 0.6f);
             static LLCachedControl<bool> s_hdr_on(gSavedSettings, "RenderHDREnabled", true);
@@ -6846,14 +6881,9 @@ static bool buildVulkanWorldFrame(LLVKWorldFrame& wf)
             put(1,  bd.mV[0], bd.mV[1], bd.mV[2], sky->getHazeDensity());
             put(2,  lc.mV[0], lc.mV[1], lc.mV[2], sky->getCloudShadow());
             put(3,  amb.mV[0], amb.mV[1], amb.mV[2], sky->getMaxY());
-            // <GMDX> Physical night: the WindLight sky's own light (gmdxnightlight.h); the ground's
-            // clamped norm is atmos[7]'s then.
-            if (night.on) ln.set(night.sky_dir);
             put(4,  ln.mV[0], ln.mV[1], ln.mV[2], sky->getDensityMultiplier());
             put(5,  gl.mV[0], gl.mV[1], gl.mV[2], sky->getDistanceMultiplier());
-            // <GMDX> glow_factor (was getSunMoonGlowFactor); .z (enabled) carries physical night's ambient
-            // as 2 - amb (gmdxnightlight.h THE NIGHT'S AMBIENT; 1 = stock)
-            put(6,  glow_factor, hdr, night.on ? 2.f - llclamp(night.amb, 0.f, 1.f) : 1.f, s_emissive_buf ? 0.f : 1.f);
+            put(6,  glow_factor, hdr, 1.f, s_emissive_buf ? 0.f : 1.f);   // (physical night's dusk: the leading light's glow)
             put(7,  ld.mV[0], ld.mV[1], ld.mV[2], llclamp((F32)s_fade, 0.f, 1.f));
             put(8,  sunc.mV[0], sunc.mV[1], sunc.mV[2], classic ? 1.f : 0.f);
             put(9,  moonc.mV[0], moonc.mV[1], moonc.mV[2], sun_up ? 1.f : 0.f);
@@ -6992,10 +7022,11 @@ static bool buildVulkanWorldFrame(LLVKWorldFrame& wf)
                 b[7] = sun_blend;
                 LLUUID moon = sky->getMoonTextureId();
                 if (moon.isNull()) moon = sky->getNextMoonTextureId();
-                // <GMDX> a creator's own moon texture (an eclipse, a planet) keeps its look: physical
-                // night's HDR disc and phase shading are for Second Life's moon (or the procedural one).
-                gmdxNightLight().custom_moon = gmdxNightLight().creators_sky && moon.notNull()
-                                               && moon != LLSettingsSky::GetDefaultMoonTextureId();
+                // Physical night (GunMetal-DX port): a creator's own moon texture (an eclipse, a planet)
+                // keeps its look: the HDR disc and phase shading are for Second Life's moon (or the
+                // procedural one).
+                slNightLight().custom_moon = slNightLight().creators_sky && moon.notNull()
+                                             && moon != LLSettingsSky::GetDefaultMoonTextureId();
                 // Stars use bloom A only (starsF samples diffuseMap twice); null -> IMG_BLOOM1
                 // as LLVOSky::setBloomTextures.
                 LLUUID bloom = sky->getBloomTextureId();
@@ -7061,9 +7092,10 @@ static bool buildVulkanWorldFrame(LLVKWorldFrame& wf)
             else if (env.getIsMoonUp()) spec += sky ? sky->getMoonlightColor() : LLColor3::white;
             LLVector3 ldir = env.getLightDirection(); ldir.normalize();
             LLVector4 cln = env.getClampedLightNorm();
-            // <GMDX> Physical night's dusk: the scene light's blended direction (gmdxnightlight.h);
-            // the glint's colour stays the light's hue (its strength comes with sunlit, clean_water.frag).
-            const GMDXNightLight& night = gmdxNightLight();
+            // Physical night's dusk (slnightlight.h; GunMetal-DX port): the scene light's blended
+            // direction; the glint's colour stays the light's hue (its strength comes with sunlit,
+            // clean_water.frag).
+            const SLNightLight& night = slNightLight();
             if (night.on && night.blended)
             {
                 spec.setToBlack();
@@ -7072,7 +7104,6 @@ static bool buildVulkanWorldFrame(LLVKWorldFrame& wf)
                 ldir.set(night.dir);
                 cln.mV[2] = ldir.mV[VX];   // (toLightNorm's z: world x, as getClampedLightNorm)
             }
-            // </GMDX>
             const F32 gp = ldir.mV[0] * ldir.mV[0] + ldir.mV[1] * ldir.mV[1];
             if (spec.normalize() > 0.f) spec *= (1.5f + 6.f * gp);
             const F32 fog_ks = 1.f / llmax(cln.mV[2], 0.3f);    // LLSettingsVOWater::WATER_FOG_LIGHT_CLAMP
@@ -7413,6 +7444,17 @@ static bool buildVulkanWorldFrame(LLVKWorldFrame& wf)
             }
             wf.lights.push_back(L);
         }
+        // <GMDX> teleport effects: a brief local light (the lightning's flash, the smoke's poof)
+        {
+            LLVKLight L{};
+            if (wf.lights.size() < light_cap && GMDXTPFX::worldLight(L.pos_radius, L.color_falloff, L.pos_radius[3]))
+            {
+                L.color_falloff[3] = kLightFalloffFudge;   // (a point light: no projector fields)
+                L.key = 0x47544658ull;                     // a stable identity ("GTFX")
+                wf.lights.push_back(L);
+            }
+        }
+        // </GMDX>
     }
 
     // ---- Edit-mode selection outline (LL renderSilhouettes: per-face wireframe) ----
@@ -7449,11 +7491,11 @@ static bool buildVulkanWorldFrame(LLVKWorldFrame& wf)
             // A clicked media face is selected only to route media focus; it gets no
             // edit wireframe.
             const LLUUID media_focus_id = LLViewerMediaFocus::getInstance()->getFocusedObjectID();
-            const LLColor4 pc = GMDXSelectionOutline::parentColor();   // <GMDX> Classic: Firestorm's colours
-            const LLColor4 cc = GMDXSelectionOutline::childColor();    // <GMDX>
+            const LLColor4 pc = LLSelectionOutline::parentColor();   // Classic: Firestorm's colours (GunMetal-DX port)
+            const LLColor4 cc = LLSelectionOutline::childColor();
             std::memcpy(wf.sel_parent_color, pc.mV, sizeof(wf.sel_parent_color));
             std::memcpy(wf.sel_child_color,  cc.mV, sizeof(wf.sel_child_color));
-            wf.sel_hidden = LLSelectMgr::sRenderHiddenSelections;
+            wf.sel_hidden = LLSelectMgr::sRenderHiddenSelections && !GMDXCombatLockout::active(); // <GMDX> combat render lockout
             const bool te_mode = sm->getTEMode();
             LLCleanInstanceStore& store = LLCleanInstanceStore::instance();
             for (LLObjectSelection::iterator it = sel->begin(); it != sel->end(); ++it)
@@ -7463,7 +7505,7 @@ static bool buildVulkanWorldFrame(LLVKWorldFrame& wf)
                 if (!o || o->isDead() || o->mDrawable.isNull()) continue;
                 if (media_focus_id.notNull() && o->getID() == media_focus_id) continue;
                 if (te_mode && !node->hasSelectedTE()) continue;
-                if (GMDXSelectionOutline::usesSilhouette(o)) continue;   // <GMDX> LL silhouette instead
+                if (LLSelectionOutline::usesSilhouette(o)) continue;   // LL silhouette instead (GunMetal-DX port)
                 const S32 nte = llmin((S32)o->getNumTEs(), o->mDrawable->getNumFaces());
                 for (S32 te = 0; te < nte; ++te)
                 {
@@ -7486,8 +7528,8 @@ static bool buildVulkanWorldFrame(LLVKWorldFrame& wf)
             LLObjectSelectionHandle hl = sm->getHighlightedObjects();
             if (hl.notNull() && hl->getNumNodes() > 0)
             {
-                const LLColor4 pc = GMDXSelectionOutline::parentColor();   // <GMDX> Classic: Firestorm's colours
-                const LLColor4 cc = GMDXSelectionOutline::childColor();    // <GMDX>
+                const LLColor4 pc = LLSelectionOutline::parentColor();   // Classic: Firestorm's colours (GunMetal-DX port)
+                const LLColor4 cc = LLSelectionOutline::childColor();
                 std::memcpy(wf.sel_parent_color, pc.mV, sizeof(wf.sel_parent_color));
                 std::memcpy(wf.sel_child_color,  cc.mV, sizeof(wf.sel_child_color));
                 LLCleanInstanceStore& store = LLCleanInstanceStore::instance();
@@ -7497,8 +7539,8 @@ static bool buildVulkanWorldFrame(LLVKWorldFrame& wf)
                     LLSelectNode* node = *it;
                     LLViewerObject* o = node ? node->getObject() : nullptr;
                     if (!o || o->isDead() || o->mDrawable.isNull()) continue;
-                    // <GMDX> LL silhouette instead (one that was never generated keeps the wireframe)
-                    if (node->mSilhouetteExists && GMDXSelectionOutline::usesSilhouette(o)) continue;
+                    // LL silhouette instead (one that was never generated keeps the wireframe)
+                    if (node->mSilhouetteExists && LLSelectionOutline::usesSilhouette(o)) continue;
                     ++hl_objs;
                     const S32 nte = llmin((S32)o->getNumTEs(), o->mDrawable->getNumFaces());
                     for (S32 te = 0; te < nte; ++te)
@@ -7789,7 +7831,7 @@ static bool buildVulkanWorldFrame(LLVKWorldFrame& wf)
                 // Minimal sphere around the slice's 8 corners (centre on the view axis).
                 F32 t = llmin(b, (a + b) * (1.f + k * k) * 0.5f);
                 F32 R = sqrtf(llmax((b - t) * (b - t) + b * b * k * k, (t - a) * (t - a) + a * a * k * k));
-                if (ortho)   // <GMDX> the box slice: the same half diagonal at both ends
+                if (ortho)   // the box slice: the same half diagonal at both ends
                 {
                     t = 0.5f * (a + b);
                     R = sqrtf(0.25f * (b - a) * (b - a) + ortho_hw * ortho_hw + ortho_hh * ortho_hh);
@@ -7876,7 +7918,7 @@ static bool buildVulkanWorldFrame(LLVKWorldFrame& wf)
                     side(at * cosf(hx) - left * sinf(hx), up,   1);   // right
                     side(at * cosf(hy) + up * sinf(hy),   left, 2);   // top
                     side(at * cosf(hy) - up * sinf(hy),   left, 3);   // bottom
-                    if (ortho)   // <GMDX> the box's sides: parallel to the view axis
+                    if (ortho)   // the box's sides: parallel to the view axis
                     {
                         nrm[0] = -left; dd[0] = ortho_hw + left * eye;   // left
                         nrm[1] =  left; dd[1] = ortho_hw - left * eye;   // right
@@ -7953,7 +7995,7 @@ static void driveVulkanWorldVOCacheCull()
     static LLCachedControl<F32> s_render_far(gSavedSettings, "RenderFarClip", 128.f);
     F32 farp = llmax(cam->getFar(), (F32)s_render_far);
     farp = llclamp(farp, 64.f, 8192.f);   // draw distance reaches 4096 m
-    LLCullCamera::calcAgentFrustum(*cam, farp, cam->getOrthoHalfHeight());   // <GMDX> (ortho: the box)
+    LLCullCamera::calcAgentFrustum(*cam, farp, cam->getOrthoHalfHeight());   // (ortho: the box)
 
     // #479: the culling camera -- the live world camera just refreshed, or the frozen
     // debug pose (Develop > Rendering > Freeze culling camera), rebuilt in agent space.
@@ -7998,6 +8040,8 @@ void displayVulkanUI()
     {
         return;
     }
+    LLVulkanContext::instance().pollUIWindowRetirement();
+    if (LLFloaterPopout::hasWork()) LLFloaterPopout::update();
     // #1074 VR: the headset keeps rendering while the mirror window is minimised / hidden (then
     // without the UI pass: the frame has no window image). Desktop: return as before.
     bool window_hidden = false;
@@ -8007,6 +8051,9 @@ void displayVulkanUI()
     {
         if (!LLVRCamera::sessionRunning())
         {
+            // Native UI stays interactive while the world window is minimized.
+            if (LLFloaterPopout::hasWork())
+                LLFloaterPopout::render(LLVulkanContext::instance().uiFrameCounter());
             return;
         }
         window_hidden = true;
@@ -8093,7 +8140,7 @@ void displayVulkanUI()
             {
                 gGL.color4f(1, 1, 1, 1);
                 LLRender::DepthScope depth(true, false);
-                GMDXRezFx::renderOverlay();   // <GMDX> rez effects: the transporter's beam (world content, UI on or off)
+                GMDXRezFx::renderOverlay();   // <GMDX> rez effects (CombatFX): beam, nozzle, debris (world content, UI on or off)
                 gGL.color4f(1, 1, 1, 1);      // <GMDX>
                 if (has_sel)
                     gViewerWindow->renderSelections(false, false, false);
@@ -8125,9 +8172,6 @@ void displayVulkanUI()
                         LLWorld::getInstance()->renderPropertyLines();   // ShowPropertyLines
                     LLViewerParcelMgr::getInstance()->render();            // selected-parcel highlight
                     LLViewerParcelMgr::getInstance()->renderParcelCollision(); // ban lines
-
-                    // <GMDX> (The OTS aim-convergence debug lines are gone: they drew every
-                    // avatar's hitbox in front of the camera through walls, a wallhack.)
                 }
                 // #479 frozen culling camera: its frustum, spheres and cache-entry boxes.
                 LLVOCacheDebug::renderOverlay();
@@ -8546,9 +8590,11 @@ void displayVulkanUI()
     { VK_HITCH_SCOPE("buildWorldFrame"); buildVulkanWorldFrame(world); }   // world.enabled == false until in-world
     // Cursor ray for the GPU raster pick (#702): answered by this frame's GPU work.
     LLCleanCursorPick::fillRequest(world);
-    SSCombatRay::fillRequests(world);   // <SS:Skoomastream> OTS camera / aim rays (aux picks)
     // ... and for the GPU particle pick (#481), only while a per-frame answer is wanted.
     LLCleanPartPick::fillRequest(world);
+    // ... and the CombatFX world rays (<SS:Skoomastream> OTS camera / aim rays, aux picks;
+    // GunMetal-DX). None with CombatFX off.
+    SSCombatRay::fillRequests(world);
     // ... and the acoustics probe (#683, AudioAcoustics): listener + in-world voices.
     LLCleanAcoustics::fillRequest(world);
 
@@ -8605,6 +8651,7 @@ void displayVulkanUI()
         }
     }
 
+    const U64 uiFrameBeforeMain = LLFloaterPopout::hasWork() ? LLVulkanContext::instance().uiFrameCounter() : 0;
     {
         VK_HITCH_SCOPE("renderFrame");
         if (window_hidden)
@@ -8612,8 +8659,11 @@ void displayVulkanUI()
         else
             LLVulkanContext::instance().renderFrame(uiRender, &world);
     }
-    // <GMDX> region map capture: its step for this frame (a preparation render or one map tile)
-    { VK_HITCH_SCOPE("gmdx_regionMap"); GMDXRegionCapture::frameTick(); }
+    if (LLFloaterPopout::hasWork()) LLFloaterPopout::render(uiFrameBeforeMain);
+    else LLVulkanContext::instance().finishUIWindowsFrame();
+    // Region map capture: its step for this frame (a preparation render or one map tile;
+    // GunMetal-DX port, llregionmapcapture.h).
+    { VK_HITCH_SCOPE("regionMap"); LLRegionMapCapture::frameTick(); }
     // #1073 VR: a begun XR frame is always ended -- renderFrame's early-outs (no window image,
     // device lost, not initialised) submit it here with zero layers (a no-op when renderFrame
     // already ended it). And a notice the session raised (it ended / was lost). Desktop: skipped.
@@ -8806,20 +8856,19 @@ bool vkRenderOffscreenSnapshot(S32 w, S32 h, bool show_hud, std::vector<U8>& rgb
         wf.hud_enabled = false;
     }
     if (proj) { proj[0] = wf.proj[10]; proj[1] = wf.proj[14]; }
-    // <GMDX> avatar layers (gmdxsnapshotavatars.h): the matte sequence, no depth of field
-    wf.avatar_matte = !depth && gmdxSnapshotAvatarOnly();
+    // Avatar layers (llsnapshotavatars.h): the matte sequence, no depth of field (GunMetal-DX port)
+    wf.avatar_matte = !depth && snapshotAvatarOnly();
     if (wf.avatar_matte) wf.dof_enabled = false;
-    // </GMDX>
     return LLVulkanContext::instance().renderOffscreen(wf, (uint32_t)w, (uint32_t)h, rgb, depth, 2u,
                                                        depth ? 0u : (uint32_t)aa_frames);
 }
 
-// <GMDX> REGION MAP CAPTURE (gmdxregioncapture.h): the world straight down through an orthographic
+// REGION MAP CAPTURE (llregionmapcapture.h): the world straight down through an orthographic
 // box, offscreen, as bottom-up RGB. The frame is this frame's (environment, probes, the instance
 // store), with the camera replaced:
 //  - view: down -Z, +Y (north) up, +X (east) right; projection: reversed-Z ortho (near = the
 //    ceiling -> depth 1, far = the floor -> 0), Vulkan Y flip, as buildVulkanWorldFrame's
-//    perspective; the cull planes are the box itself;
+//    perspective; the cull planes are the box itself; one view (views[0] = the box);
 //  - LOD and texel demand: LLVKWorldFrame::ortho (clean_cull.comp CULL_ORTHO);
 //  - sun shadows: one map fitted around the box's column in light space (cascade 0; the
 //    cascade splits sit past every depth so nothing else is sampled, and cascades 1-3 cull
@@ -8827,13 +8876,14 @@ bool vkRenderOffscreenSnapshot(S32 w, S32 h, bool show_hud, std::vector<U8>& rgb
 //  - no haze / distance fade / 2D clouds / god rays (atmos lane 6 z = 0: atmosEnabled() is
 //    false), no local lights, mirror, DoF, HUD, selection outline, RLV spheres; the water as
 //    seen from above it; one world clock for every tile.
-bool vkRenderRegionOrthoView(const GMDXOrthoView& o, std::vector<U8>& rgb, std::vector<F32>* depth)
+// Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
+bool vkRenderRegionOrthoView(const LLRegionOrthoView& o, std::vector<U8>& rgb, std::vector<F32>* depth)
 {
     if (o.width <= 0 || o.height <= 0 || !(o.right > o.left) || !(o.top > o.bottom) || !(o.ceiling > o.floor))
         return false;
     LLVKWorldFrame wf;
     buildVulkanWorldFrame(wf);
-    if (!wf.enabled) return false;
+    if (!wf.enabled || wf.view_count != 1u) return false;
 
     const LLVector3& eye = o.eye;
     const F32 zn = llmax(eye.mV[VZ] - o.ceiling, 0.01f);   // the ceiling, below the eye
@@ -8884,7 +8934,23 @@ bool vkRenderRegionOrthoView(const GMDXOrthoView& o, std::vector<U8>& rgb, std::
     wf.temporal_reset = true;
     wf.ortho = true;
     wf.ortho_ppm = o.demand_ppm;
-    wf.ortho_view = false;   // <GMDX> (the live view's orthographic toggle: this box has its own rules)
+    wf.ortho_view = false;   // (the live view's orthographic toggle: this box has its own rules)
+    // #1075: the one view is the box (the per-view block the renderer reads).
+    {
+        LLVKViewFrame& v0 = wf.views[0];
+        std::memcpy(v0.view, wf.view, sizeof(v0.view));
+        std::memcpy(v0.proj, wf.proj, sizeof(v0.proj));
+        std::memcpy(v0.inv_proj, wf.inv_proj, sizeof(v0.inv_proj));
+        std::memcpy(v0.view_proj, wf.view_proj, sizeof(v0.view_proj));
+        std::memcpy(v0.inv_view_proj, wf.inv_view_proj, sizeof(v0.inv_view_proj));
+        std::memcpy(v0.view_proj_rel, wf.view_proj_rel, sizeof(v0.view_proj_rel));
+        std::memcpy(v0.inv_view_proj_rel, wf.inv_view_proj_rel, sizeof(v0.inv_view_proj_rel));
+        v0.eye[0] = eye.mV[VX]; v0.eye[1] = eye.mV[VY]; v0.eye[2] = eye.mV[VZ]; v0.eye[3] = 0.f;
+        v0.tan[0] = -wf.tan_half[0]; v0.tan[1] = wf.tan_half[0];
+        v0.tan[2] = -wf.tan_half[1]; v0.tan[3] = wf.tan_half[1];
+        wf.view_count = 1;
+        wf.views_are_eyes = false;
+    }
 
     // What a perspective / the live view brings that a map must not show.
     wf.dof_enabled = false;
@@ -9003,7 +9069,6 @@ bool vkRenderRegionOrthoView(const GMDXOrthoView& o, std::vector<U8>& rgb, std::
     return LLVulkanContext::instance().renderOffscreen(wf, (uint32_t)o.width, (uint32_t)o.height, rgb, depth,
                                                        llmax(o.frames, 1u), o.aa_frames);
 }
-// </GMDX>
 
 bool LLAppViewer::initWindow()
 {
@@ -11557,6 +11622,7 @@ void LLAppViewer::idle()
             gAgent.autoPilot(&yaw);
         }
 
+// Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4; Linden Lab game control (viewer PR #6202)
         // Auto-derive the active game-control mode (Avatar/Captive/FlyCam) from
         // current avatar state so the runtime mappings and gating track it.
         gAgent.updateGameControlMode();
@@ -11608,15 +11674,31 @@ void LLAppViewer::idle()
             // Recompute canonical controller state (also populates the internal
             // state consumed below) and send it to the server when it changed.
             // GameControlData goes only to a region that advertises the
-            // "GameControlEnabled" simulator feature (LL d4270de9ea); OpenSim regions
-            // don't. While unsupported the resend deadline is left untouched, so the
-            // first frame after the feature appears sends immediately.
-            if (LLGameControl::computeFinalStateAndCheckForChanges())
+            // "GameControlEnabled" simulator feature (LL d4270de9ea; OpenSim regions
+            // don't) and only while the GameControlToScripts preference is on. While
+            // unsupported the resend deadline is left untouched, so the first frame
+            // after the feature appears sends immediately. The preference is the one
+            // switch for sending; the engine's own flag follows it.
+            static bool s_sent_to_region = false;
+            const bool to_scripts = gSavedSettings.getBOOL("GameControlToScripts");
+            if (LLGameControl::sendToServer() != to_scripts)
             {
-                LLViewerRegion* regionp = gAgent.getRegion();
-                if (regionp && regionp->gameControlEnabled())
+                LLGameControl::setSendToServer(to_scripts);
+            }
+            LLViewerRegion* regionp = gAgent.getRegion();
+            const bool region_wants_it = regionp && regionp->gameControlEnabled();
+            if (LLGameControl::computeFinalStateAndCheckForChanges() && region_wants_it)
+            {
+                s_sent_to_region = true;
+                sendGameControlData(LLGameControl::getServerState());
+            }
+            else if (!to_scripts && s_sent_to_region)
+            {
+                // Switched off while the region may hold non-zero input: tell it once that all is released.
+                s_sent_to_region = false;
+                if (region_wants_it)
                 {
-                    sendGameControlData();
+                    sendGameControlData(LLGameControl::ServerState());
                 }
             }
 
@@ -11660,6 +11742,7 @@ void LLAppViewer::idle()
             // movement and engage/release bookkeeping. After key scanning (sets
             // the movement input), before the agent update is sent.
             SLTPSCamera::getInstance()->update();
+            GMDXCombatLockout::update(); // <GMDX> combat render lockout: after the camera has settled
         }
 
         // Client AO (#496): see this frame's movement keys before they are
@@ -11677,7 +11760,7 @@ void LLAppViewer::idle()
         // actually sent or not) because these will be recomputed based on
         // real-time key/controller input and resubmitted next frame.
         gAgent.resetControlFlags();
-        FSRMBScript::afterControlReset(); // <GMDX> keep a right button held for scripts held
+        FSRMBScript::afterControlReset(); // <GMDX> keep a right button held for scripts held (CombatFX)
     }
 
     //////////////////////////////////////
@@ -12043,6 +12126,11 @@ void LLAppViewer::idle()
 
 void LLAppViewer::idleShutdown()
 {
+    if (LLFloaterPopout::hasWork() && LLFloaterPopout::prepareForQuit())
+    {
+        mClosingFloaters = false;
+        if (LLFloaterPopout::hasWork()) return; // retry refused reparent before closing editors
+    }
     // Wait for all modal alerts to get resolved
     if (LLModalDialog::activeCount() > 0)
     {

@@ -19,11 +19,18 @@
  * $/LicenseInfo$
  */
 
+// <GMDX> Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4. Slipstream (CombatFX
+// master gate, inventory safety): the folders are only made after the user confirms
+// (ensureFolders) or by an action that needs one (save a loadout, sort a weapon); nothing renames
+// a folder on its own; links leave a loadout to the Trash (never purged); the folders look like
+// ordinary folders and the quick swap does nothing while CombatFX is off.
+
 #include "llviewerprecompiledheaders.h"
 
 #include "gmdxloadouts.h"
 
 #include "gmdxweaponsorter.h"
+#include "slcombatfx.h"
 #include "llagent.h"
 #include "llassetstorage.h"
 #include "llfilesystem.h"
@@ -53,10 +60,8 @@
 namespace
 {
     const char* const kFolderNames[GMDXLoadouts::FOLDER_COUNT]  = {"Equipment", "Loadouts", "Outdated"};
-    const char* const kLegacyNames[GMDXLoadouts::FOLDER_COUNT]  = {"GunMetal-DX Equipment", "GunMetal-DX Loadouts",
-                                                                   "GunMetal-DX Outdated"};
-    const char* const kFolderSettings[GMDXLoadouts::FOLDER_COUNT] = {"GMDXFolderEquipment", "GMDXFolderLoadouts",
-                                                                    "GMDXFolderOutdated"};
+    const char* const kFolderSettings[GMDXLoadouts::FOLDER_COUNT] = {"SLLoadoutFolderEquipment", "SLLoadoutFolderLoadouts",
+                                                                    "SLLoadoutFolderOutdated"};
     const char* const kNotWorn = "Not worn";
     const F64 kSwapTimeout = 20.0;  // seconds before an attachment that never arrived counts as failed
 
@@ -99,6 +104,18 @@ namespace
         static const S32 kGap = 24, kRightPad = 10;
         std::string mVersion;
     };
+
+    // Slipstream: a link leaving a loadout goes to the Trash (recoverable) instead of being
+    // removed outright; only links are ever handed here.
+    void trash_link(const LLUUID& id)
+    {
+        LLViewerInventoryItem* item = gInventory.getItem(id);
+        const LLUUID trash = gInventory.findCategoryUUIDForType(LLFolderType::FT_TRASH);
+        if (item && item->getIsLinkType() && trash.notNull())
+        {
+            gInventory.changeItemParent(item, trash, false);
+        }
+    }
 
     bool is_object(const LLViewerInventoryItem* item)
     {
@@ -194,23 +211,15 @@ LLUUID GMDXLoadouts::folder(EFolder f) const
     {
         return id;
     }
-    // Not saved yet (or gone): the folder under its first name (renamed now) or its own name.
+    // Not saved yet (or gone): the folder of its own name. (Slipstream: GunMetal-DX's rename of
+    // its first-named folders is gone: nothing here changes inventory.) A folder of that plain
+    // name is only taken over when it looks like this one's (the saved id is a local setting: a
+    // new computer asks again). A user's own "Equipment" stays theirs; a new one is made beside it.
     const LLUUID root = gInventory.getRootFolderID();
-    id = findFolder(root, kLegacyNames[f]);
-    if (id.notNull())
+    id = findFolder(root, kFolderNames[f]);
+    if (id.notNull() && !looksLike(f, id))
     {
-        rename_category(&gInventory, id, kFolderNames[f]);
-    }
-    else
-    {
-        // A folder of that plain name is only taken over when it looks like this one's (the
-        // saved id is a local setting: a new computer asks again). A user's own "Equipment" stays
-        // theirs; a new one is made beside it.
-        id = findFolder(root, kFolderNames[f]);
-        if (id.notNull() && !looksLike(f, id))
-        {
-            id.setNull();
-        }
+        id.setNull();
     }
     const std::string saved = id.notNull() ? id.asString() : std::string();
     if (gSavedPerAccountSettings.getString(kFolderSettings[f]) != saved)
@@ -259,7 +268,7 @@ bool GMDXLoadouts::looksLike(EFolder f, const LLUUID& id) const
         return true;
     }
     // OUTDATED: empty, or only things carrying a watched tag.
-    std::string tags = gSavedPerAccountSettings.getString("GMDXLoadoutWatchTags");
+    std::string tags = gSavedPerAccountSettings.getString("SLLoadoutWatchTags");
     LLStringUtil::toLower(tags);
     LLInventoryModel::cat_array_t all_cats;
     LLInventoryModel::item_array_t all_items;
@@ -320,9 +329,10 @@ int GMDXLoadouts::folderKind(const LLUUID& id)
     // folder per draw.
     static LLUUID ids[FOLDER_COUNT];
     static U64 looked_up_at = U64(-1);
-    if (id.isNull() || !gInventory.isInventoryUsable() || !gSavedPerAccountSettings.controlExists(kFolderSettings[0]))
+    if (id.isNull() || !SLCombatFX::enabled() || !gInventory.isInventoryUsable()
+        || !gSavedPerAccountSettings.controlExists(kFolderSettings[0]))
     {
-        return 0;
+        return 0;   // (Slipstream: CombatFX off, they are ordinary folders)
     }
     if (looked_up_at != gInventory.getStructureGeneration())
     {
@@ -344,9 +354,39 @@ int GMDXLoadouts::folderKind(const LLUUID& id)
 
 void GMDXLoadouts::ensureFolders()
 {
-    if (!gInventory.isInventoryUsable() || mPendingCreates > 0)
+    if (!gInventory.isInventoryUsable() || mPendingCreates > 0 || !SLCombatFX::enabled())
     {
         return;
+    }
+    // Slipstream (inventory safety): what is missing is only made after the user says so, once
+    // per session; asked again at the next window open after a No.
+    if (!mFoldersConfirmed)
+    {
+        std::string missing;
+        auto note = [&missing](const std::string& name) { missing += (missing.empty() ? "" : ", ") + name; };
+        if (loadoutsFolder().isNull()) note(kFolderNames[LOADOUTS]);
+        const LLUUID equip_now = equipmentFolder();
+        if (equip_now.isNull()) note(kFolderNames[EQUIPMENT]);
+        for (const std::string& cat : categories())
+        {
+            if (equip_now.isNull() || findFolder(equip_now, cat).isNull()) note(std::string(kFolderNames[EQUIPMENT]) + "/" + cat);
+        }
+        if (!missing.empty())
+        {
+            if (mAskingFolders) return;
+            mAskingFolders = true;
+            LLSD args;
+            args["FOLDERS"] = missing;
+            LLNotificationsUtil::add("SLLoadoutCreateFolders", args, LLSD(), [](const LLSD& n, const LLSD& r)
+            {
+                GMDXLoadouts& self = GMDXLoadouts::instance();
+                self.mAskingFolders = false;
+                if (LLNotificationsUtil::getSelectedOption(n, r) != 0) return;
+                self.mFoldersConfirmed = true;
+                self.ensureFolders();
+            });
+            return;
+        }
     }
     auto created = [](const LLUUID& id)
     {
@@ -397,7 +437,7 @@ void GMDXLoadouts::ensureFolders()
 std::vector<std::string> GMDXLoadouts::categories() const
 {
     std::vector<std::string> cats;
-    std::string list = gSavedPerAccountSettings.getString("GMDXLoadoutCategories");
+    std::string list = gSavedPerAccountSettings.getString("SLLoadoutCategories");
     size_t start = 0;
     while (start <= list.size())
     {
@@ -423,7 +463,7 @@ void GMDXLoadouts::setCategories(const std::vector<std::string>& cats)
     {
         list += (list.empty() ? "" : "|") + cat;
     }
-    gSavedPerAccountSettings.setString("GMDXLoadoutCategories", list);
+    gSavedPerAccountSettings.setString("SLLoadoutCategories", list);
     bump();
 }
 
@@ -699,7 +739,7 @@ bool GMDXLoadouts::findLoadout(const LLUUID& id, Loadout& out)
 
 LLUUID GMDXLoadouts::wornLoadout() const
 {
-    LLUUID id(gSavedPerAccountSettings.getString("GMDXLoadoutWorn"));
+    LLUUID id(gSavedPerAccountSettings.getString("SLLoadoutWorn"));
     LLViewerInventoryCategory* cat = id.notNull() ? gInventory.getCategory(id) : nullptr;
     return (cat && cat->getParentUUID() == loadoutsFolder()) ? id : LLUUID::null;
 }
@@ -747,7 +787,7 @@ bool GMDXLoadouts::isInOutdated(const LLUUID& id)
     // Looked up again only when folders are added, moved or removed (it runs per searched item).
     static LLUUID outdated;
     static U64 looked_up_at = U64(-1);
-    if (!gInventory.isInventoryUsable())
+    if (!gInventory.isInventoryUsable() || !SLCombatFX::enabled())   // (Slipstream: CombatFX off, search leaves nothing out)
     {
         return false;
     }
@@ -794,7 +834,7 @@ std::vector<LLUUID> GMDXLoadouts::removeFromLoadouts(const uuid_vec_t& parts)
         }
         for (const LLUUID& id : remove)
         {
-            remove_inventory_object(id, nullptr);
+            trash_link(id);   // (Slipstream: to the Trash, not removed)
         }
         if (!remove.empty())
         {
@@ -1102,7 +1142,7 @@ void GMDXLoadouts::beginSwap(const std::string& label, const std::map<std::strin
     }
     if (loadout_id.notNull())
     {
-        gSavedPerAccountSettings.setString("GMDXLoadoutWorn", loadout_id.asString());
+        gSavedPerAccountSettings.setString("SLLoadoutWorn", loadout_id.asString());
     }
 
     if (!mDetach.empty())
@@ -1234,23 +1274,30 @@ void GMDXLoadouts::linkSlots(const LLUUID& folder, const slots_t& slots)
 
 void GMDXLoadouts::createLoadout(const std::string& name, const slots_t& slots, bool mark_worn)
 {
-    ensureFolders();
-    const LLUUID parent = loadoutsFolder();
     std::string clean = clean_name(name);
-    if (parent.isNull() || clean.empty())
+    if (clean.empty())
     {
         return;
     }
-    gInventory.createNewCategory(parent, LLFolderType::FT_NONE, clean, [slots, mark_worn](const LLUUID& id)
+    // Slipstream: the user asked for this loadout, so its Loadouts folder is made when missing
+    // (instead of the whole folder set: ensureFolders asks for that).
+    withFolder(LOADOUTS, [clean, slots, mark_worn](const LLUUID& parent)
     {
-        if (id.notNull())
+        if (parent.isNull())
         {
-            GMDXLoadouts::instance().linkSlots(id, slots);
-            if (mark_worn)
-            {
-                gSavedPerAccountSettings.setString("GMDXLoadoutWorn", id.asString());
-            }
+            return;   // the create failed: nothing retried
         }
+        gInventory.createNewCategory(parent, LLFolderType::FT_NONE, clean, [slots, mark_worn](const LLUUID& id)
+        {
+            if (id.notNull())
+            {
+                GMDXLoadouts::instance().linkSlots(id, slots);
+                if (mark_worn)
+                {
+                    gSavedPerAccountSettings.setString("SLLoadoutWorn", id.asString());
+                }
+            }
+        });
     });
 }
 
@@ -1273,7 +1320,8 @@ void GMDXLoadouts::shareLoadout(const LLUUID& loadout_id)
         auto it = loadout.slots.find(cat);
         text += cat + ": " + (it != loadout.slots.end() ? it->second.name : std::string("(empty)")) + "\n";
     }
-    text += "\nTo add it in GunMetal-DX, drop this notecard on the Loadouts window (Combat > Loadouts).\n";
+    // <GMDX> our name first (the reader matches the header line only, so either viewer takes it)
+    text += "\nTo add it in GunMetal-DX (or Slipstream with CombatFX on), drop this notecard on the Loadouts window (Combat > Loadouts).\n";
 
     LLNotecard nc(LLNotecard::MAX_SIZE);
     nc.setText(text);
@@ -1301,7 +1349,7 @@ void GMDXLoadouts::shareLoadout(const LLUUID& loadout_id)
             nullptr));
     });
     create_inventory_item(gAgent.getID(), gAgent.getSessionID(), gInventory.findCategoryUUIDForType(LLFolderType::FT_NOTECARD),
-                          LLTransactionID::tnull, name, "GunMetal-DX loadout", LLAssetType::AT_NOTECARD,
+                          LLTransactionID::tnull, name, "GunMetal-DX loadout", LLAssetType::AT_NOTECARD,   // <GMDX>
                           LLInventoryType::IT_NOTECARD, NO_INV_SUBTYPE, PERM_ALL, cb);
 }
 
@@ -1452,7 +1500,7 @@ void GMDXLoadouts::setLoadoutSlot(const LLUUID& loadout_id, const std::string& c
     }
     for (const LLUUID& id : remove)
     {
-        remove_inventory_object(id, nullptr);
+        trash_link(id);   // (Slipstream: to the Trash, not removed)
     }
     if (weapon)
     {
@@ -1478,10 +1526,10 @@ void GMDXLoadouts::saveWornInto(const LLUUID& loadout_id)
     }
     for (const LLUUID& id : remove)
     {
-        remove_inventory_object(id, nullptr);
+        trash_link(id);   // (Slipstream: to the Trash, not removed)
     }
     linkSlots(loadout_id, worn());
-    gSavedPerAccountSettings.setString("GMDXLoadoutWorn", loadout_id.asString());
+    gSavedPerAccountSettings.setString("SLLoadoutWorn", loadout_id.asString());
 }
 
 void GMDXLoadouts::renameLoadout(const LLUUID& loadout_id, const std::string& name)
@@ -1495,9 +1543,21 @@ void GMDXLoadouts::renameLoadout(const LLUUID& loadout_id, const std::string& na
 
 void GMDXLoadouts::deleteLoadout(const LLUUID& loadout_id)
 {
+    // Slipstream (inventory safety): only a folder of links goes to the Trash; one the user put
+    // anything real in (or a subfolder) stays, and says so.
+    LLInventoryModel::cat_array_t cats;
+    LLInventoryModel::item_array_t items;
+    gInventory.collectDescendents(loadout_id, cats, items, false);
+    const bool links_only = cats.empty()
+        && std::all_of(items.begin(), items.end(), [](const LLPointer<LLViewerInventoryItem>& i) { return i->getIsLinkType(); });
+    if (!links_only)
+    {
+        LLNotificationsUtil::add("SLLoadoutNotOnlyLinks");
+        return;
+    }
     if (wornLoadout() == loadout_id)
     {
-        gSavedPerAccountSettings.setString("GMDXLoadoutWorn", "");
+        gSavedPerAccountSettings.setString("SLLoadoutWorn", "");
     }
     gInventory.removeCategory(loadout_id);  // to the trash, like any folder
 }
@@ -1620,7 +1680,7 @@ void GMDXLoadouts::showChooser(const std::string& cat, const LLUUID& current, S3
 void GMDXLoadouts::showQuickMenu(S32 slot)
 {
     const std::vector<std::string> cats = categories();
-    if (slot < 0 || slot >= S32(cats.size()) || !gInventory.isInventoryUsable())
+    if (slot < 0 || slot >= S32(cats.size()) || !gInventory.isInventoryUsable() || !SLCombatFX::enabled())
     {
         return;
     }
@@ -1665,7 +1725,7 @@ namespace
     std::vector<std::string> hotkey_entries()
     {
         std::vector<std::string> out;
-        const std::string all = gSavedSettings.getString("GMDXQuickSwapKeys");
+        const std::string all = gSavedSettings.getString("SLQuickSwapKeys");
         size_t start = 0;
         while (start <= all.size())
         {
@@ -1750,13 +1810,30 @@ bool GMDXLoadouts::setHotkey(S32 slot, KEY key, MASK mask)
     {
         all += (i ? ";" : "") + entries[i];
     }
-    gSavedSettings.setString("GMDXQuickSwapKeys", all);
+    gSavedSettings.setString("SLQuickSwapKeys", all);
     applyHotkeys();
     return true;
 }
 
 void GMDXLoadouts::applyHotkeys(bool clear)
 {
+    // Slipstream: the Combat menu and its keys exist only while CombatFX is on (followed live).
+    static bool s_hooked = false;
+    if (!s_hooked)
+    {
+        if (LLControlVariable* c = gSavedSettings.getControl("CombatFX"))
+        {
+            s_hooked = true;
+            c->getSignal()->connect([](LLControlVariable*, const LLSD&, const LLSD&) { GMDXLoadouts::applyHotkeys(); });
+        }
+    }
+    const bool on = SLCombatFX::enabled();
+    if (gMenuBarView)
+    {
+        gMenuBarView->setItemVisible("Combat", on);
+        gMenuBarView->setItemEnabled("Combat", on);
+    }
+    clear = clear || !on;
     for (S32 i = 0; i < HOTKEY_SLOTS; ++i)
     {
         if (LLMenuItemGL* item = hotkey_item(i))

@@ -177,6 +177,8 @@ private:
     std::set<LLUUID>        mPrefetchedIcons;
     LLFrameTimer            mIconPassTimer{};
     boost::signals2::scoped_connection mIconConnection;
+    boost::signals2::scoped_connection mClassicNameColorsConnection;
+    void refreshNameStyles();
 
     std::string             mFriendFilterSubString{ LLStringUtil::null };
     std::string             mFriendFilterSubStringOrig{ LLStringUtil::null };

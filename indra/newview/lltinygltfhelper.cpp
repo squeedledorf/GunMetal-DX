@@ -70,17 +70,17 @@ void LLTinyGLTFHelper::initFetchedTextures(tinygltf::Material& material,
     LLPointer<LLViewerFetchedTexture>& base_color_tex,
     LLPointer<LLViewerFetchedTexture>& normal_tex,
     LLPointer<LLViewerFetchedTexture>& mr_tex,
-    LLPointer<LLViewerFetchedTexture>& emissive_tex)
+    LLPointer<LLViewerFetchedTexture>& emissive_tex, const TextureResolver& resolver)
 {
     if (base_color_img)
     {
-        base_color_tex = LLViewerTextureManager::getFetchedTexture(base_color_img, FTType::FTT_LOCAL_FILE, true);
+        base_color_tex = resolver ? resolver(base_color_img) : LLPointer<LLViewerFetchedTexture>(LLViewerTextureManager::getFetchedTexture(base_color_img, FTType::FTT_LOCAL_FILE, true));
     }
 
     if (normal_img)
     {
         strip_alpha_channel(normal_img);
-        normal_tex = LLViewerTextureManager::getFetchedTexture(normal_img, FTType::FTT_LOCAL_FILE, true);
+        normal_tex = resolver ? resolver(normal_img) : LLPointer<LLViewerFetchedTexture>(LLViewerTextureManager::getFetchedTexture(normal_img, FTType::FTT_LOCAL_FILE, true));
     }
 
     if (mr_img)
@@ -125,13 +125,13 @@ void LLTinyGLTFHelper::initFetchedTextures(tinygltf::Material& material,
 
     if (mr_img)
     {
-        mr_tex = LLViewerTextureManager::getFetchedTexture(mr_img, FTType::FTT_LOCAL_FILE, true);
+        mr_tex = resolver ? resolver(mr_img) : LLPointer<LLViewerFetchedTexture>(LLViewerTextureManager::getFetchedTexture(mr_img, FTType::FTT_LOCAL_FILE, true));
     }
 
     if (emissive_img)
     {
         strip_alpha_channel(emissive_img);
-        emissive_tex = LLViewerTextureManager::getFetchedTexture(emissive_img, FTType::FTT_LOCAL_FILE, true);
+        emissive_tex = resolver ? resolver(emissive_img) : LLPointer<LLViewerFetchedTexture>(LLViewerTextureManager::getFetchedTexture(emissive_img, FTType::FTT_LOCAL_FILE, true));
     }
 }
 
@@ -294,7 +294,7 @@ bool LLTinyGLTFHelper::getMaterialFromModel(
     S32 mat_index,
     LLFetchedGLTFMaterial* material,
     std::string& material_name,
-    bool flip)
+    bool flip, const TextureResolver& resolver)
 {
     llassert(material);
 
@@ -335,7 +335,7 @@ bool LLTinyGLTFHelper::getMaterialFromModel(
     // todo: pass it into local bitmaps?
     LLTinyGLTFHelper::initFetchedTextures(material_in,
         base_img, normal_img, mr_img, emissive_img, occlusion_img,
-        base_color_tex, normal_tex, mr_tex, emissive_tex);
+        base_color_tex, normal_tex, mr_tex, emissive_tex, resolver);
 
     if (base_color_tex)
     {

@@ -112,6 +112,7 @@ typedef void (*LLUIAudioCallback)(const LLUUID& uuid);
 
 class LLUI : public LLSimpleton<LLUI>
 {
+    friend class LLFloaterPopout;
     LOG_CLASS(LLUI);
 public:
     typedef std::map<std::string, LLControlGroup*, std::less<> > settings_map_t;

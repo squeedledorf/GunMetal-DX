@@ -153,6 +153,7 @@ static const U32 MAX_SNAPSHOT_IMAGE_SIZE = 10240; // max snapshot side: 10240 = 
 
 class LLViewerWindow : public LLWindowCallbacks
 {
+    friend class LLFloaterPopout;
 public:
     //
     // CREATORS
@@ -189,7 +190,8 @@ public:
     void            handlePieMenu(S32 x, S32 y, MASK mask);
 
     void            reshapeStatusBarContainer();
-    void            resetStatusBarContainer(); // undo changes done by resetStatusBarContainer on initWorldUI()
+    void            resetStatusBarContainer(); // undo changes done by reshapeStatusBarContainer on initWorldUI()
+    void            logTopBarLayout() const;
 
     bool handleAnyMouseClick(LLWindow *window, LLCoordGL pos, MASK mask, EMouseClickType clicktype, bool down, bool &is_toolmgr_action);
 
@@ -343,6 +345,8 @@ public:
     bool            getLeftMouseDown()  const   { return mLeftMouseDown; }
     bool            getMiddleMouseDown()    const   { return mMiddleMouseDown; }
     bool            getRightMouseDown() const   { return mRightMouseDown; }
+    // TPS released capture during this RMB gesture; its trailing up belongs to TPS.
+    void            consumeTPSRightMouseUp() { mConsumeTPSRightMouseUp = true; }
 
     const LLPickInfo&   getLastPick() const { return mLastPick; }
     U32                 getPickSerial() const { return mPickSerial; }
@@ -387,7 +391,7 @@ public:
     void            hideCursor();
     bool            getCursorHidden() { return mCursorHidden; }
     void            moveCursorToCenter();                               // move to center of window
-    void            moveCursorTo(S32 x, S32 y);                         // move to an arbitrary screen-space (GL) position, clamped to the world view
+    void            moveCursorTo(S32 x, S32 y);                         // move to a screen-space (GL) position, clamped to the window (gamepad cursor, #1207)
     // End of a hidden-cursor capture (#871): warp to the window centre, then show the cursor.
     // Returns false (and does nothing) when MouseReleaseToCenter is off, so the caller can
     // restore the cursor its old way.
@@ -465,6 +469,9 @@ public:
     void            onDirectorySelected(const std::vector<std::string>& filenames, LLImageFormatted *image, const snapshot_saved_signal_t::slot_type& success_cb, const snapshot_saved_signal_t::slot_type& failure_cb);
     void            saveImageLocal(LLImageFormatted *image, const snapshot_saved_signal_t::slot_type& success_cb, const snapshot_saved_signal_t::slot_type& failure_cb);
     void            onSelectionFailure(const snapshot_saved_signal_t::slot_type& failure_cb);
+    // #788: the path in SnapshotBaseDir the next snapshot saved to disk gets with this file
+    // name pattern (SnapshotFileNamePattern, empty = the default), never an existing file
+    std::string     getNextSnapshotPath(const std::string& pattern, S32 width, S32 height, const std::string& extension) const;
 
     // Reset the directory where snapshots are saved.
     // Client will open directory picker on next snapshot save.
@@ -596,7 +603,9 @@ private:
     S32             mSuppressMouseDeltaFrames = 0;   // after leaving relative mode (resync)
     bool            mLeftMouseDown;
     bool            mMiddleMouseDown;
+    bool            mMiddleAutoScrollPressConsumed = false;
     bool            mRightMouseDown;
+    bool            mConsumeTPSRightMouseUp = false;
 
     LLProgressView  *mProgressView;
 

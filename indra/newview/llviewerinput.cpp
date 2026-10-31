@@ -32,6 +32,10 @@
 
 #include "slchatbar.h"
 #include "sltpscamera.h"
+#include "slcombatfx.h"   // <SS:Skoomastream> OTS keys (CombatFX)
+#include "gmdxmapshare.h"  // <GMDX> ping keys (CombatFX)
+#include "gmdxpingwheel.h" // <GMDX>
+#include "gmdxots.h"       // <GMDX> Ctrl+Space and Shift+Space: the over-the-shoulder aim camera
 
 #include "llappviewer.h"
 #include "llfloaterreg.h"
@@ -60,8 +64,6 @@
 #include "slfxpresets.h"
 #include "slkeycommands.h"
 #include "llviewercamera.h"
-#include "gmdxmapshare.h" // <GMDX> pings
-#include "gmdxpingwheel.h" // <GMDX> the ping wheel
 
 //
 // Constants
@@ -555,7 +557,7 @@ bool camera_roll_left(const LLKeyPressState& s)
 
 bool camera_roll_right(const LLKeyPressState& s)
 {
-    if (KEYSTATE_UP == s.mState ) return true;
+    if (KEYSTATE_UP == s.mState) return true;
     gAgentCamera.unlockView();
     gAgentCamera.setRollRightKey(get_orbit_rate(s));
     return true;
@@ -563,12 +565,12 @@ bool camera_roll_right(const LLKeyPressState& s)
 
 bool camera_roll_reset(const LLKeyPressState& s)
 {
-    if (KEYSTATE_UP == s.mState ) return true;
+    if (KEYSTATE_UP == s.mState) return true;
     gAgentCamera.resetCameraRoll();
     return true;
 }
 
-// <GMDX> orthographic view toggle (SoapStorm 7179701d85, numpad 5)
+// Orthographic view toggle (numpad 5). Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
 bool camera_toggle_ortho(const LLKeyPressState& s)
 {
     if (KEYSTATE_DOWN == s.mState)
@@ -577,9 +579,8 @@ bool camera_toggle_ortho(const LLKeyPressState& s)
     }
     return true;
 }
-// </GMDX>
 
-bool camera_move_forward( const LLKeyPressState& s )
+bool camera_move_forward(const LLKeyPressState& s)
 {
     if( KEYSTATE_UP == s.mState ) return true;
     gAgentCamera.unlockView();
@@ -588,7 +589,7 @@ bool camera_move_forward( const LLKeyPressState& s )
 }
 
 
-bool camera_move_backward( const LLKeyPressState& s )
+bool camera_move_backward(const LLKeyPressState& s)
 {
     if( KEYSTATE_UP == s.mState ) return true;
     gAgentCamera.unlockView();
@@ -596,7 +597,7 @@ bool camera_move_backward( const LLKeyPressState& s )
     return true;
 }
 
-bool camera_move_forward_sitting( const LLKeyPressState& s )
+bool camera_move_forward_sitting(const LLKeyPressState& s)
 {
     if( KEYSTATE_UP == s.mState && gAgent.mDoubleTapRunMode != LLAgent::DOUBLETAP_FORWARD ) return true;
     if (gAgent.forwardGrabbed() || gAgentCamera.sitCameraEnabled() || (gAgent.getRunning() && !gAgent.getAlwaysRun()))
@@ -610,7 +611,7 @@ bool camera_move_forward_sitting( const LLKeyPressState& s )
     return true;
 }
 
-bool camera_move_backward_sitting( const LLKeyPressState& s )
+bool camera_move_backward_sitting(const LLKeyPressState& s)
 {
     if( KEYSTATE_UP == s.mState && gAgent.mDoubleTapRunMode != LLAgent::DOUBLETAP_BACKWARD ) return true;
 
@@ -1139,51 +1140,31 @@ bool toggle_effects(const LLKeyPressState& s)
     return true;
 }
 
-// <SS:Skoomastream>
-// OTS shoulder swap: mirror the over-the-shoulder camera to the avatar's
-// other side (TPS-style shoulder toggle). OTSCameraSide is read live via
-// LLCachedControl every frame, so negating it repositions the camera and
-// the focus point immediately; startCameraAnimation makes the move a smooth
-// lerp instead of a snap when OTS mode is active.
+// <GMDX> GunMetal-DX 0.3.0's OTS keys (gmdxots.h), CombatFX only and in aim mode (else the key is not taken):
+// Shift+Space swaps the shoulder (Slipstream's TPS shoulder framing is not used in GunMetal-DX), Ctrl+Space
+// switches between the shoulder camera and first person without leaving aim mode.
 bool ots_swap_shoulder(const LLKeyPressState& s)
 {
-    if (KEYSTATE_DOWN != s.mState) return true;
-    F32 side = gSavedSettings.getF32("OTSCameraSide");
-    gSavedSettings.setF32("OTSCameraSide", -side);
-    if (gAgentCamera.cameraOTS())
-    {
-        gAgentCamera.startCameraAnimation();
-    }
+    if (!GMDXOTS::takesKeys()) return false;
+    if (KEYSTATE_DOWN == s.mState) GMDXOTS::swapShoulder();
     return true;
 }
 
-// OTS view toggle: switch between the over-the-shoulder camera and true
-// first-person mouselook without leaving aim mode (precision-aim style).
-// Checks cameraOTS() first because cameraMouselook() also reports true in OTS.
 bool ots_toggle_view(const LLKeyPressState& s)
 {
-    if (KEYSTATE_DOWN != s.mState) return true;
-    if (gAgentCamera.cameraOTS())
-    {
-        gAgentCamera.changeCameraToMouselook();
-        gSavedSettings.setBOOL("OTSLastViewFirstPerson", true);
-    }
-    // Same rule as the M toggle (LLViewMouselook): seated without a sit
-    // camera (or under a tight RLVa camera distance cap) stays first person.
-    else if (gAgentCamera.cameraMouselook() && gAgentCamera.canUseOTS())
-    {
-        gAgentCamera.changeCameraToOTS();
-        gSavedSettings.setBOOL("OTSLastViewFirstPerson", false);
-    }
+    if (!GMDXOTS::takesKeys()) return false;
+    if (KEYSTATE_DOWN == s.mState) GMDXOTS::toggleView();
     return true;
 }
-// </SS:Skoomastream>
+// </GMDX>
 
-// <GMDX> pings (gmdxmapshare.h): under the cursor, or at the crosshair in mouselook / OTS; 0 ping,
-// 1 enemy, 2 rally
+// <GMDX> pings (gmdxmapshare.h; CombatFX, ported from GunMetal-DX, LGPL 2.1, v0.3.0 cf5f1f4): under
+// the cursor, or at the crosshair in mouselook / OTS; 0 ping, 1 enemy, 2 rally. GunMetal-DX ships
+// B (ping) and Shift+B (the wheel) as defaults; enemy and rally have no key of their own.
 template <S32 KIND>
 bool map_ping(const LLKeyPressState& s)
 {
+    if (!SLCombatFX::enabled()) return false;
     // (a binding matches with extra modifiers held: Alt+B / Ctrl+B are not pings)
     if (KEYSTATE_DOWN == s.mState && !(gKeyboard->currentMask(false) & (MASK_ALT | MASK_CONTROL))) GMDXMapShare::pingAtCursor(KIND);
     return true;
@@ -1192,8 +1173,7 @@ bool map_ping(const LLKeyPressState& s)
 // tap: a Ping; hold: the wheel (gmdxpingwheel.h)
 bool map_ping_wheel(const LLKeyPressState& s)
 {
-    GMDXPingWheel::onKey(s);
-    return true;
+    return GMDXPingWheel::onKey(s.mState);
 }
 // </GMDX>
 
@@ -1351,19 +1331,9 @@ REGISTER_KEYBOARD_ACTION(script_mouse_handler_name, script_trigger_lbutton);
 REGISTER_KEYBOARD_ACTION("roll_left", camera_roll_left);
 REGISTER_KEYBOARD_ACTION("roll_right", camera_roll_right);
 REGISTER_KEYBOARD_ACTION("roll_reset", camera_roll_reset);
-REGISTER_KEYBOARD_ACTION("toggle_ortho", camera_toggle_ortho);   // <GMDX>
+REGISTER_KEYBOARD_ACTION("toggle_ortho", camera_toggle_ortho);
 REGISTER_KEYBOARD_ACTION("toggle_tps_camera", toggle_tps_camera);
 REGISTER_KEYBOARD_ACTION("toggle_effects", toggle_effects);
-// <SS:Skoomastream>
-REGISTER_KEYBOARD_ACTION("ots_swap_shoulder", ots_swap_shoulder); // OTS shoulder swap
-REGISTER_KEYBOARD_ACTION("ots_toggle_view", ots_toggle_view);     // OTS <-> first person mouselook
-// </SS:Skoomastream>
-// <GMDX> pings
-REGISTER_KEYBOARD_ACTION("map_ping", map_ping<0>);
-REGISTER_KEYBOARD_ACTION("map_ping_enemy", map_ping<1>);
-REGISTER_KEYBOARD_ACTION("map_ping_rally", map_ping<2>);
-REGISTER_KEYBOARD_ACTION("map_ping_wheel", map_ping_wheel);
-// </GMDX>
 REGISTER_KEYBOARD_ACTION("toggle_flycam", agent_toggle_flycam);
 REGISTER_KEYBOARD_ACTION("flycam_move_forward", (flycam_axis_key<LLGameControl::FLYCAM_DOLLY, 1>));
 REGISTER_KEYBOARD_ACTION("flycam_move_backward", (flycam_axis_key<LLGameControl::FLYCAM_DOLLY, -1>));
@@ -1410,6 +1380,16 @@ REGISTER_KEYBOARD_ACTION("game_control_button_28", game_control_button<28>);
 REGISTER_KEYBOARD_ACTION("game_control_button_29", game_control_button<29>);
 REGISTER_KEYBOARD_ACTION("game_control_button_30", game_control_button<30>);
 REGISTER_KEYBOARD_ACTION("game_control_button_31", game_control_button<31>);
+// <SS:Skoomastream> CombatFX
+REGISTER_KEYBOARD_ACTION("ots_swap_shoulder", ots_swap_shoulder); // OTS shoulder swap
+// </SS:Skoomastream>
+REGISTER_KEYBOARD_ACTION("ots_toggle_view", ots_toggle_view);     // <GMDX> OTS <-> first person
+// <GMDX> pings (CombatFX)
+REGISTER_KEYBOARD_ACTION("map_ping", map_ping<0>);
+REGISTER_KEYBOARD_ACTION("map_ping_enemy", map_ping<1>);
+REGISTER_KEYBOARD_ACTION("map_ping_rally", map_ping<2>);
+REGISTER_KEYBOARD_ACTION("map_ping_wheel", map_ping_wheel);
+// </GMDX>
 #undef REGISTER_KEYBOARD_ACTION
 
 LLViewerInput::LLViewerInput()
@@ -1945,6 +1925,8 @@ std::string LLViewerInput::findBoundCommand(KEY key, MASK mask) const
     return std::string();
 }
 
+bool compare_key_by_mask(LLKeyboardBinding i1, LLKeyboardBinding i2); // <GMDX> (the version 3 step re-sorts)
+
 S32 LLViewerInput::loadBindingsXML(const std::string& filename)
 {
     resetBindings();
@@ -1965,9 +1947,28 @@ S32 LLViewerInput::loadBindingsXML(const std::string& filename)
             move_wheel = filename != gDirUtilp->getExpandedFilename(LL_PATH_APP_SETTINGS, "key_bindings.xml");
             if (!move_wheel) gSavedSettings.setBOOL("GMDXPingWheelKeysMoved", true);   // (the defaults have it)
         }
+        // <GMDX> Slipstream's version 5 (below) takes Ctrl+Space (ots_toggle_view) out of a user file; GunMetal-DX
+        // uses it again (gmdxots.h): it comes back once (GMDXOTSKeysRestored), mode by mode, where the
+        // command has no key and Ctrl+Space is free, as the version 3 step does
+        bool restore_ots = false;
+        if (gSavedSettings.controlExists("GMDXOTSKeysRestored") && !gSavedSettings.getBOOL("GMDXOTSKeysRestored"))
+        {
+            restore_ots = filename != gDirUtilp->getExpandedFilename(LL_PATH_APP_SETTINGS, "key_bindings.xml");
+            if (!restore_ots) gSavedSettings.setBOOL("GMDXOTSKeysRestored", true);   // (the defaults have it)
+        }
+        // and version 5 moved Shift+Space (ots_swap_shoulder) from first person to third person: it comes back to
+        // first person once (GMDXOTSSwapKeyRestored), likewise only where the command has no key there and the
+        // chord is free
+        bool restore_swap = false;
+        if (gSavedSettings.controlExists("GMDXOTSSwapKeyRestored") && !gSavedSettings.getBOOL("GMDXOTSSwapKeyRestored"))
+        {
+            restore_swap = filename != gDirUtilp->getExpandedFilename(LL_PATH_APP_SETTINGS, "key_bindings.xml");
+            if (!restore_swap) gSavedSettings.setBOOL("GMDXOTSSwapKeyRestored", true);   // (the defaults have it)
+        }
+        // </GMDX>
         if (move_wheel)
         {
-            auto move = [](auto& mode)
+            auto move = [](KeyMode& mode)
             {
                 if (!mode.isProvided()) return;
                 for (auto it = mode.bindings.begin(); it != mode.bindings.end(); ++it)
@@ -1984,6 +1985,90 @@ S32 LLViewerInput::loadBindingsXML(const std::string& filename)
             move(keys.sitting);
         }
         // </GMDX>
+
+        // Version 2 (#1206): a saved file from before the orthographic camera gets its default
+        // binding, numpad 5 -> toggle_ortho in third person and sitting, unless that key is
+        // already bound there. Added before the modes load so it works this session too.
+        const bool upgrade_v2 = keys.xml_version < 2;
+        if (upgrade_v2)
+        {
+            auto add_ortho = [](KeyMode& mode)
+            {
+                if (!mode.isProvided()) return;
+                for (const KeyBinding& b : mode.bindings)
+                {
+                    if (b.key.isProvided() && b.key() == "PAD_CENTER"
+                        && (!b.mask.isProvided() || b.mask() == "NONE"))
+                    {
+                        return;
+                    }
+                }
+                KeyBinding ortho;
+                ortho.key = "PAD_CENTER";
+                ortho.mask = "NONE";
+                ortho.command = "toggle_ortho";
+                mode.bindings.add(ortho);
+            };
+            add_ortho(keys.third_person);
+            add_ortho(keys.sitting);
+        }
+
+        // Version 5: OTS framing belongs to TPS. Remove the obsolete aim-view
+        // action everywhere. Remove only the shipped first-person shoulder chord;
+        // custom chords stay intact. Add Shift+Space in third person only when
+        // neither its chord nor its command was assigned by the user.
+        if (keys.xml_version < 5)
+        {
+            auto clean_ots = [](KeyMode& mode, bool first_person)
+            {
+                if (!mode.isProvided()) return;
+                KeyMode cleaned;
+                for (const KeyBinding& b : mode.bindings)
+                {
+                    //if (b.command() == "ots_toggle_view") continue; // <GMDX> GunMetal-DX uses it again (gmdxots.h)
+                    KEY key = KEY_NONE;
+                    MASK mask = MASK_NONE;
+                    const bool default_shoulder = first_person && b.command() == "ots_swap_shoulder"
+                        && (!b.mouse.isProvided() || b.mouse().empty() || b.mouse() == "NONE")
+                        && (!b.controller.isProvided() || b.controller().empty())
+                        && LLKeyboard::keyFromString(b.key(), &key) && key == ' '
+                        && LLKeyboard::maskFromString(b.mask(), &mask) && mask == MASK_SHIFT;
+                    if (!default_shoulder) cleaned.bindings.add(b);
+                }
+                mode.bindings.set(cleaned.bindings, true);
+            };
+            clean_ots(keys.first_person, true);
+            clean_ots(keys.third_person, false);
+            clean_ots(keys.sitting, false);
+            clean_ots(keys.edit_avatar, false);
+            clean_ots(keys.flycam, false);
+            clean_ots(keys.commands, false);
+            if (keys.third_person.isProvided())
+            {
+                bool occupied = false;
+                for (const KeyBinding& b : keys.third_person.bindings)
+                {
+                    KEY key = KEY_NONE;
+                    MASK mask = MASK_NONE;
+                    if (b.command() == "ots_swap_shoulder"
+                        || (LLKeyboard::keyFromString(b.key(), &key) && key == ' '
+                            && LLKeyboard::maskFromString(b.mask(), &mask) && mask == MASK_SHIFT))
+                    {
+                        occupied = true;
+                        break;
+                    }
+                }
+                if (!occupied)
+                {
+                    KeyBinding binding;
+                    binding.key = "SPACE";
+                    binding.mask = "SHIFT";
+                    binding.command = "ots_swap_shoulder";
+                    keys.third_person.bindings.add(binding);
+                }
+            }
+        }
+
         binding_count += loadBindingMode(keys.first_person, MODE_FIRST_PERSON);
         binding_count += loadBindingMode(keys.third_person, MODE_THIRD_PERSON);
         binding_count += loadBindingMode(keys.sitting, MODE_SITTING);
@@ -2002,8 +2087,6 @@ S32 LLViewerInput::loadBindingsXML(const std::string& filename)
         }
 
         // verify version
-        bool needs_rewrite = false;
-
         if (keys.xml_version < 1)
         {
             // updating from a version that was not aware of LMouse bindings
@@ -2038,11 +2121,9 @@ S32 LLViewerInput::loadBindingsXML(const std::string& filename)
             {
                 keys.edit_avatar.bindings.add(mouse_binding);
             }
-
-            needs_rewrite = true;
         }
 
-        if (keys.xml_version < 2 && !keys.flycam.isProvided())
+        if (keys.xml_version < 3 && !keys.flycam.isProvided())
         {
             // Updating from a version that predates the flycam mode: an old
             // customized key_bindings.xml has no <flycam> block at all, so
@@ -2061,26 +2142,28 @@ S32 LLViewerInput::loadBindingsXML(const std::string& filename)
                 {
                     keys.flycam.set(default_keys.flycam.getValue(), true);
                     binding_count += loadBindingMode(keys.flycam, MODE_FLYCAM);
-                    needs_rewrite = true;
                 }
             }
         }
 
-        // <GMDX> version 3: commands added after a user's own file was saved get their default keys,
-        // once, mode by mode, where the file has no binding for the command and the key is free in
-        // that mode: the ping keys (gmdxmapshare.h) and the orthographic view toggle; and once, the ping
-        // wheel (see move_wheel above)
-        if (keys.xml_version < 3 || move_wheel)
+        // <GMDX> GunMetal-DX's own version 3 (before the upstream numbering above): commands added after
+        // a user's own file was saved get their default keys, once, mode by mode, where the file has no
+        // binding for the command and the key is free in that mode: the ping keys (gmdxmapshare.h) and
+        // the orthographic view toggle (a GunMetal-DX version 2 file is past upstream's ortho step); and
+        // once, the ping wheel (see move_wheel above). Never replaces a user's binding.
+        if (keys.xml_version < 5 || move_wheel || restore_ots || restore_swap)
         {
             std::set<std::string> added_commands;
             if (keys.xml_version < 3) added_commands = { "map_ping", "map_ping_enemy", "map_ping_rally", "toggle_ortho" };
             if (move_wheel) added_commands.insert("map_ping_wheel");
+            if (restore_ots || keys.xml_version < 5) added_commands.insert("ots_toggle_view");
+            if (restore_swap) added_commands.insert("ots_swap_shoulder");   // (the defaults have it in first person only)
             std::string default_filename = gDirUtilp->getExpandedFilename(LL_PATH_APP_SETTINGS, "key_bindings.xml");
             Keys default_keys;
             LLSimpleXUIParser default_parser;
             if (default_filename != filename && default_parser.readXUI(default_filename, default_keys) && default_keys.validateBlock())
             {
-                auto merge = [&](auto& user, const auto& defaults, S32 mode, const char* mode_name)
+                auto merge = [&](KeyMode& user, const KeyMode& defaults, S32 mode, const char* mode_name)
                 {
                     if (!user.isProvided() || !defaults.isProvided()) return;
                     std::vector<KeyBinding> add;
@@ -2108,6 +2191,9 @@ S32 LLViewerInput::loadBindingsXML(const std::string& filename)
                                                 << " for " << it->command.getValue() << " in " << mode_name << LL_ENDL;
                     }
                     for (const KeyBinding& b : add) user.bindings.add(b);
+                    // bindKey appends, and scanKey takes a mode's first match: keep the most modifiers first,
+                    // or an added Ctrl+Space loses to Space (and Shift+B to B) until the next start
+                    if (!add.empty()) std::sort(mKeyBindings[mode].begin(), mKeyBindings[mode].end(), compare_key_by_mask);
                 };
                 merge(keys.first_person, default_keys.first_person, MODE_FIRST_PERSON, "first_person");
                 merge(keys.third_person, default_keys.third_person, MODE_THIRD_PERSON, "third_person");
@@ -2115,12 +2201,13 @@ S32 LLViewerInput::loadBindingsXML(const std::string& filename)
                 merge(keys.edit_avatar, default_keys.edit_avatar, MODE_EDIT_AVATAR, "edit_avatar");
                 merge(keys.flycam, default_keys.flycam, MODE_FLYCAM, "flycam");
             }
-            needs_rewrite = true;
             if (move_wheel) gSavedSettings.setBOOL("GMDXPingWheelKeysMoved", true);
+            if (restore_ots) gSavedSettings.setBOOL("GMDXOTSKeysRestored", true);
+            if (restore_swap) gSavedSettings.setBOOL("GMDXOTSSwapKeyRestored", true);
         }
         // </GMDX>
 
-        if (needs_rewrite)
+        if (keys.xml_version < keybindings_xml_version || move_wheel || restore_ots || restore_swap) // <GMDX> move_wheel, restore_ots, restore_swap: a current file rewritten once
         {
             // fix version
             keys.xml_version.set(keybindings_xml_version, true);

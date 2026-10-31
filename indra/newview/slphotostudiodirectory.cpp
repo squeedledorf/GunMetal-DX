@@ -43,6 +43,14 @@
 
 namespace
 {
+// These rows display converted or resolved values and must not bind those
+// values directly to the stored preferences.
+std::string hazeSetting(const std::string& name)
+{
+    if (name == "haze_RenderVKHazeStartDistance") return "RenderVKHazeStartDistance";
+    if (name == "haze_RenderVKHazeMaxOpacity") return "RenderVKHazeMaxOpacity";
+    return {};
+}
 const std::string SECTION_PREFIX = "sec_";
 
 /// A view's children in the order its XUI declares them. A view list is
@@ -244,6 +252,11 @@ void SLPhotoStudioDirectory::collectBoundKeys(LLView* view, std::set<std::string
             {
                 keys.insert(setting);
             }
+            setting = hazeSetting(ctrl->getName());
+            if (!setting.empty())
+            {
+                keys.insert(setting);
+            }
             // A graph that edits settings not bound through control_name (an
             // LLSD point list cannot be) names them in XUI; enrol those too.
             if (SLCurveEditorCtrl* graph = dynamic_cast<SLCurveEditorCtrl*>(ctrl))
@@ -375,6 +388,11 @@ void SLPhotoStudioDirectory::addSettings(LLView* view, size_t section)
             std::string setting;
             S32 component = 0;
             if (parseVec3Name(ctrl->getName(), setting, component))
+            {
+                addSetting(setting, ctrl, section, true);
+            }
+            setting = hazeSetting(ctrl->getName());
+            if (!setting.empty())
             {
                 addSetting(setting, ctrl, section, true);
             }

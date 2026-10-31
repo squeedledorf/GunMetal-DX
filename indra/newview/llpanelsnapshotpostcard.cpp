@@ -77,6 +77,7 @@ private:
     void onFormatComboCommit(LLUICtrl* ctrl);
     void onQualitySliderCommit(LLUICtrl* ctrl);
     void onSend();
+    void performTimedAction(const LLSD& action) override;
 
     bool mHasFirstMsgFocus;
 };
@@ -225,6 +226,21 @@ void LLPanelSnapshotPostcard::onQualitySliderCommit(LLUICtrl* ctrl)
 
 void LLPanelSnapshotPostcard::onSend()
 {
+    LLSD action = LLSD().with("type", "postcard").with("focused", mHasFirstMsgFocus);
+    for (const char* name : {"name_form", "to_form", "subject_form", "msg_form"})
+        action[name] = getChild<LLUICtrl>(name)->getValue();
+    if (auto* floater = dynamic_cast<LLFloaterSnapshot*>(mSnapshotFloater))
+    {
+        if (floater->startTimedAction(this, action)) return;
+    }
+    performTimedAction(action);
+}
+
+void LLPanelSnapshotPostcard::performTimedAction(const LLSD& action)
+{
+    for (const char* name : {"name_form", "to_form", "subject_form", "msg_form"})
+        getChild<LLUICtrl>(name)->setValue(action[name]);
+    mHasFirstMsgFocus = action["focused"].asBoolean();
     // Validate input.
     std::string to(getChild<LLUICtrl>("to_form")->getValue().asString());
 
@@ -239,7 +255,13 @@ void LLPanelSnapshotPostcard::onSend()
     std::string subject(getChild<LLUICtrl>("subject_form")->getValue().asString());
     if(subject.empty() || !mHasFirstMsgFocus)
     {
-        LLNotificationsUtil::add("PromptMissingSubjMsg", LLSD(), LLSD(), boost::bind(&LLPanelSnapshotPostcard::missingSubjMsgAlertCallback, this, _1, _2));
+        LLHandle<LLPanel> panel = getHandle();
+        LLNotificationsUtil::add("PromptMissingSubjMsg", LLSD(), LLSD(), [panel](const LLSD& notification, const LLSD& response)
+        {
+            if (auto* self = dynamic_cast<LLPanelSnapshotPostcard*>(panel.get()); self && self->isInVisibleChain())
+                return self->missingSubjMsgAlertCallback(notification, response);
+            return false;
+        });
         return;
     }
 

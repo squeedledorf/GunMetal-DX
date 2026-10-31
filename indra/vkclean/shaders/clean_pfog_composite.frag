@@ -85,6 +85,12 @@ void main()
     const vec4 wv = pf.inv_vp * vec4(ndc, 0.5, 1.0);
     const vec3 V = normalize(wv.xyz / wv.w);
     const vec3 rel = V * m;
+    if(cmOn())
+    {
+        const CameraTransport t=cmAt(pf.cam.xyz+rel,CLEAN_VIEW);
+        outColor=vec4(atmosClampHDR(t.T*Lb+(1.0-Tb)*t.L),Tb);
+        return;
+    }
     // LL's haze over [eye, m]
     if (atmosEnabled())
     {

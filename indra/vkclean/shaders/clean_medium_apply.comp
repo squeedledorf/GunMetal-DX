@@ -1,0 +1,38 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#define CLEAN_MEDIUM_PASS
+#include "clean_frame_info.glsl"
+#include "clean_atmos_common.glsl"
+#include "clean_vol_common.glsl"
+#include "clean_vol_pass.glsl"
+layout(local_size_x=8,local_size_y=8) in;
+layout(set=0,binding=40) uniform sampler2DArray uOpaqueDepth;
+layout(set=VOL_SET,binding=13,rgba16f) uniform image2DArray uMediumHdr;
+void main()
+{
+    const ivec2 pixel=ivec2(gl_GlobalInvocationID.xy);
+    if(any(greaterThanEqual(pixel,ivec2(vp.p0.xy))) || !cmOn()) return;
+    const ivec3 address=ivec3(pixel,int(MEDIUM_EYE));
+    const float depth=texelFetch(uOpaqueDepth,address,0).r;
+    // Sky has already replaced its physical-air prefix before its highlight rolloff.
+    if(depth<=0.0) return;
+    const CameraMediumView view=ssr.medium[MEDIUM_EYE];
+    const vec2 uv=(vec2(pixel)+0.5)/vp.p0.xy;
+    const vec2 ndc=uv*2.0-1.0-vp.jitter.xy;
+    const vec4 p=view.inv_vp*vec4(ndc,depth,1.0);
+    const vec3 P=view.eye.xyz+p.xyz/p.w;
+    vec3 O,V;cmRay((ndc+1.0)*0.5,MEDIUM_EYE,O,V);
+    const vec4 endpoint=imageLoad(uMediumHdr,address);
+    if(ssr.params1.z>0.5)
+    {
+        imageStore(uMediumHdr,address,vec4(endpoint.rgb,1.0));return;
+    }
+    vec3 color=cmApply(endpoint.rgb,cmAt(P,MEDIUM_EYE));
+    color=cmWaterPrefix(color,P,O);
+    g_cm_sky_prefix=true;g_cm_sky_origin=O;
+    // Opaque alpha temporarily carries the authored noFade bit; restore scene alpha
+    // before refraction, transparent blending, history copies and post-processing.
+    if(endpoint.a>0.5 && O.z>=waterHeight())
+        color=atmosDistanceFade(color,P,O,view.forward,ssr.haze_mode.w);
+    imageStore(uMediumHdr,address,vec4(atmosClampHDR(color),1.0));
+}

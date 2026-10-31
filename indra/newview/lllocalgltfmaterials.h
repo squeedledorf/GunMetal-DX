@@ -38,6 +38,8 @@ class LLScrollListCtrl;
 class LLGLTFMaterial;
 class LLViewerObject;
 class LLTextureEntry;
+namespace tinygltf { class Model; }
+struct SLBlenderConnectSnapshot;
 
 class LLLocalGLTFMaterial : public LLFetchedGLTFMaterial
 {
@@ -66,6 +68,10 @@ public: /* accessors */
 
 public:
     bool updateSelf();
+    bool loadSnapshot(const tinygltf::Model& model);
+    const std::string& snapshotKey() const { return mSnapshotKey; }
+    void setSnapshotKey(std::string key) { mSnapshotKey = std::move(key); }
+    bool isImmutableSnapshot() const { return mImmutableSnapshot; }
 
 private:
     bool loadMaterial();
@@ -96,6 +102,8 @@ private: /* members */
     std::string mMaterialName;  // glTF material name, for matching a mesh face's binding
     std::vector<std::string> mAliasNames; // other face bindings deduplicated onto this unit
     bool        mIsMeshOwned = false; // imported by a local mesh (see isMeshOwned)
+    bool        mImmutableSnapshot = false;
+    std::string mSnapshotKey;
 };
 
 class LLLocalGLTFMaterialTimer : public LLEventTimer
@@ -121,6 +129,8 @@ public:
     S32          addUnit(const std::string& filename, LLUUID& outID); // returns first material id as outID
     // Add a file's materials as mesh-owned: hidden from the Materials tab + persistence.
     S32          addUnit(const std::string& filename, bool mesh_owned);
+    void addBlenderConnectSnapshot(const SLBlenderConnectSnapshot& snapshot,
+        std::map<std::string, LLUUID>& bindings, std::vector<LLUUID>& owned);
 protected:
     S32          addUnitInternal(const std::string& filename, LLUUID& outID, bool mesh_owned = false); // file can hold multiple materials
     // Re-derive a file's unit/alias structure after a live edit: import-time dedup

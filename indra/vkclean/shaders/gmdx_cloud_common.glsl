@@ -1,6 +1,12 @@
-// <GMDX> VOLUMETRIC CLOUDS: shape, light and march (replaces clean_vol_cloud_common.glsl for the
-// march, panorama and shadow map; upstream's noise, EEP weather map, temporal pass and composite
-// are used as they are -- same textures, same outputs, same ssr.vol_clouds contract).
+// GUNMETAL-DX VOLUMETRIC CLOUDS: shape, light and march.
+//
+// GunMetal-DX's own cloud model, an alternative to clean_vol_cloud_common.glsl for the #719
+// volumetric cloud module: the same images, outputs and contract (ssr.vol_clouds, draw set 0
+// bindings 46 / 47 / 64, clean_cloud_shadow_map.glsl / clean_vol_cloud_sky.glsl read it as they
+// read Slipstream's), driven by vkgfx/gmdxvolcloudsvk.cpp instead of llcleanvolcloudsvk.cpp. The
+// 3D noises are Slipstream's own (clean_vol_cloud_noise.comp), the corona clean_cloud_corona.glsl.
+//
+// Copyright (C) 2026, squeedledorf (GunMetal-DX). LGPL 2.1, as the viewer.
 //
 // The cloud model and its lighting are ported from Wicked Engine
 // (https://github.com/turanszkij/WickedEngine, volumetricCloudsHF.hlsli / volumetricCloud_renderCS.hlsl),
@@ -18,10 +24,10 @@
 //   CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
 //   USE OR OTHER DEALINGS IN THE SOFTWARE.
 // (Wicked's noise and weather generators are NOT used: they come from an unlicensed project.
-// The noises here are upstream's own, clean_vol_cloud_noise.comp, in the same channel layout.)
+// The noises are Slipstream's, clean_vol_cloud_noise.comp, in the same channel layout.)
 //
-// Cloud bodies: CorvaeOboro's hand-sculpted cumulus volumes (CC0) placed among the procedural
-// clouds, see gcBody.
+// Cloud bodies: CorvaeOboro's hand-sculpted cumulus volumes (CC0, llcleancloudshapesvk.h) placed
+// among the procedural clouds, see gcBody.
 //
 // Model (Schneider, "Real-Time Volumetric Cloudscapes", GPU Pro 7 / Nubis 2017): Perlin-Worley
 // base shape eroded by a Worley fBm, three cloud types (small / medium / large) blended by the
@@ -31,46 +37,30 @@
 // Cornette-Shanks phase, a 5-sample self shadow, sky ambient, light bounced off the ground,
 // beer-powder albedo. With the physical sky on (RenderVKPhysicalSky) the sun reaching each
 // cloud sample is the physical sky's light through its transmittance LUT at that sample's own
-// height and position, so a cloud at sunset is lit by the same orange the sky shows.
+// height and position, so a cloud at sunset is lit by the same orange the sky shows. Physical
+// night: the moon is a second light (its own phase with a silver-lining lobe, its own self
+// shadow), at the clouds' moonlight gain (ssr.night[0].z).
 //
 // Geometry: the shell between base and top follows the planet's curve (altitude = z +
 // d^2 / 2R around the camera), so distant clouds sink toward the horizon. Positions are
-// offset by the agent frame's global origin (vc.gmdx.xy, wrapped by 21 weather tiles: every
+// offset by the agent frame's global origin (vc.origin.xy, wrapped by 21 weather tiles: every
 // noise and the anti-tiling term stay periodic) so the clouds stay put across region crossings.
-//
-// <GMDX> Corona (GMDXCloudCorona): the droplets' diffraction peak around each light, single
-// scattering in the march below (gmdx_cloud_corona.glsl has the physics).
+// Slipstream's world coverage field (#1283; gmdx_cloud_weather.comp) varies the coverage over
+// tens of kilometres, so the weather tile does not repeat across the sky.
 //
 // Requires clean_frame_info.glsl (ssr) + clean_atmos_common.glsl, and the module set at VC_SET.
 
-#include "gmdx_cloud_corona.glsl"
+#ifndef GMDX_CLOUD_COMMON_GLSL
+#define GMDX_CLOUD_COMMON_GLSL
 
 #ifndef VC_SET
 #define VC_SET 1
 #endif
 
-// The module's parameter block: upstream's VolCloudParams (clean_vol_cloud_ubo.glsl) plus the
-// GunMetal-DX vec4s after it (LLCleanVolCloudsVK::Params::gmdx).
-layout(std140, set = VC_SET, binding = 0) uniform VolCloudParams {
-    vec4 shape0;   // x weather tile (m), y 1 / tile, z 1 / base noise period (m), w 1 / detail period (m)
-    vec4 shape1;   // xy wind offset of the 3D noises (m), z extinction per m at density 1, w detail erosion
-    vec4 shape2;   // x ambient scale, y max distance (m), z multi-scatter strength, w powder strength
-    vec4 phase;    // (upstream's lobes; the Wicked phase below is fixed)
-    vec4 march;    // x max steps (main view), y light steps, z frame index, w 1 = offscreen (snapshot)
-    vec4 cam;      // xyz camera world position, w time (s)
-    vec4 shadow;   // shadow map: xy centre (m), z extent (m), w steps
-    vec4 pano;     // x first row, y rows this dispatch, z steps, w history blend (0 = overwrite)
-    mat4 inv_vp;
-    mat4 reproj;
-    vec4 dims;
-    vec4 pat;
-    vec4 temporal;
-    vec4 flash;
-    vec4 gmdx;     // xy agent frame origin (global, m) wrapped by 21 weather tiles, zw the EEP scroll (uv)
-    vec4 gmdx2;    // x sculpted cloud bodies loaded (0 = none), y their amount (GMDXCloudBodies), z the
-                   // smallest cloud footprint (m, gmdx_cloud_weather.comp)
-} vc;
+#include "gmdx_cloud_ubo.glsl"
+#include "clean_cloud_corona.glsl"   // the corona around the sun / moon (vcMarch)
 
+// The texels the march updates this frame (gmdx_cloud_march.comp's thread mapping).
 bool vcMarchedNow(ivec2 px)
 {
     const int mode = int(vc.pat.x + 0.5);
@@ -83,25 +73,34 @@ bool vcMarchedNow(ivec2 px)
 layout(set = VC_SET, binding = 1) uniform sampler3D uVcBase;      // 128^3 Perlin-Worley (r) + Worley fBm (gba)
 layout(set = VC_SET, binding = 2) uniform sampler3D uVcDetail;    // 32^3 Worley fBm (rgb)
 layout(set = VC_SET, binding = 3) uniform sampler2D uVcWeather;   // coverage, type, local density, height scale
-layout(set = VC_SET, binding = 13) uniform sampler3D uVcShapes;   // sculpted bodies (GMDXCloudShapesVK), 2 x 2 x 2 of 64^3
+layout(set = VC_SET, binding = 13) uniform sampler3D uVcShapes;   // sculpted bodies (LLCleanCloudShapesVK), 2 x 2 x 2 of 64^3
+layout(set = VC_SET, binding = 15) uniform sampler2D uVcWorld;    // world coverage window (r)
 
 const float VC_FAR = 65000.0;   // fp16-safe "no cloud" distance key
 const float GC_PI = 3.14159265;
 const float GC_HALF_INV_R = 0.5 / 6360000.0;   // altitude = z + d^2 / 2R
 
-// The physical sky lights the clouds (the panorama is the probes' WindLight sky: never).
-bool gcPhys()
-{
-#ifdef PHYSKY_NOT_IN_PROBES
-    return false;
+// Sky Debugger views (vc.debug.x; GMDXSkyTune::cloud_view): the march's own, unlit (3 - 9 are the
+// composite's texture views). Never in the panorama (GC_NO_VIEWS): its history would keep them.
+const int GC_VIEW_DENSITY = 1;   // the clouds' opacity, white
+const int GC_VIEW_LIGHT = 2;     // the sun's light through the cloud to each sample (self shadow)
+#ifdef GC_NO_VIEWS
+int gcView() { return 0; }
 #else
-    return physkyOn();
+int gcView() { const int v = int(vc.debug.x + 0.5); return v == GC_VIEW_DENSITY || v == GC_VIEW_LIGHT ? v : 0; }
 #endif
-}
+
+// The physical sky lights the clouds (the panorama, a capture, not with GunMetal-DX's own aerial
+// perspective: the probes' WindLight sky then; clean_atmos_common.glsl gmdxCaptureWindLight).
+bool gcPhys() { return physkyOn() && !gmdxCaptureWindLight(); }
 
 float vcBase()  { return ssr.vol_clouds[0].y; }
 float vcTop()   { return ssr.vol_clouds[0].z; }
 float gcThick() { return max(vcTop() - vcBase(), 1.0); }
+
+// The camera's real height (km) for the physical sky's light at a cloud: space at altitude lifts
+// the sky's own viewer (pkViewHeight), the clouds stay where they are.
+float gcCamHeightKm() { return spaceAmount() > 0.0 ? clamp(ssr.cam_origin.z * 0.001, 0.0, 60.0) : max(pkViewHeight(), 0.0); }
 
 float gcRemap(float v, float lo, float hi, float nlo, float nhi)
 {
@@ -128,17 +127,28 @@ const vec4 GC_ANVIL_L = vec4(5.0, 0.25, 5.0, 0.15);
 
 struct GcWeather { float cov; vec3 mask; vec4 grad; vec4 anvil; float dens; };
 
+// The world coverage (Slipstream #1283) at p: 0.5 = no change.
+float gcWorld(vec3 p)
+{
+    if (vc.wnoise.w <= 0.0) return 0.5;
+    const vec2 ht = 0.5 / vec2(textureSize(uVcWorld, 0));
+    return textureLod(uVcWorld, clamp((p.xy - vc.wmap.xy) * vc.wmap.z, ht, 1.0 - ht), 0.0).r;
+}
+
 GcWeather gcWeather(vec3 p)
 {
-    const vec4 w = textureLod(uVcWeather, (p.xy + vc.gmdx.xy) * vc.shape0.y, 0.0);
+    const vec4 w = textureLod(uVcWeather, (p.xy + vc.origin.xy) * vc.shape0.y, 0.0);
+    // The world field raises or lowers the tile's coverage by up to half its strength, and thins
+    // the clouds a little where it is low (Slipstream's: x 0.8 at its 0.45).
+    const float cw = gcWorld(p);
     GcWeather g;
-    g.cov = w.r;
+    g.cov = clamp(w.r + (cw - 0.5) * vc.wnoise.w, 0.0, 1.0);
     const float type = w.g;
     g.mask = vec3(1.0 - clamp(type * 2.0, 0.0, 1.0), 1.0 - abs(type - 0.5) * 2.0, clamp(type - 0.5, 0.0, 1.0) * 2.0);
-    // (<GMDX> x the height scale: a feature narrower than ~250 m sits low, gmdx_cloud_weather.comp)
+    // (x the height scale: a feature narrower than ~250 m sits low, gmdx_cloud_weather.comp)
     g.grad = (GC_GRAD_S * g.mask.r + GC_GRAD_M * g.mask.g + GC_GRAD_L * g.mask.b) * w.a;
     g.anvil = GC_ANVIL_M * g.mask.g + GC_ANVIL_L * g.mask.b;
-    g.dens = w.b;
+    g.dens = w.b * (1.0 - vc.wnoise.w * (0.2 / 0.45) * (1.0 - cw));
     return g;
 }
 
@@ -155,13 +165,14 @@ bool gcValid(float h, GcWeather w)
     return w.cov * gcAnvil(h, w) > 0.05 && w.grad.r < h && w.grad.a > h;
 }
 
-// ---- sculpted cloud bodies (CorvaeOboro's CC0 volumes, gmdxcloudshapesvk.h) ----
+// ---- sculpted cloud bodies (CorvaeOboro's CC0 volumes, llcleancloudshapesvk.h) ----
 // The weather tile is cut into cells of about 3 km; a hash picks which cells hold a body, which
-// shape, its turn, size and place in the cell. Cells live in the weather map's own uv (the EEP
-// scroll included), so a body drifts with the coverage around it and wraps with the tile. A
-// body stands on the shell's base, is cut by the shell's top, and only shows where the region's
-// coverage is high; the procedural cloud and the body merge (max) before the detail erosion,
-// so both wear the same edges and light the same way.
+// shape, its turn, size and place in the cell. Cells live in the weather map's own uv with the
+// region's wind (vc.origin.zw) in it, so a body drifts with the coverage around it; a cell's
+// identity repeats every 21 tiles, as the offsets wrap (Slipstream #1283 took it off the tile). A
+// body stands on the shell's base, is cut by the shell's top, and only shows where the coverage is
+// high; the procedural cloud and the body merge (max) before the detail erosion, so both wear the
+// same edges and light the same way.
 uvec3 gcHash3(uvec3 v)
 {
     v = v * 1664525u + 1013904223u;
@@ -173,18 +184,18 @@ uvec3 gcHash3(uvec3 v)
 
 float gcBody(vec3 p, float h, GcWeather w)
 {
-    const uint count = uint(vc.gmdx2.x + 0.5);
-    if (count == 0u || vc.gmdx2.y <= 0.0 || w.cov < 0.3) return 0.0;
+    const uint count = uint(vc.bodies.x + 0.5);
+    if (count == 0u || vc.bodies.y <= 0.0 || w.cov < 0.3) return 0.0;
     const float cells = max(1.0, floor(vc.shape0.x / 3000.0));
     const float cellM = vc.shape0.x / cells;
-    const vec2 g = ((p.xy + vc.gmdx.xy) * vc.shape0.y + vc.gmdx.zw) * cells;
+    const vec2 g = ((p.xy + vc.origin.xy) * vc.shape0.y + vc.origin.zw) * cells;
     const vec2 gc = floor(g);
-    const uvec2 ci = uvec2(mod(gc, cells));
+    const uvec2 ci = uvec2(mod(gc, 21.0 * cells));
     const uvec3 hh = gcHash3(uvec3(ci, 0x5bd1u));
     const vec3 r = vec3(hh) * (1.0 / 4294967295.0);
     const uvec3 hh2 = gcHash3(uvec3(ci, 0x2c1bu));
     const vec3 r2 = vec3(hh2) * (1.0 / 4294967295.0);
-    if (r.x > 0.55 * vc.gmdx2.y) return 0.0;                      // this cell holds no body
+    if (r.x > vc.bodies.w * vc.bodies.y) return 0.0;               // this cell holds no body
     const float R = cellM * mix(0.22, 0.35, r2.x);                 // half the body's width
     const vec2 centre = vec2(0.5) + (r2.yz - 0.5) * 0.3;
     vec2 l = (g - gc - centre) * cellM;
@@ -198,7 +209,7 @@ float gcBody(vec3 p, float h, GcWeather w)
     uvw = clamp(uvw, vec3(e), vec3(1.0 - e));
     const vec3 blk = vec3(float(k & 1u), float((k >> 1) & 1u), float(k >> 2));
     const float d = textureLod(uVcShapes, (uvw + blk) * 0.5, 0.0).r;
-    return d * 0.7 * smoothstep(0.3, 0.7, w.cov) * vc.gmdx2.y;
+    return d * vc.bodies.z * smoothstep(0.3, 0.7, w.cov) * vc.bodies.y;
 }
 
 // Density at p (m, agent frame), h its height fraction, body = gcBody there. detail = the full
@@ -208,7 +219,7 @@ float gcDensity(vec3 p, float h, GcWeather w, float body, bool detail)
     const bool valid = gcValid(h, w);
     if (!valid && body <= 0.0) return 0.0;
     vec3 q = p;
-    q.xy += vc.gmdx.xy;
+    q.xy += vc.origin.xy;
     // Anti-tiling for top-down views (Wicked: y += x/3 + z/7, Y up), then the wind, and a slow
     // vertical drift so the clouds churn as they travel.
     q.z += q.x / 3.0 + q.y / 7.0 + mod(vc.cam.w * 4.0, 1.0 / vc.shape0.z);
@@ -218,10 +229,9 @@ float gcDensity(vec3 p, float h, GcWeather w, float body, bool detail)
     if (valid)
     {
         n = textureLod(uVcBase, q * (vc.shape0.z * 4.0), 0.0);
-        // Upstream's noises sit in a narrow band (Perlin-Worley 0.62 - 0.86, the Worley fBm
-        // 0.34 - 0.63, 5th to 95th percentile); Wicked's model expects 0 - 1. Unstretched, the
-        // base shape is nearly constant and the clouds are the coverage map pushed straight up
-        // (tents and spikes).
+        // The noises sit in a narrow band (Perlin-Worley 0.62 - 0.86, the Worley fBm 0.34 - 0.63,
+        // 5th to 95th percentile); Wicked's model expects 0 - 1. Unstretched, the base shape is
+        // nearly constant and the clouds are the coverage map pushed straight up (tents and spikes).
         const float fbm = gcStretch(n.g * 0.625 + n.b * 0.25 + n.a * 0.125, 0.34, 0.63);
         c = gcRemap(gcStretch(n.r, 0.62, 0.86), -(1.0 - fbm), 1.0, 0.0, 1.0);
         c *= smoothstep(w.grad.x, w.grad.y, h) - smoothstep(w.grad.z, w.grad.w, h);
@@ -233,7 +243,7 @@ float gcDensity(vec3 p, float h, GcWeather w, float body, bool detail)
     {
         // Wicked bends the detail lookup with a curl noise near the base (up to 500 m); the
         // base noise's three Worley octaves, already fetched, stand in for it.
-        const vec3 curl = (n.gba - 0.5) * (1000.0 * pow(1.0 - h, 5.0));
+        const vec3 curl = (n.gba - 0.5) * (vc.shape3.y * pow(1.0 - h, 5.0));
         const vec3 d = textureLod(uVcDetail, (q + curl) * vc.shape0.w, 0.0).rgb;
         const float dfbm = gcStretch(d.r * 0.625 + d.g * 0.25 + d.b * 0.125, 0.34, 0.63);
         // Wispy at the base, billowy above.
@@ -244,7 +254,7 @@ float gcDensity(vec3 p, float h, GcWeather w, float body, bool detail)
 }
 float gcDensity(vec3 p, float h, GcWeather w, bool detail) { return gcDensity(p, h, w, gcBody(p, h, w), detail); }
 
-// The cheap shape at p (the shadow map; vcDensity is upstream's name).
+// The cheap shape at p (the shadow map).
 float vcDensity(vec3 p, bool detail)
 {
     const float h = gcHeight(p);
@@ -262,23 +272,21 @@ float gcCS(float g, float c)
     return k * (1.0 + c * c) / pow(max(1.0 + g * g - 2.0 * g * c, 1e-4), 1.5);
 }
 float gcPhase(float c) { return mix(gcCS(0.5, c), gcCS(-0.5, c), 0.2); }
-// <GMDX> The moon's phase (physical night only): the same plus a sharp forward Henyey-Greenstein
-// lobe (g 0.8, 35%), so thin cloud between the viewer and the moon lights up in a bright silver
-// edge as in night photographs (straight on 3.1x the sun's phase, 1.8x at 11 degrees, the same at 25,
-// ~20% less at 90 and a third less straight back: energy kept). The sun keeps gcPhase: the day is
-// unchanged.
-const float kGcMoonG = 0.8, kGcMoonW = 0.35;
+// The moon's phase (physical night only): the same plus a sharp forward Henyey-Greenstein lobe
+// (vc.light.zw: g 0.8, 35%), so thin cloud between the viewer and the moon lights up in a bright
+// silver edge as in night photographs (straight on 3.1x the sun's phase, 1.8x at 11 degrees, the
+// same at 25, ~20% less at 90 and a third less straight back: energy kept). The sun keeps gcPhase.
 float gcHG(float g, float c) { return (1.0 - g * g) / (4.0 * GC_PI * pow(max(1.0 + g * g - 2.0 * g * c, 1e-4), 1.5)); }
-float gcPhaseMoon(float c) { return mix(gcPhase(c), gcHG(kGcMoonG, c), kGcMoonW); }
+float gcPhaseMoon(float c) { return mix(gcPhase(c), gcHG(vc.light.z, c), vc.light.w); }
 
 // ---- light ----
 struct VcLight { vec3 L; vec3 E; vec3 sky; vec3 albedo; float groundAlbedo; vec3 L2; vec3 E2; };
 
 // The light's illuminance in the units the sky and the lit surfaces use: the physical sky's
 // light (radiance = E x phase, as its LUTs), or WindLight's sunlit (a white surface shows
-// sunlit x albedo, so E = pi x sunlit).
-// <GMDX> Physical night with the physical sky: L / E are the sun's (below the horizon too: the
-// planet's shadow in gcLightAt turns it off) and L2 / E2 the moon's, a second light (E2 = 0: none).
+// sunlit x albedo, so E = pi x sunlit). Physical night with the physical sky: L / E are the
+// sun's (below the horizon too: the planet's shadow in gcLightAt turns it off) and L2 / E2 the
+// moon's, a second light (E2 = 0: none).
 VcLight vcLightSetup()
 {
     VcLight l;
@@ -288,13 +296,13 @@ VcLight vcLightSetup()
     if (gcPhys())
     {
         l.E = max(pkLight(), vec3(0.0));
-        if (gmdxNightOn())
+        if (nightOn())
         {
             l.L = pkLightDir();
             if (physkyMoonOn())
             {
                 l.L2 = physkyMoonDir();
-                l.E2 = l.E * gmdxMoonSky() * gmdxCloudMoonGain();   // (GMDXNightCloudLight)
+                l.E2 = l.E * nightMoonSky() * nightCloudMoonGain();
                 // Skip the moon's march while the sun outshines it a thousand times (dusk's top).
                 const float h = pkBottom() + max(pkViewHeight(), 0.0);
                 const vec3 sunHere = l.E * textureLod(uPkTrans, pkTransUv(h, l.L.z), 0.0).rgb;
@@ -304,34 +312,33 @@ VcLight vcLightSetup()
     }
     else
         l.E = GC_PI * max(ssr.atmos_k[5].rgb, vec3(0.0)) * smoothstep(-0.06, 0.04, l.L.z)
-            * gmdxCloudMoonGain();   // <GMDX> (the scene light: 1 by day, the moon's share at dusk)
+            * nightCloudMoonGain();   // (the scene light: 1 by day, the moon's share at dusk)
     // Sky ambient: mean sky radiance (the zenith and four 15-degree directions, the upper
-    // hemisphere; x 0.6 for the dimmer half below), Wicked's sky-luminance term.
+    // hemisphere; x vc.shape2.x, 0.6, for the dimmer half below), Wicked's sky-luminance term.
     vec3 s = skyColor(vec3(0.0, 0.0, 1.0)) * 0.4;
     for (int i = 0; i < 4; ++i)
     {
         const float a = float(i) * 1.5707963 + 0.785398;
         s += skyColor(vec3(cos(a) * 0.966, sin(a) * 0.966, 0.259)) * 0.15;
     }
-    l.sky = s * 0.6 * vc.shape2.x;
+    l.sky = s * vc.shape2.x;
     // Albedo: Wicked's 0.9 in the region's cloud hue (EEP cloud_color; its brightness is the
-    // light's business).
+    // light's business -- at night too: a night sky's darker cloud colour made up for Second
+    // Life's full-strength moon, and the moon's real light already darkens the clouds).
     const vec3 cc = max(ssr.clouds[0].rgb, vec3(1e-3));
     const float ccMax = max(max(cc.r, cc.g), cc.b);
-    // (<GMDX> Physical night too: a night sky's darker cloud colour made up for Second Life's
-    // full-strength moon; the moon's real light already darkens the clouds.)
-    l.albedo = 0.9 * cc / ccMax;
+    l.albedo = vc.shape2.z * cc / ccMax;
     l.groundAlbedo = gcPhys() ? pkGroundAlbedo() : 0.3;
     return l;
 }
 
 // The light reaching p through the air (the physical sky's transmittance at p's own height
-// and place, the planet's shadow included), before the clouds. (<GMDX> any light L / E: the
-// sun's or the moon's.)
+// and place, the planet's shadow included), before the clouds; any light L / E, the sun's or
+// the moon's.
 vec3 gcLightAt(vec3 L, vec3 E, vec3 p)
 {
     if (!gcPhys()) return E;
-    const vec3 pos = vec3(0.0, 0.0, pkBottom() + gmdxCamHeightKm()) + (p - vc.cam.xyz) * 0.001;   // <GMDX> (space at altitude: the real height)
+    const vec3 pos = vec3(0.0, 0.0, pkBottom() + gcCamHeightKm()) + (p - vc.cam.xyz) * 0.001;
     const float r = length(pos);
     const vec3 up = pos / r;
     const float cz = dot(up, L);
@@ -341,13 +348,13 @@ vec3 gcLightAt(vec3 L, vec3 E, vec3 p)
 vec3 gcSunAt(VcLight l, vec3 p) { return gcLightAt(l.L, l.E, p); }
 
 // Optical depth (x the octaves' extinction) toward the light: Wicked's quadratic 5-sample
-// spread over 3 km; the first two with detail. <GMDX> j in [0, 1): where in each segment the
-// sample sits (vcMarch varies it per step and frame). Fixed mid-segment samples (0.2, 0.5, 1 and
-// 1.7 km out with the sun high) printed each cloud feature's shadow as copies stacked under it:
-// horizontal contour bands down the sunlit walls.
+// spread over vc.light.y (3 km); the first two with detail. j in [0, 1): where in each segment
+// the sample sits (vcMarch varies it per step and frame). Fixed mid-segment samples (0.2, 0.5, 1
+// and 1.7 km out with the sun high) printed each cloud feature's shadow as copies stacked under
+// it: horizontal contour bands down the sunlit walls.
 vec3 gcLightOD(vec3 p, vec3 L, int n, float j)
 {
-    const float len = 3000.0;
+    const float len = vc.light.y;
     float od = 0.0;
     for (int s = 0; s < n; ++s)
     {
@@ -361,8 +368,8 @@ vec3 gcLightOD(vec3 p, vec3 L, int n, float j)
     return gcSigma() * (od * len);
 }
 
-// Light off the sunlit ground under the cloud, through the cloud below p (3 samples). (<GMDX>
-// L: the light's direction, the sun's or the moon's.)
+// Light off the lit ground under the cloud, through the cloud below p (3 samples). L: the
+// light's direction, the sun's or the moon's.
 vec3 gcGround(VcLight l, vec3 L, vec3 p, vec3 sunAir)
 {
     const float below = gcAlt(p) - vcBase();
@@ -378,11 +385,11 @@ vec3 gcGround(VcLight l, vec3 L, vec3 p, vec3 sunAir)
         od += gcDensity(q, h, gcWeather(q), false) * (t1 - t0);
     }
     const float brdf = clamp(L.z, 0.0, 1.0) * l.groundAlbedo / GC_PI;
-    return sunAir * (brdf * 0.5) * exp(-gcSigma() * (od * len));   // 0.5 = 2 pi x 1 / (4 pi)
+    return sunAir * (brdf * vc.light.x) * exp(-gcSigma() * (od * len));   // 0.5 = 2 pi x 1 / (4 pi)
 }
 
-// The view ray's span inside the curved shell, from the camera along V (unit), up to tmax.
-// altitude(t) - level = a t^2 + V.z t + (cam.z - level), a = (1 - V.z^2) / 2R.
+// The ray's span inside the curved shell, from O along V (unit), up to tmax.
+// altitude(t) - level = a t^2 + V.z t + (O.z - level), a = (1 - V.z^2) / 2R.
 bool gcRoots(float a, float b, float c, out float r0, out float r1)
 {
     const float disc = b * b - 4.0 * a * c;
@@ -394,10 +401,10 @@ bool gcRoots(float a, float b, float c, out float r0, out float r1)
     r0 = min(x0, x1); r1 = max(x0, x1);
     return true;
 }
-bool vcSegment(vec3 V, float tmax, out float t0, out float t1)
+bool vcSegment(vec3 O, vec3 V, float tmax, out float t0, out float t1)
 {
     const float a = (1.0 - V.z * V.z) * GC_HALF_INV_R;
-    const float z = vc.cam.z;
+    const float z = O.z;
     float tT0, tT1, tB0, tB1;
     t0 = 0.0; t1 = 0.0;
     if (!gcRoots(a, V.z, z - vcTop(), tT0, tT1)) return false;   // always above the top
@@ -412,36 +419,36 @@ bool vcSegment(vec3 V, float tmax, out float t0, out float t1)
 
 struct VcResult { vec3 scat; float T; float entry; float dmean; };
 
-// March the shell along V from the camera up to tmax (scene distance / far). steps = the
-// budget for a full-length segment; jitter in [0, 1).
-VcResult vcMarch(VcLight l, vec3 V, float tmax, int steps, int lightSteps, float jitter)
+// March the shell along V from O (the camera, or the camera-medium ray's origin) up to tmax
+// (scene distance / far). steps = the budget for a full-length segment; jitter in [0, 1).
+VcResult vcMarch(VcLight l, vec3 V, float tmax, int steps, int lightSteps, float jitter, vec3 O)
 {
     VcResult r;
     r.scat = vec3(0.0); r.T = 1.0; r.entry = VC_FAR; r.dmean = VC_FAR;
     float t0, t1;
-    if (!vcSegment(V, min(tmax, vc.shape2.y), t0, t1)) return r;
+    if (!vcSegment(O, V, min(tmax, vc.shape2.y), t0, t1)) return r;
     const float frac = clamp((t1 - t0) / (gcThick() * 4.0), 0.25, 1.0);
     const float n = float(max(int(float(steps) * frac), 8));
     const float span = t1 - t0;
-    const vec3 cam = vc.cam.xyz;
     const vec3 sig = gcSigma();
+    const int view = gcView();
     const float cos_t = dot(V, l.L);
-    // <GMDX> (WindLight-lit clouds at night: l.L is the scene light; nearer the moon than the sun,
-    // it takes the moon's silver-lining phase. Physically lit: the moon is l.L2, below.)
+    // (WindLight-lit clouds at night: l.L is the scene light; nearer the moon than the sun, it
+    // takes the moon's silver-lining phase. Physically lit: the moon is l.L2, below.)
     bool moonL = false;
-    if (!gcPhys() && gmdxNightOn())
+    if (!gcPhys() && nightOn())
         moonL = dot(l.L, normalize(ssr.atmos[11].xyz)) > dot(l.L, normalize(ssr.atmos[10].xyz));
     const float ph0 = moonL ? gcPhaseMoon(cos_t) : gcPhase(cos_t);
     const float ph1 = mix(1.0 / (4.0 * GC_PI), ph0, 0.2);   // the second octave: flatter
     const bool lit = dot(l.E, l.E) > 0.0;
-    // <GMDX> the moon, a second light (physical night)
+    // the moon, a second light (physical night)
     const bool lit2 = dot(l.E2, l.E2) > 0.0;
     const float cos_t2 = dot(V, l.L2);
     const float ph0m = gcPhaseMoon(cos_t2);
     const float ph1m = mix(1.0 / (4.0 * GC_PI), ph0m, 0.2);
-    // <GMDX> corona (gmdx_cloud_corona.glsl): each light's diffraction peak, single scattering only
+    // Corona (clean_cloud_corona.glsl): each light's diffraction peak, single scattering only
     // (WindLight-lit clouds: l.L is the scene light, which turns between the bodies at dusk; the
-    // corona sits on the body it is nearer to, atmos[10] / [11].)
+    // corona sits on the body it is nearer to, atmos[10] / [11]).
     vec3 Lc = l.L;
     if (!gcPhys())
     {
@@ -454,12 +461,12 @@ VcResult vcMarch(VcLight l, vec3 V, float tmax, int steps, int lightSteps, float
     float wsum = 0.0, dsum = 0.0;
     // Quadratic spacing: short steps where the ray enters the layer (or leaves the camera inside
     // it), long ones far away -- even steps over a 40 km grazing ray left stripes in the walls.
-    // <GMDX> ...and short steps again wherever the ray meets a cloud: from inside the layer the
-    // ray starts at the camera, so a cloud 5 km off was met by ~300 m steps. A cloud is opaque
-    // within ~15-100 m (extinction 0.07 / m at density 1), so the first jittered sample inside it
-    // decided the whole pixel and the steps' distance shells sliced every cloud into contour
-    // bands. On meeting density after empty air, the march goes back to the last empty sample and
-    // spends the steps it has left on a fresh quadratic from there (same total count).
+    // ...and short steps again wherever the ray meets a cloud: from inside the layer the ray
+    // starts at the camera, so a cloud 5 km off was met by ~300 m steps. A cloud is opaque within
+    // ~15-100 m (extinction 0.07 / m at density 1), so the first jittered sample inside it decided
+    // the whole pixel and the steps' distance shells sliced every cloud into contour bands. On
+    // meeting density after empty air, the march goes back to the last empty sample and spends the
+    // steps it has left on a fresh quadratic from there (same total count).
     float sa = t0, sspan = span, i0 = 0.0, m = n, tPrev = t0;
     bool inCloud = false;
     for (float i = 0.0; i < n; i += 1.0)
@@ -468,7 +475,7 @@ VcResult vcMarch(VcLight l, vec3 V, float tmax, int steps, int lightSteps, float
         const float ta = sa + sspan * ua * ua;
         const float dt = sspan * (ub * ub - ua * ua);
         const float t = ta + jitter * dt;
-        const vec3 p = cam + V * t;
+        const vec3 p = O + V * t;
         const float h = gcHeight(p);
         if (h < 0.0 || h > 1.0) { tPrev = t; inCloud = false; continue; }
         const GcWeather w = gcWeather(p);
@@ -483,8 +490,8 @@ VcResult vcMarch(VcLight l, vec3 V, float tmax, int steps, int lightSteps, float
         const float dens = gcDensity(p, h, w, body, true);
         if (dens > 0.001 && !inCloud)
         {
-            // <GMDX> Entering a cloud on a long step: restart the spacing at the last empty
-            // sample when that makes the first new steps at least 4x shorter.
+            // Entering a cloud on a long step: restart the spacing at the last empty sample when
+            // that makes the first new steps at least 4x shorter.
             const float left = n - i - 1.0, rspan = t1 - tPrev;
             if (dt > 20.0 && left >= 4.0 && rspan < 0.25 * dt * left * left)
             {
@@ -501,11 +508,11 @@ VcResult vcMarch(VcLight l, vec3 V, float tmax, int steps, int lightSteps, float
             const vec3 ext0 = min(dens * sig, vec3(1.0));
             const vec3 ext1 = ext0 * 0.1;
             // Beer-powder albedo (Wicked: beer powder 20, power 0.5).
-            const vec3 scat0 = l.albedo * sqrt(clamp(dens * 0.9 * 20.0, 0.0, 1.0)) * ext0;
+            const vec3 scat0 = l.albedo * sqrt(clamp(dens * 0.9 * vc.shape2.w, 0.0, 1.0)) * ext0;
             const vec3 scat1 = scat0;
             const vec3 sunAir = gcSunAt(l, p);
-            // <GMDX> the light march's sample offset: per pixel and frame (the view jitter, turned
-            // half way), and per step (golden ratio), so neighbouring heights sample apart
+            // the light march's sample offset: per pixel and frame (the view jitter, turned half
+            // way), and per step (golden ratio), so neighbouring heights sample apart
             const float lj = fract(jitter + 0.5 + i * 0.618034);
             vec3 Tl0 = vec3(0.0), Tl1 = vec3(0.0);
             vec3 env = l.sky * clamp(0.75 + h, 0.0, 1.0);
@@ -515,7 +522,7 @@ VcResult vcMarch(VcLight l, vec3 V, float tmax, int steps, int lightSteps, float
                 Tl0 = exp(-od); Tl1 = exp(-od * 0.1);
                 if (max(max(Tv.r, Tv.g), Tv.b) > 0.01) env += gcGround(l, l.L, p, sunAir);
             }
-            // <GMDX> The moon's light, as the sun's (both octaves, its own phase and self shadow).
+            // The moon's light, as the sun's (both octaves, its own phase and self shadow).
             vec3 M0 = vec3(0.0), M1 = vec3(0.0), moonT0 = vec3(0.0);
             if (lit2)
             {
@@ -532,13 +539,11 @@ VcResult vcMarch(VcLight l, vec3 V, float tmax, int steps, int lightSteps, float
             // Second octave first (it uses the view transmittance before this step's).
             vec3 S1 = Tl1 * sunAir * ph1 * scat1;
             if (lit2) S1 += M1 * scat1;
-            const vec3 Tr1 = exp(-max(ext1, vec3(1e-7)) * dt);
-            r.scat += Tv * (S1 - S1 * Tr1) / max(ext1, vec3(1e-7));
             vec3 S0 = (Tl0 * sunAir * ph0 + env) * scat0;
             if (lit2) S0 += M0 * scat0;
-            // <GMDX> corona: the light through the cloud toward it, scattered into the peak (no
-            // powder: that darkens the back-lit side, this is the light passing straight on)
-            // Iridescence: the thinnest wisps hold smaller droplets (gcoDropletScale).
+            // corona: the light through the cloud toward it, scattered into the peak (no powder:
+            // that darkens the back-lit side, this is the light passing straight on). Iridescence:
+            // the thinnest wisps hold smaller droplets (gcoDropletScale).
             if (coronaS || coronaM)
             {
                 const float k = gcoDropletScale(dens * 10.0);
@@ -547,6 +552,11 @@ VcResult vcMarch(VcLight l, vec3 V, float tmax, int steps, int lightSteps, float
                 if (coronaM && dot(moonT0, moonT0) > 0.0) C += moonT0 * gcoPhase(V, l.L2, k);
                 S0 += C * (l.albedo * ext0);
             }
+            // Sky Debugger views: unlit white (opacity), or the light's transmittance to here.
+            if (view == GC_VIEW_DENSITY) { S0 = ext0; S1 = vec3(0.0); }
+            else if (view == GC_VIEW_LIGHT) { S0 = vec3(dot(Tl0, vec3(1.0 / 3.0))) * ext0; S1 = vec3(0.0); }
+            const vec3 Tr1 = exp(-max(ext1, vec3(1e-7)) * dt);
+            r.scat += Tv * (S1 - S1 * Tr1) / max(ext1, vec3(1e-7));
             const vec3 Tr0 = exp(-max(ext0, vec3(1e-7)) * dt);
             r.scat += Tv * (S0 - S0 * Tr0) / max(ext0, vec3(1e-7));
             const float Tm = dot(Tv, vec3(1.0 / 3.0));
@@ -562,12 +572,14 @@ VcResult vcMarch(VcLight l, vec3 V, float tmax, int steps, int lightSteps, float
     return r;
 }
 
-// Aerial perspective + far fade: the layer dissolves into the haze (physical or WindLight,
-// atmosScatterHaze -- the ground's own) and the sky.
+// Aerial perspective + far fade: the layer dissolves into the haze (WindLight or the physical
+// sky's, atmosScatterHaze -- the ground's own) and the sky. With the physical camera medium on
+// (cmOn, Slipstream #1266) the result stays RAW cloud radiance: the composite / the panorama's
+// readers apply the medium in front (clean_vol_cloud_sky.glsl), never baked into a history.
 VcResult vcAtmosphere(VcResult r, vec3 V)
 {
     if (r.T >= 1.0) return r;
-    if (atmosEnabled())
+    if (!cmOn() && atmosEnabled() && gcView() == 0)   // (the unlit views: no haze either)
     {
         vec3 additive, atten;
         atmosScatterHaze(V * r.dmean, additive, atten);
@@ -583,3 +595,5 @@ VcResult vcAtmosphere(VcResult r, vec3 V)
 
 // Interleaved gradient noise (Jimenez 2014).
 float vcIgn(vec2 px) { return fract(52.9829189 * fract(dot(px, vec2(0.06711056, 0.00583715)))); }
+
+#endif // GMDX_CLOUD_COMMON_GLSL

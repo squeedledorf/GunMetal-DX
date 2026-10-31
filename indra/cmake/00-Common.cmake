@@ -206,6 +206,11 @@ if (LINUX)
   )
   # Portability: pin libm symbols that newer glibc re-versioned (see the header).
   add_compile_options("SHELL:-include ${CMAKE_CURRENT_LIST_DIR}/glibc_compat.h")
+  # The viewer's debug info passed 4 GB: 32-bit DWARF offsets overflowed at link, including in prebuilt
+  # 3p static libraries (collada, vorbis) we can't rebuild. Split DWARF keeps our debug info in .dwo files
+  # beside the objects (the binary keeps a skeleton + line tables, so backtraces keep their lines);
+  # 64-bit DWARF for what stays in the binary.
+  add_compile_options(-gsplit-dwarf -gdwarf64)
 endif (LINUX)
 
 # Portability: executables inherit the ISA-level note of every linked object; a
@@ -262,7 +267,7 @@ if (DARWIN)
 endif(DARWIN)
 
 if (LINUX OR DARWIN)
-  add_compile_options(-Wall -Wno-sign-compare -Wno-trigraphs -Wno-reorder)
+  add_compile_options(-Wall -Wno-sign-compare -Wno-trigraphs $<$<COMPILE_LANGUAGE:CXX>:-Wno-reorder>)
 
   if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
     # libstdc++ headers contain deprecated declarations that fail on clang

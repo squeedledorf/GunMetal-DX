@@ -18,8 +18,9 @@
 // roof test (they ARE on the top surface), never splashing; over water / no surface: hidden.
 // M4 RUN-OFF DRIPS (clean_weather_common.glsl): the invocations past the rain (box.z) run the
 // drips -- each falls from its eave (wxDripAt), splashes and frees its slot on its landing
-// height, and is listed (0x80000000 | drip) when in the view. Drips are never hidden by the
-// roof test (they are born under a roof's edge by design).
+// height, and is listed (0x80000000 | drip) when in the view. A drip skips the roof test until it
+// has fallen kWxDripFree from its edge (it is born under a roof's edge by design); under cover
+// past that it is gone (#1145: a ridge read as an edge under a wind-parallel lee roof).
 //
 // -DWX_RUNOFF_SPAWN (M4): one invocation per run-off emitter (indirect: the list's header).
 // Each discharges its catchment x the run-off strength as drips (a Poisson count per frame,
@@ -46,7 +47,8 @@ layout(std430, set = 0, binding = 7) buffer WxSplashHead { uint splash_head; uin
 #ifndef WX_RUNOFF_SPAWN
 // The listener's openness: 0 under cover .. 1 open sky, -1 = no map (host-visible); M4: the
 // run-off loudness at the listener (x 1000), the emitter appends, this frame's drips.
-layout(std430, set = 0, binding = 5) writeonly buffer WxListener { float l_open; uint l_runoff, l_emitters, l_drips; };
+layout(std430, set = 0, binding = 5) writeonly buffer WxListener { float l_open; uint l_runoff, l_emitters, l_drips;
+    float l_probe[12]; };   // RenderVKWeatherOcclDebug (veil2.y): the streaks' roof over the camera, see main
 // #901 PER-AVATAR SHELTER MAPS: the atlas (x the top height above the layer's pelvis) and the
 // layers' frames (clean_weather_shelter.glsl). Read only while wp.shelter.x > 0.
 layout(set = 0, binding = 9) uniform sampler2D uShAtlas[2];
@@ -152,6 +154,72 @@ float wxTopAt(vec3 P)
     return -1e9;
 }
 
+// #1145 THE ROOF OVER A STREAK: the height of the first surface over P's column in one cascade
+// (map, uv = P's column, top / span = its frame); -1e9: open sky. The map holds the real height (the
+// weather pass draws with no depth bias); see wxRoofTop for how the drop's column is read.
+// m: a drop's head this far under the surface over its column still shows (float / slope slack). The
+// near map holds the real roof height (no depth bias) at a few cm texels and the drop reads the highest
+// of the texels around its column, so its slack is a couple of centimetres: under a roof the wind tilts the rain
+// nearly parallel to, a drop can slide the whole length of its streak inside a 10 cm band under
+// the boards (#1145). The coarse map (~0.4 m texels) keeps the wider slack.
+const float kWxStreakTolNear = 0.02;
+const float kWxStreakTolCoarse = 0.1;
+// m: a drip falls this far from its edge before the roof test applies (it is born under the edge).
+const float kWxDripFree = 0.25;
+
+float wxRoofH(sampler2D map, ivec2 c, ivec2 res, float top, float span, out bool ok)
+{
+    ok = all(greaterThanEqual(c, ivec2(0))) && all(lessThan(c, res));
+    const float d = ok ? texelFetch(map, c, 0).r : 1.0;
+    ok = ok && d < 1.0;
+    return top - d * span;
+}
+float wxRoofTop(sampler2D map, vec2 uv, float top, float span)
+{
+    // #1145: the HIGHEST surface over the 3 x 3 texels around P's column, no slope extrapolation.
+    // Under a rain the wind tilts nearly parallel to a pitched roof, the roof is edge-on in the map:
+    // neighbouring texels differ by tens of cm, and the slope step (the gentler neighbour pair) took
+    // the wrong face at a ridge / eave crease -- the roof read low there and drops crossing into the
+    // roof volume and the attic under it stayed visible. The max errs toward cover: a drop over a
+    // steep roof outdoors hides at most one texel's rise early.
+    const ivec2 res = textureSize(map, 0);
+    const ivec2 n = clamp(ivec2(floor(uv * vec2(res))), ivec2(0), res - 1);
+    bool ok;
+    float h = wxRoofH(map, n, res, top, span, ok);
+    if (!ok) h = -1e9;
+    for (int y = -1; y <= 1; ++y)
+        for (int x = -1; x <= 1; ++x)
+        {
+            if (x == 0 && y == 0) continue;
+            bool okq;
+            const float hq = wxRoofH(map, n + ivec2(x, y), res, top, span, okq);
+            if (okq) h = max(h, hq);
+        }
+    return h;
+}
+// The near cascade where it covers P (centimetre texels: the roof's own slope, an eave's edge to a
+// few cm), else the coarse one; -1e9: open / no map.
+float wxRoofAt(vec3 P, out float tol)
+{
+    tol = kWxStreakTolNear;
+    if (wp.occlN.w > 0.5)
+    {
+        const vec2 uv = (P.xy - (wp.occlN2.x - P.z) * wp.tilt.zw - wp.occlN.xy) * wp.occlN.z;
+        if (all(greaterThanEqual(uv, vec2(0.0))) && all(lessThanEqual(uv, vec2(1.0))))
+            return wp.occlN.w > 1.5 ? wxRoofTop(uOccl[3], uv, wp.occlN2.x, wp.occlN2.y)
+                                    : wxRoofTop(uOccl[2], uv, wp.occlN2.x, wp.occlN2.y);
+    }
+    tol = kWxStreakTolCoarse;
+    if (wp.occl.w > 0.5)
+    {
+        const vec2 uv = wxMapUV(P);
+        if (all(greaterThanEqual(uv, vec2(0.0))) && all(lessThanEqual(uv, vec2(1.0))))
+            return wp.occl.w > 1.5 ? wxRoofTop(uOccl[1], uv, wp.occl2.x, wp.occl2.y)
+                                   : wxRoofTop(uOccl[0], uv, wp.occl2.x, wp.occl2.y);
+    }
+    return -1e9;
+}
+
 // #901: the avatars' shelter maps (an umbrella, a hat, the avatar itself) over a drop at P that
 // falls with the shear sh (horizontal drift per metre of fall: its own velocity -- the wind tilts
 // it): the drop came down the line P + (-sh, 1) dz, so it is under cover when that line passed
@@ -221,6 +289,21 @@ bool wxDrip(uint d)
             particles[slot].w = 0.0;
         }
         return false;
+    }
+    // #1145: a drip that has left its edge and is under cover is gone (no splash, the slot freed).
+    // Under a wind the rain runs nearly parallel to, the lee roof is edge-on in the tilted map: the
+    // ridge reads as an edge with the ground under it, and its drips fell straight through the
+    // roof into the attic. Born under its own edge by design, a drip is tested only once it has
+    // fallen kWxDripFree; a real eave's drip falls in the open.
+    if (a.z - P.z > kWxDripFree)
+    {
+        float tol;
+        const float zr = wxRoofAt(P, tol);
+        if (zr > -1e8 && P.z < zr - tol)
+        {
+            if (wp.wind.w > 0.0) particles[slot].w = 0.0;
+            return false;
+        }
     }
     const vec4 c = wp.view_proj * vec4(P - wp.eye.xyz, 1.0);
     const float m = c.w * 1.05 + 1.0;
@@ -332,15 +415,19 @@ void main()
             const float m = c.w * 1.05 + 1.0;
             vis = c.w > 0.05 && abs(c.x) <= m && abs(c.y) <= m;
         }
-        if (vis && !drift && wp.occl.w > 0.5)
+        // Under cover: the head (the streak's lowest point; it trails up and back from it) more
+        // than kWxStreakTolNear / Coarse under the roof over its column (#1145: the near map where it covers
+        // P, the casters' slope bias put back -- wxRoofAt).
+        if (vis && !drift)
         {
-            const vec2 uv = wxMapUV(P);
-            if (all(greaterThanEqual(uv, vec2(0.0))) && all(lessThanEqual(uv, vec2(1.0))))
-            {
-                const float depth = wp.occl.w > 1.5 ? textureLod(uOccl[1], uv, 0.0).r : textureLod(uOccl[0], uv, 0.0).r;
-                const float top = wp.occl2.x - depth * wp.occl2.y;
-                vis = P.z >= top - wp.occl2.z;
-            }
+            float tol;
+            const float zr = wxRoofAt(P, tol);
+            vis = !(zr > -1e8) || P.z >= zr - tol;
+            // RenderVKWeatherOcclDebug (veil2.y): why a shown drop passed -- 1 no roof over its column
+            // in either map, 2 over the roof (near map), 3 over the roof (coarse map), 4 under the
+            // roof within the slack (clean_weather.vert colours the streak)
+            if (wp.veil2.y > 0.5)
+                particles[i].w = !(zr > -1e8) ? 1.0 : (P.z >= zr ? (tol == kWxStreakTolNear ? 2.0 : 3.0) : 4.0);
         }
     }
     // Compaction: one atomic per subgroup.
@@ -381,6 +468,20 @@ void main()
         l_runoff = run ? wx_pad0 : 0u;
         l_emitters = run ? em_head[3] : 0u;
         l_drips = run ? wx_pad1 : 0u;
+    }
+    if (i == 0u && wp.veil2.y > 0.5)
+    {
+        // RenderVKWeatherOcclDebug: the streaks' roof test straight over the camera (the log line
+        // "weather roof probe"): for h = 0, 0.5 .. 2.5 m over the eye, the roof height wxRoofAt reads
+        // over that point's column (relative to the eye, -99 no roof) and which map (1 near, 2 coarse).
+        for (int k = 0; k < 6; ++k)
+        {
+            float tol;
+            const vec3 Q = wp.eye.xyz + vec3(0.0, 0.0, 0.5 * float(k));
+            const float zr = wxRoofAt(Q, tol);
+            l_probe[2 * k] = zr > -1e8 ? zr - wp.eye.z : -99.0;
+            l_probe[2 * k + 1] = tol == kWxStreakTolNear ? 1.0 : 2.0;
+        }
     }
     if (i == 0u) { wx_pad0 = 0u; wx_pad1 = 0u; }
 }

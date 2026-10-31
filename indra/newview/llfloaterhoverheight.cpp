@@ -64,6 +64,7 @@ bool LLFloaterHoverHeight::postBuild()
     sldrCtrl->setSliderMouseUpCallback(boost::bind(&LLFloaterHoverHeight::onFinalCommit,this));
     sldrCtrl->setSliderEditorCommitCallback(boost::bind(&LLFloaterHoverHeight::onFinalCommit,this));
     childSetCommitCallback("HoverHeightSlider", &LLFloaterHoverHeight::onSliderMoved, NULL);
+    childSetAction("ResetButton", boost::bind(&LLFloaterHoverHeight::onResetButtonClicked, this));
 
     // Initialize slider from pref setting.
     syncFromPreferenceSetting(this);
@@ -119,6 +120,16 @@ void LLFloaterHoverHeight::onFinalCommit()
     gSavedPerAccountSettings.setF32("AvatarHoverOffsetZ",value);
 }
 
+// #1140: back to no hover (Firestorm's FIRE-33859 reset button), applied like a slider
+// release: the avatar moves at once, AvatarHoverOffsetZ is saved and sent to the region.
+void LLFloaterHoverHeight::onResetButtonClicked()
+{
+    LLSliderCtrl* sldrCtrl = getChild<LLSliderCtrl>("HoverHeightSlider");
+    sldrCtrl->setValue(0.f);
+    onSliderMoved(sldrCtrl, NULL);
+    onFinalCommit();
+}
+
 void LLFloaterHoverHeight::onRegionChanged()
 {
     LLViewerRegion *region = gAgent.getRegion();
@@ -146,6 +157,7 @@ void LLFloaterHoverHeight::updateEditEnabled()
     bool enabled = gAgent.getRegion() && gAgent.getRegion()->avatarHoverHeightEnabled();
     LLSliderCtrl* sldrCtrl = getChild<LLSliderCtrl>("HoverHeightSlider");
     sldrCtrl->setEnabled(enabled);
+    childSetEnabled("ResetButton", enabled);
     if (enabled)
     {
         syncFromPreferenceSetting(this);

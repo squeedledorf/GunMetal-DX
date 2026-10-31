@@ -101,6 +101,10 @@ public:
     void setFilter(std::string filter_name) { mFilterName = filter_name; }
     std::string  getFilter() const { return mFilterName; }
     void updateSnapshot(bool new_snapshot, bool new_thumbnail = false, F32 delay = 0.f);
+    void startSelfTimer(S32 seconds);
+    void cancelSelfTimer();
+    bool isSelfTimerActive() const { return mSelfTimer.getStarted(); }
+    S32 getSelfTimerRemaining() const;
     void saveTexture(bool outfit_snapshot = false, std::string name = "");
     void saveLocal(const snapshot_saved_signal_t::slot_type& success_cb, const snapshot_saved_signal_t::slot_type& failure_cb);
 
@@ -157,6 +161,7 @@ private:
     bool                        mAllowRenderUI;
     bool                        mAllowFullScreenPreview;
     LLFrameTimer                mSnapshotDelayTimer;
+    LLFrameTimer                mSelfTimer;
     S32                         mShineCountdown;
     LLFrameTimer                mShineAnimTimer;
     F32                         mFlashAlpha;

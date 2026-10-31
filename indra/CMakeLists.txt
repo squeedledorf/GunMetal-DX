@@ -47,6 +47,12 @@ set(CMAKE_XCODE_GENERATE_TOP_LEVEL_PROJECT_ONLY ON)
 include(Variables)
 include(BuildVersion)
 
+# Opt-in fuzzing build (-DLL_FUZZ=ON, see indra/fuzz/README.md): sanitizer flags for the whole
+# tree. Must come before the add_subdirectory() calls so every library is instrumented.
+if (LL_FUZZ)
+  include(LLFuzz)
+endif ()
+
 if (LL_TESTS)
   include(ProcessorCount)
   ProcessorCount(NUM_CORES)
@@ -161,4 +167,9 @@ if (LL_TESTS)
   # individual apps can add themselves as dependencies
   add_subdirectory(${INTEGRATION_TESTS_PREFIX}integration_tests)
 endif (LL_TESTS)
+
+# libFuzzer harnesses for the untrusted-input parsers (opt-in; Linux + clang only).
+if (LL_FUZZ)
+  add_subdirectory(fuzz)
+endif ()
 

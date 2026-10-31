@@ -75,6 +75,7 @@
 #include "rlvmodifiers.h"
 #include "rlvui.h"
 #include "rlvextensions.h"
+#include "gmdxtpfx.h" // <GMDX> teleport effects
 
 // Boost includes
 #include <boost/algorithm/string.hpp>
@@ -1196,6 +1197,7 @@ void RlvHandler::onTeleportCallback(U64 hRegion, const LLVector3& posRegion, con
             gAgent.teleportViaLocation(posGlobal);
         else
             gAgent.teleportViaLocationLookAt(posGlobal, vecLookAt);
+        GMDXTPFX::disarm(); // <GMDX> script-driven (@tpto by region name): no teleport effect
 
         m_CurObjectStack.pop();
     }
@@ -3465,6 +3467,7 @@ ERlvCmdRet RlvForceHandler<RLV_BHVR_TPTO>::onCommand(const RlvCommand& rlvCmd)
             gAgent.teleportViaLocation(posGlobal);
         else
         gAgent.teleportViaLocationLookAt(posGlobal, vecLookAt);
+        GMDXTPFX::disarm(); // <GMDX> script-driven (@tpto): no teleport effect
     }
     else
     {

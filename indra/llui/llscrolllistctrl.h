@@ -365,6 +365,8 @@ public:
     /*virtual*/ bool    handleMouseDown(S32 x, S32 y, MASK mask);
     /*virtual*/ bool    handleMouseUp(S32 x, S32 y, MASK mask);
     /*virtual*/ bool    handleRightMouseDown(S32 x, S32 y, MASK mask);
+    // Middle-button autoscroll (LLMiddleAutoScroll) by rows.
+    /*virtual*/ bool    handleMiddleMouseDown(S32 x, S32 y, MASK mask);
     /*virtual*/ bool    handleDoubleClick(S32 x, S32 y, MASK mask);
     /*virtual*/ bool    handleHover(S32 x, S32 y, MASK mask);
     /*virtual*/ bool    handleKeyHere(KEY key, MASK mask);

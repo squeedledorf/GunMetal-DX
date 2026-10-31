@@ -2,6 +2,9 @@
  * @file fsfloatersoundemitterblacklist.h
  * @brief Floater listing blacklisted sound emitters.
  *
+ * Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4; original code from
+ * SkoomaStorm (SoapStorm <OTS>). Only active with the SLSoundEmitterBlacklist preference.
+ *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Second Life Viewer Source Code
  * Copyright (C) 2026, SkoomaStorm

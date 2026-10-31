@@ -44,7 +44,12 @@
  *   NEAR    2 x RenderVKWeatherNearRes^2 D32 (1024: 2 x 4 MB) over RenderVKWeatherNearExtent
  *           metres (32: ~3 cm texels; RenderVKWeatherNearCascade): the surfaces near the
  *           camera, so the dry patches under roofs / trees / furniture have fine edges. The
- *           lit FS blends to the coarse map over the outer tenth of it.
+ *           lit FS blends to the coarse map over the outer tenth of it. #1145: the streaks'
+ *           roof test too, where it covers the drop (clean_weather_sim.comp wxRoofAt).
+ *   Both are drawn with the projector depth pipelines' SLOPE-SCALED DEPTH BIAS: a sloped face
+ *   sits lower in the map than in the scene (bias factor x its rise per texel). The surfaces'
+ *   receiver-plane PCF lives with that; the streaks' roof test puts it back from the face's
+ *   slope (neighbouring texels) -- otherwise rain fell a metre and more inside a steep roof.
  *   Orthographic from 128 m above to 64 m below the camera, centre snapped to an eighth of the
  *   extent (a whole number of texels: no shimmer). M2 TILTED (RenderVKWeatherTiltedMap): the
  *   projection is SHEARED along the precipitation's mean fall direction d ~ (s, -1) (the slow
@@ -58,12 +63,18 @@
  *   during a slow wind change). Caveat: at a steep tilt the near map's footprint slides by
  *   |s| per metre of height, so points well above / below the camera fall back to the coarse
  *   map sooner. A cascade is also due when the camera crosses into another snap cell, after a
- *   camera cut, and every
+ *   camera cut, (#1037) kOcclChangeMinAge recordings after the ingest reported static casters
+ *   changed inside its box (a new / released / re-shaped instance, a mover settling: the
+ *   change spheres), and every
  *   RenderVKWeatherOcclusionInterval frames otherwise; AT MOST ONE renders per recording
  *   (both due: they alternate), so the per-frame cost stays one projector-tile-sized pass.
  *   Statics only (avatars, worn attachments and -- M2 -- moving objects do not shelter). The
  *   surfaces read them with a jittered,
  *   receiver-plane PCF (clean_weather_surface.glsl): soft drip lines, not texel steps.
+ *   #1159 GLASS: an alpha-blend caster is a roof where its alpha reaches
+ *   RenderVKWeatherGlassAlphaCutoff (0.05; the renderer's mWeatherBlendPipe), not the shadow
+ *   test's 0.5 -- tinted / clear glass shelters, alpha-0 and near-invisible prims stay open.
+ *   Alpha-mask casters keep their own cutoff (foliage gaps stay open).
  *
  * ZERO COST WHEN OFF: no weather (SLWeather::State::visible() false: no precipitation and
  * the surfaces are dry) -> the renderer never creates this object; once it turns off ->
@@ -90,7 +101,13 @@
  *                       the sky darkens a little with cloud and rain (RenderVKWeatherSky).
  *   PERSISTENT SNOW     the cover grid + the moving objects' own snow (recordSnow,
  *                       clean_weather_snow.comp; RenderVKWeatherSnowCover / SnowMovers). Needs
- *                       the near cascade (the grid lies on its top plane).
+ *                       the near cascade (the grid lies on its top plane). #1037: snow BURIED
+ *                       under a new column top (a table set down on the lawn) melts under the
+ *                       cover (a full coat in ~90 s, as #903's avatars; clean_weather_snow.comp
+ *                       kBuriedMelt); and while new static geometry is arriving in the
+ *                       near map's box (the BURY HOLD: an object loading in -- a cabin's roof that
+ *                       arrived after the furniture under it) a rising top buries nothing, so the
+ *                       furniture does not keep the open-sky coat it had before the roof loaded.
  *   SPLASHES            rain hits near the camera -> a GPU ring drawn after the streaks
  *                       (RenderVKWeatherSplashes).
  *   WET REFLECTIONS     puddles / soaked flat ground reach the SSR + RT reflection thresholds
@@ -302,9 +319,10 @@
  * avatars with a layer own a GRID over their REST POSE (rigged: the bind-pose position; worn rigid:
  * the attachment joint's rest transform x its joint offset) that integrates, per cell and per
  * rest-normal bucket (up / side / down), the exposure of the vertices in it at their CURRENT pose:
- * snow falls in, slides off, melts with the world and under any cover (#903, per cell); wetness
- * soaks and dries. The lit / G-buffer FS reads the cell of the fragment's rest position (a varying
- * from the VS): one trilinear fetch (two where the buckets blend).
+ * snow falls in (#1130: by the snow landing on it, toward the full coat -- it does not wait for
+ * the ground's depth), slides off, melts with the world and under any cover (#903, per cell);
+ * wetness soaks and dries. The lit / G-buffer FS reads the cell of the fragment's rest position (a
+ * varying from the VS): one trilinear fetch (two where the buckets blend).
  *   POOL        RenderVKWeatherAvatarAccumCount grids (16), RenderVKWeatherAvatarAccumRes (2: 32 x 32 x
  *               64 cells x 3 buckets, rgba8: 768 KB a grid, ~12 MB for 16; 1: 24 x 24 x 48, 324 KB;
  *               0: 16 x 16 x 32, 96 KB) + 9.4 MB scratch (4 grids an update) + the 16 KB record.
@@ -473,6 +491,10 @@ public:
         // #954: the volumetric fog runs this recording (it then carries the precipitation's medium:
         // ssr.weather[16]; off: the analytic veil, ssr.weather[15] + recordVeil).
         bool volFogOn = false;
+        // #1145: the slope-scaled depth bias factor the roof maps' casters are drawn with (the
+        // projector depth pipelines', RenderVKShadowBiasSlope at their build): the streaks' roof
+        // test puts it back (clean_weather_sim.comp wxRoofTop).
+        float occlBiasSlope = 0.f;
     };
 
     // #901 PER-AVATAR SHELTER: the renderer's buffers the chain reads, at record time (right after
@@ -843,6 +865,11 @@ private:
     void destroyBuffers();
     void writeSets();
     void planOcclusion(const Frame& f, float radius, const float tilt[2]);
+    // #1037: the ingest's change spheres since the last recording (llcleaningest.cpp
+    // gVKChangedSpheres; consumed later this recording by the renderer's invalidateProjShadows)
+    // -> the cascades whose box they touch (changed), and the snow grid's bury hold (new static
+    // geometry in the near map's box: mBuryHoldGen).
+    void noteSceneChanges();
     bool ensureNear(VkCommandBuffer cmd);
     void destroyNear();
     // Clears freshly created maps to open sky and leaves them in their sampled layout.
@@ -982,6 +1009,9 @@ private:
     // simulation (else its word is stale).
     GpuBuffer mListen[2];
     bool      mListenWritten[2] = {};
+    // RenderVKWeatherOcclDebug: the streaks' roof over the camera at 0, 0.5 .. 2.5 m (height over the
+    // eye, -99 none; which map 1 near / 2 coarse), from the listener words (clean_weather_sim.comp).
+    float     mRoofProbe[12] = {};
     uint32_t  mCap = 0;
     bool      mBindingDirty = false;
     bool      mReset = true;
@@ -1012,6 +1042,7 @@ private:
         int       readyIdx = -1;       // rendered, waiting for the next prepare
         uint32_t  age = 0;             // recordings since the last render
         bool      forced = false;      // a camera cut asked for a render (kept until it happens)
+        bool      changed = false;     // #1037: static casters changed inside its box since its last render
         double    cell[3] = {1e30, 1e30, 1e30};   // the snapped centre the last render used
         double    pendCell[3] = {};                // ... and the pending one
         float     cellTilt[2] = {0.f, 0.f};        // the shear the last render used
@@ -1026,6 +1057,7 @@ private:
             pubIdx = readyIdx = -1;
             target = 0;
             forced = false;
+            changed = false;
             haveTilt = false;
             for (double& c : cell) c = 1e30;
         }
@@ -1182,6 +1214,11 @@ private:
     GpuImage  mFlowImg;                    // rgba32f R^2 (clean_weather_runoff.comp pass 7)
     uint32_t  mRunoffRes = 0, mRunoffFactor = 1, mEmitCap = 0;
     uint64_t  mNearGen = 0, mFlowGen = ~0ull;   // near-map publishes / the one the flow was built from
+    // #1037 BURY HOLD: while mNearGen < this, a column top that rises in the snow grid does not
+    // keep the old top's snow as buried cover (WX_F_NOBURY): new static geometry arrived in the
+    // near map's box (an object loading in late -- a roof over furniture that loaded first), and
+    // the maps that may first show it have not all been consumed yet.
+    uint64_t  mBuryHoldGen = 0;
     float     mFlowF[8] = {};              // the flow grid's near frame (x0, y0, extent, top, span, texel, sx, sy)
     bool      mFlowValid = false;          // the flow map describes the published near map
     bool      mFlowDue = false;            // this recording builds it (prepare)

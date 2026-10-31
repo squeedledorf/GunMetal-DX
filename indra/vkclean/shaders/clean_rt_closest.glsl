@@ -93,6 +93,11 @@ RtHit rtClosestWalk(vec3 o, vec3 d, float tmin, float tmax, RtClosestRules r)
             }
             const uint id   = rtHitInstance(uint(rayQueryGetIntersectionInstanceCustomIndexEXT(rq, false)),
                                             uint(rayQueryGetIntersectionGeometryIndexEXT(rq, false)));
+            if ((rflags & gl_RayFlagsNoOpaqueEXT) == 0u && rtEmissiveWasOpaque(id))
+            {
+                rayQueryConfirmIntersectionEXT(rq);
+                continue;
+            }
             const uint prim = RT_HIT_PRIM(rq, false, id);
             const vec2 bc   = rayQueryGetIntersectionBarycentricsEXT(rq, false);
             const float t   = rayQueryGetIntersectionTEXT(rq, false);

@@ -10,9 +10,9 @@
 #include "vk_pipeline.h"
 #include "vk_world_shaders_spv.h"
 
-#include "llagent.h"   // <GMDX> the agent frame origin (Params::gmdx)
 #include "llerror.h"
 #include "llviewercontrol.h"
+#include "llagent.h"
 
 #include <algorithm>
 #include <cmath>
@@ -29,7 +29,7 @@ constexpr uint32_t kShadowSteps = 16;
 constexpr uint32_t kPanoW = 512, kPanoH = 256;           // panorama (equirect)
 constexpr uint32_t kPanoRows = 32;                       // rows per recording (8 frames per refresh)
 constexpr uint32_t kPanoSteps = 48;
-// EEP mapping (header of clean_vol_cloud_weather.comp): the weather tile is this many metres
+// EEP local-detail mapping: the weather RGB tile is this many metres
 // per unit of EEP cloud scale (LL's default 0.42 -> ~10 km), the base noise repeats about
 // every kBasePeriod m (snapped to divide the tile, so the wind wrap is seamless), the detail
 // noise 16 times per base period.
@@ -136,8 +136,8 @@ bool LLCleanVolCloudsVK::create(VkDeviceContext* ctx, VkDescriptorSetLayout dslD
 
     // ---- set layouts ----
     {
-        VkDescriptorSetLayoutBinding b[14]{};   // <GMDX> + 13, the cloud shapes
-        for (uint32_t i = 0; i < 14; ++i)
+        VkDescriptorSetLayoutBinding b[15]{};   // (+ 13, the sculpted cloud bodies; GunMetal-DX port)
+        for (uint32_t i = 0; i < 15; ++i)
         {
             b[i].binding = i; b[i].descriptorCount = 1; b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
             const bool sampled = i == 1 || i == 2 || i == 3 || i == 4 || i == 7 || i == 8 || i == 13;
@@ -145,7 +145,7 @@ bool LLCleanVolCloudsVK::create(VkDeviceContext* ctx, VkDescriptorSetLayout dslD
                                 : (sampled ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE);
         }
         VkDescriptorSetLayoutCreateInfo lci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        lci.bindingCount = 14; lci.pBindings = b;
+        lci.bindingCount = 15; lci.pBindings = b;
         VK_CHECK(vkdCreateSetLayout(dev, &lci, &mDsl, "mDslVolClouds"));
     }
     {
@@ -155,10 +155,12 @@ bool LLCleanVolCloudsVK::create(VkDeviceContext* ctx, VkDescriptorSetLayout dslD
         VkDescriptorSetLayoutCreateInfo lci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
         lci.bindingCount = 1; lci.pBindings = &b;
         VK_CHECK(vkdCreateSetLayout(dev, &lci, &mNoiseDsl, "mDslVolCloudsNoise"));
-        // <GMDX> the weather map + 1 the params UBO (gmdx_cloud_weather.comp: the tile and the smallest footprint)
-        VkDescriptorSetLayoutBinding wb[2] = {b, b};
-        wb[1].binding = 1; wb[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        lci.bindingCount = 2; lci.pBindings = wb;
+        VkDescriptorSetLayoutBinding weatherBindings[2]={b,{}};
+        weatherBindings[1].binding=1;
+        weatherBindings[1].descriptorCount=1;
+        weatherBindings[1].descriptorType=VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        weatherBindings[1].stageFlags=VK_SHADER_STAGE_COMPUTE_BIT;
+        lci.bindingCount=2; lci.pBindings=weatherBindings;
         VK_CHECK(vkdCreateSetLayout(dev, &lci, &mWxDsl, "mDslVolCloudsWeather"));
     }
     {
@@ -193,11 +195,14 @@ bool LLCleanVolCloudsVK::create(VkDeviceContext* ctx, VkDescriptorSetLayout dslD
                                       su | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
         mPano    = ctx->createImage2D(kPanoW, kPanoH, VK_FORMAT_R16G16B16A16_SFLOAT,
                                       su | VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+        // Match the existing portable storage/filter format; no optional r16f feature.
+        mPanoMean=ctx->createImage2D(kPanoW,kPanoH,VK_FORMAT_R16G16B16A16_SFLOAT,
+                                      su | VK_IMAGE_USAGE_TRANSFER_DST_BIT,VK_IMAGE_ASPECT_COLOR_BIT);
         mParamBuf = ctx->createBuffer(sizeof(Params), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     }
-    if (!mNoiseBase.image || !mNoiseDetail.image || !mWeather.image || !mShadow.image || !mPano.image || !mParamBuf.buffer
-        || !mShapes.create(ctx))   // <GMDX>
+    if (!mNoiseBase.image || !mNoiseDetail.image || !mWeather.image || !mShadow.image || !mPano.image || !mPanoMean.image || !mParamBuf.buffer
+        || !mShapes.create(ctx))   // (the sculpted bodies: 2 MB, or a 1-texel stand-in; GunMetal-DX port)
     {
         LL_WARNS("VKVolClouds") << "volumetric clouds: allocation refused (out of video memory); retrying later" << LL_ENDL;
         destroy(dev);
@@ -209,15 +214,17 @@ bool LLCleanVolCloudsVK::create(VkDeviceContext* ctx, VkDescriptorSetLayout dslD
     // is read before the layer is live, but no garbage may ever sit in a sampled image.
     ctx->submitImmediate([&](VkCommandBuffer cmd)
     {
-        VkImageMemoryBarrier2 b[5] = {toGeneral(mNoiseBase.image), toGeneral(mNoiseDetail.image), toGeneral(mWeather.image),
-                                      toGeneral(mShadow.image), toGeneral(mPano.image)};
-        VkDependencyInfo d{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; d.imageMemoryBarrierCount = 5; d.pImageMemoryBarriers = b;
+        VkImageMemoryBarrier2 b[6] = {toGeneral(mNoiseBase.image), toGeneral(mNoiseDetail.image), toGeneral(mWeather.image),
+                                      toGeneral(mShadow.image), toGeneral(mPano.image),toGeneral(mPanoMean.image)};
+        VkDependencyInfo d{VK_STRUCTURE_TYPE_DEPENDENCY_INFO}; d.imageMemoryBarrierCount = 6; d.pImageMemoryBarriers = b;
         vkCmdPipelineBarrier2(cmd, &d);
         const VkImageSubresourceRange rng{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
         const VkClearColorValue lit{{1.f, 0.f, 0.f, 1.f}};
         const VkClearColorValue empty{{0.f, 0.f, 0.f, 1.f}};
         vkCmdClearColorImage(cmd, mShadow.image, VK_IMAGE_LAYOUT_GENERAL, &lit, 1, &rng);
         vkCmdClearColorImage(cmd, mPano.image, VK_IMAGE_LAYOUT_GENERAL, &empty, 1, &rng);
+        const VkClearColorValue distant{{65000.f,0.f,0.f,0.f}};
+        vkCmdClearColorImage(cmd,mPanoMean.image,VK_IMAGE_LAYOUT_GENERAL,&distant,1,&rng);
         memBarrier(cmd, VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
                    VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
                    VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT);
@@ -231,19 +238,24 @@ bool LLCleanVolCloudsVK::create(VkDeviceContext* ctx, VkDescriptorSetLayout dslD
                                              {mSampRepeat, mWeather.view, VK_IMAGE_LAYOUT_GENERAL},
                                              {VK_NULL_HANDLE, mShadow.view, VK_IMAGE_LAYOUT_GENERAL},
                                              {VK_NULL_HANDLE, mPano.view, VK_IMAGE_LAYOUT_GENERAL},
-                                             {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL}};
-        VkWriteDescriptorSet w[6]{};
-        const uint32_t bind[5] = {1, 2, 3, 11, 12};
-        for (int i = 0; i < 6; ++i) { w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w[i].dstSet = mPreSet; w[i].descriptorCount = 1; }
+                                             {VK_NULL_HANDLE, mPanoMean.view, VK_IMAGE_LAYOUT_GENERAL}};
+        VkWriteDescriptorSet w[7]{};
+        const uint32_t bind[6] = {1, 2, 3, 11, 12,14};
+        for (int i = 0; i < 7; ++i) { w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET; w[i].dstSet = mPreSet; w[i].descriptorCount = 1; }
         w[0].dstBinding = 0; w[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; w[0].pBufferInfo = &ub;
-        for (int i = 0; i < 5; ++i)
+        for (int i = 0; i < 6; ++i)
         {
             w[i + 1].dstBinding = bind[i];
             w[i + 1].descriptorType = i < 3 ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
             w[i + 1].pImageInfo = &ii[i];
         }
-        vkUpdateDescriptorSets(dev, 6, w, 0, nullptr);
-        mShapes.write(dev, mPreSet, mSampClamp);   // <GMDX>
+        vkUpdateDescriptorSets(dev, 7, w, 0, nullptr);
+        mShapes.write(dev, mPreSet, mSampClamp);   // binding 13
+        VkWriteDescriptorSet weatherParams{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        weatherParams.dstSet=mWxSet; weatherParams.dstBinding=1;
+        weatherParams.descriptorCount=1; weatherParams.descriptorType=VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        weatherParams.pBufferInfo=&ub;
+        vkUpdateDescriptorSets(dev,1,&weatherParams,0,nullptr);
         const VkDescriptorImageInfo ni[3] = {{VK_NULL_HANDLE, mNoiseBase.view, VK_IMAGE_LAYOUT_GENERAL},
                                              {VK_NULL_HANDLE, mNoiseDetail.view, VK_IMAGE_LAYOUT_GENERAL},
                                              {VK_NULL_HANDLE, mWeather.view, VK_IMAGE_LAYOUT_GENERAL}};
@@ -255,11 +267,6 @@ bool LLCleanVolCloudsVK::create(VkDeviceContext* ctx, VkDescriptorSetLayout dslD
             nw[i].descriptorCount = 1; nw[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE; nw[i].pImageInfo = &ni[i];
         }
         vkUpdateDescriptorSets(dev, 3, nw, 0, nullptr);
-        // <GMDX> the weather pass reads the params too
-        VkWriteDescriptorSet wu{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        wu.dstSet = mWxSet; wu.dstBinding = 1; wu.descriptorCount = 1;
-        wu.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER; wu.pBufferInfo = &ub;
-        vkUpdateDescriptorSets(dev, 1, &wu, 0, nullptr);
     }
 
     // ---- pipeline layouts (no push constants: everything comes from the params UBO) ----
@@ -273,7 +280,8 @@ bool LLCleanVolCloudsVK::create(VkDeviceContext* ctx, VkDescriptorSetLayout dslD
         const VkDescriptorSetLayout ms[2] = {dslDraw0, mDsl};
         pli.setLayoutCount = 2; pli.pSetLayouts = ms;
         VK_CHECK(vkdCreatePipelineLayout(dev, &pli, &mLayout, "mVolCloudsLayout"));
-        pli.setLayoutCount = 1; pli.pSetLayouts = &mCompDsl;
+        const VkDescriptorSetLayout composite[2]={dslDraw0,mCompDsl};
+        pli.setLayoutCount = 2; pli.pSetLayouts = composite;
         VK_CHECK(vkdCreatePipelineLayout(dev, &pli, &mCompLayout, "mVolCloudsCompLayout"));
     }
     mPipeDslDraw0 = dslDraw0; mPipeDslDraw1 = dslDraw1; mPipeHdrFormat = hdrFormat;
@@ -285,11 +293,10 @@ bool LLCleanVolCloudsVK::create(VkDeviceContext* ctx, VkDescriptorSetLayout dslD
         const C cs[7] = {
             {kWorldVolCloudNoiseBaseSpv,   kWorldVolCloudNoiseBaseSpv_bytes,   "kWorldVolCloudNoiseBaseSpv",   mNoiseLayout, P_NOISE_BASE},
             {kWorldVolCloudNoiseDetailSpv, kWorldVolCloudNoiseDetailSpv_bytes, "kWorldVolCloudNoiseDetailSpv", mNoiseLayout, P_NOISE_DETAIL},
-            // <GMDX> the weather map, shadow map, panorama and march run GunMetal-DX's cloud model (gmdx_cloud_*.comp)
-            {kWorldGmdxCloudWeatherSpv,    kWorldGmdxCloudWeatherSpv_bytes,    "kWorldGmdxCloudWeatherSpv",    mWxLayout,    P_WEATHER},
-            {kWorldGmdxCloudShadowSpv,     kWorldGmdxCloudShadowSpv_bytes,     "kWorldGmdxCloudShadowSpv",     mLayout,      P_SHADOW},
-            {kWorldGmdxCloudPanoSpv,       kWorldGmdxCloudPanoSpv_bytes,       "kWorldGmdxCloudPanoSpv",       mLayout,      P_PANO},
-            {kWorldGmdxCloudMarchSpv,      kWorldGmdxCloudMarchSpv_bytes,      "kWorldGmdxCloudMarchSpv",      mLayout,      P_MARCH},
+            {kWorldVolCloudWeatherSpv,     kWorldVolCloudWeatherSpv_bytes,     "kWorldVolCloudWeatherSpv",     mWxLayout,    P_WEATHER},
+            {kWorldVolCloudShadowSpv,      kWorldVolCloudShadowSpv_bytes,      "kWorldVolCloudShadowSpv",      mLayout,      P_SHADOW},
+            {kWorldVolCloudPanoSpv,        kWorldVolCloudPanoSpv_bytes,        "kWorldVolCloudPanoSpv",        mLayout,      P_PANO},
+            {kWorldVolCloudMarchSpv,       kWorldVolCloudMarchSpv_bytes,       "kWorldVolCloudMarchSpv",       mLayout,      P_MARCH},
             {kWorldVolCloudTemporalSpv,    kWorldVolCloudTemporalSpv_bytes,    "kWorldVolCloudTemporalSpv",    mLayout,      P_TEMPORAL}};
         for (const C& c : cs)
         {
@@ -298,7 +305,7 @@ bool LLCleanVolCloudsVK::create(VkDeviceContext* ctx, VkDescriptorSetLayout dslD
             destroyShaderModuleDeferred(dev, m, nullptr);
         }
         VkShaderModule vs = vcModule(dev, kWorldGlowCombineVertSpv, kWorldGlowCombineVertSpv_bytes, "kWorldGlowCombineVertSpv");
-        VkShaderModule fs = vcModule(dev, kWorldGmdxCloudCompFragSpv, kWorldGmdxCloudCompFragSpv_bytes, "kWorldGmdxCloudCompFragSpv");   // <GMDX>
+        VkShaderModule fs = vcModule(dev, kWorldVolCloudCompFragSpv, kWorldVolCloudCompFragSpv_bytes, "kWorldVolCloudCompFragSpv");
         GraphicsPipelineDesc d;
         d.vert = vs; d.frag = fs; d.layout = mCompLayout;
         d.colorFormat = hdrFormat;
@@ -316,7 +323,7 @@ bool LLCleanVolCloudsVK::create(VkDeviceContext* ctx, VkDescriptorSetLayout dslD
         o.gate = false;   // optional effect: never holds the login screen
         mJob.start(pipelineBatchFlushAsync(dev, o));
     }
-    mNoiseDone = false;
+    mNoiseDone = false; mWindValid=false;
     mShValid = false; mShAge = ~0u;
     mPanoRow = 0; mPanoFilled = 0;
     mHistValid = false;
@@ -373,8 +380,8 @@ void LLCleanVolCloudsVK::destroy(VkDevice dev)
     vkDeviceWaitIdle(dev);
     for (VkPipeline& p : mPipe) if (p) { vkDestroyPipeline(dev, p, nullptr); p = VK_NULL_HANDLE; }
     destroyTargets();
-    mShapes.destroy(mCtx);   // <GMDX>
-    for (GpuImage* im : {&mNoiseBase, &mNoiseDetail, &mWeather, &mShadow, &mPano})
+    mShapes.destroy(mCtx);   // (the sculpted cloud bodies)
+    for (GpuImage* im : {&mNoiseBase, &mNoiseDetail, &mWeather, &mShadow, &mPano, &mPanoMean})
     {
         if (im->image && mCtx) mCtx->destroyImage(*im);
         *im = GpuImage{};
@@ -405,7 +412,7 @@ void LLCleanVolCloudsVK::destroy(VkDevice dev)
     mPipeHdrFormat = VK_FORMAT_UNDEFINED;
     mPipeReady = mPipeFailed = false;
     mLive = mMainNow = mMarchRan = false;
-    mNoiseDone = false;
+    mNoiseDone = false; mWindValid=false;
     mShValid = false;
     mPanoFilled = 0;
     mLogQuality = ~0u;
@@ -489,7 +496,7 @@ void LLCleanVolCloudsVK::writeMainSets()
             w[i].pImageInfo = &ii[i - 1];
         }
         vkUpdateDescriptorSets(dev, 11, w, 0, nullptr);
-        mShapes.write(dev, mMainSet[p], mSampClamp);   // <GMDX>
+        mShapes.write(dev, mMainSet[p], mSampClamp);   // 13 the sculpted cloud bodies (GunMetal-DX port)
     }
     // Composite: [0] the raw march, [1 + p] history parity p.
     for (int s = 0; s < 3; ++s)
@@ -516,9 +523,9 @@ void LLCleanVolCloudsVK::writeMainSets()
 // ---------------------------------------------------------------------------
 bool LLCleanVolCloudsVK::prepare(const Frame& f)
 {
-    static LLCachedControl<U32> s_quality(gSavedSettings, "RenderVKVolCloudQuality", 3);   // <GMDX> default High
+    static LLCachedControl<U32> s_quality(gSavedSettings, "RenderVKVolCloudQuality", 2);
     static LLCachedControl<F32> s_alt(gSavedSettings, "RenderVKVolCloudAltitude", 1500.f);
-    static LLCachedControl<F32> s_thick(gSavedSettings, "RenderVKVolCloudThickness", 2500.f);   // <GMDX> default 2500 m
+    static LLCachedControl<F32> s_thick(gSavedSettings, "RenderVKVolCloudThickness", 1500.f);
     static LLCachedControl<bool> s_shadows(gSavedSettings, "RenderVKVolCloudShadows", true);
     static LLCachedControl<F32> s_shadow_k(gSavedSettings, "RenderVKVolCloudShadowStrength", 0.85f);
     static LLCachedControl<F32> s_scale(gSavedSettings, "RenderVKVolCloudScale", 1.f);
@@ -538,6 +545,11 @@ bool LLCleanVolCloudsVK::prepare(const Frame& f)
     mDsetDraw0 = f.dsetDraw0;
     mDsetDraw1 = f.dsetDraw1;
     mOffscreen = f.offscreen;
+    if(mPhysical!=f.physical)
+    {
+        mPhysical=f.physical;
+        mHistValid=false; mPanoRow=0; mPanoFilled=0;
+    }
 
     const float base = (float)s_alt;
     const float top = base + llclamp((F32)s_thick, 100.f, 10000.f);
@@ -547,19 +559,23 @@ bool LLCleanVolCloudsVK::prepare(const Frame& f)
     // Wind: the EEP scroll is baked into the weather map (u + pd1.xy); the 3D noises follow
     // with the same offset in metres, wrapped by the base period (divides the tile).
     const double pdx = (double)f.clouds[4], pdy = (double)f.clouds[5];
-    const double offx = std::fmod((pdx - std::floor(pdx)) * tile, basePeriod);
-    const double offy = std::fmod((pdy - std::floor(pdy)) * tile, basePeriod);
+    // Unwrap EEP scrolling before applying any incommensurate transform.
+    // Snapshots evaluate the same wind without consuming the live state.
+    const double scroll[2]={pdx,pdy};
+    double wind[2];
+    for(int axis=0;axis<2;++axis)
+        wind[axis]=mWindValid ? mWindShift[axis]+std::remainder(scroll[axis]-mPreviousScroll[axis],1.0)*tile
+                             : (scroll[axis]-std::floor(scroll[axis]))*tile;
+    const LLVector3d globalAgent=gAgent.getPositionGlobal();
+    const LLVector3 agentPosition=gAgent.getPositionAgent();
+    const double origin[2]={globalAgent.mdV[0]-agentPosition.mV[0],globalAgent.mdV[1]-agentPosition.mV[1]};
+    const double offx = std::remainder(origin[0]+wind[0],basePeriod);
+    const double offy = std::remainder(origin[1]+wind[1],basePeriod);
 
     const U32 q = llclamp((U32)s_quality, 1u, 3u);
     const Tier& tt = kTiers[q];
-    // <GMDX> In (or at the edge of) the layer every texel is marched each frame and the history
-    // only averages the dither: the cloud is all around and close. The trails history once left
-    // on the avatar and nearby objects came from blending texels whose march ended at a different
-    // surface; the temporal pass now drops those (vc.temporal.w). Without the history the step
-    // jitter stood still and every step showed as a band.
-    const bool inLayer = f.camTime[2] > base - 300.f && f.camTime[2] < top + 300.f;
     const bool temporal = s_temporal && !f.offscreen;
-    uint32_t pattern = temporal && !inLayer ? tt.pattern : 0u;
+    uint32_t pattern = temporal ? tt.pattern : 0u;
     uint32_t steps = tt.steps, light = tt.light;
     if (f.offscreen) { steps = steps * 3 / 2; light = 6; }
 
@@ -581,6 +597,27 @@ bool LLCleanVolCloudsVK::prepare(const Frame& f)
     P.shape2[1] = llclamp((F32)s_maxdist, 4000.f, 60000.f);
     P.shape2[2] = 1.f;                                     // multi-scatter strength
     P.shape2[3] = 0.6f;                                    // powder strength
+    // Alpha caches a nonperiodic world field; RGB retains the original EEP tile.
+    // Match the shadow shader's minimum light elevation without changing the
+    // coverage grid/resolution as the sun moves through an otherwise static sky.
+    const double shadowReach=kShadowExtent*.5+(top-base)/.05;
+    const double radius=std::max((double)P.shape2[1],shadowReach)+4096.0;
+    const double extent=2.0*radius,texel=extent/kWeatherSize;
+    double corner[2],advected[2];
+    for(int axis=0;axis<2;++axis)
+    {
+        const double globalEye=origin[axis]+f.camTime[axis];
+        corner[axis]=std::floor((globalEye-radius)/texel)*texel;
+        advected[axis]=(corner[axis]+wind[axis])/tile;
+        P.weather_map[axis]=(float)(corner[axis]-origin[axis]);
+        P.weather_noise[axis]=(float)((corner[axis]+wind[axis])/12000.0);
+        P.weather_eep[axis]=(float)(origin[axis]/tile-std::floor(origin[axis]/tile));
+    }
+    P.weather_map[2]=(float)(1.0/extent); P.weather_map[3]=(float)extent;
+    P.weather_noise[2]=1.f/12000.f;
+    const double rotated[2]={1.4142135623730951*(.8*advected[0]-.6*advected[1]),
+                             1.4142135623730951*(.6*advected[0]+.8*advected[1])};
+    for(int axis=0;axis<2;++axis) P.weather_eep[2+axis]=(float)(rotated[axis]-std::floor(rotated[axis]));
     P.phase[0] = 0.8f; P.phase[1] = 0.3f; P.phase[2] = 0.25f;
     P.march[0] = (float)steps; P.march[1] = (float)light;
     // #932: a supersampled offscreen shot's recordings are averaged: each a distinct march
@@ -588,44 +625,6 @@ bool LLCleanVolCloudsVK::prepare(const Frame& f)
     P.march[2] = (float)(temporal ? (mFrame % 64u) : f.snapSample ? ((mFrame + f.snapSample) % 64u) : 0u);
     P.march[3] = f.offscreen ? 1.f : 0.f;
     P.cam[0] = f.camTime[0]; P.cam[1] = f.camTime[1]; P.cam[2] = f.camTime[2]; P.cam[3] = f.camTime[3];
-    // <GMDX> The agent frame's global origin, wrapped by 21 weather tiles (the noises and the
-    // anti-tiling term in gmdx_cloud_common.glsl stay periodic): the clouds hold still across a
-    // region crossing instead of jumping with the frame.
-    const LLVector3d o = gAgent.getPosGlobalFromAgent(LLVector3::zero);
-    {
-        const double wrap = tile * 21.0;
-        // Wind speed (GMDXCloudWindSpeed, x the region's EEP cloud scroll): the scroll's step since
-        // the last recording, times (speed - 1), adds to a drift every lookup shares (the weather
-        // map, the noises, the bodies, the shadow map), so the clouds travel faster or slower in
-        // the region's own direction; 1 = the region's speed.
-        static LLCachedControl<F32> s_wind(gSavedSettings, "GMDXCloudWindSpeed", 1.f);
-        const double k = llclamp((double)(F32)s_wind, 0.0, 20.0);
-        if (mWindPrimed && !f.offscreen)
-        {
-            for (int i = 0; i < 2; ++i)
-            {
-                double d = (i ? pdy : pdx) - mWindPrevPd[i];
-                if (std::fabs(d) > 0.5) d -= std::round(d);   // (a wrapped scroll)
-                mWindExtra[i] = std::fmod(mWindExtra[i] + d * tile * (k - 1.0), wrap);
-            }
-        }
-        mWindPrevPd[0] = pdx; mWindPrevPd[1] = pdy;
-        mWindPrimed = true;
-        const double ox = o.mdV[VX] + mWindExtra[0], oy = o.mdV[VY] + mWindExtra[1];
-        P.gmdx[0] = (float)(ox - std::floor(ox / wrap) * wrap);
-        P.gmdx[1] = (float)(oy - std::floor(oy / wrap) * wrap);
-        // The EEP scroll the weather map bakes in (its uv offset): the cloud bodies ride on it.
-        P.gmdx[2] = (float)(pdx - std::floor(pdx));
-        P.gmdx[3] = (float)(pdy - std::floor(pdy));
-        static LLCachedControl<F32> s_bodies(gSavedSettings, "GMDXCloudBodies", 1.f);
-        P.gmdx[4] = (float)mShapes.count();
-        P.gmdx[5] = llclamp((F32)s_bodies, 0.f, 1.f);
-        // The smallest cloud footprint the EEP cloud texture may draw (m), a share of the shell's
-        // thickness: the coverage stands straight up through the cloud type's height band, so a
-        // feature narrower than that is a column, not a cloud (gmdx_cloud_weather.comp).
-        static LLCachedControl<F32> s_minw(gSavedSettings, "GMDXCloudMinWidth", 0.05f);
-        P.gmdx[6] = llclamp((F32)s_minw, 0.f, 0.5f) * (top - base);
-    }
     {
         // #783 M2 LIGHTNING: the flash lights the cloud layer from inside (the composite adds it
         // over the clouds' own opacity; no history, so nothing smears). Not in snapshots.
@@ -635,6 +634,14 @@ bool LLCleanVolCloudsVK::prepare(const Frame& f)
             P.flash[0] = dir[0]; P.flash[1] = dir[1]; P.flash[2] = dir[2];
             P.flash[3] = 0.2126f * rad[0] + 0.7152f * rad[1] + 0.0722f * rad[2];
         }
+    }
+    {
+        // SCULPTED CLOUD BODIES (RenderVKCloudShapes, Persist 0 A/B; clean_vol_cloud_common.glsl
+        // vcBody; ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4): CorvaeOboro's
+        // CC0 cumulus volumes placed among the procedural clouds where the coverage is high.
+        static LLCachedControl<bool> s_shapes(gSavedSettings, "RenderVKCloudShapes", false);
+        P.bodies[0] = (float)mShapes.count();
+        P.bodies[1] = s_shapes ? 1.f : 0.f;
     }
 
     // ---- shadow map: refresh decision + the latched frame ----
@@ -647,14 +654,11 @@ bool LLCleanVolCloudsVK::prepare(const Frame& f)
         const float dotL = L[0] * mShLight[0] + L[1] * mShLight[1] + L[2] * mShLight[2];
         const double dx = cx - mShCentre[0], dy = cy - mShCentre[1];
         const bool due = !mShValid || mShAge == ~0u || mShAge + 1u >= kShadowEvery || dotL < 0.99996f   // ~0.5 deg
-                       || dx * dx + dy * dy > (double)(kShadowExtent * 0.2f) * (kShadowExtent * 0.2f) || f.offscreen
-                       || o.mdV[VX] != mShOrigin[0] || o.mdV[VY] != mShOrigin[1];   // <GMDX> the frame moved (a crossing)
+                       || dx * dx + dy * dy > (double)(kShadowExtent * 0.2f) * (kShadowExtent * 0.2f) || f.offscreen;
         if (due)
         {
             mShCentre[0] = cx; mShCentre[1] = cy;
-            mShOrigin[0] = o.mdV[VX]; mShOrigin[1] = o.mdV[VY];   // <GMDX>
-            mShScroll[0] = pdx; mShScroll[1] = pdy;
-            mShWind[0] = mWindExtra[0]; mShWind[1] = mWindExtra[1];   // <GMDX>
+            mShScroll[0] = wind[0]; mShScroll[1] = wind[1];
             mShLight[0] = L[0]; mShLight[1] = L[1]; mShLight[2] = L[2];
             mShAge = 0;
             mShValid = true;
@@ -664,9 +668,7 @@ bool LLCleanVolCloudsVK::prepare(const Frame& f)
         P.shadow[0] = (float)mShCentre[0]; P.shadow[1] = (float)mShCentre[1];
         P.shadow[2] = kShadowExtent; P.shadow[3] = (float)kShadowSteps;
         // Between refreshes the clouds drift with the scroll: the lookup's centre follows.
-        // <GMDX> (+ the wind speed's own drift since the refresh)
-        const double driftx = -(pdx - mShScroll[0]) * tile - (mWindExtra[0] - mShWind[0]);
-        const double drifty = -(pdy - mShScroll[1]) * tile - (mWindExtra[1] - mShWind[1]);
+        const double driftx = -(wind[0] - mShScroll[0]), drifty = -(wind[1] - mShScroll[1]);
         mVc[0][3] = llclamp((F32)s_shadow_k, 0.f, 1.f);
         mVc[1][0] = (float)(mShCentre[0] + driftx);
         mVc[1][1] = (float)(mShCentre[1] + drifty);
@@ -704,8 +706,13 @@ bool LLCleanVolCloudsVK::prepare(const Frame& f)
     mTemporalNow = temporal && mMainNow;
     if (mTemporalNow)
     {
-        const double dl[3] = {(double)f.camTime[0] - mPrevCam[0], (double)f.camTime[1] - mPrevCam[1],
-                              (double)f.camTime[2] - mPrevCam[2]};
+        const double windDelta[2]={mWindValid ? wind[0]-mWindShift[0] : 0.,
+                                   mWindValid ? wind[1]-mWindShift[1] : 0.};
+        const double cameraDelta[3]={(double)f.camTime[0]-mPrevCam[0],(double)f.camTime[1]-mPrevCam[1],
+                                     (double)f.camTime[2]-mPrevCam[2]};
+        // Current density is sampled at p+wind. Its matching point in the
+        // previous frame is p+(wind-current - wind-previous), not p.
+        const double dl[3]={cameraDelta[0]+windDelta[0],cameraDelta[1]+windDelta[1],cameraDelta[2]};
         // current camera-relative world -> last frame's clip = last view-proj-rel x
         // translate(current eye - last eye), in double (as the god rays' temporal).
         for (int c = 0; c < 4; ++c)
@@ -716,12 +723,15 @@ bool LLCleanVolCloudsVK::prepare(const Frame& f)
                     for (int k = 0; k < 3; ++k) v += (double)mPrevViewProjRel[k * 4 + r] * dl[k];
                 P.reproj[c * 4 + r] = (float)v;
             }
-        const bool jump = dl[0] * dl[0] + dl[1] * dl[1] + dl[2] * dl[2] > kCamJump * kCamJump;
-        const bool reset = !mHistValid || f.cameraCut || jump || q != mPrevQuality || w != mW || h != mH;
-        P.temporal[0] = (float)(inLayer ? std::min(tt.hist, 8u) : tt.hist);   // <GMDX> (in the layer: quicker to follow)
+        const bool jump = cameraDelta[0]*cameraDelta[0]+cameraDelta[1]*cameraDelta[1]+cameraDelta[2]*cameraDelta[2]>kCamJump*kCamJump;
+        const bool windJump=windDelta[0]*windDelta[0]+windDelta[1]*windDelta[1]>kCamJump*kCamJump;
+        const double previousPeriod=mPreviousTile/std::max(1.0,std::round(mPreviousTile/kBasePeriod));
+        const bool shapeChanged=mWindValid && (std::abs(basePeriod-previousPeriod)>.01*std::max(basePeriod,previousPeriod)
+                                                || base!=mPreviousLayer[0] || top!=mPreviousLayer[1]);
+        const bool reset = !mHistValid || f.cameraCut || jump || windJump || shapeChanged || q != mPrevQuality || w != mW || h != mH;
+        P.temporal[0] = (float)tt.hist;
         P.temporal[1] = reset ? 1.f : 0.f;
-        P.temporal[2] = pattern == 0u ? kTiers[3].widen : tt.widen;   // <GMDX> (the widening of the pattern marched)
-        P.temporal[3] = inLayer ? 1.f : 0.f;   // <GMDX> march-end test + march end kept (clean_vol_cloud_temporal.comp)
+        P.temporal[2] = tt.widen;
         mHistCur ^= 1u;
     }
     if (q != mLogQuality || w != mLogW || h != mLogH)
@@ -738,6 +748,8 @@ bool LLCleanVolCloudsVK::prepare(const Frame& f)
         std::memcpy(mPrevViewProjRel, f.viewProjRel, sizeof(mPrevViewProjRel));
         mPrevCam[0] = f.camTime[0]; mPrevCam[1] = f.camTime[1]; mPrevCam[2] = f.camTime[2];
         mPrevQuality = q;
+        for(int axis=0;axis<2;++axis) { mWindShift[axis]=wind[axis]; mPreviousScroll[axis]=scroll[axis]; }
+        mWindValid=true; mPreviousTile=tile; mPreviousLayer[0]=base; mPreviousLayer[1]=top;
         ++mFrame;
     }
     else
@@ -900,8 +912,8 @@ void LLCleanVolCloudsVK::recordComposite(VkCommandBuffer cmd, VkImageView hdrVie
     vkCmdSetViewport(cmd, 0, 1, &vp);
     vkCmdSetScissor(cmd, 0, 1, &sc);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, mPipe[P_COMP]);
-    const VkDescriptorSet set = (mTemporalNow && mHistValid) ? mCompSet[1 + mHistCur] : mCompSet[0];
-    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, mCompLayout, 0, 1, &set, 0, nullptr);
+    const VkDescriptorSet sets[2]={mDsetDraw0,(mTemporalNow && mHistValid) ? mCompSet[1 + mHistCur] : mCompSet[0]};
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, mCompLayout, 0, 2, sets, 0, nullptr);
     vkCmdDraw(cmd, 3, 1, 0, 0);
     vkCmdEndRendering(cmd);
     // These colour writes -> pass 2's colour attachment loads / blends.

@@ -477,7 +477,14 @@ void LLAvatarList::addNewItem(const LLUUID& id, const std::string& name, bool is
 // [/RLVa:KB]
     // This sets the name as a side effect
     item->setAvatarId(id, mSessionID, mIgnoreOnlineStatus, true, mUseColorizer);
-    item->setOnline(mIgnoreOnlineStatus ? true : is_online);
+    if (mIgnoreOnlineStatus)
+    {
+        item->setState(LLAvatarListItem::IS_DEFAULT);
+    }
+    else
+    {
+        item->setOnline(is_online);
+    }
     item->showTextField(mShowLastInteractionTime || mShowDistance);
 
     item->setAvatarIconVisible(mShowIcons);

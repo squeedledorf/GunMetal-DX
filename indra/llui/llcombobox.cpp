@@ -50,7 +50,6 @@
 #include "v2math.h"
 #include "lluictrlfactory.h"
 #include "lltooltip.h"
-#include "llscrollcontainer.h"   // <GMDX> wheel over a scrolling page
 
 // Globals
 S32 MAX_COMBO_WIDTH = 500;
@@ -134,6 +133,8 @@ LLComboBox::LLComboBox(const LLComboBox::Params& p)
     params.commit_callback.function(boost::bind(&LLComboBox::onItemSelected, this, _2));
     params.visible(false);
     params.commit_on_keyboard_movement(false);
+    // An open list keeps the wheel even when it has nothing to scroll, so the panel behind it stays put
+    params.mouse_wheel_opaque(true);
 
     mList = LLUICtrlFactory::create<LLScrollListCtrl>(params);
     addChild(mList);
@@ -961,25 +962,6 @@ bool LLComboBox::handleUnicodeCharHere(llwchar uni_char)
     return result;
 }
 
-// <GMDX> On a page that scrolls (the nearest LLScrollContainer has somewhere to go) the wheel
-// scrolls the page, not this control: scrolling a long page changed whatever combo box or spinner
-// passed under the pointer (GMDXWheelScrollsPage). The page's scroll container takes the wheel
-// when this returns false.
-static bool gmdx_wheel_scrolls_page(const LLView* view)
-{
-    static LLUICachedControl<bool> s_on("GMDXWheelScrollsPage", true);
-    if (!s_on) return false;
-    for (const LLView* v = view->getParent(); v; v = v->getParent())
-    {
-        if (const LLScrollContainer* page = dynamic_cast<const LLScrollContainer*>(v))
-        {
-            return !(page->isAtTop() && page->isAtBottom());
-        }
-    }
-    return false;
-}
-// </GMDX>
-
 // virtual
 bool LLComboBox::handleScrollWheel(S32 x, S32 y, S32 clicks)
 {
@@ -987,42 +969,6 @@ bool LLComboBox::handleScrollWheel(S32 x, S32 y, S32 clicks)
     {
         return mList->handleScrollWheel(x, y, clicks);
     }
-    if (gmdx_wheel_scrolls_page(this)) return false;   // <GMDX>
-
-    if (mAllowTextEntry) // We might be editable
-    {
-        if (!mList->getFirstSelected()) // We aren't in the list, don't kill their text
-        {
-            return false;
-        }
-    }
-
-    S32 current_index = getCurrentIndex();
-    if (clicks > 0)
-    {
-        for (S32 i = 0; i < clicks; ++i)
-        {
-            if (!selectNextItem())
-                break;
-        }
-    }
-    else
-    {
-        for (S32 i = 0; i < -clicks; ++i)
-        {
-            if (!selectPrevItem())
-                break;
-        }
-    }
-    S32 new_index = getCurrentIndex();
-
-    if (new_index != current_index)
-    {
-        prearrangeList();
-        onCommit();
-        return true;
-    }
-
     return false;
 }
 

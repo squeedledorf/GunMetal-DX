@@ -270,6 +270,8 @@ public:
     // are not.
     // False if either id is not live (unknown: treat as a change).
     bool shadowEquivalent(U32 a, U32 b) const;
+    // GI transport sources, independent of DI admission: PBR emission (legacy fullbright is per row).
+    bool giEmissive(U32 id) const;
 
 private:
     LLCleanMaterialStore() = default;

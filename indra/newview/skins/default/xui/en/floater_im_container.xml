@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8" standalone="yes"?>
 <multi_floater
+ can_pop_out="true"
  can_close="true"  
  can_minimize="true"
  can_resize="true"

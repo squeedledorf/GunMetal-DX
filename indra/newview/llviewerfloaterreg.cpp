@@ -32,18 +32,19 @@
 #include "llviewerfloaterreg.h"
 #include "fsfloaterteleporthistory.h"
 #include "fsfloaterradar.h"
-#include "fsfloaterhitmarker.h" // <GMDX>
-#include "fsfloaterkillfeed.h" // <GMDX>
+#include "fsfloaterhitmarker.h" // <GMDX> CombatFX
+#include "fsfloaterkillfeed.h" // <GMDX> CombatFX
+#include "gmdxfloaterloadouts.h" // <GMDX> CombatFX loadouts
+#include "gmdxweaponsorter.h" // <GMDX> CombatFX weapon sorter / importer
+#include "gmdxtoolbarpins.h" // <GMDX> CombatFX toolbar pins (icon picker)
 #include "fsfloatergrouptitles.h"
 #include "fsfloatergroupviewer.h" // <GMDX>
-#include "gmdxregioncapture.h" // <GMDX>
-#include "gmdxfloaterloadouts.h" // <GMDX>
-#include "gmdxweaponsorter.h" // <GMDX>
-#include "gmdxsnapshotavatars.h" // <GMDX> snapshot avatar picker
-#include "gmdxtoolbarpins.h" // <GMDX> toolbar pin icon picker
+#include "gmdxfloatermapsharing.h" // <GMDX> Map Sharing
+#include "slupdater.h" // <GMDX> update download progress
 #include "fsfloateraddtocontactset.h"
 #include "fsfloatercontacts.h"
 #include "fsfloatercontactsetconfiguration.h"
+#include "fsfloatersoundemitterblacklist.h"
 
 #include "slchatbar.h"
 #include "slfloatergenerictext.h"
@@ -113,10 +114,9 @@
 #include "llfloaterfonttest.h"
 #include "llfloaterforgetuser.h"
 #include "llfloatergesture.h"
-#include "ssfloatergamecontroldebug.h" // <SS:GameControl>
-#include "ssfloatergamecontroloverlay.h" // <SS:GameControl>
 #include "gmdxfloaterinputoverlay.h"   // <GMDX>
-#include "ssfloatergamecontrolgyro.h" // <SS:GameControl>
+#include "gmdxfloaterminimapsettings.h" // <GMDX>
+#include "gmdxfloaterskydebug.h"   // <GMDX> Sky Debugger
 #include "llfloatergltfasseteditor.h"
 #include "llfloatergltfexport.h"
 #include "llfloatergodtools.h"
@@ -133,6 +133,9 @@
 #include "llfloaterinventorysettings.h"
 #include "llfloaterinventorythumbnailshelper.h"
 #include "llfloaterjoystick.h"
+#include "ssfloatergamecontroldebug.h"
+#include "ssfloatergamecontrolgyro.h"
+#include "ssfloatergamecontroloverlay.h"
 #include "llfloaterlagmeter.h"
 #include "llfloaterland.h"
 #include "llfloaterlandholdings.h"
@@ -157,7 +160,6 @@
 #include "llfloatersimplesnapshot.h"
 #include "fsareasearch.h"
 #include "slfloatersoundexplorer.h"
-#include "fsfloatersoundemitterblacklist.h" // <GMDX>
 #include "slfloaterspeakersetup.h"
 #include "slfloaterweather.h"
 #include "llfloaterpathfindingcharacters.h"
@@ -167,6 +169,7 @@
 #include "llfloaterperformance.h"
 #include "llfloaterperms.h"
 #include "llfloaterpreference.h"
+#include "llfloaterpreferencesgraphicsadvanced.h"
 #include "llfloaterpreferenceviewadvanced.h"
 #include "llfloaterpreviewtrash.h"
 #include "llfloaterprofile.h"
@@ -175,6 +178,8 @@
 #include "llfloaterpublishclassified.h"
 #include "llfloaterregiondebugconsole.h"
 #include "llfloaterregioninfo.h"
+#include "llregionmapcapture.h"   // region map capture window (GunMetal-DX port)
+#include "llsnapshotavatars.h"    // snapshot avatar picker (GunMetal-DX port)
 #include "llfloaterregionrestarting.h"
 #include "llfloaterreporter.h"
 #include "llfloaterreportbug.h"
@@ -421,17 +426,20 @@ void LLViewerFloaterReg::registerFloaters()
     LLFloaterReg::add("event", "floater_event.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLFloaterEvent>);
     LLFloaterReg::add("experiences", "floater_experiences.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLFloaterExperiences>);
     LLFloaterReg::add("fs_teleporthistory", "floater_fs_teleporthistory.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<FSFloaterTeleportHistory>);
-    LLFloaterReg::add("fs_radar", "floater_fs_radar.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<FSFloaterRadar>);
-    LLFloaterReg::add("fs_kill_feed", "floater_fs_kill_feed.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<FSFloaterKillFeed>); // <GMDX>
-    LLFloaterReg::add("fs_hit_marker", "floater_fs_hit_marker.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<FSFloaterHitMarker>); // <GMDX>
-    LLFloaterReg::add("fs_hit_marker_emojis", "floater_fs_hit_marker_emojis.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<FSFloaterHitMarkerEmojis>); // <GMDX>
-    LLFloaterReg::add("fs_group_titles", "floater_fs_group_titles.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<FSFloaterGroupTitles>);
+    // <GMDX> CombatFX (ported from GunMetal-DX, LGPL 2.1, v0.3.0 cf5f1f4)
+    LLFloaterReg::add("fs_kill_feed", "floater_fs_kill_feed.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<FSFloaterKillFeed>);
+    LLFloaterReg::add("fs_hit_marker", "floater_fs_hit_marker.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<FSFloaterHitMarker>); // <GMDX> Hit Marker Options (Combat menu)
+    LLFloaterReg::add("fs_hit_marker_emojis", "floater_fs_hit_marker_emojis.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<FSFloaterHitMarkerEmojis>);
     LLFloaterReg::add("fs_group_viewer", "floater_fs_group_viewer.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<FSFloaterGroupViewer>); // <GMDX>
     LLFloaterReg::add("gmdx_loadouts", "floater_gmdx_loadouts.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<GMDXFloaterLoadouts>); // <GMDX>
+    LLFloaterReg::add("gmdx_map_sharing", "floater_gmdx_map_sharing.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<GMDXFloaterMapSharing>); // <GMDX> Map Sharing
     LLFloaterReg::add("gmdx_weapon_import", "floater_gmdx_weapon_import.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<GMDXFloaterWeaponImport>); // <GMDX>
-    LLFloaterReg::add("gmdx_region_map", "floater_gmdx_region_map.xml", &GMDXRegionCapture::buildWindow); // <GMDX>
     LLFloaterReg::add("gmdx_weapon_sort", "floater_gmdx_weapon_sort.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<GMDXFloaterWeaponSort>); // <GMDX>
     LLFloaterReg::add("gmdx_loadout_toast", "floater_gmdx_loadout_toast.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<GMDXFloaterLoadoutToast>); // <GMDX>
+    LLFloaterReg::add("gmdx_pin_icons", "floater_gmdx_pin_icons.xml", &GMDXToolbarPins::buildIconPicker); // <GMDX> toolbar pin icons
+    // </GMDX>
+    LLFloaterReg::add("fs_radar", "floater_fs_radar.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<FSFloaterRadar>);
+    LLFloaterReg::add("fs_group_titles", "floater_fs_group_titles.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<FSFloaterGroupTitles>);
     LLFloaterReg::add("fs_add_contact", "floater_fs_contact_add.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<FSFloaterAddToContactSet>);
     LLFloaterReg::add("fs_contact_set_config", "floater_fs_contact_set_configuration.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<FSFloaterContactSetConfiguration>);
     LLFloaterReg::add("imcontacts", "floater_fs_contacts.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<FSFloaterContacts>);
@@ -443,12 +451,14 @@ void LLViewerFloaterReg::registerFloaters()
     LLFloaterReg::add("forget_username", "floater_forget_user.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLFloaterForgetUser>);
 
     LLFloaterReg::add("gestures", "floater_gesture.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLFloaterGesture>);
+    // Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4; SoapStorm game control windows
     LLFloaterReg::add("game_control_gyro", "floater_game_control_gyro.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<SSFloaterGameControlGyro>); // <SS:GameControl>
     LLFloaterReg::add("game_control_overlay", "floater_game_control_overlay.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<SSFloaterGameControlOverlay>); // <SS:GameControl>
-    LLFloaterReg::add("gmdx_minimap_hide_above", "floater_gmdx_minimap_hide_above.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLFloater>); // <GMDX> mini-map hide-above height (settings-bound)
+    LLFloaterReg::add("gmdx_minimap_settings", "floater_gmdx_minimap_settings.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<GMDXFloaterMinimapSettings>); // <GMDX> mini-map Map Settings
     LLFloaterReg::add("gmdx_sky_test", "floater_gmdx_sky_test.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLFloater>); // <GMDX> Sky Test (settings-bound, gmdxskytest.cpp)
-    LLFloaterReg::add("gmdx_pin_icons", "floater_gmdx_pin_icons.xml", &GMDXToolbarPins::buildIconPicker); // <GMDX> toolbar pin icons
+    LLFloaterReg::add("gmdx_sky_debug", "floater_gmdx_sky_debug.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<GMDXFloaterSkyDebug>); // <GMDX> Sky Debugger (Develop > Rendering)
     LLFloaterReg::add("gmdx_input_overlay", "floater_gmdx_input_overlay.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<GMDXFloaterInputOverlay>); // <GMDX>
+    LLFloaterReg::add("gmdx_update_download", "floater_gmdx_update_download.xml", &SLUpdater::buildDownloadFloater); // <GMDX> update download progress
     LLFloaterReg::add("game_control_debug", "floater_game_control_debug.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<SSFloaterGameControlDebug>); // <SS:GameControl>
     LLFloaterReg::add("gesture_sets", "floater_gesture_sets.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<SLFloaterGestureSets>);
     LLFloaterReg::add("wearable_favorites", "floater_wearable_favorites.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<SLFloaterWearableFavorites>);
@@ -520,10 +530,10 @@ void LLViewerFloaterReg::registerFloaters()
     LLFloaterPayUtil::registerFloater();
 
     LLFloaterReg::add("sound_explorer", "floater_sound_explorer.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<SLFloaterSoundExplorer>);
-    LLFloaterReg::add("fs_sound_emitter_blacklist", "floater_fs_sound_emitter_blacklist.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<FSFloaterSoundEmitterBlacklist>); // <GMDX>
     LLFloaterReg::add("sl_speaker_setup", "floater_sl_speaker_setup.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<SLFloaterSpeakerSetup>);
     LLFloaterReg::add("sl_weather", "floater_sl_weather.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<SLFloaterWeather>);
     LLFloaterReg::add("area_search", "floater_fs_area_search.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<FSAreaSearch>);
+    LLFloaterReg::add("fs_sound_emitter_blacklist", "floater_fs_sound_emitter_blacklist.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<FSFloaterSoundEmitterBlacklist>); // GunMetal-DX
     LLFloaterReg::add("pathfinding_characters", "floater_pathfinding_characters.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLFloaterPathfindingCharacters>);
     LLFloaterReg::add("pathfinding_linksets", "floater_pathfinding_linksets.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLFloaterPathfindingLinksets>);
     LLFloaterReg::add("pathfinding_console", "floater_pathfinding_console.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLFloaterPathfindingConsole>);
@@ -540,7 +550,6 @@ void LLViewerFloaterReg::registerFloaters()
     LLFloaterReg::add("prefs_spellchecker", "floater_spellcheck.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLFloaterSpellCheckerSettings>);
     LLFloaterReg::add("prefs_autoreplace", "floater_autoreplace.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLFloaterAutoReplaceSettings>);
     LLFloaterReg::add("pref_joystick", "floater_joystick.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLFloaterJoystick>);
-    LLFloaterReg::add("ocol_mist", "floater_ocol_mist.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLFloater>);   // <OCOL> OCOL mist sliders (settings-bound)
     LLFloaterReg::add("preview_anim", "floater_preview_animation.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLPreviewAnim>, "preview");
     LLFloaterReg::add("preview_conversation", "floater_conversation_preview.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLFloaterConversationPreview>);
     LLFloaterReg::add("preview_gesture", "floater_preview_gesture.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLPreviewGesture>, "preview");
@@ -573,6 +582,8 @@ void LLViewerFloaterReg::registerFloaters()
     LLFloaterReg::add("reset_queue", "floater_script_queue.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLFloaterResetQueue>);
     LLFloaterReg::add("region_debug_console", "floater_region_debug_console.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLFloaterRegionDebugConsole>);
     LLFloaterReg::add("region_info", "floater_region_info.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLFloaterRegionInfo>);
+    LLFloaterReg::add("region_map_capture", "floater_region_map_capture.xml", &LLRegionMapCapture::buildWindow);   // GunMetal-DX port
+    LLFloaterReg::add("minimap_hide_above", "floater_minimap_hide_above.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLFloater>);   // mini-map hide-above height (settings-bound; GunMetal-DX port)
     LLFloaterReg::add("region_restarting", "floater_region_restarting.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLFloaterRegionRestarting>);
 // [RLVa:KB] - Checked: 2010-03-11 (RLVa-1.2.0e) | Added: RLVa-1.2.0a
     LLFloaterReg::add("rlv_behaviours", "floater_rlv_behaviours.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<RlvFloaterBehaviours>);
@@ -595,7 +606,7 @@ void LLViewerFloaterReg::registerFloaters()
     LLFloaterReg::add("scene_load_stats", "floater_scene_load_stats.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLFloaterSceneLoadStats>);
     LLFloaterReg::add("stop_queue", "floater_script_queue.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLFloaterNotRunQueue>);
     LLFloaterReg::add("snapshot", "floater_snapshot.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLFloaterSnapshot>);
-    LLFloaterReg::add("snapshot_avatar_select", "floater_snapshot_avatar_select.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLFloaterSnapshotAvatarSelect>);   // <GMDX> snapshot avatar picker
+    LLFloaterReg::add("snapshot_avatar_select", "floater_snapshot_avatar_select.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLFloaterSnapshotAvatarSelect>);   // snapshot avatar picker (GunMetal-DX port)
     LLFloaterReg::add("simple_snapshot", "floater_simple_snapshot.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLFloaterSimpleSnapshot>);
     //LLFloaterReg::add("search", "floater_search.xml", (LLFloaterBuildFunc)&LLFloaterReg::build<LLFloaterSearch>);
 // [SL:KB] - Patch: UI-FloaterSearchReplace | Checked: 2010-10-26 (Catznip-2.3)

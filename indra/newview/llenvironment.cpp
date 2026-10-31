@@ -66,7 +66,7 @@
 // [RLVa:KB] - Checked: RLVa-2.4 (@setenv)
 #include "rlvactions.h"
 // [/RLVa:KB]
-#include "gmdxnightlight.h"   // <GMDX> GMDXRespectRegionSky (gmdxNoteEnvironmentDefault)
+#include "slnightlight.h"   // physical night: the creator's sky (slNoteEnvironmentDefault)
 
 //=========================================================================
 namespace
@@ -1697,7 +1697,7 @@ void LLEnvironment::recordEnvironment(S32 parcel_id, LLEnvironment::EnvironmentI
 
     if (envinfo->mParcelId == INVALID_PARCEL_ID)
     {
-        gmdxNoteEnvironmentDefault(false, envinfo->mIsDefault);   // <GMDX> GMDXRespectRegionSky
+        slNoteEnvironmentDefault(false, envinfo->mIsDefault);   // physical night: the creator's sky (GunMetal-DX port)
         // the returned info applies to an entire region.
         if (!envinfo->mDayCycle)
         {
@@ -1733,7 +1733,7 @@ void LLEnvironment::recordEnvironment(S32 parcel_id, LLEnvironment::EnvironmentI
             LL_DEBUGS("ENVIRONMENT") << "Requested parcel #" << parcel_id << " agent is on " << parcel->getLocalID() << LL_ENDL;
             return;
         }
-        gmdxNoteEnvironmentDefault(true, envinfo->mIsDefault);   // <GMDX> GMDXRespectRegionSky
+        slNoteEnvironmentDefault(true, envinfo->mIsDefault);   // physical night: the creator's sky (GunMetal-DX port)
 
         if (!envinfo->mDayCycle)
         {

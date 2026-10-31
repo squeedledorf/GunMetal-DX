@@ -211,6 +211,17 @@
        top="260"
        width="230" />
       <check_box
+       control_name="DisableCameraConstraints"
+       follows="left|top"
+       height="16"
+       label="Disable camera constraints"
+       layout="topleft"
+       left="20"
+       name="disable_camera_constraints"
+       tool_tip="Remove the normal camera distance limits: zoom much further out from your avatar or the focused object, and right up to (or through) what you are looking at. Same as Advanced &gt; Disable Camera Constraints."
+       top="280"
+       width="230" />
+      <check_box
        control_name="RightClickDragOrbit"
        follows="left|top"
        height="16"
@@ -249,7 +260,7 @@
        layout="topleft"
        left="266"
        name="click_avatar_keeps_camera"
-       tool_tip="Normally clicking your own avatar brings the camera back behind you. With this on the camera stays put, so a framed shot survives a stray click. (Also in Lightbox &gt; Cam.)"
+       tool_tip="Normally clicking your own avatar brings the camera back behind you. With this on the camera stays put, so a framed shot survives a stray click. (Also in Photo Studio &gt; Cam.)"
        top="74"
        width="220" />
       <check_box
@@ -449,6 +460,17 @@
        top="92"
        width="470" />
       <check_box
+       control_name="GameControlToScripts"
+       follows="left|top"
+       height="16"
+       label="Send gamepad and movement-key input to scripts"
+       layout="topleft"
+       left="20"
+       name="game_control_to_scripts"
+       tool_tip="Lets scripts you grant the 'Use gamepad inputs' permission (and attached or seat scripts) receive game_control events from your gamepad and movement keys, on regions that support it. Nothing is sent while this is off."
+       top="112"
+       width="470" />
+      <check_box
        control_name="SLStrafeWithAD"
        follows="left|top"
        height="16"
@@ -457,8 +479,8 @@
        left="20"
        name="strafe_with_ad"
        tool_tip="A/D and the Left/Right arrow keys strafe (sidestep), and Shift+A/D turn, on foot and flying. Off: A/D turn and Shift+A/D strafe. Only the default key bindings are swapped. Mouselook already strafes with A/D."
-       top="112"
-       width="470" />
+       top="132"
+       width="230" />
       <slider
        can_edit_text="true"
        control_name="SlipstreamKeyboardTurnRate"
@@ -476,7 +498,7 @@
        name="keyboard_turn_rate"
        show_text="true"
        tool_tip="How fast the A/D and Left/Right arrow keys turn your avatar (when they turn rather than strafe). 1.00 is the standard speed. Does not affect strafing, mouselook or the on-screen turn buttons."
-       top="112"
+       top="132"
        width="230" />
       <check_box
        control_name="SlipstreamMouseWalk"
@@ -487,7 +509,7 @@
        left="20"
        name="mouse_walk"
        tool_tip="While holding the left mouse button on your avatar to steer, also hold the right button to walk forward (runs or flies per your current mode). Release either button to stop. Not used with the third-person shooter camera."
-       top="132"
+       top="152"
        width="470" />
       <check_box
        control_name="FSBlockClickSit"
@@ -498,7 +520,7 @@
        left="20"
        name="block_click_sit"
        tool_tip="Ignore an object's 'sit on left-click' action, to avoid accidental sits. Left-clicking such an object touches it instead (if it responds to touch). To sit, right-click it and choose Sit Here."
-       top="152"
+       top="172"
        width="470" />
       <check_box
        control_name="EnableCollisionSounds"
@@ -508,7 +530,7 @@
        layout="topleft"
        left="20"
        name="sound_on_collisions"
-       top="172"
+       top="192"
        width="470" />
       <text
        font="SansSerifSmallBold"
@@ -519,7 +541,7 @@
        layout="topleft"
        left="24"
        name="mouse_lbl"
-       top="202"
+       top="222"
        width="208">
         Clicking on land
       </text>
@@ -531,7 +553,7 @@
        layout="topleft"
        left="20"
        name="single_click_action_lbl"
-       top="226"
+       top="246"
        width="80">
         Single click:
       </text>
@@ -539,7 +561,7 @@
        height="23"
        layout="topleft"
        left="110"
-       top="221"
+       top="241"
        name="single_click_action_combo"
        width="220">
         <combo_box.item
@@ -561,7 +583,7 @@
        layout="topleft"
        left="20"
        name="double_click_action_lbl"
-       top="254"
+       top="274"
        width="80">
         Double click:
       </text>
@@ -569,7 +591,7 @@
        height="23"
        layout="topleft"
        left="110"
-       top="249"
+       top="269"
        name="double_click_action_combo"
        width="220">
         <combo_box.item
@@ -596,7 +618,7 @@
        left="20"
        name="show_system_avatar_bodies"
        tool_tip="Draw the classic system body (skin, eyes, eyelashes, hair, skirt) of every avatar, yours included. Turn off when everyone you see wears a mesh body: avatars without a mesh body will then show ONLY their attachments."
-       top="288"
+       top="308"
        width="470" />
       <button
        follows="left|top"
@@ -605,24 +627,186 @@
        label="3Dconnexion devices"
        left="20"
        name="joystick_setup_button"
-       top="314"
+       top="334"
        width="155">
         <button.commit_callback
          function="Floater.Show"
          parameter="pref_joystick" />
       </button>
+    </panel>
+    <!-- <GMDX> Mouselook and the third-person shooter camera (Slipstream's TPS section, behind the avatar
+         only: the over-the-shoulder view is GunMetal-DX's OTS aim camera, Combat > Camera) -->
+    <panel
+     follows="all"
+     height="388"
+     label="Mouselook &amp; TPS"
+     layout="topleft"
+     left="0"
+     name="move_aim_tab"
+     top="0"
+     width="517">
       <text
+       font="SansSerifSmallBold"
        follows="left|top"
        type="string"
        length="1"
        height="12"
        layout="topleft"
        left="20"
-       name="aim_moved_note"
-       top="348"
+       name="mouselook_lbl"
+       top="11"
+       width="230">
+        Mouselook
+      </text>
+      <check_box
+       control_name="FirstPersonAvatarVisible"
+       follows="left|top"
+       height="16"
+       label="Show me in mouselook"
+       layout="topleft"
+       left="20"
+       name="first_person_avatar_visible"
+       top="32"
+       width="230" />
+      <check_box
+       control_name="SlipstreamMouselookHideUI"
+       follows="left|top"
+       height="16"
+       label="Hide UI in mouselook"
+       layout="topleft"
+       left="266"
+       name="mouselook_hide_ui"
+       tool_tip="Hide toolbars, menus and open windows (but the mini-map) on entering mouselook; Hide all controls (Me menu) shows them again. Off, mouselook keeps the UI as it was, so the Area Search list and its beacons stay on screen. The mouse still steers the camera, so the UI is visible but not clickable until you leave mouselook."
+       top="32"
+       width="220" />
+      <slider
+       control_name="MouseSensitivity"
+       follows="left|top"
+       height="15"
+       initial_value="2"
+       label="Sensitivity"
+       label_width="80"
+       layout="topleft"
+       left="20"
+       max_val="15"
+       name="mouse_sensitivity"
+       show_text="false"
+       top="54"
+       width="230" />
+      <slider
+       control_name="MouseSensitivityZoomed"
+       follows="left|top"
+       height="15"
+       initial_value="3"
+       label="Zoomed sensitivity"
+       label_width="110"
+       layout="topleft"
+       left="266"
+       max_val="15"
+       name="mouse_sensitivity_zoomed"
+       show_text="false"
+       tool_tip="Mouse sensitivity while you hold the right button to zoom in mouselook, on the same scale as Sensitivity. Aiming down sights has its own setting on the Combat tab."
+       top="54"
+       width="220" />
+      <check_box
+       control_name="InvertMouse"
+       follows="left|top"
+       height="16"
+       label="Invert"
+       layout="topleft"
+       left="20"
+       name="invert_mouse"
+       top="76"
+       width="230" />
+      <text
+       font="SansSerifSmallBold"
+       follows="left|top"
+       type="string"
+       length="1"
+       height="12"
+       layout="topleft"
+       left="20"
+       name="tps_options_heading"
+       top="104"
        width="470">
-        Mouselook and the third-person shooter camera are on the Combat tab.
+        Third-person shooter camera
+      </text>
+      <check_box
+       control_name="SlipstreamTPSCamera"
+       follows="left|top"
+       height="16"
+       label="Third-person shooter camera"
+       layout="topleft"
+       left="20"
+       name="tps_camera"
+       tool_tip="Mouse orbits the camera around your avatar with the pointer hidden, and movement keys follow the camera. Click your avatar to engage, Esc to release; RMB follows the release/drag setting. Behind the avatar only: the over-the-shoulder view is the OTS aim camera (M; Combat &gt; Camera)."
+       top="125"
+       width="470" />
+      <check_box
+       control_name="SlipstreamTPSFaceCamera"
+       enabled_control="SlipstreamTPSCamera"
+       follows="left|top"
+       height="16"
+       label="Avatar faces camera direction"
+       layout="topleft"
+       left="36"
+       name="tps_face_camera"
+       tool_tip="Shooter style: your avatar always turns to face where the camera looks, even standing still, and movement keys strafe and back-pedal. Off: your avatar turns toward the way it walks."
+       top="148"
+       width="454" />
+      <check_box
+       control_name="SlipstreamTPSDynamicCamera"
+       follows="left|top"
+       height="16"
+       label="Dynamic camera (Esc toggles follow camera)"
+       layout="topleft"
+       left="36"
+       name="tps_dynamic_camera"
+       tool_tip="With the shooter camera released, Esc returns to the normal follow camera behind your avatar and leaves the mouse free, instead of grabbing the mouse again; click your avatar to engage it again. In aim mode (the OTS camera or first person), Esc leaves it as always and the next Esc goes back in."
+       top="168"
+       width="454" />
+      <check_box
+       control_name="SlipstreamTPSRightDragSteers"
+       enabled_control="SlipstreamTPSCamera"
+       follows="left|top"
+       height="16"
+       label="Shooter camera: right-drag steers"
+       layout="topleft"
+       left="36"
+       name="tps_right_drag_steers"
+       tool_tip="While the third-person shooter camera is engaged, a right press no longer releases it: moving the mouse steers the view as usual, and a right-click without moving hands the mouse back. Off: any right-click releases the shooter camera. The release click is consumed; right-click again to open a context menu."
+       top="188"
+       width="454" />
+      <slider
+       control_name="SlipstreamTPSShoulderOffset"
+       enabled_control="SlipstreamTPSCamera"
+       can_edit_text="true"
+       decimal_digits="2"
+       follows="left|top"
+       height="16"
+       increment="0.05"
+       label="Behind avatar side (m):"
+       label_width="190"
+       layout="topleft"
+       left="36"
+       max_val="2"
+       min_val="-2"
+       name="SlipstreamTPSShoulderOffset_pref"
+       show_text="true"
+       top="212"
+       width="454" />
+      <text
+       follows="left|top"
+       height="38"
+       layout="topleft"
+       left="36"
+       name="tps_framing_help"
+       top="238"
+       width="454"
+       wrap="true">
+        The wheel zooms the shooter camera no further out than the normal camera. The over-the-shoulder aim camera is M (Preferences &gt; Combat &gt; Camera).
       </text>
     </panel>
+    <!-- </GMDX> -->
   </tab_container>
 </panel>

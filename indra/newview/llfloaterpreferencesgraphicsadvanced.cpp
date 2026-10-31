@@ -656,7 +656,7 @@ void LLFloaterPreferenceGraphicsAdvanced::refreshEnabledState()
         }
     }
 
-    // Ray-traced shadow resolution (#195): only meaningful when something is ray traced.
+    // The RT mask resolution (#195) is meaningful only when something is ray traced.
     if (LLComboBox* ctrl_rtres = findChild<LLComboBox>("RtShadowRes"))
     {
         const S32 detail = gSavedSettings.getS32("RenderShadowDetail");
@@ -665,6 +665,20 @@ void LLFloaterPreferenceGraphicsAdvanced::refreshEnabledState()
         const bool on = enabled && traced && LLVulkanContext::instance().rayTracingEnabled();
         ctrl_rtres->setEnabled(on);
         if (LLTextBox* t = findChild<LLTextBox>("RtShadowResText")) t->setEnabled(on);
+    }
+
+    // RT disc sampling is fixed at one ray, so cascade quality only applies to shadow maps.
+    // Keep its saved value untouched while an eligible RT sun/moon or projector path is selected.
+    if (LLComboBox* ctrl_quality = findChild<LLComboBox>("ShadowQuality"))
+    {
+        const S32 detail = gSavedSettings.getS32("RenderShadowDetail");
+        const bool rt_selected = (detail >= 1 && gSavedSettings.getU32("RenderVKSunShadows") == 2u)
+                              || (detail >= 2 && gSavedSettings.getU32("RenderVKProjectorShadows") == 2u);
+        const bool rt_active = enabled && rt_selected && LLVulkanContext::instance().rayTracingEnabled();
+        static const std::string base_tip = ctrl_quality->getToolTip();
+        ctrl_quality->setEnabled(enabled && !rt_active);
+        ctrl_quality->setToolTip(rt_active ? "Ray-traced shadows use a fixed sample count" : base_tip);
+        if (LLTextBox* t = findChild<LLTextBox>("ShadowQualityText")) t->setEnabled(enabled && !rt_active);
     }
 
     // Ray-traced lighting section (GI, shadows from all lights, stochastic / merged RT shadows).

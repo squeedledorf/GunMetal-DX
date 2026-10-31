@@ -42,7 +42,7 @@
     <button
      name="fl_upload_image"
      label="Upload Photo"
-     top="102"
+     top="77"
      left="175"
      height="20"
      width="120"
@@ -66,6 +66,36 @@
      width="120"
      follows="top|left"
      layout="topleft"/>
+    <button
+     name="btn_preview"
+     tool_tip="Preview how others see your profile"
+     image_overlay="Profile_Group_Visibility_On"
+     is_toggle="true"
+     top_pad="5"
+     left_delta="0"
+     height="20"
+     width="120"
+     enabled="false"
+     follows="top|left"
+     layout="topleft"/>
+    <!-- own profile preview, the text the way others see it -->
+    <text_editor
+     name="fl_description_preview"
+     trusted_content="false"
+     enabled="false"
+     visible="false"
+     top="180"
+     left="6"
+     right="-6"
+     height="224"
+     follows="all"
+     layout="topleft"
+     bg_readonly_color="Transparent"
+     border_visible="true"
+     max_length="65000"
+     parse_urls="true"
+     word_wrap="true"
+    />
     <text_editor
      name="fl_description_edit"
      trusted_content="false"

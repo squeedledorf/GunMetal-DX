@@ -36,6 +36,7 @@
 #include "llcombobox.h"
 #include "lldir.h"
 #include "llfilepicker.h"
+#include "llfloaterpopout.h"
 #include "lllocalanim.h"
 #include "llscrolllistctrl.h"
 #include "llspinctrl.h"
@@ -317,6 +318,8 @@ void SLFloaterPoseCreator::onPreview()
     }
     mPreviewAnim = id;
     mPreviewAvatar = avatar->getID();
+    // The preview plays on the world avatar, not inside this UI surface.
+    LLFloaterPopout::showWorldView();
     setStatus("status_previewing");
 }
 

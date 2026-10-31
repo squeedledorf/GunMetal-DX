@@ -643,7 +643,6 @@ void SLFloaterAOEditor::refreshStates()
     const S32 scroll = mStateList->getScrollPos();
     mStateList->deleteAllItems();
     const SLAOSet* set = SLAOSets::instance().getSet(mSelectedSet);
-    SLAOEngine& engine = SLAOEngine::instance();
     mMarkedState = marker_key(mSelectedSet);
     for (S32 i = 0; i < STATE_COUNT; ++i)
     {

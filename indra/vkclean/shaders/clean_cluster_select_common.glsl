@@ -18,6 +18,7 @@
 #define CLI1B_DYN_CASTER  4096u   // static: a moving shadow caster (#567 split: the dynamic overlay's)
 #define CLI1B_BLEND       8192u   // rigged ALPHA-BLEND material: its draw records go to the alpha lists only
                                   // (clean_cluster_alpha.comp orders them back to front), never buckets 0 / 1
+#define CLI1B_EMISSIVE_NOSHADOW 16384u   // per-face policy, copied from the clean row
 #define CLI1B_AV_SHIFT      16u
 
 // ---- CL_B_COUNTERS layout: CLC_VIEW_WORDS words per view, then the dedupe stamps ----------

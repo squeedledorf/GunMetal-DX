@@ -5,8 +5,8 @@
  *        fading hit report line and hit/kill sounds. Events arrive
  *        owner-filtered from the LSL bridge combat log listener.
  *
- *        GunMetal-DX: the bridge is the #GunMetal-DX Helper (slbridge, "#slb:hit"
- *        lines), worn only while the hit marker is enabled. The custom crosshair,
+ *        Slipstream: the bridge is the #Slipstream Helper (slbridge, "#slb:combat/hit/1"
+ *        lines), worn only while CombatFX and the hit marker are enabled. The custom crosshair,
  *        its tint and the OTS convergence parts of SoapStorm's file live in
  *        fscombataim.
  *
@@ -41,8 +41,9 @@ public:
     // helper (and asking it for the owner's hits) only while the hit marker is on.
     static void init();
 
-    // A "#slb:hit|<D or K>|<target>|<agent>|<type>|<damage>" line from the bridge
-    // (the part after "hit|"): one of the agent's own hits (D) or kills (K).
+    // A "#slb:combat/hit/1|<D, d or K>|<target>|<agent>|<type>|<damage>" line from the
+    // bridge (the part after the type): one of the agent's own hits (D) or kills (K).
+    // Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4; CombatFX only.
     static void handleBridgeEvent(const std::string& line);
 
     // Per-frame overlay: hitmarker flash and fading hit report text.

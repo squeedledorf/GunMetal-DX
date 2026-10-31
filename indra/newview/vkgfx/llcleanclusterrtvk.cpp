@@ -946,7 +946,8 @@ VkDeviceSize LLCleanClusterRTVK::plan(const FrameIn& in, VkDeviceSize salign)
     ok = ok && ensureBuf(mCut, (VkDeviceSize)kCutCap * 16, kSt | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, false, "rt.cl.cut");
     ok = ok && ensureBuf(mCutPrev, (VkDeviceSize)kCutCap * 16, kSt | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, false, "rt.cl.cut");
     ok = ok && ensureBuf(mOvr, (VkDeviceSize)mRiCap * 16, kSt | kDst, false, "rt.cl.ovr");
-    ok = ok && ensureBuf(mCnt, kCntWords * 4, kSt | kDst | kIn | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, false, "rt.cl.cnt");
+    ok = ok && ensureBuf(mCnt, kCntWords * 4, kSt | kDst | kIn | VK_BUFFER_USAGE_TRANSFER_SRC_BIT
+                         | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, false, "rt.cl.cnt");
     ok = ok && ensureBuf(mT0Valid, (VkDeviceSize)kFrameSlots * kMaxT0Builds * 4,
                          kSt | kDst | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, false, "rt.cl.t0valid");
     // (rigged; always real buffers: mode 0 writes rig_of, reads the parameter block)
@@ -2446,7 +2447,8 @@ void LLCleanClusterRTVK::record(VkCommandBuffer cmd, const std::function<VkDevic
     if (rig && clas)
     {
         dispatch(cmd, 13, 1);                         // the arena per avatar, whole or not at all
-        bar(cmd, kCS, kCS);
+        // Admission also writes mode 9's grid. Publish it to indirect-command reads.
+        bar(cmd, kCS, kCS | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT);
         mark(cmd, "c_cl_rts_admit");
         dispatch(cmd, 14, mInstN);                    // ... its instances' slots + headers
         bar(cmd, kCS, kCS | kAS);
@@ -2469,7 +2471,9 @@ void LLCleanClusterRTVK::record(VkCommandBuffer cmd, const std::function<VkDevic
         // destinations, count = CNT_RIG <= the capacity), taken by mode 4 below ----
         if (rig && mRigArgs.buffer && mRigAddr.buffer && mRigClasArena.buffer && mRigClasStride)
         {
-            dispatch(cmd, 9, mRigCap);
+            // The occupied range ends at CNT_RIG (including holes from kept avatars).
+            // Slots beyond it always returned immediately; do not launch the arena's tail.
+            dispatchIndirect(cmd, 9, mCnt.buffer, (VkDeviceSize)kRigSkinDispatch * 4);
             bar(cmd, kCS, kAS | kCS);
             // (#1011 profile: mode 9 -- the shared copies, compares and own skinning -- apart from the
             // CLAS build below; c_cl_rig_clas is the build alone now, the gpu sub line re-adds the two)
@@ -2848,7 +2852,8 @@ bool LLCleanClusterRTVK::ptlasEnsure(uint32_t cap)
         mPtlasIn = in;
     }
     bool ok = ensureBuf(mPtlasCmd, kPtlasCmdBytes, kSt | kIn | VK_BUFFER_USAGE_TRANSFER_DST_BIT, false, "rt.cl.ptlasCmd");
-    ok = ok && ensureBuf(mCnt, kCntWords * 4, kSt | kIn | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+    ok = ok && ensureBuf(mCnt, kCntWords * 4, kSt | kIn | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT
+                         | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT,
                          false, "rt.cl.cnt");
     return ok;
 #else

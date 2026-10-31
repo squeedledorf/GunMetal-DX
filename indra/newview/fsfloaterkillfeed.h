@@ -5,9 +5,9 @@
  *        position, lines, hold time); the overlay itself renders from
  *        LLViewerWindow::draw.
  *
- *        GunMetal-DX: the events come from the #GunMetal-DX Helper bridge
- *        (slbridge, "#slb:combat" lines), which is worn only while the kill
- *        feed is enabled.
+ *        Slipstream: the events come from the #Slipstream Helper bridge
+ *        (slbridge, "#slb:combat/death/1" lines), which is worn only while
+ *        CombatFX and the kill feed are enabled.
  *
  * $LicenseInfo:firstyear=2026&license=viewerlgpl$
  * Phoenix Firestorm Viewer Source Code
@@ -45,8 +45,9 @@ public:
     // helper (and listening to the combat log) only while the feed is on.
     static void init();
 
-    // A "#slb:combat|<victim>|<killer>|<type>|<damage>|<weapon>" line from the
-    // bridge (the part after "combat|").
+    // A "#slb:combat/death/1|<victim>|<killer>|<type>|<damage>|<weapon>" line from
+    // the bridge (the part after the type). Ported from GunMetal-DX (squeedledorf,
+    // LGPL 2.1), v0.3.0 cf5f1f4; CombatFX only.
     static void handleBridgeEvent(const std::string& line);
 
     // Text-only kill feed overlay, rendered every frame from

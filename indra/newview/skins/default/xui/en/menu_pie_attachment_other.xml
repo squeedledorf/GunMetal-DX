@@ -33,13 +33,15 @@
             <pie_slice.on_enable
                 function="EnableMuteParticle" />
         </pie_slice>
-        <!-- <GMDX> sound emitter blacklist -->
+        <!-- Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4: sound emitter blacklist, shown with SLSoundEmitterBlacklist -->
         <pie_slice
             enabled="true"
             label="Sound Emitter"
             name="BlacklistSoundEmitter">
             <pie_slice.on_click
                 function="Object.BlacklistSoundEmitter" />
+            <pie_slice.on_visible
+                function="Object.SoundEmitterBlacklistEnabled" />
         </pie_slice>
         <pie_slice
             enabled="true"
@@ -47,6 +49,8 @@
             name="BlacklistSoundEmitterPermanent">
             <pie_slice.on_click
                 function="Object.BlacklistSoundEmitterPermanent" />
+            <pie_slice.on_visible
+                function="Object.SoundEmitterBlacklistEnabled" />
         </pie_slice>
         <!-- </GMDX> -->
     </pie_menu>
@@ -96,14 +100,19 @@
 
         <pie_slice
             label="Freeze"
-            name="Freeze..."
-            check_enable_once="true">
+            name="Freeze...">
             <pie_slice.on_click
                 function="Avatar.Freeze" />
-            <pie_slice.on_enable
+            <pie_slice.on_visible
                 function="Avatar.EnableFreezeEject"/>
         </pie_slice>
-        <pie_separator name="Give Calling Card (not in Slipstream)" />
+        <pie_slice
+            label="Send Home"
+            name="Teleport Home..."
+            tool_tip="Remove from the region by sending home, without adding a ban.">
+            <pie_slice.on_click function="Avatar.ManageEstate" parameter="0" />
+            <pie_slice.on_visible function="Avatar.EnableManageEstate" />
+        </pie_slice>
         <pie_slice
             label="Invite to Group"
             name="Group Invite...">
@@ -114,16 +123,20 @@
         </pie_slice>
 
 <!-- [FS:Chanayane] Compass floater - face towards avatar from pie menu -->
-        <pie_separator name="Face towards (not in Slipstream)" />
+        <pie_slice
+            label="Estate Kick"
+            name="Estate Kick...">
+            <pie_slice.on_click function="Avatar.ManageEstate" parameter="1" />
+            <pie_slice.on_visible function="Avatar.EnableManageEstate" />
+        </pie_slice>
 <!-- [/FS:Chanayane] -->
 
         <pie_slice
-            label="Eject..."
-            name="Eject..."
-            check_enable_once="true">
+            label="Parcel Eject"
+            name="Eject...">
             <pie_slice.on_click
                 function="Avatar.Eject" />
-            <pie_slice.on_enable
+            <pie_slice.on_visible
                 function="Avatar.EnableFreezeEject"/>
         </pie_slice>
 

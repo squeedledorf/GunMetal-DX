@@ -6,6 +6,7 @@
 //   clean_dn_atrous.comp    one variance-guided a-trous iteration per dispatch
 #include "clean_frame_info.glsl"
 #include "clean_pdn_common.glsl"
+#include "clean_history_time.glsl"
 
 layout(set = 1, binding = 0, rgba16f) uniform image2DArray uDnIn;     // producer's raw; a-trous scratch
 layout(set = 1, binding = 1, rgba32ui) uniform uimage2D uDnMot;       // camera-only reprojection + expected depth
@@ -30,7 +31,33 @@ layout(push_constant) uniform DnPush {
 } dp;
 #define DN_F_HIST   1u    // the history is valid (the denoiser ran last frame at this size)
 #define DN_F_PARITY 2u    // this frame's GEOM / HIST layer (the producer wrote GEOM layer parity)
-                          // (bit 2: DN_F_YOUNG_BOOST, bit 31: DN_F_MOVE_ZTOL -- below, #1038)
+                          // (bit 2: DN_F_YOUNG_BOOST, bit 31: DN_F_MOVE_ZTOL -- below, #1038;
+                          //  bit 3: DN_F_RADIANCE -- below)
+// (RenderVKReSTIRRadiance) RADIANCE SIGNAL from a RESERVOIR-REUSING sampler (the pass-15 instance in radiance
+// mode; LLCleanDenoiserVK::Params::radiance -- the GI instance and the ratio path never set it): one pick per
+// texel of the SHADOWED light, its reservoir handed to a spatial neighbourhood (ReSTIR 5c, ~12 texels) and kept
+// for up to the M cap in frames (5b). The 3x3 of this frame's raw samples is then NOT nine independent
+// samples: on a flat lit surface the whole 3x3 often holds the same pick, its sigma ~0, and the neighbourhood
+// clamp dragged the history onto that one pick and cut its length (dnClamp: <= 8 frames, down to 1) -- a new
+// low-pass of a new pick every frame: the low-frequency blotches that CRAWL. With this bit the clamp box's
+// sigma is floored at the history's own per-sample spread (the accumulated luminance variance, which no
+// spatial correlation collapses; per channel in proportion to the colour, so a coloured light's chroma noise
+// is inside the box too). A real change still leaves that box (a light switched off, a shadow arriving) and
+// cuts the history as before; noise from the same pick across the neighbourhood no longer does.
+#define DN_F_RADIANCE 8u
+bool dnRadiance() { return (dp.ctl.x & DN_F_RADIANCE) != 0u; }
+// ... and (clean_dn_atrous.comp YOUNG-HISTORY FEEDBACK) a texel whose history is shorter than this many frames takes
+// the first a-trous iteration's output as its history colour
+#define DN_RAD_FEED_LEN 8.0
+// The radiance clamp's sigma floor: the per-sample luminance spread sqrt(var) carried to each channel in
+// proportion to the larger of the two estimates' colour (grey: the same in every channel).
+vec3 dnRadSpread(float var, vec3 a, vec3 b)
+{
+    const float sd = sqrt(max(var, 0.0));
+    const vec3 c = max(a, b);
+    const float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    return l > 1e-6 ? sd * c / l : vec3(sd);
+}
 #define DN_DBG_SHIFT 4u   // bits 4-7: the debug view (PDN_DBG_*; 8 / 9 the #869 split views)
 #define DN_F_SUN       256u    // the producer wrote the sun / moon channel (IN layer 2)
 #define DN_F_SUN_HIST  512u    // ... and last frame's sun history is valid (no sun <-> moon cut)
@@ -58,7 +85,8 @@ layout(push_constant) uniform DnPush {
 // diffuse takes (GEOM meta bit 15, set by the temporal pass: a reused reservoir with M >= DN_RS_M
 // and a diffuse history of >= DN_RS_M frames); 0 = every texel takes all of them.
 #define DN_CONV_SHIFT 13u
-#define DN_RS_M 8.0
+#define DN_RS_M 8.0 // actual reservoir sample confidence, never milliseconds
+#define DN_CONV_AGE 8.0 // minimum history duration in 60 Hz reference units
 uint dnConvIters() { return (dp.ctl.x >> DN_CONV_SHIFT) & 7u; }
 // (#869) THE MOVING-LIGHT RULE (RenderVKReSTIRMoveCut; clean_regir.glsl RS_MOVE_*): bits 16-19 = the
 // history (frames) of a texel whose light MOVED this frame -- the producer's MOT w = the moved
@@ -107,7 +135,7 @@ float dnYouth(float len) { const float n = dnHistFix(); return n > 0.0 ? clamp(1
 float dnMaturity(float len)
 {
     const float n = dnHistFix();
-    return (n > 0.0 && len > 0.5) ? max(min(len / n, 1.0), 1.0 / DN_HFIX_MAXW) : 1.0;
+    return (n > 0.0 && len > 0.0) ? max(min(len / n, 1.0), 1.0 / DN_HFIX_MAXW) : 1.0;
 }
 // (#87) REPROJECTION SEARCH (the GI denoiser, RenderVKGIReprojSearch): when none of the bilinear 2x2
 // history taps is the same surface (sub-texel motion across a thin strand / a silhouette at the
@@ -156,7 +184,7 @@ bool dnInfoS(float W, vec4 raw) { return W > 0.0 && raw.a >= 0.0; }
 // Tap weight of an UNKNOWN texel (DN_F_INFO, history length 0: never sampled, no estimate) --
 // soft, never a hard zero (a band of them must not starve the filters).
 #define DN_UNKNOWN_W 0.05
-float dnConf(float len) { return (!dnInfoOn() || len > 0.5) ? 1.0 : DN_UNKNOWN_W; }
+float dnConf(float len) { return (!dnInfoOn() || len > 0.0) ? 1.0 : DN_UNKNOWN_W; }
 // The sun / moon disc rays per texel this frame (sun1.w; 0 = the frame info's RenderVKRTSunSamples):
 // the one-ray option (RenderVKShadowSunOneRay) traces 1.
 float dnSunRays() { return dp.sun1.w > 0.5 ? dp.sun1.w : max(ssr.sun_rt.y, 1.0); }
@@ -186,7 +214,13 @@ ivec2 dnRenderPx(ivec2 m)
 }
 
 // The guide of texel q in layer l: view depth (<= 0: none), normal, roughness, depth gradient.
-struct DnGeom { float z; vec3 n; float rough; vec2 grad; uint meta; };
+// Final HIST layers: parity ages (diffuse, specular, sun, sun mover), followed
+// only with split images by parity split ages (one float32 ms age per light slot).
+// No quantized age feeds back; sun history layers 2/3 stay separate.
+int dnAgeLayer(uint par) { return imageSize(uDnHist).z - (dnSplitOn() ? 4 : 2) + int(par); }
+int dnSplitAgeLayer(uint par) { return imageSize(uDnHist).z - 2 + int(par); }
+vec4 dnAges(ivec2 q, uint par) { return uintBitsToFloat(imageLoad(uDnHist, ivec3(q, dnAgeLayer(par)))); }
+struct DnGeom { float z; vec3 n; float rough; vec2 grad; uint meta; float lenD; float lenS; };
 DnGeom dnGeom(ivec2 q, uint l)
 {
     const uvec4 g = imageLoad(uDnGeom, ivec3(q, int(l)));
@@ -196,6 +230,14 @@ DnGeom dnGeom(ivec2 q, uint l)
     r.rough = pdnUnpackR(g.y);
     r.grad = unpackHalf2x16(g.z);
     r.meta = g.w;
+#ifdef DN_TEMPORAL_PASS
+    // Current guides are read by neighbouring temporal invocations while those
+    // invocations write their own ages. Temporal validation needs only OLD ages.
+    const vec2 age = l != dnParity() ? dnAges(q, l).xy / HT_REF_MS : vec2(0.0);
+#else
+    const vec2 age = dnAges(q, l).xy / HT_REF_MS;
+#endif
+    r.lenD = age.x; r.lenS = age.y;
     if (!(r.z > 0.0) || isinf(r.z)) r.z = -1.0;
     return r;
 }

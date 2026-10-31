@@ -38,8 +38,8 @@ layout(location = 9) out vec4 v_phaze;    // rgb haze offset, a haze slope
 // fog's bin pass ran this frame with sprite replacement; Particle.glow.z then holds the
 // fraction of this sprite's coverage that moved into the froxel volume (main view only:
 // the mirror / shadow passes keep the plain VS and the whole sprite).
-#include "clean_frame_info.glsl"
 #endif
+#include "clean_frame_info.glsl"
 
 // Nothing to draw for this particle: all 6 vertices outside the clip volume.
 void collapseParticle(uint bucket, vec3 P)
@@ -96,6 +96,14 @@ void main()
         }
     }
     vec4 col = partColorAt(p, t);
+#ifndef PART_VERTEX_LIGHT
+    if(ssr.haze_mode.x>0.5 && pc.u_sun_color.w<0.5 && ssr.medium[0].eye.w>1.5)
+    {
+        const uint fadeClass=partFadeClass(bucket);
+        col=partApplyFade(col,fadeClass,1.0-clamp(p.glow.z,0.0,1.0));
+        if(partInvisible(col,fadeClass)) { collapseParticle(bucket,p.pos_age.xyz);return; }
+    }
+#endif
 #ifdef PART_VERTEX_LIGHT
     // Near-camera fade (per particle, from the lighting compute), then the collapse of a
     // sprite that cannot change any target (fully transparent / faded): no raster at all.

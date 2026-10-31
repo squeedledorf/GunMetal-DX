@@ -27,8 +27,8 @@
 #include "llviewerprecompiledheaders.h"
 
 #include "llappviewer.h"
+#include "fsyspath.h"
 #include "llstartup.h"
-#include "fssoundemitterblacklist.h" // <GMDX>
 #include "gmdxcrashreport.h" // <GMDX>
 #include "slassetblocklist.h"
 #include "slupdatechecker.h"
@@ -39,14 +39,16 @@
 #include "slaosets.h"
 #include "slposelookat.h"
 #include "slposesync.h"
-#include "fscombathitmarker.h" // <GMDX>
-#include "fsfloaterkillfeed.h" // <GMDX>
-#include "gmdxmapshare.h" // <GMDX>
-#include "gmdxweaponsorter.h" // <GMDX>
+#include "fscombathitmarker.h" // <GMDX> CombatFX
+#include "fsfloaterkillfeed.h" // <GMDX> CombatFX
+#include "gmdxmapshare.h" // <GMDX> CombatFX
+#include "gmdxweaponsorter.h" // <GMDX> CombatFX weapon sorter
 #include "gmdxskytest.h" // <GMDX>
+#include "slcombatfx.h"
 #include "slgesturesets.h"
 #include "fsfavoritegroups.h"
 #include "fsgrouptitleregionmgr.h"
+#include "fssoundemitterblacklist.h"
 
 #if LL_WINDOWS
 #   include <process.h>     // _spawnl()
@@ -136,6 +138,7 @@
 #include "llfloatertopobjects.h"
 #include "llfloaterworldmap.h"
 #include "llgesturemgr.h"
+#include "llgroupcolormap.h"
 #include "llgroupmgr.h"
 #include "llhudeffecttrail.h"
 #include "llhudmanager.h"
@@ -228,7 +231,6 @@
 #include "llstartuplistener.h"
 #include "lltoolbarview.h"
 #include "llexperiencelog.h"
-#include "llgroupcolormap.h" // <GMDX>
 #include "llcleanup.h"
 
 #include "llenvironment.h"
@@ -438,13 +440,13 @@ static void adoptLegacyChatLogs(const std::string& userid)
         "AlchemyViewer", "AlchemyNext",
 #endif
     };
-    const fs::path os_user_dir = fs::u8path(gDirUtilp->getOSUserDir());
+    const fs::path os_user_dir = fsyspath(gDirUtilp->getOSUserDir());
 
     const std::string cur = gSavedPerAccountSettings.getString("InstantMessageLogPath");
     bool points_legacy = false;
     if (!cur.empty())
     {
-        fs::path cur_path = fs::u8path(cur).lexically_normal();
+        fs::path cur_path = fsyspath(cur).lexically_normal();
         if (cur_path.filename().empty()) cur_path = cur_path.parent_path();   // trailing separator
         for (const char* name : legacy)
         {
@@ -459,7 +461,7 @@ static void adoptLegacyChatLogs(const std::string& userid)
     const std::string new_base = (points_legacy || cur.empty()) ? gDirUtilp->getOSUserAppDir() : cur;
     gDirUtilp->setChatLogsDir(new_base);
     gDirUtilp->setPerAccountChatLogsDir(userid);
-    const fs::path target = fs::u8path(gDirUtilp->getPerAccountChatLogsDir());
+    const fs::path target = fsyspath(gDirUtilp->getPerAccountChatLogsDir());
     const fs::path account = target.filename();
 
     // Every Alchemy directory's copy of this account's transcripts (its own folder, and
@@ -476,9 +478,9 @@ static void adoptLegacyChatLogs(const std::string& userid)
         const fs::path acct_dir = os_user_dir / name / account;
         add_source(acct_dir);
         const std::string relocated = slimport::readInstantMessageLogPath(acct_dir / "settings_per_account.xml");
-        if (!relocated.empty()) add_source(fs::u8path(relocated) / account);
+        if (!relocated.empty()) add_source(fsyspath(relocated) / account);
     }
-    if (points_legacy) add_source(fs::u8path(cur) / account);
+    if (points_legacy) add_source(fsyspath(cur) / account);
 
     S32 failed = 0;
     for (const fs::path& src : sources)
@@ -1150,6 +1152,7 @@ bool idle_startup()
         // #126: per-account values saved under the pre-1.2 Alchemy* names (autoresponse,
         // rejection, stored camera, ...) carry over to the Slipstream* names.
         SLSettingsMigration::migrateSettingsFile(gSavedPerAccountSettings, settings_per_account);
+        SLSettingsMigration::migrateGMDXRenames(gSavedPerAccountSettings, settings_per_account);   // <GMDX>
 
         // Convert 'LogInstantMessages' into 'KeepConversationLogTranscripts' for backward compatibility (CHUI-743).
         LLControlVariablePtr logInstantMessagesControl = gSavedPerAccountSettings.getControl("LogInstantMessages");
@@ -1501,7 +1504,6 @@ bool idle_startup()
 
         // Finish agent initialization.  (Requires gSavedSettings, builds camera)
         gAgent.init();
-        FSSoundEmitterBlacklist::getInstance()->init(); // <GMDX> per-account permanent sound emitter blacklist
         do_startup_frame();
         gAgentCamera.init();
         do_startup_frame();
@@ -2130,14 +2132,31 @@ bool idle_startup()
 
         // Pose Studio sync (#500): hooks the bridge; wears the helper only if enabled
         SLPoseSync::instance().init();
-        FSFloaterKillFeed::init(); // <GMDX> kill feed: wears the helper only while enabled
-        FSCombatHitMarker::init(); // <GMDX> hit marker: wears the helper only while enabled
-        GMDXMapShare::init(); // <GMDX> map shares: wears the helper while sending is on
+        // <GMDX> CombatFX (ported from GunMetal-DX, LGPL 2.1, v0.3.0 cf5f1f4): each wears the
+        // helper only while CombatFX and its own option are on
+        FSFloaterKillFeed::init();
+        FSCombatHitMarker::init();
+        GMDXMapShare::init();   // pings: wears the helper while CombatFX and sending are on
+        // Weapon sorter: watches for new weapons (it only offers; nothing moves without a click),
+        // from login when CombatFX is on, else from when it is turned on.
+        if (SLCombatFX::enabled())
+        {
+            GMDXWeaponSorter::getInstance();
+        }
+        else if (LLControlVariable* c = gSavedSettings.getControl("CombatFX"))
+        {
+            c->getSignal()->connect([](LLControlVariable*, const LLSD& v, const LLSD&)
+            {
+                if (v.asBoolean() && LLStartUp::getStartupState() >= STATE_STARTED) GMDXWeaponSorter::getInstance();
+            });
+        }
+        // </GMDX>
         // Look-at sync (#902): rides the pose sync; sends only if enabled
         SLPoseLookAt::instance().init();
-        GMDXWeaponSorter::getInstance(); // <GMDX> watches for new weapons from now on
 
         FSGroupTitleRegionMgr::getInstance()->loadFromDisk(); // <FS:PP> Region-based group titles
+        FSSoundEmitterBlacklist::getInstance()->init(); // GunMetal-DX: per-account permanent sound emitter blacklist (inert unless SLSoundEmitterBlacklist)
+        LLGroupColorMap::getInstance()->loadFromDisk(); // GunMetal-DX: per-account group colours
         FSFavoriteGroups::getInstance()->loadFavorites();     // <FS:PP> Group favorites / pinning
 
         bool show_hud = false;
@@ -2598,10 +2617,14 @@ bool idle_startup()
     if (STATE_CLEANUP == LLStartUp::getStartupState())
     {
         // VULKAN SHADER GATE: hold the progress screen until the pipelines a world frame
-        // needs are compiled -- the world batch, the ray-query lit variant, and every
-        // first-use pipeline (post effects, god rays / motion blur when on, the cluster LOD
-        // path: LLCleanRendererVK::warmFirstUse), so the first world frames never compile in
-        // a frame. They compile on background threads from the login screen on, so the
+        // needs are compiled -- the world batch and every first-use pipeline (post effects,
+        // god rays / motion blur when on, the cluster LOD path: LLCleanRendererVK::warmFirstUse),
+        // so the first world frames never compile in a frame. Then (#1029) the deferred
+        // ray-query group (the RT lit variant + the ray-traced effects' kernels, the bulk of a
+        // cold compile) for at most RenderVKShaderWaitRTMaxSec more: the world draws without
+        // it (plain lighting), so a fast machine still reveals the finished look and a slow one
+        // gets the world, with an in-world notice until the rest lands.
+        // They compile on background threads from the login screen on, so the
         // network login runs in parallel and only the reveal waits (the message loop and the
         // session keep going: this state returns every frame). A warm disk pipeline cache
         // (RenderVKPipelineCacheDisk) makes it all cache hits long before this point, so then
@@ -2611,34 +2634,52 @@ bool idle_startup()
         // as done (it never blocks). Setting-specialized sets are not waited for (the generic
         // pipelines draw the world; a set binds when it lands, without a hitch).
         {
-            static LLFrameTimer s_pipe_hold;
-            static bool s_holding = false, s_released = false;
+            static LLFrameTimer s_pipe_hold, s_rt_hold;
+            static bool s_holding = false, s_released = false, s_rt_timing = false;
             constexpr F64 PIPELINE_STALL_SEC = 180.0;
             static LLCachedControl<F32> s_wait_max(gSavedSettings, "RenderVKShaderWaitMaxSec", 120.f);
+            static LLCachedControl<F32> s_rt_wait_max(gSavedSettings, "RenderVKShaderWaitRTMaxSec", 30.f);
+            LLVulkanContext& vk = LLVulkanContext::instance();
             U32 done = 0, queued = 0;
             F64 idle = 0.0;
-            LLVulkanContext::instance().pipelineCompileProgress(done, queued, idle);
+            vk.pipelineCompileProgress(done, queued, idle);
             U32 gate_done = 0, gate_queued = 0;
-            LLVulkanContext::instance().shaderGateProgress(gate_done, gate_queued);
-            const bool pending = !s_released && (F32)s_wait_max > 0.f && LLVulkanContext::instance().worldPipelinesPending();
+            vk.shaderGateProgress(gate_done, gate_queued);
+            const bool world_pending = vk.worldPipelinesPending();
+            // (#1029) Only the deferred ray-query group left: its wait runs from here.
+            const bool rt_pending = !world_pending && vk.startupPipelinesPending();
+            if (rt_pending && !s_rt_timing && !s_released)
+            {
+                s_rt_timing = true;
+                s_rt_hold.reset();
+            }
+            const bool rt_timed_out = rt_pending && s_rt_timing && s_rt_hold.getElapsedTimeF32() > (F32)s_rt_wait_max;
+            const bool pending = !s_released && (F32)s_wait_max > 0.f
+                              && (world_pending || (rt_pending && (F32)s_rt_wait_max > 0.f && !rt_timed_out));
             const bool stalled = pending && s_holding && idle > PIPELINE_STALL_SEC;
             const bool timed_out = pending && s_holding && s_pipe_hold.getElapsedTimeF32() > (F32)s_wait_max;
             if (pending && !stalled && !timed_out)
             {
+                // (the ray-query group is not a gate job: its phase counts every batch)
+                const U32 shown_done = world_pending ? gate_done : done;
+                const U32 shown_queued = world_pending ? gate_queued : queued;
                 if (!s_holding)
                 {
                     s_holding = true;
                     s_pipe_hold.reset();
-                    LL_INFOS("AppInit") << "Login complete; holding the progress screen until the shaders the world needs "
-                                           "finish compiling (" << gate_done << " of " << gate_queued << " done)" << LL_ENDL;
+                    LL_INFOS("AppInit") << "Login complete; holding the progress screen until the shaders "
+                                        << (world_pending ? "the world needs" : "for ray tracing")
+                                        << " finish compiling (" << shown_done << " of " << shown_queued << " done)" << LL_ENDL;
                 }
                 std::string status = LLTrans::getString("LoginCompilingShaders");
-                if (gate_queued > gate_done)
+                if (shown_queued > shown_done)
                 {
-                    status += llformat(" (%u / %u)", gate_done, gate_queued);
+                    status += llformat(" (%u / %u)", shown_done, shown_queued);
                 }
-                const F32 frac = gate_queued ? (F32)gate_done / (F32)gate_queued : 0.f;
-                set_startup_status(0.9f + 0.09f * frac, status, gAgent.mMOTD);
+                // (never backwards: the count switches from the gate jobs to every batch in the RT phase)
+                static F32 s_frac = 0.f;
+                s_frac = llmax(s_frac, shown_queued ? (F32)shown_done / (F32)shown_queued : 0.f);
+                set_startup_status(0.9f + 0.09f * s_frac, status, gAgent.mMOTD);
                 do_startup_frame();
                 return true;
             }
@@ -2651,6 +2692,11 @@ bool idle_startup()
                     LL_WARNS("AppInit") << "Shaders still compiling after " << s_pipe_hold.getElapsedTimeF32()
                                         << " s (RenderVKShaderWaitMaxSec; " << gate_done << " of " << gate_queued
                                         << " done); revealing the world -- the rest land in the background" << LL_ENDL;
+                else if (rt_pending)
+                    LL_INFOS("AppInit") << "World shaders ready; ray-traced shaders still compiling after "
+                                        << s_rt_hold.getElapsedTimeF32() << " s (RenderVKShaderWaitRTMaxSec; " << done
+                                        << " of " << queued << " done); revealing the world with plain lighting --"
+                                           " ray tracing switches on when they land" << LL_ENDL;
                 else
                     LL_INFOS("AppInit") << "Shaders ready; progress screen held "
                                         << s_pipe_hold.getElapsedTimeF32() << " s (" << gate_done << " pipelines)" << LL_ENDL;
@@ -2794,6 +2840,8 @@ bool idle_startup()
         // #132: chat history asked for in the welcome window before logging in (it is per
         // account) is offered now, once.
         SLFloaterFirstRun::offerPendingImport();
+
+        gViewerWindow->logTopBarLayout();   // #1082
 
         //// We're successfully logged in.
         // 2025-06 Moved lower down in the state machine so the Avatar Welcome Pack
@@ -3417,8 +3465,6 @@ void LLStartUp::initExperiences()
         boost::bind(&LLAgent::getRegionCapability, &gAgent, _1));
 
     LLExperienceLog::instance().initialize();
-
-    LLGroupColorMap::getInstance()->loadFromDisk(); // <GMDX> per-account group colours
 }
 
 void LLStartUp::cleanupNameCache()

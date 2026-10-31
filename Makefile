@@ -40,7 +40,10 @@ PRESET              ?= linux-release
 else
 PRESET              ?= linux-releaseos
 endif
-EXTRA_CMAKE_FLAGS   ?= -DGCC_DISABLE_FATAL_WARNINGS=ON
+# Local builds use -Werror like CI (indra/cmake/00-Common.cmake). Escape hatch for a new
+# compiler's fresh warnings: make EXTRA_CMAKE_FLAGS=-DGCC_DISABLE_FATAL_WARNINGS=ON
+# OFF is explicit so an existing CMakeCache.txt with the old ON default flips back.
+EXTRA_CMAKE_FLAGS   ?= -DGCC_DISABLE_FATAL_WARNINGS=OFF
 
 # 3p download cache; empty = CMake's default ($SL_3P_CACHE or ~/.cache/slipstream-3p).
 SL_3P_CACHE ?=

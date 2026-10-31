@@ -38,19 +38,28 @@ VkShaderModule dnModule(VkDevice dev, const uint32_t* code, size_t bytes, const 
 // channel (clean_pdn_common.glsl SPLIT CHANNEL): GEOM three more (2 + parity, 4 the final), IN / OUT
 // the sun layer (allocated with it either way, so the split layer is always the last) + one more
 // -- +64 B per texel with the sun channel, +80 B without it.
-struct DnImg { VkFormat f; uint32_t layers; uint32_t sunLayers; uint32_t splitLayers; };
+struct DnImg { VkFormat f; uint32_t layers; uint32_t sunLayers; uint32_t splitLayers; uint32_t splitSunLayers = 0u; };
 const DnImg kDnImg[5] = {{VK_FORMAT_R16G16B16A16_SFLOAT, 2u, 3u, 4u}, {VK_FORMAT_R32G32B32A32_UINT, 1u, 1u, 1u},
-                         {VK_FORMAT_R32G32B32A32_UINT, 2u, 2u, 5u}, {VK_FORMAT_R32G32B32A32_UINT, 2u, 4u, 2u},
+                         {VK_FORMAT_R32G32B32A32_UINT, 2u, 2u, 5u}, {VK_FORMAT_R32G32B32A32_UINT, 4u, 6u, 6u, 8u},
                          {VK_FORMAT_R16G16B16A16_SFLOAT, 2u, 3u, 4u}};
+// HIST includes two final age/countdown layers (+32 B/texel). Split images
+// add two split-slot age layers (+32 B/texel); bytesAt includes both allocations.
 // The layers of image e: the base, the sun channel's, the split channel's (each a superset of the
 // base; HIST's sun layers only with the sun channel).
 uint32_t dnLayers(const DnImg& e, bool sun, bool split)
 {
     uint32_t n = sun ? e.sunLayers : e.layers;
     if (split) n = std::max(n, e.splitLayers);
+    if (sun && split && e.splitSunLayers != 0u) n = e.splitSunLayers;
     return n;
 }
 constexpr VkImageUsageFlags kDnUsage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+// Only split GEOM is copied: current RAW (2 + parity) -> scratch/final (4).
+constexpr uint32_t kDnSplitGeomPar = 2u, kDnSplitGeomFinal = 4u;
+constexpr VkImageUsageFlags dnUsage(uint32_t index, bool split)
+{
+    return kDnUsage | (index == 2u && split ? VK_IMAGE_USAGE_TRANSFER_SRC_BIT : 0u);
+}
 } // namespace
 
 bool LLCleanDenoiserVK::init(VkDeviceContext* ctx, VkDescriptorSetLayout dslDraw0, VkSampler nearest, const char* name)
@@ -123,7 +132,11 @@ uint64_t LLCleanDenoiserVK::bytesAt(uint32_t w, uint32_t h, bool sun, bool split
 {
     if (!mCtx) return 0;
     uint64_t b = 0;
-    for (const DnImg& e : kDnImg) b += mCtx->imageMemoryBytes(w, h, dnLayers(e, sun, split), 1, e.f, kDnUsage, false);
+    for (uint32_t i = 0; i < 5u; ++i)
+    {
+        const DnImg& e = kDnImg[i];
+        b += mCtx->imageMemoryBytes(w, h, dnLayers(e, sun, split), 1, e.f, dnUsage(i, split), false);
+    }
     return b;
 }
 
@@ -136,9 +149,10 @@ bool LLCleanDenoiserVK::createSet(GpuImage& in, GpuImage& mot, GpuImage& geom, G
     {
         const DnImg& e = kDnImg[i];
         const uint32_t layers = dnLayers(e, sun, split);
-        *im[i] = layers > 1u ? mCtx->createImageLayers(w, h, layers, 1, e.f, kDnUsage, VK_IMAGE_ASPECT_COLOR_BIT, false,
+        const VkImageUsageFlags usage = dnUsage(i, split);
+        *im[i] = layers > 1u ? mCtx->createImageLayers(w, h, layers, 1, e.f, usage, VK_IMAGE_ASPECT_COLOR_BIT, false,
                                                         VK_IMAGE_VIEW_TYPE_2D_ARRAY)
-                             : mCtx->createImage2D(w, h, e.f, kDnUsage, VK_IMAGE_ASPECT_COLOR_BIT);
+                             : mCtx->createImage2D(w, h, e.f, usage, VK_IMAGE_ASPECT_COLOR_BIT);
         if (!im[i]->image) return false;
     }
     static const char* const kNames[5] = {"denoiseIn", "denoiseMot", "denoiseGeom", "denoiseHist", "denoiseOut"};
@@ -299,9 +313,11 @@ LLCleanDenoiserVK::Push LLCleanDenoiserVK::makePush(uint32_t rw, uint32_t rh, co
     // bits 13-15 the ReSTIR-converged diffuse's a-trous iterations (DN_CONV_SHIFT); bits 16-19 the
     // moving-light history (DN_MOVE_SHIFT, 0 = off); bits 27-29 the disocclusion history fix
     // (DN_HFIX_SHIFT), bit 30 the reprojection search (DN_F_REPROJ_SEARCH); (#1038) bit 2 the young-texel
-    // boost (DN_F_YOUNG_BOOST), bit 31 the moving-surface depth tolerance (DN_F_MOVE_ZTOL).
+    // boost (DN_F_YOUNG_BOOST), bit 31 the moving-surface depth tolerance (DN_F_MOVE_ZTOL); bit 3 the
+    // reservoir-reusing radiance signal (DN_F_RADIANCE, RenderVKReSTIRRadiance).
     const bool sun = p.sun && hasSun();
     q.ctl[0] = (mHistOk ? 1u : 0u) | (mParity ? 2u : 0u) | (p.youngBoost ? 4u : 0u) | (p.moveZTol ? (1u << 31) : 0u)
+             | (p.radiance ? 8u : 0u)
              | ((std::min(p.debug, 15u)) << 4u)
              | (sun ? 256u : 0u) | (sun && mSunHistOk && !p.sunCut ? 512u : 0u) | (sun && p.sunHard ? 1024u : 0u)
              | (sun && p.sunExact ? 2048u : 0u) | (p.info ? 4096u : 0u)
@@ -337,11 +353,58 @@ static void dnComputeBarrier(VkCommandBuffer cmd)
     vkCmdPipelineBarrier2(cmd, &d);
 }
 
+static void dnSplitRawSnapshot(VkCommandBuffer cmd, VkImage geom, uint32_t w, uint32_t h, uint32_t par)
+{
+    // Layer 4's old FINAL consumers precede this recording (queue order, or the
+    // lighting fork's ALL_COMMANDS semaphore). No current-frame reader needs FINAL
+    // until after recordSpatial's last pass. Snapshot RAW before temporal overwrites
+    // 2 + parity with HISTORY; the two copy regions never overlap.
+    VkImageMemoryBarrier2 b[2]{};
+    for (uint32_t i = 0; i < 2u; ++i)
+    {
+        b[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        b[i].oldLayout = b[i].newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        b[i].srcQueueFamilyIndex = b[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b[i].image = geom;
+        b[i].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, i == 0u ? kDnSplitGeomPar + par : kDnSplitGeomFinal, 1};
+        b[i].dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+    }
+    b[0].srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    b[0].srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+    b[0].dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+    // ALL_COMMANDS includes prior CS/FS readers on graphics, and only supported
+    // stages on a compute-only queue. Cross-queue readers are ordered by the fork.
+    b[1].srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    b[1].srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT
+                       | VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    b[1].dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    VkDependencyInfo d{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+    d.imageMemoryBarrierCount = 2u; d.pImageMemoryBarriers = b;
+    vkCmdPipelineBarrier2(cmd, &d);
+    VkImageCopy region{};
+    region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, kDnSplitGeomPar + par, 1};
+    region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, kDnSplitGeomFinal, 1};
+    region.extent = {w, h, 1};
+    vkCmdCopyImage(cmd, geom, VK_IMAGE_LAYOUT_GENERAL, geom, VK_IMAGE_LAYOUT_GENERAL, 1u, &region);
+    // Copy reads must finish before temporal writes current HISTORY. Snapshot
+    // writes must be visible to temporal's centre and neighbouring RAW reads.
+    b[0].srcStageMask = b[1].srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+    b[0].srcAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+    b[0].dstStageMask = b[1].dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+    b[0].dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+    b[1].srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    b[1].dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+    vkCmdPipelineBarrier2(cmd, &d);
+    // recordSpatial's compute barriers also order these temporal snapshot reads
+    // before its last iteration overwrites layer 4 with FINAL again.
+}
+
 void LLCleanDenoiserVK::recordTemporal(VkCommandBuffer cmd, VkDescriptorSet dsetDraw0, uint32_t rw, uint32_t rh,
                                        const Params& p)
 {
     if (!pipelinesReady() || !dsetDraw0) return;
     dnComputeBarrier(cmd);   // the producer's IN / MOT / GEOM writes
+    if (mSplit) dnSplitRawSnapshot(cmd, mGeom.image, mW, mH, mParity);
     const VkDescriptorSet sets[2] = {dsetDraw0, mDset};
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, mLayout, 0, 2, sets, 0, nullptr);
     const Push q = makePush(rw, rh, p);

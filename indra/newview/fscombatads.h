@@ -47,6 +47,9 @@ public:
     // The gun tool was deselected (left mouselook): drop all ADS state. The tool
     // restores the base FOV itself.
     static void reset();
+    static void cancel();     // restore the FOV and discard the gesture/return target
+    static bool isCameraSwap();
+    static bool returnsToTPS();
 
     static bool isHeld();      // aiming down sights now (FSADSMouseSensitivity applies)
     static bool ownsFOV();     // held, or easing in / out: the tool must not touch the FOV

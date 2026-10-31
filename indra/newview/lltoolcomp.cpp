@@ -54,7 +54,8 @@
 #include "llfloatertools.h"
 #include "llviewercontrol.h"
 #include "llviewercamera.h"
-#include "fscombatads.h" // <GMDX> aim down sights
+#include "fscombatads.h" // <GMDX> aim down sights (CombatFX)
+#include "gmdxots.h"     // <GMDX> the wheel in over the shoulder
 #include "lleventtimer.h"
 
 // we use this in various places instead of NULL
@@ -836,7 +837,8 @@ bool LLToolCompGun::handleRightMouseDown(S32 x, S32 y, MASK mask)
         else
             mStartFOV = LLViewerCamera::getInstance()->getDefaultFOV();
 
-        // <GMDX> The held second tap of a double tap aims down sights instead (fscombatads.cpp)
+        // <GMDX> The held second tap of a double tap aims down sights instead (fscombatads.cpp;
+        // CombatFX only). Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
         if (FSCombatADS::onRightMouseDown(mOriginalFOV))
         {
             mTimerFOV.stop();
@@ -928,13 +930,17 @@ void    LLToolCompGun::handleDeselect()
 {
     mMouseFreed = false;
     LLToolComposite::handleDeselect();
-    if (mRightMouseDown || mTimerFOV.getStarted() || FSCombatADS::ownsFOV()) // <GMDX> ADS zoom too
+    // ADS transfers capture between TPS and the gun without restoring its FOV.
+    if (!FSCombatADS::isCameraSwap())
     {
-        LLViewerCamera::getInstance()->loadDefaultFOV();
-        mRightMouseDown = false;
-        mTimerFOV.stop();
+        if (mRightMouseDown || mTimerFOV.getStarted() || FSCombatADS::ownsFOV())
+        {
+            LLViewerCamera::getInstance()->loadDefaultFOV();
+        }
+        FSCombatADS::reset();
     }
-    FSCombatADS::reset(); // <GMDX>
+    mRightMouseDown = false;
+    mTimerFOV.stop();
     setMouseCapture(false);
 }
 
@@ -962,12 +968,13 @@ bool LLToolCompGun::handleScrollWheel(S32 x, S32 y, S32 clicks)
     {
         gAgentCamera.changeCameraToDefault();
     }
+    else if (clicks < 0) GMDXOTS::onWheelIn(); // <GMDX> the wheel in, over the shoulder: first person (gmdxots.h)
     return true;
 }
 
 void LLToolCompGun::draw()
 {
-    FSCombatADS::update(); // <GMDX> ADS zoom ease
+    FSCombatADS::update(); // <GMDX> ADS zoom ease (returns at once unless an ADS zoom eases)
     if (gAgentCamera.cameraMouselook())
     {
         updateAltHeld(gKeyboard->currentMask(true)); // <GMDX> Alt frees the mouse while held

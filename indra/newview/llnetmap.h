@@ -59,6 +59,7 @@ protected:
     LLNetMap (const Params & p);
     friend class LLUICtrlFactory;
     friend class LLFloaterMap;
+    friend class GMDXFloaterMinimapSettings;   // <GMDX> Map Settings: this map's zoom, view, rotation, re-center
 
 public:
     virtual ~LLNetMap();
@@ -100,7 +101,7 @@ public:
 
     void            renderScaledPointGlobal( const LLVector3d& pos, const LLColor4U &color, F32 radius );
 
-    // <GMDX> "Show Whole Region" (GMDXMiniMapWholeRegion) as last drawn: the agent's region
+    // <GMDX> "Show Whole Region" (SLMiniMapWholeRegion) as last drawn: the agent's region
     // fitted to the view, north up, no pan / zoom.
     bool            isWholeRegion() const { return mFitRegion; }
     // </GMDX>
@@ -133,21 +134,21 @@ private:
     LLVector3d      mapCenterGlobal() const;
     void            clampFitView(F32 region_width);   // <GMDX> Whole Region zoom
     LLVector2       mapPan() const { return mFitRegion ? mFitPan : mCurPan; }
-    bool            mCanRecenter = false;   // <GMDX> the menu's "Re-center now" (enable callback)
+    bool            mCanRecenter = false;   // <GMDX> Map Settings' "Re-center now" (enabled)
     LLVector2       mFitPan;   // Show Whole Region: the fitted square's offset from the view centre (heading tape room)
     bool            rotateMap() const;
     // </GMDX>
     // <GMDX> Only Render Physical Objects
     void            drawPhysicalObjects(const LLVector3& map_center_agent, F32 pixels_per_meter, const LLViewerRegion* only_region);
     // </GMDX>
-    // <GMDX> Mini-map marks (gmdxminimapmarks.h) and the coordinates under the cursor
+    // <GMDX> Mini-map marks (llminimapmarks.h) and the coordinates under the cursor
     void            drawMarks();
     void            drawCursorCoordinates();
     bool            onMap(const LLVector3& pos_local) const;   // inside the drawn map (Whole Region: its square)
     LLUUID          markAt(S32 x, S32 y);                       // the mark drawn under (x, y), or null
     void            copyPopupPosition(bool slurl);
     void            addMarkAtPopup(S32 color);
-    // Zones: Draw Zone puts the map in a drawing mode (mDrawKind: GMDXMapZone::Kind, -1 = off)
+    // Zones: Draw Zone puts the map in a drawing mode (mDrawKind: LLMapZone::Kind, -1 = off)
     void            drawZones();          // the saved zones: under the avatars
     void            drawZonePreview();    // the zone being drawn and its hint: over everything
     std::vector<LLVector2> zoneOutline(S32 kind, const std::vector<LLVector3d>& points);   // in view coordinates

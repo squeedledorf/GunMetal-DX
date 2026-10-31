@@ -33,6 +33,7 @@
 #include "slcolorwheelmodel.h"
 #include "llcombobox.h"
 #include "llfontgl.h"
+#include "llfloaterpopout.h"
 #include "lllocalcliprect.h"
 #include "llmenugl.h"
 #include "llpanel.h"
@@ -506,6 +507,12 @@ void SLPanelPhotoStudioScopes::updateReadouts(const SLScopeData& data)
         return;
     }
 
+    if (LLFloaterPopout::isWorldViewMinimized())
+    {
+        mClipReadout->setText(getString("world_paused"));
+        return;
+    }
+
     if (data.isEmpty())
     {
         mClipReadout->setText(getString("waiting"));
@@ -536,7 +543,10 @@ void SLPanelPhotoStudioScopes::updateReadouts(const SLScopeData& data)
     // reassurance you read once; the pixel is the answer you came for, and the
     // line is not wide enough for both.
     LLColor4U pixel;
-    if (gPipeline.getScopePixel(gViewerWindow->getCurrentMouseX(), gViewerWindow->getCurrentMouseY(), pixel))
+    // A native scope shares main's frame sample, but its pointer coordinates
+    // describe a different surface. Never interpret those as a world pixel.
+    if (!LLFloaterPopout::isVisibleNativeView(this) &&
+        gPipeline.getScopePixel(gViewerWindow->getCurrentMouseX(), gViewerWindow->getCurrentMouseY(), pixel))
     {
         args["[R]"] = llformat("%3d", pixel.mV[VRED]);
         args["[G]"] = llformat("%3d", pixel.mV[VGREEN]);

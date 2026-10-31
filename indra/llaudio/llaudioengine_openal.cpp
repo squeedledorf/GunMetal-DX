@@ -2282,7 +2282,9 @@ void LLAudioEngine_OpenAL::streamSetSource(U32 id, const StreamSourceParams& p)
     const F32 gain = llclamp(p.gain * direct * boost, 0.f, kStreamMaxGain * boost);
     const StreamSourceParams& a = s.applied;
     const bool first = !s.appliedValid;
-    if (first || std::fabs(gain - a.gain) > 1e-4f) alSourcef(s.source, AL_GAIN, gain);
+    // Source gain carries the parcel speaker distance curve. Apply even small steps: the
+    // cached gain below advances every call, so an epsilon can suppress an entire slow fade.
+    if (first || gain != a.gain) alSourcef(s.source, AL_GAIN, gain);
     if (s.role != STREAM_STEREO)
     {
         // No doppler: head-relative in the listener frame, every call (the listener moves / turns).

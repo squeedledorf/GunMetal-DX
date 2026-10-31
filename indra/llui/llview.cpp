@@ -82,6 +82,8 @@ std::vector<LLViewDrawContext*> LLViewDrawContext::sDrawContextStack;
 LLView::DrilldownFunc LLView::sDrilldown =
     boost::bind(&LLView::pointInView, _1, _2, _3, HIT_TEST_USE_BOUNDING_RECT);
 
+bool LLView::sMiddleClickBubbles = false;
+
 //#if LL_DEBUG
 bool LLView::sIsDrawing = false;
 //#endif
@@ -892,6 +894,48 @@ LLView* LLView::childrenHandleHover(S32 x, S32 y, MASK mask)
     return NULL;
 }
 
+static void collectHoverViewsRecursive(LLView* view, S32 origin_x, S32 origin_y,
+                                      S32 x, S32 y, bool honor_opaque,
+                                      std::set<LLHandle<LLView>>& views, bool& stop)
+{
+    if (!view->getVisible() || !view->calcScreenBoundingRect(origin_x, origin_y).pointInRect(x, y)) return;
+    views.insert(view->getHandle());
+    const bool opaque = honor_opaque && view->getMouseOpaque();
+    for (LLView* child : *view->getChildList())
+    {
+        const LLRect& rect = child->getRect();
+        collectHoverViewsRecursive(child, origin_x + rect.mLeft, origin_y + rect.mBottom,
+                                  x, y, honor_opaque, views, stop);
+        if (stop) return;
+    }
+    if (opaque) stop = true;
+}
+
+void LLView::collectHoverViews(LLView* root, S32 x, S32 y, bool honor_opaque,
+                              std::set<LLHandle<LLView>>& views)
+{
+    LL_PROFILE_ZONE_SCOPED_CATEGORY_UI;
+    S32 origin_x = 0, origin_y = 0;
+    root->localPointToScreen(0, 0, &origin_x, &origin_y);
+    bool stop = false;
+    collectHoverViewsRecursive(root, origin_x, origin_y, x, y, honor_opaque, views, stop);
+}
+
+void LLView::clearHoverViews(std::set<LLHandle<LLView>>& views, S32 x, S32 y, MASK mask)
+{
+    // Drain before callbacks, without allocating. Callbacks may destroy other
+    // controls or reenter clearing; resolve each weak handle just before use.
+    std::set<LLHandle<LLView>> departed;
+    departed.swap(views);
+    for (const auto& handle : departed)
+        if (auto* view = handle.get())
+        {
+            S32 local_x = 0, local_y = 0;
+            view->screenPointToLocal(x, y, &local_x, &local_y);
+            view->onMouseLeave(local_x, local_y, mask);
+        }
+}
+
 LLView* LLView::childFromPoint(S32 x, S32 y, bool recur)
 {
     if (!getVisible())
@@ -1229,7 +1273,8 @@ LLView* LLView::childrenHandleRightMouseDown(S32 x, S32 y, MASK mask)
 
 LLView* LLView::childrenHandleMiddleMouseDown(S32 x, S32 y, MASK mask)
 {
-    return childrenHandleMouseEvent(&LLView::handleMiddleMouseDown, x, y, mask);
+    // Inside a scrolling view's MiddleClickBubbleScope only a view that uses the press stops it.
+    return childrenHandleMouseEvent(&LLView::handleMiddleMouseDown, x, y, mask, !sMiddleClickBubbles);
 }
 
 LLView* LLView::childrenHandleDoubleClick(S32 x, S32 y, MASK mask)

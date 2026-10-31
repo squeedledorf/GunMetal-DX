@@ -572,6 +572,15 @@ std::string LLCleanMaterialStore::debugDescDiff(U32 a, U32 b) const
     return s.empty() ? std::string("(same desc)") : s;
 }
 
+bool LLCleanMaterialStore::giEmissive(U32 id) const
+{
+    std::lock_guard<std::mutex> lk(mMutex);
+    if (id >= mHighWater || mState[id] != 1) return true; // unknown old snapshot: conservative
+    const Material& m = mMaterials[id];
+    return (m.flags & 64u) != 0u && (m.emissive_factor[0] > 0.f
+        || m.emissive_factor[1] > 0.f || m.emissive_factor[2] > 0.f);
+}
+
 bool LLCleanMaterialStore::shadowEquivalent(U32 a, U32 b) const
 {
     if (a == b) return true;

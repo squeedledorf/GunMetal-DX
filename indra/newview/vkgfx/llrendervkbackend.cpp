@@ -782,6 +782,10 @@ uint32_t LLRenderVKBackend::resolveTexture(LLTextureData* image)
             }
             vkId = gVK.createTexture(w, h, src, /*nearest=*/levels == 1u, fmt, levels);
         }
+        // A refused upload must remain retryable, including browser media in
+        // auxiliary windows. Caching texture zero would mark this generation
+        // uploaded and leave the control blank after memory pressure clears.
+        if (!vkId) return 0;
         image->resetVKDirty();
         CachedTex ct;
         ct.levels = (U8)levels;

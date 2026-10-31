@@ -1,0 +1,563 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<!-- <GMDX> Map Settings (gmdxfloaterminimapsettings.cpp): the mini-map's display settings and the
+     Region Map tools. The checkboxes and the slider bind their settings; the lists and buttons are
+     wired in code. -->
+<floater
+ can_close="true"
+ can_minimize="true"
+ can_resize="false"
+ height="382"
+ layout="topleft"
+ name="gmdx_minimap_settings"
+ positioning="centered"
+ save_rect="true"
+ single_instance="true"
+ title="MAP SETTINGS"
+ width="340">
+    <tab_container
+     follows="all"
+     height="376"
+     layout="topleft"
+     left="6"
+     name="tabs"
+     tab_height="20"
+     tab_min_width="90"
+     tab_position="top"
+     top="4"
+     width="328">
+        <panel
+         follows="all"
+         height="352"
+         label="View"
+         layout="topleft"
+         left="0"
+         name="view_panel"
+         top="0"
+         width="328">
+            <text
+             follows="left|top"
+             font="SansSerifBold"
+             height="16"
+             layout="topleft"
+             left="12"
+             name="view_header"
+             top="8"
+             width="300">View</text>
+            <text
+             follows="left|top"
+             height="16"
+             layout="topleft"
+             left="12"
+             name="view_label"
+             top="30"
+             width="100">Map shows</text>
+            <combo_box
+             follows="left|top"
+             height="22"
+             layout="topleft"
+             left="116"
+             name="view_mode"
+             tool_tip="Follow me: the map moves with you and can be zoomed and dragged. Whole region: the region you are in, fitted to the window (the mini-map window only)."
+             top="28"
+             width="200">
+                <combo_box.item label="Follow me" name="view_mode_0" value="follow" />
+                <combo_box.item label="Whole region" name="view_mode_1" value="region" />
+            </combo_box>
+            <text
+             follows="left|top"
+             height="16"
+             layout="topleft"
+             left="12"
+             name="zoom_label"
+             top="58"
+             width="100">Zoom</text>
+            <combo_box
+             follows="left|top"
+             height="22"
+             layout="topleft"
+             left="116"
+             name="zoom"
+             tool_tip="How much of the world the map shows (Follow me). The mouse wheel zooms in finer steps."
+             top="56"
+             width="200">
+                <combo_box.item label="Very close" name="zoom_0" value="very close" />
+                <combo_box.item label="Close" name="zoom_1" value="close" />
+                <combo_box.item label="Medium" name="zoom_2" value="medium" />
+                <combo_box.item label="Far" name="zoom_3" value="far" />
+            </combo_box>
+            <check_box
+             control_name="MiniMapAutoCenter"
+             follows="left|top"
+             height="16"
+             label="Auto-center on me"
+             layout="topleft"
+             left="12"
+             name="auto_center"
+             tool_tip="Follow me: the map always comes back to you after you drag it."
+             top="84"
+             width="190" />
+            <button
+             follows="left|top"
+             height="22"
+             label="Re-center Now"
+             layout="topleft"
+             left="216"
+             name="recenter"
+             tool_tip="Follow me: bring the map back to you after dragging it."
+             top="81"
+             width="100" />
+            <check_box
+             control_name="SLMiniMapHideButtons"
+             follows="left|top"
+             height="16"
+             label="Hide window buttons"
+             layout="topleft"
+             left="12"
+             name="hide_buttons"
+             tool_tip="Hide the mini-map's window buttons, this gear included (Map Settings stays in its right-click menu)."
+             top="108"
+             width="300" />
+            <text
+             follows="left|top"
+             font="SansSerifBold"
+             height="16"
+             layout="topleft"
+             left="12"
+             name="rotation_header"
+             top="136"
+             width="300">Rotation &amp; Compass</text>
+            <text
+             follows="left|top"
+             height="16"
+             layout="topleft"
+             left="12"
+             name="rotation_label"
+             top="160"
+             width="100">Rotation</text>
+            <combo_box
+             follows="left|top"
+             height="22"
+             layout="topleft"
+             left="116"
+             name="rotation"
+             tool_tip="Whether the map turns with your camera. Whole region has its own ways to turn."
+             top="158"
+             width="200">
+                <combo_box.item label="North at top" name="rotation_0" value="north_at_top" />
+                <combo_box.item label="Camera at top" name="rotation_1" value="camera_at_top" />
+            </combo_box>
+            <text
+             follows="left|top"
+             height="16"
+             layout="topleft"
+             left="12"
+             name="compass_label"
+             top="188"
+             width="100">Compass</text>
+            <combo_box
+             follows="left|top"
+             height="22"
+             layout="topleft"
+             left="116"
+             name="compass"
+             tool_tip="The compass around the Whole region map. The heading tape needs north at the top."
+             top="186"
+             width="200">
+                <combo_box.item label="Gunmetal frame" name="compass_0" value="0" />
+                <combo_box.item label="Edge pills" name="compass_1" value="1" />
+                <combo_box.item label="Heading tape" name="compass_2" value="2" />
+            </combo_box>
+            <text
+             follows="left|top"
+             font="SansSerifBold"
+             height="16"
+             layout="topleft"
+             left="12"
+             name="background_header"
+             top="220"
+             width="300">Background &amp; Opacity</text>
+            <text
+             follows="left|top"
+             height="16"
+             layout="topleft"
+             left="12"
+             name="background_label"
+             top="244"
+             width="100">Background</text>
+            <combo_box
+             follows="left|top"
+             height="22"
+             layout="topleft"
+             left="116"
+             name="background"
+             tool_tip="What is drawn under the dots. A captured region map takes its place in that region while the Region Map tab's switch is on."
+             top="242"
+             width="200">
+                <combo_box.item label="Painted terrain" name="background_0" value="painted" />
+                <combo_box.item label="Region terrain map" name="background_1" value="terrain" />
+                <combo_box.item label="World map tile" name="background_2" value="tile" />
+            </combo_box>
+            <text
+             follows="left|top"
+             height="16"
+             layout="topleft"
+             left="12"
+             name="opacity_label"
+             top="270"
+             width="100">Opacity</text>
+            <combo_box
+             follows="left|top"
+             height="22"
+             layout="topleft"
+             left="116"
+             name="opacity"
+             tool_tip="How see-through the map is."
+             top="268"
+             width="200">
+                <combo_box.item label="100%" name="opacity_0" value="1.0" />
+                <combo_box.item label="75%" name="opacity_1" value="0.75" />
+                <combo_box.item label="50%" name="opacity_2" value="0.5" />
+                <combo_box.item label="25%" name="opacity_3" value="0.25" />
+            </combo_box>
+        </panel>
+        <panel
+         follows="all"
+         height="352"
+         label="Show"
+         layout="topleft"
+         left="0"
+         name="show_panel"
+         top="0"
+         width="328">
+            <text
+             follows="left|top"
+             font="SansSerifBold"
+             height="16"
+             layout="topleft"
+             left="12"
+             name="shares_header"
+             top="8"
+             width="300">Marks &amp; Shares</text>
+            <check_box
+             control_name="SLMiniMapShowMarks"
+             follows="left|top"
+             height="16"
+             label="Marks"
+             layout="topleft"
+             left="12"
+             name="show_marks"
+             top="28"
+             width="300" />
+            <check_box
+             control_name="SLMiniMapShowZones"
+             follows="left|top"
+             height="16"
+             label="Zones"
+             layout="topleft"
+             left="12"
+             name="show_zones"
+             top="48"
+             width="300" />
+            <check_box
+             control_name="SLMapShareShow"
+             follows="left|top"
+             height="16"
+             label="Shared marks, zones and pings"
+             layout="topleft"
+             left="12"
+             name="show_shared"
+             tool_tip="Draw what others share with you (only from your Send To list and the groups you send to)."
+             top="68"
+             width="300" />
+            <button
+             follows="left|top"
+             height="22"
+             label="Clear Shared Items"
+             layout="topleft"
+             left="12"
+             name="clear_shared"
+             tool_tip="Remove every shared mark, zone and ping from your map."
+             top="90"
+             width="140" />
+            <button
+             follows="left|top"
+             height="22"
+             label="Unblock All"
+             layout="topleft"
+             left="160"
+             name="unblock_shares"
+             tool_tip="Take every sender off your blocked list, so their map shares show again."
+             top="90"
+             width="140" />
+            <text
+             follows="left|top"
+             font="SansSerifBold"
+             height="16"
+             layout="topleft"
+             left="12"
+             name="map_header"
+             top="122"
+             width="300">On the Map</text>
+            <check_box
+             control_name="SLMiniMapCursorCoords"
+             follows="left|top"
+             height="16"
+             label="Cursor coordinates"
+             layout="topleft"
+             left="12"
+             name="cursor_coords"
+             top="142"
+             width="300" />
+            <check_box
+             control_name="SlipstreamMinimapRenderObjects"
+             follows="left|top"
+             height="16"
+             label="Objects"
+             layout="topleft"
+             left="12"
+             name="render_objects"
+             top="162"
+             width="300" />
+            <check_box
+             control_name="SLMiniMapPhysicalOnly"
+             enabled_control="SlipstreamMinimapRenderObjects"
+             follows="left|top"
+             height="16"
+             label="Physical objects only (bullets)"
+             layout="topleft"
+             left="30"
+             name="physical_only"
+             tool_tip="Only physical objects, as moving dots with a short trail: bullets, vehicles."
+             top="182"
+             width="282" />
+            <check_box
+             control_name="SlipstreamMinimapGuideLine"
+             follows="left|top"
+             height="16"
+             label="Guide line"
+             layout="topleft"
+             left="12"
+             name="guide_line"
+             top="202"
+             width="300" />
+            <check_box
+             control_name="SlipstreamMinimapChatRings"
+             follows="left|top"
+             height="16"
+             label="Chat rings"
+             layout="topleft"
+             left="12"
+             name="chat_rings"
+             top="222"
+             width="300" />
+            <check_box
+             control_name="SLMiniMapHideAbove"
+             follows="left|top"
+             height="16"
+             label="Hide avatars high above me"
+             layout="topleft"
+             left="12"
+             name="hide_above"
+             tool_tip="Avatars more than this height above you get no dot, no hover info and no right-click, e.g. people sitting on build platforms during combat."
+             top="242"
+             width="300" />
+            <slider
+             can_edit_text="true"
+             control_name="SLMiniMapHideAboveMeters"
+             decimal_digits="0"
+             enabled_control="SLMiniMapHideAbove"
+             follows="left|top"
+             height="16"
+             increment="10"
+             label="Higher than (m)"
+             label_width="100"
+             layout="topleft"
+             left="30"
+             max_val="1000"
+             min_val="250"
+             name="hide_above_meters"
+             tool_tip="How many metres above your own height an avatar must be to be hidden."
+             top="262"
+             width="286" />
+            <text
+             follows="left|top"
+             font="SansSerifBold"
+             height="16"
+             layout="topleft"
+             left="12"
+             name="parcels_header"
+             top="288"
+             width="300">Parcels</text>
+            <check_box
+             control_name="MiniMapShowPropertyLines"
+             follows="left|top"
+             height="16"
+             label="Parcel boundaries"
+             layout="topleft"
+             left="12"
+             name="parcel_lines"
+             top="308"
+             width="300" />
+            <check_box
+             control_name="SlipstreamMiniMapForSaleParcels"
+             enabled_control="MiniMapShowPropertyLines"
+             follows="left|top"
+             height="16"
+             label="For sale"
+             layout="topleft"
+             left="30"
+             name="parcels_for_sale"
+             top="328"
+             width="130" />
+            <check_box
+             control_name="SlipstreamMiniMapCollisionParcels"
+             enabled_control="MiniMapShowPropertyLines"
+             follows="left|top"
+             height="16"
+             label="Access"
+             layout="topleft"
+             left="170"
+             name="parcel_access"
+             tool_tip="Parcels you are banned from or cannot enter."
+             top="328"
+             width="130" />
+        </panel>
+        <panel
+         follows="all"
+         height="352"
+         label="Region Map"
+         layout="topleft"
+         left="0"
+         name="region_map_panel"
+         top="0"
+         width="328">
+            <check_box
+             control_name="SLRegionMapUseCaptured"
+             follows="left|top"
+             height="16"
+             label="Show captured maps (mini-map and World Map)"
+             layout="topleft"
+             left="12"
+             name="world_map_captured"
+             tool_tip="Your captured region maps as the mini-map's background in their regions (in place of the View tab's Background) and over the World Map's tiles."
+             top="8"
+             width="300" />
+            <text
+             follows="left|top"
+             font="SansSerifBold"
+             height="16"
+             layout="topleft"
+             left="12"
+             name="capture_header"
+             top="34"
+             width="300">Capture</text>
+            <button
+             follows="left|top"
+             height="22"
+             label="Capture Region Map..."
+             layout="topleft"
+             left="12"
+             name="capture"
+             tool_tip="Render a map of the region you are in from above and keep it for the mini-map."
+             top="54"
+             width="150" />
+            <button
+             follows="left|top"
+             height="22"
+             label="Cancel Capture"
+             layout="topleft"
+             left="166"
+             name="cancel_capture"
+             top="54"
+             width="150" />
+            <text
+             follows="left|top"
+             font="SansSerifBold"
+             height="16"
+             layout="topleft"
+             left="12"
+             name="this_map_header"
+             top="88"
+             width="300">This Region's Map</text>
+            <button
+             follows="left|top"
+             height="22"
+             label="Copy Map Image"
+             layout="topleft"
+             left="12"
+             name="copy_image"
+             tool_tip="Put this region's map image on the clipboard."
+             top="108"
+             width="150" />
+            <button
+             follows="left|top"
+             height="22"
+             label="Save Map Image As..."
+             layout="topleft"
+             left="166"
+             name="save_image"
+             tool_tip="Save this region's map image as a PNG."
+             top="108"
+             width="150" />
+            <button
+             follows="left|top"
+             height="22"
+             label="Export Map File..."
+             layout="topleft"
+             left="12"
+             name="export_map"
+             tool_tip="Save this region's captured map as one .gmdxmap file to give to others."
+             top="136"
+             width="150" />
+            <button
+             follows="left|top"
+             height="22"
+             label="Upload to Inventory..."
+             layout="topleft"
+             left="166"
+             name="upload_map"
+             tool_tip="Upload this region's captured map as a texture to your inventory."
+             top="136"
+             width="150" />
+            <button
+             follows="left|top"
+             height="22"
+             label="Delete This Map"
+             layout="topleft"
+             left="12"
+             name="delete_map"
+             tool_tip="Delete this region's captured map (the mini-map goes back to its background)."
+             top="164"
+             width="150" />
+            <text
+             follows="left|top"
+             font="SansSerifBold"
+             height="16"
+             layout="topleft"
+             left="12"
+             name="files_header"
+             top="198"
+             width="300">Map Files</text>
+            <button
+             follows="left|top"
+             height="22"
+             label="Import Map File..."
+             layout="topleft"
+             left="12"
+             name="import_map"
+             tool_tip="Add a region map from a .gmdxmap file."
+             top="218"
+             width="150" />
+            <button
+             follows="left|top"
+             height="22"
+             label="Open Maps Folder"
+             layout="topleft"
+             left="166"
+             name="open_folder"
+             tool_tip="Open the folder your captured region maps are kept in."
+             top="218"
+             width="150" />
+        </panel>
+    </tab_container>
+</floater>

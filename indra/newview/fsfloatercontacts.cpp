@@ -36,6 +36,7 @@
 #include "llagent.h"
 #include "llagentbenefits.h"
 #include "llavataractions.h"
+#include "llavatarpresence.h"
 #include "llconversationmodel.h"
 #include "llfloaterimcontainer.h"
 #include "llfiltereditor.h"
@@ -157,6 +158,8 @@ bool FSFloaterContacts::postBuild()
     gSavedSettings.getControl("FSFriendListSortOrder")->getSignal()->connect(boost::bind(&FSFloaterContacts::sortFriendList, this));
     gSavedSettings.getControl("FSFriendListColumnShowPermissions")->getSignal()->connect(boost::bind(&FSFloaterContacts::onColumnDisplayModeChanged, this));
     gSavedSettings.getControl("FSContactSetsColorizeFriends")->getSignal()->connect(boost::bind(&FSFloaterContacts::onDisplayNameChanged, this));
+    mClassicNameColorsConnection = gSavedSettings.getControl("SLClassicNameColors")->getSignal()->connect(
+        boost::bind(&FSFloaterContacts::refreshNameStyles, this));
     onColumnDisplayModeChanged();
 
     LLAvatarNameCache::getInstance()->addUseDisplayNamesCallback(boost::bind(&FSFloaterContacts::onDisplayNameChanged, this));
@@ -596,70 +599,26 @@ void FSFloaterContacts::changed(U32 changed_mask)
 {
     LLAvatarTracker& at = LLAvatarTracker::instance();
 
-    switch (changed_mask)
+    if (changed_mask & LLFriendObserver::POWERS)
     {
-        case (LLFriendObserver::ADD | LLFriendObserver::ONLINE) :
+        --mNumRightsChanged;
+        mAllowRightsChange = mNumRightsChanged <= 0;
+    }
+    if (changed_mask & (LLFriendObserver::ADD | LLFriendObserver::REMOVE | LLFriendObserver::ONLINE | LLFriendObserver::POWERS))
+    {
+        for (const auto& id : at.getChangedIDs())
+        {
+            const LLRelationship* info = at.getBuddyInfo(id);
+            if (info)
             {
-                // MAINT-5250 will cause this kind of mask being sent at login
-                LLAvatarTracker::buddy_map_t all_buddies;
-                at.copyBuddyList(all_buddies);
-
-                for (const auto& [id, rel] :  all_buddies)
-                {
-                    addFriend(id);
-                    if (at.isBuddyOnline(id))
-                    {
-                        const LLRelationship* info = at.getBuddyInfo(id);
-                        updateFriendItem(id, info);
-                    }
-                }
+                addFriend(id);
+                updateFriendItem(id, info);
             }
-            break;
-        case LLFriendObserver::ADD:
+            else if (auto* item = mFriendsList->getItem(id))
             {
-                for (const auto& id : at.getChangedIDs())
-                {
-                    addFriend(id);
-                }
+                mFriendsList->deleteSingleItem(mFriendsList->getItemIndex(item));
             }
-            break;
-        case LLFriendObserver::REMOVE:
-            {
-                for (const auto& id : at.getChangedIDs())
-                {
-                    mFriendsList->deleteSingleItem(mFriendsList->getItemIndex(id));
-                }
-            }
-            break;
-        case LLFriendObserver::POWERS:
-            {
-                --mNumRightsChanged;
-                if (mNumRightsChanged > 0)
-                {
-                    mAllowRightsChange = false;
-                }
-                else
-                {
-                    mAllowRightsChange = true;
-                }
-
-                for (const auto& id : at.getChangedIDs())
-                {
-                    const LLRelationship* info = at.getBuddyInfo(id);
-                    updateFriendItem(id, info);
-                }
-            }
-            break;
-        case LLFriendObserver::ONLINE:
-            {
-                for (const auto& id : at.getChangedIDs())
-                {
-                    const LLRelationship* info = at.getBuddyInfo(id);
-                    updateFriendItem(id, info);
-                }
-            }
-            break;
-        default:;
+        }
     }
 
     mIconsDirty = true;
@@ -799,12 +758,6 @@ void FSFloaterContacts::updateFriendItem(const LLUUID& agent_id, const LLRelatio
     itemp->getColumn(LIST_FRIEND_NAME)->setValue(getFullName(av_name));
     updateFriendItemColor(itemp, agent_id);
 
-    // render name of online friends in bold text
-    LLFontGL::StyleFlags font_style = ((isOnline || isOnlineSIP) ? LLFontGL::BOLD : LLFontGL::NORMAL);
-    ((LLScrollListText*)itemp->getColumn(LIST_FRIEND_USER_NAME))->setFontStyle(font_style);
-    ((LLScrollListText*)itemp->getColumn(LIST_FRIEND_DISPLAY_NAME))->setFontStyle(font_style);
-    ((LLScrollListText*)itemp->getColumn(LIST_FRIEND_NAME))->setFontStyle(font_style);
-
     itemp->getColumn(LIST_VISIBLE_ONLINE)->setValue(info->isRightGrantedTo(LLRelationship::GRANT_ONLINE_STATUS));
     itemp->getColumn(LIST_VISIBLE_MAP)->setValue(info->isRightGrantedTo(LLRelationship::GRANT_MAP_LOCATION));
     itemp->getColumn(LIST_EDIT_MINE)->setValue(info->isRightGrantedTo(LLRelationship::GRANT_MODIFY_OBJECTS));
@@ -817,14 +770,34 @@ void FSFloaterContacts::updateFriendItem(const LLUUID& agent_id, const LLRelatio
     itemp->setEnabled(true);
 }
 
+void FSFloaterContacts::refreshNameStyles()
+{
+    for (auto* item : mFriendsList->getAllData())
+    {
+        updateFriendItemColor(item, item->getUUID());
+    }
+    mFriendsList->refreshLineHeight();
+}
+
 void FSFloaterContacts::updateFriendItemColor(LLScrollListItem* item, const LLUUID& agent_id) const
 {
-    LLColor4 name_color;
+    const auto presence = LLAvatarTracker::instance().getBuddyPresence(agent_id);
+    const bool classic = LLAvatarPresence::useClassicNameColors();
+    LLColor4 name_color = LLUIColorTable::instance().getColor(LLAvatarPresence::colorName(presence)).get();
     const bool has_contact_set_color = LGGContactSets::getInstance()->hasFriendColorThatShouldShow(agent_id, ContactSetType::FRIENDS, name_color);
     LLScrollListCell* user_name_cell = item->getColumn(LIST_FRIEND_USER_NAME);
     LLScrollListCell* display_name_cell = item->getColumn(LIST_FRIEND_DISPLAY_NAME);
     LLScrollListCell* full_name_cell = item->getColumn(LIST_FRIEND_NAME);
-    if (has_contact_set_color)
+    const LLRelationship* relationship = LLAvatarTracker::instance().getBuddyInfo(agent_id);
+    const bool bold = classic ?
+        (relationship && relationship->isOnline()) || LLVoiceClient::getInstance()->isOnlineSIP(agent_id) :
+        presence == LLAvatarTracker::EPresence::ONLINE;
+    const auto font_style = bold ? LLFontGL::BOLD : LLFontGL::NORMAL;
+    for (const auto column : { LIST_FRIEND_USER_NAME, LIST_FRIEND_DISPLAY_NAME, LIST_FRIEND_NAME })
+    {
+        static_cast<LLScrollListText*>(item->getColumn(column))->setFontStyle(font_style);
+    }
+    if (has_contact_set_color || (!classic && presence != LLAvatarTracker::EPresence::NOT_FRIEND))
     {
         user_name_cell->setColor(name_color);
         display_name_cell->setColor(name_color);

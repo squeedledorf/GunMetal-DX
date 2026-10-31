@@ -2255,10 +2255,27 @@ They will temporarily be unable to move, chat, or interact with the world.
   </notification>
 
   <notification
+   icon="notify.tga"
+   name="AvatarModerationChecking"
+   duration="12"
+   log_to_chat="false"
+   type="notifytip">
+Checking parcel moderation permissions with the simulator...
+  </notification>
+
+  <notification
+   icon="alert.tga"
+   name="AvatarModerationUnavailable"
+   type="alert">
+The selected residents or your moderation permissions are no longer available. No action was sent. Select the residents again and try again.
+    <usetemplate name="okbutton" yestext="OK"/>
+  </notification>
+
+  <notification
    icon="alertmodal.tga"
    name="EjectAvatarFullname"
    type="alertmodal">
-Eject [AVATAR_NAMES] from your land?
+Eject [AVATAR_NAMES] from the parcel?
     <tag>confirm</tag>
     <usetemplate
      canceltext="Cancel"
@@ -2271,7 +2288,7 @@ Eject [AVATAR_NAMES] from your land?
    icon="alertmodal.tga"
    name="EjectAvatarFullnameNoBan"
    type="alertmodal">
-Eject [AVATAR_NAMES] from your land?
+Eject [AVATAR_NAMES] from the parcel?
     <tag>confirm</tag>
     <usetemplate
      name="okcancelbuttons"
@@ -2283,7 +2300,7 @@ Eject [AVATAR_NAMES] from your land?
    icon="alertmodal.tga"
    name="EjectAvatarMultiple"
    type="alertmodal">
-Eject the following residents from your land?
+Eject the following residents from their parcels?
 
 [AVATAR_NAMES]
     <tag>confirm</tag>
@@ -2298,7 +2315,7 @@ Eject the following residents from your land?
    icon="alertmodal.tga"
    name="EjectAvatarMultipleNoBan"
    type="alertmodal">
-Eject the following residents from your land?
+Eject the following residents from their parcels?
 
 [AVATAR_NAMES]
     <tag>confirm</tag>
@@ -2313,12 +2330,12 @@ Eject the following residents from your land?
    label="Confirm Teleport Home"
    name="EstateTeleportHomeSingle"
    type="alert">
-Teleport [AVATAR_NAMES] home?
+Remove [AVATAR_NAMES] from the region by teleporting home? This does not add a ban.
     <tag>confirm</tag>
     <usetemplate
      name="okcancelbuttons"
      notext="Cancel"
-     yestext="OK"/>
+     yestext="Teleport Home"/>
   </notification>
  
   <notification
@@ -2326,13 +2343,13 @@ Teleport [AVATAR_NAMES] home?
    label="Confirm Teleport Home"
    name="EstateTeleportHomeMultiple"
    type="alert">
-Teleport the following residents home?
+Remove the following residents from their regions by teleporting home? This does not add a ban.
 
 [AVATAR_NAMES]
     <usetemplate
      name="okcancelbuttons"
      notext="Cancel"
-     yestext="OK"/>
+     yestext="Teleport Home"/>
   </notification>
 
   <notification
@@ -2345,7 +2362,7 @@ Kick [AVATAR_NAMES] from this estate?
     <usetemplate
      name="okcancelbuttons"
      notext="Cancel"
-     yestext="OK"/>
+     yestext="Kick"/>
   </notification>
 
   <notification
@@ -2360,7 +2377,7 @@ Kick the following residents from this estate?
     <usetemplate
      name="okcancelbuttons"
      notext="Cancel"
-     yestext="OK"/>
+     yestext="Kick"/>
   </notification>
 
   <notification
@@ -3706,175 +3723,11 @@ See https://wiki.secondlife.com/wiki/Adding_Spelling_Dictionaries
     </form>
   </notification>
 
-  <!-- <GMDX> toolbar pins: "Rename..." on a pinned button (gmdxtoolbarpins.cpp); empty = the item's name -->
-  <notification
-   icon="alertmodal.tga"
-   label="Toolbar button"
-   name="GMDXPinRename"
-   type="alertmodal">
-    Name this toolbar button (leave it empty for the item's own name):
-    <tag>confirm</tag>
-    <form name="form">
-      <input name="message" type="text">
-        [NAME]
-      </input>
-      <button
-       default="true"
-       index="0"
-       name="OK"
-       text="OK"/>
-      <button
-       index="1"
-       name="Cancel"
-       text="Cancel"/>
-    </form>
-  </notification>
-
-  <!-- <GMDX> map share (gmdxmapshare.cpp): a mark or zone from the helper of someone not in my list or a group I send to
-       (pings never ask); its line stays in the nearby chat. Options by index: 0 Accept (draw it), 1 Always (add them to my
-       list, kept, and draw it), 2 Deny (nothing; not asked again for 2 minutes), 3 Mute (block their map shares, not the
-       mute list); gone unanswered after 2 minutes (ASK_SECONDS) -->
-  <notification
-   icon="notify.tga"
-   name="GMDXMapShareAsk"
-   duration="120"
-   log_to_chat="false"
-   type="notify">
-You've received map information from &lt;nolink&gt;[NAME]&lt;/nolink&gt;: &lt;nolink&gt;[WHAT]&lt;/nolink&gt; in &lt;nolink&gt;[REGION]&lt;/nolink&gt;.
-    <tag>confirm</tag>
-    <form name="form">
-      <button
-       index="0"
-       name="Accept"
-       text="Accept"/>
-      <button
-       index="1"
-       name="Always"
-       text="Always"/>
-      <button
-       index="2"
-       name="Deny"
-       text="Deny"/>
-      <button
-       index="3"
-       name="Mute"
-       text="Mute"/>
-    </form>
-  </notification>
-  <!-- <GMDX> loadouts (gmdxfloaterloadouts.cpp) -->
-  <notification
-   icon="alertmodal.tga"
-   label="Loadouts"
-   name="GMDXLoadoutName"
-   type="alertmodal">
-    [TITLE]
-    <tag>confirm</tag>
-    <form name="form">
-      <input name="message" type="text">
-        [NAME]
-      </input>
-      <button
-       default="true"
-       index="0"
-       name="OK"
-       text="OK"/>
-      <button
-       index="1"
-       name="Cancel"
-       text="Cancel"/>
-    </form>
-  </notification>
-  <notification
-   icon="alertmodal.tga"
-   label="Loadouts"
-   name="GMDXLoadoutDelete"
-   type="alertmodal">
-    Move the loadout "[NAME]" to the Trash? The weapons in it stay where they are.
-    <tag>confirm</tag>
-    <usetemplate
-     name="okcancelbuttons"
-     notext="Cancel"
-     yestext="Delete"/>
-  </notification>
-  <notification
-   icon="alertmodal.tga"
-   label="Import weapons"
-   name="GMDXImportTrash"
-   type="alertmodal">
-    Move [COUNT] older and duplicate versions to the Trash? You can still take them back out of the Trash until it is emptied.
-    <tag>confirm</tag>
-    <usetemplate
-     name="okcancelbuttons"
-     notext="Cancel"
-     yestext="Move to Trash"/>
-  </notification>
-  <notification
-   icon="notifytip.tga"
-   name="GMDXLoadoutShared"
-   type="notifytip">
-    "[NAME]" is in your Notecards folder. Give it to anyone; they drop it on their Loadouts window to add the loadout.
-  </notification>
-  <notification
-   icon="notifytip.tga"
-   name="GMDXLoadoutImported"
-   type="notifytip">
-    Added loadout "[NAME]": all [TOTAL] weapons found in your Equipment.
-  </notification>
-  <notification
-   icon="notifytip.tga"
-   name="GMDXLoadoutImportedMissing"
-   type="notifytip">
-    Added loadout "[NAME]" with [FOUND] of [TOTAL] weapons. Not in your Equipment: [MISSING]
-  </notification>
-  <notification
-   icon="notifytip.tga"
-   name="GMDXLoadoutNotecardBad"
-   type="notifytip">
-    That notecard isn't a GunMetal-DX loadout (or couldn't be read).
-  </notification>
-  <notification
-   icon="notifytip.tga"
-   name="GMDXHotkeyInUse"
-   type="notifytip">
-    [KEY] is already a menu shortcut. Pick another key.
-  </notification>
-  <notification
-   icon="notifytip.tga"
-   name="GMDXHotkeyBad"
-   type="notifytip">
-    [KEY] can't be a quick-swap key. Pick another key.
-  </notification>
-  <notification
-   icon="notifytip.tga"
-   name="GMDXHotkeySlots"
-   type="notifytip">
-    Select one of the first four slots: those have quick-swap keys.
-  </notification>
-  <notification
-   icon="alertmodal.tga"
-   label="Remove weapon"
-   name="GMDXRemoveWeapon"
-   type="alertmodal">
-    Remove [NAME] from Equipment? It goes to Outdated (take it back out any time), comes off if you wear it, and leaves every loadout that has it.
-    <tag>confirm</tag>
-    <usetemplate
-     name="okcancelbuttons"
-     notext="Cancel"
-     yestext="Remove"/>
-  </notification>
-  <notification
-   icon="notifytip.tga"
-   name="GMDXLoadoutFolderExists"
-   type="notifytip">
-    Equipment already has a folder named "[NAME]". Rename or move that folder first.
-  </notification>
-  <!-- </GMDX> -->
-
-  <!-- <GMDX> region map capture (gmdxregioncapture.cpp) -->
+  <!-- region map capture (llregionmapcapture.cpp; ported from GunMetal-DX, squeedledorf, LGPL 2.1, v0.3.0 cf5f1f4) -->
   <notification
    icon="alertmodal.tga"
    label="Capture Region Map"
-   name="GMDXRegionMapConfirm"
+   name="RegionMapConfirm"
    type="alertmodal">
 Capture a map of [REGION]?
 
@@ -3889,7 +3742,7 @@ Loading can take a few minutes and the viewer may stutter. Avatars and particles
   </notification>
   <notification
    icon="notify.tga"
-   name="GMDXRegionMapProgress"
+   name="RegionMapProgress"
    fade_toast="false"
    type="notify">
 Mapping [REGION]: [PHASE]
@@ -3902,73 +3755,49 @@ Mapping [REGION]: [PHASE]
   </notification>
   <notification
    icon="notifytip.tga"
-   name="GMDXRegionMapNight"
+   name="RegionMapNight"
    type="notifytip">
 Region maps need daylight: the sun is down in [REGION]. Capture the map when the sun is up.
   </notification>
   <notification
    icon="notifytip.tga"
-   name="GMDXRegionMapStopped"
+   name="RegionMapStopped"
    type="notifytip">
 The map of [REGION] was not made: [REASON]. Your settings are as they were.
   </notification>
   <notification
    icon="notifytip.tga"
-   name="GMDXRegionMapSaved"
+   name="RegionMapSaved"
    type="notifytip">
 Map of [REGION] saved: [PATH]
   </notification>
   <notification
    icon="notifytip.tga"
-   name="GMDXRegionMapImported"
+   name="RegionMapImported"
    type="notifytip">
 Map of [REGION] imported. The mini-map shows it while you are there.
   </notification>
   <notification
    icon="alertmodal.tga"
-   name="GMDXCrashReportOffer"
+   name="RegionMapUpload"
    type="alertmodal">
-GunMetal-DX crashed the last time it ran. Send the crash report to the developers?
+Upload the map of [REGION] to your inventory as a [SIZE] x [SIZE] px texture for L$[COST]?
 
-It holds the crash dump and the end of the viewer's log, which includes your avatar name and the regions you were in. It goes to GunMetal-DX's BugSplat account and helps find the cause.
-    <form name="form">
-      <button
-       default="true"
-       index="0"
-       name="Send"
-       text="Send"/>
-      <button
-       index="1"
-       name="Always"
-       text="Always send"/>
-      <button
-       index="2"
-       name="DontSend"
-       text="Don't send"/>
-    </form>
+Give the texture to anyone with Slipstream or GunMetal-DX: in their inventory, right-click it and choose Use as Region Map. Keep its description as it is: it tells the viewer which region the map is of.
+    <usetemplate
+     name="okcancelbuttons"
+     notext="Cancel"
+     yestext="Upload"/>
   </notification>
   <notification
    icon="alertmodal.tga"
-   name="GMDXCrashReportOfferMany"
+   name="RegionMapReplace"
    type="alertmodal">
-GunMetal-DX crashed [COUNT] times since the last report. Send the crash reports to the developers?
-
-Each holds the crash dump and the end of the viewer's log, which includes your avatar name and the regions you were in. They go to GunMetal-DX's BugSplat account and help find the cause.
-    <form name="form">
-      <button
-       default="true"
-       index="0"
-       name="Send"
-       text="Send"/>
-      <button
-       index="1"
-       name="Always"
-       text="Always send"/>
-      <button
-       index="2"
-       name="DontSend"
-       text="Don't send"/>
-    </form>
+You already have a map of [REGION]. Replace it with the imported one?
+    <usetemplate
+     name="okcancelbuttons"
+     notext="Keep Mine"
+     yestext="Replace"/>
   </notification>
   <notification
    icon="alertmodal.tga"
@@ -3976,26 +3805,140 @@ Each holds the crash dump and the end of the viewer's log, which includes your a
    type="alertmodal">
 May GunMetal-DX check for new versions?
 
-It asks GunMetal-DX's GitHub page now and then. Nothing about you is sent. Updates are signed: GunMetal-DX only installs one that it can verify. You can change this in Preferences &gt; Setup, and Help &gt; Check for updates always works.
+It asks GunMetal-DX's GitHub page when you start it and once a day. Nothing about you is sent. When there is a new version it tells you here and asks: nothing is downloaded or installed until you say so. You can change this in Preferences &gt; Setup, and Help &gt; Check for updates always works.
     <form name="form">
       <button
        default="true"
        index="0"
-       name="Auto"
-       text="Check and install"/>
+       name="Check"
+       text="Check for updates"/>
       <button
        index="1"
-       name="Notify"
-       text="Check and tell me"/>
-      <button
-       index="2"
        name="Never"
        text="Don't check"/>
     </form>
   </notification>
+  <!-- <GMDX> Update prompts (slupdater.cpp): nothing downloads before "Download and install",
+       nothing installs before "Install now" / "Install at next start". -->
   <notification
    icon="alertmodal.tga"
-   name="GMDXMinimapMarkName"
+   name="GMDXUpdateOfferModal"
+   type="alertmodal">
+GunMetal-DX [VERSION] is available. You have [CURRENT].
+
+[[NOTES_URL] What's new]
+    <tag>confirm</tag>
+    <form name="form">
+      <button
+       default="true"
+       index="0"
+       name="Download"
+       text="Download and install"/>
+      <button
+       index="1"
+       name="Later"
+       text="Remind me later"/>
+      <button
+       index="2"
+       name="Skip"
+       text="Skip this version"/>
+    </form>
+  </notification>
+  <notification
+   icon="notify.tga"
+   name="GMDXUpdateOffer"
+   type="notify">
+GunMetal-DX [VERSION] is available. You have [CURRENT].
+
+[[NOTES_URL] What's new]
+    <tag>confirm</tag>
+    <form name="form">
+      <button
+       index="0"
+       name="Download"
+       text="Download and install"/>
+      <button
+       index="1"
+       name="Later"
+       text="Remind me later"/>
+      <button
+       index="2"
+       name="Skip"
+       text="Skip this version"/>
+    </form>
+  </notification>
+  <notification
+   icon="alertmodal.tga"
+   name="GMDXUpdateReady"
+   type="alertmodal">
+GunMetal-DX [VERSION] is downloaded and verified.
+    <tag>confirm</tag>
+    <form name="form">
+      <button
+       default="true"
+       index="0"
+       name="Now"
+       text="Install now (restarts GunMetal-DX)"/>
+      <button
+       index="1"
+       name="NextStart"
+       text="Install at next start"/>
+    </form>
+  </notification>
+  <notification
+   icon="alertmodal.tga"
+   name="GMDXUpdateDownloaded"
+   type="alertmodal">
+An update to GunMetal-DX [VERSION] was downloaded.
+    <tag>confirm</tag>
+    <form name="form">
+      <button
+       default="true"
+       index="0"
+       name="Now"
+       text="Install now"/>
+      <button
+       index="1"
+       name="Later"
+       text="Later"/>
+      <button
+       index="2"
+       name="Discard"
+       text="Discard"/>
+    </form>
+  </notification>
+  <notification
+   icon="alertmodal.tga"
+   name="GMDXUpdateDownloadFailed"
+   type="alertmodal">
+Couldn't download the update: [REASON]
+
+Try again with Help &gt; Check for updates.
+    <tag>fail</tag>
+    <usetemplate
+     name="okbutton"
+     yestext="OK"/>
+  </notification>
+  <notification
+   icon="alertmodal.tga"
+   name="GMDXUpdateInstallLater"
+   type="alertmodal">
+GunMetal-DX couldn't restart itself. The update will be installed the next time you start GunMetal-DX.
+    <tag>fail</tag>
+    <usetemplate
+     name="okbutton"
+     yestext="OK"/>
+  </notification>
+  <notification
+   icon="notifytip.tga"
+   name="RegionMapMessage"
+   type="notifytip">
+[MESSAGE]
+  </notification>
+  <!-- mini-map marks and zones (llminimapmarks.cpp; ported from GunMetal-DX, v0.3.0 cf5f1f4) -->
+  <notification
+   icon="alertmodal.tga"
+   name="MinimapMarkName"
    type="alertmodal">
 Name the mark:
     <form name="form">
@@ -4015,7 +3958,7 @@ Name the mark:
   </notification>
   <notification
    icon="alertmodal.tga"
-   name="GMDXMinimapZoneName"
+   name="MinimapZoneName"
    type="alertmodal">
 Name the zone (leave it empty for no label):
     <form name="form">
@@ -4035,7 +3978,7 @@ Name the zone (leave it empty for no label):
   </notification>
   <notification
    icon="alertmodal.tga"
-   name="GMDXMinimapMarkRename"
+   name="MinimapMarkRename"
    type="alertmodal">
 Rename the mark:
     <form name="form">
@@ -4053,35 +3996,6 @@ Rename the mark:
        text="Cancel"/>
     </form>
   </notification>
-  <notification
-   icon="alertmodal.tga"
-   name="GMDXRegionMapUpload"
-   type="alertmodal">
-Upload the map of [REGION] to your inventory as a [SIZE] x [SIZE] px texture for L$[COST]?
-
-Give the texture to anyone with GunMetal-DX: in their inventory, right-click it and choose Use as Region Map. Keep its description as it is: it tells the viewer which region the map is of.
-    <usetemplate
-     name="okcancelbuttons"
-     notext="Cancel"
-     yestext="Upload"/>
-  </notification>
-  <notification
-   icon="alertmodal.tga"
-   name="GMDXRegionMapReplace"
-   type="alertmodal">
-You already have a map of [REGION]. Replace it with the imported one?
-    <usetemplate
-     name="okcancelbuttons"
-     notext="Keep Mine"
-     yestext="Replace"/>
-  </notification>
-  <notification
-   icon="notifytip.tga"
-   name="GMDXRegionMapMessage"
-   type="notifytip">
-[MESSAGE]
-  </notification>
-  <!-- </GMDX> -->
 
   <notification
  icon="alertmodal.tga"
@@ -10672,6 +10586,31 @@ Failed to save snapshot to [PATH]: Directory does not exist.
   </notification>
 
   <notification
+   icon="alertmodal.tga"
+   label="Snapshot file names"
+   name="SnapshotFileNamePattern"
+   type="alertmodal">
+    How snapshots saved to disk are named:
+{name} the base name ([BASE_NAME]), {date}, {time}, {region}, {w} and {h} the size, {n} a number ({n:3} gives 001).
+A file is never overwritten.
+    <tag>confirm</tag>
+    <form name="form">
+      <input name="pattern" type="text" width="300">
+        [PATTERN]
+      </input>
+      <button
+       default="true"
+       index="0"
+       name="OK"
+       text="OK"/>
+      <button
+       index="1"
+       name="Cancel"
+       text="Cancel"/>
+    </form>
+  </notification>
+
+  <notification
     icon="notifytip.tga"
     name="PresetNotSaved"
     type="notifytip">
@@ -10765,7 +10704,7 @@ Selected files can not be bulk-uploaded.
      yestext="OK"/>
    </notification>
 
-  <!-- <GMDX> <OTS> Bulk sound upload that also writes a music-player notecard -->
+  <!-- Bulk sound upload that also writes a music-player notecard (ported from GunMetal-DX, v0.3.0 cf5f1f4) -->
   <notification
    icon="alertmodal.tga"
    name="SoundNotecardNoFiles"
@@ -10842,7 +10781,6 @@ Uploaded [COUNT] sounds and created the notecard &quot;[NAME]&quot; in your Soun
    type="notify">
 Created the notecard &quot;[NAME]&quot; with [COUNT] sounds. [FAILED] sound(s) failed to upload and were left out.
   </notification>
-  <!-- </OTS> </GMDX> -->
 
   <notification
    icon="alertmodal.tga"
@@ -15221,24 +15159,6 @@ You can find them again any time under Help &gt; Slipstream Help (wiki).
   </notification>
 
   <notification
-   icon="notify.tga"
-   name="UpdateStaged"
-   type="notify">
-[APP_NAME] [VERSION] has been downloaded and verified. It will be installed the next time you start [APP_NAME].
-    <tag>confirm</tag>
-    <form name="form">
-      <button
-       index="0"
-       name="OK"
-       text="OK"/>
-      <button
-       index="1"
-       name="DontInstall"
-       text="Don't install this version"/>
-    </form>
-  </notification>
-
-  <notification
    icon="alertmodal.tga"
    name="UpdateAvailableModal"
    type="alertmodal">
@@ -15455,7 +15375,6 @@ A glTF export is already running.
 Select the objects to export first.
     <tag>fail</tag>
   </notification>
-
   <!-- <SS:GameControl> -->
   <!-- <SS:GameControl> -->
   <notification
@@ -15491,5 +15410,229 @@ Name this set of controller bindings. Saving over an existing name replaces it.
        text="Cancel"/>
     </form>
   </notification>
-  <!-- </SS:GameControl> -->
+
+  <!-- CombatFX loadouts (gmdxloadouts.cpp, gmdxweaponsorter.cpp; ported from GunMetal-DX, LGPL 2.1, v0.3.0 cf5f1f4) -->
+  <notification
+   icon="alertmodal.tga"
+   label="Loadouts"
+   name="SLLoadoutCreateFolders"
+   type="alertmodal">
+    Loadouts keep your weapons and loadouts in your inventory. Make these folders now?
+
+[FOLDERS]
+
+Nothing is moved into them until you choose to.
+    <tag>confirm</tag>
+    <usetemplate
+     name="okcancelbuttons"
+     notext="Not now"
+     yestext="Make folders"/>
+  </notification>
+  <notification
+   icon="alertmodal.tga"
+   label="Sort weapons"
+   name="SLLoadoutImportConfirm"
+   type="alertmodal">
+    Sort [COUNT] weapons into Equipment, and move [OTHERS] other versions of them to Outdated (made if missing)? Worn versions and versions another weapon uses stay where they are.
+    <tag>confirm</tag>
+    <usetemplate
+     name="okcancelbuttons"
+     notext="Cancel"
+     yestext="Sort"/>
+  </notification>
+  <notification
+   icon="notifytip.tga"
+   name="SLLoadoutNotOnlyLinks"
+   type="notifytip">
+    That loadout folder holds more than links (an item or a folder you put there), so it was left alone. Move those out first, or delete the folder from your inventory.
+  </notification>
+  <notification
+   icon="notifytip.tga"
+   name="GMDXLoadoutFolderExists"
+   type="notifytip">
+    Equipment already has a folder named "[NAME]". Rename or move that folder first.
+  </notification>
+  <notification
+   icon="alertmodal.tga"
+   name="GMDXCrashReportOffer"
+   type="alertmodal">
+GunMetal-DX crashed the last time it ran. Send the crash report to the developers?
+
+It holds the crash dump and the end of the viewer's log, which includes your avatar name and the regions you were in. It goes to GunMetal-DX's BugSplat account and helps find the cause.
+    <form name="form">
+      <button
+       default="true"
+       index="0"
+       name="Send"
+       text="Send"/>
+      <button
+       index="1"
+       name="Always"
+       text="Always send"/>
+      <button
+       index="2"
+       name="DontSend"
+       text="Don't send"/>
+    </form>
+  </notification>
+  <notification
+   icon="alertmodal.tga"
+   name="GMDXCrashReportOfferMany"
+   type="alertmodal">
+GunMetal-DX crashed [COUNT] times since the last report. Send the crash reports to the developers?
+
+Each holds the crash dump and the end of the viewer's log, which includes your avatar name and the regions you were in. They go to GunMetal-DX's BugSplat account and help find the cause.
+    <form name="form">
+      <button
+       default="true"
+       index="0"
+       name="Send"
+       text="Send"/>
+      <button
+       index="1"
+       name="Always"
+       text="Always send"/>
+      <button
+       index="2"
+       name="DontSend"
+       text="Don't send"/>
+    </form>
+  </notification>
+  <notification
+   icon="notifytip.tga"
+   name="GMDXLoadoutShared"
+   type="notifytip">
+    "[NAME]" is in your Notecards folder. Give it to anyone; they drop it on their Loadouts window to add the loadout.
+  </notification>
+  <notification
+   icon="notifytip.tga"
+   name="GMDXLoadoutNotecardBad"
+   type="notifytip">
+    That notecard isn't a loadout (or couldn't be read).
+  </notification>
+  <notification
+   icon="notifytip.tga"
+   name="GMDXLoadoutImported"
+   type="notifytip">
+    Added loadout "[NAME]": all [TOTAL] weapons found in your Equipment.
+  </notification>
+  <notification
+   icon="notifytip.tga"
+   name="GMDXLoadoutImportedMissing"
+   type="notifytip">
+    Added loadout "[NAME]" with [FOUND] of [TOTAL] weapons. Not in your Equipment: [MISSING]
+  </notification>
+  <notification
+   icon="alertmodal.tga"
+   label="Loadouts"
+   name="GMDXLoadoutName"
+   type="alertmodal">
+    [TITLE]
+    <tag>confirm</tag>
+    <form name="form">
+      <input name="message" type="text">
+        [NAME]
+      </input>
+      <button
+       default="true"
+       index="0"
+       name="OK"
+       text="OK"/>
+      <button
+       index="1"
+       name="Cancel"
+       text="Cancel"/>
+    </form>
+  </notification>
+  <notification
+   icon="notifytip.tga"
+   name="GMDXHotkeySlots"
+   type="notifytip">
+    Select one of the first four slots: those have quick-swap keys.
+  </notification>
+  <notification
+   icon="notifytip.tga"
+   name="GMDXHotkeyBad"
+   type="notifytip">
+    [KEY] can't be a quick-swap key. Pick another key.
+  </notification>
+  <notification
+   icon="notifytip.tga"
+   name="GMDXHotkeyInUse"
+   type="notifytip">
+    [KEY] is already a menu shortcut. Pick another key.
+  </notification>
+  <notification
+   icon="alertmodal.tga"
+   label="Remove weapon"
+   name="GMDXRemoveWeapon"
+   type="alertmodal">
+    Remove [NAME] from Equipment? It goes to Outdated (made if missing; take it back out any time), comes off if you wear it, and leaves every loadout that has it.
+    <tag>confirm</tag>
+    <usetemplate
+     name="okcancelbuttons"
+     notext="Cancel"
+     yestext="Remove"/>
+  </notification>
+  <notification
+   icon="alertmodal.tga"
+   label="Loadouts"
+   name="GMDXLoadoutDelete"
+   type="alertmodal">
+    Move the loadout "[NAME]" to the Trash? The weapons in it stay where they are.
+    <tag>confirm</tag>
+    <usetemplate
+     name="okcancelbuttons"
+     notext="Cancel"
+     yestext="Delete"/>
+  </notification>
+  <notification
+   icon="alertmodal.tga"
+   label="Toolbar button"
+   name="GMDXPinRename"
+   type="alertmodal">
+    Name this toolbar button (leave it empty for the item's own name):
+    <tag>confirm</tag>
+    <form name="form">
+      <input name="message" type="text">
+        [NAME]
+      </input>
+      <button
+       default="true"
+       index="0"
+       name="OK"
+       text="OK"/>
+      <button
+       index="1"
+       name="Cancel"
+       text="Cancel"/>
+    </form>
+  </notification>
+  <notification
+   icon="notify.tga"
+   name="GMDXMapShareAsk"
+   duration="120"
+   log_to_chat="false"
+   type="notify">
+You've received map information from &lt;nolink&gt;[NAME]&lt;/nolink&gt;: &lt;nolink&gt;[WHAT]&lt;/nolink&gt; in &lt;nolink&gt;[REGION]&lt;/nolink&gt;.
+    <tag>confirm</tag>
+    <form name="form">
+      <button
+       index="0"
+       name="Accept"
+       text="Accept"/>
+      <button
+       index="1"
+       name="Always"
+       text="Always"/>
+      <button
+       index="2"
+       name="Deny"
+       text="Deny"/>
+      <button
+       index="3"
+       name="Mute"
+       text="Mute"/>
+    </form>
+  </notification>
 </notifications>

@@ -40,4 +40,15 @@
      name="BindCameraCheck"
      top_pad="7"
      width="237"/>
+  <button
+     enabled="false"
+     follows="top|right"
+     height="19"
+     label="Reset"
+     layout="topleft"
+     name="ResetButton"
+     right="-4"
+     tool_tip="Set hover height back to 0"
+     top_delta="-2"
+     width="60"/>
 </floater>

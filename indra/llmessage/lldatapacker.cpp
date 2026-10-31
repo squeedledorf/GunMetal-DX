@@ -726,7 +726,16 @@ void LLDataPackerBinaryBuffer::dumpBufferToLog()
     S32 cur_line = 0;
     for (i = 0; i < mBufferSize; i++)
     {
+        // GCC 16 false positive: cur_line_pos is always in [0,15] (reset at 16 below), so the
+        // offset is <= 45 and the bound >= 211; the analyzer cannot see that invariant.
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-truncation"
+#endif
         snprintf(line_buffer + cur_line_pos*3, sizeof(line_buffer) - cur_line_pos*3, "%02x ", mBufferp[i]);     /* Flawfinder: ignore */
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
         cur_line_pos++;
         if (cur_line_pos >= 16)
         {

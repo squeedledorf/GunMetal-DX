@@ -247,7 +247,7 @@
              tool_tip="Write the selected loadout to a notecard (in Notecards) to give to others. A notecard dropped on this window becomes a loadout of your own weapons." />
             <check_box
              name="close_check"
-             control_name="GMDXLoadoutCloseOnEquip"
+             control_name="SLLoadoutCloseOnEquip"
              follows="left|bottom"
              layout="topleft"
              left="6"
@@ -383,7 +383,7 @@
              bottom="-44"
              height="22"
              right="-96"
-             tool_tip="Tags your group puts on its weapons, separated by commas, e.g. [Ash]. When an object or folder with one arrives, GunMetal-DX offers to move it into Equipment, or to replace an older version of it. Empty: off." />
+             tool_tip="Tags your group puts on its weapons, separated by commas, e.g. [Ash]. When an object or folder with one arrives, the viewer offers to move it into Equipment, or to replace an older version of it. Empty: off." />
             <button
              name="scan_btn"
              follows="right|bottom"

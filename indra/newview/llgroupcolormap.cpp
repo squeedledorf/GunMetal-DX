@@ -1,19 +1,31 @@
 /**
  * @file   llgroupcolormap.cpp
  * @brief  Per-group nameplate tint registry.
+ * Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4.
+ * <GMDX> Group nameplate colours come from Megapahit, LGPL 2.1 (brought into SoapStorm by Soap Frenzy,
+ * f40d505cf8): the registry, the group profile colour and the nameplate / minimap tint. The active
+ * group read from a worn attachment and the Group Viewer are squeedledorf's own (SoapStorm <OTS>).
+ *
  * $LicenseInfo:firstyear=2024&license=viewerlgpl$
+ * Second Life Viewer Source Code
+ * This library is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU Lesser General Public License version 2.1 only.
+ * $/LicenseInfo$
  */
 
 #include "llviewerprecompiledheaders.h"
 
 #include "llgroupcolormap.h"
 
+#include "gmdxslmcfactions.h" // <GMDX> SLMC factions share a colour
+
 #include "llagent.h"
 #include "llbutton.h"
 #include "llcallbacklist.h"
 #include "llcolorswatch.h"
+#include "llviewercontrol.h"   // gSavedSettings
+#include "llfloaterreg.h" // <GMDX> the Group Viewer
 #include "lldir.h"
-#include "llfloaterreg.h"
 #include "llpanelgroup.h"    // LLPanelGroupTab
 #include "llsdserialize.h"
 #include "llsdutil_math.h"   // ll_sd_from_color4 / ll_color4_from_sd
@@ -38,6 +50,12 @@ static constexpr F64 GROUP_PROBE_COOLDOWN = 30.0;   // Group Viewer re-probe thr
 LLGroupColorMap::LLGroupColorMap()
 {
     gIdleCallbacks.addFunction(&LLGroupColorMap::onIdle, this);
+
+    // Name tags cache their colour: rebuild them when the preference flips.
+    if (LLControlVariable* control = gSavedSettings.getControl("SLGroupColors"))
+    {
+        mEnabledConnection = control->getSignal()->connect([](LLControlVariable*, const LLSD&, const LLSD&) { invalidateAllNameTags(); });
+    }
 }
 
 LLGroupColorMap::~LLGroupColorMap()
@@ -188,18 +206,50 @@ LLUUID LLGroupColorMap::getActiveGroupID(const LLUUID& avatar_id) const
 
 LLColor4 LLGroupColorMap::tint(const LLUUID& avatar_id, const LLColor4& color) const
 {
-    if (mColors.empty())
+    if (!hasAnyColors())
         return color;
 
-    const LLColor4 group_color = getGroupColor(getActiveGroupID(avatar_id));
+    const LLUUID group_id = getActiveGroupID(avatar_id);
+    LLColor4 group_color = getGroupColor(group_id);
+    // <GMDX> A faction's groups are one side (the SLMC faction table, from Alchemy: Skooma (Nexii Malthus),
+    // gmdxslmcfactions.cpp): a group with no colour of its own wears the one set on another group of its faction,
+    // the main group's first.
+    if (group_color.mV[VW] < 0.01f)
+    {
+        if (const GMDXSLMCFactions::Faction* faction = GMDXSLMCFactions::factionOf(group_id))
+        {
+            for (const LLUUID& other : faction->mGroups)
+            {
+                if (hasGroupColor(other))
+                {
+                    group_color = getGroupColor(other);
+                    break;
+                }
+            }
+        }
+    }
+    // </GMDX>
     return group_color.mV[VW] >= 0.01f ? group_color : color;
 }
 
-// Only generate traffic when something will use the answer: a tint is
-// configured, or the Group Viewer floater is open.
+// static
+bool LLGroupColorMap::enabled()
+{
+    static LLCachedControl<bool> sEnabled(gSavedSettings, "SLGroupColors", false);
+    return sEnabled;
+}
+
+bool LLGroupColorMap::hasAnyColors() const
+{
+    return enabled() && !mColors.empty();
+}
+
+// Only generate traffic when something will use the answer: the preference is
+// on and a tint is configured.
+// <GMDX> or the Group Viewer is open (fsfloatergroupviewer.cpp): the user asked for the list.
 bool LLGroupColorMap::resolutionWanted() const
 {
-    return hasAnyColors() || LLFloaterReg::instanceVisible("fs_group_viewer");
+    return hasAnyColors() || LLFloaterReg::instanceVisible("fs_group_viewer"); // <GMDX>
 }
 
 // static
@@ -497,6 +547,14 @@ void LLGroupColorMap::refreshGroupColorSwatch(LLPanelGroupTab* panel)
     LLColorSwatchCtrl* swatch = panel->findChild<LLColorSwatchCtrl>("group_nametag_color");
     if (!swatch)
         return;
+
+    // The colour row only exists while the preference is on.
+    const bool show = enabled();
+    swatch->setVisible(show);
+    if (LLView* label = panel->findChild<LLView>("nametag_color_label"))
+        label->setVisible(show);
+    if (LLView* clear_btn = panel->findChild<LLView>("group_nametag_color_clear"))
+        clear_btn->setVisible(show);
 
     const LLColor4 stored = getInstance()->getGroupColor(panel->getGroupID());
     swatch->set(stored.mV[VW] >= 0.01f ? stored : LLColor4::white, false);

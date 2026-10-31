@@ -38,6 +38,7 @@ public:
     static void onSliderMoved(LLUICtrl* ctrl, void* userData);
 
     void onFinalCommit();
+    void onResetButtonClicked();
 
     static void syncFromPreferenceSetting(void *user_data, bool update_offset = true);
 

@@ -68,6 +68,10 @@ public:
     /*virtual*/ void onUpdateSucceeded();
     /*virtual*/ void refresh();
 
+    // A mouse side button pressed while a gesture editor's key dropdown has focus picks that
+    // button there (#1189). True when an editor took the press (or its release).
+    static bool pickSideButton(EMouseClickType button, bool down);
+
 protected:
     // Populate various comboboxes
     void addModifiers();
@@ -96,6 +100,10 @@ protected:
     // Write UI back into gesture
     LLMultiGesture* createGesture();
 
+    // The shortcut's modifier, and its mouse side button (CLICK_NONE when it is a key or none)
+    MASK getShortcutMask() const;
+    EMouseClickType getShortcutMouseButton() const;
+
     // Add a step.  Pass the name of the step, like "Animation",
     // "Sound", "Chat", or "Wait"
     LLScrollListItem* addStep(const enum EStepType step_type);
@@ -103,7 +111,7 @@ protected:
     void onVisibilityChanged ( const LLSD& new_visibility );
 
     void onCommitKeyorModifier();
-    void onCommitControllerButton(); // OCOL
+    void onCommitControllerButton();
 
     static std::string getLabel(std::vector<std::string> labels);
     static void updateLabel(LLScrollListItem* item);
@@ -141,7 +149,7 @@ private:
     LLLineEditor*   mReplaceEditor;
     LLComboBox*     mModifierCombo;
     LLComboBox*     mKeyCombo;
-    LLComboBox*     mControllerCombo; // OCOL: game controller button (local, per account)
+    LLComboBox*     mControllerCombo;
 
     LLScrollListCtrl*   mLibraryList;
     LLButton*           mAddBtn;

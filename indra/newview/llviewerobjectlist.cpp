@@ -29,6 +29,7 @@
 #include "llcrossingkeep.h"
 
 #include <limits>
+#include <optional>
 #include "llviewerobjectlist.h"
 #include "llworldclock.h"
 #include "llvkhitch.h"
@@ -92,6 +93,9 @@
 #include "llfloaterperms.h"
 #include "llvocache.h"
 #include "sldatausage.h"
+#include "sltempobjectedge.h"
+#include "gmdxclampedvelocity.h" // <GMDX>
+#include "gmdxghostwatch.h"      // <GMDX>
 #include "slprimdefaults.h"
 #include "llcorehttputil.h"
 #include "llstartup.h"
@@ -258,11 +262,20 @@ void LLViewerObjectList::processUpdateCore(LLViewerObject* objectp,
     LL_DEBUGS("ObjectUpdate") << "uuid " << objectp->mID << " calling processUpdateMessage "
                               << objectp << " just_created " << just_created << " from_cache " << from_cache << " msg " << msg << LL_ENDL;
 
-    objectp->processUpdateMessage(msg, user_data, i, update_type, dpp);
+    std::optional<LLCleanIngest::TempMotionUpdate> motion_diag;
+    if (LLCleanIngest::tempMotionDiagEnabled())
+        motion_diag.emplace(LLCleanIngest::tempMotionDiagBefore(objectp, (S32)update_type,
+                                                              just_created, from_cache, dpp != nullptr));
+    const U32 update_result = objectp->processUpdateMessage(msg, user_data, i, update_type, dpp);
     LLCrossingTrace::onObjectUpdate(objectp);   // #568
+    if (update_type != OUT_TERSE_IMPROVED)
+    {
+        LLCrossingKeep::onFullUpdate(objectp, msg);  // #1172: sent again after a kill held while frozen
+    }
 
     if (objectp->isDead())
     {
+        if (motion_diag) LLCleanIngest::tempMotionDiagAfter(objectp, *motion_diag, update_result);
         // The update failed
         return;
     }
@@ -316,6 +329,7 @@ void LLViewerObjectList::processUpdateCore(LLViewerObject* objectp,
         gViewerWindow->getWindow()->decBusyCount();
         gViewerWindow->setCursor( UI_CURSOR_ARROW );
     }
+    if (motion_diag) LLCleanIngest::tempMotionDiagAfter(objectp, *motion_diag, update_result);
 }
 
 static LLTrace::BlockTimerStatHandle FTM_PROCESS_OBJECTS("Process Objects");
@@ -409,6 +423,7 @@ LLViewerObject* LLViewerObjectList::processObjectUpdateFromCache(LLVOCacheEntry*
 
     processUpdateCore(objectp, NULL, 0, OUT_FULL_CACHED, cached_dpp, justCreated, true);
     objectp->loadFlags(entry->getUpdateFlags()); //just in case, reload update flags from cache.
+    LLCleanIngest::tempMotionDiagClassify(objectp);
 
     if(entry->getHitCount() > 0)
     {
@@ -1082,6 +1097,8 @@ void LLViewerObjectList::update(LLAgent &agent)
 
     // <GMDX> Probe ghost projectiles that went static and dropped off the active list
     FSGhostProjectile::idleUpdate(frame_time);
+    SLTempObjectEdge::tick();
+    GMDXGhostWatch::tick(); // <GMDX> the one ghost watch (gmdxghostwatch.cpp)
 
 
 
@@ -1696,6 +1713,9 @@ void LLViewerObjectList::killAllObjects()
     mActiveObjects.clear();
     mMapObjects.clear();
     FSGhostProjectile::clear(); // <GMDX>
+    GMDXClampedVelocity::clear(); // <GMDX>
+    SLTempObjectEdge::clear();
+    GMDXGhostWatch::clear(); // <GMDX>
 
     LLViewerObject *objectp;
     for (vobj_list_t::iterator iter = mObjects.begin(); iter != mObjects.end(); ++iter)

@@ -14,11 +14,13 @@
 // there, not a halo.
 layout(location = 0) out vec4 outColor;
 
-#define VC_SET 0
+#include "clean_frame_info.glsl"
+#include "clean_atmos_common.glsl"
+#define VC_SET 1
 #include "clean_vol_cloud_ubo.glsl"
-layout(set = 0, binding = 1) uniform sampler2D uDepth;   // world depth (texelFetch)
-layout(set = 0, binding = 2) uniform sampler2D uCloudA;  // rgb in-scatter, a transmittance
-layout(set = 0, binding = 3) uniform sampler2D uCloudB;  // x entry distance, y mean distance
+layout(set = 1, binding = 1) uniform sampler2D uDepth;   // world depth (texelFetch)
+layout(set = 1, binding = 2) uniform sampler2D uCloudA;  // rgb in-scatter, a transmittance
+layout(set = 1, binding = 3) uniform sampler2D uCloudB;  // x entry distance, y mean distance
 
 void main()
 {
@@ -31,6 +33,11 @@ void main()
         vec2 ndc = (vec2(px) + 0.5) / rdim * 2.0 - 1.0;
         const vec4 w = vc.inv_vp * vec4(ndc, d, 1.0);   // (jitter: sub-pixel, irrelevant at km)
         dist = length(w.xyz / w.w);
+        if(cmOn())
+        {
+            vec3 O,V;cmRay((vec2(px)+0.5)/rdim,MEDIUM_EYE,O,V);
+            dist=max(dot(vc.cam.xyz+w.xyz/w.w-O,V),0.0);
+        }
     }
     // Bilinear footprint in the cloud image.
     const vec2 cp = (vec2(px) + 0.5) * (cdim / rdim) - 0.5;
@@ -38,14 +45,21 @@ void main()
     const vec2 f = cp - vec2(c0);
     const ivec2 cmax = ivec2(cdim) - 1;
     vec4 acc = vec4(0.0);
-    float wsum = 0.0;
+    float wsum = 0.0,meanNumerator=0.0,meanDenominator=0.0;
     for (int j = 0; j < 2; ++j)
         for (int i = 0; i < 2; ++i)
         {
             const ivec2 q = clamp(c0 + ivec2(i, j), ivec2(0), cmax);
             const float w = (i == 0 ? 1.0 - f.x : f.x) * (j == 0 ? 1.0 - f.y : f.y);
-            const vec4 a = texelFetch(uCloudA, q, 0);
-            const float entry = texelFetch(uCloudB, q, 0).x;
+            vec4 a = texelFetch(uCloudA, q, 0);
+            const vec2 distances=texelFetch(uCloudB,q,0).xy;
+            const float entry = distances.x;
+            if(dist>entry)
+            {
+                const float opacityWeight=w*(1.0-a.a);
+                meanNumerator+=opacityWeight*distances.y;
+                meanDenominator+=opacityWeight;
+            }
             // In front of this texel's clouds: nothing (T = 1).
             acc += w * (dist > entry ? a : vec4(0.0, 0.0, 0.0, 1.0));
             wsum += w;
@@ -61,6 +75,13 @@ void main()
         const vec3 dir = normalize(w.xyz / w.w);
         const float toward = max(dot(dir, vc.flash.xyz), 0.0);
         acc.rgb += vec3(0.80, 0.88, 1.0) * (vc.flash.w * (1.0 - acc.a) * (0.3 + 0.7 * toward * toward));
+    }
+    if(cmOn())
+    {
+        vec3 O,V;cmRay((vec2(px)+0.5)/rdim,MEDIUM_EYE,O,V);
+        const float mean=meanNumerator/max(meanDenominator,1e-7);
+        const CameraTransport prefix=cmAt(O+V*mean,MEDIUM_EYE);
+        acc.rgb=prefix.T*acc.rgb+(1.0-acc.a)*prefix.L;
     }
     outColor = vec4(max(acc.rgb, vec3(0.0)), clamp(acc.a, 0.0, 1.0));
 }

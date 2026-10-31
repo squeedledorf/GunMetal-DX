@@ -256,7 +256,7 @@ namespace
             std::string ff;
             if (s.tAMC < 0) ff = "n/a(no AgentMovementComplete)";
             else if (s.tFullFrame >= 0) { std::snprintf(b, sizeof(b), "%+.0f", (s.tFullFrame - s.tAMC) * 1000.0); ff = b; }
-            else { std::snprintf(b, sizeof(b), "pending@%+.0fs", LLFrameTimer::getElapsedSeconds() - s.tAMC); ff = b; }
+            else { std::snprintf(b, sizeof(b), "pending@%+.0fs", LLFrameTimer::getElapsedSeconds().value() - s.tAMC); ff = b; }
             std::snprintf(b, sizeof(b), " far_sent=%.0f speed=%.1f fast=%d regions=%u +%u@anchor +%u@10s"
                           " first_full_frame=%s(rel AMC, new_region_creates=%u)",
                           s.farSent, s.speed, s.fast ? 1 : 0, s.regionsAtCross, s.anchorConnects, created10,

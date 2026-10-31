@@ -15,14 +15,16 @@
 //   script info      : "scripts|<batch>|<key>,<key>,..." from the viewer is answered with
 //                      the script counts, memory and time of those objects (#425)
 //   region -> viewer : Combat 2.0 events from the region combat log, only while the
-//                      viewer asks for them: every death (the kill feed), and the
-//                      owner's own hits and kills (the hit marker)
-//   map shares       : "mto|<seq>|<key>,<key>,..." then "msay|<seq>|<line>" from the viewer
-//                      say one readable map share / ping line to each listed avatar in this
-//                      region with llRegionSayTo on channel 0 (private to that avatar, never
-//                      local chat), under the name "Ping from <owner's username>" ("Mark from",
-//                      "Zone from"), then the helper's own name again; the recipients wait in
-//                      the object's linkset data (protected), never in script memory
+//                      viewer asks for them (CombatFX): every death (the kill feed), and the
+//                      owner's own hits and kills (the hit marker). Combat messages are
+//                      version tagged "combat/<name>/<version>" (slcombatfx.h holds the list).
+//   map shares       : "combat/mapto/1|<seq>|<key>,<key>,..." then "combat/mapsay/1|<seq>|<line>"
+//                      from the viewer say one readable map share / ping line to each listed
+//                      avatar in this region with llRegionSayTo on channel 0 (private to that
+//                      avatar, never local chat), under the name "Ping from <owner's username>"
+//                      ("Mark from", "Zone from"), then the helper's own name again; the
+//                      recipients wait in the object's linkset data (protected), never in
+//                      script memory
 // Identity always comes from the sim: llGetOwnerKey() of the speaking attachment, or the
 // key of the avatar answering a dialog. The viewer never trusts a key in a message body.
 // Only well-formed lines of the known kinds are forwarded, within per-speaker and overall
@@ -72,8 +74,8 @@ integer gHelloChannel;  // discovery: the viewer says "hello" here (same formula
 integer gLastCmd;       // unix time of the last command from the viewer
 list gAsked;            // avatars we sent a pose request to, awaiting their answer
 list gPosing;           // targets we sent pose data for (stopped on detach)
-integer gCombatWanted;  // the viewer's kill feed asked for the combat log (combat|1)
-integer gHitsWanted;    // the viewer's hit marker asked for the owner's hits (hits|1)
+integer gCombatWanted;  // the viewer's kill feed asked for the combat log (combat/feed/1|1)
+integer gHitsWanted;    // the viewer's hit marker asked for the owner's hits (combat/hits/1|1)
 integer gCombatOn;      // the combat log listen below exists (one, shared by both)
 integer gCombatListen;  // its handle
 integer gDeathSecond;   // unix second of the death budget
@@ -299,7 +301,7 @@ scriptInfo(string arg)
 
 // Room for map shares: below MEM_FLOOR free script memory (now, not the low-water mark
 // llGetFreeMemory gives under Mono) they stop, and the viewer is told once:
-// "#slb:mem|script|<free bytes>" (or "#slb:mem|lsd|<free bytes>" for linkset data, see mapTo).
+// "#slb:combat/mem/1|script|<free bytes>" (or "...|lsd|<free bytes>" for linkset data, see mapTo).
 integer memOk()
 {
     integer free = llGetMemoryLimit() - llGetUsedMemory();
@@ -309,7 +311,7 @@ integer memOk()
         return TRUE;
     }
     if (!gMemLow)
-        llOwnerSay("#slb:mem|script|" + (string)free);
+        llOwnerSay("#slb:combat/mem/1|script|" + (string)free);
     gMemLow = TRUE;
     return FALSE;
 }
@@ -322,7 +324,7 @@ clearTo()
     gToSeq = "";
 }
 
-// "mto|<seq>|<key>,<key>,...": recipients for map share <seq> (a new seq starts a new list, so
+// "combat/mapto/1|<seq>|<key>,<key>,...": recipients for map share <seq> (a new seq starts a new list, so
 // a share cut short never reaches the next one's people). Only valid keys, never the owner, no
 // repeats, at most MAX_TO; none once the linkset data is nearly full (told once, as memOk).
 mapTo(string arg)
@@ -347,7 +349,7 @@ mapTo(string arg)
         if (llLinksetDataAvailable() < LSD_FLOOR)
         {
             if (!gLsdLow)
-                llOwnerSay("#slb:mem|lsd|" + (string)llLinksetDataAvailable());
+                llOwnerSay("#slb:combat/mem/1|lsd|" + (string)llLinksetDataAvailable());
             gLsdLow = TRUE;
             i = n;
         }
@@ -359,7 +361,7 @@ mapTo(string arg)
     }
 }
 
-// "msay|<seq>|<line>": says the line to map share <seq>'s recipients still in this region, each
+// "combat/mapsay/1|<seq>|<line>": says the line to map share <seq>'s recipients still in this region, each
 // alone (llRegionSayTo, channel 0), under "Ping from <owner>" (the owner's own username, from the
 // sim: never a name the viewer sends), then the helper's own name again. Only a line that looks
 // like a share ("[Ping] ...", "[Mark] ...", "[Zone] ..." ending in its "(gmdx:...)" tail), within
@@ -461,7 +463,7 @@ string objectName(key id)
 }
 
 // One DEATH from the combat log, forwarded as
-//   #slb:combat|<victim>|<killer>|<damage type>|<damage>|<weapon>
+//   #slb:combat/death/1|<victim>|<killer>|<damage type>|<damage>|<weapon>
 // (type and damage empty when unknown; the weapon last, as an object name may hold "|").
 // A DEATH carries its type but no damage: the killing blow's DAMAGE normally arrives in the
 // same message, and the caller passes its amount (or "").
@@ -493,7 +495,7 @@ combatDeath(string ev, string damage)
     string weapon = objectName(source);
     if (weapon == "")
         weapon = objectName(eventKey(ev, "rezzer"));
-    llOwnerSay("#slb:combat|" + (string)victim + "|" + (string)killer + "|"
+    llOwnerSay("#slb:combat/death/1|" + (string)victim + "|" + (string)killer + "|"
         + llGetSubString(type, 0, 10) + "|" + llGetSubString(damage, 0, 15) + "|"
         + llGetSubString(weapon, 0, 63));
 }
@@ -501,7 +503,7 @@ combatDeath(string ev, string damage)
 // One of the owner's own hits ("D", a DAMAGE; "d" when the same message holds the owner's
 // kill of that target, so the viewer plays only the kill sound) or kills ("K", a DEATH),
 // forwarded as
-//   #slb:hit|<D, d or K>|<target>|<1 if the target is an avatar, else 0>|<damage type>|<damage>
+//   #slb:combat/hit/1|<D, d or K>|<target>|<1 if the target is an avatar, else 0>|<damage type>|<damage>
 // (type and damage empty when unknown). Anything not dealt by the owner, and the owner
 // hurting themselves, stays here.
 combatHit(string ev, string what)
@@ -531,7 +533,7 @@ combatHit(string ev, string what)
     string damage = llJsonGetValue(ev, ["damage"]);
     if (damage == JSON_INVALID)
         damage = "";
-    llOwnerSay("#slb:hit|" + what + "|" + llGetSubString(target, 0, 35) + "|"
+    llOwnerSay("#slb:combat/hit/1|" + what + "|" + llGetSubString(target, 0, 35) + "|"
         // A DEATH target is always an avatar, even once it has been sent home (the log
         // arrives up to a second late); a hit's target is asked.
         + (string)(what == "K" || llGetAgentSize((key)target) != ZERO_VECTOR) + "|"
@@ -543,7 +545,8 @@ command(string msg)
     gLastCmd = llGetUnixTime();
     publicListens(TRUE);
     // The viewer is back after a quiet spell that dropped the combat listen: hear it again
-    // (any command will do, so a lost combat|1 or hits|1 can't leave either feature dead).
+    // (any command will do, so a lost combat/feed/1|1 or combat/hits/1|1 can't leave either
+    // feature dead).
     if (gCombatWanted || gHitsWanted)
         combatListen(TRUE);
 
@@ -612,23 +615,23 @@ command(string msg)
         if (at >= 0)
             gPosing = llDeleteSubList(gPosing, at, at);
     }
-    else if (cmd == "combat")
+    else if (cmd == "combat/feed/1")
     {
-        // Kill feed on (1) or off (0).
+        // Kill feed on (1) or off (0). The viewer sends 1 only with CombatFX on.
         gCombatWanted = (arg == "1");
         combatListen(gCombatWanted || gHitsWanted);
     }
-    else if (cmd == "hits")
+    else if (cmd == "combat/hits/1")
     {
-        // Hit marker on (1) or off (0).
+        // Hit marker on (1) or off (0). The viewer sends 1 only with CombatFX on.
         gHitsWanted = (arg == "1");
         combatListen(gCombatWanted || gHitsWanted);
     }
-    else if (cmd == "mto")
+    else if (cmd == "combat/mapto/1")
     {
         mapTo(arg);
     }
-    else if (cmd == "msay")
+    else if (cmd == "combat/mapsay/1")
     {
         mapSay(arg);
     }

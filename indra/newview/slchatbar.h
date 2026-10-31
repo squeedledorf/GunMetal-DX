@@ -85,11 +85,10 @@ public:
     static void startChat(const char* line);
     static void stopChat();
 
-    // <GMDX> A name clicked in the chat log: the bar opens in IM mode ("To <name>", an x to cancel) and
-    // Enter sends an IM to them (their P2P session, Conversations not opened). It stays in IM mode
-    // after sending, until Esc, the x or the bar closing.
+    // MMO chat log (GunMetal-DX, squeedledorf, LGPL 2.1, v0.3.0 cf5f1f4): a name clicked in the log opens the
+    // bar in IM mode ("To <name>", an x to cancel); Enter sends an IM to them (their P2P session,
+    // Conversations not opened). It stays in IM mode after sending, until Esc, the x or the bar closing.
     static void startIM(const LLUUID& id, const std::string& name);
-    // </GMDX>
 
     static void updateChatFont();
 
@@ -101,9 +100,9 @@ protected:
     void applyShiftEnterNewline(); // #681: honour ChatShiftEnterNewline in the chat bar editor
     void changeChannelLabel(S32 channel);
     void updateChannelSelector(); // <FS> channel spinner
-    void cancelIM();                        // <GMDX> back to nearby chat
-    void sendIM(const LLWString& text);     // <GMDX> to mIMTarget
-    void resetChatLogPosition();  // <GMDX> the gear menu: the chat log and this bar back to where they start
+    void cancelIM();                        // MMO chat log: back to nearby chat
+    void sendIM(const LLWString& text);     // MMO chat log: to mIMTarget
+    void resetChatLogPosition();            // MMO chat log: the gear menu puts the log and this bar back
 
     LLChatEntry* mInputEditor;
 
@@ -120,14 +119,12 @@ protected:
 
     boost::signals2::connection mChatChannelConnection;
     boost::signals2::connection mShowChatChannelConnection;
-    boost::signals2::connection mLogStyleConnection;   // <GMDX> the chat log takes the gear (updateChannelSelector)
+    boost::signals2::connection mLogStyleConnection;   // MMO chat log: the log takes the gear (updateChannelSelector)
     boost::signals2::connection mChatFontSizeConnection;
 
-    // <GMDX> part of the chat log (GMDXChatLog::dockedBarRect): its own drag and resize are off
-    // while the log is on, so they never fight the panel
+    // MMO chat log: its own drag and resize are off while the log owns the bar
     LLUUID mIMTarget;       // IM mode: who Enter sends to (null: nearby chat)
     std::string mIMName;
     LLRect mDefaultRect;
     bool mDocked = false;   // (owned by the log)
-    // </GMDX>
 };

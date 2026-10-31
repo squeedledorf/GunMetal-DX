@@ -30,6 +30,23 @@
       }
     },
     {
+      "name": "linux-fuzz",
+      "displayName": "Linux x86_64 libFuzzer harnesses (clang, ASan + UBSan; build target fuzz_all; see indra/fuzz/README.md)",
+      "inherits": "linux-releaseos",
+      "binaryDir": "${sourceDir}/../build-linux-fuzz",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "LL_FUZZ": "ON",
+        "LL_TESTS": "OFF",
+        "USE_LTO": "OFF",
+        "USE_PRECOMPILED_HEADERS": "OFF",
+        "CLANG_DISABLE_FATAL_WARNINGS": "ON",
+        "GCC_DISABLE_FATAL_WARNINGS": "ON"
+      }
+    },
+    {
       "name": "windows-cross",
       "displayName": "Windows x64 cross build on Linux (clang-cl + lld-link + xwin; see scripts/wincross)",
       "inherits": "base",
@@ -54,6 +71,7 @@
   "buildPresets": [
     { "name": "linux-releaseos", "configurePreset": "linux-releaseos" },
     { "name": "linux-release", "configurePreset": "linux-release" },
+    { "name": "linux-fuzz", "configurePreset": "linux-fuzz", "targets": ["fuzz_all"] },
     { "name": "windows-cross", "configurePreset": "windows-cross" }
   ]
 }

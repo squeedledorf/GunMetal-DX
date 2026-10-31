@@ -162,11 +162,6 @@ inline float pfClamp01(float x) { return x < 0.f ? 0.f : (x > 1.f ? 1.f : x); }
 inline float pfRamp(float x, float a, float b) { return pfClamp01((x - a) / (b - a)); }
 inline float pfStep(float a, float b, float x) { const float t = pfRamp(x, a, b); return t * t * (3.f - 2.f * t); }
 
-uint32_t orderedToBits(float f)
-{
-    uint32_t b; std::memcpy(&b, &f, 4);
-    return (b & 0x80000000u) ? ~b : (b | 0x80000000u);
-}
 float bitsToOrdered(uint32_t u)
 {
     const uint32_t b = (u & 0x80000000u) ? (u & 0x7FFFFFFFu) : ~u;

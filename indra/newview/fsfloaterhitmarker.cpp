@@ -32,8 +32,10 @@
 #include "llscrolllistctrl.h"
 #include "llscrolllistitem.h"
 
-// ---------------------------------------------------------------------------
-// FSFloaterHitMarker
+// Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4 (CombatFX).
+
+// <GMDX> ---------------------------------------------------------------------
+// FSFloaterHitMarker (GunMetal-DX 0.3.0's Hit Marker Options floater)
 // ---------------------------------------------------------------------------
 
 FSFloaterHitMarker::FSFloaterHitMarker(const LLSD& key)
@@ -51,6 +53,7 @@ bool FSFloaterHitMarker::postBuild()
         [](LLUICtrl*, const LLSD&) { FSCombatHitMarker::playKillSoundPreview(); });
     return true;
 }
+// </GMDX>
 
 // ---------------------------------------------------------------------------
 // FSFloaterHitMarkerEmojis

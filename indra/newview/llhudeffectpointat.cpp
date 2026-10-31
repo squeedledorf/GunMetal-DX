@@ -37,6 +37,7 @@
 #include "llviewerobjectlist.h"
 #include "llvoavatar.h"
 #include "message.h"
+#include "gmdxcombatlockout.h" // <GMDX>
 
 // packet layout
 const S32 SOURCE_AVATAR = 0;
@@ -320,7 +321,7 @@ void LLHUDEffectPointAt::setSourceObject(LLViewerObject* objectp)
 void LLHUDEffectPointAt::render()
 {
     update();
-    if (sDebugPointAt && mTargetType != POINTAT_TARGET_NONE)
+    if (sDebugPointAt && !GMDXCombatLockout::active() && mTargetType != POINTAT_TARGET_NONE) // <GMDX> combat render lockout
     {
         gGL.getTexUnit(0)->unbind(LLTexUnit::TT_TEXTURE);
 

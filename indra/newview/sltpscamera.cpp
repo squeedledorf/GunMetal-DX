@@ -24,10 +24,12 @@
 #include "llviewerprecompiledheaders.h"
 
 #include "sltpscamera.h"
+#include "rlvactions.h"
 
 #include "llcriticaldamp.h"
 #include "llfocusmgr.h"
 #include "llfontgl.h"
+#include "llrender.h"
 #include "llkeyboard.h"
 #include "llui.h"
 #include "lluiimage.h"
@@ -37,6 +39,8 @@
 #include "llagentcamera.h"
 #include "llappviewer.h"
 #include "llfloatercamera.h"
+#include "llfloaterreg.h"
+#include "llfollowcam.h"
 #include "llstartup.h"
 #include "lltoolmgr.h"
 #include "lltoolpie.h"
@@ -47,9 +51,30 @@
 #include "llviewerjoystick.h"
 #include "llviewerwindow.h"
 #include "llvoavatarself.h"
+#include "fscombatads.h"
+#include "fscombataim.h"
+#include "slcombatfx.h"
+#include "sscombatray.h"
+#include "rlvactions.h"
 
 namespace
 {
+    LLFloater* preferences_for_view(const LLView* view)
+    {
+        if (!view) return nullptr;
+        for (const char* name : {"preferences", "quick_prefs", "prefs_view_advanced"})
+        {
+            LLFloater* floater = LLFloaterReg::findInstance(name);
+            if (floater && floater->getVisible() && (view == floater || view->hasAncestor(floater))) return floater;
+        }
+        return nullptr;
+    }
+
+    bool preferences_visible()
+    {
+        return LLFloaterReg::instanceVisible("preferences") || LLFloaterReg::instanceVisible("quick_prefs")
+            || LLFloaterReg::instanceVisible("prefs_view_advanced");
+    }
     // How fast the avatar turns toward the movement direction (half-life, seconds)
     constexpr F32 TPS_TURN_HALF_LIFE = 0.05f;
     // Body pitch limit while flying (keeps resetAxes away from the degenerate
@@ -137,6 +162,15 @@ SLTPSCamera::SLTPSCamera()
         mSettingConnection = control->getSignal()->connect(
             [this](LLControlVariable*, const LLSD& new_value, const LLSD&) { onSettingChanged(new_value); });
     }
+    if (LLControlVariable* control = gSavedSettings.getControl("SlipstreamTPSCameraMode"))
+    {
+        mFramingConnection = control->getSignal()->connect(
+            [this](LLControlVariable*, const LLSD&, const LLSD&)
+            {
+                mCollisionDistance = -1.f;
+                if (mEngaged) gAgentCamera.startCameraAnimation();
+            });
+    }
 }
 
 SLTPSCamera::~SLTPSCamera()
@@ -146,10 +180,8 @@ SLTPSCamera::~SLTPSCamera()
 // static
 bool SLTPSCamera::isEnabled()
 {
-    // <GMDX> No third-person shooter camera in GunMetal-DX: OTS is the combat camera, and
-    // TPS click-fired while reporting the floating orbit camera to the sim (camera-based
-    // weapons could fire around cover). Every engage path checks this gate.
-    return false;
+    static LLCachedControl<bool> enabled(gSavedSettings, "SlipstreamTPSCamera", false);
+    return enabled;
 }
 
 // static
@@ -167,7 +199,7 @@ bool SLTPSCamera::isSeated()
 // static
 bool SLTPSCamera::isEngagedOnFoot()
 {
-    return isEngagedNow() && !isSeated();
+    return isEngagedNow() && !getInstance()->mInputSuspended && !isSeated();
 }
 
 // static
@@ -188,7 +220,13 @@ void SLTPSCamera::applyAimToAgentUpdate(LLQuaternion& body_rotation, LLQuaternio
     {
         return;
     }
-    const LLVector3 aim = aim_axis();
+    LLVector3 aim = aim_axis();
+    if (SLCombatFX::enabled() && isShoulderActive() && gAgentAvatarp->mHeadp)
+    {
+        aim = FSCombatAim::getOTSConvergenceTarget(LLViewerCamera::getInstance()->getOrigin(), aim)
+            - gAgentAvatarp->mHeadp->getWorldPosition();
+        aim.normalize();
+    }
 
     // HeadRotation: the camera look direction, like LLAgent::getHeadRotation in
     // mouselook (the avatar's head already looks there via the look-at target).
@@ -210,14 +248,204 @@ void SLTPSCamera::applyAimToAgentUpdate(LLQuaternion& body_rotation, LLQuaternio
     }
 }
 
+// static
+bool SLTPSCamera::isShoulderMode()
+{
+    // <GMDX> No shoulder framing in GunMetal-DX: its over-the-shoulder view is its own OTS aim camera
+    // (gmdxots.h, real mouselook with the camera at the shoulder), so TPS frames behind the avatar only,
+    // whatever SlipstreamTPSCameraMode says (a GunMetal-DX 0.3.0 user migrated to 1 there).
+    return false;
+    //static LLCachedControl<U32> mode(gSavedSettings, "SlipstreamTPSCameraMode", BEHIND_AVATAR);
+    //return mode == OVER_SHOULDER;
+    // </GMDX>
+}
+
+// static
+bool SLTPSCamera::isShoulderActive()
+{
+    return isEngagedNow() && gAgentCamera.tpsCameraActive() && isShoulderMode();
+}
+
+// static
+bool SLTPSCamera::isADSReturning()
+{
+    return FSCombatADS::returnsToTPS();
+}
+
+namespace
+{
+LLVector3 shoulder_pivot()
+{
+    LLVector3 pivot;
+    if (!gAgentCamera.getTPSVehiclePivot(pivot))
+    {
+        pivot = gAgentCamera.getAvatarRootPosition();
+    }
+    return pivot;
+}
+
+F32 framing_value(const char* name, F32 lower, F32 upper)
+{
+    const F32 value = gSavedSettings.getF32(name);
+    return llfinite(value) ? llclamp(value, lower, upper) : lower;
+}
+}
+
+LLVector3 SLTPSCamera::getShoulderFocus() const
+{
+    const LLVector3 local(framing_value("SlipstreamTPSFocusDistance", 2.f, 50.f),
+                          framing_value("SlipstreamTPSCameraSide", -2.f, 2.f),
+                          framing_value("SlipstreamTPSCameraHeight", -1.f, 3.f));
+    return shoulder_pivot() + local * gAgentCamera.getTPSRotation();
+}
+
+LLVector3 SLTPSCamera::getShoulderPosition()
+{
+    const F32 height = framing_value("SlipstreamTPSCameraHeight", -1.f, 3.f);
+    const LLVector3 root = shoulder_pivot();
+    const LLVector3 local(-framing_value("SlipstreamTPSCameraDistance", 0.5f, 10.f),
+                          framing_value("SlipstreamTPSCameraSide", -2.f, 2.f), height);
+    LLVector3 position = root + local * gAgentCamera.getTPSRotation();
+    static LLCachedControl<bool> collision(gSavedSettings, "SlipstreamTPSCameraCollision", true);
+    if (SLCombatFX::enabled() && collision && gAgent.getTeleportState() == LLAgent::TELEPORT_NONE)
+    {
+        const LLVector3 pivot = root + LLVector3(0.f, 0.f, height);
+        LLVector3 direction = position - pivot;
+        const F32 desired = direction.normalize();
+        F32 target = desired;
+        F32 hit_distance = desired;
+        bool known = false;
+        const LLViewerObject* skip_root = isSeated() ? (const LLViewerObject*)gAgentAvatarp->getRoot() : nullptr;
+        const F32 margin = llmax(DEFAULT_NEAR_PLANE, LLViewerCamera::getInstance()->getNear() + 0.05f);
+        if (SSCombatRay::cast(SSCombatRay::KEY_OTS_COLLISION, pivot, position, skip_root, hit_distance, &known))
+        {
+            target = llclamp(hit_distance - margin, llmin(0.30f, desired), desired);
+        }
+        else if (!known && mCollisionDistance >= 0.f)
+        {
+            target = llmin(mCollisionDistance, desired);
+        }
+        // Snap in to avoid clipping; recover only when the GPU knows the segment is clear.
+        mCollisionDistance = mCollisionDistance < 0.f || target <= mCollisionDistance ? target
+            : lerp(mCollisionDistance, target, LLSmoothInterpolation::getInterpolant(0.15f));
+        position = pivot + direction * llmin(mCollisionDistance, desired);
+    }
+    else
+    {
+        mCollisionDistance = -1.f;
+    }
+    return constrainPosition(position);
+}
+
+// The final rendered camera is clamped too, so animation and smoothing cannot
+// temporarily escape a restriction that arrived while TPS was already engaged.
+// static
+LLVector3 SLTPSCamera::constrainPosition(const LLVector3& position)
+{
+    if (!RlvActions::isRlvEnabled() || !RlvActions::isCameraDistanceClamped()) return position;
+    LLVector3 result = position;
+    const LLVector3 head = isAgentAvatarValid() && gAgentAvatarp->mHeadp
+        ? gAgentAvatarp->mHeadp->getWorldPosition() : gAgent.getPositionAgent();
+    auto clamp_distance = [&result](const LLVector3& reference, F32 lower, F32 upper)
+    {
+        LLVector3 direction = result - reference;
+        const F32 distance = direction.normalize();
+        if (distance < 0.001f) direction = -LLVector3::x_axis * gAgentCamera.getTPSYawRotation();
+        result = reference + direction * llclamp(distance, lower, upper);
+    };
+    F32 av_min = 0.f, av_max = F32_MAX, origin_min = 0.f, origin_max = F32_MAX;
+    const bool avatar_limit = RlvActions::getCameraAvatarDistanceLimits(av_min, av_max);
+    const bool origin_limit = RlvActions::getCameraOriginDistanceLimits(origin_min, origin_max);
+    // Shoulder focus is an aim target, not a camera origin. Its distance limits
+    // are measured from the avatar's head, as for the convergence camera.
+    if (isShoulderMode())
+    {
+        const F32 lower = llmax(avatar_limit ? av_min : 0.f, origin_limit ? origin_min : 0.f);
+        const F32 upper = llmin(avatar_limit ? av_max : F32_MAX, origin_limit ? origin_max : F32_MAX);
+        if (avatar_limit || origin_limit) clamp_distance(head, llmin(lower, upper), upper);
+    }
+    else
+    {
+        if (origin_limit && !(avatar_limit && av_min == av_max))
+            clamp_distance(gAgentCamera.getTPSCameraOrigin(), origin_min, origin_max);
+        if (avatar_limit && (av_min == av_max || !origin_limit)) clamp_distance(head, av_min, av_max);
+    }
+    return result;
+}
+
+void SLTPSCamera::zoomShoulder(F32 meters)
+{
+    gSavedSettings.setF32("SlipstreamTPSCameraDistance",
+        llclamp(framing_value("SlipstreamTPSCameraDistance", 0.5f, 10.f) - meters, 0.5f, 10.f));
+}
+
+void SLTPSCamera::scrollShoulder(F32 notches)
+{
+    const F32 distance = framing_value("SlipstreamTPSCameraDistance", 0.5f, 10.f);
+    zoomShoulder(distance * (1.f - powf(sqrtf(F_SQRT2), notches)));
+}
+
+bool SLTPSCamera::swapShoulder()
+{
+    if (!mEngaged || !gAgentCamera.tpsCameraActive() || !isShoulderMode()) return false;
+    const char* setting = "SlipstreamTPSCameraSide";
+    const F32 side = gSavedSettings.getF32(setting);
+    if (side == 0.f) return false;
+    gSavedSettings.setF32(setting, -side);
+    mCollisionDistance = -1.f;
+    gAgentCamera.startCameraAnimation();
+    return true;
+}
+
+bool SLTPSCamera::returnFromADS(bool animate)
+{
+    // Restore the current persisted TPS choice without changing it. A sit camera,
+    // teleport, build tool, focus loss or a new restriction cancels the return.
+    if (!isEnabled() || !gViewerWindow || !gFocusMgr.getAppHasFocus()
+        || gAgentCamera.getCameraMode() != CAMERA_MODE_MOUSELOOK) return false;
+    gAgentCamera.changeCameraToThirdPerson(false);
+    if (!canEngage()) return false;
+    const LLVector3 aim = LLViewerCamera::getInstance()->getAtAxis();
+    if (!engage()) return false;
+    gAgentCamera.setTPSCameraEngaged(true, yaw_of(aim), pitch_of(aim));
+    if (animate) gAgentCamera.startCameraAnimation();
+    return true;
+}
+
 void SLTPSCamera::onSettingChanged(const LLSD& new_value)
 {
     // #795: enabling only arms the feature (mouse stays free until the user engages
     // it with a self click, Esc or the keybind). Disabling releases at once.
     if (!new_value.asBoolean())
     {
+        // Only an already engaged camera suspended by this floater can be
+        // restored when the setting is switched back on (including Cancel).
+        const bool retain_preview = mEngaged && mInputSuspended && mPreviewFloater.get();
+        const LLHandle<LLFloater> floater = mPreviewFloater;
+        const LLVector3 aim = LLVector3::x_axis * gAgentCamera.getTPSRotation();
         mPendingEngage = false;
         disengage(DISENGAGE_USER);
+        if (retain_preview)
+        {
+            mPreviewFloater = floater;
+            mPreviewParked = true;
+            mPreviewYaw = yaw_of(aim);
+            mPreviewPitch = pitch_of(aim);
+            mPreviewFocus = gAgentCamera.getFocusTargetGlobal();
+            mPreviewOffset = gAgentCamera.getCameraFocusOffsetTarget();
+        }
+    }
+    else if (mPreviewParked)
+    {
+        if (parkedPreviewValid())
+        {
+            gAgentCamera.setFocusOnAvatar(true, false, false);
+            gAgentCamera.setTPSCameraEngaged(true, mPreviewYaw, mPreviewPitch);
+            mEngaged = true;
+            mInputSuspended = true;
+            mCollisionDistance = -1.f;
+        }
+        mPreviewParked = false;
     }
 }
 
@@ -238,22 +466,12 @@ void SLTPSCamera::toggleEngaged()
 
 bool SLTPSCamera::canEngage() const
 {
-    // <SS:Skoomastream>
-    // OTS gate: while the over-the-shoulder aim camera is engaged it owns the
-    // camera (and the mouse, through the mouselook toolset), so the TPS camera
-    // must not engage on top of it: not from its keybind, not from turning
-    // SlipstreamTPSCamera on, not from a pending engage. CAMERA_MODE_OTS already
-    // fails the THIRD_PERSON test below; the explicit check states the rule and
-    // keeps it if that test ever changes. Entering OTS releases an engaged TPS
-    // camera (LLAgentCamera::changeCameraToMouselook). With OTS off, or simply
-    // not engaged, nothing here changes and TPS behaves as before.
-    if (gAgentCamera.cameraOTS())
-    {
-        return false;
-    }
-    // </SS:Skoomastream>
-    return isEnabled()
-        && !gDisconnected
+    return isEnabled() && canUseCamera();
+}
+
+bool SLTPSCamera::canUseCamera() const
+{
+    return !gDisconnected
         && LLStartUp::getStartupState() == STATE_STARTED
         && gViewerWindow
         && gFocusMgr.getAppHasFocus()
@@ -262,11 +480,25 @@ bool SLTPSCamera::canEngage() const
         // (llSetCameraEyeOffset/AtOffset) or follow camera (llSetCameraParams) wins:
         // TPS yields (the follow camera is not CAMERA_MODE_THIRD_PERSON, below).
         && !gAgentCamera.sitCameraEnabled()
+        && !LLFollowCamMgr::getInstance()->getActiveFollowCamParams()
+        && !RlvActions::isCameraPresetLocked()
         && gAgentCamera.getCameraMode() == CAMERA_MODE_THIRD_PERSON
         && gAgent.getTeleportState() == LLAgent::TELEPORT_NONE
         && !LLToolMgr::getInstance()->inBuildMode()
         && !LLFloaterCamera::inFreeCameraMode()
         && !LLViewerJoystick::getInstance()->getOverrideCamera();
+}
+
+bool SLTPSCamera::parkedPreviewValid() const
+{
+    LLFloater* floater = mPreviewFloater.get();
+    LLMouseHandler* captor = gFocusMgr.getMouseCapture();
+    // Do not reclaim a free camera that was moved or assigned to another owner.
+    return mPreviewParked && floater && floater->getVisible() && canUseCamera()
+        && !gAgentCamera.getFocusOnAvatar()
+        && (!captor || preferences_for_view(dynamic_cast<LLView*>(captor)))
+        && (gAgentCamera.getFocusTargetGlobal() - mPreviewFocus).magVecSquared() < 0.000001
+        && (gAgentCamera.getCameraFocusOffsetTarget() - mPreviewOffset).magVecSquared() < 0.000001;
 }
 
 bool SLTPSCamera::canStayEngaged() const
@@ -309,7 +541,9 @@ bool SLTPSCamera::engage()
     }
     gAgentCamera.setTPSCameraEngaged(true, yaw, pitch);
 
+    mCollisionDistance = -1.f;
     mEngaged = true;
+    mInputSuspended = false;
     mLeftDown = false;
     mLeftFacesAim = false;
     resetMoveInput();
@@ -333,14 +567,23 @@ bool SLTPSCamera::engage()
 void SLTPSCamera::disengage(EDisengageReason reason)
 {
     mPendingEngage = false;
+    mPreviewParked = false;
+    mPreviewFloater = LLHandle<LLFloater>();
     if (!mEngaged)
     {
         return;
     }
     // Clear first: releasing capture calls back into onMouseCaptureLost.
     mEngaged = false;
+    mInputSuspended = false;
+    mCollisionDistance = -1.f;
+    if (!FSCombatADS::isCameraSwap())
+    {
+        FSCombatADS::cancel();
+    }
 
     setLeftButton(false);
+    if (mRightHeld && gViewerWindow) gViewerWindow->consumeTPSRightMouseUp();
     mRightHeld = false;
     resetMoveInput();
     mHintTimer.stop();
@@ -394,6 +637,7 @@ void SLTPSCamera::setLeftButton(bool down, bool face_aim)
     {
         return;
     }
+    if (down && RlvActions::isRlvEnabled() && !RlvActions::canChangeToMouselook()) return;
     mLeftDown = down;
     mLeftFacesAim = down && face_aim;
     if (down && face_aim && mEngaged && !isSeated())
@@ -404,15 +648,139 @@ void SLTPSCamera::setLeftButton(bool down, bool face_aim)
         // event fires. While held, updateMovement keeps facing the aim.
         face_aim_now();
     }
-    // Same controls mouselook sends (LLToolCompGun), so weapons/HUDs that
-    // llTakeControls(CONTROL_ML_LBUTTON) fire. No touch, grab or selection.
-    gAgent.setControlFlags(down ? AGENT_CONTROL_ML_LBUTTON_DOWN : AGENT_CONTROL_ML_LBUTTON_UP);
+    if (down)
+    {
+        // TPS aim must reach weapons taking the mouselook control even though
+        // the render camera is third person. Also support ordinary mouse-control
+        // scripts, including controls taken with pass_on. Always report shooter
+        // fire as ML_LBUTTON, plus LBUTTON when subscribed. Deliver both in the
+        // same packet and latch through release even if subscriptions change.
+        mLeftControlDown = AGENT_CONTROL_ML_LBUTTON_DOWN;
+        if (gAgent.leftButtonGrabbed(false)) mLeftControlDown |= AGENT_CONTROL_LBUTTON_DOWN;
+    }
+    const U32 edge = down ? mLeftControlDown : (mLeftControlDown << 1);
+    queueFireEdge(edge);
+    gAgent.setControlFlags(edge);
+}
+
+void SLTPSCamera::queueFireEdge(U32 flags)
+{
+    const U32 down_mask = AGENT_CONTROL_ML_LBUTTON_DOWN | AGENT_CONTROL_LBUTTON_DOWN;
+    mFireOwnedDown |= (flags & down_mask) ? flags : (flags >> 1);
+    if (mFireCount == kFireQueueCapacity)
+    {
+        // Bound pathological input bursts without leaving a script held. Preserve
+        // the last transmitted release and the final physical state, not the burst.
+        mFireHead = mFireCount = 0;
+        gAgent.clearControlFlags(mFireOwnedDown | (mFireOwnedDown << 1));
+        if (mWireFireDown) queueFireEdge(mWireFireDown << 1);
+        if (mLeftDown) queueFireEdge(mLeftControlDown);
+        return;
+    }
+    mFireEdges[(mFireHead + mFireCount++) % kFireQueueCapacity] = { flags, ++mNextFireEdge };
+}
+
+void SLTPSCamera::cancelFire()
+{
+    mLeftDown = mLeftFacesAim = false;
+    mFireHead = mFireCount = 0;
+    gAgent.clearControlFlags(mFireOwnedDown | (mFireOwnedDown << 1));
+    // Unsent presses are cancelled. A transmitted hold gets one matching release.
+    if (mWireFireDown) queueFireEdge(mWireFireDown << 1);
+}
+
+bool SLTPSCamera::applyFireToAgentUpdate(U32& control_flags)
+{
+    if (!instanceExists()) return false;
+    SLTPSCamera* camera = getInstance();
+    camera->mPackedFireEdge = 0;
+    camera->mPackedNativeEdge = 0;
+    const U32 ml_down = AGENT_CONTROL_ML_LBUTTON_DOWN;
+    const U32 ml_up = AGENT_CONTROL_ML_LBUTTON_UP;
+    if ((camera->mFireCount || camera->mWireFireDown) && gAgentCamera.cameraMouselook()
+        && (control_flags & ml_down))
+    {
+        // A new native press can arrive before TPS's pending release is sent.
+        // Preserve it across that cleanup and the next ephemeral reset.
+        camera->mDeferredNativeDown = true;
+    }
+    if (!camera->mFireCount && !camera->mWireFireDown)
+    {
+        if (!camera->mDeferredNativeDown && !camera->mDeferredNativeUp) return false;
+        const MASK mask = gKeyboard ? gKeyboard->currentMask(true) : MASK_NONE;
+        if (!gAgentCamera.cameraMouselook() || !gFocusMgr.getAppHasFocus()
+            || (mask & (MASK_ALT | MASK_CONTROL))
+            || (RlvActions::isRlvEnabled() && !RlvActions::canChangeToMouselook()))
+        {
+            camera->mDeferredNativeDown = camera->mDeferredNativeUp = false;
+            return false;
+        }
+        if (control_flags & ml_up) camera->mDeferredNativeUp = true;
+        const U32 edge = camera->mDeferredNativeDown ? ml_down : ml_up;
+        control_flags = (control_flags & ~(ml_down | ml_up)) | edge;
+        camera->mPackedNativeEdge = edge;
+        return false; // Native mouselook supplies its own genuine camera context.
+    }
+    const MASK modifiers = gKeyboard ? gKeyboard->currentMask(true) : MASK_NONE;
+    if (!camera->mEngaged || !camera->canStayEngaged()
+        || !gFocusMgr.getAppHasFocus() || (modifiers & (MASK_ALT | MASK_CONTROL))
+        || !SLToolTPS::getInstance()->hasMouseCapture()
+        || (RlvActions::isRlvEnabled() && !RlvActions::canChangeToMouselook()))
+    {
+        camera->cancelFire();
+    }
+    // One owner at the packet boundary. Native handlers cannot end a TPS hold;
+    // real transitions remain ordered even when several arrive between frames.
+    const U32 owned = camera->mFireOwnedDown;
+    control_flags &= ~(owned | (owned << 1));
+    if (!camera->mFireCount && !camera->mWireFireDown) return false;
+    // Button bits are edges, as resetControlFlags makes them for native input: the
+    // press goes out once and the simulator holds it until the release. Repeating
+    // the DOWN bits during a hold reads as fresh presses and restarts weapon loops.
+    U32 buttons = 0;
+    if (camera->mFireCount)
+    {
+        const FireEdge& edge = camera->mFireEdges[camera->mFireHead];
+        buttons = edge.flags;
+        camera->mPackedFireEdge = edge.serial;
+    }
+    control_flags |= buttons;
+
+    // Supply the mouselook context expected by ML-controlled weapons. This affects
+    // only the wire snapshot: keep the local camera, input owner and agent flags
+    // in TPS. Include the final UP in that context, then clear it next update.
+    control_flags |= AGENT_CONTROL_MOUSELOOK;
+    return ((buttons | camera->mWireFireDown) & (AGENT_CONTROL_ML_LBUTTON_DOWN | AGENT_CONTROL_LBUTTON_DOWN)) != 0;
+}
+
+void SLTPSCamera::fireAgentUpdateSent(U32 control_flags)
+{
+    if (!instanceExists()) return;
+    SLTPSCamera* camera = getInstance();
+    if (camera->mPackedNativeEdge && (control_flags & camera->mPackedNativeEdge))
+    {
+        if (camera->mPackedNativeEdge == AGENT_CONTROL_ML_LBUTTON_DOWN) camera->mDeferredNativeDown = false;
+        else camera->mDeferredNativeUp = false;
+        gAgent.clearControlFlags(AGENT_CONTROL_ML_LBUTTON_DOWN | AGENT_CONTROL_ML_LBUTTON_UP);
+        camera->mPackedNativeEdge = 0;
+    }
+    if (!camera->mFireCount) return;
+    const FireEdge edge = camera->mFireEdges[camera->mFireHead];
+    if (edge.serial != camera->mPackedFireEdge || (control_flags & edge.flags) != edge.flags) return;
+    const U32 down_mask = AGENT_CONTROL_ML_LBUTTON_DOWN | AGENT_CONTROL_LBUTTON_DOWN;
+    const bool down = (edge.flags & down_mask) != 0;
+    if (down) camera->mWireFireDown = edge.flags;
+    else camera->mWireFireDown &= ~(edge.flags >> 1);
+    camera->mFireHead = (camera->mFireHead + 1) % kFireQueueCapacity;
+    --camera->mFireCount;
+    gAgent.clearControlFlags(down ? (edge.flags | (edge.flags << 1)) : (edge.flags | (edge.flags >> 1)));
+    if (!camera->mFireCount && !camera->mWireFireDown) camera->mFireOwnedDown = 0;
 }
 
 // SlipstreamTPSRightDragSteers: a right press while engaged does not release the camera.
 // The mouse already steers the view; a release that travelled no more than the right-drag
-// slop was a click, so the camera is handed back (a pointer is needed to use a menu) and
-// the context menu opens under the crosshair.
+// slop was a click, so the camera is handed back. This release gesture is consumed;
+// a subsequent distinct right click can open the context menu.
 void SLTPSCamera::setRightButton(bool down)
 {
     if (down)
@@ -420,6 +788,7 @@ void SLTPSCamera::setRightButton(bool down)
         mRightHeld = mEngaged;
         mRightTravelX = 0;
         mRightTravelY = 0;
+        mRightDownTime = LLFrameTimer::getTotalSeconds();
         return;
     }
     if (!mRightHeld)
@@ -427,15 +796,15 @@ void SLTPSCamera::setRightButton(bool down)
         return;
     }
     mRightHeld = false;
+    // While engaged the mouse steers the view, so a click almost always travels a few pixels:
+    // a press released within 250 ms is a click (as #861 decided for right-click orbit); a
+    // longer hold is a click only if it stayed inside the slop.
     static LLCachedControl<S32> slop_setting(gSavedSettings, "RightClickOrbitSlopPx", 3);
     const S32 slop = llclamp((S32)slop_setting, 0, 24);
-    if (mRightTravelX <= slop && mRightTravelY <= slop)
+    const bool quick = LLFrameTimer::getTotalSeconds() - mRightDownTime <= 0.25;
+    if (quick || (mRightTravelX <= slop && mRightTravelY <= slop))
     {
-        const S32 x = gViewerWindow->getWorldViewWidthScaled() / 2;
-        const S32 y = gViewerWindow->getWorldViewHeightScaled() / 2;
-        const MASK mask = gKeyboard ? gKeyboard->currentMask(true) : MASK_NONE;
         disengage(DISENGAGE_USER);
-        LLToolPie::getInstance()->showContextMenuAt(x, y, mask);
     }
 }
 
@@ -453,6 +822,34 @@ void SLTPSCamera::resetMoveInput()
     mInputNudge = true;
 }
 
+bool SLTPSCamera::suspendForPreferences()
+{
+    if (!mEngaged || !canStayEngaged()) return false;
+    LLFloater* floater = preferences_for_view(dynamic_cast<LLView*>(gFocusMgr.getMouseCapture()));
+    if (!floater) floater = preferences_for_view(dynamic_cast<LLView*>(gFocusMgr.getKeyboardFocus()));
+    if (!floater) return false;
+    mPreviewFloater = floater->getHandle();
+    // Keep the existing camera owner and rotation, but give all input to UI.
+    mInputSuspended = true;
+    FSCombatADS::cancel();
+    setLeftButton(false);
+    if (mRightHeld && gViewerWindow) gViewerWindow->consumeTPSRightMouseUp();
+    mRightHeld = false;
+    resetMoveInput();
+    gAgent.clearControlFlags(AGENT_CONTROL_AT_POS | AGENT_CONTROL_AT_NEG | AGENT_CONTROL_FAST_AT
+        | AGENT_CONTROL_LEFT_POS | AGENT_CONTROL_LEFT_NEG | AGENT_CONTROL_FAST_LEFT
+        | AGENT_CONTROL_NUDGE_AT_POS | AGENT_CONTROL_NUDGE_AT_NEG
+        | AGENT_CONTROL_NUDGE_LEFT_POS | AGENT_CONTROL_NUDGE_LEFT_NEG);
+    mHintTimer.stop();
+    if (SLToolTPS::getInstance()->hasMouseCapture()) SLToolTPS::getInstance()->setMouseCapture(false);
+    if (gViewerWindow)
+    {
+        gViewerWindow->showCursor();
+        gViewerWindow->getWindow()->setMouseClipping(false);
+    }
+    return true;
+}
+
 void SLTPSCamera::update()
 {
     if (mPendingEngage && !mEngaged)
@@ -463,6 +860,11 @@ void SLTPSCamera::update()
 
     if (!mEngaged)
     {
+        if (mPreviewParked && !parkedPreviewValid())
+        {
+            mPreviewParked = false;
+            mPreviewFloater = LLHandle<LLFloater>();
+        }
         resetMoveInput();
         return;
     }
@@ -479,6 +881,31 @@ void SLTPSCamera::update()
         return;
     }
 
+    if (!mInputSuspended && preferences_for_view(dynamic_cast<LLView*>(gFocusMgr.getKeyboardFocus())))
+    {
+        suspendForPreferences();
+    }
+    if (mInputSuspended)
+    {
+        resetMoveInput();
+        LLMouseHandler* captor = gFocusMgr.getMouseCapture();
+        if (captor && !preferences_for_view(dynamic_cast<LLView*>(captor)))
+        {
+            disengage(DISENGAGE_USER);
+        }
+        else if (!preferences_visible() && !captor)
+        {
+            // Resume only the engagement that was suspended, after UI lets go.
+            mInputSuspended = false;
+            mPreviewFloater = LLHandle<LLFloater>();
+            SLToolTPS::getInstance()->setMouseCapture(true);
+            gViewerWindow->hideCursor();
+            gViewerWindow->moveCursorToCenter();
+            gViewerWindow->getWindow()->setMouseClipping(true);
+        }
+        return;
+    }
+
     if (!SLToolTPS::getInstance()->hasMouseCapture())
     {
         // something took the mouse (modal dialog, drag, ...): give the pointer back
@@ -486,6 +913,7 @@ void SLTPSCamera::update()
         return;
     }
 
+    FSCombatADS::update();
     updateMouse();
     updateMovement();
     resetMoveInput();
@@ -643,7 +1071,7 @@ void SLTPSCamera::updateMovement()
 // static
 void SLTPSCamera::drawOverlay()
 {
-    if (!isEngagedNow() || !gViewerWindow)
+    if (!isEngagedNow() || getInstance()->mInputSuspended || !gViewerWindow)
     {
         return;
     }
@@ -653,17 +1081,29 @@ void SLTPSCamera::drawOverlay()
     static LLCachedControl<bool> show_crosshairs(gSavedSettings, "ShowCrosshairs");
     if (show_crosshairs)
     {
-        // Leaked on purpose: a static image ref would be released in static-destructor
-        // order, after the texture statics it depends on (#275).
-        static LLUIImagePtr* crosshair_p = new LLUIImagePtr(LLUI::getUIImage("crosshairs.tga"));
-        const LLUIImagePtr& crosshair = *crosshair_p;
-        if (crosshair)
+        static LLCachedControl<bool> custom_crosshair(gSavedSettings, "FSCustomCrosshair", false);
+        if (SLCombatFX::enabled() && isShoulderActive() && custom_crosshair)
         {
-            LLColor4 color = LLColor4::white;
-            color.mV[VALPHA] = 0.75f;
-            // center of the world view == where the camera (and llGetCameraRot) aims
-            crosshair->draw(world_rect.getCenterX() - crosshair->getWidth() / 2,
-                            world_rect.getCenterY() - crosshair->getHeight() / 2, color);
+            FSCombatAim::setCrosshairTint(LLColor4::white);
+            gGL.pushMatrix();
+            gGL.translatef((F32)world_rect.mLeft, (F32)world_rect.mBottom, 0.f);
+            FSCombatAim::drawCrosshair(world_rect.getWidth(), world_rect.getHeight());
+            gGL.popMatrix();
+        }
+        else
+        {
+            // Leaked on purpose: a static image ref would be released in static-destructor
+            // order, after the texture statics it depends on (#275).
+            static LLUIImagePtr* crosshair_p = new LLUIImagePtr(LLUI::getUIImage("crosshairs.tga"));
+            const LLUIImagePtr& crosshair = *crosshair_p;
+            if (crosshair)
+            {
+                LLColor4 color = LLColor4::white;
+                color.mV[VALPHA] = 0.75f;
+                // center of the world view == where the camera (and llGetCameraRot) aims
+                crosshair->draw(world_rect.getCenterX() - crosshair->getWidth() / 2,
+                                world_rect.getCenterY() - crosshair->getHeight() / 2, color);
+            }
         }
     }
 
@@ -728,8 +1168,8 @@ bool SLToolTPS::handleMouseDown(S32 x, S32 y, MASK mask)
         SLTPSCamera::disengageIfEngaged(SLTPSCamera::DISENGAGE_USER);
         return LLToolMgr::getInstance()->getCurrentTool()->handleMouseDown(x, y, mask);
     }
-    // Shoot, like mouselook. Returning true keeps LLViewerInput from also
-    // firing the plain LBUTTON script binding for this click. The avatar turns to the
+    // Returning true keeps LLViewerInput from also firing a script binding
+    // for this click. The avatar turns to the
     // aim for a shot, but not for a click on yourself (crosshair over your own avatar or
     // attachments): that must leave the heading alone, like a self click anywhere else.
     SLTPSCamera::getInstance()->setLeftButton(true, !crosshair_on_self());
@@ -752,20 +1192,31 @@ bool SLToolTPS::handleDoubleClick(S32 x, S32 y, MASK mask)
 bool SLToolTPS::handleRightMouseDown(S32 x, S32 y, MASK mask)
 {
     static LLCachedControl<bool> right_drag_steers(gSavedSettings, "SlipstreamTPSRightDragSteers", false);
+    if (SLTPSCamera::isShoulderActive() && SLCombatFX::enabled() && !(mask & MASK_ALT))
+    {
+        FSCombatADS::onRightMouseDown(LLViewerCamera::getInstance()->getDefaultFOV());
+        return true;
+    }
     if (right_drag_steers)
     {
-        // Keep the camera: the drag steers, a click opens the menu on release.
+        // Keep the camera: a drag steers, a click only releases TPS.
         SLTPSCamera::getInstance()->setRightButton(true);
         return true;
     }
     // Give the mouse back. Consuming the click keeps the context menu from
-    // opening on this same click.
+    // opening on this same click, including its up after capture changes.
+    gViewerWindow->consumeTPSRightMouseUp();
     SLTPSCamera::disengageIfEngaged(SLTPSCamera::DISENGAGE_USER);
     return true;
 }
 
 bool SLToolTPS::handleRightMouseUp(S32 x, S32 y, MASK mask)
 {
+    if (SLTPSCamera::isShoulderActive() && SLCombatFX::enabled() && !(mask & MASK_ALT))
+    {
+        FSCombatADS::onRightMouseUp();
+        return true;
+    }
     SLTPSCamera::getInstance()->setRightButton(false);
     return true;
 }
@@ -791,6 +1242,7 @@ bool SLToolTPS::handleHover(S32 x, S32 y, MASK mask)
 
 bool SLToolTPS::handleScrollWheel(S32 x, S32 y, S32 clicks)
 {
+    if (FSCombatADS::onScrollWheel(clicks)) return true;
     // Zoom the orbit distance (clamped at the minimum; no forced mouselook)
     gAgentCamera.handleScrollWheel(clicks);
     return true;
@@ -800,6 +1252,10 @@ void SLToolTPS::onMouseCaptureLost()
 {
     // focus loss (alt-tab), another captor, ... : give the pointer back, unless
     // it was mouselook's tool taking over (it keeps the cursor hidden itself)
+    if (!SLTPSCamera::instanceExists()) return;
+    if (SLTPSCamera::getInstance()->isInputSuspended() && !gFocusMgr.getMouseCapture()) return;
+    if (preferences_for_view(dynamic_cast<LLView*>(gFocusMgr.getMouseCapture()))
+        && SLTPSCamera::getInstance()->suspendForPreferences()) return;
     SLTPSCamera::disengageIfEngaged(gAgentCamera.getCameraMode() == CAMERA_MODE_MOUSELOOK
                                     ? SLTPSCamera::DISENGAGE_MOUSELOOK
                                     : SLTPSCamera::DISENGAGE_USER);

@@ -4297,12 +4297,6 @@ bool LLViewerRegion::meshUploadEnabled() const
         mSimulatorFeatures["MeshUploadEnabled"].asBoolean());
 }
 
-bool LLViewerRegion::gameControlEnabled() const
-{
-    return (mSimulatorFeatures.has("GameControlEnabled") &&
-        mSimulatorFeatures["GameControlEnabled"].asBoolean());
-}
-
 bool LLViewerRegion::bakesOnMeshEnabled() const
 {
     return (mSimulatorFeatures.has("BakesOnMeshEnabled") &&
@@ -4320,6 +4314,14 @@ bool LLViewerRegion::avatarHoverHeightEnabled() const
     return ( mSimulatorFeatures.has("AvatarHoverHeightEnabled") &&
              mSimulatorFeatures["AvatarHoverHeightEnabled"].asBoolean());
 }
+
+bool LLViewerRegion::gameControlEnabled() const
+{
+    // SimulatorFeatures flag for the game_control event (protocol per LL viewer PR #6202)
+    return ( mSimulatorFeatures.has("GameControlEnabled") &&
+             mSimulatorFeatures["GameControlEnabled"].asBoolean());
+}
+
 /* Static Functions */
 
 void log_capabilities(const CapabilityMap &capmap)

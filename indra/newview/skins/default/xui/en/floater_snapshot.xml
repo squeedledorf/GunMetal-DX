@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="utf-8" standalone="yes"?>
-<floater
+<floater can_pop_out="false"
  positioning="cascading"
  legacy_header_height="18"
  can_minimize="true"
  can_resize="false"
  can_close="true"
- height="541"
+ height="593"
  layout="topleft"
  name="Snapshot"
  single_instance="true"
@@ -14,12 +14,12 @@
  save_visibility="false"
  title="SNAPSHOT"
  width="624"
- min_height="521">
+ min_height="573">
     <floater.string
      name="unknown">
         unknown
     </floater.string>
-    <!-- <GMDX> orientation swap tooltips (gmdxsnapshotavatars.cpp) -->
+    <!-- orientation swap tooltips (llsnapshotavatars.cpp; ported from GunMetal-DX, v0.3.0 cf5f1f4) -->
     <floater.string
      name="orientation_landscape_tip">
         Orientation: Landscape (click to switch to Portrait)
@@ -93,7 +93,7 @@
      name="new_snapshot_btn"
      top_pad="26"
      width="136" />
-    <!-- <GMDX> landscape / portrait swap (SoapStorm) -->
+    <!-- landscape / portrait swap (SoapStorm, via GunMetal-DX v0.3.0 cf5f1f4) -->
     <button
      follows="left|top"
      height="25"
@@ -137,6 +137,34 @@
        left_delta="0"
 	   top_delta="0"
        width="31" />
+    <string name="cancel_countdown">Cancel ([SECONDS] s)</string>
+    <string name="cancel_timer">Cancel</string>
+    <combo_box
+     follows="left|top"
+     height="23"
+     initial_value="0"
+     layout="topleft"
+     left="10"
+     top_pad="5"
+     name="snapshot_timer"
+     tool_tip="Choose a self-timer, then save or send. Changing the timer cancels the countdown. Snapshot settings can be changed during the countdown."
+     width="100">
+        <combo_box.item label="Timer: Off" name="timer_off" value="0" />
+        <combo_box.item label="Timer: 3 s" name="timer_3" value="3" />
+        <combo_box.item label="Timer: 5 s" name="timer_5" value="5" />
+        <combo_box.item label="Timer: 10 s" name="timer_10" value="10" />
+    </combo_box>
+    <button
+     enabled="false"
+     follows="left|top"
+     height="23"
+     label="Cancel"
+     layout="topleft"
+     left_pad="3"
+     name="cancel_timer_btn"
+     top_delta="0"
+     tool_tip="Cancel the pending snapshot. Hiding, minimizing or closing this window also cancels the countdown."
+     width="96" />
 	<panel
      height="223"
      layout="topleft"
@@ -183,7 +211,7 @@
              label="Depth"
              name="Depth"
              value="depth" />
-            <!-- <GMDX> avatar layers (SoapStorm; gmdxsnapshotavatars.h) -->
+            <!-- avatar layers (SoapStorm, via GunMetal-DX v0.3.0 cf5f1f4; llsnapshotavatars.h) -->
             <combo_box.item
              label="Avatar (Transparent)"
              name="AvatarTransparent"
@@ -197,9 +225,9 @@
              name="AvatarMaskWhite"
              value="avatar_mask_white" />
         </combo_box>
-        <!-- <GMDX> which avatars snapshots include (FSSnapshotAvatarScope) + the picker -->
+        <!-- which avatars snapshots include (SLSnapshotAvatarScope) + the picker -->
         <combo_box
-         control_name="FSSnapshotAvatarScope"
+         control_name="SLSnapshotAvatarScope"
          follows="left|top|right"
          height="23"
          layout="topleft"
@@ -336,7 +364,7 @@
     </panel>
 	<panel_container
      follows="left|top"
-     height="252"
+     height="276"
      layout="topleft"
      left="0"
      name="panel_container"

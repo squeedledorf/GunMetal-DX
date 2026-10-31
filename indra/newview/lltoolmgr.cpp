@@ -323,12 +323,10 @@ void LLToolMgr::enterBuildMode(bool verify_canedit /*=false*/)
     {
 // [/RLVa:KB]
         ECameraMode camMode = gAgentCamera.getCameraMode();
-        // <SS:Skoomastream>
-        //if (CAMERA_MODE_MOUSELOOK == camMode || CAMERA_MODE_CUSTOMIZE_AVATAR == camMode)
-        if (CAMERA_MODE_MOUSELOOK == camMode || CAMERA_MODE_OTS == camMode || CAMERA_MODE_CUSTOMIZE_AVATAR == camMode)
-        // </SS:Skoomastream>
+        // <SS:Skoomastream> (and the CombatFX OTS aim camera)
+        if (CAMERA_MODE_MOUSELOOK == camMode || CAMERA_MODE_CUSTOMIZE_AVATAR == camMode)
         {
-            // pull the user out of mouselook, OTS or appearance mode when entering build mode
+            // pull the user out of mouselook or appearance mode when entering build mode
             handle_reset_view();
         }
 

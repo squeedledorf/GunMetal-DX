@@ -30,7 +30,7 @@
 #include "llviewerprecompiledheaders.h"
 
 #include "slchatbar.h"
-#include "gmdxchatlog.h" // <GMDX>
+#include "gmdxchatlog.h" // MMO chat log
 #include "slkeycommands.h"
 
 #include "llautoreplace.h"
@@ -57,11 +57,11 @@
 #include "llfloaterimnearbychat.h"
 #include "llkeyboard.h"
 #include "lllineeditor.h"
-#include "llrender2dutils.h"   // <GMDX>
-#include "lluicolortable.h"    // <GMDX>
+#include "llrender2dutils.h"   // MMO chat log look
+#include "lluicolortable.h"    // MMO chat log look
+#include "lltooldraganddrop.h"
 #include "llstatusbar.h"
 #include "lltextbox.h"
-#include "lltooldraganddrop.h"  // <GMDX>
 #include "lluiconstants.h"
 #include "llviewergesture.h"            // for triggering gestures
 #include "llviewermenu.h"       // for deleting object with DEL key
@@ -78,11 +78,11 @@
 // [RLVa:KB] - Checked: 2010-02-27 (RLVa-1.2.0b)
 #include "rlvactions.h"
 #include "rlvcommon.h"
-#include "llavatarnamecache.h"   // <GMDX> IM mode
-#include "llimview.h"            // <GMDX>
-#include "llinstantmessage.h"    // <GMDX>
-#include "llslurl.h"             // <GMDX>
 // [/RLVa:KB]
+#include "llavatarnamecache.h"   // IM mode (MMO chat log)
+#include "llimview.h"            // IM mode
+#include "llinstantmessage.h"    // IM mode
+#include "llslurl.h"             // IM mode
 
 class SLChatBarGestureObserver final : public LLGestureManagerObserver
 {
@@ -114,7 +114,8 @@ SLChatBar::SLChatBar(const LLSD& key)
 {
     mCommitCallbackRegistrar.add("Chatbar.Shout", boost::bind(&SLChatBar::sendChat, this, CHAT_TYPE_SHOUT, false));
     mCommitCallbackRegistrar.add("Chatbar.Whisper", boost::bind(&SLChatBar::sendChat, this, CHAT_TYPE_WHISPER, false));
-    mCommitCallbackRegistrar.add("Chatbar.ResetChatLogPosition", boost::bind(&SLChatBar::resetChatLogPosition, this));   // <GMDX>
+    mCommitCallbackRegistrar.add("Chatbar.ResetChatLogPosition", boost::bind(&SLChatBar::resetChatLogPosition, this));   // MMO chat log
+    mEnableCallbackRegistrar.add("Chatbar.ChatLogOn", [](LLUICtrl*, const LLSD&) { return GMDXChatLog::active(); });
 }
 
 
@@ -129,7 +130,7 @@ SLChatBar::~SLChatBar()
 
     mChatChannelConnection.disconnect();
     mShowChatChannelConnection.disconnect();
-    mLogStyleConnection.disconnect();   // <GMDX>
+    mLogStyleConnection.disconnect();   // MMO chat log
     mChatFontSizeConnection.disconnect();
 }
 
@@ -159,7 +160,7 @@ bool SLChatBar::postBuild()
         [this](LLControlVariable*, const LLSD& new_val, const LLSD&) { changeChannelLabel(new_val.asInteger()); });
     mShowChatChannelConnection = gSavedSettings.getControl("FSShowChatChannel")->getSignal()->connect(
         [this](LLControlVariable*, const LLSD&, const LLSD&) { updateChannelSelector(); });
-    mLogStyleConnection = gSavedSettings.getControl("NearbyChatOverlayStyle")->getSignal()->connect(   // <GMDX>
+    mLogStyleConnection = gSavedSettings.getControl("NearbyChatOverlayStyle")->getSignal()->connect(   // MMO chat log
         [this](LLControlVariable*, const LLSD&, const LLSD&) { updateChannelSelector(); });
     updateChannelSelector();
     // </FS>
@@ -246,10 +247,9 @@ bool SLChatBar::handleKeyHere( KEY key, MASK mask )
     // only do this in main chatbar
     else if ( KEY_ESCAPE == key)
     {
-        // <GMDX> IM mode: back to nearby chat first
+        // MMO chat log IM mode: back to nearby chat first
         if (mIMTarget.notNull()) cancelIM();
         else
-        // </GMDX>
         stopChat();
 
         handled = TRUE;
@@ -387,7 +387,7 @@ void SLChatBar::sendChat( EChatType type, bool ooc )
         LLWString text = mInputEditor->getConvertedText();
         LLWStringUtil::trim(text);
         LLWStringUtil::replaceChar(text, 182, '\n'); // Convert paragraph symbols back into newlines.
-        // <GMDX> IM mode: to the person picked in the chat log, not nearby
+        // MMO chat log IM mode: to the person picked in the chat log, not nearby
         if (mIMTarget.notNull() && !text.empty())
         {
             mInputEditor->updateHistory();
@@ -395,7 +395,6 @@ void SLChatBar::sendChat( EChatType type, bool ooc )
             sendIM(text);
             text.clear();
         }
-        // </GMDX>
         if (!text.empty())
         {
             // store sent line for Ctrl+Up/Down recall, duplicates get filtered
@@ -468,7 +467,7 @@ void SLChatBar::changeChannelLabel(S32 channel)
 {
     if (mInputEditor)
     {
-        // <GMDX> IM mode names who it goes to
+        // MMO chat log IM mode names who it goes to
         mInputEditor->setLabel(mIMTarget.notNull() ? "To " + mIMName : LLFloaterIMNearbyChat::getChannelLabel(channel));
     }
 }
@@ -483,11 +482,10 @@ void SLChatBar::updateChannelSelector()
         return;
     }
     const bool show = gSavedSettings.getBOOL("FSShowChatChannel");
-    // <GMDX> with the chat log on, its gear is in the log's top-right corner: the line takes this one's room
+    // MMO chat log: its gear is in the log's top-right corner, so the line takes this one's room
     const bool log = GMDXChatLog::active();
     gear->setVisible(!log);
     const S32 right_limit = log ? gear->getRect().mRight : gear->getRect().mLeft - 2;
-    // </GMDX>
     LLRect editor_rect = mInputEditor->getRect();
     if (show)
     {
@@ -501,7 +499,7 @@ void SLChatBar::updateChannelSelector()
     {
         editor_rect.mRight = right_limit;
     }
-    // <GMDX> IM mode: its x (back to nearby chat) at the line's right end
+    // MMO chat log IM mode: its x (back to nearby chat) at the line's right end
     if (LLView* cancel = findChild<LLView>("im_cancel"))
     {
         const bool im = mIMTarget.notNull();
@@ -514,7 +512,6 @@ void SLChatBar::updateChannelSelector()
             editor_rect.mRight -= 24;
         }
     }
-    // </GMDX>
     mInputEditor->setShape(editor_rect);
     spinner->setVisible(show);
 }
@@ -540,10 +537,9 @@ void SLChatBar::startChat(const char* line)
 {
     SLChatBar* bar = LLFloaterReg::getTypedInstance<SLChatBar>("chatbar");
     bar->applyShiftEnterNewline();
-    // <GMDX> the chat log's font while it is on (gmdxchatlog.h), else the chat font
+    // MMO chat log: its font while it is on, else the chat font
     const LLFontGL* log_font = GMDXChatLog::chatBarFont();
     bar->mInputEditor->setFont(log_font ? log_font : LLViewerChat::getChatFont());
-    // </GMDX>
     bar->setVisible(TRUE);
     bar->setFocus(TRUE);
     bar->mInputEditor->setFocus(TRUE);
@@ -565,11 +561,11 @@ void SLChatBar::stopChat()
     SLChatBar* bar = LLFloaterReg::getTypedInstance<SLChatBar>("chatbar");
     bar->mInputEditor->setFocus(FALSE);
     bar->setVisible(FALSE);
-    bar->cancelIM();   // <GMDX> (closing ends IM mode)
+    bar->cancelIM();   // MMO chat log (closing ends IM mode)
     gAgent.stopTyping();
 }
 
-// <GMDX> IM mode (gmdxchatlog.cpp: a name clicked)
+// IM mode (gmdxchatlog.cpp: a name clicked)
 // static
 void SLChatBar::startIM(const LLUUID& id, const std::string& name)
 {
@@ -624,7 +620,6 @@ void SLChatBar::sendIM(const LLWString& text)
         LLIMModel::sendMessage(utf8_text, session_id, mIMTarget, IM_NOTHING_SPECIAL);
     }
 }
-// </GMDX>
 
 // static
 void SLChatBar::updateChatFont()
@@ -632,7 +627,8 @@ void SLChatBar::updateChatFont()
     SLChatBar* bar = LLFloaterReg::getTypedInstance<SLChatBar>("chatbar");
     if (bar)
     {
-        bar->mInputEditor->setFont(LLViewerChat::getChatFont());
+        const LLFontGL* log_font = GMDXChatLog::chatBarFont();   // MMO chat log
+        bar->mInputEditor->setFont(log_font ? log_font : LLViewerChat::getChatFont());
     }
 }
 
@@ -651,7 +647,7 @@ void SLChatBar::onInputEditorKeystroke(LLTextEditor* caller)
         && (raw_text[0] != '/')     // forward slash is used for escape (eg. emote) sequences
             && (raw_text[0] != ':') // colon is used in for MUD poses
             && (LLFloaterIMNearbyChat::getDefaultChatChannel() == 0) // <FS> no typing animation off channel 0
-            && mIMTarget.isNull() // <GMDX> nor for an IM
+            && mIMTarget.isNull() // MMO chat log: nor for an IM
       )
     {
         gAgent.startTyping();
@@ -748,9 +744,8 @@ void SLChatBar::onCommitGesture(LLUICtrl* ctrl)
 // no-op once it is inside). Not for a bar hosted inside another window.
 void SLChatBar::draw()
 {
-    // <GMDX> With the chat log on, the bar moves and resizes with it (its lock), not on its own; once
-    // the panel has been moved, the bar is right under it, as wide as it (the panel keeps that place
-    // inside the floater area; while dragged, GMDXChatLog places the bar as the mouse moves).
+    // MMO chat log (GunMetal-DX): with the log on, the bar moves and resizes with it (its lock), not on
+    // its own; once the panel has been moved, the bar is right under it, as wide as it. Off: nothing here.
     const bool owned = GMDXChatLog::active() && gFloaterView && getParent() == gFloaterView;
     if (owned != mDocked)
     {
@@ -762,8 +757,8 @@ void SLChatBar::draw()
     LLRect docked;
     const bool dock = owned && !isMinimized() && GMDXChatLog::dockedBarRect(gFloaterView, docked);
     if (dock && docked != getRect()) setShape(docked);
-    // The chat log panel's bottom row: its fill and edge (no skin box, floater_sl_chatbar.xml), no
-    // top edge while the panel sits on it (the panel draws the rule between them).
+    // <GMDX> The bar's own look, docked or not (no skin box, floater_sl_chatbar.xml): the chat log
+    // panel's fill and edge, no top edge while the panel sits on it (the panel draws the rule between them).
     {
         static LLUIColor fill = LLUIColorTable::instance().getColor("GMDXChatBarBackground");
         static LLUIColor edge = LLUIColorTable::instance().getColor("GMDXChatBarEdge");
@@ -774,12 +769,12 @@ void SLChatBar::draw()
         gl_line_2d(r, 0, r, t, edge.get());
         if (!GMDXChatLog::panelOnBar()) gl_line_2d(0, t, r, t, edge.get());
     }
+    // </GMDX>
     if (dock)
     {
         LLFloater::draw();
         return;
     }
-    // </GMDX>
     // <GMDX> not while something is dragged: the toolbars that show during a drag (empty ones to drop
     // on) shrink the area for the drag only, and a fit would be kept (a too wide bar made narrower)
     if (gFloaterView && getParent() == gFloaterView && !isMinimized()
@@ -796,15 +791,14 @@ void SLChatBar::draw()
     LLFloater::draw();
 }
 
-// <GMDX> the chat log's place back to over this bar, and this bar back to where it first opens
+// MMO chat log: the chat log's place back to over this bar, and this bar back to where it first opens
 void SLChatBar::resetChatLogPosition()
 {
-    gSavedSettings.setRect("GMDXChatLogRect", LLRect());
+    gSavedSettings.setRect("SLChatLogRect", LLRect());
     LLFloater::getControlGroup()->setRect(LLFloaterReg::getRectControlName("chatbar"), LLRect());
     setShape(mDefaultRect);
     if (gFloaterView && getParent() == gFloaterView) gFloaterView->adjustToFitScreen(this, false);
 }
-// </GMDX>
 
 // [SL:KB] - Patch: Chat-NearbyToastWidth | Checked: 2010-11-10 (Catznip-2.4)
 // virtual

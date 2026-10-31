@@ -33,6 +33,8 @@
 #include "llsnapshotmodel.h"
 
 class LLSpinCtrl;
+class LLButton;
+class LLComboBox;
 class LLSnapshotLivePreview;
 class LLToolset;
 
@@ -151,13 +153,20 @@ public:
     /*virtual*/ ~LLFloaterSnapshot();
 
     /*virtual*/ bool postBuild();
+    void draw() override;
     /*virtual*/ void onOpen(const LLSD& key);
+    void onClose(bool app_quitting) override;
     /*virtual*/ S32 notify(const LLSD& info);
 
     static void update();
 
     void onExtendFloater();
     void on360Snapshot();
+    bool startTimedAction(LLPanelSnapshot* panel, const LLSD& action);
+    void onClickTimerSnapshot();
+    void cancelSelfTimer();
+    void updateSelfTimerControls(bool force = false);
+    void setMinimized(bool minimized) override;
 
     static LLFloaterSnapshot* getInstance();
     static LLFloaterSnapshot* findInstance();
@@ -171,6 +180,15 @@ public:
 
     class Impl;
     friend class Impl;
+
+private:
+    LLHandle<LLPanel> mTimedPanel;
+    LLSD mTimedAction;
+    LLComboBox* mSnapshotTimerCombo = nullptr;
+    LLButton* mCancelTimerButton = nullptr;
+    S32 mCountdownSeconds = -1;
+    std::string mCountdownText;
+    boost::signals2::scoped_connection mTimerVisibilityConnection;
 };
 
 ///----------------------------------------------------------------------------
@@ -231,6 +249,7 @@ protected:
 
 public:
     virtual ~LLSnapshotFloaterView();
+    bool drawChildRetained(LLView* childp) override;
 
     /*virtual*/ bool handleKey(KEY key, MASK mask, bool called_from_parent);
     /*virtual*/ bool handleMouseDown(S32 x, S32 y, MASK mask);

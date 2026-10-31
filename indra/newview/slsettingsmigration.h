@@ -60,11 +60,24 @@ namespace SLSettingsMigration
     void migrateGMDXChatLog(LLControlGroup& group);
     // <GMDX> Once per install: the mouselook hint and coordinates go (they are off by default now).
     void migrateGMDXMouselookHud(LLControlGroup& group);
+    // <GMDX> Settings Slipstream renamed when it ported GunMetal-DX v0.3.0 (GMDX* / FS* / OCOL* ->
+    // SL* / RenderVK*; app_settings/settings_renames_gmdx.xml): as migrateSettingsFile, once per
+    // settings file (marker GMDXSettingsRenamed, the table's version), for the global settings and
+    // each account's. migratePresetFile applies the table to saved presets too.
+    constexpr unsigned GMDX_RENAMES_VERSION = 1;
+    unsigned migrateGMDXRenames(LLControlGroup& group, const std::string& filename);
+
+    // Retire legacy OTS aim-mode preferences and carry saved framing into TPS once.
+    void migrateTPSFraming(LLControlGroup& group, const std::string& filename);
 
     // Once per install: an existing user file keeps what its combined per-type notification
     // modes and the SlipstreamFlashTaskbarOn* settings did, now as separate flash, taskbar
     // and show settings. A new user gets the new defaults.
     void migrateChatNotifications(LLControlGroup& group, const std::string& filename);
+
+    // Once per install (#624): SlipstreamMouselookShowUI on (keep the UI in mouselook) is
+    // SlipstreamMouselookHideUI off (leave the UI as it was).
+    void migrateMouselookHideUI(LLControlGroup& group, const std::string& filename);
 
     // A saved preset (graphics / camera) just loaded into `group`: apply the values it
     // carries under old names to the new names. Every time the preset is loaded (the

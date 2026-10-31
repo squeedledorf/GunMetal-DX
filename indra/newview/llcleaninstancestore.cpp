@@ -374,6 +374,9 @@ void LLCleanInstanceStore::shutdown()
     LLCleanMeshAsset::instance().resetGroupRefs();   // every instance goes
     mOrphanSuspect.clear();
     mOrphanCursorInit = false;
+    mGiRadianceCount = 0;
+    mGiRadianceOverflow = mGiRadianceOn;
+    if (mGiRadianceOn) ++mGiRadianceStats.storeReset;
     mCapacity = 0;
     mLiveCount = 0;
     mWaterExclCount = 0;
@@ -522,6 +525,10 @@ U32 LLCleanInstanceStore::upsert(const LLUUID& object_uuid, S32 face_idx,
         ++mLiveCount;
         ++mUpsertCount;   // new instance
         ++mNewCount;
+        // Never alias an admitted allocation token after 32-bit exhaustion. Zero is
+        // unavailable to the optional emitter producer; existing raster/RT rows still work.
+        if (mNextAllocationGeneration < 0xFFFFFFFFull) mRowGen[id] = (U32)++mNextAllocationGeneration;
+        else mRowGen[id] = 0u;
         // #825: a NEW face of an object the mover tracker holds dynamic (a face / LOD rebuilt
         // while it moves) takes the bit at once -- before, it waited up to 8 frames for
         // tickDynCasters' re-assert: a moving object's face could bake into a static layer
@@ -591,6 +598,90 @@ void LLCleanInstanceStore::markDirtyLocked(U32 id)
     mDirty[id] = 1;
     if (id < mDirtyMin) mDirtyMin = id;
     if (id + 1 > mDirtyMax) mDirtyMax = id + 1;
+}
+
+void LLCleanInstanceStore::setGiRadianceCollect(bool on)
+{
+    std::lock_guard<std::mutex> lk(mMutex);
+    mGiRadianceOn = on;
+    if (!on) { mGiRadianceCount = 0; mGiRadianceOverflow = false; }
+}
+
+U32 LLCleanInstanceStore::takeGiRadianceDirty(GiRadianceSpheres& out, bool& overflow, GiRadianceStats& stats)
+{
+    std::lock_guard<std::mutex> lk(mMutex);
+    const U32 n = mGiRadianceCount;
+    std::copy_n(mGiRadianceDirty.begin(), 4 * n, out.begin());
+    overflow = mGiRadianceOverflow;
+    stats = mGiRadianceStats;
+    mGiRadianceCount = 0;
+    mGiRadianceOverflow = false;
+    return n;
+}
+
+void LLCleanInstanceStore::noteGiRadianceDirtyLocked(const Instance& row)
+{
+    if (!mGiRadianceOn || mGiRadianceOverflow || row.lod_group_id == 0xFFFFFFFFu
+        || (row.flags & (8u | 32u | 2048u)) != 0u) return; // HUD/terrain/water are not these emitters
+    if ((row.flags & 4096u) == 0u && !LLCleanMaterialStore::instance().giEmissive(row.material_id)) return;
+    // Rigged / attach-relative bounds need the live skin/joint transform. Never treat
+    // their local origin as a world sphere. Skip this delta until live-pose bounds
+    // are available; a moving worn emitter must not wipe the entire scene's history.
+    if ((row.flags & (1u | 512u)) != 0u)
+    { ++mGiRadianceStats.unknownPose; return; }
+    Instance in = row;
+    toAgentFrame(in);
+    const F32* m = in.model_matrix;
+    F32 c[3], h[3];
+    for (int k = 0; k < 3; ++k)
+    {
+        const F32 lo = in.aabb_min[k], hi = in.aabb_max[k];
+        if (!std::isfinite(lo) || !std::isfinite(hi) || hi < lo)
+        { ++mGiRadianceStats.badBounds; return; }
+        c[k] = 0.5f * (lo + hi); h[k] = 0.5f * (hi - lo);
+    }
+    F32 sp[4];
+    F32 r2 = 0.f;
+    for (int k = 0; k < 3; ++k)
+    {
+        sp[k] = m[k] * c[0] + m[4+k] * c[1] + m[8+k] * c[2] + m[12+k];
+        // World AABB extents give a conservative sphere even for sheared glTF nodes.
+        const F32 extent = std::fabs(m[k]) * h[0] + std::fabs(m[4+k]) * h[1] + std::fabs(m[8+k]) * h[2];
+        r2 += extent * extent;
+    }
+    sp[3] = std::sqrt(r2) + 0.25f;
+    if (in.spin_axis[0] != 0.f || in.spin_axis[1] != 0.f || in.spin_axis[2] != 0.f)
+    {
+        F32 d2 = 0.f;
+        for (int k = 0; k < 3; ++k)
+        { const F32 delta = sp[k] - in.spin_pivot[k]; d2 += delta * delta; sp[k] = in.spin_pivot[k]; }
+        sp[3] += std::sqrt(d2);
+    }
+    for (F32 v : sp) if (!std::isfinite(v))
+    { ++mGiRadianceStats.nonfiniteBounds; return; }
+    // Coalesce adjacent faces/old+new bounds. At capacity enclose all further events
+    // in the last sphere; bounded storage, conservative coverage rather than lost deltas.
+    if (mGiRadianceCount)
+    {
+        F32* last = &mGiRadianceDirty[4 * (mGiRadianceCount - 1)];
+        const F32 dx = sp[0]-last[0], dy = sp[1]-last[1], dz = sp[2]-last[2];
+        const F32 d = std::sqrt(dx*dx + dy*dy + dz*dz);
+        if (d + sp[3] <= last[3]) return;
+        const F32 radius = 0.5f * (d + last[3] + sp[3]);
+        if (!std::isfinite(radius))
+        { ++mGiRadianceStats.nonfiniteBounds; return; }
+        if (mGiRadianceCount == kGiRadianceSpheres || radius <= std::max(last[3], sp[3]) * 1.25f + 0.25f)
+        {
+            if (d + last[3] <= sp[3]) std::copy_n(sp, 4, last);
+            else
+            {
+                const F32 t = (radius - last[3]) / std::max(d, 1e-6f);
+                last[0] += dx*t; last[1] += dy*t; last[2] += dz*t; last[3] = radius;
+            }
+            return;
+        }
+    }
+    std::copy_n(sp, 4, &mGiRadianceDirty[4 * mGiRadianceCount++]);
 }
 
 void LLCleanInstanceStore::setShadowDirtyCollect(bool on)
@@ -905,7 +996,7 @@ bool LLCleanInstanceStore::setFlexiOrigin(const LLUUID& id, const F32 origin[3])
     return any;
 }
 
-bool LLCleanInstanceStore::refreshObjectPose(LLViewerObject* obj)
+bool LLCleanInstanceStore::refreshObjectPose(LLViewerObject* obj, PoseSample* before, PoseSample* after)
 {
     if (!obj || obj->isDead()) return false;
     std::lock_guard<std::mutex> lk(mMutex);
@@ -913,6 +1004,12 @@ bool LLCleanInstanceStore::refreshObjectPose(LLViewerObject* obj)
     auto oit = mObjIds.find(id);
     if (oit == mObjIds.end()) return false;
     bool any = false;
+    const Instance* sample_row = nullptr;   // the PoseSample row (see the header)
+    auto sampleOf = [](const Instance& in, PoseSample& s)
+    {
+        std::memcpy(s.m, in.model_matrix, sizeof(s.m));
+        std::memcpy(s.spin, in.spin_axis, sizeof(s.spin));
+    };
     // The composed poses depend only on the object (each instance adds at most its own
     // glTF node pre-transform): compose each kind at most ONCE per refresh, not once per
     // face. A moved multi-face prim re-ran composeOwnedPose (parent chain, region ->
@@ -924,6 +1021,11 @@ bool LLCleanInstanceStore::refreshObjectPose(LLViewerObject* obj)
         if (iid >= mCapacity) continue;
         Instance& inst = mInstances[iid];
         if ((inst.flags & 1u) != 0u) continue;   // rigged: pose comes from the skin palette
+        if (!sample_row)
+        {
+            sample_row = &inst;
+            if (before) sampleOf(inst, *before);
+        }
         const F32* local = localXformLocked(iid);   // glTF node pre-transform (#39)
         bool changed = false;
         F32 m[16];
@@ -989,6 +1091,7 @@ bool LLCleanInstanceStore::refreshObjectPose(LLViewerObject* obj)
             any = true;
         }
     }
+    if (after && sample_row) sampleOf(*sample_row, *after);
     return any;
 }
 
@@ -1043,7 +1146,7 @@ void LLCleanInstanceStore::release(const LLUUID& object_uuid, S32 face_idx)
     // Sentinel the slot so the compute cull skips it (slot 0 is a
     // VALID mesh slot -- zeroing lod_group_id would alias to the
     // first registered asset and draw it everywhere).
-    std::memset(&mInstances[id], 0, sizeof(Instance));
+    mInstances[id] = Instance{};
     mInstances[id].lod_group_id = 0xFFFFFFFFu;
     mSig[id] = 0;
     ++mRowGen[id];   // (rowGenerations: the id may next hold another key)
@@ -1232,6 +1335,8 @@ F32 LLCleanInstanceStore::renderOffsetSpan() const
 void LLCleanInstanceStore::noteAgentShift(const F32 off[3])
 {
     std::lock_guard<std::mutex> lk(mMutex);
+    if (mGiRadianceOn)
+    { mGiRadianceOverflow = true; mGiRadianceCount = 0; ++mGiRadianceStats.agentShift; }
     // store = agent + d and agent' = agent + off  =>  d' = d - off keeps every stored row
     // (and every pick box) where it is. Exact: off and d are multiples of 256 m.
     for (int k = 0; k < 3; ++k)
@@ -1284,7 +1389,7 @@ void LLCleanInstanceStore::releaseObject(const LLUUID& object_uuid)
         if ((mInstances[id].flags & WATER_EXCLUSION_FLAG) != 0u) --mWaterExclCount;
         retargetRefs(rowRefs(mInstances[id]), RowRefs{0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu});
         LLCleanMeshAsset::instance().groupRefSwap(mInstances[id].lod_group_id, 0xFFFFFFFFu);
-        std::memset(&mInstances[id], 0, sizeof(Instance));
+        mInstances[id] = Instance{};
         mInstances[id].lod_group_id = 0xFFFFFFFFu;
         mSig[id] = 0;
         ++mRowGen[id];   // (rowGenerations: the id may next hold another key)
@@ -1521,11 +1626,19 @@ bool LLCleanInstanceStore::intersectAvatars(const LLVector4a& start, LLVector4a&
 }
 
 void LLCleanInstanceStore::copyDirtyVK(std::vector<U8>& mirror, std::vector<std::pair<U32, U32>>& runs, U32 heal_mode,
-                                       U32* live_out, VKFrameSync* sync_out)
+                                       U32* live_out, VKFrameSync* sync_out, std::vector<U32>* generations)
 {
     LLCrossingTrace::CopyProbe crossing_probe(runs, sizeof(Instance));   // #568: first call after an origin shift
     std::lock_guard<std::mutex> lk(mMutex);
     if (live_out) *live_out = mLiveCount;
+    // Exact allocation identities captured under the SAME lock as the instance mirror.
+    // Copy spans only; no object/material/eligibility walk. Failure disables the optional consumer.
+    if (generations && generations->size() != mRowGen.size())
+    {
+        try { generations->resize(mRowGen.size()); }
+        catch (const std::bad_alloc&) { generations->clear(); }
+        if (!generations->empty()) std::memcpy(generations->data(), mRowGen.data(), mRowGen.size() * sizeof(U32));
+    }
     // #568 RENDER-WORLD FRAME. The mirror rows are store-frame copies; hand the renderer the
     // frame (upload writes row - d) and the agent shift its GPU rows still need. A pending
     // re-anchor moves the mirror like the store (O(N) adds; dirty rows are re-copied below
@@ -1556,8 +1669,13 @@ void LLCleanInstanceStore::copyDirtyVK(std::vector<U8>& mirror, std::vector<std:
     const size_t bytes = (size_t)n * sizeof(Instance);
     if (mirror.size() != bytes)
     {
+        // A resized mirror has no complete old snapshot. Skip only that unknown
+        // delta; retain queued known bounds, without a scene scan or global reset.
+        if (mGiRadianceOn) ++mGiRadianceStats.mirrorReset;
         mirror.resize(bytes);
         if (bytes) std::memcpy(mirror.data(), mInstances.data(), bytes);
+        if (generations && generations->size() == mRowGen.size() && !mRowGen.empty())
+            std::memcpy(generations->data(), mRowGen.data(), mRowGen.size() * sizeof(U32));
         std::fill(mDirty.begin(), mDirty.end(), (U8)0);
         mDirtyMin = 0xFFFFFFFFu; mDirtyMax = 0;
         if (n) runs.emplace_back(0u, n);
@@ -1566,8 +1684,26 @@ void LLCleanInstanceStore::copyDirtyVK(std::vector<U8>& mirror, std::vector<std:
     }
     auto copyRun = [&](U32 a, U32 b)
     {
+        if (mGiRadianceOn && !mGiRadianceOverflow)
+            for (U32 id = a; id < b; ++id)
+            {
+                Instance old;
+                std::memcpy(&old, mirror.data() + (size_t)id * sizeof(Instance), sizeof(old));
+                const Instance& cur = mInstances[id];
+                if (std::memcmp(&old, &cur, sizeof(Instance)) == 0) continue;
+                // Mask ownership/priority bits alone do not change transport. Dying
+                // (bit22) does: removal must invalidate before slot reuse, even during de-rez.
+                Instance previous = old, current = cur;
+                previous.flags &= ~(DYNAMIC_CASTER_FLAG | 8192u | 0xFF800000u);
+                current.flags &= ~(DYNAMIC_CASTER_FLAG | 8192u | 0xFF800000u);
+                if (std::memcmp(&previous, &current, sizeof(Instance)) == 0) continue;
+                noteGiRadianceDirtyLocked(old);
+                noteGiRadianceDirtyLocked(cur);
+            }
         std::memcpy(mirror.data() + (size_t)a * sizeof(Instance), &mInstances[a],
                     (size_t)(b - a) * sizeof(Instance));
+        if (generations && generations->size() == mRowGen.size())
+            std::memcpy(generations->data() + a, mRowGen.data() + a, (size_t)(b - a) * sizeof(U32));
         runs.emplace_back(a, b);
     };
     // (the row change log: dirtied runs only, see setChangeLog)

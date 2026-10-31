@@ -84,7 +84,7 @@ typedef enum e_image_codec
     IMG_CODEC_JPEG = 5,
     IMG_CODEC_DXT  = 6,
     IMG_CODEC_PNG  = 7,
-    IMG_CODEC_TIFF = 8,
+    IMG_CODEC_TIFF = 8,   // baseline TIFF, read only (GunMetal-DX port)
     IMG_CODEC_EOF  = 9
 } EImageCodec;
 

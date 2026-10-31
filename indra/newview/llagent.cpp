@@ -89,6 +89,7 @@
 #include "llurlentry.h"
 #include "llviewercontrol.h"
 #include "llviewerdisplay.h"
+#include "llviewerjoystick.h"
 #include "llviewermediafocus.h"
 #include "llviewermenu.h"
 #include "llviewerobjectlist.h"
@@ -96,6 +97,9 @@
 #include "llviewerregion.h"
 #include "llviewerstats.h"
 #include "llviewerwindow.h"
+#include "llviewercamera.h"
+#include "sltpscamera.h"
+#include "llvoiceclient.h"
 #include "llvoavatarself.h"
 #include "llwindow.h"
 #include "llworld.h"
@@ -111,6 +115,8 @@
 #include "llmemorygovernor.h"
 #include <boost/stacktrace.hpp>   // <GMDX> GMDXFly
 // [/RLVa:KB]
+#include "gmdxtpfx.h"   // <GMDX> teleport effects
+#include "gmdxots.h"    // <GMDX> the over-the-shoulder aim camera
 
 using namespace LLAvatarAppearanceDefines;
 
@@ -131,6 +137,7 @@ const F32 AUTOPILOT_MAX_TIME_NO_PROGRESS_FLY = 2.5f;        // seconds. Flying i
 // against, so refuse them outright when the ground below the agent is farther
 // than this away, rather than snapping the agent down onto distant terrain.
 const F32 MAX_SIT_ON_GROUND_DISTANCE = 30.f;                // meters
+
 static bool sOverlaySkippedInMouselook = false; // <GMDX> controller overlay kept up in mouselook
 static bool sInputOverlaySkippedInMouselook = false; // <GMDX> keyboard and mouse overlay, likewise
 
@@ -849,9 +856,7 @@ void LLAgent::moveUp(S32 direction)
     }
 
     if (!mCrouch)
-    {
         gAgentCamera.resetView(mMovementResetCamera);
-    }
 }
 
 //-----------------------------------------------------------------------------
@@ -1463,6 +1468,7 @@ LLVector3d LLAgent::getPosGlobalFromAgent(const LLVector3 &pos_agent) const
     return pos_agent_d + mAgentOriginGlobal;
 }
 
+// GunMetal-DX port (#1207): the controller's ground sit lands through the autopilot, then sits.
 static void finish_sit_on_ground(bool success, void*)
 {
     if (success)
@@ -1483,9 +1489,9 @@ void LLAgent::sitDown()
     setControlFlags(AGENT_CONTROL_SIT_ON_GROUND);
 }
 
-// <GMDX> Linden Lab's bf43fb63d4 changed sitDown() itself; it is kept for the
-// game controller's sit only, because it measures to the terrain and would refuse
-// a menu or keyboard ground sit on a skybox floor.
+// Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4; Linden Lab game control (viewer PR #6202)
+// Sits on the ground below, walking there first. Used by the game controller's sit only: it measures
+// to the terrain, so it would refuse a menu or keyboard ground sit on a skybox floor.
 void LLAgent::sitDownNearby()
 {
 // [RLVa:KB] - Checked: RLVa-1.2.1
@@ -1605,7 +1611,7 @@ LLVector3 LLAgent::getReferenceUpVector()
     return up_vector;
 }
 
-// Radians, positive is downward toward ground
+// Radians, positive is forward into ground
 //-----------------------------------------------------------------------------
 // pitch()
 //-----------------------------------------------------------------------------
@@ -2300,15 +2306,7 @@ std::ostream& operator<<(std::ostream &s, const LLAgent &agent)
 //-----------------------------------------------------------------------------
 bool LLAgent::needsRenderAvatar()
 {
-    // <SS:Skoomastream>
-    // OTS mode: always render avatar -- we are in third-person even though
-    // mouselook input is active. RLVa @showself still hides it.
-    if (gAgentCamera.cameraOTS())
-    {
-        return mShowAvatar && mOutfitChosen && !gRlvHandler.hasBehaviour(RLV_BHVR_SHOWSELF);
-    }
-    // </SS:Skoomastream>
-
+    if (GMDXOTS::shoulderCamera()) return mShowAvatar && mOutfitChosen && !gRlvHandler.hasBehaviour(RLV_BHVR_SHOWSELF); // <GMDX> over the shoulder: drawn (RLVa @showself still hides it)
 //  if (gAgentCamera.cameraMouselook() && !LLVOAvatar::sVisibleInFirstPerson)
 // [RLVa:KB] - Checked: RLVa-2.0.2
     if ( (gAgentCamera.isHidingAvatarForFirstPerson() && !LLVOAvatar::sVisibleInFirstPerson) || (gRlvHandler.hasBehaviour(RLV_BHVR_SHOWSELF)) )
@@ -2323,14 +2321,7 @@ bool LLAgent::needsRenderAvatar()
 // true if we need to render your own avatar's head.
 bool LLAgent::needsRenderHead()
 {
-    // <SS:Skoomastream>
-    // OTS mode: always render head -- avatar is fully visible, unless RLVa
-    // @showselfhead hides it.
-    if (gAgentCamera.cameraOTS())
-    {
-        return mShowAvatar && !gRlvHandler.hasBehaviour(RLV_BHVR_SHOWSELFHEAD);
-    }
-    // </SS:Skoomastream>
+    if (GMDXOTS::shoulderCamera()) return mShowAvatar && !gRlvHandler.hasBehaviour(RLV_BHVR_SHOWSELFHEAD); // <GMDX> over the shoulder: the head too (not under @showselfhead)
 // [RLVa:KB] - Checked: RLVa-2.0.2
     // #1074: the VR camera sits at the head like mouselook (#1076: not in fly cam; false on the desktop).
     return ((LLVOAvatar::sVisibleInFirstPerson && LLPipeline::sReflectionRender) || (mShowAvatar && !gAgentCamera.isHidingAvatarForFirstPerson() && !LLVRCamera::firstPerson())) && (!gRlvHandler.hasBehaviour(RLV_BHVR_SHOWSELFHEAD));
@@ -2455,35 +2446,12 @@ void LLAgent::endAnimationUpdateUI()
     }
 
     // clean up UI from mode we're leaving
-    // <SS:Skoomastream>
-    // Mouselook and OTS are one aim mode as far as the UI goes: switching between
-    // them (third person -> OTS routes through a brief mouselook state, and the
-    // OTS <-> first person view toggle) must neither restore nor re-hide the UI,
-    // or the floaters pushed on the way in would be pushed twice and lost.
-    const bool was_aiming = gAgentCamera.getLastCameraMode() == CAMERA_MODE_MOUSELOOK
-                         || gAgentCamera.getLastCameraMode() == CAMERA_MODE_OTS;
-    const bool is_aiming = gAgentCamera.getCameraMode() == CAMERA_MODE_MOUSELOOK
-                        || gAgentCamera.getCameraMode() == CAMERA_MODE_OTS;
-    //if (gAgentCamera.getLastCameraMode() == CAMERA_MODE_MOUSELOOK )
-    if (was_aiming && !is_aiming)
-    // </SS:Skoomastream>
+    if (gAgentCamera.getLastCameraMode() == CAMERA_MODE_MOUSELOOK)
     {
-        gToolBarView->setToolBarsVisible(true);
         // show mouse cursor
         gViewerWindow->showCursor();
-        // show menus
-        gMenuBarView->setVisible(true);
-        LLNavigationBar::getInstance()->setVisible(true && gSavedSettings.getBOOL("ShowNavbarNavigationPanel"));
-        gStatusBar->setVisibleForMouselook(true);
 
-        static LLCachedControl<bool> show_mini_location_panel(gSavedSettings, "ShowMiniLocationPanel");
-        if (show_mini_location_panel)
-        {
-            LLPanelTopInfoBar::getInstance()->setVisible(true);
-        }
-
-        LLChicletBar::getInstance()->setVisible(true);
-
+        // hides itself in mouselook, whether or not the rest of the UI was hidden
         LLPanelStandStopFlying::getInstance()->setVisible(true);
 
         LLToolMgr::getInstance()->setCurrentToolset(gBasicToolset);
@@ -2495,42 +2463,8 @@ void LLAgent::endAnimationUpdateUI()
             (*mMouselookModeOutSignal)();
         }
 
-        // Only pop if we have pushed...
-        if (true == mViewsPushed)
-        {
-#if 0 // Use this once all floaters are registered
-            LLFloaterReg::restoreVisibleInstances();
-#else // Use this for now
-            LLFloaterView::skip_list_t skip_list;
-            if (LLFloaterReg::findInstance("mini_map"))
-            {
-                skip_list.insert(LLFloaterReg::findInstance("mini_map"));
-            }
-            if (LLFloaterReg::findInstance("beacons"))
-            {
-                skip_list.insert(LLFloaterReg::findInstance("beacons"));
-            }
-            if (sOverlaySkippedInMouselook && LLFloaterReg::findInstance("game_control_overlay"))
-            {
-                skip_list.insert(LLFloaterReg::findInstance("game_control_overlay")); // <GMDX>
-            }
-            if (sInputOverlaySkippedInMouselook && LLFloaterReg::findInstance("gmdx_input_overlay"))
-            {
-                skip_list.insert(LLFloaterReg::findInstance("gmdx_input_overlay")); // <GMDX>
-            }
-            LLFloaterIMContainer* im_box = LLFloaterReg::getTypedInstance<LLFloaterIMContainer>("im_container");
-            LLFloaterIMContainer::floater_list_t conversations;
-            im_box->getDetachedConversationFloaters(conversations);
-            for (LLFloater* conversation : conversations)
-            {
-                LL_INFOS() << "skip_list.insert(session_floater): " << conversation->getTitle() << LL_ENDL;
-                skip_list.insert(conversation);
-            }
-
-            gFloaterView->popVisibleAll(skip_list);
-#endif
-            mViewsPushed = false;
-        }
+        // show what mouselook hid (#624: unless Hide all controls already did)
+        setMouselookUIHidden(false);
 
         gAgentCamera.setLookAt(LOOKAT_TARGET_CLEAR);
         if( gMorphView )
@@ -2596,36 +2530,21 @@ void LLAgent::endAnimationUpdateUI()
     //---------------------------------------------------------------------
     // Set up UI for mode we're entering
     //---------------------------------------------------------------------
-    // <SS:Skoomastream>
-    //if (gAgentCamera.getCameraMode() == CAMERA_MODE_MOUSELOOK)
-    if (is_aiming && !was_aiming)
-    // </SS:Skoomastream>
+    if (gAgentCamera.getCameraMode() == CAMERA_MODE_MOUSELOOK)
     {
-        // clean up UI
-        // first show anything hidden by UI toggle
-        gViewerWindow->setUIVisibility(true);
-
-        // #499: SlipstreamMouselookShowUI keeps the bars and open floaters (Area Search
-        // list and its beacons, minimap, ...) on screen in mouselook. The gun toolset still
-        // captures the mouse, so the UI is shown but not clickable; leaving mouselook
-        // restores as usual (the restores below are no-ops for what stayed visible, and
-        // mViewsPushed guards the floater pop).
-        static LLCachedControl<bool> mouselook_show_ui(gSavedSettings, "SlipstreamMouselookShowUI", false);
-        const bool hide_ui = !mouselook_show_ui;
-
-        // then hide stuff we want hidden for mouselook
-        if (hide_ui)
+        // #624: SlipstreamMouselookHideUI hides the UI on entering mouselook, until Hide all
+        // controls shows it again. Off, mouselook leaves the UI as it was, shown or hidden
+        // (#499: the Area Search list and its beacons, minimap, ... stay on screen). The gun
+        // toolset still captures the mouse, so a UI shown in mouselook is not clickable.
+        static LLCachedControl<bool> mouselook_hide_ui(gSavedSettings, "SlipstreamMouselookHideUI", true);
+        if (mouselook_hide_ui)
         {
-            gToolBarView->setToolBarsVisible(false);
-            gMenuBarView->setVisible(false);
-            LLNavigationBar::getInstance()->setVisible(false);
-            gStatusBar->setVisibleForMouselook(false);
+            // clean up UI
+            // first show anything hidden by UI toggle
+            gViewerWindow->setUIVisibility(true);
 
-            LLPanelTopInfoBar::getInstance()->setVisible(false);
-
-            LLChicletBar::getInstance()->setVisible(false);
-
-            LLPanelStandStopFlying::getInstance()->setVisible(false);
+            // then hide stuff we want hidden for mouselook
+            setMouselookUIHidden(true);
         }
 
         // clear out camera lag effect
@@ -2636,41 +2555,9 @@ void LLAgent::endAnimationUpdateUI()
 
         LLToolMgr::getInstance()->setCurrentToolset(gMouselookToolset);
 
-        mViewsPushed = hide_ui;
-
         if (mMouselookModeInSignal)
         {
             (*mMouselookModeInSignal)();
-        }
-
-        // hide all floaters except the mini map
-        if (hide_ui)
-        {
-#if 0 // Use this once all floaters are registered
-            std::set<std::string> exceptions;
-            exceptions.insert("mini_map");
-            LLFloaterReg::hideVisibleInstances(exceptions);
-#else // Use this for now
-            LLFloaterView::skip_list_t skip_list;
-            skip_list.insert(LLFloaterReg::findInstance("mini_map"));
-            skip_list.insert(LLFloaterReg::findInstance("beacons"));
-            // <SS:GameControl> the controller overlay, when it is set to show in mouselook
-            // (<GMDX> remembered, so leaving mouselook skips it too and doesn't pop it to
-            // the hidden state it never was pushed from)
-            sOverlaySkippedInMouselook = gSavedSettings.getBOOL("GameControlOverlayInMouselook");
-            if (sOverlaySkippedInMouselook)
-            {
-                skip_list.insert(LLFloaterReg::findInstance("game_control_overlay"));
-            }
-            // <GMDX> and the keyboard and mouse overlay, likewise
-            sInputOverlaySkippedInMouselook = gSavedSettings.getBOOL("GMDXInputOverlayInMouselook");
-            if (sInputOverlaySkippedInMouselook)
-            {
-                skip_list.insert(LLFloaterReg::findInstance("gmdx_input_overlay"));
-            }
-            // </GMDX>
-            gFloaterView->pushVisibleAll(false, skip_list);
-#endif
         }
 
         if( gMorphView )
@@ -2747,6 +2634,106 @@ void LLAgent::endAnimationUpdateUI()
     // Don't let this be called more than once if the camera
     // mode hasn't changed.  --JC
     gAgentCamera.updateLastCamera();
+}
+
+void LLAgent::setMouselookUIHidden(bool hidden)
+{
+    if (hidden == mViewsPushed)
+    {
+        return;
+    }
+    mViewsPushed = hidden;
+
+    const bool visible = !hidden;
+    gToolBarView->setToolBarsVisible(visible);
+    gMenuBarView->setVisible(visible);
+    LLNavigationBar::getInstance()->setVisible(visible && gSavedSettings.getBOOL("ShowNavbarNavigationPanel"));
+    gStatusBar->setVisibleForMouselook(visible);
+
+    static LLCachedControl<bool> show_mini_location_panel(gSavedSettings, "ShowMiniLocationPanel");
+    LLPanelTopInfoBar::getInstance()->setVisible(visible && show_mini_location_panel);
+
+    LLChicletBar::getInstance()->setVisible(visible);
+
+    LLFloaterView::skip_list_t skip_list;
+    if (LLFloaterReg::findInstance("mini_map"))
+    {
+        skip_list.insert(LLFloaterReg::findInstance("mini_map"));
+    }
+    if (LLFloaterReg::findInstance("beacons"))
+    {
+        skip_list.insert(LLFloaterReg::findInstance("beacons"));
+    }
+    if (hidden)
+    {
+        LLPanelStandStopFlying::getInstance()->setVisible(false);
+
+        // <SS:GameControl> the controller overlay, when it is set to show in mouselook
+        // (<GMDX> remembered, so showing the UI again skips it too and doesn't pop it to
+        // the hidden state it never was pushed from)
+        sOverlaySkippedInMouselook = gSavedSettings.getBOOL("GameControlOverlayInMouselook");
+        if (sOverlaySkippedInMouselook)
+        {
+            skip_list.insert(LLFloaterReg::findInstance("game_control_overlay"));
+        }
+        // and the keyboard and mouse overlay, likewise
+        sInputOverlaySkippedInMouselook = gSavedSettings.getBOOL("GMDXInputOverlayInMouselook");
+        if (sInputOverlaySkippedInMouselook)
+        {
+            skip_list.insert(LLFloaterReg::findInstance("gmdx_input_overlay"));
+        }
+        // </GMDX>
+
+        // hide all floaters except the mini map
+        gFloaterView->pushVisibleAll(false, skip_list);
+    }
+    else
+    {
+        if (sOverlaySkippedInMouselook && LLFloaterReg::findInstance("game_control_overlay"))
+        {
+            skip_list.insert(LLFloaterReg::findInstance("game_control_overlay")); // <GMDX>
+        }
+        if (sInputOverlaySkippedInMouselook && LLFloaterReg::findInstance("gmdx_input_overlay"))
+        {
+            skip_list.insert(LLFloaterReg::findInstance("gmdx_input_overlay")); // <GMDX>
+        }
+        LLFloaterIMContainer* im_box = LLFloaterReg::getTypedInstance<LLFloaterIMContainer>("im_container");
+        LLFloaterIMContainer::floater_list_t conversations;
+        im_box->getDetachedConversationFloaters(conversations);
+        for (LLFloater* conversation : conversations)
+        {
+            LL_INFOS() << "skip_list.insert(session_floater): " << conversation->getTitle() << LL_ENDL;
+            skip_list.insert(conversation);
+        }
+
+        gFloaterView->popVisibleAll(skip_list);
+    }
+}
+
+void LLAgent::toggleMouselookUI()
+{
+    // Shows what mouselook or the toggle hid. Else hides the UI like entering mouselook does
+    // with SlipstreamMouselookHideUI (shown again on leaving mouselook), or without it like
+    // the toggle does outside mouselook (still hidden after leaving it).
+    const bool toggle_hidden = gSavedSettings.getBOOL("HideUIControls");
+    if (mViewsPushed || toggle_hidden)
+    {
+        setMouselookUIHidden(false);
+        if (toggle_hidden)
+        {
+            gViewerWindow->setUIVisibility(true);
+            gSavedSettings.setBOOL("HideUIControls", false);
+        }
+    }
+    else if (gSavedSettings.getBOOL("SlipstreamMouselookHideUI"))
+    {
+        setMouselookUIHidden(true);
+    }
+    else
+    {
+        gViewerWindow->setUIVisibility(false);
+        gSavedSettings.setBOOL("HideUIControls", true);
+    }
 }
 
 boost::signals2::connection LLAgent::setMouselookModeInCallback( const camera_signal_t::slot_type& cb )
@@ -3773,11 +3760,13 @@ void LLAgent::initOriginGlobal(const LLVector3d &origin_global)
 
 bool LLAgent::leftButtonGrabbed() const
 {
-    const bool camera_mouse_look = gAgentCamera.cameraMouselook();
-    return (!camera_mouse_look && mControlsTakenCount[CONTROL_LBUTTON_DOWN_INDEX] > 0)
-        || (camera_mouse_look && mControlsTakenCount[CONTROL_ML_LBUTTON_DOWN_INDEX] > 0)
-        || (!camera_mouse_look && mControlsTakenPassedOnCount[CONTROL_LBUTTON_DOWN_INDEX] > 0)
-        || (camera_mouse_look && mControlsTakenPassedOnCount[CONTROL_ML_LBUTTON_DOWN_INDEX] > 0);
+    return leftButtonGrabbed(gAgentCamera.cameraMouselook());
+}
+
+bool LLAgent::leftButtonGrabbed(bool mouselook) const
+{
+    const U32 index = mouselook ? CONTROL_ML_LBUTTON_DOWN_INDEX : CONTROL_LBUTTON_DOWN_INDEX;
+    return mControlsTakenCount[index] > 0 || mControlsTakenPassedOnCount[index] > 0;
 }
 
 bool LLAgent::rotateGrabbed() const
@@ -4379,6 +4368,7 @@ void LLAgent::restartFailedTeleportRequest()
     if (hasRestartableFailedTeleportRequest())
     {
         mTeleportRequest->setStatus(LLTeleportRequest::kRestartPending);
+        GMDXTPFX::arm(); // <GMDX> the user said "teleport anyway" (maturity prompt)
         startTeleportRequest();
     }
 }
@@ -4632,6 +4622,7 @@ void LLAgent::teleportViaLandmark(const LLUUID& landmark_asset_id)
     {
         gAgentCamera.resetView();
     }
+    GMDXTPFX::arm(); // <GMDX> a teleport the user asked for (landmark / Home)
     mTeleportRequest = LLTeleportRequestPtr(new LLTeleportRequestViaLandmark(landmark_asset_id));
     startTeleportRequest();
 }
@@ -4672,6 +4663,7 @@ void LLAgent::doTeleportViaLandmark(const LLUUID& landmark_asset_id)
 
 void LLAgent::teleportViaLure(const LLUUID& lure_id, bool godlike)
 {
+    GMDXTPFX::arm(); // <GMDX> an accepted offer (the forced lures disarm: llimprocessing.cpp)
     mTeleportRequest = LLTeleportRequestPtr(new LLTeleportRequestViaLure(lure_id, godlike));
     startTeleportRequest();
 }
@@ -4765,6 +4757,7 @@ void LLAgent::teleportViaLocation(const LLVector3d& pos_global)
     }
 // [/RLVa:KB]
 
+    GMDXTPFX::arm(); // <GMDX> map / SLURL / places... (RLV's forced ones disarm: rlvhandler.cpp, rlvcommon.cpp)
     mTeleportRequest = LLTeleportRequestPtr(new LLTeleportRequestViaLocation(pos_global));
     startTeleportRequest();
 }
@@ -4841,6 +4834,7 @@ void LLAgent::teleportViaLocationLookAt(const LLVector3d& pos_global, const LLVe
         }
     }
 
+    GMDXTPFX::arm(); // <GMDX> as teleportViaLocation
     mTeleportRequest = LLTeleportRequestPtr(new LLTeleportRequestViaLocationLookAt(pos_global, (look_at.isExactlyZero()) ? LLViewerCamera::getInstance()->getAtAxis() : look_at));
     startTeleportRequest();
 }
@@ -5371,6 +5365,7 @@ void LLAgent::renderAutoPilotTarget()
     }
 }
 
+// Ported from GunMetal-DX (squeedledorf, LGPL 2.1), v0.3.0 cf5f1f4; Linden Lab game control (viewer PR #6202)
 static U64 g_lastUpdateTime { 0 };
 static F32 g_deltaTime { 0.0f };
 static S32 g_lastUpdateFrame { 0 };
@@ -5595,10 +5590,10 @@ void LLAgent::applyExternalActions(const LLGameControl::AgentActions& actions)
     // <SS:GameControl> Gyro aim turns the view by an angle, the way the mouse does
     // (LLToolGun::handleHover), not by a rate like the stick, so the stick still covers
     // big turns while the gyro fine-tunes. <GMDX> Aiming down sights scales it by the
-    // ratio FSADSMouseSensitivity gives the mouse (LLToolGun::handleHover). In mouselook
-    // and in OTS, which reports mouselook.
+    // ratio FSADSMouseSensitivity gives the mouse (LLToolGun::handleHover). In mouselook.
     if (gAgentCamera.cameraMouselook() && (actions.mGyroYaw != 0.f || actions.mGyroPitch != 0.f))
     {
+        // <GMDX>
         F32 scale = 1.f;
         if (FSCombatADS::isHeld())
         {
@@ -5608,12 +5603,13 @@ void LLAgent::applyExternalActions(const LLGameControl::AgentActions& actions)
             const F32 aimed = clamp_rescale((F32)ads_sens, 0.f, 15.f, 0.5f, 2.75f);
             scale = aimed / llmax(base, 0.01f);
         }
+        // </GMDX>
         pitch(-actions.mGyroPitch * scale); // pad tipped up looks up
         LLVector3 skyward = getReferenceUpVector();
         rotate(actions.mGyroYaw * scale, skyward.mV[VX], skyward.mV[VY], skyward.mV[VZ]);
     }
 
-    // <GMDX> A trackpad used as a mouse: in mouselook (and OTS) it turns the view the
+    // <GMDX> A trackpad used as a mouse: in mouselook it turns the view the
     // way LLToolGun turns it for the mouse, scaled by the field of view and by the
     // aim-down-sights ratio; anywhere else it moves the cursor.
     if (actions.mPadDX != 0.f || actions.mPadDY != 0.f)
@@ -5651,11 +5647,23 @@ void LLAgent::applyExternalActions(const LLGameControl::AgentActions& actions)
         return;
     }
 
+    // The third-person shooter camera (SLTPSCamera) resolves on-foot movement relative to
+    // the camera, and the stick orbits that camera instead of turning the body, exactly
+    // as the keys do (see agent_push_forwardbackward() in llviewerinput.cpp).
+    const bool tps_on_foot = SLTPSCamera::isEngagedOnFoot();
+
     S32 direction = (S32)(mExternalActionFlags & AGENT_CONTROL_AT_POS)
         - (S32)((mExternalActionFlags & AGENT_CONTROL_AT_NEG) >> 1);
     if (direction != 0)
     {
-        moveAt(direction);
+        if (tps_on_foot)
+        {
+            SLTPSCamera::getInstance()->addMoveInput(direction, 0, false);
+        }
+        else
+        {
+            moveAt(direction);
+        }
     }
 
     static U32 last_non_fly_frame = 0;
@@ -5702,7 +5710,14 @@ void LLAgent::applyExternalActions(const LLGameControl::AgentActions& actions)
         - (S32)((mExternalActionFlags & AGENT_CONTROL_LEFT_NEG) >> 1);
     if (direction != 0)
     {
-        moveLeft(direction);
+        if (tps_on_foot)
+        {
+            SLTPSCamera::getInstance()->addMoveInput(0, direction, false);
+        }
+        else
+        {
+            moveLeft(direction);
+        }
     }
 
     direction = (S32)(mExternalActionFlags & AGENT_CONTROL_YAW_POS)
@@ -5713,14 +5728,30 @@ void LLAgent::applyExternalActions(const LLGameControl::AgentActions& actions)
         // actions.mYawAmplitude is the analog stick deflection ([-1, 1]) that
         // set this flag; use its magnitude to modulate turn speed instead of
         // always snapping to full rate
-        moveYaw(sign * fabs(actions.mYawAmplitude));
+        if (tps_on_foot && gAgentCamera.tpsCameraActive())
+        {
+            constexpr F32 TPS_ORBIT_RATE = 2.f; // radians per second at full deflection
+            gAgentCamera.tpsCameraOrbit(sign * fabs(actions.mYawAmplitude) * TPS_ORBIT_RATE * g_deltaTime, 0.f);
+        }
+        else
+        {
+            moveYaw(sign * fabs(actions.mYawAmplitude));
+        }
     }
 
     {
         F32 pitch_sign = ((mExternalActionFlags & AGENT_CONTROL_PITCH_POS) > 0 ? 1.0f : 0.0f)
             - ((mExternalActionFlags & AGENT_CONTROL_PITCH_NEG) > 0 ? 1.0f : 0.0f);
         // Same analog modulation as yaw above, via actions.mPitchAmplitude.
-        movePitch(pitch_sign * fabs(actions.mPitchAmplitude));
+        if (tps_on_foot && gAgentCamera.tpsCameraActive())
+        {
+            constexpr F32 TPS_ORBIT_RATE = 2.f; // radians per second at full deflection
+            gAgentCamera.tpsCameraOrbit(0.f, pitch_sign * fabs(actions.mPitchAmplitude) * TPS_ORBIT_RATE * g_deltaTime);
+        }
+        else
+        {
+            movePitch(pitch_sign * fabs(actions.mPitchAmplitude));
+        }
     }
 
     // actions.mZoomAmplitude ([-1, 1], from "Zoom +/-"/"Zoom +"/"Zoom -") drives the

@@ -34,6 +34,8 @@
 #include "llcolorswatch.h"
 #include "llvirtualtrackball.h"
 #include "llsettingssky.h"
+#include "llhazeenv.h"
+#include "lltextbox.h"
 #include "llenvironment.h"
 #include "llviewercontrol.h"
 
@@ -45,6 +47,12 @@ namespace
     const std::string   FIELD_SKY_BLUE_DENSITY("blue_density");
     const std::string   FIELD_SKY_HAZE_HORIZON("haze_horizon");
     const std::string   FIELD_SKY_HAZE_DENSITY("haze_density");
+    const std::string   FIELD_HAZE_START_AUTO("haze_start_auto");
+    const std::string   FIELD_HAZE_START("haze_start");
+    const std::string   FIELD_HAZE_OPACITY_AUTO("haze_opacity_auto");
+    const std::string   FIELD_HAZE_OPACITY("haze_opacity");
+    const std::string   FIELD_HAZE_START_STATUS("haze_start_status");
+    const std::string   FIELD_HAZE_OPACITY_STATUS("haze_opacity_status");
     const std::string   FIELD_SKY_SCENE_GAMMA("scene_gamma");
     const std::string   FIELD_SKY_DENSITY_MULTIP("density_multip");
     const std::string   FIELD_SKY_DISTANCE_MULTIP("distance_multip");
@@ -153,9 +161,43 @@ bool LLPanelSettingsSkyAtmosTab::postBuild()
     getChild<LLUICtrl>(FIELD_SKY_DENSITY_DROPLET_RADIUS)->setCommitCallback([this](LLUICtrl *, const LLSD &) { onDropletRadiusChanged(); });
     getChild<LLUICtrl>(FIELD_SKY_DENSITY_ICE_LEVEL)->setCommitCallback([this](LLUICtrl *, const LLSD &) { onIceLevelChanged(); });
     getChild<LLUICtrl>(FIELD_REFLECTION_PROBE_AMBIANCE)->setCommitCallback([this](LLUICtrl*, const LLSD&) { onReflectionProbeAmbianceChanged(); });
+    for (const auto &field : { FIELD_HAZE_START_AUTO, FIELD_HAZE_START })
+        getChild<LLUICtrl>(field)->setCommitCallback([this](LLUICtrl *, const LLSD &) { onHazeGuardrailChanged(false); });
+    for (const auto &field : { FIELD_HAZE_OPACITY_AUTO, FIELD_HAZE_OPACITY })
+        getChild<LLUICtrl>(field)->setCommitCallback([this](LLUICtrl *, const LLSD &) { onHazeGuardrailChanged(true); });
     refresh();
 
     return true;
+}
+
+void LLPanelSettingsSkyAtmosTab::draw()
+{
+    updateHazeStatus();
+    LLPanelSettingsSky::draw();
+}
+
+void LLPanelSettingsSkyAtmosTab::updateHazeStatus()
+{
+    if (!mSkySettings) return;
+    const LLHazeDisplay display = llGetHazeDisplay(*mSkySettings);
+    if (!mSkySettings->hasSetting(LLSettingsSky::SETTING_SL_HAZE_START_DISTANCE))
+        getChild<LLUICtrl>(FIELD_HAZE_START)->setValue(display.startDistance);
+    if (!mSkySettings->hasSetting(LLSettingsSky::SETTING_SL_HAZE_MAX_OPACITY))
+        getChild<LLUICtrl>(FIELD_HAZE_OPACITY)->setValue(100.0 * display.maxOpacity);
+    auto show_status = [this, &display](const std::string &field, LLHaze::Source source)
+    {
+        LLTextBox *status = getChild<LLTextBox>(field);
+        if (!display.physicalActive && source == LLHaze::Source::User)
+            status->setText(LLStringExplicit("Inactive; local override set"));
+        else if (!display.physicalActive)
+            status->setText(LLStringExplicit("Inactive: physical sky is off"));
+        else if (source == LLHaze::Source::User)
+            status->setText(LLStringExplicit("Preview uses local override"));
+        else
+            status->setText(LLStringExplicit(""));
+    };
+    show_status(FIELD_HAZE_START_STATUS, display.startSource);
+    show_status(FIELD_HAZE_OPACITY_STATUS, display.opacitySource);
 }
 
 //virtual
@@ -194,6 +236,16 @@ void LLPanelSettingsSkyAtmosTab::refresh()
     getChild<LLColorSwatchCtrl>(FIELD_SKY_AMBIENT_LIGHT)->set(mSkySettings->getAmbientColor() / SLIDER_SCALE_SUN_AMBIENT);
     getChild<LLColorSwatchCtrl>(FIELD_SKY_BLUE_HORIZON)->set(mSkySettings->getBlueHorizon() / SLIDER_SCALE_BLUE_HORIZON_DENSITY);
     getChild<LLColorSwatchCtrl>(FIELD_SKY_BLUE_DENSITY)->set(mSkySettings->getBlueDensity() / SLIDER_SCALE_BLUE_HORIZON_DENSITY);
+
+    const LLHazeDisplay haze_display = llGetHazeDisplay(*mSkySettings);
+    const bool has_start = mSkySettings->hasSetting(LLSettingsSky::SETTING_SL_HAZE_START_DISTANCE);
+    const bool has_opacity = mSkySettings->hasSetting(LLSettingsSky::SETTING_SL_HAZE_MAX_OPACITY);
+    getChild<LLUICtrl>(FIELD_HAZE_START_AUTO)->setValue(!has_start);
+    getChild<LLUICtrl>(FIELD_HAZE_OPACITY_AUTO)->setValue(!has_opacity);
+    getChild<LLUICtrl>(FIELD_HAZE_START)->setValue(has_start ? mSkySettings->getValue(LLSettingsSky::SETTING_SL_HAZE_START_DISTANCE).asReal() : haze_display.startDistance);
+    getChild<LLUICtrl>(FIELD_HAZE_OPACITY)->setValue(has_opacity ? 100.0 * mSkySettings->getValue(LLSettingsSky::SETTING_SL_HAZE_MAX_OPACITY).asReal() : 100.0 * haze_display.maxOpacity);
+    getChild<LLUICtrl>(FIELD_HAZE_START)->setEnabled(getCanChangeSettings() && has_start);
+    getChild<LLUICtrl>(FIELD_HAZE_OPACITY)->setEnabled(getCanChangeSettings() && has_opacity);
 
     getChild<LLUICtrl>(FIELD_SKY_HAZE_HORIZON)->setValue(mSkySettings->getHazeHorizon());
     getChild<LLUICtrl>(FIELD_SKY_HAZE_DENSITY)->setValue(mSkySettings->getHazeDensity());
@@ -258,6 +310,27 @@ void LLPanelSettingsSkyAtmosTab::onHazeDensityChanged()
     mSkySettings->setHazeDensity((F32)getChild<LLUICtrl>(FIELD_SKY_HAZE_DENSITY)->getValue().asReal());
     mSkySettings->update();
     setIsDirty();
+}
+
+void LLPanelSettingsSkyAtmosTab::onHazeGuardrailChanged(bool opacity)
+{
+    if (!mSkySettings) return;
+    const std::string &key = opacity ? LLSettingsSky::SETTING_SL_HAZE_MAX_OPACITY : LLSettingsSky::SETTING_SL_HAZE_START_DISTANCE;
+    const std::string &automatic = opacity ? FIELD_HAZE_OPACITY_AUTO : FIELD_HAZE_START_AUTO;
+    const std::string &field = opacity ? FIELD_HAZE_OPACITY : FIELD_HAZE_START;
+    if (getChild<LLUICtrl>(automatic)->getValue().asBoolean())
+        mSkySettings->clearHazeGuardrail(key);
+    else
+    {
+        const bool was_automatic = !mSkySettings->hasSetting(key);
+        const LLHazeDisplay display = llGetHazeDisplay(*mSkySettings);
+        const F64 value = was_automatic ? (opacity ? display.maxOpacity : display.startDistance)
+                                      : getChild<LLUICtrl>(field)->getValue().asReal() / (opacity ? 100.0 : 1.0);
+        mSkySettings->setValue(key, LLSD::Real(value));
+    }
+    mSkySettings->update();
+    setIsDirty();
+    refresh();
 }
 
 void LLPanelSettingsSkyAtmosTab::onSceneGammaChanged()

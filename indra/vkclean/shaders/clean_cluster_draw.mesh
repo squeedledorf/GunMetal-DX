@@ -23,8 +23,8 @@ layout(location = 0) flat out uint v_material_id[];
 layout(location = 1) invariant out vec2 v_uv[];   // (invariant: as the VS tiers)
 layout(location = 3) flat out vec4 v_tint[];
 layout(location = 4) flat out uint v_flags[];
-layout(location = 16) invariant out vec4 v_rez[];       // <GMDX> rez effects: none on the cluster path
-layout(location = 17) invariant flat out vec4 v_rez_box[];        // <GMDX>
+layout(location = 16) invariant out vec4 v_rez[];
+layout(location = 17) invariant flat out vec4 v_rez_box[];
 #endif
 // (declaration order as before the slim variants: the full variant's module is unchanged)
 #ifdef CLEAN_VS_NORMAL_FRAME
@@ -73,8 +73,8 @@ void main()
         v_uv[t]            = o.uv;
         v_tint[t]          = o.tint;
         v_flags[t]         = o.flags;
-        v_rez[t]           = vec4(0.0);   // <GMDX>
-        v_rez_box[t]       = vec4(0.0);   // <GMDX>
+        v_rez[t]           = o.rez;
+        v_rez_box[t]       = o.rez_box;
 #endif
 #ifdef CLEAN_VS_NORMAL_FRAME
         v_world_normal[t]  = o.world_normal;

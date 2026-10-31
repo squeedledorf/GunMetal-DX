@@ -1,12 +1,13 @@
 #version 450
-// <GMDX> upstream's clean_vol_cloud_shadowmap.comp on the GunMetal-DX cloud model (gmdx_cloud_common.glsl).
 #extension GL_GOOGLE_include_directive : require
-// vkclean -- VOLUMETRIC CLOUDS (#719): the CLOUD SHADOW MAP (top-down sun / moon transmittance).
+// GUNMETAL-DX VOLUMETRIC CLOUDS: the CLOUD SHADOW MAP (top-down sun / moon transmittance) on
+// GunMetal-DX's cloud model (gmdx_cloud_common.glsl; Slipstream's clean_vol_cloud_shadowmap.comp
+// with the same contract). Copyright (C) 2026, squeedledorf (GunMetal-DX). LGPL 2.1, as the viewer.
 //
 // 512^2 texels over vc.shadow.z metres around the camera (centre snapped to the texel grid by
-// the CPU), rebuilt every few frames (and at once when the light turns or the camera leaves
-// the middle of the map); between rebuilds the lookup's centre follows the wind (the CPU
-// moves ssr.vol_clouds[1].xy with the EEP scroll), so the shadows drift with the clouds.
+// the CPU), rebuilt every few frames (and at once when the light turns, the camera leaves the
+// middle of the map or the agent frame moves); between rebuilds the lookup's centre follows the
+// wind (the CPU moves ssr.vol_clouds[1].xy), so the shadows drift with the clouds.
 //
 // Texel convention (clean_cloud_shadow_map.glsl): the light ray that crosses the BASE plane
 // at the texel's world xy, integrated from the base to the top of the shell along the light

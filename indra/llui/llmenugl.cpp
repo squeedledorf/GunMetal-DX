@@ -3359,6 +3359,9 @@ void hide_top_view( LLView* view )
 // static
 void LLMenuGL::showPopup(LLView* spawning_view, LLMenuGL* menu, S32 x, S32 y, S32 mouse_x, S32 mouse_y)
 {
+    // Cached menus follow the UI window that opened them. Their branches must
+    // move too; keeping a main-window parent puts the menu on the wrong surface.
+    if (sMenuContainer && menu->getRootView() != sMenuContainer->getRootView()) menu->updateParent(sMenuContainer);
     const S32 CURSOR_HEIGHT = 22;       // Approximate "normal" cursor size
     const S32 CURSOR_WIDTH = 12;
 
@@ -4261,6 +4264,7 @@ void LLContextMenu::setVisible(bool visible)
 // Takes cursor position in screen space?
 void LLContextMenu::show(S32 x, S32 y, LLView* spawning_view)
 {
+    if (sMenuContainer && getRootView() != sMenuContainer->getRootView()) updateParent(sMenuContainer);
     if (getChildList()->empty())
     {
         // nothing to show, so abort

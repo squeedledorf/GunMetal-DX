@@ -31,6 +31,9 @@
 #include "llsdserialize.h"
 
 #include "../llinventory.h"
+#include "../llsettingssky.h"
+#include "llhazesky.h"
+#include <limits>
 #include "../test/lltut.h"
 
 
@@ -581,5 +584,244 @@ namespace tut
         ensure("6.LLInventoryItem::fromLLSD()", dst->fromLLSD(sd2));
         ensure_equals("7.owner replaced", dst->getPermissions().getOwner(), new_owner);
         ensure("8.creator reset to default", dst->getPermissions().getCreator().isNull());
+    }
+}
+
+namespace tut
+{
+    struct haze_settings_data {};
+    typedef test_group<haze_settings_data> haze_settings_test;
+    typedef haze_settings_test::object haze_settings_object;
+    haze_settings_test haze_settings("Haze sky settings");
+
+    template<> template<>
+    void haze_settings_object::test<1>()
+    {
+        const std::string &start = LLSettingsSky::SETTING_SL_HAZE_START_DISTANCE;
+        const std::string &opacity = LLSettingsSky::SETTING_SL_HAZE_MAX_OPACITY;
+        LLSD values = LLSD::emptyMap();
+        LLSettingsSky::normalizeHazeGuardrails(values);
+        ensure("absent fields remain absent", !values.has(start) && !values.has(opacity));
+        values[start] = LLSD::Integer(600);
+        values[opacity] = LLSD::Real(-0.1);
+        LLSettingsSky::normalizeHazeGuardrails(values);
+        ensure("integer converted to real", values[start].type() == LLSD::TypeReal);
+        ensure_equals("start clamped", values[start].asReal(), 512.0);
+        ensure_equals("opacity clamped", values[opacity].asReal(), 0.0);
+        values[start] = "bad";
+        values[opacity] = LLSD::Real(std::numeric_limits<F64>::infinity());
+        LLSettingsSky::normalizeHazeGuardrails(values);
+        ensure("bad values removed independently", !values.has(start) && !values.has(opacity));
+    }
+
+    template<> template<>
+    void haze_settings_object::test<2>()
+    {
+        const std::string &start = LLSettingsSky::SETTING_SL_HAZE_START_DISTANCE;
+        const std::string &opacity = LLSettingsSky::SETTING_SL_HAZE_MAX_OPACITY;
+        for (bool partial : { false, true })
+        {
+            LLSD values = LLSettingsSky::defaults();
+            values[start] = LLSD::Real(0.0);
+            LLSD result = LLSettingsSky::validateSkySettings(values, partial);
+            ensure("sky validation succeeds", result["success"].asBoolean());
+            ensure("zero preserved", values.has(start) && values[start].asReal() == 0.0);
+            ensure("automatic opacity remains absent", !values.has(opacity));
+            std::ostringstream stream;
+            LLSDSerialize::toXML(values, stream);
+            std::istringstream input(stream.str());
+            LLSD restored;
+            LLSDSerialize::fromXML(restored, input);
+            ensure("serialized presence retained", restored.has(start) && !restored.has(opacity));
+            ensure("serialized value is real", restored[start].type() == LLSD::TypeReal);
+        }
+    }
+}
+
+namespace tut
+{
+    class TestHazeSky : public LLSettingsSky
+    {
+    public:
+        explicit TestHazeSky(const LLSD &settings) : LLSettingsSky(settings) {}
+        void installTransition(const LLHaze::Transition &transition) { mHazeTransition = transition; }
+        ptr_t buildClone() override
+        {
+            auto clone = std::make_shared<TestHazeSky>(cloneSettings());
+            clone->copyHazeTransitionFrom(*this);
+            return clone;
+        }
+    };
+
+    template<> template<>
+    void haze_settings_object::test<3>()
+    {
+        const auto &start = LLSettingsSky::SETTING_SL_HAZE_START_DISTANCE;
+        const auto &opacity = LLSettingsSky::SETTING_SL_HAZE_MAX_OPACITY;
+        for (bool partial : { false, true })
+        {
+            LLSD values = LLSettingsSky::defaults();
+            values[start] = LLSD::Integer(12);
+            values[opacity] = LLSD::Real(std::numeric_limits<F64>::quiet_NaN());
+            ensure("invalid optional key does not invalidate sky", LLSettingsSky::validateSkySettings(values, partial)["success"].asBoolean());
+            ensure("integer normalized before validator", values[start].type() == LLSD::TypeReal && values[start].asReal() == 12.0);
+            ensure("nonfinite optional key removed", !values.has(opacity));
+        }
+    }
+
+    template<> template<>
+    void haze_settings_object::test<4>()
+    {
+        const auto &start = LLSettingsSky::SETTING_SL_HAZE_START_DISTANCE;
+        const auto &opacity = LLSettingsSky::SETTING_SL_HAZE_MAX_OPACITY;
+        LLSD first = LLSettingsSky::defaults();
+        LLSD last = LLSettingsSky::defaults();
+        first[start] = LLSD::Real(10.0);
+        last[start] = LLSD::Real(30.0);
+        last[opacity] = LLSD::Real(0.8);
+        auto sky = std::make_shared<TestHazeSky>(first);
+        LLSettingsBase::ptr_t end = std::make_shared<TestHazeSky>(last);
+        sky->blend(end, 0.25);
+        const auto *transition = sky->getHazeTransition();
+        ensure("transition exists", transition != nullptr);
+        ensure("endpoint presence independent", !transition->from.saved.maxOpacity.present && transition->to.saved.maxOpacity.present);
+        ensure_approximately_equals("manual endpoint blend", LLHaze::resolveTransition(*transition).startDistance.value, 15.0, 4);
+        ensure("automatic value not baked", !sky->getSettings().has(opacity));
+        auto clone = sky->buildClone();
+        ensure("clone keeps metadata", clone->getHazeTransition() != nullptr);
+        auto target = std::make_shared<TestHazeSky>(first);
+        LLSettingsBase::ptr_t initial = clone;
+        target->replaceSettings(initial);
+        ensure("pointer replacement keeps transition for blender evaluation", target->getHazeTransition() != nullptr);
+        LLSettingsBase::ptr_t target_base = target;
+        LLSettingsBlender blender(target_base, initial, end);
+        ensure("blender initialization preserves transition", target->getHazeTransition() != nullptr);
+        blender.setBlendFactor(0.0);
+        const auto first_blend = LLHaze::resolveTransition(*target->getHazeTransition());
+        ensure_approximately_equals("blender begins at interrupted preview", first_blend.startDistance.value,
+                                    LLHaze::resolveTransition(*clone->getHazeTransition()).startDistance.value, 16);
+        blender.setBlendFactor(0.5);
+        const auto midpoint = LLHaze::resolveTransition(*target->getHazeTransition());
+        const auto last_endpoint = LLHaze::resolveEndpoint(target->getHazeTransition()->to);
+        ensure_approximately_equals("blender evaluates from original frozen endpoint", midpoint.startDistance.value,
+                                    (first_blend.startDistance.value + last_endpoint.startDistance.value) * .5, 16);
+        const LLHaze::Pair before = LLHaze::resolveTransition(*clone->getHazeTransition());
+        LLSettingsBase::ptr_t another = std::make_shared<TestHazeSky>(first);
+        clone->blend(another, 0.0);
+        const auto *interrupted = clone->getHazeTransition();
+        ensure("interrupted transition is frozen", interrupted && interrupted->from.frozen);
+        ensure_approximately_equals("interrupted start continuous", LLHaze::resolveTransition(*interrupted).startDistance.value, before.startDistance.value, 4);
+        ensure_approximately_equals("interrupted opacity continuous", LLHaze::resolveTransition(*interrupted).maxOpacity.value, before.maxOpacity.value, 4);
+        ensure("freeze not serialized", !clone->getSettings().has(opacity));
+        clone->setValue(start, LLSD::Real(0.0));
+        ensure("explicit edit clears metadata", !clone->getHazeTransition());
+        clone->clearHazeGuardrail(start);
+        ensure("automatic removes field", !clone->getSettings().has(start));
+    }
+}
+
+namespace tut
+{
+    template<> template<>
+    void haze_settings_object::test<5>()
+    {
+        struct RestorePolicy
+        {
+            bool original = LLHaze::illuminationPolicy().physicalNight;
+            ~RestorePolicy() { LLHaze::illuminationPolicy().physicalNight = original; }
+        } restore;
+
+        // A night sky with a visible moon makes the two physical-night policies differ.
+        LLHaze::illuminationPolicy().physicalNight = false;
+        LLHaze::Endpoint raw;
+        raw.hasLighting = true;
+        raw.lighting.sun = {0., 0., -1.};
+        raw.lighting.moon = {0., 0., 1.};
+        raw.inputs.illuminationRatio = LLHaze::illumination(raw.lighting, false) / LLHaze::referenceIllumination();
+        LLHaze::Endpoint frozen;
+        frozen.frozen = true;
+        frozen.snapshot.startDistance = {6., LLHaze::Source::Sky};
+        frozen.snapshot.maxOpacity = {.7, LLHaze::Source::Sky};
+        LLHaze::Transition old{raw, frozen, .4};
+        const LLHaze::Pair stale = LLHaze::resolveTransition(old);
+        LLHaze::illuminationPolicy().physicalNight = true;
+        LLHaze::Transition refreshed = old;
+        llHazeRefreshTransition(refreshed);
+        const LLHaze::Pair expected = LLHaze::resolveTransition(refreshed);
+        ensure("policy toggle changes unfrozen endpoint", std::abs(expected.startDistance.value - stale.startDistance.value) > .0001);
+        ensure("refresh keeps frozen snapshot", refreshed.to.snapshot.startDistance.value == 6. && refreshed.to.snapshot.maxOpacity.value == .7);
+
+        LLSD values = LLSettingsSky::defaults();
+        const auto &start = LLSettingsSky::SETTING_SL_HAZE_START_DISTANCE;
+        const auto &opacity = LLSettingsSky::SETTING_SL_HAZE_MAX_OPACITY;
+        auto from = std::make_shared<TestHazeSky>(values);
+        auto to = std::make_shared<TestHazeSky>(values);
+        from->installTransition(old);
+        to->installTransition(old);
+        LLSettingsBase::ptr_t end = to;
+        from->blend(end, .5);
+        const LLHaze::Transition *current = from->getHazeTransition();
+        ensure("both interrupted endpoints frozen", current && current->from.frozen && current->to.frozen);
+        ensure_approximately_equals("source uses refreshed start", current->from.snapshot.startDistance.value, expected.startDistance.value, 20);
+        ensure_approximately_equals("source uses refreshed opacity", current->from.snapshot.maxOpacity.value, expected.maxOpacity.value, 20);
+        ensure_approximately_equals("destination uses refreshed start", current->to.snapshot.startDistance.value, expected.startDistance.value, 20);
+        ensure_approximately_equals("destination uses refreshed opacity", current->to.snapshot.maxOpacity.value, expected.maxOpacity.value, 20);
+        ensure("destination metadata was not modified", to->getHazeTransition()->from.inputs.illuminationRatio == old.from.inputs.illuminationRatio);
+        ensure("automatic keys remain absent", !from->getSettings().has(start) && !from->getSettings().has(opacity));
+    }
+}
+
+namespace tut
+{
+    template<> template<>
+    void haze_settings_object::test<6>()
+    {
+        const auto &start = LLSettingsSky::SETTING_SL_HAZE_START_DISTANCE;
+        const auto &opacity = LLSettingsSky::SETTING_SL_HAZE_MAX_OPACITY;
+        LLSD values = LLSettingsSky::defaults();
+        auto source = std::make_shared<TestHazeSky>(values);
+        LLSettingsBase::ptr_t other = std::make_shared<TestHazeSky>(values);
+        source->blend(other, .5);
+        ensure("ordinary sky blend retains endpoint metadata", source->getHazeTransition() != nullptr);
+        auto edited = source->buildClone();
+        const LLHaze::Pair before = LLHaze::resolveTransition(*edited->getHazeTransition());
+        edited->setHazeDensity(0.f);
+        ensure("existing density edit clears blended metadata", !edited->getHazeTransition());
+        const LLHaze::Endpoint endpoint = llHazeEndpoint(*edited);
+        const LLHaze::Pair after = LLHaze::resolveEndpoint(endpoint);
+        ensure("automatic resolves from edited density", endpoint.inputs.hazeDensity == 0. &&
+               std::abs(after.maxOpacity.value - before.maxOpacity.value) > .0001);
+        ensure("automatic values are not saved", !edited->getSettings().has(start) && !edited->getSettings().has(opacity));
+
+        const auto check_edit = [&](const char *label, const auto &edit)
+        {
+            auto sky = source->buildClone();
+            edit(*sky);
+            ensure(label, !sky->getHazeTransition());
+            ensure("edit preserves automatic presence", !sky->getSettings().has(start) && !sky->getSettings().has(opacity));
+        };
+        check_edit("density multiplier clears metadata", [](LLSettingsSky &sky) { sky.setDensityMultiplier(.0002f); });
+        check_edit("distance multiplier clears metadata", [](LLSettingsSky &sky) { sky.setDistanceMultiplier(2.f); });
+        check_edit("maximum altitude clears metadata", [](LLSettingsSky &sky) { sky.setMaxY(1000.f); });
+        check_edit("ambient clears metadata", [](LLSettingsSky &sky) { sky.setAmbientColor(LLColor3(.3f, .4f, .5f)); });
+        check_edit("blue density clears metadata", [](LLSettingsSky &sky) { sky.setBlueDensity(LLColor3(.2f, .3f, .4f)); });
+        check_edit("sunlight clears metadata", [](LLSettingsSky &sky) { sky.setSunlightColor(LLColor3(.5f, .6f, .7f)); });
+        check_edit("sun rotation clears metadata", [](LLSettingsSky &sky) { sky.setSunRotation(LLQuaternion()); });
+        check_edit("moon rotation clears metadata", [](LLSettingsSky &sky) { sky.setMoonRotation(LLQuaternion()); });
+        check_edit("moon brightness clears metadata", [](LLSettingsSky &sky) { sky.setMoonBrightness(.2f); });
+    }
+
+    template<> template<>
+    void haze_settings_object::test<7>()
+    {
+        // Exercise the legacy ambient conversion inside blend: it must not look
+        // like a creator edit and clear the newly constructed endpoints.
+        LLSD left = LLSettingsSky::defaults();
+        left.erase(LLSettingsSky::SETTING_LEGACY_HAZE);
+        left[LLSettingsSky::SETTING_AMBIENT] = LLColor3(.2f, .3f, .4f).getValue();
+        auto sky = std::make_shared<TestHazeSky>(left);
+        LLSettingsBase::ptr_t end = std::make_shared<TestHazeSky>(LLSettingsSky::defaults());
+        sky->blend(end, .5);
+        ensure("legacy ambient blend retains transition metadata", sky->getHazeTransition() != nullptr);
     }
 }

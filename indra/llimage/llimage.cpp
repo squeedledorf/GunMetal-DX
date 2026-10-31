@@ -691,7 +691,9 @@ U8* LLImageBase::allocateData(S32 size)
 
     if (size < 0)
     {
-        size = mWidth * mHeight * mComponents;
+        // 64-bit: decoder dimensions come from file headers and can multiply past S32
+        const S64 dims_size = (S64)mWidth * mHeight * mComponents;
+        size = (dims_size > (S64)MAX_BUFFER_SIZE) ? (S32)MAX_BUFFER_SIZE + 1 : (S32)dims_size;
         if (size <= 0)
         {
             LL_WARNS() << llformat("LLImageBase::allocateData called with bad dimensions: %dx%dx%d",mWidth,mHeight,(S32)mComponents) << LL_ENDL;

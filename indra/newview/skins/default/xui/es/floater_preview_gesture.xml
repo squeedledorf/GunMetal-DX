@@ -37,8 +37,8 @@
 	<text name="key_label">
 		Atajo de teclado:
 	</text>
-	<combo_box label="Ninguno" name="modifier_combo" width="76"/>
-	<combo_box label="Ninguno" name="key_combo" width="50"/>
+	<combo_box label="Ninguno" name="modifier_combo" width="72"/>
+	<combo_box label="Ninguno" name="key_combo" width="54"/>
 	<text name="library_label">
 		Biblioteca:
 	</text>

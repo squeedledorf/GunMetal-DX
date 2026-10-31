@@ -39,7 +39,8 @@ layout(std430, set = 0, binding = 4) readonly buffer CCount { uint cluster_count
 layout(std430, set = 0, binding = 5) readonly buffer CIndex { uint cluster_index[]; };
 layout(std140, set = 0, binding = 6) uniform LInfo { LightInfo linfo; };   // (draw set 0: UBO, #814)
 #include "clean_frame_info.glsl"
-#define PHYSKY_NOT_IN_PROBES   // (clean_atmos_common.glsl: the probes see the WindLight sky)
+// RT and raster captures share physical transmittance/MS tables and evaluate their own altitude.
+#define CLEAN_CAPTURE_LEGACY_SKY // retain physical-off capture sky/space policy
 #include "clean_atmos_common.glsl"
 layout(set = 1, binding = 0) uniform sampler2D uTextures[];
 #include "clean_clouds.glsl"
@@ -53,6 +54,7 @@ layout(set = 1, binding = 0) uniform sampler2D uTextures[];
 layout(set = 0, binding = 18) uniform sampler2DShadow uProjShadowAtlas;
 layout(set = 0, binding = 29) uniform sampler2DShadow uProjTransDepth;
 layout(set = 0, binding = 30) uniform sampler2D uProjTransColor;
+#define RT_SHADOW_ORTHO false
 #include "clean_shadow_rt.glsl"
 #include "clean_rt_surface.glsl"
 #include "clean_cloud_shadow_map.glsl"   // #719: rtHitSunShadow x the cloud shadow (draw set 0 binding 46)
@@ -137,6 +139,7 @@ void main()
               | ((j.info.z & PJ_DYNAMIC) != 0u ? PRT_DYNAMIC : 0u)
               | ((j.info.z & PJ_SKY) != 0u ? PRT_SKY_ONLY : 0u);
     }
+    g_cm_capture_sky=cmOn(); g_cm_secondary_sky=cmOn(); g_cm_sky_origin=origin.xyz;
     vec3 col;
     if ((flags & PRT_SKY_ONLY) != 0u)
     {

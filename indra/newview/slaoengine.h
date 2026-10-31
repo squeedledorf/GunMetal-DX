@@ -345,6 +345,10 @@ private:
     bool mBodyTakeover = false;
     bool mSeatAnimates = false;
     bool mServerOverride = false;
+    // <GMDX> A server-side override whatever its priority, told from a gesture by
+    // its reaction to movement (slaoengine.cpp onSelfAnimations / scanForeign)
+    bool mReactiveOverride = false;
+    std::set<LLUUID> mReactiveAnims;
     LLUUID mTakeoverSource;
     LLUUID mTakeoverAnim;
     std::set<LLUUID> mAnimatingSeats;

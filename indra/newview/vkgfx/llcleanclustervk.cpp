@@ -385,7 +385,7 @@ void LLCleanClusterVK::recordFrameStart(VkCommandBuffer cmd, bool cmd_async)
     }
 }
 
-uint32_t LLCleanClusterVK::recordCull(VkCommandBuffer cmd, const LLClusterViewIn& view)
+uint32_t LLCleanClusterVK::recordCull(VkCommandBuffer cmd, const LLClusterViewIn& view, bool track_main)
 {
     if (!mReady) return kNone;
     // FIXED-COST AUDIT (2026-10-14): a SECONDARY view (sun cascade, mirror) selects STATIC
@@ -412,25 +412,28 @@ uint32_t LLCleanClusterVK::recordCull(VkCommandBuffer cmd, const LLClusterViewIn
     if (v.role < CLROLE_OTHER && !(v.flags & CLV_RT))
         mControl.applyView(v.role, v.sub, v.cam_pos, (v.flags & CLV_ORTHO) != 0u, v.px_scale, v.tol_px, v.lod_cam);
     const uint32_t idx = mSelect->recordSelect(cmd, v);
-    if ((v.flags & CLV_MAIN) && !(v.flags & CLV_ORTHO) && idx != kNone)
-    {   // (shadowLiftBound: the projection this selection used)
+    if ((v.flags & CLV_MAIN) && track_main && idx != kNone)
+    {   // The main RT cut and receiver lift share this selection, including a live ortho view.
         mMainTolPx = v.tol_px;
         mMainPxScale = v.px_scale;
         mMainZnear = v.znear;
+        mMainOrtho = (v.flags & CLV_ORTHO) != 0u;
         mMainViewFrame = mFrame;
         mMainView = idx;
     }
     return idx;
 }
 
-bool LLCleanClusterVK::shadowLiftBound(float& m_per_m, float& znear) const
+bool LLCleanClusterVK::shadowLiftBound(float& m_per_m, float& znear, bool& ortho) const
 {
     m_per_m = 0.f;
     znear = 0.1f;
+    ortho = false;
     if (!mReady || !mSkin || mMainViewFrame != mFrame || mSkin->avatarsOnCluster() == 0) return false;
     if (!(mMainPxScale > 0.f) || !std::isfinite(mMainTolPx) || !(mMainTolPx > 0.f)) return false;
     m_per_m = mMainTolPx / mMainPxScale;
     znear = std::max(mMainZnear, 1.0e-3f);
+    ortho = mMainOrtho;
     return std::isfinite(m_per_m);
 }
 

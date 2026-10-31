@@ -48,7 +48,7 @@ void gbufferPack(SurfaceLit s, float glow, bool noFade,
     if (s.model == SURF_PBR)            { a = s.ao;  x = s.rough; y = s.metal; e = s.emissive; }
     else if (s.model == SURF_LEGACY)    { a = s.env; x = s.gloss; y = s.emask; e = s.spec; }   // <GMDX> y
     else if (s.model == SURF_FULLBRIGHT){ a = s.env; }
-    // <GMDX> rez effect: a legacy face's emission takes G3 (its specular colour drops there)
+    // <GMDX> rez effect (CombatFX): a legacy face's emission takes G3 (its specular colour drops there)
     const bool rezfx = s.model == SURF_LEGACY && max(max(s.emissive.r, s.emissive.g), s.emissive.b) > 0.0;
     if (rezfx) e = s.emissive;
     g0 = vec4(clamp(s.albedo, vec3(0.0), vec3(1.0)), clamp(a, 0.0, 1.0));

@@ -11,7 +11,7 @@ layout(set = 0, binding = 0) uniform sampler2D uSrc;    // scene (extract) or th
 layout(set = 0, binding = 1) uniform sampler2D uGlow;   // per-face glow target (extract only)
 
 layout(push_constant) uniform BloomPush {
-    vec4 p0;   // texel size of the source (xy), mode, scatter (mode 3) / <GMDX> threshold term weight (mode 0, 0 = 1)
+    vec4 p0;   // texel size of the source (xy), mode, scatter (mode 3) / the threshold term's weight (mode 0, 0 = 1)
     vec4 p1;   // threshold, knee, firefly clamp, alpha glow boost
     vec4 p2;   // halation luminance weights (rgb), halation on
 } pc;

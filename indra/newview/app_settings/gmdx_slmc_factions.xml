@@ -1,0 +1,54 @@
+<?xml version="1.0" ?>
+<!-- From Alchemy: Skooma (Nexii Malthus), LGPL 2.1: the SLMC faction table (sk_slmc_factions.xml, 86d86a029d), data from github.com/Martin-Pitt/SLMC. A faction's main (g), militia (m) and land (l) groups are one side (gmdxslmcfactions.cpp). -->
+<llsd>
+<map>
+    <key>source</key><string>https://github.com/Martin-Pitt/SLMC/blob/main/SLMC.lsl</string>
+    <key>version</key><integer>1</integer>
+    <key>factions</key>
+    <array>
+        <map><key>name</key><string>Chaos Indivisvm</string><key>short</key><string>Chaos</string>
+            <key>g</key><array><uuid>3aed126e-f13d-1675-2ef1-34bf9fcbbd96</uuid></array>
+            <key>m</key><array><uuid>1c01a66d-09eb-4df9-322b-256bc1cf4822</uuid></array>
+            <key>l</key><array><uuid>5db7e14b-538e-9929-9e12-8140cfdb622a</uuid></array></map>
+        <map><key>name</key><string>- The Grand Federation -</string><key>short</key><string>GF</string>
+            <key>g</key><array><uuid>0b081b3b-8960-f1f6-cc9f-5b4837f284d1</uuid></array>
+            <key>m</key><array><uuid>feba2be6-f860-7fbb-6180-548acfe93fc2</uuid></array>
+            <key>l</key><array><uuid>2f7aa268-fd59-807d-0881-acc0b8d0c0b7</uuid></array></map>
+        <map><key>name</key><string>Vos Imperium</string><key>short</key><string>Vos</string>
+            <key>g</key><array><uuid>87824e8b-4734-4ba1-8cf9-b2cf8e1499d5</uuid></array></map>
+        <map><key>name</key><string>Silver Hawk- Prime [New]</string><key>short</key><string>SH</string>
+            <key>g</key><array><uuid>3d3b2276-a9a2-530a-36be-905516fefe81</uuid></array>
+            <key>l</key><array><uuid>bf7d2293-ed35-9dc9-141b-d73ed562c548</uuid></array>
+            <key>note</key><string>l from the SLMC region table (Apogee)</string></map>
+        <map><key>name</key><string>[Faust-Infernium]</string><key>short</key><string>Faust</string>
+            <key>g</key><array><uuid>5d7c52c7-bfda-d83b-5267-7ce3489b1655</uuid></array>
+            <key>m</key><array><uuid>4b7f2184-8143-ced1-d382-62da21736dfb</uuid></array>
+            <key>l</key><array><uuid>f7144ecd-9e03-b7f0-c4ac-9605af80061c</uuid></array></map>
+        <map><key>name</key><string>Exyrian Ascendant</string><key>short</key><string>Exyrian</string>
+            <key>g</key><array><uuid>0ca421d9-5df9-c69b-8fb2-225e90371462</uuid></array></map>
+        <map><key>name</key><string>Ashguard</string><key>short</key><string>Ash</string>
+            <key>g</key><array><uuid>64064c89-25aa-008b-cfe7-0c34e28ae523</uuid></array>
+            <key>m</key><array><uuid>86376bab-a5c9-d551-1866-7f6ac222c96f</uuid></array>
+            <key>l</key><array><uuid>127ed99a-37c2-c620-4908-85da85180ea9</uuid></array>
+            <key>note</key><string>civilian group a15cd794 left out: civilian groups are not part of factions</string></map>
+        <map><key>name</key><string>Alliance Navy</string><key>short</key><string>AN</string>
+            <key>g</key><array><uuid>05f39447-f320-79c3-d289-32d0ac37841d</uuid></array></map>
+        <map><key>name</key><string>- // Echelon | Tactical Forces</string><key>short</key><string>Echelon</string>
+            <key>g</key><array><uuid>5ac60f7d-1284-2fe9-a53c-5c22bc80d16a</uuid></array>
+            <key>m</key><array><uuid>910ac4ea-316e-9edc-1e7a-97f98b75de1c</uuid></array>
+            <key>l</key><array><uuid>ad324ce5-f1a7-bfac-4f7f-0585a1865bb0</uuid></array></map>
+        <map><key>name</key><string>Colonial Defence Foundation</string><key>short</key><string>CDF</string>
+            <key>g</key><array><uuid>9a9701e6-d3f0-4a37-2fee-ad7af7ae6a9a</uuid></array>
+            <key>l</key><array><uuid>0a22668d-9443-125c-8d42-2a681fd6eabe</uuid></array>
+            <key>note</key><string>l from the SLMC region table (Port Babel)</string></map>
+        <map><key>name</key><string>Kkamagwi Paramilitary Corporation</string><key>short</key><string>KPC</string>
+            <key>g</key><array><uuid>d1cc4dba-b4ab-2db7-93a1-8f380e7d68d7</uuid></array></map>
+        <map><key>name</key><string>The Megiddo - Ultimate</string><key>short</key><string>Megiddo</string>
+            <key>g</key><array><uuid>6fdd5815-7a8c-b3ce-1a78-a3a437955efc</uuid></array></map>
+        <map><key>name</key><string>New Rome</string><key>short</key><string>New Rome</string>
+            <key>g</key><array><uuid>f77172ef-4382-365a-2f3f-13463271527d</uuid></array>
+            <key>m</key><array><uuid>e22ec527-b3d1-3abe-106c-2b9d467fb920</uuid></array>
+            <key>l</key><array><uuid>f77172ef-4382-365a-2f3f-13463271527d</uuid></array></map>
+    </array>
+</map>
+</llsd>

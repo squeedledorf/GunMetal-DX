@@ -79,7 +79,8 @@ bool dnSunPartial(vec3 v) { return any(greaterThan(v, vec3(0.002))) && any(lessT
 void dnSunAtrous(ivec2 m, ivec2 D, uint par, DnGeom g, uint k, bool last)
 {
     vec4 c = dnSrc(m, 2);
-    const PdnSunHist h = pdnUnpackSunHist(imageLoad(uDnHist, ivec3(m, int(2u + par))));
+    PdnSunHist h = pdnUnpackSunHist(imageLoad(uDnHist, ivec3(m, int(2u + par))));
+    h.len = dnAges(m, par).z / HT_REF_MS;
     const float lenc = max(h.len, 1.0);
     const bool young = h.len < 4.0;
     const bool myoung = young && h.cnt > 0u;   // (a moving caster's fresh shadow)
@@ -143,7 +144,7 @@ void dnSunAtrous(ivec2 m, ivec2 D, uint par, DnGeom g, uint k, bool last)
                     v = dnSrc(q, 2);
                     w *= exp(-abs(dnLum3(v.rgb) - lc) / sl);
                     if (young && !myoung)
-                        w *= clamp(pdnUnpackSunHist(imageLoad(uDnHist, ivec3(q, int(2u + par)))).len / lenc, 1.0, 8.0);
+                        w *= clamp((dnAges(q, par).z / HT_REF_MS) / lenc, 1.0, 8.0);
                 }
                 if (!(w > 1e-6)) continue;
                 sum += w * v.rgb;
@@ -187,11 +188,11 @@ vec4 dnSplitAtrous(ivec2 m, ivec2 D, uint par, DnGeom g, uint it, bool last, out
     {
         cid[k] = pdnSplitWord(cur.xy, k);
         if (cid[k] == 0u) { o[k] = 1.0; continue; }
-        const float len = pdnSplitHistLen(pdnSplitWord(cur.zw, k));
+        const float len = uintBitsToFloat(imageLoad(uDnHist, ivec3(m, dnSplitAgeLayer(par))))[k] / HT_REF_MS;
         const float v = clamp(c[k], 0.0, 1.0);
         const float var = max(v * (1.0 - v), len < 4.0 ? 0.25 : 0.0) / max(len, 1.0);
         phi[k] = dp.prm0.w * sqrt(var) + 1e-4;
-        lsc[k] = len < 0.5 ? 0.0 : 1.0;   // (UNKNOWN centre: no luminance stop)
+        lsc[k] = len <= 0.0 ? 0.0 : 1.0;   // (UNKNOWN centre: no luminance stop)
         on[k] = var > 1e-6;
     }
     if (any(on) && !dnRawView())
@@ -228,7 +229,7 @@ vec4 dnSplitAtrous(ivec2 m, ivec2 D, uint par, DnGeom g, uint it, bool last, out
                     const int jj = pdnSplitFind(qs.xy, cid[k]);
                     if (jj < 0) continue;
                     const float v = qv[jj];
-                    const float w = wg * dnConf(pdnSplitHistLen(pdnSplitWord(qs.zw, uint(jj))))
+                    const float w = wg * dnConf(uintBitsToFloat(imageLoad(uDnHist, ivec3(q, dnSplitAgeLayer(par))))[jj] / HT_REF_MS)
                                   * exp(-lsc[k] * abs(v - c[k]) / phi[k]);
                     if (w > 1e-6) { sum[k] += w * v; ws[k] += w; }
                 }
@@ -289,7 +290,7 @@ void main()
     // (DN_F_INFO) an UNKNOWN centre (length 0: never sampled, no estimate -- its value is the
     // producer's default): weight DN_UNKNOWN_W and no luminance stop anchored on it, so its
     // neighbours' geometry-stopped mean fills it; filled = it took neighbour weight.
-    const bool unkD = dnConf(pdnMetaLenD(g.meta)) < 1.0, unkS = dnConf(pdnMetaLenS(g.meta)) < 1.0;
+    const bool unkD = dnConf(g.lenD) < 1.0, unkS = dnConf(g.lenS) < 1.0;
     bool fillD = !unkD;
     // COST TRIMS: the 3x3 variance prefilter on the first iteration only (later ones read their
     // already filtered variance), and no taps at all where nothing is left to filter -- no light
@@ -308,7 +309,7 @@ void main()
         // (DN_HFIX_SHIFT) a YOUNG centre (a disocclusion, history < N frames): the luminance stop
         // widened (up to 3x for a 1-frame history) and its taps weighted by their history length
         // relative to its own (1 .. DN_HFIX_MAXW) -- converged neighbours fill it, ReBLUR's history fix
-        const float lcD = pdnMetaLenD(g.meta), lcS = pdnMetaLenS(g.meta);
+        const float lcD = g.lenD, lcS = g.lenS;
         const float yD = unkD ? 0.0 : dnYouth(lcD), yS = unkS ? 0.0 : dnYouth(lcS);
         const float phiD = (dp.prm0.w * sqrt(max(gv.x, 0.0)) + 1e-4) * (1.0 + 2.0 * yD);
         const float phiS = (dp.prm0.w * sqrt(max(gv.y, 0.0)) + 1e-4) * (1.0 + 2.0 * yS);
@@ -353,29 +354,48 @@ void main()
                 const vec4 qD = diffOn ? dnSrc(q, 0) : vec4(0.0);
                 // (DN_F_INFO) every tap counts -- an unknown one at DN_UNKNOWN_W (dnConf); the
                 // depth plane and the normal stop what lies across a wall
-                float w0 = diffOn ? h * wz * pow(nn, pD) * dnConf(pdnMetaLenD(gq.meta))
+                float w0 = diffOn ? h * wz * pow(nn, pD) * dnConf(gq.lenD)
                                     * exp(-lsD * abs(pdnLum(qD.rgb) - lD) / phiD) : 0.0;
-                w0 *= yD > 0.0 ? clamp(pdnMetaLenD(gq.meta) / max(lcD, 1.0), 1.0, DN_HFIX_MAXW) : dnMaturity(pdnMetaLenD(gq.meta));
-                if (w0 > 1e-6) { sD += w0 * qD.rgb; vD += w0 * w0 * qD.a; wD += w0; if (dnConf(pdnMetaLenD(gq.meta)) >= 1.0) nbD += w0; }   // (fill: known taps only)
+                w0 *= yD > 0.0 ? clamp(gq.lenD / max(lcD, 1.0), 1.0, DN_HFIX_MAXW) : dnMaturity(gq.lenD);
+                if (w0 > 1e-6) { sD += w0 * qD.rgb; vD += w0 * w0 * qD.a; wD += w0; if (dnConf(gq.lenD) >= 1.0) nbD += w0; }   // (fill: known taps only)
                 if (specOn)
                 {
                     const vec4 qS = dnSrc(q, 1);
-                    float w1 = h * wz * pow(nn, pS) * exp(-8.0 * abs(g.rough - gq.rough)) * dnConf(pdnMetaLenS(gq.meta))
+                    float w1 = h * wz * pow(nn, pS) * exp(-8.0 * abs(g.rough - gq.rough)) * dnConf(gq.lenS)
                              * exp(-lsS * abs(pdnLum(qS.rgb) - lS) / phiS);
-                    w1 *= yS > 0.0 ? clamp(pdnMetaLenS(gq.meta) / max(lcS, 1.0), 1.0, DN_HFIX_MAXW) : dnMaturity(pdnMetaLenS(gq.meta));
+                    w1 *= yS > 0.0 ? clamp(gq.lenS / max(lcS, 1.0), 1.0, DN_HFIX_MAXW) : dnMaturity(gq.lenS);
                     if (w1 > 1e-6) { sS += w1 * qS.rgb; vS += w1 * w1 * qS.a; wS += w1; }
                 }
             }
         if (diffOn) { oD = sD / wD; ovD = vD / (wD * wD); }   // (wD >= the centre's h DN_UNKNOWN_W > 0)
         fillD = fillD || nbD > 1e-4;
         if (specOn && wS > 0.0) { oS = sS / wS; ovS = vS / (wS * wS); }
+        // (DN_F_RADIANCE) YOUNG-HISTORY FEEDBACK (SVGF's first-iteration feedback, for young texels only): a
+        // texel whose history is shorter than DN_RAD_FEED_LEN frames -- a disocclusion: the band an avatar's
+        // swaying / walking silhouette uncovers every frame, wider in texels when zoomed out -- otherwise
+        // accumulated its own 1-2 radiance samples per frame (heavy-tailed: one pick of one light) for frames
+        // after the history fix's boost had ended. Here the first iteration's edge-stopped mean (its settled
+        // neighbours weighted by their history: DN_HFIX) replaces its HISTORY colour (this parity: the next
+        // frame's temporal pass reads it), so it starts from its neighbourhood's estimate and its own next
+        // samples refine it at 1 / n. The variances and the lengths stay; settled texels are untouched (no
+        // blur builds up in a long history). The ratio and the GI instance never set the flag.
+        if (dnRadiance() && k == 0u && !pdnMetaConv(g.meta))
+        {
+            const bool fbD = diffOn && lcD < DN_RAD_FEED_LEN, fbS = specOn && wS > 0.0 && lcS < DN_RAD_FEED_LEN;
+            if (fbD || fbS)
+            {
+                vec3 hd, hs; float hvd, hvs;
+                pdnUnpackHist(imageLoad(uDnHist, ivec3(m, int(par))), hd, hs, hvd, hvs);
+                imageStore(uDnHist, ivec3(m, int(par)), pdnPackHist(fbD ? pdnSane(oD) : hd, fbS ? pdnSane(oS) : hs, hvd, hvs));
+            }
+        }
     }
     if (last)
     {
         // The consumer's view: depth in the diffuse alpha (its upsample), debug overrides.
         if (dbg == PDN_DBG_LEN)
         {
-            oD = vec3(pdnMetaLenD(g.meta) / max(dp.prm0.x, 1.0), pdnMetaLenS(g.meta) / max(dp.prm0.y, 1.0),
+            oD = vec3(g.lenD / max(dp.prm0.x, 1.0), g.lenS / max(dp.prm0.y, 1.0),
                       float(pdnMetaSpecIt(g.meta)) / 7.0);
             oS = vec3(0.0);
         }

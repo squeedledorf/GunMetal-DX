@@ -3,15 +3,32 @@
 #include <algorithm>
 #include <cstdio>
 
+bool VkSwapchain::checkResult(VkResult result) const
+{
+    if (result == VK_SUCCESS) return true;
+    // Keep the main-window error policy intact. Auxiliary allocation failures
+    // return to their owner, which leaves the existing floater in the viewer.
+    if (!mUIOnly) VK_CHECK(result);
+    std::fprintf(stderr, "[vkgfx] auxiliary swapchain allocation: %s\n", vkResultString(result));
+    if (result == VK_ERROR_DEVICE_LOST)
+        vkDeviceLostRaise("auxiliary swapchain allocation", result, "graphics", __FILE__, __LINE__);
+    return false;
+}
+
 bool VkSwapchain::init(VkDeviceContext& ctx, VkSurfaceKHR surface,
                        uint32_t width, uint32_t height, uint32_t framesInFlight) {
     mSurface = surface;
+    mMaintenance = mMaintenance || ctx.swapchainMaintenance();
+    mFrame = 0;
+    mUIFailed = false;
+    mPresentPending = false;
+    mUnresolvedPresent = false;
     mFramesInFlight = framesInFlight ? framesInFlight : 2;
 
     // Sanity: confirm the graphics queue family can present to this surface.
     VkBool32 presentSupported = VK_FALSE;
-    vkGetPhysicalDeviceSurfaceSupportKHR(ctx.physicalDevice(), ctx.queueFamily(),
-                                         mSurface, &presentSupported);
+    if (!checkResult(vkGetPhysicalDeviceSurfaceSupportKHR(ctx.physicalDevice(), ctx.queueFamily(),
+                                         mSurface, &presentSupported))) return false;
     if (!presentSupported) {
         std::fprintf(stderr,
             "[vkgfx] queue family %u does not support present to surface\n",
@@ -26,14 +43,22 @@ bool VkSwapchain::init(VkDeviceContext& ctx, VkSurfaceKHR surface,
 
     // Per-frame-in-flight sync objects: image-available semaphore + in-flight
     // fence. (render-finished is per-image; owned by createSwapchainObjects.)
+    if (mUIOnly) mSubmissionArmed.resize(mFramesInFlight, false);
     mImageAvailable.resize(mFramesInFlight);
     mInFlight.resize(mFramesInFlight);
+    if (mUIOnly)
+    {
+        mAcquireArmed.resize(mFramesInFlight, false);
+        mAcquireFences.resize(mFramesInFlight);
+    }
     VkSemaphoreCreateInfo sci{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
     VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     fci.flags = VK_FENCE_CREATE_SIGNALED_BIT; // so the first acquire doesn't hang
     for (uint32_t i = 0; i < mFramesInFlight; ++i) {
-        VK_CHECK(vkCreateSemaphore(ctx.device(), &sci, nullptr, &mImageAvailable[i]));
-        VK_CHECK(vkCreateFence(ctx.device(), &fci, nullptr, &mInFlight[i]));
+        if (!checkResult(vkCreateSemaphore(ctx.device(), &sci, nullptr, &mImageAvailable[i])) ||
+            !checkResult(vkCreateFence(ctx.device(), &fci, nullptr, &mInFlight[i])))
+            return false;
+        if (mUIOnly && !checkResult(vkCreateFence(ctx.device(), &fci, nullptr, &mAcquireFences[i]))) return false;
     }
     return true;
 }
@@ -44,20 +69,20 @@ uint32_t VkSwapchain::sNoVsyncMode = 0;
 bool VkSwapchain::createSwapchainObjects(VkDeviceContext& ctx, uint32_t width,
                                          uint32_t height) {
     VkSurfaceCapabilitiesKHR caps{};
-    VK_CHECK(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
-        ctx.physicalDevice(), mSurface, &caps));
+    if (!checkResult(vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
+        ctx.physicalDevice(), mSurface, &caps))) return false;
 
     // Choose a format: prefer BGRA8 SRGB, else the first available.
     uint32_t fmtCount = 0;
-    vkGetPhysicalDeviceSurfaceFormatsKHR(ctx.physicalDevice(), mSurface,
-                                         &fmtCount, nullptr);
+    if (!checkResult(vkGetPhysicalDeviceSurfaceFormatsKHR(ctx.physicalDevice(), mSurface,
+                                         &fmtCount, nullptr))) return false;
     if (fmtCount == 0) {
         std::fprintf(stderr, "[vkgfx] surface has no formats\n");
         return false;
     }
     std::vector<VkSurfaceFormatKHR> fmts(fmtCount);
-    vkGetPhysicalDeviceSurfaceFormatsKHR(ctx.physicalDevice(), mSurface,
-                                         &fmtCount, fmts.data());
+    if (!checkResult(vkGetPhysicalDeviceSurfaceFormatsKHR(ctx.physicalDevice(), mSurface,
+                                         &fmtCount, fmts.data()))) return false;
     mFormat = fmts[0];
     for (const auto& f : fmts) {
         if (f.format == VK_FORMAT_B8G8R8A8_UNORM &&
@@ -71,7 +96,7 @@ bool VkSwapchain::createSwapchainObjects(VkDeviceContext& ctx, uint32_t width,
     // sNoVsyncMode 1 the order of the first two flips (IMMEDIATE bypasses a compositor
     // that releases MAILBOX images on its own cadence).
     mPresentMode = VK_PRESENT_MODE_FIFO_KHR;
-    if (!sVSync)
+    if (mUIOnly || !sVSync)
     {
         std::vector<VkPresentModeKHR> pms;
         // #919: with a full-screen-exclusive chain, the modes valid for it.
@@ -79,10 +104,10 @@ bool VkSwapchain::createSwapchainObjects(VkDeviceContext& ctx, uint32_t width,
         {
             pms.clear();
             uint32_t pmCount = 0;
-            vkGetPhysicalDeviceSurfacePresentModesKHR(ctx.physicalDevice(), mSurface, &pmCount, nullptr);
+            if (!checkResult(vkGetPhysicalDeviceSurfacePresentModesKHR(ctx.physicalDevice(), mSurface, &pmCount, nullptr))) return false;
             pms.resize(pmCount);
             if (pmCount)
-                vkGetPhysicalDeviceSurfacePresentModesKHR(ctx.physicalDevice(), mSurface, &pmCount, pms.data());
+                if (!checkResult(vkGetPhysicalDeviceSurfacePresentModesKHR(ctx.physicalDevice(), mSurface, &pmCount, pms.data()))) return false;
             pms.resize(pmCount);
         }
         bool mailbox = false, immediate = false;
@@ -115,6 +140,8 @@ bool VkSwapchain::createSwapchainObjects(VkDeviceContext& ctx, uint32_t width,
     }
 
     uint32_t imageCount = caps.minImageCount + 1;
+    if (mUIOnly && (mExtent.width > 8192 || mExtent.height > 8192 || imageCount > 4 ||
+        uint64_t(mExtent.width) * mExtent.height * 4 * imageCount > 128ull * 1024 * 1024)) return false;
     if (caps.maxImageCount > 0 && imageCount > caps.maxImageCount) {
         imageCount = caps.maxImageCount;
     }
@@ -135,9 +162,16 @@ bool VkSwapchain::createSwapchainObjects(VkDeviceContext& ctx, uint32_t width,
     ci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
                     VK_IMAGE_USAGE_TRANSFER_DST_BIT |
                     VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    if (mUIOnly) ci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE; // single queue family
     ci.preTransform = caps.currentTransform;
     ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    if (mUIOnly)
+    {
+        for (auto mode : {VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR, VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR,
+                          VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR, VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR})
+            if (caps.supportedCompositeAlpha & mode) { ci.compositeAlpha = mode; break; }
+    }
     ci.presentMode = mPresentMode;
     ci.clipped = VK_TRUE;
     ci.oldSwapchain = VK_NULL_HANDLE;
@@ -156,12 +190,13 @@ bool VkSwapchain::createSwapchainObjects(VkDeviceContext& ctx, uint32_t width,
         ci.presentMode = mPresentMode;
         cr = vkCreateSwapchainKHR(ctx.device(), &ci, nullptr, &mSwapchain);
     }
-    VK_CHECK(cr);
+    if (!checkResult(cr)) return false;
 
     uint32_t n = 0;
-    vkGetSwapchainImagesKHR(ctx.device(), mSwapchain, &n, nullptr);
+    if (!checkResult(vkGetSwapchainImagesKHR(ctx.device(), mSwapchain, &n, nullptr))) return false;
+    if (mUIOnly && (!n || n > 4)) return false;
     mImages.resize(n);
-    vkGetSwapchainImagesKHR(ctx.device(), mSwapchain, &n, mImages.data());
+    if (!checkResult(vkGetSwapchainImagesKHR(ctx.device(), mSwapchain, &n, mImages.data()))) return false;
 
     {   // #407: what these images take in device memory. The same create info the WSI
         // uses for them (no VkImageSwapchainCreateInfoKHR: not allowed in this query).
@@ -184,6 +219,23 @@ bool VkSwapchain::createSwapchainObjects(VkDeviceContext& ctx, uint32_t width,
     }
 
     mImageViews.resize(n);
+    mRenderFinished.resize(n);
+    if (!mUIOnly) mMaintenance = ctx.swapchainMaintenance();
+    if (mMaintenance)
+    {
+        try
+        {
+            mPresentArmed.resize(n + mFramesInFlight, false);
+            mPresentFences.resize(n + mFramesInFlight);
+        }
+        catch (const std::bad_alloc&)
+        {
+            if (mUIOnly) return false;
+            mPresentArmed.clear();
+            mPresentFences.clear();
+            mMaintenance = false; // optional main proof allocation never fails the viewer
+        }
+    }
     for (uint32_t i = 0; i < n; ++i) {
         VkImageViewCreateInfo vci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
         vci.image = mImages[i];
@@ -192,21 +244,48 @@ bool VkSwapchain::createSwapchainObjects(VkDeviceContext& ctx, uint32_t width,
         vci.components = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
                           VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
         vci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        VK_CHECK(vkCreateImageView(ctx.device(), &vci, nullptr, &mImageViews[i]));
+        if (!checkResult(vkCreateImageView(ctx.device(), &vci, nullptr, &mImageViews[i])))
+            return false;
     }
 
     // Per-IMAGE render-finished semaphores (one per swapchain image). Must be
     // (re)created here because the image count is only known now and can change
     // across recreate(); present() waits mRenderFinished[imageIndex].
-    mRenderFinished.resize(n);
     VkSemaphoreCreateInfo rsci{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
     for (uint32_t i = 0; i < n; ++i) {
-        VK_CHECK(vkCreateSemaphore(ctx.device(), &rsci, nullptr, &mRenderFinished[i]));
+        if (!checkResult(vkCreateSemaphore(ctx.device(), &rsci, nullptr, &mRenderFinished[i])))
+            return false;
+    }
+    if (mMaintenance)
+    {
+        VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        for (auto& fence : mPresentFences)
+        {
+            const VkResult result = vkCreateFence(ctx.device(), &fci, nullptr, &fence);
+            if (result == VK_SUCCESS) continue;
+            if (result == VK_ERROR_DEVICE_LOST)
+            {
+                vkDeviceLostRaise("present proof allocation", result, "graphics", __FILE__, __LINE__);
+                return false;
+            }
+            if (mUIOnly) return false;
+            // Main already has a usable chain: keep it with the conventional
+            // existing idle-teardown policy, then retry proofs at next recreate.
+            for (VkFence allocated : mPresentFences) if (allocated) vkDestroyFence(ctx.device(), allocated, nullptr);
+            mPresentFences.clear();
+            mPresentArmed.clear();
+            mMaintenance = false;
+            std::fprintf(stderr, "[vkgfx] optional main present-proof allocation refused: %s\n", vkResultString(result));
+            break;
+        }
     }
     return true;
 }
 
 void VkSwapchain::destroySwapchainObjects(VkDeviceContext& ctx) {
+    for (VkFence fence : mPresentFences) if (fence) vkDestroyFence(ctx.device(), fence, nullptr);
+    mPresentFences.clear();
+    mPresentArmed.clear();
     for (VkSemaphore s : mRenderFinished) {
         if (s) vkDestroySemaphore(ctx.device(), s, nullptr);
     }
@@ -225,14 +304,37 @@ void VkSwapchain::destroySwapchainObjects(VkDeviceContext& ctx) {
 
 bool VkSwapchain::recreate(VkDeviceContext& ctx, uint32_t width, uint32_t height) {
     if (vkDeviceIsLost()) return false;   // #135
-    vkDeviceWaitIdle(ctx.device());
+    if (mUIOnly)
+    {
+        if (!retired(ctx.device())) return false;
+    }
+    else
+    {
+        vkDeviceWaitIdle(ctx.device());
+        // Device-wide maintenance1: main WSI teardown also needs present proof.
+        for (size_t i = 0; i < mPresentFences.size(); ++i)
+            if (mPresentArmed[i]) VK_CHECK(vkWaitForFences(ctx.device(), 1, &mPresentFences[i], VK_TRUE, UINT64_MAX));
+    }
     destroySwapchainObjects(ctx);
     return createSwapchainObjects(ctx, width, height);
 }
 
 void VkSwapchain::destroy(VkDeviceContext& ctx) {
     if (vkDeviceIsLost()) return;   // #135: leak to process exit, never touch the lost device
-    if (ctx.device()) vkDeviceWaitIdle(ctx.device());
+    if (mUIOnly)
+    {
+        if (!retired(ctx.device())) return; // owner retains this entry and polls
+    }
+    else if (ctx.device())
+    {
+        vkDeviceWaitIdle(ctx.device());
+        for (size_t i = 0; i < mPresentFences.size(); ++i)
+            if (mPresentArmed[i]) VK_CHECK(vkWaitForFences(ctx.device(), 1, &mPresentFences[i], VK_TRUE, UINT64_MAX));
+    }
+    for (VkFence fence : mAcquireFences) if (fence) vkDestroyFence(ctx.device(), fence, nullptr);
+    mAcquireFences.clear();
+    mAcquireArmed.clear();
+    mSubmissionArmed.clear();
     // Per-frame-in-flight objects (image-available semaphores + fences).
     for (VkSemaphore s : mImageAvailable) if (s) vkDestroySemaphore(ctx.device(), s, nullptr);
     for (VkFence f : mInFlight) if (f) vkDestroyFence(ctx.device(), f, nullptr);
@@ -242,6 +344,19 @@ void VkSwapchain::destroy(VkDeviceContext& ctx) {
     destroySwapchainObjects(ctx);
     // Surface is owned by the window layer; not destroyed here.
     mSurface = VK_NULL_HANDLE;
+    mPresentPending = false;
+}
+
+bool VkSwapchain::retired(VkDevice device) const
+{
+    if (vkDeviceIsLost() || mUnresolvedPresent || needsPresentDrain()) return false;
+    for (size_t i = 0; i < mInFlight.size(); ++i)
+        if ((!mUIOnly || mSubmissionArmed[i]) && vkGetFenceStatus(device, mInFlight[i]) != VK_SUCCESS) return false;
+    for (size_t i = 0; i < mAcquireFences.size(); ++i)
+        if (mAcquireArmed[i] && vkGetFenceStatus(device, mAcquireFences[i]) != VK_SUCCESS) return false;
+    for (size_t i = 0; i < mPresentFences.size(); ++i)
+        if (mPresentArmed[i] && vkGetFenceStatus(device, mPresentFences[i]) != VK_SUCCESS) return false;
+    return true;
 }
 
 bool VkSwapchain::slotDone(VkDevice dev, uint32_t slot) const
@@ -268,12 +383,26 @@ bool VkSwapchain::acquire(VkDeviceContext& ctx, uint32_t* outImageIndex,
     // through here), an infinite wait is sliced into the hang watchdog. With frame pacing
     // (waitFrameSlot at the top of the main-loop frame) this fence is already signaled and
     // the wait returns at once; kept as the correctness backstop for slot reuse.
-    VK_CHECK(vkWaitForFences(ctx.device(), 1, &mInFlight[mFrame], VK_TRUE, UINT64_MAX));
+    if (mUIOnly)
+    {
+        if (!slotDone(ctx.device(), mFrame)) return false;
+        if (mAcquireArmed[mFrame] && vkGetFenceStatus(ctx.device(), mAcquireFences[mFrame]) != VK_SUCCESS) return false;
+        mAcquireArmed[mFrame] = false;
+        if (!checkResult(vkResetFences(ctx.device(), 1, &mAcquireFences[mFrame]))) return false;
+    }
+    else VK_CHECK(vkWaitForFences(ctx.device(), 1, &mInFlight[mFrame], VK_TRUE, UINT64_MAX));
     if (vkDeviceIsLost()) return false;
+    if (mMaintenance)
+    {
+        mNextPresentFence = 0;
+        while (mNextPresentFence < mPresentFences.size() && mPresentArmed[mNextPresentFence] &&
+               vkGetFenceStatus(ctx.device(), mPresentFences[mNextPresentFence]) != VK_SUCCESS) ++mNextPresentFence;
+        if (mNextPresentFence == mPresentFences.size()) return false;
+    }
     vkAddrFrameTick();
 
     VkResult r = vkAcquireNextImageKHR(ctx.device(), mSwapchain, mAcquireTimeout,
-                                       mImageAvailable[mFrame], VK_NULL_HANDLE,
+                                       mImageAvailable[mFrame], mUIOnly ? mAcquireFences[mFrame] : VK_NULL_HANDLE,
                                        outImageIndex);
     if (r == VK_TIMEOUT || r == VK_NOT_READY) {
         // #1074 (VR only: the timeout is UINT64_MAX otherwise): no image in time, the semaphore
@@ -291,6 +420,7 @@ bool VkSwapchain::acquire(VkDeviceContext& ctx, uint32_t* outImageIndex,
         else if (outNeedsRecreate) *outNeedsRecreate = true;
         return false;
     }
+    if (mUIOnly && (r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR)) mAcquireArmed[mFrame] = true;
     if (r == VK_SUBOPTIMAL_KHR) {
         // SUBOPTIMAL DID deliver an image and DID signal the semaphore; we must
         // render + present this frame (else the acquire semaphore stays signaled
@@ -304,28 +434,66 @@ bool VkSwapchain::acquire(VkDeviceContext& ctx, uint32_t* outImageIndex,
         // A lost device, or a lost surface (the window's surface is gone: nothing can be
         // presented again without re-creating the device's WSI objects): the graceful
         // device-lost exit (#135) instead of skipping every frame from now on.
-        if (r == VK_ERROR_DEVICE_LOST || r == VK_ERROR_SURFACE_LOST_KHR)
+        if (mUIOnly) mUIFailed = true;
+        if (r == VK_ERROR_DEVICE_LOST || (r == VK_ERROR_SURFACE_LOST_KHR && !mUIOnly))
             vkDeviceLostRaise("vkAcquireNextImageKHR", r, "graphics", __FILE__, __LINE__);
         return false;
     }
     // Only reset the fence once we know we'll submit work this frame.
-    VK_CHECK(vkResetFences(ctx.device(), 1, &mInFlight[mFrame]));
+    if (mUIOnly) mSubmissionArmed[mFrame] = false;
+    if (mUIOnly)
+    {
+        if (!checkResult(vkResetFences(ctx.device(), 1, &mInFlight[mFrame]))) { mUIFailed = true; return false; }
+    }
+    else VK_CHECK(vkResetFences(ctx.device(), 1, &mInFlight[mFrame]));
     return true;
 }
 
 bool VkSwapchain::beginFrameWithoutImage(VkDeviceContext& ctx) {
     if (vkDeviceIsLost() || !ctx.device()) return false;   // #135
     if (mFrame >= mInFlight.size() || !mInFlight[mFrame]) return false;
-    VK_CHECK(vkWaitForFences(ctx.device(), 1, &mInFlight[mFrame], VK_TRUE, UINT64_MAX));
+    if (mUIOnly)
+    {
+        if (!slotDone(ctx.device(), mFrame)) return false;
+        if (mAcquireArmed[mFrame] && vkGetFenceStatus(ctx.device(), mAcquireFences[mFrame]) != VK_SUCCESS) return false;
+        mAcquireArmed[mFrame] = false;
+        if (!checkResult(vkResetFences(ctx.device(), 1, &mAcquireFences[mFrame]))) return false;
+    }
+    else VK_CHECK(vkWaitForFences(ctx.device(), 1, &mInFlight[mFrame], VK_TRUE, UINT64_MAX));
     if (vkDeviceIsLost()) return false;
-    VK_CHECK(vkResetFences(ctx.device(), 1, &mInFlight[mFrame]));
+    if (mUIOnly) mSubmissionArmed[mFrame] = false;
+    if (mUIOnly)
+    {
+        if (!checkResult(vkResetFences(ctx.device(), 1, &mInFlight[mFrame]))) { mUIFailed = true; return false; }
+    }
+    else VK_CHECK(vkResetFences(ctx.device(), 1, &mInFlight[mFrame]));
     return true;
 }
 
 bool VkSwapchain::present(VkDeviceContext& ctx, uint32_t imageIndex,
                           bool* outNeedsRecreate) {
     if (outNeedsRecreate) *outNeedsRecreate = false;
+    VkSwapchainPresentFenceInfoEXT presentFence{VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_EXT};
+    if (mMaintenance)
+    {
+        // Reserved before acquire. An acquire may return before the prior PE
+        // fence signals, so proof slots must be independent of image indices.
+        if (mNextPresentFence >= mPresentFences.size()) { mUIFailed = true; return false; }
+        mPresentArmed[mNextPresentFence] = false;
+        const VkResult reset = vkResetFences(ctx.device(), 1, &mPresentFences[mNextPresentFence]);
+        if (reset != VK_SUCCESS)
+        {
+            mUIFailed = true;
+            if (outNeedsRecreate) *outNeedsRecreate = true;
+            if (reset == VK_ERROR_DEVICE_LOST)
+                vkDeviceLostRaise("present proof reset", reset, "graphics", __FILE__, __LINE__);
+            return false;
+        }
+        presentFence.swapchainCount = 1;
+        presentFence.pFences = &mPresentFences[mNextPresentFence];
+    }
     VkPresentInfoKHR pi{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+    pi.pNext = mMaintenance ? &presentFence : nullptr;
     pi.waitSemaphoreCount = 1;
     // Wait the render-finished semaphore for THIS image (signaled by its submit).
     pi.pWaitSemaphores = &mRenderFinished[imageIndex];
@@ -339,6 +507,14 @@ bool VkSwapchain::present(VkDeviceContext& ctx, uint32_t imageIndex,
         r = VK_ERROR_DEVICE_LOST;          // RenderVKDebugSimulateDeviceLost 3: not presented
     else
         r = vkQueuePresentKHR(ctx.queue(), &pi);
+    if (r != VK_ERROR_OUT_OF_HOST_MEMORY && r != VK_ERROR_OUT_OF_DEVICE_MEMORY) mPresentPending = true;
+    if (mMaintenance && (r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR ||
+        r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_ERROR_SURFACE_LOST_KHR ||
+        r == VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT)) mPresentArmed[mNextPresentFence] = true;
+    if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR && r != VK_ERROR_OUT_OF_DATE_KHR &&
+        r != VK_ERROR_SURFACE_LOST_KHR && r != VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT &&
+        r != VK_ERROR_OUT_OF_HOST_MEMORY && r != VK_ERROR_OUT_OF_DEVICE_MEMORY && r != VK_ERROR_DEVICE_LOST)
+        mUnresolvedPresent = true; // unknown enqueue outcome is never a completion proof
     mFrame = (mFrame + 1) % mFramesInFlight;
 
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR || r == VK_ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT) {
@@ -350,7 +526,8 @@ bool VkSwapchain::present(VkDeviceContext& ctx, uint32_t imageIndex,
     }
     if (r != VK_SUCCESS) {
         std::fprintf(stderr, "[vkgfx] vkQueuePresentKHR = %s\n", vkResultString(r));
-        if (r == VK_ERROR_DEVICE_LOST || r == VK_ERROR_SURFACE_LOST_KHR)
+        if (mUIOnly) mUIFailed = true;
+        if (r == VK_ERROR_DEVICE_LOST || (r == VK_ERROR_SURFACE_LOST_KHR && !mUIOnly))
             vkDeviceLostRaise(vkDeviceLostSimulated() ? "vkQueuePresentKHR (simulated)" : "vkQueuePresentKHR",
                               r, "graphics", __FILE__, __LINE__);
         return false;

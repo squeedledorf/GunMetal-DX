@@ -284,6 +284,7 @@ bool LLMediaCtrl::handleMouseUp( S32 x, S32 y, MASK mask )
 bool LLMediaCtrl::handleMouseDown( S32 x, S32 y, MASK mask )
 {
     if (LLPanel::handleMouseDown(x, y, mask)) return true;
+    mTextInputPoint = LLCoordGL(x, y);
     convertInputCoords(x, y);
 
     if (mMediaSource)
@@ -743,6 +744,7 @@ bool LLMediaCtrl::ensureMediaSourceExists()
         if ( mMediaSource )
         {
             mMediaSource->setUsedInUI(true);
+            mMediaSource->setUIOwner(this);
             mMediaSource->setHomeURL(mHomePageUrl, mHomePageMimeType);
             mMediaSource->setTarget(mTarget);
             mMediaSource->setVisible( getVisible() );
@@ -792,6 +794,18 @@ LLPluginClassMedia* LLMediaCtrl::getMediaPlugin()
 void LLMediaCtrl::draw()
 {
     F32 alpha = getDrawContext().mAlpha;
+
+    if (hasFocus())
+    {
+        // The media protocol has no DOM caret/preedit rectangles. Anchor the
+        // native IME candidate UI at the last click in this control, in its own
+        // host's pixel coordinates. Inline CEF preedit is not implemented.
+        S32 x = 0, y = 0;
+        localPointToScreen(llclamp(mTextInputPoint.mX, 0, getRect().getWidth()),
+                           llclamp(mTextInputPoint.mY, 0, getRect().getHeight()), &x, &y);
+        getWindow()->setLanguageTextInput(LLCoordGL(ll_round(x * LLUI::getScaleFactor().mV[VX]),
+                                                   ll_round(y * LLUI::getScaleFactor().mV[VY])));
+    }
 
     if ( gRestoreGL == 1 || mUpdateScrolls)
     {
@@ -982,14 +996,20 @@ void LLMediaCtrl::convertInputCoords(S32& x, S32& y)
         coords_opengl = mMediaSource->getMediaPlugin()->getTextureCoordsOpenGL();
     }
 
-    x = ll_round((F32)x * LLUI::getScaleFactor().mV[VX]);
+    // Match the actual textured rectangle, including letterboxing and the old
+    // plugin size while an asynchronous resize is pending. Host DPI alone is
+    // insufficient for a decoupled or stretched media texture.
+    const auto* plugin = getMediaPlugin();
+    const F32 scale_x = plugin && width > 0 ? (F32)plugin->getWidth() / width : LLUI::getScaleFactor().mV[VX];
+    const F32 scale_y = plugin && height > 0 ? (F32)plugin->getHeight() / height : LLUI::getScaleFactor().mV[VY];
+    x = ll_round((F32)x * scale_x);
     if ( ! coords_opengl )
     {
-        y = ll_round((F32)(y) * LLUI::getScaleFactor().mV[VY]);
+        y = ll_round((F32)y * scale_y);
     }
     else
     {
-        y = ll_round((F32)(getRect().getHeight() - y) * LLUI::getScaleFactor().mV[VY]);
+        y = ll_round((F32)(height - y) * scale_y);
     };
 }
 
@@ -1015,8 +1035,9 @@ void LLMediaCtrl::handleMediaEvent(LLPluginClassMedia* self, EMediaEvent event)
         case MEDIA_EVENT_SIZE_CHANGED:
         {
             LL_DEBUGS("Media") <<  "Media event:  MEDIA_EVENT_SIZE_CHANGED " << LL_ENDL;
-            LLRect r = getRect();
-            reshape( r.getWidth(), r.getHeight(), false );
+            // Delivered by media idle, where the active globals describe main.
+            // Resize on the next draw under this control's own native context.
+            mUpdateScrolls = true;
         };
         break;
 

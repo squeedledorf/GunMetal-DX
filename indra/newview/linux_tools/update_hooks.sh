@@ -4,9 +4,12 @@
 #
 # State lives in ${XDG_STATE_HOME:-$HOME/.local/state}/gunmetal-dx-update (the viewer,
 # SLUpdater / slupdateapply.cpp, uses the same path):
-#   pending-update      one line: path of the staged record a running viewer wrote after it
-#                       downloaded and verified an update. Its existence is the only thing
-#                       the launcher checks on a normal start (one stat, no process).
+#   approved-update     one line: path of the staged record of a downloaded, verified update
+#                       the person chose to install ("Install now" / "Install at next start").
+#                       Its existence is the only thing the launcher checks on a normal start
+#                       (one stat, no process). <GMDX> downloaded-update (and pending-update,
+#                       left by GunMetal-DX 0.3.0 and older) mean "downloaded, not yet
+#                       approved": the viewer asks about them; the launcher never applies them.
 #   update-unconfirmed  written by the apply step: line 1 = new build, line 2 = old build.
 #                       The new viewer deletes it when it reaches the login screen.
 #   bad-build           a build that died before confirming; never installed again.
@@ -19,13 +22,13 @@ slipstream_update_state_dir() {
 }
 
 # slipstream_update_apply ROOT BIN
-# Runs the apply step when an update is pending. Returns 0 when the install changed (the
+# Runs the apply step when the person approved an update. Returns 0 when the install changed (the
 # caller must re-exec the launcher: its own directory was just swapped), 1 otherwise.
 slipstream_update_apply() {
     local root=$1 bin=$2 state
     [ -z "${SLIPSTREAM_UPDATE_APPLIED:-}" ] || return 1     # at most once per launch
     state=$(slipstream_update_state_dir)
-    [ -f "${state}/pending-update" ] || return 1
+    [ -f "${state}/approved-update" ] || return 1
     [ -x "${bin}" ] || return 1
     "${bin}" --slipstream-apply-update "${root}"
     [ $? -eq 0 ]
